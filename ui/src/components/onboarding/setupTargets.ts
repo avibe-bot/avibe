@@ -1,5 +1,4 @@
 import type { VibeAgentBrief, VibeAgentFull } from '../../context/ApiContext';
-import { getBackendUiMeta } from '@/lib/agentBackends';
 import { ASSISTANT_ORDER, type AssistantId } from './collaborationTimeline';
 
 /**
@@ -38,7 +37,7 @@ export function setupTargetFor<T extends SetupTargetAgent>(
 ): T | null {
   const pool = agents.filter((agent) =>
     agent.backend === backend && agent.enabled && !agent.archived && isBuiltinAgent(agent));
-  return pool.find((agent) => agent.name === getBackendUiMeta(backend).builtinAgentName)
+  return pool.find((agent) => agent.name === backend)
     ?? pool.find((agent) => agent.name === DEFAULT_AGENT_NAME)
     ?? [...pool].sort(byName)[0]
     ?? null;

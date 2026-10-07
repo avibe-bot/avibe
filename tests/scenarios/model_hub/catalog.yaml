@@ -4,7 +4,7 @@ capability:
   name: Model Hub configured routes and turn outcomes
   canonical_tests:
     - tests/test_model_hub_api.py
-    - tests/test_model_hub_avibe_consumer.py
+    - tests/test_model_hub_vibey_consumer.py
     - tests/test_model_hub_config.py
     - tests/test_model_hub_legacy_opencode_migration.py
     - tests/test_member_management_parity.py
@@ -111,73 +111,73 @@ status_legend:
     expected_fail: false
     priority: false
 scenarios:
-  - id: MH-AVIBE-001
-    name: Avibe resolves the primary native protocol and nullable alias capabilities without a CLI overlay
+  - id: MH-VIBEY-001
+    name: Vibey resolves the primary native protocol and nullable alias capabilities without a CLI overlay
     status: covered
     kind: compatibility
     layer: contract
-    test: tests/test_model_hub_avibe_consumer.py::test_hop_resolution_uses_primary_protocol_and_alias_capabilities
-  - id: MH-AVIBE-002
-    name: Avibe receives the actual served hop before consuming a cross-protocol fallback response
+    test: tests/test_model_hub_vibey_consumer.py::test_hop_resolution_uses_primary_protocol_and_alias_capabilities
+  - id: MH-VIBEY-002
+    name: Vibey receives the actual served hop before consuming a cross-protocol fallback response
     status: covered
     kind: recovery
     layer: contract
-    test: tests/test_model_hub_avibe_consumer.py::test_failover_origin_is_available_before_body_and_matches_served_attempt
+    test: tests/test_model_hub_vibey_consumer.py::test_failover_origin_is_available_before_body_and_matches_served_attempt
     related_tests:
-      - tests/test_model_hub_avibe_consumer.py::test_terminal_response_origin_follows_its_carrier
-      - tests/test_model_hub_avibe_consumer.py::test_origin_header_limit_is_checked_before_each_avibe_hop
-      - tests/test_model_hub_avibe_consumer.py::test_served_hop_transport_bound_does_not_restrict_native_clients
-      - tests/test_model_hub_avibe_consumer.py::test_slow_anthropic_resolution_waits_to_publish_origin_and_keeps_source_snapshot
-      - tests/test_model_hub_avibe_consumer.py::test_concurrent_responses_keep_their_own_origin
-  - id: MH-AVIBE-003
-    name: Released three-backend configs gain only an empty Avibe Hub row without changing existing routes
+      - tests/test_model_hub_vibey_consumer.py::test_terminal_response_origin_follows_its_carrier
+      - tests/test_model_hub_vibey_consumer.py::test_origin_header_limit_is_checked_before_each_vibey_hop
+      - tests/test_model_hub_vibey_consumer.py::test_served_hop_transport_bound_does_not_restrict_native_clients
+      - tests/test_model_hub_vibey_consumer.py::test_slow_anthropic_resolution_waits_to_publish_origin_and_keeps_source_snapshot
+      - tests/test_model_hub_vibey_consumer.py::test_concurrent_responses_keep_their_own_origin
+  - id: MH-VIBEY-003
+    name: Released three-backend configs gain only an empty Vibey Hub row without changing existing routes
     status: covered
     kind: compatibility
     layer: contract
-    test: tests/test_model_hub_avibe_consumer.py::test_released_config_adds_only_empty_avibe_supply
-  - id: MH-AVIBE-007
-    name: The Avibe Agent starts once with the user's Sources and built-in Agent models, seeded when its first Source exists
+    test: tests/test_model_hub_vibey_consumer.py::test_released_config_adds_only_empty_vibey_supply
+  - id: MH-VIBEY-007
+    name: Vibey starts once with the user's Sources and built-in Agent models, seeded when its first Source exists
     status: covered
     kind: compatibility
     layer: contract
-    test: tests/test_model_hub_avibe_consumer.py::test_avibe_agent_predating_its_supply_starts_with_the_users_providers_and_models
+    test: tests/test_model_hub_vibey_consumer.py::test_vibey_agent_predating_its_supply_starts_with_the_users_providers_and_models
     related_tests:
-      - tests/test_model_hub_avibe_consumer.py::test_fresh_install_seeds_avibe_with_its_first_source
-      - tests/test_model_hub_native_takeover.py::test_takeover_seeds_a_pending_avibe_entry_from_its_whole_batch
-      - tests/test_avibe_backend_registration.py::test_avibe_agent_runs_its_catalogs_first_model_until_it_has_one
-      - tests/test_avibe_backend_registration.py::test_a_lost_avibe_model_hand_off_heals_on_the_next_start
+      - tests/test_model_hub_vibey_consumer.py::test_fresh_install_seeds_vibey_with_its_first_source
+      - tests/test_model_hub_native_takeover.py::test_takeover_seeds_a_pending_vibey_entry_from_its_whole_batch
+      - tests/test_vibey_backend_registration.py::test_vibey_agent_runs_its_catalogs_first_model_until_it_has_one
+      - tests/test_vibey_backend_registration.py::test_a_lost_vibey_model_hand_off_heals_on_the_next_start
       - tests/test_controller_im_ready.py::test_runtime_services_start_when_post_update_notification_fails
-  - id: MH-AVIBE-004
-    name: Avibe refuses native CLI sources and Direct mode
+  - id: MH-VIBEY-004
+    name: Vibey refuses native CLI sources and Direct mode
     status: covered
     kind: validation
     layer: contract
-    test: tests/test_model_hub_avibe_consumer.py::test_native_cli_and_direct_are_not_avibe_channels
+    test: tests/test_model_hub_vibey_consumer.py::test_native_cli_and_direct_are_not_vibey_channels
     related_tests:
-      - tests/test_model_hub_avibe_consumer.py::test_avibe_candidate_capabilities_survive_catalog_admission_without_guesses
-      - tests/test_model_hub_avibe_contract_matrix.py::test_avibe_matrix_covers_every_declared_backend_shape
-      - tests/test_model_hub_avibe_contract_matrix.py::test_avibe_channel_matrix_rejects_impossible_shapes_without_changing_native
-      - tests/test_model_hub_avibe_contract_matrix.py::test_avibe_runtime_matrix_refuses_native_admission
-      - tests/test_model_hub_api.py::test_runtime_stop_protects_configured_avibe_models
+      - tests/test_model_hub_vibey_consumer.py::test_vibey_candidate_capabilities_survive_catalog_admission_without_guesses
+      - tests/test_model_hub_vibey_contract_matrix.py::test_vibey_matrix_covers_every_declared_backend_shape
+      - tests/test_model_hub_vibey_contract_matrix.py::test_vibey_channel_matrix_rejects_impossible_shapes_without_changing_native
+      - tests/test_model_hub_vibey_contract_matrix.py::test_vibey_runtime_matrix_refuses_native_admission
+      - tests/test_model_hub_api.py::test_runtime_stop_protects_configured_vibey_models
       - tests/test_model_hub_api.py::test_runtime_stop_returns_explicit_not_started_state
-  - id: MH-AVIBE-005
-    name: Avibe failover strips opaque history only for a different or unverified origin
+  - id: MH-VIBEY-005
+    name: Vibey failover strips opaque history only for a different or unverified origin
     status: covered
     kind: compatibility
     layer: contract
-    test: tests/test_model_hub_avibe_consumer.py::test_failover_strips_opaque_history_only_when_origin_changes
+    test: tests/test_model_hub_vibey_consumer.py::test_failover_strips_opaque_history_only_when_origin_changes
     related_tests:
-      - tests/test_model_hub_avibe_consumer.py::test_opaque_history_uses_launch_snapshot_without_requiring_turn_attribution
-      - tests/test_model_hub_avibe_consumer.py::test_opaque_history_origin_survives_recovery_walks
-      - tests/test_model_hub_avibe_consumer.py::test_native_history_is_not_scrubbed_by_avibe_origin_policy
-  - id: MH-AVIBE-006
-    name: Sequential Avibe retries replace a completed route without losing turn provenance
+      - tests/test_model_hub_vibey_consumer.py::test_opaque_history_uses_launch_snapshot_without_requiring_turn_attribution
+      - tests/test_model_hub_vibey_consumer.py::test_opaque_history_origin_survives_recovery_walks
+      - tests/test_model_hub_vibey_consumer.py::test_native_history_is_not_scrubbed_by_vibey_origin_policy
+  - id: MH-VIBEY-006
+    name: Sequential Vibey retries replace a completed route without losing turn provenance
     status: covered
     kind: recovery
     layer: contract
-    test: tests/test_model_hub_avibe_consumer.py::test_sequential_avibe_retry_replaces_route_and_retains_served_provenance
+    test: tests/test_model_hub_vibey_consumer.py::test_sequential_vibey_retry_replaces_route_and_retains_served_provenance
     related_tests:
-      - tests/test_model_hub_avibe_consumer.py::test_avibe_route_replacement_refuses_overlap_without_poisoning_current_request
+      - tests/test_model_hub_vibey_consumer.py::test_vibey_route_replacement_refuses_overlap_without_poisoning_current_request
   - id: MH-CODEX-ROUTING-001
     name: Shared Codex authentication stays stable while concurrent aliases route and settle independently
     status: covered

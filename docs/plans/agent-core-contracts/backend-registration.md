@@ -1,20 +1,20 @@
 # C-8 Backend registration
 
-Adding `avibe` touches every place that lists backends. Today those lists are literals scattered through the tree,
+Adding `vibey` touches every place that lists backends. Today those lists are literals scattered through the tree,
 and they mean two different things. This contract makes the difference explicit.
 
 ## 1. Two sets
 
 | Set | Members | Meaning |
 | --- | --- | --- |
-| **Agent backends** | `claude`, `codex`, `opencode`, `avibe` | anything an Avibe Agent can run on: catalog, routing, settings, Model Hub supply and routes, turn provenance, Agent Run targets, IM agent pickers |
+| **Agent backends** | `claude`, `codex`, `opencode`, `vibey` | anything an Avibe Agent can run on: catalog, routing, settings, Model Hub supply and routes, turn provenance, Agent Run targets, IM agent pickers |
 | **Native CLI backends** | `claude`, `codex`, `opencode` | backends that are an external CLI: CLI path discovery, CLI auth and OAuth setup, native session listing and resume, CLI process restart, Model Hub launch overlays for native CLIs |
 
-`avibe` has no CLI, CLI auth, native session store, or native fork. It must never be added to a native-CLI list, and
+`vibey` has no CLI, CLI auth, native session store, or native fork. It must never be added to a native-CLI list, and
 it must be added to every agent-backend list.
 
-`avibe` is also the one **built-in** backend (`AgentBackendDescriptor.builtin`, owner decision 2026-10-06): part of the
-platform, so it is always enabled. It has no `agents.avibe` config section and no enable switch, the controller
+`vibey` is also the one **built-in** backend (`AgentBackendDescriptor.builtin`, owner decision 2026-10-06): part of the
+platform, so it is always enabled. It has no `agents.vibey` config section and no enable switch, the controller
 registers it at startup and never unregisters it, and its built-in Agent cannot be disabled. Registry order is display
 order, and the built-in backend comes first. Being listed first does not make it the default: any fallback that picks
 a backend or Agent nobody chose ranks it last ([`avibe-agent-always-on.md`](../avibe-agent-always-on.md)).

@@ -1,4 +1,4 @@
-"""MH-AVIBE-004: schemas cannot certify a transport Avibe cannot use.
+"""MH-VIBEY-004: schemas cannot certify a transport Avibe cannot use.
 
 Positive Hub payloads miss illegal discriminator/channel combinations. The
 producer-owned audit table drives refusals and must cover newly declared shapes.
@@ -17,10 +17,10 @@ from config.v2_config import ModelHubRouteConfig, ModelHubRouteHopConfig
 from core.handlers.model_hub.service import ModelHubError
 from core.handlers.model_hub.turn_gateway import ModelHubTurnGateway
 from modules.agents.model_hub import ModelHubRuntimeRouter
-from tests.test_model_hub_avibe_consumer import CONTRACTS, _avibe_service, _source
+from tests.test_model_hub_vibey_consumer import CONTRACTS, _vibey_service, _source
 
 
-MATRIX = json.loads((CONTRACTS / "avibe-boundary-matrix.json").read_text())["boundaries"]
+MATRIX = json.loads((CONTRACTS / "vibey-boundary-matrix.json").read_text())["boundaries"]
 
 
 def _schema(row):
@@ -41,9 +41,9 @@ def _fixture(kind):
         "origin": {"provider": "anthropic", "api": "anthropic", "model": "fixture-model"},
     }
     if kind == "supply":
-        return {"backend": "avibe", "mode": "hub", "menu_kind": "fixed", "cli_present": False}
+        return {"backend": "vibey", "mode": "hub", "menu_kind": "fixed", "cli_present": False}
     if kind == "catalog":
-        return {"backend": "avibe", "mode": "hub", "catalog_models": []}
+        return {"backend": "vibey", "mode": "hub", "catalog_models": []}
     if kind == "probe":
         # Start from a valid native response so no Hub latency constraint can
         # accidentally reject the Avibe/native pairing for an unrelated cause.
@@ -54,7 +54,7 @@ def _fixture(kind):
         }
     if kind == "chain":
         return {
-            "contract_version": 12, "backend": "avibe", "model_id": "fixture-model",
+            "contract_version": 12, "backend": "vibey", "model_id": "fixture-model",
             "manual_override": None, "route_origin": "automatic",
             "chain": [{"source_id": "src_fixture01", "model_id": "fixture-model", "channel": "hub",
                        "health": "healthy", "runnable": True, "reason": None, "retry_at": None}],
@@ -67,7 +67,7 @@ def _fixture(kind):
         }
     return {
         "contract_version": 12, "turn_id": "turn-fixture", "ts": "2026-10-02T07:00:00Z",
-        "agent": "avibe", "requested_model_id": "fixture-model", "outcome": kind,
+        "agent": "vibey", "requested_model_id": "fixture-model", "outcome": kind,
         "failed_attempts": [{**identity, "reason": "rate_limited"}] if kind == "exhausted" else [],
         "served": identity if kind == "served" else None,
         "terminal_error": (
@@ -79,13 +79,13 @@ def _fixture(kind):
     }
 
 
-def test_avibe_matrix_covers_every_declared_backend_shape():
+def test_vibey_matrix_covers_every_declared_backend_shape():
     def declared(node, pointer=""):
         if not isinstance(node, dict):
             return
         for field in ("backend", "agent"):
             enum = node.get("properties", {}).get(field, {}).get("enum", [])
-            if {"claude", "codex", "opencode", "avibe"} & set(enum):
+            if {"claude", "codex", "opencode", "vibey"} & set(enum):
                 yield pointer, field
         # Traverse shape definitions, not if/then discriminator constraints.
         for field in ("properties", "definitions", "$defs"):
@@ -118,7 +118,7 @@ def test_avibe_matrix_covers_every_declared_backend_shape():
         for row in MATRIX for refusal in row.get("refusals", [])
     ],
 )
-def test_avibe_channel_matrix_rejects_impossible_shapes_without_changing_native(row, refusal):
+def test_vibey_channel_matrix_rejects_impossible_shapes_without_changing_native(row, refusal):
     validator = _schema(row)
     payload = _fixture(refusal["fixture"])
     validator.validate(payload)
@@ -134,7 +134,7 @@ def test_avibe_channel_matrix_rejects_impossible_shapes_without_changing_native(
         validator.validate(invalid)
 
 
-def test_avibe_local_terminal_and_pre_admission_cancel_remain_nullable():
+def test_vibey_local_terminal_and_pre_admission_cancel_remain_nullable():
     row = next(row for row in MATRIX if row["schema"] == "turn-provenance.schema.json")
     validator = _schema(row)
     payload = _fixture("failed_terminal")
@@ -150,10 +150,10 @@ def test_avibe_local_terminal_and_pre_admission_cancel_remain_nullable():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("case", [case for row in MATRIX for case in row.get("runtime_cases", [])])
-async def test_avibe_runtime_matrix_refuses_native_admission(tmp_path, case):
+async def test_vibey_runtime_matrix_refuses_native_admission(tmp_path, case):
     """Admission, not just serialization, must refuse impossible transports."""
     native = _source("src_native001", "Native", channel="native_cli", vendor="anthropic", protocol="anthropic")
-    service = _avibe_service(tmp_path, [native])
+    service = _vibey_service(tmp_path, [native])
     gateway = ModelHubTurnGateway(service)
     router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
     route = ModelHubRouteConfig((ModelHubRouteHopConfig(native.id, "shared-model"),))
@@ -162,18 +162,18 @@ async def test_avibe_runtime_matrix_refuses_native_admission(tmp_path, case):
             # The recording boundary must not let an accidental future caller
             # manufacture native Avibe provenance after normal routing refused.
             if case == "native_attempt":
-                with pytest.raises(ValueError, match="avibe.*hub"):
+                with pytest.raises(ValueError, match="vibey.*hub"):
                     gateway.correlation.begin_native_attempt(
-                        backend="avibe", process_scope="avibe:matrix", turn_id="turn-matrix",
+                        backend="vibey", process_scope="vibey:matrix", turn_id="turn-matrix",
                         requested_model_id="menu-alias", source_id=native.id,
                         resolved_model_id="shared-model", via_mapping=False,
                     )
             else:
                 await gateway.endpoint(
-                    "avibe", process_scope="avibe:matrix", turn_id="turn-matrix",
+                    "vibey", process_scope="vibey:matrix", turn_id="turn-matrix",
                     requested_model_id="menu-alias", source_id=native.id, resolved_model_id="shared-model",
                 )
-                with pytest.raises(ValueError, match="avibe.*hub"):
+                with pytest.raises(ValueError, match="vibey.*hub"):
                     gateway.correlation.begin_attempt(
                         "turn-matrix", source_id=native.id, resolved_model_id="shared-model",
                         channel="native_cli", via_mapping=False,
@@ -181,23 +181,23 @@ async def test_avibe_runtime_matrix_refuses_native_admission(tmp_path, case):
         else:
             with pytest.raises(ModelHubError) as refusal:
                 if case == "mode":
-                    await service.set_agent_mode("avibe", "direct")
+                    await service.set_agent_mode("vibey", "direct")
                 elif case == "source_order":
-                    await service.set_agent_sources("avibe", {"order": [native.id]})
+                    await service.set_agent_sources("vibey", {"order": [native.id]})
                 elif case == "route_write":
-                    await service.set_agent_chain("avibe", "menu-alias", route.to_payload())
+                    await service.set_agent_chain("vibey", "menu-alias", route.to_payload())
                 else:
                     # Corrupt in-process route still cannot bypass live
                     # admission (persisted config rejects it on load).
-                    service.store.config.agents["avibe"].routes["menu-alias"] = route
+                    service.store.config.agents["vibey"].routes["menu-alias"] = route
                     if case == "probe":
-                        await service.probe_agent("avibe", "menu-alias")
+                        await service.probe_agent("vibey", "menu-alias")
                     elif case == "resolve_hop":
-                        await router.resolve_hop("menu-alias", process_scope="avibe:matrix")
+                        await router.resolve_hop("menu-alias", process_scope="vibey:matrix")
                     elif case in {"resolve", "recovery"}:
                         service.recovery.window_seconds = 120 if case == "recovery" else 0
                         await service.resolve_with_recovery(
-                            backend="avibe", model_id="menu-alias", request={}, stream=False,
+                            backend="vibey", model_id="menu-alias", request={}, stream=False,
                         )
                     else:
                         raise AssertionError(f"Unhandled runtime boundary: {case}")

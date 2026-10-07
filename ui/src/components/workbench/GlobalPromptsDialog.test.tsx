@@ -22,7 +22,7 @@ describe('native global prompts', () => {
   // Growing the Agent catalog must not invent a native prompt file for Avibe.
   // The sync payload is as important as the tabs: a hidden target is still a write.
   it('offers and synchronizes only native backend files', async () => {
-    const files = ['claude', 'opencode', 'codex', 'avibe'].map((backend) => ({
+    const files = ['claude', 'opencode', 'codex', 'vibey'].map((backend) => ({
       backend, content: 'Instructions', path: `/fixture/${backend}/AGENTS.md`,
       filename: 'AGENTS.md', exists: true, read_error: false,
     }));

@@ -7,7 +7,6 @@ from typing import Optional
 from modules.agents import get_agent_display_name
 from modules.agents.catalog import (
     AGENT_BACKENDS,
-    builtin_agent_name_for_backend,
     display_name_for_backend,
     implicit_default_rank,
     is_builtin_backend,
@@ -547,7 +546,7 @@ class SettingsHandler(BaseHandler):
     def _routing_agent_name(self, backend: str) -> str:
         """A backend choice routes to that backend's built-in Agent, under whatever name the row holds."""
         store = getattr(self.controller, "vibe_agent_store", None)
-        return store.routing_name_for_backend(backend) if store is not None else builtin_agent_name_for_backend(backend)
+        return store.routing_name_for_backend(backend) if store is not None else backend
 
     def _resolve_route_backend(self, agent_name: Optional[str]) -> Optional[str]:
         if not agent_name:

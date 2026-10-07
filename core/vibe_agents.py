@@ -20,7 +20,6 @@ from config import paths
 from modules.agents.catalog import (
     AGENT_BACKENDS,
     BUILTIN_AGENT_BACKENDS,
-    builtin_agent_name_for_backend,
     display_name_for_backend,
     implicit_default_rank,
     is_builtin_backend,
@@ -903,8 +902,9 @@ class VibeAgentStore:
     def require_reference(self, name: str) -> VibeAgent:
         """Resolve a durable Agent reference, including a disabled archive.
 
-        Routing saved while built-in Agents were named after their backend holds that
-        backend id: when no Agent has the name, it means the backend's built-in Agent.
+        Routing can hold a backend id, for example while the built-in has the next free name
+        because a user's Agent holds the id: when no Agent has the name, it means the backend's
+        built-in Agent.
         """
 
         agent = self.get(name)
@@ -917,7 +917,7 @@ class VibeAgentStore:
         """The Agent name a backend choice routes to: its built-in Agent's, whatever the row is called."""
 
         agent = self.get_builtin_default_agent_for_backend(backend, enabled_only=False)
-        return agent.name if agent is not None else builtin_agent_name_for_backend(backend)
+        return agent.name if agent is not None else backend
 
     def require_reference_by_id(self, agent_id: str) -> VibeAgent:
         """Resolve a durable Agent identity across rename/archive operations."""
@@ -1696,9 +1696,8 @@ class VibeAgentStore:
             if current is not None:
                 return self._write_builtin_state(current, metadata={**current.metadata, **metadata})
             # An always-enabled backend needs its own row: when another Agent holds the
-            # catalog's name for it, the built-in takes the next free one.
-            base = builtin_agent_name_for_backend(backend)
-            name = self._free_agent_name(base) if is_builtin_backend(backend) else base
+            # backend's name, the built-in takes the next free one.
+            name = self._free_agent_name(backend) if is_builtin_backend(backend) else backend
         agent_name = str(name).strip()
         existing = self.get(agent_name)
         if existing:

@@ -20,9 +20,9 @@ from core.agent_core.ai.provider import Done, ProviderError
 from core.agent_core.harness.context import StateRequest, text_tokens
 from core.agent_core.messages import ToolCallBlock, UserMessage, text
 from core.agent_core.tools.base import ToolResult
-from modules.agents.avibe.context import AvibeContextHost, mark_skill_loads
+from modules.agents.vibey.context import VibeyContextHost, mark_skill_loads
 from tests.agent_core.fakes import FakeTool, assistant
-from tests.test_avibe_agent import (  # noqa: F401 (fixtures)
+from tests.test_vibey_agent import (  # noqa: F401 (fixtures)
     SESSION,
     _SCOPES,
     _Harness,
@@ -224,7 +224,7 @@ async def test_a_context_that_cannot_fit_locally_is_never_reported_as_a_source_f
     assert not harness.provider.requests and not reported  # stopped before the provider: no source was involved
     assert harness.controller.terminals[-1]["is_error"] is True
     # The message itself cannot fit, so the notice says that, not that the conversation has grown too long.
-    assert _texts(harness, "notify") == [f"❌ {i18n_t('avibeAgent.error.inputTooLarge', 'en')}"]
+    assert _texts(harness, "notify") == [f"❌ {i18n_t('vibeyAgent.error.inputTooLarge', 'en')}"]
 
 
 async def _failing_commit(harness: _Harness) -> None:
@@ -337,7 +337,7 @@ async def test_failed_checkpoints_are_silent_and_a_context_that_then_cannot_fit_
     # request the last result leaves cannot fit: it ends the Turn with the one notice, and nothing was compacted.
     assert sum(is_checkpoint(request) for request in harness.provider.requests) == 2
     assert not [row for row in await harness.context_rows() if row.kind == "compaction"]
-    assert _texts(harness, "notify") == [f"❌ {i18n_t('avibeAgent.error.contextExhausted', 'zh')}"]
+    assert _texts(harness, "notify") == [f"❌ {i18n_t('vibeyAgent.error.contextExhausted', 'zh')}"]
 
 
 # --- the host's parts ------------------------------------------------------------------------------------
@@ -353,7 +353,7 @@ async def test_the_earlier_record_hint_names_the_session_its_bound_and_its_fork_
             "fork_source_context_seq": 3,
         }
         _insert_session(conn, "ses_child", _SCOPES["avibe"], metadata)
-    host = AvibeContextHost(engine, environment=lambda _: {})
+    host = VibeyContextHost(engine, environment=lambda _: {})
     hint = host.earlier_record("ses_child", 7)
     assert "messages table" in hint and "session_id = 'ses_child'" in hint and "through context_seq 7" in hint
     # It says plainly what is not there: tool output is re-run, not looked up.
@@ -374,7 +374,7 @@ async def test_the_earlier_record_example_runs_through_the_real_read_only_guard(
     harness = _Harness(engine, tmp_path, "avibe", [[Done(assistant("first reply"))], [Done(assistant("second"))]])
     await _turn(harness, "the earliest question")
     await _turn(harness, "a later one")
-    hint = AvibeContextHost(engine, environment=lambda _: {}).earlier_record(SESSION, 2)
+    hint = VibeyContextHost(engine, environment=lambda _: {}).earlier_record(SESSION, 2)
     (line,) = [line for line in hint.splitlines() if line.startswith("vibe data query ")]
     argv = shlex.split(line)
     assert argv[:4] == ["vibe", "data", "query", "--sql"] and len(argv) == 5
@@ -387,7 +387,7 @@ async def test_the_earlier_record_example_runs_through_the_real_read_only_guard(
 
 
 def test_the_earlier_record_example_is_left_out_for_an_id_it_could_not_quote():
-    from modules.agents.avibe.context import example_query
+    from modules.agents.vibey.context import example_query
 
     assert example_query("ses_ok-1", 4).startswith('vibe data query --sql "SELECT ')
     assert example_query("ses'; DROP", 4) is None and example_query('ses"x', 4) is None
@@ -404,7 +404,7 @@ async def test_the_state_is_the_environment_core_fields_each_bounded_in_bytes(en
         "timezone": "Zone/" + "時" * 2_000,
         "watches": 'wd_1 "CI" command running',
     }
-    host = AvibeContextHost(engine, environment=lambda _: fields)
+    host = VibeyContextHost(engine, environment=lambda _: fields)
     (environment,) = await host.render_state(StateRequest(SESSION))
     lines = environment.splitlines()[1:-1]
     assert [line.split(": ", 1)[0] for line in lines] == ["cwd", "os", "shell", "date", "timezone"]
@@ -414,7 +414,7 @@ async def test_the_state_is_the_environment_core_fields_each_bounded_in_bytes(en
 
 
 async def test_a_3000_byte_cwd_is_kept_whole_on_every_input_and_in_the_state(engine, session):
-    from modules.agents.avibe.prompt import current_environment, render_environment
+    from modules.agents.vibey.prompt import current_environment, render_environment
 
     # The cwd is never cut, only escaped: the model builds absolute paths from it, so a cut one would be false.
     cwd = "/工作区/" + "/".join(["目录" * 40] * 12) + "/a<b"
@@ -422,7 +422,7 @@ async def test_a_3000_byte_cwd_is_kept_whole_on_every_input_and_in_the_state(eng
     assert fields["cwd"] == cwd and len(cwd.encode()) > 2_900
     shown = cwd.replace("<", "\\u003c")
     assert f"\ncwd: {shown}\n" in render_environment(fields)  # every input
-    host = AvibeContextHost(engine, environment=lambda _: fields)
+    host = VibeyContextHost(engine, environment=lambda _: fields)
     (environment,) = await host.render_state(StateRequest(SESSION))
     assert f"\ncwd: {shown}\n" in environment and "…" not in environment
 
@@ -498,7 +498,7 @@ async def test_a_threshold_checkpoint_and_an_overflow_roll_through_the_real_loop
     replies."""
     import httpx
 
-    from modules.agents.avibe.models import registry_providers
+    from modules.agents.vibey.models import registry_providers
 
     served = json.dumps({"provider": "upstream", "api": "anthropic", "model": "served-model"}, separators=(",", ":"))
     overflow = json.dumps(

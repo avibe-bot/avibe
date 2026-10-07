@@ -328,8 +328,8 @@ mechanically, and stops after its fourth overflow.
 ## 9. What the adapter supplies
 
 The loop takes a `ContextConfig` (`harness/context.py`); without one, no context management runs and an overflow
-ends the run `context_exhausted`, as in P1. The adapter supplies the following; the Avibe Agent's are in
-`modules/agents/avibe` (`agent.py`, `context.py`, `store.py`), and every Turn of it runs with a `ContextConfig`.
+ends the run `context_exhausted`, as in P1. The adapter supplies the following; Vibey's are in
+`modules/agents/vibey` (`agent.py`, `context.py`, `store.py`), and every Turn of it runs with a `ContextConfig`.
 
 - The limits (§1): the route's capabilities come from the Model Hub model definition the user edits
   (`context_window`, `max_output_tokens`; `input_limit` stays unknown until Model Hub stores one, so `L_in = W`), and
@@ -358,7 +358,7 @@ ends the run `context_exhausted`, as in P1. The adapter supplies the following; 
   The SQLite store and the adapter's implement it, and one contract suite runs the same tests on them and on the
   in-memory store the engine tests use (`tests/test_transcript_store_contract.py`).
 - The full environment block (C-7 §8) on the first input after a checkpoint: the summarized inputs that carried it
-  are gone. The Avibe Agent works out an
+  are gone. Vibey works out an
   input's environment delta against the inputs the projected context keeps, so the input carries every field the
   context no longer shows, and forgets what it sent when a checkpoint commits.
 - The one user-visible text of context management, through `vibe/i18n`: when a run ends `context_exhausted`, the stop

@@ -1,4 +1,4 @@
-"""Avibe Agent backend adapter (``modules/agents/avibe``) over Avibe's real rows.
+"""Avibe Agent backend adapter (``modules/agents/vibey``) over Avibe's real rows.
 
 Properties, each through the adapter's real boundaries (the transcript store on
 a temporary SQLite database, the Delivery rows, and the shared outbound
@@ -37,9 +37,9 @@ from core.agent_core.messages import AssistantMessage, TextBlock, ToolCallBlock,
 from core.agent_core.tools.base import JobStatus, ToolResult
 from core.message_dispatcher import ConsolidatedMessageDispatcher
 from core.services.agent_steering import ActiveSteerTarget, SteerOutcome, SteerRequest
-from modules.agents.avibe import AvibeAgent
-from modules.agents.avibe.errors import _KIND_KEYS, error_key
-from modules.agents.avibe.tools import ToolSuite, local_tool_suite
+from modules.agents.vibey import VibeyAgent
+from modules.agents.vibey.errors import _KIND_KEYS, error_key
+from modules.agents.vibey.tools import ToolSuite, local_tool_suite
 from modules.agents.base import AgentRequest
 from modules.agents.model_hub import ModelHubLaunch
 from modules.im import MessageContext
@@ -53,7 +53,7 @@ from tests.agent_core.fakes import ORIGIN, FakeJobHost, FakeTool, ScriptedProvid
 from vibe.i18n import t as i18n_t
 
 NOW = "2026-10-02T00:00:00.000000Z"
-SESSION = "ses_avibe"
+SESSION = "ses_vibey"
 
 
 @pytest.fixture()
@@ -175,7 +175,7 @@ class _Controller:
         self.hub_protocol = "anthropic"
         # The Model Hub model definition's limits (C-9 takes W, L_in, and O from them).
         self.hub_limits = {"context_window": 32000, "max_output_tokens": 4096}
-        self.agent: Optional[AvibeAgent] = None
+        self.agent: Optional[VibeyAgent] = None
         self.agent_service = SimpleNamespace(
             mark_runtime_turn_started=self._native_start,
             release_runtime_turn=lambda context, **_kw: self.released.append(_turn(context)),
@@ -221,7 +221,7 @@ class _Controller:
             target_model=requested_model,
             runtime_model=requested_model,
             source_id="src_test",
-            gateway_base_url="http://hub.invalid/avibe",
+            gateway_base_url="http://hub.invalid/vibey",
             gateway_token="hub-token",
             **self.hub_limits,
             supports_tools=True,
@@ -235,7 +235,7 @@ class _Controller:
         turn_id = _turn(context)
         target = ActiveSteerTarget("runtime", turn_id, context, None, self.agent)
         # Outside a run (a crash simulation), the identity a previous process's adapter bound.
-        native = self.agent.steering_native_turn_id(target) or f"avibe:previous-process:{turn_id}"
+        native = self.agent.steering_native_turn_id(target) or f"vibey:previous-process:{turn_id}"
         self.started.append(native)
         with self.engine.begin() as conn:
             turn = message_deliveries.get_turn(conn, turn_id)
@@ -261,7 +261,7 @@ def _context(platform: str, session_id: str, *, turn_id: str, delivery_id: str) 
         platform=platform,
         platform_specific={
             "agent_session_id": session_id,
-            "agent_session_target": {"id": session_id, "agent_backend": "avibe"},
+            "agent_session_target": {"id": session_id, "agent_backend": "vibey"},
             "workbench_session_id": session_id if platform == "avibe" else None,
             "platform": platform,
             "turn_token": turn_id,
@@ -297,9 +297,9 @@ class _Harness:
         self.agent = self.new_agent()
         self._turns = 0
 
-    def new_agent(self) -> AvibeAgent:
+    def new_agent(self) -> VibeyAgent:
         """A fresh adapter over the same rows: what a restarted process starts with."""
-        agent = AvibeAgent(
+        agent = VibeyAgent(
             self.controller,
             engine=self.engine,
             providers=self.providers,
@@ -347,7 +347,7 @@ class _Harness:
                 now=NOW,
             )
             message_deliveries.claim_start_batch(
-                conn, turn_id=turn_id, session_id=self.session_id, backend="avibe", deliveries=[delivery], dispatch_text=body
+                conn, turn_id=turn_id, session_id=self.session_id, backend="vibey", deliveries=[delivery], dispatch_text=body
             )
         context = _context(self.platform, self.session_id, turn_id=turn_id, delivery_id=delivery_id)
         return AgentRequest(
@@ -431,7 +431,7 @@ def _insert_session(conn, session_id: str, scope_id: str, metadata: Optional[dic
     conn.exec_driver_sql(
         "insert into agent_sessions (id, scope_id, agent_name, agent_backend, agent_variant, session_anchor, "
         "workdir, native_session_id, status, visibility, pinned, agent_status, metadata_json, created_at, "
-        "updated_at, last_active_at) values (?, ?, 'avibe', 'avibe', 'avibe', ?, '/tmp', ?, 'active', "
+        "updated_at, last_active_at) values (?, ?, 'vibey', 'vibey', 'vibey', ?, '/tmp', ?, 'active', "
         "'foreground', 0, 'idle', ?, ?, ?, ?)",
         (session_id, scope_id, session_id, session_id, json.dumps(metadata or {}), NOW, NOW, NOW),
     )
@@ -464,13 +464,13 @@ async def test_a_turn_commits_its_context_once_and_shows_the_reply_once(
     assert "date:" not in environment.text and "timezone:" not in environment.text
     # The steer identity existed when the Turn owner bound the native start.
     [native] = harness.controller.started
-    assert native.startswith("avibe:") and native.endswith(f":{_turn(request.context)}")
+    assert native.startswith("vibey:") and native.endswith(f":{_turn(request.context)}")
     # A10: every request is the context rebuilt from the tables at that point.
     assert [request_.messages for request_ in harness.provider.requests] == [
         project(rows[:1]).messages,
         project(rows[:3]).messages,
     ]
-    assert harness.provider.requests[0].endpoint.base_url == "http://hub.invalid/avibe/v1"
+    assert harness.provider.requests[0].endpoint.base_url == "http://hub.invalid/vibey/v1"
     # One row per response: the dispatcher wrote its display into the committed rows, never a copy.
     [result] = harness.rows("result")
     [narration] = harness.rows("assistant")
@@ -551,7 +551,7 @@ async def test_committed_rows_keep_the_agent_that_ran_the_turn(engine, session, 
 
     harness = _Harness(engine, tmp_path, "avibe", _tool_turn(), tools=[FakeTool("echo", execute=slow)])
     request = harness.request("list files")
-    request.vibe_agent_name = "avibe"
+    request.vibe_agent_name = "vibey"
     running = asyncio.create_task(harness.agent.handle_message(request))
     await started.wait()
     with engine.begin() as conn:
@@ -578,12 +578,12 @@ async def test_committed_rows_keep_the_agent_that_ran_the_turn(engine, session, 
                 )
             )
         }
-    assert names == {"avibe"}
+    assert names == {"vibey"}
     with engine.connect() as conn:
         backends = set(conn.execute(
             select(agent_events.c.backend).where(agent_events.c.session_id == SESSION, agent_events.c.context_seq.is_not(None))
         ).scalars())
-    assert backends == {"avibe"}
+    assert backends == {"vibey"}
 
 
 async def test_the_environment_names_at_most_twenty_watches_without_their_commands(
@@ -1092,7 +1092,7 @@ async def test_a_google_hop_is_called_over_chat_at_the_gateway_prefix(engine, se
     [request] = harness.provider.requests
     assert asked == ["openai_chat"]
     assert (request.endpoint.protocol, request.endpoint.base_url, request.endpoint.provider) == (
-        "openai_chat", "http://hub.invalid/avibe/v1", "test-provider"
+        "openai_chat", "http://hub.invalid/vibey/v1", "test-provider"
     )
     assert harness.controller.terminals[-1]["is_error"] is False
 
@@ -1124,8 +1124,8 @@ async def test_a_failed_run_shows_localized_copy_and_a_refusal_shows_its_explana
     await harness.agent.handle_message(harness.request("say something unsafe"))
 
     sent = harness.controller.im_client.sent
-    empty_copy = i18n_t("avibeAgent.error.emptyResponse", language)
-    refusal_copy = i18n_t("avibeAgent.error.refusal", language)
+    empty_copy = i18n_t("vibeyAgent.error.emptyResponse", language)
+    refusal_copy = i18n_t("vibeyAgent.error.refusal", language)
     # Each failed final carries its own explanation in its row.
     assert sent == [empty_copy, refusal_copy]
     assert sorted(row["content_text"] for row in harness.rows("error")) == sorted([empty_copy, refusal_copy])
@@ -1329,7 +1329,7 @@ async def test_a_refused_model_route_fails_before_the_input_is_written(
         raise RuntimeError("no source serves this model")
 
     harness.controller.model_hub_runtime = SimpleNamespace(resolve=refuse)
-    hub = SimpleNamespace(enabled=gateway_enabled, agents={"avibe": SimpleNamespace(mode="hub")})
+    hub = SimpleNamespace(enabled=gateway_enabled, agents={"vibey": SimpleNamespace(mode="hub")})
     harness.controller.model_hub_service = SimpleNamespace(store=SimpleNamespace(load=lambda: hub))
     request = harness.request("hello")
     await harness.agent.handle_message(request)
@@ -1431,7 +1431,7 @@ async def test_a_silent_final_whose_run_failed_after_its_commit_is_typed_by_its_
 
 
 async def test_a_relative_tool_path_is_shown_under_the_runs_cwd(engine, session, tmp_path, published) -> None:
-    from modules.agents.avibe.agent import _relative_to
+    from modules.agents.vibey.agent import _relative_to
 
     project = tmp_path / "project"
     shown = _relative_to(str(project))
@@ -1514,7 +1514,7 @@ async def test_a_stop_while_the_input_is_prepared_starts_no_run(engine, session,
 async def test_a_stop_after_the_final_reply_committed_loses_the_race(
     engine, session, tmp_path, published, monkeypatch
 ) -> None:
-    import modules.agents.avibe.agent as agent_module
+    import modules.agents.vibey.agent as agent_module
     from core.agent_core.agent.events import MessageCommitted, RunEnded
     from core.agent_core.agent.loop import Agent
 
@@ -1688,7 +1688,7 @@ async def test_a_provider_that_fails_to_close_does_not_fail_a_delivered_turn(
     assert harness.controller.terminals[-1]["is_error"] is False
     assert closed == ["anthropic"]
     # Every adapter is closed even when an earlier one fails to close.
-    from modules.agents.avibe.models import HubModelRouter
+    from modules.agents.vibey.models import HubModelRouter
 
     adapters = {"anthropic": _Provider([], "anthropic", fails=True), "google": _Provider([], "google", fails=False)}
     router = HubModelRouter(lambda: None, lambda protocol: adapters[protocol])
@@ -1912,7 +1912,7 @@ async def _until(predicate, what: str, timeout: float = 10.0) -> None:
 
 _TEXT_STREAMS = {
     "anthropic": (
-        "/avibe/v1/messages",
+        "/vibey/v1/messages",
         'data: {"type":"message_start","message":{"usage":{}}}\n\n'
         'data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n'
         'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}\n\n'
@@ -1921,13 +1921,13 @@ _TEXT_STREAMS = {
         'data: {"type":"message_stop"}\n\n',
     ),
     "openai_responses": (
-        "/avibe/v1/responses",
+        "/vibey/v1/responses",
         'data: {"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_1"}}\n\n'
         'data: {"type":"response.output_text.delta","output_index":0,"delta":"hi"}\n\n'
         'data: {"type":"response.completed","response":{"status":"completed","output":null}}\n\n',
     ),
     "openai_chat": (
-        "/avibe/v1/chat/completions",
+        "/vibey/v1/chat/completions",
         'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'
         'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n'
         "data: [DONE]\n\n",
@@ -1939,7 +1939,7 @@ _TEXT_STREAMS = {
 async def test_a_turn_runs_through_the_real_provider_registry(engine, session, tmp_path, published, hub_protocol) -> None:
     import httpx
 
-    from modules.agents.avibe.models import registry_providers
+    from modules.agents.vibey.models import registry_providers
 
     wire = "openai_chat" if hub_protocol == "google" else hub_protocol
     path, body = _TEXT_STREAMS[wire]
@@ -2009,7 +2009,7 @@ async def test_bash_runs_with_the_turns_caller_environment(engine, session, tmp_
     assert seen.get("PATH") and seen.get("HOME")
     # The Turn's caller provenance, as the other backends give their shells.
     assert seen[AVIBE_SESSION_ID_ENV] == SESSION
-    assert seen[AVIBE_CALLER_BACKEND_ENV] == "avibe"
+    assert seen[AVIBE_CALLER_BACKEND_ENV] == "vibey"
     assert {key for key in seen if key in CALLER_CONTEXT_ENV_NAMES} >= {AVIBE_SESSION_ID_ENV, AVIBE_CALLER_BACKEND_ENV}
     # The Model Hub gateway token stays in the adapter: never in a command's environment.
     assert "hub-token" not in output
@@ -2123,17 +2123,17 @@ async def test_resume_settles_a_reused_call_id_from_the_job_its_own_call_started
         await suite.jobs.kill(current)
 
 
-def _controller_with(agent: AvibeAgent) -> SimpleNamespace:
+def _controller_with(agent: VibeyAgent) -> SimpleNamespace:
     """A controller with the registered adapter and its single recovery owner."""
-    from modules.agents.avibe.recovery import AvibeRecovery
+    from modules.agents.vibey.recovery import VibeyRecovery
 
     controller = SimpleNamespace(
-        agent_service=SimpleNamespace(agents={"avibe": agent}),
+        agent_service=SimpleNamespace(agents={"vibey": agent}),
         config=SimpleNamespace(platform="avibe", language="en"),
         im_client=None,
         settings_manager=SimpleNamespace(),
     )
-    controller.avibe_recovery = AvibeRecovery(controller)
+    controller.vibey_recovery = VibeyRecovery(controller)
     return controller
 
 
@@ -2162,7 +2162,7 @@ async def _two_sessions_with_open_calls(engine, tmp_path, suite) -> tuple[_Harne
 def _hand_over_failing_once(monkeypatch) -> list[str]:
     """Watch hand-over raises on its first call, as a transient DB or Watch failure would."""
     import core.watches as watches_module
-    import modules.agents.avibe.recovery as recovery_module
+    import modules.agents.vibey.recovery as recovery_module
 
     calls: list[str] = []
     real = watches_module.hand_over_job
@@ -2195,7 +2195,7 @@ async def test_recovery_retries_a_session_it_could_not_settle(
 
     _hand_over_failing_once(monkeypatch)
     harness, running, _exited = await _two_sessions_with_open_calls(engine, tmp_path, local_tool_suite())
-    recovery = _controller_with(harness.new_agent()).avibe_recovery
+    recovery = _controller_with(harness.new_agent()).vibey_recovery
     try:
         # The first pass settles ses_b and reports SESSION, never success over a failure.
         assert await recovery.start() == [SESSION]
@@ -2253,13 +2253,13 @@ async def test_applying_saved_config_never_retires_the_built_in_backend(engine, 
     auth._load_backend_runtime_config = lambda _backend: None
     auth._sync_builtin_default_agents = lambda: None
 
-    await auth.renew_backend_runtime("avibe", config_save=True)
+    await auth.renew_backend_runtime("vibey", config_save=True)
 
-    assert controller.agent_service.agents["avibe"] is harness.agent
+    assert controller.agent_service.agents["vibey"] is harness.agent
 
 
 async def test_recovery_admits_a_returned_input_whose_admission_failed(engine, session, tmp_path, published) -> None:
-    from modules.agents.avibe.recovery import AvibeRecovery
+    from modules.agents.vibey.recovery import VibeyRecovery
 
     started = asyncio.Event()
 
@@ -2269,8 +2269,8 @@ async def test_recovery_admits_a_returned_input_whose_admission_failed(engine, s
         return ToolResult((text("Command aborted"),), is_error=True)
 
     harness = _Harness(engine, tmp_path, "avibe", _tool_turn(), tools=[FakeTool("echo", execute=wait_for_cancel)])
-    harness.controller.avibe_recovery = AvibeRecovery(harness.controller)
-    harness.controller.agent_service.agents = {"avibe": harness.agent}
+    harness.controller.vibey_recovery = VibeyRecovery(harness.controller)
+    harness.controller.agent_service.agents = {"vibey": harness.agent}
     request = harness.request("run it")
     turn_id = _turn(request.context)
     running = asyncio.create_task(harness.agent.handle_message(request))
@@ -2295,11 +2295,11 @@ async def test_recovery_admits_a_returned_input_whose_admission_failed(engine, s
     # Stop returns the accepted steer; admitting it fails once.
     await harness.agent.handle_stop(AgentRequest(**{**request.__dict__, "message": "stop"}))
     await running
-    assert failures == [delivery_id] and harness.controller.avibe_recovery.retrying
-    harness.controller.avibe_recovery._task.cancel()
+    assert failures == [delivery_id] and harness.controller.vibey_recovery.retrying
+    harness.controller.vibey_recovery._task.cancel()
 
     # The owner's next pass admits it, without any Turn, exactly once.
-    assert await harness.controller.avibe_recovery.start() == []
+    assert await harness.controller.vibey_recovery.start() == []
     admitted = [entry for entry in await harness.context_rows() if entry.row_id == delivery_id]
     assert len(admitted) == 1
 
@@ -2320,7 +2320,7 @@ async def _remote_turn_with_open_call(
     """A Workbench Turn (by a remote principal unless ``author_id`` says otherwise) whose response opened a bash call; returns its job id."""
     from core.vibe_agents import VibeAgentStore
 
-    VibeAgentStore().ensure_builtin_default_agent(backend="avibe")
+    VibeAgentStore().ensure_builtin_default_agent(backend="vibey")
     turn_id, delivery_id = f"turn_remote_{id(harness)}", f"dlv_remote_{id(harness)}"
     metadata = {"resource_user_context": dict(snapshot)} if snapshot is not None else {}
     with harness.engine.begin() as conn:
@@ -2338,13 +2338,13 @@ async def _remote_turn_with_open_call(
             now=NOW,
         )
         message_deliveries.claim_start_batch(
-            conn, turn_id=turn_id, session_id=SESSION, backend="avibe", deliveries=[delivery],
+            conn, turn_id=turn_id, session_id=SESSION, backend="vibey", deliveries=[delivery],
             dispatch_text="run the release",
         )
     context = _context("avibe", SESSION, turn_id=turn_id, delivery_id=delivery_id)
     harness.controller._native_start(context)
     await harness.agent.store.consume_input(SESSION, delivery_id, UserMessage((text("run the release"),)))
-    harness.agent.store.bind_agent(SESSION, "avibe")
+    harness.agent.store.bind_agent(SESSION, "vibey")
     call = ToolCallBlock(id="call_release", name="bash", arguments={"command": "sleep 30"})
     await harness.agent.store.append_response(SESSION, assistant("", calls=(call,)), final=False)
     harness.agent.store.bind_agent(SESSION, None)
@@ -2374,7 +2374,7 @@ async def test_a_remote_turns_job_watch_carries_its_authorization(engine, sessio
         await harness.agent._tools().jobs.hand_over(job_id)
 
         watch = _job_watch(job_id)
-        assert watch.agent_name == "avibe"
+        assert watch.agent_name == "vibey"
         assert watch.metadata["resource_user_context"]["sub"] == "remote-user-1"
         from core.watches import watch_allows_runtime
 
@@ -2423,7 +2423,7 @@ async def test_startup_recovery_hands_a_job_over_with_its_turns_authorization(
         assert await agent.recover_runtime_state() == []
 
         watch = _job_watch(job_id)
-        assert watch is not None and watch.agent_name == "avibe"
+        assert watch is not None and watch.agent_name == "vibey"
         for key, expected in authority.items():
             recorded = watch.metadata.get(key)
             assert {k: recorded[k] for k in expected} == expected if isinstance(expected, dict) else recorded == expected
@@ -2439,7 +2439,7 @@ async def test_the_default_job_host_lives_in_the_watch_jobs_dir(engine, session,
     from core.watches import agent_jobs_dir
 
     controller = _Controller(engine, "avibe")
-    suite = AvibeAgent(controller, engine=engine)._tools()
+    suite = VibeyAgent(controller, engine=engine)._tools()
     job_id = await _real_job(suite, "true", call_id="call_true", cwd=tmp_path)
     try:
         # vibe stop's stop_all_jobs and the job-Watch sweep both look in this one directory.

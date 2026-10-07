@@ -20,7 +20,7 @@ export const BACKEND_TEXT: Record<Backend, string> = {
   claude: 'text-mint-ink',
   opencode: 'text-cyan-ink',
   codex: 'text-violet-ink',
-  avibe: 'text-mint-ink',
+  vibey: 'text-mint-ink',
 };
 
 // Solid dot fill — e.g. a status dot inside a chip.
@@ -28,7 +28,7 @@ export const BACKEND_DOT: Record<Backend, string> = {
   claude: 'bg-mint',
   opencode: 'bg-cyan',
   codex: 'bg-violet',
-  avibe: 'bg-mint',
+  vibey: 'bg-mint',
 };
 
 // Full pill surface (soft bg + 40% border + accent text) for backend chips.
@@ -36,7 +36,7 @@ export const BACKEND_CHIP: Record<Backend, string> = {
   claude: 'bg-mint-soft border-mint/40 text-mint-ink',
   opencode: 'bg-cyan-soft border-cyan/40 text-cyan-ink',
   codex: 'bg-violet-soft border-violet/40 text-violet-ink',
-  avibe: 'bg-mint-soft border-mint/40 text-mint-ink',
+  vibey: 'bg-mint-soft border-mint/40 text-mint-ink',
 };
 
 export function isBackend(value: string): value is Backend {

@@ -1,8 +1,8 @@
-"""The single owner of the Avibe Agent's settlement outside a Turn.
+"""The single owner of Vibey's settlement outside a Turn.
 
 Settlement outside a Turn is T2 (open tool calls), T3 admission (accepted inputs
 no run consumed), and J5 (pruning settled jobs). The controller holds one
-``AvibeRecovery`` and so at most one recovery task, whose passes run on the
+``VibeyRecovery`` and so at most one recovery task, whose passes run on the
 adapter the controller registered at startup. Every pass re-derives its
 candidates from the rows, so a retry picks up whatever the last pass left
 unsettled.
@@ -23,7 +23,7 @@ RETRY_DELAYS_S = (5.0, 30.0, 120.0)
 RETRY_PERIOD_S = 600.0
 
 
-class AvibeRecovery:
+class VibeyRecovery:
     def __init__(self, controller: Any) -> None:
         self._controller = controller
         self._task: Optional[asyncio.Task] = None
@@ -48,13 +48,13 @@ class AvibeRecovery:
             await self.stop()
             unsettled = await self._pass()
             if unsettled and not self.retrying:
-                self._task = asyncio.create_task(self._retry(), name="avibe-agent-recovery")
+                self._task = asyncio.create_task(self._retry(), name="vibey-agent-recovery")
         return unsettled
 
     def ensure(self) -> None:
         """A Turn could not settle something (a returned input it failed to admit): retry it."""
         if not self.retrying:
-            self._task = asyncio.create_task(self._retry(), name="avibe-agent-recovery")
+            self._task = asyncio.create_task(self._retry(), name="vibey-agent-recovery")
 
     async def stop(self) -> None:
         """Stop retrying (service stop); the next start recovers again."""
@@ -72,13 +72,13 @@ class AvibeRecovery:
             async with self._lock:
                 unsettled = await self._pass()
             if not unsettled:
-                logger.info("Avibe Agent recovery settled every Session")
+                logger.info("Vibey recovery settled every Session")
                 return
-            logger.error("Avibe Agent recovery could not settle Sessions %s; retrying", ", ".join(unsettled))
+            logger.error("Vibey recovery could not settle Sessions %s; retrying", ", ".join(unsettled))
 
     async def _pass(self) -> list[str]:
         try:
-            return await self._controller.agent_service.agents["avibe"].recover_runtime_state()
+            return await self._controller.agent_service.agents["vibey"].recover_runtime_state()
         except Exception:
-            logger.exception("Avibe Agent recovery pass failed")
+            logger.exception("Vibey recovery pass failed")
             return ["*"]

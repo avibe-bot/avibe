@@ -378,8 +378,8 @@ def reserve_forked_session(
                     "fork_created_at": now,
                 }
             )
-            if source_backend == "avibe":
-                # The Avibe Agent's context is the source's rows up to the anchor, resolved
+            if source_backend == "vibey":
+                # Vibey's context is the source's rows up to the anchor, resolved
                 # once now so later rows never enter the prefix (C-5 section 4). With no
                 # running Turn the anchor is the whole context, as a native fork keeps the
                 # whole settled session: a silent or stopped Turn shows no row to name.

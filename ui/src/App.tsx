@@ -719,7 +719,7 @@ const settingsRoute = () => (
     <Route path="backends/opencode" element={<SettingsOpencodeProviderPage />} />
     <Route path="backends/claude" element={<SettingsClaudeProviderPage />} />
     <Route path="backends/codex" element={<SettingsCodexProviderPage />} />
-    <Route path="backends/avibe" element={<SettingsBackendPage backend="avibe" />} />
+    <Route path="backends/vibey" element={<SettingsBackendPage backend="vibey" />} />
     <Route
       path="models"
       element={

@@ -56,7 +56,7 @@ class ServedHopHeaderTooLarge(ValueError):
 
 
 class PreparedGatewayRouteConflict(ValueError):
-    """An Avibe launch would replace another request's still-owned route."""
+    """A Vibey launch would replace another request's still-owned route."""
 
 
 @dataclass(frozen=True)
@@ -1483,14 +1483,14 @@ class TurnCorrelationRegistry:
             else:
                 exact = self._exact_turn(backend, token)
                 if exact is None:
-                    if backend == "avibe":
+                    if backend == "vibey":
                         # A consumer launch without a tracked turn still needs
                         # its alias and primary origin bound to this credential.
                         return self._route_credential(key, scope, prepared)
                     return token
                 route_turn_id = exact[0]
             existing = scope.prepared_routes.get(route_turn_id)
-            if backend == "avibe" and existing is not None and existing != prepared:
+            if backend == "vibey" and existing is not None and existing != prepared:
                 trace = self._readable_trace(route_turn_id, backend)
                 if (
                     trace is None
@@ -1499,7 +1499,7 @@ class TurnCorrelationRegistry:
                     or trace.pending_attempts
                     or trace.recovery_requests
                 ):
-                    raise PreparedGatewayRouteConflict("Avibe route is still owned or its alias changed")
+                    raise PreparedGatewayRouteConflict("Vibey route is still owned or its alias changed")
                 # Keep the turn's attempt history and outcome. Only the launch
                 # snapshot changes; old credentials can route but cannot claim
                 # this newly prepared identity.
@@ -1845,7 +1845,7 @@ class TurnCorrelationRegistry:
                 or trace.gateway_model_id is None
             ):
                 return None
-            if backend == "avibe":
+            if backend == "vibey":
                 if credential.route != scope.prepared_routes.get(turn_id):
                     # A superseded credential must not poison the successor
                     # even when malformed JSON fails before body attribution.
@@ -1966,8 +1966,8 @@ class TurnCorrelationRegistry:
         resolved_model_id: str,
         via_mapping: bool,
     ) -> None:
-        if backend == "avibe":
-            raise ValueError("avibe attempts require the hub channel")
+        if backend == "vibey":
+            raise ValueError("vibey attempts require the hub channel")
         token = self.credentials(backend, process_scope, turn_id)
         normalized_turn_id = str(turn_id or "").strip()
         if not normalized_turn_id:
@@ -2082,8 +2082,8 @@ class TurnCorrelationRegistry:
             trace = self._traces.get(turn_id)
             if trace is None or trace.outcome_frozen:
                 return
-            if trace.agent == "avibe" and channel != "hub":
-                raise ValueError("avibe attempts require the hub channel")
+            if trace.agent == "vibey" and channel != "hub":
+                raise ValueError("vibey attempts require the hub channel")
             # Admission supersedes earlier supply failures, not their attempt history.
             trace.model_supply_state = None
             trace.blockers = []

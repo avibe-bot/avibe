@@ -2828,8 +2828,8 @@ class ModelHubAgentSupplyConfig:
 
     @classmethod
     def default(cls, backend: str, *, mode: Literal["hub", "direct"]) -> "ModelHubAgentSupplyConfig":
-        if backend == "avibe":
-            return cls(backend="avibe", mode="hub", menu_kind="fixed")
+        if backend == "vibey":
+            return cls(backend="vibey", mode="hub", menu_kind="fixed")
         if backend == "opencode":
             return cls(
                 backend="opencode",
@@ -2877,8 +2877,8 @@ class ModelHubAgentSupplyConfig:
             raise ValueError("Config 'model_hub.agents.backend' is invalid")
         if not isinstance(mode, str) or mode not in {"hub", "direct"}:
             raise ValueError("Config 'model_hub.agents.mode' is invalid")
-        if backend == "avibe" and mode != "hub":
-            raise ValueError("Config 'model_hub.agents.avibe.mode' must be hub")
+        if backend == "vibey" and mode != "hub":
+            raise ValueError("Config 'model_hub.agents.vibey.mode' must be hub")
         expected_menu_kind = "open" if backend == "opencode" else "fixed"
         if not isinstance(menu_kind, str) or menu_kind != expected_menu_kind:
             raise ValueError("Config 'model_hub.agents.menu_kind' is invalid for backend")
@@ -3014,27 +3014,27 @@ class ModelHubConfig:
         default_factory=lambda: {
             backend: ModelHubAgentSupplyConfig.default(backend, mode="hub")
             for backend in MODEL_HUB_BACKENDS
-            if backend != "avibe"
+            if backend != "vibey"
         }
     )
     # Fresh configs and explicit Start/Stop consume the default. Disk observers
     # retain a pending false marker until lock-owning startup commits promotion;
     # an unrelated save must not acknowledge an upgrade it did not perform.
     runtime_default_applied: bool = True
-    # Not persisted, like ``V2Config.load_warnings``. True while the Avibe
-    # entry was never supplied: a fresh install, or a file written before the
-    # Avibe Agent existed. The empty entry standing in waits for its starting
-    # supply (see ``ModelHubService._seed_avibe``), and until that seed, or any
+    # Not persisted, like ``V2Config.load_warnings``. True while the Vibey
+    # entry was never supplied: a fresh install, or a file written before
+    # Vibey existed. The empty entry standing in waits for its starting
+    # supply (see ``ModelHubService._seed_vibey``), and until that seed, or any
     # other edit, touches it, ``to_payload`` keeps it absent, so an unrelated
     # write cannot record an empty supply as the user's choice.
-    avibe_supply_pending: ClassVar[bool] = False
+    vibey_supply_pending: ClassVar[bool] = False
 
     def __post_init__(self) -> None:
         # Existing in-process config producers may still supply the released
         # three-backend shape, just like older on-disk configurations.
-        if "avibe" not in self.agents:
-            self.agents["avibe"] = ModelHubAgentSupplyConfig.default("avibe", mode="hub")
-            self.avibe_supply_pending = True
+        if "vibey" not in self.agents:
+            self.agents["vibey"] = ModelHubAgentSupplyConfig.default("vibey", mode="hub")
+            self.vibey_supply_pending = True
 
     @staticmethod
     def source_eligible_for_backend(
@@ -3117,7 +3117,7 @@ class ModelHubConfig:
                 )
         agents = {}
         for backend in MODEL_HUB_BACKENDS:
-            if backend == "avibe" and backend not in agents_payload:
+            if backend == "vibey" and backend not in agents_payload:
                 # Supplied by ``__post_init__``, which marks it pending.
                 continue
             if backend not in agents_payload:
@@ -3176,8 +3176,8 @@ class ModelHubConfig:
         return config
 
     def to_payload(self) -> dict:
-        unseeded = self.avibe_supply_pending and self.agents["avibe"] == ModelHubAgentSupplyConfig.default(
-            "avibe", mode="hub"
+        unseeded = self.vibey_supply_pending and self.agents["vibey"] == ModelHubAgentSupplyConfig.default(
+            "vibey", mode="hub"
         )
         return {
             "enabled": self.enabled,
@@ -3186,7 +3186,7 @@ class ModelHubConfig:
             "agents": {
                 backend: self.agents[backend].to_payload()
                 for backend in MODEL_HUB_BACKENDS
-                if not (backend == "avibe" and unseeded)
+                if not (backend == "vibey" and unseeded)
             },
         }
 

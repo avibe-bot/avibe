@@ -52,7 +52,7 @@ const mountRuntime = async () => {
 
 describe('persisted backend install paths', () => {
   it('reads the built-in backend as enabled without a config section and rejects CLI work at the hook boundary', async () => {
-    const hook = renderHook(() => useBackendRuntime({ backend: 'avibe' }));
+    const hook = renderHook(() => useBackendRuntime({ backend: 'vibey' }));
     await waitFor(() => expect(hook.result.current.loaded).toBe(true));
     expect(hook.result.current.enabled).toBe(true);
     expect(hook.result.current.cliPath).toBe('');

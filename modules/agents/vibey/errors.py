@@ -2,7 +2,7 @@
 
 ``AgentError.kind`` is the engine's stable discriminator (loop-control.md section 6);
 ``AgentError.message`` is diagnostic detail and is never shown as display copy.
-Every kind maps to one ``vibe/i18n`` key under ``avibeAgent.error``.
+Every kind maps to one ``vibe/i18n`` key under ``vibeyAgent.error``.
 """
 
 from __future__ import annotations
@@ -47,8 +47,8 @@ _REASON_KEYS: dict[str, str] = {
 def error_key(kind: Optional[str], *, reason: Optional[str] = None) -> str:
     """The i18n key for an error kind, falling back to the run reason, then to generic copy."""
     name = _KIND_KEYS.get(kind or "") or _REASON_KEYS.get(reason or "") or "generic"
-    return f"avibeAgent.error.{name}"
+    return f"vibeyAgent.error.{name}"
 
 
 def error_text(kind: Optional[str], lang: str, *, reason: Optional[str] = None) -> str:
-    return i18n_t(error_key(kind, reason=reason), lang, backend=display_name_for_backend("avibe"))
+    return i18n_t(error_key(kind, reason=reason), lang, backend=display_name_for_backend("vibey"))

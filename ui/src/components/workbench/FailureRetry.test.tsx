@@ -57,7 +57,7 @@ describe('failed-turn retry action', () => {
         ...notice,
         text: '⚠️ 本轮执行被中断——Avibe 服务在它运行期间重启。正在运行的命令已作为 Watch w_1 继续执行，结果会发到这里。',
         metadata: {
-          event: 'backend_failure', backend: 'avibe',
+          event: 'backend_failure', backend: 'vibey',
           failure_id: 'turn:interrupted-turn', turn_id: 'interrupted-turn', detached: false,
           replayed: true, watch_ids: ['w_1'],
         },

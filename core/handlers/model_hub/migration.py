@@ -143,9 +143,9 @@ class MigrationHost(Protocol):
 
     def _save_config(self, config: ModelHubConfig) -> ModelHubConfig: ...
 
-    async def _seed_avibe(self, config: ModelHubConfig) -> bool: ...
+    async def _seed_vibey(self, config: ModelHubConfig) -> bool: ...
 
-    async def _announce_avibe_seed(self) -> None: ...
+    async def _announce_vibey_seed(self) -> None: ...
 
     def _carry_agent_selections(self, config: ModelHubConfig, backend: Any) -> None: ...
 
@@ -1866,10 +1866,10 @@ async def _prepare_takeover(
                 source = ModelHubSourceConfig.from_payload(replacement)
                 updated.sources = [source if value.id == source.id else value for value in updated.sources]
                 _ensure_takeover_placement(updated, source, item.backend)
-                # Now on the Hub, it is new to the Avibe Agent, which reaches every
+                # Now on the Hub, it is new to Vibey, which reaches every
                 # Hub Source: placed like a new Source (a pending entry is seeded
                 # below instead).
-                host._apply_source_placement(updated, source, ("avibe",))
+                host._apply_source_placement(updated, source, ("vibey",))
             else:
                 updated.sources.append(source)
                 host._apply_source_placement(updated, source)
@@ -1882,9 +1882,9 @@ async def _prepare_takeover(
                         "store_backend": item.backend, "store_routing": item.native_store_routing or "",
                     } if item.native_store_revision else {}),
                 }
-        if updated.avibe_supply_pending:
+        if updated.vibey_supply_pending:
             # Once every Source of the batch is in place, reused identities too.
-            await host._seed_avibe(updated)
+            await host._seed_vibey(updated)
         backends = sorted({item.backend for item in [*(consented or selected), *retained_keys]})
         native_before = _native_auth_snapshot(host, tuple(backends))
         # Copy-only keeps the Avibe-saved native key; Hub launches shadow it.
@@ -2086,8 +2086,8 @@ async def _resume_takeover(
             # Save the decision without projecting staged grants into CPA.
             # sync_sources is a runtime write, not a config-only operation.
             host._save_config(updated)
-            if previous.avibe_supply_pending and not updated.avibe_supply_pending:
-                await host._announce_avibe_seed()
+            if previous.vibey_supply_pending and not updated.vibey_supply_pending:
+                await host._announce_vibey_seed()
             host._engine_synced = False
             host._reconcile_native_auth(tuple(record["backends"]))
             # This durable marker precedes any credential exposure to CPA.

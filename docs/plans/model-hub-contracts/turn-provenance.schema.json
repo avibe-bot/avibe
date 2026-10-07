@@ -50,7 +50,7 @@
       "description": "When the FSM settled the turn."
     },
     "agent": {
-      "enum": ["claude", "codex", "opencode", "avibe"],
+      "enum": ["claude", "codex", "opencode", "vibey"],
       "description": "Backend identifier. Mirrors AgentSupply.backend exactly."
     },
     "requested_model_id": {
@@ -302,7 +302,7 @@
   },
   "allOf": [
     {
-      "if": { "properties": { "agent": { "const": "avibe" } }, "required": ["agent"] },
+      "if": { "properties": { "agent": { "const": "vibey" } }, "required": ["agent"] },
       "then": {
         "properties": {
           "failed_attempts": { "items": { "properties": { "channel": { "const": "hub" } } } },

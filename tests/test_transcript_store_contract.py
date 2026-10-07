@@ -23,7 +23,7 @@ from core.agent_core.ai.provider import Done, ProviderError
 from core.agent_core.harness.context import ContextConfig, request_tokens
 from core.agent_core.harness.store import TranscriptStore
 from core.agent_core.messages import AssistantMessage, ToolCallBlock, ToolResultMessage, Usage, text, usage_to_dict
-from modules.agents.avibe.store import AdapterTranscriptStore
+from modules.agents.vibey.store import AdapterTranscriptStore
 from storage import agent_events_service, messages_service
 from storage.agent_transcript import SQLiteTranscriptStore, resolve_fork_anchor_seq
 from storage.db import create_sqlite_engine
@@ -138,7 +138,7 @@ def _session(conn, session_id: str, scope_id: str, metadata: dict | None = None)
     conn.exec_driver_sql(
         "insert into agent_sessions (id, scope_id, agent_name, agent_backend, agent_variant, session_anchor, "
         "workdir, native_session_id, status, visibility, pinned, agent_status, metadata_json, created_at, "
-        "updated_at, last_active_at) values (?, ?, 'avibe', 'avibe', 'avibe', ?, '/tmp', ?, 'active', "
+        "updated_at, last_active_at) values (?, ?, 'vibey', 'vibey', 'vibey', ?, '/tmp', ?, 'active', "
         "'foreground', 0, 'idle', ?, ?, ?, ?)",
         (session_id, scope_id, session_id, session_id, json.dumps(metadata or {}), NOW, NOW, NOW),
     )

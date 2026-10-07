@@ -8,7 +8,7 @@
   "additionalProperties": false,
   "properties": {
     "contract_version": { "const": 12 },
-    "backend": { "enum": ["claude", "codex", "opencode", "avibe"] },
+    "backend": { "enum": ["claude", "codex", "opencode", "vibey"] },
     "channel": { "enum": ["hub", "native_cli"] },
     "reachable": { "type": "boolean" },
     "source_id": { "type": "string", "pattern": "^src_[a-z0-9]{8,}$" },
@@ -33,7 +33,7 @@
   },
   "allOf": [
     {
-      "if": { "properties": { "backend": { "const": "avibe" } }, "required": ["backend"] },
+      "if": { "properties": { "backend": { "const": "vibey" } }, "required": ["backend"] },
       "then": { "properties": { "channel": { "const": "hub" } } }
     },
     {

@@ -14,8 +14,6 @@ type BackendCapabilities = { [K in keyof BackendDescriptor['capabilities']]: boo
 export type BackendUiMeta = {
   id: BackendId;
   label: string;
-  /** The name the store gives this backend's built-in Agent. */
-  builtinAgentName: string;
   defaultCli: string | null;
   defaultEnabled: boolean;
   /** Part of the platform: always enabled, with no switch. */
@@ -37,7 +35,7 @@ export type BackendUiMeta = {
   iconCls: string;
 };
 
-const VibeyMark = brandMarkIcon(BACKEND_BRAND_MARKS.avibe, 'VibeyMark');
+const VibeyMark = brandMarkIcon(BACKEND_BRAND_MARKS.vibey, 'VibeyMark');
 
 // Presentation only. Membership, defaults and capabilities come from Python.
 const BACKEND_VISUALS = {
@@ -77,7 +75,7 @@ const BACKEND_VISUALS = {
     tileCls: 'bg-gold',
     iconCls: 'text-gold-foreground',
   },
-  avibe: {
+  vibey: {
     nativeOrder: 3,
     publisher: 'Avibe',
     accent: 'mint',
@@ -96,7 +94,6 @@ export const AGENT_BACKENDS = BACKEND_CATALOG.map((backend) => ({
   ...BACKEND_VISUALS[backend.id],
   id: backend.id,
   label: backend.display_name,
-  builtinAgentName: backend.builtin_agent_name,
   defaultCli: backend.default_cli,
   defaultEnabled: backend.default_enabled,
   builtin: backend.builtin,
@@ -145,7 +142,6 @@ export function getBackendUiMeta(id: string): BackendUiMeta {
     AGENT_BACKEND_BY_ID[id] || {
       id,
       label: id.replace(/_/g, ' ').replace(/\b\w/g, (char) => char.toUpperCase()),
-      builtinAgentName: id,
       defaultCli: null,
       defaultEnabled: false,
       builtin: false,

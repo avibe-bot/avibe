@@ -114,15 +114,15 @@ describe('NewAgentDialog', () => {
   });
 
   it('creates a Vibey Agent through the existing backend and model pickers', async () => {
-    modelCatalog = { models: ['avibe-model'], reasoningOptions: { 'avibe-model': [] } };
+    modelCatalog = { models: ['vibey-model'], reasoningOptions: { 'vibey-model': [] } };
     const { createVibeAgent } = renderDialog();
     fireEvent.click(screen.getByRole('button', { name: /Vibey/ }));
     fireEvent.change(screen.getByPlaceholderText('agents.create.namePlaceholder'), { target: { value: 'local-helper' } });
     fireEvent.click(screen.getByRole('combobox'));
-    fireEvent.click(screen.getByRole('option', { name: 'avibe-model' }));
+    fireEvent.click(screen.getByRole('option', { name: 'vibey-model' }));
     submit();
     await waitFor(() => expect(createVibeAgent).toHaveBeenCalledWith(expect.objectContaining({
-      name: 'local-helper', backend: 'avibe', model: 'avibe-model', reasoning_effort: null,
+      name: 'local-helper', backend: 'vibey', model: 'vibey-model', reasoning_effort: null,
     })));
   });
 

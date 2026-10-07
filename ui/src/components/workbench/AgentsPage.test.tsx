@@ -237,8 +237,8 @@ describe('AgentsPage contextual selection', () => {
     // Enabling the Avibe backend creates its built-in Agent before any model is selected.
     vi.spyOn(modelsApi, 'listAgents').mockResolvedValue([
       {
-        backend: 'avibe', cli_present: false, mode: 'hub', menu_kind: 'fixed',
-        named_agents: [{ name: 'avibe', effective_model_id: null, supply_status: null }],
+        backend: 'vibey', cli_present: false, mode: 'hub', menu_kind: 'fixed',
+        named_agents: [{ name: 'vibey', effective_model_id: null, supply_status: null }],
       },
       {
         backend: 'codex', cli_present: true, mode: 'hub', menu_kind: 'fixed',
@@ -246,20 +246,20 @@ describe('AgentsPage contextual selection', () => {
       },
     ] as AgentSupply[]);
     const api = makeApi(vi.fn().mockResolvedValue(listResult([
-      { ...brief('avibe', 'Default Agent'), backend: 'avibe' },
+      { ...brief('vibey', 'Default Agent'), backend: 'vibey' },
       { ...brief('codex', ''), model: 'gpt-5' },
     ])));
     renderPage(api);
     const row = (name: string) => screen.getAllByText(name).find((node) => node.closest('button'))!.closest('button')!;
 
     await waitFor(() => expect(
-      within(row('avibe')).getByText('settings.models.gateway.agentIssues.modelMissing'),
+      within(row('vibey')).getByText('settings.models.gateway.agentIssues.modelMissing'),
     ).toBeTruthy());
     expect(within(row('codex')).queryByText('settings.models.gateway.agentIssues.modelMissing')).toBeNull();
   });
 
   it('lists, selects and edits a Vibey Agent without a native import option or CLI detail', async () => {
-    const agent = { ...brief('local-helper', 'before'), backend: 'avibe' };
+    const agent = { ...brief('local-helper', 'before'), backend: 'vibey' };
     const changed = { ...agent, description: 'updated in place' };
     const updateVibeAgent = vi.fn().mockResolvedValue(fullAgent(changed, 'prompt'));
     const api = makeApi(
@@ -293,7 +293,7 @@ describe('AgentsPage contextual selection', () => {
     ['vibey', 'builtin', { builtin: true, builtin_default: true, lock_delete: true }, true],
     ['local-helper', 'custom', {}, false],
   ])('locks the enable switch of %s only when it is the built-in Vibey', async (name, source, metadata, locked) => {
-    const agent = { ...brief(name, 'avibe agent'), backend: 'avibe', source };
+    const agent = { ...brief(name, 'vibey agent'), backend: 'vibey', source };
     const full = fullAgent(agent, 'prompt');
     const api = makeApi(
       vi.fn().mockResolvedValue(listResult(agent)),

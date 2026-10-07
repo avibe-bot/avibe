@@ -1252,7 +1252,7 @@ describe('app i18n key coverage', () => {
     for (const backend of ['claude', 'codex', 'opencode']) {
       expect(referenced).toContainEqual({ key: `settings.models.direct.backend.${backend}.detail`, counted: false, listed: false, demand: 'exact' });
     }
-    expect(referenced.some(({ key }) => key === 'settings.models.direct.backend.avibe.detail')).toBe(false);
+    expect(referenced.some(({ key }) => key === 'settings.models.direct.backend.vibey.detail')).toBe(false);
   });
 
   // A name the bundles never had is not an existence gap: nothing here can tell

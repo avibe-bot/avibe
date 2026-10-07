@@ -136,7 +136,7 @@ describe('fetchBackendModels for OpenCode', () => {
 
 describe('fetchBackendModels in gateway mode', () => {
   it('projects Avibe models and effort metadata without a CLI fallback', async () => {
-    const readModelHubAgentCatalogForModelPicker = vi.fn().mockResolvedValue(hubAgent('avibe', {
+    const readModelHubAgentCatalogForModelPicker = vi.fn().mockResolvedValue(hubAgent('vibey', {
       cli_present: false,
       catalog_models: [model('local-model', { display_name: 'Local model', supports_reasoning: false })],
     }));
@@ -144,12 +144,12 @@ describe('fetchBackendModels in gateway mode', () => {
     const codexModels = vi.fn();
     const readOpencodeOptionsForModelPicker = vi.fn();
     const api = { readModelHubAgentCatalogForModelPicker, claudeModels, codexModels, readOpencodeOptionsForModelPicker } as unknown as ApiContextType;
-    expect(await fetchBackendModels(api, 'avibe')).toEqual({
+    expect(await fetchBackendModels(api, 'vibey')).toEqual({
       models: ['local-model'], modelLabels: { 'local-model': 'Local model' }, reasoningOptions: { 'local-model': [] },
     });
-    expect(readModelHubAgentCatalogForModelPicker).toHaveBeenCalledWith('avibe');
+    expect(readModelHubAgentCatalogForModelPicker).toHaveBeenCalledWith('vibey');
     readModelHubAgentCatalogForModelPicker.mockResolvedValue(null);
-    expect(await fetchBackendModels(api, 'avibe')).toEqual({ models: [] });
+    expect(await fetchBackendModels(api, 'vibey')).toEqual({ models: [] });
     expect(claudeModels).not.toHaveBeenCalled();
     expect(codexModels).not.toHaveBeenCalled();
     expect(readOpencodeOptionsForModelPicker).not.toHaveBeenCalled();

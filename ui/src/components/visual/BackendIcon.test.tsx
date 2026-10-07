@@ -14,18 +14,18 @@ describe('Vibey mark', () => {
   afterEach(cleanup);
 
   it('is the built-in backend icon, avatar and brand mark', () => {
-    const vibey = BACKEND_BRAND_MARKS.avibe.path;
-    const { Icon, Avatar } = getBackendUiMeta('avibe');
+    const vibey = BACKEND_BRAND_MARKS.vibey.path;
+    const { Icon, Avatar } = getBackendUiMeta('vibey');
     expect(markPath(render(<Icon size={16} />).container)).toBe(vibey);
     expect(markPath(render(<Avatar size={16} />).container)).toBe(vibey);
-    expect(markPath(render(<BackendAvatar backend="avibe" />).container)).toBe(vibey);
-    expect(markPath(render(<BackendIcon backend="avibe" variant="brand" size={28} />).container)).toBe(vibey);
+    expect(markPath(render(<BackendAvatar backend="vibey" />).container)).toBe(vibey);
+    expect(markPath(render(<BackendIcon backend="vibey" variant="brand" size={28} />).container)).toBe(vibey);
     // The Models route card reads the same table.
-    expect(backendVisual('avibe').Icon).toBe(Icon);
+    expect(backendVisual('vibey').Icon).toBe(Icon);
   });
 
   it('follows the text color so it reads on dark and light themes', () => {
-    const { container } = render(<BackendAvatar backend="avibe" className="size-3.5" />);
+    const { container } = render(<BackendAvatar backend="vibey" className="size-3.5" />);
     const svg = container.querySelector('svg')!;
     expect(svg.getAttribute('class')).toBe('size-3.5');
     expect(container.querySelector('path')!.getAttribute('fill')).toBe('currentColor');

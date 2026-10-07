@@ -20,7 +20,7 @@ from modules.agents.model_hub import ModelHubRuntimeRouter
 from tests.e2e.drivers.mock_llm_upstream import _buffered_response, _stream_frames
 from tests.e2e.test_model_hub_runtime import _isolated_engine_adapter
 from tests.scenario_harness.model_hub import MemoryModelHubStore, service_for
-from tests.test_model_hub_avibe_consumer import _avibe_service
+from tests.test_model_hub_vibey_consumer import _vibey_service
 from tests.test_model_hub_google import GOOGLE_RESPONSE, _server, _sse
 from tests.test_model_hub_l3 import _source
 
@@ -70,13 +70,13 @@ async def test_real_google_frontend_uses_pinned_engine_and_reports_serving_origi
             source.credential_ref = adapter.state_store.store_api_key(
                 "synthetic-google-integration", vendor="custom", protocol=protocol, base_url=source.base_url,
             )
-            config = _avibe_service(tmp_path, [source]).store.config
+            config = _vibey_service(tmp_path, [source]).store.config
             service = service_for(tmp_path, MemoryModelHubStore(config), adapter)
             await service.runtime_start()
             gateway = ModelHubTurnGateway(service)
             router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
             try:
-                hop = await router.resolve_hop("menu-alias", process_scope="avibe:real-google", turn_id="real-google")
+                hop = await router.resolve_hop("menu-alias", process_scope="vibey:real-google", turn_id="real-google")
                 # The upstream determines the primary frontend. Ask the same
                 # admitted gateway for Google to exercise CPA's conversion.
                 base = hop["base_url"].rsplit("/", 1)[0]

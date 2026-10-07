@@ -1,4 +1,4 @@
-"""The Avibe Agent's system prompt and the environment block of each consumed input.
+"""Vibey's system prompt and the environment block of each consumed input.
 
 The system prompt is stable so providers can cache it: Pi's coding-agent framing
 and tool snippets, then Avibe's injected sections. Facts that change (cwd, date,

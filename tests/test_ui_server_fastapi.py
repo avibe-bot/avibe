@@ -2098,7 +2098,7 @@ def test_config_routes_redact_platform_and_gateway_secrets(monkeypatch, tmp_path
 
 @pytest.mark.parametrize(
     ("hub_switch", "gateway_enabled", "blocks"),
-    [("1", True, {}), ("1", False, {"avibe": "gateway_off"}), ("0", True, {"avibe": "hub_disabled"})],
+    [("1", True, {}), ("1", False, {"vibey": "gateway_off"}), ("0", True, {"vibey": "hub_disabled"})],
 )
 def test_config_api_carries_why_the_model_hub_leaves_a_backend_no_model(monkeypatch, tmp_path, hub_switch, gateway_enabled, blocks):
     """The Backends page shows the server's answer; it keeps no rule of its own."""
@@ -2121,11 +2121,11 @@ def test_config_api_carries_why_the_model_hub_leaves_a_backend_no_model(monkeypa
 @pytest.mark.parametrize(
     ("method", "path", "body", "code"),
     [
-        ("post", "/api/config", {"agents": {"avibe": {"enabled": False}}}, None),
+        ("post", "/api/config", {"agents": {"vibey": {"enabled": False}}}, None),
         ("patch", "/api/agents/vibey", {"enabled": False}, "agent_always_enabled"),
     ],
 )
-def test_requests_to_turn_off_the_built_in_avibe_agent_fail_with_a_client_error(
+def test_requests_to_turn_off_the_built_in_vibey_agent_fail_with_a_client_error(
     monkeypatch, tmp_path, method, path, body, code
 ):
     """It has no switch: a request to turn it off is refused instead of silently ignored."""
@@ -2150,7 +2150,7 @@ def test_requests_to_turn_off_the_built_in_avibe_agent_fail_with_a_client_error(
         assert "always enabled" in payload["error"]
     else:
         assert payload["code"] == code and payload["message"]
-    assert "avibe" not in api.config_to_payload(api.load_config())["agents"]
+    assert "vibey" not in api.config_to_payload(api.load_config())["agents"]
     store = VibeAgentStore()
     try:
         assert store.require("vibey").enabled is True

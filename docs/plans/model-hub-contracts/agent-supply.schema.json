@@ -7,7 +7,7 @@
   "required": ["backend", "mode", "menu_kind"],
   "additionalProperties": false,
   "properties": {
-    "backend": { "enum": ["claude", "codex", "opencode", "avibe"] },
+    "backend": { "enum": ["claude", "codex", "opencode", "vibey"] },
     "cli_present": {
       "type": "boolean",
       "description": "Server-authoritative fact that this backend's configured CLI executable is present on the Avibe host. It does not prove login, process readiness, or Source health. OPTIONAL in the reusable schema and REQUIRED on AgentSupply API payloads."
@@ -353,11 +353,11 @@
       "then": { "properties": { "menu_kind": { "const": "open" } } }
     },
     {
-      "if": { "properties": { "backend": { "enum": ["claude", "codex", "avibe"] } }, "required": ["backend"] },
+      "if": { "properties": { "backend": { "enum": ["claude", "codex", "vibey"] } }, "required": ["backend"] },
       "then": { "properties": { "menu_kind": { "const": "fixed" } } }
     },
     {
-      "if": { "properties": { "backend": { "const": "avibe" } }, "required": ["backend"] },
+      "if": { "properties": { "backend": { "const": "vibey" } }, "required": ["backend"] },
       "then": { "properties": { "mode": { "const": "hub" }, "cli_present": { "const": false } } }
     },
     {

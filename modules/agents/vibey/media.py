@@ -1,4 +1,4 @@
-"""Images in the Avibe Agent's context: immutable snapshots over ``media_objects``.
+"""Images in Vibey's context: immutable snapshots over ``media_objects``.
 
 An ``ImageBlock`` names a ``media_objects`` token whose bytes never change for a
 committed block (C-1, C-2 ``MediaLoader``). Every image the agent puts into its

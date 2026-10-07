@@ -9,8 +9,8 @@ Status: **Approved direction, contracts in draft** · 2026-10-02
 ## 0. Decision summary
 
 Avibe builds its own first-party Agent in Python, inside this repository, as a fourth backend next to Claude Code,
-Codex, and OpenCode. Its backend id is `avibe`; users meet it as "Vibey", its built-in Agent is `vibey`, and the
-catalog owns both names. "Avibe Agent" remains the engine's name in these plans. It reaches models through
+Codex, and OpenCode. Its backend id is `vibey`, which is also its built-in Agent's name, and users meet it as "Vibey"
+(renamed from `avibe` before release). "Avibe Agent" remains the engine's name in these plans. It reaches models through
 Model Hub in each vendor's native protocol, and Avibe can steer, fork, resume, and manage its context directly.
 
 Sourcing, by layer:
@@ -71,7 +71,7 @@ sits below the product boundary Avibe must own: loop semantics, persistence, and
 ## 4. Architecture
 
 ```
-modules/agents/avibe/             backend adapter: BaseAgent implementation, event → MessageOutput,
+modules/agents/vibey/             backend adapter: BaseAgent implementation, event → MessageOutput,
                                   transcript store over messages/agent_events, Watch-backed job host,
                                   question/permission bridge, Model Hub hop resolution
 core/agent_core/
@@ -85,7 +85,7 @@ docs/plans/agent-core-contracts/  frozen shapes (§5)
 ```
 
 `core/agent_core/` knows nothing about IM platforms, the controller, Watch, or Model Hub's HTTP surface beyond a
-`ModelEndpoint` value; `modules/agents/avibe/` is the only package that touches controller state.
+`ModelEndpoint` value; `modules/agents/vibey/` is the only package that touches controller state.
 
 One turn: `AgentRequest` → the adapter resolves the hop from Model Hub → the engine's `run()` yields typed events →
 the adapter commits each context entry to Avibe's tables, then delivers it to the surfaces from the committed row →
@@ -106,7 +106,7 @@ payload.
 | C-5 | Transcript rows: what each context entry stores, `context_seq`, projection, fork by reference | adapter ↔ `harness` | `transcript.md`, `transcript-rows.schema.json` |
 | C-6 | Model Hub consumer extension: `google` protocol, hop resolution, served-hop report | Model Hub → adapter | `model-hub-consumer.md`, `hop-resolution.schema.json` |
 | C-7 | Tools: Pi's surface plus the owner's additions; output governance; job handle | `tools` → `agent`, adapter | `tools.md`, `job.schema.json` |
-| C-8 | Backend registration: the catalog as the one declaration, and which sets must include `avibe` | catalog → every backend list | `backend-registration.md` |
+| C-8 | Backend registration: the catalog as the one declaration, and which sets must include `vibey` | catalog → every backend list | `backend-registration.md` |
 | C-9 | Context management: projection tiers, trigger, cut point, checkpoint, overflow ladder, guards | `harness` → `agent`, adapter | `context.md`; row shapes in `transcript-rows.schema.json` |
 
 ### 5.1 Transcript storage
@@ -342,7 +342,7 @@ Properties; the test suites enumerate cases.
 | --- | --- | --- | --- |
 | P0 | docs | this plan, the evaluation, and the contract drafts | owner approval; `pr-delivery-loop` gates |
 | P1 | Model Hub extension: `core/handlers/model_hub/`, Model Hub contracts, UI types · `ai`: `core/agent_core/ai/` · `agent`: `core/agent_core/agent/` · `tools`: `core/agent_core/tools/` | C-1, C-2, C-3, C-6, C-7 frozen on `master` first | each lane in its own worktree and PR; the control points it owns pass |
-| P2 | adapter: `modules/agents/avibe/`, catalog, config, and UI registration (i18n strings; any new UI element needs an approved `design.pen` frame first) · transcript and Watch `job` target: `core/agent_core/harness/`, `storage/`, `core/watches.py` | C-4, C-5, C-8 frozen | A1, A3, A7, A10, A11; Incus smoke on one platform |
+| P2 | adapter: `modules/agents/vibey/`, catalog, config, and UI registration (i18n strings; any new UI element needs an approved `design.pen` frame first) · transcript and Watch `job` target: `core/agent_core/harness/`, `storage/`, `core/watches.py` | C-4, C-5, C-8 frozen | A1, A3, A7, A10, A11; Incus smoke on one platform |
 | P3 | context management as the main v1 investment; loaded skills listed by name across checkpoints; MCP client; permissions through the question UI (pending questions live in the controller process while Workbench answers arrive through `vibe/ui_server.py`, so this needs the controller IPC path, not the in-memory `QuestionUIHandler` alone) | C-9 frozen | A4; A12 baseline recorded |
 | P4 | regression and acceptance | Incus four-platform regression; owner checklist | A6; default-agent decision |
 

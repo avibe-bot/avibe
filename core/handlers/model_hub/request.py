@@ -95,7 +95,7 @@ def _plain_history(value: Any) -> Any:
 
 
 def without_opaque_history(request: Mapping[str, Any]) -> Mapping[str, Any]:
-    """Copy a request's history for an unverified/different Avibe hop origin."""
+    """Copy a request's history for an unverified/different Vibey hop origin."""
 
     payload = dict(request)
     for field in ("messages", "input", "contents"):

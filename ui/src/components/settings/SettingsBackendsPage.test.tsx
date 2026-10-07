@@ -38,7 +38,7 @@ beforeEach(async () => {
   await i18n.changeLanguage('en');
   mocks.api.getConfig.mockResolvedValue({ agents: {} });
   mocks.api.detectCli.mockImplementation(async (binary: string) => ({ found: true, path: binary }));
-  mocks.api.mutateConfig.mockResolvedValue({ agents: { avibe: { enabled: true } } });
+  mocks.api.mutateConfig.mockResolvedValue({ agents: { vibey: { enabled: true } } });
 });
 
 afterEach(() => {
@@ -51,7 +51,7 @@ const renderBackends = () => render(
     <MemoryRouter initialEntries={['/settings/backends']}>
       <Routes>
         <Route path="/settings/backends" element={<SettingsBackendsPage />} />
-        <Route path="/settings/backends/avibe" element={<SettingsBackendPage backend="avibe" />} />
+        <Route path="/settings/backends/vibey" element={<SettingsBackendPage backend="vibey" />} />
       </Routes>
     </MemoryRouter>
   </I18nextProvider>,
@@ -65,14 +65,14 @@ describe('built-in backend settings', () => {
   it('lists Avibe first as Built-in with no switch, and its page has no switch or native actions', async () => {
     renderBackends();
 
-    const avibe = await rowOf('Vibey');
+    const vibey = await rowOf('Vibey');
     const rows = [...document.querySelectorAll('.rounded-xl')];
     expect(rows.map((row) => row.querySelector('span.font-semibold')?.textContent)).toEqual([
       'Vibey', 'OpenCode', 'Claude Code', 'Codex',
     ]);
-    expect(within(avibe).getByText('Built-in')).toBeTruthy();
-    expect(within(avibe).queryByRole('switch')).toBeNull();
-    expect(within(avibe).queryByTestId('lifecycle-avibe')).toBeNull();
+    expect(within(vibey).getByText('Built-in')).toBeTruthy();
+    expect(within(vibey).queryByRole('switch')).toBeNull();
+    expect(within(vibey).queryByTestId('lifecycle-vibey')).toBeNull();
     for (const name of ['OpenCode', 'Claude Code', 'Codex']) {
       const row = await rowOf(name);
       expect(within(row).getByRole('switch')).toBeTruthy();
@@ -80,8 +80,8 @@ describe('built-in backend settings', () => {
     }
     await waitFor(() => expect(mocks.api.detectCli).toHaveBeenCalledTimes(3));
     expect(mocks.api.detectCli.mock.calls.map(([binary]) => binary).sort()).toEqual(['claude', 'codex', 'opencode']);
-    const configure = within(avibe).getByRole('link', { name: 'Configure' });
-    expect(configure.getAttribute('href')).toBe('/settings/backends/avibe');
+    const configure = within(vibey).getByRole('link', { name: 'Configure' });
+    expect(configure.getAttribute('href')).toBe('/settings/backends/vibey');
     fireEvent.click(configure);
 
     await screen.findByRole('heading', { level: 1, name: 'Vibey' });
@@ -89,7 +89,7 @@ describe('built-in backend settings', () => {
     expect(screen.queryByRole('switch')).toBeNull();
     expect(screen.queryByRole('textbox')).toBeNull();
     expect(screen.queryByRole('button', { name: /Detect|Install|Restart|Save|Sign in/i })).toBeNull();
-    expect(screen.queryByTestId('lifecycle-avibe')).toBeNull();
+    expect(screen.queryByTestId('lifecycle-vibey')).toBeNull();
     expect(mocks.api.mutateConfig).not.toHaveBeenCalled();
     expect(mocks.api.detectCli).toHaveBeenCalledTimes(3);
     expect(mocks.api.getBackendRuntime).not.toHaveBeenCalled();
@@ -101,8 +101,8 @@ describe('built-in backend settings', () => {
 describe('backend attention', () => {
   const withoutModel = [
     {
-      backend: 'avibe', cli_present: false, mode: 'hub', menu_kind: 'fixed',
-      named_agents: [{ name: 'avibe', effective_model_id: null, supply_status: null }],
+      backend: 'vibey', cli_present: false, mode: 'hub', menu_kind: 'fixed',
+      named_agents: [{ name: 'vibey', effective_model_id: null, supply_status: null }],
     },
     {
       backend: 'claude', cli_present: true, mode: 'hub', menu_kind: 'fixed',
@@ -113,7 +113,7 @@ describe('backend attention', () => {
   const modelHubConfig = (enabled: boolean) => ({
     agents: {},
     capabilities: { model_hub: { enabled: true } },
-    agent_supply_blocks: enabled ? {} : { avibe: 'gateway_off' },
+    agent_supply_blocks: enabled ? {} : { vibey: 'gateway_off' },
   });
 
   it('flags the always-on backend whose Agent has no model', async () => {
@@ -121,9 +121,9 @@ describe('backend attention', () => {
     mocks.api.getConfig.mockResolvedValue(modelHubConfig(true));
     renderBackends();
 
-    const avibe = await rowOf('Vibey');
-    expect(await within(avibe).findByText('No model selected')).toBeTruthy();
-    expect(within(avibe).queryByText('Gateway off')).toBeNull();
+    const vibey = await rowOf('Vibey');
+    expect(await within(vibey).findByText('No model selected')).toBeTruthy();
+    expect(within(vibey).queryByText('Gateway off')).toBeNull();
     expect(within(await rowOf('Claude Code')).queryByText('No model selected')).toBeNull();
   });
 
@@ -134,12 +134,12 @@ describe('backend attention', () => {
     mocks.api.getConfig.mockResolvedValue(modelHubConfig(false));
     renderBackends();
 
-    const avibe = await rowOf('Vibey');
-    expect(await within(avibe).findByText('Gateway off')).toBeTruthy();
-    expect(within(avibe).queryByText('No model selected')).toBeNull();
+    const vibey = await rowOf('Vibey');
+    expect(await within(vibey).findByText('Gateway off')).toBeTruthy();
+    expect(within(vibey).queryByText('No model selected')).toBeNull();
     expect(within(await rowOf('Claude Code')).queryByText('Gateway off')).toBeNull();
 
-    fireEvent.click(within(avibe).getByRole('link', { name: 'Configure' }));
+    fireEvent.click(within(vibey).getByRole('link', { name: 'Configure' }));
     expect(await screen.findByText('The model gateway is off, so Vibey has no model to run on.')).toBeTruthy();
     expect(screen.getByRole('link', { name: 'Open Models page' }).getAttribute('href')).toBe('/settings/models');
   });
@@ -149,15 +149,15 @@ describe('backend attention', () => {
   it('says Model Hub is disabled when the instance turns it off', async () => {
     vi.spyOn(modelsApi, 'listAgents').mockResolvedValue(withoutModel);
     mocks.api.getConfig.mockResolvedValue({
-      agents: {}, capabilities: { model_hub: { enabled: false } }, agent_supply_blocks: { avibe: 'hub_disabled' },
+      agents: {}, capabilities: { model_hub: { enabled: false } }, agent_supply_blocks: { vibey: 'hub_disabled' },
     });
     renderBackends();
 
-    const avibe = await rowOf('Vibey');
-    expect(await within(avibe).findByText('Model Hub disabled')).toBeTruthy();
+    const vibey = await rowOf('Vibey');
+    expect(await within(vibey).findByText('Model Hub disabled')).toBeTruthy();
     expect(within(await rowOf('Claude Code')).queryByText('Model Hub disabled')).toBeNull();
 
-    fireEvent.click(within(avibe).getByRole('link', { name: 'Configure' }));
+    fireEvent.click(within(vibey).getByRole('link', { name: 'Configure' }));
     expect(await screen.findByText('Model Hub is disabled on this instance, so Vibey has no model to run on.')).toBeTruthy();
     expect(screen.queryByRole('link', { name: 'Open Models page' })).toBeNull();
   });

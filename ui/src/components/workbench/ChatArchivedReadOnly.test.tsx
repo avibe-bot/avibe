@@ -259,26 +259,26 @@ describe('archived Agent display names', () => {
 });
 
 describe('chat avatars', () => {
-  const vibey = { ...archivedPm, id: 'agt-vibey', name: 'vibey', display_name: 'vibey', backend: 'avibe' };
+  const vibey = { ...archivedPm, id: 'agt-vibey', name: 'vibey', display_name: 'vibey', backend: 'vibey' };
   const claude = { ...archivedPm, id: 'agt-claude', name: 'claude', display_name: 'claude', backend: 'claude' };
 
   it('resolves the backend a reply comes from, through an inherited default', () => {
     const inherits = session({ agent_id: null, agent_name: null, agent_backend: null });
-    expect(sessionAgentBackend(inherits, [claude, vibey], 'vibey')).toBe('avibe');
+    expect(sessionAgentBackend(inherits, [claude, vibey], 'vibey')).toBe('vibey');
     // A runtime-owned row passes no default, so it borrows no avatar.
     expect(sessionAgentBackend(inherits, [claude, vibey], null)).toBeNull();
-    expect(sessionAgentBackend(session({ agent_id: vibey.id, agent_name: 'vibey', agent_backend: null }), [claude, vibey], 'claude')).toBe('avibe');
+    expect(sessionAgentBackend(session({ agent_id: vibey.id, agent_name: 'vibey', agent_backend: null }), [claude, vibey], 'claude')).toBe('vibey');
     expect(sessionAgentBackend(session({ agent_backend: 'claude' }), [claude, vibey], 'vibey')).toBe('claude');
   });
 
   it('draws Vibey in the thinking and transcript bubbles of a session that inherits it', () => {
     const inherits = session({ agent_id: null, agent_name: null, agent_backend: null });
-    const thinking = render(<ThinkingBubble session={inherits} agentDisplayName={null} agentBackend="avibe" />);
+    const thinking = render(<ThinkingBubble session={inherits} agentDisplayName={null} agentBackend="vibey" />);
     const message = render(
-      <MessageRow message={agentWithQuickReplies()} session={inherits} agentBackend="avibe" messageFontSize={13} />,
+      <MessageRow message={agentWithQuickReplies()} session={inherits} agentBackend="vibey" messageFontSize={13} />,
     );
-    expect(thinking).toContain(BACKEND_BRAND_MARKS.avibe.path);
-    expect(message).toContain(BACKEND_BRAND_MARKS.avibe.path);
+    expect(thinking).toContain(BACKEND_BRAND_MARKS.vibey.path);
+    expect(message).toContain(BACKEND_BRAND_MARKS.vibey.path);
   });
 });
 

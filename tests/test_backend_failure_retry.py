@@ -183,7 +183,7 @@ def test_restart_notice_names_the_watch_running_the_command_and_offers_no_retry(
     from vibe.ui_server import app
 
     session_id, notice = _restart_failure_notice(
-        tmp_path, backend="avibe", before_restart=_hand_over_the_open_command
+        tmp_path, backend="vibey", before_restart=_hand_over_the_open_command
     )
 
     assert "watch_job_1" in notice["text"] and "重新发送" not in notice["text"]

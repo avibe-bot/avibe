@@ -4200,7 +4200,7 @@ def test_start_write_ambiguity_replays_once_after_restart(managers) -> None:
     assert turns[1]["state"] == "starting"
 
 
-@pytest.mark.parametrize("backend", ["codex", "avibe"])
+@pytest.mark.parametrize("backend", ["codex", "vibey"])
 def test_accepted_turn_of_a_process_bound_backend_without_runtime_settles_and_releases_queue(
     managers, backend: str
 ) -> None:

@@ -433,7 +433,7 @@ def _store_hub_credential(source):
     return store
 
 
-def test_avibe_connection_uses_hub_supply_without_any_native_probe(hub_connection, monkeypatch):
+def test_vibey_connection_uses_hub_supply_without_any_native_probe(hub_connection, monkeypatch):
     """The new backend has no CLI; the existing native cases cannot protect that boundary."""
     from core import backend_restart
 
@@ -442,12 +442,12 @@ def test_avibe_connection_uses_hub_supply_without_any_native_probe(hub_connectio
 
     monkeypatch.setattr(api, "resolve_cli_path", forbidden)
     monkeypatch.setattr(backend_restart, "pending_native_backends", forbidden)
-    empty = asyncio.run(api.get_backend_connection("avibe"))
+    empty = asyncio.run(api.get_backend_connection("vibey"))
     assert empty["installed"] and empty["enabled"]
     assert empty["auth"] == "none" and not empty["ready"]
 
-    _place_hub_source(hub_connection, "avibe", _hub_source())
-    response = ui_server.app.test_client().get("/api/backend/avibe/connection")
+    _place_hub_source(hub_connection, "vibey", _hub_source())
+    response = ui_server.app.test_client().get("/api/backend/vibey/connection")
     assert response.status_code == 200
     state = response.get_json()
     assert state["ready"] and state["entry_eligible"]
@@ -456,13 +456,13 @@ def test_avibe_connection_uses_hub_supply_without_any_native_probe(hub_connectio
     # With the Model Hub disabled on the instance, or its gateway turned off, the built-in backend
     # stays enabled with nothing to run on, whatever source is saved.
     monkeypatch.setenv("VIBE_MODEL_HUB_ENABLED", "0")
-    disabled = asyncio.run(api.get_backend_connection("avibe"))
+    disabled = asyncio.run(api.get_backend_connection("vibey"))
     assert disabled["enabled"] and disabled["auth"] == "none"
     assert not disabled["ready"] and not disabled["entry_eligible"]
     monkeypatch.setenv("VIBE_MODEL_HUB_ENABLED", "1")
     hub_connection.config.model_hub.enabled = False
     hub_connection.config.save()
-    stopped = asyncio.run(api.get_backend_connection("avibe"))
+    stopped = asyncio.run(api.get_backend_connection("vibey"))
     assert stopped["enabled"] and stopped["auth"] == "none"
     assert not stopped["ready"] and not stopped["entry_eligible"]
 

@@ -1,6 +1,6 @@
 # C-6 Model Hub consumer extension
 
-What the Avibe Agent needs from Model Hub. Owned by Model Hub (`../model-hub-contracts/`); this file states the
+What Vibey needs from Model Hub. Owned by Model Hub (`../model-hub-contracts/`); this file states the
 consumer's requirements, and the Model Hub lane lands the change in both places.
 
 ## 1. Today
@@ -17,15 +17,15 @@ consumer's requirements, and the Model Hub lane lands the change in both places.
 
 1. **`google` protocol.** Gemini `generateContent` / `streamGenerateContent` joins the protocol vocabulary and gets a
    gateway frontend under the backend prefix.
-2. **Backend id `avibe`** in every Model Hub enum that lists backends (C-8).
-3. **Hop resolution** for the `avibe` backend returns `HopResolution` (`hop-resolution.schema.json`) through the Model
+2. **Backend id `vibey`** in every Model Hub enum that lists backends (C-8).
+3. **Hop resolution** for the `vibey` backend returns `HopResolution` (`hop-resolution.schema.json`) through the Model
    Hub runtime router: the primary hop's protocol, the gateway URL for that protocol, the token, the runtime model,
    and capabilities. A capability Model Hub does not know is `null`, never guessed; `input_limit` is `null` until Model
    Hub stores one. The agent treats unknown values conservatively (C-2). It resolves once per run and again after a
    retryable error.
-4. **Served-hop report.** Every gateway response for `avibe` carries `x-avibe-served-hop`: compact, ASCII-escaped JSON
+4. **Served-hop report.** Every gateway response for `vibey` carries `x-avibe-served-hop`: compact, ASCII-escaped JSON
    with exactly `provider`, `api`, `model`, taken from the winning attempt (Source vendor, Source protocol, upstream
-   target) and sent before the first model byte. The gateway does not commit early keepalive headers for `avibe`;
+   target) and sent before the first model byte. The gateway does not commit early keepalive headers for `vibey`;
    other backends are unchanged. The same origin is recorded on `TurnProvenance.served`. An `api` different from the
    frontend protocol means the gateway converted. The agent records it as the message `origin` (C-1). The header value is at most 4096 bytes; a hop whose origin cannot be represented within that limit is
    refused before invocation with a controlled local error (no model call, no header). Identifiers are never truncated.

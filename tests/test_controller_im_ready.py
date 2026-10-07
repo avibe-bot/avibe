@@ -35,16 +35,16 @@ def test_runtime_services_start_when_post_update_notification_fails() -> None:
     controller.runtime_work_supervisor = SimpleNamespace(activate=AsyncMock())
     seed_started = []
 
-    async def seed_avibe_supply():
+    async def seed_vibey_supply():
         # A first start may wait on models.dev; startup must not wait with it.
         seed_started.append(True)
         await asyncio.Event().wait()
 
     controller.model_hub_service = SimpleNamespace(
         recover_runtime_intent=AsyncMock(),
-        seed_avibe_supply=seed_avibe_supply,
+        seed_vibey_supply=seed_vibey_supply,
     )
-    controller.avibe_model_supply_task = None
+    controller.vibey_model_supply_task = None
     controller._get_idle_cleanup_timeouts = Mock(return_value=(0, 0))
     controller.cleanup_task = None
     controller.trace_retention_task = None
@@ -226,15 +226,15 @@ def test_runtime_owner_recovery_isolates_optional_model_hub_failure(
     assert "Model Hub runtime recovery failed" in caplog.text
 
 
-@pytest.mark.parametrize("avibe_recovery_fails", [False, True])
-def test_runtime_owner_recovery_settles_avibe_tool_calls_before_turns(avibe_recovery_fails: bool) -> None:
+@pytest.mark.parametrize("vibey_recovery_fails", [False, True])
+def test_runtime_owner_recovery_settles_vibey_tool_calls_before_turns(vibey_recovery_fails: bool) -> None:
     # recovery.md: T2 before T4. A Turn the restart interrupted is reported only after its
     # running command became a Watch, so the notice can say so instead of asking for a resend.
     order: list[str] = []
 
-    async def avibe_pass() -> list[str]:
-        order.append("avibe T2")
-        if avibe_recovery_fails:
+    async def vibey_pass() -> list[str]:
+        order.append("vibey T2")
+        if vibey_recovery_fails:
             raise OSError("jobs directory unreadable")
         return []
 
@@ -243,7 +243,7 @@ def test_runtime_owner_recovery_settles_avibe_tool_calls_before_turns(avibe_reco
         return []
 
     controller = Controller.__new__(Controller)
-    controller.avibe_recovery = SimpleNamespace(start=AsyncMock(side_effect=avibe_pass))
+    controller.vibey_recovery = SimpleNamespace(start=AsyncMock(side_effect=vibey_pass))
     controller.session_turns = SimpleNamespace(
         recover_durable_delivery_state=AsyncMock(side_effect=turns_pass),
         recover_persisted_agent_run_queue=AsyncMock(return_value=[]),
@@ -255,7 +255,7 @@ def test_runtime_owner_recovery_settles_avibe_tool_calls_before_turns(avibe_reco
     asyncio.run(controller._recover_runtime_owners())
 
     # Best effort, as before: the Avibe pass retries on its own and never blocks the delivery owners.
-    assert order == ["avibe T2", "Turn T4"]
+    assert order == ["vibey T2", "Turn T4"]
     assert controller._delivery_recovery_complete.is_set()
 
 

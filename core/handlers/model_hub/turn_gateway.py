@@ -524,7 +524,7 @@ class ModelHubTurnGateway:
     ) -> tuple[str, str]:
         if backend not in MODEL_HUB_BACKENDS:
             raise ModelHubError("mapping_target_unavailable", status=409)
-        if backend == "avibe" and turn_id:
+        if backend == "vibey" and turn_id:
             # The caller may read EOF before the previous handler's owned
             # teardown exits. Drain already-settled responses, not live model
             # work; the registry still refuses any remaining overlap.
@@ -1106,7 +1106,7 @@ class ModelHubTurnGateway:
         writes to the response.
         """
 
-        if not stream or protocol != "anthropic" or request.match_info["backend"] == "avibe":
+        if not stream or protocol != "anthropic" or request.match_info["backend"] == "vibey":
             yield
             return
         resolution_ended = asyncio.get_running_loop().create_future()

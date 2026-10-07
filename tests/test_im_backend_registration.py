@@ -30,10 +30,10 @@ def _options(payload):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("platform", ["slack", "discord", "feishu"])
-async def test_agent_picker_includes_avibe_but_native_resume_excludes_it(platform):
+async def test_agent_picker_includes_vibey_but_native_resume_excludes_it(platform):
     routing = dict(
-        channel_id="fixture-channel", registered_backends=["codex", "avibe"],
-        current_backend="avibe", current_routing=None,
+        channel_id="fixture-channel", registered_backends=["codex", "vibey"],
+        current_backend="vibey", current_routing=None,
         opencode_agents=[], opencode_models={}, opencode_default_config={},
         claude_agents=[], claude_models=[], codex_agents=[], codex_models=[],
     )
@@ -57,10 +57,10 @@ async def test_agent_picker_includes_avibe_but_native_resume_excludes_it(platfor
         bot._send_card_to_channel = AsyncMock()
         await bot.open_routing_modal(trigger_id=None, **routing)
         options = list(_options(bot._send_card_to_channel.await_args.args[1]))
-    avibe = next(option for option in options if option["value"] == "avibe")
-    assert "Vibey" in json.dumps(avibe)
+    vibey = next(option for option in options if option["value"] == "vibey")
+    assert "Vibey" in json.dumps(vibey)
 
-    bot._controller = SimpleNamespace(agent_service=SimpleNamespace(agents={"codex": object(), "avibe": object()}))
+    bot._controller = SimpleNamespace(agent_service=SimpleNamespace(agents={"codex": object(), "vibey": object()}))
     await bot.open_resume_session_modal(
         trigger_id=None, sessions=[], channel_id="fixture-channel", thread_id=None, host_message_ts=None,
     )
@@ -73,4 +73,4 @@ async def test_agent_picker_includes_avibe_but_native_resume_excludes_it(platfor
     else:
         values = [option["value"] for option in _options(bot._send_card_to_channel.await_args.args[1])]
     assert "codex" in values
-    assert "avibe" not in values
+    assert "vibey" not in values

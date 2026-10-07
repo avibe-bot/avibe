@@ -706,23 +706,23 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
             {"id": "agent-default", "name": "default", "backend": "codex"},
         )
 
-    async def test_avibe_message_prefix_never_reads_native_codex_subagents(self):
+    async def test_vibey_message_prefix_never_reads_native_codex_subagents(self):
         """C-8: the native prefix dispatcher must not treat a new backend as Codex."""
         controller = _StubController(platform="slack", ack_mode="reaction", typing_result=True)
         agent = controller.resolve_vibe_agent_for_context(None)
-        agent.backend = "avibe"
+        agent.backend = "vibey"
         agent.model = "team-model"
-        controller.resolve_agent_for_context = lambda _context: "avibe"
+        controller.resolve_agent_for_context = lambda _context: "vibey"
         controller.resolve_vibe_agent_for_context = lambda *_args, **_kwargs: agent
         handler = MessageHandler(controller)
         handler.set_session_handler(_StubSessionHandler())
-        context = MessageContext(user_id="U1", channel_id="C1", message_id="avibe-prefix", platform="slack")
+        context = MessageContext(user_id="U1", channel_id="C1", message_id="vibey-prefix", platform="slack")
 
         with patch("modules.agents.subagent_router.load_codex_subagent") as load_native:
             await handler.handle_user_message(context, "reviewer: inspect the change")
         load_native.assert_not_called()
         backend, request = controller.agent_service.requests[0]
-        self.assertEqual(backend, "avibe")
+        self.assertEqual(backend, "vibey")
         self.assertEqual(request.vibe_agent_model, "team-model")
         self.assertEqual(request.message, "reviewer: inspect the change")
         self.assertIsNone(request.subagent_name)

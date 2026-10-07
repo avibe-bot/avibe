@@ -3999,7 +3999,7 @@ def test_vibe_agent_api_rejects_non_boolean_enabled(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize(
     ("backends", "expected"),
-    [(list(AGENT_BACKENDS), "opencode"), (["claude", "avibe"], "claude"), ([], "vibey")],
+    [(list(AGENT_BACKENDS), "opencode"), (["claude", "vibey"], "claude"), ([], "vibey")],
 )
 def test_builtin_default_agent_uses_first_enabled_backend_when_no_default_exists(
     tmp_path, monkeypatch, backends, expected
@@ -4014,7 +4014,7 @@ def test_builtin_default_agent_uses_first_enabled_backend_when_no_default_exists
         store.close()
 
 
-def test_a_default_nobody_chose_is_not_the_built_in_avibe_agent(tmp_path, monkeypatch):
+def test_a_default_nobody_chose_is_not_the_built_in_vibey_agent(tmp_path, monkeypatch):
     """With the chosen default disabled, new chats fall back to an enabled Agent, as before Avibe was built in."""
     from core.vibe_agents import resolve_effective_default_agent
 
@@ -4041,8 +4041,8 @@ def test_archiving_the_default_never_hands_new_chats_to_the_built_in_agent(tmp_p
     store = VibeAgentStore()
     try:
         store.create(
-            name="avibe", backend="avibe", source="builtin",
-            metadata={**BUILTIN_DEFAULT_AGENT_METADATA, "backend": "avibe"},
+            name="vibey", backend="vibey", source="builtin",
+            metadata={**BUILTIN_DEFAULT_AGENT_METADATA, "backend": "vibey"},
         )
         store.create(name="omega", backend="claude")
         store.create(name="zeta", backend="opencode")
@@ -4056,7 +4056,7 @@ def test_archiving_the_default_never_hands_new_chats_to_the_built_in_agent(tmp_p
         store.close()
 
 
-def test_the_built_in_avibe_agent_cannot_be_disabled_and_stays_editable(tmp_path, monkeypatch):
+def test_the_built_in_vibey_agent_cannot_be_disabled_and_stays_editable(tmp_path, monkeypatch):
     """Turning it off would turn off the backend; its model, prompt and metadata stay editable."""
     from core.vibe_agents import AgentAlwaysEnabledError
 
@@ -4074,7 +4074,7 @@ def test_the_built_in_avibe_agent_cannot_be_disabled_and_stays_editable(tmp_path
         assert updated["agent"]["model"] == "team-model"
         assert store.require("vibey").enabled is True
         # Any other Avibe Agent is an ordinary Agent.
-        store.create(name="helper", backend="avibe")
+        store.create(name="helper", backend="vibey")
         assert api.update_vibe_agent("helper", {"enabled": False})["agent"]["enabled"] is False
     finally:
         store.close()
@@ -4108,7 +4108,7 @@ def test_callers_cannot_forge_or_strip_built_in_markers(tmp_path, monkeypatch, e
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path / ".vibe_remote"))
     forged = {"builtin": True, "builtin_default": True, "lock_delete": True, "backend_enabled": True, "note": "kept"}
-    created = api.create_vibe_agent({"name": "helper", "backend": "avibe", "metadata": forged})
+    created = api.create_vibe_agent({"name": "helper", "backend": "vibey", "metadata": forged})
     assert created["agent"]["metadata"] == {"note": "kept"}
 
     updated = api.update_vibe_agent("helper", {"metadata": forged, "enabled": enabled})

@@ -63,11 +63,11 @@ const renderCard = () =>
 
 describe('BackendSupplyModeCard', () => {
   it('offers the Avibe gateway model link without native configuration scanning or direct mode', async () => {
-    vi.mocked(modelsApi.listAgents).mockResolvedValue([{ backend: 'avibe', cli_present: false, mode: 'hub', menu_kind: 'fixed' }]);
+    vi.mocked(modelsApi.listAgents).mockResolvedValue([{ backend: 'vibey', cli_present: false, mode: 'hub', menu_kind: 'fixed' }]);
     const setMode = vi.spyOn(modelsApi, 'setAgentMode');
     render(
       <MemoryRouter>
-        <I18nextProvider i18n={i18n}><BackendSupplyModeCard backend="avibe" /></I18nextProvider>
+        <I18nextProvider i18n={i18n}><BackendSupplyModeCard backend="vibey" /></I18nextProvider>
       </MemoryRouter>,
     );
     const hub = await screen.findByRole('radio', { name: /Gateway mode/ });
@@ -85,11 +85,11 @@ describe('BackendSupplyModeCard', () => {
   ])('punctuates the warning and its fix as one %s sentence pair', async (language, banner) => {
     await i18n.changeLanguage(language);
     vi.mocked(modelsApi.listAgents).mockResolvedValue([
-      { backend: 'avibe', cli_present: false, mode: 'hub', menu_kind: 'fixed', sources: { order: [] } },
+      { backend: 'vibey', cli_present: false, mode: 'hub', menu_kind: 'fixed', sources: { order: [] } },
     ]);
     render(
       <MemoryRouter>
-        <I18nextProvider i18n={i18n}><BackendSupplyModeCard backend="avibe" /></I18nextProvider>
+        <I18nextProvider i18n={i18n}><BackendSupplyModeCard backend="vibey" /></I18nextProvider>
       </MemoryRouter>,
     );
     expect((await screen.findByText(banner)).textContent).toBe(banner);

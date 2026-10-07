@@ -33,7 +33,7 @@ from core.handlers.model_hub.turn_gateway import ModelHubTurnGateway
 from core.handlers.model_hub.request import ModelHubRequest
 from core.handlers.model_hub.service import ModelHubError
 from modules.agents.model_hub import ModelHubRuntimeRouter
-from tests.test_model_hub_avibe_consumer import _avibe_service, _validate
+from tests.test_model_hub_vibey_consumer import _vibey_service, _validate
 from tests.test_model_hub_l3 import InvokeHandle, LiveInvokeHandle, _outcome, _source
 from vibe.model_hub_runtime.adapter import CLIProxyEngineAdapter
 from vibe.model_hub_runtime.client import EngineClient, EngineClientError, EngineConnection, probe_models
@@ -308,7 +308,7 @@ async def test_google_router_gateway_failover_preserves_visible_history_and_orig
         fallback.protocol = "google"
         fallback.models[0].id = primary.models[0].id
     raw = _sse(GOOGLE_RESPONSE) if stream else json.dumps(GOOGLE_RESPONSE).encode()
-    service = _avibe_service(tmp_path, [primary, fallback], handles=[
+    service = _vibey_service(tmp_path, [primary, fallback], handles=[
         InvokeHandle(_outcome(RawOutcomeKind.HTTP_ERROR, status=429, code="rate_limit_error")),
         LiveInvokeHandle(_outcome(RawOutcomeKind.SUCCESS, source_id=fallback.id), (raw,)),
     ])
@@ -325,9 +325,9 @@ async def test_google_router_gateway_failover_preserves_visible_history_and_orig
     plain["contents"][0]["parts"][0] = {"text": "Visible thought"}
     plain["contents"][0]["parts"][1].pop("thoughtSignature")
     try:
-        hop = await router.resolve_hop("menu-alias", process_scope="avibe:google", turn_id="turn-google")
+        hop = await router.resolve_hop("menu-alias", process_scope="vibey:google", turn_id="turn-google")
         _validate("hop-resolution.schema.json", hop)
-        assert hop["base_url"].endswith("/avibe/v1beta")
+        assert hop["base_url"].endswith("/vibey/v1beta")
         action = "streamGenerateContent?alt=sse" if stream else "generateContent"
         async with aiohttp.ClientSession() as client:
             async with client.post(
@@ -440,11 +440,11 @@ async def test_google_discovery_does_not_follow_redirects_with_credentials():
 ])
 async def test_google_local_errors_are_native_and_never_admit_a_hop(tmp_path, suffix, payload, token_valid, status):
     """Native endpoint/query/body validation shares all pre-admission no-origin rules."""
-    service = _avibe_service(tmp_path, [_source("src_google001", "Google", vendor="custom", protocol="google")], handles=[])
+    service = _vibey_service(tmp_path, [_source("src_google001", "Google", vendor="custom", protocol="google")], handles=[])
     gateway = ModelHubTurnGateway(service)
     router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
     try:
-        hop = await router.resolve_hop("menu-alias", process_scope="avibe:google-errors", turn_id="turn-invalid")
+        hop = await router.resolve_hop("menu-alias", process_scope="vibey:google-errors", turn_id="turn-invalid")
         async with aiohttp.ClientSession() as client:
             async with client.post(
                 f'{hop["base_url"]}/models/{hop["runtime_model"]}{suffix}', json=payload,
@@ -463,7 +463,7 @@ async def test_google_local_errors_are_native_and_never_admit_a_hop(tmp_path, su
 
 async def test_google_saved_source_probe_speaks_the_declared_protocol(tmp_path):
     """Add-time discovery is not inference; an explicit model test is and needs Gemini's body."""
-    service = _avibe_service(tmp_path, [_source("src_google001", "Google", vendor="custom", protocol="google")], handles=[
+    service = _vibey_service(tmp_path, [_source("src_google001", "Google", vendor="custom", protocol="google")], handles=[
         InvokeHandle(_outcome(RawOutcomeKind.SUCCESS, source_id="src_google001")),
     ])
     result = await service.probe_source("src_google001", {"model": "shared-model"})
@@ -492,7 +492,7 @@ async def test_google_skips_unsupported_hops_before_admission(
     blocked = _source("src_blocked01", "Blocked", vendor="custom", protocol=protocol, model_id=model_id)
     good = _source("src_google001", "Google", vendor="custom", protocol="google", model_id="gemini-fixture")
     raw = _sse(GOOGLE_RESPONSE) if stream else json.dumps(GOOGLE_RESPONSE).encode()
-    service = _avibe_service(tmp_path, [blocked, good] if working_fallback else [blocked], handles=[
+    service = _vibey_service(tmp_path, [blocked, good] if working_fallback else [blocked], handles=[
         LiveInvokeHandle(_outcome(RawOutcomeKind.SUCCESS, source_id=good.id), (raw,)),
     ])
     gateway = ModelHubTurnGateway(service)
@@ -536,12 +536,12 @@ async def test_google_skips_unsupported_hops_before_admission(
 @pytest.mark.parametrize(("backend", "protocol", "model_id"), [
     ("codex", "google", "shared-model"),
     ("codex", "google", "fixture:free"),
-    ("avibe", "openai_chat", "fixture:free"),
+    ("vibey", "openai_chat", "fixture:free"),
 ])
 async def test_other_frontends_and_native_paths_keep_their_admission_policy(tmp_path, backend, protocol, model_id):
     """The Google limitations must not silently broaden to native/other frontends."""
     source = _source("src_blocked01", "Native", protocol="openai_responses", model_id=model_id)
-    service = _avibe_service(tmp_path, [source], handles=[
+    service = _vibey_service(tmp_path, [source], handles=[
         InvokeHandle(_outcome(RawOutcomeKind.SUCCESS, source_id=source.id)),
     ])
     await service.resolve(
@@ -555,20 +555,20 @@ async def test_google_unsupported_model_skip_keeps_next_model_on_the_same_source
     """The colon restriction belongs to the exact hop, not the Source's healthy inventory."""
     source = _source("src_google001", "Google", vendor="custom", protocol="google", model_id="fixture:free")
     source.models.append(ModelHubModelConfig(id="safe-model", provenance="discovered"))
-    service = _avibe_service(tmp_path, [source], handles=[
+    service = _vibey_service(tmp_path, [source], handles=[
         InvokeHandle(_outcome(RawOutcomeKind.SUCCESS, source_id=source.id)),
     ])
     service.revocations.add("src_retired01", "cred_retired01")
-    service.store.config.agents["avibe"].routes["menu-alias"] = ModelHubRouteConfig((
+    service.store.config.agents["vibey"].routes["menu-alias"] = ModelHubRouteConfig((
         ModelHubRouteHopConfig(source.id, "fixture:free"),
         ModelHubRouteHopConfig(source.id, "safe-model"),
     ))
     result = await service.resolve(
-        backend="avibe", model_id="menu-alias",
+        backend="vibey", model_id="menu-alias",
         request=ModelHubRequest({"contents": []}, protocol="google"), stream=False,
     )
     assert result.model_id == "safe-model"
-    assert service.adapter.invocations == [(source.id, "safe-model", "avibe")]
+    assert service.adapter.invocations == [(source.id, "safe-model", "vibey")]
     assert service.revocations.list() == []
 
 
@@ -577,7 +577,7 @@ async def test_google_unsupported_model_skip_keeps_next_model_on_the_same_source
 async def test_google_unsupported_model_refusal_precedes_engine_work(tmp_path, caller, pending_revocation):
     """Local skips must not start an engine or alter custody before refusing."""
     source = _source("src_google001", "Google", vendor="custom", protocol="google", model_id="fixture:free")
-    service = _avibe_service(tmp_path, [source])
+    service = _vibey_service(tmp_path, [source])
     if pending_revocation:
         service.revocations.add("src_retired01", "cred_retired01")
     pending = service.revocations.list()
@@ -587,10 +587,10 @@ async def test_google_unsupported_model_refusal_precedes_engine_work(tmp_path, c
     service._ensure_engine_synced = AsyncMock(wraps=service._ensure_engine_synced)
     with pytest.raises(ModelHubError) as refused:
         if caller == "agent_probe":
-            await service.probe_agent("avibe", "menu-alias")
+            await service.probe_agent("vibey", "menu-alias")
         else:
             await service.resolve(
-                backend="avibe", model_id="menu-alias",
+                backend="vibey", model_id="menu-alias",
                 request=ModelHubRequest({"contents": []}, protocol="google"), stream=False,
             )
     assert refused.value.code == "google_model_path_unsupported"

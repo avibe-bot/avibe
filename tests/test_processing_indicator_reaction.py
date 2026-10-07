@@ -260,10 +260,10 @@ class WorkbenchAckModeTests(unittest.IsolatedAsyncioTestCase):
         svc = ProcessingIndicatorService(controller)
         context = MessageContext(user_id="u1", channel_id="ses_1", message_id="msg_user", platform="avibe")
 
-        handle = await svc.start(context, "avibe")
+        handle = await svc.start(context, "vibey")
         # The ack message is the indicator from the start: nothing is deferred to the runtime gate.
-        self.assertEqual(published, [svc._get_ack_text("avibe")])
-        await svc.promote_reaction_to_running(handle, agent_name="avibe")
+        self.assertEqual(published, [svc._get_ack_text("vibey")])
+        await svc.promote_reaction_to_running(handle, agent_name="vibey")
         return handle, published
 
     async def test_every_ack_mode_starts_with_the_ack_message_and_no_downgrade_warning(self):
