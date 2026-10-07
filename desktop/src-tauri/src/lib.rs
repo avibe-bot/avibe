@@ -29,6 +29,8 @@ mod macos_deep_link;
 #[cfg(target_os = "macos")]
 mod macos_new_context;
 #[cfg(target_os = "macos")]
+mod macos_terminate;
+#[cfg(target_os = "macos")]
 mod macos_title_bar;
 
 use avibe_runtime_host::deep_link::{DeepLinkNavigation, DeepLinks};
@@ -563,9 +565,43 @@ fn quit_choice(result: MessageDialogResult, catalog: &NativeTrayCatalog) -> Quit
 }
 
 fn exit_shell(app: &AppHandle) {
+    authorize_exit(app);
+    app.exit(0);
+}
+
+/// Everything the shell does before it ends, however the end is carried out.
+fn authorize_exit(app: &AppHandle) {
     notifications::stop(app);
     app.state::<Shell>().exit_authorized.store(true, Ordering::SeqCst);
-    app.exit(0);
+}
+
+/// How long logout, restart or shutdown waits for this app's Runtime to stop.
+/// A stop has taken up to about 15 s with the tunnel connector up. macOS
+/// allows an app two minutes to answer a held quit, and loginwindow gives an
+/// app about 45 s before it reports the logout as interrupted.
+#[cfg(target_os = "macos")]
+const SESSION_END_STOP_LIMIT: Duration = Duration::from_secs(30);
+
+/// Logout, restart and shutdown cannot wait on the quit question, and nothing
+/// of the session outlives them. When this app owns the Runtime and nothing
+/// else holds the lifecycle, the shell stops it with the stop "Quit and stop
+/// Runtime" runs, within [`SESSION_END_STOP_LIMIT`]. Otherwise there is nothing
+/// for the shell to stop, and it ends at once. Either way the exit is authorized
+/// now, and the session end proceeds whatever the stop returns.
+///
+/// On macOS this matters because loginwindow kills a background process
+/// outright, leaving the Runtime no chance to drain. Windows ends a session's
+/// processes with `TerminateProcess`, which is what `vibe stop` does there, so
+/// the shell adds nothing and does not hold the session end.
+#[cfg(target_os = "macos")]
+fn stop_for_session_end(app: &AppHandle) -> Option<impl std::future::Future<Output = ()>> {
+    let shell = app.state::<Shell>();
+    let stop = shell.host.has_owned_runtime() && claim_runtime_stop(&shell.activity);
+    let host = shell.host.clone();
+    authorize_exit(app);
+    stop.then_some(async move {
+        let _ = tokio::time::timeout(SESSION_END_STOP_LIMIT, host.stop_owned_runtime()).await;
+    })
 }
 
 fn request_runtime_lifecycle(app: AppHandle, quit: bool) {
@@ -1828,6 +1864,8 @@ pub fn run() {
             app.manage(notifications::Notifications::new(
                 app.path().app_local_data_dir()?.join("notifications.json"),
             ));
+            #[cfg(target_os = "macos")]
+            macos_terminate::install(app.handle());
             if let Ok(mut links) = app.state::<Mutex<DeepLinks>>().lock() {
                 links.receive(
                     std::env::args_os()

@@ -23,6 +23,39 @@ The OS registration is authoritative and is read back after every toggle.
 There are no new webview commands or permissions. Workbench and Show Pages
 remain unprivileged.
 
+## System quit paths (#2274)
+
+Every quit request reaches the same lifecycle owner, `request_runtime_lifecycle`.
+The tray Quit, the app-menu Quit and Cmd+Q call it directly (#2269, #2280).
+On macOS, the Dock's Quit, the quit Apple Event (`quit app "Avibe"`,
+installers), a direct `-[NSApplication terminate:]` and logout, restart or
+shutdown all end in `terminate:`. AppKit asks the delegate's
+`applicationShouldTerminate:` first. tao's delegate has no such method, through
+tao 0.37 (tauri-apps/tauri#9198), so the shell adds it to tao's delegate class
+at setup (`macos_terminate.rs`). The method reads the quit reason from the
+current Apple Event (`kAEQuitReason`, as an attribute or a parameter):
+
+- No session-ending reason, or no event at all, is a user's quit. The shell
+  cancels it and hands it to the lifecycle, which asks the same question as
+  every menu Quit.
+- `logo`, `rlgo`, `rrst`, `rest`, `rsdn` and `shut` end the session. The shell
+  never asks or cancels here. When it owns the Runtime and the lifecycle is
+  idle, it holds the quit (`NSTerminateLater`) while it runs the same scoped
+  stop as "Quit and stop Runtime", for up to 30 s, and then always lets the quit
+  through. Otherwise it lets the quit through at once. Either way the session
+  end goes ahead.
+- A quit after the shell has authorized its own exit (for example the
+  updater's restart) goes ahead unchanged.
+
+Logout, restart and shutdown policy: the Runtime cannot outlive the user
+session on either OS, so "Keep running" has no meaning there. On macOS,
+loginwindow kills background processes outright, so an orderly stop lets the
+Runtime drain. On Windows, the OS ends a session's processes with
+`TerminateProcess`, which is the same thing `vibe stop` does there, so the shell
+does not hold the session end and its behaviour is unchanged. The Windows
+taskbar "Close window" sends `WM_CLOSE`, which hides the window like the close
+button. It is not a quit.
+
 ## Stop semantics
 
 PR 2b of #2135 retired the startup receipt this section used to freeze.
@@ -81,6 +114,17 @@ it does not copy or stack on that lane's Python implementation.
 - While bootstrap, uninstall, or stop owns the lifecycle activity, a competing
   Stop or Quit reports busy instead of interrupting a launch/removal command.
   The user retries when that bounded startup or explicit operation finishes.
+
+- A forced quit (Force Quit, `kill -9`) or a signal sent to the shell ends it
+  without asking, and leaves the Runtime running. No app can intercept these.
+- The quit question has no remembered choice; it asks every time.
+- A user's quit that arrives while the quit or stop question is already open
+  does nothing new; the open question answers it.
+- Logout while a launch, stop or uninstall holds the lifecycle lets the quit
+  through at once, without a second stop.
+- A quit Apple Event whose reason is missing or unknown is treated as a user's
+  quit. A logout that sent no reason would be cancelled and reported by macOS
+  as interrupted by Avibe.
 
 ## Pre-review local evidence (2026-09-10, macOS, head 8856b1648)
 
