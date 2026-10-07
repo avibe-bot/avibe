@@ -356,7 +356,7 @@ def test_authorized_config_envelope_and_completion_persistence_closed_loop(monke
 
 
 def test_pet_window_reads_setup_finished_in_the_main_window_closed_loop(monkeypatch, tmp_path):
-    """Scenario: AUTH-SETUP-128 — the desktop pet leaves setup-pending once setup is
+    """Scenarios: AUTH-SETUP-128 producer — the desktop pet leaves setup-pending once setup is
     finished in the main window.
 
     Two clients share one signed-in principal, as the pet and main windows share one
