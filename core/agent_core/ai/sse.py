@@ -31,12 +31,6 @@ class SSEEvent:
     event_id: str | None = None
     retry: int | None = None
 
-    @property
-    def id(self) -> str | None:
-        """Compatibility alias for callers using the SSE field name."""
-
-        return self.event_id
-
 
 class SSEParser:
     """Parse an SSE byte or text stream incrementally."""
