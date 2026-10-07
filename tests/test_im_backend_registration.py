@@ -58,7 +58,7 @@ async def test_agent_picker_includes_avibe_but_native_resume_excludes_it(platfor
         await bot.open_routing_modal(trigger_id=None, **routing)
         options = list(_options(bot._send_card_to_channel.await_args.args[1]))
     avibe = next(option for option in options if option["value"] == "avibe")
-    assert "Avibe Agent" in json.dumps(avibe)
+    assert "Vibey" in json.dumps(avibe)
 
     bot._controller = SimpleNamespace(agent_service=SimpleNamespace(agents={"codex": object(), "avibe": object()}))
     await bot.open_resume_session_modal(

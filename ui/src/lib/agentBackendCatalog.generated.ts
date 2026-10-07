@@ -3,8 +3,9 @@
 export const BACKEND_CATALOG = [
   {
     "id": "avibe",
-    "display_name": "Avibe Agent",
+    "display_name": "Vibey",
     "config_key": "avibe",
+    "builtin_agent_name": "vibey",
     "default_cli": null,
     "default_enabled": true,
     "latest_probe": null,
@@ -23,6 +24,7 @@ export const BACKEND_CATALOG = [
     "id": "opencode",
     "display_name": "OpenCode",
     "config_key": "opencode",
+    "builtin_agent_name": "opencode",
     "default_cli": "opencode",
     "default_enabled": true,
     "latest_probe": [
@@ -44,6 +46,7 @@ export const BACKEND_CATALOG = [
     "id": "claude",
     "display_name": "Claude Code",
     "config_key": "claude",
+    "builtin_agent_name": "claude",
     "default_cli": "claude",
     "default_enabled": true,
     "latest_probe": [
@@ -65,6 +68,7 @@ export const BACKEND_CATALOG = [
     "id": "codex",
     "display_name": "Codex",
     "config_key": "codex",
+    "builtin_agent_name": "codex",
     "default_cli": "codex",
     "default_enabled": false,
     "latest_probe": [

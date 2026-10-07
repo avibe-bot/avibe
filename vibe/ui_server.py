@@ -4509,6 +4509,17 @@ def _config_payload_for_context(config: Any, authorization_context: Any) -> dict
     return api.non_owner_config_payload(config)
 
 
+def _routing_name_for_backend(backend: str) -> str:
+    """A modal's backend choice saved as routing names that backend's built-in Agent."""
+    from core.vibe_agents import VibeAgentStore
+
+    store = VibeAgentStore()
+    try:
+        return store.routing_name_for_backend(backend)
+    finally:
+        store.close()
+
+
 def _config_api_payload_for_context(config: Any, authorization_context: Any) -> dict[str, Any]:
     """Return the complete payload exposed by the config API."""
 
@@ -13155,7 +13166,7 @@ if os.environ.get("E2E_TEST_MODE", "").lower() in ("true", "1", "yes"):
                     from config.v2_settings import RoutingSettings
 
                     ch.routing = RoutingSettings(
-                        agent_name=modal_values.get("backend", "opencode"),
+                        agent_name=_routing_name_for_backend(modal_values.get("backend", "opencode")),
                         model=(
                             modal_values.get("opencode_model")
                             or modal_values.get("claude_model")
@@ -13203,7 +13214,7 @@ if os.environ.get("E2E_TEST_MODE", "").lower() in ("true", "1", "yes"):
                     from config.v2_settings import RoutingSettings
 
                     ch.routing = RoutingSettings(
-                        agent_name=modal_values.get("backend", "opencode"),
+                        agent_name=_routing_name_for_backend(modal_values.get("backend", "opencode")),
                         model=(
                             modal_values.get("opencode_model")
                             or modal_values.get("claude_model")

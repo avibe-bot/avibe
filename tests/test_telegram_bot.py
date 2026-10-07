@@ -28,7 +28,7 @@ from modules.im import telegram_api
 from config.v2_config import TelegramConfig
 
 
-# The settings handler lists routing backends in catalog order, the built-in Avibe Agent first.
+# The settings handler lists routing backends in catalog order, the built-in backend first.
 ROUTING_BACKENDS = list(AGENT_BACKENDS)
 
 
@@ -1479,7 +1479,7 @@ def test_routing_state_keeps_backend_picker_entry_for_extra_backends(extra_backe
 
     text, keyboard = bot._render_routing_state(state)
     if extra_backend == "avibe":
-        assert "Avibe Agent" in text
+        assert "Vibey" in text
 
     assert [button.callback_data for button in keyboard.buttons[0]] == [
         "tg_route:backend:avibe",

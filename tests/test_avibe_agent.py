@@ -1339,11 +1339,11 @@ async def test_a_refused_model_route_fails_before_the_input_is_written(
     assert harness.provider.requests == []
     # Every route runs through the Model Hub: disabled, or its gateway off, the copy names that cause.
     if hub_switch == "0":
-        expected = i18n_t("errors.modelHubDisabled", "en", backend="Avibe Agent")
+        expected = i18n_t("errors.modelHubDisabled", "en", backend="Vibey")
     elif not gateway_enabled:
-        expected = i18n_t("errors.modelGatewayOff", "en", backend="Avibe Agent")
+        expected = i18n_t("errors.modelGatewayOff", "en", backend="Vibey")
     else:
-        expected = i18n_t("avibeAgent.error.generic", "en")
+        expected = "Vibey's run failed."
     assert harness.controller.im_client.sent == [f"❌ {expected}"]
     assert [terminal["is_error"] for terminal in harness.controller.terminals] == [True]
 

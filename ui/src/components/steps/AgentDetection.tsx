@@ -186,7 +186,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
         try {
           const candidates = vibeAgents.agents.filter((row) => !row.archived && row.backend === backend)
             .sort((left, right) => {
-              const rank = (name: string) => name === backend ? 0 : name === 'default' ? 1 : 2;
+              const rank = (name: string) => name === getBackendUiMeta(backend).builtinAgentName ? 0 : name === 'default' ? 1 : 2;
               return rank(left.name) - rank(right.name)
                 || (left.name < right.name ? -1 : left.name > right.name ? 1 : 0);
             });

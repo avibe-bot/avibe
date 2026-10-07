@@ -1174,10 +1174,11 @@ export const SettingsModelsPage: React.FC = () => {
     || runtimeHealth === 'installing'
     || runtimeSwitchUnsupported
     || stopBlocked;
+  const builtinHubBackend = hubBackends.find((backend) => !getBackendUiMeta(backend).capabilities.supports_cli);
   const runtimeSwitchLabel = stopBlocked
     ? supplyRead.kind === 'ready'
-      ? hubBackends.some((backend) => !getBackendUiMeta(backend).capabilities.supports_cli)
-        ? t('settings.models.shell.toggle.stopAvibeBlocked')
+      ? builtinHubBackend
+        ? t('settings.models.shell.toggle.stopAvibeBlocked', { name: getBackendUiMeta(builtinHubBackend).label })
         : t('settings.models.shell.toggle.stopBlocked', { names: hubBackends.join(', ') })
       : t('settings.models.shell.toggle.stopUnavailable')
     : runtimeEnabled

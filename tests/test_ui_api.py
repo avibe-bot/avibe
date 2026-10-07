@@ -3917,7 +3917,7 @@ def test_builtin_default_agent_enabled_state_follows_backend_config(tmp_path, mo
         assert store.require("opencode").enabled is True
         assert store.require("claude").enabled is False
         # The built-in backend has no config entry and is always enabled.
-        assert store.require("avibe").enabled is True
+        assert store.require("vibey").enabled is True
         assert "claude" not in [agent.name for agent in store.list_agents(include_disabled=False)]
         assert "claude" in [agent.name for agent in store.list_agents(include_disabled=True)]
     finally:
@@ -3999,7 +3999,7 @@ def test_vibe_agent_api_rejects_non_boolean_enabled(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize(
     ("backends", "expected"),
-    [(list(AGENT_BACKENDS), "opencode"), (["claude", "avibe"], "claude"), ([], "avibe")],
+    [(list(AGENT_BACKENDS), "opencode"), (["claude", "avibe"], "claude"), ([], "vibey")],
 )
 def test_builtin_default_agent_uses_first_enabled_backend_when_no_default_exists(
     tmp_path, monkeypatch, backends, expected
@@ -4027,7 +4027,7 @@ def test_a_default_nobody_chose_is_not_the_built_in_avibe_agent(tmp_path, monkey
             assert resolve_effective_default_agent(conn).name == "claude"
         store.set_enabled("claude", False)
         with store.engine.connect() as conn:
-            assert resolve_effective_default_agent(conn).name == "avibe"
+            assert resolve_effective_default_agent(conn).name == "vibey"
     finally:
         store.close()
 
@@ -4064,15 +4064,15 @@ def test_the_built_in_avibe_agent_cannot_be_disabled_and_stays_editable(tmp_path
     store = VibeAgentStore()
     try:
         store.ensure_builtin_default_agents([])
-        refused = api.update_vibe_agent("avibe", {"enabled": False})
+        refused = api.update_vibe_agent("vibey", {"enabled": False})
         assert refused["ok"] is False and refused["code"] == "agent_always_enabled"
         # Dropping the built-in markers first is no way around it.
-        assert api.update_vibe_agent("avibe", {"metadata": {}})["ok"] is True
+        assert api.update_vibe_agent("vibey", {"metadata": {}})["ok"] is True
         with pytest.raises(AgentAlwaysEnabledError):
-            store.set_enabled("avibe", False)
-        updated = api.update_vibe_agent("avibe", {"model": "team-model", "system_prompt": "Be brief."})
+            store.set_enabled("vibey", False)
+        updated = api.update_vibe_agent("vibey", {"model": "team-model", "system_prompt": "Be brief."})
         assert updated["agent"]["model"] == "team-model"
-        assert store.require("avibe").enabled is True
+        assert store.require("vibey").enabled is True
         # Any other Avibe Agent is an ordinary Agent.
         store.create(name="helper", backend="avibe")
         assert api.update_vibe_agent("helper", {"enabled": False})["agent"]["enabled"] is False

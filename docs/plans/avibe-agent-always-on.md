@@ -32,13 +32,18 @@ backend list, it is always enabled, and it cannot be turned off.
   drop them from caller metadata and keep the row's own. `ensure_builtin_default_agents` always includes the built-in
   backend, restores the markers of whatever row the lookup names and re-enables it, so the row exists and is enabled
   when controller startup's sync returns (Model Hub seeds the Avibe supply onto it next). Without such a row it is
-  created at `avibe`, or at the next free name (`avibe-2`) when a user's Agent holds `avibe`. `VibeAgentStore.update`
-  refuses to disable it (`agent_always_enabled`); its model, effort, prompt and description stay editable.
+  created at the catalog's `builtin_agent_name` (`vibey`), or at the next free name (`vibey-2`) when a user's Agent
+  holds `vibey`; a row an earlier build created as `avibe` stays the built-in. `VibeAgentStore.update` refuses to
+  disable it (`agent_always_enabled`); its model, effort, prompt and description stay editable.
+- **Backend choices route to the built-in.** A routing picker that chooses a backend saves that backend's built-in
+  Agent's name (`VibeAgentStore.routing_name_for_backend`), never the backend id; a saved backend id that names no
+  Agent resolves to the backend's built-in Agent.
 - **Refusals.** `POST /api/config` with `agents.avibe` returns 400 (`errors.builtinBackendConfig`, in the configured
-  language); `PATCH /api/agents/avibe` with `enabled: false` returns 400 `agent_always_enabled`; the CLI reports the
-  same code.
+  language); `PATCH /api/agents/<built-in name>` (`vibey` on a fresh install) with `enabled: false` returns 400
+  `agent_always_enabled`; the CLI reports the same code.
 - **UI.** The built-in backend shows a "Built-in" badge where other backends have their enable switch, in the list and
-  on its page. The built-in Avibe Agent's enable switch is locked on.
+  on its page. The built-in Agent's enable switch is locked on. Users meet the backend as Vibey (the catalog's
+  `display_name`), drawn with the mascot mark (`BACKEND_BRAND_MARKS.avibe`).
 - **Model Hub cannot supply.** `hub_supply_block(backend, hub_config)` (`config/v2_config.py`) is the one owner of why
   the Model Hub leaves a backend no model to run on now. The shared model gate and the adapter's preflight render its
   copy (`hub_supply_refusal`), `get_backend_connection` reports such a backend unready, and `GET /api/config` carries

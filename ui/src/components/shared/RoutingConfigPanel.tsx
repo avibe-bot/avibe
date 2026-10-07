@@ -92,7 +92,12 @@ export const RoutingConfigPanel: React.FC<RoutingConfigPanelProps> = ({
   const canManageAccessMembers = capabilities.can_manage_access_members;
   const { t } = useTranslation();
 
-  const selectedVibeAgent = vibeAgents.find((agent) => agent.name === value.routing.agent_name) || null;
+  const routedName = value.routing.agent_name;
+  // Routing saved while built-in Agents were named after their backend holds that
+  // backend id; with no Agent of that name it means the backend's built-in Agent.
+  const selectedVibeAgent = vibeAgents.find((agent) => agent.name === routedName)
+    ?? vibeAgents.find((agent) => !agent.archived && agent.source === 'builtin' && agent.backend === routedName)
+    ?? null;
   const defaultVibeAgent = vibeAgents.find((agent) => agent.name === defaultAgentName) || null;
 
   // Picking an agent re-seeds model/effort, so always clear the deprecated
@@ -198,7 +203,7 @@ export const RoutingConfigPanel: React.FC<RoutingConfigPanelProps> = ({
             // agent_backend also falls back to the default agent so the columns
             // resolve while inheriting the global default.
             agent_backend: selectedVibeAgent?.backend ?? defaultVibeAgent?.backend ?? null,
-            agent_name: value.routing.agent_name ?? null,
+            agent_name: selectedVibeAgent?.name ?? value.routing.agent_name ?? null,
             model: value.routing.model ?? selectedVibeAgent?.model ?? null,
             reasoning_effort: value.routing.reasoning_effort ?? selectedVibeAgent?.reasoning_effort ?? null,
           }}

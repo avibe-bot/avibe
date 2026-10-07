@@ -5,7 +5,13 @@ import logging
 from typing import Optional
 
 from modules.agents import get_agent_display_name
-from modules.agents.catalog import AGENT_BACKENDS, implicit_default_rank, is_builtin_backend
+from modules.agents.catalog import (
+    AGENT_BACKENDS,
+    builtin_agent_name_for_backend,
+    display_name_for_backend,
+    implicit_default_rank,
+    is_builtin_backend,
+)
 from modules.im import MessageContext, InlineKeyboard, InlineButton
 from core.modals import RoutingModalData, RoutingModalSelection
 from vibe import backend_model_catalog
@@ -538,6 +544,11 @@ class SettingsHandler(BaseHandler):
             return False
         return bool(getattr(backend_config, "enabled", True))
 
+    def _routing_agent_name(self, backend: str) -> str:
+        """A backend choice routes to that backend's built-in Agent, under whatever name the row holds."""
+        store = getattr(self.controller, "vibe_agent_store", None)
+        return store.routing_name_for_backend(backend) if store is not None else builtin_agent_name_for_backend(backend)
+
     def _resolve_route_backend(self, agent_name: Optional[str]) -> Optional[str]:
         if not agent_name:
             return None
@@ -879,7 +890,7 @@ class SettingsHandler(BaseHandler):
                 resolved_codex_agent = codex_agent
 
             routing = RoutingSettings(
-                agent_name=backend,
+                agent_name=self._routing_agent_name(backend),
                 model=(
                     opencode_model
                     if backend == "opencode"
@@ -912,7 +923,7 @@ class SettingsHandler(BaseHandler):
             settings_manager.set_channel_routing(settings_key, routing)
             needs_new_session_hint = self._routing_update_needs_new_session_hint(context, routing)
 
-            parts = [f"{self._t('routing.label.backend')}: **{backend}**"]
+            parts = [f"{self._t('routing.label.backend')}: **{display_name_for_backend(backend)}**"]
             if backend == "opencode":
                 if opencode_agent:
                     parts.append(f"{self._t('routing.label.agent')}: **{opencode_agent}**")

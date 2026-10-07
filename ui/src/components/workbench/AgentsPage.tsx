@@ -64,6 +64,7 @@ import {
   type Backend,
 } from '../../lib/backendAccent';
 import { getBackendUiMeta, type NativeCliBackend } from '@/lib/agentBackends';
+import { BackendAvatar } from '../visual';
 import { isBuiltinAgent } from '../onboarding/setupTargets';
 import { modelsApi } from '../settings/models/modelsApi';
 import { agentsWithoutModel } from '../settings/models/supply';
@@ -1608,7 +1609,7 @@ export const AgentsPage: React.FC = () => {
             return (
               <div key={backend} className="flex flex-col gap-2">
                 <div className="flex items-center gap-2 px-1">
-                  <Bot className={clsx('size-3.5', BACKEND_ICON_CLASS[backend])} />
+                  <BackendAvatar backend={backend} className={clsx('size-3.5', BACKEND_ICON_CLASS[backend])} />
                   <span className={clsx('text-[13px] font-bold', BACKEND_ICON_CLASS[backend])}>
                     {BACKEND_LABEL[backend]}
                   </span>
@@ -1784,7 +1785,7 @@ const OrganizationAgentOnboarding: React.FC<OrganizationAgentOnboardingProps> = 
                   <div className="min-w-0">
                     <div className="truncate text-[12px] font-semibold text-foreground">{agent.name}</div>
                     <div className="truncate font-mono text-[10px] text-muted">
-                      {agent.backend} · {system ? t('agents.onboarding.system') : t('agents.onboarding.custom')}
+                      {getBackendUiMeta(agent.backend).label} · {system ? t('agents.onboarding.system') : t('agents.onboarding.custom')}
                     </div>
                   </div>
                   <Badge variant={statusVariant} className="max-w-[45vw]">
@@ -1891,7 +1892,7 @@ const BackendFilter: React.FC<BackendFilterProps> = ({ value, onChange }) => {
               value === key ? 'bg-cyan-soft text-cyan-ink' : 'text-foreground hover:bg-foreground/[0.04]',
             )}
           >
-            {key !== 'all' && <Bot className={clsx('size-3.5', BACKEND_ICON_CLASS[key])} />}
+            {key !== 'all' && <BackendAvatar backend={key} className={clsx('size-3.5', BACKEND_ICON_CLASS[key])} />}
             <span>{key === 'all' ? t('agents.backendAll') : BACKEND_LABEL[key]}</span>
           </button>
         ))}
@@ -1932,7 +1933,7 @@ const ImportMenu: React.FC<ImportMenuProps> = ({ onImport, importing }) => {
             }}
             className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[12px] text-foreground transition hover:bg-foreground/[0.04] disabled:opacity-50"
           >
-            <Bot className={clsx('size-3.5', BACKEND_ICON_CLASS[backend])} />
+            <BackendAvatar backend={backend} className={clsx('size-3.5', BACKEND_ICON_CLASS[backend])} />
             <span>{t('agents.importFrom', { backend: BACKEND_LABEL[backend] })}</span>
           </button>
         ))}
@@ -2271,7 +2272,7 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, ca
         <div className="flex min-w-0 flex-1 flex-col">
           <div className="truncate text-[16px] font-bold text-foreground">{agent.name}</div>
           <div className="truncate text-[10px] text-muted">
-            Vibe Agent · {agent.backend} backend
+            Vibe Agent · {getBackendUiMeta(agent.backend).label} backend
           </div>
         </div>
         <Button
@@ -2296,7 +2297,9 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, ca
         <div className="flex min-w-0 flex-col gap-0.5">
           <span className="text-[13px] font-bold text-foreground">{t('agents.detail.enabled')}</span>
           <span className="text-[11px] text-muted">
-            {t(alwaysEnabled ? 'agents.detail.alwaysEnabledHint' : 'agents.detail.enabledHint')}
+            {alwaysEnabled
+              ? t('agents.detail.alwaysEnabledHint', { name: getBackendUiMeta(agent.backend).label })
+              : t('agents.detail.enabledHint')}
           </span>
         </div>
         <Switch
@@ -2401,7 +2404,7 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, ca
           don't mistake it for a note about the field above (the name). */}
       <Field label={t('agents.detail.backend')}>
         <div className="flex items-center gap-2 rounded-lg border border-border bg-surface-3 px-3 py-2">
-          <Bot className={clsx('size-3 shrink-0', BACKEND_ICON_CLASS[agent.backend as Backend] || 'text-muted')} />
+          <BackendAvatar backend={agent.backend} className={clsx('size-3 shrink-0', BACKEND_ICON_CLASS[agent.backend as Backend] || 'text-muted')} />
           <span className={clsx('font-mono text-[12px] font-bold', BACKEND_ICON_CLASS[agent.backend as Backend] || 'text-foreground')}>
             {agent.backend}
           </span>

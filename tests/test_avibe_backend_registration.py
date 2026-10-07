@@ -84,8 +84,9 @@ _EARLIER_ROWS = {
     # Before the markers were the catalog's, a metadata update could strip them, and the row could then be renamed.
     "markers-stripped": ("avibe", "avibe", "builtin", {}, False),
     "markers-stripped-and-renamed": ("assistant", "avibe", "builtin", {}, False),
-    "user-agent-same-backend": ("avibe", "avibe", "user", {}, False),
-    "user-agent-other-backend": ("avibe", "claude", "user", {}, True),
+    # A user's own Agent already holds the catalog's name for the built-in.
+    "user-agent-same-backend": ("vibey", "avibe", "user", {}, False),
+    "user-agent-other-backend": ("vibey", "claude", "user", {}, True),
 }
 
 
@@ -96,8 +97,8 @@ def test_the_startup_sync_leaves_the_built_in_avibe_agent_enabled(tmp_path, sqli
 
     Whatever backends the caller read from config, and whatever an earlier build left, exactly one
     built-in Avibe Agent exists and is enabled once the sync returns, and the identity lookup names
-    it. A row the store created stays the built-in under any name; a user's own Agent keeps its name
-    and state.
+    it. A new one is named by the catalog. A row the store created stays the built-in under any name,
+    including the ``avibe`` an earlier build gave it; a user's own Agent keeps its name and state.
     """
     store = VibeAgentStore(sqlite_db_factory(tmp_path / "agents.sqlite"))
     try:
@@ -111,12 +112,14 @@ def test_the_startup_sync_leaves_the_built_in_avibe_agent_enabled(tmp_path, sqli
         built_in = [agent for agent in store.list_agents() if agent.backend == "avibe" and is_always_enabled_agent(agent)]
         assert len(built_in) == 1 and built_in[0].enabled
         assert store.get_builtin_default_agent_for_backend("avibe") == built_in[0]
+        if earlier is None:
+            assert built_in[0].name == "vibey"
         if earlier is not None and earlier.source == "builtin":
-            assert built_in[0].id == earlier.id
+            assert (built_in[0].id, built_in[0].name) == (earlier.id, earlier.name)
         if earlier is not None and earlier.source == "user":
             kept = store.get_by_id(earlier.id)
-            assert (kept.name, kept.backend, kept.enabled, kept.source) == ("avibe", row[1], row[4], "user")
-            assert built_in[0].name == "avibe-2"
+            assert (kept.name, kept.backend, kept.enabled, kept.source) == ("vibey", row[1], row[4], "user")
+            assert built_in[0].name == "vibey-2"
     finally:
         store.close()
 
@@ -188,9 +191,9 @@ def test_native_auth_refresh_preserves_enabled_avibe_builtin(tmp_path, sqlite_db
         store.ensure_builtin_default_agents(["avibe"])
         service = AgentAuthService(SimpleNamespace(vibe_agent_store=store))
         service._sync_builtin_default_agents()
-        avibe = store.get("avibe")
-        assert avibe is not None and avibe.enabled
-        assert avibe.backend == "avibe"
+        vibey = store.get("vibey")
+        assert vibey is not None and vibey.enabled
+        assert vibey.backend == "avibe"
     finally:
         store.close()
 
@@ -230,19 +233,19 @@ def test_avibe_agent_runs_its_catalogs_first_model_until_it_has_one(tmp_path, sq
     The built-in native Agents' models feed the seed in backend-name order. An
     Avibe Agent without a model cannot run a turn, so it takes its catalog's
     first model, seeded or listed by the user, and only while it has none: a
-    model the user chose stands. When a user Agent already holds the name, no
-    built-in exists and that Agent is left alone.
+    model the user chose stands. When a user Agent already holds the catalog's
+    name for it, the built-in takes the next free name and that Agent is left alone.
     """
     store = VibeAgentStore(sqlite_db_factory(tmp_path / "agents.sqlite"))
     try:
         if avibe == "name taken":
-            store.create(name="avibe", backend="claude", model="claude-haiku-4-5")
+            store.create(name="vibey", backend="claude", model="claude-haiku-4-5")
         store.ensure_builtin_default_agents(["opencode", "claude", "codex", "avibe"])
         store.create(name="reviewer", backend="claude", model="claude-sonnet-5-5")
         for name, model in (("claude", "claude-opus-5-5"), ("codex", "gpt-5.5"), ("opencode", "openai/gpt-6-sol")):
             store.update(name, model=model)
         if avibe == "chosen":
-            store.update("avibe", model="chosen-model")
+            store.update("vibey", model="chosen-model")
         controller = Controller.__new__(Controller)
         controller.vibe_agent_store = store
         controller.model_hub_service = {
@@ -254,7 +257,7 @@ def test_avibe_agent_runs_its_catalogs_first_model_until_it_has_one(tmp_path, sq
             ("claude", "claude-opus-5-5"), ("codex", "gpt-5.5"), ("opencode", "openai/gpt-6-sol"),
         ]
         controller._reconcile_avibe_agent_model()
-        assert (store.get("avibe").backend, store.get("avibe").model) == {
+        assert (store.get("vibey").backend, store.get("vibey").model) == {
             "seeded": ("avibe", "gpt-5.5"),
             "user-built list": ("avibe", "my-relay-model"),
             "chosen": ("avibe", "chosen-model"),
@@ -282,11 +285,11 @@ def test_a_lost_avibe_model_hand_off_heals_on_the_next_start(tmp_path, sqlite_db
         # The seed's catalog announcement: its reconciliation fails, the supply stays.
         monkeypatch.setattr(store, "update", locked_database)
         asyncio.run(controller._model_hub_catalog_changed("avibe"))
-        assert store.get("avibe").model is None
+        assert store.get("vibey").model is None
 
         monkeypatch.setattr(store, "update", real_update)
         asyncio.run(controller._seed_avibe_model_supply())
-        assert store.get("avibe").model == "gpt-5.5"
+        assert store.get("vibey").model == "gpt-5.5"
     finally:
         store.close()
 
@@ -312,10 +315,10 @@ async def test_the_first_model_a_user_adds_makes_the_avibe_agent_runnable(tmp_pa
         service.backend_catalog_changed = controller._model_hub_catalog_changed
 
         assert await service.seed_avibe_supply() == []
-        assert store.get("avibe").model is None
+        assert store.get("vibey").model is None
         candidate, = service.agent_model_candidates("avibe")["providers"]
         await service.set_agent_models("avibe", [], [{key: value for key, value in candidate.items() if key != "suppliers"}])
-        assert store.get("avibe").model == "relay-model"
+        assert store.get("vibey").model == "relay-model"
     finally:
         store.close()
 
@@ -351,6 +354,86 @@ async def test_a_starting_model_needs_a_source_that_lists_it(tmp_path, sqlite_db
 
         avibe = service.store.load().agents["avibe"]
         assert (avibe.sources.order, avibe.models) == ([anthropic.id], [])
-        assert store.get("avibe").model is None
+        assert store.get("vibey").model is None
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("name_taken", [False, True])
+def test_choosing_the_built_in_backend_in_an_im_picker_routes_to_its_agent(tmp_path, sqlite_db_factory, name_taken):
+    """An IM picker chooses a backend; the routing it saves names that backend's built-in Agent.
+
+    The built-in is no longer named after its backend id, so saving the id would leave a
+    reference no Agent answers to, and every message on that channel would fail to resolve.
+    """
+    from core.handlers.settings_handler import SettingsHandler
+
+    store = VibeAgentStore(sqlite_db_factory(tmp_path / "agents.sqlite"))
+    try:
+        if name_taken:
+            store.create(name="vibey", backend="claude")
+        store.ensure_builtin_default_agents(["claude"])
+        built_in = store.get_builtin_default_agent_for_backend("avibe")
+        assert built_in.name == ("vibey-2" if name_taken else "vibey")
+
+        saved: dict[str, RoutingSettings] = {}
+        settings_manager = SimpleNamespace(
+            get_channel_routing=lambda key: saved.get(key),
+            set_channel_routing=lambda key, routing: saved.__setitem__(key, routing),
+        )
+        config = V2Config.from_payload(_full_config_payload())
+        controller = Controller.__new__(Controller)
+        controller.primary_platform = "slack"
+        controller.sqlite_engine = store.engine
+        controller.config = to_app_config(config, resolve_agent_paths=False)
+        controller.agent_service = SimpleNamespace(agents={"avibe": object(), "claude": object()})
+        controller.vibe_agent_store = store
+        controller.settings_manager = settings_manager
+        controller._get_settings_key = lambda context: context.channel_id
+        controller.get_settings_manager_for_context = lambda _context: settings_manager
+        controller.im_client = SimpleNamespace(send_message=AsyncMock())
+        controller._get_lang = lambda: "en"
+        handler = SettingsHandler(controller)
+        handler._get_settings_key = lambda context: context.channel_id
+        handler._get_settings_manager = lambda context: settings_manager
+
+        for backend, expected in (("avibe", built_in.name), ("claude", "claude")):
+            asyncio.run(handler.handle_routing_update(
+                user_id="U1", channel_id="C-test", backend=backend,
+                opencode_agent=None, opencode_model=None, claude_agent=None, claude_model=None,
+                notify_user=False, platform="slack",
+            ))
+            assert saved["C-test"].agent_name == expected
+            context = MessageContext(user_id="U1", channel_id="C-test", platform="slack")
+            assert controller.resolve_vibe_agent_for_context(context).name == expected
+            assert controller.resolve_agent_for_context(context) == backend
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("user_holds_avibe", [False, True])
+def test_routing_saved_as_the_backend_id_still_resolves(tmp_path, sqlite_db_factory, user_holds_avibe):
+    """Routing saved while the built-in was named ``avibe`` holds that id: it means the built-in.
+
+    An Agent that really has the name keeps it, as any name lookup does.
+    """
+    store = VibeAgentStore(sqlite_db_factory(tmp_path / "agents.sqlite"))
+    try:
+        if user_holds_avibe:
+            store.create(name="avibe", backend="claude")
+        store.ensure_builtin_default_agents([])
+        built_in = store.get_builtin_default_agent_for_backend("avibe")
+        assert built_in.name == "vibey"
+        controller = Controller.__new__(Controller)
+        controller.primary_platform = "slack"
+        controller.vibe_agent_store = store
+        controller._get_settings_key = lambda context: context.channel_id
+        controller.get_settings_manager_for_context = lambda _context: SimpleNamespace(
+            get_channel_routing=lambda _key: RoutingSettings(agent_name="avibe"),
+        )
+        resolved = controller.resolve_vibe_agent_for_context(MessageContext(user_id="U1", channel_id="C1", platform="slack"))
+        assert (resolved.name, resolved.backend) == (("avibe", "claude") if user_holds_avibe else ("vibey", "avibe"))
+        with pytest.raises(Exception, match="not found"):
+            store.require_reference("opencode")  # A backend with no built-in row names nothing.
     finally:
         store.close()

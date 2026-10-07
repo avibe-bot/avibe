@@ -99,10 +99,10 @@ afterEach(() => {
 describe('NewAgentDialog', () => {
   // The picker used a second label table, so its Claude label disagreed with
   // Settings and Model Hub. All backend choices share the catalog brands, and
-  // they follow catalog order, the built-in Avibe Agent first.
+  // they follow catalog order, the built-in Vibey first.
   it('uses the catalog brand names and order for every backend choice', () => {
     renderDialog();
-    const labels = ['Avibe Agent', 'OpenCode', 'Claude Code', 'Codex'];
+    const labels = ['Vibey', 'OpenCode', 'Claude Code', 'Codex'];
     for (const label of labels) {
       expect(screen.getByRole('button', { name: new RegExp(label) }).textContent).toContain(label);
     }
@@ -113,10 +113,10 @@ describe('NewAgentDialog', () => {
     expect(screen.queryByText('Claude', { exact: true })).toBeNull();
   });
 
-  it('creates an Avibe Agent through the existing backend and model pickers', async () => {
+  it('creates a Vibey Agent through the existing backend and model pickers', async () => {
     modelCatalog = { models: ['avibe-model'], reasoningOptions: { 'avibe-model': [] } };
     const { createVibeAgent } = renderDialog();
-    fireEvent.click(screen.getByRole('button', { name: /Avibe Agent/ }));
+    fireEvent.click(screen.getByRole('button', { name: /Vibey/ }));
     fireEvent.change(screen.getByPlaceholderText('agents.create.namePlaceholder'), { target: { value: 'local-helper' } });
     fireEvent.click(screen.getByRole('combobox'));
     fireEvent.click(screen.getByRole('option', { name: 'avibe-model' }));

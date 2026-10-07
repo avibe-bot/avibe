@@ -1,8 +1,9 @@
 // Model Hub identity colors are semantic, not vendor branding: channel/kind
 // owns source color, while backend identity owns Agent color.
 import type React from 'react';
-import { Bot, KeyRound, Sparkles, Terminal } from 'lucide-react';
+import { KeyRound, Sparkles } from 'lucide-react';
 
+import { getBackendUiMeta } from '@/lib/agentBackends';
 import type { AgentBackend, Source } from './types';
 
 export type Accent = 'mint' | 'gold' | 'cyan' | 'violet' | 'muted';
@@ -76,22 +77,9 @@ export const BACKEND_IDENTITY_ACCENT = {
   avibe: 'muted',
 } as const satisfies Record<AgentBackend, Accent>;
 
-const BACKEND_ICON: Record<AgentBackend, IconType> = {
-  claude: Sparkles,
-  codex: Bot,
-  opencode: Terminal,
-  avibe: Bot,
-};
-
-const BACKEND_VISUAL: Record<AgentBackend, BackendVisual> = {
-  claude: { Icon: BACKEND_ICON.claude, accent: BACKEND_IDENTITY_ACCENT.claude },
-  codex: { Icon: BACKEND_ICON.codex, accent: BACKEND_IDENTITY_ACCENT.codex },
-  opencode: { Icon: BACKEND_ICON.opencode, accent: BACKEND_IDENTITY_ACCENT.opencode },
-  avibe: { Icon: BACKEND_ICON.avibe, accent: BACKEND_IDENTITY_ACCENT.avibe },
-};
-
+// The icon is the backend's own, from the one backend visuals table.
 export function backendVisual(backend: AgentBackend): BackendVisual {
-  return BACKEND_VISUAL[backend] ?? { Icon: Bot, accent: 'muted' };
+  return { Icon: getBackendUiMeta(backend).Icon, accent: BACKEND_IDENTITY_ACCENT[backend] ?? 'muted' };
 }
 
 // Official endpoints classify existing Sources and provide their display identity.
