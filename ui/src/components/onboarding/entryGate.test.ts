@@ -226,6 +226,17 @@ describe('D3 a built-in assistant completes setup on its own', () => {
     expect(chooseEntryDefault(entryCandidates(alone), alone)?.agent.name).toBe('vibey');
   });
 
+  it('prefers a runnable custom CLI Agent over the built-in one, whose own Agent is a target', () => {
+    // Claude Code's own Agent cannot run; a custom Agent on it can, and so can Vibey's own.
+    const custom = evidence({
+      agents: [CLAUDE, VIBEY],
+      connections: [applied('claude'), applied('vibey')],
+      supplies: [claudeSupply(), vibeySupply()],
+      targets: [VIBEY, { ...CLAUDE, name: 'claude' }],
+    });
+    expect(chooseEntryDefault(entryCandidates(custom), custom)?.agent.name).toBe('claude-agent');
+  });
+
   it('keeps a saved built-in default that can run', () => {
     const saved = evidence({
       agents: [CLAUDE, VIBEY],

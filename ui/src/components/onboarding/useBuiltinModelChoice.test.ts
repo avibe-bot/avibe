@@ -128,6 +128,40 @@ describe('the built-in model choice', () => {
     expect(view.result.current.failure('vibey')).toBeNull();
   });
 
+  it('settles on the whole choice: a fill that names the model but keeps an effort it does not take holds', async () => {
+    // The list write lands and the server fills the unset Agent with the pick, but the
+    // reply is lost, so the write that moves the effort never runs.
+    const fixture = server({ effort: 'xhigh' });
+    const commit = fixture.models.putAgentModels.getMockImplementation()!;
+    fixture.models.putAgentModels.mockImplementationOnce(async (backend, body) => {
+      await commit(backend, body);
+      throw new Error('reply lost');
+    });
+    const { view } = mount(fixture);
+    const pick = chosenCandidate(candidate('lab-mini', ['low', 'medium', 'high']));
+    await act(async () => view.result.current.choose('vibey', pick));
+    expect(fixture.state).toMatchObject({ model: 'lab-mini', effort: 'xhigh' });
+    expect(view.result.current.holds('vibey')).toBe(true);
+    await act(async () => view.result.current.retry('vibey'));
+    expect(fixture.state).toMatchObject({ model: 'lab-mini', effort: 'medium' });
+    expect(view.result.current.holds('vibey')).toBe(false);
+  });
+
+  it('keeps writing until the reads it set off have settled', async () => {
+    const fixture = server();
+    const settled = deferred<void>();
+    const { view } = mount(fixture, { onSettled: () => settled.promise });
+    let done!: Promise<void>;
+    act(() => { done = view.result.current.choose('vibey', chosenCandidate(candidate('lab-mini'))); });
+    await waitFor(() => expect(fixture.state.model).toBe('lab-mini'));
+    await waitFor(() => expect(fixture.agentReads.refresh).toHaveBeenCalled());
+    expect(view.result.current.picking('vibey')).toBe('lab-mini');
+    expect(view.result.current.holds('vibey')).toBe(true);
+    await act(async () => { settled.resolve(); await done; });
+    expect(view.result.current.picking('vibey')).toBeNull();
+    expect(view.result.current.holds('vibey')).toBe(false);
+  });
+
   it('drops the rows a refusal was about and reads today\'s, without naming anything', async () => {
     const fixture = server();
     const { view } = mount(fixture);

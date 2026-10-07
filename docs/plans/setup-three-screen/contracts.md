@@ -303,11 +303,11 @@ ensure/start. Startup
 has no assistant/source readiness prerequisite. Do not restart after an enable/config write.
 
 Preserve `default_agent_name` if it remains in the available set, including a usable custom
-Agent outside the cards' designated builtin Agents. Otherwise prefer a runnable designated
-builtin Agent, then an available named Agent, both in the gate's stable backend/name order —
-the CLI assistants in card order and a built-in backend last, the server's
-`implicit_default_rank` — so the built-in assistant becomes the default only when no CLI
-assistant can run (D3). Call `setDefaultVibeAgent` and verify a fresh Agent read. Write `setup_completed` last through
+Agent outside the cards' designated builtin Agents. Otherwise take the first rank that can run —
+the CLI assistants before a built-in backend, the server's `implicit_default_rank` — and
+within it prefer a runnable designated builtin Agent in card order, then an available named
+Agent in stable backend/name order. The built-in assistant therefore becomes the default
+only when no CLI assistant's Agent, its own or a custom one, can run (D3). Call `setDefaultVibeAgent` and verify a fresh Agent read. Write `setup_completed` last through
 `api.mutateConfig` with an explicit field mutation, then validate a fresh uncached
 `apiFetch('/api/config', {cache:'no-store'})` readback before navigating. Use that same
 read/parse path after an unknown/failed write; cached pre-write data cannot settle it.
@@ -339,7 +339,8 @@ and asks again), and then becomes the Agent's `model` through `PATCH /api/agents
 The server's own reconciliation fills an Agent that has no model with the list's first row,
 so a failure between the two writes can leave the Agent on a model nobody chose. The choice
 is therefore settled by an uncached read of the Agent, not by the writes' answers: until
-that read shows the chosen model, the card keeps the offer open with Retry and the screen
+that read shows the chosen model with an effort it takes, and the reads the choice sets off
+have settled, the card keeps the offer open with Retry and the screen
 holds the whole entry on it, even when a CLI assistant is ready. One hook (`useBuiltinModelChoice`) owns the offer's read, its freshness
 per screen showing, the conflict re-read and this write. Nothing else about another
 backend's route or Agent changes.

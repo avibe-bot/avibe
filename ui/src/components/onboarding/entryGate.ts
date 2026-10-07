@@ -186,16 +186,22 @@ export function admitEntry(evidence: EntryEvidence): EntryAdmission {
  * Agent no card represents — setup is finishing a machine, not imposing its own
  * preference on one. Only when the saved name cannot run does setup pick, and then it
  * prefers the assistant's own Agent so the first workspace turn matches the card the
- * person was just looking at. Candidates arrive in `ENTRY_ORDER`, so a CLI assistant's
- * own Agent wins over the built-in one whenever both can run.
+ * person was just looking at. That preference applies within the first rank that can run
+ * — the CLI assistants before the built-in backend, as `ENTRY_ORDER` ranks them — so any
+ * runnable CLI assistant's Agent, its own or a custom one, wins over the built-in one.
  */
 export function chooseEntryDefault(
   candidates: readonly EntryCandidate[],
   evidence: EntryEvidence,
 ): EntryCandidate | null {
   if (candidates.some((candidate) => candidate.agent.name === evidence.defaultAgentName)) return null;
+  // The preference for an assistant's own Agent applies within the first rank that can
+  // run: a runnable CLI assistant's custom Agent still wins over the built-in one.
+  const rank = (candidate: EntryCandidate) => (isBuiltinBackend(candidate.backend) ? 1 : 0);
+  const best = Math.min(...candidates.map(rank));
+  const pool = candidates.filter((candidate) => rank(candidate) === best);
   const targets = evidence.targets.map((target) => target.name);
-  return candidates.find((candidate) => targets.includes(candidate.agent.name)) ?? candidates[0] ?? null;
+  return pool.find((candidate) => targets.includes(candidate.agent.name)) ?? pool[0] ?? null;
 }
 
 export type EntryGateDeps = {

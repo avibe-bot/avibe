@@ -84,11 +84,15 @@ export function useBuiltinModelChoice(deps: BuiltinModelChoiceDeps) {
     const model = pick.candidate.id;
     setChoices((current) => ({ ...current, [backend]: { pick, writing: true, failure: null } }));
     let refused = false;
+    // The efforts the chosen model takes: what the list holds for it, else what the
+    // candidate states — the row the write would add.
+    let efforts: readonly string[] = pick.candidate.reasoning_efforts;
     try {
       const supply = (await agentReads.readValue()).find((row) => row.backend === backend);
       if (!supply) throw new Error('supply_unread');
       const baseline = supply.catalog_models ?? [];
       const row = draftRowFor(pick.candidate, [], baseline);
+      efforts = row.reasoning_efforts;
       if (!baseline.some((held) => held.id === model)) {
         await models.putAgentModels(backend, {
           baseline, models: [...baseline, row], expected_suppliers: { [model]: pick.expected_suppliers },
@@ -104,25 +108,32 @@ export function useBuiltinModelChoice(deps: BuiltinModelChoiceDeps) {
       // A refusal committed nothing, which is the one answer a write can be trusted for.
       refused = apiFailure(error)?.code === CANDIDATES_CHANGED;
     }
+    // The choice stands when the Agent reads as the whole of it: the chosen model, with
+    // an effort that model takes. The server's own fill can name the model without the
+    // write that moves the effort ever landing.
     const confirmed = !refused && await api.getVibeAgent(target, { cache: false })
-      .then((result) => !!result?.ok && result.agent.model === model, () => false);
-    writing.current[backend] = false;
+      .then((result) => !!result?.ok && result.agent.model === model
+        && compatibleEffort(result.agent.reasoning_effort, efforts) === (result.agent.reasoning_effort ?? null), () => false);
     const failure: BuiltinChoiceFailure | null = refused ? { model, kind: 'suppliersChanged' }
       : confirmed ? null : { model, kind: 'failed' };
-    setChoices((current) => {
-      const next = { ...current };
-      if (failure) next[backend] = { pick, writing: false, failure };
-      else delete next[backend];
-      return next;
-    });
     if (refused) {
       setOffers((current) => ({ ...current, [backend]: { kind: 'loading', epoch: latest.current.epoch() } }));
       void read(backend);
     }
+    // Still writing until the reads it set off have settled: entry acts on the same
+    // shared reads, and a click in between would race them.
     if (confirmed) {
       try { await agentReads.refresh(); } catch { /* The redraw below reports what it cannot read. */ }
     }
-    await latest.current.onSettled(backend);
+    try { await latest.current.onSettled(backend); } finally {
+      writing.current[backend] = false;
+      setChoices((current) => {
+        const next = { ...current };
+        if (failure) next[backend] = { pick, writing: false, failure };
+        else delete next[backend];
+        return next;
+      });
+    }
   }, [latest, read]);
 
   const shown = (backend: BuiltinBackend) => {
