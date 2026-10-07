@@ -1,8 +1,16 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
+import subprocess
+import sys
 import tomllib
 
-from core.computer_use import ManagedMcpServerSpec
+from core.computer_use import (
+    COMPUTER_USE_TOOL_SNAPSHOT_SHA256,
+    ManagedMcpServerSpec,
+    managed_mcp_server_spec,
+)
 from core.handlers.session_handler import (
     apply_managed_computer_use_to_claude_options,
 )
@@ -15,7 +23,7 @@ def _spec() -> ManagedMcpServerSpec:
     return ManagedMcpServerSpec(
         name="avibe_computer",
         command="/Applications/Avibe.app/Contents/Resources/python",
-        args=("-m", "core.computer_server"),
+        args=("-I", "/Applications/Avibe.app/Contents/Resources/core/computer_server.py"),
         env={"AVIBE_COMPUTER_USE_STATE_DIR": "/tmp/desktop state"},
         fingerprint="managed-v1",
     )
@@ -34,7 +42,7 @@ def test_claude_translation_preserves_native_config_and_agent_tool_allowlist() -
         "avibe_computer": {
             "type": "stdio",
             "command": "/Applications/Avibe.app/Contents/Resources/python",
-            "args": ["-m", "core.computer_server"],
+            "args": ["-I", "/Applications/Avibe.app/Contents/Resources/core/computer_server.py"],
             "env": {"AVIBE_COMPUTER_USE_STATE_DIR": "/tmp/desktop state"},
         }
     }
@@ -62,7 +70,7 @@ def test_codex_translation_is_fixed_last_and_approves_managed_tools() -> None:
     server = parsed["mcp_servers"]["avibe_computer"]
     assert server == {
         "command": "/Applications/Avibe.app/Contents/Resources/python",
-        "args": ["-m", "core.computer_server"],
+        "args": ["-I", "/Applications/Avibe.app/Contents/Resources/core/computer_server.py"],
         "default_tools_approval_mode": "approve",
         "env": {"AVIBE_COMPUTER_USE_STATE_DIR": "/tmp/desktop state"},
     }
@@ -95,8 +103,8 @@ def test_opencode_translation_preserves_user_mcp_and_owns_only_reserved_name() -
         "type": "local",
         "command": [
             "/Applications/Avibe.app/Contents/Resources/python",
-            "-m",
-            "core.computer_server",
+            "-I",
+            "/Applications/Avibe.app/Contents/Resources/core/computer_server.py",
         ],
         "environment": {
             "AVIBE_COMPUTER_USE_STATE_DIR": "/tmp/desktop state",
@@ -112,3 +120,55 @@ def test_computer_prompt_exists_exactly_when_managed_server_is_configured() -> N
     enabled = build_system_prompt_blocks(include_computer_use=True)
     assert "computer-use-prompt" not in {block.module_id for block in disabled}
     assert [block.module_id for block in enabled].count("computer-use-prompt") == 1
+
+
+def test_managed_server_absolute_entrypoint_survives_shadowing_cwd(tmp_path: Path) -> None:
+    """A workspace ``core`` package cannot replace Avibe's managed server."""
+
+    shadow = tmp_path / "shadow"
+    (shadow / "core").mkdir(parents=True)
+    (shadow / "core" / "__init__.py").write_text(
+        "raise RuntimeError('shadow package executed')\n",
+        encoding="utf-8",
+    )
+    (shadow / "core" / "computer_server.py").write_text(
+        "raise RuntimeError('shadow module executed')\n",
+        encoding="utf-8",
+    )
+
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    snapshot = Path("desktop/cua-driver/tools-v0.31.0.json").resolve()
+    state = {
+        "schema_version": 1,
+        "enabled": True,
+        "state": "off",
+        "reason": None,
+        "shell_pid": 1,
+        "instance_id": "shadow-test",
+        "generation": 1,
+        "driver_version": "0.31.0",
+        "tool_snapshot": {
+            "path": str(snapshot),
+            "sha256": COMPUTER_USE_TOOL_SNAPSHOT_SHA256,
+        },
+    }
+    state_path = state_dir / "computer-use.json"
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    spec = managed_mcp_server_spec(
+        state_path=state_path,
+        python_executable=sys.executable,
+    )
+    assert spec is not None
+    result = subprocess.run(
+        [spec.command, *spec.args],
+        cwd=shadow,
+        env={**spec.env, "PATH": str(Path(sys.executable).parent)},
+        input='{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}\n',
+        text=True,
+        capture_output=True,
+        timeout=10,
+        check=True,
+    )
+    payload = json.loads(result.stdout)
+    assert len(payload["result"]["tools"]) == 28

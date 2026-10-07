@@ -116,6 +116,16 @@ running. The tray keeps the shell alive after the window closes.
   default-off `cua-driver-uia.exe` worker is needed is a Windows-run question.
   Spawn it with `CREATE_NO_WINDOW` (it is a console program), as `runtime-host`
   already does for the Runtime.
+  - **Asset path trust.** Release builds resolve the driver, managed policy,
+    snapshot, and state directory from the signed bundle and app-data paths.
+    `AVIBE_COMPUTER_USE_DRIVER_PATH`, `AVIBE_COMPUTER_USE_POLICY_PATH`,
+    `AVIBE_COMPUTER_USE_SNAPSHOT_PATH`, and
+    `AVIBE_COMPUTER_USE_STATE_DIR` are ignored in production. Hermetic
+    acceptance may enable the explicit `computer-use-test-overrides` build
+    feature; the release package workflow does not enable it and does not
+    inject these variables. This prevents a launch environment from replacing
+    the binary, policy, or state contract inherited by the shell's TCC
+    responsibility.
 - **Toggle.** A native checkable "Computer Use" item in the tray and the app
   menu, following the Start at Login pattern. It adds no webview command. Its
   only durable record is `D.enabled`. The shell keeps no second copy in its
@@ -179,6 +189,15 @@ running. The tray keeps the shell alive after the window closes.
     installed app in the Screen Recording pane before anyone uses the pane's
     manual `+` control. Manually adding the app is a recovery workaround, not
     evidence that the product request path succeeded.
+  - **Owner decision (2026-10-07).** On macOS 26 ad-hoc builds, the guided
+    manual `+`/drag recovery is accepted as the Phase 1 product path when the
+    automatic registration attempt leaves the app absent. The shell must open
+    the Screen & System Audio Recording pane and explain, through the localized
+    shell/UI catalog, that the user should click `+` or drag Avibe into the
+    list and then enable it. This accepts the workaround for Phase 1 while
+    preserving the distinction that automatic registration did not succeed.
+    Revisit the automatic path separately when Developer ID signing exists;
+    Developer ID remains outside this Phase 1 signing scope.
 - **Lifecycle.** The shell runs one state machine whose states are the `D`
   states. Every transition writes `D` first, except that `ready` is written
   only after the health check passes.
@@ -195,6 +214,19 @@ running. The tray keeps the shell alive after the window closes.
     `state_unwritable`. A failed post-health `ready` write does the same: it
     stops and reaps the healthy daemon, then holds `error` /
     `state_unwritable` in memory and shows it in the menu.
+  - **Optional initialization.** Computer Use initialization is best effort.
+    A lock race, unwritable state directory, or relaunch/updater overlap logs a
+    warning and leaves a disabled native control with localized initialization
+    failure text; it never aborts Tauri startup or unrelated Runtime,
+    notification, and updater setup.
+  - **Responsiveness bound.** The native permission request uses one shared
+    five-second deadline for its main-thread checks and ScreenCaptureKit probe.
+    A startup health wait has a five-second deadline. The actor consumes a
+    queued toggle-off after the current bounded operation completes, invalidates
+    pending retry events, and then stops the daemon. Daemon reaping waits at
+    most three seconds before termination. These are explicit upper bounds, not
+    a retry or debounce policy; tests cover the shared permission deadline,
+    child cancellation, and retry invalidation.
 
   The first matching row wins:
 
@@ -459,6 +491,11 @@ running. The tray keeps the shell alive after the window closes.
     Configuration reads only `enabled` and `tool_snapshot`. A missing or invalid
     file counts as not enabled. Atomic writes keep a half-written file from
     appearing.
+    Runtime adoption uses two stable reasons: `runtime_unavailable` means the
+    shell has not yet confirmed the adopted Runtime or it is restarting;
+    `runtime_too_old` is reserved for a definitive capability answer below the
+    shell's schema. The native menu and Workbench keep those cases distinct,
+    so a restarting Runtime is never described as too old.
 - **Computer MCP server.** A small Avibe-owned stdio server is the one stable
   endpoint for every backend.
   - It starts without a daemon. It serves the tool list from the snapshot
@@ -534,8 +571,14 @@ running. The tray keeps the shell alive after the window closes.
       A server process that has no record of a session, for example after the
       backend restarted it, starts that session with every window requiring
       observation. Nothing has to persist across server processes.
-  - This isolation is cooperative. Every caller is the same user's agent;
-    it is not a security boundary.
+  - **Same-user trust boundary.** The Python server's lease, `require_bind`,
+    `observe_first`, focus-shortcut, and window-target checks are cooperative
+    controls for Avibe-owned callers. A same-user local process that discovers
+    `D.socket_path` or `D.proxy_executable` can connect to the daemon or invoke
+    the proxy directly and bypass those Python-layer checks. `require_bind`
+    protects shared-channel callers that enter through Avibe; it cannot
+    constrain arbitrary local processes under the same OS account. This is an
+    accepted Phase 1 trust boundary and is stated in the user documentation.
   - Tool restriction stays in the driver's managed policy, not in this server.
   - The proxy exits with its daemon and never reconnects (Phase 0, Q3), so
     this server is what keeps one endpoint alive per backend lifetime.
@@ -569,7 +612,7 @@ running. The tray keeps the shell alive after the window closes.
   that ships a new driver therefore reaches running sessions the same way a
   toggle flip does. On a mismatch it reconciles every consumer that caches MCP
   configuration:
-  - Codex and OpenCode: the same `AgentAuthService._refresh_backend_runtime`
+  - Codex and OpenCode: the same `AgentAuthService.renew_backend_runtime`
     handler that restart markers call.
   - Cached Claude clients: marked stale, then retired and recreated at their
     next turn boundary, never mid-turn.
@@ -934,29 +977,41 @@ Each case lives in the suite of the component that owns the behavior.
     process requires an observation before a session's first input.
   - macOS input: a desktop-targeted, foreground, or unrecognised input
     call is rejected, and so are the guide's focus-intent shortcuts.
-- **Manual, on an installed byte-fixed ad-hoc build.**
-  - Before manually adding the app with the Screen Recording pane's `+`
-    control, toggle computer use on once and confirm that the app row appears
-    automatically. Require matching shell main-thread request/probe and
-    bounded child-capture records in `bootstrap.log`, plus a TCC request whose
-    responsible identity is the outer app. A silent no-op, timeout, or
-    manual-add workaround does not pass this gate.
-  - During that request and an idle observation window, record the actual
-    helper CHECKIN identity, require no outer bundle id and no helper
-    frontmost assertion, and require exactly one registration child with no
-    daemon respawn loop. Continue the idle count while `needs_permission` to
-    prove that a shell/driver grant disagreement cannot cause one daemon spawn
-    per tick.
-  - Slack → agent → a background GUI task completes while the user keeps
-    working, and the tray toggle stops an in-flight session's access.
-  - On an idle desktop, sample the frontmost app and the pointer during AX
-    and pixel actions, and confirm that the agent cursor overlay stays
-    visible even though the helper is bundle-less.
-  - Grant the fixed candidate once and do not rebuild, replace, or re-sign it
-    before the TCC, parent-liveness, focus, pointer, and cursor checks.
-  - Install a changed ad-hoc candidate with computer use still enabled. Confirm
-    that the orphaned grant produces `needs_permission`, presents the re-grant
-    path, and causes neither `error` nor repeated child attempts.
+- **Manual, on the one final installed byte-fixed ad-hoc build.**
+  - The final candidate must be built from the guidance-fix exact source head
+    under a new bundle identifier. Candidate 5 remains fixed and ungranted;
+    its retained evidence is pre-guidance evidence only.
+  - Toggle Computer Use once and follow the product guidance: use the opened
+    Screen & System Audio Recording pane, click `+` or drag the exact Avibe
+    app into the list, then enable it. The source inspects the list before any
+    manual action, and the owner performs exactly this one grant sequence.
+  - Record the final candidate's missing → granted recovery. Returning to
+    Avibe should let the existing edge enter `ready`; if the fixed app still
+    reports a stale grant, document the exact isolated Quit & Reopen recovery
+    instead of claiming a relaunch requirement in advance.
+  - During the permission attempt and the post-grant idle window, record the
+    actual helper CHECKIN identity, require no outer bundle id and no helper
+    frontmost assertion, and require no respawn loop. Keep the
+    `needs_permission` idle count across multiple five-second ticks.
+  - After the owner grant, validate the persistent serve path, overlay and
+    visible cursor, idle focus and pointer behavior, native stop,
+    parent-liveness cleanup, normal Runtime MCP injection, and the Claude
+    product-prompt E2E. The direct no-overlay registration child cannot
+    substitute for these checks.
 
 All automated cases are hermetic: the `D` path and the upstream command are
 redirected to test-owned fakes.
+
+## Owner decision ledger
+
+- **2026-10-07 19:22 UTC+8 — accepted Phase 1 workaround.** The owner accepts
+  the localized Screen Recording `+`/drag and enable flow when macOS 26
+  ad-hoc signing leaves the automatic row absent. Automatic registration
+  remains a known limitation and is deferred for a separate Developer ID
+  investigation. The accepted path is product guidance, not documentation
+  alone.
+- **2026-10-07 18:56 UTC+8 — Candidate 5 evidence boundary.** Candidate 5
+  established the Helpers child identity and TCC responsibility chain, with no
+  helper CHECKIN under the outer bundle identity and no recorded helper
+  frontmost assertion. It did not establish generic idle focus, pointer, or
+  cursor acceptance, and it remains ungranted.

@@ -35,6 +35,9 @@ COMPUTER_USE_LOCK_FILE = "computer-use.lock"
 COMPUTER_USE_LEASE_FILE = "computer-lease.json"
 COMPUTER_USE_LEASE_LOCK_FILE = "computer-lease.lock"
 COMPUTER_USE_RECONCILE_INTERVAL_SECONDS = 2.0
+COMPUTER_USE_TOOL_SNAPSHOT_SHA256 = (
+    "b03c3e48d1b00c8fe7c0e8b9813eb5ea104ad38313672fc4b68af203a827f43b"
+)
 
 COMPUTER_USE_TOOL_NAMES = (
     "list_apps",
@@ -412,7 +415,10 @@ def managed_mcp_server_spec(
     return ManagedMcpServerSpec(
         name=COMPUTER_USE_SERVER_NAME,
         command=python_executable or sys.executable,
-        args=("-m", "core.computer_server"),
+        args=(
+            "-I",
+            str(Path(__file__).resolve().with_name("computer_server.py")),
+        ),
         env=env,
         fingerprint=fingerprint,
     )

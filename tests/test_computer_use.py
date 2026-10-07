@@ -99,7 +99,7 @@ def test_desktop_state_path_ignores_avibe_home(tmp_path: Path) -> None:
         ("needs_permission", ("needs_permission", "screen_recording")),
         ("starting", ("starting", None)),
         ("error", ("error", "endpoint_busy")),
-        ("needs_runtime", ("needs_runtime", "runtime_too_old")),
+        ("needs_runtime", ("needs_runtime", "runtime_unavailable")),
         ("daemon_unreachable", ("unavailable", "daemon_unreachable")),
         ("ready", ("ready", None)),
     ],
@@ -134,7 +134,7 @@ def test_effective_status_table_is_total(
         elif arrange == "error":
             reason = "endpoint_busy"
         elif arrange == "needs_runtime":
-            reason = "runtime_too_old"
+            reason = "runtime_unavailable"
         elif arrange == "daemon_unreachable":
             state_name = "ready"
         _write_state(
@@ -168,7 +168,8 @@ def test_managed_spec_exists_only_for_enabled_verified_snapshot(tmp_path: Path) 
     assert spec is not None
     assert spec.name == "avibe_computer"
     assert spec.command == "/test/python"
-    assert spec.args == ("-m", "core.computer_server")
+    assert spec.args[0] == "-I"
+    assert spec.args[1].endswith("/core/computer_server.py")
     assert spec.env == {COMPUTER_USE_STATE_DIR_ENV: str(tmp_path)}
 
     snapshot.write_text("corrupt", encoding="utf-8")

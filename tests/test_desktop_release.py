@@ -194,6 +194,26 @@ def test_real_assembled_assets_pass_the_release_consumer(tmp_path):
     assert {path.suffix for path in paths} >= {".dmg", ".exe"}
 
 
+def test_verify_accepts_published_schema_one_macos_metadata_without_driver(tmp_path):
+    directory = assemble_assets(tmp_path)
+    for target, (system, _arch, _suffix) in release.TARGETS.items():
+        if system != "macos":
+            continue
+        names = release.asset_names(VERSION, target)
+        source_path = directory / names[2]
+        source = json.loads(source_path.read_text(encoding="utf-8"))
+        source.pop("computer_use_driver", None)
+        source_path.write_text(json.dumps(source, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        (directory / names[4]).write_text(
+            "".join(
+                f"{release.digest(directory / name)}  {name}\n"
+                for name in sorted(names[:4])
+            ),
+            encoding="utf-8",
+        )
+    assert len(release.verify(directory, TAG, SOURCE)) == 15
+
+
 @pytest.mark.parametrize("target", release.TARGETS)
 def test_workflow_record_command_feeds_the_release_consumer(tmp_path, target):
     directory = assemble_assets(tmp_path)
@@ -320,6 +340,11 @@ def test_workflow_preserves_manual_path_and_isolates_test_signing():
     assert "Contents/MacOS/cua-driver" in signing
     assert "NotSigned" in step("Verify unsigned Windows installer")["run"]
     assert steps[-1]["uses"] == "actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f"
+    workflow_text = (ROOT / ".github/workflows/desktop-package.yml").read_text(encoding="utf-8")
+    assert "computer-use-test-overrides" not in workflow_text
+    assert "AVIBE_COMPUTER_USE_DRIVER_PATH" not in workflow_text
+    assert "AVIBE_COMPUTER_USE_POLICY_PATH" not in workflow_text
+    assert "AVIBE_COMPUTER_USE_SNAPSHOT_PATH" not in workflow_text
 
 
 @pytest.mark.parametrize(("value", "names"), [

@@ -28,6 +28,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tauri::plugin::{Builder as PluginBuilder, TauriPlugin};
 use tauri::{AppHandle, Manager, RunEvent};
+use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{mpsc, oneshot};
@@ -84,6 +85,7 @@ pub(crate) struct MenuView {
     pub reason: Option<String>,
     pub invalid_state: bool,
     pub asset_error: bool,
+    pub initialization_error: bool,
     pub save_failed: bool,
     pub runtime_refused: bool,
 }
@@ -96,6 +98,7 @@ impl Default for MenuView {
             reason: None,
             invalid_state: false,
             asset_error: false,
+            initialization_error: false,
             save_failed: false,
             runtime_refused: false,
         }
@@ -107,6 +110,7 @@ enum Event {
     RuntimeReady { origin: LoopbackOrigin, adoption: bool },
     RuntimeLost,
     Activated,
+    RetryStart { id: u64 },
     PermissionProbeFinished { id: u64, result: PermissionChildRun },
     Shutdown(oneshot::Sender<()>),
 }
@@ -117,12 +121,21 @@ pub(crate) struct Controller {
 }
 
 impl Controller {
-    pub(crate) fn start(app: &AppHandle) -> Result<Self, Box<dyn std::error::Error>> {
+    pub(crate) fn start(app: &AppHandle) -> Self {
         let (sender, receiver) = mpsc::unbounded_channel();
         let view = Arc::new(Mutex::new(MenuView::default()));
-        let runtime = RuntimeState::new(app.clone(), view.clone(), sender.clone())?;
-        tauri::async_runtime::spawn(runtime.run(receiver));
-        Ok(Self { sender, view })
+        match RuntimeState::new(app.clone(), view.clone(), sender.clone()) {
+            Ok(runtime) => {
+                tauri::async_runtime::spawn(runtime.run(receiver));
+            }
+            Err(error) => {
+                eprintln!("warning: Computer Use initialization degraded: {error}");
+                if let Ok(mut current) = view.lock() {
+                    current.initialization_error = true;
+                }
+            }
+        }
+        Self { sender, view }
     }
 
     pub(crate) fn view(&self) -> MenuView {
@@ -164,20 +177,12 @@ struct Paths {
 
 impl Paths {
     fn resolve(app: &AppHandle) -> Result<Self, Box<dyn std::error::Error>> {
-        let state_dir = std::env::var_os(STATE_DIR_ENV)
-            .map(PathBuf::from)
-            .unwrap_or(app.path().app_data_dir()?);
+        let state_dir = configured_path(app.path().app_data_dir()?, STATE_DIR_ENV);
         let executable = std::env::current_exe()?;
         let resource_dir = app.path().resource_dir()?;
-        let driver = std::env::var_os(DRIVER_PATH_ENV)
-            .map(PathBuf::from)
-            .unwrap_or_else(|| bundled_driver_path(&executable));
-        let policy = std::env::var_os(POLICY_PATH_ENV)
-            .map(PathBuf::from)
-            .unwrap_or_else(|| resource_dir.join("computer-use/policy.yaml"));
-        let snapshot = std::env::var_os(SNAPSHOT_PATH_ENV)
-            .map(PathBuf::from)
-            .unwrap_or_else(|| resource_dir.join("computer-use/tools-v0.31.0.json"));
+        let driver = configured_path(bundled_driver_path(&executable), DRIVER_PATH_ENV);
+        let policy = configured_path(resource_dir.join("computer-use/policy.yaml"), POLICY_PATH_ENV);
+        let snapshot = configured_path(resource_dir.join("computer-use/tools-v0.31.0.json"), SNAPSHOT_PATH_ENV);
         Ok(Self {
             state_file: state_dir.join(COMPUTER_USE_STATE_FILE),
             socket: state_dir.join(COMPUTER_USE_SOCKET_FILE),
@@ -193,6 +198,26 @@ impl Paths {
             && self.policy.is_file()
             && sha256_file(&self.snapshot).as_deref() == Some(COMPUTER_USE_TOOL_SNAPSHOT_SHA256)
     }
+}
+
+fn configured_path(default: PathBuf, variable: &str) -> PathBuf {
+    configured_path_with_value(default, std::env::var_os(variable), test_path_overrides_enabled())
+}
+
+fn configured_path_with_value(
+    default: PathBuf,
+    override_value: Option<std::ffi::OsString>,
+    allow_override: bool,
+) -> PathBuf {
+    if allow_override {
+        override_value.map(PathBuf::from).unwrap_or(default)
+    } else {
+        default
+    }
+}
+
+const fn test_path_overrides_enabled() -> bool {
+    cfg!(any(debug_assertions, test, feature = "computer-use-test-overrides"))
 }
 
 fn bundled_driver_path(executable: &Path) -> PathBuf {
@@ -228,6 +253,7 @@ struct RuntimeState {
     daemon: Option<Daemon>,
     permission_probe: Option<PermissionProbe>,
     next_permission_probe_id: u64,
+    start_retry_id: u64,
     instance_id: String,
     generation: u64,
     host_bundle_id: String,
@@ -267,6 +293,7 @@ impl RuntimeState {
             daemon: None,
             permission_probe: None,
             next_permission_probe_id: 0,
+            start_retry_id: 0,
             instance_id: random_instance_id()?,
             generation: 0,
             host_bundle_id: String::new(),
@@ -311,6 +338,7 @@ impl RuntimeState {
                         }
                         Event::RuntimeLost => self.runtime_lost().await,
                         Event::Activated => self.activated().await,
+                        Event::RetryStart { id } => self.retry_start(id).await,
                         Event::PermissionProbeFinished { id, result } => {
                             self.permission_probe_finished(id, result);
                         }
@@ -331,10 +359,12 @@ impl RuntimeState {
             view.invalid_state = false;
         });
         if self.lifecycle.enabled() {
+            self.invalidate_start_retry();
             let directive = self.lifecycle.toggle_off();
             self.apply(directive).await;
             return;
         }
+        self.invalidate_start_retry();
         if !self.assets_valid {
             self.update_view(|view| view.asset_error = true);
             self.publish_view();
@@ -355,6 +385,7 @@ impl RuntimeState {
 
     async fn runtime_ready(&mut self, origin: LoopbackOrigin, adoption: bool) {
         if adoption {
+            self.invalidate_start_retry();
             self.capabilities.begin_adoption();
             let directive = self.lifecycle.capabilities(RuntimeSupport::Unknown, silent_grants());
             self.apply(directive).await;
@@ -362,6 +393,9 @@ impl RuntimeState {
         self.origin = Some(origin.clone());
         let probe = probe_capabilities(&origin).await;
         let support = self.capabilities.observe(probe);
+        if support == RuntimeSupport::Supported {
+            self.update_view(|view| view.runtime_refused = false);
+        }
         let grants = if self.lifecycle.phase() == ComputerUsePhase::NeedsRuntime && support == RuntimeSupport::Supported
         {
             silent_grants()
@@ -376,6 +410,7 @@ impl RuntimeState {
     }
 
     async fn runtime_lost(&mut self) {
+        self.invalidate_start_retry();
         self.origin = None;
         self.capabilities.begin_adoption();
         let directive = self.lifecycle.capabilities(RuntimeSupport::Unknown, silent_grants());
@@ -414,6 +449,17 @@ impl RuntimeState {
         }
     }
 
+    async fn retry_start(&mut self, id: u64) {
+        if !retry_is_current(id, self.start_retry_id, &self.lifecycle) {
+            return;
+        }
+        self.apply(LifecycleDirective {
+            spawn_daemon: true,
+            ..LifecycleDirective::default()
+        })
+        .await;
+    }
+
     async fn ready_tick(&mut self) {
         let exited = match self.daemon.as_mut() {
             Some(daemon) => daemon.child.try_wait().ok().flatten().is_some(),
@@ -437,49 +483,76 @@ impl RuntimeState {
     }
 
     async fn apply(&mut self, mut directive: LifecycleDirective) {
-        loop {
-            if directive.spawn_daemon {
-                self.generation = self.generation.saturating_add(1);
-            }
-            let state_written = if directive.write_state {
-                self.write_current_state()
-            } else {
-                true
-            };
-            if directive.stop_daemon {
+        let spawn_daemon = directive.spawn_daemon;
+        directive.spawn_daemon = false;
+        if spawn_daemon {
+            self.generation = self.generation.saturating_add(1);
+        }
+        if !self.apply_state(directive).await {
+            return;
+        }
+        if !spawn_daemon {
+            return;
+        }
+
+        let health = self.start_once().await;
+        let mut follow_up = self.lifecycle.startup_health(health, self.elapsed());
+        let retry = follow_up.spawn_daemon;
+        follow_up.spawn_daemon = false;
+        if !self.apply_state(follow_up).await {
+            return;
+        }
+        if retry {
+            self.schedule_start_retry();
+        }
+    }
+
+    async fn apply_state(&mut self, directive: LifecycleDirective) -> bool {
+        let state_written = if directive.write_state {
+            self.write_current_state()
+        } else {
+            true
+        };
+        if directive.stop_daemon {
+            self.stop_daemon().await;
+        }
+        if directive.stop_permission_probe {
+            self.stop_permission_probe().await;
+        }
+        if !state_written {
+            if self.lifecycle.enabled()
+                && matches!(
+                    self.lifecycle.phase(),
+                    ComputerUsePhase::Starting | ComputerUsePhase::Ready
+                )
+            {
+                self.lifecycle.set_error("state_unwritable");
+                self.pending_write = Some(self.current_record());
+                self.stop_permission_probe().await;
                 self.stop_daemon().await;
             }
-            if directive.stop_permission_probe {
-                self.stop_permission_probe().await;
-            }
-            if !state_written {
-                if self.lifecycle.enabled()
-                    && matches!(
-                        self.lifecycle.phase(),
-                        ComputerUsePhase::Starting | ComputerUsePhase::Ready
-                    )
-                {
-                    self.lifecycle.set_error("state_unwritable");
-                    self.pending_write = Some(self.current_record());
-                    self.stop_permission_probe().await;
-                    self.stop_daemon().await;
-                }
-                self.publish_view();
-                return;
-            }
             self.publish_view();
-            if directive.spawn_permission_probe {
-                self.start_permission_probe().await;
-            }
-            if !directive.spawn_daemon {
-                return;
-            }
-            let health = self.start_once().await;
-            directive = self.lifecycle.startup_health(health, self.elapsed());
-            if directive.spawn_daemon {
-                sleep(START_BACKOFF).await;
-            }
+            return false;
         }
+        self.publish_view();
+        if directive.spawn_permission_probe {
+            self.start_permission_probe().await;
+        }
+        true
+    }
+
+    fn invalidate_start_retry(&mut self) {
+        self.start_retry_id = self.start_retry_id.wrapping_add(1);
+    }
+
+    fn schedule_start_retry(&mut self) {
+        let id = self.start_retry_id.wrapping_add(1);
+        self.start_retry_id = id;
+        let events = self.events.clone();
+        tauri::async_runtime::spawn(async move {
+            sleep(START_BACKOFF).await;
+            let _ = events.send(Event::RetryStart { id });
+        });
     }
 
     async fn start_once(&mut self) -> HealthResult {
@@ -696,9 +769,18 @@ impl RuntimeState {
     }
 }
 
+fn retry_is_current(id: u64, current_id: u64, lifecycle: &ComputerUseLifecycle) -> bool {
+    id == current_id && lifecycle.enabled() && lifecycle.phase() == ComputerUsePhase::Starting
+}
+
 async fn probe_capabilities(origin: &LoopbackOrigin) -> CapabilityProbe {
     let url = format!("{}/api/desktop/capabilities", origin.as_str().trim_end_matches('/'));
-    let client = match reqwest::Client::builder().timeout(CAPABILITY_TIMEOUT).build() {
+    let client = match reqwest::Client::builder()
+        .timeout(CAPABILITY_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
+        .build()
+    {
         Ok(client) => client,
         Err(_) => {
             return CapabilityProbe {
@@ -1680,6 +1762,7 @@ fn record_permission_request(diagnostics: &BootstrapLog, result: &PermissionRequ
 }
 
 fn open_missing_permission_settings(app: &AppHandle, grants: Grants) {
+    let screen_recording_needs_guidance = grants.accessibility && !grants.screen_recording;
     let url = if !grants.accessibility {
         "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
     } else {
@@ -1687,6 +1770,14 @@ fn open_missing_permission_settings(app: &AppHandle, grants: Grants) {
     };
     if tauri_plugin_opener::open_url(url, None::<&str>).is_err() {
         let _ = app;
+    }
+    if screen_recording_needs_guidance {
+        let catalog = crate::native_catalog_for_locales(sys_locale::get_locales()).computer_use;
+        app.dialog()
+            .message(catalog.screen_recording_guide)
+            .title(catalog.screen_recording_title)
+            .kind(MessageDialogKind::Info)
+            .show(|_| {});
     }
 }
 
@@ -1898,6 +1989,51 @@ done
             bundled_driver_path(Path::new("/Applications/Avibe.app/Contents/MacOS/avibe-desktop")),
             PathBuf::from("/Applications/Avibe.app/Contents/Helpers/cua-driver")
         );
+    }
+
+    #[test]
+    fn release_path_resolution_ignores_test_environment_overrides() {
+        let bundled = PathBuf::from("/Applications/Avibe.app/Contents/Helpers/cua-driver");
+        let injected = PathBuf::from("/tmp/replaced-driver");
+        assert_eq!(
+            configured_path_with_value(bundled.clone(), Some(injected.clone().into_os_string()), false),
+            bundled
+        );
+        assert_eq!(
+            configured_path_with_value(bundled, Some(injected.clone().into_os_string()), true),
+            injected
+        );
+    }
+
+    #[test]
+    fn delayed_start_retry_is_invalidated_by_toggle_off_and_runtime_loss() {
+        let mut starting = ComputerUseLifecycle::off();
+        assert!(
+            starting
+                .toggle_on(RuntimeSupport::Supported, Grants::all())
+                .spawn_daemon
+        );
+        assert!(retry_is_current(7, 7, &starting));
+
+        starting.toggle_off();
+        assert!(!retry_is_current(7, 8, &starting));
+
+        let mut restarting = ComputerUseLifecycle::off();
+        assert!(
+            restarting
+                .toggle_on(RuntimeSupport::Supported, Grants::all())
+                .spawn_daemon
+        );
+        let _ = restarting.capabilities(RuntimeSupport::Unknown, Grants::all());
+        assert!(!retry_is_current(7, 8, &restarting));
+    }
+
+    #[test]
+    fn lifecycle_waits_have_explicit_bounds_for_shutdown_documentation() {
+        assert_eq!(PERMISSION_REQUEST_TIMEOUT, Duration::from_secs(5));
+        assert_eq!(HEALTH_TIMEOUT, Duration::from_secs(5));
+        assert_eq!(PROCESS_STOP_TIMEOUT, Duration::from_secs(3));
+        assert_eq!(START_BACKOFF, Duration::from_secs(1));
     }
 
     #[tokio::test]

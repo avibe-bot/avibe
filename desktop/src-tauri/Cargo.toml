@@ -15,6 +15,9 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 [features]
 default = []
 bundled-runtime = []
+# Test-only builds may redirect Computer Use state and assets to a hermetic lane.
+# Release packaging never enables this feature.
+computer-use-test-overrides = []
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

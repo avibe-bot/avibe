@@ -15,6 +15,8 @@
 //!   and [`ensure_shell_ui`] rejects the call a second time regardless. Only
 //!   the two built-in window drag commands are granted to the Workbench.
 
+#[cfg(target_os = "macos")]
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -156,10 +158,18 @@ struct NativeComputerUseCatalog {
     starting: String,
     ready: String,
     needs_permission: String,
+    needs_permission_accessibility: String,
+    needs_permission_screen_recording: String,
+    screen_recording_title: String,
+    screen_recording_guide: String,
     needs_runtime: String,
+    runtime_unavailable: String,
+    runtime_too_old: String,
     error: String,
+    error_reasons: HashMap<String, String>,
     invalid_state: String,
     unavailable: String,
+    initialization_failed: String,
     save_failed: String,
 }
 
@@ -222,20 +232,34 @@ fn computer_use_label(catalog: &NativeComputerUseCatalog, view: &computer_use::M
     if view.invalid_state {
         return catalog.invalid_state.clone();
     }
+    if view.initialization_error {
+        return catalog.initialization_failed.clone();
+    }
     if view.asset_error {
         return catalog.unavailable.clone();
     }
     if view.runtime_refused || view.phase == avibe_runtime_host::computer_use::ComputerUsePhase::NeedsRuntime {
-        return catalog.needs_runtime.clone();
+        return match view.reason.as_deref() {
+            Some("runtime_unavailable") => catalog.runtime_unavailable.clone(),
+            Some("runtime_too_old") => catalog.runtime_too_old.clone(),
+            _ => catalog.needs_runtime.clone(),
+        };
     }
     match view.phase {
         avibe_runtime_host::computer_use::ComputerUsePhase::Off => catalog.off.clone(),
-        avibe_runtime_host::computer_use::ComputerUsePhase::NeedsPermission => catalog.needs_permission.clone(),
+        avibe_runtime_host::computer_use::ComputerUsePhase::NeedsPermission => match view.reason.as_deref() {
+            Some("accessibility") => catalog.needs_permission_accessibility.clone(),
+            Some("screen_recording") => catalog.needs_permission_screen_recording.clone(),
+            _ => catalog.needs_permission.clone(),
+        },
         avibe_runtime_host::computer_use::ComputerUsePhase::Starting => catalog.starting.clone(),
         avibe_runtime_host::computer_use::ComputerUsePhase::Ready => catalog.ready.clone(),
-        avibe_runtime_host::computer_use::ComputerUsePhase::Error => catalog
-            .error
-            .replace("{{reason}}", view.reason.as_deref().unwrap_or("unknown")),
+        avibe_runtime_host::computer_use::ComputerUsePhase::Error => view
+            .reason
+            .as_deref()
+            .and_then(|reason| catalog.error_reasons.get(reason))
+            .cloned()
+            .unwrap_or_else(|| catalog.error.clone()),
         avibe_runtime_host::computer_use::ComputerUsePhase::Stopped => catalog.off.clone(),
         avibe_runtime_host::computer_use::ComputerUsePhase::NeedsRuntime => catalog.needs_runtime.clone(),
     }
@@ -2063,7 +2087,7 @@ pub fn run() {
             };
             app.manage(Shell::new(host, bootstrap_url));
             #[cfg(target_os = "macos")]
-            app.manage(computer_use::Controller::start(app.handle())?);
+            app.manage(computer_use::Controller::start(app.handle()));
             app.manage(notifications::Notifications::new(
                 app.path().app_local_data_dir()?.join("notifications.json"),
             ));
@@ -2177,6 +2201,85 @@ mod tests {
                 assert_eq!(quit_choice(result, &catalog), QuitChoice::Cancel);
             }
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn computer_use_catalog_contains_screen_recording_recovery_guidance_in_each_locale() {
+        let english = native_catalog_for_locales(["en-US".to_owned()]).computer_use;
+        assert!(english.screen_recording_title.contains("Screen Recording"));
+        assert!(english.screen_recording_guide.to_lowercase().contains("click +"));
+        assert!(english.screen_recording_guide.contains("drag"));
+
+        let chinese = native_catalog_for_locales(["zh-CN".to_owned()]).computer_use;
+        assert!(chinese.screen_recording_title.contains("屏幕"));
+        assert!(chinese.screen_recording_guide.contains("拖"));
+        assert!(chinese.screen_recording_guide.contains("+"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn computer_use_native_labels_localize_permission_and_error_reasons() {
+        let catalog = native_catalog_for_locales(["en-US".to_owned()]).computer_use;
+        let accessibility = computer_use::MenuView {
+            reason: Some("accessibility".to_owned()),
+            phase: avibe_runtime_host::computer_use::ComputerUsePhase::NeedsPermission,
+            ..Default::default()
+        };
+        let screen_recording = computer_use::MenuView {
+            reason: Some("screen_recording".to_owned()),
+            phase: avibe_runtime_host::computer_use::ComputerUsePhase::NeedsPermission,
+            ..Default::default()
+        };
+        let known_error = computer_use::MenuView {
+            reason: Some("state_unwritable".to_owned()),
+            phase: avibe_runtime_host::computer_use::ComputerUsePhase::Error,
+            ..Default::default()
+        };
+        let runtime_unavailable = computer_use::MenuView {
+            reason: Some("runtime_unavailable".to_owned()),
+            phase: avibe_runtime_host::computer_use::ComputerUsePhase::NeedsRuntime,
+            ..Default::default()
+        };
+        let runtime_too_old = computer_use::MenuView {
+            reason: Some("runtime_too_old".to_owned()),
+            phase: avibe_runtime_host::computer_use::ComputerUsePhase::NeedsRuntime,
+            ..Default::default()
+        };
+        let unknown_error = computer_use::MenuView {
+            reason: Some("future_reason".to_owned()),
+            phase: avibe_runtime_host::computer_use::ComputerUsePhase::Error,
+            ..Default::default()
+        };
+
+        let accessibility_label = computer_use_label(&catalog, &accessibility);
+        let screen_recording_label = computer_use_label(&catalog, &screen_recording);
+        let known_error_label = computer_use_label(&catalog, &known_error);
+        let runtime_unavailable_label = computer_use_label(&catalog, &runtime_unavailable);
+        let runtime_too_old_label = computer_use_label(&catalog, &runtime_too_old);
+        let unknown_error_label = computer_use_label(&catalog, &unknown_error);
+
+        assert!(accessibility_label.contains("Accessibility"));
+        assert!(screen_recording_label.contains("Screen Recording"));
+        assert_ne!(accessibility_label, screen_recording_label);
+        assert!(!known_error_label.contains("state_unwritable"));
+        assert!(runtime_unavailable_label.contains("waiting"));
+        assert!(runtime_too_old_label.contains("restart"));
+        assert_ne!(runtime_unavailable_label, runtime_too_old_label);
+        assert_eq!(unknown_error_label, catalog.error);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn computer_use_initialization_failure_keeps_a_disabled_native_control() {
+        let catalog = native_catalog_for_locales(["en-US".to_owned()]).computer_use;
+        let view = computer_use::MenuView {
+            initialization_error: true,
+            ..Default::default()
+        };
+
+        assert!(!view.enabled);
+        assert_eq!(computer_use_label(&catalog, &view), catalog.initialization_failed);
     }
 
     #[test]

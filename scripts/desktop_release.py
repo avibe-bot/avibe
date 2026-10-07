@@ -261,7 +261,13 @@ def verify(directory: Path, tag: str, source_sha: str, *, updater_enabled: bool 
                 "thinned_upstream_sha256",
                 "packaged_sha256",
             )
-            if (
+            if driver is None and source.get("schema_version") == 1:
+                # Schema-1 macOS artifacts predate the pinned Cua Driver
+                # provenance block. Keep those already-published artifacts
+                # verifiable; any current producer output still carries and
+                # strictly validates the block below.
+                pass
+            elif (
                 not isinstance(driver, dict)
                 or driver.get("target") != target
                 or driver.get("version") != "0.31.0"

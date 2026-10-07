@@ -6,6 +6,7 @@ import json
 import multiprocessing
 import os
 from pathlib import Path
+import shutil
 import time
 from typing import Any, Mapping
 
@@ -34,7 +35,7 @@ def _snapshot() -> dict[str, Any]:
 
 def _state(tmp_path: Path, *, generation: int = 1) -> tuple[Path, ComputerUseState]:
     snapshot_path = tmp_path / "tools.json"
-    snapshot_path.write_text(json.dumps(_snapshot()), encoding="utf-8")
+    shutil.copyfile("desktop/cua-driver/tools-v0.31.0.json", snapshot_path)
     digest = hashlib.sha256(snapshot_path.read_bytes()).hexdigest()
     state = ComputerUseState(
         schema_version=1,
@@ -170,6 +171,17 @@ def test_advertised_surface_requires_session_and_drops_output_schema(
         assert "outputSchema" not in tool
 
 
+def test_snapshot_loader_rejects_changed_or_unapproved_bytes(tmp_path: Path) -> None:
+    """The server owns the final digest check before advertising tools."""
+
+    state_path, _state_value = _state(tmp_path)
+    payload = json.loads(state_path.read_text(encoding="utf-8"))
+    snapshot_path = Path(payload["tool_snapshot"]["path"])
+    snapshot_path.write_text(snapshot_path.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="digest"):
+        ComputerUseServer(state_path=state_path)
+
+
 @pytest.mark.parametrize(
     ("status", "reason"),
     [
@@ -180,7 +192,7 @@ def test_advertised_surface_requires_session_and_drops_output_schema(
         ("starting", None),
         ("error", "spawn_failed"),
         ("stopped", None),
-        ("needs_runtime", "runtime_too_old"),
+        ("needs_runtime", "runtime_unavailable"),
         ("unavailable", "shell_not_running"),
         ("unavailable", "daemon_unreachable"),
     ],
@@ -365,6 +377,28 @@ async def test_named_sessions_start_independently_and_revive_after_end(
 
 
 @pytest.mark.asyncio
+async def test_session_label_is_normalized_before_forwarding(
+    tmp_path: Path,
+) -> None:
+    """Whitespace around one public label cannot create a second driver session."""
+
+    state_path, state = _state(tmp_path)
+    upstream = FakeUpstream()
+    server = ComputerUseServer(
+        state_path=state_path,
+        status_reader=lambda: ComputerUseStatus("ready", None, state),
+        upstream_factory=lambda _state: asyncio.sleep(0, result=upstream),
+        lease_manager=FakeLeaseManager(),  # type: ignore[arg-type]
+    )
+
+    await server.call_tool("list_apps", {"session": "  ses-a  "})
+    assert [
+        params["arguments"].get("session")
+        for _method, params in upstream.calls
+    ] == ["ses-a", "ses-a"]
+
+
+@pytest.mark.asyncio
 async def test_window_input_requires_observation_and_rejects_focus_routes(
     tmp_path: Path,
 ) -> None:
@@ -419,6 +453,80 @@ async def test_window_input_requires_observation_and_rejects_focus_routes(
         },
     )
     assert "focus_shortcut_forbidden" in shortcut["content"][0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_real_lease_epoch_survives_handoff_and_rejects_stale_observation(
+    tmp_path: Path,
+) -> None:
+    """A released lease keeps its epoch so a later holder revives the session."""
+
+    now = 100.0
+    leases = DesktopLeaseManager(tmp_path, now=lambda: now, ttl_seconds=60.0)
+    state_path, state = _state(tmp_path)
+    upstream = FakeUpstream()
+    server = ComputerUseServer(
+        state_path=state_path,
+        status_reader=lambda: ComputerUseStatus("ready", None, state),
+        upstream_factory=lambda _state: asyncio.sleep(0, result=upstream),
+        lease_manager=leases,
+    )
+
+    observed = await server.call_tool(
+        "get_window_state",
+        {"session": "ses-a", "pid": 7, "window_id": 9},
+    )
+    assert not observed.get("isError")
+
+    now += 61.0
+    observed_by_b = await server.call_tool(
+        "get_window_state",
+        {"session": "ses-b", "pid": 8, "window_id": 10},
+    )
+    assert not observed_by_b.get("isError")
+    ended = await server.call_tool("end_session", {"session": "ses-b"})
+    assert not ended.get("isError")
+
+    stale = await server.call_tool(
+        "click",
+        {"session": "ses-a", "pid": 7, "window_id": 9, "x": 1, "y": 2},
+    )
+    assert "observe_first" in stale["content"][0]["text"]
+    assert [params["name"] for _method, params in upstream.calls][-2:] == [
+        "end_session",
+        "start_session",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_proxy_replacement_clears_observations(tmp_path: Path) -> None:
+    """A fresh upstream proxy cannot reuse observations from the old process."""
+
+    state_path, state = _state(tmp_path)
+    upstreams: list[FakeUpstream] = []
+
+    async def factory(_state):
+        upstream = FakeUpstream()
+        upstreams.append(upstream)
+        return upstream
+
+    server = ComputerUseServer(
+        state_path=state_path,
+        status_reader=lambda: ComputerUseStatus("ready", None, state),
+        upstream_factory=factory,
+        lease_manager=FakeLeaseManager(),  # type: ignore[arg-type]
+    )
+    await server.call_tool(
+        "get_window_state",
+        {"session": "ses-a", "pid": 7, "window_id": 9},
+    )
+    upstreams[0].alive = False
+    await server.call_tool("list_apps", {"session": "ses-a"})
+    stale = await server.call_tool(
+        "click",
+        {"session": "ses-a", "pid": 7, "window_id": 9, "x": 1, "y": 2},
+    )
+    assert "observe_first" in stale["content"][0]["text"]
 
 
 @pytest.mark.asyncio
@@ -515,7 +623,11 @@ async def test_new_server_process_requires_observation_again(tmp_path: Path) -> 
         ),
         ({"target": "window"}, "window_target_required"),
         ({"scope": "desktop"}, "window_target_required"),
+        ({"scope": "other"}, "window_target_required"),
+        ({"scope": None}, "window_target_required"),
         ({"pid": 7}, "window_target_required"),
+        ({"element_token": None}, "window_target_required"),
+        ({"element_token": ""}, "window_target_required"),
         ({"pid": True, "window_id": 9}, "window_target_required"),
         ({"pid": 7, "window_id": True}, "window_target_required"),
         (

@@ -225,21 +225,25 @@ Candidate 5 row was absent. The screenshot is
 `/tmp/avibe-computer-use-phase1-sesbn6xrdnd8p/source-c5/screen-recording-list-1905.png`.
 Candidate 5 automatic Screen Recording registration therefore failed even
 with the corrected helper layout, direct child responsibility chain, stable
-permission lifecycle, and no driver foreground assertion. Candidate iteration
-is stopped; do not build a Candidate 6 until the owner decides whether the
-documented manual `+`/drag recovery is acceptable as a limitation.
+permission lifecycle, and no recorded driver foreground assertion. The owner
+accepted the guided manual `+`/drag recovery as the Phase 1 product path at
+`2026-10-07 19:22` UTC+8. Automatic registration remains a known limitation
+and is deferred for separate investigation when Developer ID signing exists;
+it is not automatic-registration success.
 
 One unannounced state change must remain separate from the lane action: at
 `2026-10-07 18:56:14.57`, TCC recorded Accessibility as
 `Allowed (System Set)` for Candidate 5. The request came from the
 System Settings `SecurityPrivacyExtension.appex` PID `15214`, not from the
-lane's AXPress or registration child. The available evidence does not establish
-which person accepted that prompt, so it must not be described as a lane action
-or as proof that Screen Recording registration succeeded.
+lane's AXPress or registration child. The owner later confirmed that they
+accepted the Accessibility prompt and completed the Settings action. This is
+positive evidence for the Accessibility prompt-to-Settings path, but it is not
+Screen Recording evidence.
 
 This result closes the live evidence for the activation and focus fixes and
-records the remaining macOS registration defect. The owner-assisted manual
-addition path is a workaround and is not product request-path acceptance.
+records the remaining macOS registration limitation. The guided manual
+addition path is accepted Phase 1 product guidance and remains distinct from
+automatic registration.
 
 Primary diagnostics:
 
@@ -256,7 +260,7 @@ Primary diagnostics:
 
 macOS **Quit & Reopen** relaunched the fixed artifact without the lane's launch
 environment. That shell adopted the owner's older Runtime on port 5123 and
-correctly entered `needs_runtime/runtime_too_old`; it did not start a driver.
+correctly entered `needs_runtime/runtime_unavailable`; it did not start a driver.
 The lane stopped only that recorded shell PID and relaunched the same unchanged
 artifact with the isolated origin and executable overrides. Before resuming
 GUI work, the lane verified that the replacement shell connected only to
@@ -317,10 +321,11 @@ This is mechanism evidence with explicit limits:
 
 ## Remaining native acceptance
 
-Candidate 5 failed the automatic Screen Recording registration gate. No further
-candidate should be built until the owner decides the documented manual
-`+`/drag recovery boundary. The failed registration evidence is separate from
-the live validation that passed:
+Candidate 5 failed the automatic Screen Recording registration attempt. The
+owner accepted the guided manual `+`/drag path for Phase 1, so no further
+permission candidate is required for that limitation. The failed
+automatic-registration evidence remains separate from the live evidence that
+passed:
 
 1. the shell and helper have a stable parent/child relationship;
 2. the helper no longer acquires the outer app identity or foreground status;
@@ -330,8 +335,8 @@ the live validation that passed:
 5. the TCC request is attributed to the outer Candidate 5 shell while the
    helper is the capture accessor.
 
-After the owner decision and an actually granted fixed artifact, the remaining
-native evidence still needs the persistent serve path, visible cursor overlay,
-idle focus and pointer checks, parent-liveness cleanup, and the normal isolated
-Runtime Claude session with native user MCP configuration preserved. A direct
-no-overlay registration child does not satisfy those later checks.
+After the owner grants the unchanged fixed artifact through the guided path, the
+remaining native evidence still needs the persistent serve path, visible cursor
+overlay, idle focus and pointer checks, parent-liveness cleanup, and the normal
+isolated Runtime Claude session with native user MCP configuration preserved.
+A direct no-overlay registration child does not satisfy those later checks.

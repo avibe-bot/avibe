@@ -11,6 +11,7 @@ import asyncio
 from contextlib import suppress
 from copy import deepcopy
 from dataclasses import dataclass, field
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -18,10 +19,20 @@ import sys
 import time
 from typing import Any, Awaitable, Callable, Mapping, Protocol
 
+# Managed MCP launches this file as an absolute script with Python isolated
+# mode. Put the installed/source package root ahead of the caller's cwd before
+# importing Avibe modules so a project named ``core`` in an agent workspace
+# cannot shadow the server.
+if __package__ in {None, ""}:
+    _PACKAGE_ROOT = Path(__file__).resolve().parent.parent
+    if str(_PACKAGE_ROOT) not in sys.path:
+        sys.path.insert(0, str(_PACKAGE_ROOT))
+
 from config.atomic_io import write_atomic
 from core.computer_use import (
     COMPUTER_USE_LEASE_FILE,
     COMPUTER_USE_LEASE_LOCK_FILE,
+    COMPUTER_USE_TOOL_SNAPSHOT_SHA256,
     COMPUTER_USE_TOOL_NAMES,
     ComputerUseState,
     ComputerUseStatus,
@@ -120,7 +131,6 @@ class DesktopLeaseManager:
             return None
         if (
             not isinstance(holder, str)
-            or not holder
             or isinstance(refreshed_at, bool)
             or not isinstance(refreshed_at, (int, float))
             or isinstance(epoch, bool)
@@ -194,11 +204,12 @@ class DesktopLeaseManager:
                 and now - previous.refreshed_at < self._ttl_seconds
             )
             if valid and previous.holder != session:
-                raise ComputerServerError(
-                    "desktop_busy",
-                    f"Desktop computer use is held by session {previous.holder!r}.",
-                )
-            if valid:
+                if previous.holder:
+                    raise ComputerServerError(
+                        "desktop_busy",
+                        f"Desktop computer use is held by session {previous.holder!r}.",
+                    )
+            if valid and previous.holder == session:
                 epoch = previous.epoch
             else:
                 epoch = (previous.epoch if previous is not None else 0) + 1
@@ -247,10 +258,15 @@ class DesktopLeaseManager:
                 or current.daemon_key != lease.daemon_key
             ):
                 return
-            try:
-                self._record_path.unlink()
-            except FileNotFoundError:
-                pass
+            self._write(
+                Lease(
+                    holder="",
+                    refreshed_at=self._now(),
+                    epoch=current.epoch,
+                    daemon_instance_id=current.daemon_instance_id,
+                    daemon_generation=current.daemon_generation,
+                )
+            )
 
         self._under_lock(operation)
 
@@ -430,7 +446,17 @@ def _load_snapshot(state_path: Path) -> tuple[list[dict[str, Any]], set[str]]:
     state = read_computer_use_state(state_path)
     if state is None:
         raise RuntimeError("computer-use state is missing")
-    payload = json.loads(state.tool_snapshot.path.read_text(encoding="utf-8"))
+    try:
+        snapshot_bytes = state.tool_snapshot.path.read_bytes()
+    except OSError as exc:
+        raise RuntimeError("computer-use tool snapshot is unreadable") from exc
+    actual_sha256 = hashlib.sha256(snapshot_bytes).hexdigest()
+    if (
+        actual_sha256 != state.tool_snapshot.sha256
+        or actual_sha256 != COMPUTER_USE_TOOL_SNAPSHOT_SHA256
+    ):
+        raise RuntimeError("computer-use tool snapshot digest is not approved")
+    payload = json.loads(snapshot_bytes.decode("utf-8"))
     if not isinstance(payload, dict) or payload.get("schema_version") != 1:
         raise RuntimeError("computer-use tool snapshot has an unsupported schema")
     tools = payload.get("tools")
@@ -576,11 +602,13 @@ def _validate_input(tool_name: str, arguments: Mapping[str, Any]) -> None:
             "foreground_forbidden",
             "Foreground input is disabled on macOS computer use.",
         )
-    if arguments.get("scope") == "desktop":
+    if "scope" in arguments and arguments.get("scope") != "window":
         raise ComputerServerError(
             "window_target_required",
-            "Input must address one application window.",
+            "Input must use the approved window location.",
         )
+    element_token = arguments.get("element_token")
+    has_element_token = isinstance(element_token, str) and bool(element_token.strip())
     target = arguments.get("target")
     if target is not None:
         if (
@@ -596,7 +624,7 @@ def _validate_input(tool_name: str, arguments: Mapping[str, Any]) -> None:
                 "window_target_required",
                 "The input target shape is not an approved exact window target.",
             )
-    elif "element_token" not in arguments:
+    elif not has_element_token:
         pid = arguments.get("pid")
         window_id = arguments.get("window_id")
         if (
@@ -664,6 +692,7 @@ class ComputerUseServer:
             for session_state in self._sessions.values():
                 session_state.active_proxy_serial = None
                 session_state.active_daemon_key = None
+                session_state.observed_windows.clear()
             return upstream
 
     async def _upstream_call(
@@ -733,7 +762,10 @@ class ComputerUseServer:
         arguments: Mapping[str, Any],
         session_state: _SessionState,
     ) -> None:
-        if tool_name not in _INPUT_TOOLS or "element_token" in arguments:
+        element_token = arguments.get("element_token")
+        if tool_name not in _INPUT_TOOLS or (
+            isinstance(element_token, str) and bool(element_token.strip())
+        ):
             return
         key = _window_key(arguments)
         if key is None:
@@ -764,6 +796,8 @@ class ComputerUseServer:
 
         lock = self._session_locks.setdefault(session, asyncio.Lock())
         async with lock:
+            lease: Lease | None = None
+            setup_complete = False
             try:
                 _validate_input(name, arguments)
                 status = await asyncio.to_thread(self._status_reader)
@@ -790,8 +824,10 @@ class ComputerUseServer:
                     session_state,
                 )
                 self._require_observation(name, arguments, session_state)
+                setup_complete = True
 
                 forwarded = dict(arguments)
+                forwarded["session"] = session
                 if name not in self._upstream_accepts_session:
                     forwarded.pop("session", None)
                 heartbeat = asyncio.create_task(
@@ -837,6 +873,8 @@ class ComputerUseServer:
                 return result
             except ComputerServerError as exc:
                 return _error_result(exc.code, str(exc))
+            except asyncio.CancelledError:
+                raise
             except UpstreamUnavailable:
                 async with self._upstream_lock:
                     if self._upstream is not None and not self._upstream.alive:
@@ -851,6 +889,9 @@ class ComputerUseServer:
                     "computer_use_error",
                     f"Computer use failed: {type(exc).__name__}",
                 )
+            finally:
+                if lease is not None and not setup_complete:
+                    await asyncio.to_thread(self._lease_manager.release, lease)
 
     async def handle(self, message: Mapping[str, Any]) -> dict[str, Any] | None:
         request_id = message.get("id")

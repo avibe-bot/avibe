@@ -19,6 +19,8 @@ pub const COMPUTER_USE_LOCK_FILE: &str = "computer-use.lock";
 pub const COMPUTER_USE_SOCKET_FILE: &str = "cua-driver.sock";
 pub const COMPUTER_USE_DRIVER_VERSION: &str = "0.31.0";
 pub const COMPUTER_USE_TOOL_SNAPSHOT_SHA256: &str = "b03c3e48d1b00c8fe7c0e8b9813eb5ea104ad38313672fc4b68af203a827f43b";
+pub const RUNTIME_TOO_OLD_REASON: &str = "runtime_too_old";
+pub const RUNTIME_UNAVAILABLE_REASON: &str = "runtime_unavailable";
 pub const FAILURE_LIMIT: usize = 3;
 pub const FAILURE_WINDOW: Duration = Duration::from_secs(5 * 60);
 
@@ -373,7 +375,7 @@ impl ComputerUseLifecycle {
             reason: if phase == ComputerUsePhase::Error {
                 record.reason.clone()
             } else if phase == ComputerUsePhase::NeedsRuntime {
-                Some("runtime_too_old".to_owned())
+                Some(RUNTIME_UNAVAILABLE_REASON.to_owned())
             } else {
                 None
             },
@@ -452,11 +454,15 @@ impl ComputerUseLifecycle {
             return LifecycleDirective::default();
         }
         if support != RuntimeSupport::Supported {
-            let changed =
-                self.phase != ComputerUsePhase::NeedsRuntime || self.reason.as_deref() != Some("runtime_too_old");
+            let reason = match support {
+                RuntimeSupport::Unknown => RUNTIME_UNAVAILABLE_REASON,
+                RuntimeSupport::Unsupported => RUNTIME_TOO_OLD_REASON,
+                RuntimeSupport::Supported => unreachable!(),
+            };
+            let changed = self.phase != ComputerUsePhase::NeedsRuntime || self.reason.as_deref() != Some(reason);
             let stop_daemon = matches!(self.phase, ComputerUsePhase::Starting | ComputerUsePhase::Ready);
             self.phase = ComputerUsePhase::NeedsRuntime;
-            self.reason = Some("runtime_too_old".to_owned());
+            self.reason = Some(reason.to_owned());
             self.permission_edge_armed = false;
             return LifecycleDirective {
                 write_state: changed,
@@ -655,6 +661,25 @@ mod tests {
     }
 
     #[test]
+    fn shell_lock_reports_a_same_user_startup_race_without_replacing_the_holder() {
+        let directory = std::env::temp_dir().join(format!(
+            "avibe-computer-use-lock-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).expect("temporary directory");
+        let path = directory.join(COMPUTER_USE_LOCK_FILE);
+        let first = ComputerUseShellLock::acquire(&path).expect("first shell lock");
+        assert!(ComputerUseShellLock::acquire(&path).is_err());
+        drop(first);
+        ComputerUseShellLock::acquire(&path).expect("lock after holder exits");
+        std::fs::remove_dir_all(directory).expect("remove temporary directory");
+    }
+
+    #[test]
     fn capability_cache_keeps_transient_answers_only_within_one_adoption() {
         let mut cache = CapabilityCache::default();
         assert_eq!(
@@ -829,6 +854,28 @@ mod tests {
             LifecycleDirective::default(),
             "the driver's disagreement consumes restore eligibility"
         );
+    }
+
+    #[test]
+    fn runtime_adoption_reason_distinguishes_unavailable_from_unsupported() {
+        let stored = record(ComputerUsePhase::Ready, true);
+        let mut lifecycle = ComputerUseLifecycle::from_record(&stored);
+        assert_eq!(lifecycle.reason(), Some(RUNTIME_UNAVAILABLE_REASON));
+        assert_eq!(
+            lifecycle
+                .capabilities(RuntimeSupport::Unsupported, Grants::all())
+                .write_state,
+            true
+        );
+        assert_eq!(lifecycle.reason(), Some(RUNTIME_TOO_OLD_REASON));
+
+        let mut restarting = ComputerUseLifecycle::off();
+        restarting.enabled = true;
+        restarting.phase = ComputerUsePhase::Ready;
+        let directive = restarting.capabilities(RuntimeSupport::Unknown, Grants::all());
+        assert!(directive.stop_daemon);
+        assert_eq!(restarting.phase(), ComputerUsePhase::NeedsRuntime);
+        assert_eq!(restarting.reason(), Some(RUNTIME_UNAVAILABLE_REASON));
     }
 
     #[test]

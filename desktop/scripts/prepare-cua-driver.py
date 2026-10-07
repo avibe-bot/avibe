@@ -15,6 +15,8 @@ import tarfile
 import tempfile
 import urllib.request
 
+import yaml
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCES = ROOT / "cua-driver" / "sources.json"
@@ -23,6 +25,8 @@ TARGET_ARCH = {
     "x86_64-apple-darwin": "x86_64",
 }
 SHA256 = re.compile(r"[0-9a-f]{64}")
+POLICY = ROOT / "cua-driver" / "policy.yaml"
+TOOL_SNAPSHOT = ROOT / "cua-driver" / "tools-v0.31.0.json"
 
 
 def digest(path: Path) -> str:
@@ -56,7 +60,39 @@ def load_manifest(path: Path = SOURCES) -> dict:
         raise ValueError("invalid pinned Cua Driver source manifest")
     if "perception" in json.dumps(payload).lower():
         raise ValueError("Cua perception assets must not enter the Phase 1 package")
+    verify_managed_policy_surface()
     return payload
+
+
+def verify_managed_policy_surface(
+    policy_path: Path = POLICY,
+    snapshot_path: Path = TOOL_SNAPSHOT,
+) -> None:
+    """Keep the shipped allow-list equal to the reviewed 28-tool snapshot."""
+
+    try:
+        snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+        policy = yaml.safe_load(policy_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError, yaml.YAMLError) as exc:
+        raise ValueError("pinned Computer Use policy or snapshot is unreadable") from exc
+    snapshot_tools = snapshot.get("tools") if isinstance(snapshot, dict) else None
+    policy_tools = (
+        policy.get("allow", {}).get("tools")
+        if isinstance(policy, dict)
+        else None
+    )
+    if not isinstance(snapshot_tools, list) or not isinstance(policy_tools, list):
+        raise ValueError("pinned Computer Use policy and snapshot must contain tool lists")
+    snapshot_names = [
+        tool.get("name") for tool in snapshot_tools if isinstance(tool, dict)
+    ]
+    if (
+        len(snapshot_names) != len(snapshot_tools)
+        or any(not isinstance(name, str) or not name for name in snapshot_names)
+        or len(set(snapshot_names)) != len(snapshot_names)
+        or snapshot_names != policy_tools
+    ):
+        raise ValueError("managed Computer Use policy does not match the pinned tool snapshot")
 
 
 def download(url: str, target: Path) -> None:
