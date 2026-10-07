@@ -227,6 +227,14 @@ running. The tray keeps the shell alive after the window closes.
     most three seconds before termination. These are explicit upper bounds, not
     a retry or debounce policy; tests cover the shared permission deadline,
     child cancellation, and retry invalidation.
+  - **Shell exit boundary.** Cmd+Q, Dock and logout/restart termination,
+    updater restart, tray quit, and the explicit exit helper share one
+    idempotent Computer Use shutdown claim. Shutdown invalidates delayed startup
+    retries, stops and reaps the daemon, removes its socket, and releases the
+    shell lock before acknowledging the native shutdown or starting a
+    replacement process. A stuck startup attempt remains bounded by the health
+    and reap deadlines and cannot start another daemon after shutdown has been
+    requested.
 
   The first matching row wins:
 

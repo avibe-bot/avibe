@@ -805,6 +805,35 @@ fn native_lifecycle_authority_requires_the_runtime_identity_not_a_launch_attempt
 }
 
 #[test]
+fn every_quit_boundary_reuses_one_bounded_computer_use_cleanup() {
+    let shell = shipping_source("src/lib.rs");
+    let termination = shipping_source("src/macos_terminate.rs");
+    let updater = shipping_source("src/updater.rs");
+    let computer_use = shipping_source("src/computer_use.rs");
+
+    for required in [
+        "fn claim_exit_cleanup",
+        "shutdown_computer_use(&app).await",
+        "fn restart_after_computer_use_shutdown",
+        "fn stop_for_session_end",
+        "computer_use::Controller",
+        "app.restart()",
+    ] {
+        assert!(shell.contains(required), "shell cleanup boundary is missing {required}");
+    }
+    assert!(termination.contains("crate::request_runtime_lifecycle(app, true)"));
+    assert!(termination.contains("crate::stop_for_session_end(app)"));
+    assert!(updater.contains("super::restart_after_computer_use_shutdown(app)"));
+    assert!(computer_use.contains("_shell_lock: shell_lock"));
+    assert!(computer_use.contains("drop(shell_lock);"));
+    assert!(computer_use.contains("let _ = reply.send(());"));
+    assert!(
+        computer_use.find("drop(shell_lock);") < computer_use.find("let _ = reply.send(());"),
+        "the controller must release its lock before acknowledging shutdown"
+    );
+}
+
+#[test]
 fn native_tray_copy_has_locale_and_placeholder_parity() {
     let root = crate_dir().join("../../ui/src/i18n");
     let english = read_json(root.join("en.json"));

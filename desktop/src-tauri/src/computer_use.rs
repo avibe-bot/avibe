@@ -6,6 +6,7 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::ptr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -118,13 +119,16 @@ enum Event {
 pub(crate) struct Controller {
     sender: mpsc::UnboundedSender<Event>,
     view: Arc<Mutex<MenuView>>,
+    shutdown_requested: Arc<AtomicBool>,
+    shutdown_started: AtomicBool,
 }
 
 impl Controller {
     pub(crate) fn start(app: &AppHandle) -> Self {
         let (sender, receiver) = mpsc::unbounded_channel();
         let view = Arc::new(Mutex::new(MenuView::default()));
-        match RuntimeState::new(app.clone(), view.clone(), sender.clone()) {
+        let shutdown_requested = Arc::new(AtomicBool::new(false));
+        match RuntimeState::new(app.clone(), view.clone(), sender.clone(), shutdown_requested.clone()) {
             Ok(runtime) => {
                 tauri::async_runtime::spawn(runtime.run(receiver));
             }
@@ -135,7 +139,12 @@ impl Controller {
                 }
             }
         }
-        Self { sender, view }
+        Self {
+            sender,
+            view,
+            shutdown_requested,
+            shutdown_started: AtomicBool::new(false),
+        }
     }
 
     pub(crate) fn view(&self) -> MenuView {
@@ -159,6 +168,10 @@ impl Controller {
     }
 
     pub(crate) async fn shutdown(&self) {
+        if self.shutdown_started.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        self.shutdown_requested.store(true, Ordering::SeqCst);
         let (sender, receiver) = oneshot::channel();
         if self.sender.send(Event::Shutdown(sender)).is_ok() {
             let _ = receiver.await;
@@ -247,6 +260,7 @@ struct RuntimeState {
     paths: Paths,
     store: ComputerUseStateStore,
     _shell_lock: ComputerUseShellLock,
+    shutdown_requested: Arc<AtomicBool>,
     lifecycle: ComputerUseLifecycle,
     capabilities: CapabilityCache,
     origin: Option<LoopbackOrigin>,
@@ -267,6 +281,7 @@ impl RuntimeState {
         app: AppHandle,
         view: Arc<Mutex<MenuView>>,
         events: mpsc::UnboundedSender<Event>,
+        shutdown_requested: Arc<AtomicBool>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let paths = Paths::resolve(&app)?;
         let diagnostics = BootstrapLog::at(app.path().app_local_data_dir()?.join(BOOTSTRAP_LOG_NAME));
@@ -287,6 +302,7 @@ impl RuntimeState {
             paths,
             store,
             _shell_lock: shell_lock,
+            shutdown_requested,
             lifecycle,
             capabilities: CapabilityCache::default(),
             origin: None,
@@ -344,8 +360,13 @@ impl RuntimeState {
                         }
                         Event::Shutdown(reply) => {
                             self.shutdown().await;
+                            let RuntimeState {
+                                _shell_lock: shell_lock,
+                                ..
+                            } = self;
+                            drop(shell_lock);
                             let _ = reply.send(());
-                            break;
+                            return;
                         }
                     }
                 }
@@ -426,6 +447,9 @@ impl RuntimeState {
     }
 
     async fn tick(&mut self) {
+        if self.shutdown_requested.load(Ordering::SeqCst) {
+            return;
+        }
         if let Some(record) = self.pending_write.clone() {
             if self.store.write(&record).is_ok() {
                 self.pending_write = None;
@@ -450,7 +474,8 @@ impl RuntimeState {
     }
 
     async fn retry_start(&mut self, id: u64) {
-        if !retry_is_current(id, self.start_retry_id, &self.lifecycle) {
+        if self.shutdown_requested.load(Ordering::SeqCst) || !retry_is_current(id, self.start_retry_id, &self.lifecycle)
+        {
             return;
         }
         self.apply(LifecycleDirective {
@@ -496,6 +521,10 @@ impl RuntimeState {
         }
 
         let health = self.start_once().await;
+        if self.shutdown_requested.load(Ordering::SeqCst) {
+            self.stop_daemon().await;
+            return;
+        }
         let mut follow_up = self.lifecycle.startup_health(health, self.elapsed());
         let retry = follow_up.spawn_daemon;
         follow_up.spawn_daemon = false;
@@ -556,6 +585,9 @@ impl RuntimeState {
     }
 
     async fn start_once(&mut self) -> HealthResult {
+        if self.shutdown_requested.load(Ordering::SeqCst) {
+            return HealthResult::Unhealthy("shutdown_requested".to_owned());
+        }
         self.stop_daemon().await;
         if let Err(reason) = self.reclaim_endpoint().await {
             return HealthResult::Unhealthy(reason);
@@ -597,6 +629,9 @@ impl RuntimeState {
 
         timeout(HEALTH_TIMEOUT, async {
             loop {
+                if self.shutdown_requested.load(Ordering::SeqCst) {
+                    return HealthResult::Unhealthy("shutdown_requested".to_owned());
+                }
                 if self
                     .daemon
                     .as_mut()
@@ -703,6 +738,7 @@ impl RuntimeState {
     }
 
     async fn shutdown(&mut self) {
+        self.invalidate_start_retry();
         let directive = self.lifecycle.quit();
         if directive.write_state {
             let _ = self.write_current_state();
@@ -2026,6 +2062,33 @@ done
         );
         let _ = restarting.capabilities(RuntimeSupport::Unknown, Grants::all());
         assert!(!retry_is_current(7, 8, &restarting));
+    }
+
+    #[tokio::test]
+    async fn controller_shutdown_is_idempotent_and_acknowledges_once() {
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let controller = Controller {
+            sender,
+            view: Arc::new(Mutex::new(MenuView::default())),
+            shutdown_requested: Arc::new(AtomicBool::new(false)),
+            shutdown_started: AtomicBool::new(false),
+        };
+
+        let first = controller.shutdown();
+        tokio::pin!(first);
+        let event = tokio::select! {
+            event = receiver.recv() => event.expect("shutdown event"),
+            _ = &mut first => panic!("shutdown completed before the actor acknowledged it"),
+        };
+        let Event::Shutdown(reply) = event else {
+            panic!("unexpected computer-use event");
+        };
+        reply.send(()).expect("shutdown acknowledgement receiver");
+        first.await;
+
+        controller.shutdown().await;
+        assert!(receiver.try_recv().is_err());
+        assert!(controller.shutdown_requested.load(Ordering::SeqCst));
     }
 
     #[test]

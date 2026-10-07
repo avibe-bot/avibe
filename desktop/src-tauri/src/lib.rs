@@ -286,6 +286,7 @@ struct Shell {
     monitor_generation: Arc<AtomicU64>,
     dialog_pending: AtomicBool,
     exit_authorized: AtomicBool,
+    exit_cleanup_started: AtomicBool,
     bootstrap_url: Url,
 }
 
@@ -300,6 +301,7 @@ impl Shell {
             monitor_generation: Arc::new(AtomicU64::new(0)),
             dialog_pending: AtomicBool::new(false),
             exit_authorized: AtomicBool::new(false),
+            exit_cleanup_started: AtomicBool::new(false),
             bootstrap_url,
         }
     }
@@ -706,14 +708,15 @@ fn quit_choice(result: MessageDialogResult, catalog: &NativeTrayCatalog) -> Quit
 }
 
 fn exit_shell(app: &AppHandle) {
+    if !claim_exit_cleanup(app) {
+        return;
+    }
     authorize_exit(app);
     #[cfg(target_os = "macos")]
     {
         let app = app.clone();
         tauri::async_runtime::spawn(async move {
-            if let Some(controller) = app.try_state::<computer_use::Controller>() {
-                controller.shutdown().await;
-            }
+            shutdown_computer_use(&app).await;
             app.exit(0);
         });
     }
@@ -721,10 +724,37 @@ fn exit_shell(app: &AppHandle) {
     app.exit(0);
 }
 
+fn claim_exit_cleanup(app: &AppHandle) -> bool {
+    claim_exit_cleanup_flag(&app.state::<Shell>().exit_cleanup_started)
+}
+
+fn claim_exit_cleanup_flag(started: &AtomicBool) -> bool {
+    !started.swap(true, Ordering::SeqCst)
+}
+
 /// Everything the shell does before it ends, however the end is carried out.
 fn authorize_exit(app: &AppHandle) {
     notifications::stop(app);
     app.state::<Shell>().exit_authorized.store(true, Ordering::SeqCst);
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) async fn shutdown_computer_use(app: &AppHandle) {
+    if let Some(controller) = app.try_state::<computer_use::Controller>() {
+        controller.shutdown().await;
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn restart_after_computer_use_shutdown(app: AppHandle) {
+    if !claim_exit_cleanup(&app) {
+        return;
+    }
+    authorize_exit(&app);
+    tauri::async_runtime::spawn(async move {
+        shutdown_computer_use(&app).await;
+        app.restart();
+    });
 }
 
 /// How long logout, restart or shutdown waits for this app's Runtime to stop.
@@ -750,9 +780,22 @@ fn stop_for_session_end(app: &AppHandle) -> Option<impl std::future::Future<Outp
     let shell = app.state::<Shell>();
     let stop = shell.host.has_owned_runtime() && claim_runtime_stop(&shell.activity);
     let host = shell.host.clone();
-    authorize_exit(app);
-    stop.then_some(async move {
-        let _ = tokio::time::timeout(SESSION_END_STOP_LIMIT, host.stop_owned_runtime()).await;
+    let cleanup = claim_exit_cleanup(app);
+    let app = app.clone();
+    authorize_exit(&app);
+    if !cleanup && !stop {
+        return None;
+    }
+    Some(async move {
+        let _ = tokio::time::timeout(SESSION_END_STOP_LIMIT, async {
+            if cleanup {
+                shutdown_computer_use(&app).await;
+            }
+            if stop {
+                let _ = host.stop_owned_runtime().await;
+            }
+        })
+        .await;
     })
 }
 
@@ -2280,6 +2323,13 @@ mod tests {
 
         assert!(!view.enabled);
         assert_eq!(computer_use_label(&catalog, &view), catalog.initialization_failed);
+    }
+
+    #[test]
+    fn exit_cleanup_is_claimed_once_across_quit_and_restart_paths() {
+        let started = AtomicBool::new(false);
+        assert!(claim_exit_cleanup_flag(&started));
+        assert!(!claim_exit_cleanup_flag(&started));
     }
 
     #[test]
