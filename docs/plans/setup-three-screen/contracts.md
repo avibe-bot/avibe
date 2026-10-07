@@ -242,8 +242,10 @@ wires are drawn in the same 1040 space. Below 1024 the story and the assistants 
 two columns without wires; below 760 they stack. The intro card states its role under the
 name, inside the same `--ob-card-h` box as the assistant card, so both steps keep one card
 box. The built-in card on screen 3 may grow to offer models while the others keep
-`--ob-card-h`, top-aligned; while it does, the shell's aside hangs under the action pair
-instead of resting on the band it would reach into. The action and the gateway card are
+`--ob-card-h`, top-aligned. Every band's stage floor reserves that card at its worst
+reading (`--ob-offer-h`), so opening the offer cannot move the action; while it is open,
+the shell's aside hangs under the action pair instead of resting on the band the card
+reaches into. The action and the gateway card are
 299 of 1040, centred.
 
 **Motion bail-out.** Under `prefers-reduced-motion`, a hidden page, or an explicit pause the
