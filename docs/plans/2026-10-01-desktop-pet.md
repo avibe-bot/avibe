@@ -547,7 +547,10 @@ The microphone usage string and audio-input entitlement already ship (#2293).
     lost recreates it through `pet_reconcile()`;
   - the saved anchor is the pet image position whichever side the panel
     opened on, and a restore onto a missing monitor is clamped on screen;
-  - `pet_set_expanded` returns the layout it applied, near each screen edge;
+  - `pet_set_expanded` returns the layout it applied, near each screen edge,
+    and calls are applied in the order they were made, so a late collapse
+    cannot overtake a later expand (the page also keeps only the answer to
+    its latest request);
   - `pet_bind` persists to `pet.json` and emits `pet:bound`, and the binding
     survives a Runtime origin change; every change raises the revision by
     one, and `pet_ready`, `pet_bind`, `pet_unbind` and `pet:bound` all carry
@@ -654,8 +657,12 @@ The code and its tests are the contract; this section records why.
   `pet.json`, and "Show in pet". The pet stays invisible until (c) lands, so
   (a) and (b) ship nothing a user can see.
 - **`/pet` sits inside `AuthGuard` with a setup-redirect exemption only.** It
-  keeps the login and authorization gates, and `SETUP_CHECK_BYPASS_PATHS`
-  exempts it from the wizard redirect: its own setup gate (`usePetSetup`)
+  keeps the login and authorization gates, and `SETUP_REDIRECT_EXEMPT_PATHS`
+  exempts it from the wizard redirect only. It is not a diagnostics-style
+  bypass (`SETUP_CHECK_BYPASS_PATHS`), so it never renders without a session:
+  if the first session probe fails, the guard keeps loading and checks again
+  each time the page comes back, and the pet always runs with its
+  authorization. Its own setup gate (`usePetSetup`)
   applies the same rule through the shared `isSetupComplete` and shows
   "finish setting up in Avibe" instead of a pet-sized wizard. The route stays
   outside the Workbench chrome. The setup re-read bypasses the config cache
@@ -701,8 +708,14 @@ The code and its tests are the contract; this section records why.
   answer applies only from the latest read; a failure only settles the first
   check and never turns a known state back.
 - **An authorization change drops what was read under the old one.** The
-  session, tail, turn state and switcher rows are cleared at once and re-read;
-  vault requests follow the binding, and the inbox has its own handler.
+  session, tail, turn state and switcher rows are cleared at once and re-read.
+  Pending vault requests do the same in the shared `usePendingVaultRequests`
+  (so the chat page gets it too), and the inbox has its own handler.
+- **Mark-read answers are ordered in the inbox provider.** A newer mark-read
+  or read-changing event for a session supersedes an older answer for it, and
+  the account-wide unread map in an answer is adopted only if no other write
+  or snapshot has committed since the write began; otherwise only that
+  session's count is merged.
 - **`design.pen` frames are deferred.** The panel reuses existing tokens and
   primitives; frames follow once the shell PR makes the pet visible.
 

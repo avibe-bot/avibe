@@ -8,10 +8,12 @@ const SETUP_CHECK_BYPASS_PATHS = new Set([
   '/settings/diagnostics/logs',
   '/admin/logs',
   '/admin/settings/diagnostics',
-  // The desktop pet keeps the login and authorization gates but owns its setup
-  // state: it shows "finish setting up in Avibe" instead of a pet-sized wizard.
-  '/pet',
 ]);
+// Routes that own their setup state. Unlike the diagnostics bypass above, the
+// guard checks login, authorization and setup as usual and only declines to
+// redirect them to the wizard: the desktop pet shows "finish setting up in
+// Avibe" instead of a pet-sized wizard.
+const SETUP_REDIRECT_EXEMPT_PATHS = new Set(['/pet']);
 
 type PwaContext = {
   ios: boolean;
@@ -52,6 +54,10 @@ export function remoteLoginPath(target: string): string {
 
 export function isSetupCheckBypassed(path: string): boolean {
   return SETUP_CHECK_BYPASS_PATHS.has(path);
+}
+
+export function isSetupRedirectExempt(path: string): boolean {
+  return SETUP_REDIRECT_EXEMPT_PATHS.has(path);
 }
 
 export async function checkRemoteAuthForPath<Session extends RemoteSession>(

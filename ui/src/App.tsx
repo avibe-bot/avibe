@@ -56,6 +56,7 @@ import type { ReactNode } from 'react';
 import {
     checkRemoteAuthForPath,
     isSetupCheckBypassed,
+    isSetupRedirectExempt,
     remoteLoginPath,
     REMOTE_AUTH_REQUIRED_EVENT,
     REMOTE_AUTH_STATE_EVENT,
@@ -303,6 +304,7 @@ export const AuthGuard = ({ children }: { children: ReactNode }) => {
     const [setupModelHubAllowed, setSetupModelHubAllowed] = useState(false);
     const authorizationUnavailableRef = useRef(false);
     const bypassSetupGuard = isSetupCheckBypassed(location.pathname);
+    const setupRedirectExempt = isSetupRedirectExempt(location.pathname);
     // Re-validate only when crossing the setup boundary, not on every
     // route change. The wizard completes by saving config and navigating
     // off /setup; that pathname flip re-runs the effect so the stale
@@ -485,7 +487,16 @@ export const AuthGuard = ({ children }: { children: ReactNode }) => {
         // completion clears the stale needs-setup status, while ordinary
         // sidebar navigation never re-runs (which would re-mount the
         // shell behind the Loading state).
-    }, [authCheckVersion, bypassSetupGuard, isSetupRoute, getConfig, getAuthSession]);
+    }, [authCheckVersion, bypassSetupGuard, setupRedirectExempt, isSetupRoute, getConfig, getAuthSession]);
+
+    // A route exempt from the setup redirect still needs a session: without one
+    // its capabilities would read as denied. When the first probe found none
+    // (the Runtime was unreachable), check again each time the page comes back.
+    const awaitingExemptSession = setupRedirectExempt && guardStatus === 'needs-setup' && !authorizationSession;
+    useEffect(() => {
+        if (!awaitingExemptSession) return undefined;
+        return onPageReactivated(() => setAuthCheckVersion((version) => version + 1));
+    }, [awaitingExemptSession]);
 
     if (guardStatus === 'loading') {
         return <div className="min-h-screen flex items-center justify-center bg-bg text-text">{t('common.loading')}</div>;
@@ -512,7 +523,7 @@ export const AuthGuard = ({ children }: { children: ReactNode }) => {
     if (guardStatus === 'access-blocked') {
         return <AccessBlocked code={blockedCode} />;
     }
-    if (guardStatus === 'needs-setup' && !bypassSetupGuard) {
+    if (guardStatus === 'needs-setup' && !bypassSetupGuard && !setupRedirectExempt) {
         // Model Hub keeps its own grant; General needs only the wizard beneath it.
         if (authorizationSession && (location.pathname === '/setup'
             || (settingsOverSetup && location.pathname !== MODEL_HUB_SETTINGS_PATH)

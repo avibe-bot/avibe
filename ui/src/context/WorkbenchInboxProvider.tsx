@@ -455,16 +455,26 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
       // With handleError off, a 4xx/5xx resolves with the error body rather
       // than throwing; only the endpoint's success shape is an applied write.
       const applied = typeof result?.updated === 'number' || Boolean(result?.unread_by_session);
+      // A later write or read-changing event for this session (including a
+      // second mark-read issued while this one was in flight) supersedes it.
       if (
         !applied
-        || !readOwnershipRef.current.isMutationCurrent(operation, `inbox-session:${sessionId}`)
+        || !readOwnershipRef.current.isMutationCurrent(operation, [
+          `inbox-session:${sessionId}`,
+          `inbox-unread-session:${sessionId}`,
+        ])
       ) {
         return applied;
       }
+      // The response carries the whole account map, but it describes the other
+      // sessions only as of this write. It is adopted whole only if nothing has
+      // changed or committed the whole map since this write began; otherwise
+      // only this session's count, which nothing newer has touched, is merged.
+      const wholeMapCurrent =
+        readOwnershipRef.current.isMutationCurrent(operation, 'inbox-unread')
+        && committedWholeUnreadGenerationRef.current <= operation.generation;
       // A successful write commits after every read that was already in flight,
-      // even when one of those reads started later and returns last. The endpoint
-      // mutates only this session, so merge only that count; concurrent mark-read
-      // writes for other sessions remain independent.
+      // even when one of those reads started later and returns last.
       readOwnershipRef.current.acceptMutation([
         'inbox-unread',
         `inbox-unread-session:${sessionId}`,
@@ -472,10 +482,12 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
       // The unread map is authoritative for badges; the card's unread styling
       // derives from it, so clearing here clears the dot without touching the
       // feed order (a read doesn't change last activity).
-      if (result.unread_by_session) applyUnreadMap(result.unread_by_session);
+      const map = result.unread_by_session;
+      if (map && wholeMapCurrent) applyUnreadMap(map);
+      else if (map) applySessionUnread(sessionId, map[sessionId] ?? 0);
       return true;
     },
-    [api, applyUnreadMap],
+    [api, applySessionUnread, applyUnreadMap],
   );
 
   // Resume reconcile: re-read the feed WITHOUT collapsing pagination. A

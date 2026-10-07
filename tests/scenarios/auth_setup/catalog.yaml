@@ -495,4 +495,5 @@ scenarios:
     supporting_tests:
       - ui/src/pet/PetPage.test.tsx
       - ui/src/lib/remoteAuth.test.ts
+      - ui/src/App.remoteAuth.test.tsx
 next_priority: []
