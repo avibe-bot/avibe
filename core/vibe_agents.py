@@ -900,18 +900,9 @@ class VibeAgentStore:
         return agent
 
     def require_reference(self, name: str) -> VibeAgent:
-        """Resolve a durable Agent reference, including a disabled archive.
+        """Resolve a durable Agent reference, including a disabled archive."""
 
-        Routing can hold a backend id, for example while the built-in has the next free name
-        because a user's Agent holds the id: when no Agent has the name, it means the backend's
-        built-in Agent.
-        """
-
-        agent = self.get(name)
-        backend = str(name or "").strip()
-        if agent is None and backend in AGENT_BACKENDS:
-            agent = self.get_builtin_default_agent_for_backend(backend, enabled_only=False)
-        return self._require_reference_agent(agent if agent is not None else self.require(name))
+        return self._require_reference_agent(self.require(name))
 
     def routing_name_for_backend(self, backend: str) -> str:
         """The Agent name a backend choice routes to: its built-in Agent's, whatever the row is called."""
@@ -1706,8 +1697,8 @@ class VibeAgentStore:
                     f"agent '{agent_name}' already exists with backend '{existing.backend}', "
                     f"cannot use it as the built-in default for '{backend}'"
                 )
-            if existing.source != "builtin":
-                # A user's Agent keeps its own identity.
+            if not is_builtin_default_agent(existing):
+                # An Agent that is not the built-in keeps its own identity.
                 return existing
             return self._write_builtin_state(existing, metadata={**existing.metadata, **metadata})
         return self.create(
@@ -1749,11 +1740,10 @@ class VibeAgentStore:
         if not is_builtin_default_agent(agent):
             return agent
 
-        always_enabled = is_always_enabled_agent(agent)
-        backend_enabled = bool(backend_enabled) or always_enabled
+        backend_enabled = bool(backend_enabled) or is_always_enabled_agent(agent)
         previous_backend_enabled = agent.metadata.get(BUILTIN_BACKEND_ENABLED_META_KEY)
         metadata = {**agent.metadata, BUILTIN_BACKEND_ENABLED_META_KEY: backend_enabled}
-        should_enable = (backend_enabled and previous_backend_enabled is not True) or (always_enabled and not agent.enabled)
+        should_enable = backend_enabled and previous_backend_enabled is not True
         should_disable = not backend_enabled and agent.enabled
         enabled: Any = True if should_enable else False if should_disable else _UNSET
         return self._write_builtin_state(agent, metadata=metadata, enabled=enabled)
@@ -1797,12 +1787,9 @@ class VibeAgentStore:
     def get_builtin_default_agent_for_backend(self, backend: str, *, enabled_only: bool = True) -> Optional[VibeAgent]:
         """The backend's built-in Agent: the one owner of built-in identity.
 
-        It is a row the store created for the backend (``source == "builtin"``, which no
-        caller can write), under any name; its markers are only a projection the sync
-        keeps current. A marked row wins over one an earlier build left without
-        markers, then the oldest. The legacy instance default, also store-made, is a
-        backend's built-in only if marked. ``enabled_only`` reports a disabled one as
-        missing.
+        It is the oldest row the store created and marked for the backend
+        (``is_builtin_default_agent``; no caller can write either), under any name.
+        ``enabled_only`` reports a disabled one as missing.
         """
         backend = validate_agent_backend(backend)
         with self.engine.connect() as conn:
@@ -1811,15 +1798,7 @@ class VibeAgentStore:
                 .where(agents.c.backend == backend, agents.c.source == "builtin", agents.c.archived_at.is_(None))
                 .order_by(agents.c.created_at, agents.c.id)
             ).mappings().all()
-        built_in = min(
-            (
-                agent
-                for agent in map(self._from_row, rows)
-                if _has_builtin_markers(agent) or agent.normalized_name != DEFAULT_AGENT_NAME
-            ),
-            key=lambda agent: not _has_builtin_markers(agent),
-            default=None,
-        )
+        built_in = next((agent for agent in map(self._from_row, rows) if _has_builtin_markers(agent)), None)
         if built_in is None or (enabled_only and not built_in.enabled):
             return None
         return built_in

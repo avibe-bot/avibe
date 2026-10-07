@@ -7,6 +7,7 @@ from typing import Optional
 from modules.agents import get_agent_display_name
 from modules.agents.catalog import (
     AGENT_BACKENDS,
+    NATIVE_CLI_BACKENDS,
     display_name_for_backend,
     implicit_default_rank,
     is_builtin_backend,
@@ -552,7 +553,7 @@ class SettingsHandler(BaseHandler):
         if not agent_name:
             return None
         name = str(agent_name)
-        if name in AGENT_BACKENDS:
+        if name in NATIVE_CLI_BACKENDS:
             return name
         store = getattr(self.controller, "vibe_agent_store", None)
         if store is None:
@@ -568,7 +569,7 @@ class SettingsHandler(BaseHandler):
     def _routing_target_from_row(row: dict) -> tuple[str, str, str, str, str]:
         backend = str(row.get("agent_backend") or "").strip()
         agent_name = str(row.get("agent_name") or "").strip()
-        if not agent_name and backend in AGENT_BACKENDS:
+        if not agent_name and backend in NATIVE_CLI_BACKENDS:
             agent_name = backend
         variant = str(row.get("agent_variant") or "").strip()
         if variant == backend and agent_name == backend:

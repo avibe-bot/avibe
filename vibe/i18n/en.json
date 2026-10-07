@@ -6,7 +6,6 @@
   },
   "errors": {
     "agentModelRequired": "Select a model for the {backend} Agent or Session in Avibe before running it.",
-    "builtinBackendConfig": "{backend} is built in and always enabled, so `{section}` cannot be set.",
     "modelHubDisabled": "Model Hub is disabled on this instance, so {backend} has no model to run on.",
     "modelGatewayOff": "The model gateway is off, so {backend} has no model to run on. Turn it on in Models, then choose a model.",
     "opencodeModelProviderRequired": "Select an OpenCode model with a provider in Avibe, or configure its Model Hub route."

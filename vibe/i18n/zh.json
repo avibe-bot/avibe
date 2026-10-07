@@ -6,7 +6,6 @@
   },
   "errors": {
     "agentModelRequired": "请先在 Avibe 中为 {backend} Agent 或会话选择模型。",
-    "builtinBackendConfig": "{backend} 是内置后端，始终启用，不能设置 `{section}`。",
     "modelHubDisabled": "本实例已停用模型网关，{backend} 没有可用的模型。",
     "modelGatewayOff": "模型网关已关闭，{backend} 没有可用的模型。请在「模型」页开启网关并选择模型。",
     "opencodeModelProviderRequired": "请在 Avibe 中选择带供应商的 OpenCode 模型，或配置它的 Model Hub 路由。"
