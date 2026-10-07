@@ -174,7 +174,7 @@ from .usage import (
     local_usage_day,
 )
 
-CONTRACT_VERSION = 12
+CONTRACT_VERSION = 11
 
 
 def seeded_source_name(vendor: str) -> str:
@@ -276,8 +276,8 @@ _MODELS_DEV_CANDIDATE_FIELDS = (
 )
 
 
-AGENT_CHAIN_CONTRACT_VERSION = 12
-PROBE_RESULT_CONTRACT_VERSION = 12
+AGENT_CHAIN_CONTRACT_VERSION = 11
+PROBE_RESULT_CONTRACT_VERSION = 11
 _SOURCE_DISCOVERY_TIMEOUT_SECONDS = 15
 _SOURCE_PROBE_TIMEOUT_SECONDS = 60
 _REORDER_ORDER_UNSET = object()
@@ -957,7 +957,7 @@ def _runtime_payload(status: EngineStatus, *, enabled: bool) -> dict:
 
     manager = EngineRuntimeManager()
     return {
-        "contract_version": 12,
+        "contract_version": 11,
         "enabled": enabled,
         "host_platform": status.host_platform or manager.host_platform(),
         "manifest": manager.contract_manifest(),
@@ -1939,7 +1939,7 @@ class ModelHubService:
             if pinned_protocol is not None:
                 return (pinned_protocol,)
             if vendor == "custom":
-                # Google is explicit API/config admission in v12, not a new
+                # Google is explicit API/config admission in v11, not a new
                 # automatic probe or picker option. Its generation path needs
                 # a model, which non-inference observation must not invent.
                 return tuple(protocol for protocol in SOURCE_PROTOCOLS if protocol != "google")

@@ -206,7 +206,7 @@ def normalize_model_hub_vendor_id(value: object) -> str:
 
 
 def validate_model_hub_protocol_vendor(vendor: str, protocol: str) -> None:
-    """Keep Google's v12 explicit custom admission consistent across consumers."""
+    """Keep Google's v11 explicit custom admission consistent across consumers."""
     if protocol == "google" and vendor != "custom":
         raise ValueError("Google Sources require the custom vendor")
 

@@ -874,7 +874,7 @@ async def test_failover_origin_is_available_before_body_and_matches_served_attem
         # Exercise the persistence reader, not only in-memory schema payloads.
         history = []
         for backend in ("claude", "codex", "opencode"):
-            for version in (5, 6, 7, 8, 9, 10, 11):
+            for version in (5, 6, 7, 8, 9, 10):
                 native = copy.deepcopy(record)
                 native.update(agent=backend, contract_version=version, turn_id=f"{backend}-{version}")
                 native["served"].pop("origin")

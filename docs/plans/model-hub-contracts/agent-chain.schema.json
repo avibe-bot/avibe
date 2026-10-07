@@ -7,7 +7,7 @@
   "required": ["contract_version", "backend", "model_id", "manual_override", "route_origin", "chain", "current", "supply_state"],
   "additionalProperties": false,
   "properties": {
-    "contract_version": { "const": 12 },
+    "contract_version": { "const": 11 },
     "backend": { "enum": ["claude", "codex", "opencode", "vibey"] },
     "model_id": { "type": "string" },
     "manual_override": {
@@ -237,7 +237,7 @@
   ],
   "examples": [
     {
-      "contract_version": 12,
+      "contract_version": 11,
       "backend": "codex",
       "model_id": "unlisted-model",
       "manual_override": null,
@@ -247,7 +247,7 @@
       "supply_state": "ok"
     },
     {
-      "contract_version": 12,
+      "contract_version": 11,
       "backend": "codex",
       "model_id": "gpt-5.6",
       "manual_override": null,
@@ -257,7 +257,7 @@
       "supply_state": "ok"
     },
     {
-      "contract_version": 12,
+      "contract_version": 11,
       "backend": "claude",
       "model_id": "claude-opus-4-6",
       "manual_override": null,
@@ -267,7 +267,7 @@
       "supply_state": "waiting"
     },
     {
-      "contract_version": 12,
+      "contract_version": 11,
       "backend": "opencode",
       "model_id": "glm-5.2",
       "manual_override": { "hops": [{ "source_id": "src_relay9c1x", "model_id": "glm-5.2" }] },
@@ -277,7 +277,7 @@
       "supply_state": "waiting"
     },
     {
-      "contract_version": 12,
+      "contract_version": 11,
       "backend": "codex",
       "model_id": "gpt-5.6",
       "manual_override": null,
@@ -287,7 +287,7 @@
       "supply_state": "interrupted"
     },
     {
-      "contract_version": 12,
+      "contract_version": 11,
       "backend": "codex",
       "model_id": "gpt-5.6",
       "manual_override": null,
@@ -297,7 +297,7 @@
       "supply_state": "interrupted"
     },
     {
-      "contract_version": 12,
+      "contract_version": 11,
       "backend": "claude",
       "model_id": "claude-haiku-4-5",
       "manual_override": null,

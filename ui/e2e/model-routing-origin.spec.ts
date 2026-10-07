@@ -39,7 +39,7 @@ test('MH-ROUTING-007 follow-defaults switch, undo, cancel, and save preserve exp
       expect(response.request().postDataJSON()).toEqual({ manual_override: null });
       const body = await response.json() as { ok: boolean; contract_version: number; chain: AgentChain };
       expect(body.ok).toBe(true);
-      expect(body.contract_version).toBe(12);
+      expect(body.contract_version).toBe(11);
       expect(body.chain.manual_override).toBeNull();
       expect(body.chain.route_origin).toBe(inherited.route_origin);
       expect(identities(body.chain)).toEqual(identities(inherited));
@@ -102,7 +102,7 @@ test('MH-ROUTING-007 follow-defaults switch, undo, cancel, and save preserve exp
       would_remove_hops: [{ backend: gateway.backend, menu_model: gateway.model, ...manual.hops[0], position: 1 }],
       would_interrupt: [],
     };
-    expect(await refused.json()).toMatchObject({ ok: false, contract_version: 12, error: 'source_in_route_chain', ...plan });
+    expect(await refused.json()).toMatchObject({ ok: false, contract_version: 11, error: 'source_in_route_chain', ...plan });
     expect((await api.agentChain(gateway.backend, gateway.model)).manual_override).toEqual(manual);
     // The one question is its own modal over the chain the user was editing.
     const guard = hub.dialogTitled(copy('guard.title.saveRoute', { menuModel: gateway.model }));

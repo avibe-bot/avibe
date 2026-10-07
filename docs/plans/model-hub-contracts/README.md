@@ -1,8 +1,9 @@
 # Model Hub contracts
 
-Status: **contract_version 12**, 2026-10-02: Google protocol vocabulary and Gemini
-gateway frontend, with API/config-only Source admission. See
-[`google-protocol.md`](google-protocol.md) and [`vibey-consumer.md`](vibey-consumer.md).
+Status: **contract_version 11**, 2026-10-02: the Vibey Hub-only consumer, primary-hop
+resolution and response origin linked to the served attempt, plus the Google protocol
+vocabulary and Gemini gateway frontend, with API/config-only Source admission. See
+[`vibey-consumer.md`](vibey-consumer.md) and [`google-protocol.md`](google-protocol.md).
 The approved routing contract is
 `../model-hub-routing-modes.md`, including the owner-approved Empty Route Inheritance
 correction `352486374`; API-key-only scope remains unchanged.
@@ -181,7 +182,7 @@ comparison. A gate may not report success by comparing stale input with itself.
 
 ## Version closure
 
-`contract_version` 12 must coexist in all registered version locations on the same tested head:
+`contract_version` 11 must coexist in all registered version locations on the same tested head:
 
 - `mirror-registry.json`
 - `agent-chain.schema.json`

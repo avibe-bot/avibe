@@ -48,7 +48,7 @@ const MODEL_HUB_AGENT = {
 };
 
 const MODEL_HUB_RUNTIME = {
-  contract_version: 12,
+  contract_version: 11,
   enabled: true,
   manifest: { name: 'cliproxyapi', resolution: 'resolved', version: 'fixture', source_sha: 'f'.repeat(40), assets: [] },
   status: { installed_version: 'fixture', verified: true, listening: { host: '127.0.0.1', port: 43123 }, health: 'ok' },

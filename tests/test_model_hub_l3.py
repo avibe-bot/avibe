@@ -6830,7 +6830,7 @@ def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
     _assert_valid(
         "observation-result.schema.json",
         {
-            "contract_version": 12,
+            "contract_version": 11,
             "outcome": "adapter_error",
             "reachable": True,
             "authenticated": "unknown",
@@ -9361,7 +9361,7 @@ def test_native_chain_visibility_and_probe_readiness(tmp_path: Path) -> None:
 
     probe = asyncio.run(service.probe_agent("codex", "shared-model"))
     assert probe == {
-        "contract_version": 12,
+        "contract_version": 11,
         "backend": "codex",
         "channel": "native_cli",
         "reachable": True,
