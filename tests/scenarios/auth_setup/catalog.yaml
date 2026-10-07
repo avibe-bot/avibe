@@ -489,6 +489,10 @@ scenarios:
       and config read against controlled responses; the packaged two-window
       journey lands with the desktop shell PR that creates the pet window.
     owning_layer: L4 integrated acceptance (packaged desktop shell against a live instance)
+    partial_evidence:
+      covers: the server half at the real boundary — the `/pet` shell document, authentication refusal of the config read, a signed-in pet read that reports setup pending with the fields the setup rule reads, completion from a second client through CSRF, and the pet's per-call re-read seeing it; the browser rules are the supporting tests below, against controlled responses
+      test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_pet_window_reads_setup_finished_in_the_main_window_closed_loop
     supporting_tests:
       - ui/src/pet/PetPage.test.tsx
+      - ui/src/lib/remoteAuth.test.ts
 next_priority: []

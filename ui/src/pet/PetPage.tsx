@@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
 import { Activity, ArrowUp, ExternalLink, KeyRound, Shuffle } from 'lucide-react';
 
-import { useApi, type SessionActivityState, type WorkbenchMessage } from '@/context/ApiContext';
+import { ApiError, useApi, type SessionActivityState, type WorkbenchMessage } from '@/context/ApiContext';
 import { useInstanceAuthorization } from '@/context/InstanceAuthorizationContext';
 import { useWorkbenchInbox } from '@/context/WorkbenchInboxContext';
 import { Button } from '@/components/ui/button';
@@ -17,7 +17,6 @@ import {
 } from '@/lib/backgroundActivity';
 import { usePageActive } from '@/lib/pageActivity';
 import { usePendingVaultRequests } from '@/lib/usePendingVaultRequests';
-import { useLatestRef } from '@/lib/useLatestRef';
 
 import { PetAvatar, type PetPose } from './PetAvatar';
 import {
@@ -38,6 +37,11 @@ import { useSessionSwitcher } from './useSessionSwitcher';
 const SLEEP_AFTER_MS = 5 * 60 * 1000;
 // A pointer that moves this far after pressing the pet drags the window.
 const DRAG_THRESHOLD_PX = 4;
+// Answers that prove the server refused a message, as on the new-session
+// sheet; anything else (a lost response, a 5xx, `dispatch_pending`) may have
+// started a turn, so the send is uncertain.
+const REFUSED_SEND_STATUSES = new Set([400, 403, 404, 409, 422]);
+const sendRefused = (error: unknown) => error instanceof ApiError && REFUSED_SEND_STATUSES.has(error.status);
 
 /**
  * `/pet`: the desktop pet window's page. Outside the Workbench shell and the
@@ -80,16 +84,11 @@ const PetSurface: React.FC = () => {
   const api = useApi();
   const inbox = useWorkbenchInbox({ feed: false });
 
-  const shellBinding = usePetBinding();
-  // Undefined until the shell has answered `pet_ready()`; until then nothing
-  // can be picked, so a local pick never races the shell's durable binding.
-  const bindingKnown = shellBinding !== undefined;
-  const binding = shellBinding ?? null;
+  const binding = usePetBinding() ?? null;
   // Sending is a chat capability, as in the chat page: a principal without it
   // sees the pet's state but gets no composer or quick replies.
   const { capabilities } = useInstanceAuthorization();
   const canChat = capabilities.can_chat;
-  const bindingRef = useLatestRef(binding);
   const [expanded, setExpanded] = useState(false);
   const [layout, setLayout] = useState<PetLayout>({ panel_side: 'left', panel_edge: 'bottom' });
   const [switcherOpen, setSwitcherOpen] = useState(false);
@@ -103,19 +102,16 @@ const PetSurface: React.FC = () => {
     setDraft('');
   }
   const [sending, setSending] = useState(false);
+  // The session whose last send may or may not have been admitted. Resending
+  // could start a second turn, so input stays closed there until the user has
+  // looked at the conversation in Avibe. A ref as well, so a send in the same
+  // tick sees it.
+  const [uncertainFor, setUncertainFor] = useState<string | null>(null);
+  const uncertainRef = useRef<string | null>(null);
+  const uncertain = Boolean(binding) && uncertainFor === binding;
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
-  // Compare-and-clear, in this page and in the shell. Unlike a failed pick,
-  // a failed clear is not reverted: the binding is invalid (archived, missing
-  // or read-only), so restoring it would only re-run validation and clear it
-  // again, in a loop. If the shell keeps it durably, the next load validates
-  // it the same way before the pet uses it, so it is never sent to.
-  const unbind = useCallback((sessionId: string) => {
-    if (bindingRef.current === sessionId) petShell.setBinding(null);
-    void petBridge.unbind(sessionId).catch(() => undefined);
-  }, [bindingRef]);
-
-  const data = usePetSession(binding, unbind);
+  const data = usePetSession(binding, petShell.unbind);
   const { requests: vaultRequests } = usePendingVaultRequests(binding ?? '');
   const unreadCount = binding ? inbox.unreadBySession[binding] ?? 0 : 0;
 
@@ -208,7 +204,7 @@ const PetSurface: React.FC = () => {
     // Only a session this page has validated as writable accepts input; a
     // restored or just-picked binding waits for its first successful read.
     if (!canChat || !binding || data.session?.id !== binding || !text.trim()) return false;
-    if (sendingRef.current) return false;
+    if (sendingRef.current || uncertainRef.current === binding) return false;
     sendingRef.current = true;
     setSending(true);
     try {
@@ -219,7 +215,11 @@ const PetSurface: React.FC = () => {
         data.noteSent(row && typeof row === 'object' && 'id' in row ? row : null);
       }
       return true;
-    } catch {
+    } catch (error) {
+      if (!sendRefused(error)) {
+        uncertainRef.current = binding;
+        setUncertainFor(binding);
+      }
       return false;
     } finally {
       sendingRef.current = false;
@@ -283,20 +283,9 @@ const PetSurface: React.FC = () => {
       title={data.session?.title ?? null}
       switcherOpen={switcherOpen || !binding}
       onToggleSwitcher={() => setSwitcherOpen((open) => !open)}
-      pickable={bindingKnown}
       onPick={(sessionId) => {
-        if (petShell.currentBinding() === undefined) return;
         setSwitcherOpen(false);
-        // Optimistic, but the shell owns the durable binding: if it cannot
-        // persist the pick, go back to the last binding it confirmed (never to
-        // an earlier pick that may itself be unconfirmed).
-        petShell.setBinding(sessionId);
-        petBridge.bind(sessionId).then(
-          () => petShell.confirm(sessionId),
-          () => {
-            if (petShell.currentBinding() === sessionId) petShell.setBinding(petShell.confirmedBinding());
-          },
-        );
+        petShell.pick(sessionId);
       }}
       exchange={exchange}
       markRead={markRead}
@@ -312,7 +301,15 @@ const PetSurface: React.FC = () => {
       onSubmit={() => void submit()}
       sending={sending}
       canChat={canChat}
-      canSend={canChat && Boolean(binding) && data.session?.id === binding}
+      canSend={canChat && !uncertain && Boolean(binding) && data.session?.id === binding}
+      uncertain={uncertain}
+      onInspect={() => {
+        // Looking at the conversation resolves the doubt: the user sees whether
+        // the message went through before deciding to send again.
+        uncertainRef.current = null;
+        setUncertainFor(null);
+        if (binding) void petBridge.open(sessionLink(binding));
+      }}
       inputRef={inputRef}
     />
   ) : null;
@@ -337,8 +334,6 @@ type PanelProps = {
   title: string | null;
   switcherOpen: boolean;
   onToggleSwitcher: () => void;
-  /** The shell's binding is known, so a pick cannot race it. */
-  pickable: boolean;
   onPick: (sessionId: string) => void;
   exchange: ReturnType<typeof latestExchange>;
   markRead: (sessionId: string, untilMessageId?: string) => Promise<boolean>;
@@ -358,6 +353,9 @@ type PanelProps = {
   canSend: boolean;
   /** The principal may chat at all (instance capability). */
   canChat: boolean;
+  /** The last send may have started a turn; resending waits for a look. */
+  uncertain: boolean;
+  onInspect: () => void;
   inputRef: React.RefObject<HTMLTextAreaElement | null>;
 };
 
@@ -385,7 +383,7 @@ const PetPanel: React.FC<PanelProps> = ({ inputRef, ...props }) => {
         )}
       </header>
       {props.switcherOpen ? (
-        <SessionSwitcher current={binding} pickable={props.pickable} onPick={props.onPick} />
+        <SessionSwitcher current={binding} onPick={props.onPick} />
       ) : binding ? (
         <>
           <ExchangeView
@@ -398,9 +396,17 @@ const PetPanel: React.FC<PanelProps> = ({ inputRef, ...props }) => {
           <ActivityLine activities={props.activities} />
           <NeedsInput
             vaultRequestIds={props.vaultRequestIds}
-            quickReplies={props.canChat ? props.quickReplies : null}
+            quickReplies={props.canChat && !props.uncertain ? props.quickReplies : null}
             onChoose={props.onChoose}
           />
+          {props.uncertain && (
+            <div className="flex flex-col items-start gap-1 border-t border-border px-3 py-2 text-[12px] text-muted" role="status">
+              <p>{t('newSession.sendUncertain')}</p>
+              <Button variant="link" size="sm" className="px-0" onClick={props.onInspect}>
+                {t('pet.openInAvibe')}
+              </Button>
+            </div>
+          )}
           {props.canChat && (
           <form
             className="flex items-end gap-1.5 border-t border-border p-2"
@@ -534,9 +540,8 @@ const NeedsInput: React.FC<{
 
 const SessionSwitcher: React.FC<{
   current: string | null;
-  pickable: boolean;
   onPick: (sessionId: string) => void;
-}> = ({ current, pickable, onPick }) => {
+}> = ({ current, onPick }) => {
   const { t } = useTranslation();
   const { sessions, loading } = useSessionSwitcher(true);
   return (
@@ -552,7 +557,6 @@ const SessionSwitcher: React.FC<{
             'truncate px-3 py-1.5 text-left text-[13px] hover:bg-muted-soft',
             session.id === current && 'font-medium text-primary-ink',
           )}
-          disabled={!pickable}
           onClick={() => onPick(session.id)}
         >
           {session.title || t('pet.untitled')}

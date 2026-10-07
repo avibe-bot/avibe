@@ -11,8 +11,9 @@ export const SWITCHER_LIMIT = 20;
 /**
  * Recent writable sessions for the pet's switcher: the global active list,
  * newest first, so a new session with no reply yet is listed. Read when the
- * switcher opens and re-read on session activity and reconnects while open,
- * fenced so an older response never overwrites a newer refresh.
+ * switcher opens and re-read on session activity, reconnects and
+ * authorization changes while open, fenced so an older response never
+ * overwrites a newer refresh.
  */
 export function useSessionSwitcher(open: boolean): { sessions: WorkbenchSession[]; loading: boolean } {
   const api = useApi();
@@ -45,6 +46,13 @@ export function useSessionSwitcher(open: boolean): { sessions: WorkbenchSession[
     return api.connectWorkbenchEvents({
       onConnected: () => source.refresh(),
       onSessionActivity: () => source.refresh(),
+      // Access changed: rows from a project the user lost must not stay
+      // listed or pickable, so they go at once and the list is re-read.
+      onAuthorizationChanged: () => {
+        setSessions([]);
+        setLoading(true);
+        source.refresh();
+      },
     });
   }, [api, open, source]);
 

@@ -130,7 +130,7 @@ extra window:
 The IPC surface is kept minimal. It is granted to window `pet` for the remote
 loopback origin only, through a new capability file:
 
-- command `pet_ready() -> {binding, summon_pending: null | {intent}}`, which
+- command `pet_ready() -> {binding, revision, summon_pending: null | {intent}}`, which
   the route calls once `/pet` has mounted and its listeners are installed. It
   returns the current binding and consumes any summon that arrived before the
   page was ready, so a summon that recreated the window is never lost;
@@ -144,12 +144,18 @@ loopback origin only, through a new capability file:
   chose, `{panel_side: left | right, panel_edge: top | bottom, pet_offset}`,
   and the route renders the pet and panel from that value. The native frame
   and the DOM therefore share one placement decision;
-- command `pet_bind(session_id) -> {shown}` and event `pet:bound`, which set
-  and carry the session binding (see Session binding). The pet uses
-  `pet_bind` for its switcher; a call from `main` also wakes the pet;
-- command `pet_unbind(session_id)`, a compare-and-clear: it clears the binding
-  only if it is still `session_id`, so a late result about an old session can
-  never clear a newer one;
+- command `pet_bind(session_id) -> {binding, revision, shown}` and event
+  `pet:bound {session_id, revision}`, which set and carry the session binding
+  (see Session binding). The pet uses `pet_bind` for its switcher; a call from
+  `main` also wakes the pet;
+- command `pet_unbind(session_id) -> {binding, revision}`, a compare-and-clear:
+  it clears the binding only if it is still `session_id`, so a late result
+  about an old session can never clear a newer one;
+- every binding the shell reports carries `revision`, a counter it raises by
+  one on each change. The page applies a report only if its revision is newer
+  than the last one it applied, so a `pet:bound` and a command answer that
+  cross can never leave the older binding shown; a report without a revision
+  is rejected;
 - command `pet_open(link)`, which takes any link the existing deep-link
   parser (`desktop-deep-links.md`) accepts: session, Show Page, settings, and
   vault request. It focuses `main` through the same path a clicked deep link
@@ -310,7 +316,9 @@ when the user changes the UI port, so it cannot own anything durable.
   re-read on `session.activity` and `onConnected` while it is open, so a new
   session with no reply yet is listed.
 - The shell writes `pet.json` and emits `pet:bound` to the pet. On load, the
-  pet reads the binding from `pet_ready()`.
+  pet reads the binding from `pet_ready()`. Every report is ordered by its
+  revision, and the pet's own picks and clears are sent one at a time in the
+  order the user made them.
 - **A binding is valid only while `S` is a writable session**, by the chat
   page's own predicate: `getSession(S)` succeeds and
   `isSessionReadOnly(session)` is false. That rejects archived sessions and
@@ -541,7 +549,9 @@ The microphone usage string and audio-input entitlement already ship (#2293).
     opened on, and a restore onto a missing monitor is clamped on screen;
   - `pet_set_expanded` returns the layout it applied, near each screen edge;
   - `pet_bind` persists to `pet.json` and emits `pet:bound`, and the binding
-    survives a Runtime origin change;
+    survives a Runtime origin change; every change raises the revision by
+    one, and `pet_ready`, `pet_bind`, `pet_unbind` and `pet:bound` all carry
+    it;
   - `main` gains only `pet_bind`, and `pet` is granted exactly `pet_ready`,
     `pet_set_expanded`, `pet_bind`, `pet_unbind`, `pet_open`, the two events,
     and `start-dragging`; `pet_unbind(A)` is a no-op when the binding is `B`;
@@ -669,6 +679,30 @@ The code and its tests are the contract; this section records why.
 - **Generation fencing** is one class, `FencedSource`, used by every source
   including the switcher list. A key change frees the in-flight slot at once,
   so switching sessions never waits on the old session's read.
+- **The shell's revision orders bindings.** The page never infers order from
+  arrival: `pet_ready()`, `pet:bound`, and the answers to its own picks and
+  clears are applied only when newer than the last report it applied. Its own
+  changes are shown at once and queued, so a second pick is not sent before
+  the first is answered; when none is outstanding, it shows exactly what the
+  shell last reported. A failed pick shows the shell's binding again. A
+  failed clear is not undone, since re-showing an invalid session would only
+  fail validation and clear it again.
+- **An unknown send result is not a failure.** As in the chat composer
+  (`useNewSession`), a send counts as refused only for `400`, `403`, `404`,
+  `409` or `422`. Any other failure (a network error, a `5xx`, a
+  `dispatch_pending` `502`/`504`) may have been admitted, so the pet keeps the
+  draft, hides quick replies, closes input for that session and offers "Open
+  in Avibe"; opening the session there is how the user finds out, and lifts it.
+- **Read-marking waits for a tail snapshot.** Live rows that arrive before the
+  first tail read lands say nothing about older unread rows, so the pet treats
+  the tail as having older rows until a read has landed.
+- **Setup is monotonic.** One wake runs several setup reads (a summon also
+  focuses the window). Any read that sees setup complete wins; an incomplete
+  answer applies only from the latest read; a failure only settles the first
+  check and never turns a known state back.
+- **An authorization change drops what was read under the old one.** The
+  session, tail, turn state and switcher rows are cleared at once and re-read;
+  vault requests follow the binding, and the inbox has its own handler.
 - **`design.pen` frames are deferred.** The panel reuses existing tokens and
   primitives; frames follow once the shell PR makes the pet visible.
 

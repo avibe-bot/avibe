@@ -17,31 +17,25 @@ export function usePetSetup(): { setup: PetSetup; recheck: () => void } {
   const [setup, setSetup] = useState<PetSetup>('checking');
   const requestRef = useRef(0);
 
-  const check = useCallback(async () => {
+  // One wake often triggers several checks at once (a summon focuses the
+  // window). Finishing setup is one-way, so any check that sees it complete
+  // wins, whatever order the answers land in. An incomplete answer applies
+  // only from the latest check, and a failure only decides the first one:
+  // it never turns a known state back.
+  const check = useCallback(() => {
     const request = ++requestRef.current;
-    try {
-      const config = await api.getConfig({ cache: false });
-      if (request === requestRef.current) setSetup(isSetupComplete(config) ? 'ready' : 'pending');
-    } catch {
-      if (request === requestRef.current) setSetup('pending');
-    }
+    return api.getConfig({ cache: false }).then(
+      (config) => {
+        if (isSetupComplete(config)) setSetup('ready');
+        else if (request === requestRef.current) setSetup((current) => (current === 'ready' ? current : 'pending'));
+      },
+      () => setSetup((current) => (current === 'checking' ? 'pending' : current)),
+    );
   }, [api]);
 
   useEffect(() => {
-    let cancelled = false;
-    const request = ++requestRef.current;
-    api.getConfig({ cache: false }).then(
-      (config) => {
-        if (!cancelled && request === requestRef.current) setSetup(isSetupComplete(config) ? 'ready' : 'pending');
-      },
-      () => {
-        if (!cancelled && request === requestRef.current) setSetup('pending');
-      },
-    );
-    return () => {
-      cancelled = true;
-    };
-  }, [api]);
+    void check();
+  }, [check]);
 
   useEffect(() => {
     if (setup !== 'pending') return undefined;

@@ -1,10 +1,12 @@
 /* @vitest-environment jsdom */
 
-import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { WorkbenchEventHandlers, WorkbenchMessage, WorkbenchSession } from '@/context/ApiContext';
+
+import { ApiError } from '@/context/ApiContext';
 
 import { PET_BOUND_EVENT, PET_SUMMON_EVENT } from './petBridge';
 
@@ -115,7 +117,10 @@ const api = {
   },
 };
 
-vi.mock('@/context/ApiContext', () => ({ useApi: () => api }));
+vi.mock('@/context/ApiContext', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/context/ApiContext')>()),
+  useApi: () => api,
+}));
 let canChat = true;
 vi.mock('@/context/InstanceAuthorizationContext', () => ({
   useInstanceAuthorization: () => ({ capabilities: { can_chat: canChat } }),
@@ -151,13 +156,24 @@ Object.defineProperty(window, 'localStorage', { value: memoryStorage(), configur
 let windowFocused = true;
 Object.defineProperty(document, 'hasFocus', { value: () => windowFocused, configurable: true });
 
-const devBind = (sessionId: string | null) => {
-  if (sessionId) window.localStorage.setItem('avibe.pet.devBinding', sessionId);
-  else window.localStorage.removeItem('avibe.pet.devBinding');
+// The dev bridge's stand-in for the shell: the binding and its revision.
+const DEV_BINDING_KEY = 'avibe.pet.devBinding';
+const devBinding = (): { binding: string | null; revision: number } => {
+  const stored = window.localStorage.getItem(DEV_BINDING_KEY);
+  return stored ? JSON.parse(stored) : { binding: null, revision: 0 };
 };
+const devBind = (sessionId: string | null) => {
+  const next = { binding: sessionId, revision: devBinding().revision + 1 };
+  window.localStorage.setItem(DEV_BINDING_KEY, JSON.stringify(next));
+  return next;
+};
+// A change made elsewhere (the main window's "Show in pet"), reported by event.
 const bound = (sessionId: string | null) => act(() => {
-  devBind(sessionId);
-  window.dispatchEvent(new CustomEvent(PET_BOUND_EVENT, { detail: { session_id: sessionId } }));
+  const next = devBind(sessionId);
+  window.dispatchEvent(new CustomEvent(PET_BOUND_EVENT, { detail: { session_id: sessionId, revision: next.revision } }));
+});
+const shellBound = (sessionId: string | null, revision: number) => act(() => {
+  window.dispatchEvent(new CustomEvent(PET_BOUND_EVENT, { detail: { session_id: sessionId, revision } }));
 });
 const summon = (intent: 'listen' | 'show') => act(() => {
   window.dispatchEvent(new CustomEvent(PET_SUMMON_EVENT, { detail: { intent } }));
@@ -235,7 +251,7 @@ describe('PetPage binding', () => {
     await act(async () => lateA.resolve({ status: 404, session: null }));
     summon('show');
     expect(await screen.findByText('Session B')).toBeTruthy();
-    expect(window.localStorage.getItem('avibe.pet.devBinding')).toBe('B');
+    expect(devBinding().binding).toBe('B');
   });
 
   it('clears a persisted binding to a Runtime-owned session and opens the switcher', async () => {
@@ -246,7 +262,7 @@ describe('PetPage binding', () => {
     switcherSessions = [session('fresh', { title: 'Brand new' })];
     devBind('ses-workspace-notices');
     render(<PetPage />);
-    await waitFor(() => expect(window.localStorage.getItem('avibe.pet.devBinding')).toBeNull());
+    await waitFor(() => expect(devBinding().binding).toBeNull());
     summon('listen');
     expect(await screen.findByText('Brand new')).toBeTruthy();
   });
@@ -261,7 +277,7 @@ describe('PetPage binding', () => {
     expect(await screen.findByText('No reply yet')).toBeTruthy();
     expect(screen.queryByText('Archived')).toBeNull();
     await userEvent.click(screen.getByText('No reply yet'));
-    expect(window.localStorage.getItem('avibe.pet.devBinding')).toBe('new');
+    expect(devBinding().binding).toBe('new');
   });
 });
 
@@ -363,7 +379,7 @@ describe('PetPage review fixes', () => {
     render(<PetPage />);
     // The surface is mounted and subscribed before the shell answers.
     await screen.findByLabelText('pet.toggle');
-    await act(async () => ready.resolve({ binding: 'S', summon_pending: { intent: 'listen' } }));
+    await act(async () => ready.resolve({ binding: 'S', revision: 1, summon_pending: { intent: 'listen' } }));
     // The summon opens the bound session's input, not the switcher.
     expect(await screen.findByLabelText('pet.inputPlaceholder')).toBeTruthy();
     expect(api.listSessions).not.toHaveBeenCalled();
@@ -464,10 +480,9 @@ describe('PetPage review fixes, round 3', () => {
     Object.defineProperty(window, '__TAURI_INTERNALS__', { value: { invoke }, configurable: true });
     render(<PetPage />);
     await screen.findByLabelText('pet.toggle');
-    act(() => {
-      window.dispatchEvent(new CustomEvent(PET_BOUND_EVENT, { detail: { session_id: 'B' } }));
-    });
-    await act(async () => ready.resolve({ binding: 'A', summon_pending: null }));
+    // The shell moved to B (revision 2) after answering pet_ready at revision 1.
+    await shellBound('B', 2);
+    await act(async () => ready.resolve({ binding: 'A', revision: 1, summon_pending: null }));
     summon('show');
     expect(await screen.findByText('Session B')).toBeTruthy();
   });
@@ -548,7 +563,7 @@ describe('PetPage independent sweep', () => {
 describe('PetPage review fixes, round 4', () => {
   it('goes back to the binding the shell still holds when a pick cannot be persisted', async () => {
     const invoke = vi.fn((command: string) => {
-      if (command === 'pet_ready') return Promise.resolve({ binding: 'A', summon_pending: null });
+      if (command === 'pet_ready') return Promise.resolve({ binding: 'A', revision: 1, summon_pending: null });
       if (command === 'pet_bind') return Promise.reject(new Error('disk full'));
       return Promise.resolve({ panel_side: 'left', panel_edge: 'bottom' });
     });
@@ -570,7 +585,7 @@ describe('PetPage review fixes, round 5', () => {
   it('stays unbound, without a validation loop, when the shell cannot persist a clear', async () => {
     sessionReads.A = async () => ({ status: 404, session: null });
     const invoke = vi.fn((command: string) => {
-      if (command === 'pet_ready') return Promise.resolve({ binding: 'A', summon_pending: null });
+      if (command === 'pet_ready') return Promise.resolve({ binding: 'A', revision: 1, summon_pending: null });
       if (command === 'pet_unbind') return Promise.reject(new Error('disk full'));
       return Promise.resolve({ panel_side: 'left', panel_edge: 'bottom' });
     });
@@ -614,11 +629,11 @@ describe('PetPage review fixes, round 6', () => {
     expect((screen.getByLabelText('pet.inputPlaceholder') as HTMLTextAreaElement).value).toBe('');
   });
 
-  it('accepts no pick until pet_ready has answered, so a pick never races it', async () => {
+  it('keeps a pick made before pet_ready answers over the older answer', async () => {
     const ready = deferred<unknown>();
     const invoke = vi.fn((command: string) => {
       if (command === 'pet_ready') return ready.promise;
-      if (command === 'pet_bind') return Promise.reject(new Error('disk full'));
+      if (command === 'pet_bind') return Promise.resolve({ binding: 'B', revision: 2, shown: false });
       return Promise.resolve({ panel_side: 'left', panel_edge: 'bottom' });
     });
     Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { value: true, configurable: true });
@@ -627,9 +642,12 @@ describe('PetPage review fixes, round 6', () => {
     render(<PetPage />);
     await userEvent.click(await screen.findByLabelText('pet.toggle'));
     await userEvent.click(await screen.findByText('Session B'));
-    expect(invoke).not.toHaveBeenCalledWith('pet_bind', expect.anything());
-    await act(async () => ready.resolve({ binding: 'A', summon_pending: null }));
-    await waitFor(() => expect(api.getSessionResult).toHaveBeenCalledWith('A'));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('pet_bind', { sessionId: 'B' }));
+    // The shell answered pet_ready at revision 1, before it applied the pick.
+    await act(async () => ready.resolve({ binding: 'A', revision: 1, summon_pending: null }));
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 20)));
+    expect(api.getSessionResult).not.toHaveBeenCalledWith('A');
+    expect(api.getSessionResult).toHaveBeenLastCalledWith('B');
   });
 });
 
@@ -645,15 +663,13 @@ describe('PetPage review fixes, round 7', () => {
     render(<PetPage />);
     await screen.findByLabelText('pet.toggle');
     // The live summon is newer than the pending one pet_ready still carries.
-    act(() => {
-      window.dispatchEvent(new CustomEvent(PET_BOUND_EVENT, { detail: { session_id: 'S' } }));
-    });
+    await shellBound('S', 1);
     summon('show');
     await screen.findByText('Session S');
     act(() => {
       window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
     });
-    await act(async () => ready.resolve({ binding: 'S', summon_pending: { intent: 'listen' } }));
+    await act(async () => ready.resolve({ binding: 'S', revision: 1, summon_pending: { intent: 'listen' } }));
     await act(async () => new Promise((resolve) => setTimeout(resolve, 20)));
     // The stale pending summon did not reopen the panel.
     expect(screen.queryByLabelText('pet.inputPlaceholder')).toBeNull();
@@ -755,7 +771,7 @@ describe('PetPage review fixes, round 10', () => {
   it('reverts a failed pick to the binding the shell confirmed, not an earlier pick', async () => {
     const binds: Record<string, ReturnType<typeof deferred<unknown>>> = { B: deferred(), C: deferred() };
     const invoke = vi.fn((command: string, args?: { sessionId?: string }) => {
-      if (command === 'pet_ready') return Promise.resolve({ binding: 'A', summon_pending: null });
+      if (command === 'pet_ready') return Promise.resolve({ binding: 'A', revision: 1, summon_pending: null });
       if (command === 'pet_bind') return binds[args?.sessionId ?? ''].promise;
       return Promise.resolve({ panel_side: 'left', panel_edge: 'bottom' });
     });
@@ -778,7 +794,7 @@ describe('PetPage review fixes, round 10', () => {
 describe('PetPage review fixes, round 12', () => {
   it('keeps the panel matching the native frame when a resize fails', async () => {
     const invoke = vi.fn((command: string) => {
-      if (command === 'pet_ready') return Promise.resolve({ binding: 'S', summon_pending: null });
+      if (command === 'pet_ready') return Promise.resolve({ binding: 'S', revision: 1, summon_pending: null });
       if (command === 'pet_set_expanded') return Promise.reject(new Error('no monitor'));
       return Promise.resolve(null);
     });
@@ -827,6 +843,131 @@ describe('PetPage review fixes, round 13', () => {
     sessionReads.S = async () => ({ status: 403, session: null });
     await emit((h) => h.onAuthorizationChanged?.({}));
     await waitFor(() => expect(screen.queryByText('private reply')).toBeNull());
-    await waitFor(() => expect(window.localStorage.getItem('avibe.pet.devBinding')).toBeNull());
+    await waitFor(() => expect(devBinding().binding).toBeNull());
+  });
+});
+
+describe('PetPage async closure', () => {
+  // Binding order: the shell's revision decides, and picks reach it in order.
+  it('sends picks one at a time and ignores a report older than the newest answer', async () => {
+    const binds: Record<string, Deferred<unknown>> = { B: deferred(), C: deferred() };
+    const invoke = vi.fn((command: string, args?: { sessionId?: string }) => {
+      if (command === 'pet_ready') return Promise.resolve({ binding: 'A', revision: 1, summon_pending: null });
+      if (command === 'pet_bind') return binds[args?.sessionId ?? ''].promise;
+      return Promise.resolve({ panel_side: 'left', panel_edge: 'bottom' });
+    });
+    Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { value: true, configurable: true });
+    Object.defineProperty(window, '__TAURI_INTERNALS__', { value: { invoke }, configurable: true });
+    switcherSessions = [session('A'), session('B'), session('C')];
+    render(<PetPage />);
+    summon('show');
+    await screen.findByText('Session A');
+    await userEvent.click(screen.getByLabelText('pet.switchSession'));
+    await userEvent.click(await screen.findByText('Session B'));
+    await userEvent.click(await screen.findByLabelText('pet.switchSession'));
+    await userEvent.click(await screen.findByText('Session C'));
+    // C waits for B's answer, so the shell sees the picks in the user's order.
+    expect(invoke.mock.calls.filter(([command]) => command === 'pet_bind')).toEqual([['pet_bind', { sessionId: 'B' }]]);
+    await act(async () => binds.B.resolve({ binding: 'B', revision: 2, shown: false }));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('pet_bind', { sessionId: 'C' }));
+    await act(async () => binds.C.resolve({ binding: 'C', revision: 3, shown: false }));
+    // B's own pet:bound arrives late, after the answer for C.
+    await shellBound('B', 2);
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 20)));
+    expect(api.getSessionResult).toHaveBeenLastCalledWith('C');
+    expect(await screen.findByText('Session C')).toBeTruthy();
+  });
+
+  // Read freshness: what was read under the old authorization goes at once.
+  it('drops switcher rows at once when authorization changes, then re-reads', async () => {
+    switcherSessions = [session('X', { title: 'Revoked project' })];
+    render(<PetPage />);
+    summon('show');
+    await screen.findByText('Revoked project');
+    const reread = deferred<{ sessions: WorkbenchSession[]; next_before_id: null }>();
+    api.listSessions.mockImplementationOnce(() => reread.promise);
+    await emit((h) => h.onAuthorizationChanged?.({}));
+    expect(screen.queryByText('Revoked project')).toBeNull();
+    await act(async () => reread.resolve({ sessions: [session('Y', { title: 'Still allowed' })], next_before_id: null }));
+    expect(await screen.findByText('Still allowed')).toBeTruthy();
+  });
+
+  // Unknown outcomes are not treated as answers.
+  it('does not mark read from live rows that land before the first tail read', async () => {
+    const tail = deferred<{ messages: WorkbenchMessage[]; next_after_id: null; next_before_id: string | null }>();
+    api.listSessionMessages.mockImplementationOnce(() => tail.promise);
+    unreadBySession = { S: 3 };
+    devBind('S');
+    render(<PetPage />);
+    summon('show');
+    await screen.findByLabelText('pet.panel');
+    await emit((h) => h.onMessageNew?.(message('live', 'S', { read_at: null })));
+    await screen.findByText('reply live');
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 20)));
+    expect(markRead).not.toHaveBeenCalled();
+    // The snapshot shows older unread rows past the tail: still not marked.
+    await act(async () => tail.resolve({
+      messages: [message('older', 'S', { read_at: null }), message('live', 'S', { read_at: null })],
+      next_after_id: null,
+      next_before_id: 'earlier',
+    }));
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 20)));
+    expect(markRead).not.toHaveBeenCalled();
+  });
+
+  it('keeps the draft and closes input when a send may have been admitted', async () => {
+    tails.S = [message('u', 'S', { author: 'user', type: 'user' }), message('q', 'S', { content: { quick_replies: ['Yes'] } })];
+    api.sendSessionMessage.mockRejectedValueOnce(new ApiError('dispatch pending', 504, null));
+    devBind('S');
+    render(<PetPage />);
+    summon('listen');
+    const input = await screen.findByLabelText('pet.inputPlaceholder') as HTMLTextAreaElement;
+    await waitFor(() => expect(api.getSessionResult).toHaveBeenCalledWith('S'));
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 10)));
+    await userEvent.type(input, 'deploy{Enter}');
+    expect(await screen.findByText('newSession.sendUncertain')).toBeTruthy();
+    expect(input.value).toBe('deploy');
+    expect(screen.queryByText('Yes')).toBeNull();
+    await userEvent.type(input, '{Enter}');
+    expect(api.sendSessionMessage).toHaveBeenCalledTimes(1);
+    // Looking at the conversation in Avibe lifts it.
+    const notice = screen.getByRole('status');
+    await userEvent.click(within(notice).getByRole('button', { name: 'pet.openInAvibe' }));
+    expect(screen.queryByText('newSession.sendUncertain')).toBeNull();
+    await userEvent.type(input, '{Enter}');
+    expect(api.sendSessionMessage).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps input open when the server refused the send', async () => {
+    api.sendSessionMessage.mockRejectedValueOnce(new ApiError('conflict', 409, null));
+    devBind('S');
+    render(<PetPage />);
+    summon('listen');
+    const input = await screen.findByLabelText('pet.inputPlaceholder');
+    await waitFor(() => expect(api.getSessionResult).toHaveBeenCalledWith('S'));
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 10)));
+    await userEvent.type(input, 'again{Enter}');
+    await waitFor(() => expect(api.sendSessionMessage).toHaveBeenCalledTimes(1));
+    expect(screen.queryByText('newSession.sendUncertain')).toBeNull();
+    await userEvent.type(input, '{Enter}');
+    expect(api.sendSessionMessage).toHaveBeenCalledTimes(2);
+  });
+
+  it('leaves setup-pending when one of two overlapping checks sees setup finished', async () => {
+    setupDone = false;
+    render(<PetPage />);
+    await screen.findByText('pet.setupPending');
+    const seesDone = deferred<unknown>();
+    api.getConfig
+      .mockImplementationOnce(() => seesDone.promise as never)
+      .mockImplementationOnce(() => Promise.reject(new Error('network')));
+    // One wake: focus, then the summon, each re-reading setup.
+    act(() => {
+      window.dispatchEvent(new Event('focus'));
+    });
+    summon('show');
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 10)));
+    await act(async () => seesDone.resolve({ mode: 'self_host', setup_state: { needs_setup: false } }));
+    await waitFor(() => expect(screen.queryByText('pet.setupPending')).toBeNull());
   });
 });

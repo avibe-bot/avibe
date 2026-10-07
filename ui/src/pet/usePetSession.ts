@@ -25,6 +25,8 @@ export const SEND_GRACE_MS = 4000;
 export type PetSessionData = {
   session: WorkbenchSession | null;
   messages: WorkbenchMessage[];
+  /** Rows before `messages` may exist: the tail was trimmed, or no tail read
+   *  has landed yet, so live rows alone say nothing about what came before. */
   hasOlder: boolean;
   turn: SessionRuntimeState | null;
   /** Running per the server, or a local send inside the registration grace. */
@@ -35,8 +37,10 @@ export type PetSessionData = {
   refreshTail: () => void;
 };
 
-type Tail = { messages: WorkbenchMessage[]; hasOlder: boolean };
-const EMPTY_TAIL: Tail = { messages: [], hasOlder: false };
+// `loaded`: a tail read has applied. Until then the rows are only what live
+// events merged, so they cannot be read as a complete window.
+type Tail = { messages: WorkbenchMessage[]; hasOlder: boolean; loaded: boolean };
+const EMPTY_TAIL: Tail = { messages: [], hasOlder: false, loaded: false };
 const TAIL_CAP = PET_TAIL_LIMIT * 2;
 
 /**
@@ -53,7 +57,7 @@ const mergeRow = (tail: Tail, row: WorkbenchMessage): Tail => {
   if (!isTranscriptMessage(row)) return tail;
   const messages = [...tail.messages, row];
   if (messages.length <= TAIL_CAP) return { ...tail, messages };
-  return { messages: messages.slice(-TAIL_CAP), hasOlder: true };
+  return { ...tail, messages: messages.slice(-TAIL_CAP), hasOlder: true };
 };
 
 /**
@@ -104,7 +108,7 @@ export function usePetSession(sessionId: string | null, onInvalid: (sessionId: s
     tail: new FencedSource<string, { messages: WorkbenchMessage[]; next_before_id?: string | null }>({
       read: (key) => api.listSessionMessages(key, { tail: true, cache: false, limit: PET_TAIL_LIMIT }),
       apply: (_key, value) => {
-        setTail({ messages: value.messages, hasOlder: Boolean(value.next_before_id) });
+        setTail({ messages: value.messages, hasOlder: Boolean(value.next_before_id), loaded: true });
       },
     }),
     turn: new FencedSource<string, SessionRuntimeState>({
@@ -172,11 +176,9 @@ export function usePetSession(sessionId: string | null, onInvalid: (sessionId: s
         sources.turn.refresh();
       },
       // Access changed: drop everything read under the old authorization at
-      // once, then re-read; a lost session reads 403 and clears the binding.
+      // once, then re-read (a refresh also drops any read in flight); a lost
+      // session reads 403 and clears the binding.
       onAuthorizationChanged: () => {
-        sources.session.noteLiveMerge();
-        sources.tail.noteLiveMerge();
-        sources.turn.noteLiveMerge();
         setSession(null);
         setTail(EMPTY_TAIL);
         setTurn(null);
@@ -235,5 +237,13 @@ export function usePetSession(sessionId: string | null, onInvalid: (sessionId: s
 
   const refreshTail = useCallback(() => sources.tail.refresh(), [sources]);
 
-  return { session, messages: tail.messages, hasOlder: tail.hasOlder, turn, running: working, noteSent, refreshTail };
+  return {
+    session,
+    messages: tail.messages,
+    hasOlder: tail.hasOlder || !tail.loaded,
+    turn,
+    running: working,
+    noteSent,
+    refreshTail,
+  };
 }
