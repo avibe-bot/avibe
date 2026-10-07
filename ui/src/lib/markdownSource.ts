@@ -273,9 +273,10 @@ export function selectedMarkdown(range: Range, container: Element): string | nul
   return parts.filter((part) => part.trim() !== '').join('\n\n') || null;
 }
 
-/** `range` widened to cover every bubble it reaches, or null when it reaches none. */
+/** `range` widened to cover every bubble it selects content of, or null when it selects none. */
 export function wholeMarkdownRange(range: Range, container: Element): Range | null {
-  const roots = markdownRoots(range, container);
+  const selected = selectedContent(range);
+  const roots = selected ? markdownRoots(selected, container) : [];
   if (!roots.length) return null;
   const last = roots[roots.length - 1];
   const whole = container.ownerDocument.createRange();

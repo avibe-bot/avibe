@@ -203,4 +203,17 @@ describe('wholeMarkdownRange', () => {
     expect(selectedMarkdown(whole, container))
       .toBe('Intro.\n\nfirst **bubble** text\n\n- second\n- bubble\n\nOutro.');
   });
+  it('does not widen into a bubble the selection only ends at the start of', () => {
+    const { container } = render(
+      <>
+        <Markdown content="first bubble" />
+        <Markdown content="next bubble" />
+      </>,
+    );
+    const range = document.createRange();
+    range.setStart(...pointAt(container, ['first', 'before']));
+    range.setEnd(...pointAt(container, ['next', 'before']));
+
+    expect(wholeMarkdownRange(range, container)!.toString()).toBe('first bubble');
+  });
 });

@@ -17,6 +17,7 @@ type SelectionRect = {
 };
 
 type SelectionState = {
+  // What Quote and Ask in a new session take; empty for an image or a rule alone.
   text: string;
   // What Copy writes: the selected Markdown source, or the plain text when the
   // selection reaches no rendered Markdown.
@@ -97,7 +98,13 @@ export const SelectionQuoteToolbar: React.FC<{
     }
     const text = selection.toString().trim();
     const range = selection.getRangeAt(0);
-    if (!text || !container.contains(range.commonAncestorContainer)) {
+    if (!container.contains(range.commonAncestorContainer)) {
+      setSel(null);
+      return;
+    }
+    // An image or a rule has no text but still has Markdown to copy.
+    const markdown = selectedMarkdown(range, container);
+    if (!text && !markdown) {
       setSel(null);
       return;
     }
@@ -111,7 +118,7 @@ export const SelectionQuoteToolbar: React.FC<{
     }
     setSel({
       text,
-      copyText: selectedMarkdown(range, container) ?? text,
+      copyText: markdown ?? text,
       whole: wholeMarkdownRange(range, container),
       top: rect.top,
       bottom: rect.bottom,
@@ -200,6 +207,9 @@ export const SelectionQuoteToolbar: React.FC<{
   }, [sel, onQuote, onAskInNew, isTouch]);
 
   if (!sel) return null;
+  // Quote and Ask in a new session carry text, so an image or a rule alone offers neither.
+  const quote = sel.text ? onQuote : undefined;
+  const ask = sel.text ? onAskInNew : undefined;
 
   const dismiss = () => {
     clearPress(false);
@@ -358,7 +368,7 @@ export const SelectionQuoteToolbar: React.FC<{
     >
       {/* Separators sit BEFORE each item after the first, so a hidden action
           never leaves a dangling divider at the edge of the bar. */}
-      {onQuote && (
+      {quote && (
         <Button
           variant="ghost"
           className={itemClass}
@@ -370,9 +380,9 @@ export const SelectionQuoteToolbar: React.FC<{
           {t('chat.selection.quote')}
         </Button>
       )}
-      {onAskInNew && (
+      {ask && (
         <>
-          {onQuote && <span className="h-5 w-px bg-border" />}
+          {quote && <span className="h-5 w-px bg-border" />}
           <Button
             variant="ghost"
             className={itemClass}
@@ -385,7 +395,7 @@ export const SelectionQuoteToolbar: React.FC<{
           </Button>
         </>
       )}
-      {(onQuote || onAskInNew) && <span className="h-5 w-px bg-border" />}
+      {(quote || ask) && <span className="h-5 w-px bg-border" />}
       <Button
         variant="ghost"
         className={itemClass}

@@ -198,6 +198,32 @@ describe('chat selection action gesture lifetime', () => {
     expect(writeText).toHaveBeenCalledExactlyOnceWith(BUBBLE);
   });
 
+  it('offers Copy for an image alone, which has Markdown but no text', async () => {
+    const containerRef = createRef<HTMLDivElement>();
+    const image = '![chart](/api/media/abc123)';
+    render(
+      <>
+        <div ref={containerRef}>
+          <Markdown content={`Intro.\n\n${image}`} />
+        </div>
+        <SelectionQuoteToolbar containerRef={containerRef} onQuote={quote} />
+      </>,
+    );
+    const range = document.createRange();
+    range.selectNode(containerRef.current!.querySelector('img')!);
+    window.getSelection()!.addRange(range);
+    settle();
+
+    expect(screen.queryByRole('button', { name: 'chat.selection.quote' })).toBeNull();
+    await act(async () => {
+      const copy = screen.getByRole('button', { name: 'chat.selection.copy' });
+      fireEvent.pointerDown(copy, press);
+      fireEvent.pointerUp(copy, press);
+      await Promise.resolve();
+    });
+    expect(writeText).toHaveBeenCalledExactlyOnceWith(image);
+  });
+
   it('selects the whole bubble on desktop and stays up over the new selection', async () => {
     coarsePointer = false;
     const container = mountBubble();
