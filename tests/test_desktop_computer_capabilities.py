@@ -7,6 +7,7 @@ import httpx
 from fastapi.testclient import TestClient
 
 from core import internal_server
+from core.computer_use import ComputerUseStatus
 from vibe import internal_client
 from vibe.ui_server import app
 
@@ -70,5 +71,26 @@ def test_ui_desktop_capabilities_are_forwarded_from_controller(monkeypatch) -> N
     assert response.get_json() == {
         "computer_use_schema": 1,
         "controller_id": "controller-test",
+    }
+    assert response.headers["Cache-Control"] == "no-store"
+
+
+def test_workbench_status_uses_the_shared_effective_status_contract(
+    monkeypatch,
+) -> None:
+    """Workbench must not infer availability from the capabilities endpoint."""
+
+    monkeypatch.setattr(
+        "core.computer_use.effective_computer_use_status",
+        lambda: ComputerUseStatus("needs_permission", "screen_recording"),
+    )
+    response = app.test_client().get(
+        "/api/desktop/computer-use/status",
+        base_url="http://127.0.0.1:5123",
+    )
+    assert response.status_code == 200
+    assert response.get_json() == {
+        "status": "needs_permission",
+        "reason": "screen_recording",
     }
     assert response.headers["Cache-Control"] == "no-store"

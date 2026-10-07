@@ -3369,6 +3369,23 @@ async def desktop_capabilities():
     return response_payload
 
 
+@app.route("/api/desktop/computer-use/status")
+async def desktop_computer_use_status():
+    """Read the shell/daemon status from the shared desktop state contract."""
+
+    from core.computer_use import effective_computer_use_status
+
+    status = await asyncio.to_thread(effective_computer_use_status)
+    response_payload = jsonify(
+        {
+            "status": status.status,
+            "reason": status.reason,
+        }
+    )
+    response_payload.headers["Cache-Control"] = "no-store"
+    return response_payload
+
+
 @app.websocket("/ws/echo")
 async def websocket_echo(websocket: WebSocket):
     if os.environ.get("VIBE_UI_ENABLE_WS_ECHO", "").lower() not in {"1", "true", "yes", "on"}:

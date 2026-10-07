@@ -72,6 +72,7 @@ def _inputs(backend="codex", history="managed", skill_mode="pages"):
             },
         },
         "include_codex_generated_images": backend == "codex",
+        "include_computer_use": True,
         "skills_cwd": "/fixture/project",
         "enabled_agents": [
             {"name": "zeta", "backend": "claude", "description": "Last"},
@@ -127,7 +128,7 @@ def test_export_reconstructs_production_text_with_source_for_every_block(monkeyp
     assert result == render_prompt_context(request)
     assert request["options"]["context"]["platform"] == "avibe"
     if skill_mode in {"single", "pages"}:
-        assert ids[ids.index("base-capabilities-body") + 1] == "skills-prompt"
+        assert ids[ids.index("computer-use-prompt") + 1] == "skills-prompt"
         assert production.count(prompt_text("skills-prompt")) == 1
         assert (
             "Consider whether any available Skills would help in the current situation. "
@@ -263,6 +264,7 @@ def test_working_principles_remain_without_session_skills_or_optional_capabiliti
         "options": {
             "include_quick_replies": False,
             "include_codex_generated_images": False,
+            "include_computer_use": False,
             "include_context_guidance": False,
         },
     }
@@ -517,7 +519,12 @@ def test_cli_localizes_invalid_context_files(monkeypatch, tmp_path, capsys, lang
 
 def test_approved_guidance_changes_preserve_all_other_injection_bytes(monkeypatch):
     outputs = []
-    changed = {"skills-prompt", "skills-manual-prompt", "codex-skill-reuse"}
+    changed = {
+        "computer-use-prompt",
+        "skills-prompt",
+        "skills-manual-prompt",
+        "codex-skill-reuse",
+    }
     for backend, history, skill_mode in itertools.product(
         ("claude", "codex", "opencode"), ("off", "managed", "self-managed"), ("empty", "manual", "pages"),
     ):
@@ -532,8 +539,9 @@ def test_approved_guidance_changes_preserve_all_other_injection_bytes(monkeypatc
         outputs.append(text.replace(_EVIDENCE_LED_PRINCIPLE, _PREVIOUS_VERIFICATION_PRINCIPLE))
     digest = hashlib.sha256(json.dumps(outputs, ensure_ascii=False).encode()).hexdigest()
     # Captured before editing from 1e9ba96bc61b0e86027d4871553e68e8ed85c1ac,
-    # omitting only the approved Skill-loading guidance blocks (including the
-    # Codex-only reuse sentence) and restoring the previous verification principle
-    # and conversation-history guidance and Follow-through principle.
+    # omitting only the approved Computer Use and Skill-loading guidance blocks
+    # (including the Codex-only reuse sentence) and restoring the previous
+    # verification principle and conversation-history guidance and Follow-through
+    # principle.
     # Every other byte/order stays pinned, including all Claude/OpenCode output.
     assert digest == "262c7cbabbbb0bfefa4a69511d805d28f76a3559bd511184006242f831b4836e"

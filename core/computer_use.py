@@ -504,6 +504,10 @@ class ComputerUseConfigReconciler:
             state_path=state_path,
             verifier=self._verifier,
         )
+        self._consumer_fingerprints = {
+            backend: self._fingerprint
+            for backend in dict.fromkeys(self._backend_names())
+        }
         self._task: asyncio.Task[None] | None = None
 
     @property
@@ -515,12 +519,33 @@ class ComputerUseConfigReconciler:
             state_path=self._state_path,
             verifier=self._verifier,
         )
-        if current == self._fingerprint:
-            return False
         self._fingerprint = current
-        for backend in dict.fromkeys(self._backend_names()):
-            await self._renew_backend(backend)
-        return True
+        live_backends = list(dict.fromkeys(self._backend_names()))
+        live_set = set(live_backends)
+        for backend in tuple(self._consumer_fingerprints):
+            if backend not in live_set:
+                self._consumer_fingerprints.pop(backend, None)
+        for backend in live_backends:
+            # A consumer that appeared since the prior poll was built from the
+            # current managed MCP spec, so it starts converged.
+            self._consumer_fingerprints.setdefault(backend, current)
+
+        changed = False
+        for backend in live_backends:
+            if self._consumer_fingerprints[backend] == current:
+                continue
+            changed = True
+            try:
+                await self._renew_backend(backend)
+            except Exception:
+                logger.warning(
+                    "Computer-use configuration did not reconcile backend %s; retrying",
+                    backend,
+                    exc_info=True,
+                )
+                continue
+            self._consumer_fingerprints[backend] = current
+        return changed
 
     async def _run(self) -> None:
         try:

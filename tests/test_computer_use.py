@@ -238,3 +238,40 @@ async def test_reconciler_renews_only_after_the_final_config_triple_changes(
     _write_state(tmp_path, enabled=True)
     assert await reconciler.check_once() is False
     assert renewed == []
+
+
+@pytest.mark.asyncio
+async def test_reconciler_confirms_each_consumer_and_retries_one_failure(
+    tmp_path: Path,
+) -> None:
+    """One failed backend must not strand itself or consumers after it."""
+
+    state_path, _snapshot = _write_state(tmp_path, enabled=False)
+    attempts: list[str] = []
+    failed_once = False
+
+    async def renew(backend: str) -> None:
+        nonlocal failed_once
+        attempts.append(backend)
+        if backend == "claude" and not failed_once:
+            failed_once = True
+            raise RuntimeError("transient")
+
+    reconciler = ComputerUseConfigReconciler(
+        renew,
+        lambda: ["claude", "codex", "opencode"],
+        state_path=state_path,
+        verifier=SnapshotVerifier(),
+    )
+    _write_state(tmp_path, enabled=True)
+
+    assert await reconciler.check_once() is True
+    assert attempts == ["claude", "codex", "opencode"]
+
+    attempts.clear()
+    assert await reconciler.check_once() is True
+    assert attempts == ["claude"]
+
+    attempts.clear()
+    assert await reconciler.check_once() is False
+    assert attempts == []

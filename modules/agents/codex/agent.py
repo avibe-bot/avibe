@@ -129,6 +129,7 @@ class CodexLaunchSpec:
     args: tuple[str, ...]
     extra_args: tuple[str, ...]
     env: Mapping[str, str] = field(repr=False)
+    computer_use_spec: Any = field(default=None, repr=False)
     hub: bool = False
     catalog: CodexHubCatalog | None = field(default=None, repr=False)
 
@@ -153,6 +154,7 @@ class _LaunchInputs:
     binary: str
     extra_args: tuple[str, ...]
     env: Mapping[str, str] = field(repr=False)
+    computer_use_spec: Any = field(repr=False)
     # Renewal epoch, binary and credential identity, and the cwd's inode.
     identity: Mapping[str, Any] = field(repr=False)
 
@@ -2136,11 +2138,15 @@ class CodexAgent(BaseAgent):
             env.get("HOME") or os.path.expanduser("~"),
             ".codex",
         )
+        from core.computer_use import managed_mcp_server_spec
+
+        computer_use_spec = managed_mcp_server_spec()
         return _LaunchInputs(
             hub_config=hub_config,
             binary=binary,
             extra_args=tuple(codex_config.extra_args),
             env=env,
+            computer_use_spec=computer_use_spec,
             identity={
                 "epoch": self._runtime_epoch,
                 "binary": self._binary_identity(binary, env),
@@ -2148,6 +2154,11 @@ class CodexAgent(BaseAgent):
                 # A directory deleted and re-created under the same path leaves
                 # a running app-server in a dead inode (#561).
                 "cwd": [cwd, self._cwd_inode(cwd)],
+                "computer_use": (
+                    computer_use_spec.fingerprint
+                    if computer_use_spec is not None
+                    else None
+                ),
             },
         )
 
@@ -2234,6 +2245,7 @@ class CodexAgent(BaseAgent):
             args=tuple(args),
             extra_args=inputs.extra_args,
             env=env,
+            computer_use_spec=inputs.computer_use_spec,
             hub=catalog is not None,
             catalog=catalog,
         )
@@ -2308,6 +2320,7 @@ class CodexAgent(BaseAgent):
             runtime_args=list(spec.args),
             runtime_env=dict(spec.env),
             model_hub_catalog=spec.catalog,
+            managed_mcp_spec=spec.computer_use_spec,
         )
         runtime = _CodexRuntime(
             cwd=spec.cwd,
