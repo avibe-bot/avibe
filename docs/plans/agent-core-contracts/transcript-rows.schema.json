@@ -130,6 +130,7 @@
         "checkpoint",
         "state",
         "first_kept_seq",
+        "kept_inputs",
         "summarized_to_seq",
         "files_read",
         "files_read_omitted",
@@ -186,7 +187,7 @@
             "type": "integer",
             "minimum": 1
           },
-          "description": "`context_seq` of each input of the in-flight Turn (its first and every accepted steer) before `first_kept_seq`, ascending: projection keeps them verbatim, in order, right before this row's message (context.md section 5). Empty when the cut did not fall inside that Turn; optional: a row without it, written before the field, keeps the latest input before `first_kept_seq` when the first kept unit is not an input, as it was written."
+          "description": "`context_seq` of each input of the in-flight Turn (its first and every accepted steer) before `first_kept_seq`, ascending: projection keeps them verbatim, in order, right before this row's message (context.md section 5). Empty when the cut did not fall inside that Turn."
         },
         "summarized_to_seq": {
           "type": "integer",

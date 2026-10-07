@@ -172,8 +172,7 @@ def _tool_result(call_id: str, body: str) -> ToolResultMessage:
 COMPACTION = {  # the current C-9 ``Compaction`` shape (transcript-rows.schema.json)
     "version": 1,
     "mode": "normal",
-    "reason": "manual",
-    "focus": None,
+    "reason": "threshold",
     "summary": "<context-checkpoint>\n## Objective\n修复路径测试\n</context-checkpoint>",
     "checkpoint": "## Objective\n修复路径测试",
     "state": [],
