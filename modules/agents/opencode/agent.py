@@ -1854,6 +1854,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 agent_instructions=request.vibe_agent_system_prompt or "",
                 include_quick_replies=getattr(self.controller.config, "reply_enhancements", True)
                 and platform != "wechat",
+                include_computer_use=getattr(launch_spec, "computer_use_spec", None) is not None,
                 context=request.context,
                 fallback_platform=platform,
                 enabled_agents=get_enabled_agents_for_prompt(self.controller),

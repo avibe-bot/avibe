@@ -612,6 +612,29 @@ async def test_new_server_process_requires_observation_again(tmp_path: Path) -> 
     assert "observe_first" in result["content"][0]["text"]
 
 
+@pytest.mark.asyncio
+async def test_setup_failure_releases_lease_before_returning(tmp_path: Path) -> None:
+    """A proxy/session setup error must not strand the cross-process lease."""
+
+    state_path, state = _state(tmp_path)
+    leases = FakeLeaseManager()
+
+    async def fail_upstream(_state: ComputerUseState) -> Any:
+        raise RuntimeError("proxy failed before the first tool call")
+
+    server = ComputerUseServer(
+        state_path=state_path,
+        status_reader=lambda: ComputerUseStatus("ready", None, state),
+        upstream_factory=fail_upstream,
+        lease_manager=leases,  # type: ignore[arg-type]
+    )
+
+    result = await server.call_tool("start_session", {"session": "ses-a"})
+
+    assert result["isError"]
+    assert leases.holder is None
+
+
 @pytest.mark.parametrize(
     ("arguments", "code"),
     [
