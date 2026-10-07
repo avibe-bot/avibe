@@ -25,8 +25,8 @@ import {
   sessionLink,
   vaultRequestLink,
   type PetIntent,
-  type PetLayout,
 } from './petBridge';
+import { petPanel, usePetPanel } from './petPanel';
 import { petShell, useOnSummon, usePetBinding } from './petShell';
 import { derivePetState, latestExchange, openQuickReplies } from './petState';
 import { usePetSession } from './usePetSession';
@@ -63,17 +63,32 @@ export const PetPage: React.FC = () => {
 
 const PetSetupPending: React.FC<{ recheck: () => void }> = ({ recheck }) => {
   const { t } = useTranslation();
-  // A summon re-reads setup but stays waiting, so the pet surface acts on it
-  // once setup turns out to be complete.
-  useOnSummon(recheck);
+  const { expanded, layout, setPanel } = usePetPanel();
+  // The collapsed native frame is avatar-sized; grow it as soon as this card
+  // is the page, and again on a summon (which also re-reads setup so the pet
+  // surface can take over once setup is complete).
+  useEffect(() => { void setPanel(true); }, [setPanel]);
+  useOnSummon(() => {
+    recheck();
+    void setPanel(true);
+  });
+  const card = expanded ? (
+    <div className="max-w-[220px] rounded-xl border border-border bg-card p-3 text-[12px] text-foreground shadow-lg">
+      <p className="mb-2">{t('pet.setupPending')}</p>
+      <Button size="sm" onClick={() => void petBridge.open(SETTINGS_LINK)}>
+        {t('pet.openAvibe')}
+      </Button>
+    </div>
+  ) : null;
   return (
-    <div className="flex h-full flex-col items-end justify-end gap-2 p-2">
-      <div className="max-w-[220px] rounded-xl border border-border bg-card p-3 text-[12px] text-foreground shadow-lg">
-        <p className="mb-2">{t('pet.setupPending')}</p>
-        <Button size="sm" onClick={() => void petBridge.open(SETTINGS_LINK)}>
-          {t('pet.openAvibe')}
-        </Button>
-      </div>
+    <div
+      className={clsx(
+        'flex h-full w-full gap-2 p-2',
+        layout.panel_side === 'left' ? 'flex-row' : 'flex-row-reverse',
+        layout.panel_edge === 'bottom' ? 'items-end' : 'items-start',
+      )}
+    >
+      {card}
       <PetAvatar pose="idle" />
     </div>
   );
@@ -89,8 +104,7 @@ const PetSurface: React.FC = () => {
   // sees the pet's state but gets no composer or quick replies.
   const { capabilities } = useInstanceAuthorization();
   const canChat = capabilities.can_chat;
-  const [expanded, setExpanded] = useState(false);
-  const [layout, setLayout] = useState<PetLayout>({ panel_side: 'left', panel_edge: 'bottom' });
+  const { expanded, layout, setPanel } = usePetPanel();
   const [switcherOpen, setSwitcherOpen] = useState(false);
   const [draft, setDraft] = useState('');
   // A draft belongs to the session it was typed for: changing the binding
@@ -129,37 +143,6 @@ const PetSurface: React.FC = () => {
     pendingVaultRequests: vaultRequests.length,
     unreadCount,
   });
-
-  // `expanded` is what the native frame shows. Closing hides the panel at
-  // once (a moment of transparent frame is harmless); opening shows it only
-  // once the shell has grown the frame, since until then the panel would be
-  // clipped and its replies marked read unseen. Only the latest request
-  // applies, and a toggle acts on the latest request, not on the frame.
-  const layoutRequestRef = useRef(0);
-  const wantExpandedRef = useRef(false);
-  // The last expansion the native frame confirmed. A later request that
-  // rejects restores this, not `!next`: a redundant expand of an already
-  // open panel must not hide it.
-  const confirmedExpandedRef = useRef(false);
-  const setPanel = useCallback(async (next: boolean) => {
-    wantExpandedRef.current = next;
-    const request = ++layoutRequestRef.current;
-    if (!next) setExpanded(false);
-    try {
-      const applied = await petBridge.setExpanded(next);
-      if (request !== layoutRequestRef.current) return;
-      confirmedExpandedRef.current = next;
-      setLayout(applied);
-      setExpanded(next);
-    } catch {
-      // The native frame did not change. Restore what it last confirmed, so a
-      // failed expand of an already-open panel stays open, and a failed
-      // collapse of a closed one stays closed.
-      if (request !== layoutRequestRef.current) return;
-      wantExpandedRef.current = confirmedExpandedRef.current;
-      setExpanded(confirmedExpandedRef.current);
-    }
-  }, []);
 
   const summon = useCallback((intent: PetIntent, bound: string | null) => {
     void setPanel(true);
@@ -284,7 +267,7 @@ const PetSurface: React.FC = () => {
         const dragged = pressRef.current?.dragged;
         pressRef.current = null;
         if (dragged) return;
-        void setPanel(!wantExpandedRef.current);
+        void setPanel(!petPanel.want());
       }}
     >
       <PetAvatar
