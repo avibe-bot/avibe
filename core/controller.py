@@ -45,10 +45,11 @@ from core.scheduled_tasks import ScheduledTaskService
 from core.show_git import ShowGitCheckpointService
 from core.update_checker import UpdateChecker
 from core.watches import ManagedWatchService
+from core.web_ui_watchdog import watch_web_ui
 from core.vibe_agents import VibeAgent, VibeAgentStore
 from core.blocking import run_blocking
 from vibe.i18n import get_supported_languages, t as i18n_t
-from vibe.runtime import mark_service_instance_started
+from vibe.runtime import current_process_owns_service_instance, mark_service_instance_started
 
 if TYPE_CHECKING:
     pass
@@ -317,6 +318,7 @@ class Controller:
         # Background task for cleanup
         self.cleanup_task: Optional[asyncio.Task] = None
         self.trace_retention_task: Optional[asyncio.Task] = None
+        self.web_ui_watchdog_task: Optional[asyncio.Task] = None
         self._trace_retention_executor: Optional[Any] = None
         self._trace_retention_cancel_event: Optional[threading.Event] = None
         self._trace_retention_future: Optional[Any] = None
@@ -1165,6 +1167,15 @@ class Controller:
                 self.trace_retention_task = asyncio.create_task(self._agent_events_retention_loop())
         except Exception as e:
             logger.error("Failed to start agent trace-event retention: %s", e, exc_info=True)
+        try:
+            # Only the service process owns the runtime's Web UI; a controller
+            # embedded in a test or tool must never start one.
+            if current_process_owns_service_instance() and (
+                self.web_ui_watchdog_task is None or self.web_ui_watchdog_task.done()
+            ):
+                self.web_ui_watchdog_task = asyncio.create_task(watch_web_ui(lambda: self.shutdown_requested))
+        except Exception as e:
+            logger.error("Failed to start the Web UI watchdog: %s", e, exc_info=True)
 
     async def _recover_runtime_owners(self) -> None:
         """Restore durable execution owners before any producer can admit work."""
@@ -2309,6 +2320,16 @@ class Controller:
                     pass
             self.cleanup_task = None
 
+        async def _cancel_web_ui_watchdog_task() -> None:
+            task = self.web_ui_watchdog_task
+            if task and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+            self.web_ui_watchdog_task = None
+
         async def _cancel_trace_retention_task() -> None:
             cancel_event = getattr(self, "_trace_retention_cancel_event", None)
             if cancel_event is not None:
@@ -2353,6 +2374,7 @@ class Controller:
             logger.debug(f"Internal dispatch server status write skipped: {e}")
 
         _stop_loop_coroutine(_cancel_cleanup_task(), "Idle cleanup task")
+        _stop_loop_coroutine(_cancel_web_ui_watchdog_task(), "Web UI watchdog task")
         # Retention cancellation is cooperative at a delete-batch boundary;
         # wait for that bounded join instead of abandoning the worker after
         # the generic five-second cleanup timeout.

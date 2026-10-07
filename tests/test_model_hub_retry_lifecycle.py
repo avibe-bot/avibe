@@ -641,7 +641,110 @@ def test_expiry_after_mixed_real_failures_keeps_the_action_blocker_terminal(tmp_
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("backend", ["codex", "claude"])
+def test_waiters_without_an_attempt_record_blocked_supply_not_a_protocol_error(tmp_path, backend):
+    """MH-RETRY-PROVENANCE-001: losing the half-open slot is blocked supply, not a gateway fault."""
+    async def run():
+        service, clock, models = configured_service(tmp_path)
+        service.store = FreshStore(service.store.load())
+        source = service.store.load().sources[0]
+        await fail(service, source, "server_error")
+        clock.advance(31)
+        claim = service.recovery.claim
+        peers = []
+
+        def a_peer_claims_first(candidate, generation):
+            # Another waiter wins the eligible slot between inspection and claim.
+            if not peers:
+                peers.append(claim(candidate, service._reserve_settlement_generation(candidate.id)))
+            return claim(candidate, generation)
+
+        service.recovery.claim = a_peer_claims_first
+        async with gateway_client(service, backend, models[backend]) as (gateway, client, url, headers):
+            async with client.post(url, headers=headers, json={"model": "shared-model"}) as response:
+                assert response.status == (400 if backend == "codex" else 424)
+            gateway.correlation.settle("turn_lifecycle", settled_by=SETTLED_BY_TERMINAL_RESULT)
+            record = service.provenance.get("turn_lifecycle")
+        assert peers == [True] and service.adapter.invocations == []
+        assert (record["outcome"], record["model_supply_state"]) == ("no_candidate", "waiting")
+        assert record["terminal_error"] is None and record["failed_attempts"] == []
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("backend", ["codex", "claude"])
+def test_a_waiter_ending_beside_the_slot_owner_leaves_no_turn_projection(tmp_path, backend):
+    """MH-RETRY-PROVENANCE-003: the gateway commits a peer-scoped ending only for its own request."""
+    async def run():
+        service, clock, models = configured_service(tmp_path, outcomes=[
+            _outcome(RawOutcomeKind.SUCCESS, source_id="src_recovery01"),
+        ])
+        source = service.store.load().sources[0]
+        await fail(service, source, "server_error")
+        clock.advance(31)
+        release = asyncio.Event()
+        original_invoke = service.adapter.invoke
+
+        async def owner_waits_upstream(*args, **kwargs):
+            handle = await original_invoke(*args, **kwargs)
+            await release.wait()
+            return handle
+
+        service.adapter.invoke = owner_waits_upstream
+        async with gateway_client(service, backend, models[backend]) as (gateway, client, url, headers):
+            async def post():
+                async with client.post(url, headers=headers, json={"model": "shared-model"}) as response:
+                    return response.status
+
+            owner = asyncio.create_task(post())
+            while not service.adapter.invocations:
+                await asyncio.sleep(0.01)
+            assert await post() == (400 if backend == "codex" else 424)
+            release.set()
+            assert await owner == 200
+            assert gateway.correlation.terminal_projection("turn_lifecycle", backend=backend) is None
+            gateway.correlation.settle("turn_lifecycle", settled_by=SETTLED_BY_TERMINAL_RESULT)
+            record = service.provenance.get("turn_lifecycle")
+            assert record["outcome"] == "served" and record["model_supply_state"] is None
+    asyncio.run(run())
+
+
 KEEPALIVE = b": keepalive\n\n"
+
+
+def test_claude_stream_rejected_within_its_first_byte_budget_keeps_the_status(tmp_path):
+    """MH-RUNTIME-012: a rejection after a few seconds still reaches Claude as HTTP 400.
+
+    Claude Code downgrades an unsupported request feature (a beta, or
+    thinking.display) and retries only on an HTTP 400 naming it; a rejection
+    inside a committed 200 stream ends the turn instead.
+    """
+    rejection = "thinking.adaptive.display: Input should be 'summarized', 'omitted'"
+
+    async def run() -> None:
+        source = _source("src_rejects1", "Rejects", vendor="anthropic", protocol="anthropic")
+        service, _clock, models = configured_service(tmp_path, sources=[source])
+        calls = []
+
+        async def respond(request: web.Request) -> web.Response:
+            calls.append(await request.json())
+            # Slower than a fast Source, well within Claude's first-byte window.
+            await asyncio.sleep(2.5)
+            return web.json_response(
+                {"type": "error", "error": {"type": "invalid_request_error", "message": rejection}}, status=400,
+            )
+
+        async with loopback_engine(tmp_path, service, respond) as (adapter, _engine_client):
+            async with gateway_client(service, "claude", models["claude"]) as (_gateway, client, url, headers):
+                async with client.post(
+                    url, headers=headers, json={"model": "shared-model", "stream": True},
+                ) as response:
+                    body = await response.text()
+                    assert response.status == 400, body
+                    assert rejection in json.loads(body)["error"]["message"]
+            assert adapter._active_transports == 0
+        assert len(calls) == 1
+
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize("backend", BACKENDS)

@@ -65,8 +65,8 @@ remain readable; ephemeral envelopes use only the terminal version.
 | GET `/api/models/quota` | → `{quota: QuotaSummary}` | Rate-limit windows of every hub-held subscription Source, from the vendor's own usage report, plus each Source's API-price `value` (see Subscription quota). Served from the server cache; a Source older than five minutes is re-read before answering, bounded by a short deadline, and a Source still being read is listed in `pending`. Never starts the engine. |
 | POST `/api/models/quota/refresh` | → `{quota: QuotaSummary}` | Forced re-read. Rate-limited per Source to one vendor call every 30 seconds and suppressed while a Source cools down after a vendor 429; a suppressed Source returns its cached snapshot. |
 | POST `/api/models/oauth/start` | `{vendor, channel, client_nonce?}` → `{flow: OAuthFlow}` | Starts creation of a new subscription source. Before provider work, the optional exact `(client_nonce, vendor, channel)` tuple is atomically claimed; concurrent retries coalesce to its one pending start and terminal result. |
-| GET `/api/models/oauth/status/<flow_id>` | → OAuth result | Terminal create and reauth shapes are below. |
-| POST `/api/models/oauth/submit` | `{flow_id, value}` → OAuth result | Same terminal shape as status. A value the provider refuses before writing anything (not a callback address, no `code`) is the non-terminal `422 submission_rejected`: the flow stays `awaiting_action` and accepts another submission until its `expires_at`. |
+| GET `/api/models/oauth/status/<flow_id>` | → OAuth result | Terminal create and reauth shapes are below. A `failed` flow names its cause with the closed `error_key` and, when the provider, engine, or native CLI said more, carries that reason verbatim on one bounded line in `error_detail` for the dialog's copyable details. |
+| POST `/api/models/oauth/submit` | `{flow_id, value}` → OAuth result | Same terminal shape as status. A callback address is recognized with or without its `http(s)://` scheme, which browsers drop when copying a page that failed to load; any other value is a bare code. An address the flow refuses before anything reaches the provider is the non-terminal `422 submission_rejected`: one with no `code` or `error`, or one whose `state` answers a different sign-in link than this flow's (`detail: modelHub.errors.submission_rejected_other_attempt`). The flow stays `awaiting_action` and accepts another submission until its `expires_at`. |
 | POST `/api/models/oauth/cancel` | `{flow_id}` → `{ok}` | Cancels provider work. A committed flow with `client_nonce` remains the same bounded terminal `OAuthFlow` with `state: "cancelled"` until its existing `expires_at`; a flow without a nonce is forgotten. |
 | POST `/api/models/migration/scan` | → `{scan: MigrationScan}` | Read-only. |
 | POST `/api/models/migration/apply` | `{item_ids: string[]}` → `{applied, sources, added_to}` | Applies one grouped, server-owned custody transaction. It validates selected items before withdrawal, upgrades an existing native Source in place when present, commits Source/Routes/backend mode atomically, and removes only replaced native material. Pre-exposure failure is reversible; post-exposure recovery is forward-only and keeps the backend blocked until terminalized. |
@@ -1319,8 +1319,8 @@ was observed and classification returned `upstream_request_invalid`, retain it o
 co-occurring generic `invalid_request_error` type; otherwise use existing specificity
 order. This is diagnostic selection, not a classifier rank/decision change. Never infer
 `model_not_found` from `invalid_parameter`, the requested model, or today's route.
-Unknown upstream strings, raw bodies, messages, headers and credentials are not
-retained. These optional observations do not change classification, fallback or Source
+Unknown upstream strings, raw bodies, headers and credentials are not retained; the
+upstream message is kept only as the bounded `upstream_detail` below. These optional observations do not change classification, fallback or Source
 health. Historical records may omit both fields and keep their existing read behavior.
 
 `failed_attempts[].http_status` is independently optional: a strict integer
@@ -1328,6 +1328,14 @@ health. Historical records may omit both fields and keep their existing read beh
 It records the original upstream status, for example 503 even when native
 compatibility uses 400. Older retained records without it remain readable.
 This additive diagnostic changes neither the failure reason nor classifier.
+
+`failed_attempts[].upstream_detail` and `terminal_error.upstream_detail` are
+independently optional strings: the upstream error message the engine client
+projected for that attempt, or for a `network` attempt the engine's own connection
+diagnostic (which carries no `http_status`). The text is credential-redacted, stripped
+of control and bidi characters, whitespace-collapsed, and bounded to 400 characters.
+They are omitted when no message was observed and in older records, and are never
+read by classification.
 
 The dialog independently reads this projection on demand and labels it "Latest recorded
 turn" / "最近已记录回合". Its error panel and details action use the same structured record,

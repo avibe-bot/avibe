@@ -663,17 +663,63 @@ def test_tail_recovery_rechecks_cancellation_before_next_protocol(monkeypatch, t
     assert results[0]["result"] == "failed"
 
 
-def test_availability_recovery_uses_cloudflared_auto_fallback(monkeypatch, tmp_path) -> None:
-    config, active_pid, candidate_pid, alive = _setup_recovery(monkeypatch, tmp_path, _quality(80))
+_UNAVAILABLE_REQUEST_PATH = {
+    **_request_path(3500, 3500, 3500, failure_rate=1.0),
+    "status": "unavailable",
+    "success_count": 0,
+}
+
+
+@pytest.mark.parametrize(
+    ("previous", "candidate_protocol", "expected_protocol", "expected_preference"),
+    [
+        # Partial availability keeps the existing edge-reselection behavior.
+        ({"ha_connections": 2, "protocol": "quic"}, "quic", "auto", "quic"),
+        # RA-TQ-033: a dead QUIC route is replaced over HTTP/2, whether the
+        # connector admits it or still reports a stale ready connection.
+        ({"ha_connections": 0, "protocol": "quic"}, "http2", "http2", "http2"),
+        (
+            {"ha_connections": 1, "protocol": "quic", "request_path": _UNAVAILABLE_REQUEST_PATH},
+            "http2",
+            "http2",
+            "http2",
+        ),
+        (
+            {"ha_connections": 4, "protocol": "quic", "request_path": _UNAVAILABLE_REQUEST_PATH},
+            "http2",
+            "http2",
+            "http2",
+        ),
+        # Cloudflare auto already starts on QUIC, the alternative to a dead
+        # HTTP/2 route; the transport it verified replaces the failed preference.
+        ({"ha_connections": 0, "protocol": "http2"}, "quic", "auto", "quic"),
+    ],
+)
+def test_ra_tq_033_availability_recovery_protocol_follows_route_outage(
+    monkeypatch,
+    tmp_path,
+    previous,
+    candidate_protocol,
+    expected_protocol,
+    expected_preference,
+) -> None:
+    config, active_pid, candidate_pid, alive = _setup_recovery(
+        monkeypatch,
+        tmp_path,
+        {**_quality(80), "protocol": candidate_protocol},
+    )
     remote_access._write_state(
         active_pid,
         config,
         "/usr/local/bin/cloudflared",
         "http://127.0.0.1:29001",
-        requested_protocol="quic",
+        requested_protocol=previous["protocol"],
     )
+    monkeypatch.setattr(remote_access, "_PREFERRED_PROTOCOL", previous["protocol"])
+    remote_access._set_preferred_protocol(previous["protocol"])
     spawned_protocols = []
     results = []
+    drain_preferences = []
 
     def spawn_background(args, pid_path, stdout_name, stderr_name, env=None):
         spawned_protocols.append(env["TUNNEL_TRANSPORT_PROTOCOL"])
@@ -681,6 +727,8 @@ def test_availability_recovery_uses_cloudflared_auto_fallback(monkeypatch, tmp_p
         return candidate_pid
 
     def stop_pid(pid, timeout=8):
+        # The drain can outlive the process, so the preference must already be durable.
+        drain_preferences.append(remote_access._stored_preferred_protocol())
         alive.discard(pid)
         return True
 
@@ -691,11 +739,63 @@ def test_availability_recovery_uses_cloudflared_auto_fallback(monkeypatch, tmp_p
     remote_access._run_route_optimization(
         config,
         "availability",
-        {**_quality(80), "ha_connections": 0, "protocol": "quic"},
+        {**_quality(80), **previous},
     )
 
-    assert spawned_protocols == ["auto"]
+    assert spawned_protocols == [expected_protocol]
     assert results[0]["result"] == "improved"
+    assert drain_preferences == [expected_preference]
+
+
+@pytest.mark.parametrize(
+    ("request_path", "expected_started"),
+    [
+        # RA-TQ-033: a route serving no public request overrides the cooldown
+        # even though cloudflared still reports one ready connection.
+        (_UNAVAILABLE_REQUEST_PATH, True),
+        (_request_path(900, 1800, 2500, failure_rate=0.5), False),
+    ],
+)
+def test_ra_tq_033_unavailable_route_bypasses_recovery_cooldown(
+    monkeypatch,
+    tmp_path,
+    request_path,
+    expected_started,
+) -> None:
+    started = []
+
+    class FakeThread:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def start(self):
+            started.append(self)
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    now = time.time()
+    previous = {**_quality(80), "ha_connections": 1, "protocol": "quic", "request_path": request_path}
+    monkeypatch.setattr(remote_access, "status", lambda config=None: {"running": True})
+    monkeypatch.setattr(remote_access, "_fresh_active_comparison_snapshot", lambda *args, **kwargs: previous)
+    monkeypatch.setattr(remote_access, "_set_recovery_state", lambda **changes: changes)
+    monkeypatch.setattr(remote_access.threading, "Thread", FakeThread)
+    with remote_access._RECOVERY_LOCK:
+        remote_access._RECOVERY_THREAD = None
+        remote_access._RECOVERY_ATTEMPTS[:] = [now - 600]
+        remote_access._RECOVERY_STATE["next_attempt_at"] = remote_access.tunnel_quality.utc_timestamp(now + 3600)
+        remote_access._RECOVERY_EMERGENCY_BYPASS_USED = False
+
+    try:
+        result = remote_access.optimize_route(trigger="availability")
+    finally:
+        with remote_access._RECOVERY_LOCK:
+            remote_access._RECOVERY_THREAD = None
+            remote_access._RECOVERY_ATTEMPTS.clear()
+            remote_access._RECOVERY_STATE.clear()
+            remote_access._RECOVERY_STATE.update(remote_access.tunnel_quality.empty_recovery())
+            remote_access._RECOVERY_EMERGENCY_BYPASS_USED = False
+
+    assert result["ok"] is expected_started
+    assert len(started) == int(expected_started)
 
 
 def test_optimize_route_reserves_single_candidate_atomically(monkeypatch, tmp_path) -> None:

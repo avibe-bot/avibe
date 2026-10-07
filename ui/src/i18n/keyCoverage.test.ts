@@ -883,6 +883,7 @@ const NON_KEY_LITERALS = [
   'modelHub.errors.models_dev_unavailable',
   'modelHub.errors.native_login_in_progress',
   'modelHub.errors.native_subscription_exists',
+  'modelHub.errors.submission_rejected_other_attempt',
 
   // Storage keys. Namespaced on purpose, which is also why they read like keys.
   'avibe.agents.tab.v1',

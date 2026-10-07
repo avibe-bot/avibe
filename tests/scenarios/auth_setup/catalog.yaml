@@ -473,6 +473,20 @@ scenarios:
       - ui/src/components/onboarding/AssistantSetup.test.tsx
       - ui/e2e/onboarding-fidelity/provider-gate.spec.ts
   - id: AUTH-SETUP-127
+    name: A mis-pasted Hub OAuth callback stays recoverable and a scheme-less callback address signs in
+    status: covered
+    kind: historical_regression
+    layer: scenario
+    backend: shared
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_hub_oauth_mispaste_stays_recoverable_and_schemeless_address_signs_in
+    supporting_tests:
+      - tests/test_model_hub_runtime.py::test_oauth_paste_reaches_the_engine_as_the_value_it_is
+      - tests/test_model_hub_runtime.py::test_oauth_paste_that_cannot_exchange_keeps_the_flow_awaiting
+      - tests/test_model_hub_runtime.py::test_oauth_engine_failure_names_what_the_user_can_do
+      - tests/test_model_hub_runtime.py::test_oauth_failure_detail_is_the_engine_reason_on_one_bounded_line
+      - ui/src/components/settings/models/serverCopy.test.ts
+      - ui/src/components/settings/models/SettingsModelsPage.render.test.tsx
+  - id: AUTH-SETUP-128
     name: The desktop pet leaves its setup-pending state once setup is finished in the main window
     status: partial
     kind: happy_path

@@ -74,6 +74,11 @@ _UNRECORDED_RUNTIME_ID = object()
 # its spawn, before its record is written, until a stop proves it gone or its
 # start proves it exited, so this controller's shutdown stops it, recorded or not.
 _OWNED_HERE: dict[str, tuple[int, Optional[float]]] = {}
+# The process handle of each owned generation this process spawned. Until the
+# handle reaps it, its pid cannot name another process, so the handle, never
+# the start time the platform reports (which moves with every clock step),
+# says whether it is still running.
+_CHILDREN_HERE: dict[str, Any] = {}
 # A busy server after a controller crash can miss one health probe; adoption
 # gives it this many before stopping it.
 _ADOPTION_PROBES = 3
@@ -1699,8 +1704,10 @@ class OpenCodeGeneration(OpenCodeServerClient):
 
     def process_alive(self) -> bool:
         process = self._process
-        if process is not None and process.returncode is not None:
-            return False
+        if process is not None:
+            # This controller's own child: its handle is the authority, and
+            # its pid cannot be reused before the handle reaps it.
+            return process.returncode is None
         created_at = runtime.process_create_time(self.pid)
         if self.process_created_at is None:
             return created_at is not None or _pid_exists(self.pid)
@@ -1834,6 +1841,7 @@ async def start_generation(
             # Owned before anything else can fail, the record write included.
             created_at = runtime.process_create_time(process.pid)
             _OWNED_HERE[generation_id] = (process.pid, created_at)
+            _CHILDREN_HERE[generation_id] = process
             generation = OpenCodeGeneration(
                 generation_id=generation_id,
                 pid=process.pid,
@@ -1893,10 +1901,23 @@ async def start_generation(
         raise
 
 
+def _disown(generation_id: str) -> None:
+    _OWNED_HERE.pop(generation_id, None)
+    _CHILDREN_HERE.pop(generation_id, None)
+
+
+def _child_running(generation_id: object) -> Optional[bool]:
+    """Whether a process this controller spawned still runs; None for any other process."""
+    child = _CHILDREN_HERE.get(generation_id) if isinstance(generation_id, str) else None
+    if child is None:
+        return None
+    return child.returncode is None
+
+
 def _disown_ended_start(generation: OpenCodeGeneration) -> None:
     """A start's process exited: it is no longer owned here, and its record goes."""
 
-    _OWNED_HERE.pop(generation.generation_id, None)
+    _disown(generation.generation_id)
     _remove_quietly(generation.record_path)
 
 
@@ -1922,7 +1943,7 @@ async def stop_generation(generation: OpenCodeGeneration) -> None:
                 f"OpenCode generation {generation.generation_id} pid={generation.pid} did not exit"
             )
     generation._record_removed = True
-    _OWNED_HERE.pop(generation.generation_id, None)
+    _disown(generation.generation_id)
     _remove_quietly(generation.record_path)
     _remove_quietly(generation.overlay_path)
     if generation._supersedes is not None:
@@ -2312,24 +2333,41 @@ def stop_owned_generations_sync() -> None:
 
     recorded: set[str] = set()
     for path, info in _recorded_processes():
-        if _owned_here(info):
+        if not _owned_here(info):
+            continue
+        generation_id = info.get("generation_id")
+        running = _child_running(generation_id)
+        if running is None:
             stop_recorded_server_sync(path, info)
-            if isinstance(info.get("generation_id"), str):
-                recorded.add(info["generation_id"])
+        elif not running or terminate_pid_tree_sync(_CHILDREN_HERE[generation_id].pid):
+            # This controller's own child, stopped or already exited.
+            forget_record(path)
+            _disown(generation_id)
+        else:
+            logger.warning("OpenCode generation %s survived its stop", generation_id)
+        if isinstance(generation_id, str):
+            recorded.add(generation_id)
     for generation_id, (pid, created_at) in list(_OWNED_HERE.items()):
         if generation_id not in recorded:
             _stop_unrecorded_process_sync(generation_id, pid, created_at)
 
 
 def _stop_unrecorded_process_sync(generation_id: str, pid: int, created_at: Optional[float]) -> None:
-    """Stop an owned process no record names, proven by its pid and create time.
+    """Stop an owned process no record names.
 
-    A process whose create time is unknown or cannot be read now is never
-    signalled: its pid may have been reused. One whose pid is gone, or now
-    names another process, has ended, and is no longer owned here.
+    This controller's own child is judged by its handle. Any other is proven by
+    its pid and create time: one whose create time is unknown or cannot be
+    read now is never signalled, since its pid may have been reused, and one
+    whose pid is gone, or now names another process, has ended and is no
+    longer owned here.
     """
 
-    if _pid_exists(pid):
+    running = _child_running(generation_id)
+    if running is not None:
+        if running and not terminate_pid_tree_sync(pid):
+            logger.warning("OpenCode generation %s pid=%s survived its stop", generation_id, pid)
+            return
+    elif _pid_exists(pid):
         current = runtime.process_create_time(pid)
         if created_at is None or current is None:
             logger.warning("Leaving OpenCode generation %s pid=%s: its process cannot be proven", generation_id, pid)
@@ -2337,7 +2375,7 @@ def _stop_unrecorded_process_sync(generation_id: str, pid: int, created_at: Opti
         if current == created_at and not terminate_pid_tree_sync(pid):
             logger.warning("OpenCode generation %s pid=%s survived its stop", generation_id, pid)
             return
-    _OWNED_HERE.pop(generation_id, None)
+    _disown(generation_id)
     _remove_quietly(generation_records_dir() / f"{generation_id}.overlay.json")
 
 

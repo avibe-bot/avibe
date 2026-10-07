@@ -1,6 +1,12 @@
 version: 2
 capability: model_hub
 observations:
+  - id: MH-OBS-013
+    source: claude-cli-2.1.288-thinking-display-relay-rejection-2026-10-03
+    summary: Claude Code 2.1.288 sends thinking.display "updates" with its beta by default, and a relay that rejects it answers HTTP 400. The CLI drops a rejected beta or display value and retries only on an HTTP 400 naming it, but a Hub resolution slower than 2s had already committed a 200 stream, so the rejection arrived as an in-stream error and ended the turn. Claude streams now keep the real status until shortly before the CLI's default first-byte window, and Claude hub launches pin both pre-output timeouts to the CLI maximum so no shorter native choice aborts that wait.
+    affects:
+      - MH-RUNTIME-010
+      - MH-RUNTIME-012
   - id: MH-OBS-012
     source: codex-0.156.0-hermetic-remote-compaction-wire-2026-09-29
     summary: Codex 0.155.0 removed the remote_compaction_v2 switch and the legacy /responses/compact client, so MH-OBS-009's header-only compact probe is unreachable. Remote compaction posts to the ordinary Responses endpoint with a compaction_trigger input item and carries the new turn's identity in both the metadata header and body client_metadata. Codex 0.154.0, where v2 was already the default, and 0.158.0 send the same shape.

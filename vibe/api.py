@@ -108,7 +108,6 @@ from modules.agents.catalog import (
     display_name_for_backend,
     is_agent_backend,
     latest_probe_for_backend,
-    runtime_refresh_success_message,
     supports_runtime_refresh,
     supports_web_oauth,
 )
@@ -10345,7 +10344,12 @@ def _restart_backend(name: str, *, metadata: Optional[dict[str, Any]] = None) ->
                 "ok": False,
                 "message": f"Backend refresh failed: {controller_error}",
             }
-        return {"ok": True, "message": runtime_refresh_success_message(name)}
+        return {
+            "ok": True,
+            "message": backend_t(
+                "backendConnection.restartAccepted", lang=language, agent=display_name_for_backend(name)
+            ),
+        }
 
     # A running service with broken IPC is not a stopped backend. Killing its
     # child process here would hide stale controller state and split ownership.

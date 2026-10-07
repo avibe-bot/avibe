@@ -160,6 +160,7 @@ def isolated_launch(tmp_path, monkeypatch):
 
     monkeypatch.setattr(opencode_server, "generation_records_dir", lambda: tmp_path / "generations")
     monkeypatch.setattr(opencode_server, "_OWNED_HERE", {})
+    monkeypatch.setattr(opencode_server, "_CHILDREN_HERE", {})
     monkeypatch.setattr(opencode_server, "_ADOPTION_PROBE_INTERVAL_SECONDS", 0)
     monkeypatch.setattr(opencode_server, "ensure_plugin_installed", lambda: None)
     monkeypatch.setattr(opencode_server.runtime, "process_create_time", lambda pid: 100.0 + pid)
@@ -350,6 +351,7 @@ def fake_processes(tmp_path, monkeypatch):
 
     monkeypatch.setattr(opencode_server, "generation_records_dir", lambda: tmp_path / "generations")
     monkeypatch.setattr(opencode_server, "_OWNED_HERE", {})
+    monkeypatch.setattr(opencode_server, "_CHILDREN_HERE", {})
     started: list[OpenCodeGeneration] = []
     stopped: list[OpenCodeGeneration] = []
     alive: set[str] = set()
@@ -456,6 +458,29 @@ def test_an_old_generation_stays_until_the_activity_it_started_ends(fake_process
 
     assert kept_for_its_activity
     assert fake_processes.stopped == [old]
+
+
+def test_runtime_gen_026_a_generation_this_controller_started_is_alive_while_its_handle_says_so(monkeypatch):
+    """RUNTIME-GEN-026: its own child's handle decides, never a start-time
+    comparison. A clock step moves the start time the platform reports, and the
+    generation was then taken for exited, replaced on the next turn, and left
+    running with no record."""
+
+    process = SimpleNamespace(returncode=None)
+    generation = OpenCodeGeneration(
+        generation_id="ocg_own",
+        pid=fake_pid(7),
+        port=50107,
+        spec_digest="v1",
+        process_created_at=1_000.0,
+        process=process,
+    )
+    # The start time read now differs from the one recorded at spawn.
+    monkeypatch.setattr(opencode_server.runtime, "process_create_time", lambda _pid: 998.0)
+
+    assert generation.process_alive()
+    process.returncode = 0
+    assert not generation.process_alive()
 
 
 def test_a_current_generation_whose_process_died_is_replaced(fake_processes):
@@ -2060,12 +2085,13 @@ def test_a_failed_start_whose_process_survives_is_reaped_until_it_is_gone(isolat
 def test_service_shutdown_stops_a_started_process_whose_record_was_never_written(isolated_launch, monkeypatch):
     """A start's record write fails and its process survives the stop. Avibe
     stops before any reap retries it: the controller's shutdown still stops
-    that process, proven by its pid and create time, and drops its Hub
-    overlay. It never signals a pid whose create time changed or cannot be read."""
+    that process and drops its Hub overlay. It is this controller's own child,
+    so its handle decides, never the start time the platform reports now: a
+    clock step does not spare one, and one that exited is not signalled."""
 
-    proven, reused, unreadable = fake_pid(67), fake_pid(68), fake_pid(69)
-    isolated_launch.processes.extend(_Process(pid) for pid in (proven, reused, unreadable))
-    create_times = {proven: 1.0, reused: 2.0, unreadable: 3.0}
+    proven, shifted, exited = fake_pid(67), fake_pid(68), fake_pid(69)
+    isolated_launch.processes.extend(_Process(pid) for pid in (proven, shifted, exited))
+    create_times = {proven: 1.0, shifted: 2.0, exited: 3.0}
     monkeypatch.setattr(opencode_server.runtime, "process_create_time", create_times.get)
     monkeypatch.setattr(opencode_server.runtime, "pid_alive", lambda pid: pid in create_times)
     monkeypatch.setattr(opencode_server, "legacy_pid_file", lambda: isolated_launch.records / "absent.json")
@@ -2093,15 +2119,39 @@ def test_service_shutdown_stops_a_started_process_whose_record_was_never_written
                 await opencode_server.start_generation(spec, on_survivor=survivors.append)
 
     asyncio.run(start_three())
-    create_times[reused] = 9.0
-    create_times[unreadable] = None
+    create_times[shifted] = 9.0  # The clock stepped.
+    next(generation for generation in survivors if generation.pid == exited)._process.returncode = 0
 
     opencode_server.stop_owned_generations_sync()
 
-    assert stopped == [proven]
-    kept = next(generation for generation in survivors if generation.pid == unreadable)
-    assert list(opencode_server._OWNED_HERE) == [kept.generation_id]
-    assert [path.name for path in isolated_launch.records.iterdir()] == [kept.overlay_path.name]
+    assert stopped == [proven, shifted]
+    assert opencode_server._OWNED_HERE == {} and opencode_server._CHILDREN_HERE == {}
+    assert list(isolated_launch.records.iterdir()) == []
+
+
+def test_runtime_gen_026_service_shutdown_stops_its_own_recorded_server_after_a_clock_step(isolated_launch, monkeypatch):
+    """RUNTIME-GEN-026: the start time the platform reports for a server this
+    controller started moved with the clock, so its record no longer proves
+    it. Its handle still does: shutdown stops it and forgets its record."""
+
+    pid = fake_pid(70)
+    isolated_launch.processes.append(_Process(pid))
+    monkeypatch.setattr(opencode_server.runtime, "pid_alive", lambda candidate: candidate == pid)
+    monkeypatch.setattr(opencode_server, "legacy_pid_file", lambda: isolated_launch.records / "absent.json")
+    stopped: list[int] = []
+    monkeypatch.setattr(opencode_server, "terminate_pid_tree_sync", lambda target, timeout=5.0: stopped.append(target) or True)
+
+    generation = asyncio.run(
+        opencode_server.start_generation(OpenCodeLaunchSpec(digest="spec", binary="/bin/opencode"))
+    )
+    assert generation.record_path.exists()
+    monkeypatch.setattr(opencode_server.runtime, "process_create_time", lambda _pid: 7.0)
+
+    opencode_server.stop_owned_generations_sync()
+
+    assert stopped == [pid]
+    assert not generation.record_path.exists()
+    assert opencode_server._OWNED_HERE == {} and opencode_server._CHILDREN_HERE == {}
 
 
 def test_a_turn_keeps_the_opencode_settings_it_was_admitted_with(monkeypatch):

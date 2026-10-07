@@ -193,7 +193,11 @@ def test_turn_outcome_rendering_authority_covers_matrix_and_locales() -> None:
     projected_keys = {
         key
         for rule in TURN_OUTCOME_RENDERING_AUTHORITY.values()
-        for _variant, key in rule.copy_keys
+        for key in (
+            *(key for _variant, key in rule.copy_keys),
+            rule.upstream_failure_key,
+            rule.connection_failure_key,
+        )
         if key is not None
     }
     locale_launch_keys = None
@@ -1941,6 +1945,79 @@ def test_a_canceled_turn_reports_the_attempt_it_waited_on_longest(
         "configured_model_id": "hub-live",
         "channel": "hub",
     }
+
+
+@pytest.mark.parametrize("peer", ["open_at_commit", "closed_before_commit", "opened_before_commit"])
+@pytest.mark.parametrize("peer_result", ["served", "exhausted"])
+@pytest.mark.parametrize("loser_exit", ["no_candidate", "gateway_exit"])
+def test_a_request_ending_beside_an_open_peer_leaves_the_turn_to_that_peer(
+    tmp_path: Path,
+    loser_exit: str,
+    peer_result: str,
+    peer: str,
+) -> None:
+    """MH-RETRY-PROVENANCE-003: one request's exit is wholly its own or wholly the turn's.
+
+    A waiter that lost the half-open slot ends beside the request that won it.
+    Its staged exit commits as one write: beside an open peer it leaves the
+    turn to that peer; as the last request to end it is the turn's ending.
+    """
+
+    store = BoundedProvenanceStore(tmp_path / "routing-peer.json")
+    registry = TurnCorrelationRegistry(store)
+    token = registry.credentials("claude", "session:/repo", "turn_peer01")
+    live_token = _prepare_route(
+        registry,
+        token,
+        turn_id="turn_peer01",
+        requested="caller-live",
+        resolved="hub-live",
+    )
+    result = (
+        _outcome(RawOutcomeKind.SUCCESS)
+        if peer_result == "served"
+        else _outcome(RawOutcomeKind.HTTP_ERROR, status=500, code="server_error")
+    )
+    projection = produce_turn_outcome("turn.engine_down")
+
+    def open_peer():
+        terminalizer = registry.gateway_terminalizer(backend="claude", token=live_token)
+        assert terminalizer.resolution_model("hub-live") == "caller-live"
+        terminalizer.begin_attempt(
+            source_id="src_primary01", resolved_model_id="hub-live", channel="hub", via_mapping=True,
+        )
+        return terminalizer
+
+    winner = open_peer() if peer != "opened_before_commit" else None
+    with registry.gateway_terminalizer(backend="claude", token=live_token) as loser:
+        assert loser.resolution_model("hub-live") == "caller-live"
+        if loser_exit == "no_candidate":
+            loser.mark_no_candidate("waiting")
+        else:
+            loser.fail("protocol_error")
+        if peer == "closed_before_commit":
+            winner.finish_attempt(outcome=result, decision=classify_outcome(result))
+            winner.__exit__(None, None, None)
+        elif peer == "opened_before_commit":
+            winner = open_peer()
+        loser.record_turn_outcome(projection)
+    if peer != "closed_before_commit":
+        # The loser left the turn to its peer: no projection of its own remains.
+        assert registry.terminal_projection("turn_peer01", backend="claude") is None
+        winner.finish_attempt(outcome=result, decision=classify_outcome(result))
+        winner.__exit__(None, None, None)
+    registry.settle("turn_peer01", settled_by=SETTLED_BY_TERMINAL_RESULT, ts=NOW.isoformat())
+
+    record = store.get("turn_peer01")
+    assert record is not None
+    if peer == "closed_before_commit":
+        # The loser ended last, so its whole exit is the turn's.
+        assert record["outcome"] == ("no_candidate" if loser_exit == "no_candidate" else "failed_terminal")
+        assert (record["model_supply_state"] is not None) is (loser_exit == "no_candidate")
+    else:
+        assert record["outcome"] == peer_result
+        assert record["terminal_error"] is None
+        assert record["model_supply_state"] is None
 
 
 def test_an_unclaimed_request_leaves_no_attempt_on_the_live_turn(

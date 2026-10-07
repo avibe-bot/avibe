@@ -613,7 +613,7 @@ export type TurnProvenance = {
   agent: AgentBackend;
   requested_model_id: string;
   outcome: 'served' | 'exhausted' | 'failed_terminal' | 'no_candidate' | 'canceled';
-  failed_attempts: Array<RecordedAttempt & { reason: ResolutionReason; http_status?: number | null }>;
+  failed_attempts: Array<RecordedAttempt & { reason: ResolutionReason; http_status?: number | null; upstream_detail?: string }>;
   served: RecordedAttempt | null;
   canceled_attempt: RecordedAttempt | null;
   terminal_error: {
@@ -624,6 +624,7 @@ export type TurnProvenance = {
     stream_started: boolean;
     http_status?: number | null;
     upstream_error_code?: string | null;
+    upstream_detail?: string;
     local_error_detail?: string;
     stripped_reasoning_efforts?: string[];
     declared_reasoning_efforts?: string[];
@@ -721,8 +722,11 @@ export type OAuthFlow = {
   channel: SupplyChannel;
   state: OAuthFlowState;
   presentation: OAuthPresentation;
-  /** i18n key; raw upstream errors never surface. */
+  /** Closed i18n key for the user-facing sentence. */
   error_key?: string | null;
+  /** A failed flow's own reason (provider, engine, or CLI), verbatim on one
+   *  bounded line; shown behind the copyable details control. */
+  error_detail?: string;
   expires_at?: string | null;
 };
 

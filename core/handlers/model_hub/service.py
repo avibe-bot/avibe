@@ -135,6 +135,7 @@ from .provenance import (
     ENGINE_DOWN_TURN_OUTCOME,
     ExactHopBlocker,
     TurnOutcomeProjectionInput,
+    TurnUpstreamFailure,
     exact_hop_blockers,
     no_candidate_decision,
     produce_turn_outcome,
@@ -909,6 +910,8 @@ def _oauth_payload(
     }
     if client_nonce is not None:
         payload["client_nonce"] = client_nonce
+    if flow.state == "failed" and flow.error_detail:
+        payload["error_detail"] = flow.error_detail
     return payload
 
 
@@ -1261,8 +1264,16 @@ class ModelHubService:
                 status=409,
                 detail="modelHub.errors.native_login_in_progress",
             ) from None
-        except OAuthSubmissionRejectedError:
-            raise ModelHubError("submission_rejected", status=422) from None
+        except OAuthSubmissionRejectedError as error:
+            raise ModelHubError(
+                "submission_rejected",
+                status=422,
+                detail=(
+                    "modelHub.errors.submission_rejected_other_attempt"
+                    if error.reason == "other_attempt"
+                    else None
+                ),
+            ) from None
         except ModelHubError:
             raise
         except Exception as error:
@@ -7559,24 +7570,42 @@ class ModelHubService:
             backend=backend,
             model_id=model_id,
         )
+        source_label = next(
+            (source.display_name for source in config.sources if source.id == source_id), source_id,
+        )
         return produce_turn_outcome(
             "turn.streamed_fallback",
             config=config,
             resolution=resolution,
             attempted_hop=(source_id, source_model_id),
             source_transition_persisted=source_transition_persisted,
+            last_upstream_failure=self._upstream_failure(source_label, outcome),
         )
+
+    @staticmethod
+    def _upstream_failure(source_label: str, outcome: RawCallOutcome) -> TurnUpstreamFailure | None:
+        if not outcome.upstream_detail:
+            return None
+        if outcome.kind in {RawOutcomeKind.NETWORK_ERROR, RawOutcomeKind.TIMEOUT}:
+            # The engine's own connection diagnostic: no upstream answered.
+            return TurnUpstreamFailure(source=source_label, http_status=None, detail=outcome.upstream_detail)
+        status = outcome.http_status
+        if type(status) is not int or not 100 <= status <= 599:
+            return None
+        return TurnUpstreamFailure(source=source_label, http_status=status, detail=outcome.upstream_detail)
 
     @staticmethod
     def _produce_no_candidate_terminal_outcome(
         *,
         config: ModelHubConfig,
         resolution: ModelHubTurnResolution,
+        last_upstream_failure: TurnUpstreamFailure | None = None,
     ) -> TurnOutcomeProjectionInput:
         return produce_turn_outcome(
             no_candidate_decision(config, resolution),
             config=config,
             resolution=resolution,
+            last_upstream_failure=last_upstream_failure,
         )
 
     @staticmethod
@@ -7584,11 +7613,13 @@ class ModelHubService:
         *,
         config: ModelHubConfig,
         resolution: ModelHubTurnResolution,
+        last_upstream_failure: TurnUpstreamFailure | None = None,
     ) -> TurnOutcomeProjectionInput:
         return produce_turn_outcome(
             "turn.exhausted",
             config=config,
             resolution=resolution,
+            last_upstream_failure=last_upstream_failure,
         )
 
     @staticmethod
@@ -8161,9 +8192,18 @@ class ModelHubService:
                     backend=cast(BackendName, backend),
                     model_id=model_id,
                 )
-            turn_outcome = self._produce_no_candidate_terminal_outcome(
+            # A request that attempted in an earlier walk exhausted those attempts.
+            attempted = recovery_request is not None and recovery_request.attempt_count > 0
+            turn_outcome = (
+                self._produce_exhausted_terminal_outcome
+                if attempted
+                else self._produce_no_candidate_terminal_outcome
+            )(
                 config=projection_config,
                 resolution=projection_resolution,
+                last_upstream_failure=(
+                    recovery_request.last_upstream_failure if recovery_request is not None else None
+                ),
             )
             facts = turn_outcome.supply_facts
             if facts is None:
@@ -8180,8 +8220,12 @@ class ModelHubService:
 
         failed_source: Optional[ModelHubSourceConfig] = None
         failed_reason: Optional[EventReason] = None
+        last_upstream_failure = (
+            recovery_request.last_upstream_failure if recovery_request is not None else None
+        )
         window_closed = False
         non_retryable_failure = False
+        attempted = False
         globally_blocked_source_ids: set[str] = set()
         while True:
             async with self._mutation_lock:
@@ -8226,7 +8270,8 @@ class ModelHubService:
             settlement_generation = None
 
             def admitted(generation: int) -> None:
-                nonlocal settlement_generation
+                nonlocal attempted, settlement_generation
+                attempted = True
                 settlement_generation = generation
                 if recovery_request is not None:
                     recovery_request.attempt_count += 1
@@ -8434,6 +8479,13 @@ class ModelHubService:
                 if recovery_request is not None and decision.reason in RETRY_DELAYS:
                     recovery_request.start()
                     recovery_request.reason = decision.reason
+                elif recovery_request is not None:
+                    recovery_request.non_retryable_failure = True
+                # The newest refusal wins even without text: an older message
+                # would name a response that did not end this request.
+                last_upstream_failure = self._upstream_failure(source.display_name, outcome)
+                if recovery_request is not None:
+                    recovery_request.last_upstream_failure = last_upstream_failure
                 event_reason, _persisted = await self._settle_fallback_source(
                     source,
                     decision,
@@ -8456,9 +8508,19 @@ class ModelHubService:
             backend=cast(BackendName, backend),
             model_id=model_id,
         )
-        turn_outcome = self._produce_exhausted_terminal_outcome(
+        # A request that admitted nothing in any walk (another waiter held the
+        # half-open slot, or the window closed first) found every hop blocked;
+        # it exhausted no attempt of its own.
+        attempted = attempted or (recovery_request is not None and recovery_request.attempt_count > 0)
+        produce_outcome = (
+            self._produce_exhausted_terminal_outcome
+            if attempted
+            else self._produce_no_candidate_terminal_outcome
+        )
+        turn_outcome = produce_outcome(
             config=final_config,
             resolution=final_resolution,
+            last_upstream_failure=last_upstream_failure,
         )
         final_facts = turn_outcome.supply_facts
         if final_facts is None:
@@ -8491,6 +8553,7 @@ class ModelHubService:
             # Explicit opt-out for single-walk probes and characterization tests.
             return await self.resolve(**kwargs)
         pending = RecoveryRequest(self.recovery, observer=recovery_observer)
+        supply_channel = kwargs.get("supply_channel")
         try:
             while True:
                 try:
@@ -8500,7 +8563,7 @@ class ModelHubService:
                     if (
                         projection is None or projection.outcome not in {"no_candidate", "exhausted"}
                         or projection.supply_facts is None
-                        or projection.supply_facts.supply_state != "waiting"
+                        or pending.non_retryable_failure
                     ):
                         raise
                     pending.start()
@@ -8508,11 +8571,15 @@ class ModelHubService:
                         raise self._recovery_exhausted(exc) from exc
                     config = self.store.load()
                     resolution = self._invocation_resolution(
-                        config, kwargs["backend"], kwargs["model_id"], kwargs.get("supply_channel"),
+                        config, kwargs["backend"], kwargs["model_id"], supply_channel,
                     )
                     if resolution.candidate_hops:
                         continue
-                    if resolution.supply_status != "waiting":
+                    # An action already owed elsewhere in the chain keeps it
+                    # `interrupted` for display, but must not end this request
+                    # while another hop may still heal.
+                    waitable = resolution.self_healing_hops(supply_channel)
+                    if not waitable:
                         raise
                     annotations = self.recovery.annotations(config)
                     waits = [
@@ -8520,17 +8587,17 @@ class ModelHubService:
                             max(0.0, (parse_model_hub_timestamp(hop.retry_at) - self.now()).total_seconds()),
                             hop,
                         )
-                        for hop in resolution.inspected_hops
-                        if hop.temporary_blocker and hop.recovery != "in_flight" and hop.retry_at
+                        for hop in waitable
+                        if hop.recovery != "in_flight" and hop.retry_at
                     ]
                     selected = min(waits, key=lambda item: item[0]) if waits else None
                     delay = selected[0] if selected is not None else pending.remaining
                     if delay >= pending.remaining:
                         # Another admitted owner can still wake this request early.
-                        if not any(hop.recovery == "in_flight" for hop in resolution.inspected_hops):
+                        if not any(hop.recovery == "in_flight" for hop in waitable):
                             raise self._recovery_exhausted(exc) from exc
                         delay = pending.remaining
-                    hop = selected[1] if selected is not None else resolution.inspected_hops[0]
+                    hop = selected[1] if selected is not None else waitable[0]
                     pending.source_id = hop.source_id
                     annotation = annotations.get(hop.source_id)
                     pending.reason = annotation.reason if annotation else pending.reason

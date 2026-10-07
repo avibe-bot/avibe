@@ -252,3 +252,13 @@ scenarios:
       - tests/test_opencode_generations.py::test_adoption_leaves_every_record_of_another_desktop_runtime_alone
       - tests/test_opencode_restore_polls.py::test_restore_leaves_every_poll_whose_run_another_desktop_runtimes_live_server_executes
       - tests/test_opencode_generations.py::test_a_malformed_record_never_disables_opencode
+  - id: RUNTIME-GEN-026
+    name: A clock step never makes a live OpenCode server this controller started look exited or foreign; its process handle, never the start time the platform reports, decides whether it runs, both for each turn and when the service shuts down
+    status: covered
+    kind: recovery
+    layer: unit
+    backend: opencode
+    test: tests/test_opencode_generations.py::test_runtime_gen_026_a_generation_this_controller_started_is_alive_while_its_handle_says_so
+    related_tests:
+      - tests/test_opencode_generations.py::test_runtime_gen_026_service_shutdown_stops_its_own_recorded_server_after_a_clock_step
+      - tests/test_opencode_generations.py::test_service_shutdown_stops_a_started_process_whose_record_was_never_written

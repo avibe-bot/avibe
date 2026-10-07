@@ -1373,7 +1373,7 @@ def start_runtime(monkeypatch):
     monkeypatch.setattr(runtime.psutil, "Process", fake_process)
     monkeypatch.setattr(runtime, "_pid_mismatches_service", lambda pid: False)
     monkeypatch.setattr(runtime, "_pid_matches_ui_server", lambda pid: True)
-    monkeypatch.setattr(runtime, "_ui_server_compatible", lambda host, port: True)
+    monkeypatch.setattr(runtime, "ui_server_compatible", lambda host, port: True)
     monkeypatch.setattr(runtime, "service_pid_recorded", lambda pid: True)
     monkeypatch.setattr(runtime, "wait_for_service_ready", lambda pid, timeout: pid)
     monkeypatch.setattr(runtime, "service_instance_lock_available", lambda: (True, None))
@@ -1624,7 +1624,7 @@ def test_cmd_start_reuses_independent_ui_or_recovers_only_unhealthy_ui(monkeypat
     monkeypatch.setattr(runtime, "ui_server_healthy", lambda *args: ui_state == "healthy")
     # This tree adopts a UI through its identity-checked readiness probe; stub it
     # like the health probe so no real loopback listener is consulted.
-    monkeypatch.setattr(runtime, "_ui_server_compatible", lambda *args, **kwargs: ui_state == "healthy")
+    monkeypatch.setattr(runtime, "ui_server_compatible", lambda *args, **kwargs: ui_state == "healthy")
     monkeypatch.setattr(runtime, "process_create_time", lambda pid: 1789010100.0 + pid)
     monkeypatch.setattr(runtime, "wait_for_ui_server", lambda *args: True)
     monkeypatch.setattr(runtime, "current_service_launcher", lambda: SimpleNamespace(python="test-owned-python"))
@@ -4521,7 +4521,7 @@ def test_start_ui_reuses_existing_live_pid(tmp_path, monkeypatch):
     monkeypatch.setattr(runtime, "pid_alive", lambda pid: pid == 12345)
     monkeypatch.setattr(
         runtime,
-        "_ui_server_compatible",
+        "ui_server_compatible",
         lambda host, port: host == "127.0.0.1" and port == 5123,
     )
     monkeypatch.setattr(
@@ -4574,10 +4574,10 @@ def test_start_ui_replaces_stale_live_pid_when_health_check_fails(tmp_path, monk
     stopped = []
 
     monkeypatch.setattr(runtime, "pid_alive", lambda pid: pid == 12345)
-    # Adoption is decided by `_ui_server_compatible`, which probes the real
+    # Adoption is decided by `ui_server_compatible`, which probes the real
     # listener. Stubbing only `ui_server_healthy` let this test reach whatever
     # answers on 127.0.0.1:5123 -- a developer's own running UI -- and adopt it.
-    monkeypatch.setattr(runtime, "_ui_server_compatible", lambda host, port: False)
+    monkeypatch.setattr(runtime, "ui_server_compatible", lambda host, port: False)
     monkeypatch.setattr(
         runtime,
         "get_process_command",

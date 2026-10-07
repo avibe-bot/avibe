@@ -710,6 +710,19 @@ start the model-output stream.
 | `network_failure.shaped_after_first_byte` | explicit closed code/classification arrives only after model output began | `stream_started: true`; after first user-visible model output | apply that existing non-permanent family and its unchanged recovery rule | none | terminal, no replay; emit only the existing redacted event |
 | `network_failure.transport_after_first_byte` | stream interrupted without explicit code | `stream_started: true`; after first user-visible model output | none; the successful connection/authentication/output evidence wins | none | terminal, no replay; emit only the existing redacted `network` event |
 
+The engine answers its own failed upstream connection or read, before any upstream
+response, with one of exactly two JSON error bodies, both produced by the pinned
+engine's error writers: the Anthropic form
+`{"type":"error","error":{"type":"api_error","message":M}}` and the OpenAI form
+`{"error":{"type":"server_error","code":"internal_server_error","message":M}}`. The
+engine always sets that `code` for a 5xx in the OpenAI form; no code-less form exists.
+When `M` is the transport error text, such as `dial tcp ...: i/o timeout` or
+`read tcp ...: operation timed out`, that exact body is the engine's label, not an
+upstream verdict, so the engine client projects it to
+`network_failure.transport_before_first_byte`. An upstream that answered adds or
+omits fields (for example a request id, a specific code, or no code), so any other
+body, a 4xx, and any streamed error event keep their own classification.
+
 Connection backoff is live execution state, never Source/configuration state. For the
 same Source, consecutive `transport_before_first_byte` decisions use delays
 `1, 2, 4, 8, 16, 30, 30, ...` seconds. While the deadline is future, it overlays only
@@ -779,17 +792,21 @@ probe scheduler or prompt/Turn/Source blackout deduplication.
 Each pending model HTTP request has one 120-second automatic admission window,
 starting at its first retryable failure or temporarily blocked admission. Fallback
 passes and Source changes never reset it. The service re-reads the effective route
-after waits and immediately tries a runnable fallback. It waits only for
-all-temporary supply; empty routes and mixed action/process/capability blockers
-retain their existing terminal rules. If the next eligibility time is outside
+after waits and immediately tries a runnable fallback. It waits while any hop of the
+effective chain may heal unattended: an effective cooldown, live connection backoff,
+or half-open ownership. A hop that already owes user action keeps the chain
+`interrupted` for display and stays in its terminal blockers, but does not end the
+wait for another hop. An empty route, a chain with no such hop, or a non-retryable
+failure this request itself observed keeps its existing terminal rule. Runtime
+preflight launches on the same predicate. If the next eligibility time is outside
 the remaining window, it ends immediately; an in-flight owner may instead wake
-waiters before their window closes. Window expiry prevents another admission,
-never cancels an already connected slow inference, and never permits replay
-after output. Explicit Stop and downstream disconnection retain cancellation.
-An expired admission remains the explicit exhausted-recovery domain result even
-if another owner recovers or a route changes before this waiter resumes or
-finishes engine preparation. An actual admitted request's permanent, request,
-engine, or post-output failure retains its own terminal classification.
+waiters before their window closes. Window expiry prevents another admission, never
+cancels an already connected slow inference, and never permits replay after output.
+Explicit Stop and downstream disconnection retain cancellation. An expired admission
+remains the explicit exhausted-recovery domain result even if another owner recovers
+or a route changes before this waiter resumes or finishes engine preparation. An
+actual admitted request's permanent, request, engine, or post-output failure retains
+its own terminal classification.
 
 Consecutive failed HTTP attempts on the same Hub Source identity use:
 
@@ -814,18 +831,20 @@ timer-generated `recover` events. Unclassified native connection failures remain
 non-persistent and do not create a Hub backoff.
 
 An eligible affected Source admits one real request as half-open owner across
-waiting Sessions. Ownership and stale settlement fencing reuse the existing
-attempt-start generation. Cancellation releases that owner only after transport
-cleanup; old generations and replaced endpoint/credential identities cannot clear
-or extend the new identity's state. A valid recovery clears the streak and emits
-one `recover`; mere timer expiry emits none. Live reads expose optional
-`recovery: eligible | in_flight` on AgentChain hops. `in_flight` is not runnable;
-with no stronger blocker it is temporary `waiting`, with nullable `retry_at`.
-The same annotation feeds service, runtime launch, API chain and AgentSupply reads.
-If the adapter returns a completed local failure without transport admission,
-release the provisional half-open claim on that normal return as well as on
-exception or cancellation. Do not synthesize `on_admitted`, attempt observations
-or retry counts for a request the engine never owned.
+waiting Sessions. A waiter whose walk admits no attempt of its own ends as
+`turn.no_candidate.blocked`, never as a gateway protocol error. Ownership and stale
+settlement fencing reuse the existing attempt-start generation. Cancellation
+releases that owner only after transport cleanup; old generations and replaced
+endpoint/credential identities cannot clear or extend the new identity's state. A
+valid recovery clears the streak and emits one `recover`; mere timer expiry emits
+none. Live reads expose optional `recovery: eligible | in_flight` on AgentChain
+hops. `in_flight` is not runnable; with no stronger blocker it is temporary
+`waiting`, with nullable `retry_at`. The same annotation feeds service, runtime
+launch, API chain and AgentSupply reads. If the adapter returns a completed local
+failure without transport admission, release the provisional half-open claim on that
+normal return as well as on exception or cancellation. Do not synthesize
+`on_admitted`, attempt observations or retry counts for a request the engine never
+owned.
 
 Temporary cooldown persistence and recovery bookkeeping are observational.
 A failed write cannot destroy valid output or replace the actual upstream
@@ -1108,15 +1127,18 @@ the probe's typed `supply` sibling, the turn record's `model_supply_state` — a
 rollup stays what its name says. One taxonomy, two grains, and only one definition of
 「稍等即可」 vs 「需处理」 at each.
 
-The predicate itself is stated **once, here**, and every contract that carries either
-grain points back at this table rather than restating it: `interrupted` when the chain
-is empty **or at least one blocker needs the user**, `waiting` only when every blocker
-is an effective cooldown, live connection backoff, or half-open ownership. The asymmetry is deliberate and
-load-bearing — `interrupted` is the
+The predicate itself is stated **once, here**, and every contract that carries
+either grain points back at this table rather than restating it: `interrupted` when
+the chain is empty **or at least one blocker needs the user**, `waiting` only when
+every blocker is an effective cooldown, live connection backoff, or half-open
+ownership. The asymmetry is deliberate and load-bearing — `interrupted` is the
 OR-branch, `waiting` the AND-branch, so a chain holding one cooling source and one
-revoked key is `interrupted`. Reading it as "every member needs the user" leaves that
-mixed chain matching neither value and, worse, hides the action the user is owed for
-the revoked key behind the fact that something else in the chain is merely cooling.
+revoked key is `interrupted`. This answers what the user owes, not whether a pending
+request may wait: recovery admission (§ bounded automatic recovery) waits for that
+cooling source while the chain still reads `interrupted`. Reading it as "every
+member needs the user" leaves that mixed chain matching neither value and, worse,
+hides the action the user is owed for the revoked key behind the fact that something
+else in the chain is merely cooling.
 
 **Surfacing tiers** (the colleague test: ask for action only when action is owed):
 
@@ -1273,9 +1295,20 @@ checked mechanically against both `vibe/i18n` locale files. A new outcome, discr
 or supply message ships as one new matrix row plus its enum/key/mirror fixtures; none may
 land as standalone prose.
 
-`upstream_detail` is display-only reply text. It is never read by classification,
-never written to resolution events, probes, or persisted provenance, and lives only on
-the in-memory turn projection that renders this turn's reply.
+`upstream_detail` is display-only text. It is never read by classification and
+never written to resolution events or probes. Owner decision (2026-10-07): an upstream
+refusal that only says "server error" cannot be diagnosed, so persisted provenance keeps
+it per attempt (`failed_attempts[].upstream_detail`, `terminal_error.upstream_detail`),
+each failed Hub attempt logs it once, and the `turn.exhausted`,
+`turn.no_candidate.blocked`, and `turn.streamed_fallback` rows append the last
+fallback-class failure of the pending request to their summary copy. An upstream
+refusal renders `modelHub.launch.last_upstream_failure` (Source, HTTP status, text).
+The engine's own transport envelope (`network_failure.transport_before_first_byte`)
+carries no upstream status and renders `modelHub.launch.last_connection_failure`
+(Source, text), and Failure details labels that text as a connection error, never as
+what the upstream said. The text is the same projection in every place:
+credential-redacted, C0/C1 and Unicode Bidi_Control characters removed,
+whitespace-collapsed, and bounded to 400 characters.
 
 For `turn.engine_down`, an optional `local_error_detail` carries the numeric OS
 errno and its system message, such as `[Errno 28] No space left on device`.

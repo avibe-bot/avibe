@@ -269,6 +269,69 @@ def test_workbench_side_actions_have_fail_closed_core_message_kinds(
     )
 
 
+def test_quick_reply_choice_publishes_the_answered_row_after_it_commits(
+    isolated_state,
+    tmp_path,
+):
+    """Scenario: other windows (another tab, the desktop pet) learn that a
+    quick-reply group was answered from one ``message.updated`` event that is
+    published only after the choice is persisted, and only once."""
+    from vibe.ui_server import app
+
+    scope_id, session_id = _make_session(tmp_path)
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        agent_row = messages_service.append(
+            conn,
+            scope_id=scope_id,
+            session_id=session_id,
+            platform="avibe",
+            author="agent",
+            source="agent",
+            message_type="result",
+            text="Pick one",
+            content={"kind": "result", "quick_replies": ["Yes", "No"]},
+        )
+
+    published: list[tuple[str, dict, str | None]] = []
+
+    def record(event_type: str, data: Any) -> None:
+        # Read the committed row at publish time: the event must never
+        # precede the write it announces.
+        with engine.connect() as conn:
+            persisted = messages_service.get_quick_reply_chosen(
+                conn, session_id, agent_row["id"],
+            )
+        published.append((event_type, data, persisted))
+
+    client = app.test_client()
+    headers = csrf_headers(client)
+    with patch("vibe.internal_client.dispatch_async", _accepted_dispatch(session_id)), \
+            patch("vibe.sse_broker.broker.publish", side_effect=record):
+        first = client.post(
+            f"/api/sessions/{session_id}/messages",
+            json={"text": "Yes", "metadata": {"quick_reply_for": agent_row["id"]}},
+            headers=headers,
+        )
+        updates_after_first = [event for event in published if event[0] == "message.updated"]
+        second = client.post(
+            f"/api/sessions/{session_id}/messages",
+            json={"text": "No", "metadata": {"quick_reply_for": agent_row["id"]}},
+            headers=headers,
+        )
+
+    assert first.status_code == 201
+    assert second.get_json() == {"already_answered": True}
+    assert len(updates_after_first) == 1
+    _, data, persisted = updates_after_first[0]
+    assert data["id"] == agent_row["id"]
+    assert data["session_id"] == session_id
+    assert data["content"]["quick_reply_chosen"] == "Yes"
+    assert persisted == "Yes"
+    # Set-once: the second click records nothing new, so it publishes no update.
+    assert [event for event in published if event[0] == "message.updated"] == updates_after_first
+
+
 def test_workbench_text_uses_authenticated_author_and_core_message_kind(
     isolated_state,
     tmp_path,

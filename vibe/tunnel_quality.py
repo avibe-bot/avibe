@@ -268,6 +268,24 @@ def request_path_needs_recovery(
     return request_path_is_degraded(request_path)
 
 
+def route_unavailable(snapshot: dict[str, Any]) -> bool:
+    """Whether the active route serves no traffic.
+
+    cloudflared can keep reporting ready connections after its transport has
+    silently died, so a high-confidence window with no successful public probe
+    is treated as an outage alongside zero ready connections.
+    """
+
+    if int(snapshot.get("ha_connections") or 0) == 0:
+        return True
+    request_path = snapshot.get("request_path")
+    return (
+        isinstance(request_path, dict)
+        and request_path.get("confidence") == "high"
+        and request_path.get("status") == "unavailable"
+    )
+
+
 def request_path_has_usable_latency(request_path: dict[str, Any] | None) -> bool:
     if not request_path or request_path.get("confidence") == "low":
         return False
@@ -682,7 +700,7 @@ class QualityEvaluator:
             return None
         if state not in {"healthy", "degraded"}:
             return None
-        if int(current.get("ha_connections") or 0) < 4:
+        if int(current.get("ha_connections") or 0) < 4 or route_unavailable(current):
             return "availability"
         if float(current.get("request_errors_per_minute") or 0) >= 3 or float(current.get("packet_loss_per_minute") or 0) >= 10:
             return "errors"
