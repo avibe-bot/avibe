@@ -291,28 +291,22 @@ export const SelectionQuoteToolbar: React.FC<{
     if (!releasedInside) {
       return;
     }
-    activatedAtRef.current = performance.now();
+    activatedAtRef.current = e.timeStamp;
     run();
   };
   const handleKeyDown = (e: React.KeyboardEvent, run: () => void) => {
     if (e.key === 'Enter' || e.key === ' ') {
       e.preventDefault();
-      activatedAtRef.current = performance.now();
+      activatedAtRef.current = e.timeStamp;
       run();
     }
   };
   // Assistive technology (VoiceOver, TalkBack, switch access) activates a button
   // with a click alone; a pointer or key activation is followed by one as well.
-  const handleClick = (run: () => void) => {
-    if (performance.now() - activatedAtRef.current < CLICK_AFTER_ACTIVATION_MS) return;
+  const handleClick = (e: React.MouseEvent, run: () => void) => {
+    if (e.timeStamp - activatedAtRef.current < CLICK_AFTER_ACTIVATION_MS) return;
     run();
   };
-  const activation = (run: () => void) => ({
-    onPointerDown: handlePointerDown,
-    onPointerUp: (e: React.PointerEvent<HTMLButtonElement>) => handlePointerUp(e, run),
-    onKeyDown: (e: React.KeyboardEvent) => handleKeyDown(e, run),
-    onClick: () => handleClick(run),
-  });
 
   const toolbarHeight = height || TOOLBAR_H;
   const placementGap = isTouch ? SELECTION_HANDLE_GAP : GAP;
@@ -398,7 +392,10 @@ export const SelectionQuoteToolbar: React.FC<{
         <Button
           variant="ghost"
           className={itemClass}
-          {...activation(runQuote)}
+          onPointerDown={handlePointerDown}
+          onPointerUp={(e) => handlePointerUp(e, runQuote)}
+          onKeyDown={(e) => handleKeyDown(e, runQuote)}
+          onClick={(e) => handleClick(e, runQuote)}
         >
           <TextQuote className="size-3.5 text-muted" />
           {t('chat.selection.quote')}
@@ -410,7 +407,10 @@ export const SelectionQuoteToolbar: React.FC<{
           <Button
             variant="ghost"
             className={itemClass}
-            {...activation(runAsk)}
+            onPointerDown={handlePointerDown}
+            onPointerUp={(e) => handlePointerUp(e, runAsk)}
+            onKeyDown={(e) => handleKeyDown(e, runAsk)}
+            onClick={(e) => handleClick(e, runAsk)}
           >
             <GitFork className="size-3.5 text-muted" />
             {t('chat.selection.askInNew')}
@@ -421,7 +421,10 @@ export const SelectionQuoteToolbar: React.FC<{
       <Button
         variant="ghost"
         className={itemClass}
-        {...activation(runCopy)}
+        onPointerDown={handlePointerDown}
+        onPointerUp={(e) => handlePointerUp(e, runCopy)}
+        onKeyDown={(e) => handleKeyDown(e, runCopy)}
+        onClick={(e) => handleClick(e, runCopy)}
       >
         {copied ? <Check className="size-3.5 text-mint-ink" /> : <Copy className="size-3.5 text-muted" />}
         {t('chat.selection.copy')}
@@ -432,7 +435,10 @@ export const SelectionQuoteToolbar: React.FC<{
           <Button
             variant="ghost"
             className={itemClass}
-            {...activation(runSelectAll)}
+            onPointerDown={handlePointerDown}
+            onPointerUp={(e) => handlePointerUp(e, runSelectAll)}
+            onKeyDown={(e) => handleKeyDown(e, runSelectAll)}
+            onClick={(e) => handleClick(e, runSelectAll)}
           >
             <TextSelect className="size-3.5 text-muted" />
             {t('chat.selection.selectAll')}
