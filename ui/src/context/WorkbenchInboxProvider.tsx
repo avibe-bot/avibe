@@ -455,13 +455,16 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
       // With handleError off, a 4xx/5xx resolves with the error body rather
       // than throwing; only the endpoint's success shape is an applied write.
       const applied = typeof result?.updated === 'number' || Boolean(result?.unread_by_session);
-      // A later write or read-changing event for this session (including a
-      // second mark-read issued while this one was in flight) supersedes it.
+      // A later *started* write for this session (a second mark-read, or a
+      // read-changing event) supersedes this one. Completing an older write
+      // first must not fence a newer write that started after it: both share
+      // the same mutation epoch until one of them commits.
+      const laterMarkStarted = (readOwnershipRef.current.latestGeneration(`inbox-mark-read:${sessionId}`) ?? 0) > operation.generation;
       if (
         !applied
+        || laterMarkStarted
         || !readOwnershipRef.current.isMutationCurrent(operation, [
           `inbox-session:${sessionId}`,
-          `inbox-unread-session:${sessionId}`,
         ])
       ) {
         return applied;

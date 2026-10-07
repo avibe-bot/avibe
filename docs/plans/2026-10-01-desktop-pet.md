@@ -701,9 +701,12 @@ The code and its tests are the contract; this section records why.
   draft, hides quick replies, closes input for that session and offers "Open
   in Avibe"; opening the session there is how the user finds out, and lifts it.
   Each session keeps its own lock, so inspecting B does not reopen A.
+  The lock lifts only after `pet_open` succeeds; a failed open leaves it.
 - **The panel opens after the shell grows the frame.** Closing hides it at
   once; opening waits for `pet_set_expanded` to succeed, so replies are never
-  marked read while still clipped. A failed expand never mounts the panel.
+  marked read while still clipped. A failed request restores the last
+  confirmed expansion, so a redundant expand of an already-open panel cannot
+  hide it.
 - **Read-marking waits for a tail snapshot.** Live rows that arrive before the
   first tail read lands say nothing about older unread rows, so the pet treats
   the tail as having older rows until a read has landed. A live row or unread

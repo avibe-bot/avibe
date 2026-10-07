@@ -137,6 +137,10 @@ const PetSurface: React.FC = () => {
   // applies, and a toggle acts on the latest request, not on the frame.
   const layoutRequestRef = useRef(0);
   const wantExpandedRef = useRef(false);
+  // The last expansion the native frame confirmed. A later request that
+  // rejects restores this, not `!next`: a redundant expand of an already
+  // open panel must not hide it.
+  const confirmedExpandedRef = useRef(false);
   const setPanel = useCallback(async (next: boolean) => {
     wantExpandedRef.current = next;
     const request = ++layoutRequestRef.current;
@@ -144,15 +148,16 @@ const PetSurface: React.FC = () => {
     try {
       const applied = await petBridge.setExpanded(next);
       if (request !== layoutRequestRef.current) return;
+      confirmedExpandedRef.current = next;
       setLayout(applied);
       setExpanded(next);
     } catch {
-      // The shell kept its current frame, so the page follows it: a panel in a
-      // collapsed frame would be clipped, and a collapsed pet in an expanded
-      // frame would leave a transparent area catching clicks.
+      // The native frame did not change. Restore what it last confirmed, so a
+      // failed expand of an already-open panel stays open, and a failed
+      // collapse of a closed one stays closed.
       if (request !== layoutRequestRef.current) return;
-      wantExpandedRef.current = !next;
-      setExpanded(!next);
+      wantExpandedRef.current = confirmedExpandedRef.current;
+      setExpanded(confirmedExpandedRef.current);
     }
   }, []);
 
@@ -318,10 +323,14 @@ const PetSurface: React.FC = () => {
       uncertain={uncertain}
       onInspect={() => {
         // Looking at the conversation resolves the doubt: the user sees whether
-        // the message went through before deciding to send again.
+        // the message went through before deciding to send again. Only a
+        // successful open counts as looking; a failed one must not unlock send.
         if (!binding) return;
-        setUncertain(binding, false);
-        void petBridge.open(sessionLink(binding));
+        const sessionId = binding;
+        void petBridge.open(sessionLink(sessionId)).then(
+          () => setUncertain(sessionId, false),
+          () => undefined,
+        );
       }}
       inputRef={inputRef}
     />

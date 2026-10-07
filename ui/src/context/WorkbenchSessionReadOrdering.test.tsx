@@ -1093,6 +1093,28 @@ describe('Workbench session read ownership', () => {
     return holder;
   };
 
+  it('lets a newer mark-read for the same session land after an older one that finished first', async () => {
+    const older = deferred({ unread_by_session: {} as Record<string, number> });
+    const newer = deferred({ unread_by_session: {} as Record<string, number> });
+    const holder = await renderInboxWithMarks([older.promise, newer.promise]);
+
+    act(() => {
+      void holder.inbox?.markRead(session.id, 'msg_1');
+      void holder.inbox?.markRead(session.id, 'msg_2');
+    });
+    await act(async () => {
+      older.resolve({ unread_by_session: { [session.id]: 1, [sessionB.id]: 5 } });
+      await older.promise;
+    });
+    await act(async () => {
+      newer.resolve({ unread_by_session: { [sessionB.id]: 2 } });
+      await newer.promise;
+    });
+    await settle();
+
+    expect(holder.inbox?.unreadBySession).toEqual({ [sessionB.id]: 2 });
+  });
+
   it('does not let an older mark-read for the same session land over a newer one', async () => {
     const older = deferred({ unread_by_session: {} as Record<string, number> });
     const newer = deferred({ unread_by_session: {} as Record<string, number> });

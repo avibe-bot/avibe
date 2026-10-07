@@ -975,6 +975,31 @@ describe('PetPage async closure', () => {
 describe('PetPage live convergence', () => {
   const settle = () => act(async () => new Promise((resolve) => setTimeout(resolve, 20)));
 
+  it('keeps the send lock when opening the conversation fails', async () => {
+    api.sendSessionMessage.mockRejectedValueOnce(new ApiError('dispatch pending', 504, null));
+    const invoke = vi.fn((command: string) => {
+      if (command === 'pet_ready') return Promise.resolve({ binding: 'S', revision: 1, summon_pending: null });
+      if (command === 'pet_set_expanded') return Promise.resolve({ panel_side: 'left', panel_edge: 'bottom' });
+      if (command === 'pet_open') return Promise.reject(new Error('main window gone'));
+      return Promise.resolve(null);
+    });
+    Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { value: true, configurable: true });
+    Object.defineProperty(window, '__TAURI_INTERNALS__', { value: { invoke }, configurable: true });
+    tails.S = [message('u', 'S', { author: 'user', type: 'user' })];
+    render(<PetPage />);
+    summon('listen');
+    const input = await screen.findByLabelText('pet.inputPlaceholder') as HTMLTextAreaElement;
+    await settle();
+    await userEvent.type(input, 'to S{Enter}');
+    expect(await screen.findByText('newSession.sendUncertain')).toBeTruthy();
+    const notice = screen.getByRole('status');
+    await userEvent.click(within(notice).getByRole('button', { name: 'pet.openInAvibe' }));
+    await settle();
+    expect(screen.getByText('newSession.sendUncertain')).toBeTruthy();
+    await userEvent.type(input, '{Enter}');
+    expect(api.sendSessionMessage).toHaveBeenCalledTimes(1);
+  });
+
   it('keeps each session closed after its own uncertain send', async () => {
     api.sendSessionMessage
       .mockRejectedValueOnce(new ApiError('dispatch pending', 504, null))
@@ -999,6 +1024,34 @@ describe('PetPage live convergence', () => {
     expect(screen.getByText('newSession.sendUncertain')).toBeTruthy();
     await userEvent.type(input, 'again{Enter}');
     expect(api.sendSessionMessage).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps an already-open panel when a later expand request fails', async () => {
+    const first = deferred<unknown>();
+    const second = deferred<unknown>();
+    let expands = 0;
+    const invoke = vi.fn((command: string) => {
+      if (command === 'pet_ready') return Promise.resolve({ binding: 'S', revision: 1, summon_pending: null });
+      if (command === 'pet_set_expanded') {
+        expands += 1;
+        return expands === 1 ? first.promise : second.promise;
+      }
+      return Promise.resolve(null);
+    });
+    Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { value: true, configurable: true });
+    Object.defineProperty(window, '__TAURI_INTERNALS__', { value: { invoke }, configurable: true });
+    tails.S = [message('u', 'S', { author: 'user', type: 'user' })];
+    render(<PetPage />);
+    summon('show');
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('pet_set_expanded', { expanded: true }));
+    await act(async () => first.resolve({ panel_side: 'left', panel_edge: 'bottom' }));
+    await screen.findByLabelText('pet.panel');
+
+    summon('show');
+    await waitFor(() => expect(invoke.mock.calls.filter(([c]) => c === 'pet_set_expanded')).toHaveLength(2));
+    await act(async () => second.reject(new Error('already expanded')));
+    await settle();
+    expect(screen.getByLabelText('pet.panel')).toBeTruthy();
   });
 
   it('shows the panel and marks replies read only once the shell has grown the frame', async () => {
