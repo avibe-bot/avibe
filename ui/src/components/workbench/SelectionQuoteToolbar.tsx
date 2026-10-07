@@ -35,6 +35,8 @@ const TOOLBAR_H = 36;
 const GAP = 8;
 const EDGE = 8;
 const PRESS_GRACE_MS = 700;
+// The native click that follows a pointer or keyboard activation already handled.
+const CLICK_AFTER_ACTIVATION_MS = 700;
 // iOS keeps touch sequences that start within this padding around a selection
 // handle in its native selection gesture recognizer. Keep the web toolbar
 // outside that region so pointerup/touchend remains deliverable to the button.
@@ -83,6 +85,7 @@ export const SelectionQuoteToolbar: React.FC<{
     deferred: boolean;
   } | null>(null);
   const pressExpiryRef = useRef<number | null>(null);
+  const activatedAtRef = useRef(Number.NEGATIVE_INFINITY);
   const [width, setWidth] = useState(0);
   const [height, setHeight] = useState(TOOLBAR_H);
   // Touch (coarse pointer — phones AND tablets/iPads) is where the OS selection
@@ -250,7 +253,8 @@ export const SelectionQuoteToolbar: React.FC<{
     recompute();
   };
 
-  // Activate on pointerup (mouse + touch) and Enter/Space (keyboard). The
+  // Activate on pointerup (mouse + touch), Enter/Space (keyboard), or a click no
+  // pointer or key activation preceded (assistive technology). The
   // pointerdown preventDefault keeps the text selection alive. We deliberately
   // keep only a short-lived gesture match here: iOS can deliver pointerdown
   // for a touch near a selection handle without ever delivering pointerup, so
@@ -287,14 +291,28 @@ export const SelectionQuoteToolbar: React.FC<{
     if (!releasedInside) {
       return;
     }
+    activatedAtRef.current = performance.now();
     run();
   };
   const handleKeyDown = (e: React.KeyboardEvent, run: () => void) => {
     if (e.key === 'Enter' || e.key === ' ') {
       e.preventDefault();
+      activatedAtRef.current = performance.now();
       run();
     }
   };
+  // Assistive technology (VoiceOver, TalkBack, switch access) activates a button
+  // with a click alone; a pointer or key activation is followed by one as well.
+  const handleClick = (run: () => void) => {
+    if (performance.now() - activatedAtRef.current < CLICK_AFTER_ACTIVATION_MS) return;
+    run();
+  };
+  const activation = (run: () => void) => ({
+    onPointerDown: handlePointerDown,
+    onPointerUp: (e: React.PointerEvent<HTMLButtonElement>) => handlePointerUp(e, run),
+    onKeyDown: (e: React.KeyboardEvent) => handleKeyDown(e, run),
+    onClick: () => handleClick(run),
+  });
 
   const toolbarHeight = height || TOOLBAR_H;
   const placementGap = isTouch ? SELECTION_HANDLE_GAP : GAP;
@@ -380,9 +398,7 @@ export const SelectionQuoteToolbar: React.FC<{
         <Button
           variant="ghost"
           className={itemClass}
-          onPointerDown={handlePointerDown}
-          onPointerUp={(e) => handlePointerUp(e, runQuote)}
-          onKeyDown={(e) => handleKeyDown(e, runQuote)}
+          {...activation(runQuote)}
         >
           <TextQuote className="size-3.5 text-muted" />
           {t('chat.selection.quote')}
@@ -394,9 +410,7 @@ export const SelectionQuoteToolbar: React.FC<{
           <Button
             variant="ghost"
             className={itemClass}
-            onPointerDown={handlePointerDown}
-            onPointerUp={(e) => handlePointerUp(e, runAsk)}
-            onKeyDown={(e) => handleKeyDown(e, runAsk)}
+            {...activation(runAsk)}
           >
             <GitFork className="size-3.5 text-muted" />
             {t('chat.selection.askInNew')}
@@ -407,9 +421,7 @@ export const SelectionQuoteToolbar: React.FC<{
       <Button
         variant="ghost"
         className={itemClass}
-        onPointerDown={handlePointerDown}
-        onPointerUp={(e) => handlePointerUp(e, runCopy)}
-        onKeyDown={(e) => handleKeyDown(e, runCopy)}
+        {...activation(runCopy)}
       >
         {copied ? <Check className="size-3.5 text-mint-ink" /> : <Copy className="size-3.5 text-muted" />}
         {t('chat.selection.copy')}
@@ -420,9 +432,7 @@ export const SelectionQuoteToolbar: React.FC<{
           <Button
             variant="ghost"
             className={itemClass}
-            onPointerDown={handlePointerDown}
-            onPointerUp={(e) => handlePointerUp(e, runSelectAll)}
-            onKeyDown={(e) => handleKeyDown(e, runSelectAll)}
+            {...activation(runSelectAll)}
           >
             <TextSelect className="size-3.5 text-muted" />
             {t('chat.selection.selectAll')}

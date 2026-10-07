@@ -520,6 +520,47 @@ describe('chat selection action gesture lifetime', () => {
     expect(top).toBe(36);
   });
 
+  it.each([
+    ['quote', () => quote],
+    ['askInNew', () => ask],
+  ] as const)('activates %s from a click alone, as assistive technology sends', (action, consumer) => {
+    mountToolbar();
+    fireEvent.click(screen.getByRole('button', { name: `chat.selection.${action}` }));
+    expect(consumer()).toHaveBeenCalledExactlyOnceWith(TEXT);
+  });
+
+  it('selects the whole bubble from a click alone', () => {
+    coarsePointer = false;
+    const containerRef = createRef<HTMLDivElement>();
+    render(
+      <>
+        <div ref={containerRef}><Markdown content={BUBBLE} /></div>
+        <SelectionQuoteToolbar containerRef={containerRef} onQuote={quote} />
+      </>,
+    );
+    const range = document.createRange();
+    range.selectNodeContents(containerRef.current!.querySelector('strong')!);
+    window.getSelection()!.addRange(range);
+    settle();
+
+    fireEvent.click(screen.getByRole('button', { name: 'chat.selection.selectAll' }));
+
+    expect(window.getSelection()!.toString()).toBe('Use bold now');
+  });
+
+  it('runs once for a pointer activation and the click that follows it', async () => {
+    // Copy keeps the toolbar mounted, so the following click reaches the button.
+    mountToolbar();
+    const button = screen.getByRole('button', { name: 'chat.selection.copy' });
+    await act(async () => {
+      fireEvent.pointerDown(button, press);
+      fireEvent.pointerUp(button, press);
+      fireEvent.click(button);
+      await Promise.resolve();
+    });
+    expect(writeText).toHaveBeenCalledExactlyOnceWith(TEXT);
+  });
+
   it.each(['Enter', ' '])('preserves %s keyboard activation', (key) => {
     mountToolbar();
     fireEvent.keyDown(screen.getByRole('button', { name: 'chat.selection.quote' }), { key });
