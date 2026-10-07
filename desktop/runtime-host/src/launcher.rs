@@ -594,6 +594,14 @@ impl RuntimeCommand {
     fn apply(&self, command: &mut Command, inherited_path: Option<&OsStr>) {
         command.args(&self.prefix_args);
         self.apply_environment(command, env::vars_os());
+        if self.path_prefix.is_empty() {
+            // Nothing to put in front: the command gets the PATH it was given,
+            // or keeps this process's own, byte for byte.
+            if let Some(path) = inherited_path {
+                command.env("PATH", path);
+            }
+            return;
+        }
         let inherited_path = inherited_path.map(OsStr::to_owned).or_else(|| env::var_os("PATH"));
         if let Some(path) = self.path(inherited_path.as_deref()) {
             command.env("PATH", path);
@@ -601,6 +609,9 @@ impl RuntimeCommand {
     }
 
     /// `path_prefix` ahead of `inherited`, or `None` when there is neither.
+    ///
+    /// Only a private Runtime has a prefix. Empty entries, which name the
+    /// current directory, are dropped as they always were for it.
     fn path(&self, inherited: Option<&OsStr>) -> Option<OsString> {
         let mut entries = self.path_prefix.clone();
         if let Some(inherited) = inherited {
@@ -2302,16 +2313,28 @@ mod tests {
     }
 
     #[test]
-    fn an_unresolved_login_path_leaves_an_installed_runtime_with_the_shells_own_path() {
+    fn an_installed_runtime_inherits_path_verbatim() {
         let runtime = RuntimeCommand::installed(PathBuf::from("/test-owned/vibe"));
-        assert_eq!(runtime.path(None), None);
+        let path_override = |command: &Command| {
+            command
+                .get_envs()
+                .find_map(|(name, value)| (name == "PATH").then(|| value.map(OsStr::to_owned)))
+        };
 
-        let command = lifecycle_command(&runtime, &START_ARGS, None);
+        // Discovery, the lifecycle verbs, and a start whose login PATH could
+        // not be read leave this process's PATH untouched.
+        assert_eq!(path_override(&lifecycle_command(&runtime, &START_ARGS, None)), None);
+        assert_eq!(
+            path_override(&lifecycle_command(&runtime, &stop_arguments(&"b".repeat(64)), None)),
+            None
+        );
 
-        let path = command
-            .get_envs()
-            .find_map(|(name, value)| (name == "PATH").then_some(value))
-            .flatten();
-        assert_eq!(path, env::var_os("PATH").as_deref());
+        // A login PATH is passed on as the shell printed it, empty entries
+        // (the current directory) included.
+        let login_path = OsString::from(":/login/bin::/usr/bin:");
+        assert_eq!(
+            path_override(&lifecycle_command(&runtime, &START_ARGS, Some(&login_path))),
+            Some(Some(login_path))
+        );
     }
 }

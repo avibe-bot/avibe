@@ -157,11 +157,27 @@ pub(crate) fn resolve_with(shell: &Path, timeout: Duration) -> LoginPath {
             Err(mpsc::RecvTimeoutError::Disconnected) => break LoginPath::Inherited("no_path"),
         }
     };
-    if !matches!(child.try_wait(), Ok(Some(_))) {
-        let _ = child.kill();
-        let _ = child.wait();
-    }
+    end_process_group(&mut child);
     outcome
+}
+
+/// Ends the login shell and everything its startup files started.
+///
+/// A startup file that blocks in a subprocess (`sleep`, a prompt that waits for
+/// input) would otherwise outlive the shell and hold stdout, and with it the
+/// reader thread, open. The group is signalled before the shell is reaped: until
+/// then its leader's pid, and so the group id, cannot be reused by an unrelated
+/// process. The crate forbids `unsafe`, so the signal goes through `kill(1)`.
+#[cfg(target_os = "macos")]
+fn end_process_group(child: &mut std::process::Child) {
+    let _ = Command::new("/bin/kill")
+        .args(["-KILL", "--", &format!("-{}", child.id())])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 /// The value between the markers, or `None` until the end marker has arrived.
@@ -264,6 +280,37 @@ mod tests {
 
         assert_eq!(resolved, LoginPath::Inherited("timeout"));
         assert!(started.elapsed() < Duration::from_secs(5));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `.zshrc` running `sleep 30` without `exec` blocks in a subprocess, not
+    /// in the shell; the fallback must not leave that subprocess behind.
+    #[test]
+    fn a_fallback_ends_what_the_startup_files_started() {
+        let dir = scratch_dir("group");
+        let pid_file = dir.join("pid");
+        let shell = fake_shell(&dir, &format!("sleep 30 &\necho $! > '{}'\nwait", pid_file.display()));
+
+        // Long enough for the fake shell to start and record its child while
+        // the rest of the suite is spawning processes too.
+        assert_eq!(
+            resolve_with(&shell, Duration::from_secs(3)),
+            LoginPath::Inherited("timeout")
+        );
+
+        let pid = std::fs::read_to_string(&pid_file).expect("startup file ran");
+        let alive = || {
+            Command::new("/bin/kill")
+                .args(["-0", pid.trim()])
+                .stderr(Stdio::null())
+                .status()
+                .is_ok_and(|status| status.success())
+        };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while alive() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(!alive(), "the startup file's subprocess outlived the fallback");
         std::fs::remove_dir_all(&dir).ok();
     }
 
