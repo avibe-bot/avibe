@@ -1861,13 +1861,17 @@ pub fn run() {
                             }
                         }
                     }
+                    // The pet is a visible window too, so whether any window is
+                    // visible says nothing about the Workbench: a Dock click
+                    // restores `main` whenever `main` itself is not on screen.
                     #[cfg(target_os = "macos")]
-                    if let RunEvent::Reopen {
-                        has_visible_windows: false,
-                        ..
-                    } = event
-                    {
-                        focus_or_restore_main_window(app);
+                    if let RunEvent::Reopen { .. } = event {
+                        let main_visible = app
+                            .get_webview_window(MAIN_WINDOW)
+                            .is_some_and(|window| window.is_visible().unwrap_or(false));
+                        if !main_visible {
+                            focus_or_restore_main_window(app);
+                        }
                     }
                 })
                 .build(),
