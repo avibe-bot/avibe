@@ -21,6 +21,7 @@ use std::time::Duration;
 
 mod native_frame;
 mod notifications;
+mod pet;
 mod update_install;
 mod updater;
 
@@ -108,6 +109,7 @@ struct DesktopBootstrapCatalog {
     tray: NativeTrayCatalog,
     updater: updater::Catalog,
     notifications: notifications::NativeNotificationCatalog,
+    pet: pet::NativePetCatalog,
     #[cfg(feature = "bundled-runtime")]
     uninstall: NativeUninstallCatalog,
 }
@@ -331,6 +333,7 @@ fn install_native_tray(app: &AppHandle) -> tauri::Result<()> {
         app.state::<notifications::Notifications>().enabled(),
         None::<&str>,
     )?;
+    let (pet_toggle, pet_shortcut) = pet::tray_items(app)?;
     let updater = app.state::<updater::Updater>();
     let tray = Menu::with_items(
         app,
@@ -343,6 +346,8 @@ fn install_native_tray(app: &AppHandle) -> tauri::Result<()> {
             &updater.channel_menu,
             &login,
             &notifications,
+            &pet_toggle,
+            &pet_shortcut,
             &PredefinedMenuItem::separator(app)?,
             &quit,
         ],
@@ -706,6 +711,9 @@ fn stop_runtime(app: AppHandle, quit: bool) {
             CliOutcome::Failed { .. } | CliOutcome::Unrunnable => (BootstrapNoticeCode::RuntimeStopFailed, true),
         };
         let _ = return_to_bootstrap(&app);
+        // Whether or not the window could leave the Workbench, the Runtime the
+        // pet was built for is no longer one the shell vouches for.
+        pet::runtime_gone(&app);
         let mut status = BootstrapStatus::rejected(code, true);
         if let Some(previous) = previous_status {
             status.origin = previous.origin;
@@ -1053,6 +1061,7 @@ fn open_workbench(app: &AppHandle, ready: &BootstrapStatus, activity: Arc<Atomic
             WorkbenchHandoff::Monitor => {
                 commit_deep_link_navigation(app, &navigation, true, observed_generation);
                 apply_pending_deep_link(app);
+                pet::runtime_ready(app, origin.clone());
                 start_runtime_monitor(app.clone(), origin, activity);
                 return;
             }
@@ -1183,6 +1192,7 @@ fn restore_bootstrap_view(app: &AppHandle) -> bool {
         return false;
     }
     let _ = set_active_origin(app, None);
+    pet::runtime_gone(app);
     true
 }
 
@@ -1228,6 +1238,7 @@ fn ensure_main_window(app: &AppHandle) -> Option<WebviewWindow> {
     let builder = WebviewWindowBuilder::from_config(app, &config)
         .ok()?
         .initialization_script(DESKTOP_SHELL_MARKER)
+        .initialization_script(pet::DESKTOP_PET_MARKER)
         .initialization_script(format!(
             "if (window.self === window.top) Object.defineProperty(window, '__AVIBE_DESKTOP_VERSION__', {{ value: {} }});",
             serde_json::to_string(&app.package_info().version.to_string()).expect("version JSON")
@@ -1736,6 +1747,16 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_autostart::Builder::new().build())
         .plugin(tauri_plugin_notification::init())
+        // The pet's summon shortcut. Only a press wakes it; the release is ignored.
+        .plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler(|app, _shortcut, event| {
+                    if event.state() == tauri_plugin_global_shortcut::ShortcutState::Pressed {
+                        pet::wake(app, avibe_runtime_host::pet::PetIntent::Listen);
+                    }
+                })
+                .build(),
+        )
         .on_menu_event(|app, event| {
             if let Some(quit) = runtime_lifecycle_request(event.id().as_ref()) {
                 request_runtime_lifecycle(app.clone(), quit);
@@ -1753,6 +1774,8 @@ pub fn run() {
                         let _ = menus.notifications.set_checked(notifications.enabled());
                     }
                 }
+                pet::MENU_ID => pet::toggle(app),
+                id if id.starts_with(pet::SHORTCUT_MENU_PREFIX) => pet::choose_shortcut(app, id),
                 _ => {}
             }
             #[cfg(feature = "bundled-runtime")]
@@ -1763,6 +1786,9 @@ pub fn run() {
         .plugin(
             PluginBuilder::<_, ()>::new("shell-run-events")
                 .on_page_load(|webview, payload| {
+                    if webview.label() == pet::PET_WINDOW && payload.event() == tauri::webview::PageLoadEvent::Started {
+                        pet::page_loading(webview.app_handle());
+                    }
                     if webview.label() == MAIN_WINDOW && payload.event() == tauri::webview::PageLoadEvent::Finished {
                         // The native frame is independent of the Runtime UI version;
                         // older adopted Workbench pages must not restore a title bar.
@@ -1776,6 +1802,9 @@ pub fn run() {
                     }
                 })
                 .on_navigation(|webview, url| {
+                    if webview.label() == pet::PET_WINDOW {
+                        return pet::navigation_allowed(webview.app_handle(), url);
+                    }
                     if webview.label() == MAIN_WINDOW && url.as_str() == updater::OPEN_URL {
                         updater::check(webview.app_handle().clone(), true);
                         return false;
@@ -1806,6 +1835,20 @@ pub fn run() {
                                 let _ = window.hide();
                             }
                         }
+                        if label == pet::PET_WINDOW {
+                            api.prevent_close();
+                            pet::hide(app);
+                        }
+                    }
+                    if let RunEvent::WindowEvent {
+                        label,
+                        event: WindowEvent::Moved(_),
+                        ..
+                    } = event
+                    {
+                        if label == pet::PET_WINDOW {
+                            pet::window_moved(app);
+                        }
                     }
                     if let RunEvent::ExitRequested { api, .. } = event {
                         if let Some(shell) = app.try_state::<Shell>() {
@@ -1829,7 +1872,12 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             bootstrap_status,
             bootstrap_retry,
-            open_install_docs
+            open_install_docs,
+            pet::pet_ready,
+            pet::pet_set_expanded,
+            pet::pet_bind,
+            pet::pet_unbind,
+            pet::pet_open
         ])
         .setup(|app| {
             let window = ensure_main_window(app.handle()).ok_or_else(|| {
@@ -1864,6 +1912,7 @@ pub fn run() {
             app.manage(notifications::Notifications::new(
                 app.path().app_local_data_dir()?.join("notifications.json"),
             ));
+            app.manage(pet::Pet::new(app.path().app_local_data_dir()?.join("pet.json")));
             #[cfg(target_os = "macos")]
             macos_terminate::install(app.handle());
             if let Ok(mut links) = app.state::<Mutex<DeepLinks>>().lock() {
@@ -1875,6 +1924,7 @@ pub fn run() {
             }
             updater::init(app.handle())?;
             install_native_tray(app.handle())?;
+            pet::apply_shortcut(app.handle());
             updater::check(app.handle().clone(), false);
             let _ = spawn_bootstrap(app.handle().clone(), BootstrapTrigger::Launch);
             Ok(())

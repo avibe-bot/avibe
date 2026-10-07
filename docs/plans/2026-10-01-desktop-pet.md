@@ -761,6 +761,36 @@ The code and its tests are the contract; this section records why.
   instance editor who is a project viewer therefore sees state but no composer
   or quick replies; POST remains rejected by project-role middleware.
 
+- **The shell's window has one owner.** `reconcile_now` alone creates and
+  destroys `pet`: the window exists exactly when the pet is on and the
+  Workbench handoff has a ready Runtime, at that Runtime's origin. The
+  Workbench handoff, the return to bootstrap and an explicit stop report the
+  Runtime to it; nothing else builds the window. Every wake runs on the main
+  thread and checks the switch first. `pet_bind` and `pet_open` move their
+  window work off the IPC callback, because creating a window inside one
+  deadlocks on Windows.
+- **Commands check their caller twice.** The `pet` capability (and
+  `main-pet-bind` for the Workbench) only grants literal-loopback pages, and
+  each command checks again that its caller is the pet window on its own
+  `/pet` page, or, for `pet_bind`, the `main` window on the active Runtime.
+  The Workbench learns "Show in pet" exists from a top-level
+  `__AVIBE_DESKTOP_PET__` marker, so an older shell never offers it.
+- **The shortcut plugin is pinned to 2.3.** `tauri-plugin-global-shortcut`
+  2.4 requires Tauri 2.12; `~2.3` keeps the locked Tauri 2.11 and adds only
+  the hotkey crates to the lock file. Lift the pin with the Tauri upgrade.
+- **Placement is in logical points per display.** macOS reports each display
+  in its own scale; Windows and Linux report one physical desktop, which the
+  window's scale converts. The anchor saved after a drag settles (400 ms) is
+  the pet's own top-left corner, rounded, with the display's name; it is
+  clamped back onto a connected display when the window is built.
+- **`⌃⌥Space` can collide with macOS input-source switching.** It is the
+  default "Select next source in Input menu" shortcut, which many users with
+  a second input method keep. The default stays as specified; a refused
+  registration shows in the tray, and the presets are the way out.
+- **Scenario.** `AUTH-SETUP-128` stays partial: its packaged two-window
+  journey is a manual check on the built shell. "Show in pet" has no scenario
+  catalog of its own; the session-actions tests cover it.
+
 ## Follow-ups
 
 - Bind to the main-agent session when the session type lands, and remove the
@@ -775,14 +805,15 @@ The code and its tests are the contract; this section records why.
 ## Todo
 
 - [x] Update G8 and G10 in `desktop-product-gaps.md` to point here.
-- [ ] Pet window, lifecycle invariants, capability file, and IPC.
-- [ ] Global shortcut, tray toggle and presets, `pet.json`.
-- [x] `/pet` route and session binding ("Show in pet" ships with the shell PR).
+- [x] Pet window, lifecycle invariants, capability file, and IPC.
+- [x] Global shortcut, tray toggle and presets, `pet.json`.
+- [x] `/pet` route, session binding, and "Show in pet".
 - [x] `derivePetState` with Vitest coverage.
 - [x] Panel: latest exchange, activity strip, needs input, text send.
 - [x] Input-freshness table for the pet route (`usePetSession`, `FencedSource`).
 - [ ] Shared dictation hook; cross-window voice claim; pet listening flow.
 - [x] Vibey pose assets, CSS motion, i18n strings.
 - [ ] Panel frames in `design.pen`.
-- [ ] Rust boundary tests; manual checks on macOS and Windows.
-- [ ] User docs: `desktop/README.md` pet section.
+- [x] Rust boundary tests.
+- [ ] Manual checks on macOS and Windows.
+- [x] User docs: `desktop/README.md` pet section.

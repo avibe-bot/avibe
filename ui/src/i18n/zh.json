@@ -65,6 +65,11 @@
         "body": "后台工作已取消。"
       }
     },
+    "pet": {
+      "toggle": "显示桌宠",
+      "shortcutMenu": "桌宠快捷键",
+      "shortcutUnavailable": "{{shortcut}} 不可用，可能已被其他应用占用"
+    },
     "uninstall": {
       "menuLabel": "卸载 Avibe…",
       "confirmTitle": "卸载 Avibe",
@@ -2919,6 +2924,7 @@
     "sessionReference": "引用该会话",
     "sessionFork": "复刻会话",
     "sessionForkUnavailable": "此会话还没有可复刻的原生 Agent 会话。",
+    "sessionShowInPet": "在桌宠中显示",
     "sessionHideToBackground": "隐藏到后台",
     "sessionHiddenToast": "已隐藏到后台 · 可在 Agents→Runs 找回",
     "sessionArchive": "归档会话",
@@ -5465,6 +5471,8 @@
     "unreadBadge_one": "{{count}} 条未读回复",
     "unreadBadge_other": "{{count}} 条未读回复",
     "setupPending": "先在 Avibe 里完成设置，就可以在这里和 agent 对话了。",
+    "showInPetOff": "桌宠已切换到这个会话。在 Avibe 托盘菜单中打开“显示桌宠”即可看到。",
+    "showInPetFailed": "桌宠无法显示这个会话。",
     "openAvibe": "打开 Avibe",
     "toggle": "展开或收起宠物面板",
     "panel": "宠物面板",

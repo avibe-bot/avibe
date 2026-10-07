@@ -100,10 +100,10 @@ fn the_bootstrap_capability_grants_only_the_three_shell_commands() {
 }
 
 #[test]
-fn the_shell_enables_only_bootstrap_and_window_drag() {
+fn the_shell_enables_only_its_four_capabilities() {
     assert_eq!(
         config()["app"]["security"]["capabilities"],
-        serde_json::json!(["bootstrap", "window-drag"])
+        serde_json::json!(["bootstrap", "window-drag", "pet", "main-pet-bind"])
     );
 }
 
@@ -396,15 +396,32 @@ fn every_shell_command_is_declared_so_its_permission_exists() {
     // undeclared command has no `allow-*` permission and so no capability can
     // scope it.
     let build_rs = shipping_source("build.rs");
-    let lib_rs = shipping_source("src/lib.rs");
-
-    let declared: Vec<&str> = ["bootstrap_status", "bootstrap_retry", "open_install_docs"]
+    let commands = [
+        "bootstrap_status",
+        "bootstrap_retry",
+        "open_install_docs",
+        "pet_ready",
+        "pet_set_expanded",
+        "pet_bind",
+        "pet_unbind",
+        "pet_open",
+    ];
+    let declared: Vec<&str> = commands
         .into_iter()
-        .filter(|command| build_rs.contains(command))
+        .filter(|command| build_rs.contains(&format!("\"{command}\"")))
         .collect();
-    assert_eq!(declared, ["bootstrap_status", "bootstrap_retry", "open_install_docs"]);
+    assert_eq!(declared, commands);
 
-    let defined = lib_rs.matches("#[tauri::command]").count();
+    let defined: usize = std::fs::read_dir(crate_dir().join("src"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|extension| extension == "rs"))
+        .map(|path| {
+            shipping_text(&read_to_string(&path))
+                .matches("#[tauri::command]")
+                .count()
+        })
+        .sum();
     assert_eq!(
         defined,
         declared.len(),
@@ -1014,5 +1031,212 @@ fn workbench_window_permissions_are_narrow_and_match_literal_loopback_origins() 
     ] {
         let url = url::Url::parse(rejected).unwrap();
         assert!(!patterns.iter().any(|pattern| pattern.test(&url)), "{url}");
+    }
+}
+
+fn function_body(source: &str, name: &str) -> String {
+    source
+        .split(&format!("fn {name}("))
+        .nth(1)
+        .unwrap_or_else(|| panic!("{name} exists"))
+        .split("\n}\n")
+        .next()
+        .expect("function body")
+        .to_owned()
+}
+
+fn loopback_patterns(grant: &Value) -> Vec<tauri::utils::acl::RemoteUrlPattern> {
+    grant["remote"]["urls"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|pattern| pattern.as_str().unwrap().parse().unwrap())
+        .collect()
+}
+
+#[test]
+fn the_pet_and_the_workbench_get_only_their_pet_commands_on_loopback_pages() {
+    let pet = read_json(crate_dir().join("capabilities/pet.json"));
+    assert_eq!(pet["windows"], serde_json::json!(["pet"]));
+    assert_eq!(pet["local"], false, "the pet never loads the bundled bootstrap page");
+    assert_eq!(
+        pet["permissions"],
+        serde_json::json!([
+            "allow-pet-ready",
+            "allow-pet-set-expanded",
+            "allow-pet-bind",
+            "allow-pet-unbind",
+            "allow-pet-open",
+            "core:window:allow-start-dragging"
+        ])
+    );
+    let workbench = read_json(crate_dir().join("capabilities/main-pet-bind.json"));
+    assert_eq!(workbench["windows"], serde_json::json!([MAIN_WINDOW]));
+    assert_eq!(workbench["local"], false);
+    assert_eq!(workbench["permissions"], serde_json::json!(["allow-pet-bind"]));
+    // No other capability reaches a pet command, and the pet gets no
+    // bootstrap command and no event channel.
+    for name in ["bootstrap", "window-drag"] {
+        let grant = read_to_string(&crate_dir().join(format!("capabilities/{name}.json")));
+        assert!(!grant.contains("allow-pet-"), "{name} must not grant pet commands");
+    }
+    let pet_grant = pet["permissions"].to_string();
+    assert!(!pet_grant.contains("bootstrap") && !pet_grant.contains("core:event"));
+    for grant in [&pet, &workbench] {
+        let patterns = loopback_patterns(grant);
+        for allowed in ["http://127.0.0.1:5123/pet", "http://[::1]:6174/chat/abc"] {
+            let url = url::Url::parse(allowed).unwrap();
+            assert!(patterns.iter().any(|pattern| pattern.test(&url)), "{url}");
+        }
+        for rejected in [
+            "https://example.com/pet",
+            "http://127.0.0.1.example.com/pet",
+            "http://192.168.1.2:5123/pet",
+            "http://localhost:5123/pet",
+        ] {
+            let url = url::Url::parse(rejected).unwrap();
+            assert!(!patterns.iter().any(|pattern| pattern.test(&url)), "{url}");
+        }
+    }
+}
+
+#[test]
+fn pet_commands_check_their_caller_behind_the_capability() {
+    let pet = shipping_source("src/pet.rs");
+    for command in ["pet_ready", "pet_set_expanded", "pet_unbind", "pet_open"] {
+        assert!(
+            function_body(&pet, command).contains("ensure_pet_page(&window)?;"),
+            "{command} must refuse any caller but the pet page"
+        );
+    }
+    let bind = function_body(&pet, "pet_bind");
+    assert!(bind.contains("let from_workbench = is_workbench(&window);"));
+    assert!(bind.find("ensure_pet_page(&window)?;").unwrap() < bind.find("valid_session_id(").unwrap());
+    assert!(bind.find("valid_session_id(").unwrap() < bind.find(".bind(&session_id)").unwrap());
+    // Creating a window inside an IPC callback deadlocks on Windows.
+    assert!(bind.contains("tauri::async_runtime::spawn(async move { wake(&wake_app, PetIntent::Show) })"));
+    let open = function_body(&pet, "pet_open");
+    assert!(open.find("parse_deep_link(&link).is_none()").unwrap() < open.find("receive_native_deep_link").unwrap());
+    let ensure = function_body(&pet, "ensure_pet_page");
+    assert!(ensure.contains("window.label() == PET_WINDOW && is_pet_page("));
+}
+
+#[test]
+fn the_pet_window_has_one_owner_and_only_ever_shows_its_own_route() {
+    let pet = shipping_source("src/pet.rs");
+    let source = shipping_source("src/lib.rs");
+    // `reconcile_now` alone creates and destroys the window, from the pet
+    // switch and the Runtime the Workbench shows.
+    assert_eq!(pet.matches("WebviewWindowBuilder::new(").count(), 1);
+    assert!(function_body(&pet, "build_window").contains("WebviewWindowBuilder::new(app, PET_WINDOW,"));
+    assert_eq!(pet.matches("build_window(").count(), 2);
+    assert!(function_body(&pet, "reconcile_now").contains("build_window(app, &origin)"));
+    assert_eq!(pet.matches(".destroy()").count(), 1);
+    assert!(function_body(&pet, "reconcile_now").contains("window.destroy()"));
+    assert!(!source.contains("PET_WINDOW, WebviewUrl") && !source.contains("pet::reconcile_now"));
+    // The Runtime the pet may load follows the Workbench's own handoff.
+    let workbench = function_body(&source, "open_workbench");
+    assert!(workbench.contains("pet::runtime_ready(app, origin.clone());"));
+    assert!(function_body(&source, "restore_bootstrap_view").contains("pet::runtime_gone(app);"));
+    assert!(function_body(&source, "stop_runtime").contains("pet::runtime_gone(&app);"));
+    // Every summon checks the switch before building anything.
+    let wake = function_body(&pet, "wake");
+    assert!(wake.find(".enabled()").unwrap() < wake.find("reconcile_now(").unwrap());
+    // The pet window's navigation rule runs first and admits only `/pet`.
+    let navigation = source
+        .split(".on_navigation(|webview, url| {")
+        .nth(1)
+        .expect("navigation hook");
+    assert!(navigation
+        .trim_start()
+        .starts_with("if webview.label() == pet::PET_WINDOW {\n                        return pet::navigation_allowed(webview.app_handle(), url);"));
+    assert!(pet.contains("const PET_PATH: &str = \"/pet\";"));
+    assert!(function_body(&pet, "is_pet_page").contains("url.path() == PET_PATH"));
+    let builder = function_body(&pet, "build_window");
+    for required in [
+        ".initialization_script(DESKTOP_SHELL_MARKER)",
+        ".on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny)",
+        ".transparent(true)",
+        ".decorations(false)",
+        ".always_on_top(true)",
+        ".skip_taskbar(true)",
+        ".focused(false)",
+    ] {
+        assert!(builder.contains(required), "the pet window must keep {required}");
+    }
+    // Closing the pet hides it; only the tray switch turns it off.
+    let close = source
+        .split("event: WindowEvent::CloseRequested")
+        .nth(1)
+        .unwrap()
+        .split("if let RunEvent::ExitRequested")
+        .next()
+        .unwrap();
+    assert!(close.contains("if label == pet::PET_WINDOW {\n                            api.prevent_close();\n                            pet::hide(app);"));
+    assert_eq!(
+        config()["app"]["macOSPrivateApi"],
+        true,
+        "a transparent pet needs it on macOS"
+    );
+}
+
+#[test]
+fn the_summon_shortcut_is_native_registered_only_while_the_pet_is_on() {
+    let source = shipping_source("src/lib.rs");
+    let pet = shipping_source("src/pet.rs");
+    let cargo = read_to_string(&crate_dir().join("Cargo.toml"));
+    assert!(cargo.contains("tauri-plugin-global-shortcut = \"~2.3\""));
+    let handler = source
+        .split("tauri_plugin_global_shortcut::Builder::new()")
+        .nth(1)
+        .expect("the shortcut plugin")
+        .split(".build()")
+        .next()
+        .unwrap();
+    assert!(handler.contains("if event.state() == tauri_plugin_global_shortcut::ShortcutState::Pressed {"));
+    assert!(handler.contains("pet::wake(app, avibe_runtime_host::pet::PetIntent::Listen);"));
+    let apply = function_body(&pet, "apply_shortcut");
+    assert!(apply.find("unregister_all()").unwrap() < apply.find("let error = if enabled {").unwrap());
+    assert_eq!(pet.matches(".register(").count(), 1);
+    assert!(apply.contains("shortcuts.register(shortcut.as_str())"));
+    // Presets only: the tray never registers an id it did not offer.
+    assert!(function_body(&pet, "choose_shortcut").contains("SHORTCUT_PRESETS.iter().find("));
+    for grant in std::fs::read_dir(crate_dir().join("capabilities")).unwrap() {
+        let grant = read_to_string(&grant.unwrap().path());
+        assert!(!grant.contains("global-shortcut"), "no page may register a shortcut");
+    }
+    assert!(function_body(&source, "run").contains("pet::apply_shortcut(app.handle());"));
+}
+
+#[test]
+fn only_the_workbench_learns_it_can_show_a_session_in_the_pet() {
+    let source = shipping_source("src/lib.rs");
+    let pet = shipping_source("src/pet.rs");
+    assert!(function_body(&source, "ensure_main_window").contains(".initialization_script(pet::DESKTOP_PET_MARKER)"));
+    assert!(!function_body(&pet, "build_window").contains("DESKTOP_PET_MARKER"));
+    let marker = pet
+        .split("pub const DESKTOP_PET_MARKER: &str =")
+        .nth(1)
+        .expect("marker script")
+        .split("\";\n")
+        .next()
+        .expect("marker literal");
+    assert!(marker.contains("if (window.self === window.top)"));
+    assert!(marker.contains("Object.defineProperty(window, '__AVIBE_DESKTOP_PET__', { value: true })"));
+    let reader = read_to_string(&crate_dir().join("../../ui/src/lib/desktopShell.ts"));
+    assert!(reader.contains("window.__AVIBE_DESKTOP_PET__ === true"));
+    let bridge = read_to_string(&crate_dir().join("../../ui/src/pet/petBridge.ts"));
+    for event in ["SUMMON_EVENT", "BOUND_EVENT"] {
+        let name = pet
+            .split(&format!("const {event}: &str = \""))
+            .nth(1)
+            .unwrap_or_else(|| panic!("{event} exists"))
+            .split('"')
+            .next()
+            .unwrap();
+        assert!(
+            bridge.contains(&format!("'{name}'")),
+            "the pet page must listen for {name}"
+        );
     }
 }

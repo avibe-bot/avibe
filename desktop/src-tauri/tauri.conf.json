@@ -27,10 +27,13 @@
         "hiddenTitle": true
       }
     ],
+    "macOSPrivateApi": true,
     "security": {
       "capabilities": [
         "bootstrap",
-        "window-drag"
+        "window-drag",
+        "pet",
+        "main-pet-bind"
       ],
       "csp": "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; connect-src 'self' ipc: http://ipc.localhost"
     }

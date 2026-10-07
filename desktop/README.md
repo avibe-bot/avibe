@@ -414,6 +414,45 @@ is also why the Workbench's own `navigator.setAppBadge` call, which only browser
 and PWAs implement, is not relied on here. Windows has no badge count in Tauri;
 a taskbar overlay icon is follow-up work.
 
+## Desktop pet
+
+The pet is a small always-on-top window that shows one session: its latest
+exchange, live activity, and a composer. It is off by default.
+
+- **Tray.** "Show Pet" turns it on and off. "Pet Shortcut" picks the summon
+  shortcut from three presets: `Control+Alt+Space` (the default),
+  `Control+Shift+Space` and `Alt+Shift+Space`. A preset the OS refuses (often
+  because another app holds it) is shown in that submenu instead of failing
+  silently. On macOS the default can collide with "Select next source in Input
+  menu"; pick another preset if it does.
+- **Summoning.** The shortcut registers only while the pet is on, and only its
+  press wakes the pet, with the composer focused. The tray switch and the
+  Workbench's "Show in pet" bring it forward without focusing input. Closing
+  the window only hides it.
+- **Lifecycle.** The window exists exactly when the pet is on and the shell
+  has handed the Workbench to a ready Runtime. It loads `/pet` from that
+  Runtime's origin and is destroyed when the Runtime stops, is lost, or
+  changes origin. It may navigate only to `/pet` on that origin and never
+  opens a second window.
+- **`pet.json`** sits next to `notifications.json` in the app's local data
+  directory: `{ "version": 1, "enabled", "shortcut", "anchor": { "x", "y",
+  "monitor" }, "binding" }`, every field but `version` optional. `anchor` is
+  where the user last dragged the pet, in logical points, and is clamped back
+  onto a connected display on the next start. `binding` is the shown session
+  id. A file the shell cannot read, or with another `version`, keeps the pet
+  off for that run and is never overwritten by a drag or a binding; turning
+  the pet on from the tray replaces it.
+
+The page reaches the shell through five commands, declared in `build.rs`:
+`pet_ready`, `pet_set_expanded`, `pet_bind`, `pet_unbind` and `pet_open`.
+`capabilities/pet.json` grants them, plus `start_dragging`, to the `pet`
+window for literal-loopback pages only; each command also checks that its
+caller is the pet window on its own `/pet` page. `capabilities/main-pet-bind.json`
+grants only `pet_bind` to the Workbench, for "Show in pet", which the shell
+offers through the top-level `__AVIBE_DESKTOP_PET__` marker. The shell talks
+back with two DOM events, `avibe:pet-summon` and `avibe:pet-bound`, so the
+pet has no event permission. `ui/src/pet/petBridge.ts` is the page contract.
+
 ## Microphone
 
 Workbench voice input records through `getUserMedia` inside the WebView. On
