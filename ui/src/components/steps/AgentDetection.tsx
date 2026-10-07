@@ -30,7 +30,7 @@ import { OpencodePermissionSetup } from '../settings/shared/OpencodePermissionSe
 import { hubSupplyBlocks, modelHubEnabledFromConfig } from '../settings/models/featureFlags';
 import type { SetupAction, SetupFlowState, SetupScreenHandle, SetupScreenId } from '../onboarding/setupFlow';
 import {
-  BUILTIN_BACKENDS, isBuiltinBackend, type AgentBackendId, type BuiltinBackend, type NativeCliBackend as RuntimeBackendId,
+  BUILTIN_BACKENDS, isBuiltinBackend, isNativeCliBackend, type AgentBackendId, type BuiltinBackend, type NativeCliBackend as RuntimeBackendId,
 } from '@/lib/agentBackends';
 import { useOpencodePermission } from '../settings/shared/useOpencodePermission';
 import { Button } from '../ui/button';
@@ -42,6 +42,8 @@ import type { CollectionReadAuthority } from '../settings/models/collectionReadA
 import type { AgentChain, AgentSupply, ModelCandidate, Source } from '../settings/models/types';
 import { BackendModelPickerDialog } from '../settings/models/BackendModelPickerDialog';
 import { chosenCandidate, draftRowFor, type ChosenCandidate } from '../settings/models/backendCatalog';
+import { compatibleEffort } from '@/lib/effortOptions';
+import { routeRunnable } from '../onboarding/entryGate';
 import type { AssistantRouteView } from '../onboarding/AssistantRow';
 import { isBuiltinAgent } from '../onboarding/setupTargets';
 import { readyRegion } from '../settings/models/regionRead';
@@ -346,7 +348,11 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
       if (!result.ok) throw new Error(result.message || t('onboarding.connection.readFailed'));
       setConnections((current) => ({ ...current, [name]: result }));
       setConnectionConfirmed((current) => ({ ...current, [name]: { epoch, token } }));
-      setAgents((current) => ({ ...current, [name]: { ...current[name], enabled: result.enabled } }));
+      // Only a CLI assistant is detected, installed and switched; a built-in one is
+      // always on and never enters that state.
+      if (isNativeCliBackend(name)) {
+        setAgents((current) => ({ ...current, [name]: { ...current[name], enabled: result.enabled } }));
+      }
       // Spending the verdict takes all three: this read still owns the screen, the
       // caller is an operation that actually answers for it, and the verdict in hand
       // is the one that was there when the read began. A newer write that landed
@@ -655,11 +661,23 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
           expected_suppliers: Object.fromEntries(additions.map((pick) => [pick.candidate.id, pick.expected_suppliers])),
         });
       }
-      const updated = await api.updateVibeAgent(target, { model });
+      // The Agent's effort moves with its model, as the Agent editor moves it: one the
+      // picked model does not take is replaced in the same write.
+      const current = await api.getVibeAgent(target, { cache: false });
+      if (!current?.ok) throw new Error('Agent unreadable');
+      const efforts = draftRowFor(chosen[0].candidate, [], baseline).reasoning_efforts;
+      const effort = compatibleEffort(current.agent.reasoning_effort, efforts);
+      const updated = await api.updateVibeAgent(target, effort === (current.agent.reasoning_effort ?? null)
+        ? { model } : { model, reasoning_effort: effort });
       if (!updated?.ok) throw new Error('Agent update failed');
     } catch (error) {
-      setBuiltinPick({ backend, id: null, error: t(apiFailure(error)?.code === CANDIDATES_CHANGED
+      const changed = apiFailure(error)?.code === CANDIDATES_CHANGED;
+      setBuiltinPick({ backend, id: null, error: t(changed
         ? 'onboarding.setup.suppliersChanged' : 'onboarding.setup.modelPickFailed') });
+      // The server refused the suppliers these rows showed, so the rows go with them
+      // until today's read replaces them; offering them meanwhile asks the same
+      // refused question again.
+      if (changed) setOffers((current) => ({ ...current, [backend]: { kind: 'loading' } }));
       // Either nothing was written, or only the list was: the card is redrawn from what
       // the server holds now, and still offers today's candidates if it has no model.
       void refreshRouteOwnership(backend);
@@ -680,9 +698,13 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
         read: routeRead.chains[name] ? readyRegion(routeRead.chains[name]) : undefined });
     }
   };
+  // A built-in backend is ready when the server can route one of its Agents now — the
+  // entry gate's own rule, read from the same named-Agent rows — so the card's Agent
+  // and any other runnable Agent on it are judged alike.
   const builtinReady = (backend: BuiltinBackend) => {
-    const route = routeViewFor(backend);
-    return route.kind === 'route' && !!route.model && !supplyBlocks.get(backend) && !builtinPick?.id
+    const supply = sharedRouteReady() ? routeRead.supplies.find((row) => row.backend === backend) : undefined;
+    return !!supply?.named_agents?.some((row) => routeRunnable(supply, row.name) !== null)
+      && !supplyBlocks.get(backend) && !builtinPick?.id
       && !connectionPending[backend] && !connectionErrors[backend] && !!connections[backend]?.entry_eligible;
   };
   const builtinUnset = BUILTIN_BACKENDS.some((backend) => routeViewFor(backend).kind === 'no-agent-model');

@@ -104,6 +104,17 @@ export function resolveEffortOptions(
   return values.length ? values : effortOptionsFor(backend);
 }
 
+/**
+ * The effort to keep when an Agent moves to a model offering `options`: the current one
+ * if the model takes it, otherwise medium where offered, otherwise the first option.
+ * No option is itself an answer — a model that states no efforts clears the field
+ * rather than keeping a value it cannot run.
+ */
+export function compatibleEffort(effort: string | null | undefined, options: readonly string[]): string | null {
+  if (!effort || options.includes(effort)) return effort ?? null;
+  return options.includes('medium') ? 'medium' : options[0] ?? null;
+}
+
 export function isEffortSupported(
   backend: string,
   model: string | null | undefined,

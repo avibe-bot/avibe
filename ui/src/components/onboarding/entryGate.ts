@@ -125,7 +125,7 @@ const backendUsable = (
  * another's. The runnable-hop owner is the server resolver, and its per-Agent answer
  * is the `named_agents` row — an absent row is a backend that never routed this name.
  */
-const routeRunnable = (supply: AgentSupply | undefined, name: string): string | null => {
+export const routeRunnable = (supply: AgentSupply | undefined, name: string): string | null => {
   if (!supply || supply.mode !== 'hub') return null;
   const row = supply.named_agents?.find((named) => named.name === name);
   if (!row || row.route_reason === 'route_unconfigured') return null;
