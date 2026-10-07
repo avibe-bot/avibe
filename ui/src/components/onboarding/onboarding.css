@@ -43,8 +43,10 @@
   --ob-line-number: #585c71;
   --ob-code-violet: #a496e15c;
   --ob-code-cyan: #67c2b75c;
-  --ob-diff-removed: #ff6b6b14;
-  --ob-diff-added: #5bffa00f;
+  /* The review's diff tints, taken from the theme's own destructive and mint so each
+     theme draws its own pair without a second set of literals. */
+  --ob-diff-removed: color-mix(in srgb, var(--destructive) 8%, transparent);
+  --ob-diff-added: color-mix(in srgb, var(--mint) 6%, transparent);
   --ob-check-bg: #ffffff05;
   --ob-check-border: #5bffa044;
   --ob-check-done: #5bffa012;
@@ -146,6 +148,12 @@
   --ob-assistant-h: calc(2px + var(--ob-card-pv) + var(--ob-card-ph) + var(--ob-id-h) + var(--ob-card-gap) * 2
     + var(--ob-life-h) + var(--ob-note-lh) * 2 + var(--ob-spacer-2)
     + var(--ob-method-h) * 2 + var(--ob-method-gap));
+  /* The built-in card offering its models: the same card with the two method rows
+     replaced by the offer — three candidates and "All models" two short of a method
+     row each, its 4 inset and 1 border on both sides, and the hairline above the last.
+     The stacked and folded bands reserve it; the side-by-side rows fit it in the
+     diagram's own box. */
+  --ob-offer-h: calc(var(--ob-assistant-h) + var(--ob-method-h) * 2 - var(--ob-method-gap) + 3px);
   /* One floor under the cards, so a card that grows while its step is read — a
      sentence that wraps in one language, a state row that arrives with detection —
      cannot move the action. It reserves the cards only; whatever a step draws under
@@ -191,8 +199,6 @@
     --ob-line-number: #5c6079;
     --ob-code-violet: #7c3aed24;
     --ob-code-cyan: #0891b224;
-    --ob-diff-removed: #ef444414;
-    --ob-diff-added: #10b98112;
     --ob-check-bg: #eef1f7;
     --ob-check-border: #aae6d2;
     --ob-check-done: #10b98114;
@@ -223,8 +229,6 @@
   --ob-line-number: #5c6079;
   --ob-code-violet: #7c3aed24;
   --ob-code-cyan: #0891b224;
-  --ob-diff-removed: #ef444414;
-  --ob-diff-added: #10b98112;
   --ob-check-bg: #eef1f7;
   --ob-check-border: #aae6d2;
   --ob-check-done: #10b98114;
@@ -1314,6 +1318,10 @@ span.onboarding-model-offer-row { cursor: default; }
   .onboarding-shell {
     --ob-gutter: 24px;
     --ob-stack-gap: 16px;
+    /* The fold's rows, the first holding the built-in card at its tallest. The shell
+       states the row count from the lineup. */
+    --ob-stage-h: calc(max(var(--ob-card-h), var(--ob-offer-h))
+      + (max(var(--ob-card-h), var(--ob-assistant-h)) + var(--ob-stack-gap)) * (var(--ob-fold-rows) - 1));
   }
   .onboarding-collaboration-cards, .onboarding-assistants-list {
     grid-auto-flow: row;
@@ -1365,11 +1373,11 @@ span.onboarding-model-offer-row { cursor: default; }
     --ob-p-min: var(--ob-sub-lh);
     --ob-band-gap: 27px;
     --ob-stack-gap: 16px;
-    /* The same reservation as the desktop rows, re-derived from the stack: one of
-       the taller card per assistant and the gaps between them. `--ob-cards` is the
-       lineup's own count, which the shell states. */
-    --ob-stage-h: calc(max(var(--ob-card-h), var(--ob-assistant-h)) * var(--ob-cards)
-      + var(--ob-stack-gap) * (var(--ob-cards) - 1));
+    /* The same reservation as the desktop rows, re-derived from the stack: the built-in
+       card at its tallest, then one of the taller card per other assistant, and the
+       gaps between them. `--ob-cards` is the lineup's own count, which the shell states. */
+    --ob-stage-h: calc(max(var(--ob-card-h), var(--ob-offer-h))
+      + (max(var(--ob-card-h), var(--ob-assistant-h)) + var(--ob-stack-gap)) * (var(--ob-cards) - 1));
     --ob-main-top: 0px;
     --ob-access-w: 100%;
     --ob-access-pad: 24px;

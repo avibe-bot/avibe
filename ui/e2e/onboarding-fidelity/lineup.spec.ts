@@ -91,12 +91,14 @@ test('the lineup stands the built-in assistant first, on the reference tracks of
 });
 
 /**
- * Where the offer fits the stage every screen reserves — the authored desktop rows — the
- * action does not move either. On a 1024 window the card's sentence takes two lines and
- * the offer outgrows that reservation, so there the claim is only that nothing is drawn
- * over a card.
+ * Wherever the stage reserves the offer — the authored desktop rows fit it in the
+ * diagram's box, the fold and the stack reserve it outright — the action does not move
+ * either. On a 1024 window the card's sentence takes two lines and the offer outgrows the
+ * diagram's box, so there the claim is only that nothing is drawn over a card.
  */
-for (const [width, height, holds] of [[1200, 800, true], [1440, 900, true], [1920, 1080, true], [1024, 768, false]] as const) {
+for (const [width, height, holds] of [
+  [1200, 800, true], [1440, 900, true], [1920, 1080, true], [1024, 768, false], [800, 1000, true], [390, 844, true],
+] as const) {
   test(`${width}x${height}: the built-in offer is never drawn under the aside${holds ? ', and the action holds still' : ''}`, async ({ page }) => {
     await page.setViewportSize({ width, height });
     await serveProduct(page);

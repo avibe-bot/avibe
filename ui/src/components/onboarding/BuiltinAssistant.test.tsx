@@ -166,6 +166,23 @@ describe('the built-in assistant card', () => {
     expect(screen.queryByRole('dialog')).toBeNull();
   });
 
+  it('lets All models choose a model the list already holds, without adding it again', async () => {
+    const listedRow = { ...candidate('gpt-5.6-pro'), group_if_removed: 'providers' as const };
+    mock.models.getAgentModelCandidates.mockImplementation(async () => ({ ...candidates(), in_list: [listedRow] }));
+    // Listed, and the Agent still has no model: the server's own fill has not run yet.
+    const supply = () => [vibeySupply(['gpt-5.6-pro'])];
+    const listed = { ...reads, read: async () => ({ kind: 'current' as const, value: supply() }), readValue: async () => supply() };
+    render(wrap(<AgentDetection data={data()} onNext={vi.fn()} onNavigate={vi.fn()} agentReads={listed} />));
+    fireEvent.click(await card().findByRole('button', { name: en.onboarding.setup.allModels }));
+    const dialog = within(await screen.findByRole('dialog'));
+    const row = await dialog.findByRole('checkbox', { name: /gpt-5\.6-pro/ });
+    expect(row.getAttribute('aria-disabled')).not.toBe('true');
+    fireEvent.click(row);
+    fireEvent.click(dialog.getByRole('button', { name: 'Add 1 model' }));
+    await waitFor(() => expect(mock.api.updateVibeAgent).toHaveBeenCalledWith('vibey', { model: 'gpt-5.6-pro' }));
+    expect(mock.models.putAgentModels).not.toHaveBeenCalled();
+  });
+
   it('reads as an enabled assistant once it has a model, and opens its route', async () => {
     model = 'gpt-5.6-sol';
     render(wrap(<AgentDetection data={data()} onNext={vi.fn()} onNavigate={vi.fn()} agentReads={reads} />));

@@ -71,6 +71,10 @@ type AgentState = {
 
 /** The server's refusal of a pick whose suppliers moved after the card showed them. */
 const CANDIDATES_CHANGED = 'candidate_suppliers_changed';
+/** Choosing a built-in assistant's model, a model its list already holds is as much a
+ *  choice as one it does not: the pick only adds what is missing. So the picker is
+ *  told nothing is listed, and every supplied model stays selectable. */
+const NOTHING_LISTED: ReadonlySet<string> = new Set();
 
 /**
  * The verdict of the latest settled enable write, and the intent that earned it.
@@ -1108,8 +1112,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
       </div>
       {providerDialog}
       {pickerFor && (
-        <BackendModelPickerDialog open backend={pickerFor}
-          listedIds={new Set((routeRead.supplies.find((row) => row.backend === pickerFor)?.catalog_models ?? []).map((row) => row.id))}
+        <BackendModelPickerDialog open backend={pickerFor} listedIds={NOTHING_LISTED}
           onCancel={() => setPickerFor(null)}
           onAdd={(chosen) => {
             const backend = pickerFor;

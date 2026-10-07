@@ -548,9 +548,10 @@ export function Wizard() {
       navigate('/', { state: { onboardingCompleted: true } });
     } finally { completing.current = false; }
   };
-  // The stylesheet's stacked reservation is one card per assistant; the lineup is the
-  // one place that count lives.
-  return <div className="onboarding-shell" style={{ '--ob-cards': SETUP_LINEUP.length } as CSSProperties}>
+  // The stylesheet's stacked and folded reservations count the cards; the lineup is
+  // the one place that count lives.
+  return <div className="onboarding-shell"
+    style={{ '--ob-cards': SETUP_LINEUP.length, '--ob-fold-rows': Math.ceil(SETUP_LINEUP.length / 2) } as CSSProperties}>
     <SetupHeader />
     <main className="onboarding-shell-content">
       <SetupFlowShell sequence={SETUP_REGISTERED_SCREENS} capability={capability} gatewayEnabled={gatewayEnabled}

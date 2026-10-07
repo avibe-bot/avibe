@@ -4376,6 +4376,107 @@ def test_explicit_opencode_model_recovery_preserves_agent_and_completes(monkeypa
         store.close()
 
 
+def test_builtin_vibey_model_pick_completes_setup_without_a_cli(monkeypatch, tmp_path):
+    """AUTH-SETUP-127: Vibey candidates -> catalog write -> Agent model -> runnable route -> completion.
+
+    The setup card for the built-in backend reads its candidates, adds a pick its catalog
+    lacks with the suppliers it displayed, names it as the built-in Agent's model and then
+    lets setup finish on that Agent alone. Every step here is the HTTP route the card
+    calls; the Hub service is wired to the real Agent store the way the controller wires it.
+    """
+    from core.vibe_agents import VibeAgentStore
+    from tests.test_model_hub_api import _service
+
+    monkeypatch.setenv("VIBE_MODEL_HUB_ENABLED", "1")
+    V2Config.default().save()
+    service, store, _adapter = _service(tmp_path / "hub")
+    agents = VibeAgentStore()
+    service.named_agents_override = lambda backend: [
+        (agent.name, agent.model)
+        for agent in agents.list_agents(include_disabled=False)
+        if agent.backend == backend
+    ]
+    monkeypatch.setattr(ui_server, "_model_hub_service", lambda: service)
+    source = ModelHubSourceConfig(
+        id="src_vibey001",
+        kind="api_key",
+        vendor="custom",
+        display_name="Mock Lab",
+        protocol="openai_chat",
+        supply_channel="hub",
+        billing="metered",
+        state=ModelHubSourceStateConfig(status="standby"),
+        models=[ModelHubModelConfig(id=model, provenance="discovered") for model in ("mock-large", "mock-mini")],
+        credential_ref="cred_vibey001",
+    )
+    store.config.sources = [source]
+    store.config.agents["vibey"].sources.order = [source.id]
+    client = app.test_client()
+    headers = csrf_headers(client)
+    try:
+        listed = client.get("/api/agents").get_json()
+        vibey = next(row for row in listed["agents"] if row["backend"] == "vibey")
+        assert vibey["model"] is None
+
+        candidates = client.get("/api/models/agents/vibey/models/candidates").get_json()["candidates"]
+        pick = next(row for row in candidates["providers"] if row["id"] == "mock-mini")
+        suppliers = [{"source_id": row["source_id"], "model_id": row["model_id"]} for row in pick["suppliers"]]
+        assert suppliers == [{"source_id": source.id, "model_id": "mock-mini"}]
+
+        def vibey_supply():
+            rows = client.get("/api/models/agents").get_json()["agents"]
+            return next(row for row in rows if row["backend"] == "vibey")
+
+        baseline = vibey_supply()["catalog_models"]
+        assert baseline == []
+        # The row the card builds for a candidate: what the candidate states, nothing more.
+        added = {
+            "id": pick["id"], "display_name": pick["display_name"], "origin": pick["origin"],
+            "models_dev_id": None, "context_window": None, "max_output_tokens": None,
+            "input_modalities": [], "output_modalities": [], "supports_tools": None,
+            "supports_reasoning": None, "reasoning_efforts": list(pick["reasoning_efforts"]),
+            "locked": False, "routeable": True,
+        }
+        before = store.config.to_payload()
+        stale = client.put(
+            "/api/models/agents/vibey/models",
+            json={"baseline": baseline, "models": [*baseline, added], "expected_suppliers": {"mock-mini": []}},
+            headers=headers,
+        )
+        # A pick whose suppliers moved after the card showed them commits nothing.
+        assert stale.status_code == 409, stale.get_json()
+        assert stale.get_json()["error"] == "candidate_suppliers_changed"
+        assert store.config.to_payload() == before
+
+        written = client.put(
+            "/api/models/agents/vibey/models",
+            json={"baseline": baseline, "models": [*baseline, added], "expected_suppliers": {"mock-mini": suppliers}},
+            headers=headers,
+        )
+        assert written.status_code == 200, written.get_json()
+        assert [row["id"] for row in vibey_supply()["catalog_models"]] == ["mock-mini"]
+
+        named = client.patch(f"/api/agents/{vibey['name']}", json={"model": "mock-mini"}, headers=headers)
+        assert named.status_code == 200, named.get_json()
+        assert agents.require(vibey["name"]).model == "mock-mini"
+        supply = vibey_supply()
+        assert supply["cli_present"] is False
+        route = next(row for row in supply["named_agents"] if row["name"] == vibey["name"])
+        assert route["effective_model_id"] == "mock-mini"
+        assert route["supply_status"] in {"ok", "degraded"}
+        assert route["route_reason"] != "route_unconfigured"
+
+        # With no CLI assistant able to run, setup enters on the built-in Agent.
+        chosen = client.post("/api/agents/default", json={"name": vibey["name"]}, headers=headers)
+        assert chosen.status_code == 200, chosen.get_json()
+        completed = client.post("/api/config", json={"setup_completed": True}, headers=headers)
+        assert completed.status_code == 200, completed.get_json()
+        assert V2Config.load().setup_completed
+        assert agents.get_default_agent().name == vibey["name"]
+    finally:
+        agents.close()
+
+
 @pytest.mark.parametrize("setup_host", ["192.0.2.5", "fd00::1", "2001:db8::5", "[2001:db8::5]"])
 async def test_cloud_pairing_origin_reaches_effective_ui_listener(monkeypatch, setup_host):
     """Scenario: AUTH-SETUP-907 — every origin consumer reaches the widened UI bind."""

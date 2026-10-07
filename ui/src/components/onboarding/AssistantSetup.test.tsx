@@ -268,7 +268,10 @@ describe('assistant installation presentation', () => {
     mock.api.installAgent.mockResolvedValue({ ok: false, path: '/fixture/new-cli', message: 'fixture apply failed' });
     mock.api.getBackendConnection.mockImplementation(async (backend) => ({ ok: true, backend, installed: true, enabled: true, auth: 'api_key', application: 'failed', ready: false, entry_eligible: false }));
     fireEvent.click(row('Claude Code').getByRole('button', { name: 'Install' }));
-    await waitFor(() => expect(mock.api.getBackendConnection).toHaveBeenCalledTimes(4));
+    // The settlement reads the installed backend's connection once more, and the failed
+    // application it reports is what keeps entry closed.
+    await waitFor(() => expect(mock.api.getBackendConnection).toHaveBeenCalledTimes(SETUP_LINEUP.length + 1));
+    expect(mock.api.getBackendConnection).toHaveBeenLastCalledWith('claude');
     expect(screen.getByRole('button', { name: 'Enter workspace' }).hasAttribute('disabled')).toBe(true);
     expect(mock.api.installAgent).toHaveBeenCalledOnce(); expect(mock.api.mutateConfig).not.toHaveBeenCalled();
   });
