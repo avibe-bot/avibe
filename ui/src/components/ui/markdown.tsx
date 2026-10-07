@@ -26,7 +26,7 @@ import { isAbsoluteWindowsFileHref, resolveLocalFileLink, type LocalFileLinkTarg
 import {
   bindMarkdownSource,
   rehypeSourceSpans,
-  remarkSourceAnchors,
+  remarkDefinitionSpans,
   sourceSpanProps,
 } from '@/lib/markdownSource';
 import {
@@ -239,15 +239,13 @@ const AUTOLINK_BOUNDARY =
 // only after punctuation or a symbol (a run holds no whitespace).
 const AUTOLINK_START = /(?<![a-z])https?:\/\/|(?<=[\p{P}\p{S}])www\./giu;
 
-type AutolinkPoint = { line: number; column: number; offset: number };
-
 type AutolinkNode = {
   type: string;
   value?: string;
   url?: string;
   title?: null;
   children?: AutolinkNode[];
-  position?: { start?: Partial<AutolinkPoint>; end?: Partial<AutolinkPoint> };
+  position?: { start?: { offset?: number } };
 };
 
 // GFM's trailing-punctuation rule (mdast-util-gfm-autolink-literal `splitUrl`):
@@ -280,17 +278,10 @@ function isAutolinkLiteral(literal: string): boolean {
 }
 
 // Re-split the run GFM linked as one literal into the links and text it spells
-// once a boundary ends each URL, or null to keep GFM's link as it is. A literal's
-// label is its source spelled verbatim on one line, so each piece is positioned
-// from where the run starts (`at`): the source of what is selected and copied.
-function splitAutolinkRun(run: string, at?: AutolinkPoint): AutolinkNode[] | null {
+// once a boundary ends each URL, or null to keep GFM's link as it is.
+function splitAutolinkRun(run: string): AutolinkNode[] | null {
   if (!AUTOLINK_BOUNDARY.test(run)) return null;
   const nodes: AutolinkNode[] = [];
-  const place = (node: AutolinkNode, start: number, end: number): AutolinkNode => {
-    if (!at) return node;
-    const point = (index: number) => ({ line: at.line, column: at.column + index, offset: at.offset + index });
-    return { ...node, position: { start: point(start), end: point(end) } };
-  };
   let textStart = 0;
   let linkStart = 0;
   for (;;) {
@@ -299,13 +290,9 @@ function splitAutolinkRun(run: string, at?: AutolinkPoint): AutolinkNode[] | nul
     const literal = trimAutolinkTrail(boundary < 0 ? tail : tail.slice(0, boundary));
     let resume = linkStart + 1;
     if (isAutolinkLiteral(literal)) {
-      if (linkStart > textStart) {
-        nodes.push(place({ type: 'text', value: run.slice(textStart, linkStart) }, textStart, linkStart));
-      }
+      if (linkStart > textStart) nodes.push({ type: 'text', value: run.slice(textStart, linkStart) });
       const url = (/^www\./i.test(literal) ? 'http://' : '') + literal;
-      const end = linkStart + literal.length;
-      const label = place({ type: 'text', value: literal }, linkStart, end);
-      nodes.push(place({ type: 'link', url, title: null, children: [label] }, linkStart, end));
+      nodes.push({ type: 'link', url, title: null, children: [{ type: 'text', value: literal }] });
       textStart = resume = linkStart + literal.length;
     } else if (linkStart === 0) {
       // The cut left GFM's own literal invalid (a CJK host): keep GFM's link, as
@@ -317,7 +304,7 @@ function splitAutolinkRun(run: string, at?: AutolinkPoint): AutolinkNode[] | nul
     if (!next) break;
     linkStart = next.index;
   }
-  if (textStart < run.length) nodes.push(place({ type: 'text', value: run.slice(textStart) }, textStart, run.length));
+  if (textStart < run.length) nodes.push({ type: 'text', value: run.slice(textStart) });
   return nodes;
 }
 
@@ -338,11 +325,7 @@ function remarkCjkAutolinkBoundary() {
           && run !== undefined
           && (node.url === run || node.url === `http://${run}`)
           && (offset === undefined || (source[offset] !== '[' && source[offset] !== '<'));
-        const start = node.position?.start;
-        const at = typeof start?.line === 'number' && typeof start.column === 'number' && typeof start.offset === 'number'
-          ? { line: start.line, column: start.column, offset: start.offset }
-          : undefined;
-        const pieces = isLiteral ? splitAutolinkRun(run, at) : null;
+        const pieces = isLiteral ? splitAutolinkRun(run) : null;
         if (pieces) {
           children.splice(index, 1, ...pieces);
           index += pieces.length - 1;
@@ -376,7 +359,7 @@ function mentionUrlTransform(
 const rehypePlugins = [rehypeSourceSpans];
 
 // A custom component draws its own element in place of the one react-markdown
-// would have, so it carries the mark itself. The wrapper takes no box of its own.
+// would have, so it carries the marks itself. The wrapper takes no box of its own.
 function withSourceSpan<P extends { node?: unknown }>(render: (props: P) => React.ReactNode) {
   return (props: P) => (
     <span className="contents" {...sourceSpanProps(props.node)}>
@@ -389,7 +372,7 @@ function withSourceSpan<P extends { node?: unknown }>(render: (props: P) => Reac
 // relatively-positioned wrapper (not the <pre>, which scrolls horizontally) so
 // it stays pinned top-right while the code scrolls. The code text is read from
 // the rendered <pre> (textContent) rather than re-derived from the markdown AST.
-const CodeBlock: React.FC<{ children?: React.ReactNode; sourceSpan: Record<string, string | number> }> = ({
+const CodeBlock: React.FC<{ children?: React.ReactNode; sourceSpan: Record<string, number> }> = ({
   children,
   sourceSpan,
 }) => {
@@ -577,8 +560,8 @@ export const Markdown: React.FC<{
       // Unconditional: which destinations were written with a bracketed host is
       // a fact about this text, not about whether it carries citations.
       remarkLiteralAuthority,
-      // Unconditional too: what copying a selection as Markdown reads back (lib/markdownSource).
-      remarkSourceAnchors,
+      // Unconditional too: a copied reference needs its definition (lib/markdownSource).
+      remarkDefinitionSpans,
       ...(softBreaks ? [remarkBreaks] : []),
       ...(annotateCitations ? [remarkCitationSpans] : []),
     ],
