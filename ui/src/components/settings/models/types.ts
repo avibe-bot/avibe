@@ -613,7 +613,7 @@ export type TurnProvenance = {
   agent: AgentBackend;
   requested_model_id: string;
   outcome: 'served' | 'exhausted' | 'failed_terminal' | 'no_candidate' | 'canceled';
-  failed_attempts: Array<RecordedAttempt & { reason: ResolutionReason; http_status?: number | null }>;
+  failed_attempts: Array<RecordedAttempt & { reason: ResolutionReason; http_status?: number | null; upstream_detail?: string }>;
   served: RecordedAttempt | null;
   canceled_attempt: RecordedAttempt | null;
   terminal_error: {
@@ -624,6 +624,7 @@ export type TurnProvenance = {
     stream_started: boolean;
     http_status?: number | null;
     upstream_error_code?: string | null;
+    upstream_detail?: string;
     local_error_detail?: string;
     stripped_reasoning_efforts?: string[];
     declared_reasoning_efforts?: string[];

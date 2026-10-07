@@ -7428,6 +7428,8 @@ def test_engine_reported_upstream_transport_failure_takes_network_recovery(
     assert outcome.kind is kind
     assert outcome.stream_started is stream_started
     assert classify_outcome(outcome).reason == reason
+    # The engine's own 500 is not an upstream status.
+    assert (outcome.http_status is None) is (kind is RawOutcomeKind.NETWORK_ERROR)
 
 
 @pytest.mark.parametrize(
@@ -7515,6 +7517,19 @@ def test_engine_upstream_detail_keeps_email_addresses_usable() -> None:
     assert client_module._bounded_upstream_detail("Contact support@example.com, cc @ops or x@everyone") == (
         "Contact support@example.com, cc @\u200bops or x@\u200beveryone"
     )
+
+
+def test_engine_upstream_detail_drops_terminal_control_characters() -> None:
+    payload = json.dumps(
+        {"error": {"message": (
+            "relay \x1b]52;c;cGF5bG9hZA==\x07 down\x1b[2J\x9b now"
+            " \u202egnp.exe\u202c \u2066a\u2069\u2067b\u2068c\u200e\u200f\u061c end"
+        )}}
+    ).encode()
+
+    detail = client_module._upstream_error_detail(payload, (("error",),))
+
+    assert detail == "relay ]52;c;cGF5bG9hZA== down [2J now gnp.exe a b c end"
 
 
 def test_engine_upstream_detail_replaces_lone_surrogates_so_it_can_persist() -> None:
