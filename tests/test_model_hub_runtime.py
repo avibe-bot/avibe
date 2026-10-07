@@ -8840,9 +8840,8 @@ def test_oauth_engine_failure_names_what_the_user_can_do(
         assert failed.error_key == error_key
         # The engine's own words travel beside the key, for the dialog's
         # details and for the log.
-        # The engine's own words travel beside the key.
-        assert failed.error_detail is not None
-        assert failed.error_detail.startswith(engine_error[:24])
+        # The engine's own words travel beside the key, as written.
+        assert failed.error_detail == " ".join(engine_error.split())
         assert any(
             error_key in record.getMessage() and engine_error[:24] in record.getMessage()
             for record in caplog.records
@@ -8853,96 +8852,35 @@ def test_oauth_engine_failure_names_what_the_user_can_do(
         assert isinstance(_ui_text(language, error_key), str), (language, error_key)
 
 
-@pytest.mark.parametrize(
-    ("engine_error", "secrets", "kept"),
-    [
-        (
-            "Failed to exchange authorization code for tokens: token exchange failed with status 401: "
-            '{"error": {"message": "Incorrect API key provided: sk-proj-abcdefghijklmnop0123456789", '
-            '"code": "invalid_api_key"}} ' + "x" * 600,
-            ("sk-proj-abcdefghijklmnop0123456789",),
-            "Incorrect API key provided: ",
-        ),
-        # The failure echoes the address the user pasted: its code may still
-        # be exchangeable, and the state names the live session.
-        (
-            "Failed to exchange authorization code for tokens: token exchange request failed: "
-            'Post "https://auth.openai.com/oauth/token": redirect_url '
-            "http://localhost:1455/auth/callback?code=ac_live-Grant_123&scope=openid&state=0f1e2d3c "
-            "grant_type=authorization_code&code=ac_live-Grant_123&code_verifier=verifier-xyz",
-            ("ac_live-Grant_123", "0f1e2d3c", "verifier-xyz"),
-            "/oauth/token\": redirect_url",
-        ),
-        # Grant material echoed without a name=value parameter: as JSON, after
-        # a colon, or bare. The provider's error identifiers stay readable.
-        (
-            "Failed to exchange authorization code for tokens: token exchange failed with status 400: "
-            '{"error": "invalid_grant", "code": "ac_V8kQ2mZp4XrT7nLw9bYc3HdF6sJ1", '
-            '"state": "0f1e2d3c4b5a69788796a5b4c3d2e1f0"}',
-            ("ac_V8kQ2mZp4XrT7nLw9bYc3HdF6sJ1", "0f1e2d3c4b5a69788796a5b4c3d2e1f0"),
-            '{"error": "invalid_grant", "code": "[redacted]"',
-        ),
-        (
-            "Authentication failed: authorization code: ac_V8kQ2mZp4XrT7nLw9bYc3HdF6sJ1 was rejected",
-            ("ac_V8kQ2mZp4XrT7nLw9bYc3HdF6sJ1",),
-            "authorization code: [redacted] was rejected",
-        ),
-        # A grant split by base64 separators, or too short or too plain for the
-        # shape rule, is still caught by its field name.
-        (
-            'Authentication failed: {"code":"Abc123Def456/Ghi789Jkl012", "state": "abcdefghij"}',
-            ("Abc123Def456", "Ghi789Jkl012", "abcdefghij"),
-            '{"code":"[redacted]", "state": "[redacted]"}',
-        ),
-        # A grant shaped like an error identifier is still a grant.
-        (
-            'Authentication failed: {"code":"ac_live_authorization_grant"}',
-            ("ac_live_authorization_grant",),
-            '{"code":"[redacted]"}',
-        ),
-        # A transport failure carries no grant: its network cause after the
-        # quoted URL reaches the user whole.
-        (
-            "Failed to exchange authorization code for tokens: token exchange request failed: "
-            'Post "https://auth.openai.com/oauth/token": dial tcp 47.131.95.123:443: i/o timeout',
-            (),
-            'Post "https://auth.openai.com/oauth/token": dial tcp 47.131.95.123:443: i/o timeout',
-        ),
-        # A field path that ends like a label still guards the value after it.
-        (
-            "Failed to exchange authorization code for tokens: provider rejected /token: opaquevalue123456789",
-            ("opaquevalue123456789",),
-            "provider rejected /token: ",
-        ),
-        # A label before a quoted URL still drops everything after it.
-        (
-            'Failed to exchange authorization code for tokens: session: opaquesession42 '
-            'Post "https://auth.openai.com/oauth/token": dial tcp: i/o timeout',
-            ("opaquesession42", "auth.openai.com"),
-            "session: ",
-        ),
-    ],
-)
-def test_oauth_failure_detail_never_carries_credential_material(
-    tmp_path: Path, engine_error: str, secrets: tuple[str, ...], kept: str,
-) -> None:
+def test_oauth_failure_detail_is_the_engine_reason_on_one_bounded_line(tmp_path: Path) -> None:
+    reasons = iter([
+        # What the user copies is what the provider said, unaltered.
+        "Failed to exchange authorization code for tokens: token exchange failed with status 401: {\n"
+        '  "error": {\n    "message": "Could not validate your token. Please try signing in again.",\n'
+        '    "type": "invalid_request_error",\n    "param": null,\n    "code": "token_expired"\n  }\n}',
+        # A proxy error page must not flood the dialog or the log.
+        "Failed to exchange authorization code for tokens: token exchange failed with status 502: " + "<p>bad gateway</p>" * 200,
+    ])
 
     class Engine(_BrowserCallbackEngine):
         def management_request(self, method, path, *, query=None, payload=None, timeout=None):
             if path == "/get-auth-status":
-                return {"status": "error", "error": engine_error}
+                return {"status": "error", "error": next(reasons)}
             return super().management_request(method, path, query=query, payload=payload, timeout=timeout)
 
     async def run() -> None:
         adapter = _browser_callback_adapter(tmp_path, Engine())
-        flow = await adapter.start_oauth("src_fixture123", "openai")
-        failed = await adapter.oauth_status(flow.flow_id)
-        assert failed.error_detail is not None
-        assert not any(secret in failed.error_detail for secret in secrets)
-        assert ("[redacted]" in failed.error_detail) is bool(secrets)
-        # What explains the failure survives the redaction.
-        assert kept in failed.error_detail
-        assert len(failed.error_detail) <= 400
+        first = await adapter.oauth_status((await adapter.start_oauth("src_fixture123", "openai")).flow_id)
+        assert first.error_detail == (
+            "Failed to exchange authorization code for tokens: token exchange failed with status 401: "
+            '{ "error": { "message": "Could not validate your token. Please try signing in again.", '
+            '"type": "invalid_request_error", "param": null, "code": "token_expired" } }'
+        )
+        second = await adapter.oauth_status((await adapter.start_oauth("src_fixture456", "openai")).flow_id)
+        assert second.error_detail is not None
+        assert len(second.error_detail) == 1000
+        assert second.error_detail.startswith("Failed to exchange authorization code for tokens: ")
+        assert second.error_detail.endswith("…")
 
     asyncio.run(run())
 

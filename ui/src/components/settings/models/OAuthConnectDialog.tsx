@@ -81,7 +81,7 @@ const Step: React.FC<{ n: number; label: string; children: React.ReactNode }> = 
 /**
  * The provider's own words behind a failed sign-in, collapsed by default under
  * the sentence that explains it, and copyable so the user can pass them on.
- * The server bounds and redacts them before they arrive.
+ * The server sends them verbatim on one bounded line.
  */
 const OAuthFailureDetail: React.FC<{ detail: string }> = ({ detail }) => {
   const { t } = useTranslation();

@@ -9,8 +9,8 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Mapping, Protocol
 
 from .adapter import OAuthFlowState, RetainedMaterialDisposition
-from .events import bounded_failure_detail, contains_credential_material
-from .oauth import NativeOAuthSourceStatus, NativeOAuthUnavailableError
+from .events import contains_credential_material
+from .oauth import NativeOAuthSourceStatus, NativeOAuthUnavailableError, oauth_failure_detail
 
 _VENDOR_BACKENDS = {"anthropic": "claude", "openai": "codex"}
 _INSTRUCTIONS_KEYS = {
@@ -279,7 +279,7 @@ class AgentAuthNativeOAuthAdapter:
         if state == "failed":
             error_key = _TIMEOUT_ERROR_KEY if payload.get("error") == "timed_out" else _GENERIC_ERROR_KEY
             if error_key == _GENERIC_ERROR_KEY:
-                error_detail = bounded_failure_detail(payload.get("error"))
+                error_detail = oauth_failure_detail(payload.get("error"))
         elif state == "cancelled":
             error_key = _GENERIC_ERROR_KEY
 

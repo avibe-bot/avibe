@@ -723,8 +723,8 @@ export type OAuthFlow = {
   presentation: OAuthPresentation;
   /** Closed i18n key for the user-facing sentence. */
   error_key?: string | null;
-  /** A failed flow's own reason (provider, engine, or CLI), bounded and redacted
-   *  by the server; shown behind the copyable details control. */
+  /** A failed flow's own reason (provider, engine, or CLI), verbatim on one
+   *  bounded line; shown behind the copyable details control. */
   error_detail?: string;
   expires_at?: string | null;
 };

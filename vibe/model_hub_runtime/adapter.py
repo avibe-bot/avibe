@@ -38,7 +38,7 @@ from core.handlers.model_hub.adapter import (
     make_source_observation,
 )
 from core.handlers.model_hub.errors import ModelDiscoveryError
-from core.handlers.model_hub.events import bounded_failure_detail
+from core.handlers.model_hub.oauth import oauth_failure_detail
 from core.handlers.model_hub.identifiers import model_id_without_credential_address
 from core.handlers.model_hub.quota import (
     CLAUDE_PLAN_FETCH_TIMEOUT_SECONDS,
@@ -3092,7 +3092,7 @@ class CLIProxyEngineAdapter:
         self._mark_retention_unknown_if_needed(flow)
         flow.state = "failed"
         flow.error_key = error_key
-        flow.error_detail = bounded_failure_detail(detail)
+        flow.error_detail = oauth_failure_detail(detail)
         if flow.error_detail is not None:
             logger.warning(
                 "OAuth flow failed: flow=%s provider=%s error_key=%s detail=%s",

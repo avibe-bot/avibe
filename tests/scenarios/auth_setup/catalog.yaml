@@ -483,7 +483,7 @@ scenarios:
       - tests/test_model_hub_runtime.py::test_oauth_paste_reaches_the_engine_as_the_value_it_is
       - tests/test_model_hub_runtime.py::test_oauth_paste_that_cannot_exchange_keeps_the_flow_awaiting
       - tests/test_model_hub_runtime.py::test_oauth_engine_failure_names_what_the_user_can_do
-      - tests/test_model_hub_runtime.py::test_oauth_failure_detail_never_carries_credential_material
+      - tests/test_model_hub_runtime.py::test_oauth_failure_detail_is_the_engine_reason_on_one_bounded_line
       - ui/src/components/settings/models/serverCopy.test.ts
       - ui/src/components/settings/models/SettingsModelsPage.render.test.tsx
 next_priority: []
