@@ -91,15 +91,11 @@ test('the lineup stands the built-in assistant first, on the reference tracks of
 });
 
 /**
- * Wherever the stage reserves the offer — the authored desktop rows fit it in the
- * diagram's box, the fold and the stack reserve it outright — the action does not move
- * either. On a 1024 window the card's sentence takes two lines and the offer outgrows the
- * diagram's box, so there the claim is only that nothing is drawn over a card.
+ * Every band reserves the offer at its worst reading, so opening it moves nothing: the
+ * aside is never drawn over a card and the action keeps the introduction's y.
  */
-for (const [width, height, holds] of [
-  [1200, 800, true], [1440, 900, true], [1920, 1080, true], [1024, 768, false], [800, 1000, true], [390, 844, true],
-] as const) {
-  test(`${width}x${height}: the built-in offer is never drawn under the aside${holds ? ', and the action holds still' : ''}`, async ({ page }) => {
+for (const [width, height] of [[1200, 800], [1440, 900], [1920, 1080], [1024, 768], [800, 1000], [390, 844]] as const) {
+  test(`${width}x${height}: the built-in offer is never drawn under the aside, and the action holds still`, async ({ page }) => {
     await page.setViewportSize({ width, height });
     await serveProduct(page);
     await serveLineup(page, { permitted: false });
@@ -118,6 +114,6 @@ for (const [width, height, holds] of [
     }
     expect(overlaps(footer, asideBox)).toBe(false);
     const action = (await boxes(page, '.onboarding-primary-action'))[0];
-    if (holds) expect(action.y).toBeCloseTo(introAction.y, 0);
+    expect(action.y).toBeCloseTo(introAction.y, 0);
   });
 }

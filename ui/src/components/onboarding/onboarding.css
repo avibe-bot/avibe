@@ -151,15 +151,15 @@
   /* The built-in card offering its models: the same card with the two method rows
      replaced by the offer — three candidates and "All models" two short of a method
      row each, its 4 inset and 1 border on both sides, and the hairline above the last.
-     The stacked and folded bands reserve it; the side-by-side rows fit it in the
-     diagram's own box. */
+     Every band reserves it at its worst reading — the note at its two-line clamp —
+     because whether the note wraps is the platform's fonts' answer, not the design's. */
   --ob-offer-h: calc(var(--ob-assistant-h) + var(--ob-method-h) * 2 - var(--ob-method-gap) + 3px);
   /* One floor under the cards, so a card that grows while its step is read — a
-     sentence that wraps in one language, a state row that arrives with detection —
-     cannot move the action. It reserves the cards only; whatever a step draws under
-     them adds its own height on top, and the shared cell (see `.onboarding-screens`)
-     is what then holds the three steps level. */
-  --ob-stage-h: max(var(--ob-diagram-h), var(--ob-assistant-h));
+     sentence that wraps in one language, a state row that arrives with detection, the
+     built-in card opening its model offer — cannot move the action. It reserves the
+     cards only; whatever a step draws under them adds its own height on top, and the
+     shared cell (see `.onboarding-screens`) is what then holds the three steps level. */
+  --ob-stage-h: max(var(--ob-diagram-h), var(--ob-assistant-h), var(--ob-offer-h));
   /* The diagram keeps the box the reference draws it in: the story's card plus the
      band the return wire needs under it — the card plus 64 at every reading. A
      reservation that has to hold a wrapped sentence on another step does not
