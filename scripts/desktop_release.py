@@ -55,7 +55,14 @@ def resolve(tag: str, source_sha: str | None = None) -> dict[str, str]:
             "package_version": package_version_from_release_tag(tag)}
 
 
-def prepare(version: str, tag: str, source_sha: str, config: Path, env_file: Path) -> None:
+def prepare(
+    version: str,
+    tag: str,
+    source_sha: str,
+    config: Path,
+    env_file: Path,
+    target: str | None = None,
+) -> None:
     match = SEMVER.fullmatch(version)
     if match is None or any(
         part.isdigit() and len(part) > 1 and part.startswith("0")
@@ -76,6 +83,21 @@ def prepare(version: str, tag: str, source_sha: str, config: Path, env_file: Pat
         with env_file.open("a", encoding="utf-8") as stream:
             for key in ("SETUPTOOLS_SCM_PRETEND_VERSION", "SETUPTOOLS_SCM_PRETEND_VERSION_FOR_AVIBE_OS"):
                 stream.write(f"{key}={resolved['package_version']}\n")
+    if target is not None:
+        if target not in TARGETS:
+            raise ValueError("unknown desktop release target")
+        if TARGETS[target][0] == "macos":
+            bundle = override.setdefault("bundle", {})
+            bundle["externalBin"] = ["binaries/cua-driver"]
+            resources = bundle.setdefault("resources", {})
+            resources.update(
+                {
+                    "../cua-driver/policy.yaml": "computer-use/policy.yaml",
+                    "../cua-driver/tools-v0.31.0.json": "computer-use/tools-v0.31.0.json",
+                    "../cua-driver/LICENSE.md": "computer-use/LICENSE.md",
+                    "../cua-driver/sources.json": "computer-use/sources.json",
+                }
+            )
     config.write_text(json.dumps(override) + "\n", encoding="utf-8")
 
 
@@ -228,6 +250,7 @@ def main() -> None:
     prep.add_argument("--source-sha", default="")
     prep.add_argument("--config", type=Path, required=True)
     prep.add_argument("--env-file", type=Path, required=True)
+    prep.add_argument("--target", choices=TARGETS)
     producer = sub.add_parser("record")
     producer.add_argument("--version", required=True)
     producer.add_argument("--target", choices=TARGETS, required=True)

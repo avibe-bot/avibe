@@ -25,6 +25,7 @@ flate2 = "1"
 reqwest = { workspace = true, features = ["json", "rustls-tls"] }
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 sys-locale.workspace = true
 tar = "0.4"
 tauri = { version = "2", features = ["tray-icon", "macos-private-api"] }
@@ -38,7 +39,7 @@ tauri-plugin-opener = "2"
 tauri-plugin-single-instance = "2"
 tauri-plugin-window-state = "2"
 tempfile = "3"
-tokio.workspace = true
+tokio = { workspace = true, features = ["io-util", "macros", "net", "process", "sync"] }
 url.workspace = true
 
 [dev-dependencies]
@@ -59,6 +60,8 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = [
   "NSEnumerator",
   "NSError",
   "NSGeometry",
+  "NSNotification",
+  "NSOperation",
   "NSString",
   "NSURL",
   "NSURLRequest",

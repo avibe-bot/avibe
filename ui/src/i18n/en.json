@@ -46,6 +46,17 @@
       "failureTitle": "Action Could Not Be Completed",
       "loginFailure": "The login setting could not be read or changed. Check your operating system's login settings and try again."
     },
+    "computerUse": {
+      "off": "Computer Use",
+      "starting": "Computer Use — starting…",
+      "ready": "Computer Use — ready",
+      "needsPermission": "Computer Use — permissions required; turn off and on to re-grant",
+      "needsRuntime": "Computer Use — restart the Avibe service",
+      "error": "Computer Use — error: {{reason}}",
+      "invalidState": "Computer Use — state file needs repair; toggle to replace it",
+      "unavailable": "Computer Use — bundled driver unavailable",
+      "saveFailed": "Computer Use — setting was not saved"
+    },
     "notifications": {
       "toggle": "Notifications",
       "approvalRequested": {

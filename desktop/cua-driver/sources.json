@@ -5,6 +5,8 @@
     "tag": "cua-driver-rs-v0.31.0",
     "source_commit": "5272e492d61b96caf08e3bf434d91126c1f3dccc",
     "license": "MIT",
+    "release_base_url": "https://github.com/trycua/cua/releases/download/cua-driver-rs-v0.31.0",
+    "release_checksums_asset": "checksums.txt",
     "release_checksums_sha256": "b9e0f7a45a49f25de4824e53ae498d5d228d7bd1a80a746a06809707e9490275",
     "macos": {
       "asset": "cua-driver-rs-0.31.0-darwin-universal-binary.tar.gz",

@@ -46,6 +46,17 @@
       "failureTitle": "无法完成操作",
       "loginFailure": "无法读取或更改登录启动设置。请检查操作系统的登录设置后重试。"
     },
+    "computerUse": {
+      "off": "电脑操作",
+      "starting": "电脑操作 — 正在启动…",
+      "ready": "电脑操作 — 已就绪",
+      "needsPermission": "电脑操作 — 需要权限；请关闭后重新开启以授权",
+      "needsRuntime": "电脑操作 — 请重启 Avibe 服务",
+      "error": "电脑操作 — 错误：{{reason}}",
+      "invalidState": "电脑操作 — 状态文件需要修复；切换开关可替换",
+      "unavailable": "电脑操作 — 内置驱动不可用",
+      "saveFailed": "电脑操作 — 设置未保存"
+    },
     "notifications": {
       "toggle": "通知",
       "approvalRequested": {

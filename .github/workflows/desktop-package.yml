@@ -106,7 +106,7 @@ jobs:
           python scripts/desktop_release.py prepare \
             --version "$AVIBE_DESKTOP_VERSION" --tag "$RELEASE_TAG" \
             --source-sha "$SOURCE_SHA" --config desktop/tauri.release.conf.json \
-            --env-file "$GITHUB_ENV"
+            --env-file "$GITHUB_ENV" --target "${{ matrix.target }}"
 
       - name: Configure signed updater or explicitly disable it
         shell: bash
@@ -123,6 +123,12 @@ jobs:
       - name: Build verified private Runtime
         run: >
           python desktop/scripts/build-runtime-bundle.py
+          --target "${{ matrix.target }}"
+
+      - name: Prepare pinned Cua Driver sidecar
+        if: runner.os == 'macOS'
+        run: >
+          python desktop/scripts/prepare-cua-driver.py
           --target "${{ matrix.target }}"
 
       - name: Clean prior bundle output

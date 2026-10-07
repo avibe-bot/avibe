@@ -130,6 +130,33 @@ def test_manual_prepare_retains_optional_signing_and_native_version(tmp_path):
         release.prepare("2.0.0-01", "", "", config, environment)
 
 
+@pytest.mark.parametrize(
+    ("target", "expected_bundle"),
+    [
+        (
+            "aarch64-apple-darwin",
+            {
+                "externalBin": ["binaries/cua-driver"],
+                "resources": {
+                    "../cua-driver/policy.yaml": "computer-use/policy.yaml",
+                    "../cua-driver/tools-v0.31.0.json": "computer-use/tools-v0.31.0.json",
+                    "../cua-driver/LICENSE.md": "computer-use/LICENSE.md",
+                    "../cua-driver/sources.json": "computer-use/sources.json",
+                },
+            },
+        ),
+        ("x86_64-pc-windows-msvc", None),
+    ],
+)
+def test_prepare_packages_computer_use_assets_only_for_macos(tmp_path, target, expected_bundle):
+    config, environment = tmp_path / "config.json", tmp_path / "env"
+    release.prepare("2.0.0", "", "", config, environment, target)
+    override = json.loads(config.read_text())
+    assert override["version"] == "2.0.0"
+    assert override.get("bundle") == expected_bundle
+    assert not environment.exists()
+
+
 def test_real_assembled_assets_pass_the_release_consumer(tmp_path):
     directory = assemble_assets(tmp_path)
     paths = release.verify(directory, TAG, SOURCE)

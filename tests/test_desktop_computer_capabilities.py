@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import httpx
 from fastapi.testclient import TestClient
+import pytest
 
 from core import internal_server
 from core.computer_use import ComputerUseStatus
@@ -73,6 +74,38 @@ def test_ui_desktop_capabilities_are_forwarded_from_controller(monkeypatch) -> N
         "controller_id": "controller-test",
     }
     assert response.headers["Cache-Control"] == "no-store"
+
+
+@pytest.mark.parametrize(
+    ("failure", "error"),
+    [
+        (internal_client.InternalServerTimeout("slow"), "controller_timeout"),
+        (
+            internal_client.InternalServerUnavailable("offline"),
+            "controller_unavailable",
+        ),
+    ],
+)
+def test_ui_desktop_capabilities_classify_transient_controller_failures(
+    monkeypatch,
+    failure,
+    error,
+) -> None:
+    """Transient Controller failures stay non-definitive for the native cache."""
+
+    async def capabilities():
+        raise failure
+
+    monkeypatch.setattr(internal_client, "desktop_capabilities", capabilities)
+    response = app.test_client().get(
+        "/api/desktop/capabilities",
+        base_url="http://127.0.0.1:5123",
+    )
+    assert response.status_code == 503
+    assert response.get_json() == {
+        "ok": False,
+        "error": error,
+    }
 
 
 def test_workbench_status_uses_the_shared_effective_status_contract(

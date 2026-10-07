@@ -22,6 +22,7 @@
 
 pub mod bootstrap;
 pub mod bootstrap_log;
+pub mod computer_use;
 pub mod deep_link;
 pub mod download;
 pub mod health;
