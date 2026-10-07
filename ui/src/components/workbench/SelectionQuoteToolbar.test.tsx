@@ -224,6 +224,54 @@ describe('chat selection action gesture lifetime', () => {
     expect(writeText).toHaveBeenCalledExactlyOnceWith(image);
   });
 
+  it('copies the whole bubble right after Select all, before the selection settles', async () => {
+    const containerRef = createRef<HTMLDivElement>();
+    const content = 'Use **bold** now.\n\nSecond paragraph.';
+    render(
+      <>
+        <div ref={containerRef}>
+          <Markdown content={content} />
+        </div>
+        <SelectionQuoteToolbar containerRef={containerRef} onQuote={quote} />
+      </>,
+    );
+    const range = document.createRange();
+    range.selectNodeContents(containerRef.current!.querySelector('strong')!);
+    window.getSelection()!.addRange(range);
+    settle();
+
+    // Two clicks, with no time for the 150 ms settle between them.
+    const selectAll = screen.getByRole('button', { name: 'chat.selection.selectAll' });
+    fireEvent.pointerDown(selectAll, press);
+    fireEvent.pointerUp(selectAll, press);
+    await act(async () => {
+      const copy = screen.getByRole('button', { name: 'chat.selection.copy' });
+      fireEvent.pointerDown(copy, press);
+      fireEvent.pointerUp(copy, press);
+      await Promise.resolve();
+    });
+
+    expect(writeText).toHaveBeenCalledExactlyOnceWith(content);
+  });
+
+  it('leaves a selection made after Copy in place', async () => {
+    const container = mountToolbar();
+    await act(async () => {
+      const copy = screen.getByRole('button', { name: 'chat.selection.copy' });
+      fireEvent.pointerDown(copy, press);
+      fireEvent.pointerUp(copy, press);
+      await Promise.resolve();
+    });
+    expect(writeText).toHaveBeenCalledOnce();
+
+    container.textContent = NEXT_TEXT;
+    selectContainer(container);
+    act(() => vi.advanceTimersByTime(800));
+
+    expect(window.getSelection()!.toString()).toBe(NEXT_TEXT);
+    expect(screen.queryByRole('button', { name: 'chat.selection.quote' })).not.toBeNull();
+  });
+
   it('selects the whole bubble on desktop and stays up over the new selection', async () => {
     coarsePointer = false;
     const container = mountBubble();

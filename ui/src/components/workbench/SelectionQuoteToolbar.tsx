@@ -72,6 +72,9 @@ export const SelectionQuoteToolbar: React.FC<{
   const { t } = useTranslation();
   const [sel, setSel] = useState<SelectionState | null>(null);
   const [copied, setCopied] = useState(false);
+  // Counts selection changes, so work finishing later (the clipboard write, the
+  // dismissal after it) applies only to the selection it was started for.
+  const generationRef = useRef(0);
   const toolbarRef = useRef<HTMLDivElement>(null);
   const pressRef = useRef<{
     pointerId: number;
@@ -160,6 +163,8 @@ export const SelectionQuoteToolbar: React.FC<{
       clearPress();
     };
     const onSelectionChange = () => {
+      generationRef.current += 1;
+      setCopied(false);
       const press = pressRef.current;
       const currentText = window.getSelection()?.toString().trim() ?? '';
       if (press && (!currentText || currentText === press.selectionText)) {
@@ -226,20 +231,23 @@ export const SelectionQuoteToolbar: React.FC<{
     dismiss();
   };
   const runCopy = () => {
+    const generation = generationRef.current;
     void copyTextToClipboard(sel.copyText).then((ok) => {
-      if (ok) {
-        setCopied(true);
-        window.setTimeout(dismiss, 800);
-      }
+      if (!ok || generationRef.current !== generation) return;
+      setCopied(true);
+      window.setTimeout(() => {
+        if (generationRef.current === generation) dismiss();
+      }, 800);
     });
   };
-  // The widened selection fires selectionchange, which re-places the toolbar
-  // over it; nothing dismisses, since the bubble is still selected.
+  // Nothing dismisses, since the bubble is still selected: the toolbar is
+  // re-read over the widened selection at once, so Copy right after copies it.
   const runSelectAll = () => {
     const selection = window.getSelection();
     if (!sel.whole || !selection) return;
     selection.removeAllRanges();
     selection.addRange(sel.whole.cloneRange());
+    recompute();
   };
 
   // Activate on pointerup (mouse + touch) and Enter/Space (keyboard). The
