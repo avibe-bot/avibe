@@ -93,14 +93,26 @@ running. The tray keeps the shell alive after the window closes.
 
 ### Shell (`desktop/src-tauri`, `desktop/runtime-host`)
 
-- **Packaging.** Ship `cua-driver` as a Tauri sidecar (`externalBin`), signed as
-  a nested executable before the app is signed and notarized. Pin the version
-  and SHA-256 in a sources manifest beside `runtime-sources.json`. Fetch only
-  the plain driver binary, never the `cua-perception` extension, which is AGPL.
-  Add the upstream MIT notice. Desktop packages are per architecture
-  (`aarch64-apple-darwin`, `x86_64-apple-darwin`, `x86_64-pc-windows-msvc`), so
-  ship one thin slice per package: `lipo -thin` of the universal binary keeps
-  Cua's valid per-slice signature. Windows ships `cua-driver.exe`; whether the
+- **Packaging.** On macOS, ship the raw, plist-less driver at
+  `Contents/Helpers/cua-driver` through Tauri's `bundle.macOS.files`; do not
+  use `externalBin`, and ship no stale copy in `Contents/MacOS`. A raw helper
+  in `Contents/MacOS` resolves the outer Avibe bundle before the pinned
+  driver's AppKit startup can set its accessory policy. In acceptance this
+  registered every daemon under Avibe's regular-app identity, made the daemon
+  frontmost, and fed a driver-exit → host-reactivation spawn loop.
+  `Contents/Helpers` keeps the executable bundle-less while remaining a
+  standard nested-code location. Launch it directly with `Command`, never
+  through LaunchServices.
+  Pin the version and SHA-256 in a sources manifest beside
+  `runtime-sources.json`. Fetch only the plain driver binary, never the
+  `cua-perception` extension, which is AGPL. Add the upstream MIT notice.
+  Desktop packages are per architecture (`aarch64-apple-darwin`,
+  `x86_64-apple-darwin`, `x86_64-pc-windows-msvc`), so ship one thin slice per
+  package: `lipo -thin` of the universal binary keeps Cua's valid per-slice
+  signature. Record the release archive, extracted universal, and thinned
+  upstream digests before packaging, separately from the packaged digest and
+  cdhash after signing. Sign nested code explicitly before the outer app;
+  `--deep` is verification-only. Windows ships `cua-driver.exe`; whether the
   default-off `cua-driver-uia.exe` worker is needed is a Windows-run question.
   Spawn it with `CREATE_NO_WINDOW` (it is a console program), as `runtime-host`
   already does for the Runtime.
@@ -188,10 +200,11 @@ running. The tray keeps the shell alive after the window closes.
 
   | From | Event | To | Action |
   | --- | --- | --- | --- |
-  | any | toggle off | `off` | stop the daemon if running |
+  | any | toggle off | `off` | stop the daemon and any permission-registration child if running |
   | `off` | toggle on, Runtime lacks a covering `computer_use_schema` | `off` | refuse; the menu says the Avibe service must restart |
   | `off` | toggle on, both grants held | `starting` | spawn |
-  | `off` | toggle on, a grant missing | `needs_permission` | prompt and run the capture probe (the only prompting path) |
+  | `off` | toggle on, Screen Recording missing | `needs_permission` | prompt, run the shell's one-pixel probe, and start one bounded child capture-registration attempt |
+  | `off` | toggle on, only Accessibility missing | `needs_permission` | prompt and run the shell's one-pixel probe; do not start the child capture |
   | shell launch | `D` unreadable, malformed, or of a newer `schema_version` | unchanged | spawn nothing and do not rewrite `D`; the menu warns. Only an explicit toggle action overwrites it |
   | shell launch | `enabled` and recorded `state` is `error` | `error` | none; no spawn |
   | shell launch | `D` missing or not `enabled` | `off` | if `D` exists, write `off` with this shell's `instance_id` |
@@ -200,39 +213,52 @@ running. The tray keeps the shell alive after the window closes.
   | shell launch | `enabled`, a grant missing | `needs_permission` | none; silent |
   | `needs_runtime` | capabilities now cover the schema, both grants held | `starting` | spawn |
   | `needs_runtime` | capabilities now cover the schema, a grant missing | `needs_permission` | none; silent |
-    | any `enabled` state except `error` | a successful `/ready` is followed by an unsupported capabilities answer | `needs_runtime` | stop the daemon if running |
+  | any `enabled` state except `error` | a successful `/ready` is followed by an unsupported capabilities answer | `needs_runtime` | stop the daemon and any permission-registration child if running |
   | any `enabled` state except `error` | adoption found a new `controller_id` with no definitive supported answer yet | `needs_runtime` | stop the daemon if running |
   | `needs_permission` | grant check passes | `starting` | spawn |
-  | `needs_permission` | app activation, grant check still fails, and no fallback ran in the previous 5 s | `starting` | spawn once (stale-preflight fallback) |
+  | `needs_permission` | app activation or 5 s check, grant check still fails | `needs_permission` | none; never start a child |
   | `starting` | socket accepts and the health check returns `pass` | `ready` | none |
   | `starting` | the health check returns `missing_grant` | `needs_permission` | stop the daemon; no prompt |
   | `starting` | spawn or socket fails, or the health check returns `unhealthy` | per the failure budget | stop the daemon; apply the failure budget |
   | `ready` | the health check returns `missing_grant` | `needs_permission` | stop the daemon |
   | `ready` | daemon exits unexpectedly, or its socket refuses or the health check returns `unhealthy` on 2 consecutive ticks | per the failure budget | stop the daemon if alive; apply the failure budget |
-  | any `enabled` state except `error` | quit | `stopped` | stop the daemon |
+  | any `enabled` state except `error` | quit | `stopped` | stop the daemon and permission-registration child |
   | `error` | quit | `error` | none; `error` is kept across relaunch |
 
   - **Grant check.** Silent, and it runs only while `enabled`. It fires on app
-    activation, and every 5 s. In `needs_permission`, it uses the shell's own
-    `AXIsProcessTrusted` and `CGPreflightScreenCaptureAccess`. In `ready`, it
-    runs the daemon health check below instead. That process reads its grants
-    fresh, so a stale shell preflight can never stop a daemon that the fallback
-    just brought up. The same 5 s tick also probes the daemon's socket. A wedged
-    daemon that is alive but not accepting is treated like one that exited.
-  - **Stale preflight.** macOS caches TCC answers per process, so the
-    shell's own preflight can stay false after the user grants access in
-    System Settings. The fallback row covers that case.
-    - A user who grants access returns to Avibe, which is an app activation.
-      At most one attempt runs per activation and per 5 s interval, measured
-      with monotonic time. Activation events observed while an attempt is in
-      flight are not queued for later retries.
-    - A normal preflight that sees both grants enters `starting` immediately,
-      even when a stale-preflight fallback ran less than 5 s earlier.
-    - A fresh daemon reads the grants anew. Its health check then reaches
-      `ready`, or returns to `needs_permission` with no prompt.
-    - A grant that is truly missing therefore costs one short-lived daemon
-      per eligible activation, never a loop. There is no background permission
-      retry or prompt.
+    activation and every 5 s. In `needs_permission`, it uses the shell's own
+    `AXIsProcessTrusted` and `CGPreflightScreenCaptureAccess`. A false result
+    leaves the state unchanged and cannot authorize a daemon or registration
+    child. A proven missing→granted transition enters `starting` immediately.
+    In `ready`, the 5 s tick runs the daemon health check below instead. The
+    same tick also probes the daemon's socket. A wedged daemon that is alive
+    but not accepting is treated like one that exited.
+  - **Grant recovery.** macOS can cache TCC answers per process. If the silent
+    check remains false after the user grants access, returning to Avibe alone
+    is not a retry mechanism. The user explicitly turns Computer Use off and
+    on. If that fixed-byte process still has a stale answer, the user quits and
+    reopens the same installed app, then turns the toggle on. The acceptance
+    harness must restore its isolated launch environment and verify the Runtime
+    origin after such an OS relaunch. Neither action rebuilds or re-signs the
+    app, and neither adds a background permission retry.
+  - **Capture registration child.** Only an explicit toggle-on while Screen
+    Recording is missing starts it, after the shell's main-thread AX,
+    CGRequest, and one-pixel ScreenCaptureKit probe. The shell directly
+    executes the pinned helper as
+    `cua-driver mcp --direct --embedded --no-overlay`, initializes MCP over
+    stdio, and calls `get_desktop_state` once with a one-pixel output cap.
+    This is the ordinary child-owned ScreenCaptureKit path that made the Phase
+    0 app grantable. The returned pixels are discarded and never logged or
+    persisted. The child gets private HOME/XDG/state directories, the managed
+    policy, telemetry and update checks disabled, one 10 s deadline, and no
+    retry. Toggle-off, shell quit, stdin EOF, and timeout all bound and reap it.
+    Its completion never changes `D`: missing permission remains
+    `needs_permission` until a later silent check proves the grant.
+  - **Activation feedback boundary.** `NSApplicationDidBecomeActive` is an
+    observation, not user authorization. The injected sequence
+    `authorized spawn → host deactivates → child exits → host activates`
+    must produce exactly one child spawn. This prevents driver lifecycle
+    focus changes from recursively authorizing more driver processes.
   - **Support invariant.** Every row that can spawn or prompt sits behind a
     supported capabilities answer. So any enabled state other than
     `needs_runtime` implies that the latest probe said supported. An
@@ -272,6 +298,8 @@ running. The tray keeps the shell alive after the window closes.
 - **Daemon.** Spawn directly with `Command`, never through
   `open`/LaunchServices. Mirror upstream `EmbeddedCuaDriverHost` (in
   `cua-driver-sdk/src/embedded.rs`) at the pinned tag.
+  Both the daemon and the per-generation MCP proxy resolve the same
+  `Contents/Helpers/cua-driver` executable.
   - Arguments: `serve --embedded --parent-liveness-stdio
     --no-permissions-gate --socket <S> --host-bundle-id <bundle id>
     --permission-mode standard`.
@@ -806,12 +834,18 @@ Each case lives in the suite of the component that owns the behavior.
   health, `/ready`, and capabilities faked. These cases cover:
   - One case per lifecycle-table row. Each asserts the resulting `D` and
     that no prompt is raised outside the toggle-on row.
-  - Stale preflight: a grant the shell's preflight misses reaches `ready`
-    after one activation. Eighteen activation events observed within 3 s
-    produce one fallback; no second fallback runs before 5 s, and a new
-    activation at or after 5 s may try again. A normal preflight that sees the
-    grants enters `starting` immediately despite the throttle. A stale shell
-    preflight does not stop a `ready` daemon.
+  - Activation feedback: inject an explicit authorized spawn, host
+    deactivation, missing-grant child exit, and host reactivation. Assert
+    exactly one spawn. Repeated activations while the grant remains missing
+    never spawn or queue a child; a later silent check that proves the grant
+    enters `starting` immediately. Explicit toggle-off/on remains the retry
+    path.
+  - Permission registration: one explicit toggle-on with Screen Recording
+    missing starts exactly one direct child capture; an Accessibility-only
+    failure does not. A fake child verifies the private
+    HOME/XDG/state paths, managed policy, disabled telemetry/update checks,
+    direct MCP arguments, one tool call, timeout, cancellation, and reap.
+    Activation and background ticks never start this child.
   - Health check: the full mode runs at start and includes the capture
     probe. The `ready` heartbeat never captures. A step that hangs or fails
     returns `unhealthy` in both modes.
@@ -827,11 +861,21 @@ Each case lives in the suite of the component that owns the behavior.
     turning it off still works.
   - Process: a daemon that ignores EOF is killed after 3 s. A killed shell
     takes its daemon down and releases its lock, and the next launch
-    reclaims the endpoint. `generation` bumps on each spawn, and nothing is
-    spawned through LaunchServices.
+    reclaims the endpoint. `generation` bumps on each daemon spawn, and
+    nothing is spawned through LaunchServices. Both daemon and proxy resolve
+    `Contents/Helpers/cua-driver`.
   - State file: a failed `D` write still stops the daemon, and the toggle
     persists only in `D`.
-- **Release check (shell build)**, covering three points:
+- **Release check (shell build)**, covering:
+  - The prepared archive, extracted universal binary, and thinned upstream
+    slice have separate recorded digests. The final packaged digest and cdhash
+    are recorded after signing.
+  - The helper exists only at `Contents/Helpers/cua-driver`; no
+    `Contents/MacOS/cua-driver` ships.
+  - Nested code is signed before the outer app. Driver and outer signatures
+    verify with `codesign --verify --deep --strict`, and identity-signed builds
+    use the same authority and team. `CodeResources` records the helper as
+    nested code.
   - The daemon environment names the bundled managed policy.
   - The pinned driver's `tools/list`, under that policy, equals the bundled
     tool snapshot.
@@ -880,19 +924,24 @@ Each case lives in the suite of the component that owns the behavior.
 - **Manual, on an installed byte-fixed ad-hoc build.**
   - Before manually adding the app with the Screen Recording pane's `+`
     control, toggle computer use on once and confirm that the app row appears
-    automatically. Require a matching main-thread request and completed
-    capture-probe record in `bootstrap.log`; a silent no-op, timeout, or
+    automatically. Require matching shell main-thread request/probe and
+    bounded child-capture records in `bootstrap.log`, plus a TCC request whose
+    responsible identity is the outer app. A silent no-op, timeout, or
     manual-add workaround does not pass this gate.
+  - During that request and an idle observation window, record the actual
+    helper CHECKIN identity, require no outer bundle id and no helper
+    frontmost assertion, and require exactly one registration child with no
+    daemon respawn loop.
   - Slack → agent → a background GUI task completes while the user keeps
     working, and the tray toggle stops an in-flight session's access.
   - On an idle desktop, sample the frontmost app and the pointer during AX
     and pixel actions, and confirm that the agent cursor overlay stays
-    visible.
+    visible even though the helper is bundle-less.
   - Grant the fixed candidate once and do not rebuild, replace, or re-sign it
     before the TCC, parent-liveness, focus, pointer, and cursor checks.
   - Install a changed ad-hoc candidate with computer use still enabled. Confirm
     that the orphaned grant produces `needs_permission`, presents the re-grant
-    path, and causes neither `error` nor repeated fallback attempts.
+    path, and causes neither `error` nor repeated child attempts.
 
 All automated cases are hermetic: the `D` path and the upstream command are
 redirected to test-owned fakes.

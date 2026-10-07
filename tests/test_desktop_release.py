@@ -69,9 +69,33 @@ def assemble_assets(root, source=SOURCE):
         installer = work / ("native installer" + suffix)
         installer.write_bytes(f"installer bytes for {target}".encode())
         output = work / "output"
+        driver_args = {}
+        if system == "macos":
+            driver = work / "cua-driver"
+            driver.write_bytes(f"packaged driver for {target}".encode())
+            provenance = work / "driver-provenance.json"
+            provenance.write_text(json.dumps({
+                "schema_version": 1,
+                "version": "0.31.0",
+                "tag": "cua-driver-rs-v0.31.0",
+                "source_commit": "5272e492d61b96caf08e3bf434d91126c1f3dccc",
+                "target": target,
+                "arch": "arm64" if arch == "aarch64" else arch,
+                "release_checksums_sha256": "1" * 64,
+                "archive": "cua-driver-rs-0.31.0-darwin-universal-binary.tar.gz",
+                "archive_sha256": "2" * 64,
+                "extracted_universal_sha256": "3" * 64,
+                "thinned_upstream_sha256": "4" * 64,
+                "thinned_signature": "upstream_preserved",
+            }), encoding="utf-8")
+            driver_args = {
+                "driver": driver,
+                "driver_provenance_path": provenance,
+                "driver_cdhash": "5" * 40,
+            }
         release.record(version=VERSION, target=target, tag=TAG, source_sha=source,
                        installer=installer, runtime=runtime, output=output,
-                       signing=release.signature(target).strip())
+                       signing=release.signature(target).strip(), **driver_args)
         for path in output.iterdir():
             shutil.copyfile(path, directory / path.name)
     return directory
@@ -136,12 +160,18 @@ def test_manual_prepare_retains_optional_signing_and_native_version(tmp_path):
         (
             "aarch64-apple-darwin",
             {
-                "externalBin": ["binaries/cua-driver"],
+                "macOS": {
+                    "files": {
+                        "Helpers/cua-driver": "binaries/cua-driver-aarch64-apple-darwin",
+                    },
+                },
                 "resources": {
                     "../cua-driver/policy.yaml": "computer-use/policy.yaml",
                     "../cua-driver/tools-v0.31.0.json": "computer-use/tools-v0.31.0.json",
                     "../cua-driver/LICENSE.md": "computer-use/LICENSE.md",
                     "../cua-driver/sources.json": "computer-use/sources.json",
+                    "binaries/cua-driver-aarch64-apple-darwin.provenance.json":
+                        "computer-use/driver-provenance.json",
                 },
             },
         ),
@@ -190,7 +220,10 @@ def test_workflow_record_command_feeds_the_release_consumer(tmp_path, target):
                             env={**os.environ, "PATH": f"{binaries}{os.pathsep}{os.environ['PATH']}",
                                  "AVIBE_DESKTOP_VERSION": VERSION, "RELEASE_TAG": TAG, "TARGET": target,
                                  "RUNNER_OS": "macOS" if "darwin" in target else "Windows",
-                                 "signature_state": "app-adhoc"},
+                                 "signature_state": "app-adhoc",
+                                 "driver_packaged_path": str(work / "cua-driver"),
+                                 "driver_provenance_path": str(work / "driver-provenance.json"),
+                                 "driver_packaged_cdhash": "5" * 40},
                             capture_output=True, text=True, timeout=10)
     assert result.returncode == 0, result.stderr
     for path in (work / "desktop-package").iterdir():
@@ -244,10 +277,17 @@ def test_producer_rejects_incorrect_runtime_or_signing(tmp_path, mutation):
         data["runtime_version"] = "0.1.0"
         path.write_text(json.dumps(data))
     with pytest.raises(ValueError):
+        driver_args = {}
+        if "darwin" in target:
+            driver_args = {
+                "driver": work / "cua-driver",
+                "driver_provenance_path": work / "driver-provenance.json",
+                "driver_cdhash": "5" * 40,
+            }
         release.record(version=VERSION, target=target, tag=TAG, source_sha=SOURCE,
                        installer=work / "native installer.dmg", runtime=work / "runtime",
                        output=work / "rejected", signing="identity" if mutation == "signing"
-                       else release.signature(target).strip())
+                       else release.signature(target).strip(), **driver_args)
     assert not (work / "rejected").exists()
 
 
@@ -269,7 +309,15 @@ def test_workflow_preserves_manual_path_and_isolates_test_signing():
     assert steps.index(step("Prepare package version")) < steps.index(step("Build verified private Runtime"))
     credentials = step("Export Apple signing credentials when configured")
     assert credentials["if"] == "runner.os == 'macOS' && inputs.release_tag == ''"
-    assert "codesign --force --deep --sign -" in step("Verify macOS app signature matches the signing path")["run"]
+    signing = step("Verify macOS app signature matches the signing path")["run"]
+    assert signing.count(
+        "--preserve-metadata=identifier,entitlements,flags,runtime"
+    ) == 2
+    assert "\"$driver\"" in signing
+    assert "\"$app\"" in signing
+    assert "--deep --sign" not in signing
+    assert "Contents/Helpers/cua-driver" in signing
+    assert "Contents/MacOS/cua-driver" in signing
     assert "NotSigned" in step("Verify unsigned Windows installer")["run"]
     assert steps[-1]["uses"] == "actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f"
 

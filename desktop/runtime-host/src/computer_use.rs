@@ -21,7 +21,6 @@ pub const COMPUTER_USE_DRIVER_VERSION: &str = "0.31.0";
 pub const COMPUTER_USE_TOOL_SNAPSHOT_SHA256: &str = "b03c3e48d1b00c8fe7c0e8b9813eb5ea104ad38313672fc4b68af203a827f43b";
 pub const FAILURE_LIMIT: usize = 3;
 pub const FAILURE_WINDOW: Duration = Duration::from_secs(5 * 60);
-pub const STALE_PREFLIGHT_FALLBACK_INTERVAL: Duration = Duration::from_secs(5);
 
 static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -293,6 +292,8 @@ impl Grants {
 pub struct LifecycleDirective {
     pub write_state: bool,
     pub prompt_permissions: bool,
+    pub spawn_permission_probe: bool,
+    pub stop_permission_probe: bool,
     pub spawn_daemon: bool,
     pub stop_daemon: bool,
     pub runtime_refused: bool,
@@ -343,8 +344,6 @@ pub struct ComputerUseLifecycle {
     reason: Option<String>,
     failure_budget: FailureBudget,
     consecutive_ready_failures: u8,
-    last_fallback_activation: Option<u64>,
-    last_fallback_at: Option<Duration>,
 }
 
 impl ComputerUseLifecycle {
@@ -355,8 +354,6 @@ impl ComputerUseLifecycle {
             reason: None,
             failure_budget: FailureBudget::default(),
             consecutive_ready_failures: 0,
-            last_fallback_activation: None,
-            last_fallback_at: None,
         }
     }
 
@@ -380,8 +377,6 @@ impl ComputerUseLifecycle {
             },
             failure_budget: FailureBudget::default(),
             consecutive_ready_failures: 0,
-            last_fallback_activation: None,
-            last_fallback_at: None,
         }
     }
 
@@ -409,10 +404,9 @@ impl ComputerUseLifecycle {
         self.reason = None;
         self.failure_budget.clear();
         self.consecutive_ready_failures = 0;
-        self.last_fallback_activation = None;
-        self.last_fallback_at = None;
         LifecycleDirective {
             write_state: true,
+            stop_permission_probe: true,
             stop_daemon: true,
             ..LifecycleDirective::default()
         }
@@ -432,6 +426,7 @@ impl ComputerUseLifecycle {
             return LifecycleDirective {
                 write_state: true,
                 prompt_permissions: true,
+                spawn_permission_probe: !grants.screen_recording,
                 ..LifecycleDirective::default()
             };
         }
@@ -458,6 +453,7 @@ impl ComputerUseLifecycle {
             return LifecycleDirective {
                 write_state: changed,
                 stop_daemon,
+                stop_permission_probe: true,
                 ..LifecycleDirective::default()
             };
         }
@@ -481,7 +477,7 @@ impl ComputerUseLifecycle {
         }
     }
 
-    pub fn permission_tick(&mut self, grants: Grants) -> LifecycleDirective {
+    pub fn observe_permissions(&mut self, grants: Grants) -> LifecycleDirective {
         if !self.enabled || self.phase != ComputerUsePhase::NeedsPermission {
             return LifecycleDirective::default();
         }
@@ -490,6 +486,7 @@ impl ComputerUseLifecycle {
             self.reason = None;
             return LifecycleDirective {
                 write_state: true,
+                stop_permission_probe: true,
                 spawn_daemon: true,
                 ..LifecycleDirective::default()
             };
@@ -502,39 +499,6 @@ impl ComputerUseLifecycle {
             };
         }
         LifecycleDirective::default()
-    }
-
-    pub fn activation(&mut self, activation: u64, observed_at: Duration, grants: Grants) -> LifecycleDirective {
-        if !self.enabled || self.phase != ComputerUsePhase::NeedsPermission {
-            return LifecycleDirective::default();
-        }
-        if grants.missing_reason().is_none() {
-            self.phase = ComputerUsePhase::Starting;
-            self.reason = None;
-            return LifecycleDirective {
-                write_state: true,
-                spawn_daemon: true,
-                ..LifecycleDirective::default()
-            };
-        }
-        if self.last_fallback_activation == Some(activation) {
-            return LifecycleDirective::default();
-        }
-        if self
-            .last_fallback_at
-            .is_some_and(|last| observed_at.saturating_sub(last) < STALE_PREFLIGHT_FALLBACK_INTERVAL)
-        {
-            return LifecycleDirective::default();
-        }
-        self.last_fallback_activation = Some(activation);
-        self.last_fallback_at = Some(observed_at);
-        self.phase = ComputerUsePhase::Starting;
-        self.reason = None;
-        LifecycleDirective {
-            write_state: true,
-            spawn_daemon: true,
-            ..LifecycleDirective::default()
-        }
     }
 
     pub fn startup_health(&mut self, result: HealthResult, now: Duration) -> LifecycleDirective {
@@ -610,6 +574,7 @@ impl ComputerUseLifecycle {
         self.reason = None;
         LifecycleDirective {
             write_state: true,
+            stop_permission_probe: true,
             stop_daemon: true,
             ..LifecycleDirective::default()
         }
@@ -705,36 +670,41 @@ mod tests {
     }
 
     #[test]
-    fn stale_preflight_fallback_throttles_activation_bursts_but_not_fresh_grants() {
+    fn synthetic_activation_feedback_cannot_spawn_but_a_real_grant_transition_can() {
         let mut lifecycle = ComputerUseLifecycle::off();
-        lifecycle.enabled = true;
-        lifecycle.phase = ComputerUsePhase::NeedsPermission;
-        lifecycle.reason = Some("screen_recording".to_owned());
         let missing = Grants {
             accessibility: true,
             screen_recording: false,
         };
-        let mut fallback_attempts = 0;
-        for activation in 1..=18 {
-            let observed_at = Duration::from_millis((activation - 1) * 3_000 / 17);
-            fallback_attempts += usize::from(lifecycle.activation(activation, observed_at, missing).spawn_daemon);
-            lifecycle.phase = ComputerUsePhase::NeedsPermission;
-            lifecycle.reason = Some("screen_recording".to_owned());
+        let initial = lifecycle.toggle_on(RuntimeSupport::Supported, missing);
+        assert!(initial.spawn_permission_probe);
+        assert!(!initial.spawn_daemon);
+        assert_eq!(lifecycle.phase(), ComputerUsePhase::NeedsPermission);
+
+        for _ in 0..32 {
+            assert_eq!(
+                lifecycle.observe_permissions(missing),
+                LifecycleDirective::default(),
+                "driver exit -> host activation feedback must not authorize another child"
+            );
         }
-        assert_eq!(fallback_attempts, 1);
 
-        assert!(
-            !lifecycle
-                .activation(19, Duration::from_millis(4_999), missing)
-                .spawn_daemon
-        );
-        assert!(lifecycle.activation(20, Duration::from_secs(5), missing).spawn_daemon);
-
-        lifecycle.phase = ComputerUsePhase::NeedsPermission;
-        lifecycle.reason = Some("screen_recording".to_owned());
-        let granted = lifecycle.activation(21, Duration::from_millis(5_001), Grants::all());
+        let granted = lifecycle.observe_permissions(Grants::all());
+        assert!(granted.stop_permission_probe);
         assert!(granted.spawn_daemon);
         assert_eq!(lifecycle.phase(), ComputerUsePhase::Starting);
+
+        let denied = lifecycle.startup_health(
+            HealthResult::MissingGrant("screen_recording".to_owned()),
+            Duration::ZERO,
+        );
+        assert!(denied.stop_daemon);
+        assert_eq!(lifecycle.phase(), ComputerUsePhase::NeedsPermission);
+        assert_eq!(
+            lifecycle.observe_permissions(missing),
+            LifecycleDirective::default(),
+            "the daemon exit and host reactivation still cannot authorize a child"
+        );
     }
 
     #[test]
@@ -749,8 +719,7 @@ mod tests {
                 .toggle_on(RuntimeSupport::Supported, missing)
                 .prompt_permissions
         );
-        assert!(!lifecycle.permission_tick(missing).prompt_permissions);
-        assert!(!lifecycle.activation(1, Duration::ZERO, missing).prompt_permissions);
+        assert!(!lifecycle.observe_permissions(missing).prompt_permissions);
         assert!(!lifecycle.toggle_off().prompt_permissions);
 
         lifecycle.enabled = true;
@@ -772,16 +741,53 @@ mod tests {
         let toggle = lifecycle.toggle_on(RuntimeSupport::Supported, missing);
         assert!(toggle.write_state);
         assert!(toggle.prompt_permissions);
+        assert!(toggle.spawn_permission_probe);
         assert!(!toggle.spawn_daemon);
         assert_eq!(lifecycle.phase(), ComputerUsePhase::NeedsPermission);
         assert_eq!(lifecycle.reason(), Some("screen_recording"));
 
         for _ in 0..3 {
-            let tick = lifecycle.permission_tick(missing);
+            let tick = lifecycle.observe_permissions(missing);
             assert_eq!(tick, LifecycleDirective::default());
             assert_eq!(lifecycle.phase(), ComputerUsePhase::NeedsPermission);
             assert_eq!(lifecycle.reason(), Some("screen_recording"));
         }
+    }
+
+    #[test]
+    fn only_each_explicit_toggle_on_authorizes_one_permission_child() {
+        let missing = Grants {
+            accessibility: false,
+            screen_recording: false,
+        };
+        let mut lifecycle = ComputerUseLifecycle::off();
+
+        let first = lifecycle.toggle_on(RuntimeSupport::Supported, missing);
+        assert!(first.spawn_permission_probe);
+        assert!(!first.stop_permission_probe);
+        for _ in 0..10 {
+            assert!(!lifecycle.observe_permissions(missing).spawn_permission_probe);
+        }
+
+        let off = lifecycle.toggle_off();
+        assert!(off.stop_permission_probe);
+        let second = lifecycle.toggle_on(RuntimeSupport::Supported, missing);
+        assert!(second.spawn_permission_probe);
+        assert!(!second.spawn_daemon);
+
+        lifecycle.toggle_off();
+        let accessibility_only = lifecycle.toggle_on(
+            RuntimeSupport::Supported,
+            Grants {
+                accessibility: false,
+                screen_recording: true,
+            },
+        );
+        assert!(accessibility_only.prompt_permissions);
+        assert!(!accessibility_only.spawn_permission_probe);
+
+        let unsupported = lifecycle.capabilities(RuntimeSupport::Unsupported, Grants::all());
+        assert!(unsupported.stop_permission_probe);
     }
 
     #[test]

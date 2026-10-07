@@ -13,6 +13,14 @@ if [ ! -d "$app/Contents/MacOS" ]; then
   echo "input is not a macOS application bundle: $app" >&2
   exit 2
 fi
+if [ ! -f "$app/Contents/Helpers/cua-driver" ]; then
+  echo "input is missing Contents/Helpers/cua-driver" >&2
+  exit 2
+fi
+if [ -e "$app/Contents/MacOS/cua-driver" ]; then
+  echo "input contains a stale Contents/MacOS/cua-driver" >&2
+  exit 2
+fi
 
 # Signature-aware staging. A Developer ID (or any identity-bearing) signature
 # is copied as-is: re-signing with an ad-hoc identity here would strip it and
@@ -42,11 +50,18 @@ if [ -n "$adhoc" ] || [ -z "$identity" ]; then
   # bundle. Ad-hoc sign the disposable DMG copy so macOS can verify its
   # structure. This is not Developer ID signing and does not bypass
   # Gatekeeper/notarization.
-  codesign --force --deep --sign - "$staging/Avibe.app"
+  codesign --force --sign - \
+    --preserve-metadata=identifier,entitlements,flags,runtime \
+    "$staging/Avibe.app/Contents/Helpers/cua-driver"
+  codesign --force --sign - \
+    --preserve-metadata=identifier,entitlements,flags,runtime \
+    "$staging/Avibe.app"
+  codesign --verify --strict "$staging/Avibe.app/Contents/Helpers/cua-driver"
   codesign --verify --deep --strict "$staging/Avibe.app"
 else
   # Sealing the copy must not invalidate the identity signature: verify the
   # staging copy still validates against the same team before imaging it.
+  codesign --verify --strict "$staging/Avibe.app/Contents/Helpers/cua-driver"
   codesign --verify --deep --strict "$staging/Avibe.app"
 fi
 

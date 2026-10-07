@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify and prepare the pinned macOS Cua Driver Tauri sidecar."""
+"""Verify and prepare the pinned macOS Cua Driver nested helper."""
 
 from __future__ import annotations
 
@@ -148,6 +148,7 @@ def prepare(
             with universal.open("wb") as stream:
                 shutil.copyfileobj(extracted, stream)
         universal.chmod(0o755)
+        universal_sha256 = digest(universal)
 
         prepared = work / f"cua-driver-{arch}"
         subprocess.run(
@@ -166,6 +167,27 @@ def prepare(
         shutil.copyfile(prepared, temporary_output)
         temporary_output.chmod(0o755)
         os.replace(temporary_output, output)
+        provenance = {
+            "schema_version": 1,
+            "version": driver["version"],
+            "tag": driver["tag"],
+            "source_commit": driver["source_commit"],
+            "target": target,
+            "arch": arch,
+            "release_checksums_sha256": driver["release_checksums_sha256"],
+            "archive": driver["macos"]["asset"],
+            "archive_sha256": driver["macos"]["sha256"],
+            "extracted_universal_sha256": universal_sha256,
+            "thinned_upstream_sha256": digest(output),
+            "thinned_signature": "upstream_preserved",
+        }
+        provenance_output = output.with_name(f"{output.name}.provenance.json")
+        temporary_provenance = destination / f".{provenance_output.name}.{os.getpid()}.tmp"
+        temporary_provenance.write_text(
+            json.dumps(provenance, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        os.replace(temporary_provenance, provenance_output)
     return output
 
 

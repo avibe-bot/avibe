@@ -35,19 +35,41 @@ page and its assets, not only the API.
 
 ### Activation burst
 
-An acceptance probe repeatedly activated the app while looking for the native
-menu item. It advanced the daemon generation to 18. Timestamped reads then
-showed generation 18 steady while the feature remained
-`needs_permission/screen_recording`; there was no continuing Runtime-adoption
-or menu-refresh churn. The exact probe and timestamps are retained under:
+The first investigation incorrectly attributed the generation increase to
+repeated acceptance-probe activations. The saved commands contain no 18- or
+14-action loop. Preserved WindowServer, RunningBoard, LaunchServices, AppKit,
+and driver-exit logs instead establish a product feedback loop:
+
+1. a real host activation authorized the stale-preflight fallback;
+2. the raw driver under `Contents/MacOS` resolved the outer app bundle id and
+   registered as a regular foreground process before setting its accessory
+   policy;
+3. the host deactivated when the driver became frontmost;
+4. the missing-grant driver exited and LaunchServices restored the host;
+5. `NSApplicationDidBecomeActive` treated that synthetic return as a new retry
+   and spawned the next driver.
+
+The first burst produced 18 drivers and the second produced 14. Every driver
+in the first burst received a frontmost assertion. The representative first
+cycle was host active at 12:17:36.004, driver 52754 first log at .025,
+driver frontmost at .223, host inactive at .230, driver exit at .275-.279,
+host restored and active at .289, and driver 52756 starting at .302.
+
+The exact early probe and timestamps remain under:
 
 `/tmp/avibe-cua-phase1-acceptance-ses9qeb46suvv-be8e909/evidence-20261007/`
 
-The product response is a monotonic stale-preflight throttle: a burst of 18
-activations over 3 s permits one fallback, no second fallback before 5 s, and
-one later activation may try again. A silent preflight that sees both grants
-starts immediately and is not throttled. This adds no background permission
-retry or prompt.
+The full ordered loop evidence is under:
+
+`/tmp/avibe-computer-use-phase1-sesbn6xrdnd8p/activation-loop/`
+
+The accepted fix has two parts. The driver moves unchanged to the raw,
+plist-less nested-tool location `Contents/Helpers/cua-driver`, so it no longer
+resolves the outer regular-app bundle before AppKit initialization. The shell
+treats activation as a silent preflight observation only. A false preflight
+cannot spawn any child; only an explicit toggle or a proven grant transition
+can. The prior five-second activation throttle is removed because it limited
+the loop without fixing its cause.
 
 ### Screen Recording registration failure
 
@@ -95,6 +117,45 @@ enumeration callback cannot start capture. The image is discarded, and no
 window or application enumeration is logged or retained. This remains a
 testable hypothesis until a new bundle identity appears in Settings before any
 manual add or grant.
+
+Candidate 3 was built from
+`d0127adc8ae299e220180c70cdeeb84d56b4f6dc` and held byte-for-byte fixed at:
+
+- app: `/Users/max/Applications/Avibe CUA Candidate 3.app`
+- bundle identifier: `bot.avibe.desktop.cua.candidate3`
+- outer cdhash: `5b15f25bb08bb138699d147becdffddbe9ba9242`
+- installed tree-manifest SHA-256:
+  `9c35406431e1a80abb2344b7e2dc6797cf7b6ec8c92d146180446c8e38a4adad`
+
+Its first intended toggle did not run: a System Events process reference
+selected by unix id was later re-resolved by the common process name and read
+the owner app. Native PID-bound AX inspection proved Candidate 3 had both
+Computer Use menu items, and the failed aliased lookup performed no menu
+action. A later direct AX action verified PID, bundle id, path, menu role,
+title, enabled state, and element owner immediately before the press.
+Candidate 3 then made both the shell `CGRequestScreenCaptureAccess` request and
+the ordinary SCK request. TCC attributed both to the correct shell, but logged
+that ScreenCapture prompting was not allowed and persisted no row. System
+Settings reopened fresh still showed Candidate 3 absent.
+
+That third failure ended in-process probe variants. The approved implementation
+adds exactly one shell-owned child capture on explicit toggle-on while the
+grant is missing. It runs the pinned driver as direct embedded MCP, calls one
+real `get_desktop_state` capture with a one-pixel output cap, discards the
+result, and exits under one deadline. It is not the persistent daemon, never
+retries, never changes `D` out of `needs_permission`, and is canceled on
+toggle-off or quit.
+
+Candidate 3 also exposed the activation feedback loop because the raw driver
+was packaged in the outer app's `Contents/MacOS`. LaunchServices CHECKIN logs
+gave each driver the outer Candidate bundle id and foreground status. A
+Foundation metadata probe showed that identical bytes under
+`Contents/Helpers` resolve with no bundle identifier, while nested-code
+signing and `codesign --verify --deep --strict` succeed there. The next fixed
+candidate combines this layout change with the shell activation change; it
+must prove helper identity, no helper foreground assertion, no respawn loop,
+outer-app TCC responsibility, automatic Settings registration, and a visible
+agent cursor during a later authorized action.
 
 Primary diagnostics:
 
@@ -157,7 +218,7 @@ Primary evidence:
 This is mechanism evidence with explicit limits:
 
 - Screen Recording came from the manual-add workaround.
-- The artifact predates the activation throttle and observable main-thread
+- The artifact predates the activation-loop fix and observable main-thread
   permission probe.
 - `--strict-mcp-config` isolated the direct CLI probe. It does not prove the
   Runtime `SessionHandler` injection path or preservation of native user MCP

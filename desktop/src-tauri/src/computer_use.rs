@@ -6,7 +6,6 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::ptr;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -44,6 +43,7 @@ const ENDPOINT_RECLAIM_TIMEOUT: Duration = Duration::from_secs(2);
 const PROCESS_STOP_TIMEOUT: Duration = Duration::from_secs(3);
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(5);
 const PERMISSION_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+const PERMISSION_CHILD_TIMEOUT: Duration = Duration::from_secs(10);
 const START_BACKOFF: Duration = Duration::from_secs(1);
 const COMPUTER_USE_SCHEMA: u64 = COMPUTER_USE_SCHEMA_VERSION as u64;
 
@@ -106,27 +106,23 @@ enum Event {
     Toggle,
     RuntimeReady { origin: LoopbackOrigin, adoption: bool },
     RuntimeLost,
-    Activated { activation: u64, observed_at: Instant },
+    Activated,
+    PermissionProbeFinished { id: u64, result: PermissionChildRun },
     Shutdown(oneshot::Sender<()>),
 }
 
 pub(crate) struct Controller {
     sender: mpsc::UnboundedSender<Event>,
     view: Arc<Mutex<MenuView>>,
-    activation: AtomicU64,
 }
 
 impl Controller {
     pub(crate) fn start(app: &AppHandle) -> Result<Self, Box<dyn std::error::Error>> {
         let (sender, receiver) = mpsc::unbounded_channel();
         let view = Arc::new(Mutex::new(MenuView::default()));
-        let runtime = RuntimeState::new(app.clone(), view.clone())?;
+        let runtime = RuntimeState::new(app.clone(), view.clone(), sender.clone())?;
         tauri::async_runtime::spawn(runtime.run(receiver));
-        Ok(Self {
-            sender,
-            view,
-            activation: AtomicU64::new(0),
-        })
+        Ok(Self { sender, view })
     }
 
     pub(crate) fn view(&self) -> MenuView {
@@ -146,11 +142,7 @@ impl Controller {
     }
 
     pub(crate) fn activated(&self) {
-        let activation = self.activation.fetch_add(1, Ordering::SeqCst) + 1;
-        let _ = self.sender.send(Event::Activated {
-            activation,
-            observed_at: Instant::now(),
-        });
+        let _ = self.sender.send(Event::Activated);
     }
 
     pub(crate) async fn shutdown(&self) {
@@ -175,14 +167,11 @@ impl Paths {
         let state_dir = std::env::var_os(STATE_DIR_ENV)
             .map(PathBuf::from)
             .unwrap_or(app.path().app_data_dir()?);
-        let executable_dir = std::env::current_exe()?
-            .parent()
-            .ok_or_else(|| io::Error::other("desktop executable has no parent"))?
-            .to_owned();
+        let executable = std::env::current_exe()?;
         let resource_dir = app.path().resource_dir()?;
         let driver = std::env::var_os(DRIVER_PATH_ENV)
             .map(PathBuf::from)
-            .unwrap_or_else(|| executable_dir.join("cua-driver"));
+            .unwrap_or_else(|| bundled_driver_path(&executable));
         let policy = std::env::var_os(POLICY_PATH_ENV)
             .map(PathBuf::from)
             .unwrap_or_else(|| resource_dir.join("computer-use/policy.yaml"));
@@ -206,13 +195,28 @@ impl Paths {
     }
 }
 
+fn bundled_driver_path(executable: &Path) -> PathBuf {
+    executable
+        .parent()
+        .and_then(Path::parent)
+        .map(|contents| contents.join("Helpers/cua-driver"))
+        .unwrap_or_else(|| PathBuf::from("cua-driver"))
+}
+
 struct Daemon {
     child: Child,
     stdin: Option<ChildStdin>,
 }
 
+struct PermissionProbe {
+    id: u64,
+    cancel: oneshot::Sender<()>,
+    task: tauri::async_runtime::JoinHandle<()>,
+}
+
 struct RuntimeState {
     app: AppHandle,
+    events: mpsc::UnboundedSender<Event>,
     view: Arc<Mutex<MenuView>>,
     diagnostics: BootstrapLog,
     paths: Paths,
@@ -222,6 +226,8 @@ struct RuntimeState {
     capabilities: CapabilityCache,
     origin: Option<LoopbackOrigin>,
     daemon: Option<Daemon>,
+    permission_probe: Option<PermissionProbe>,
+    next_permission_probe_id: u64,
     instance_id: String,
     generation: u64,
     host_bundle_id: String,
@@ -231,7 +237,11 @@ struct RuntimeState {
 }
 
 impl RuntimeState {
-    fn new(app: AppHandle, view: Arc<Mutex<MenuView>>) -> Result<Self, Box<dyn std::error::Error>> {
+    fn new(
+        app: AppHandle,
+        view: Arc<Mutex<MenuView>>,
+        events: mpsc::UnboundedSender<Event>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let paths = Paths::resolve(&app)?;
         let diagnostics = BootstrapLog::at(app.path().app_local_data_dir()?.join(BOOTSTRAP_LOG_NAME));
         std::fs::create_dir_all(&paths.state_dir)?;
@@ -245,6 +255,7 @@ impl RuntimeState {
         let assets_valid = paths.assets_valid();
         let mut runtime = Self {
             app,
+            events,
             view,
             diagnostics,
             paths,
@@ -254,6 +265,8 @@ impl RuntimeState {
             capabilities: CapabilityCache::default(),
             origin: None,
             daemon: None,
+            permission_probe: None,
+            next_permission_probe_id: 0,
             instance_id: random_instance_id()?,
             generation: 0,
             host_bundle_id: String::new(),
@@ -297,10 +310,10 @@ impl RuntimeState {
                             self.runtime_ready(origin, adoption).await;
                         }
                         Event::RuntimeLost => self.runtime_lost().await,
-                        Event::Activated {
-                            activation,
-                            observed_at,
-                        } => self.activated(activation, observed_at).await,
+                        Event::Activated => self.activated().await,
+                        Event::PermissionProbeFinished { id, result } => {
+                            self.permission_probe_finished(id, result);
+                        }
                         Event::Shutdown(reply) => {
                             self.shutdown().await;
                             let _ = reply.send(());
@@ -369,12 +382,11 @@ impl RuntimeState {
         self.apply(directive).await;
     }
 
-    async fn activated(&mut self, activation: u64, observed_at: Instant) {
+    async fn activated(&mut self) {
         if self.capabilities.current() != RuntimeSupport::Supported {
             return;
         }
-        let observed_at = observed_at.saturating_duration_since(self.started_at);
-        let directive = self.lifecycle.activation(activation, observed_at, silent_grants());
+        let directive = self.lifecycle.observe_permissions(silent_grants());
         self.apply(directive).await;
     }
 
@@ -394,7 +406,7 @@ impl RuntimeState {
         }
         match self.lifecycle.phase() {
             ComputerUsePhase::NeedsPermission => {
-                let directive = self.lifecycle.permission_tick(silent_grants());
+                let directive = self.lifecycle.observe_permissions(silent_grants());
                 self.apply(directive).await;
             }
             ComputerUsePhase::Ready => self.ready_tick().await,
@@ -437,6 +449,9 @@ impl RuntimeState {
             if directive.stop_daemon {
                 self.stop_daemon().await;
             }
+            if directive.stop_permission_probe {
+                self.stop_permission_probe().await;
+            }
             if !state_written {
                 if self.lifecycle.enabled()
                     && matches!(
@@ -446,12 +461,16 @@ impl RuntimeState {
                 {
                     self.lifecycle.set_error("state_unwritable");
                     self.pending_write = Some(self.current_record());
+                    self.stop_permission_probe().await;
                     self.stop_daemon().await;
                 }
                 self.publish_view();
                 return;
             }
             self.publish_view();
+            if directive.spawn_permission_probe {
+                self.start_permission_probe().await;
+            }
             if !directive.spawn_daemon {
                 return;
             }
@@ -557,11 +576,65 @@ impl RuntimeState {
         let _ = std::fs::remove_file(&self.paths.socket);
     }
 
+    async fn start_permission_probe(&mut self) {
+        self.stop_permission_probe().await;
+        self.next_permission_probe_id = self.next_permission_probe_id.saturating_add(1);
+        let id = self.next_permission_probe_id;
+        let (cancel, cancelled) = oneshot::channel();
+        let events = self.events.clone();
+        let driver = self.paths.driver.clone();
+        let state_dir = self.paths.state_dir.clone();
+        let policy = self.paths.policy.clone();
+        let host_bundle_id = self.host_bundle_id.clone();
+        let task = tauri::async_runtime::spawn(async move {
+            let result = run_permission_child(
+                &driver,
+                &state_dir,
+                &policy,
+                &host_bundle_id,
+                PERMISSION_CHILD_TIMEOUT,
+                cancelled,
+            )
+            .await;
+            let _ = events.send(Event::PermissionProbeFinished { id, result });
+        });
+        self.permission_probe = Some(PermissionProbe { id, cancel, task });
+    }
+
+    async fn stop_permission_probe(&mut self) {
+        if let Some(probe) = self.permission_probe.take() {
+            let _ = probe.cancel.send(());
+            let _ = probe.task.await;
+        }
+    }
+
+    fn permission_probe_finished(&mut self, id: u64, result: PermissionChildRun) {
+        if self.permission_probe.as_ref().map(|probe| probe.id) != Some(id) {
+            return;
+        }
+        self.permission_probe = None;
+        let mut fields = vec![
+            ("outcome", result.outcome.code().to_owned()),
+            (
+                "pid",
+                result
+                    .pid
+                    .map(|pid| pid.to_string())
+                    .unwrap_or_else(|| "not_started".to_owned()),
+            ),
+        ];
+        if let Some(detail) = result.outcome.detail() {
+            fields.push(("detail", detail));
+        }
+        self.diagnostics.record("computer-use.permission-child", &fields);
+    }
+
     async fn shutdown(&mut self) {
         let directive = self.lifecycle.quit();
         if directive.write_state {
             let _ = self.write_current_state();
         }
+        self.stop_permission_probe().await;
         self.stop_daemon().await;
     }
 
@@ -686,6 +759,240 @@ async fn socket_accepts(path: &Path) -> bool {
     timeout(Duration::from_millis(300), tokio::net::UnixStream::connect(path))
         .await
         .is_ok_and(|result| result.is_ok())
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum PermissionChildOutcome {
+    Image,
+    CaptureRejected,
+    CaptureCompleted,
+    SpawnFailed(String),
+    TransportFailed,
+    TimedOut,
+    Cancelled,
+}
+
+impl PermissionChildOutcome {
+    fn code(&self) -> &'static str {
+        match self {
+            Self::Image => "image",
+            Self::CaptureRejected => "capture_rejected",
+            Self::CaptureCompleted => "capture_completed",
+            Self::SpawnFailed(_) => "spawn_failed",
+            Self::TransportFailed => "transport_failed",
+            Self::TimedOut => "timed_out",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
+    fn detail(&self) -> Option<String> {
+        match self {
+            Self::SpawnFailed(error) => Some(error.clone()),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PermissionChildRun {
+    pid: Option<u32>,
+    outcome: PermissionChildOutcome,
+}
+
+async fn run_permission_child(
+    driver: &Path,
+    state_dir: &Path,
+    policy: &Path,
+    host_bundle_id: &str,
+    child_timeout: Duration,
+    mut cancelled: oneshot::Receiver<()>,
+) -> PermissionChildRun {
+    run_permission_child_with_stop_timeout(
+        driver,
+        state_dir,
+        policy,
+        host_bundle_id,
+        child_timeout,
+        PROCESS_STOP_TIMEOUT,
+        &mut cancelled,
+    )
+    .await
+}
+
+async fn run_permission_child_with_stop_timeout(
+    driver: &Path,
+    state_dir: &Path,
+    policy: &Path,
+    host_bundle_id: &str,
+    child_timeout: Duration,
+    stop_timeout: Duration,
+    cancelled: &mut oneshot::Receiver<()>,
+) -> PermissionChildRun {
+    let private_root = state_dir.join("permission-probe");
+    for directory in [
+        private_root.clone(),
+        private_root.join("config"),
+        private_root.join("data"),
+        private_root.join("state"),
+        private_root.join("cache"),
+        private_root.join("tmp"),
+    ] {
+        if let Err(error) = std::fs::create_dir_all(directory) {
+            return PermissionChildRun {
+                pid: None,
+                outcome: PermissionChildOutcome::SpawnFailed(error.to_string()),
+            };
+        }
+    }
+
+    let mut command = Command::new(driver);
+    command
+        .env_clear()
+        .args(["mcp", "--direct", "--embedded", "--no-overlay", "--host-bundle-id"])
+        .arg(host_bundle_id)
+        .env("HOME", &private_root)
+        .env("USERPROFILE", &private_root)
+        .env("XDG_CONFIG_HOME", private_root.join("config"))
+        .env("XDG_DATA_HOME", private_root.join("data"))
+        .env("XDG_STATE_HOME", private_root.join("state"))
+        .env("XDG_CACHE_HOME", private_root.join("cache"))
+        .env("TMPDIR", private_root.join("tmp"))
+        .env("CUA_DRIVER_RS_HOME", private_root.join("driver"))
+        .env("CUA_DRIVER_TELEMETRY_HOME", private_root.join("telemetry"))
+        .env("CUA_DRIVER_EMBEDDED", "1")
+        .env("CUA_DRIVER_EMBEDDED_HOST_PID", std::process::id().to_string())
+        .env("CUA_DRIVER_MANAGED_POLICY_FILE", policy)
+        .env("CUA_DRIVER_PERMISSION_MODE", "standard")
+        .env("CUA_DRIVER_RS_TELEMETRY_ENABLED", "0")
+        .env("CUA_DRIVER_RS_UPDATE_CHECK", "0")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            return PermissionChildRun {
+                pid: None,
+                outcome: PermissionChildOutcome::SpawnFailed(error.to_string()),
+            };
+        }
+    };
+    let pid = child.id();
+    let mut stdin = match child.stdin.take() {
+        Some(stdin) => stdin,
+        None => {
+            stop_child(&mut child, stop_timeout).await;
+            return PermissionChildRun {
+                pid,
+                outcome: PermissionChildOutcome::TransportFailed,
+            };
+        }
+    };
+    let stdout = match child.stdout.take() {
+        Some(stdout) => stdout,
+        None => {
+            drop(stdin);
+            stop_child(&mut child, stop_timeout).await;
+            return PermissionChildRun {
+                pid,
+                outcome: PermissionChildOutcome::TransportFailed,
+            };
+        }
+    };
+    let mut stdout = BufReader::new(stdout);
+    let outcome = {
+        let operation = timeout(child_timeout, permission_child_capture(&mut stdin, &mut stdout));
+        tokio::pin!(operation);
+        tokio::select! {
+            _ = cancelled => PermissionChildOutcome::Cancelled,
+            result = &mut operation => match result {
+                Ok(outcome) => outcome,
+                Err(_) => PermissionChildOutcome::TimedOut,
+            },
+        }
+    };
+    drop(stdin);
+    stop_child(&mut child, stop_timeout).await;
+    PermissionChildRun { pid, outcome }
+}
+
+async fn permission_child_capture<W, R>(writer: &mut W, reader: &mut BufReader<R>) -> PermissionChildOutcome
+where
+    W: AsyncWrite + Unpin,
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let initialize = match json_rpc_request(
+        writer,
+        reader,
+        1,
+        "initialize",
+        json!({
+            "protocolVersion": "2025-06-18",
+            "capabilities": {},
+            "clientInfo": {"name": "avibe-permission-bootstrap", "version": "1"},
+        }),
+    )
+    .await
+    {
+        Ok(message) if message.get("error").is_none() => message,
+        _ => return PermissionChildOutcome::TransportFailed,
+    };
+    let _ = initialize;
+    if write_json_line(
+        writer,
+        &json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized",
+            "params": {},
+        }),
+    )
+    .await
+    .is_err()
+    {
+        return PermissionChildOutcome::TransportFailed;
+    }
+    let capture = match json_rpc_request(
+        writer,
+        reader,
+        2,
+        "tools/call",
+        json!({
+            "name": "get_desktop_state",
+            "arguments": {
+                "session": "avibe-permission-bootstrap",
+                "max_image_dimension": 1
+            }
+        }),
+    )
+    .await
+    {
+        Ok(message) => message,
+        Err(_) => return PermissionChildOutcome::TransportFailed,
+    };
+    if capture.get("error").is_some()
+        || capture
+            .get("result")
+            .and_then(|result| result.get("isError"))
+            .and_then(Value::as_bool)
+            == Some(true)
+    {
+        return PermissionChildOutcome::CaptureRejected;
+    }
+    if validate_capture(&capture).is_ok() {
+        PermissionChildOutcome::Image
+    } else if capture.get("result").is_some() {
+        PermissionChildOutcome::CaptureCompleted
+    } else {
+        PermissionChildOutcome::TransportFailed
+    }
+}
+
+async fn stop_child(child: &mut Child, stop_timeout: Duration) {
+    if timeout(stop_timeout, child.wait()).await.is_err() {
+        let _ = child.kill().await;
+        let _ = child.wait().await;
+    }
 }
 
 async fn health_check(driver: &Path, socket: &Path, host_bundle_id: &str, full: bool) -> HealthResult {
@@ -1460,6 +1767,72 @@ pub(crate) fn activation_plugin() -> TauriPlugin<tauri::Wry> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn shell_quote(value: &Path) -> String {
+        format!("'{}'", value.display().to_string().replace('\'', "'\"'\"'"))
+    }
+
+    fn write_permission_child(root: &Path, state_dir: &Path, policy: &Path, behavior: &str) -> PathBuf {
+        let path = root.join("fake-cua-driver");
+        let launches = root.join("launches");
+        let requests = root.join("requests");
+        let private_root = state_dir.join("permission-probe");
+        let body = format!(
+            r#"#!/bin/sh
+set -eu
+printf '1\n' >> {launches}
+[ "$1" = "mcp" ]
+[ "$2" = "--direct" ]
+[ "$3" = "--embedded" ]
+[ "$4" = "--no-overlay" ]
+[ "$5" = "--host-bundle-id" ]
+[ "$6" = "bot.avibe.desktop.test" ]
+[ "$HOME" = {home} ]
+[ "$USERPROFILE" = {home} ]
+[ "$XDG_CONFIG_HOME" = {config} ]
+[ "$XDG_DATA_HOME" = {data} ]
+[ "$XDG_STATE_HOME" = {state} ]
+[ "$XDG_CACHE_HOME" = {cache} ]
+[ "$TMPDIR" = {tmp} ]
+[ "$CUA_DRIVER_RS_HOME" = {driver_home} ]
+[ "$CUA_DRIVER_TELEMETRY_HOME" = {telemetry} ]
+[ "$CUA_DRIVER_EMBEDDED" = "1" ]
+[ "$CUA_DRIVER_MANAGED_POLICY_FILE" = {policy} ]
+[ "$CUA_DRIVER_PERMISSION_MODE" = "standard" ]
+[ "$CUA_DRIVER_RS_TELEMETRY_ENABLED" = "0" ]
+[ "$CUA_DRIVER_RS_UPDATE_CHECK" = "0" ]
+[ -z "${{CUA_DRIVER_WINDOW_CHANGE_TIMEOUT_MS+x}}" ]
+while IFS= read -r line; do
+  printf '%s\n' "$line" >> {requests}
+  case "$line" in
+    *'"id":1'*)
+      printf '%s\n' '{{"jsonrpc":"2.0","id":1,"result":{{}}}}'
+      ;;
+    *'"id":2'*)
+      {behavior}
+      ;;
+  esac
+done
+"#,
+            launches = shell_quote(&launches),
+            requests = shell_quote(&requests),
+            home = shell_quote(&private_root),
+            config = shell_quote(&private_root.join("config")),
+            data = shell_quote(&private_root.join("data")),
+            state = shell_quote(&private_root.join("state")),
+            cache = shell_quote(&private_root.join("cache")),
+            tmp = shell_quote(&private_root.join("tmp")),
+            driver_home = shell_quote(&private_root.join("driver")),
+            telemetry = shell_quote(&private_root.join("telemetry")),
+            policy = shell_quote(policy),
+        );
+        std::fs::write(&path, body).expect("fake driver");
+        let mut permissions = std::fs::metadata(&path).expect("fake driver metadata").permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&path, permissions).expect("fake driver executable");
+        path
+    }
 
     #[test]
     fn health_parser_requires_host_attribution_and_both_grants() {
@@ -1517,6 +1890,105 @@ mod tests {
             classify_capability_payload(Some("controller-a"), Some(COMPUTER_USE_SCHEMA - 1)),
             CapabilityVerdict::Unsupported
         );
+    }
+
+    #[test]
+    fn packaged_driver_resolves_from_contents_helpers() {
+        assert_eq!(
+            bundled_driver_path(Path::new("/Applications/Avibe.app/Contents/MacOS/avibe-desktop")),
+            PathBuf::from("/Applications/Avibe.app/Contents/Helpers/cua-driver")
+        );
+    }
+
+    #[tokio::test]
+    async fn permission_child_is_one_direct_bounded_capture_with_private_state() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let state_dir = temporary.path().join("state");
+        let policy = temporary.path().join("policy.yaml");
+        std::fs::write(&policy, "version: 1\n").expect("policy");
+        let driver = write_permission_child(
+            temporary.path(),
+            &state_dir,
+            &policy,
+            r#"printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"isError":true,"content":[{"type":"text","text":"screen recording denied"}]}}'
+      break"#,
+        );
+        let (_cancel, mut cancelled) = oneshot::channel();
+
+        let result = run_permission_child_with_stop_timeout(
+            &driver,
+            &state_dir,
+            &policy,
+            "bot.avibe.desktop.test",
+            Duration::from_secs(1),
+            Duration::from_millis(100),
+            &mut cancelled,
+        )
+        .await;
+
+        assert_eq!(result.outcome, PermissionChildOutcome::CaptureRejected);
+        assert_eq!(
+            std::fs::read_to_string(temporary.path().join("launches"))
+                .expect("launch count")
+                .lines()
+                .count(),
+            1
+        );
+        let requests = std::fs::read_to_string(temporary.path().join("requests")).expect("MCP requests");
+        assert_eq!(requests.matches("\"id\":2").count(), 1);
+        assert!(requests.contains("\"name\":\"get_desktop_state\""));
+        assert!(requests.contains("\"session\":\"avibe-permission-bootstrap\""));
+        assert!(requests.contains("\"max_image_dimension\":1"));
+    }
+
+    #[tokio::test]
+    async fn permission_child_timeout_and_cancellation_reap_the_recorded_pid() {
+        for cancel in [false, true] {
+            let temporary = tempfile::tempdir().expect("temporary directory");
+            let state_dir = temporary.path().join("state");
+            let policy = temporary.path().join("policy.yaml");
+            std::fs::write(&policy, "version: 1\n").expect("policy");
+            let driver = write_permission_child(
+                temporary.path(),
+                &state_dir,
+                &policy,
+                "while IFS= read -r ignored; do :; done; exit 0",
+            );
+            let (cancel_sender, mut cancelled) = oneshot::channel();
+            if cancel {
+                tokio::spawn(async move {
+                    sleep(Duration::from_millis(25)).await;
+                    let _ = cancel_sender.send(());
+                });
+            }
+
+            let result = run_permission_child_with_stop_timeout(
+                &driver,
+                &state_dir,
+                &policy,
+                "bot.avibe.desktop.test",
+                Duration::from_millis(50),
+                Duration::from_millis(50),
+                &mut cancelled,
+            )
+            .await;
+            assert_eq!(
+                result.outcome,
+                if cancel {
+                    PermissionChildOutcome::Cancelled
+                } else {
+                    PermissionChildOutcome::TimedOut
+                }
+            );
+            let pid = result.pid.expect("spawned permission child").to_string();
+            let status = std::process::Command::new("ps")
+                .args(["-p", &pid])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .expect("query recorded pid");
+            assert!(!status.success(), "permission child {pid} remained alive");
+        }
     }
 
     #[tokio::test]

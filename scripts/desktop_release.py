@@ -88,7 +88,10 @@ def prepare(
             raise ValueError("unknown desktop release target")
         if TARGETS[target][0] == "macos":
             bundle = override.setdefault("bundle", {})
-            bundle["externalBin"] = ["binaries/cua-driver"]
+            macos = bundle.setdefault("macOS", {})
+            macos["files"] = {
+                "Helpers/cua-driver": f"binaries/cua-driver-{target}",
+            }
             resources = bundle.setdefault("resources", {})
             resources.update(
                 {
@@ -96,6 +99,7 @@ def prepare(
                     "../cua-driver/tools-v0.31.0.json": "computer-use/tools-v0.31.0.json",
                     "../cua-driver/LICENSE.md": "computer-use/LICENSE.md",
                     "../cua-driver/sources.json": "computer-use/sources.json",
+                    f"binaries/cua-driver-{target}.provenance.json": "computer-use/driver-provenance.json",
                 }
             )
     config.write_text(json.dumps(override) + "\n", encoding="utf-8")
@@ -135,8 +139,45 @@ def validate_manifest(manifest: dict, target: str, tag: str) -> None:
             raise ValueError(f"Invalid Runtime {field}")
 
 
+def driver_provenance(
+    target: str,
+    driver: Path,
+    provenance_path: Path,
+    packaged_cdhash: str,
+) -> dict:
+    if TARGETS[target][0] != "macos":
+        raise ValueError("Cua Driver provenance is macOS-only")
+    if re.fullmatch(r"[0-9a-f]{40,64}", packaged_cdhash) is None:
+        raise ValueError("Invalid packaged Cua Driver cdhash")
+    provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
+    required_hashes = (
+        "release_checksums_sha256",
+        "archive_sha256",
+        "extracted_universal_sha256",
+        "thinned_upstream_sha256",
+    )
+    if (
+        provenance.get("schema_version") != 1
+        or provenance.get("version") != "0.31.0"
+        or provenance.get("tag") != "cua-driver-rs-v0.31.0"
+        or provenance.get("source_commit") != "5272e492d61b96caf08e3bf434d91126c1f3dccc"
+        or provenance.get("target") != target
+        or provenance.get("arch") != TARGETS[target][1].replace("aarch64", "arm64")
+        or provenance.get("thinned_signature") != "upstream_preserved"
+        or any(re.fullmatch(r"[0-9a-f]{64}", str(provenance.get(field))) is None for field in required_hashes)
+    ):
+        raise ValueError("Invalid prepared Cua Driver provenance")
+    return {
+        **provenance,
+        "packaged_sha256": digest(driver),
+        "packaged_cdhash": packaged_cdhash,
+    }
+
+
 def record(*, version: str, target: str, tag: str, source_sha: str,
-           installer: Path, runtime: Path, output: Path, signing: str) -> None:
+           installer: Path, runtime: Path, output: Path, signing: str,
+           driver: Path | None = None, driver_provenance_path: Path | None = None,
+           driver_cdhash: str | None = None) -> None:
     if SHA.fullmatch(source_sha) is None:
         raise ValueError("Invalid source SHA")
     if tag and (version != desktop_version_from_tag(tag) or signing != signature(target).strip()):
@@ -156,11 +197,24 @@ def record(*, version: str, target: str, tag: str, source_sha: str,
     names = asset_names(version, target)
     shutil.copyfile(installer, output / names[0])
     shutil.copyfile(manifest_path, output / names[1])
-    (output / names[2]).write_text(json.dumps({
+    source = {
         "schema_version": 1, "tag": tag, "source_sha": source_sha,
         "version": version, "target": target,
         "package_version": manifest["runtime_version"],
-    }, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    }
+    driver_values = (driver, driver_provenance_path, driver_cdhash)
+    if TARGETS[target][0] == "macos":
+        if any(value is None for value in driver_values):
+            raise ValueError("macOS desktop artifacts require Cua Driver provenance")
+        source["computer_use_driver"] = driver_provenance(
+            target,
+            driver,
+            driver_provenance_path,
+            driver_cdhash,
+        )
+    elif any(value is not None for value in driver_values):
+        raise ValueError("Windows desktop artifacts cannot carry macOS Cua Driver provenance")
+    (output / names[2]).write_text(json.dumps(source, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     (output / names[3]).write_text(signing + "\n", encoding="utf-8")
     (output / names[4]).write_text(
         "".join(f"{digest(output / name)}  {name}\n" for name in sorted(names[:4])), encoding="utf-8",
@@ -195,9 +249,33 @@ def verify(directory: Path, tag: str, source_sha: str, *, updater_enabled: bool 
         if (directory / names[4]).read_text(encoding="utf-8") != checksums:
             raise ValueError("Desktop asset hash mismatch")
         source = json.loads((directory / names[2]).read_text(encoding="utf-8"))
-        if source != {"schema_version": 1, "tag": tag, "source_sha": source_sha,
-                      "version": version, "target": target,
-                      "package_version": package_version_from_release_tag(tag)}:
+        expected_source = {"schema_version": 1, "tag": tag, "source_sha": source_sha,
+                           "version": version, "target": target,
+                           "package_version": package_version_from_release_tag(tag)}
+        driver = source.pop("computer_use_driver", None)
+        if TARGETS[target][0] == "macos":
+            required_hashes = (
+                "release_checksums_sha256",
+                "archive_sha256",
+                "extracted_universal_sha256",
+                "thinned_upstream_sha256",
+                "packaged_sha256",
+            )
+            if (
+                not isinstance(driver, dict)
+                or driver.get("target") != target
+                or driver.get("version") != "0.31.0"
+                or driver.get("tag") != "cua-driver-rs-v0.31.0"
+                or driver.get("source_commit") != "5272e492d61b96caf08e3bf434d91126c1f3dccc"
+                or driver.get("thinned_signature") != "upstream_preserved"
+                or re.fullmatch(r"[0-9a-f]{40,64}", str(driver.get("packaged_cdhash"))) is None
+                or any(re.fullmatch(r"[0-9a-f]{64}", str(driver.get(field))) is None
+                       for field in required_hashes)
+            ):
+                raise ValueError("Desktop Cua Driver provenance mismatch")
+        elif driver is not None:
+            raise ValueError("Windows desktop source unexpectedly carries Cua Driver provenance")
+        if source != expected_source:
             raise ValueError("Desktop source provenance mismatch")
         if (directory / names[3]).read_text(encoding="utf-8") != signature(target):
             raise ValueError("Desktop TEST signature policy mismatch")
@@ -260,6 +338,9 @@ def main() -> None:
     producer.add_argument("--runtime", type=Path, required=True)
     producer.add_argument("--output", type=Path, required=True)
     producer.add_argument("--signing", required=True)
+    producer.add_argument("--driver", type=Path)
+    producer.add_argument("--driver-provenance-path", type=Path)
+    producer.add_argument("--driver-cdhash")
     for command in ("verify", "check-remote"):
         consumer = sub.add_parser(command)
         consumer.add_argument("--directory", type=Path, required=True)
