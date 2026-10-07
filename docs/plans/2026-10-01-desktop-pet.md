@@ -779,6 +779,12 @@ The code and its tests are the contract; this section records why.
   `/pet` page, or, for `pet_bind`, the `main` window on the active Runtime.
   The Workbench learns "Show in pet" exists from a top-level
   `__AVIBE_DESKTOP_PET__` marker, so an older shell never offers it.
+- **A summon before any Runtime waits as `show`.** The shortcut is live from
+  launch and the tray can turn the pet on during bootstrap, before a window
+  can exist. Such a summon is kept for the first page and delivered as
+  `show` with the window focused, so the pet answers once the Runtime is
+  ready, but a key pressed during a startup that can take a while never
+  opens the microphone long after. A Runtime that goes away first drops it.
 - **The shortcut plugin is pinned to 2.3.** `tauri-plugin-global-shortcut`
   2.4 requires Tauri 2.12; `~2.3` keeps the locked Tauri 2.11 and adds only
   the hotkey crates to the lock file. Lift the pin with the Tauri upgrade.

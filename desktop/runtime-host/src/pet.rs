@@ -278,6 +278,15 @@ impl PetStore {
         None
     }
 
+    /// A summon while no window can exist yet, because the Workbench has no
+    /// Runtime. It waits for the next page as `show`: the pet comes up with
+    /// its composer focused once a Runtime is ready, but a key pressed during
+    /// startup never opens the microphone long after.
+    pub fn summon_before_window(&mut self) {
+        self.page_ready = false;
+        self.pending_summon = Some(PetIntent::Show);
+    }
+
     fn persist(&self) {
         if !self.trusted {
             return;
@@ -909,6 +918,29 @@ mod tests {
 
         let corner = default_anchor(&areas[0]);
         assert_eq!(clamp_anchor(&corner, &areas), corner);
+    }
+
+    #[test]
+    fn a_summon_before_any_runtime_waits_for_the_first_page_as_show() {
+        let directory = TestDirectory::new();
+        let mut store = PetStore::load(directory.file());
+        // The hotkey during Runtime startup: no window can exist yet.
+        store.summon_before_window();
+        // The Runtime becomes ready and the window's page loads.
+        store.page_loading();
+        assert_eq!(
+            store.page_ready().summon_pending,
+            Some(PendingSummon {
+                intent: PetIntent::Show
+            })
+        );
+        // Delivered once.
+        store.page_loading();
+        assert_eq!(store.page_ready().summon_pending, None);
+        // A Runtime that goes away before any window takes the wait with it.
+        store.summon_before_window();
+        store.window_gone();
+        assert_eq!(store.page_ready().summon_pending, None);
     }
 
     #[test]

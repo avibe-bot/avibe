@@ -371,15 +371,19 @@ fn build_window(app: &AppHandle, origin: &LoopbackOrigin) -> Option<WebviewWindo
 pub fn wake(app: &AppHandle, intent: PetIntent) {
     let handle = app.clone();
     let _ = app.run_on_main_thread(move || {
-        if !handle.state::<Pet>().enabled() {
+        let pet = handle.state::<Pet>();
+        if !pet.enabled() {
             return;
         }
         let Some(window) = reconcile_now(&handle) else {
+            // The Workbench has no Runtime yet; the summon waits for the
+            // window that Runtime will bring.
+            pet.store().summon_before_window();
             return;
         };
         let _ = window.show();
         let _ = window.set_focus();
-        let deliver = handle.state::<Pet>().store().summon(intent);
+        let deliver = pet.store().summon(intent);
         if let Some(intent) = deliver {
             dispatch(&window, SUMMON_EVENT, &serde_json::json!({ "intent": intent }));
         }
@@ -577,6 +581,12 @@ pub fn pet_ready(window: WebviewWindow) -> Result<PetReady, String> {
         let _ = set_expanded(&window, false);
     }
     let ready = pet.store().page_ready();
+    // A summon that waited for this page brings the window forward now; the
+    // window was built without focus.
+    if ready.summon_pending.is_some() {
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
     Ok(ready)
 }
 
