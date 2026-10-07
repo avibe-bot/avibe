@@ -21,6 +21,7 @@ use std::time::{Duration, Instant};
 use serde::Deserialize;
 
 use crate::bootstrap_log::BootstrapLog;
+use crate::login_path::{login_shell_path, LoginPath};
 use crate::origin::LoopbackOrigin;
 use crate::private_runtime::{InstalledPrivateRuntime, PrivateRuntimeBundle, PrivateRuntimeError};
 use crate::status::BootstrapNoticeCode;
@@ -194,6 +195,11 @@ pub trait RuntimeLauncher: Send + Sync {
 /// spawned; readiness is decided by the presence probe.
 pub trait ResolvedRuntimeLauncher: Send + Sync {
     fn endpoint(&self) -> Result<LoopbackOrigin, LaunchError>;
+    /// Work that must happen before `launch` and that must not hold the
+    /// launch-state mutex: the login-shell `PATH` lookup, which can wait 10 s
+    /// on a hanging startup file. The default is a no-op so a test launcher
+    /// that never starts a Runtime does not wait on the user's shell.
+    fn prepare_launch(&self) {}
     /// `hand_over` lets the start replace another desktop Runtime serving this
     /// home. The start owns that act and reports it in its exit.
     fn launch(&self, hand_over: bool) -> Result<LaunchedRuntime, LaunchError>;
@@ -385,7 +391,6 @@ impl RuntimeLauncher for BundledVibeLauncher {
                 runtime.npm_cli,
                 self.backend_root.clone(),
                 &runtime_id,
-                env::var_os("PATH").as_deref(),
             ),
             expected_runtime_id: Some(runtime_id),
             cleanup: Some((self.bundle.clone(), runtime.root)),
@@ -443,13 +448,18 @@ impl ResolvedRuntimeLauncher for ResolvedVibeExecutable {
         query_endpoint(&self.command, &self.log)
     }
 
+    fn prepare_launch(&self) {
+        let _ = cached_login_path(&self.log);
+    }
+
     fn launch(&self, hand_over: bool) -> Result<LaunchedRuntime, LaunchError> {
         // Only this shell's own Runtime is started by a CLI of its version,
         // which knows the flag and exits by the handover contract.
         let identified = self.expected_runtime_id.is_some();
         let hand_over = hand_over && identified;
+        let login_path = cached_login_path(&self.log);
         let started = Instant::now();
-        let child = spawn_detached(&self.command, hand_over).map_err(LaunchError::Spawn)?;
+        let child = spawn_detached(&self.command, hand_over, login_path).map_err(LaunchError::Spawn)?;
         let pid = child.id();
         let watch = LaunchWatch::default();
 
@@ -511,6 +521,9 @@ struct RuntimeCommand {
     executable: PathBuf,
     prefix_args: Vec<OsString>,
     environment: Vec<(OsString, OsString)>,
+    /// Directories that lead `PATH`, ahead of whatever `PATH` the command
+    /// inherits. Empty for an installed Runtime.
+    path_prefix: Vec<PathBuf>,
     /// Whether the shell's own `PYTHON*` variables are withheld from the child.
     ///
     /// Only the private Runtime sets this. `-I` protects just the interpreter
@@ -529,6 +542,7 @@ impl RuntimeCommand {
             executable,
             prefix_args: Vec::new(),
             environment: Vec::new(),
+            path_prefix: Vec::new(),
             withholds_inherited_python: false,
         }
     }
@@ -540,17 +554,11 @@ impl RuntimeCommand {
         npm_cli: PathBuf,
         backends_root: PathBuf,
         runtime_id: &str,
-        inherited_path: Option<&OsStr>,
     ) -> Self {
-        let tools_dir = node.parent().expect("validated private Node has a parent");
+        let tools_dir = node.parent().expect("validated private Node has a parent").to_owned();
         // The builder includes a relocatable vibe entry point in bin. Expose
         // only that directory, never python/bin (which would shadow user tools).
         let cli_dir = runtime_root.join("bin");
-        let mut path_entries = vec![cli_dir.clone(), tools_dir.to_owned()];
-        if let Some(path) = inherited_path {
-            path_entries.extend(env::split_paths(path).filter(|entry| !entry.as_os_str().is_empty()));
-        }
-        let private_path = env::join_paths(path_entries).unwrap_or_else(|_| cli_dir.into_os_string());
         Self {
             executable: python,
             // Isolated mode excludes the user site and PYTHONPATH. The Avibe
@@ -570,7 +578,6 @@ impl RuntimeCommand {
                 OsString::from("vibe"),
             ],
             environment: vec![
-                (OsString::from("PATH"), private_path),
                 (OsString::from("VIBE_SHOW_RUNTIME_NODE_BIN"), node.into_os_string()),
                 (OsString::from(DESKTOP_NPM_CLI_ENV), npm_cli.into_os_string()),
                 (
@@ -585,13 +592,48 @@ impl RuntimeCommand {
                 // what covers this process itself.
                 (OsString::from("PYTHONDONTWRITEBYTECODE"), OsString::from("1")),
             ],
+            path_prefix: vec![cli_dir, tools_dir],
             withholds_inherited_python: true,
         }
     }
 
-    fn apply(&self, command: &mut Command) {
+    /// Applies this command's arguments and environment. `inherited_path` is
+    /// the `PATH` the command would otherwise inherit; `None` means this
+    /// process's own.
+    fn apply(&self, command: &mut Command, inherited_path: Option<&OsStr>) {
         command.args(&self.prefix_args);
         self.apply_environment(command, env::vars_os());
+        if self.path_prefix.is_empty() {
+            // Nothing to put in front: the command gets the PATH it was given,
+            // or keeps this process's own, byte for byte.
+            if let Some(path) = inherited_path {
+                command.env("PATH", path);
+            }
+            return;
+        }
+        let inherited_path = inherited_path.map(OsStr::to_owned).or_else(|| env::var_os("PATH"));
+        if let Some(path) = self.path(inherited_path.as_deref()) {
+            command.env("PATH", path);
+        }
+    }
+
+    /// `path_prefix` ahead of `inherited`, or `None` when there is neither.
+    ///
+    /// Only a private Runtime has a prefix. Empty entries, which name the
+    /// current directory, are dropped as they always were for it.
+    fn path(&self, inherited: Option<&OsStr>) -> Option<OsString> {
+        let mut entries = self.path_prefix.clone();
+        if let Some(inherited) = inherited {
+            entries.extend(env::split_paths(inherited).filter(|entry| !entry.as_os_str().is_empty()));
+        }
+        if entries.is_empty() {
+            return None;
+        }
+        // An entry that cannot be joined (one containing the separator) is a
+        // PATH the user cannot have been running with; keep only the prefix.
+        env::join_paths(&entries)
+            .or_else(|_| env::join_paths(&self.path_prefix))
+            .ok()
     }
 
     /// The environment half of `apply`, over an explicit inherited set.
@@ -679,7 +721,7 @@ fn endpoint_descriptor(
     stderr_slot: &mut Option<mpsc::Receiver<Vec<u8>>>,
 ) -> Result<LoopbackOrigin, LaunchError> {
     let mut command = Command::new(&runtime.executable);
-    runtime.apply(&mut command);
+    runtime.apply(&mut command, None);
     command
         .args(ENDPOINT_ARGS)
         .stdin(Stdio::null())
@@ -965,8 +1007,39 @@ fn is_executable(_metadata: &std::fs::Metadata) -> bool {
     true
 }
 
-fn spawn_detached(runtime: &RuntimeCommand, hand_over: bool) -> std::io::Result<std::process::Child> {
-    let mut command = lifecycle_command(runtime, &START_ARGS);
+/// The `PATH` the Runtime about to be started inherits, recorded once.
+///
+/// Only the start needs it: it is the one command whose process outlives this
+/// call and runs the user's agents. Discovery and the lifecycle verbs keep the
+/// shell's own `PATH`, so adopting a running Runtime never waits on the user's
+/// shell startup files. Cached so `prepare_launch` can run the lookup off the
+/// launch-state mutex and `launch` can reuse the result without asking again.
+fn cached_login_path(log: &BootstrapLog) -> &'static LoginPath {
+    static LOGIN_PATH: OnceLock<LoginPath> = OnceLock::new();
+    LOGIN_PATH.get_or_init(|| {
+        let started = Instant::now();
+        let login_path = login_shell_path();
+        log.record(
+            "runtime.login_path",
+            &[
+                ("outcome", login_path.outcome().to_owned()),
+                ("ms", started.elapsed().as_millis().to_string()),
+            ],
+        );
+        login_path
+    })
+}
+
+fn spawn_detached(
+    runtime: &RuntimeCommand,
+    hand_over: bool,
+    login_path: &LoginPath,
+) -> std::io::Result<std::process::Child> {
+    let inherited_path = match login_path {
+        LoginPath::Resolved(path) => Some(path.as_os_str()),
+        LoginPath::Inherited(_) => None,
+    };
+    let mut command = lifecycle_command(runtime, &START_ARGS, inherited_path);
     if hand_over {
         command.arg(HAND_OVER_ARG);
     }
@@ -986,7 +1059,7 @@ fn stop_arguments(runtime_id: &str) -> [&str; 3] {
 /// caller would then act against services that are still alive.
 fn run_lifecycle_verb(runtime: &RuntimeCommand, args: &[&str], log: &BootstrapLog, event: &str) -> CliOutcome {
     let started = Instant::now();
-    let mut command = lifecycle_command(runtime, args);
+    let mut command = lifecycle_command(runtime, args, None);
     // The verdict is on stderr. It stays in this process and the log.
     command.stderr(Stdio::piped());
     let mut child = match command.spawn() {
@@ -1049,9 +1122,9 @@ fn last_json_string(stderr: &[u8], field: &str) -> String {
         .unwrap_or_else(|| "unknown".to_owned())
 }
 
-fn lifecycle_command(runtime: &RuntimeCommand, args: &[&str]) -> Command {
+fn lifecycle_command(runtime: &RuntimeCommand, args: &[&str], inherited_path: Option<&OsStr>) -> Command {
     let mut command = Command::new(&runtime.executable);
-    runtime.apply(&mut command);
+    runtime.apply(&mut command, inherited_path);
     command
         .args(args)
         // Nothing the Runtime prints may reach the shell, and therefore the WebView.
@@ -1162,10 +1235,11 @@ mod tests {
             executable: PathBuf::from("/test-owned/Runtime Root/python"),
             prefix_args: vec![OsString::from("-m"), OsString::from("vibe")],
             environment: vec![(OsString::from("AVIBE_DESKTOP_MANAGED_RUNTIME"), OsString::from("1"))],
+            path_prefix: Vec::new(),
             withholds_inherited_python: true,
         };
         let runtime_id = "b".repeat(64);
-        let command = lifecycle_command(&runtime, &stop_arguments(&runtime_id));
+        let command = lifecycle_command(&runtime, &stop_arguments(&runtime_id), None);
         assert_eq!(command.get_program(), runtime.executable.as_os_str());
         assert_eq!(
             command.get_args().collect::<Vec<_>>(),
@@ -1772,7 +1846,6 @@ mod tests {
             tree.join("tools/npm/bin/npm-cli.js"),
             dir.join("backends"),
             &"a".repeat(64),
-            env::var_os("PATH").as_deref(),
         );
         let mut process = Command::new(&command.executable);
         for (name, value) in &command.environment {
@@ -1829,7 +1902,6 @@ mod tests {
             tree.join("tools/npm/bin/npm-cli.js"),
             dir.join("backends"),
             &"a".repeat(64),
-            env::var_os("PATH").as_deref(),
         );
         let inherited = [
             (
@@ -2145,7 +2217,15 @@ mod tests {
             npm_cli,
             backends_root,
             &"a".repeat(64),
-            Some(&inherited),
+        );
+        let path_entries: Vec<_> = env::split_paths(&command.path(Some(&inherited)).expect("private PATH")).collect();
+        assert_eq!(
+            path_entries,
+            [
+                runtime_root.join("bin"),
+                node.parent().unwrap().to_owned(),
+                PathBuf::from("/usr/bin")
+            ]
         );
 
         assert_eq!(command.executable, python);
@@ -2159,15 +2239,9 @@ mod tests {
             ]
         );
         let environment: std::collections::HashMap<_, _> = command.environment.into_iter().collect();
-        let path_entries: Vec<_> =
-            env::split_paths(environment.get(OsStr::new("PATH")).expect("private PATH")).collect();
-        assert_eq!(
-            path_entries,
-            [
-                runtime_root.join("bin"),
-                node.parent().unwrap().to_owned(),
-                PathBuf::from("/usr/bin")
-            ]
+        assert!(
+            !environment.contains_key(OsStr::new("PATH")),
+            "PATH is composed per command, from the PATH that command inherits"
         );
         assert_eq!(
             environment.get(OsStr::new("VIBE_SHOW_RUNTIME_NODE_BIN")),
@@ -2196,6 +2270,84 @@ mod tests {
         assert_eq!(
             environment.get(OsStr::new("PYTHONDONTWRITEBYTECODE")),
             Some(&OsString::from("1"))
+        );
+    }
+    /// The Runtime a desktop launch starts must see the PATH the user's login
+    /// shell has, not the one launchd gave the application: an npm-installed
+    /// backend is a `#!/usr/bin/env node` script, and nvm's `node` is only on
+    /// the former (#2378).
+    #[cfg(unix)]
+    #[test]
+    fn the_runtime_start_inherits_the_login_shell_path() {
+        let dir = scratch_dir("login-path");
+        let recording = dir.join("path");
+        let executable = write_fake_runtime(
+            &dir,
+            &format!("#!/bin/sh\nprintf '%s' \"$PATH\" > \"{}\"\n", recording.display()),
+        );
+        let runtime = RuntimeCommand::installed(executable);
+        let login_path = env::join_paths(["/login/nvm/bin", "/usr/bin", "/bin"]).expect("PATH");
+
+        let mut child = spawn_detached(&runtime, false, &LoginPath::Resolved(login_path.clone())).expect("start");
+        child.wait().expect("fake start exits");
+
+        assert_eq!(wait_for_file(&recording), login_path.to_string_lossy());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_private_runtime_keeps_its_own_tools_ahead_of_the_login_shell_path() {
+        let runtime = RuntimeCommand::private(
+            PathBuf::from("/private/runtime"),
+            PathBuf::from("/private/runtime/python/bin/python3"),
+            PathBuf::from("/private/runtime/tools/bin/node"),
+            PathBuf::from("/private/runtime/tools/npm/bin/npm-cli.js"),
+            PathBuf::from("/private/backends"),
+            &"a".repeat(64),
+        );
+        let login_path = env::join_paths(["/login/nvm/bin", "/usr/bin"]).expect("PATH");
+
+        let command = lifecycle_command(&runtime, &START_ARGS, Some(&login_path));
+
+        let path = command
+            .get_envs()
+            .find_map(|(name, value)| (name == "PATH").then_some(value))
+            .flatten()
+            .expect("the start sets PATH");
+        assert_eq!(
+            env::split_paths(path).collect::<Vec<_>>(),
+            [
+                PathBuf::from("/private/runtime/bin"),
+                PathBuf::from("/private/runtime/tools/bin"),
+                PathBuf::from("/login/nvm/bin"),
+                PathBuf::from("/usr/bin"),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_installed_runtime_inherits_path_verbatim() {
+        let runtime = RuntimeCommand::installed(PathBuf::from("/test-owned/vibe"));
+        let path_override = |command: &Command| {
+            command
+                .get_envs()
+                .find_map(|(name, value)| (name == "PATH").then(|| value.map(OsStr::to_owned)))
+        };
+
+        // Discovery, the lifecycle verbs, and a start whose login PATH could
+        // not be read leave this process's PATH untouched.
+        assert_eq!(path_override(&lifecycle_command(&runtime, &START_ARGS, None)), None);
+        assert_eq!(
+            path_override(&lifecycle_command(&runtime, &stop_arguments(&"b".repeat(64)), None)),
+            None
+        );
+
+        // A login PATH is passed on as the shell printed it, empty entries
+        // (the current directory) included.
+        let login_path = OsString::from(":/login/bin::/usr/bin:");
+        assert_eq!(
+            path_override(&lifecycle_command(&runtime, &START_ARGS, Some(&login_path))),
+            Some(Some(login_path))
         );
     }
 }
