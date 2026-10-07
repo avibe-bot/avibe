@@ -17,7 +17,7 @@ import { BackendIcon } from '../visual';
 import { InstallOutcome, type InstallOutcomeResult } from '../shared/InstallOutcome';
 import { AssistantRow } from '../onboarding/AssistantRow';
 import { BuiltinAssistantRow } from '../onboarding/BuiltinAssistantRow';
-import type { BuiltinModelOffer } from '../onboarding/builtinModelOffer';
+import { useBuiltinModelChoice } from '../onboarding/useBuiltinModelChoice';
 import { ASSISTANT_ORDER, SETUP_LINEUP } from '../onboarding/collaborationTimeline';
 import '../onboarding/onboarding.css';
 import type { BackendId } from '../visual';
@@ -41,13 +41,12 @@ import { RouteChainDialog, type RouteChainSelection } from '../settings/models/R
 import type { CollectionReadAuthority } from '../settings/models/collectionReadAuthority';
 import type { AgentChain, AgentSupply, ModelCandidate, Source } from '../settings/models/types';
 import { BackendModelPickerDialog } from '../settings/models/BackendModelPickerDialog';
-import { chosenCandidate, draftRowFor, type ChosenCandidate } from '../settings/models/backendCatalog';
-import { compatibleEffort } from '@/lib/effortOptions';
+import { chosenCandidate } from '../settings/models/backendCatalog';
 import { routeRunnable } from '../onboarding/entryGate';
 import type { AssistantRouteView } from '../onboarding/AssistantRow';
 import { isBuiltinAgent } from '../onboarding/setupTargets';
 import { readyRegion } from '../settings/models/regionRead';
-import { apiFailure, modelsApi } from '../settings/models/modelsApi';
+import { modelsApi } from '../settings/models/modelsApi';
 import { usableSource } from '../onboarding/providers/providerStage';
 
 interface AgentDetectionProps {
@@ -71,8 +70,6 @@ type AgentState = {
   status?: 'unknown' | 'ok' | 'missing';
 };
 
-/** The server's refusal of a pick whose suppliers moved after the card showed them. */
-const CANDIDATES_CHANGED = 'candidate_suppliers_changed';
 /** Choosing a built-in assistant's model, a model its list already holds is as much a
  *  choice as one it does not: the pick only adds what is missing. So the picker is
  *  told nothing is listed, and every supplied model stays selectable. */
@@ -179,28 +176,15 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
   const routeFailureCurrent = (backend: AgentBackendId) => active && activeRef.current && (
     sharedRouteFailed()
     || (sharedRouteReady() && routeRead.backendReads[backend] === 'failed'));
-  // A built-in card with no model offers the models it could run on; this is that read.
-  // Each offer belongs to the showing of the screen that read it: a screen the person
-  // left and came back to reads its candidates again rather than offering rows from
-  // before, when the suppliers may have moved.
-  const [offers, setOffers] = useState<Partial<Record<BuiltinBackend, BuiltinModelOffer & { epoch: number }>>>({});
-  const offerTokens = useRef<Partial<Record<BuiltinBackend, number>>>({});
-  const readOffer = useCallback(async (backend: BuiltinBackend) => {
-    const token = (offerTokens.current[backend] || 0) + 1;
-    offerTokens.current[backend] = token;
-    // A re-read within the same showing keeps the rows it already shows, so refreshing
-    // the routes does not blank the list under the person's pointer.
-    const epoch = activation.current;
-    const owns = () => offerTokens.current[backend] === token && activation.current === epoch;
-    setOffers((current) => (current[backend]?.kind === 'ready' && current[backend].epoch === epoch
-      ? current : { ...current, [backend]: { kind: 'loading', epoch } }));
-    try {
-      const read = await modelsApi.getAgentModelCandidates(backend);
-      if (owns()) setOffers((current) => ({ ...current, [backend]: { kind: 'ready', read, epoch } }));
-    } catch {
-      if (owns()) setOffers((current) => ({ ...current, [backend]: { kind: 'failed', epoch } }));
-    }
-  }, []);
+  // The built-in card's model choice — its candidates, the write and both ways they go
+  // stale or half-done — has one owner; see `useBuiltinModelChoice`.
+  const choice = useBuiltinModelChoice({
+    api, models: modelsApi, agentReads,
+    epoch: () => activation.current,
+    target: (backend) => routeRead.targets[backend],
+    onSettled: (backend) => refreshRouteOwnership(backend),
+  });
+  const readOffer = choice.read;
   const readCardRoutes = useCallback(async (target?: AgentBackendId) => {
     if (!agentReads) return false;
     const token = ++routeReadToken.current;
@@ -643,55 +627,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
     }
   };
 
-  // A built-in assistant's one setup decision: which model it runs on. The pick joins
-  // the backend's model list when it is not there yet — carrying the suppliers the card
-  // showed, so the server can refuse a pick whose projection moved — and then becomes
-  // its own Agent's model. The server only ever fills a model nobody set, so writing
-  // the person's pick last is what makes it the one that stands.
-  const [builtinPick, setBuiltinPick] = useState<{ backend: BuiltinBackend; id: string | null; error: string } | null>(null);
   const [pickerFor, setPickerFor] = useState<BuiltinBackend | null>(null);
-  const pickBuiltinModel = async (backend: BuiltinBackend, pick: ChosenCandidate) => {
-    const target = routeRead.targets[backend];
-    if (!target || !agentReads || builtinPick?.id) return;
-    const model = pick.candidate.id;
-    setBuiltinPick({ backend, id: model, error: '' });
-    try {
-      const supply = (await agentReads.readValue()).find((row) => row.backend === backend);
-      if (!supply) throw new Error('Supply unreadable');
-      const baseline = supply.catalog_models ?? [];
-      const row = draftRowFor(pick.candidate, [], baseline);
-      if (!baseline.some((held) => held.id === model)) {
-        await modelsApi.putAgentModels(backend, {
-          baseline,
-          models: [...baseline, row],
-          expected_suppliers: { [model]: pick.expected_suppliers },
-        });
-      }
-      // The Agent's effort moves with its model, as the Agent editor moves it: one the
-      // picked model does not take is replaced in the same write.
-      const current = await api.getVibeAgent(target, { cache: false });
-      if (!current?.ok) throw new Error('Agent unreadable');
-      const effort = compatibleEffort(current.agent.reasoning_effort, row.reasoning_efforts);
-      const updated = await api.updateVibeAgent(target, effort === (current.agent.reasoning_effort ?? null)
-        ? { model } : { model, reasoning_effort: effort });
-      if (!updated?.ok) throw new Error('Agent update failed');
-    } catch (error) {
-      const changed = apiFailure(error)?.code === CANDIDATES_CHANGED;
-      setBuiltinPick({ backend, id: null, error: t(changed
-        ? 'onboarding.setup.suppliersChanged' : 'onboarding.setup.modelPickFailed') });
-      // The server refused the suppliers these rows showed, so the rows go with them
-      // until today's read replaces them; offering them meanwhile asks the same
-      // refused question again.
-      if (changed) setOffers((current) => ({ ...current, [backend]: { kind: 'loading', epoch: activation.current } }));
-      // Either nothing was written, or only the list was: the card is redrawn from what
-      // the server holds now, and still offers today's candidates if it has no model.
-      void refreshRouteOwnership(backend);
-      return;
-    }
-    setBuiltinPick(null);
-    try { await agentReads.refresh(); } catch { /* The route read below reports what it cannot read. */ }
-    await refreshRouteOwnership(backend);
-  };
   const supplyBlocks = hubSupplyBlocks(data);
   /** Opens the card's route in the route editor, once the read that names it is current. */
   const openRoute = (name: AgentBackendId) => {
@@ -709,10 +645,11 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
   const builtinReady = (backend: BuiltinBackend) => {
     const supply = sharedRouteReady() ? routeRead.supplies.find((row) => row.backend === backend) : undefined;
     return !!supply?.named_agents?.some((row) => routeRunnable(supply, row.name) !== null)
-      && !supplyBlocks.get(backend) && !builtinPick?.id
+      && !supplyBlocks.get(backend) && !choice.holds(backend)
       && !connectionPending[backend] && !connectionErrors[backend] && !!connections[backend]?.entry_eligible;
   };
-  const builtinUnset = BUILTIN_BACKENDS.some((backend) => routeViewFor(backend).kind === 'no-agent-model');
+  const builtinUnset = BUILTIN_BACKENDS.some((backend) => routeViewFor(backend).kind === 'no-agent-model'
+    || choice.holds(backend));
 
   const opencodeAgent = agents['opencode'];
   const requiresSource = canEditSetupRoute && modelHubEnabled;
@@ -728,7 +665,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
   ];
   const canContinue = isPage ? Object.values(agents).some((agent) => agent.enabled)
     : (!requiresSource || hasSource) && readyBackends.length > 0;
-  const actionBusy = syncing || entering || isAnyInstalling || !!builtinPick?.id
+  const actionBusy = syncing || entering || isAnyInstalling || BUILTIN_BACKENDS.some((backend) => !!choice.picking(backend))
     || Object.values(pendingWrites).some(Boolean) || Object.values(refreshingAgents).some(Boolean);
   const primaryPending = useRef(false);
   const handlePrimaryAction = async () => {
@@ -1031,9 +968,8 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
         <div className="onboarding-assistants-list">
         {BUILTIN_BACKENDS.map((name) => (
           <BuiltinAssistantRow key={name} backend={name} route={routeViewFor(name)}
-            block={supplyBlocks.get(name)} offer={offers[name]?.epoch === activation.current ? offers[name] : undefined}
-            picking={builtinPick?.backend === name ? builtinPick.id : null}
-            pickError={builtinPick?.backend === name ? builtinPick.error : undefined}
+            block={supplyBlocks.get(name)} offer={choice.offer(name)}
+            picking={choice.picking(name)} failure={choice.failure(name)} onRetryChoice={() => choice.retry(name)}
             connectionPending={connectionPending[name]}
             connectionError={connectionErrors[name] || connections[name]?.message}
             onRefreshConnection={() => void refreshConnection(name, { acknowledge: true })}
@@ -1042,7 +978,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
             onRetryRoute={() => void readCardRoutes(name)}
             configuringDisabled={syncing || !canEditSetupRoute || !routeTargetReady(name)}
             onConfigure={() => openRoute(name)}
-            onPick={(candidate: ModelCandidate) => void pickBuiltinModel(name, chosenCandidate(candidate))}
+            onPick={(candidate: ModelCandidate) => void choice.choose(name, chosenCandidate(candidate))}
             onAllModels={() => setPickerFor(name)}
             onRetryOffer={() => void readOffer(name)} />
         ))}
@@ -1144,7 +1080,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
           onAdd={(chosen) => {
             const backend = pickerFor;
             setPickerFor(null);
-            if (chosen[0]) void pickBuiltinModel(backend, chosen[0]);
+            if (chosen[0]) void choice.choose(backend, chosen[0]);
           }} />
       )}
       {canEditSetupRoute && agentReads && (

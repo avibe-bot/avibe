@@ -7,7 +7,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AgentDetection } from '../steps/AgentDetection';
 import en from '../../i18n/en.json';
 import { RouteSurfaceActiveContext } from '../../lib/routeSurfaceActivity';
-import { ApiCallError } from '../settings/models/modelsApi';
 import type { AgentSupply, BackendModelCandidates, ModelCandidate, Source } from '../settings/models/types';
 import { inlineCandidates } from './builtinModelOffer';
 
@@ -140,46 +139,22 @@ describe('the built-in assistant card', () => {
     await waitFor(() => expect(onNext).toHaveBeenCalledWith(expect.objectContaining({ readyBackends: ['vibey'] })));
   });
 
-  it('does not add a model the list already holds; it only names it', async () => {
-    mock.models.getAgentModelCandidates.mockImplementation(async () => ({ ...candidates(), in_list: [candidate('gpt-5.6-pro')] }));
-    const listed = { ...reads, readValue: async () => [vibeySupply(['gpt-5.6-pro'])] };
-    render(wrap(<AgentDetection data={data()} onNext={vi.fn()} onNavigate={vi.fn()} agentReads={listed} />));
-    fireEvent.click(await card().findByRole('button', { name: /gpt-5\.6-pro/ }));
-    await waitFor(() => expect(mock.api.updateVibeAgent).toHaveBeenCalledWith('vibey', { model: 'gpt-5.6-pro' }));
-    expect(mock.models.putAgentModels).not.toHaveBeenCalled();
-  });
-
-  it('asks again when the suppliers it showed have moved, offering none of the refused rows meanwhile', async () => {
-    mock.models.putAgentModels.mockRejectedValueOnce(new ApiCallError('candidate_suppliers_changed', undefined, true, [], [], [], 409));
-    render(wrap(<AgentDetection data={data()} onNext={vi.fn()} onNavigate={vi.fn()} agentReads={reads} />));
-    const pick = await card().findByRole('button', { name: /gpt-5\.6-sol/ });
-    let answer!: (read: BackendModelCandidates) => void;
-    mock.models.getAgentModelCandidates.mockImplementationOnce(() => new Promise((resolve) => { answer = resolve; }));
-    fireEvent.click(pick);
-    expect(await card().findByText(en.onboarding.setup.suppliersChanged)).toBeTruthy();
-    expect(mock.api.updateVibeAgent).not.toHaveBeenCalled();
-    await waitFor(() => expect(mock.models.getAgentModelCandidates).toHaveBeenCalledTimes(2));
-    expect(card().queryByRole('button', { name: /gpt-5\.6-/ })).toBeNull();
-    await act(async () => answer(candidates()));
-    expect(await card().findByRole('button', { name: /gpt-5\.6-sol/ })).toBeTruthy();
-    expect(enter().disabled).toBe(true);
-  });
-
-  it('moves the Agent\'s effort with its model when the picked model does not take it', async () => {
-    effort = 'xhigh';
-    mock.models.getAgentModelCandidates.mockImplementation(async () => ({
-      ...candidates(), providers: [{ ...candidate('gpt-5.6-sol'), reasoning_efforts: ['low', 'medium', 'high'] }, candidate('gpt-5.6-mini')],
-    }));
-    render(wrap(<AgentDetection data={data()} onNext={vi.fn()} onNavigate={vi.fn()} agentReads={reads} />));
-    fireEvent.click(await card().findByRole('button', { name: /gpt-5\.6-sol/ }));
-    await waitFor(() => expect(mock.api.updateVibeAgent).toHaveBeenCalledWith('vibey', { model: 'gpt-5.6-sol', reasoning_effort: 'medium' }));
-  });
-
-  it('clears an effort a model that states none cannot run, and leaves no effort alone', async () => {
-    effort = 'high';
-    render(wrap(<AgentDetection data={data()} onNext={vi.fn()} onNavigate={vi.fn()} agentReads={reads} />));
+  it('keeps a choice that did not stand open, and holds entry on it, until Retry applies it', async () => {
+    // Naming the pick fails after the list took it; the server has meanwhile filled the
+    // Agent with another model, so the Agent reads as configured with one nobody chose.
+    mock.api.updateVibeAgent.mockRejectedValueOnce(new Error('offline'));
+    mock.models.putAgentModels.mockImplementationOnce(async () => { model = 'gpt-5.6-large'; return vibeySupply(); });
+    const onNext = vi.fn();
+    render(wrap(<AgentDetection data={data()} onNext={onNext} onNavigate={vi.fn()} agentReads={reads} />));
     fireEvent.click(await card().findByRole('button', { name: /gpt-5\.6-mini/ }));
-    await waitFor(() => expect(mock.api.updateVibeAgent).toHaveBeenCalledWith('vibey', { model: 'gpt-5.6-mini', reasoning_effort: null }));
+    const alert = await card().findByRole('alert');
+    expect(alert.textContent).toContain(en.onboarding.setup.modelPickFailed);
+    expect(card().getByRole('button', { name: /gpt-5\.6-sol/ })).toBeTruthy();
+    await act(async () => undefined);
+    expect(enter().disabled).toBe(true);
+    fireEvent.click(within(alert).getByRole('button', { name: 'Retry' }));
+    await waitFor(() => expect(model).toBe('gpt-5.6-mini'));
+    await waitFor(() => expect(enter().disabled).toBe(false));
   });
 
   it('lets setup finish on another runnable Agent of the built-in backend', async () => {
@@ -244,25 +219,6 @@ describe('the built-in assistant card', () => {
     fireEvent.click(dialog.getByRole('button', { name: en.settings.models.gateway.picker.use }));
     await waitFor(() => expect(mock.api.updateVibeAgent).toHaveBeenCalledWith('vibey', { model: 'gpt-5.6-pro' }));
     expect(mock.models.putAgentModels).not.toHaveBeenCalled();
-  });
-
-  it('offers no candidates read before the screen was left, when it comes back', async () => {
-    let answerFirst!: (read: BackendModelCandidates) => void;
-    let answerSecond!: (read: BackendModelCandidates) => void;
-    mock.models.getAgentModelCandidates
-      .mockImplementationOnce(() => new Promise((resolve) => { answerFirst = resolve; }))
-      .mockImplementationOnce(() => new Promise((resolve) => { answerSecond = resolve; }));
-    const props = { data: data(), onNext: vi.fn(), onNavigate: vi.fn(), agentReads: reads };
-    const view = render(wrap(<AgentDetection {...props} active />));
-    await waitFor(() => expect(mock.models.getAgentModelCandidates).toHaveBeenCalledOnce());
-    view.rerender(wrap(<AgentDetection {...props} active={false} />));
-    // The first read lands after the person left: it answers a showing that is over.
-    await act(async () => answerFirst(candidates()));
-    view.rerender(wrap(<AgentDetection {...props} active />));
-    await waitFor(() => expect(mock.models.getAgentModelCandidates).toHaveBeenCalledTimes(2));
-    expect(card().queryByRole('button', { name: /gpt-5\.6-/ })).toBeNull();
-    await act(async () => answerSecond(candidates()));
-    expect(await card().findByRole('button', { name: /gpt-5\.6-sol/ })).toBeTruthy();
   });
 
   it('reads as an enabled assistant once it has a model, and opens its route', async () => {

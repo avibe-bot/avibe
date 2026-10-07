@@ -336,8 +336,13 @@ inline, with the existing `BackendModelPickerDialog` in its single-choice mode f
 backend's catalog yet is added through `PUT /api/models/agents/{backend}/models` with the
 `expected_suppliers` the card displayed (a `candidate_suppliers_changed` refusal re-reads
 and asks again), and then becomes the Agent's `model` through `PATCH /api/agents/{name}`.
-The server's own reconciliation only fills a model nobody set, so the person's pick is
-written last and stands. Nothing else about another backend's route or Agent changes.
+The server's own reconciliation fills an Agent that has no model with the list's first row,
+so a failure between the two writes can leave the Agent on a model nobody chose. The choice
+is therefore settled by an uncached read of the Agent, not by the writes' answers: until
+that read shows the chosen model, the card keeps the offer open with Retry and the screen
+holds entry on it. One hook (`useBuiltinModelChoice`) owns the offer's read, its freshness
+per screen showing, the conflict re-read and this write. Nothing else about another
+backend's route or Agent changes.
 
 **Known by design — setup requires Model Hub.** Owner decision, 2026-09-21 12:56 +08:
 “setup的契约是默认使用模型网关”; users who later need to disable it do so in Settings.

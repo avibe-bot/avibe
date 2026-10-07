@@ -9,6 +9,7 @@ import type { HubSupplyBlock } from '../settings/models/featureFlags';
 import type { ModelCandidate } from '../settings/models/types';
 import { RouteChoice, type AssistantRouteView } from './AssistantRow';
 import { INLINE_CANDIDATES, inlineCandidates, type BuiltinModelOffer } from './builtinModelOffer';
+import type { BuiltinChoiceFailure } from './useBuiltinModelChoice';
 
 export interface BuiltinAssistantRowProps {
   backend: BuiltinBackend;
@@ -19,7 +20,9 @@ export interface BuiltinAssistantRowProps {
   offer?: BuiltinModelOffer;
   /** The candidate whose pick is being written, if any. */
   picking?: string | null;
-  pickError?: string;
+  /** Why the last choice did not stand, if it did not. */
+  failure?: BuiltinChoiceFailure | null;
+  onRetryChoice?: () => void;
   connectionPending?: boolean;
   connectionError?: string;
   routeError?: string;
@@ -41,12 +44,15 @@ export interface BuiltinAssistantRowProps {
  * Without one, the card offers the models it could run on right now and writes the
  * pick, so setup can finish on this assistant alone (D3).
  */
-export function BuiltinAssistantRow({ backend, route, block, offer, picking = null, pickError, connectionPending,
-  connectionError, routeError, configuringDisabled = false, onConfigure, onPick, onAllModels, onRetryOffer,
-  onRefreshConnection, onRetryRoute }: BuiltinAssistantRowProps) {
+export function BuiltinAssistantRow({ backend, route, block, offer, picking = null, failure = null, onRetryChoice,
+  connectionPending, connectionError, routeError, configuringDisabled = false, onConfigure, onPick, onAllModels,
+  onRetryOffer, onRefreshConnection, onRetryRoute }: BuiltinAssistantRowProps) {
   const { t } = useTranslation();
   const label = getBackendUiMeta(backend).label;
-  const unset = !block && route?.kind === 'no-agent-model';
+  // A choice that did not stand keeps the offer open whatever the Agent reads as now:
+  // the server may have filled it with a model nobody chose.
+  const unconfirmed = failure?.kind === 'failed';
+  const unset = !block && (route?.kind === 'no-agent-model' || unconfirmed);
   const routeModel = route?.kind === 'route' ? route.model : null;
   const routeUnknown = route?.kind === 'pending' || route?.kind === 'failed';
   const note = block === 'gateway_off' ? t('onboarding.setup.noteGatewayOff', { name: label })
@@ -116,7 +122,10 @@ export function BuiltinAssistantRow({ backend, route, block, offer, picking = nu
           ) : null}
         </div>
         {/* A failed pick belongs to the offer it was made from. */}
-        {unset && pickError && <div className="onboarding-assistant-error" role="alert">{pickError}</div>}
+        {unset && failure && <div className="onboarding-assistant-error" role="alert">
+          {t(unconfirmed ? 'onboarding.setup.modelPickFailed' : 'onboarding.setup.suppliersChanged')}
+          {unconfirmed && onRetryChoice && <Button variant="link" size="xs" disabled={busy} onClick={onRetryChoice}>{t('common.retry')}</Button>}
+        </div>}
         {connectionError && <div className="onboarding-assistant-error" role="alert">
           {connectionError}
           {onRefreshConnection && <Button variant="link" size="xs" onClick={onRefreshConnection}>{t('common.retry')}</Button>}
