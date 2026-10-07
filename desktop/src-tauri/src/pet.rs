@@ -272,9 +272,14 @@ fn reconcile_now(app: &AppHandle) -> Option<WebviewWindow> {
         pet.store().window_gone();
     }
     let origin = desired?;
-    let window = build_window(app, &origin)?;
-    *lock(&pet.window_origin) = Some(origin);
-    Some(window)
+    // The navigation hook also judges the window's first load, so the origin
+    // it may load is recorded before the webview starts loading it.
+    *lock(&pet.window_origin) = Some(origin.clone());
+    let window = build_window(app, &origin);
+    if window.is_none() {
+        *lock(&pet.window_origin) = None;
+    }
+    window
 }
 
 fn build_window(app: &AppHandle, origin: &LoopbackOrigin) -> Option<WebviewWindow> {

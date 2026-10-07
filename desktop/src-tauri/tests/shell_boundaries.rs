@@ -1130,7 +1130,15 @@ fn the_pet_window_has_one_owner_and_only_ever_shows_its_own_route() {
     assert_eq!(pet.matches("WebviewWindowBuilder::new(").count(), 1);
     assert!(function_body(&pet, "build_window").contains("WebviewWindowBuilder::new(app, PET_WINDOW,"));
     assert_eq!(pet.matches("build_window(").count(), 2);
-    assert!(function_body(&pet, "reconcile_now").contains("build_window(app, &origin)"));
+    let reconcile = function_body(&pet, "reconcile_now");
+    assert!(reconcile.contains("build_window(app, &origin)"));
+    // The navigation hook judges the first load too: the origin it may load is
+    // authorized before the window is built, and withdrawn if building fails.
+    let authorized = reconcile
+        .find("*lock(&pet.window_origin) = Some(origin.clone());")
+        .expect("the origin is authorized for the first load");
+    assert!(authorized < reconcile.find("build_window(app, &origin)").unwrap());
+    assert!(reconcile.contains("if window.is_none() {\n        *lock(&pet.window_origin) = None;"));
     assert_eq!(pet.matches(".destroy()").count(), 1);
     assert!(function_body(&pet, "reconcile_now").contains("window.destroy()"));
     assert!(!source.contains("PET_WINDOW, WebviewUrl") && !source.contains("pet::reconcile_now"));
