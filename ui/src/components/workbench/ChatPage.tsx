@@ -4443,8 +4443,7 @@ export const Transcript: React.FC<TranscriptProps> = ({
         <SelectionQuoteToolbar
           containerRef={scrollRef}
           // Both write actions are omitted rather than offered just to fail —
-          // see transcriptSelectionActions. On an archived session that leaves only
-          // the touch Copy fallback, and on desktop the toolbar renders nothing.
+          // see transcriptSelectionActions. Copy (and Select all, inside a bubble) stay.
           onQuote={selectionActions.quote ? onQuoteSelection : undefined}
           // Forking needs a bound native session (mirrors the sidebar's fork gate).
           onAskInNew={selectionActions.askInNew ? onAskInNewSession : undefined}

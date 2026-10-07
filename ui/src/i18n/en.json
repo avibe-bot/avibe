@@ -4439,6 +4439,7 @@
       "quote": "Quote",
       "askInNew": "Ask in a new session",
       "copy": "Copy",
+      "selectAll": "Select all",
       "askFailed": "Couldn't start a new session from the selection."
     },
     "showPage": {
