@@ -157,6 +157,27 @@ describe('the built-in assistant card', () => {
     await waitFor(() => expect(enter().disabled).toBe(false));
   });
 
+  it('holds the whole entry on a choice that did not stand, even with a CLI assistant ready', async () => {
+    mock.api.detectCli.mockResolvedValue({ found: true, path: '/isolated/bin/claude' });
+    mock.api.getBackendConnection.mockImplementation(async (backend: string) => ({
+      ok: true, backend, installed: true, enabled: true, auth: 'api_key', application: 'applied', ready: true, entry_eligible: true, supply_mode: 'hub',
+    }));
+    mock.api.updateVibeAgent.mockRejectedValueOnce(new Error('offline'));
+    mock.models.putAgentModels.mockImplementationOnce(async () => { model = 'gpt-5.6-large'; return vibeySupply(); });
+    const ready = { ...data(), agents: { ...data().agents, claude: { enabled: true, cli_path: 'claude', status: 'ok' } } };
+    render(wrap(<AgentDetection data={ready} onNext={vi.fn()} onNavigate={vi.fn()} agentReads={reads} />));
+    const pick = await card().findByRole('button', { name: /gpt-5\.6-mini/ });
+    await waitFor(() => expect(enter().disabled).toBe(false));
+    fireEvent.click(pick);
+    await card().findByRole('alert');
+    await act(async () => undefined);
+    expect(enter().disabled).toBe(true);
+    expect(screen.getByText(en.onboarding.connection.builtinChoiceHint.replace('{{name}}', 'Vibey'))).toBeTruthy();
+    fireEvent.click(within(card().getByRole('alert')).getByRole('button', { name: 'Retry' }));
+    await waitFor(() => expect(model).toBe('gpt-5.6-mini'));
+    await waitFor(() => expect(enter().disabled).toBe(false));
+  });
+
   it('lets setup finish on another runnable Agent of the built-in backend', async () => {
     const supply = (): AgentSupply[] => [{
       ...vibeySupply(['gpt-5.6-pro'], null),

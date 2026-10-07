@@ -340,7 +340,7 @@ The server's own reconciliation fills an Agent that has no model with the list's
 so a failure between the two writes can leave the Agent on a model nobody chose. The choice
 is therefore settled by an uncached read of the Agent, not by the writes' answers: until
 that read shows the chosen model, the card keeps the offer open with Retry and the screen
-holds entry on it. One hook (`useBuiltinModelChoice`) owns the offer's read, its freshness
+holds the whole entry on it, even when a CLI assistant is ready. One hook (`useBuiltinModelChoice`) owns the offer's read, its freshness
 per screen showing, the conflict re-read and this write. Nothing else about another
 backend's route or Agent changes.
 

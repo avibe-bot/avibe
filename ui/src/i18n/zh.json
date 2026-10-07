@@ -5367,7 +5367,8 @@
       "credentialType": "凭据类型",
       "apiKeyLabel": "API Key",
       "authTokenLabel": "Auth Token",
-      "builtinModelHint": "为 {{name}} 选择模型或启用一个助手，即可进入工作台"
+      "builtinModelHint": "为 {{name}} 选择模型或启用一个助手，即可进入工作台",
+      "builtinChoiceHint": "完成 {{name}} 的模型选择后即可进入工作台"
     },
     "brand": {
       "name": "Avibe",

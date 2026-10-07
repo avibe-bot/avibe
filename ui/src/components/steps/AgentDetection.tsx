@@ -648,8 +648,10 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
       && !supplyBlocks.get(backend) && !choice.holds(backend)
       && !connectionPending[backend] && !connectionErrors[backend] && !!connections[backend]?.entry_eligible;
   };
-  const builtinUnset = BUILTIN_BACKENDS.some((backend) => routeViewFor(backend).kind === 'no-agent-model'
-    || choice.holds(backend));
+  const builtinUnset = BUILTIN_BACKENDS.some((backend) => routeViewFor(backend).kind === 'no-agent-model');
+  // A model choice that has not stood holds the whole entry, not only its own backend:
+  // entering on another assistant would leave Vibey on a model nobody chose.
+  const choiceHeld = BUILTIN_BACKENDS.some((backend) => choice.holds(backend));
 
   const opencodeAgent = agents['opencode'];
   const requiresSource = canEditSetupRoute && modelHubEnabled;
@@ -664,7 +666,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
     ...(isPage ? [] : BUILTIN_BACKENDS.filter(builtinReady)),
   ];
   const canContinue = isPage ? Object.values(agents).some((agent) => agent.enabled)
-    : (!requiresSource || hasSource) && readyBackends.length > 0;
+    : (!requiresSource || hasSource) && readyBackends.length > 0 && !choiceHeld;
   const actionBusy = syncing || entering || isAnyInstalling || BUILTIN_BACKENDS.some((backend) => !!choice.picking(backend))
     || Object.values(pendingWrites).some(Boolean) || Object.values(refreshingAgents).some(Boolean);
   const primaryPending = useRef(false);
@@ -731,7 +733,8 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
           <span>{t(sourceReadPending ? 'onboarding.providers.actionChecking'
             : sourceReadFailed ? 'onboarding.connection.readFailed'
               : needsSource ? 'onboarding.connection.sourceRequired'
-                : builtinUnset ? 'onboarding.connection.builtinModelHint' : 'onboarding.connection.entryHint',
+                : choiceHeld ? 'onboarding.connection.builtinChoiceHint'
+                  : builtinUnset ? 'onboarding.connection.builtinModelHint' : 'onboarding.connection.entryHint',
           { name: getBackendUiMeta(BUILTIN_BACKENDS[0]).label })}</span>
           {needsSource ? (
             <Button type="button" variant="link" size="xs" className="h-auto p-0"

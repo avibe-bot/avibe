@@ -5367,7 +5367,8 @@
       "credentialType": "Credential type",
       "apiKeyLabel": "API Key",
       "authTokenLabel": "Auth Token",
-      "builtinModelHint": "Pick a model for {{name}}, or enable an assistant, to enter the workspace"
+      "builtinModelHint": "Pick a model for {{name}}, or enable an assistant, to enter the workspace",
+      "builtinChoiceHint": "Finish choosing {{name}}'s model to enter the workspace"
     },
     "brand": {
       "name": "Avibe",
