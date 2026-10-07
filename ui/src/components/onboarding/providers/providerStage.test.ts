@@ -660,7 +660,7 @@ describe('adoptionBackend', () => {
 });
 
 const runtime = (health: RuntimeHealth, over: Partial<RuntimeDependency> = {}): RuntimeDependency => ({
-  contract_version: 12,
+  contract_version: 11,
   manifest: { name: 'cliproxyapi', resolution: 'resolved', version: '1.0.0', source_sha: 'sha', assets: [] },
   status: { verified: true, health },
   ...over,

@@ -92,7 +92,7 @@ for (const width of [1200, 390]) {
       if (path === '/api/models/runtime/status') return answer({
         ok: true,
         runtime: {
-          contract_version: 12, enabled: true, host_platform: 'linux',
+          contract_version: 11, enabled: true, host_platform: 'linux',
           manifest: { name: 'cliproxyapi', resolution: 'resolved', version: 'fixture', source_sha: 'a'.repeat(40), assets: [] },
           status: { installed_version: 'fixture', verified: true, health: 'ok' },
         },

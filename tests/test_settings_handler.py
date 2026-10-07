@@ -9,7 +9,7 @@ from unittest.mock import patch
 from config.v2_settings import RoutingSettings
 from core.handlers.settings_handler import SettingsHandler
 from core.modals import RoutingModalSelection
-from modules.agents.catalog import AGENT_BACKENDS
+from modules.agents.catalog import AGENT_BACKENDS, NATIVE_CLI_BACKENDS
 from modules.im import MessageContext
 
 
@@ -497,7 +497,7 @@ def _make_routing_handler() -> tuple[SettingsHandler, _FakeOpenCodeServer]:
         config=SimpleNamespace(
             platform="slack",
             language="en",
-            **{backend: SimpleNamespace(enabled=True) for backend in AGENT_BACKENDS},
+            **{backend: SimpleNamespace(enabled=True) for backend in NATIVE_CLI_BACKENDS},
         ),
         im_client=SimpleNamespace(send_message=AsyncMock()),
         settings_manager=_RoutingSettingsManager(),

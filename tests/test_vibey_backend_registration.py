@@ -16,7 +16,7 @@ from config.v2_compat import to_app_config
 from config.v2_settings import RoutingSettings
 from core.controller import Controller
 from core.services.agent_run_target import resolve_agent_run_target
-from core.vibe_agents import BUILTIN_DEFAULT_AGENT_METADATA, VibeAgentStore, is_always_enabled_agent
+from core.vibe_agents import VibeAgentStore, is_always_enabled_agent
 from modules.agents.catalog import NATIVE_CLI_BACKENDS
 from modules.im import MessageContext
 from tests.test_api_save_config_merge import _full_config_payload
@@ -40,86 +40,36 @@ def test_released_config_shapes_preserve_native_settings(tmp_path, fixture):
             assert {field: actual[field] for field in expected} == expected
 
 
-@pytest.mark.parametrize("persisted", [{"enabled": False}, {"enabled": True}, None, "invalid", {"enabled": "false"}])
-def test_a_persisted_vibey_switch_loads_as_on_and_leaves_on_the_next_save(tmp_path, sqlite_db_factory, persisted):
-    """Builds with an Avibe Agent switch wrote ``agents.vibey``; the built-in backend has no switch to honor.
-
-    Such a build also left its built-in Agent disabled while the switch was off.
-    """
-    payload = _full_config_payload()
-    payload["agents"]["vibey"] = persisted
-    path = tmp_path / "config.json"
-    path.write_text(json.dumps(payload))
-    loaded = V2Config.load(path, persist_migrations=False)
-    assert not loaded.load_warnings
-    assert loaded.agents.codex.enabled is True
-    assert loaded.agents.opencode.active_turn_timeout_seconds == 7200
-
-    store = VibeAgentStore(sqlite_db_factory(tmp_path / "agents.sqlite"))
-    try:
-        store.create(
-            name="vibey",
-            backend="vibey",
-            source="builtin",
-            metadata={**BUILTIN_DEFAULT_AGENT_METADATA, "backend": "vibey", "backend_enabled": False},
-            enabled=False,
-        )
-        store.ensure_builtin_default_agents(api._enabled_agent_backends_from_config(loaded))
-        assert store.get("vibey").enabled
-        assert store.get_default_agent_name() == "opencode"
-    finally:
-        store.close()
-
-    loaded.save(path)
-    saved = json.loads(path.read_text())
-    assert "vibey" not in saved["agents"]
-    assert saved["agents"]["codex"]["enabled"] is True
-
-
-# Rows an earlier build may have left: (name, backend, source, metadata, enabled).
-_BUILT_IN = {**BUILTIN_DEFAULT_AGENT_METADATA, "backend": "vibey", "backend_enabled": True}
-_EARLIER_ROWS = {
+# Agent rows a released build can leave: none on the built-in backend, which no release had,
+# or a user's own Agent that already holds its name.
+_RELEASED_ROWS = {
     "absent": None,
-    "disabled": ("vibey", "vibey", "builtin", _BUILT_IN, False),
-    # Before the markers were the catalog's, a metadata update could strip them, and the row could then be renamed.
-    "markers-stripped": ("vibey", "vibey", "builtin", {}, False),
-    "markers-stripped-and-renamed": ("assistant", "vibey", "builtin", {}, False),
-    # A user's own Agent already holds the catalog's name for the built-in.
-    "user-agent-same-backend": ("vibey", "vibey", "user", {}, False),
-    "user-agent-other-backend": ("vibey", "claude", "user", {}, True),
+    "user-agent-holds-the-name": ("vibey", "claude"),
 }
 
 
-@pytest.mark.parametrize("earlier_row", list(_EARLIER_ROWS))
+@pytest.mark.parametrize("released_row", list(_RELEASED_ROWS))
 @pytest.mark.parametrize("enabled_backends", [[], ["claude"], list(NATIVE_CLI_BACKENDS)])
-def test_the_startup_sync_leaves_the_built_in_vibey_agent_enabled(tmp_path, sqlite_db_factory, earlier_row, enabled_backends):
-    """Controller startup runs this sync first; Model Hub then seeds the Avibe supply onto that Agent row.
+def test_the_startup_sync_leaves_the_built_in_vibey_agent_enabled(tmp_path, sqlite_db_factory, released_row, enabled_backends):
+    """Controller startup runs this sync first; Model Hub then seeds the Vibey supply onto that Agent row.
 
-    Whatever backends the caller read from config, and whatever an earlier build left, exactly one
-    built-in Avibe Agent exists and is enabled once the sync returns, and the identity lookup names
-    it. A new one is named by the catalog. A row the store created stays the built-in under any name,
-    including the ``vibey`` an earlier build gave it; a user's own Agent keeps its name and state.
+    Whatever backends the caller read from config, exactly one built-in Vibey Agent exists and is
+    enabled once the sync returns, and the identity lookup names it. It takes the backend id, or the
+    next free name when a user's own Agent holds it; that Agent keeps its name and state.
     """
     store = VibeAgentStore(sqlite_db_factory(tmp_path / "agents.sqlite"))
     try:
-        row = _EARLIER_ROWS[earlier_row]
-        earlier = None
-        if row is not None:
-            name, backend, source, metadata, enabled = row
-            earlier = store.create(name=name, backend=backend, source=source, metadata=metadata, enabled=enabled)
+        row = _RELEASED_ROWS[released_row]
+        users = store.create(name=row[0], backend=row[1]) if row is not None else None
         store.ensure_builtin_default_agents(enabled_backends)
 
         built_in = [agent for agent in store.list_agents() if agent.backend == "vibey" and is_always_enabled_agent(agent)]
         assert len(built_in) == 1 and built_in[0].enabled
         assert store.get_builtin_default_agent_for_backend("vibey") == built_in[0]
-        if earlier is None:
-            assert built_in[0].name == "vibey"
-        if earlier is not None and earlier.source == "builtin":
-            assert (built_in[0].id, built_in[0].name) == (earlier.id, earlier.name)
-        if earlier is not None and earlier.source == "user":
-            kept = store.get_by_id(earlier.id)
-            assert (kept.name, kept.backend, kept.enabled, kept.source) == ("vibey", row[1], row[4], "user")
-            assert built_in[0].name == "vibey-2"
+        assert built_in[0].name == ("vibey" if users is None else "vibey-2")
+        if users is not None:
+            kept = store.get_by_id(users.id)
+            assert (kept.name, kept.backend, kept.enabled, kept.source) == ("vibey", "claude", True, "user")
     finally:
         store.close()
 
@@ -411,32 +361,30 @@ def test_choosing_the_built_in_backend_in_an_im_picker_routes_to_its_agent(tmp_p
         store.close()
 
 
-def test_routing_saved_as_the_backend_id_still_resolves(tmp_path, sqlite_db_factory):
-    """Routing that holds a backend id means that backend's built-in Agent, unless an Agent really has the name.
+def test_routing_to_a_users_own_agent_named_vibey_stays_on_that_agent(tmp_path, sqlite_db_factory):
+    """A released user's own Agent named ``vibey`` keeps its routing, even though the name is the built-in backend's id.
 
-    The built-in takes the next free name while a user's Agent holds ``vibey``; once that Agent
-    gives the name up, routing saved as ``vibey`` reaches the built-in again.
+    The built-in takes ``vibey-2``; routing that names ``vibey`` reaches that user's Agent, and its scope
+    model applies to that Agent's backend.
     """
+    from config.v2_settings import routing_model_for_backend
+
     store = VibeAgentStore(sqlite_db_factory(tmp_path / "agents.sqlite"))
     try:
         store.create(name="vibey", backend="claude")
         store.ensure_builtin_default_agents([])
-        built_in = store.get_builtin_default_agent_for_backend("vibey")
-        assert built_in.name == "vibey-2"
+        assert store.get_builtin_default_agent_for_backend("vibey").name == "vibey-2"
+        routing = RoutingSettings(agent_name="vibey", model="claude-haiku-4-5")
         controller = Controller.__new__(Controller)
         controller.primary_platform = "slack"
         controller.vibe_agent_store = store
         controller._get_settings_key = lambda context: context.channel_id
         controller.get_settings_manager_for_context = lambda _context: SimpleNamespace(
-            get_channel_routing=lambda _key: RoutingSettings(agent_name="vibey"),
+            get_channel_routing=lambda _key: routing,
         )
         context = MessageContext(user_id="U1", channel_id="C1", platform="slack")
         resolved = controller.resolve_vibe_agent_for_context(context)
         assert (resolved.name, resolved.backend) == ("vibey", "claude")
-        store.rename("vibey", "helper")
-        resolved = controller.resolve_vibe_agent_for_context(context)
-        assert (resolved.name, resolved.backend) == ("vibey-2", "vibey")
-        with pytest.raises(Exception, match="not found"):
-            store.require_reference("opencode")  # A backend with no built-in row names nothing.
+        assert routing_model_for_backend(routing, "claude") == "claude-haiku-4-5"
     finally:
         store.close()

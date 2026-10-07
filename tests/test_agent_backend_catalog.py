@@ -61,30 +61,6 @@ def test_agent_backend_catalog_payload_exposes_public_metadata() -> None:
     assert payload[1]["capabilities"]["supports_runtime_refresh"] is True
 
 
-def test_avibe_names_the_workbench_platform_and_no_agent_backend() -> None:
-    """``avibe`` is the product and the Workbench platform id; the built-in backend is ``vibey``.
-
-    One token meaning both a platform and a backend let one Session row carry platform=avibe and
-    backend=avibe, and made the built-in the only backend whose Agent was not named after its id.
-    """
-    from config.platform_registry import WORKBENCH_PLATFORM_ID, supported_platform_set
-
-    def strings(value):
-        if isinstance(value, dict):
-            for item in value.values():
-                yield from strings(item)
-        elif isinstance(value, (list, tuple)):
-            for item in value:
-                yield from strings(item)
-        elif isinstance(value, str):
-            yield value
-
-    assert WORKBENCH_PLATFORM_ID == "avibe" and "avibe" in supported_platform_set()
-    assert not is_agent_backend("avibe")
-    assert not any("avibe" in value for value in strings(agent_backend_catalog_payload()))
-    assert [item["id"] for item in agent_backend_catalog_payload() if item["builtin"]] == ["vibey"]
-
-
 def test_api_exposes_agent_backend_catalog() -> None:
     payload = api.get_agent_backend_catalog()
 
@@ -100,9 +76,9 @@ def test_copy_about_the_built_in_names_it_from_the_catalog(lang) -> None:
     name = display_name_for_backend("vibey")
     for kind in ("aborted", "UnsupportedModelRoute", "ProviderProtocolViolation", None):
         text = error_text(kind, lang)
-        assert name in text and "{backend}" not in text and "Avibe Agent" not in text
-    for key in ("errors.modelHubDisabled", "errors.modelGatewayOff", "errors.builtinBackendConfig"):
-        text = t(key, lang, backend=name, section="agents.vibey")
+        assert name in text and "{backend}" not in text
+    for key in ("errors.modelHubDisabled", "errors.modelGatewayOff"):
+        text = t(key, lang, backend=name)
         assert name in text and "{backend}" not in text
     always_on = t("error.agentLifecycle.agent_always_enabled.message", lang, agent="vibey")
-    assert "Avibe Agent" not in always_on and "`vibey`" in always_on
+    assert "`vibey`" in always_on

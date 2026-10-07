@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from config import paths
-from modules.agents.catalog import AGENT_BACKENDS, NATIVE_CLI_BACKENDS
+from modules.agents.catalog import NATIVE_CLI_BACKENDS
 
 logger = logging.getLogger(__name__)
 
@@ -167,7 +167,7 @@ def normalize_routing_settings(routing: Optional[RoutingSettings]) -> RoutingSet
     if routing is None:
         return RoutingSettings()
     agent_name = getattr(routing, "agent_name", None)
-    builtin_agent_backend = agent_name if agent_name in AGENT_BACKENDS else None
+    builtin_agent_backend = agent_name if agent_name in NATIVE_CLI_BACKENDS else None
     model = getattr(routing, "model", None)
     reasoning_effort = getattr(routing, "reasoning_effort", None)
     return RoutingSettings(
@@ -206,7 +206,7 @@ def routing_reasoning_effort_for_backend(
 
 def _routing_backend_matches(routing: RoutingSettings, backend: Optional[str]) -> bool:
     agent_name = getattr(routing, "agent_name", None)
-    if agent_name in AGENT_BACKENDS:
+    if agent_name in NATIVE_CLI_BACKENDS:
         return agent_name == backend
     return True
 

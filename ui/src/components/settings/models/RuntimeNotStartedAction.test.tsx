@@ -31,7 +31,7 @@ const runtime = (
     ? 'unresolved' as const
     : hostPlatform === 'linux-amd64' ? 'unsupported' as const : 'resolved' as const;
   return {
-    contract_version: 12,
+    contract_version: 11,
     ...(hostPlatform === undefined ? {} : { host_platform: hostPlatform }),
     manifest: resolution === 'unresolved'
       ? { name: 'cliproxyapi', resolution, assets: [] }

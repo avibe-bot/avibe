@@ -1,6 +1,6 @@
 # Google protocol consumer extension
 
-Normative for the v12 Model Hub contract. This extends the existing gateway,
+Normative for the v11 Model Hub contract. This extends the existing gateway,
 EngineAdapter and pinned CPA transport; it does not add a provider implementation
 to agent-core, change backend registration, or upgrade the engine.
 
@@ -133,7 +133,7 @@ Both buffered and streaming responses share these facts with metering.
 Local JSON failures use Google's numeric `error.code`, canonical `error.status`,
 localized `error.message`, and `details[].reason` for the Model Hub machine code.
 Late local streaming endings use the Google error envelope. All carriers retain
-the v11 response-origin policy: `x-avibe-served-hop` comes only from the immutable
+the response-origin policy of [`vibey-consumer.md`](vibey-consumer.md): `x-avibe-served-hop` comes only from the immutable
 admitted invocation that actually supplied the response. Pre-admission/local
 failures have no origin header.
 
@@ -147,7 +147,7 @@ Cross-protocol fallback follows this same policy before CPA conversion.
 
 The shared Source enum guard includes create, observation and Source-probe
 contracts, runtime storage, config, adapter and UI type consumers. The new writer
-generation is 12; persisted provenance generations 5 through 11 still load, and
+generation is 11; persisted provenance generations 5 through 10 still load, and
 released configuration fixtures retain their meaning. Only version literals
 change in existing UI browser fixtures.
 

@@ -2118,16 +2118,7 @@ def test_config_api_carries_why_the_model_hub_leaves_a_backend_no_model(monkeypa
     assert app.test_client().get("/api/config").get_json()["agent_supply_blocks"] == blocks
 
 
-@pytest.mark.parametrize(
-    ("method", "path", "body", "code"),
-    [
-        ("post", "/api/config", {"agents": {"vibey": {"enabled": False}}}, None),
-        ("patch", "/api/agents/vibey", {"enabled": False}, "agent_always_enabled"),
-    ],
-)
-def test_requests_to_turn_off_the_built_in_vibey_agent_fail_with_a_client_error(
-    monkeypatch, tmp_path, method, path, body, code
-):
+def test_a_request_to_turn_off_the_built_in_vibey_agent_fails_with_a_client_error(monkeypatch, tmp_path):
     """It has no switch: a request to turn it off is refused instead of silently ignored."""
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     from core.vibe_agents import VibeAgentStore
@@ -2141,16 +2132,12 @@ def test_requests_to_turn_off_the_built_in_vibey_agent_fail_with_a_client_error(
         store.close()
     client = app.test_client()
 
-    response = getattr(client, method)(path, json=body, headers=csrf_headers(client))
+    response = client.patch("/api/agents/vibey", json={"enabled": False}, headers=csrf_headers(client))
 
     assert response.status_code == 400
     payload = response.get_json()
     assert payload["ok"] is False
-    if code is None:
-        assert "always enabled" in payload["error"]
-    else:
-        assert payload["code"] == code and payload["message"]
-    assert "vibey" not in api.config_to_payload(api.load_config())["agents"]
+    assert payload["code"] == "agent_always_enabled" and payload["message"]
     store = VibeAgentStore()
     try:
         assert store.require("vibey").enabled is True

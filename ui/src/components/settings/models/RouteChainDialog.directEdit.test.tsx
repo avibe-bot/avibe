@@ -17,7 +17,7 @@ const sources: Source[] = ['a', 'b'].map((id) => ({
 }));
 const hops = sources.map((source) => ({ source_id: source.id, model_id: 'gpt-test' }));
 const makeChain = (backend: AgentSupply['backend'], routeOrigin: 'automatic' | 'passthrough' | 'manual'): AgentChain => ({
-  contract_version: 12, backend, model_id: 'gpt-test', route_origin: routeOrigin,
+  contract_version: 11, backend, model_id: 'gpt-test', route_origin: routeOrigin,
   manual_override: routeOrigin === 'manual' ? { hops } : null,
   current: hops[0], supply_state: 'ok',
   chain: hops.map((hop) => ({ ...hop, channel: 'hub', health: 'healthy', runnable: true, reason: null, retry_at: null })),

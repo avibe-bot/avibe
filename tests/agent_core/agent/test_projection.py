@@ -142,10 +142,6 @@ def test_a_fork_before_a_checkpoint_or_edit_projects_the_original_context(fork_p
     assert projected.messages[5].content[0].text == result_b
 
 
-def _state_row(context):
-    return ContextEntry("session", 2, "agent_state", "state", payload={"version": 1, "state": {}, "context": context})
-
-
 @pytest.mark.parametrize(
     "row",
     [
@@ -159,7 +155,11 @@ def _state_row(context):
         _checkpoint_row(2, 1, files_read="a.py"),
         _checkpoint_row(2, 1, files_modified=[1]),
         _checkpoint_row(2, 1, mode="partial"),
-        # A kept input must be an input row before the kept rows.
+        # Every checkpoint row records the inputs it keeps, and a kept input must be an input row before the kept rows.
+        ContextEntry(
+            "session", 2, "compaction", "checkpoint",
+            payload={key: value for key, value in _checkpoint_payload(1).items() if key != "kept_inputs"},
+        ),
         _checkpoint_row(2, 1, kept_inputs=[1]),
         _checkpoint_row(2, 2, kept_inputs=[9]),
         _checkpoint_row(2, 2, kept_inputs=["1"]),
@@ -168,8 +168,7 @@ def _state_row(context):
         _checkpoint_row(2, 1, summarizer={"origin": {}, "prompt_version": "v", "rounds": 0}),
         _checkpoint_row(2, 1, usage={"input_tokens": -1}),
         _checkpoint_row(2, 1, unexpected=True),
-        # Hook state only: C-9 keeps no guard in the rows.
-        _state_row({"failures": 0, "ineffective": 0, "paused": False}),
+        ContextEntry("session", 2, "agent_state", "state", payload={"version": 1, "state": {}, "unexpected": True}),
     ],
 )
 def test_malformed_context_rows_fail_explicitly_instead_of_projecting_a_wrong_context(row):
@@ -185,29 +184,6 @@ def test_a_complete_checkpoint_row_loads():
     ]
     projected = project(rows)
     assert [block.text for block in projected.messages[0].content] == ["SUMMARY", "STATE"]
-
-
-def test_a_checkpoint_row_written_before_kept_inputs_keeps_the_pin_it_was_written_with():
-    # Rows written before the field pinned the latest input before first_kept_seq when the cut fell inside a turn;
-    # without the field, the same rule applies, so such a conversation keeps its request. An explicit empty list
-    # pins nothing.
-    def legacy(first_kept_seq, **fields):
-        payload = {key: value for key, value in _checkpoint_payload(first_kept_seq).items() if key != "kept_inputs"}
-        return ContextEntry("session", 9, "compaction", "c", payload={**payload, **fields})
-
-    rows = [
-        ContextEntry("session", 1, "input", "in-1", user("an older request")),
-        ContextEntry("session", 2, "response", "out-1", assistant("done")),
-        ContextEntry("session", 3, "input", "in-2", user("read f10 to f18")),
-        ContextEntry("session", 4, "response", "out-2", assistant("f10")),
-        ContextEntry("session", 5, "response", "out-3", assistant("f11")),
-    ]
-    texts = [message.content[0].text for message in project([*rows, legacy(5)]).messages]
-    assert texts == ["read f10 to f18", "SUMMARY", "f11"]
-    assert context_view([*rows, legacy(5)]).pinned == 1
-    # A cut at an input split nothing: nothing is pinned.
-    assert [m.content[0].text for m in project([*rows, legacy(3)]).messages][:2] == ["SUMMARY", "read f10 to f18"]
-    assert [m.content[0].text for m in project([*rows, legacy(5, kept_inputs=[])]).messages] == ["SUMMARY", "f11"]
 
 
 def test_the_kept_inputs_of_a_turn_stay_whole_in_order_before_the_checkpoint():

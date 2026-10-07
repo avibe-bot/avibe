@@ -84,7 +84,7 @@ export async function serveProduct(page: Page) {
     const backend = new URL(route.request().url()).pathname.split('/')[4];
     return route.fulfill({ json: { ok: true, agent: { backend, mode: 'direct', sources: { order: [], eligibility: [] }, routes: {}, builtin_models: [], catalog_models: [], named_agents: [], menu: null, model_supply: [], supply_status: 'unavailable' } } });
   });
-  await page.route('**/api/models/runtime/status', (route) => route.fulfill({ json: { ok: true, runtime: { contract_version: 12, enabled: true, host_platform: 'linux', manifest: { name: 'cliproxyapi', resolution: 'resolved', version: 'fixture', source_sha: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', assets: [] }, status: { installed_version: 'fixture', verified: true, health: 'ok' } } } }));
+  await page.route('**/api/models/runtime/status', (route) => route.fulfill({ json: { ok: true, runtime: { contract_version: 11, enabled: true, host_platform: 'linux', manifest: { name: 'cliproxyapi', resolution: 'resolved', version: 'fixture', source_sha: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', assets: [] }, status: { installed_version: 'fixture', verified: true, health: 'ok' } } } }));
   await page.route(`${ORIGIN}/status`, (route) => route.fulfill({ json: { state: 'running' } }));
   await page.route('**/api/backend/*/connection', (route) => route.fulfill({ json: { ok: true, backend: new URL(route.request().url()).pathname.split('/').at(-2), installed: true, enabled: true, auth: 'none', application: 'applied', ready: false, entry_eligible: false } }));
   await page.route('**/api/config', (route) => route.fulfill({ json: CONFIG }));

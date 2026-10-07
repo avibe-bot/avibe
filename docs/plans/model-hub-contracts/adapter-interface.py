@@ -1,4 +1,4 @@
-"""Model Hub EngineAdapter interface. FINAL CONTRACT v12 (2026-10-02).
+"""Model Hub EngineAdapter interface. FINAL CONTRACT v11 (2026-10-02).
 
 This file is the canonical adapter boundary and must remain byte-identical to
 ``core/handlers/model_hub/adapter.py``. The adapter owns one-Source operations:

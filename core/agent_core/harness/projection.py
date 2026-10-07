@@ -219,11 +219,10 @@ _PAYLOAD_SHAPES: dict[str, Check] = {
             "tokens_before": _count,
             "tokens_after_estimate": _count,
             "threshold": _integer,
+            "kept_inputs": _list(lambda value: _integer(value) and value > 0),
         },
         {
             "previous_compaction_id": _nullable(_string),
-            # Optional: a row without it keeps no inputs, as rows written before the field existed behave.
-            "kept_inputs": _list(lambda value: _integer(value) and value > 0),
             "summarizer": _nullable(
                 _object({"origin": _reads(origin_from_dict), "prompt_version": _string, "rounds": _count})
             ),
@@ -326,7 +325,7 @@ def context_view(entries: Sequence[ContextEntry], *, fork_point: Optional[int] =
     if compaction is not None:
         # The checkpoint's cut fell inside the in-flight Turn: each of its inputs, the first and every steer, stays as
         # it was, in order, before the checkpoint and the kept rows (C-9 context.md section 5).
-        kept = kept_inputs(compaction, inputs, first_is_input=bool(units) and units[0].lead.kind == "input")
+        kept = list(compaction.payload["kept_inputs"])
         if any(seq not in inputs for seq in kept) or kept != sorted(set(kept)):
             raise ProjectionError(f"compaction row {compaction.row_id} keeps inputs it cannot place: {kept}")
         units[:0] = [Unit(seq, ((inputs[seq], inputs[seq].message),)) for seq in kept]
@@ -344,15 +343,6 @@ def context_view(entries: Sequence[ContextEntry], *, fork_point: Optional[int] =
         state=deepcopy(state),
         pinned=len(kept),
     )
-
-
-def kept_inputs(compaction: ContextEntry, inputs: Mapping[int, ContextEntry], *, first_is_input: bool) -> list[int]:
-    """The inputs a checkpoint row keeps: its ``kept_inputs``; a row written before that field kept the latest input
-    before its ``first_kept_seq`` when its cut fell inside a turn (the first kept unit is not an input), and the same
-    rule reads it now. ``inputs``: the input rows before ``first_kept_seq``, by ``context_seq``."""
-    if "kept_inputs" in compaction.payload:
-        return list(compaction.payload["kept_inputs"])
-    return [max(inputs)] if inputs and not first_is_input else []
 
 
 def project(

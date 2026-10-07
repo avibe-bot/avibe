@@ -146,8 +146,7 @@ environment blocks included, right before the checkpoint message and the kept ro
 The checkpoint summarizes everything else in the head, and a later checkpoint inside the same Turn keeps them again.
 In a later run they are ordinary history, yet no cut falls between them: one there would make an old input's seq the
 new `first_kept_seq` and bring back what that checkpoint summarized, so cuts start at the first unit after them.
-`kept_inputs` is optional: a row written before it kept the latest input before its `first_kept_seq` when its cut
-fell inside a turn (the first kept unit is not an input), and projection reads such a row by the same rule. An earlier Turn a cut splits is summarized like any head. If the kept inputs alone cannot fit, nothing can move them
+An earlier Turn a cut splits is summarized like any head. If the kept inputs alone cannot fit, nothing can move them
 out, and §8 (d) applies.
 
 ## 6. Checkpoint turn

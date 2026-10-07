@@ -105,7 +105,6 @@ from vibe import backend_model_catalog
 from vibe.i18n import t as backend_t
 from modules.agents.catalog import (
     AGENT_BACKENDS,
-    BUILTIN_AGENT_BACKENDS,
     NATIVE_CLI_BACKENDS,
     agent_backend_catalog_payload,
     agent_backend_descriptors,
@@ -783,23 +782,6 @@ def _strip_agent_auth_fields(payload: dict) -> dict:
     return {**payload, "agents": cleaned_agents}
 
 
-def _reject_builtin_backend_config(payload: dict) -> None:
-    """A built-in backend has no config section, so a request to set one, such as disabling it, fails."""
-    agents = payload.get("agents")
-    if not isinstance(agents, dict):
-        return
-    for backend in BUILTIN_AGENT_BACKENDS:
-        if backend in agents:
-            raise ValueError(
-                backend_t(
-                    "errors.builtinBackendConfig",
-                    _configured_backend_language(),
-                    backend=display_name_for_backend(backend),
-                    section=f"agents.{backend}",
-                )
-            )
-
-
 def _strip_preserved_config_secrets(payload: dict) -> dict:
     """Drop redacted secret placeholders from generic config saves.
 
@@ -1018,7 +1000,6 @@ def save_config(
     # as a read-only projection here rather than accepting a potentially stale
     # client snapshot.
     payload = {key: value for key, value in payload.items() if key != "model_hub"}
-    _reject_builtin_backend_config(payload)
     payload = _strip_agent_auth_fields(payload)
     payload = _strip_preserved_config_secrets(payload)
     payload = _mark_explicit_audio_asr_enabled(payload)
