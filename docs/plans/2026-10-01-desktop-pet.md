@@ -700,9 +700,16 @@ The code and its tests are the contract; this section records why.
   `dispatch_pending` `502`/`504`) may have been admitted, so the pet keeps the
   draft, hides quick replies, closes input for that session and offers "Open
   in Avibe"; opening the session there is how the user finds out, and lifts it.
+  Each session keeps its own lock, so inspecting B does not reopen A.
+- **The panel opens after the shell grows the frame.** Closing hides it at
+  once; opening waits for `pet_set_expanded` to succeed, so replies are never
+  marked read while still clipped. A failed expand never mounts the panel.
 - **Read-marking waits for a tail snapshot.** Live rows that arrive before the
   first tail read lands say nothing about older unread rows, so the pet treats
-  the tail as having older rows until a read has landed.
+  the tail as having older rows until a read has landed. A live row or unread
+  change that arrives with no snapshot yet also starts that first read; a
+  mark-read in any window re-reads the bound session's tail so `read_at` is
+  not stale when the next result lands.
 - **Setup is monotonic.** One wake runs several setup reads (a summon also
   focuses the window). Any read that sees setup complete wins; an incomplete
   answer applies only from the latest read; a failure only settles the first
@@ -710,7 +717,9 @@ The code and its tests are the contract; this section records why.
 - **An authorization change drops what was read under the old one.** The
   session, tail, turn state and switcher rows are cleared at once and re-read.
   Pending vault requests do the same in the shared `usePendingVaultRequests`
-  (so the chat page gets it too), and the inbox has its own handler.
+  (so the chat page gets it too), and the inbox has its own handler. A
+  `session.status` event that arrives with no session row starts a read
+  instead of patching nothing.
 - **Mark-read answers are ordered in the inbox provider.** A newer mark-read
   or read-changing event for a session supersedes an older answer for it, and
   the account-wide unread map in an answer is adopted only if no other write

@@ -102,13 +102,20 @@ const PetSurface: React.FC = () => {
     setDraft('');
   }
   const [sending, setSending] = useState(false);
-  // The session whose last send may or may not have been admitted. Resending
-  // could start a second turn, so input stays closed there until the user has
-  // looked at the conversation in Avibe. A ref as well, so a send in the same
-  // tick sees it.
-  const [uncertainFor, setUncertainFor] = useState<string | null>(null);
-  const uncertainRef = useRef<string | null>(null);
-  const uncertain = Boolean(binding) && uncertainFor === binding;
+  // Sessions whose last send may or may not have been admitted. Resending
+  // could start a second turn, so input stays closed in each of them until the
+  // user has looked at that conversation in Avibe. A ref as well, so a send in
+  // the same tick sees it.
+  const uncertainRef = useRef<ReadonlySet<string>>(new Set());
+  const [uncertainSessions, setUncertainSessions] = useState<ReadonlySet<string>>(() => new Set());
+  const setUncertain = useCallback((sessionId: string, value: boolean) => {
+    const next = new Set(uncertainRef.current);
+    if (value) next.add(sessionId);
+    else next.delete(sessionId);
+    uncertainRef.current = next;
+    setUncertainSessions(next);
+  }, []);
+  const uncertain = Boolean(binding) && uncertainSessions.has(binding ?? '');
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
   const data = usePetSession(binding, petShell.unbind);
@@ -123,20 +130,29 @@ const PetSurface: React.FC = () => {
     unreadCount,
   });
 
-  // Only the latest open/close request's layout applies: a quick toggle must
-  // not leave the open layout on a collapsed pet.
+  // `expanded` is what the native frame shows. Closing hides the panel at
+  // once (a moment of transparent frame is harmless); opening shows it only
+  // once the shell has grown the frame, since until then the panel would be
+  // clipped and its replies marked read unseen. Only the latest request
+  // applies, and a toggle acts on the latest request, not on the frame.
   const layoutRequestRef = useRef(0);
+  const wantExpandedRef = useRef(false);
   const setPanel = useCallback(async (next: boolean) => {
-    setExpanded(next);
+    wantExpandedRef.current = next;
     const request = ++layoutRequestRef.current;
+    if (!next) setExpanded(false);
     try {
       const applied = await petBridge.setExpanded(next);
-      if (request === layoutRequestRef.current) setLayout(applied);
+      if (request !== layoutRequestRef.current) return;
+      setLayout(applied);
+      setExpanded(next);
     } catch {
       // The shell kept its current frame, so the page follows it: a panel in a
       // collapsed frame would be clipped, and a collapsed pet in an expanded
       // frame would leave a transparent area catching clicks.
-      if (request === layoutRequestRef.current) setExpanded(!next);
+      if (request !== layoutRequestRef.current) return;
+      wantExpandedRef.current = !next;
+      setExpanded(!next);
     }
   }, []);
 
@@ -204,7 +220,7 @@ const PetSurface: React.FC = () => {
     // Only a session this page has validated as writable accepts input; a
     // restored or just-picked binding waits for its first successful read.
     if (!canChat || !binding || data.session?.id !== binding || !text.trim()) return false;
-    if (sendingRef.current || uncertainRef.current === binding) return false;
+    if (sendingRef.current || uncertainRef.current.has(binding)) return false;
     sendingRef.current = true;
     setSending(true);
     try {
@@ -216,16 +232,13 @@ const PetSurface: React.FC = () => {
       }
       return true;
     } catch (error) {
-      if (!sendRefused(error)) {
-        uncertainRef.current = binding;
-        setUncertainFor(binding);
-      }
+      if (!sendRefused(error)) setUncertain(binding, true);
       return false;
     } finally {
       sendingRef.current = false;
       setSending(false);
     }
-  }, [api, binding, canChat, data]);
+  }, [api, binding, canChat, data, setUncertain]);
 
   // A completed send clears the draft only if it is still the same text in
   // the same session it was submitted from. A binding change already empties
@@ -266,7 +279,7 @@ const PetSurface: React.FC = () => {
         const dragged = pressRef.current?.dragged;
         pressRef.current = null;
         if (dragged) return;
-        void setPanel(!expanded);
+        void setPanel(!wantExpandedRef.current);
       }}
     >
       <PetAvatar
@@ -306,9 +319,9 @@ const PetSurface: React.FC = () => {
       onInspect={() => {
         // Looking at the conversation resolves the doubt: the user sees whether
         // the message went through before deciding to send again.
-        uncertainRef.current = null;
-        setUncertainFor(null);
-        if (binding) void petBridge.open(sessionLink(binding));
+        if (!binding) return;
+        setUncertain(binding, false);
+        void petBridge.open(sessionLink(binding));
       }}
       inputRef={inputRef}
     />

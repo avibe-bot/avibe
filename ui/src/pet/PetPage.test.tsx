@@ -971,3 +971,99 @@ describe('PetPage async closure', () => {
     await waitFor(() => expect(screen.queryByText('pet.setupPending')).toBeNull());
   });
 });
+
+describe('PetPage live convergence', () => {
+  const settle = () => act(async () => new Promise((resolve) => setTimeout(resolve, 20)));
+
+  it('keeps each session closed after its own uncertain send', async () => {
+    api.sendSessionMessage
+      .mockRejectedValueOnce(new ApiError('dispatch pending', 504, null))
+      .mockRejectedValueOnce(new ApiError('dispatch pending', 504, null));
+    devBind('A');
+    render(<PetPage />);
+    summon('listen');
+    const input = await screen.findByLabelText('pet.inputPlaceholder') as HTMLTextAreaElement;
+    await settle();
+    await userEvent.type(input, 'to A{Enter}');
+    expect(await screen.findByText('newSession.sendUncertain')).toBeTruthy();
+
+    await bound('B');
+    await waitFor(() => expect(api.getSessionResult).toHaveBeenCalledWith('B'));
+    await settle();
+    expect(screen.queryByText('newSession.sendUncertain')).toBeNull();
+    await userEvent.type(input, 'to B{Enter}');
+    expect(await screen.findByText('newSession.sendUncertain')).toBeTruthy();
+
+    await bound('A');
+    await settle();
+    expect(screen.getByText('newSession.sendUncertain')).toBeTruthy();
+    await userEvent.type(input, 'again{Enter}');
+    expect(api.sendSessionMessage).toHaveBeenCalledTimes(2);
+  });
+
+  it('shows the panel and marks replies read only once the shell has grown the frame', async () => {
+    tails.S = [message('u', 'S', { author: 'user', type: 'user' }), message('r', 'S', { read_at: null })];
+    unreadBySession = { S: 1 };
+    const grow = deferred<unknown>();
+    const invoke = vi.fn((command: string) => {
+      if (command === 'pet_ready') return Promise.resolve({ binding: 'S', revision: 1, summon_pending: null });
+      if (command === 'pet_set_expanded') return grow.promise;
+      return Promise.resolve(null);
+    });
+    Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { value: true, configurable: true });
+    Object.defineProperty(window, '__TAURI_INTERNALS__', { value: { invoke }, configurable: true });
+    render(<PetPage />);
+    summon('show');
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('pet_set_expanded', { expanded: true }));
+    await settle();
+    expect(screen.queryByLabelText('pet.panel')).toBeNull();
+    expect(markRead).not.toHaveBeenCalled();
+
+    await act(async () => grow.reject(new Error('resize failed')));
+    await settle();
+    expect(screen.queryByLabelText('pet.panel')).toBeNull();
+    expect(markRead).not.toHaveBeenCalled();
+  });
+
+  it('reads the session on a status event when no read has supplied it yet', async () => {
+    sessionReads.S = vi.fn()
+      .mockResolvedValueOnce({ status: 500, session: null })
+      .mockResolvedValue({ status: 200, session: session('S') });
+    devBind('S');
+    render(<PetPage />);
+    summon('show');
+    await screen.findByLabelText('pet.panel');
+    await settle();
+    expect(screen.queryByText('Session S')).toBeNull();
+
+    await emit((h) => h.onSessionStatus?.({ session_id: 'S', agent_status: 'idle' }));
+    expect(await screen.findByText('Session S')).toBeTruthy();
+  });
+
+  it('reads the tail on a live row when no tail read has landed yet', async () => {
+    api.listSessionMessages.mockRejectedValueOnce(new Error('network'));
+    devBind('S');
+    render(<PetPage />);
+    summon('show');
+    await screen.findByLabelText('pet.panel');
+    await settle();
+    const reads = api.listSessionMessages.mock.calls.filter(([id]) => id === 'S').length;
+
+    await emit((h) => h.onMessageNew?.(message('live', 'S')));
+    await settle();
+    expect(api.listSessionMessages.mock.calls.filter(([id]) => id === 'S')).toHaveLength(reads + 1);
+  });
+
+  it('re-reads the tail when the session is marked read in another window', async () => {
+    devBind('S');
+    render(<PetPage />);
+    summon('show');
+    await screen.findByLabelText('pet.panel');
+    await settle();
+    const reads = api.listSessionMessages.mock.calls.filter(([id]) => id === 'S').length;
+
+    await emit((h) => h.onInboxUnreadChanged?.({ session_id: 'S', delta: -1, unread_counts: {} }));
+    await settle();
+    expect(api.listSessionMessages.mock.calls.filter(([id]) => id === 'S')).toHaveLength(reads + 1);
+  });
+});

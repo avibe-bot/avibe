@@ -10,6 +10,7 @@ import {
 import { isSessionReadOnly } from '@/components/workbench/sessionArchived';
 import { isTranscriptMessage } from '@/lib/chatMessageTypes';
 import { onPageReactivated } from '@/lib/pageActivity';
+import { useLatestRef } from '@/lib/useLatestRef';
 
 import { FencedSource } from './fencedSource';
 
@@ -119,6 +120,12 @@ export function usePetSession(sessionId: string | null, onInvalid: (sessionId: s
     }),
   }), [api]);
 
+  // A live event can only patch rows a read has supplied. Until one has (the
+  // first read failed, say, while the stream stayed up), the event is the
+  // next chance to read instead.
+  const sessionRef = useLatestRef(session);
+  const tailLoadedRef = useLatestRef(tail.loaded);
+
   const refreshAll = useCallback(() => {
     sources.session.refresh();
     sources.tail.refresh();
@@ -148,6 +155,7 @@ export function usePetSession(sessionId: string | null, onInvalid: (sessionId: s
         if (!mine(row.session_id)) return;
         sources.tail.noteLiveMerge();
         setTail((current) => mergeRow(current, row));
+        if (!tailLoadedRef.current) sources.tail.refresh();
       },
       onMessageUpdated: (row) => {
         if (!mine(row.session_id)) return;
@@ -156,9 +164,19 @@ export function usePetSession(sessionId: string | null, onInvalid: (sessionId: s
           ...current,
           messages: current.messages.map((existing) => (existing.id === row.id ? row : existing)),
         }));
+        if (!tailLoadedRef.current) sources.tail.refresh();
+      },
+      // A mark-read in any window (this one included) changes `read_at` on
+      // rows the pet holds, and only a read brings that in.
+      onInboxUnreadChanged: ({ session_id }) => {
+        if (mine(session_id)) sources.tail.refresh();
       },
       onSessionStatus: ({ session_id, agent_status }) => {
         if (!mine(session_id)) return;
+        if (!sessionRef.current) {
+          sources.session.refresh();
+          return;
+        }
         sources.session.noteLiveMerge();
         setSession((current) => (current ? { ...current, agent_status } : current));
       },
@@ -192,7 +210,7 @@ export function usePetSession(sessionId: string | null, onInvalid: (sessionId: s
       onRunsUpdated: () => sources.turn.refresh(),
       onDefinitionsUpdated: () => sources.turn.refresh(),
     });
-  }, [api, sessionId, sources, refreshAll]);
+  }, [api, sessionId, sources, refreshAll, sessionRef, tailLoadedRef]);
 
   // The window coming back is a gap too.
   useEffect(() => {
