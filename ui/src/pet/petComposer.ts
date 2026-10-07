@@ -1,15 +1,17 @@
 import { useEffect, useSyncExternalStore } from 'react';
 
 /**
- * Draft, in-flight send, and per-session uncertainty for the pet window.
- * Held once per document outside React so an AuthGuard recheck — which
- * unmounts the page while it revalidates — cannot drop a send lock or the
- * text that belongs to it.
+ * Draft, in-flight send, per-session uncertainty, and a pending listen-focus
+ * for the pet window. Held once per document outside React so an AuthGuard
+ * recheck — which unmounts the page while it revalidates — cannot drop a send
+ * lock, the text that belongs to it, or a listen that is still waiting for
+ * the composer to mount.
  */
 let draft = '';
 let draftSession: string | null | undefined;
 const uncertainSessions = new Set<string>();
 let sending = false;
+let pendingListen = false;
 let version = 0;
 const listeners = new Set<() => void>();
 
@@ -58,12 +60,24 @@ export const petComposer = {
     draft = '';
     notify();
   },
+  requestListen() {
+    if (pendingListen) return;
+    pendingListen = true;
+    notify();
+  },
+  takeListen(): boolean {
+    if (!pendingListen) return false;
+    pendingListen = false;
+    notify();
+    return true;
+  },
 };
 
 export function usePetComposer(binding: string | null): {
   draft: string;
   uncertain: boolean;
   sending: boolean;
+  listenPending: boolean;
   setDraft: (value: string) => void;
   setUncertain: (sessionId: string, value: boolean) => void;
 } {
@@ -77,6 +91,7 @@ export function usePetComposer(binding: string | null): {
     draft: draftSession === binding ? draft : '',
     uncertain: petComposer.isUncertain(binding),
     sending,
+    listenPending: pendingListen,
     setDraft: (value: string) => petComposer.setDraft(value, binding),
     setUncertain: petComposer.setUncertain,
   };

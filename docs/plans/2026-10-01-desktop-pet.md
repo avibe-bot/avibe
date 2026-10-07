@@ -434,7 +434,9 @@ Workbench. The pet shows "Queued" and offers no steering control in v1.
 
 - **Hotkey tap with the pet collapsed or hidden** (`listen` intent). Show the
   pet, expand it, focus it, and start listening. If voice is unavailable, focus the text input
-  instead.
+  instead. Focus waits until the native frame has grown and the composer is
+  on screen (a cold load still waits on the session grant). The listen
+  request lives in the document store so an AuthGuard recheck cannot drop it.
 - **No valid binding** (none chosen yet, or cleared after an archive). The
   hotkey opens the panel on the session switcher and does not start listening
   or accept input, so nothing is ever captured without a destination.
@@ -714,8 +716,10 @@ The code and its tests are the contract; this section records why.
   in Avibe"; opening the session there is how the user finds out, and lifts it.
   Each session keeps its own lock, so inspecting B does not reopen A.
   The lock lifts only after `pet_open` succeeds; a failed open leaves it.
-  Draft, in-flight send, and those locks live outside React so an AuthGuard
-  recheck cannot drop them.
+  Draft, in-flight send, those locks, and a pending listen-focus live
+  outside React so an AuthGuard recheck cannot drop them. A listen summon
+  focuses the input only after the panel has grown and the composer is on
+  screen.
 - **The panel opens after the shell grows the frame.** Closing hides it at
   once; opening waits for `pet_set_expanded` to succeed, so replies are never
   marked read while still clipped. Native resizes are sent one at a time in

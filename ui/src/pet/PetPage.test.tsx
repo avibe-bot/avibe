@@ -1223,5 +1223,25 @@ describe('PetPage review fixes, round 14', () => {
     await waitFor(() => expect(order).toEqual([true, false]));
     await act(async () => second.resolve({ panel_side: 'left', panel_edge: 'bottom' }));
   });
+
+  it('focuses the input only after the native panel has grown and the composer is on screen', async () => {
+    const grow = deferred<unknown>();
+    const invoke = vi.fn((command: string) => {
+      if (command === 'pet_ready') return Promise.resolve({ binding: 'S', revision: 1, summon_pending: null });
+      if (command === 'pet_set_expanded') return grow.promise;
+      return Promise.resolve(null);
+    });
+    Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { value: true, configurable: true });
+    Object.defineProperty(window, '__TAURI_INTERNALS__', { value: { invoke }, configurable: true });
+    tails.S = [message('u', 'S', { author: 'user', type: 'user' })];
+    render(<PetPage />);
+    summon('listen');
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('pet_set_expanded', { expanded: true }));
+    expect(screen.queryByLabelText('pet.inputPlaceholder')).toBeNull();
+
+    await act(async () => grow.resolve({ panel_side: 'left', panel_edge: 'bottom' }));
+    const input = await screen.findByLabelText('pet.inputPlaceholder');
+    await waitFor(() => expect(document.activeElement).toBe(input));
+  });
 });
 

@@ -105,7 +105,7 @@ const PetSurface: React.FC = () => {
   const [switcherOpen, setSwitcherOpen] = useState(false);
   // Draft, in-flight send and per-session uncertainty live for the document,
   // so an AuthGuard recheck cannot drop a lock or the text that belongs to it.
-  const { draft, uncertain, sending, setDraft, setUncertain } = usePetComposer(binding);
+  const { draft, uncertain, sending, listenPending, setDraft, setUncertain } = usePetComposer(binding);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
   const data = usePetSession(binding, petShell.unbind);
@@ -130,8 +130,9 @@ const PetSurface: React.FC = () => {
     if (!bound) return;
     setSwitcherOpen(false);
     // Voice ships in a later PR; until then a `listen` summon focuses the text
-    // input, and a `show` summon only shows the panel.
-    if (intent === 'listen') window.setTimeout(() => inputRef.current?.focus(), 0);
+    // input once the panel and composer have actually mounted. `setPanel` waits
+    // for the native frame, and a cold load still waits on the session grant.
+    if (intent === 'listen') petComposer.requestListen();
   }, [setPanel]);
 
   // Act on a waiting summon, including one that arrived before this surface
@@ -143,6 +144,18 @@ const PetSurface: React.FC = () => {
     if (intent) summon(intent, petShell.currentBinding() ?? null);
   }, [summon]);
   useOnSummon(onSummon);
+
+  // A listen summon waits until the composer is actually on screen: expansion
+  // is async, and a cold load still waits on the session grant. Do not consume
+  // the pending listen until the textarea is mounted — AuthGuard can remount
+  // the page, and the store must still hold the request until focus lands.
+  useEffect(() => {
+    if (!listenPending || !expanded || !canChat || !binding || switcherOpen) return;
+    const input = inputRef.current;
+    if (!input) return;
+    input.focus();
+    petComposer.takeListen();
+  }, [listenPending, expanded, canChat, binding, switcherOpen]);
 
   // Esc collapses.
   useEffect(() => {
