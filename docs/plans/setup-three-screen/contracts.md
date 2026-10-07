@@ -332,7 +332,7 @@ connection and a runnable route; no CLI is detected, installed or enabled for it
 no switch because it is always on. Its gate row is the table above with the CLI conditions
 removed. When its designated builtin Agent has no model, its card reads
 `GET /api/models/agents/{backend}/models/candidates` and offers the supplied candidates
-inline, with the existing `BackendModelPickerDialog` for the rest. A pick that is not in the
+inline, with the existing `BackendModelPickerDialog` in its single-choice mode for the rest. A pick that is not in the
 backend's catalog yet is added through `PUT /api/models/agents/{backend}/models` with the
 `expected_suppliers` the card displayed (a `candidate_suppliers_changed` refusal re-reads
 and asks again), and then becomes the Agent's `model` through `PATCH /api/agents/{name}`.

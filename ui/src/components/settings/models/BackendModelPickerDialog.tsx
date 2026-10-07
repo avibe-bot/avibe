@@ -79,7 +79,10 @@ export const BackendModelPickerDialog: React.FC<{
    *  picking a built-in assistant's first model — omits it, and the action is not
    *  offered. */
   onCustom?: (seedId: string) => void;
-}> = ({ open, backend, listedIds, seedPicked, onCancel, onAdd, onCustom }) => {
+  /** `one` asks for a single model — setup choosing a built-in assistant's model —
+   *  so picking a row replaces the pick instead of adding to it. */
+  choose?: 'many' | 'one';
+}> = ({ open, backend, listedIds, seedPicked, onCancel, onAdd, onCustom, choose = 'many' }) => {
   const { t } = useTranslation();
   const [readState, setReadState] = React.useState<ReadState>('loading');
   const [candidates, setCandidates] = React.useState<BackendModelCandidates | null>(null);
@@ -131,8 +134,9 @@ export const BackendModelPickerDialog: React.FC<{
    *  promise something about a model the user just took off the list. */
   const toggle = (candidate: ModelCandidate) => {
     setChosen((current) => {
-      const next = new Map(current);
-      if (!next.delete(candidate.id)) next.set(candidate.id, chosenCandidate(candidate));
+      const next = new Map(choose === 'one' ? [] : current);
+      if (!current.has(candidate.id)) next.set(candidate.id, chosenCandidate(candidate));
+      else if (choose === 'many') next.delete(candidate.id);
       return next;
     });
   };
@@ -160,6 +164,7 @@ export const BackendModelPickerDialog: React.FC<{
             candidate={candidate}
             picked={chosen.has(candidate.id)}
             listed={key === 'listed'}
+            single={choose === 'one'}
             onToggle={() => toggle(candidate)}
           />
         ))}
@@ -176,9 +181,13 @@ export const BackendModelPickerDialog: React.FC<{
       >
         <DialogHeader className="model-hub-catalog-head shrink-0 justify-center border-b border-border">
           <DialogTitle className="model-hub-catalog-title">
-            {t('settings.models.gateway.picker.title', { backend: getBackendUiMeta(backend).label })}
+            {choose === 'one'
+              ? t('settings.models.gateway.picker.chooseTitle', { backend: getBackendUiMeta(backend).label })
+              : t('settings.models.gateway.picker.title', { backend: getBackendUiMeta(backend).label })}
           </DialogTitle>
-          <DialogDescription className="sr-only">{t('settings.models.gateway.picker.description')}</DialogDescription>
+          <DialogDescription className="sr-only">
+            {t(choose === 'one' ? 'settings.models.gateway.picker.chooseDescription' : 'settings.models.gateway.picker.description')}
+          </DialogDescription>
         </DialogHeader>
 
         <div className="model-hub-catalog-body flex min-h-0 flex-1 flex-col">
@@ -275,9 +284,11 @@ export const BackendModelPickerDialog: React.FC<{
               {/* The empty state borrows the catalog's own action label rather
                   than a count of zero, so the footer keeps its width and the
                   button keeps naming what it does. */}
-              {picks.length === 0
-                ? t('settings.models.gateway.catalog.add')
-                : t('settings.models.gateway.picker.confirm', { count: picks.length })}
+              {choose === 'one'
+                ? t('settings.models.gateway.picker.use')
+                : picks.length === 0
+                  ? t('settings.models.gateway.catalog.add')
+                  : t('settings.models.gateway.picker.confirm', { count: picks.length })}
             </Button>
           </div>
         </DialogFooter>
@@ -298,14 +309,16 @@ const PickerRow: React.FC<{
   candidate: ModelCandidate;
   picked: boolean;
   listed: boolean;
+  /** One of a single choice: the row is a radio rather than a checkbox. */
+  single?: boolean;
   onToggle: () => void;
-}> = ({ candidate, picked, listed, onToggle }) => {
+}> = ({ candidate, picked, listed, single = false, onToggle }) => {
   const checked = picked || listed;
   const supplied = candidate.suppliers.length > 0;
   return (
     <button
       type="button"
-      role="checkbox"
+      role={single ? 'radio' : 'checkbox'}
       aria-checked={checked}
       disabled={listed}
       onClick={onToggle}

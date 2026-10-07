@@ -210,14 +210,22 @@ describe('the built-in assistant card', () => {
     expect(mock.api.detectCli.mock.calls.map(([binary]) => binary)).not.toContain('vibey');
   });
 
-  it('opens every candidate behind All models and uses the first one added', async () => {
+  it('opens every candidate behind All models as one choice, and uses the model chosen', async () => {
     render(wrap(<AgentDetection data={data()} onNext={vi.fn()} onNavigate={vi.fn()} agentReads={reads} />));
     fireEvent.click(await card().findByRole('button', { name: en.onboarding.setup.allModels }));
-    const dialog = within(await screen.findByRole('dialog'));
+    const dialog = within(await screen.findByRole('dialog', { name: 'Choose a Vibey model' }));
     expect(dialog.queryByRole('button', { name: en.settings.models.gateway.picker.custom })).toBeNull();
-    fireEvent.click(await dialog.findByRole('checkbox', { name: /gpt-5\.6-pro/ }));
-    fireEvent.click(dialog.getByRole('button', { name: 'Add 1 model' }));
-    await waitFor(() => expect(mock.api.updateVibeAgent).toHaveBeenCalledWith('vibey', { model: 'gpt-5.6-pro' }));
+    const pro = await dialog.findByRole('radio', { name: /gpt-5\.6-pro/ });
+    const nano = dialog.getByRole('radio', { name: /gpt-5\.6-nano/ });
+    fireEvent.click(pro);
+    fireEvent.click(nano);
+    // A second pick replaces the first: one model is chosen, and it is the last one clicked.
+    expect(pro.getAttribute('aria-checked')).toBe('false');
+    expect(nano.getAttribute('aria-checked')).toBe('true');
+    fireEvent.click(dialog.getByRole('button', { name: en.settings.models.gateway.picker.use }));
+    await waitFor(() => expect(mock.api.updateVibeAgent).toHaveBeenCalledWith('vibey', { model: 'gpt-5.6-nano' }));
+    expect(mock.models.putAgentModels).toHaveBeenCalledOnce();
+    expect(mock.models.putAgentModels.mock.calls[0][1].models.map((row: { id: string }) => row.id)).toEqual(['gpt-5.6-nano']);
     expect(screen.queryByRole('dialog')).toBeNull();
   });
 
@@ -230,12 +238,31 @@ describe('the built-in assistant card', () => {
     render(wrap(<AgentDetection data={data()} onNext={vi.fn()} onNavigate={vi.fn()} agentReads={listed} />));
     fireEvent.click(await card().findByRole('button', { name: en.onboarding.setup.allModels }));
     const dialog = within(await screen.findByRole('dialog'));
-    const row = await dialog.findByRole('checkbox', { name: /gpt-5\.6-pro/ });
+    const row = await dialog.findByRole('radio', { name: /gpt-5\.6-pro/ });
     expect(row.getAttribute('aria-disabled')).not.toBe('true');
     fireEvent.click(row);
-    fireEvent.click(dialog.getByRole('button', { name: 'Add 1 model' }));
+    fireEvent.click(dialog.getByRole('button', { name: en.settings.models.gateway.picker.use }));
     await waitFor(() => expect(mock.api.updateVibeAgent).toHaveBeenCalledWith('vibey', { model: 'gpt-5.6-pro' }));
     expect(mock.models.putAgentModels).not.toHaveBeenCalled();
+  });
+
+  it('offers no candidates read before the screen was left, when it comes back', async () => {
+    let answerFirst!: (read: BackendModelCandidates) => void;
+    let answerSecond!: (read: BackendModelCandidates) => void;
+    mock.models.getAgentModelCandidates
+      .mockImplementationOnce(() => new Promise((resolve) => { answerFirst = resolve; }))
+      .mockImplementationOnce(() => new Promise((resolve) => { answerSecond = resolve; }));
+    const props = { data: data(), onNext: vi.fn(), onNavigate: vi.fn(), agentReads: reads };
+    const view = render(wrap(<AgentDetection {...props} active />));
+    await waitFor(() => expect(mock.models.getAgentModelCandidates).toHaveBeenCalledOnce());
+    view.rerender(wrap(<AgentDetection {...props} active={false} />));
+    // The first read lands after the person left: it answers a showing that is over.
+    await act(async () => answerFirst(candidates()));
+    view.rerender(wrap(<AgentDetection {...props} active />));
+    await waitFor(() => expect(mock.models.getAgentModelCandidates).toHaveBeenCalledTimes(2));
+    expect(card().queryByRole('button', { name: /gpt-5\.6-/ })).toBeNull();
+    await act(async () => answerSecond(candidates()));
+    expect(await card().findByRole('button', { name: /gpt-5\.6-sol/ })).toBeTruthy();
   });
 
   it('reads as an enabled assistant once it has a model, and opens its route', async () => {

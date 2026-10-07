@@ -1094,6 +1094,9 @@
         "picker": {
           "title": "Add {{backend}} models",
           "description": "Pick the models to add to this backend's list.",
+          "chooseTitle": "Choose a {{backend}} model",
+          "chooseDescription": "Pick the model to use.",
+          "use": "Use this model",
           "search": "Search models or providers",
           "groupBuiltin": "{{backend}} built-in",
           "groupProviders": "From your providers",

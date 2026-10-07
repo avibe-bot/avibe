@@ -1094,6 +1094,9 @@
         "picker": {
           "title": "添加 {{backend}} 模型",
           "description": "挑选要加入这个后端模型列表的模型。",
+          "chooseTitle": "选择 {{backend}} 的模型",
+          "chooseDescription": "选择要使用的模型。",
+          "use": "使用此模型",
           "search": "搜索模型或供应商",
           "groupBuiltin": "{{backend}} 内置",
           "groupProviders": "来自你的供应商",
