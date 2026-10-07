@@ -104,10 +104,7 @@ const PetSurface: React.FC = () => {
   const inbox = useWorkbenchInbox({ feed: false });
 
   const binding = usePetBinding() ?? null;
-  // Sending is a chat capability, as in the chat page: a principal without it
-  // sees the pet's state but gets no composer or quick replies.
   const { capabilities } = useInstanceAuthorization();
-  const canChat = capabilities.can_chat;
   const { expanded, layout, setPanel } = usePetPanel();
   const [switcherOpen, setSwitcherOpen] = useState(false);
   const [draft, setDraft] = useState('');
@@ -137,6 +134,9 @@ const PetSurface: React.FC = () => {
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
   const data = usePetSession(binding, petShell.unbind);
+  // Sending is a chat capability, as in the chat page: instance can_chat and
+  // the bound session's project grant. Unknown or failed reads deny.
+  const canChat = capabilities.can_chat && data.canChat === true;
   const { requests: vaultRequests } = usePendingVaultRequests(binding ?? '');
   const unreadCount = binding ? inbox.unreadBySession[binding] ?? 0 : 0;
 
@@ -360,7 +360,7 @@ type PanelProps = {
   sending: boolean;
   /** The bound session has been read and is writable. */
   canSend: boolean;
-  /** The principal may chat at all (instance capability). */
+  /** Instance and project chat grants are both true. */
   canChat: boolean;
   /** The last send may have started a turn; resending waits for a look. */
   uncertain: boolean;

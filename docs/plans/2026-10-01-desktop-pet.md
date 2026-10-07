@@ -666,7 +666,11 @@ The code and its tests are the contract; this section records why.
   applies the same rule through the shared `isSetupComplete` and shows
   "finish setting up in Avibe" instead of a pet-sized wizard. The route stays
   outside the Workbench chrome. The setup re-read bypasses the config cache
-  (`getConfig({ cache: false })`). Composing is shown only with `can_chat`.
+  (`getConfig({ cache: false })`). Composing is shown only when both the
+  instance `can_chat` and the bound session's project `capabilities.can_chat`
+  are true. The session GET carries that flag with the same role rule as
+  bootstrap (`get_effective_session_role` + editor); unknown or failed reads
+  deny. The pet does not load bootstrap.
 - **Shell → page events are DOM events.** The shell dispatches
   `avibe:pet-summon` and `avibe:pet-bound` on `window` through a
   shell-evaluated script, the channel the Settings… menu already uses, so the
@@ -733,6 +737,13 @@ The code and its tests are the contract; this section records why.
   session's count is merged.
 - **`design.pen` frames are deferred.** The panel reuses existing tokens and
   primitives; frames follow once the shell PR makes the pet visible.
+- **Pet input uses the session GET's project grant.** Workbench Chat combines
+  instance `can_chat` with bootstrap `capabilities.can_chat`. The pet already
+  reads the session row, so GET `/api/sessions/<id>` now includes the same
+  `{capabilities:{can_chat}}` sibling (the session fields stay top-level; the
+  client strips `capabilities` before treating the rest as the row). An
+  instance editor who is a project viewer therefore sees state but no composer
+  or quick replies; POST remains rejected by project-role middleware.
 
 ## Follow-ups
 

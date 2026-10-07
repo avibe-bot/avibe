@@ -25,6 +25,8 @@ export const SEND_GRACE_MS = 4000;
 
 export type PetSessionData = {
   session: WorkbenchSession | null;
+  /** Project-level chat grant from GET session; null until a read lands. */
+  canChat: boolean | null;
   messages: WorkbenchMessage[];
   /** Rows before `messages` may exist: the tail was trimmed, or no tail read
    *  has landed yet, so live rows alone say nothing about what came before. */
@@ -73,6 +75,7 @@ export function usePetSession(sessionId: string | null, onInvalid: (sessionId: s
   const api = useApi();
 
   const [session, setSession] = useState<WorkbenchSession | null>(null);
+  const [canChat, setCanChat] = useState<boolean | null>(null);
   const [tail, setTail] = useState<Tail>(EMPTY_TAIL);
   const [turn, setTurn] = useState<SessionRuntimeState | null>(null);
   // The session a fresh read found missing or read-only.
@@ -86,6 +89,7 @@ export function usePetSession(sessionId: string | null, onInvalid: (sessionId: s
   if (displayed !== sessionId) {
     setDisplayed(sessionId);
     setSession(null);
+    setCanChat(null);
     setTail(EMPTY_TAIL);
     setTurn(null);
     setInGrace(false);
@@ -95,16 +99,20 @@ export function usePetSession(sessionId: string | null, onInvalid: (sessionId: s
   const sources = useMemo(() => ({
     session: new FencedSource<string, WorkbenchSessionReadResult>({
       read: (key) => api.getSessionResult(key),
-      apply: (key, { status, session: row }) => {
+      apply: (key, { status, session: row, capabilities }) => {
         // A binding is valid only while S is writable: missing, archived and
         // Runtime-owned sessions all clear it.
         // 403: this principal lost access to the session (or its project).
         if (status === 404 || status === 403 || (row && isSessionReadOnly(row))) {
           setInvalid(key);
+          setCanChat(false);
           return;
         }
+        // Unknown or missing: deny. The composer waits on an explicit true.
+        setCanChat(capabilities?.can_chat === true);
         if (row) setSession(row);
       },
+      fail: () => setCanChat(false),
     }),
     tail: new FencedSource<string, { messages: WorkbenchMessage[]; next_before_id?: string | null }>({
       read: (key) => api.listSessionMessages(key, { tail: true, cache: false, limit: PET_TAIL_LIMIT }),
@@ -198,6 +206,7 @@ export function usePetSession(sessionId: string | null, onInvalid: (sessionId: s
       // session reads 403 and clears the binding.
       onAuthorizationChanged: () => {
         setSession(null);
+        setCanChat(null);
         setTail(EMPTY_TAIL);
         setTurn(null);
         refreshAll();
@@ -257,6 +266,7 @@ export function usePetSession(sessionId: string | null, onInvalid: (sessionId: s
 
   return {
     session,
+    canChat,
     messages: tail.messages,
     hasOlder: tail.hasOlder || !tail.loaded,
     turn,

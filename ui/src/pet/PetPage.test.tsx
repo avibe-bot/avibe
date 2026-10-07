@@ -4,7 +4,7 @@ import { act, cleanup, render, screen, waitFor, within } from '@testing-library/
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import type { WorkbenchEventHandlers, WorkbenchMessage, WorkbenchSession } from '@/context/ApiContext';
+import type { WorkbenchEventHandlers, WorkbenchMessage, WorkbenchSession, WorkbenchSessionReadResult } from '@/context/ApiContext';
 
 import { ApiError } from '@/context/ApiContext';
 
@@ -85,7 +85,7 @@ const idleTurn = {
 };
 
 let setupDone = true;
-let sessionReads: Record<string, () => Promise<{ status: number; session: WorkbenchSession | null }>> = {};
+let sessionReads: Record<string, () => Promise<WorkbenchSessionReadResult>> = {};
 let tails: Record<string, WorkbenchMessage[]> = {};
 let switcherSessions: WorkbenchSession[] = [];
 let unreadBySession: Record<string, number> = {};
@@ -105,7 +105,7 @@ const api = {
     : { mode: 'self_host', setup_state: { needs_setup: true } })),
   getSessionResult: vi.fn((id: string) => (sessionReads[id]
     ? sessionReads[id]()
-    : Promise.resolve({ status: 200, session: session(id) }))),
+    : Promise.resolve({ status: 200, session: session(id), capabilities: { can_chat: true } }))),
   listSessionMessages: vi.fn(async (id: string) => ({ messages: tails[id] ?? [], next_after_id: null, next_before_id: null })),
   getTurnState: vi.fn(async () => idleTurn),
   listSessions: vi.fn(async () => ({ sessions: switcherSessions, next_before_id: null })),
@@ -241,7 +241,7 @@ describe('PetPage setup', () => {
 
 describe('PetPage binding', () => {
   it('keeps B bound when a late 404 for A arrives after switching', async () => {
-    const lateA = deferred<{ status: number; session: WorkbenchSession | null }>();
+    const lateA = deferred<WorkbenchSessionReadResult>();
     sessionReads.A = () => lateA.promise;
     devBind('A');
     render(<PetPage />);
@@ -605,16 +605,21 @@ describe('PetPage review fixes, round 5', () => {
 
 describe('PetPage review fixes, round 6', () => {
   it('accepts no input for a binding whose session has not been validated yet', async () => {
-    const validation = deferred<{ status: number; session: WorkbenchSession | null }>();
+    const validation = deferred<WorkbenchSessionReadResult>();
     sessionReads.S = () => validation.promise;
     devBind('S');
     render(<PetPage />);
     summon('listen');
-    const input = await screen.findByLabelText('pet.inputPlaceholder');
-    await userEvent.type(input, 'too early{Enter}');
+    await screen.findByLabelText('pet.panel');
+    expect(screen.queryByLabelText('pet.inputPlaceholder')).toBeNull();
     expect(api.sendSessionMessage).not.toHaveBeenCalled();
-    await act(async () => validation.resolve({ status: 200, session: session('S') }));
-    await userEvent.type(input, '{Enter}');
+    await act(async () => validation.resolve({
+      status: 200,
+      session: session('S'),
+      capabilities: { can_chat: true },
+    }));
+    const input = await screen.findByLabelText('pet.inputPlaceholder');
+    await userEvent.type(input, 'hello{Enter}');
     expect(api.sendSessionMessage).toHaveBeenCalledTimes(1);
   });
 
@@ -821,6 +826,25 @@ describe('PetPage review fixes, round 13', () => {
     expect(screen.queryByText('Yes')).toBeNull();
   });
 
+  it('offers no composer or quick replies when the bound session is project-viewer', async () => {
+    canChat = true;
+    sessionReads.S = async () => ({
+      status: 200,
+      session: session('S'),
+      capabilities: { can_chat: false },
+    });
+    tails.S = [message('u', 'S', { author: 'user', type: 'user' }), message('q', 'S', { content: { quick_replies: ['Yes'] } })];
+    devBind('S');
+    render(<PetPage />);
+    summon('listen');
+    await screen.findByLabelText('pet.panel');
+    await screen.findByText('Session S');
+    expect(screen.queryByLabelText('pet.inputPlaceholder')).toBeNull();
+    expect(screen.queryByText('Yes')).toBeNull();
+    await userEvent.keyboard('should not send{Enter}');
+    expect(api.sendSessionMessage).not.toHaveBeenCalled();
+  });
+
   it('ends the post-send Running grace on an authoritative turn.end', async () => {
     devBind('S');
     render(<PetPage />);
@@ -1014,15 +1038,16 @@ describe('PetPage live convergence', () => {
 
     await bound('B');
     await waitFor(() => expect(api.getSessionResult).toHaveBeenCalledWith('B'));
+    const inputB = await screen.findByLabelText('pet.inputPlaceholder') as HTMLTextAreaElement;
     await settle();
     expect(screen.queryByText('newSession.sendUncertain')).toBeNull();
-    await userEvent.type(input, 'to B{Enter}');
+    await userEvent.type(inputB, 'to B{Enter}');
     expect(await screen.findByText('newSession.sendUncertain')).toBeTruthy();
 
     await bound('A');
     await settle();
     expect(screen.getByText('newSession.sendUncertain')).toBeTruthy();
-    await userEvent.type(input, 'again{Enter}');
+    await userEvent.type(screen.getByLabelText('pet.inputPlaceholder'), 'again{Enter}');
     expect(api.sendSessionMessage).toHaveBeenCalledTimes(2);
   });
 
