@@ -3,15 +3,21 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import multiprocessing
+import os
 from pathlib import Path
+import time
 from typing import Any, Mapping
 
 import pytest
 
 from core.computer_server import (
+    ComputerServerError,
     ComputerUseServer,
     DesktopLeaseManager,
+    JsonRpcUpstream,
     _fold_tool_result,
+    _validate_input,
 )
 from core.computer_use import (
     COMPUTER_USE_TOOL_NAMES,
@@ -109,6 +115,7 @@ class FakeLeaseManager:
     def __init__(self) -> None:
         self.epoch = 1
         self.holder: str | None = None
+        self.refresh_count = 0
 
     def acquire(self, session: str, daemon_key: tuple[str, int]):
         from core.computer_server import ComputerServerError, Lease
@@ -119,11 +126,28 @@ class FakeLeaseManager:
         return Lease(session, 1.0, self.epoch, daemon_key[0], daemon_key[1])
 
     def refresh(self, lease) -> bool:
+        self.refresh_count += 1
         return self.holder == lease.holder
 
     def release(self, lease) -> None:
         if self.holder == lease.holder:
             self.holder = None
+
+
+def _acquire_lease_in_process(
+    directory: str,
+    session: str,
+    start: multiprocessing.synchronize.Event,
+    results: multiprocessing.queues.Queue,
+) -> None:
+    manager = DesktopLeaseManager(Path(directory), now=time.monotonic)
+    start.wait()
+    try:
+        lease = manager.acquire(session, ("shell-a", 1))
+    except ComputerServerError as exc:
+        results.put(("error", exc.code))
+    else:
+        results.put(("ok", lease.holder))
 
 
 def test_advertised_surface_requires_session_and_drops_output_schema(
@@ -146,9 +170,28 @@ def test_advertised_surface_requires_session_and_drops_output_schema(
         assert "outputSchema" not in tool
 
 
+@pytest.mark.parametrize(
+    ("status", "reason"),
+    [
+        ("off", "never_enabled"),
+        ("off", "toggle_off"),
+        ("needs_permission", "accessibility"),
+        ("needs_permission", "screen_recording"),
+        ("starting", None),
+        ("error", "spawn_failed"),
+        ("stopped", None),
+        ("needs_runtime", "runtime_too_old"),
+        ("unavailable", "shell_not_running"),
+        ("unavailable", "daemon_unreachable"),
+    ],
+)
 @pytest.mark.asyncio
-async def test_non_ready_call_never_spawns_upstream(tmp_path: Path) -> None:
-    """Availability errors stay per-call and never create a daemon or proxy."""
+async def test_non_ready_call_names_status_and_never_spawns_upstream(
+    tmp_path: Path,
+    status: str,
+    reason: str | None,
+) -> None:
+    """Every non-ready state is returned per call without creating a proxy."""
 
     state_path, _state_value = _state(tmp_path)
     starts = 0
@@ -160,13 +203,19 @@ async def test_non_ready_call_never_spawns_upstream(tmp_path: Path) -> None:
 
     server = ComputerUseServer(
         state_path=state_path,
-        status_reader=lambda: ComputerUseStatus("needs_permission", "accessibility"),
+        status_reader=lambda: ComputerUseStatus(status, reason),
         upstream_factory=factory,
         lease_manager=FakeLeaseManager(),  # type: ignore[arg-type]
     )
     result = await server.call_tool("list_apps", {"session": "ses-a"})
     assert result["isError"] is True
-    assert "needs_permission" in result["content"][0]["text"]
+    payload = json.loads(result["content"][0]["text"])
+    assert payload == {
+        "code": "computer_use_unavailable",
+        "message": "Computer use is not ready.",
+        "reason": reason,
+        "status": status,
+    }
     assert starts == 0
 
 
@@ -195,6 +244,11 @@ async def test_daemon_generation_and_child_exit_each_replace_proxy_once(
     await server.call_tool("list_apps", {"session": "ses-a"})
     await server.call_tool("list_apps", {"session": "ses-a"})
     assert len(upstreams) == 1
+    assert [params["name"] for _method, params in upstreams[0].calls] == [
+        "start_session",
+        "list_apps",
+        "list_apps",
+    ]
 
     current = ComputerUseState(
         **{
@@ -205,10 +259,18 @@ async def test_daemon_generation_and_child_exit_each_replace_proxy_once(
     leases.epoch += 1
     await server.call_tool("list_apps", {"session": "ses-a"})
     assert len(upstreams) == 2
+    assert [params["name"] for _method, params in upstreams[1].calls] == [
+        "start_session",
+        "list_apps",
+    ]
 
     upstreams[-1].alive = False
     await server.call_tool("list_apps", {"session": "ses-a"})
     assert len(upstreams) == 3
+    assert [params["name"] for _method, params in upstreams[2].calls] == [
+        "start_session",
+        "list_apps",
+    ]
 
 
 def test_result_folding_preserves_images_and_moves_structured_content() -> None:
@@ -262,6 +324,44 @@ async def test_one_sessions_calls_are_serial_and_end_releases_after_queue(
     assert leases.holder is None
     names = [params["name"] for _method, params in upstream.calls]
     assert names == ["start_session", "list_apps", "end_session"]
+
+
+@pytest.mark.asyncio
+async def test_named_sessions_start_independently_and_revive_after_end(
+    tmp_path: Path,
+) -> None:
+    """Each Avibe session receives its own Cua lifecycle and end is revivable."""
+
+    state_path, state = _state(tmp_path)
+    upstream = FakeUpstream()
+    leases = FakeLeaseManager()
+    server = ComputerUseServer(
+        state_path=state_path,
+        status_reader=lambda: ComputerUseStatus("ready", None, state),
+        upstream_factory=lambda _state: asyncio.sleep(0, result=upstream),
+        lease_manager=leases,  # type: ignore[arg-type]
+    )
+
+    await server.call_tool("list_apps", {"session": "ses-a"})
+    await server.call_tool("end_session", {"session": "ses-a"})
+    await server.call_tool("list_apps", {"session": "ses-b"})
+    await server.call_tool("end_session", {"session": "ses-b"})
+    await server.call_tool("list_apps", {"session": "ses-a"})
+
+    calls = [
+        (params["name"], params["arguments"].get("session"))
+        for _method, params in upstream.calls
+    ]
+    assert calls == [
+        ("start_session", "ses-a"),
+        ("list_apps", "ses-a"),
+        ("end_session", "ses-a"),
+        ("start_session", "ses-b"),
+        ("list_apps", "ses-b"),
+        ("end_session", "ses-b"),
+        ("start_session", "ses-a"),
+        ("list_apps", "ses-a"),
+    ]
 
 
 @pytest.mark.asyncio
@@ -321,6 +421,153 @@ async def test_window_input_requires_observation_and_rejects_focus_routes(
     assert "focus_shortcut_forbidden" in shortcut["content"][0]["text"]
 
 
+@pytest.mark.asyncio
+async def test_epoch_change_restarts_session_and_requires_each_window_again(
+    tmp_path: Path,
+) -> None:
+    """A reacquired desktop invalidates Cua state and each observed window."""
+
+    state_path, state = _state(tmp_path)
+    upstream = FakeUpstream()
+    leases = FakeLeaseManager()
+    server = ComputerUseServer(
+        state_path=state_path,
+        status_reader=lambda: ComputerUseStatus("ready", None, state),
+        upstream_factory=lambda _state: asyncio.sleep(0, result=upstream),
+        lease_manager=leases,  # type: ignore[arg-type]
+    )
+
+    for window_id in (9, 10):
+        result = await server.call_tool(
+            "get_window_state",
+            {"session": "ses-a", "pid": 7, "window_id": window_id},
+        )
+        assert not result.get("isError")
+
+    leases.epoch += 1
+    stale = await server.call_tool(
+        "click",
+        {"session": "ses-a", "pid": 7, "window_id": 9, "x": 1, "y": 2},
+    )
+    assert "observe_first" in stale["content"][0]["text"]
+    assert [params["name"] for _method, params in upstream.calls][-2:] == [
+        "end_session",
+        "start_session",
+    ]
+
+    await server.call_tool(
+        "get_window_state",
+        {"session": "ses-a", "pid": 7, "window_id": 9},
+    )
+    window_a = await server.call_tool(
+        "click",
+        {"session": "ses-a", "pid": 7, "window_id": 9, "x": 1, "y": 2},
+    )
+    window_b = await server.call_tool(
+        "click",
+        {"session": "ses-a", "pid": 7, "window_id": 10, "x": 1, "y": 2},
+    )
+    assert not window_a.get("isError")
+    assert "observe_first" in window_b["content"][0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_new_server_process_requires_observation_again(tmp_path: Path) -> None:
+    """Observation state is intentionally process-local and starts empty."""
+
+    state_path, state = _state(tmp_path)
+    leases = FakeLeaseManager()
+    first_upstream = FakeUpstream()
+    first = ComputerUseServer(
+        state_path=state_path,
+        status_reader=lambda: ComputerUseStatus("ready", None, state),
+        upstream_factory=lambda _state: asyncio.sleep(0, result=first_upstream),
+        lease_manager=leases,  # type: ignore[arg-type]
+    )
+    await first.call_tool(
+        "get_window_state",
+        {"session": "ses-a", "pid": 7, "window_id": 9},
+    )
+    await first.call_tool("end_session", {"session": "ses-a"})
+
+    second_upstream = FakeUpstream()
+    second = ComputerUseServer(
+        state_path=state_path,
+        status_reader=lambda: ComputerUseStatus("ready", None, state),
+        upstream_factory=lambda _state: asyncio.sleep(0, result=second_upstream),
+        lease_manager=leases,  # type: ignore[arg-type]
+    )
+    result = await second.call_tool(
+        "click",
+        {"session": "ses-a", "pid": 7, "window_id": 9, "x": 1, "y": 2},
+    )
+    assert "observe_first" in result["content"][0]["text"]
+
+
+@pytest.mark.parametrize(
+    ("arguments", "code"),
+    [
+        ({"target": {"kind": "desktop"}}, "window_target_required"),
+        ({"target": {"kind": "window", "pid": 7}}, "window_target_required"),
+        (
+            {"target": {"kind": "window", "pid": 7, "window_id": 9, "display_id": 2}},
+            "window_target_required",
+        ),
+        ({"target": "window"}, "window_target_required"),
+        ({"scope": "desktop"}, "window_target_required"),
+        ({"pid": 7}, "window_target_required"),
+        ({"pid": True, "window_id": 9}, "window_target_required"),
+        ({"pid": 7, "window_id": True}, "window_target_required"),
+        (
+            {"pid": 7, "window_id": 9, "delivery_mode": "foreground"},
+            "foreground_forbidden",
+        ),
+    ],
+)
+def test_input_rejects_non_window_and_unknown_target_shapes(
+    arguments: dict[str, Any],
+    code: str,
+) -> None:
+    """The macOS input boundary accepts only an exact background window."""
+
+    with pytest.raises(ComputerServerError) as raised:
+        _validate_input("click", arguments)
+    assert raised.value.code == code
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "arguments"),
+    [
+        ("hotkey", {"keys": ["cmd", "l"]}),
+        ("hotkey", {"keys": ["command", "shift", "g"]}),
+        ("hotkey", {"keys": "meta+1"}),
+        ("hotkey", {"keys": ["⌘", "9"]}),
+        ("hotkey", {"keys": ["cmd", "["]}),
+        ("hotkey", {"keys": ["cmd", "]"]}),
+        ("hotkey", {"keys": ["cmd", "shift", "["]}),
+        ("hotkey", {"keys": ["cmd", "shift", "]"]}),
+        ("press_key", {"key": "l", "modifiers": ["cmd"]}),
+        ("press_key", {"key": "g", "modifiers": ["meta", "shift"]}),
+    ],
+)
+def test_all_documented_focus_shortcuts_are_rejected(
+    tool_name: str,
+    arguments: dict[str, Any],
+) -> None:
+    """Every shortcut named by the pinned no-foreground guide is blocked."""
+
+    with pytest.raises(ComputerServerError) as raised:
+        _validate_input(
+            tool_name,
+            {
+                "pid": 7,
+                "window_id": 9,
+                **arguments,
+            },
+        )
+    assert raised.value.code == "focus_shortcut_forbidden"
+
+
 def test_desktop_lease_expires_and_daemon_generation_voids_it(
     tmp_path: Path,
 ) -> None:
@@ -338,3 +585,141 @@ def test_desktop_lease_expires_and_daemon_generation_voids_it(
 
     third = manager.acquire("ses-c", ("shell-a", 2))
     assert third.epoch == second.epoch + 1
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Phase 1 cross-process lease is macOS-only")
+def test_cross_process_first_calls_have_exactly_one_lease_holder(
+    tmp_path: Path,
+) -> None:
+    """The filesystem lock serializes simultaneous first calls across servers."""
+
+    context = multiprocessing.get_context("spawn")
+    start = context.Event()
+    results = context.Queue()
+    processes = [
+        context.Process(
+            target=_acquire_lease_in_process,
+            args=(str(tmp_path), session, start, results),
+        )
+        for session in ("ses-a", "ses-b")
+    ]
+    for process in processes:
+        process.start()
+    start.set()
+    observed = [results.get(timeout=10) for _process in processes]
+    for process in processes:
+        process.join(timeout=10)
+        assert process.exitcode == 0
+    assert sorted(kind for kind, _detail in observed) == ["error", "ok"]
+    assert {detail for kind, detail in observed if kind == "error"} == {
+        "desktop_busy"
+    }
+
+
+@pytest.mark.asyncio
+async def test_long_call_refreshes_lease_until_it_finishes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The heartbeat keeps a lease alive while one upstream call is blocked."""
+
+    monkeypatch.setattr("core.computer_server._LEASE_HEARTBEAT_SECONDS", 0.01)
+    state_path, state = _state(tmp_path)
+    upstream = FakeUpstream()
+    upstream.block = asyncio.Event()
+    leases = FakeLeaseManager()
+    server = ComputerUseServer(
+        state_path=state_path,
+        status_reader=lambda: ComputerUseStatus("ready", None, state),
+        upstream_factory=lambda _state: asyncio.sleep(0, result=upstream),
+        lease_manager=leases,  # type: ignore[arg-type]
+    )
+    call = asyncio.create_task(
+        server.call_tool("list_apps", {"session": "ses-a"})
+    )
+    for _attempt in range(100):
+        if leases.refresh_count >= 2:
+            break
+        await asyncio.sleep(0.005)
+    assert leases.refresh_count >= 2
+    upstream.block.set()
+    await call
+    refreshes_at_completion = leases.refresh_count
+    await asyncio.sleep(0.03)
+    assert leases.refresh_count == refreshes_at_completion
+
+
+@pytest.mark.asyncio
+async def test_proxy_command_disables_telemetry_updates_and_window_timeout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every proxy child receives the fixed embedded environment contract."""
+
+    _state_path, state = _state(tmp_path)
+    captured: dict[str, Any] = {}
+
+    class FakeStream:
+        async def readline(self) -> bytes:
+            return b""
+
+    class FakeStdin:
+        def close(self) -> None:
+            return None
+
+        async def wait_closed(self) -> None:
+            return None
+
+    class FakeProcess:
+        returncode = None
+        stdin = FakeStdin()
+        stdout = FakeStream()
+        stderr = FakeStream()
+
+        async def wait(self) -> int:
+            self.returncode = 0
+            return 0
+
+        def kill(self) -> None:
+            self.returncode = -9
+
+    async def fake_exec(*args: Any, **kwargs: Any) -> FakeProcess:
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return FakeProcess()
+
+    async def fake_request(
+        self: JsonRpcUpstream,
+        method: str,
+        params: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        return {"jsonrpc": "2.0", "id": 1, "result": {}}
+
+    async def fake_notify(
+        self: JsonRpcUpstream,
+        method: str,
+        params: Mapping[str, Any],
+    ) -> None:
+        return None
+
+    monkeypatch.setenv("CUA_DRIVER_WINDOW_CHANGE_TIMEOUT_MS", "1")
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    monkeypatch.setattr(JsonRpcUpstream, "request", fake_request)
+    monkeypatch.setattr(JsonRpcUpstream, "notify", fake_notify)
+
+    upstream = await JsonRpcUpstream.start(state)
+    env = captured["kwargs"]["env"]
+    assert captured["args"] == (
+        state.proxy_executable,
+        "mcp",
+        "--embedded",
+        "--socket",
+        state.socket_path,
+        "--host-bundle-id",
+        state.host_bundle_id,
+    )
+    assert env["CUA_DRIVER_EMBEDDED"] == "1"
+    assert env["CUA_DRIVER_RS_TELEMETRY_ENABLED"] == "0"
+    assert env["CUA_DRIVER_RS_UPDATE_CHECK"] == "0"
+    assert "CUA_DRIVER_WINDOW_CHANGE_TIMEOUT_MS" not in env
+    await upstream.close()

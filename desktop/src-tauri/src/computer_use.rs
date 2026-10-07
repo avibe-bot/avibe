@@ -16,12 +16,12 @@ use avibe_runtime_host::computer_use::{
     StoredComputerUseState, ToolSnapshot, COMPUTER_USE_DRIVER_VERSION, COMPUTER_USE_LOCK_FILE,
     COMPUTER_USE_SCHEMA_VERSION, COMPUTER_USE_SOCKET_FILE, COMPUTER_USE_STATE_FILE, COMPUTER_USE_TOOL_SNAPSHOT_SHA256,
 };
-use avibe_runtime_host::LoopbackOrigin;
+use avibe_runtime_host::{BootstrapLog, LoopbackOrigin, BOOTSTRAP_LOG_NAME};
 use block2::RcBlock;
 use objc2::runtime::{AnyClass, AnyObject, NSObjectProtocol, ProtocolObject};
-use objc2::{msg_send, sel};
+use objc2::{msg_send, sel, MainThreadMarker};
 use objc2_app_kit::NSApplicationDidBecomeActiveNotification;
-use objc2_foundation::{NSNotification, NSNotificationCenter, NSOperationQueue, NSPoint, NSRect, NSSize};
+use objc2_foundation::{NSError, NSNotification, NSNotificationCenter, NSOperationQueue, NSPoint, NSRect, NSSize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tauri::plugin::{Builder as PluginBuilder, TauriPlugin};
@@ -40,6 +40,7 @@ const CAPABILITY_TIMEOUT: Duration = Duration::from_secs(2);
 const ENDPOINT_RECLAIM_TIMEOUT: Duration = Duration::from_secs(2);
 const PROCESS_STOP_TIMEOUT: Duration = Duration::from_secs(3);
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(5);
+const PERMISSION_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const START_BACKOFF: Duration = Duration::from_secs(1);
 const COMPUTER_USE_SCHEMA: u64 = COMPUTER_USE_SCHEMA_VERSION as u64;
 
@@ -102,7 +103,7 @@ enum Event {
     Toggle,
     RuntimeReady { origin: LoopbackOrigin, adoption: bool },
     RuntimeLost,
-    Activated(u64),
+    Activated { activation: u64, observed_at: Instant },
     Shutdown(oneshot::Sender<()>),
 }
 
@@ -143,7 +144,10 @@ impl Controller {
 
     pub(crate) fn activated(&self) {
         let activation = self.activation.fetch_add(1, Ordering::SeqCst) + 1;
-        let _ = self.sender.send(Event::Activated(activation));
+        let _ = self.sender.send(Event::Activated {
+            activation,
+            observed_at: Instant::now(),
+        });
     }
 
     pub(crate) async fn shutdown(&self) {
@@ -207,6 +211,7 @@ struct Daemon {
 struct RuntimeState {
     app: AppHandle,
     view: Arc<Mutex<MenuView>>,
+    diagnostics: BootstrapLog,
     paths: Paths,
     store: ComputerUseStateStore,
     _shell_lock: ComputerUseShellLock,
@@ -225,6 +230,7 @@ struct RuntimeState {
 impl RuntimeState {
     fn new(app: AppHandle, view: Arc<Mutex<MenuView>>) -> Result<Self, Box<dyn std::error::Error>> {
         let paths = Paths::resolve(&app)?;
+        let diagnostics = BootstrapLog::at(app.path().app_local_data_dir()?.join(BOOTSTRAP_LOG_NAME));
         std::fs::create_dir_all(&paths.state_dir)?;
         let shell_lock = ComputerUseShellLock::acquire(&paths.state_dir.join(COMPUTER_USE_LOCK_FILE))?;
         let store = ComputerUseStateStore::new(paths.state_file.clone());
@@ -237,6 +243,7 @@ impl RuntimeState {
         let mut runtime = Self {
             app,
             view,
+            diagnostics,
             paths,
             store,
             _shell_lock: shell_lock,
@@ -287,7 +294,10 @@ impl RuntimeState {
                             self.runtime_ready(origin, adoption).await;
                         }
                         Event::RuntimeLost => self.runtime_lost().await,
-                        Event::Activated(activation) => self.activated(activation).await,
+                        Event::Activated {
+                            activation,
+                            observed_at,
+                        } => self.activated(activation, observed_at).await,
                         Event::Shutdown(reply) => {
                             self.shutdown().await;
                             let _ = reply.send(());
@@ -319,7 +329,7 @@ impl RuntimeState {
             self.publish_view();
             return;
         }
-        let grants = request_permissions();
+        let grants = request_permissions(&self.app, &self.diagnostics).await;
         if grants.missing_reason().is_some() {
             open_missing_permission_settings(&self.app, grants);
         }
@@ -356,11 +366,12 @@ impl RuntimeState {
         self.apply(directive).await;
     }
 
-    async fn activated(&mut self, activation: u64) {
+    async fn activated(&mut self, activation: u64, observed_at: Instant) {
         if self.capabilities.current() != RuntimeSupport::Supported {
             return;
         }
-        let directive = self.lifecycle.activation(activation, silent_grants());
+        let observed_at = observed_at.saturating_duration_since(self.started_at);
+        let directive = self.lifecycle.activation(activation, observed_at, silent_grants());
         self.apply(directive).await;
     }
 
@@ -653,12 +664,19 @@ async fn probe_capabilities(origin: &LoopbackOrigin) -> CapabilityProbe {
         .as_ref()
         .and_then(|value| value.get("computer_use_schema"))
         .and_then(Value::as_u64);
-    let verdict = match schema {
+    let verdict = classify_capability_payload(controller_id.as_deref(), schema);
+    CapabilityProbe { controller_id, verdict }
+}
+
+fn classify_capability_payload(controller_id: Option<&str>, schema: Option<u64>) -> CapabilityVerdict {
+    if controller_id.is_none() {
+        return CapabilityVerdict::Transient;
+    }
+    match schema {
         Some(schema) if schema >= COMPUTER_USE_SCHEMA => CapabilityVerdict::Supported,
         Some(_) => CapabilityVerdict::Unsupported,
         None => CapabilityVerdict::Transient,
-    };
-    CapabilityProbe { controller_id, verdict }
+    }
 }
 
 async fn socket_accepts(path: &Path) -> bool {
@@ -910,10 +928,159 @@ fn silent_grants() -> Grants {
     }
 }
 
-fn request_permissions() -> Grants {
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PermissionRequestChecks {
+    grants: Grants,
+    main_thread: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum CaptureProbeOutcome {
+    Image,
+    Error {
+        domain: String,
+        code: isize,
+        description: String,
+    },
+    EmptyResult,
+    ClassUnavailable,
+    SelectorUnavailable,
+    CallbackTimedOut,
+    CallbackDropped,
+    MainThreadDispatchFailed(String),
+    MainThreadContextMismatch,
+    MainThreadRequestTimedOut,
+    MainThreadRequestDropped,
+}
+
+impl CaptureProbeOutcome {
+    fn code(&self) -> &'static str {
+        match self {
+            Self::Image => "image",
+            Self::Error { .. } => "error",
+            Self::EmptyResult => "empty_result",
+            Self::ClassUnavailable => "class_unavailable",
+            Self::SelectorUnavailable => "selector_unavailable",
+            Self::CallbackTimedOut => "callback_timed_out",
+            Self::CallbackDropped => "callback_dropped",
+            Self::MainThreadDispatchFailed(_) => "main_thread_dispatch_failed",
+            Self::MainThreadContextMismatch => "main_thread_context_mismatch",
+            Self::MainThreadRequestTimedOut => "main_thread_request_timed_out",
+            Self::MainThreadRequestDropped => "main_thread_request_dropped",
+        }
+    }
+
+    fn detail(&self) -> Option<String> {
+        match self {
+            Self::Error {
+                domain,
+                code,
+                description,
+            } => Some(format!("{domain}({code}): {description}")),
+            Self::MainThreadDispatchFailed(error) => Some(error.clone()),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PermissionRequestResult {
+    checks: Option<PermissionRequestChecks>,
+    capture: CaptureProbeOutcome,
+}
+
+impl PermissionRequestResult {
+    fn grants(&self) -> Grants {
+        self.checks
+            .as_ref()
+            .map(|checks| checks.grants)
+            .unwrap_or_else(silent_grants)
+    }
+}
+
+async fn run_permission_request<F>(
+    request_timeout: Duration,
+    capture_timeout: Duration,
+    dispatch: F,
+) -> PermissionRequestResult
+where
+    F: FnOnce(oneshot::Sender<PermissionRequestChecks>, oneshot::Sender<CaptureProbeOutcome>) -> Result<(), String>,
+{
+    let (checks_sender, checks_receiver) = oneshot::channel();
+    let (capture_sender, capture_receiver) = oneshot::channel();
+    if let Err(error) = dispatch(checks_sender, capture_sender) {
+        return PermissionRequestResult {
+            checks: None,
+            capture: CaptureProbeOutcome::MainThreadDispatchFailed(error),
+        };
+    }
+    let checks = match timeout(request_timeout, checks_receiver).await {
+        Ok(Ok(checks)) => checks,
+        Ok(Err(_)) => {
+            return PermissionRequestResult {
+                checks: None,
+                capture: CaptureProbeOutcome::MainThreadRequestDropped,
+            };
+        }
+        Err(_) => {
+            return PermissionRequestResult {
+                checks: None,
+                capture: CaptureProbeOutcome::MainThreadRequestTimedOut,
+            };
+        }
+    };
+    let capture = match timeout(capture_timeout, capture_receiver).await {
+        Ok(Ok(outcome)) => outcome,
+        Ok(Err(_)) => CaptureProbeOutcome::CallbackDropped,
+        Err(_) => CaptureProbeOutcome::CallbackTimedOut,
+    };
+    PermissionRequestResult {
+        checks: Some(checks),
+        capture,
+    }
+}
+
+async fn request_permissions(app: &AppHandle, diagnostics: &BootstrapLog) -> Grants {
+    let app = app.clone();
+    let result = run_permission_request(
+        PERMISSION_REQUEST_TIMEOUT,
+        PERMISSION_REQUEST_TIMEOUT,
+        move |checks_sender, capture_sender| {
+            app.run_on_main_thread(move || {
+                let main_thread = MainThreadMarker::new().is_some();
+                if !main_thread {
+                    let _ = checks_sender.send(PermissionRequestChecks {
+                        grants: silent_grants(),
+                        main_thread: false,
+                    });
+                    let _ = capture_sender.send(CaptureProbeOutcome::MainThreadContextMismatch);
+                    return;
+                }
+                let accessibility = request_accessibility();
+                // SAFETY: CoreGraphics owns the permission prompt and returns
+                // the current process grant.
+                let screen_recording = unsafe { CGRequestScreenCaptureAccess() };
+                let _ = checks_sender.send(PermissionRequestChecks {
+                    grants: Grants {
+                        accessibility,
+                        screen_recording,
+                    },
+                    main_thread,
+                });
+                one_pixel_capture_probe(capture_sender);
+            })
+            .map_err(|error| error.to_string())
+        },
+    )
+    .await;
+    record_permission_request(diagnostics, &result);
+    result.grants()
+}
+
+fn request_accessibility() -> bool {
     // SAFETY: The dictionary contains two process-lifetime CoreFoundation
     // constants. The prompting call does not retain it after returning.
-    let accessibility = unsafe {
+    unsafe {
         let keys = [kAXTrustedCheckOptionPrompt];
         let values = [kCFBooleanTrue];
         let options = CFDictionaryCreate(ptr::null(), keys.as_ptr(), values.as_ptr(), 1, ptr::null(), ptr::null());
@@ -922,27 +1089,35 @@ fn request_permissions() -> Grants {
             CFRelease(options);
         }
         trusted
-    };
-    // SAFETY: CoreGraphics owns the permission prompt and returns the current
-    // process grant. The one-pixel probe below is separately attributed to the
-    // shell process.
-    let screen_recording = unsafe { CGRequestScreenCaptureAccess() };
-    one_pixel_capture_probe();
-    Grants {
-        accessibility,
-        screen_recording,
     }
 }
 
-fn one_pixel_capture_probe() {
+fn one_pixel_capture_probe(sender: oneshot::Sender<CaptureProbeOutcome>) {
+    let sender = Arc::new(Mutex::new(Some(sender)));
     let Some(manager) = AnyClass::get(c"SCScreenshotManager") else {
+        send_capture_outcome(&sender, CaptureProbeOutcome::ClassUnavailable);
         return;
     };
     let selector = sel!(captureImageInRect:completionHandler:);
     if manager.class_method(selector).is_none() {
+        send_capture_outcome(&sender, CaptureProbeOutcome::SelectorUnavailable);
         return;
     }
-    let completion = RcBlock::new(|_image: *mut AnyObject, _error: *mut AnyObject| {});
+    let completion_sender = sender.clone();
+    let completion = RcBlock::new(move |image: *mut AnyObject, error: *mut NSError| {
+        let outcome = if let Some(error) = unsafe { error.as_ref() } {
+            CaptureProbeOutcome::Error {
+                domain: error.domain().to_string(),
+                code: error.code(),
+                description: error.localizedDescription().to_string(),
+            }
+        } else if image.is_null() {
+            CaptureProbeOutcome::EmptyResult
+        } else {
+            CaptureProbeOutcome::Image
+        };
+        send_capture_outcome(&completion_sender, outcome);
+    });
     let rect = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(1.0, 1.0));
     // SAFETY: Availability and selector shape were checked above. The block is
     // copied by ScreenCaptureKit for the asynchronous completion.
@@ -953,6 +1128,47 @@ fn one_pixel_capture_probe() {
             completionHandler: &*completion
         ];
     }
+}
+
+fn send_capture_outcome(
+    sender: &Arc<Mutex<Option<oneshot::Sender<CaptureProbeOutcome>>>>,
+    outcome: CaptureProbeOutcome,
+) {
+    if let Ok(mut sender) = sender.lock() {
+        if let Some(sender) = sender.take() {
+            let _ = sender.send(outcome);
+        }
+    }
+}
+
+fn record_permission_request(diagnostics: &BootstrapLog, result: &PermissionRequestResult) {
+    let grants = result.grants();
+    let thread = result
+        .checks
+        .as_ref()
+        .map(|checks| if checks.main_thread { "main" } else { "non_main" })
+        .unwrap_or("not_run");
+    let capture = result.capture.code();
+    let mut fields = vec![
+        ("thread", thread.to_owned()),
+        ("accessibility", grants.accessibility.to_string()),
+        ("screen_recording", grants.screen_recording.to_string()),
+        ("capture", capture.to_owned()),
+    ];
+    if let Some(detail) = result.capture.detail() {
+        fields.push(("capture_detail", detail));
+    }
+    diagnostics.record("computer-use.permission-request", &fields);
+    eprintln!(
+        "computer-use permission request: thread={thread} accessibility={} screen_recording={} capture={capture}{}",
+        grants.accessibility,
+        grants.screen_recording,
+        result
+            .capture
+            .detail()
+            .map(|detail| format!(" detail={detail:?}"))
+            .unwrap_or_default()
+    );
 }
 
 fn open_missing_permission_settings(app: &AppHandle, grants: Grants) {
@@ -1084,5 +1300,110 @@ mod tests {
             })),
             Err("capture_missing")
         );
+    }
+
+    #[test]
+    fn capability_payload_requires_controller_identity_for_a_definitive_answer() {
+        assert_eq!(
+            classify_capability_payload(None, Some(COMPUTER_USE_SCHEMA)),
+            CapabilityVerdict::Transient
+        );
+        assert_eq!(
+            classify_capability_payload(Some("controller-a"), Some(COMPUTER_USE_SCHEMA)),
+            CapabilityVerdict::Supported
+        );
+        assert_eq!(
+            classify_capability_payload(Some("controller-a"), Some(COMPUTER_USE_SCHEMA - 1)),
+            CapabilityVerdict::Unsupported
+        );
+    }
+
+    #[tokio::test]
+    async fn permission_probe_preserves_failures_and_bounds_a_missing_callback() {
+        let checks = PermissionRequestChecks {
+            grants: Grants {
+                accessibility: true,
+                screen_recording: false,
+            },
+            main_thread: true,
+        };
+        for outcome in [
+            CaptureProbeOutcome::ClassUnavailable,
+            CaptureProbeOutcome::SelectorUnavailable,
+            CaptureProbeOutcome::MainThreadContextMismatch,
+            CaptureProbeOutcome::Error {
+                domain: "SCStreamErrorDomain".to_owned(),
+                code: -3801,
+                description: "permission denied".to_owned(),
+            },
+        ] {
+            let expected = outcome.clone();
+            let checks = checks.clone();
+            let result = run_permission_request(
+                Duration::from_millis(50),
+                Duration::from_millis(50),
+                move |checks_sender, capture_sender| {
+                    checks_sender.send(checks).expect("request receiver");
+                    capture_sender.send(outcome).expect("capture receiver");
+                    Ok(())
+                },
+            )
+            .await;
+            assert_eq!(result.capture, expected);
+            assert_eq!(result.checks.as_ref().map(|value| value.main_thread), Some(true));
+        }
+
+        let dispatch_failure = run_permission_request(Duration::from_millis(50), Duration::from_millis(50), |_, _| {
+            Err("event loop closed".to_owned())
+        })
+        .await;
+        assert_eq!(
+            dispatch_failure.capture,
+            CaptureProbeOutcome::MainThreadDispatchFailed("event loop closed".to_owned())
+        );
+
+        let timed_out = run_permission_request(
+            Duration::from_millis(50),
+            Duration::from_millis(5),
+            move |checks_sender, capture_sender| {
+                checks_sender.send(checks).expect("request receiver");
+                tokio::spawn(async move {
+                    sleep(Duration::from_millis(50)).await;
+                    drop(capture_sender);
+                });
+                Ok(())
+            },
+        )
+        .await;
+        assert_eq!(timed_out.capture, CaptureProbeOutcome::CallbackTimedOut);
+    }
+
+    #[test]
+    fn permission_probe_result_is_written_to_the_existing_desktop_log() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let path = temporary.path().join(BOOTSTRAP_LOG_NAME);
+        let diagnostics = BootstrapLog::at(path.clone());
+        record_permission_request(
+            &diagnostics,
+            &PermissionRequestResult {
+                checks: Some(PermissionRequestChecks {
+                    grants: Grants {
+                        accessibility: true,
+                        screen_recording: false,
+                    },
+                    main_thread: true,
+                }),
+                capture: CaptureProbeOutcome::Error {
+                    domain: "SCStreamErrorDomain".to_owned(),
+                    code: -3801,
+                    description: "permission denied".to_owned(),
+                },
+            },
+        );
+        let written = std::fs::read_to_string(path).expect("diagnostic log");
+        assert!(written.contains("computer-use.permission-request"));
+        assert!(written.contains("thread=\"main\""));
+        assert!(written.contains("capture=\"error\""));
+        assert!(written.contains("SCStreamErrorDomain(-3801): permission denied"));
     }
 }

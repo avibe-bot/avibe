@@ -50,6 +50,10 @@ product logic.
 The Runtime outlives the shell. Closing the window never stops a Runtime,
 whether the shell adopted it or started it.
 
+See [Computer use on macOS](../docs/desktop-computer-use.md) for the native
+toggle, required Privacy & Security grants, stop behavior, remote-channel
+guidance, and macOS limitations.
+
 ### Native command boundaries
 
 The three bootstrap commands are declared in `src-tauri/build.rs`, which makes

@@ -21,6 +21,7 @@ pub const COMPUTER_USE_DRIVER_VERSION: &str = "0.31.0";
 pub const COMPUTER_USE_TOOL_SNAPSHOT_SHA256: &str = "b03c3e48d1b00c8fe7c0e8b9813eb5ea104ad38313672fc4b68af203a827f43b";
 pub const FAILURE_LIMIT: usize = 3;
 pub const FAILURE_WINDOW: Duration = Duration::from_secs(5 * 60);
+pub const STALE_PREFLIGHT_FALLBACK_INTERVAL: Duration = Duration::from_secs(5);
 
 static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -233,6 +234,9 @@ impl CapabilityCache {
     }
 
     pub fn observe(&mut self, probe: CapabilityProbe) -> RuntimeSupport {
+        if probe.controller_id.is_none() && probe.verdict != CapabilityVerdict::Transient {
+            return self.current();
+        }
         if let Some(controller_id) = probe.controller_id {
             if self.controller_id.as_deref() != Some(&controller_id) {
                 self.controller_id = Some(controller_id);
@@ -340,6 +344,7 @@ pub struct ComputerUseLifecycle {
     failure_budget: FailureBudget,
     consecutive_ready_failures: u8,
     last_fallback_activation: Option<u64>,
+    last_fallback_at: Option<Duration>,
 }
 
 impl ComputerUseLifecycle {
@@ -351,6 +356,7 @@ impl ComputerUseLifecycle {
             failure_budget: FailureBudget::default(),
             consecutive_ready_failures: 0,
             last_fallback_activation: None,
+            last_fallback_at: None,
         }
     }
 
@@ -375,6 +381,7 @@ impl ComputerUseLifecycle {
             failure_budget: FailureBudget::default(),
             consecutive_ready_failures: 0,
             last_fallback_activation: None,
+            last_fallback_at: None,
         }
     }
 
@@ -403,6 +410,7 @@ impl ComputerUseLifecycle {
         self.failure_budget.clear();
         self.consecutive_ready_failures = 0;
         self.last_fallback_activation = None;
+        self.last_fallback_at = None;
         LifecycleDirective {
             write_state: true,
             stop_daemon: true,
@@ -496,7 +504,7 @@ impl ComputerUseLifecycle {
         LifecycleDirective::default()
     }
 
-    pub fn activation(&mut self, activation: u64, grants: Grants) -> LifecycleDirective {
+    pub fn activation(&mut self, activation: u64, observed_at: Duration, grants: Grants) -> LifecycleDirective {
         if !self.enabled || self.phase != ComputerUsePhase::NeedsPermission {
             return LifecycleDirective::default();
         }
@@ -512,7 +520,14 @@ impl ComputerUseLifecycle {
         if self.last_fallback_activation == Some(activation) {
             return LifecycleDirective::default();
         }
+        if self
+            .last_fallback_at
+            .is_some_and(|last| observed_at.saturating_sub(last) < STALE_PREFLIGHT_FALLBACK_INTERVAL)
+        {
+            return LifecycleDirective::default();
+        }
         self.last_fallback_activation = Some(activation);
+        self.last_fallback_at = Some(observed_at);
         self.phase = ComputerUsePhase::Starting;
         self.reason = None;
         LifecycleDirective {
@@ -659,6 +674,13 @@ mod tests {
         let mut cache = CapabilityCache::default();
         assert_eq!(
             cache.observe(CapabilityProbe {
+                controller_id: None,
+                verdict: CapabilityVerdict::Supported,
+            }),
+            RuntimeSupport::Unknown
+        );
+        assert_eq!(
+            cache.observe(CapabilityProbe {
                 controller_id: Some("a".to_owned()),
                 verdict: CapabilityVerdict::Supported,
             }),
@@ -683,7 +705,7 @@ mod tests {
     }
 
     #[test]
-    fn stale_preflight_fallback_runs_once_per_activation() {
+    fn stale_preflight_fallback_throttles_activation_bursts_but_not_fresh_grants() {
         let mut lifecycle = ComputerUseLifecycle::off();
         lifecycle.enabled = true;
         lifecycle.phase = ComputerUsePhase::NeedsPermission;
@@ -692,10 +714,52 @@ mod tests {
             accessibility: true,
             screen_recording: false,
         };
-        assert!(lifecycle.activation(4, missing).spawn_daemon);
+        let mut fallback_attempts = 0;
+        for activation in 1..=18 {
+            let observed_at = Duration::from_millis((activation - 1) * 3_000 / 17);
+            fallback_attempts += usize::from(lifecycle.activation(activation, observed_at, missing).spawn_daemon);
+            lifecycle.phase = ComputerUsePhase::NeedsPermission;
+            lifecycle.reason = Some("screen_recording".to_owned());
+        }
+        assert_eq!(fallback_attempts, 1);
+
+        assert!(
+            !lifecycle
+                .activation(19, Duration::from_millis(4_999), missing)
+                .spawn_daemon
+        );
+        assert!(lifecycle.activation(20, Duration::from_secs(5), missing).spawn_daemon);
+
         lifecycle.phase = ComputerUsePhase::NeedsPermission;
-        assert!(!lifecycle.activation(4, missing).spawn_daemon);
-        assert!(lifecycle.activation(5, missing).spawn_daemon);
+        lifecycle.reason = Some("screen_recording".to_owned());
+        let granted = lifecycle.activation(21, Duration::from_millis(5_001), Grants::all());
+        assert!(granted.spawn_daemon);
+        assert_eq!(lifecycle.phase(), ComputerUsePhase::Starting);
+    }
+
+    #[test]
+    fn only_toggle_on_marks_a_permission_request() {
+        let missing = Grants {
+            accessibility: true,
+            screen_recording: false,
+        };
+        let mut lifecycle = ComputerUseLifecycle::off();
+        assert!(
+            lifecycle
+                .toggle_on(RuntimeSupport::Supported, missing)
+                .prompt_permissions
+        );
+        assert!(!lifecycle.permission_tick(missing).prompt_permissions);
+        assert!(!lifecycle.activation(1, Duration::ZERO, missing).prompt_permissions);
+        assert!(!lifecycle.toggle_off().prompt_permissions);
+
+        lifecycle.enabled = true;
+        lifecycle.phase = ComputerUsePhase::NeedsRuntime;
+        assert!(
+            !lifecycle
+                .capabilities(RuntimeSupport::Supported, missing)
+                .prompt_permissions
+        );
     }
 
     #[test]

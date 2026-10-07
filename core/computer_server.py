@@ -596,11 +596,19 @@ def _validate_input(tool_name: str, arguments: Mapping[str, Any]) -> None:
                 "window_target_required",
                 "The input target shape is not an approved exact window target.",
             )
-    elif "element_token" not in arguments and _window_key(arguments) is None:
-        raise ComputerServerError(
-            "window_target_required",
-            "Input must provide pid and window_id, or an element token.",
-        )
+    elif "element_token" not in arguments:
+        pid = arguments.get("pid")
+        window_id = arguments.get("window_id")
+        if (
+            isinstance(pid, bool)
+            or not isinstance(pid, int)
+            or isinstance(window_id, bool)
+            or not isinstance(window_id, int)
+        ):
+            raise ComputerServerError(
+                "window_target_required",
+                "Input must provide pid and window_id, or an element token.",
+            )
     if _focus_shortcut(arguments, tool_name):
         raise ComputerServerError(
             "focus_shortcut_forbidden",

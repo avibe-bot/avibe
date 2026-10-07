@@ -152,11 +152,16 @@ running. The tray keeps the shell alive after the window closes.
     another system dialog.
   - On macOS 26 an app appears in the Screen Recording pane only after a real
     capture attempt. So the request also makes one attempt from the shell
-    process itself: a one-pixel ScreenCaptureKit capture whose result is
-    discarded. TCC attributes it to Avibe.app, and it needs no daemon, which
-    matters because the daemon starts only after both grants exist. In the
-    spike the row appeared after the host's daemon attempted a capture, so
-    verify the shell-side probe on macOS 26 in Phase 1.
+    process itself: a one-pixel ScreenCaptureKit capture. The shell dispatches
+    both request calls to the AppKit main thread, waits at most 5 s for the
+    capture completion, and records whether it received an image, an
+    `NSError`, an empty result, or no callback in `bootstrap.log`. TCC
+    attributes the attempt to Avibe.app, and it needs no daemon, which matters
+    because the daemon starts only after both grants exist.
+  - Phase 1 acceptance requires the toggle-on request to register the fixed
+    installed app in the Screen Recording pane before anyone uses the pane's
+    manual `+` control. Manually adding the app is a recovery workaround, not
+    evidence that the product request path succeeded.
 - **Lifecycle.** The shell runs one state machine whose states are the `D`
   states. Every transition writes `D` first, except that `ready` is written
   only after the health check passes.
@@ -193,7 +198,7 @@ running. The tray keeps the shell alive after the window closes.
     | any `enabled` state except `error` | a successful `/ready` is followed by an unsupported capabilities answer | `needs_runtime` | stop the daemon if running |
   | any `enabled` state except `error` | adoption found a new `controller_id` with no definitive supported answer yet | `needs_runtime` | stop the daemon if running |
   | `needs_permission` | grant check passes | `starting` | spawn |
-  | `needs_permission` | app activation, grant check still fails, no fallback attempt yet in this activation | `starting` | spawn once (stale-preflight fallback) |
+  | `needs_permission` | app activation, grant check still fails, and no fallback ran in the previous 5 s | `starting` | spawn once (stale-preflight fallback) |
   | `starting` | socket accepts and the health check returns `pass` | `ready` | none |
   | `starting` | the health check returns `missing_grant` | `needs_permission` | stop the daemon; no prompt |
   | `starting` | spawn or socket fails, or the health check returns `unhealthy` | per the failure budget | stop the daemon; apply the failure budget |
@@ -213,11 +218,16 @@ running. The tray keeps the shell alive after the window closes.
     shell's own preflight can stay false after the user grants access in
     System Settings. The fallback row covers that case.
     - A user who grants access returns to Avibe, which is an app activation.
-      At most one attempt runs per activation.
+      At most one attempt runs per activation and per 5 s interval, measured
+      with monotonic time. Activation events observed while an attempt is in
+      flight are not queued for later retries.
+    - A normal preflight that sees both grants enters `starting` immediately,
+      even when a stale-preflight fallback ran less than 5 s earlier.
     - A fresh daemon reads the grants anew. Its health check then reaches
       `ready`, or returns to `needs_permission` with no prompt.
     - A grant that is truly missing therefore costs one short-lived daemon
-      per activation, never a loop.
+      per eligible activation, never a loop. There is no background permission
+      retry or prompt.
   - **Support invariant.** Every row that can spawn or prompt sits behind a
     supported capabilities answer. So any enabled state other than
     `needs_runtime` implies that the latest probe said supported. An
@@ -557,7 +567,7 @@ covers one rendering per status. The Workbench API reads it through the same
 separate process. Copy goes through `ui/src/i18n/en.json` and `zh.json`.
 The control itself stays native in v1.
 
-## Signing prerequisite
+## Installed-build prerequisite
 
 The app must also be a registered bundle in a normal location
 (`/Applications` or `~/Applications`). An unregistered bundle run from `/tmp`
@@ -566,10 +576,15 @@ never appears in the Privacy panes, so the user cannot grant it.
 TCC binds a grant to the app's code requirement. Ad-hoc acceptance builds
 match by cdhash, so every new build loses the grant. In the spike, toggling the
 stale row off and on in System Settings did not repair it: tccd kept checking
-the old cdhash requirement until the rows were reset. Computer use can be tested
-on ad-hoc builds, which need a re-grant after each install, but ships only on
-Developer ID signed, notarized builds (`APPLE_SIGNING_IDENTITY` path in
-`desktop-package.yml`).
+the old cdhash requirement until the app was granted again.
+
+Owner amendment, 2026-10-07: the Phase 1 acceptance gate is an ad-hoc app
+installed in `/Applications` or `~/Applications` and held byte-for-byte fixed
+between the grant and the test. Developer ID signing and notarization are
+separate release infrastructure and are not a Phase 1 gate. When an update
+changes the ad-hoc cdhash and orphans the old grant, an enabled computer-use
+toggle must settle at `needs_permission` with a clear re-grant path. It must
+not become stuck in `error` or start a permission retry loop.
 
 ## Upstream mechanism risk
 
@@ -773,7 +788,7 @@ Direct-mode runs used `cua-driver mcp --direct` from a scratch directory with
   reconciliation, Claude/Codex/OpenCode translation, prompt
 - [ ] Workbench status line + i18n
 - [ ] User docs: enabling, permissions, `require_bind` guidance, stop
-- [ ] Signed build, idle desktop: the agent cursor overlay stays visible, and
+- [ ] Installed byte-fixed ad-hoc build, idle desktop: the agent cursor overlay stays visible, and
   representative AX and pixel actions neither take focus nor move the user's
   pointer (redoes the confounded Phase 0 check)
 - [ ] Windows parity
@@ -787,8 +802,11 @@ Each case lives in the suite of the component that owns the behavior.
   - One case per lifecycle-table row. Each asserts the resulting `D` and
     that no prompt is raised outside the toggle-on row.
   - Stale preflight: a grant the shell's preflight misses reaches `ready`
-    after one activation. A truly missing grant spawns once per activation.
-    A stale shell preflight does not stop a `ready` daemon.
+    after one activation. Eighteen activation events observed within 3 s
+    produce one fallback; no second fallback runs before 5 s, and a new
+    activation at or after 5 s may try again. A normal preflight that sees the
+    grants enters `starting` immediately despite the throttle. A stale shell
+    preflight does not stop a `ready` daemon.
   - Health check: the full mode runs at start and includes the capture
     probe. The `ready` heartbeat never captures. A step that hangs or fails
     returns `unhealthy` in both modes.
@@ -854,12 +872,22 @@ Each case lives in the suite of the component that owns the behavior.
     process requires an observation before a session's first input.
   - macOS input: a desktop-targeted, foreground, or unrecognised input
     call is rejected, and so are the guide's focus-intent shortcuts.
-- **Manual, on a signed build.**
+- **Manual, on an installed byte-fixed ad-hoc build.**
+  - Before manually adding the app with the Screen Recording pane's `+`
+    control, toggle computer use on once and confirm that the app row appears
+    automatically. Require a matching main-thread request and completed
+    capture-probe record in `bootstrap.log`; a silent no-op, timeout, or
+    manual-add workaround does not pass this gate.
   - Slack → agent → a background GUI task completes while the user keeps
     working, and the tray toggle stops an in-flight session's access.
   - On an idle desktop, sample the frontmost app and the pointer during AX
     and pixel actions, and confirm that the agent cursor overlay stays
     visible.
+  - Grant the fixed candidate once and do not rebuild, replace, or re-sign it
+    before the TCC, parent-liveness, focus, pointer, and cursor checks.
+  - Install a changed ad-hoc candidate with computer use still enabled. Confirm
+    that the orphaned grant produces `needs_permission`, presents the re-grant
+    path, and causes neither `error` nor repeated fallback attempts.
 
 All automated cases are hermetic: the `D` path and the upstream command are
 redirected to test-owned fakes.
