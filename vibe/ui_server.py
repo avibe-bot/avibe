@@ -3342,6 +3342,33 @@ async def ready():
     return response(payload)
 
 
+@app.route("/api/desktop/capabilities")
+async def desktop_capabilities():
+    """Expose Controller-owned desktop capability support to the native shell."""
+
+    from vibe import internal_client
+
+    try:
+        payload = await internal_client.desktop_capabilities()
+    except internal_client.InternalServerTimeout:
+        return jsonify(
+            {
+                "ok": False,
+                "error": "controller_timeout",
+            }
+        ), 503
+    except internal_client.InternalServerUnavailable:
+        return jsonify(
+            {
+                "ok": False,
+                "error": "controller_unavailable",
+            }
+        ), 503
+    response_payload = jsonify(payload)
+    response_payload.headers["Cache-Control"] = "no-store"
+    return response_payload
+
+
 @app.websocket("/ws/echo")
 async def websocket_echo(websocket: WebSocket):
     if os.environ.get("VIBE_UI_ENABLE_WS_ECHO", "").lower() not in {"1", "true", "yes", "on"}:

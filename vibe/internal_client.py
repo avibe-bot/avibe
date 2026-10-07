@@ -890,6 +890,66 @@ async def health_identity(socket_path: Optional[Path] = None) -> dict[str, Any] 
         return None
 
 
+async def desktop_capabilities(
+    socket_path: Optional[Path] = None,
+) -> dict[str, Any]:
+    """Read the desktop capability contract from the authoritative Controller.
+
+    A released Controller that predates this endpoint answers 404. That is a
+    definitive schema-0 result; transport failures remain transient so the
+    desktop shell can retain a same-Controller cached answer.
+    """
+
+    endpoint = await _resolve_endpoint_async(socket_path)
+    transport = _async_transport(endpoint)
+    try:
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url=endpoint.base_url,
+            headers=endpoint.headers,
+            timeout=httpx.Timeout(2.0, connect=1.0),
+        ) as client:
+            response = await client.get("/internal/desktop/capabilities")
+            _validate_response(response, endpoint)
+            if response.status_code == 404:
+                return {
+                    "computer_use_schema": 0,
+                    "controller_id": "legacy",
+                }
+            if response.status_code >= 400:
+                raise InternalServerUnavailable(
+                    f"desktop capabilities endpoint returned {response.status_code}"
+                )
+            try:
+                payload = response.json()
+            except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+                raise InternalServerUnavailable(
+                    "desktop capabilities response was not JSON"
+                ) from exc
+            schema = payload.get("computer_use_schema") if isinstance(payload, dict) else None
+            controller_id = payload.get("controller_id") if isinstance(payload, dict) else None
+            if (
+                isinstance(schema, bool)
+                or not isinstance(schema, int)
+                or schema < 0
+                or not isinstance(controller_id, str)
+                or not controller_id
+            ):
+                raise InternalServerUnavailable(
+                    "desktop capabilities response was malformed"
+                )
+            return {
+                "computer_use_schema": schema,
+                "controller_id": controller_id,
+            }
+    except InternalServerUnavailable:
+        raise
+    except httpx.TimeoutException as exc:
+        raise InternalServerTimeout(str(exc)) from exc
+    except _SOCKET_ERRORS as exc:
+        raise InternalServerUnavailable(str(exc)) from exc
+
+
 def health_identity_sync(socket_path: Optional[Path] = None) -> dict[str, Any] | None:
     """Synchronous Controller identity probe for CLI lifecycle decisions."""
 

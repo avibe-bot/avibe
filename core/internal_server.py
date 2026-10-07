@@ -633,6 +633,15 @@ def create_app(
             payload["desktop_runtime_id"] = runtime_id
         return payload
 
+    @app.get("/internal/desktop/capabilities")
+    async def _desktop_capabilities() -> dict[str, Any]:
+        from core.computer_use import COMPUTER_USE_SCHEMA_VERSION
+
+        return {
+            "computer_use_schema": COMPUTER_USE_SCHEMA_VERSION,
+            "controller_id": str(controller.controller_id),
+        }
+
     @app.post("/internal/show-access/settings-read")
     async def _show_access_settings_read(request: Request) -> Any:
         from core.show_pages import ShowPageError, ShowPageStore, show_access_payload

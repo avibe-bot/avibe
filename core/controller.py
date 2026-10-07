@@ -7,6 +7,7 @@ import concurrent.futures
 import json
 import logging
 import threading
+import uuid
 from typing import TYPE_CHECKING, Optional, Dict, Any
 from config import paths
 from config.platform_registry import get_platform_descriptor
@@ -31,6 +32,7 @@ from core.handlers import (
 from core.agent_auth_service import AgentAuthService
 from core.audio_asr import AudioAsrService
 from core.citations import CitationBundle
+from core.computer_use import ComputerUseConfigReconciler
 from core.message_context import build_context_session_key
 from core.message_dispatcher import ConsolidatedMessageDispatcher
 from core.message_output import MessageOutput
@@ -215,6 +217,7 @@ class Controller:
         self._runtime_work_shutdown_task: asyncio.Task[None] | None = None
         self._shutdown_tainted = False
         self._service_lock_safe_to_release = False
+        self.controller_id = uuid.uuid4().hex
         self._runtime_work_shutdown_grace_seconds = (
             _RUNTIME_WORK_SHUTDOWN_GRACE_SECONDS
         )
@@ -285,6 +288,10 @@ class Controller:
         # Initialize agents (depends on handlers/session handler)
         self._init_agents()
         self.agent_auth_service = AgentAuthService(self)
+        self.computer_use_reconciler = ComputerUseConfigReconciler(
+            self.agent_auth_service.renew_backend_runtime,
+            lambda: list(getattr(self.agent_service, "agents", {})),
+        )
         from core.backend_restart import BackendRestartCoordinator
 
         self.backend_restart_coordinator = BackendRestartCoordinator(
@@ -1130,6 +1137,14 @@ class Controller:
             await self.runtime_command_watcher.start()
         except Exception as e:
             logger.error("Failed to start runtime command watcher: %s", e, exc_info=True)
+        try:
+            self.computer_use_reconciler.start()
+        except Exception as e:
+            logger.error(
+                "Failed to start computer-use configuration reconciliation: %s",
+                e,
+                exc_info=True,
+            )
 
         try:
             if "opencode" not in getattr(agent_service, "agents", {}):
@@ -2388,6 +2403,10 @@ class Controller:
             "Runtime work stack",
         )
         _stop_loop_coroutine(self.runtime_command_watcher.stop(), "Runtime command watcher")
+        _stop_loop_coroutine(
+            self.computer_use_reconciler.stop(),
+            "Computer-use configuration reconciler",
+        )
         # Reconciliation, capture cancellation, accepted destructive work, and
         # runtime close share one deadline so no stage can block service exit or
         # starve the stages behind it.
