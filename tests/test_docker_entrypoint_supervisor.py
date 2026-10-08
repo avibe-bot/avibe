@@ -1,3 +1,4 @@
+import json
 import os
 import signal
 import stat
@@ -21,6 +22,42 @@ class DockerEntrypointSupervisorTests(unittest.TestCase):
         self.assertIn('python -m vibe.log_sink "$ui_stdout"', entrypoint)
         self.assertIn('python -m vibe.log_sink "$ui_stderr"', entrypoint)
         subprocess.run(["bash", "-n", str(ENTRYPOINT)], check=True)
+
+    def test_first_start_seeds_the_shared_first_run_config(self):
+        """A container without a config starts from the first run every other entry point seeds.
+
+        This runs the entrypoint's seeding step with the real interpreter. The
+        stubbed `python` in the tests below answers every `-c` snippet with exit
+        0, which is how a snippet importing a name that no longer existed went
+        unnoticed.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            bin_dir = tmp_path / "bin"
+            bin_dir.mkdir()
+            shim = bin_dir / "python"
+            shim.write_text(f'#!/bin/sh\nexec "{sys.executable}" "$@"\n', encoding="utf-8")
+            shim.chmod(shim.stat().st_mode | stat.S_IEXEC)
+
+            env = os.environ.copy()
+            env["PATH"] = f"{bin_dir}{os.pathsep}{env.get('PATH', '')}"
+            env["HOME"] = str(tmp_path / "user")
+            env["AVIBE_HOME"] = str(tmp_path / "avibe")
+
+            result = subprocess.run(
+                ["bash", str(ENTRYPOINT), "exec", "true"],
+                cwd=REPO_ROOT,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            config = json.loads((tmp_path / "avibe" / "config" / "config.json").read_text(encoding="utf-8"))
+            self.assertIs(config["setup_completed"], False)
+            self.assertEqual(config["platform"], "avibe")
+            self.assertEqual(config["platforms"], {"enabled": [], "primary": "avibe"})
 
     def test_full_mode_exits_when_service_process_dies(self):
         with tempfile.TemporaryDirectory() as tmpdir:
