@@ -374,6 +374,28 @@ comes from an API the Workbench already uses:
   (`turn_state.background_activities`) do not change the state. The panel
   shows them as an activity strip, and the collapsed pet shows a count. The pet
   is "Running" only when the agent itself is working.
+- **Other conversations move the pose only.** When the bound session is
+  Idle (or nothing is bound) and an agent is mid-turn in any other
+  conversation the user can see, the avatar shows the Running pose and does
+  not fall asleep. The state, the panel, the badge and `data-state` still
+  describe the bound session alone, so the panel never claims `S` is running.
+  - "Working" means an `active` instance of a `foreground` session in the
+    running-agents snapshot (`GET /api/running-agents`, the Agents page's
+    source), on any surface. Background runs, Runtime-owned sessions and
+    session-less processes do not count; an unreachable snapshot counts as
+    nothing working.
+  - It is read only with `can_use_agents`. It is re-read on every event that
+    can change an input of the rule, declared once as `REFRESH_TRIGGERS`:
+    agent state (`turn.start`, `turn.end`, `session.status`,
+    `runs.updated`), a session's visibility or existence
+    (`session.activity`), what the reader may see (authorization changes),
+    and gaps (reconnect, page return). A 30-second reconcile while visible
+    covers IM turns and agents that stop without an event.
+  - `turn.start` is published before the backend registers the agent as
+    active, so a started session is re-read every 2 seconds until the
+    snapshot shows it active, its `turn.end` arrives, or 30 seconds pass.
+  - `derivePetPose(state, {othersWorking, asleep})` is the pure rule; the
+    bound session's non-Idle states always win.
 - **Reading.** The pet marks read only what it rendered. The expanded panel
   renders every unread agent result in the loaded tail, oldest first, in a
   scrollable list, rather than only the latest one.
@@ -399,6 +421,13 @@ question, and treating it as one would hold the pet in Needs input
 indefinitely with no action that clears it. Older groups stay clickable in the
 Workbench, reached with "Open in Avibe". This also keeps the state computable
 from the bounded tail, with no history scan.
+
+A group is also answered by any user input after it (a row whose type lists
+`user` in the catalog's `inputAuthors`; a display-only Show Page annotation is
+not input). The user often answers
+in free text, and that message starts a turn: until the next result lands the
+agent is working on the answer, so the pet shows Running rather than Needs
+input for the whole turn.
 
 Tool approvals and `AskUserQuestion`-style waits do not exist today. Claude
 runs with permissions bypassed and Codex auto-approves, so vault requests and

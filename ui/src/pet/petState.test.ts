@@ -1,8 +1,16 @@
 import { describe, expect, it } from 'vitest';
 
-import type { WorkbenchMessage } from '@/context/ApiContext';
+import type { RunningAgent, RunningAgentsResult, WorkbenchMessage } from '@/context/ApiContext';
 
-import { derivePetState, latestExchange, openQuickReplies, type PetStateInputs } from './petState';
+import {
+  conversationAgentWorking,
+  derivePetPose,
+  derivePetState,
+  latestExchange,
+  openQuickReplies,
+  type PetState,
+  type PetStateInputs,
+} from './petState';
 
 let nextId = 0;
 const row = (overrides: Partial<WorkbenchMessage>): WorkbenchMessage => ({
@@ -77,6 +85,16 @@ describe('derivePetState', () => {
     expect(derivePetState({ ...quiet, messages: [user(), asking('Yes')] })).toBe('idle');
   });
 
+  it('treats a free-text reply after the group as its answer, while that turn runs', () => {
+    const messages = [user(), asking(), user('free text')];
+    expect(openQuickReplies(messages)).toBeNull();
+    expect(derivePetState({ ...quiet, messages, turn: { foreground: 'running', in_flight: true } })).toBe('running');
+    // Rows that are not the user's input do not answer it: a harness message,
+    // or the user's own display-only Show Page annotation.
+    expect(openQuickReplies([user(), asking(), row({ author: 'harness', type: 'harness' })])).not.toBeNull();
+    expect(openQuickReplies([user(), asking(), row({ author: 'user', type: 'annotation', source: 'user' })])).not.toBeNull();
+  });
+
   it('ignores an older unanswered group once a newer result exists', () => {
     const messages = [user(), asking(), user('free text'), result()];
     expect(openQuickReplies(messages)).toBeNull();
@@ -121,5 +139,69 @@ describe('latestExchange', () => {
   it('leaves out process rows', () => {
     const exchange = latestExchange([user(), row({ type: 'tool_call' }), result({ text: 'done' })], false);
     expect(exchange.results.map((message) => message.text)).toEqual(['done']);
+  });
+});
+
+const agent = (overrides: Partial<RunningAgent>): RunningAgent => ({
+  backend: 'claude',
+  state: 'active',
+  base_session_id: 'S',
+  composite_key: 'S:/w',
+  workdir: '/w',
+  pid: 1,
+  pid_shared: false,
+  native_session_id: null,
+  model: null,
+  elapsed_seconds: 1,
+  session_id: 'S',
+  title: 'S',
+  platform: 'avibe',
+  scope_type: 'project',
+  scope_display_name: 'p',
+  visibility: 'foreground',
+  trigger_source: 'human',
+  agent_name: 'claude',
+  openable_in_chat: true,
+  ...overrides,
+});
+const snapshot = (agents: RunningAgent[]): RunningAgentsResult => ({
+  ok: true,
+  agents,
+  counts: { total: agents.length, active: 0, idle: 0, orphan: 0, by_backend: {} },
+});
+
+describe('conversationAgentWorking', () => {
+  it('is true only for an active agent in a foreground conversation', () => {
+    expect(conversationAgentWorking(snapshot([agent({})]))).toBe(true);
+    expect(conversationAgentWorking(snapshot([agent({ state: 'idle' }), agent({ state: 'orphan' })]))).toBe(false);
+    expect(conversationAgentWorking(snapshot([agent({ visibility: 'background' })]))).toBe(false);
+    expect(conversationAgentWorking(snapshot([agent({ visibility: 'system' })]))).toBe(false);
+    expect(conversationAgentWorking(snapshot([agent({ session_id: null, visibility: null })]))).toBe(false);
+    expect(conversationAgentWorking(snapshot([agent({ state: 'idle' }), agent({ session_id: 'T' })]))).toBe(true);
+  });
+
+  it('is false when the Runtime cannot answer', () => {
+    expect(conversationAgentWorking({ ok: false, unreachable: true, agents: [agent({})], counts: {} })).toBe(false);
+  });
+});
+
+describe('derivePetPose', () => {
+  const states: PetState[] = ['needs_input', 'blocked', 'ready', 'running', 'idle'];
+
+  it('keeps every bound-session state other than idle, whatever else is working', () => {
+    for (const state of states.filter((value) => value !== 'idle')) {
+      for (const othersWorking of [false, true]) {
+        for (const asleep of [false, true]) {
+          expect(derivePetPose(state, { othersWorking, asleep })).toBe(state);
+        }
+      }
+    }
+  });
+
+  it('shows another conversation\'s work over idle and sleep', () => {
+    expect(derivePetPose('idle', { othersWorking: true, asleep: true })).toBe('running');
+    expect(derivePetPose('idle', { othersWorking: true, asleep: false })).toBe('running');
+    expect(derivePetPose('idle', { othersWorking: false, asleep: true })).toBe('sleeping');
+    expect(derivePetPose('idle', { othersWorking: false, asleep: false })).toBe('idle');
   });
 });

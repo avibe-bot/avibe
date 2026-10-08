@@ -1836,6 +1836,8 @@ export type RunningAgent = {
   platform: string | null;
   scope_type: string | null;
   scope_display_name: string | null;
+  /** The session's visibility; null for a process with no session row. */
+  visibility: 'foreground' | 'background' | 'system' | null;
   trigger_source: 'human' | 'agent' | 'scheduled' | 'watch' | 'webhook' | 'callback' | null;
   agent_name: string | null;
   openable_in_chat: boolean;

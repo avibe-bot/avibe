@@ -1,5 +1,13 @@
-import type { SessionRuntimeState, WorkbenchMessage, WorkbenchSession } from '@/context/ApiContext';
+import type {
+  RunningAgentsResult,
+  SessionRuntimeState,
+  WorkbenchMessage,
+  WorkbenchSession,
+} from '@/context/ApiContext';
 import { isTranscriptMessage } from '@/lib/chatMessageTypes';
+import { specFor } from '@/lib/messageTypes';
+
+import type { PetPose } from './PetAvatar';
 
 /**
  * What the desktop pet shows for its bound session. One pure derivation from
@@ -34,6 +42,11 @@ export const quickReplyChosen = (message: WorkbenchMessage): string | null => {
 const isAgentResult = (message: WorkbenchMessage): boolean =>
   message.author === 'agent' && message.type === 'result';
 
+/** A row the user sent the agent as input (the catalog's `inputAuthors`), not
+ *  a display-only row such as a Show Page annotation. */
+const isUserInput = (message: WorkbenchMessage): boolean =>
+  message.author === 'user' && specFor(message.type).inputAuthors.includes('user');
+
 /** The latest agent result in the tail, or null. */
 export const latestAgentResult = (messages: WorkbenchMessage[]): WorkbenchMessage | null => {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
@@ -44,15 +57,22 @@ export const latestAgentResult = (messages: WorkbenchMessage[]): WorkbenchMessag
 
 /**
  * The quick-reply group the agent is waiting on now: the latest agent result's
- * group, while unanswered. An older unanswered group is not an open question —
- * once a newer result exists the agent has moved on — so it never counts
- * (it stays clickable in the Workbench).
+ * group, while unanswered. A group is answered by a chosen option or by any
+ * user input after it (a free-text reply, which then runs as a turn). An
+ * older unanswered group is not an open question either — once a newer result
+ * exists the agent has moved on — so it never counts (it stays clickable in
+ * the Workbench).
  */
 export const openQuickReplies = (messages: WorkbenchMessage[]): { message: WorkbenchMessage; options: string[] } | null => {
-  const latest = latestAgentResult(messages);
-  if (!latest || quickReplyChosen(latest)) return null;
-  const options = quickReplyOptions(latest);
-  return options.length > 0 ? { message: latest, options } : null;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (isUserInput(message)) return null;
+    if (!isAgentResult(message)) continue;
+    if (quickReplyChosen(message)) return null;
+    const options = quickReplyOptions(message);
+    return options.length > 0 ? { message, options } : null;
+  }
+  return null;
 };
 
 const isRunning = (turn: PetStateInputs['turn']): boolean =>
@@ -65,6 +85,31 @@ export const derivePetState = (inputs: PetStateInputs): PetState => {
   if (!isRunning(inputs.turn) && inputs.unreadCount > 0) return 'ready';
   if (isRunning(inputs.turn)) return 'running';
   return 'idle';
+};
+
+/**
+ * Whether an agent is mid-turn in any conversation the user can see: an
+ * active instance of a foreground session, on any surface. Background runs,
+ * Runtime-owned sessions and processes without a session do not count, and
+ * an unreachable snapshot says nothing is known to be working.
+ */
+export const conversationAgentWorking = (result: RunningAgentsResult): boolean =>
+  result.ok === true
+  && result.agents.some((agent) => agent.state === 'active' && agent.visibility === 'foreground');
+
+/**
+ * What the avatar draws. The bound session's state wins; when it has nothing
+ * to say, an agent working in another conversation keeps the pet busy (and
+ * awake). Only the pose follows other sessions: the panel, badge and
+ * `data-state` describe the bound session alone.
+ */
+export const derivePetPose = (
+  state: PetState,
+  { othersWorking, asleep }: { othersWorking: boolean; asleep: boolean },
+): PetPose => {
+  if (state !== 'idle') return state;
+  if (othersWorking) return 'running';
+  return asleep ? 'sleeping' : 'idle';
 };
 
 /**
