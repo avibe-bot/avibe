@@ -23,6 +23,7 @@ async function serveProduct(page: Page, lang: Lang = 'en') {
     '/api/session', '/api/config', '/api/csrf-token', '/api/projects',
     '/api/workbench/projects-bootstrap', '/api/sessions', '/api/agents',
     '/api/inbox', '/api/version', '/api/events',
+    '/api/desktop/computer-use/status',
   ]);
   await page.route('**/api/**', (route) => {
     const request = route.request();

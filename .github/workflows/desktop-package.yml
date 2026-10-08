@@ -125,6 +125,12 @@ jobs:
           python desktop/scripts/build-runtime-bundle.py
           --target "${{ matrix.target }}"
 
+      - name: Install pinned driver validation dependency
+        if: runner.os == 'macOS'
+        run: >-
+          python -m pip install --disable-pip-version-check
+          --only-binary=:all: "PyYAML==6.0.3"
+
       - name: Prepare pinned Cua Driver sidecar
         if: runner.os == 'macOS'
         run: >

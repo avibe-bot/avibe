@@ -17,12 +17,42 @@ export type ComputerUseCopyKey =
   | 'workbench.home.computerUse.needsRuntime'
   | 'workbench.home.computerUse.error'
   | 'workbench.home.computerUse.errorDetail'
+  | 'workbench.home.computerUse.stateUnwritableDetail'
+  | 'workbench.home.computerUse.assetsInvalidDetail'
+  | 'workbench.home.computerUse.spawnFailedDetail'
+  | 'workbench.home.computerUse.daemonExitedDetail'
+  | 'workbench.home.computerUse.healthTimeoutDetail'
+  | 'workbench.home.computerUse.endpointBusyDetail'
+  | 'workbench.home.computerUse.endpointUnremovableDetail'
+  | 'workbench.home.computerUse.socketUnreachableDetail'
   | 'workbench.home.computerUse.unavailable'
   | 'workbench.home.computerUse.unavailableDetail'
+  | 'workbench.home.computerUse.invalidStateFileDetail'
+  | 'workbench.home.computerUse.snapshotInvalidDetail'
+  | 'workbench.home.computerUse.shellNotRunningDetail'
+  | 'workbench.home.computerUse.daemonUnreachableDetail'
   | 'workbench.home.computerUse.off'
   | 'workbench.home.computerUse.offDetail';
 
 export type StatusTone = 'muted' | 'mint' | 'gold' | 'destructive';
+
+const errorDetailKeys: Record<string, ComputerUseCopyKey> = {
+  state_unwritable: 'workbench.home.computerUse.stateUnwritableDetail',
+  assets_invalid: 'workbench.home.computerUse.assetsInvalidDetail',
+  spawn_failed: 'workbench.home.computerUse.spawnFailedDetail',
+  daemon_exited: 'workbench.home.computerUse.daemonExitedDetail',
+  health_timeout: 'workbench.home.computerUse.healthTimeoutDetail',
+  endpoint_busy: 'workbench.home.computerUse.endpointBusyDetail',
+  endpoint_unremovable: 'workbench.home.computerUse.endpointUnremovableDetail',
+  socket_unreachable: 'workbench.home.computerUse.socketUnreachableDetail',
+};
+
+const unavailableDetailKeys: Record<string, ComputerUseCopyKey> = {
+  invalid_state_file: 'workbench.home.computerUse.invalidStateFileDetail',
+  snapshot_invalid: 'workbench.home.computerUse.snapshotInvalidDetail',
+  shell_not_running: 'workbench.home.computerUse.shellNotRunningDetail',
+  daemon_unreachable: 'workbench.home.computerUse.daemonUnreachableDetail',
+};
 
 export const computerUseStatusCopy = (
   status: ComputerUseStatus,
@@ -49,10 +79,14 @@ export const computerUseStatusCopy = (
     return { label: t('workbench.home.computerUse.needsRuntime'), detail, tone: 'gold' };
   }
   if (status.status === 'error') {
-    return { label: t('workbench.home.computerUse.error'), detail: t('workbench.home.computerUse.errorDetail'), tone: 'destructive' };
+    const detailKey = errorDetailKeys[status.reason ?? '']
+      ?? 'workbench.home.computerUse.errorDetail';
+    return { label: t('workbench.home.computerUse.error'), detail: t(detailKey), tone: 'destructive' };
   }
   if (status.status === 'unavailable') {
-    return { label: t('workbench.home.computerUse.unavailable'), detail: t('workbench.home.computerUse.unavailableDetail'), tone: 'destructive' };
+    const detailKey = unavailableDetailKeys[status.reason ?? '']
+      ?? 'workbench.home.computerUse.unavailableDetail';
+    return { label: t('workbench.home.computerUse.unavailable'), detail: t(detailKey), tone: 'destructive' };
   }
   return { label: t('workbench.home.computerUse.off'), detail: t('workbench.home.computerUse.offDetail'), tone: 'muted' };
 };

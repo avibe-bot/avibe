@@ -2943,8 +2943,20 @@
         "runtimeTooOldDetail": "当前 Avibe 服务不支持这项电脑操作协议。",
         "error": "电脑操作需要处理",
         "errorDetail": "请关闭电脑操作后重新开启一次。",
+        "stateUnwritableDetail": "Avibe 无法保存原生状态。请检查应用数据访问权限，然后关闭并重新开启电脑操作。",
+        "assetsInvalidDetail": "受管理的驱动或策略验证失败。请更新或重新安装 Avibe 桌面应用。",
+        "spawnFailedDetail": "受管理的驱动无法启动。请关闭并重新开启电脑操作；如果持续失败，请重新打开 Avibe。",
+        "daemonExitedDetail": "受管理的驱动意外停止。请关闭并重新开启电脑操作；如果问题重复出现，请重新打开 Avibe。",
+        "healthTimeoutDetail": "受管理的驱动未能及时就绪。请关闭并重新开启电脑操作；如果问题重复出现，请重新打开 Avibe。",
+        "endpointBusyDetail": "另一个 Avibe 桌面进程正在占用电脑操作端点。请退出另一个进程后重试。",
+        "endpointUnremovableDetail": "Avibe 无法替换旧的电脑操作端点。请退出并重新打开桌面应用。",
+        "socketUnreachableDetail": "Avibe 无法连接受管理的驱动。请关闭并重新开启电脑操作；如果问题重复出现，请重新打开 Avibe。",
         "unavailable": "电脑操作不可用",
-        "unavailableDetail": "受管理的驱动或已验证的策略不可用。"
+        "unavailableDetail": "受管理的电脑操作状态不可用。请重新打开 Avibe 桌面应用。",
+        "invalidStateFileDetail": "原生电脑操作状态已损坏。请使用原生开关重新生成状态。",
+        "snapshotInvalidDetail": "已验证的电脑操作工具快照缺失或发生变化。请更新或重新安装 Avibe 桌面应用。",
+        "shellNotRunningDetail": "请打开或重新打开 Avibe 桌面应用，以使用电脑操作。",
+        "daemonUnreachableDetail": "桌面驱动当前无法连接。请关闭并重新开启电脑操作；如果问题重复出现，请重新打开 Avibe。"
       },
       "continueOnPhone": "在手机 APP 上继续",
       "connectChatApps": "聊天应用可在<settings>设置</settings>中连接"

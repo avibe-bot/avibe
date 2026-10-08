@@ -113,11 +113,16 @@ def test_workbench_status_uses_the_shared_effective_status_contract(
 ) -> None:
     """Workbench must not infer availability from the capabilities endpoint."""
 
+    monkeypatch.setattr(ui_server.sys, "platform", "darwin")
+    monkeypatch.setattr(
+        ui_server,
+        "desktop_caller_provenance",
+        lambda: frozenset({"desktop-runtime"}),
+    )
     monkeypatch.setattr(
         "core.computer_use.effective_computer_use_status",
         lambda: ComputerUseStatus("needs_permission", "screen_recording"),
     )
-    monkeypatch.setattr(ui_server, "_desktop_computer_use_supported", lambda: True)
     response = app.test_client().get(
         "/api/desktop/computer-use/status",
         base_url="http://127.0.0.1:5123",
@@ -132,7 +137,12 @@ def test_workbench_status_uses_the_shared_effective_status_contract(
 
 
 def test_workbench_status_hides_computer_use_on_unsupported_hosts(monkeypatch) -> None:
-    monkeypatch.setattr(ui_server, "_desktop_computer_use_supported", lambda: False)
+    monkeypatch.setattr(ui_server.sys, "platform", "darwin")
+    monkeypatch.setattr(
+        ui_server,
+        "desktop_caller_provenance",
+        lambda: frozenset(),
+    )
     response = app.test_client().get(
         "/api/desktop/computer-use/status",
         base_url="http://127.0.0.1:5123",
@@ -144,3 +154,16 @@ def test_workbench_status_hides_computer_use_on_unsupported_hosts(monkeypatch) -
         "reason": "unsupported_host",
     }
     assert response.headers["Cache-Control"] == "no-store"
+
+
+def test_workbench_status_stays_hidden_outside_macos_desktop_runtime(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(ui_server.sys, "platform", "linux")
+    monkeypatch.setattr(
+        ui_server,
+        "desktop_caller_provenance",
+        lambda: frozenset({"desktop-runtime"}),
+    )
+
+    assert not ui_server._desktop_computer_use_supported()

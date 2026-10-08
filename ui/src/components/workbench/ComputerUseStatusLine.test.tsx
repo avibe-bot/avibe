@@ -48,6 +48,49 @@ describe('computerUseStatusCopy', () => {
       (key) => key,
     ).detail).toContain('runtimeTooOldDetail');
   });
+
+  it.each([
+    ['state_unwritable', 'stateUnwritableDetail'],
+    ['assets_invalid', 'assetsInvalidDetail'],
+    ['spawn_failed', 'spawnFailedDetail'],
+    ['daemon_exited', 'daemonExitedDetail'],
+    ['health_timeout', 'healthTimeoutDetail'],
+    ['endpoint_busy', 'endpointBusyDetail'],
+    ['endpoint_unremovable', 'endpointUnremovableDetail'],
+    ['socket_unreachable', 'socketUnreachableDetail'],
+  ])('maps error reason %s to dedicated localized remediation', (reason, key) => {
+    const detail = computerUseStatusCopy(
+      { status: 'error', reason },
+      (copyKey) => copyKey,
+    ).detail;
+    expect(detail).toContain(key);
+    expect(detail).not.toContain(reason);
+  });
+
+  it.each([
+    ['invalid_state_file', 'invalidStateFileDetail'],
+    ['snapshot_invalid', 'snapshotInvalidDetail'],
+    ['shell_not_running', 'shellNotRunningDetail'],
+    ['daemon_unreachable', 'daemonUnreachableDetail'],
+  ])('maps unavailable reason %s to dedicated localized remediation', (reason, key) => {
+    const detail = computerUseStatusCopy(
+      { status: 'unavailable', reason },
+      (copyKey) => copyKey,
+    ).detail;
+    expect(detail).toContain(key);
+    expect(detail).not.toContain(reason);
+  });
+
+  it('keeps unknown error and unavailable reasons localized', () => {
+    expect(computerUseStatusCopy(
+      { status: 'error', reason: 'future_error' },
+      (key) => key,
+    ).detail).toBe('workbench.home.computerUse.errorDetail');
+    expect(computerUseStatusCopy(
+      { status: 'unavailable', reason: 'future_unavailable' },
+      (key) => key,
+    ).detail).toBe('workbench.home.computerUse.unavailableDetail');
+  });
 });
 
 describe('ComputerUseStatusLine', () => {

@@ -18,6 +18,7 @@ from runpy import run_path
 _versions = run_path(str(Path(__file__).with_name("release_package_version.py")))
 package_version_from_release_tag = _versions["package_version_from_release_tag"]
 _github = run_path(str(Path(__file__).with_name("github_release.py")))
+DESKTOP_SOURCE_SCHEMA_VERSION = 2
 TARGETS = {
     "aarch64-apple-darwin": ("macos", "aarch64", ".dmg"),
     "x86_64-apple-darwin": ("macos", "x86_64", ".dmg"),
@@ -198,7 +199,8 @@ def record(*, version: str, target: str, tag: str, source_sha: str,
     shutil.copyfile(installer, output / names[0])
     shutil.copyfile(manifest_path, output / names[1])
     source = {
-        "schema_version": 1, "tag": tag, "source_sha": source_sha,
+        "schema_version": DESKTOP_SOURCE_SCHEMA_VERSION,
+        "tag": tag, "source_sha": source_sha,
         "version": version, "target": target,
         "package_version": manifest["runtime_version"],
     }
@@ -249,7 +251,10 @@ def verify(directory: Path, tag: str, source_sha: str, *, updater_enabled: bool 
         if (directory / names[4]).read_text(encoding="utf-8") != checksums:
             raise ValueError("Desktop asset hash mismatch")
         source = json.loads((directory / names[2]).read_text(encoding="utf-8"))
-        expected_source = {"schema_version": 1, "tag": tag, "source_sha": source_sha,
+        schema_version = source.get("schema_version")
+        if schema_version not in {1, DESKTOP_SOURCE_SCHEMA_VERSION}:
+            raise ValueError("Desktop source provenance schema mismatch")
+        expected_source = {"schema_version": schema_version, "tag": tag, "source_sha": source_sha,
                            "version": version, "target": target,
                            "package_version": package_version_from_release_tag(tag)}
         driver = source.pop("computer_use_driver", None)
@@ -261,11 +266,10 @@ def verify(directory: Path, tag: str, source_sha: str, *, updater_enabled: bool 
                 "thinned_upstream_sha256",
                 "packaged_sha256",
             )
-            if driver is None and source.get("schema_version") == 1:
+            if driver is None and schema_version == 1:
                 # Schema-1 macOS artifacts predate the pinned Cua Driver
                 # provenance block. Keep those already-published artifacts
-                # verifiable; any current producer output still carries and
-                # strictly validates the block below.
+                # verifiable. Schema 2 makes the block mandatory.
                 pass
             elif (
                 not isinstance(driver, dict)

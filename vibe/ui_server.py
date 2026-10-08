@@ -74,6 +74,7 @@ from core.show_session_events import (
 )
 from core.terminal_service import TERMINAL_SUPPORTED, TerminalService, TerminalServiceError, sanitize_session_id
 from modules.agents.catalog import AGENT_BACKENDS, supports_runtime_refresh
+from vibe.desktop_runtime import desktop_caller_provenance
 from vibe.i18n import get_supported_languages, t
 from vibe.logging_config import application_log_paths
 from vibe.runtime import get_ui_dist_path, get_working_dir
@@ -88,7 +89,7 @@ logger = logging.getLogger(__name__)
 
 
 def _desktop_computer_use_supported() -> bool:
-    return sys.platform == "darwin"
+    return sys.platform == "darwin" and bool(desktop_caller_provenance())
 
 
 class _ShowEventDispatchOutcome(str, Enum):

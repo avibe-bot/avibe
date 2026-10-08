@@ -111,11 +111,14 @@ running. The tray keeps the shell alive after the window closes.
   package: `lipo -thin` of the universal binary keeps Cua's valid per-slice
   signature. Record the release archive, extracted universal, and thinned
   upstream digests before packaging, separately from the packaged digest and
-  cdhash after signing. Sign nested code explicitly before the outer app;
-  `--deep` is verification-only. Windows ships `cua-driver.exe`; whether the
-  default-off `cua-driver-uia.exe` worker is needed is a Windows-run question.
-  Spawn it with `CREATE_NO_WINDOW` (it is a console program), as `runtime-host`
-  already does for the Runtime.
+  cdhash after signing. Newly produced desktop source metadata uses schema 2:
+  every macOS record must include this complete driver provenance block.
+  Schema-1 metadata remains accepted only as a legacy published input. Sign
+  nested code explicitly before the outer app; `--deep` is verification-only.
+  Windows ships `cua-driver.exe`; whether the default-off
+  `cua-driver-uia.exe` worker is needed is a Windows-run question. Spawn it
+  with `CREATE_NO_WINDOW` (it is a console program), as `runtime-host` already
+  does for the Runtime.
   - **Asset path trust.** Release builds resolve the driver, managed policy,
     snapshot, and state directory from the signed bundle and app-data paths.
     `AVIBE_COMPUTER_USE_DRIVER_PATH`, `AVIBE_COMPUTER_USE_POLICY_PATH`,
@@ -553,7 +556,15 @@ running. The tray keeps the shell alive after the window closes.
       Windows). Inside that lock the server reads and writes the lease
       record: holder session id, last refresh time, a lease `epoch` that
       increases with each new holder, and the daemon key (`instance_id`,
-      `generation`) it was taken under.
+      `generation`) it was taken under. Acquisition also re-reads the
+      effective ready daemon key while holding this same lock. A caller that
+      read stale `D` therefore cannot overwrite a holder admitted for the
+      current generation.
+    - Acquisition reports whether this call newly claimed the holder or merely
+      renewed the same session. An ordinary pre-forward failure releases only
+      a newly claimed lease; a renewed lease survives guards such as
+      `observe_first`. A daemon-generation change voids either form, and exact
+      key matching prevents that cleanup from releasing the newer generation.
     - Two first calls from different processes therefore serialize. One
       wins, and the other gets `desktop_busy` naming the holder.
     - The holder refreshes the lease when each call starts, and every 10 s
@@ -565,6 +576,18 @@ running. The tray keeps the shell alive after the window closes.
     - A lease whose daemon key differs from `D`'s current one is void. A
       native stop, a toggle off and on, or a respawn therefore clears every
       lease without waiting out the 60 s.
+    - After creating or reusing an upstream proxy, the server re-reads the
+      effective status before session revival or forwarding. A daemon-key
+      mismatch closes only that exact proxy and may retry admission once,
+      before any tool request has been forwarded. EOF, timeout, or another
+      failure after forwarding is never replayed, because an input result may
+      be unknown.
+    - Proxy liveness includes the JSON-RPC reader task, not only the child
+      process. Request registration checks reader completion on both sides of
+      publishing its future, and every request has a 180 s transport deadline,
+      above Cua's documented 120 s accessibility-call bound. EOF and timeout
+      discard only the failed transport; a late failure from an old proxy
+      cannot clear its replacement or the replacement's observations.
     - Each session remembers the epoch it last held. Another session may have
       held the desktop in between, so a session can reacquire the lease under a
       newer epoch. Before forwarding that call, the server runs `end_session`
@@ -651,11 +674,16 @@ running. The tray keeps the shell alive after the window closes.
 
 A read-only status line, derived from the effective status: ready, off, needs
 permission, needs a newer Runtime (with "restart the Avibe service"),
-starting, error with its reason, or unavailable with its reason. Validation
-covers one rendering per status. The Workbench API reads it through the same
-`core/computer_use.py` reader, not through Runtime memory, because it runs in a
-separate process. Copy goes through `ui/src/i18n/en.json` and `zh.json`.
-The control itself stays native in v1.
+starting, error with reason-specific remediation, or unavailable with
+reason-specific remediation. Unknown future reasons use a localized fallback
+and never expose an internal reason code. The line appears only in a
+macOS Runtime whose interpreter or launcher marker proves desktop-managed
+provenance; a normal terminal-installed macOS Runtime does not advertise a
+native control it cannot own. Validation covers one rendering per status and
+every emitted error or unavailable reason. The Workbench API reads state
+through the same `core/computer_use.py` reader, not through Runtime memory,
+because it runs in a separate process. Copy goes through
+`ui/src/i18n/en.json` and `zh.json`. The control itself stays native in v1.
 
 ## Installed-build prerequisite
 
@@ -977,8 +1005,13 @@ Each case lives in the suite of the component that owns the behavior.
     `end_session` waits for the calls queued before it.
   - Lease: simultaneous first calls from two processes yield exactly one
     holder, and the other gets `desktop_busy` until `end_session` or 60 s
-    idle. A 120 s call keeps its lease. A stop and re-enable voids every
-    lease.
+    idle. Admission revalidates the daemon key under the lease lock, a renewed
+    holder survives `observe_first`, and a newly claimed setup failure releases
+    immediately. A 120 s call keeps its lease. A stop and re-enable voids
+    every lease.
+  - Transport: reader EOF before request registration fails promptly; a hung
+    request reaches the 180 s bound; and a late failure from an old proxy
+    leaves the current replacement and its observations intact.
   - Stale input: after an epoch change, old element tokens are rejected,
     and input to a window gets `observe_first` until that same window is
     observed. Observing window A does not clear window B. A new server
@@ -1012,6 +1045,15 @@ redirected to test-owned fakes.
 
 ## Owner decision ledger
 
+- **2026-10-08 — f043 review scope.** Keep `ComputerUseServer` as the single
+  owner and close lease generation, proxy reader, admitted Codex prompt,
+  Workbench provenance/remediation, workflow dependency, and release metadata
+  contracts in one exact head. Do not add another lock, state file, or server
+  type.
+- **2026-10-08 — shell-lock retry follow-up.** A Python shell-lock probe can
+  race a desktop relaunch. Preserve one-shell ownership in Phase 1 and track a
+  bounded startup retry as a separate follow-up instead of weakening the lock
+  in this review head.
 - **2026-10-07 19:22 UTC+8 — accepted Phase 1 workaround.** The owner accepts
   the localized Screen Recording `+`/drag and enable flow when macOS 26
   ad-hoc signing leaves the automatic row absent. Automatic registration

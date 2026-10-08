@@ -192,6 +192,11 @@ def test_real_assembled_assets_pass_the_release_consumer(tmp_path):
     paths = release.verify(directory, TAG, SOURCE)
     assert len(paths) == len({path.name for path in paths}) == 15
     assert {path.suffix for path in paths} >= {".dmg", ".exe"}
+    for target in release.TARGETS:
+        source = json.loads(
+            (directory / release.asset_names(VERSION, target)[2]).read_text()
+        )
+        assert source["schema_version"] == 2
 
 
 def test_verify_accepts_published_schema_one_macos_metadata_without_driver(tmp_path):
@@ -202,6 +207,7 @@ def test_verify_accepts_published_schema_one_macos_metadata_without_driver(tmp_p
         names = release.asset_names(VERSION, target)
         source_path = directory / names[2]
         source = json.loads(source_path.read_text(encoding="utf-8"))
+        source["schema_version"] = 1
         source.pop("computer_use_driver", None)
         source_path.write_text(json.dumps(source, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         (directory / names[4]).write_text(
@@ -212,6 +218,34 @@ def test_verify_accepts_published_schema_one_macos_metadata_without_driver(tmp_p
             encoding="utf-8",
         )
     assert len(release.verify(directory, TAG, SOURCE)) == 15
+
+
+def test_verify_rejects_schema_two_macos_metadata_without_driver(tmp_path):
+    directory = assemble_assets(tmp_path)
+    target = next(
+        target
+        for target, (system, _arch, _suffix) in release.TARGETS.items()
+        if system == "macos"
+    )
+    names = release.asset_names(VERSION, target)
+    source_path = directory / names[2]
+    source = json.loads(source_path.read_text(encoding="utf-8"))
+    assert source["schema_version"] == 2
+    source.pop("computer_use_driver")
+    source_path.write_text(
+        json.dumps(source, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    (directory / names[4]).write_text(
+        "".join(
+            f"{release.digest(directory / name)}  {name}\n"
+            for name in sorted(names[:4])
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="Driver provenance"):
+        release.verify(directory, TAG, SOURCE)
 
 
 @pytest.mark.parametrize("target", release.TARGETS)
@@ -345,6 +379,23 @@ def test_workflow_preserves_manual_path_and_isolates_test_signing():
     assert "AVIBE_COMPUTER_USE_DRIVER_PATH" not in workflow_text
     assert "AVIBE_COMPUTER_USE_POLICY_PATH" not in workflow_text
     assert "AVIBE_COMPUTER_USE_SNAPSHOT_PATH" not in workflow_text
+
+
+def test_driver_workflows_parse_and_install_yaml_before_driver_validation():
+    package = workflow("desktop-package.yml")["jobs"]["package"]["steps"]
+    shell = workflow("desktop-shell.yml")["jobs"]["shell"]["steps"]
+    for steps, consumer_name in (
+        (package, "Prepare pinned Cua Driver sidecar"),
+        (shell, "Validate private Runtime build inputs"),
+    ):
+        dependency = next(
+            item
+            for item in steps
+            if item.get("name") == "Install pinned driver validation dependency"
+        )
+        consumer = next(item for item in steps if item.get("name") == consumer_name)
+        assert steps.index(dependency) < steps.index(consumer)
+        assert "PyYAML==6.0.3" in dependency["run"]
 
 
 @pytest.mark.parametrize(("value", "names"), [

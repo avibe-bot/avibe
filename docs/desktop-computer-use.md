@@ -55,8 +55,11 @@ the desktop shell running.
 The Workbench shows one read-only Computer Use status line. It refreshes without
 browser caching when the page opens, every five seconds, and when the window
 becomes visible or focused. It reflects the native state and gives localized
-guidance for a missing Accessibility or Screen Recording permission; it does
-not turn the feature on or issue permission changes.
+guidance for a missing permission, a driver failure, damaged state, or an
+unavailable desktop shell. It does not expose internal reason codes, turn the
+feature on, or issue permission changes. The line appears only in the
+desktop-managed macOS Runtime; a terminal-installed Avibe Runtime does not show
+a native desktop control it cannot own.
 
 ## Remote and shared-channel use
 

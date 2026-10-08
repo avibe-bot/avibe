@@ -1779,6 +1779,11 @@ class CodexAgentHandleMessageTests(unittest.IsolatedAsyncioTestCase):
             agent_auth_service=SimpleNamespace(maybe_emit_auth_recovery_message=AsyncMock(return_value=False)),
         )
         agent._acquire_generation = acquire_returning(agent, transport)
+        admitted_computer_use = object()
+        agent._launch_inputs = lambda cwd, *, hub_config=None: SimpleNamespace(
+            hub_config=hub_config,
+            computer_use_spec=admitted_computer_use,
+        )
         agent.ensure_agent_session_id = Mock(
             side_effect=lambda existing_request: events.append(
                 ("ensure", existing_request)
@@ -1815,6 +1820,10 @@ class CodexAgentHandleMessageTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
         agent._start_or_resume_thread.assert_not_awaited()
+        agent._build_thread_developer_instructions.assert_awaited_once_with(
+            request,
+            include_computer_use=True,
+        )
 
     async def test_prompt_refresh_failure_display_is_localized(self):
         agent = init_generation_state(object.__new__(CodexAgent))

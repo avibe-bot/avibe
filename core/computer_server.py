@@ -44,6 +44,11 @@ from core.computer_use import (
 _LEASE_TTL_SECONDS = 60.0
 _LEASE_HEARTBEAT_SECONDS = 10.0
 _UPSTREAM_RESPONSE_LIMIT = 128 * 1024 * 1024
+# Cua permits individual accessibility calls to run for 120 seconds. Keep the
+# transport deadline above that documented bound while still preventing a dead
+# reader from holding the desktop lease forever.
+_UPSTREAM_REQUEST_TIMEOUT_SECONDS = 180.0
+_ADMISSION_RETRY_LIMIT = 1
 
 _INPUT_TOOLS = frozenset(
     {
@@ -76,6 +81,10 @@ class UpstreamUnavailable(RuntimeError):
     """The Cua proxy exited or rejected its transport."""
 
 
+class _DaemonGenerationChanged(RuntimeError):
+    """The desktop state changed before this call could be admitted."""
+
+
 class Upstream(Protocol):
     serial: int
 
@@ -100,6 +109,12 @@ class Lease:
     @property
     def daemon_key(self) -> tuple[str, int]:
         return (self.daemon_instance_id, self.daemon_generation)
+
+
+@dataclass(frozen=True)
+class LeaseAcquisition:
+    lease: Lease
+    newly_claimed: bool
 
 
 class DesktopLeaseManager:
@@ -194,8 +209,17 @@ class DesktopLeaseManager:
             finally:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
-    def acquire(self, session: str, daemon_key: tuple[str, int]) -> Lease:
-        def operation() -> Lease:
+    def acquire(
+        self,
+        session: str,
+        daemon_key: tuple[str, int],
+        current_daemon_key: Callable[[], tuple[str, int] | None],
+    ) -> LeaseAcquisition:
+        def operation() -> LeaseAcquisition:
+            if current_daemon_key() != daemon_key:
+                raise _DaemonGenerationChanged(
+                    "computer-use daemon generation changed during lease admission"
+                )
             previous = self._read()
             now = self._now()
             valid = (
@@ -213,6 +237,9 @@ class DesktopLeaseManager:
                 epoch = previous.epoch
             else:
                 epoch = (previous.epoch if previous is not None else 0) + 1
+            newly_claimed = not (
+                valid and previous is not None and previous.holder == session
+            )
             lease = Lease(
                 holder=session,
                 refreshed_at=now,
@@ -221,7 +248,10 @@ class DesktopLeaseManager:
                 daemon_generation=daemon_key[1],
             )
             self._write(lease)
-            return lease
+            return LeaseAcquisition(
+                lease=lease,
+                newly_claimed=newly_claimed,
+            )
 
         return self._under_lock(operation)
 
@@ -294,7 +324,7 @@ class JsonRpcUpstream:
 
     @property
     def alive(self) -> bool:
-        return self._process.returncode is None
+        return self._process.returncode is None and not self._reader_task.done()
 
     @classmethod
     async def start(cls, state: ComputerUseState) -> "JsonRpcUpstream":
@@ -358,11 +388,20 @@ class JsonRpcUpstream:
                 raise UpstreamUnavailable("computer-use upstream pipe closed") from exc
 
     async def request(self, method: str, params: Mapping[str, Any]) -> dict[str, Any]:
+        if not self.alive:
+            raise UpstreamUnavailable("computer-use upstream reader is not running")
         self._request_id += 1
         request_id = self._request_id
         future = asyncio.get_running_loop().create_future()
         self._pending[request_id] = future
         try:
+            # The reader can reach EOF between the first liveness check and
+            # registration. Recheck after the future is visible so either the
+            # reader completes it or this request fails promptly.
+            if self._reader_task.done():
+                raise UpstreamUnavailable(
+                    "computer-use upstream reader exited before request registration"
+                )
             await self._write(
                 {
                     "jsonrpc": "2.0",
@@ -371,9 +410,23 @@ class JsonRpcUpstream:
                     "params": dict(params),
                 }
             )
-            return await future
+            if self._reader_task.done() and not future.done():
+                raise UpstreamUnavailable(
+                    "computer-use upstream reader exited before request delivery"
+                )
+            try:
+                return await asyncio.wait_for(
+                    future,
+                    timeout=_UPSTREAM_REQUEST_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError as exc:
+                raise UpstreamUnavailable(
+                    "computer-use upstream request exceeded the 180 second limit"
+                ) from exc
         finally:
             self._pending.pop(request_id, None)
+            if not future.done():
+                future.cancel()
 
     async def notify(self, method: str, params: Mapping[str, Any]) -> None:
         await self._write(
@@ -402,9 +455,10 @@ class JsonRpcUpstream:
                     future = self._pending.get(request_id)
                     if future is not None and not future.done():
                         future.set_result(message)
-        except BaseException as exc:
-            error = exc
+        except asyncio.CancelledError:
             raise
+        except BaseException:
+            error = UpstreamUnavailable("computer-use upstream reader failed")
         finally:
             for future in tuple(self._pending.values()):
                 if not future.done():
@@ -672,6 +726,18 @@ class ComputerUseServer:
     def tools(self) -> list[dict[str, Any]]:
         return deepcopy(self._tools)
 
+    def _current_ready_daemon_key(self) -> tuple[str, int] | None:
+        status = self._status_reader()
+        if status.status != "ready" or status.state is None:
+            return None
+        return status.state.daemon_key
+
+    def _revalidate_daemon_key(self, expected: tuple[str, int]) -> None:
+        if self._current_ready_daemon_key() != expected:
+            raise _DaemonGenerationChanged(
+                "computer-use daemon generation changed before forwarding"
+            )
+
     async def _ensure_upstream(self, state: ComputerUseState) -> Upstream:
         async with self._upstream_lock:
             daemon_key = state.daemon_key
@@ -813,101 +879,172 @@ class ComputerUseServer:
 
         lock = self._session_locks.setdefault(session, asyncio.Lock())
         async with lock:
-            lease: Lease | None = None
-            setup_complete = False
-            upstream: Upstream | None = None
             try:
                 _validate_input(name, arguments)
-                status = await asyncio.to_thread(self._status_reader)
-                if status.status != "ready" or status.state is None:
-                    return _error_result(
-                        "computer_use_unavailable",
-                        "Computer use is not ready.",
-                        status=status.status,
-                        reason=status.reason,
-                    )
-                state = status.state
-                lease = await asyncio.to_thread(
-                    self._lease_manager.acquire,
-                    session,
-                    state.daemon_key,
-                )
-                upstream = await self._ensure_upstream(state)
-                session_state = self._sessions.setdefault(session, _SessionState())
-                await self._revive_session(
-                    upstream,
-                    session,
-                    state,
-                    lease,
-                    session_state,
-                )
-                self._require_observation(name, arguments, session_state)
-                setup_complete = True
-
-                forwarded = dict(arguments)
-                forwarded["session"] = session
-                if name not in self._upstream_accepts_session:
-                    forwarded.pop("session", None)
-                heartbeat = asyncio.create_task(
-                    self._heartbeat(lease),
-                    name=f"computer-use-lease-heartbeat-{session}",
-                )
-                try:
-                    if name == "start_session":
-                        result = {
-                            "content": [
-                                {
-                                    "type": "text",
-                                    "text": json.dumps(
-                                        {
-                                            "session": session,
-                                            "status": "started",
-                                        },
-                                        sort_keys=True,
-                                    ),
-                                }
-                            ]
-                        }
-                    else:
-                        result = await self._upstream_call(
-                            upstream,
-                            name,
-                            forwarded,
-                        )
-                finally:
-                    heartbeat.cancel()
-                    with suppress(asyncio.CancelledError):
-                        await heartbeat
-
-                if name in _OBSERVE_TOOLS and not result.get("isError"):
-                    key = _window_key(arguments)
-                    if key is not None:
-                        session_state.observed_windows.add(key)
-                if name == "end_session":
-                    session_state.active_proxy_serial = None
-                    session_state.active_daemon_key = None
-                    session_state.observed_windows.clear()
-                    await asyncio.to_thread(self._lease_manager.release, lease)
-                return result
             except ComputerServerError as exc:
                 return _error_result(exc.code, str(exc))
-            except asyncio.CancelledError:
-                raise
-            except UpstreamUnavailable:
-                if upstream is not None:
-                    await self._discard_upstream(upstream)
-                return _error_result(
-                    "upstream_unavailable",
-                    "The computer-use proxy exited. Observe again before retrying.",
-                )
-            except Exception as exc:
-                return _error_result(
-                    "computer_use_error",
-                    f"Computer use failed: {type(exc).__name__}",
-                )
-            finally:
-                if lease is not None and not setup_complete:
-                    await asyncio.to_thread(self._lease_manager.release, lease)
+
+            for admission_attempt in range(_ADMISSION_RETRY_LIMIT + 1):
+                acquisition: LeaseAcquisition | None = None
+                upstream: Upstream | None = None
+                pre_forward = True
+                try:
+                    status = await asyncio.to_thread(self._status_reader)
+                    if status.status != "ready" or status.state is None:
+                        return _error_result(
+                            "computer_use_unavailable",
+                            "Computer use is not ready.",
+                            status=status.status,
+                            reason=status.reason,
+                        )
+                    state = status.state
+                    acquisition = await asyncio.to_thread(
+                        self._lease_manager.acquire,
+                        session,
+                        state.daemon_key,
+                        self._current_ready_daemon_key,
+                    )
+                    lease = acquisition.lease
+                    upstream = await self._ensure_upstream(state)
+                    await asyncio.to_thread(
+                        self._revalidate_daemon_key,
+                        state.daemon_key,
+                    )
+                    session_state = self._sessions.setdefault(
+                        session,
+                        _SessionState(),
+                    )
+                    await self._revive_session(
+                        upstream,
+                        session,
+                        state,
+                        lease,
+                        session_state,
+                    )
+                    self._require_observation(name, arguments, session_state)
+                    pre_forward = False
+
+                    forwarded = dict(arguments)
+                    forwarded["session"] = session
+                    if name not in self._upstream_accepts_session:
+                        forwarded.pop("session", None)
+                    heartbeat = asyncio.create_task(
+                        self._heartbeat(lease),
+                        name=f"computer-use-lease-heartbeat-{session}",
+                    )
+                    try:
+                        if name == "start_session":
+                            result = {
+                                "content": [
+                                    {
+                                        "type": "text",
+                                        "text": json.dumps(
+                                            {
+                                                "session": session,
+                                                "status": "started",
+                                            },
+                                            sort_keys=True,
+                                        ),
+                                    }
+                                ]
+                            }
+                        else:
+                            result = await self._upstream_call(
+                                upstream,
+                                name,
+                                forwarded,
+                            )
+                    finally:
+                        heartbeat.cancel()
+                        with suppress(asyncio.CancelledError):
+                            await heartbeat
+
+                    if name in _OBSERVE_TOOLS and not result.get("isError"):
+                        key = _window_key(arguments)
+                        if key is not None:
+                            session_state.observed_windows.add(key)
+                    if name == "end_session":
+                        session_state.active_proxy_serial = None
+                        session_state.active_daemon_key = None
+                        session_state.observed_windows.clear()
+                        await asyncio.to_thread(
+                            self._lease_manager.release,
+                            lease,
+                        )
+                    return result
+                except _DaemonGenerationChanged:
+                    if upstream is not None:
+                        await self._discard_upstream(upstream)
+                    if acquisition is not None:
+                        # A generation change voids this lease even when this
+                        # call merely renewed it. Exact-key release cannot
+                        # disturb a newer generation's holder.
+                        await asyncio.to_thread(
+                            self._lease_manager.release,
+                            acquisition.lease,
+                        )
+                    if admission_attempt < _ADMISSION_RETRY_LIMIT:
+                        continue
+                    return _error_result(
+                        "computer_use_unavailable",
+                        "Computer use changed while the request was being admitted.",
+                        status="unavailable",
+                        reason="daemon_generation_changed",
+                    )
+                except ComputerServerError as exc:
+                    if (
+                        acquisition is not None
+                        and pre_forward
+                        and acquisition.newly_claimed
+                    ):
+                        await asyncio.to_thread(
+                            self._lease_manager.release,
+                            acquisition.lease,
+                        )
+                    return _error_result(exc.code, str(exc))
+                except asyncio.CancelledError:
+                    if (
+                        acquisition is not None
+                        and pre_forward
+                        and acquisition.newly_claimed
+                    ):
+                        await asyncio.to_thread(
+                            self._lease_manager.release,
+                            acquisition.lease,
+                        )
+                    raise
+                except UpstreamUnavailable:
+                    if upstream is not None:
+                        await self._discard_upstream(upstream)
+                    if (
+                        acquisition is not None
+                        and pre_forward
+                        and acquisition.newly_claimed
+                    ):
+                        await asyncio.to_thread(
+                            self._lease_manager.release,
+                            acquisition.lease,
+                        )
+                    return _error_result(
+                        "upstream_unavailable",
+                        "The computer-use proxy exited. Observe again before retrying.",
+                    )
+                except Exception as exc:
+                    if (
+                        acquisition is not None
+                        and pre_forward
+                        and acquisition.newly_claimed
+                    ):
+                        await asyncio.to_thread(
+                            self._lease_manager.release,
+                            acquisition.lease,
+                        )
+                    return _error_result(
+                        "computer_use_error",
+                        f"Computer use failed: {type(exc).__name__}",
+                    )
+
+            raise AssertionError("computer-use admission loop exhausted")
 
     async def handle(self, message: Mapping[str, Any]) -> dict[str, Any] | None:
         request_id = message.get("id")

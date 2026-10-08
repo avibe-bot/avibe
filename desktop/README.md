@@ -169,7 +169,11 @@ DMG/EXE download has a target-qualified `.SHA256SUMS`, `.SIGNATURE`,
 `.SOURCE.json`, and `.runtime-manifest.json` alongside it. `SIGNATURE` describes
 the verified layer; it is not a cryptographic signature. Hashes and source
 metadata are checked before upload and downloaded desktop bytes are checked
-again before publication. A failed build or check leaves the release unpublished.
+again before publication. New `.SOURCE.json` records use schema 2; every macOS
+record includes the pinned Cua Driver source, archive, extracted, thinned,
+packaged, and code-signing provenance. The verifier still accepts already
+published schema-1 records as legacy input. A failed build or check leaves the
+release unpublished.
 Existing asset bytes cannot be overwritten; a changed build requires a new rc.
 Already-published releases cannot be retrofitted with missing desktop assets.
 

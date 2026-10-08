@@ -2943,8 +2943,20 @@
         "runtimeTooOldDetail": "This Avibe service does not support the current Computer Use contract.",
         "error": "Computer Use needs attention",
         "errorDetail": "Turn Computer Use off and on once to retry.",
+        "stateUnwritableDetail": "Avibe could not save the native state. Check access to its app data, then turn Computer Use off and on.",
+        "assetsInvalidDetail": "The managed driver or policy failed verification. Update or reinstall the Avibe desktop app.",
+        "spawnFailedDetail": "The managed driver could not start. Turn Computer Use off and on; reopen Avibe if it keeps failing.",
+        "daemonExitedDetail": "The managed driver stopped unexpectedly. Turn Computer Use off and on; reopen Avibe if it repeats.",
+        "healthTimeoutDetail": "The managed driver did not become ready in time. Turn Computer Use off and on; reopen Avibe if it repeats.",
+        "endpointBusyDetail": "Another Avibe desktop shell owns the Computer Use endpoint. Quit the other shell, then retry.",
+        "endpointUnremovableDetail": "Avibe could not replace the old Computer Use endpoint. Quit and reopen the desktop app.",
+        "socketUnreachableDetail": "Avibe cannot reach the managed driver. Turn Computer Use off and on; reopen Avibe if it repeats.",
         "unavailable": "Computer Use is unavailable",
-        "unavailableDetail": "The managed driver or its verified policy is not available."
+        "unavailableDetail": "The managed Computer Use state is not available. Reopen the Avibe desktop app.",
+        "invalidStateFileDetail": "The native Computer Use state is damaged. Use the native toggle to replace it.",
+        "snapshotInvalidDetail": "The verified Computer Use tool snapshot is missing or changed. Update or reinstall the Avibe desktop app.",
+        "shellNotRunningDetail": "Open or reopen the Avibe desktop app to make Computer Use available.",
+        "daemonUnreachableDetail": "The desktop driver is not reachable. Turn Computer Use off and on; reopen Avibe if it repeats."
       },
       "continueOnPhone": "Continue on your phone",
       "connectChatApps": "Connect chat apps in <settings>Settings</settings>"
