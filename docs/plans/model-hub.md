@@ -250,7 +250,11 @@ The Source workflow is complete at both entry points:
   and retries after 15 minutes, doubling up to 6 hours, until any later successful
   listing, background or manual, resets the backoff. Discovery runs outside the mutation
   lock, and its result applies only if the Source still has the identity and
-  `last_discovered_at` it was listed with.
+  `last_discovered_at` it was listed with. A viewer's read of Source inventory
+  (`list_sources`, `agent_model_candidates`) also requests one coalesced background pass
+  with a 30-minute age instead of the period, so a model released upstream appears when
+  someone looks. The read never waits for it, the pass honors the same backoff and
+  rules, it runs only while the schedule runs, and no Source is listed twice at once.
 - **Model inventory and manual entries.** Model `id` is unique within a Source. Every
   model-list item has
   `{id, origin: "discovered" | "manual", reasoning_efforts: string[], retired?:

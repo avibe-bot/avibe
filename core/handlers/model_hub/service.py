@@ -283,6 +283,8 @@ _BACKGROUND_DISCOVERY_JITTER = 0.2
 _BACKGROUND_DISCOVERY_TICK = timedelta(minutes=5)
 _BACKGROUND_DISCOVERY_RETRY_BASE = timedelta(minutes=15)
 _BACKGROUND_DISCOVERY_RETRY_CAP = timedelta(hours=6)
+# A viewer of Source inventory asks for listings at most this old.
+_VIEWED_DISCOVERY_AGE = timedelta(minutes=30)
 # A credential waiting on the user cannot list models until the user acts.
 _UNDISCOVERABLE_SOURCE_DETAILS = frozenset({
     "models.source.needs_action.oauth_expired",
@@ -1129,6 +1131,8 @@ class ModelHubService:
         self._background_discovery_checked: dict[str, datetime] = {}
         self._background_discovery_retries: dict[str, _DiscoveryRetry] = {}
         self._background_discovery_caught_up = False
+        self._background_discovery_inflight: set[str] = set()
+        self._viewed_discovery_task: asyncio.Task[None] | None = None
         self._builtin_snapshot_generations: dict[BackendName, str] = {}
         self._builtin_snapshot_cache: dict[BackendName, list[dict[str, Any]]] = {}
         self._pending_builtin_catalog_refresh: set[BackendName] = set()
@@ -1806,11 +1810,14 @@ class ModelHubService:
             # beneath it. A retired resume never starts the engine.
             await await_owned_task(resume)
         discovery, self._background_discovery_task = self._background_discovery_task, None
-        if discovery is not None and not discovery.done():
-            # Drain for the same reason: an OAuth listing may start the engine
-            # from a worker thread. A pass stops between Sources once signalled.
-            cast(asyncio.Event, self._background_discovery_stop).set()
-            await await_owned_task(discovery)
+        viewed, self._viewed_discovery_task = self._viewed_discovery_task, None
+        if self._background_discovery_stop is not None:
+            self._background_discovery_stop.set()
+        for task in (discovery, viewed):
+            if task is not None and not task.done():
+                # Drain for the same reason: an OAuth listing may start the engine
+                # from a worker thread. A pass stops between Sources once signalled.
+                await await_owned_task(task)
         async with self._runtime_lifecycle_lock:
             await self.adapter.stop()
 
@@ -4369,15 +4376,41 @@ class ModelHubService:
                 return
             except asyncio.TimeoutError:
                 pass
-            try:
-                await self._refresh_due_sources()
-            except Exception as exc:
-                logger.warning(
-                    "Model Hub background discovery pass failed: %s", type(exc).__name__,
-                )
+            await self._refresh_due_sources_logged()
 
-    async def _refresh_due_sources(self) -> None:
-        """Refresh, one at a time, each Hub Source whose background listing is due."""
+    async def _refresh_due_sources_logged(self, *, max_age: timedelta | None = None) -> None:
+        try:
+            await self._refresh_due_sources(max_age=max_age)
+        except Exception as exc:
+            logger.warning(
+                "Model Hub background discovery pass failed: %s", type(exc).__name__,
+            )
+
+    def request_inventory_refresh(self) -> None:
+        """A viewer read Source inventory: list Sources older than 30 minutes.
+
+        Fire-and-forget and coalesced into one pass. It runs only while the
+        background schedule does, so it shares that schedule's backoff and
+        shutdown and never starts work for a stopped runtime.
+        """
+
+        schedule = self._background_discovery_task
+        stopping = self._background_discovery_stop
+        if schedule is None or schedule.done() or stopping is None or stopping.is_set():
+            return
+        viewed = self._viewed_discovery_task
+        if viewed is not None and not viewed.done():
+            return
+        self._viewed_discovery_task = asyncio.get_running_loop().create_task(
+            self._refresh_due_sources_logged(max_age=_VIEWED_DISCOVERY_AGE),
+            name="model-hub-viewed-discovery",
+        )
+
+    async def _refresh_due_sources(self, *, max_age: timedelta | None = None) -> None:
+        """Refresh, one at a time, each Hub Source whose background listing is due.
+
+        ``max_age`` tightens the period for a viewer's pass; backoff still holds.
+        """
 
         config = self.store.load()
         if not config.enabled:
@@ -4396,9 +4429,10 @@ class ModelHubService:
         due = sorted(
             (due_at, source.id)
             for source in sources
-            if (due_at := self._background_discovery_due(source, now)) <= now
+            if (due_at := self._background_discovery_due(source, now, max_age=max_age)) <= now
         )
-        self._background_discovery_caught_up = True
+        if max_age is None:
+            self._background_discovery_caught_up = True
         for _due_at, source_id in due:
             stopping = self._background_discovery_stop
             if stopping is not None and stopping.is_set():
@@ -4435,7 +4469,13 @@ class ModelHubService:
         # Any later successful listing, including a manual refresh, resets backoff.
         return None if listed_at is not None and listed_at > retry.failed_at else retry
 
-    def _background_discovery_due(self, source: ModelHubSourceConfig, now: datetime) -> datetime:
+    def _background_discovery_due(
+        self,
+        source: ModelHubSourceConfig,
+        now: datetime,
+        *,
+        max_age: timedelta | None = None,
+    ) -> datetime:
         retry = self._background_discovery_retry(source)
         if retry is not None:
             return retry.failed_at + retry.delay
@@ -4446,6 +4486,8 @@ class ModelHubService:
         if not self._background_discovery_caught_up:
             # The first pass catches up every Source past the nominal interval.
             period = min(period, _BACKGROUND_DISCOVERY_INTERVAL)
+        if max_age is not None:
+            period = min(period, max_age)
         return listed_at + period
 
     async def _refresh_source_in_background(self, source_id: str) -> None:
@@ -4455,6 +4497,16 @@ class ModelHubService:
         state, removals, and their guards stay with a manual `refresh_source`.
         """
 
+        if source_id in self._background_discovery_inflight:
+            # The schedule and a viewer's pass never list one Source twice at once.
+            return
+        self._background_discovery_inflight.add(source_id)
+        try:
+            await self._refresh_listed_source_in_background(source_id)
+        finally:
+            self._background_discovery_inflight.discard(source_id)
+
+    async def _refresh_listed_source_in_background(self, source_id: str) -> None:
         observed = next(
             (item for item in self.store.load().sources if item.id == source_id),
             None,

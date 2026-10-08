@@ -11,6 +11,7 @@ import pytest
 
 from config.v2_config import ModelHubModelConfig, ModelHubSourceStateConfig
 from core.handlers.model_hub.errors import ModelDiscoveryError
+from core.handlers.model_hub.rpc import dispatch_model_hub_rpc
 from tests.test_model_hub_resolution import FakeAdapter, _config, _service, _source
 from tests.test_model_hub_retry_policy import Clock
 
@@ -332,6 +333,60 @@ def test_listing_that_would_strand_a_menu_model_is_left_to_manual_refresh(tmp_pa
     assert adapter.listed == ["cred_src_blocked2"]
     assert store.load().to_payload() == before
     assert adapter.synced == []
+
+
+@pytest.mark.parametrize("read", ["list_sources", "agent_model_candidates"])
+def test_viewing_inventory_lists_sources_older_than_thirty_minutes_once(tmp_path, read):
+    """MH-DISCOVERY-SCHEDULE-001: a viewer's read lists Sources older than 30 minutes, once, in the background."""
+
+    clock = Clock()
+    stale = _listed(_hub_source("src_viewed01"), clock, hours_ago=1)
+    fresh = _listed(_hub_source("src_viewed02"), clock, hours_ago=0.25)
+    # Also due for the schedule, which may list it while a viewer's pass runs.
+    overdue = _listed(_hub_source("src_viewed03"), clock, hours_ago=7)
+    class HeldListingAdapter(ListingAdapter):
+        """Holds every listing open so repeated reads overlap it."""
+
+        released: asyncio.Event
+
+        async def discover_models(self, vendor, protocol, base_url, credential_ref):
+            self.listed.append(credential_ref)
+            await self.released.wait()
+            return await FakeAdapter.discover_models(self, vendor, protocol, base_url, credential_ref)
+
+    service, store, adapter, clock = _background(
+        tmp_path, [stale, fresh, overdue], HeldListingAdapter((MENU_MODEL, "claude-new-model")),
+    )
+    payload = {"backend": "claude"} if read == "agent_model_candidates" else {}
+
+    async def run():
+        adapter.released = asyncio.Event()
+        # No schedule, no listing: a stopped runtime is never woken by a read.
+        await dispatch_model_hub_rpc(service, read, payload)
+        await asyncio.sleep(0.05)
+        assert adapter.listed == []
+        service.start_background_discovery()
+        try:
+            scheduled = asyncio.create_task(service._refresh_due_sources())
+            for _ in range(3):
+                await dispatch_model_hub_rpc(service, read, payload)
+                await asyncio.sleep(0.02)
+            adapter.released.set()
+            await scheduled
+            for _ in range(100):
+                if _model_ids(store, 0) != [MENU_MODEL] and _model_ids(store, 2) != [MENU_MODEL]:
+                    break
+                await asyncio.sleep(0.01)
+        finally:
+            adapter.released.set()
+            await asyncio.wait_for(service.stop(), 2)
+
+    asyncio.run(run())
+
+    assert sorted(adapter.listed) == ["cred_src_viewed01", "cred_src_viewed03"]
+    assert _model_ids(store, 0) == [MENU_MODEL, "claude-new-model"]
+    assert _model_ids(store, 1) == [MENU_MODEL]
+    assert _model_ids(store, 2) == [MENU_MODEL, "claude-new-model"]
 
 
 def test_stop_retires_the_background_schedule(tmp_path):
