@@ -204,8 +204,13 @@ def test_existing_native_source_conversion_also_restores_missing_placement(
     assert [model.to_payload() for model in source.models] == before["sources"][0]["models"]
     assert store.config.effective_source_order(backend) == [source.id]
     assert len(adapter.oauth_provisioned) == 1
-    for other in {"claude", "codex", "opencode"} - {backend}:
+    for other in {"claude", "codex"} - {backend}:
         assert store.config.to_payload()["agents"][other] == before["agents"][other]
+    # OpenCode could not use the native CLI Source; on the Hub it joins like a new one.
+    opencode = before["agents"]["opencode"]
+    assert opencode["sources"]["order"] == []
+    opencode["sources"]["order"] = [source.id]
+    assert store.config.to_payload()["agents"]["opencode"] == opencode
 
 
 def test_deduplicated_auth_reversal_restores_every_physical_config(monkeypatch, tmp_path):

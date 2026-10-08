@@ -15,6 +15,7 @@ from modules.agents.catalog import NATIVE_CLI_BACKENDS, NativeCliBackend, displa
 from typing import Any, Awaitable, Callable, Collection, Literal, Mapping, Optional, Protocol, cast
 
 from config.v2_config import (
+    MODEL_HUB_BACKENDS,
     ModelHubConfig,
     ModelHubModelConfig,
     ModelHubSourceConfig,
@@ -193,6 +194,7 @@ class MigrationHost(Protocol):
         self,
         config: ModelHubConfig,
         source: ModelHubSourceConfig,
+        backends: Collection[str] = MODEL_HUB_BACKENDS,
     ) -> None: ...
 
     def _added_to(self, source_id: str) -> list[dict]: ...
@@ -1866,10 +1868,14 @@ async def _prepare_takeover(
                 source = ModelHubSourceConfig.from_payload(replacement)
                 updated.sources = [source if value.id == source.id else value for value in updated.sources]
                 _ensure_takeover_placement(updated, source, item.backend)
-                # Now on the Hub, it is new to Vibey, which reaches every
-                # Hub Source: placed like a new Source (a pending entry is seeded
-                # below instead).
-                host._apply_source_placement(updated, source, ("vibey",))
+                # Now on the Hub, it is new to every backend its native CLI
+                # could not serve, OpenCode and Vibey among them: placed there
+                # like a new Source (a pending Vibey entry is seeded below
+                # instead). Where it already served, the order stays the user's.
+                host._apply_source_placement(updated, source, tuple(
+                    backend for backend in MODEL_HUB_BACKENDS
+                    if not updated.source_eligible_for_backend(existing, backend)
+                ))
             else:
                 updated.sources.append(source)
                 host._apply_source_placement(updated, source)
