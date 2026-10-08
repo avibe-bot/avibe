@@ -213,7 +213,10 @@ updates of that slug stay unseeded without repeating the flag. An environment
 changes mode only together with `--reset-mode all`, which empties its Avibe home
 and agent CLI homes: `--seed none --reset-mode all` turns an existing worktree
 environment back into a fresh install, and `--seed regression --reset-mode all`
-seeds it again. `--reset-mode config` on a fresh environment removes the Avibe
+seeds it again. Until that reset has rebuilt the home, the instance records
+`switching`; if the switch is interrupted, every later `up` refuses until the
+same `--seed <mode> --reset-mode all` is run again, because the home then
+matches neither mode. `--reset-mode config` on a fresh environment removes the Avibe
 config and state to rerun the wizard while keeping CLI logins made in it. The
 master environment is always seeded.
 

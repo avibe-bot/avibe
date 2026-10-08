@@ -1927,6 +1927,11 @@ def test_runtime_env_report_names_the_source_of_each_key_without_values(
         ("worktree", "none", "absent", "config", "needs --reset-mode all"),
         ("worktree", "regression", "none", "none", "needs --reset-mode all"),
         ("master", "none", None, "none", "for worktree environments"),
+        ("worktree", None, "switching", "none", "did not finish switching"),
+        ("worktree", None, "switching", "all", "did not finish switching"),
+        ("worktree", "none", "switching", "config", "did not finish switching"),
+        ("worktree", "none", "switching", "all", "none"),
+        ("worktree", "regression", "switching", "all", "regression"),
     ],
 )
 def test_seed_mode_belongs_to_the_environment(
@@ -1960,32 +1965,24 @@ def test_seed_mode_belongs_to_the_environment(
             incus_regression.resolve_seed(target, requested=requested, record=record, reset_mode=reset_mode)
 
 
-@pytest.mark.parametrize(
-    ("case", "requested", "recorded", "reset_mode"),
-    [
-        ("create", "none", None, "none"),
-        ("update", None, "none", "none"),
-        ("switch", "none", "regression", "all"),
-    ],
-)
-def test_fresh_install_environment_gets_no_seed_and_no_credentials(
+def run_fresh_up(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    case: str,
+    commands: list[str],
+    inputs: dict[str, str],
+    *,
     requested: str | None,
     recorded: str | None,
     reset_mode: str,
-) -> None:
-    """`--seed none` builds a home the first-run wizard has never seen.
+    fail_on: str | None = None,
+) -> int:
+    """Run `up` for worktree slug `fresh` against a daemon whose instance records `recorded`.
 
-    No platform tokens are asked for, `prepare_regression.py` never runs, and the
-    instance's runtime env carries none of the operator's credentials although
-    the loaded env file has them -- on creation, on a later update that does not
-    repeat the flag, and when a seeded environment is switched by a full reset.
+    The operator's credentials are loaded and the platform tokens are absent.
+    Every command `up` issues lands in `commands`, and the stdin it writes in
+    `inputs` keyed by that command. A command containing `fail_on` fails.
     """
     write_ui_builder_stage(tmp_path)
-    commands = []
-    inputs = {}
     inventory = () if recorded is None else ("avr-wt-fresh", "avibe-wt-fresh")
     config = {} if recorded in (None, "regression") else {incus_regression.SEED_CONFIG_KEY: recorded}
 
@@ -1999,6 +1996,8 @@ def test_fresh_install_environment_gets_no_seed_and_no_credentials(
             commands.append(" ".join(command))
             if input_bytes is not None:
                 inputs[commands[-1]] = input_bytes.decode()
+            if fail_on is not None and fail_on in commands[-1]:
+                raise subprocess.CalledProcessError(1, command)
             return subprocess.CompletedProcess(command, 0, stdout="")
 
     for key in incus_regression.required_platform_seed_envs():
@@ -2047,8 +2046,43 @@ def test_fresh_install_environment_gets_no_seed_and_no_credentials(
         reset_mode=reset_mode,
         seed=requested,
     )
+    return incus_regression.cmd_up(args)
 
-    assert incus_regression.cmd_up(args) == 0
+
+FRESH_SEED_SET = "config set avibe-wt-fresh user.avibe-regression.seed="
+FRESH_HOME_WIPE = "rm -rf /home/avibe/.avibe /home/avibe/.vibe_remote /home/avibe/.claude"
+
+
+@pytest.mark.parametrize(
+    ("case", "requested", "recorded", "reset_mode"),
+    [
+        ("create", "none", None, "none"),
+        ("update", None, "none", "none"),
+        ("switch", "none", "regression", "all"),
+        ("rerun an unfinished switch", "none", "switching", "all"),
+    ],
+)
+def test_fresh_install_environment_gets_no_seed_and_no_credentials(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
+    requested: str | None,
+    recorded: str | None,
+    reset_mode: str,
+) -> None:
+    """`--seed none` builds a home the first-run wizard has never seen.
+
+    No platform tokens are asked for, `prepare_regression.py` never runs, and the
+    instance's runtime env carries none of the operator's credentials although
+    the loaded env file has them -- on creation, on a later update that does not
+    repeat the flag, and when an environment is switched by a full reset.
+    """
+    commands: list[str] = []
+    inputs: dict[str, str] = {}
+
+    assert run_fresh_up(
+        tmp_path, monkeypatch, commands, inputs, requested=requested, recorded=recorded, reset_mode=reset_mode
+    ) == 0
 
     joined = "\n".join(commands)
     assert "prepare_regression.py --output-root" not in joined
@@ -2056,17 +2090,45 @@ def test_fresh_install_environment_gets_no_seed_and_no_credentials(
     assert "VIBE_SHOW_RUNTIME_SOURCE=archive" in runtime_env
     for name in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "REGRESSION_SLACK_BOT_TOKEN"):
         assert name not in runtime_env
-    seed_set = "config set avibe-wt-fresh user.avibe-regression.seed=none"
-    wipe = "rm -rf /home/avibe/.avibe /home/avibe/.vibe_remote /home/avibe/.claude"
     if case == "create":
         assert "--config user.avibe-regression.seed=none" in joined
-    if case == "switch":
-        assert seed_set in joined
-        assert wipe in joined
+    marks = [(i, command.rsplit("=", 1)[1]) for i, command in enumerate(commands) if FRESH_SEED_SET in command]
+    if reset_mode == "all":
+        wipe = next(i for i, command in enumerate(commands) if FRESH_HOME_WIPE in command)
+        # The new mode is recorded only once the reset has rebuilt the home.
+        assert [mode for _, mode in marks] == ["switching", "none"]
+        assert marks[0][0] < wipe < marks[1][0]
         assert "rm -rf /home/avibe/.regression-seed" in joined
     else:
-        assert seed_set not in joined
-        assert wipe not in joined
+        assert marks == []
+        assert FRESH_HOME_WIPE not in joined
+
+
+def test_an_interrupted_seed_switch_is_never_read_as_finished(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A switch that stops before its reset rebuilt the home leaves no mode for the next `up` to trust.
+
+    Recording the new mode up front let a later plain `up` skip the reset it
+    still owed: seeded logins kept under a fresh-install mode, or a fresh home
+    under a seeded one. The instance stays marked as switching instead, and
+    only the switch itself may run on it.
+    """
+    commands: list[str] = []
+
+    with pytest.raises(subprocess.CalledProcessError):
+        run_fresh_up(
+            tmp_path,
+            monkeypatch,
+            commands,
+            {},
+            requested="none",
+            recorded="regression",
+            reset_mode="all",
+            fail_on=FRESH_HOME_WIPE,
+        )
+
+    assert [command.rsplit("=", 1)[1] for command in commands if FRESH_SEED_SET in command] == ["switching"]
 
 
 def test_prepare_state_skips_existing_state_without_reset() -> None:

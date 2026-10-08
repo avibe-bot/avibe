@@ -97,6 +97,9 @@ LLM_ENV_KEYS = ("ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "OPENAI_API_KEY", "OP
 SEED_REGRESSION = "regression"
 SEED_NONE = "none"
 SEED_MODES = (SEED_REGRESSION, SEED_NONE)
+# Recorded while `--reset-mode all` moves a home between modes: until that reset
+# has rebuilt the home, it matches neither mode.
+SEED_SWITCHING = "switching"
 SEED_CONFIG_KEY = "user.avibe-regression.seed"
 SHOW_RUNTIME_BUILD_TIMEOUT_SECONDS = 300
 SLUG_RE = re.compile(r"^[a-z][a-z0-9-]{1,38}[a-z0-9]$")
@@ -2214,7 +2217,7 @@ def read_existing_fingerprints(runner: Runner, target: RegressionTarget, *, remo
 
 
 def recorded_seed(record: dict) -> str:
-    """The seed mode an existing instance was built with.
+    """The seed mode an existing instance was built with, or that it is switching.
 
     Instances that predate the mode were all seeded, which is what an absent key means.
     """
@@ -2222,7 +2225,7 @@ def recorded_seed(record: dict) -> str:
     value = config.get(SEED_CONFIG_KEY) if isinstance(config, dict) else None
     if value is None:
         return SEED_REGRESSION
-    if value not in SEED_MODES:
+    if value not in (*SEED_MODES, SEED_SWITCHING):
         raise RegressionError(f"Instance {record['name']} records an unknown {SEED_CONFIG_KEY}: {value!r}")
     return value
 
@@ -2242,11 +2245,24 @@ def resolve_seed(target: RegressionTarget, *, requested: str | None, record: dic
     if record is None:
         return requested or SEED_REGRESSION
     recorded = recorded_seed(record)
+    if recorded == SEED_SWITCHING:
+        if requested is not None and reset_mode == "all":
+            return requested
+        raise RegressionError(
+            f"{target.instance} did not finish switching seed modes, so its home matches neither. "
+            "Rerun the switch with --seed <regression|none> --reset-mode all."
+        )
     if requested is None or requested == recorded or reset_mode == "all":
         return requested or recorded
     raise RegressionError(
         f"{target.instance} was built with --seed {recorded}. Switching it to --seed {requested} "
         "needs --reset-mode all, which empties its Avibe home and agent CLI homes."
+    )
+
+
+def record_seed(runner: Runner, target: RegressionTarget, value: str, *, remote: str | None) -> None:
+    runner.run(
+        incus("config", "set", remote_ref(remote, target.instance), f"{SEED_CONFIG_KEY}={value}", project=target.project)
     )
 
 
@@ -2851,10 +2867,11 @@ def cmd_up(args: argparse.Namespace) -> int:
                 seed=seed,
                 remote=args.remote,
             )
-            if target_exists and seed != recorded_seed(record):
-                runner.run(
-                    incus("config", "set", remote_ref(args.remote, target.instance), f"{SEED_CONFIG_KEY}={seed}", project=target.project)
-                )
+            # A switch records the new mode only once the reset below has rebuilt
+            # the home; a run that stops before then leaves it marked as switching.
+            switching_seed = target_exists and seed != recorded_seed(record)
+            if switching_seed:
+                record_seed(runner, target, SEED_SWITCHING, remote=args.remote)
             if (
                 seed == SEED_REGRESSION
                 and not args.dry_run
@@ -2896,6 +2913,8 @@ def cmd_up(args: argparse.Namespace) -> int:
             # reconciles the show runtime or fails outright.
             reconciled = reconciled | {"show_runtime"}
             run_prepare_state(runner, target, reset_mode=args.reset_mode, seed=seed, remote=args.remote)
+            if switching_seed:
+                record_seed(runner, target, seed, remote=args.remote)
             normalize_runtime_config(runner, target, remote=args.remote)
             write_metadata(
                 runner,
