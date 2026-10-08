@@ -594,19 +594,19 @@ def _settled_result(conn: Connection, session_id: str, tool_call_id: str) -> Opt
     return _event_entry(first["session_id"], first) if first is not None else None
 
 
-def source_tool_result(
+def call_instance_result(
     conn: Connection, owner_session_id: str, response_seq: int, tool_call_id: str
 ) -> Optional[ContextEntry]:
-    """The result its owner committed for a call instance a fork inherited open.
+    """The result its owner committed for a call instance, if it has one.
 
-    A fork anchored between a response and its tool results inherits those calls
-    open. A call's identity is its instance: the response that carries it
+    A call's identity is its instance: the response that carries it
     (``owner_session_id`` at ``response_seq``) plus its id, because providers may
     reuse ids. Its result is the first ``tool_result`` for that id after the
     response in the owner's own rows, in context order: every call is settled
-    before the next model call, so a later reuse of the id comes after it. The
-    child settles with that result instead of re-deriving it from job state that
-    J5 may since have pruned.
+    before the next model call, so a later reuse of the id comes after it. A fork
+    anchored between a response and its tool results inherits those calls open
+    and settles them with this result instead of re-deriving it from job state
+    that J5 may since have pruned; J5 keeps a job's files until it exists.
     """
     row = (
         conn.execute(

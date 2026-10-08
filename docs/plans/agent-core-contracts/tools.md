@@ -178,7 +178,7 @@ backend they are required.
 
 | Operation | v1 | Meaning |
 | --- | --- | --- |
-| `start(command, cwd, env, timeout)` → `job_id` | yes | create the job directory and metadata, then spawn the wrapper in its own session |
+| `start(command, cwd, env, timeout, call)` → `job_id` | yes | create the job directory and metadata for the call instance `call`, then spawn the wrapper in its own session |
 | `status(job_id)` | yes | `running`, `exited{code}`, or `gone` (ended without an exit code) |
 | `wait(job_id, deadline_s)` | yes | until exit, or at most `deadline_s` seconds from now (`None`: until exit) |
 | `output_path(job_id)` | yes | absolute path of `output.log`, named in truncated and handover results |
@@ -186,6 +186,11 @@ backend they are required.
 | `kill(job_id)` | yes | terminate the process tree, verified by process identity |
 | `hand_over(job_id)` → `watch_id` | yes | register a once Watch with target kind `job` |
 | `send(job_id, keys)`, `screen(job_id)`, `resize(job_id, cols, rows)`, `attach_info(job_id)` | reserved | `pty` backend (plan §5.4) |
+
+A job belongs to its call instance (`CallInstance`, the loop's `ToolContext.call`): the committed response that made
+the call, as its row id and `context_seq`, plus the call id. Providers reuse call ids, so every lookup from a call to
+its job matches the whole instance, and none compares a job's time with a row's: the wall clock can step back. A
+checkpoint turn's call has no committed response and starts no job.
 
 Job directory: `<state>/agent_core/jobs/<job_id>/` with `meta.json`, `output.log`, and the files the `tools` lane's
 launch mechanism needs. The job host meets recovery invariants J1–J6 ([`recovery.md`](recovery.md)): a command starts

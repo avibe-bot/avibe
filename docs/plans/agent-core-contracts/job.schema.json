@@ -8,6 +8,8 @@
     "version",
     "job_id",
     "session_id",
+    "response_id",
+    "response_seq",
     "tool_call_id",
     "backend",
     "command",
@@ -27,6 +29,14 @@
     },
     "session_id": {
       "type": "string"
+    },
+    "response_id": {
+      "type": "string",
+      "description": "`messages.id` of the committed response that made the call. With `session_id`, `response_seq`, and `tool_call_id`, the call instance that started the job (`CallInstance`, `ToolContext.call`): providers reuse call ids, so T2's job lookup, J5's settled check, and the hand-over's owning Turn match a job to its call by the whole instance, never by time."
+    },
+    "response_seq": {
+      "type": "integer",
+      "description": "That response's `context_seq` in `session_id`. The call's result is the first `tool_result` with its id after it, in context order."
     },
     "tool_call_id": {
       "type": "string"
@@ -53,7 +63,7 @@
     "created_at": {
       "type": "string",
       "format": "date-time",
-      "description": "UTC creation time at full microsecond precision; recovery compares it with a response's commit time to tell apart jobs a reused tool-call id started."
+      "description": "UTC creation time, from which a job Watch reports the elapsed time. Never compared with a row's time: the wall clock can step back."
     },
     "state_dir": {
       "type": "string",
@@ -123,12 +133,14 @@
       "version": 1,
       "job_id": "job_31c",
       "session_id": "ses7k2m9p4q1x",
+      "response_id": "msg_0640b3c1f2a9e8d47c1e9a2b",
+      "response_seq": 42,
       "tool_call_id": "toolu_01AbC",
       "backend": "pipe",
       "command": "pytest -q",
       "cwd": "/work/repo",
       "timeout_s": null,
-      "created_at": "2026-10-02T04:12:09.512345Z",
+      "created_at": "2026-10-02T04:12:09.512Z",
       "state_dir": "/home/u/.avibe/state/agent_core/jobs/job_31c",
       "process": {
         "pid": 48211,

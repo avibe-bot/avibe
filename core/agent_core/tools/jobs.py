@@ -51,7 +51,7 @@ from typing import Any, Awaitable, Callable, Mapping, Optional
 
 import psutil
 
-from core.agent_core.tools.base import JobStatus
+from core.agent_core.tools.base import CallInstance, JobStatus
 from core.agent_core.tools.paths import os_reason, run_to_end
 from core.process_isolation import (
     DEFAULT_PROCESS_TERMINATE_TIMEOUT_SECONDS,
@@ -121,27 +121,6 @@ def _iso(moment: datetime) -> str:
     return moment.isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
-def instant_text(moment: datetime) -> str:
-    """A UTC instant at full microsecond precision, the form job and transcript times compare in."""
-    return moment.astimezone(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
-
-
-def instant(value: object) -> Optional[datetime]:
-    """Parse a recorded UTC time (``...Z`` or an offset) at full precision, or ``None``.
-
-    The one parser for every time the job and recovery paths compare: a job's
-    ``created_at``, a response's commit, a tool result's commit.
-    """
-    text = str(value or "").strip()
-    if not text:
-        return None
-    try:
-        moment = datetime.fromisoformat(text[:-1] + "+00:00" if text.endswith("Z") else text)
-    except ValueError:
-        return None
-    return moment if moment.tzinfo is not None else moment.replace(tzinfo=timezone.utc)
-
-
 def _ceil_ms(moment: datetime) -> datetime:
     """Round up to the millisecond ``_iso`` keeps, so a recorded deadline is never early."""
     rest = moment.microsecond % 1000
@@ -181,6 +160,17 @@ def _read_text(path: str) -> Optional[str]:
             return handle.read(_STATE_FILE_CHARS).strip()
     except FileNotFoundError:
         return None
+
+
+def call_instance(meta: Mapping[str, Any]) -> Optional[CallInstance]:
+    """The call instance that started a job, from its ``meta.json``; ``None`` if the record names none."""
+    session_id, response_id = meta.get("session_id"), meta.get("response_id")
+    response_seq, tool_call_id = meta.get("response_seq"), meta.get("tool_call_id")
+    if not all(isinstance(value, str) for value in (session_id, response_id, tool_call_id)):
+        return None
+    if not isinstance(response_seq, int) or isinstance(response_seq, bool):
+        return None
+    return CallInstance(session_id, response_id, response_seq, tool_call_id)
 
 
 class LocalJobHost:
@@ -234,30 +224,19 @@ class LocalJobHost:
     def _write_meta(self, job_id: str, meta: Mapping[str, Any]) -> None:
         _write_atomic(self._path(job_id, "meta.json"), _meta_text(meta))
 
-    def find_job(
-        self, session_id: str, tool_call_id: str, *, created_since: Optional[datetime] = None
-    ) -> Optional[str]:
-        """The job started for a tool call, for settling it at resume.
+    def find_job(self, call: CallInstance) -> Optional[str]:
+        """The job a call instance started, for settling the call at resume; it starts at most one.
 
-        A provider may reuse a tool-call id in a later response, so several jobs can
-        match: the newest is returned. ``created_since``, the commit time of the
-        response that made the call, excludes jobs an earlier call with the same id
-        started.
+        Matched on the whole instance, never the call id alone: a provider may reuse an id in a later response.
         """
-        newest: Optional[tuple[datetime, str]] = None
         for name in self._job_ids():
             try:
                 meta = self.meta(name)
             except (KeyError, ValueError, OSError):
                 continue
-            if meta.get("session_id") != session_id or meta.get("tool_call_id") != tool_call_id:
-                continue
-            created = instant(meta.get("created_at"))
-            if created is None or (created_since is not None and created < created_since):
-                continue
-            if newest is None or created > newest[0]:
-                newest = (created, name)
-        return newest[1] if newest is not None else None
+            if call_instance(meta) == call:
+                return name
+        return None
 
     def _job_ids(self) -> list[str]:
         try:
@@ -312,10 +291,9 @@ class LocalJobHost:
         cwd: str,
         env: Mapping[str, str],
         timeout_s: Optional[float],
-        session_id: str,
-        tool_call_id: str,
+        call: CallInstance,
     ) -> str:
-        """Start ``command`` with ``env`` as its whole environment; return once it may run.
+        """Start ``command`` for ``call`` with ``env`` as its whole environment; return once it may run.
 
         Raises ``JobStartError`` when the command did not start.
         """
@@ -325,7 +303,7 @@ class LocalJobHost:
             raise JobStartError("No Python interpreter is available to run the command.")
         # The host's own steps are small and synchronous, so the only await is the wait for the pid: a cancel
         # can land nowhere else, and never between publishing ``go`` and returning the job id.
-        job_id, proc, marker, meta = self._spawn(command, cwd, env, timeout_s, session_id, tool_call_id)
+        job_id, proc, marker, meta = self._spawn(command, cwd, env, timeout_s, call)
         try:
             identity = await self._await_pid(job_id, proc, marker)
         except asyncio.CancelledError:
@@ -343,8 +321,7 @@ class LocalJobHost:
         cwd: str,
         env: Mapping[str, str],
         timeout_s: Optional[float],
-        session_id: str,
-        tool_call_id: str,
+        call: CallInstance,
     ) -> tuple[str, subprocess.Popen, str, dict[str, Any]]:
         """The job directory, ``meta.json``, and the wrapper, which waits for the decision (J1)."""
         job_id = f"job_{secrets.token_hex(8)}"
@@ -354,15 +331,15 @@ class LocalJobHost:
         meta: dict[str, Any] = {
             "version": 1,
             "job_id": job_id,
-            "session_id": session_id,
-            "tool_call_id": tool_call_id,
+            "session_id": call.session_id,
+            "response_id": call.response_id,
+            "response_seq": call.response_seq,
+            "tool_call_id": call.tool_call_id,
             "backend": "pipe",
             "command": command,
             "cwd": cwd,
             "timeout_s": timeout_s,
-            # Full precision: recovery tells apart jobs a reused tool-call id started
-            # within one millisecond (``find_job``).
-            "created_at": instant_text(created),
+            "created_at": _iso(created),
             "state_dir": job_dir,
             "process": None,
             "terminal": None,

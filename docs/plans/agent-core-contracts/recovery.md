@@ -16,7 +16,7 @@ at-least-once, and that is stated where it applies.
 | J2 | Before a command can run, the job record holds an identity that distinguishes its process tree from a recycled pid, so recovery can inspect and kill exactly that tree. | kill and inspect after a simulated pid reuse |
 | J3 | A `timeout` holds across handover and vibe restarts: the deadline is absolute and recorded with the job, and whichever component owns the job when it passes kills the tree. | timeout shorter than the foreground window with `watch: true`, and with a restart in between |
 | J4 | Output on disk is bounded per job (head and tail kept, middle dropped beyond a fixed cap), and every result or follow-up built from a truncated log says so. | a command producing more than the cap |
-| J5 | Job files are kept until the owning tool call has a durable `tool_result` and the Watch that owns the job, if any, has settled. | an exited job whose call is unsettled is never removed |
+| J5 | Job files are kept until the call instance that started the job has a durable `tool_result` and the Watch that owns the job, if any, has settled. An earlier call's result never settles a later call that reuses its id. | an exited job whose call is unsettled is never removed, including after a reused id and a wall clock that stepped back |
 | J6 | Handover is idempotent per job: one job has at most one Watch, whatever crashes in between. | crash between Watch creation and committing the handover result, then recovery |
 
 ## Tool calls (`loop` lane)
@@ -24,7 +24,7 @@ at-least-once, and that is stated where it applies.
 | ID | Invariant | Proof |
 | --- | --- | --- |
 | T1 | `project()` reads only committed rows; the same rows always produce the same request. | projection before and after job state changes |
-| T2 | At resume, before the first projection, and when a run ends without completing (a Stop), every tool call without a committed `tool_result` gets exactly one, chosen from its job state (exited: the output; running: handover; stopped with a recorded reason: that result; never ran: the interrupted result). A call without job state (`write`, `edit`) gets `[tool call interrupted; it may or may not have completed; re-read the file before continuing]`. Retries settle nothing twice, and neither do concurrent writers: the store's `append_tool_result` returns the result already committed for the call instance instead of writing a second. | crash between settlement steps, then resume twice |
+| T2 | At resume, before the first projection, and when a run ends without completing (a Stop), every tool call without a committed `tool_result` gets exactly one, chosen from the state of the job its call instance started (exited: the output; running: handover; stopped with a recorded reason: that result; never ran: the interrupted result). A call without job state (`write`, `edit`) gets `[tool call interrupted; it may or may not have completed; re-read the file before continuing]`. Retries settle nothing twice, and neither do concurrent writers: the store's `append_tool_result` returns the result already committed for the call instance instead of writing a second. | crash between settlement steps, then resume twice |
 | T3 | Inputs accepted by `steer` or `follow_up` are never dropped: they enter the context, including after a crash. They belong to the Turn that accepted them and are never re-queued as a new P3 Turn. A run that ended by design runs again for them within its Turn; after a stop, an error, or a crash they are admitted into the context (at the end of the run, or at the Session's resume) and share the Turn's outcome. | a terminating tool while a steer is queued; a crash before consumption |
 | T4 | An unsettled Turn found at startup is settled as interrupted after T2; the agent never continues it on its own (a hook `end`, an abort, or a crash all leave the same safe state). The user's next message starts a new Turn with the full context. When T2 handed the Turn's running commands to Watches, its notice names them and offers no Retry, because a resend would run them twice. | crash after an `end` hook and after a mid-turn commit |
 
@@ -43,7 +43,10 @@ notice, and the committed reply stays in the Workbench transcript with its commi
 The only cross-lane shapes recovery adds:
 
 - `meta.json` (`job.schema.json`): `deadline_at` (absolute, nullable), and `process` with the identity fields of
-  `PersistedProcessIdentity` (`core/process_isolation.py`), recorded before the command can run (J2).
+  `PersistedProcessIdentity` (`core/process_isolation.py`), recorded before the command can run (J2). `session_id`,
+  `response_id`, `response_seq`, and `tool_call_id` are the call instance that started the job. T2's job lookup,
+  J5's settled check, and the hand-over's owning Turn all match on it, in context order; none compares a job's
+  `created_at` with a row's time.
 - `tool_result` `details.recovered`: `true` on every result T2 commits, so T4 tells the Watches recovery created for
   the Turn's running commands from those the Turn handed over itself (`storage.agent_transcript.recovered_watch_ids`).
 - Watch `job` target: keyed by `job_id`, created by adopt-or-create (J6). The hand-over takes the Watch's Agent and

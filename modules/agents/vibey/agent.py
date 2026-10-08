@@ -29,7 +29,6 @@ import secrets
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
-from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, AsyncIterator, Callable, Mapping, Optional, Sequence
@@ -53,7 +52,8 @@ from core.agent_core.agent.recovery import settle_open_calls
 from core.agent_core.harness.context import ContextConfig
 from core.agent_core.harness.projection import open_tool_calls
 from core.agent_core.harness.store import ContextEntry
-from core.agent_core.tools.jobs import instant
+from core.agent_core.tools.base import CallInstance
+from core.agent_core.tools.jobs import call_instance
 from core.agent_core.messages import (
     IMAGE_MIME_TYPES,
     AssistantMessage,
@@ -95,9 +95,9 @@ from storage.agent_transcript import (
     INPUT_TYPES,
     RESPONSE_TYPES,
     SQLiteTranscriptStore,
+    call_instance_result,
     final_outcome,
     render_text,
-    source_tool_result,
 )
 from storage.db import get_cached_sqlite_engine
 from storage.models import agent_events, agent_sessions, message_deliveries, messages, session_turns
@@ -410,28 +410,16 @@ class VibeyAgent(BaseAgent):
             logger.exception("Vibey job pruning failed")
 
     def _job_call_settled(self, meta: Any) -> bool:
-        """Whether the job's tool call has a durable ``tool_result`` row (the adapter's half of J5).
+        """Whether the job's call instance has a durable ``tool_result`` row (the adapter's half of J5).
 
-        Only a result committed after the job was created counts: a provider may reuse
-        a tool-call id, and an earlier call's result does not settle a later one. The
-        same rule as T2's job lookup (``_settle_open_calls``).
+        Matched in context order, never by time: a provider may reuse a tool-call id,
+        and an earlier call's result does not settle a later one.
         """
-        from sqlalchemy import func
-
-        session_id, call_id = str(meta.get("session_id") or ""), str(meta.get("tool_call_id") or "")
-        created = instant(meta.get("created_at"))
-        if not session_id or not call_id or created is None:
+        call = call_instance(meta)
+        if call is None:
             return False
         with self._engine.connect() as conn:
-            committed = conn.execute(
-                select(agent_events.c.created_at).where(
-                    agent_events.c.session_id == session_id,
-                    agent_events.c.event_type == "tool_result",
-                    agent_events.c.context_seq.is_not(None),
-                    func.json_extract(agent_events.c.content_json, "$.message.tool_call_id") == call_id,
-                )
-            ).scalars()
-            return any((moment := instant(value)) is not None and moment >= created for value in committed)
+            return call_instance_result(conn, call.session_id, call.response_seq, call.tool_call_id) is not None
 
     async def prepare_resume_binding(self, *, base_session_id: str, session_key: str, working_path: str) -> None:
         """Nothing to prepare: the transcript is the Session's own rows, read at the next run."""
@@ -730,24 +718,22 @@ class VibeyAgent(BaseAgent):
             return
         suite = self._tools()
 
-        def evidence() -> tuple[list[ContextEntry], dict[tuple[str, str], str]]:
+        def evidence() -> tuple[list[ContextEntry], dict[CallInstance, str]]:
             # A call is its instance, the owning response plus its id (providers reuse ids).
             # A call this Session inherited open takes the result its owner committed, matched
-            # in context order. Only a job file falls back to the clock: its job started after
-            # the owning response committed (one rule with J5).
-            committed = self._committed_at([owner.row_id for owner, _ in open_calls])
+            # in context order; any other call, the job its instance started.
             inherited, found = [], {}
             with self._engine.connect() as conn:
                 for owner, call in open_calls:
                     if owner.session_id != session_id:
-                        result = source_tool_result(conn, owner.session_id, owner.context_seq, call.id)
+                        result = call_instance_result(conn, owner.session_id, owner.context_seq, call.id)
                         if result is not None:
                             inherited.append(result)
                             continue
-                    since = committed.get(owner.row_id)
-                    job_id = suite.find_job(owner.session_id, call.id, created_since=since)
+                    instance = CallInstance(owner.session_id, owner.row_id, owner.context_seq, call.id)
+                    job_id = suite.find_job(instance)
                     if job_id is not None:
-                        found[(owner.session_id, call.id)] = job_id
+                        found[instance] = job_id
             return inherited, found
 
         # Each job lookup lists the jobs directory: one pass, off the event loop.
@@ -777,9 +763,9 @@ class VibeyAgent(BaseAgent):
         """A job Watch's Agent and authorization, from the job's owning Turn (fail closed).
 
         The same rule for every hand-over, in a Turn or at startup: the owning response
-        is the latest one carrying the job's call, committed at or before the job's
-        creation; its Turn is the one whose input the response answers, and that Turn's
-        initial input row carries the principal and its persisted resource snapshot.
+        is the one the job's call instance names; its Turn is the one whose input the
+        response answers, and that Turn's initial input row carries the principal and
+        its persisted resource snapshot.
         A remote Turn without a usable snapshot, or a job whose Turn cannot be found, is
         handed over as unverifiable: owned, but never followed up.
         """
@@ -790,14 +776,22 @@ class VibeyAgent(BaseAgent):
             resource_user_context_from_metadata,
         )
 
-        session_id, call_id = str(meta.get("session_id") or ""), str(meta.get("tool_call_id") or "")
-        created = instant(meta.get("created_at"))
+        call = call_instance(meta)
+        if call is None:
+            return {"unverifiable_remote": True}
+        session_id = call.session_id
         with self._engine.connect() as conn:
-            owner = self._owning_response(conn, session_id, call_id, created)
-            origin = self._turn_initial_input(conn, session_id, owner["context_seq"]) if owner else None
+            owner = conn.execute(
+                select(messages.c.author_name).where(
+                    messages.c.id == call.response_id,
+                    messages.c.session_id == session_id,
+                    messages.c.context_seq == call.response_seq,
+                )
+            ).first()
+            origin = self._turn_initial_input(conn, session_id, call.response_seq) if owner else None
         if owner is None or origin is None:
             return {"unverifiable_remote": True}
-        route: dict[str, Any] = {"agent_name": owner["author_name"]} if owner["author_name"] else {}
+        route: dict[str, Any] = {"agent_name": owner.author_name} if owner.author_name else {}
         metadata = _json_object(origin["metadata_json"])
         caller = caller_context_from_platform_payload(
             {"agent_session_id": session_id, "platform": origin["platform"], "message_metadata": metadata},
@@ -819,26 +813,6 @@ class VibeyAgent(BaseAgent):
         if context is None:
             return {**route, "unverifiable_remote": True}
         return {**route, "user_context": context}
-
-    @staticmethod
-    def _owning_response(conn: Any, session_id: str, call_id: str, created: Optional[datetime]) -> Optional[dict]:
-        from sqlalchemy import text as sql_text
-
-        rows = conn.execute(
-            sql_text(
-                "SELECT m.context_seq, m.author_name, m.created_at FROM messages AS m, "
-                "json_each(json_extract(m.content_json, '$.model.message.content')) AS block "
-                "WHERE m.session_id = :session_id AND m.context_seq IS NOT NULL "
-                "AND json_extract(block.value, '$.type') = 'tool_call' AND json_extract(block.value, '$.id') = :call_id "
-                "ORDER BY m.context_seq DESC"
-            ),
-            {"session_id": session_id, "call_id": call_id},
-        ).mappings()
-        for row in rows:
-            committed = instant(row["created_at"])
-            if created is None or committed is None or committed <= created:
-                return dict(row)
-        return None
 
     @staticmethod
     def _turn_initial_input(conn: Any, session_id: str, before_seq: int) -> Optional[dict]:
@@ -876,11 +850,6 @@ class VibeyAgent(BaseAgent):
             select(messages.c.platform, messages.c.author_id, messages.c.metadata_json).where(messages.c.id == initial_id)
         ).mappings().first()
         return dict(row) if row is not None else None
-
-    def _committed_at(self, row_ids: Sequence[str]) -> dict[str, datetime]:
-        with self._engine.connect() as conn:
-            rows = conn.execute(select(messages.c.id, messages.c.created_at).where(messages.c.id.in_(set(row_ids))))
-            return {row_id: moment for row_id, created in rows if (moment := instant(created)) is not None}
 
     def _unconsumed_inputs(self, session_id: str) -> list[tuple[str, str, list[FileAttachment], dict[str, Any]]]:
         """Inputs accepted into a ``vibey`` Turn but never consumed, in acceptance order.

@@ -26,6 +26,7 @@ from sqlalchemy import insert
 
 from config import paths
 from core import watches as watches_module
+from core.agent_core.tools.base import CallInstance
 from core.agent_core.tools.jobs import LocalJobHost
 from core.scheduled_tasks import TaskExecutionStore
 from core.watches import (
@@ -94,8 +95,7 @@ async def _start_job(host: LocalJobHost, cwd: Path, command: str, *, timeout_s=N
         cwd=str(cwd),
         env={"PATH": os.environ.get("PATH", "/usr/bin:/bin")},
         timeout_s=timeout_s,
-        session_id=SESSION_ID,
-        tool_call_id=tool_call_id,
+        call=CallInstance(SESSION_ID, "msg_1", 1, tool_call_id),
     )
 
 

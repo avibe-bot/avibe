@@ -27,9 +27,28 @@ class ToolSpec:
 
 
 @dataclass(frozen=True)
+class CallInstance:
+    """A tool call's identity: the committed response that made it, plus the call id.
+
+    Providers reuse call ids, so an id alone names no call. ``response_id`` is the
+    response's row (``messages.id``) and ``response_seq`` its ``context_seq`` in
+    ``session_id``; the call's result is the first ``tool_result`` with its id after
+    that response, in context order (C-5).
+    """
+
+    session_id: str
+    response_id: str
+    response_seq: int
+    tool_call_id: str
+
+
+@dataclass(frozen=True)
 class ToolContext:
     session_id: str
     tool_call_id: str
+    #: The call's instance when a committed response made it; ``None`` for a checkpoint turn's call (C-9),
+    #: which starts no job.
+    call: Optional[CallInstance]
     cwd: str
     env: Mapping[str, str]
     cancel: CancelToken
@@ -74,8 +93,7 @@ class JobHost(Protocol):
         cwd: str,
         env: Mapping[str, str],
         timeout_s: Optional[float],
-        session_id: str,
-        tool_call_id: str,
+        call: CallInstance,
     ) -> str: ...
 
     def status(self, job_id: str) -> JobStatus: ...

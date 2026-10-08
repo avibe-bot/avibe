@@ -14,7 +14,7 @@ from core.agent_core.agent.recovery import settle_open_calls
 from core.agent_core.ai.provider import Done
 from core.agent_core.harness.projection import INTERRUPTED, ProjectionError, project
 from core.agent_core.messages import LargeRef, TextBlock, ToolCallBlock, ToolResultMessage, text
-from core.agent_core.tools.base import JobStatus, ToolResult
+from core.agent_core.tools.base import CallInstance, JobStatus, ToolResult
 from tests.agent_core.fakes import (
     FakeJobHost,
     FakeModelRouter,
@@ -24,6 +24,10 @@ from tests.agent_core.fakes import (
     input_row,
     user,
 )
+
+
+def _instance(response, call_id):
+    return CallInstance(response.session_id, response.row_id, response.context_seq, call_id)
 
 
 async def _never_rendered(*_args):
@@ -69,10 +73,10 @@ async def test_resume_settles_each_job_state_once_and_projection_never_rechecks_
     # without job state. The previous bash-only table missed write/edit wording.
     store, jobs = InMemoryTranscriptStore(), FakeJobHost()
     call = ToolCallBlock("call", tool_name)
-    await store.append_response("session", assistant(calls=[call]), final=False)
+    response = await store.append_response("session", assistant(calls=[call]), final=False)
     job_ids = {}
     if state != "missing":
-        job_ids[("session", "call")] = "job_1"
+        job_ids[_instance(response, "call")] = "job_1"
         jobs.states["job_1"] = JobStatus(
             "gone" if state in {"never-ran", "stopped"} else state, exit_code=7 if state == "exited" else None
         )
@@ -133,7 +137,7 @@ async def test_settlement_resume_after_partial_commit_skips_done_calls_and_keeps
             return await super().append_tool_result(session_id, message, details=details)
 
     store, jobs = InterruptedStore(), FakeJobHost()
-    await store.append_response(
+    response = await store.append_response(
         "session",
         assistant(
             calls=[
@@ -146,7 +150,7 @@ async def test_settlement_resume_after_partial_commit_skips_done_calls_and_keeps
     for name in ("a", "b"):
         jobs.states[name] = JobStatus("exited", exit_code=0)
         jobs.outputs[name] = name.encode()
-    ids = {("session", name): name for name in ("a", "b")}
+    ids = {_instance(response, name): name for name in ("a", "b")}
 
     async def render(call, job_id, status, watch_id):
         if failure == "unsupported_result" and store.fail and call.id == "b":
@@ -195,7 +199,7 @@ async def test_fork_settlement_uses_parent_job_identity_and_late_rows_project_at
         session_id="child",
         store=store,
         jobs=jobs,
-        job_ids={("parent", "a"): "job_a"},
+        job_ids={_instance(response, "a"): "job_a"},
         render_result=renderer(jobs),
     )
     child = project(await store.load("child"))
@@ -226,7 +230,7 @@ async def test_retry_after_handover_commit_failure_reuses_job_identity_without_s
             return await super().hand_over(job_id)
 
     store, jobs = InterruptedStore(), Host()
-    await store.append_response("session", assistant(calls=[ToolCallBlock("a", "bash")]), final=False)
+    response = await store.append_response("session", assistant(calls=[ToolCallBlock("a", "bash")]), final=False)
     jobs.states["job_a"] = JobStatus("running")
     jobs.outputs["job_a"] = b""
     with pytest.raises(OSError, match="commit interrupted"):
@@ -234,7 +238,7 @@ async def test_retry_after_handover_commit_failure_reuses_job_identity_without_s
             session_id="session",
             store=store,
             jobs=jobs,
-            job_ids={("session", "a"): "job_a"},
+            job_ids={_instance(response, "a"): "job_a"},
             render_result=renderer(jobs),
         )
     watch = jobs.watches["job_a"]
@@ -243,7 +247,7 @@ async def test_retry_after_handover_commit_failure_reuses_job_identity_without_s
         session_id="session",
         store=store,
         jobs=jobs,
-        job_ids={("session", "a"): "job_a"},
+        job_ids={_instance(response, "a"): "job_a"},
         render_result=renderer(jobs),
     )
     assert len(rows) == 1
@@ -271,7 +275,8 @@ async def test_foreground_release_is_scoped_to_call_then_session_and_never_watch
     host = FakeJobHost()
     tracked = TrackingJobHost(host)
     for session, call in [("one", "a"), ("one", "b"), ("two", "a"), ("one", "a")]:
-        await tracked.start("fake", cwd="/test-owned", env={}, timeout_s=None, session_id=session, tool_call_id=call)
+        instance = CallInstance(session, "msg_1", 1, call)
+        await tracked.start("fake", cwd="/test-owned", env={}, timeout_s=None, call=instance)
     await tracked.hand_over("job_4")
     await tracked.kill_foreground("one", tool_call_id="a")
     assert host.killed == ["job_1"]

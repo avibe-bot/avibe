@@ -34,7 +34,7 @@ from core.agent_core.agent.recovery import UNRECORDED_EFFECT
 from core.agent_core.ai.provider import Done
 from core.agent_core.harness.projection import project
 from core.agent_core.messages import AssistantMessage, TextBlock, ToolCallBlock, ToolResultMessage, UserMessage, text
-from core.agent_core.tools.base import JobStatus, ToolResult
+from core.agent_core.tools.base import CallInstance, JobStatus, ToolResult
 from core.message_dispatcher import ConsolidatedMessageDispatcher
 from core.services.agent_steering import ActiveSteerTarget, SteerOutcome, SteerRequest
 from modules.agents.vibey import VibeyAgent
@@ -292,7 +292,7 @@ class _Harness:
             jobs=self.jobs,
             create_tools=lambda jobs, sink: list(self.tools),
             render_recovered=_unused_renderer,
-            find_job=lambda session_id, call_id, **_: None,
+            find_job=lambda call: None,
         )
         self.agent = self.new_agent()
         self._turns = 0
@@ -847,7 +847,7 @@ async def test_resume_settles_open_calls_and_admits_unconsumed_inputs_before_the
         jobs=jobs,
         create_tools=lambda jobs_, sink: [FakeTool("bash"), FakeTool("edit")],
         render_recovered=render,
-        find_job=lambda session_id, call_id, **_: "job_1" if (session_id, call_id) == (SESSION, "call_bash") else None,
+        find_job=lambda call: "job_1" if (call.session_id, call.tool_call_id) == (SESSION, "call_bash") else None,
     )
     harness = _Harness(engine, tmp_path, "avibe", [[Done(assistant("resumed"))]], suite=suite)
     # The crashed process: a Turn whose response opened two calls, one with a running job,
@@ -1377,8 +1377,7 @@ async def test_the_footer_reports_the_runs_final_outcome(engine, session, tmp_pa
 
     def tools(tracking, sink):
         async def start_and_leave(arguments, ctx):
-            await tracking.start("sleep 600", cwd=ctx.cwd, env={}, timeout_s=None, session_id=ctx.session_id,
-                                 tool_call_id=ctx.tool_call_id)
+            await tracking.start("sleep 600", cwd=ctx.cwd, env={}, timeout_s=None, call=ctx.call)
             return ToolResult((text("started"),))
 
         return [FakeTool("echo", execute=start_and_leave)]
@@ -1424,8 +1423,7 @@ async def test_a_silent_final_whose_run_failed_after_its_commit_is_typed_by_its_
 
     def tools(tracking, sink):
         async def start_and_leave(arguments, ctx):
-            await tracking.start("sleep 600", cwd=ctx.cwd, env={}, timeout_s=None, session_id=ctx.session_id,
-                                 tool_call_id=ctx.tool_call_id)
+            await tracking.start("sleep 600", cwd=ctx.cwd, env={}, timeout_s=None, call=ctx.call)
             return ToolResult((text("started"),))
 
         return [FakeTool("echo", execute=start_and_leave)]
@@ -1581,7 +1579,7 @@ async def test_startup_hands_an_orphaned_foreground_job_to_its_watch(engine, ses
         jobs=jobs,
         create_tools=lambda jobs_, sink: [FakeTool("bash")],
         render_recovered=render,
-        find_job=lambda session_id, call_id, **_: "job_1" if (session_id, call_id) == (SESSION, "call_bash") else None,
+        find_job=lambda call: "job_1" if (call.session_id, call.tool_call_id) == (SESSION, "call_bash") else None,
     )
     harness = _Harness(engine, tmp_path, "avibe", [], suite=suite)
     # The crashed process left a running foreground command, and no Turn will resume this
@@ -1628,7 +1626,7 @@ async def test_startup_recovers_a_session_routed_to_another_agent_since(engine, 
         jobs=jobs,
         create_tools=lambda jobs_, sink: [FakeTool("bash")],
         render_recovered=render,
-        find_job=lambda session_id, call_id, **_: "job_1" if (session_id, call_id) == (SESSION, "call_bash") else None,
+        find_job=lambda call: "job_1" if (call.session_id, call.tool_call_id) == (SESSION, "call_bash") else None,
     )
     harness = _Harness(engine, tmp_path, "avibe", [], suite=suite)
     request = harness.request("run the slow suite")
@@ -1908,14 +1906,14 @@ async def test_a_suppressed_committed_row_becomes_a_receipt_when_its_output_is_s
 # --- real wiring: the merged tools, job host and Watch hand-over ---------------------------
 
 
-async def _real_job(suite, command: str, *, call_id: str, cwd: Path) -> str:
+def _instance(response, call_id: str) -> CallInstance:
+    """Call ``call_id`` of a committed response (its ``ContextEntry``)."""
+    return CallInstance(response.session_id, response.row_id, response.context_seq, call_id)
+
+
+async def _real_job(suite, command: str, *, call: CallInstance, cwd: Path) -> str:
     return await suite.jobs.start(
-        command,
-        cwd=str(cwd),
-        env={"PATH": os.environ.get("PATH", "/usr/bin:/bin")},
-        timeout_s=None,
-        session_id=SESSION,
-        tool_call_id=call_id,
+        command, cwd=str(cwd), env={"PATH": os.environ.get("PATH", "/usr/bin:/bin")}, timeout_s=None, call=call
     )
 
 
@@ -2039,8 +2037,16 @@ async def test_a_stop_settles_the_running_command_with_its_recorded_reason(engin
     request = harness.request("run it")
 
     running = asyncio.create_task(harness.agent.handle_message(request))
-    await _until(lambda: suite.find_job(SESSION, "call_bash") is not None, "the command never started")
-    job_id = suite.find_job(SESSION, "call_bash")
+
+    def started() -> Optional[str]:
+        # The job of the call the run's committed response made (its call instance).
+        responses = harness.rows("assistant")
+        if not responses:
+            return None
+        return suite.find_job(CallInstance(SESSION, responses[0]["id"], responses[0]["context_seq"], "call_bash"))
+
+    await _until(lambda: started() is not None, "the command never started")
+    job_id = started()
     await _until(lambda: b"started" in suite.jobs.output(job_id)[0], "the command printed nothing")
     assert await harness.agent.handle_stop(AgentRequest(**{**request.__dict__, "message": "stop"})) is True
     await running
@@ -2069,9 +2075,9 @@ async def test_resume_settles_a_real_bash_job_through_the_real_renderer(
     )
     command = "printf done" if state == "exited" else "sleep 30"
     call = ToolCallBlock(id="call_bash", name="bash", arguments={"command": command})
-    await harness.agent.store.append_response(SESSION, assistant("", calls=(call,)), final=False)
+    response = await harness.agent.store.append_response(SESSION, assistant("", calls=(call,)), final=False)
     # The crashed process had started the command; nothing committed its result.
-    job_id = await _real_job(suite, command, call_id="call_bash", cwd=tmp_path)
+    job_id = await _real_job(suite, command, call=_instance(response, "call_bash"), cwd=tmp_path)
     try:
         if state == "exited":
             await _until(lambda: suite.jobs.status(job_id).state == "exited", "the command never exited")
@@ -2093,49 +2099,63 @@ async def test_resume_settles_a_real_bash_job_through_the_real_renderer(
             await suite.jobs.kill(job_id)
 
 
-async def test_resume_settles_a_reused_call_id_from_the_job_its_own_call_started(
+def _clock_behind(hours: float):
+    """The job host's ``datetime`` after the wall clock stepped back (an NTP or manual correction)."""
+    from datetime import datetime, timedelta
+
+    class Behind(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime.now(tz) - timedelta(hours=hours)
+
+    return Behind
+
+
+async def test_resume_settles_a_reused_call_id_from_its_own_instance_whatever_the_clock_says(
     engine, session, tmp_path, published, monkeypatch
 ) -> None:
-    import secrets
-
     import core.agent_core.tools.jobs as jobs_module
-    from core.watches import ManagedWatchStore
+    from core.watches import watch_allows_runtime
 
-    # The earlier call's job id sorts first, so a lookup by (session, call id) alone finds it.
-    job_ids, token_hex = iter(["0" * 16, "f" * 16]), secrets.token_hex
-    monkeypatch.setattr(jobs_module.secrets, "token_hex", lambda n=None: next(job_ids) if n == 8 else token_hex(n))
-    suite = local_tool_suite(str(tmp_path / "jobs"))
-    harness = _Harness(engine, tmp_path, "avibe", [], suite=suite)
+    harness = _Harness(engine, tmp_path, "avibe", [])
+    harness.agent._tool_suite = None  # the adapter's own job host, whose hand-over takes the job's owning Turn
+    suite = harness.agent._tools()
     first = harness.request("print it")
     harness.controller._native_start(first.context)
     await harness.agent.store.consume_input(
         SESSION, first.context.platform_specific["delivery_id"], UserMessage((text("print it"),))
     )
     reused = ToolCallBlock(id="call_0", name="bash", arguments={"command": "printf old"})
-    await harness.agent.store.append_response(SESSION, assistant("", calls=(reused,)), final=False)
-    old = await _real_job(suite, "printf old", call_id="call_0", cwd=tmp_path)
+    earlier = await harness.agent.store.append_response(SESSION, assistant("", calls=(reused,)), final=False)
+    old = await _real_job(suite, "printf old", call=_instance(earlier, "call_0"), cwd=tmp_path)
     await _until(lambda: suite.jobs.status(old).state == "exited", "the first command never exited")
     await harness.agent.store.append_tool_result(
         SESSION, ToolResultMessage("call_0", "bash", (text("old"),)), details={"job_id": old}
     )
     await harness.agent.store.append_response(SESSION, assistant("printed"), final=True)
-    # The next Turn's provider reuses call_0; the crash leaves its command running.
+    # The next Turn's provider reuses call_0, and the wall clock steps back an hour between that
+    # response's commit and its command's start; the crash leaves the command running.
     second = harness.request("wait for it")
     harness.controller._native_start(second.context)
     await harness.agent.store.consume_input(
         SESSION, second.context.platform_specific["delivery_id"], UserMessage((text("wait for it"),))
     )
     again = ToolCallBlock(id="call_0", name="bash", arguments={"command": "sleep 30"})
-    await harness.agent.store.append_response(SESSION, assistant("", calls=(again,)), final=False)
-    current = await _real_job(suite, "sleep 30", call_id="call_0", cwd=tmp_path)
+    later = await harness.agent.store.append_response(SESSION, assistant("", calls=(again,)), final=False)
+    with monkeypatch.context() as clock:
+        clock.setattr(jobs_module, "datetime", _clock_behind(hours=1))
+        current = await _real_job(suite, "sleep 30", call=_instance(later, "call_0"), cwd=tmp_path)
     try:
-        harness.new_agent()
-        await harness.agent.recover_runtime_state()
+        agent = harness.new_agent()
+        agent._tool_suite = None
+        await agent.recover_runtime_state()
 
         result = (await harness.context_rows())[-1]
-        watch_id = ManagedWatchStore().find_job_watch(current)
-        assert result.kind == "tool_result" and watch_id and f"now Watch {watch_id}" in result.message.content[0].text
-        assert ManagedWatchStore().find_job_watch(old) is None
+        watch = _job_watch(current)
+        assert result.kind == "tool_result" and f"now Watch {watch.id}" in result.message.content[0].text
+        assert _job_watch(old) is None
+        # The Watch's authority is the Turn the job's own response answers.
+        assert watch.metadata.get("job_watch_authorization") == "local" and watch_allows_runtime(watch)
     finally:
         await suite.jobs.kill(current)
 
@@ -2167,11 +2187,8 @@ async def _two_sessions_with_open_calls(engine, tmp_path, suite) -> tuple[_Harne
             session_id, request.context.platform_specific["delivery_id"], UserMessage((text("run it"),))
         )
         call = ToolCallBlock(id="call_bash", name="bash", arguments={"command": command})
-        await harness.agent.store.append_response(session_id, assistant("", calls=(call,)), final=False)
-        jobs[session_id] = await suite.jobs.start(
-            command, cwd=str(tmp_path), env={"PATH": os.environ.get("PATH", "/usr/bin:/bin")},
-            timeout_s=None, session_id=session_id, tool_call_id="call_bash",
-        )
+        response = await harness.agent.store.append_response(session_id, assistant("", calls=(call,)), final=False)
+        jobs[session_id] = await _real_job(suite, command, call=_instance(response, "call_bash"), cwd=tmp_path)
     await _until(lambda: suite.jobs.status(jobs["ses_b"]).state == "exited", "ses_b's job never exited")
     return harness, jobs[SESSION], jobs["ses_b"]
 
@@ -2240,7 +2257,7 @@ async def test_two_recovery_passes_racing_on_one_open_call_settle_it_once(engine
 
     suite = ToolSuite(
         jobs=jobs, create_tools=lambda jobs_, sink: [FakeTool("bash")], render_recovered=render,
-        find_job=lambda session_id, call_id, **_: "job_1",
+        find_job=lambda call: "job_1",
     )
     harness = _Harness(engine, tmp_path, "avibe", [], suite=suite)
     request = harness.request("run it")
@@ -2363,12 +2380,9 @@ async def _remote_turn_with_open_call(
     await harness.agent.store.consume_input(SESSION, delivery_id, UserMessage((text("run the release"),)))
     harness.agent.store.bind_agent(SESSION, "vibey")
     call = ToolCallBlock(id="call_release", name="bash", arguments={"command": "sleep 30"})
-    await harness.agent.store.append_response(SESSION, assistant("", calls=(call,)), final=False)
+    response = await harness.agent.store.append_response(SESSION, assistant("", calls=(call,)), final=False)
     harness.agent.store.bind_agent(SESSION, None)
-    return await harness.agent._tools().jobs.start(
-        "sleep 30", cwd=str(tmp_path), env={"PATH": os.environ.get("PATH", "/usr/bin:/bin")},
-        timeout_s=None, session_id=SESSION, tool_call_id="call_release",
-    )
+    return await _real_job(harness.agent._tools(), "sleep 30", call=_instance(response, "call_release"), cwd=tmp_path)
 
 
 def _job_watch(job_id: str):
@@ -2457,7 +2471,7 @@ async def test_the_default_job_host_lives_in_the_watch_jobs_dir(engine, session,
 
     controller = _Controller(engine, "avibe")
     suite = VibeyAgent(controller, engine=engine)._tools()
-    job_id = await _real_job(suite, "true", call_id="call_true", cwd=tmp_path)
+    job_id = await _real_job(suite, "true", call=CallInstance(SESSION, "msg_true", 1, "call_true"), cwd=tmp_path)
     try:
         # vibe stop's stop_all_jobs and the job-Watch sweep both look in this one directory.
         assert Path(suite.jobs.output_path(job_id)).is_relative_to(Path(os.path.realpath(agent_jobs_dir())))
@@ -2465,7 +2479,10 @@ async def test_the_default_job_host_lives_in_the_watch_jobs_dir(engine, session,
         await _until(lambda: suite.jobs.status(job_id).state != "running", "the job never ended")
 
 
-async def test_startup_prunes_only_jobs_whose_call_and_watch_have_settled(engine, session, tmp_path, published) -> None:
+async def test_startup_prunes_only_jobs_whose_call_and_watch_have_settled(
+    engine, session, tmp_path, published, monkeypatch
+) -> None:
+    import core.agent_core.tools.jobs as jobs_module
     from core.watches import ManagedWatchStore
 
     suite = local_tool_suite(str(tmp_path / "jobs"))
@@ -2476,19 +2493,26 @@ async def test_startup_prunes_only_jobs_whose_call_and_watch_have_settled(engine
         SESSION, request.context.platform_specific["delivery_id"], UserMessage((text("run them"),))
     )
     calls = tuple(ToolCallBlock(id=f"call_{name}", name="bash", arguments={"command": "printf out"}) for name in "abc")
-    await harness.agent.store.append_response(SESSION, assistant("", calls=calls), final=False)
+    response = await harness.agent.store.append_response(SESSION, assistant("", calls=calls), final=False)
     # d's call is in no committed response, so nothing can ever settle it.
-    jobs = {name: await _real_job(suite, "printf out", call_id=f"call_{name}", cwd=tmp_path) for name in "abcd"}
+    jobs = {
+        name: await _real_job(suite, "printf out", call=_instance(response, f"call_{name}"), cwd=tmp_path)
+        for name in "abcd"
+    }
     for job_id in jobs.values():
         await _until(lambda job_id=job_id: suite.jobs.status(job_id).state == "exited", "a job never exited")
     # a and b have durable results and b's Watch still owns it; c's call is still open.
     for name in "ab":
-        await harness.agent.store.append_tool_result(
+        settled = await harness.agent.store.append_tool_result(
             SESSION, ToolResultMessage(f"call_{name}", "bash", (text("ok"),)), details={"job_id": jobs[name]}
         )
-    # e reuses a's call id after a's result committed (a model call apart): a's result does not settle it.
-    await asyncio.sleep(0.01)
-    jobs["e"] = await _real_job(suite, "printf out", call_id="call_a", cwd=tmp_path)
+    # e is the next response's call, which reuses a's id, started after the wall clock stepped back
+    # behind a's result: that earlier result does not settle it.
+    with monkeypatch.context() as clock:
+        clock.setattr(jobs_module, "datetime", _clock_behind(hours=1))
+        jobs["e"] = await _real_job(
+            suite, "printf out", call=CallInstance(SESSION, "msg_next", settled.context_seq + 1, "call_a"), cwd=tmp_path
+        )
     await _until(lambda: suite.jobs.status(jobs["e"]).state == "exited", "a job never exited")
     await suite.jobs.hand_over(jobs["b"])
     assert ManagedWatchStore().job_watch_settled(jobs["b"]) is False
@@ -2518,8 +2542,8 @@ async def test_a_running_service_prunes_settled_jobs_after_its_runs(engine, sess
         SESSION, request.context.platform_specific["delivery_id"], UserMessage((text("run it"),))
     )
     call = ToolCallBlock(id="call_old", name="bash", arguments={"command": "printf out"})
-    await harness.agent.store.append_response(SESSION, assistant("", calls=(call,)), final=False)
-    job_id = await _real_job(suite, "printf out", call_id="call_old", cwd=tmp_path)
+    response = await harness.agent.store.append_response(SESSION, assistant("", calls=(call,)), final=False)
+    job_id = await _real_job(suite, "printf out", call=_instance(response, "call_old"), cwd=tmp_path)
     await _until(lambda: suite.jobs.status(job_id).state == "exited", "the job never exited")
     await harness.agent.store.append_tool_result(
         SESSION, ToolResultMessage("call_old", "bash", (text("out"),)), details={"job_id": job_id}

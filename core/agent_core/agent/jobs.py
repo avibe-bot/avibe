@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from typing import Mapping, Optional
 
-from core.agent_core.tools.base import JobHost, JobStatus
+from core.agent_core.tools.base import CallInstance, JobHost, JobStatus
 
 
 class ForegroundCleanupError(RuntimeError):
@@ -22,7 +22,7 @@ class TrackingJobHost:
 
     def __init__(self, host: JobHost) -> None:
         self.host = host
-        self._foreground: dict[str, tuple[str, str]] = {}
+        self._foreground: dict[str, CallInstance] = {}
 
     async def start(
         self,
@@ -31,26 +31,16 @@ class TrackingJobHost:
         cwd: str,
         env: Mapping[str, str],
         timeout_s: Optional[float],
-        session_id: str,
-        tool_call_id: str,
+        call: CallInstance,
     ) -> str:
-        task = asyncio.create_task(
-            self.host.start(
-                command,
-                cwd=cwd,
-                env=env,
-                timeout_s=timeout_s,
-                session_id=session_id,
-                tool_call_id=tool_call_id,
-            )
-        )
+        task = asyncio.create_task(self.host.start(command, cwd=cwd, env=env, timeout_s=timeout_s, call=call))
         try:
             job_id = await asyncio.shield(task)
         except asyncio.CancelledError:
             job_id = await task
-            self._foreground[job_id] = (session_id, tool_call_id)
+            self._foreground[job_id] = call
             raise
-        self._foreground[job_id] = (session_id, tool_call_id)
+        self._foreground[job_id] = call
         return job_id
 
     def status(self, job_id: str) -> JobStatus:
@@ -93,8 +83,8 @@ class TrackingJobHost:
         self, session_id: str, *, tool_call_id: Optional[str] = None, reason: str = "killed"
     ) -> None:
         failures = []
-        for job_id, (owner, call) in list(self._foreground.items()):
-            if owner != session_id or (tool_call_id is not None and call != tool_call_id):
+        for job_id, call in list(self._foreground.items()):
+            if call.session_id != session_id or (tool_call_id is not None and call.tool_call_id != tool_call_id):
                 continue
             try:
                 if self.status(job_id).state == "running":

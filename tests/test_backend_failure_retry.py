@@ -153,7 +153,7 @@ def _hand_over_the_open_command(engine, session_id, turn_id):
     """The restart left the Turn's bash command running; startup recovery made it a Watch (T2)."""
     from core.agent_core.agent.recovery import settle_open_calls
     from core.agent_core.messages import ToolCallBlock, UserMessage, text
-    from core.agent_core.tools.base import JobStatus, ToolResult
+    from core.agent_core.tools.base import CallInstance, JobStatus, ToolResult
     from storage.agent_transcript import SQLiteTranscriptStore
     from tests.agent_core.fakes import FakeJobHost, assistant
 
@@ -168,10 +168,10 @@ def _hand_over_the_open_command(engine, session_id, turn_id):
 
     async def previous_process_then_t2():
         await store.consume_input(session_id, input_id, UserMessage((text("run it"),)))
-        await store.append_response(session_id, assistant("", calls=(call,)), final=False)
+        response = await store.append_response(session_id, assistant("", calls=(call,)), final=False)
+        instance = CallInstance(session_id, response.row_id, response.context_seq, "call_bash")
         await settle_open_calls(
-            session_id=session_id, store=store, jobs=jobs,
-            job_ids={(session_id, "call_bash"): "job_1"}, render_result=handed_over,
+            session_id=session_id, store=store, jobs=jobs, job_ids={instance: "job_1"}, render_result=handed_over
         )
 
     asyncio.run(previous_process_then_t2())

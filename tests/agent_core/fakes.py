@@ -227,18 +227,10 @@ class FakeJobHost:
         self.watches: dict[str, str] = {}
         self.changed = asyncio.Event()
 
-    async def start(self, command, *, cwd, env, timeout_s, session_id, tool_call_id) -> str:
+    async def start(self, command, *, cwd, env, timeout_s, call) -> str:
         job_id = f"job_{len(self.starts) + 1}"
         self.starts.append(
-            dict(
-                command=command,
-                cwd=cwd,
-                env=dict(env),
-                timeout_s=timeout_s,
-                session_id=session_id,
-                tool_call_id=tool_call_id,
-                job_id=job_id,
-            )
+            dict(command=command, cwd=cwd, env=dict(env), timeout_s=timeout_s, call=call, job_id=job_id)
         )
         self.states[job_id] = JobStatus("running")
         self.outputs[job_id] = b""

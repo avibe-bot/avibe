@@ -21,6 +21,7 @@ import pytest
 
 import core.agent_core.tools.jobs as jobs_module
 from core.agent_core.tools.jobs import JobStartError, LocalJobHost
+from tests.agent_core.tools.conftest import instance
 
 
 class Crash(Exception):
@@ -31,9 +32,9 @@ def _env():
     return {"PATH": os.environ.get("PATH", "/usr/bin:/bin")}
 
 
-async def _start(host, cwd, command, *, tool_call_id="toolu_1", timeout_s=None):
+async def _start(host, cwd, command, *, tool_call_id="toolu_1", response_seq=1, timeout_s=None):
     return await host.start(
-        command, cwd=str(cwd), env=_env(), timeout_s=timeout_s, session_id="ses_test", tool_call_id=tool_call_id
+        command, cwd=str(cwd), env=_env(), timeout_s=timeout_s, call=instance(tool_call_id, response_seq=response_seq)
     )
 
 
@@ -115,7 +116,7 @@ async def test_a_crash_at_any_launch_step_runs_the_command_at_most_once(tmp_path
     monkeypatch.undo()
 
     recovery = LocalJobHost(str(jobs_dir))
-    job_id = recovery.find_job("ses_test", "toolu_1")
+    job_id = recovery.find_job(instance())
     assert job_id is not None
     may_have_started = recovery.started(job_id)
     if crash_point != "after_meta_before_spawn":
@@ -141,39 +142,34 @@ async def test_a_wrapper_left_without_a_decision_abandons_and_a_late_host_cannot
     with pytest.raises(JobStartError):
         await _start(host, tmp_path, f"echo ran >> {tmp_path / 'counter'}")
 
-    job_id = host.find_job("ses_test", "toolu_1")
+    job_id = host.find_job(instance())
     assert _wait_until(lambda: _wrapper_gone(host.job_dir(job_id)))
     assert not host.started(job_id)
     assert _counter(tmp_path) == 0
 
 
-async def test_find_job_tells_apart_jobs_a_reused_call_started_within_one_millisecond(tmp_path, monkeypatch):
-    import secrets
-
-    # The earlier call's job, the later response's commit, and the later call's job, all inside one
-    # millisecond; the earlier job's id sorts first, so a tie would pick it.
+async def test_find_job_matches_the_whole_call_instance_whatever_the_clock_says(tmp_path, monkeypatch):
+    """Two responses reuse one call id, and the wall clock steps back an hour between their jobs."""
     moments = iter([
-        datetime(2026, 10, 4, 4, 30, 0, 123100, tzinfo=timezone.utc),
-        datetime(2026, 10, 4, 4, 30, 0, 123700, tzinfo=timezone.utc),
+        datetime(2026, 10, 4, 4, 30, tzinfo=timezone.utc),
+        datetime(2026, 10, 4, 3, 30, tzinfo=timezone.utc),
     ])
-    real_datetime, token_hex = jobs_module.datetime, secrets.token_hex
 
-    class _Clock(real_datetime):
+    class _Clock(jobs_module.datetime):
         @classmethod
         def now(cls, tz=None):
             return next(moments)
 
-    job_ids = iter(["0" * 16, "f" * 16])
     monkeypatch.setattr(jobs_module, "datetime", _Clock)
-    monkeypatch.setattr(jobs_module.secrets, "token_hex", lambda n=None: next(job_ids) if n == 8 else token_hex(n))
     host = LocalJobHost(str(tmp_path / "jobs"))
-    earlier = await _start(host, tmp_path, "true", tool_call_id="call_0")
-    later = await _start(host, tmp_path, "true", tool_call_id="call_0")
+    earlier = await _start(host, tmp_path, "true", tool_call_id="call_0", response_seq=2)
+    later = await _start(host, tmp_path, "true", tool_call_id="call_0", response_seq=5)
     monkeypatch.undo()
-    response_committed = datetime(2026, 10, 4, 4, 30, 0, 123400, tzinfo=timezone.utc)
+    assert host.meta(later)["created_at"] < host.meta(earlier)["created_at"]
 
-    assert host.find_job("ses_test", "call_0", created_since=response_committed) == later
-    assert host.find_job("ses_test", "call_0") == later
+    assert host.find_job(instance("call_0", response_seq=2)) == earlier
+    assert host.find_job(instance("call_0", response_seq=5)) == later
+    assert host.find_job(instance("call_0", response_seq=8)) is None
     assert _wait_until(lambda: all(host.status(job).state != "running" for job in (earlier, later)))
 
 
@@ -558,7 +554,7 @@ async def test_a_command_whose_record_would_be_unreadable_never_starts(tmp_path,
     if not starts:
         with pytest.raises(JobStartError):
             await _start(host, tmp_path, command)
-        assert host.find_job("ses_test", "toolu_1") is None
+        assert host.find_job(instance()) is None
         return
     job_id = await _start(host, tmp_path, command)
     assert (await host.wait(job_id, deadline_s=5)).state == "exited"
@@ -584,7 +580,7 @@ async def test_a_start_cancelled_before_its_decision_abandons_the_wrapper_at_onc
     with pytest.raises(asyncio.CancelledError):
         await task
 
-    job_id = host.find_job("ses_test", "toolu_1")
+    job_id = host.find_job(instance())
     assert host.started(job_id) is False
     assert _wait_until(lambda: _wrapper_gone(host.job_dir(job_id)), timeout_s=5)
     assert not (tmp_path / "ran").exists()
@@ -596,9 +592,9 @@ async def test_a_cwd_with_bytes_that_are_not_utf8_is_recorded_and_read_back(tmp_
     host = LocalJobHost(str(tmp_path / "jobs"))
 
     with pytest.raises(JobStartError):  # the directory does not exist; the record must not be what fails
-        await host.start("true", cwd=cwd, env=_env(), timeout_s=None, session_id="ses_test", tool_call_id="toolu_1")
+        await host.start("true", cwd=cwd, env=_env(), timeout_s=None, call=instance())
 
-    assert host.meta(host.find_job("ses_test", "toolu_1"))["cwd"] == cwd
+    assert host.meta(host.find_job(instance()))["cwd"] == cwd
 
 
 async def test_meta_json_is_read_in_a_bound(tmp_path):

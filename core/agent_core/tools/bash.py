@@ -26,7 +26,16 @@ from core.agent_core.tools.args import (
     str_arg,
     text_result,
 )
-from core.agent_core.tools.base import MAX_BYTES, MAX_LINES, JobHost, JobStatus, ToolContext, ToolResult, ToolSpec
+from core.agent_core.tools.base import (
+    MAX_BYTES,
+    MAX_LINES,
+    CallInstance,
+    JobHost,
+    JobStatus,
+    ToolContext,
+    ToolResult,
+    ToolSpec,
+)
 from core.agent_core.tools.jobs import (
     STOP_ABORTED,
     STOP_TIMEOUT,
@@ -163,9 +172,9 @@ async def recovered_result(
     return await stopped_result(output, line) if line else None
 
 
-async def settle_bash_call(jobs: LocalJobHost, session_id: str, tool_call_id: str) -> Optional[ToolResult]:
+async def settle_bash_call(jobs: LocalJobHost, call: CallInstance) -> Optional[ToolResult]:
     """The durable result for a ``bash`` call left open by a crash; a running job is handed to Watch first."""
-    job_id = jobs.find_job(session_id, tool_call_id)
+    job_id = jobs.find_job(call)
     if job_id is None:
         return None
     await jobs.enforce_deadline(job_id)
@@ -201,6 +210,9 @@ class BashTool:
             return error_result(f"Working directory is not accessible: {ctx.cwd}\nCannot execute bash commands.")
         if ctx.cancel.cancelled:
             return error_result("Command aborted")
+        if ctx.call is None:
+            # A job is keyed by its call instance; a checkpoint turn's call has none (its policy denies bash first).
+            return error_result("Commands cannot run in this turn.")
 
         # The job host enforces the timeout (its wrapper decides timeout versus exit); bash only reports
         # the recorded reason.
@@ -210,8 +222,7 @@ class BashTool:
                 cwd=ctx.cwd,
                 env=ctx.env,
                 timeout_s=timeout,
-                session_id=ctx.session_id,
-                tool_call_id=ctx.tool_call_id,
+                call=ctx.call,
             )
         except JobStartError as exc:
             return error_result(str(exc))
