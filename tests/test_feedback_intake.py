@@ -4,14 +4,17 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 import importlib.util
 import json
+import math
 import os
 from pathlib import Path
 import shutil
+import signal
 import sqlite3
 import subprocess
 import sys
 import threading
 import time
+from types import SimpleNamespace
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -312,20 +315,67 @@ def test_builtin_publication_preserves_helper(tmp_path):
     assert (tmp_path / "builtin" / snapshot / "use-avibe/scripts/feedback_intake.py").read_bytes() == HELPER.read_bytes()
 
 
+def _parent_clock_stopped_for(seconds):
+    """The parent's clock, standing still for ``seconds`` of real time and then past every deadline.
+
+    Its own deadline cannot end a call that works, and a vault that hangs before its
+    child runs still fails, as a 504, instead of hanging the test.
+    """
+    thaws_at = time.monotonic() + seconds
+    return SimpleNamespace(monotonic=lambda: 0.0 if time.monotonic() < thaws_at else math.inf, time=time.time, sleep=time.sleep)
+
+
+def _expire_worker_deadline_once_written(server, request_id, signalled):
+    """Deliver what the worker's ITIMER_REAL delivers at its ledger deadline, after the POST landed."""
+    import psutil
+
+    server.written.wait()
+    for process in psutil.Process().children(recursive=True):
+        try:
+            command = process.cmdline()
+        except psutil.Error:
+            continue
+        # The worker itself; the vault CLI and avault carry the same words later in their argv.
+        if command[1:4] == [str(WORKER), "execute", request_id]:
+            process.send_signal(signal.SIGALRM)
+            signalled.append(process.pid)
+
+
 def test_real_vault_timeout_terminates_detached_processes(real_vault, monkeypatch):
     import psutil
     worker = load_worker()
     real_vault.mode = "stall"
     payload = make_payload()
-    # Shorten the absolute deadline in the parent ledger; the child must obey it.
-    monkeypatch.setattr(worker, "EXECUTION_SECONDS", 2)
-    before = {p.pid for p in psutil.Process().children(recursive=True)}
-    start = time.monotonic()
-    with pytest.raises(worker.FeedbackError):
-        worker.submit(payload)
-    assert time.monotonic() - start < 6
-    assert real_vault.written.is_set()
     request_id = json.loads(payload)["request_id"]
+    # No deadline expires on its own: the chain before the POST (vault CLI, avault, the
+    # worker, its binding read and claim) may take any time on a loaded machine. The
+    # worker's deadline is delivered once the stalled POST has landed.
+    monkeypatch.setattr(worker, "EXECUTION_SECONDS", 3600)
+    monkeypatch.setattr(worker, "time", _parent_clock_stopped_for(60))
+    before = {p.pid for p in psutil.Process().children(recursive=True)}
+    signalled = []
+    alarm = threading.Thread(
+        target=_expire_worker_deadline_once_written, args=(real_vault, request_id, signalled), daemon=True
+    )
+    alarm.start()
+    vault_runs = []
+
+    class RecordedPopen(subprocess.Popen):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            vault_runs.append(self)
+
+    monkeypatch.setattr(worker, "subprocess", SimpleNamespace(Popen=RecordedPopen, DEVNULL=subprocess.DEVNULL, PIPE=subprocess.PIPE))
+    with pytest.raises(worker.FeedbackError) as raised:
+        worker.submit(payload)
+    assert real_vault.written.is_set()
+    alarm.join()
+    assert len(signalled) == 1
+    # The alarm itself ended the worker: the vault run reports its signal death, not the
+    # exit status 1 the worker gives once its stalled request times out on its own.
+    assert [run.returncode for run in vault_runs] == [128 + signal.SIGALRM]
+    # The worker's own deadline ended the call, not the parent's.
+    assert raised.value.status != 504
     assert worker.receipt(request_id)["state"] == "unknown"
     for _ in range(30):
         remaining = [p for p in psutil.Process().children(recursive=True) if p.pid not in before and p.status() != psutil.STATUS_ZOMBIE]
@@ -457,10 +507,11 @@ def test_real_vault_child_output_is_bounded_and_killed(real_vault, tmp_path, mon
     child_script = tmp_path / "noisy-child.py"
     child_script.write_text("import sys,time\nsys.stdout.write('x'*40000)\nsys.stdout.flush()\ntime.sleep(30)\n")
     monkeypatch.setattr(worker, "__file__", str(child_script))
-    start = time.monotonic()
-    with pytest.raises(worker.FeedbackError):
+    # The parent's clock stands still, so its deadline cannot be what ends the call.
+    monkeypatch.setattr(worker, "time", _parent_clock_stopped_for(60))
+    with pytest.raises(worker.FeedbackError) as raised:
         worker._vault(str(uuid.uuid4()), uuid.uuid4().hex)
-    assert time.monotonic() - start < 6
+    assert raised.value.status != 504
     assert not real_vault.calls
 
 
