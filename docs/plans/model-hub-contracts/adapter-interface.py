@@ -682,8 +682,14 @@ class EngineAdapter(Protocol):
         protocol: str,
         base_url: str | None,
         credential_ref: str,
+        *,
+        start_engine: bool = True,
     ) -> Sequence[DiscoveredModel]:
-        """Refresh supplyable models for a saved Source using its stored protocol."""
+        """Refresh supplyable models for a saved Source using its stored protocol.
+
+        With ``start_engine=False`` an engine-held credential is listed only
+        from an engine that is already running; it is never started for this.
+        """
         ...
 
     async def observe_source(

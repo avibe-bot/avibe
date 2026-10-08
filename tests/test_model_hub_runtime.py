@@ -40,6 +40,7 @@ from core.handlers.model_hub.classification import (
     classify_outcome,
     terminal_outcome_category,
 )
+from core.handlers.model_hub.errors import ModelDiscoveryError
 from core.handlers.model_hub.events import redact_untrusted_text
 from core.handlers.model_hub.request import ModelHubRequest
 from core.handlers.model_hub.stream_wire import (
@@ -8382,6 +8383,49 @@ def test_oauth_model_discovery_accepts_engine_definition_fields(tmp_path: Path) 
         )
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("engine_running", [True, False])
+def test_background_oauth_discovery_never_starts_the_engine(tmp_path: Path, engine_running: bool) -> None:
+    """MH-DISCOVERY-SCHEDULE-001: a background listing reads a running engine and never starts one."""
+
+    class Client:
+        def management_request(self, method, path, *, query=None, payload=None, timeout=None):
+            return {"models": [{"id": "model-id"}]}
+
+    class Supervisor:
+        def __init__(self) -> None:
+            self.started = False
+
+        def client(self):
+            self.started = True
+            return Client()
+
+        def client_if_running(self):
+            return Client() if engine_running else None
+
+    async def run() -> tuple[Supervisor, object]:
+        store = EngineStateStore(tmp_path / "state")
+        store.prepare_instance("install-1")
+        (store.auth_dir / "claude-account.json").write_text("{}", encoding="utf-8")
+        credential_ref = store.bind_oauth_credential("src_fixture123", "anthropic", "claude-account.json")
+        supervisor = Supervisor()
+        adapter = CLIProxyEngineAdapter(supervisor=supervisor, state_store=store)  # type: ignore[arg-type]
+        try:
+            listed = await adapter.discover_models(
+                "anthropic", "anthropic", None, credential_ref, start_engine=False,
+            )
+        except ModelDiscoveryError as error:
+            listed = error
+        return supervisor, listed
+
+    supervisor, listed = asyncio.run(run())
+
+    assert supervisor.started is False
+    if engine_running:
+        assert listed == (DiscoveredModel(id="model-id"),)
+    else:
+        assert isinstance(listed, ModelDiscoveryError)
 
 
 @pytest.mark.parametrize(

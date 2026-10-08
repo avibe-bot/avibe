@@ -27,8 +27,9 @@ class ListingAdapter(FakeAdapter):
         super().__init__(discovered)
         self.listed: list[str] = []
 
-    async def discover_models(self, vendor, protocol, base_url, credential_ref):
+    async def discover_models(self, vendor, protocol, base_url, credential_ref, *, start_engine=True):
         self.listed.append(credential_ref)
+        self.started_engine = getattr(self, "started_engine", False) or start_engine
         return await super().discover_models(vendor, protocol, base_url, credential_ref)
 
 
@@ -78,6 +79,8 @@ def test_due_sources_gain_new_models_and_fresh_sources_are_left_alone(
     _refresh(service)
 
     persisted = store.load().sources[0]
+    # A background listing never starts the engine.
+    assert getattr(adapter, "started_engine", False) is False
     if refreshed:
         assert adapter.listed == ["cred_src_sched001"]
         assert _model_ids(store) == [MENU_MODEL, "claude-new-model"]
@@ -349,7 +352,7 @@ def test_viewing_inventory_lists_sources_older_than_thirty_minutes_once(tmp_path
 
         released: asyncio.Event
 
-        async def discover_models(self, vendor, protocol, base_url, credential_ref):
+        async def discover_models(self, vendor, protocol, base_url, credential_ref, *, start_engine=True):
             self.listed.append(credential_ref)
             await self.released.wait()
             return await FakeAdapter.discover_models(self, vendor, protocol, base_url, credential_ref)
@@ -389,16 +392,67 @@ def test_viewing_inventory_lists_sources_older_than_thirty_minutes_once(tmp_path
     assert _model_ids(store, 2) == [MENU_MODEL, "claude-new-model"]
 
 
-def test_stop_retires_the_background_schedule(tmp_path):
-    service, _, adapter, _ = _background(tmp_path, [_hub_source("src_lifecyc1")])
+class _HeldAdapter(ListingAdapter):
+    """Holds each listing open until released."""
+
+    released: asyncio.Event
+
+    async def discover_models(self, vendor, protocol, base_url, credential_ref, *, start_engine=True):
+        self.listed.append(credential_ref)
+        await self.released.wait()
+        return await FakeAdapter.discover_models(self, vendor, protocol, base_url, credential_ref)
+
+
+def test_stop_retires_the_background_schedule_without_waiting_for_a_listing(tmp_path):
+    """MH-DISCOVERY-SCHEDULE-001: shutdown retires a listing that upstream is still holding."""
+
+    service, _, adapter, _ = _background(tmp_path, [_hub_source("src_lifecyc1")], _HeldAdapter())
 
     async def run():
+        adapter.released = asyncio.Event()
         service.start_background_discovery()
-        await asyncio.wait_for(service.stop(), 1)
-        return [
+        service.request_inventory_refresh()
+        for _ in range(100):
+            if adapter.listed:
+                break
+            await asyncio.sleep(0.01)
+        assert adapter.listed == ["cred_src_lifecyc1"]
+        # The listing is never released: shutdown must not wait for upstream.
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        await asyncio.wait_for(service.stop(), 30)
+        elapsed = loop.time() - started
+        return elapsed, [
             task for task in asyncio.all_tasks()
-            if task.get_name() == "model-hub-background-discovery" and not task.done()
+            if task.get_name() in {"model-hub-background-discovery", "model-hub-viewed-discovery"}
+            and not task.done()
         ]
 
-    assert asyncio.run(run()) == []
-    assert adapter.listed == []
+    elapsed, running = asyncio.run(run())
+    # Well inside the controller's 10-second runtime-work shutdown grace.
+    assert elapsed < 1
+    assert running == []
+
+
+def test_runtime_stopped_mid_pass_lists_no_further_source(tmp_path):
+    """MH-DISCOVERY-SCHEDULE-001: a runtime stopped during a pass is not listed again by it."""
+
+    first, second = _hub_source("src_midpass1"), _hub_source("src_midpass2")
+    service, store, adapter, _ = _background(tmp_path, [first, second], _HeldAdapter())
+
+    async def run():
+        adapter.released = asyncio.Event()
+        passing = asyncio.create_task(service._refresh_due_sources())
+        for _ in range(100):
+            if adapter.listed:
+                break
+            await asyncio.sleep(0.01)
+        config = store.load()
+        config.enabled = False
+        store.save(config)
+        adapter.released.set()
+        await asyncio.wait_for(passing, 1)
+
+    asyncio.run(run())
+
+    assert len(adapter.listed) == 1

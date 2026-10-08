@@ -212,6 +212,8 @@ class ModelHubScenarioAdapter:
         protocol: str,
         base_url: str | None,
         credential_ref: str,
+        *,
+        start_engine: bool = True,
     ) -> tuple[DiscoveredModel, ...]:
         self.discovery_calls.append((vendor, protocol, base_url, credential_ref))
         return tuple(DiscoveredModel(id=model_id) for model_id in self.refresh_models)

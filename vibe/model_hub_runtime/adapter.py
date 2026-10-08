@@ -2217,6 +2217,8 @@ class CLIProxyEngineAdapter:
         protocol: str,
         base_url: str | None,
         credential_ref: str,
+        *,
+        start_engine: bool = True,
     ) -> Sequence[DiscoveredModel]:
         metadata = await asyncio.to_thread(
             self.state_store.credential_metadata,
@@ -2226,7 +2228,12 @@ class CLIProxyEngineAdapter:
         if metadata["kind"] == "oauth":
             if metadata.get("vendor") != normalized_vendor or base_url is not None:
                 raise EngineStateError("credential does not match discovery target")
-            client = await asyncio.to_thread(self.supervisor.client)
+            if start_engine:
+                client = await asyncio.to_thread(self.supervisor.client)
+            else:
+                client = await asyncio.to_thread(self.supervisor.client_if_running)
+                if client is None:
+                    raise ModelDiscoveryError("engine is not running")
             payload = await asyncio.to_thread(
                 client.management_request,
                 "GET",

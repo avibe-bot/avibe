@@ -1813,11 +1813,13 @@ class ModelHubService:
         viewed, self._viewed_discovery_task = self._viewed_discovery_task, None
         if self._background_discovery_stop is not None:
             self._background_discovery_stop.set()
-        for task in (discovery, viewed):
-            if task is not None and not task.done():
-                # Drain for the same reason: an OAuth listing may start the engine
-                # from a worker thread. A pass stops between Sources once signalled.
-                await await_owned_task(task)
+        # Background listings never start the engine, so cancelling one cannot
+        # leave a starting engine beneath `adapter.stop()`; shutdown need not
+        # wait for an upstream listing.
+        retiring = [task for task in (discovery, viewed) if task is not None and not task.done()]
+        for task in retiring:
+            task.cancel()
+        await asyncio.gather(*retiring, return_exceptions=True)
         async with self._runtime_lifecycle_lock:
             await self.adapter.stop()
 
@@ -1930,7 +1932,12 @@ class ModelHubService:
             return False
         return True
 
-    async def _discover(self, source: ModelHubSourceConfig) -> list[DiscoveredModel]:
+    async def _discover(
+        self,
+        source: ModelHubSourceConfig,
+        *,
+        start_engine: bool = True,
+    ) -> list[DiscoveredModel]:
         if not source.credential_ref:
             return [
                 DiscoveredModel(id=model.id)
@@ -1944,6 +1951,7 @@ class ModelHubService:
                     source.protocol,
                     source.base_url,
                     source.credential_ref,
+                    start_engine=start_engine,
                 )
             )
         )
@@ -4507,8 +4515,12 @@ class ModelHubService:
             self._background_discovery_inflight.discard(source_id)
 
     async def _refresh_listed_source_in_background(self, source_id: str) -> None:
+        config = self.store.load()
+        if not config.enabled:
+            # Re-read per Source: a runtime stopped mid-pass is not listed again.
+            return
         observed = next(
-            (item for item in self.store.load().sources if item.id == source_id),
+            (item for item in config.sources if item.id == source_id),
             None,
         )
         if observed is None or not self._background_discovery_eligible(observed):
@@ -4516,7 +4528,8 @@ class ModelHubService:
         basis = (source_identity(observed), observed.last_discovered_at)
         try:
             discovered = await asyncio.wait_for(
-                self._discover(observed), timeout=_SOURCE_DISCOVERY_TIMEOUT_SECONDS,
+                self._discover(observed, start_engine=False),
+                timeout=_SOURCE_DISCOVERY_TIMEOUT_SECONDS,
             )
             async with self._mutation_lock:
                 previous = self.store.load()
