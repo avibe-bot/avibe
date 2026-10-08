@@ -149,7 +149,8 @@ because they are rendered into the prompt (C-9 §6).
 
 - A side turn sends the caller's endpoint, system prompt, tool definitions, tool choice, and reasoning settings
   unchanged.
-- Its messages begin with the caller's latest request's messages through the cut, byte for byte.
+- Its messages begin with the caller's latest request's messages, rehydrated messages included, through the cut,
+  byte for byte.
 - It narrows capability when a call executes, never in the tool list. Removing a denied tool from the request would
   shift every byte after it.
 
@@ -226,7 +227,10 @@ Consequences:
 
 ## 6. Capability
 
-**F6:** a fork never has a capability its source lacks.
+**F6:** a fork never exceeds the authority it was created under. A side turn never has a capability its caller lacks.
+A fork Session never has more than the requesting caller may select: its Agent is the source's, or one the caller has
+selection authority for on the same backend. That Agent may hold tools the source's Agent did not; the bound is the
+caller's authority, not the source's tool set.
 
 **Side turn.** Its policy names the tools it may run, each with a rule:
 
@@ -242,7 +246,8 @@ Any tool the policy does not name is denied with the policy's text and never run
   to scratch.
 - A tool missing from the caller's request cannot be granted, because the request is the caller's.
 
-**Fork Session.** Its tools are its Agent's. The reservation already checks that the caller has:
+**Fork Session.** Its tools are its Agent's, which `--agent` may override (`vibe/cli.py:1857`). The reservation
+already checks that the caller has:
 
 - editor access to the source (`session_fork.py:200-231`);
 - chat access to the destination Project (`:232-246`);
@@ -268,13 +273,14 @@ C-9's checkpoint turn becomes the generic side turn: `loop.py:1461-1618`, its to
 turn runs inside the caller's run, in these steps:
 
 1. **Request.**
-   - It is composed by the caller's request builder (`_built`, `loop.py:622-649`) from
-     `prefix(caller, (latest, units))`, then `prompt`, then the turn so far.
+   - It is composed by the caller's request builder (`_built`, `loop.py:622-649`) from the caller's rehydrated
+     messages (hook state, which are not rows; C-5 §3 step 6), then `prefix(caller, (latest, units))`, then `prompt`,
+     then the turn so far, as `_fork` composes it today (`loop.py:1284-1302`).
    - It uses the caller's endpoint, system prompt, tool definitions, and reasoning settings. `max_tokens` comes from
      the spec, per route.
    - The request actually composed is budgeted. One that cannot fit is never sent, and the turn fails as an overflow.
-   - The dry run that decides whether to start (C-9's `_fork_fits`, `:1304-1309`) composes the same request (C-9 §10,
-     invariant 1).
+   - The dry run that decides whether to start (`side_turn_fits`; C-9's `_fork_fits`, `:1304-1309`) composes the same
+     request, rehydrated messages included (C-9 §10, invariant 1).
 2. **Model.** It goes through the caller's model call (`_model`, `loop.py:651`), so it shares that call's:
    - retries;
    - attempt ledger, under purpose `side_turn`;
@@ -372,7 +378,7 @@ information shown to the model.
 | --- | --- | --- |
 | Data loss | two writers on one context; a source deleting rows a child reads | one writer per Session, with its own `context_seq` space and locks; a fork Session never writes a source row (F5); rows `<= as_of` never change (C-5 §5), so no lock spans Sessions; nothing deletes a referenced row (F8); merge-back only appends, through the receiver's own loop (§9) |
 | Runaway | an Agent forking Agents that fork in turn; a side turn that keeps calling tools | a side turn is bounded by its rounds and room, at most one runs per Session, and C-9's per-run bound applies; fork Sessions: see below |
-| Security | a fork gaining a capability | F6 (§6) |
+| Security | a fork exceeding the authority it was created under | F6 (§6) |
 | False information | a child believing it owns its source's Watches or jobs; a side turn's messages leaking into context | the fork notice and the child-only environment block (§8); a side turn's messages are audit only (§7) |
 
 **Runaway bounds for fork Sessions.**
@@ -413,7 +419,7 @@ information shown to the model.
 | Backend | Fork today | Point-in-time | Phase |
 | --- | --- | --- | --- |
 | `vibey` | by reference, at the latest point (`session_fork.py:381-399`) | yes (§2) | 1 |
-| `codex` | `thread/fork` (`modules/agents/codex/agent.py:3316-3421`); `lastTurnId` is used only to trim a live Turn (`:3393-3408`) | `lastTurnId` accepts any completed Turn, and the map from Avibe message to Codex Turn already exists (`session_turns.native_turn_id`, `core/session_turns.py:8008`) | 3, first |
+| `codex` | `thread/fork` (`modules/agents/codex/agent.py:3316-3421`); `lastTurnId` is used only to trim a live Turn (`:3393-3408`) | `lastTurnId` accepts any completed Turn. Avibe maps only a Turn's initial input to its Codex Turn (`native_turn_id_for_initial_message`, `core/session_turns.py:8008-8044`); point-in-time needs a reply-to-Turn association and, for a fork before an input, the preceding Turn | 3, first |
 | `claude` | `resume` with `fork_session` (`core/handlers/session_handler.py:1558-1563`, `:1730-1731`) | the Agent SDK's `resume_session_at` takes a message UUID, used with `fork_session`; Avibe stores no map from message to UUID | 3; needs the map |
 | `opencode` | `POST /session/{id}/fork`; `messageID` is sent only to trim (`modules/agents/opencode/server.py:818-837`) | `messageID` accepts any message, and the fork excludes it; Avibe stores no map from message to OpenCode id | 3; needs the map |
 
@@ -511,7 +517,7 @@ already provide, plus work outside fork.
 | F3 | Every fork point is settled; a fork never inherits an open call, and never settles or looks up a call it did not make (settled calls are inherited as history, F1) | harness, storage | every row kind in §2's table, including mid batch, a job handed over, a running foreground job, a Session's first input (0), and an inherited row (refused, naming its owner): resolved settled, or refused |
 | F4 | A fork Session owns nothing an ancestor started: jobs, Watches, Tasks, runs, scratch stay with the Session that started them. A side turn starts nothing: its calls have no call instance | vibey, service, agent | a child of a source with a live job Watch neither lists it nor receives its follow-up, and its first input carries the notice; a side turn's `bash` call starts no job even when a policy allowed it |
 | F5 | A fork Session never writes a row of its source. A side turn writes only its audit row and, after the reply, what its fold commits | agent, storage | the source's rows before and after a child's Turns; the caller's rows after a failed and after a successful side turn |
-| F6 | A fork has no capability its source lacks | agent, service | a side turn's call to every tool its policy does not allow is denied and never runs; a reservation without editor, chat, or selection authority is refused |
+| F6 | A side turn has no capability its caller lacks; a fork Session runs an Agent the requesting caller may select, on the source's backend | agent, service | a side turn's call to every tool its policy does not allow is denied and never runs; a reservation without editor on the source, chat in the destination, or selection authority for the Agent (inherited or `--agent`) is refused, as is an Agent on another backend |
 | F7 | One `fork_turn` audit per side turn, on every exit except an abort, with its purpose, point, policy, messages, usage, outcome, and folded row | agent | each exit path of the turn, as C-9 §10 invariant 4 tests it today |
 | F8 | No context row is deleted while a live descendant's prefix includes it | storage | holds today because no path deletes a context row (§4); Phase 1a adds a contract test that every deletion path keeps `visibility = 'context'` rows and the `messages` rows of a Session with context; any later retention adds its own proof |
 
@@ -564,7 +570,8 @@ class Folded:
 @dataclass(frozen=True)
 class SideTurn:
     purpose: Literal["checkpoint"]                         # grows with its consumers ("memory", ...)
-    units: Optional[int]                                   # the caller's current view: all of it, or its first units
+    units: Optional[int]                                   # the caller's current view: all of it, or its first units;
+                                                           # the request puts the caller's rehydrated messages first
     prompt: UserMessage
     policy: ForkPolicy
     max_tokens: Callable[[ModelCapabilities], int]         # per route; C-9: min(16,000, O)
@@ -618,17 +625,31 @@ Its optional fields are `detail` (for `checkpoint`: `{reason, mode}`), `error`, 
 
 ## 16. Contract delta at freeze
 
-| File | Change |
-| --- | --- |
-| `transcript.md` §4 | `anchor_seq` resolution becomes §2's fork point rule; add a pointer to C-10 |
-| `transcript.md` §5 | point to F8 |
-| `transcript-rows.schema.json` | `CheckpointTurn` becomes `ForkTurn` (§15) |
-| `context.md` §6 | the tool bullets point to C-10 §7 |
-| `context.md` §10 | invariant 2 points to C-10 §7; the audit kind is renamed |
-| `context.md` §12 | the reserved memory row points to C-10 §13 |
-| `loop-control.md` §7 | "Snapshot and fork" points to C-10 |
-| `backend-registration.md` | lists `FORK_AT_MESSAGE_BACKENDS` as a capability-specific set |
-| `README.md` and plan §5 | the C-10 row; this PR adds it as a draft |
+Built from a search of `docs/plans` for every fork term and every identifier C-10 renames or replaces (`fork`,
+`anchor_seq`, `snapshot`, `dreaming`, `checkpoint_turn`, `CheckpointTurn`, `append_audit`). Rows not listed keep their
+meaning: their "fork" is the side turn or the fork Session as C-10 defines them.
+
+| File | Location | Change |
+| --- | --- | --- |
+| `transcript.md` | §1, lines 30-31 | the audit kind `context_checkpoint_turn` (`CheckpointTurn`) becomes `fork_turn` (`ForkTurn`, C-10 §7) |
+| `transcript.md` | §4, lines 87-90 | `anchor_seq` resolution becomes C-10 §2's fork point: settled, 0 for the empty prefix, the source's own rows, no clock |
+| `transcript.md` | §5, lines 101-102 | points to F8 |
+| `transcript-rows.schema.json` | `CheckpointTurn`, lines 348-404 | becomes `ForkTurn` (§15); the `append_audit` kind in its description becomes `fork_turn` |
+| `context.md` | §6, lines 152-216 | the checkpoint is a side turn (C-10 §7); the dreaming table stays here as the value of `DREAMING`; the budget, room, rounds, and bound bullets point to C-10 §7; the audit becomes `fork_turn` with `purpose: checkpoint` and `detail: {reason, mode}` |
+| `context.md` | §9, lines 355-356 | the `append_audit` kinds become `fork_turn` and `attempt` |
+| `context.md` | §10, invariant 1 (line 395) | "the fork the stage would send first" is `side_turn_fits`, rehydrated messages included |
+| `context.md` | §10, invariant 2 (line 404) | points to C-10 §7 step 3 |
+| `context.md` | §10, invariant 4 (line 421) | the `CheckpointTurn` row becomes the `fork_turn` audit (F7) |
+| `context.md` | §12, lines 494-496 | the reserved memory row points to C-10 §13 |
+| `loop-control.md` | §1, lines 8-20 | the `Agent` surface adds `side_turn_fits` and `side_turn` (C-10 §15) |
+| `loop-control.md` | §7, lines 111-115 | "Snapshot and fork" points to C-10; `snapshot()` stays the `after_run` outcome's state |
+| `backend-registration.md` | its capability-specific sets | adds `FORK_AT_MESSAGE_BACKENDS` |
+| plan `avibe-agent-core.md` | §4, line 79 | `agent/` holds the side turn, not a "fork snapshot" |
+| plan | §5 table, lines 104 and 106 | C-3's "snapshot and fork" and C-5's "fork by reference" point to C-10 |
+| plan | §5.1, lines 165-167 | the child's context is the source's rows up to the fork point (C-10 §2) |
+| plan | §5.2, lines 195-199 | checkpoint delivery is a side turn under the `dreaming` policy |
+| plan | §6 A10, lines 330-332 | a checkpoint turn's request is a side turn's (C-10 §7) |
+| `README.md`, plan §5 | the C-10 rows | added by this PR as a draft; marked frozen at freeze |
 
 ## 17. Phases
 
@@ -638,19 +659,27 @@ Its optional fields are `detail` (for `checkpoint`: `{reason, mode}`), `error`, 
 | 1a | point-in-time fork for Vibey: `settled`, `fork_cut`, `resolve_fork_point` (no clock); trimming the live Turn; `at_message_id` with error codes; `FORK_AT_MESSAGE_BACKENDS`; CLI `--at`; the HTTP body; the fork notice; T2's inherited branch removed; the Web action and banner once the frame is approved | F1, F3, F4, F6 (reservation), F8 pin; an E2E on Workbench: fork from an earlier reply while the source runs, continue in the fork, and the source is unaffected (the E2E wave's S8) |
 | 1b | C-9 on the side turn, as a pure refactor: `ForkPolicy` and `DREAMING`, `Agent.side_turn`, the `fork_turn` audit | F2, F5, F6 (policy), F7; the C-9 suite passes with only the audit kind renamed |
 | 2 | teammates and Agents: the descendant lookup and `fork_initiator`; the Harness bound [O-4]; a Session-invariant system prompt for warm fork Sessions; an Agent fork tool; side turns while idle | decided when the teams design is written |
-| 3 | point-in-time for native backends: Codex through `lastTurnId` from `session_turns.native_turn_id`, then Claude (store message UUIDs; `resume_session_at`) and OpenCode (store message ids; `messageID`) | F1 per backend, to the extent its native store allows |
+| 3 | point-in-time for native backends: Codex through `lastTurnId`, after adding a reply-to-Turn association and preceding-Turn resolution, then Claude (store message UUIDs; `resume_session_at`) and OpenCode (store message ids; `messageID`) | F1 per backend, to the extent its native store allows |
 
-1b follows 1a; they are not parallel lanes. Both edit `storage/agent_transcript.py` (1a replaces the fork anchor
-resolution; 1b renames the audit kind), and 1b records the `ForkPoint` that 1a adds in `harness/fork.py`. 1b
-reopens review on C-9's code, the most-reviewed code on `avibe-agent`. Keeping 1b a pure refactor, with C-9's tests
-unchanged, keeps that review to the move itself.
+Files each lane touches, from a search of the code, tests, prompts, and UI for the identifiers it changes
+(`resolve_fork_anchor_seq`, `context_bound`, `fork_source_context_seq`, `--fork-self`, `--fork-session`,
+`sessionFork`, `checkpoint_turn`, `CheckpointTurn`, `CheckpointPolicy`, `CHECKPOINT_TOOL_*`, `_fork_fits`):
+
+| Lane | Code | Tests | Docs, prompts, copy |
+| --- | --- | --- | --- |
+| 1a | `core/agent_core/harness/fork.py` (new); `storage/agent_transcript.py` (fork resolution); `core/services/session_fork.py`; `modules/agents/vibey/agent.py` (T2's inherited branch, the fork notice); `modules/agents/catalog.py`; `vibe/cli.py`; `vibe/ui_server.py`; `ui/src` (`context/ApiContext.tsx`, `components/workbench/ChatPage.tsx`, the new action) | `tests/test_agent_transcript.py`, `tests/test_transcript_store_contract.py`, `tests/test_vibey_agent.py`, `tests/test_vibey_agent_context.py`, `tests/test_session_fork.py`, the CLI parser tests | `vibe/i18n/{en,zh}.json`, `ui/src/i18n/{en,zh}.json`, `core/prompts/harness-agents.md`, `docs/CLI.md`, `docs/CLI_ZH.md`, `skills/use-avibe-harness/SKILL.md`, `skills/use-avibe/references/harness.md` |
+| 1b | `core/agent_core/agent/loop.py`; `core/agent_core/agent/checkpoint.py` (becomes `fork.py`); `core/agent_core/harness/context.py` (the `CHECKPOINT_TOOL_*` constants); `core/agent_core/harness/store.py` (the audit kind); `storage/agent_transcript.py` (the audit map, lines 94-95); `modules/agents/vibey/store.py` (the audit kind) | `tests/agent_core/fakes.py`, `tests/agent_core/agent/test_compaction.py`, `tests/agent_core/agent/test_context.py`, `tests/test_agent_transcript.py`, `tests/test_transcript_store_contract.py` | none |
+
+1b follows 1a; they are not parallel lanes. Both edit `storage/agent_transcript.py` and its two test suites, and 1b
+records the `ForkPoint` that 1a adds in `harness/fork.py`. 1b reopens review on C-9's code, the most-reviewed code on
+`avibe-agent`. Keeping 1b a pure refactor, with C-9's tests unchanged, keeps that review to the move itself.
 
 ## 18. Owner decisions
 
 | ID | Decision | Recommendation |
 | --- | --- | --- |
 | O-1 | The model: one primitive (the fork point) with two carriers separated by identity. A side turn can do nothing that outlives its turn; a fork Session does everything else. C-9's checkpoint becomes the first side turn. | Yes |
-| O-2 | Phase 1 scope: point-in-time fork for Vibey only, on CLI, HTTP, and Web. Native backends come in Phase 3, Codex first; Claude and OpenCode each first need a message-id map. Until then, those backends keep forking at the latest point. | Yes |
+| O-2 | Phase 1 scope: point-in-time fork for Vibey only, on CLI, HTTP, and Web. Native backends come in Phase 3, Codex first; each needs a new map first (Codex: reply to Turn; Claude and OpenCode: message ids). Until then, those backends keep forking at the latest point. | Yes |
 | O-3 | Web UX: "Fork from here" only on Vibey replies. The fork shows the banner naming that message, not the inherited history. Not in v1: "edit and resend" on a user message (the API supports it as "fork before this input"), and rendering inherited history in the child. The action needs a `design.pen` frame. | Yes, replies only, with the banner |
 | O-4 | Forks requested by Agents. There is no fork tool in v1. Bounding self-replication: an Agent can already recurse with `vibe agent run --fork-self` or `--agent`, bounded only by the 8-run concurrency limit. | A Harness bound on depth and live descendants per root, landing in Phase 2 before the tool. Pull it into Phase 1 only if today's exposure should close now: Phase 1 adds no new exposure, because user forks are not recursive |
 
