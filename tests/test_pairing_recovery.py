@@ -6,11 +6,12 @@ import ipaddress
 import inspect
 import json
 import multiprocessing
+import multiprocessing.connection
 import os
 from pathlib import Path
+import queue
 import sys
 import threading
-import time
 from types import SimpleNamespace
 
 import pytest
@@ -91,12 +92,71 @@ def _clear_identity():
     }
 
 
-def _wait_for_marker(path, timeout=10):
-    deadline = time.monotonic() + timeout
-    while not path.exists():
-        if time.monotonic() >= deadline:
-            raise TimeoutError(f"timed out waiting for {path}")
-        time.sleep(0.01)
+class _ThreadRedeemGate:
+    """Hold one worker thread inside redeem until the test has acted.
+
+    Every wait ends on a state change -- the worker reached redeem, or its
+    ``pair`` returned or raised -- never on a guess of how long setup takes.
+    """
+
+    def __init__(self):
+        self._events = queue.SimpleQueue()
+        self._release = threading.Event()
+        self.result = None
+
+    def hold(self):
+        """Called by the worker's redeem stub."""
+        self._events.put("entered")
+        self._release.wait()
+
+    def start(self, *args):
+        def run():
+            try:
+                self.result = remote_access.pair(*args)
+            finally:
+                self._events.put("finished")
+
+        self._worker = threading.Thread(target=run)
+        self._worker.start()
+        return self
+
+    def wait_entered(self):
+        assert self._events.get() == "entered", "pair() finished before it reached redeem"
+
+    def finish(self):
+        self._release.set()
+        self._worker.join()
+        return self.result
+
+
+class _ProcessRedeemGate:
+    """The cross-process counterpart: a pipe for "entered", the sentinel for death."""
+
+    def __init__(self, ctx):
+        self._ctx = ctx
+        self._entered_reader, self._entered_writer = ctx.Pipe(duplex=False)
+        self._release = ctx.Event()
+
+    def hold(self):
+        """Called by the child's redeem stub."""
+        self._entered_writer.send(True)
+        self._release.wait()
+
+    def start(self, target, *args):
+        self._worker = self._ctx.Process(target=target, args=args, daemon=True)
+        self._worker.start()
+        return self._worker
+
+    def wait_entered(self):
+        ready = multiprocessing.connection.wait([self._entered_reader, self._worker.sentinel])
+        assert self._entered_reader in ready, (
+            f"worker exited with {self._worker.exitcode} before it reached redeem"
+        )
+
+    def finish(self):
+        self._release.set()
+        self._worker.join()
+        return self._worker
 
 
 def _write_child_result(path, result):
@@ -113,10 +173,10 @@ def _child_pair(pairing_key, backend_url, result_path):
         })
 
 
-def _child_resume(ready_path, start_path, result_path):
+def _child_resume(ready, start, result_path):
     try:
-        ready_path.touch()
-        _wait_for_marker(start_path)
+        ready.send(True)
+        start.wait()
         _write_child_result(result_path, remote_access.pair("", ""))
     except BaseException as exc:
         _write_child_result(result_path, {
@@ -818,8 +878,8 @@ def test_new_backend_is_validated_before_pending_selection(pairing_host, monkeyp
 def test_duplicate_key_preserves_the_inflight_owner_across_processes(pairing_host, monkeypatch):
     ctx = _fork_context()
     root, _ = pairing_host
+    gate = _ProcessRedeemGate(ctx)
     entered = root / "duplicate-redeem-entered"
-    release = root / "duplicate-redeem-release"
     result_path = root / "duplicate-first-result.json"
     attempts = root / "duplicate-network-attempts"
 
@@ -829,16 +889,13 @@ def test_duplicate_key_preserves_the_inflight_owner_across_processes(pairing_hos
         if entered.exists():
             raise remote_access.BackendRequestError(400, {"error": "pairing_key_used"})
         entered.touch()
-        _wait_for_marker(release)
+        gate.hold()
         return _response("inst_A")
 
     monkeypatch.setattr(remote_access, "_json_request", redeem)
-    worker = ctx.Process(
-        target=_child_pair, args=("key_A", "https://backend.test", result_path),
-    )
-    worker.start()
+    gate.start(_child_pair, "key_A", "https://backend.test", result_path)
     try:
-        _wait_for_marker(entered)
+        gate.wait_entered()
         journal = root / "state/pending-pairing.json"
         claimed = journal.read_bytes()
         duplicate = remote_access.pair(" key_A ", "https://backend.test", device_name="another tab")
@@ -846,9 +903,7 @@ def test_duplicate_key_preserves_the_inflight_owner_across_processes(pairing_hos
         assert journal.read_bytes() == claimed
         assert "key_A" not in claimed.decode()
     finally:
-        release.touch()
-        worker.join(timeout=15)
-    assert not worker.is_alive()
+        worker = gate.finish()
     assert worker.exitcode == 0
     assert json.loads(result_path.read_text())["ok"]
     assert attempts.read_text().splitlines() == ["redeem"]
@@ -1373,57 +1428,45 @@ def test_clear_fences_an_applied_record_after_retirement_failure(pairing_host, m
 
 def test_unrelated_save_during_redeem_does_not_revoke_claim(pairing_host, monkeypatch):
     _, calls = pairing_host
-    entered = threading.Event()
-    release = threading.Event()
+    gate = _ThreadRedeemGate()
 
     def redeem(url, payload, **kwargs):
         calls.append((url, payload["pairing_key"]))
-        entered.set()
-        assert release.wait(timeout=5)
+        gate.hold()
         return _response("inst_A")
 
     monkeypatch.setattr(remote_access, "_json_request", redeem)
-    result_holder = []
-    worker = threading.Thread(
-        target=lambda: result_holder.append(remote_access.pair("key_A", "https://backend.test")),
-    )
-    worker.start()
-    assert entered.wait(timeout=5)
-    api.save_config({"ui": {"setup_port": 5124}}, validate_remote_access_network=False)
-    release.set()
-    worker.join(timeout=10)
-    assert not worker.is_alive()
-    assert result_holder[0]["ok"]
+    gate.start("key_A", "https://backend.test")
+    try:
+        gate.wait_entered()
+        api.save_config({"ui": {"setup_port": 5124}}, validate_remote_access_network=False)
+    finally:
+        result = gate.finish()
+    assert result["ok"]
     assert V2Config.load().remote_access.vibe_cloud.instance_id == "inst_A"
 
 
 def test_late_response_cannot_override_new_claim(pairing_host, monkeypatch):
     _, calls = pairing_host
-    entered = threading.Event()
-    release = threading.Event()
+    gate = _ThreadRedeemGate()
 
     def redeem(url, payload, **kwargs):
         key = payload["pairing_key"]
         calls.append((url, key))
         if key == "key_A":
-            entered.set()
-            assert release.wait(timeout=5)
+            gate.hold()
             return _response("inst_A")
         return _response("inst_B")
 
     monkeypatch.setattr(remote_access, "_json_request", redeem)
-    result_a = []
-    worker = threading.Thread(
-        target=lambda: result_a.append(remote_access.pair("key_A", "https://backend.test")),
-    )
-    worker.start()
-    assert entered.wait(timeout=5)
-    result_b = remote_access.pair("key_B", "https://other-backend.test")
-    release.set()
-    worker.join(timeout=10)
-    assert not worker.is_alive()
+    gate.start("key_A", "https://backend.test")
+    try:
+        gate.wait_entered()
+        result_b = remote_access.pair("key_B", "https://other-backend.test")
+    finally:
+        result_a = gate.finish()
     assert result_b["ok"]
-    assert result_a[0]["error"] == "pairing_superseded_after_redeem"
+    assert result_a["error"] == "pairing_superseded_after_redeem"
     saved = V2Config.load().remote_access.vibe_cloud
     assert saved.instance_id == "inst_B"
     assert saved.backend_url == "https://other-backend.test"
@@ -1431,34 +1474,28 @@ def test_late_response_cannot_override_new_claim(pairing_host, monkeypatch):
 
 def test_definitive_failure_cannot_retire_superseding_claim(pairing_host, monkeypatch):
     _, calls = pairing_host
-    entered = threading.Event()
-    release = threading.Event()
+    gate = _ThreadRedeemGate()
 
     def redeem(url, payload, **kwargs):
         key = payload["pairing_key"]
         calls.append((url, key))
         if key == "key_A":
-            entered.set()
-            assert release.wait(timeout=5)
+            gate.hold()
             raise remote_access.BackendRequestError(
                 400, {"error": "invalid_pairing_key"}
             )
         return _response("inst_B")
 
     monkeypatch.setattr(remote_access, "_json_request", redeem)
-    result_a = []
-    worker = threading.Thread(
-        target=lambda: result_a.append(remote_access.pair("key_A", "https://backend.test")),
-    )
-    worker.start()
-    assert entered.wait(timeout=5)
-    result_b = remote_access.pair("key_B", "https://other-backend.test")
-    release.set()
-    worker.join(timeout=10)
+    gate.start("key_A", "https://backend.test")
+    try:
+        gate.wait_entered()
+        result_b = remote_access.pair("key_B", "https://other-backend.test")
+    finally:
+        result_a = gate.finish()
 
-    assert not worker.is_alive()
     assert result_b["ok"]
-    assert result_a[0]["error"] == "invalid_pairing_key"
+    assert result_a["error"] == "invalid_pairing_key"
     saved = V2Config.load().remote_access.vibe_cloud
     assert saved.instance_id == "inst_B"
     assert saved.backend_url == "https://other-backend.test"
@@ -1480,8 +1517,7 @@ def test_concurrent_resume_has_one_owner(pairing_host, monkeypatch):
         worker.start()
     barrier.wait()
     for worker in workers:
-        worker.join(timeout=10)
-    assert all(not worker.is_alive() for worker in workers)
+        worker.join()
     assert sum(bool(result.get("ok")) for result in results) == 1
     assert sum(result.get("error") == "missing_pairing_key" for result in results) == 1
     assert V2Config.load().remote_access.vibe_cloud.instance_id == "inst_A"
@@ -1496,34 +1532,31 @@ def test_concurrent_resume_has_one_owner_across_processes(pairing_host, monkeypa
     )
     process_dir = root / "process-resume"
     process_dir.mkdir()
-    start_path = process_dir / "start"
+    start = ctx.Event()
+    readies = [ctx.Pipe(duplex=False) for _ in range(2)]
+    result_paths = [process_dir / f"result-{index}.json" for index in range(2)]
     workers = [
         ctx.Process(
-            target=_child_resume,
-            args=(
-                process_dir / f"ready-{index}",
-                start_path,
-                process_dir / f"result-{index}.json",
-            ),
+            target=_child_resume, args=(readies[index][1], start, result_paths[index]), daemon=True,
         )
         for index in range(2)
     ]
     for worker in workers:
         worker.start()
-    for index in range(2):
-        _wait_for_marker(process_dir / f"ready-{index}")
-    start_path.touch()
-    result_paths = [process_dir / f"result-{index}.json" for index in range(2)]
-    for result_path in result_paths:
-        _wait_for_marker(result_path)
+    try:
+        for (ready, _), worker in zip(readies, workers):
+            woke = multiprocessing.connection.wait([ready, worker.sentinel])
+            assert ready in woke, f"worker exited with {worker.exitcode} before it was ready"
+    finally:
+        start.set()
+        for worker in workers:
+            worker.join()
+    for worker in workers:
+        assert worker.exitcode == 0
     results = [
         json.loads(result_path.read_text(encoding="utf-8"))
         for result_path in result_paths
     ]
-    for worker in workers:
-        worker.join(timeout=10)
-        assert not worker.is_alive()
-        assert worker.exitcode == 0
     assert all("child_exception" not in result for result in results)
     assert sum(bool(result.get("ok")) for result in results) == 1
     assert sum(result.get("error") == "missing_pairing_key" for result in results) == 1
@@ -1535,31 +1568,24 @@ def test_old_response_in_process_cannot_override_new_claim(pairing_host, monkeyp
     root, _ = pairing_host
     process_dir = root / "process-late-response"
     process_dir.mkdir()
-    entered = process_dir / "redeem-entered"
-    release = process_dir / "redeem-release"
+    gate = _ProcessRedeemGate(ctx)
     result_path = process_dir / "result.json"
 
     def redeem(url, payload, **kwargs):
         if payload["pairing_key"] == "key_A":
-            entered.touch()
-            _wait_for_marker(release)
+            gate.hold()
             return _response("inst_A")
         return _response("inst_B")
 
     monkeypatch.setattr(remote_access, "_json_request", redeem)
-    worker = ctx.Process(
-        target=_child_pair,
-        args=("key_A", "https://backend.test", result_path),
-    )
-    worker.start()
-    _wait_for_marker(entered)
-    result_b = remote_access.pair("key_B", "https://other-backend.test")
-    release.touch()
-    _wait_for_marker(result_path)
-    result_a = json.loads(result_path.read_text(encoding="utf-8"))
-    worker.join(timeout=10)
-    assert not worker.is_alive()
+    gate.start(_child_pair, "key_A", "https://backend.test", result_path)
+    try:
+        gate.wait_entered()
+        result_b = remote_access.pair("key_B", "https://other-backend.test")
+    finally:
+        worker = gate.finish()
     assert worker.exitcode == 0
+    result_a = json.loads(result_path.read_text(encoding="utf-8"))
     assert result_b["ok"]
     assert result_a["error"] == "pairing_superseded_after_redeem"
     saved = V2Config.load().remote_access.vibe_cloud
@@ -1573,32 +1599,25 @@ def test_clear_during_redeem_fences_old_response_across_processes(pairing_host, 
     _save_paired_identity()
     process_dir = root / "process-clear"
     process_dir.mkdir()
-    entered = process_dir / "redeem-entered"
-    release = process_dir / "redeem-release"
+    gate = _ProcessRedeemGate(ctx)
     result_path = process_dir / "result.json"
 
     def redeem(url, payload, **kwargs):
-        entered.touch()
-        _wait_for_marker(release)
+        gate.hold()
         return _response("inst_A")
 
     monkeypatch.setattr(remote_access, "_json_request", redeem)
-    worker = ctx.Process(
-        target=_child_pair,
-        args=("key_A", "https://backend.test", result_path),
-    )
-    worker.start()
-    _wait_for_marker(entered)
-    api.save_config(
-        {"remote_access": {"vibe_cloud": _clear_identity()}},
-        validate_remote_access_network=False,
-    )
-    release.touch()
-    _wait_for_marker(result_path)
-    result = json.loads(result_path.read_text(encoding="utf-8"))
-    worker.join(timeout=10)
-    assert not worker.is_alive()
+    gate.start(_child_pair, "key_A", "https://backend.test", result_path)
+    try:
+        gate.wait_entered()
+        api.save_config(
+            {"remote_access": {"vibe_cloud": _clear_identity()}},
+            validate_remote_access_network=False,
+        )
+    finally:
+        worker = gate.finish()
     assert worker.exitcode == 0
+    result = json.loads(result_path.read_text(encoding="utf-8"))
     assert result["error"] == "pairing_superseded_after_redeem"
     assert not V2Config.load().remote_access.vibe_cloud.is_runtime_paired()
     assert not (paths.get_state_dir() / "pending-pairing.json").exists()
@@ -1610,32 +1629,25 @@ def test_ordinary_save_during_redeem_does_not_revoke_across_processes(pairing_ho
     _save_paired_identity()
     process_dir = root / "process-ordinary-save"
     process_dir.mkdir()
-    entered = process_dir / "redeem-entered"
-    release = process_dir / "redeem-release"
+    gate = _ProcessRedeemGate(ctx)
     result_path = process_dir / "result.json"
 
     def redeem(url, payload, **kwargs):
-        entered.touch()
-        _wait_for_marker(release)
+        gate.hold()
         return _response("inst_A")
 
     monkeypatch.setattr(remote_access, "_json_request", redeem)
-    worker = ctx.Process(
-        target=_child_pair,
-        args=("key_A", "https://backend.test", result_path),
-    )
-    worker.start()
-    _wait_for_marker(entered)
-    api.save_config({"ui": {"setup_port": 5124}}, validate_remote_access_network=False)
-    assert json.loads(
-        (paths.get_state_dir() / "pending-pairing.json").read_text(encoding="utf-8")
-    )["phase"] == "prepared"
-    release.touch()
-    _wait_for_marker(result_path)
-    result = json.loads(result_path.read_text(encoding="utf-8"))
-    worker.join(timeout=10)
-    assert not worker.is_alive()
+    gate.start(_child_pair, "key_A", "https://backend.test", result_path)
+    try:
+        gate.wait_entered()
+        api.save_config({"ui": {"setup_port": 5124}}, validate_remote_access_network=False)
+        assert json.loads(
+            (paths.get_state_dir() / "pending-pairing.json").read_text(encoding="utf-8")
+        )["phase"] == "prepared"
+    finally:
+        worker = gate.finish()
     assert worker.exitcode == 0
+    result = json.loads(result_path.read_text(encoding="utf-8"))
     assert result["ok"]
     assert V2Config.load().remote_access.vibe_cloud.instance_id == "inst_A"
 
