@@ -141,9 +141,17 @@ async def test_only_the_recorded_reason_makes_a_gone_job_a_timeout(tmp_path, mak
     """A wrapper failure inside a short timeout is reported as what it was, not as the timeout."""
     monkeypatch.setattr(jobs_module, "OUTPUT_HEAD_BYTES", 10)
     host = _host(tmp_path)
-    running = asyncio.ensure_future(
-        BashTool(host).execute({"command": "sleep 0.3; seq 1 1000; sleep 30", "timeout": 1.0}, make_ctx())
-    )
+    real_start = host.start
+
+    async def start_with_a_distant_deadline(*args, **kwargs):
+        # bash keeps the call's 1 s timeout; the job's own deadline lies past the test, so only the
+        # wrapper failure stops it, however long the launch takes.
+        return await real_start(*args, **{**kwargs, "timeout_s": 3600.0})
+
+    monkeypatch.setattr(host, "start", start_with_a_distant_deadline)
+    go = tmp_path / "go"
+    command = f"until [ -e {go} ]; do sleep 0.01; done; seq 1 1000; sleep 30"
+    running = asyncio.ensure_future(BashTool(host).execute({"command": command, "timeout": 1.0}, make_ctx()))
     job_id = None
     while job_id is None or not os.path.exists(os.path.join(host.job_dir(job_id), "pid")):
         await asyncio.sleep(0.01)
@@ -151,6 +159,7 @@ async def test_only_the_recorded_reason_makes_a_gone_job_a_timeout(tmp_path, mak
     # The wrapper cannot write its tail snapshot once the head is full, as on a full disk.
     wrapper_pid = open(os.path.join(host.job_dir(job_id), "pid")).read().strip()
     os.mkdir(os.path.join(host.job_dir(job_id), f"tail.log.{wrapper_pid}.tmp"))
+    go.touch()  # only now does the command write
 
     result = await asyncio.wait_for(running, timeout=10)
 
@@ -397,7 +406,8 @@ async def test_the_foreground_window_hands_over_and_the_command_runs_once(tmp_pa
 
 
 async def test_watch_true_returns_at_once(tmp_path, make_ctx, monkeypatch):
-    """At once after the command may run (the 0.5 s grace), however long the launch itself took."""
+    """After the 0.5 s grace from when the command may run, not the foreground window, however long the launch took."""
+    window_s = 60.0
     host = _host(tmp_path, Watches())
     may_run_at = []
     real_start = host.start
@@ -409,9 +419,12 @@ async def test_watch_true_returns_at_once(tmp_path, make_ctx, monkeypatch):
 
     monkeypatch.setattr(host, "start", start_and_note)
 
-    result = await BashTool(host).execute({"command": "sleep 2; echo late", "watch": True}, make_ctx())
+    # The command outlives the window, so only the grace can hand it over before the window ends.
+    result = await BashTool(host, foreground_window_s=window_s).execute(
+        {"command": "sleep 120", "watch": True}, make_ctx()
+    )
 
-    assert time.monotonic() - may_run_at[0] < 1.5
+    assert bash_module._WATCH_GRACE_S <= time.monotonic() - may_run_at[0] < window_s
     assert result_text(result).startswith("Command is still running and is now Watch wch_1.")
     assert host.status(result.details["job_id"]).state == "running"
     await host.kill(result.details["job_id"])
