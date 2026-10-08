@@ -3474,25 +3474,35 @@ class V2Config:
         Only the replacement service's lock-owning startup opts into migration
         persistence; incidental reads must not invalidate that older reader.
         Explicit saves remain writes, and recovery keeps its backup evidence.
+
+        A plain load (``persist_migrations=False``) never writes config.json and
+        takes no config lock. Its only disk effects are data-dir bootstrap and
+        uniquely named, append-only evidence backups, both outside the config
+        lock. Every writer publishes the file with an atomic replace, so the read
+        sees one whole snapshot: the old file or the new one. The read takes no
+        lock in either mode: migration persistence re-reads the file under the
+        config lock and replaces it only if it still holds these bytes. A lock
+        here would also invert the canonical order (config lock, then SQLite
+        writer) for every caller that reads config inside an open SQLite write
+        transaction, while a config writer waits for that SQLite writer.
         """
         paths.ensure_data_dirs()
         path = config_path or paths.get_config_path()
-        with CONFIG_LOCK:
-            if not path.exists():
-                raise FileNotFoundError(f"Config not found: {path}")
-            raw_bytes = b""
-            try:
-                raw_bytes = path.read_bytes()
-                raw = raw_bytes.decode("utf-8")
-            except UnicodeDecodeError as exc:
-                backup = _backup_config_file(path, "invalid-encoding", content=raw_bytes)
-                warning = f"Config is not valid UTF-8; using recovery defaults: {exc.reason}"
-                logger.error("%s (backup=%s)", warning, backup)
-                config = cls._recovery_default()
-                config.load_warnings = (warning,)
-                config.recovered_sections = ()
-                config.whole_config_recovery = True
-                return config
+        if not path.exists():
+            raise FileNotFoundError(f"Config not found: {path}")
+        raw_bytes = b""
+        try:
+            raw_bytes = path.read_bytes()
+            raw = raw_bytes.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            backup = _backup_config_file(path, "invalid-encoding", content=raw_bytes)
+            warning = f"Config is not valid UTF-8; using recovery defaults: {exc.reason}"
+            logger.error("%s (backup=%s)", warning, backup)
+            config = cls._recovery_default()
+            config.load_warnings = (warning,)
+            config.recovered_sections = ()
+            config.whole_config_recovery = True
+            return config
 
         try:
             payload = json.loads(raw)
