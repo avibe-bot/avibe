@@ -64,6 +64,10 @@
         "spawn_failed": "Computer Use — the managed driver could not start; turn it off and on to retry",
         "daemon_exited": "Computer Use — the managed driver exited; turn it off and on to retry",
         "health_timeout": "Computer Use — the managed driver did not become ready; turn it off and on to retry",
+        "bundle_identity": "Computer Use — the managed driver cannot verify this Avibe app; update or reinstall it",
+        "ax_capability": "Computer Use — Accessibility is unavailable; check Avibe in System Settings, then reopen it",
+        "capture_failed": "Computer Use — screen capture failed; check Avibe in Screen & System Audio Recording, then retry",
+        "driver_health_failed": "Computer Use — the managed driver failed its health check; reopen, update, or reinstall Avibe",
         "endpoint_busy": "Computer Use — its previous driver endpoint is still busy; turn it off and on to retry",
         "endpoint_unremovable": "Computer Use — its previous driver endpoint could not be cleared; turn it off and on to retry",
         "socket_unreachable": "Computer Use — the managed driver could not be reached; turn it off and on to retry"

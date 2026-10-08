@@ -13,6 +13,7 @@ from core.computer_use import (
 )
 from core.handlers.session_handler import (
     apply_managed_computer_use_to_claude_options,
+    claude_allowlist_exposes_computer_use,
 )
 from core.system_prompt_injection import build_system_prompt_blocks
 from modules.agents.codex.transport import _managed_mcp_config_args
@@ -59,6 +60,28 @@ def test_claude_translation_preserves_native_config_and_agent_tool_allowlist() -
         is None
     )
     assert "allowed_tools" not in no_agent_allowlist
+
+
+def test_claude_guidance_requires_an_admitted_tool_in_an_explicit_allowlist() -> None:
+    """A configured MCP server is not guidance authority for a restricted agent."""
+
+    spec = _spec()
+    assert claude_allowlist_exposes_computer_use(None, spec)
+    assert claude_allowlist_exposes_computer_use(
+        ["Read", "mcp__avibe_computer__click"],
+        spec,
+    )
+    assert claude_allowlist_exposes_computer_use(
+        ["mcp__avibe_computer__*"],
+        spec,
+    )
+    assert not claude_allowlist_exposes_computer_use(["Read", "Bash"], spec)
+    assert not claude_allowlist_exposes_computer_use([], spec)
+    assert not claude_allowlist_exposes_computer_use(
+        ["mcp__other_server__click"],
+        spec,
+    )
+    assert not claude_allowlist_exposes_computer_use(None, None)
 
 
 def test_codex_translation_is_fixed_last_and_approves_managed_tools() -> None:

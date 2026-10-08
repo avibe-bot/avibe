@@ -270,6 +270,11 @@ fn computer_use_control_enabled(view: &computer_use::MenuView) -> bool {
     !view.initialization_error
 }
 
+#[cfg(target_os = "macos")]
+fn computer_use_menu_state(view: &computer_use::MenuView) -> (bool, bool) {
+    (computer_use_control_enabled(view), view.enabled)
+}
+
 #[cfg(feature = "bundled-runtime")]
 fn native_uninstall_catalog_for_locales(locales: impl IntoIterator<Item = String>) -> NativeUninstallCatalog {
     native_catalog_for_locales(locales).uninstall
@@ -419,6 +424,8 @@ fn install_native_tray(app: &AppHandle) -> tauri::Result<()> {
     #[cfg(target_os = "macos")]
     let computer_use_view = app.state::<computer_use::Controller>().view();
     #[cfg(target_os = "macos")]
+    let (computer_use_enabled, computer_use_checked) = computer_use_menu_state(&computer_use_view);
+    #[cfg(target_os = "macos")]
     let computer_use = CheckMenuItem::with_id(
         app,
         COMPUTER_USE_MENU_ID,
@@ -426,8 +433,8 @@ fn install_native_tray(app: &AppHandle) -> tauri::Result<()> {
             &native_catalog_for_locales(sys_locale::get_locales()).computer_use,
             &computer_use_view,
         ),
-        true,
-        computer_use_control_enabled(&computer_use_view),
+        computer_use_enabled,
+        computer_use_checked,
         None::<&str>,
     )?;
     let updater = app.state::<updater::Updater>();
@@ -649,12 +656,13 @@ fn refresh_computer_use_control(app: &AppHandle) {
             return;
         };
         let view = controller.view();
+        let (enabled, checked) = computer_use_menu_state(&view);
         let catalog = native_catalog_for_locales(sys_locale::get_locales()).computer_use;
         if menus
             .computer_use
             .set_text(computer_use_label(&catalog, &view))
-            .and_then(|()| menus.computer_use.set_enabled(computer_use_control_enabled(&view)))
-            .and_then(|()| menus.computer_use.set_checked(view.enabled))
+            .and_then(|()| menus.computer_use.set_enabled(enabled))
+            .and_then(|()| menus.computer_use.set_checked(checked))
             .is_err()
         {
             eprintln!("failed to refresh native Computer Use control");
@@ -2312,6 +2320,21 @@ mod tests {
         assert!(screen_recording_label.contains("Screen Recording"));
         assert_ne!(accessibility_label, screen_recording_label);
         assert!(!known_error_label.contains("state_unwritable"));
+        for reason in [
+            "bundle_identity",
+            "ax_capability",
+            "capture_failed",
+            "driver_health_failed",
+        ] {
+            let view = computer_use::MenuView {
+                reason: Some(reason.to_owned()),
+                phase: avibe_runtime_host::computer_use::ComputerUsePhase::Error,
+                ..Default::default()
+            };
+            let label = computer_use_label(&catalog, &view);
+            assert_eq!(label, catalog.error_reasons[reason]);
+            assert!(!label.contains(reason));
+        }
         assert!(runtime_unavailable_label.contains("waiting"));
         assert!(runtime_too_old_label.contains("restart"));
         assert_ne!(runtime_unavailable_label, runtime_too_old_label);
@@ -2328,7 +2351,28 @@ mod tests {
         };
 
         assert!(!computer_use_control_enabled(&view));
+        assert_eq!(computer_use_menu_state(&view), (false, false));
         assert_eq!(computer_use_label(&catalog, &view), catalog.initialization_failed);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn computer_use_menu_state_keeps_enabled_and_checked_independent() {
+        let off = computer_use::MenuView::default();
+        assert_eq!(computer_use_menu_state(&off), (true, false));
+
+        let on = computer_use::MenuView {
+            enabled: true,
+            ..Default::default()
+        };
+        assert_eq!(computer_use_menu_state(&on), (true, true));
+
+        let failed_on = computer_use::MenuView {
+            enabled: true,
+            initialization_error: true,
+            ..Default::default()
+        };
+        assert_eq!(computer_use_menu_state(&failed_on), (false, true));
     }
 
     #[test]

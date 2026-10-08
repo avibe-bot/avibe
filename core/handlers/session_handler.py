@@ -121,6 +121,23 @@ def apply_managed_computer_use_to_claude_options(
     return agent_allowed_tools
 
 
+def claude_allowlist_exposes_computer_use(
+    agent_allowed_tools: list[str] | None,
+    computer_use_spec: Any,
+) -> bool:
+    """Whether this Claude launch can call at least one managed MCP tool."""
+
+    if computer_use_spec is None:
+        return False
+    if agent_allowed_tools is None:
+        return True
+    prefix = f"mcp__{computer_use_spec.name}__"
+    return any(
+        isinstance(tool, str) and tool.startswith(prefix)
+        for tool in agent_allowed_tools
+    )
+
+
 class ClaudeSessionNotFoundError(RuntimeError):
     """Claude Code could not resume a persisted session in the current cwd."""
 
@@ -733,6 +750,7 @@ class SessionHandler(BaseHandler):
             computer_use_spec=(
                 launch_inputs.computer_use_spec if launch_inputs is not None else None
             ),
+            agent_allowed_tools=None,
         )
         if await self._replace_stale_cached_claude_client(
             composite_key,
@@ -800,10 +818,11 @@ class SessionHandler(BaseHandler):
             agent_name="claude",
             session_anchor=base_session_id,
         )
+        agent_data = self._load_agent_file(effective_agent, working_path)
         next_agent_system_prompt = agent_system_prompt
         if next_agent_system_prompt is None:
-            agent_data = self._load_agent_file(effective_agent, working_path)
             next_agent_system_prompt = agent_data.get("prompt") if agent_data else None
+        next_agent_allowed_tools = agent_data.get("tools") if agent_data else None
         next_system_prompt = await self._build_claude_system_prompt(
             context=context,
             session_key=session_key,
@@ -815,6 +834,7 @@ class SessionHandler(BaseHandler):
             computer_use_spec=(
                 launch_inputs.computer_use_spec if launch_inputs is not None else None
             ),
+            agent_allowed_tools=next_agent_allowed_tools,
         )
         if await self._replace_stale_cached_claude_client(
             composite_key,
@@ -1711,6 +1731,7 @@ class SessionHandler(BaseHandler):
             working_path=working_path,
             claude_config=claude_config,
             computer_use_spec=launch_inputs.computer_use_spec,
+            agent_allowed_tools=agent_allowed_tools,
         )
 
         # Echo native input frames so the long-lived receiver can correlate
@@ -1802,7 +1823,7 @@ class SessionHandler(BaseHandler):
             option_kwargs["effort"] = effective_effort
         # Only set allowed_tools if agent file specifies tools.
         # Omitting the field keeps SDK default tool behavior.
-        if agent_allowed_tools:
+        if agent_allowed_tools is not None:
             option_kwargs["allowed_tools"] = agent_allowed_tools
 
         options = ClaudeAgentOptions(**option_kwargs)
@@ -1969,6 +1990,7 @@ class SessionHandler(BaseHandler):
         skill_catalog_sink: list[dict] | None = None,
         claude_config: Any = None,
         computer_use_spec: Any = None,
+        agent_allowed_tools: list[str] | None = None,
     ) -> str | Dict[str, str]:
         if claude_config is None:
             claude_config = self.config.claude
@@ -1987,7 +2009,10 @@ class SessionHandler(BaseHandler):
             build_system_prompt_injection,
             agent_instructions=base_prompt or "",
             include_quick_replies=quick_replies_on and platform != "wechat",
-            include_computer_use=computer_use_spec is not None,
+            include_computer_use=claude_allowlist_exposes_computer_use(
+                agent_allowed_tools,
+                computer_use_spec,
+            ),
             context=context,
             fallback_platform=platform,
             enabled_agents=get_enabled_agents_for_prompt(self.controller),

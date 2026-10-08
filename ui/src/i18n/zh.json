@@ -64,6 +64,10 @@
         "spawn_failed": "电脑操作 — 受管理的驱动无法启动；请关闭后重新开启",
         "daemon_exited": "电脑操作 — 受管理的驱动已退出；请关闭后重新开启",
         "health_timeout": "电脑操作 — 受管理的驱动未能就绪；请关闭后重新开启",
+        "bundle_identity": "电脑操作 — 受管理的驱动无法验证当前 Avibe 应用；请更新或重新安装",
+        "ax_capability": "电脑操作 — 无法使用辅助功能；请在系统设置中检查 Avibe，然后重新打开",
+        "capture_failed": "电脑操作 — 屏幕捕获失败；请在“屏幕与系统音频录制”中检查 Avibe，然后重试",
+        "driver_health_failed": "电脑操作 — 受管理的驱动健康检查失败；请重新打开、更新或重新安装 Avibe",
         "endpoint_busy": "电脑操作 — 上一个驱动端点仍在使用；请关闭后重新开启",
         "endpoint_unremovable": "电脑操作 — 无法清理上一个驱动端点；请关闭后重新开启",
         "socket_unreachable": "电脑操作 — 无法连接受管理的驱动；请关闭后重新开启"

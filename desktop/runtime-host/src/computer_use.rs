@@ -373,7 +373,7 @@ impl ComputerUseLifecycle {
             enabled: record.enabled,
             phase,
             reason: if phase == ComputerUsePhase::Error {
-                record.reason.clone()
+                record.reason.as_deref().map(stable_failure_reason).map(str::to_owned)
             } else if phase == ComputerUsePhase::NeedsRuntime {
                 Some(RUNTIME_UNAVAILABLE_REASON.to_owned())
             } else {
@@ -653,6 +653,7 @@ mod tests {
     use super::*;
 
     fn record(state: ComputerUsePhase, enabled: bool) -> ComputerUseRecord {
+        let temporary = std::env::temp_dir().join("avibe-computer-use-tests");
         ComputerUseRecord {
             schema_version: COMPUTER_USE_SCHEMA_VERSION,
             enabled,
@@ -663,11 +664,11 @@ mod tests {
             generation: 1,
             driver_version: COMPUTER_USE_DRIVER_VERSION.to_owned(),
             tool_snapshot: ToolSnapshot {
-                path: PathBuf::from("/tmp/tools.json"),
+                path: temporary.join("tools.json"),
                 sha256: COMPUTER_USE_TOOL_SNAPSHOT_SHA256.to_owned(),
             },
-            socket_path: (state == ComputerUsePhase::Ready).then(|| PathBuf::from("/tmp/cua.sock")),
-            proxy_executable: (state == ComputerUsePhase::Ready).then(|| PathBuf::from("/tmp/cua-driver")),
+            socket_path: (state == ComputerUsePhase::Ready).then(|| temporary.join("cua.sock")),
+            proxy_executable: (state == ComputerUsePhase::Ready).then(|| temporary.join("cua-driver")),
             host_bundle_id: (state == ComputerUsePhase::Ready).then(|| "bot.avibe.desktop.test".to_owned()),
         }
     }
@@ -1043,6 +1044,11 @@ mod tests {
             lifecycle.startup_health(HealthResult::Unhealthy(raw.to_owned()), Duration::ZERO);
 
             assert_eq!(lifecycle.reason(), Some(expected), "raw reason: {raw}");
+
+            let mut stored = record(ComputerUsePhase::Error, true);
+            stored.reason = Some(raw.to_owned());
+            let restored = ComputerUseLifecycle::from_record(&stored);
+            assert_eq!(restored.reason(), Some(expected), "restored raw reason: {raw}");
         }
     }
 

@@ -864,6 +864,14 @@ fn native_tray_copy_has_locale_and_placeholder_parity() {
 }
 
 #[test]
+fn computer_use_menu_constructor_keeps_enabled_and_checked_in_their_slots() {
+    let source = shipping_source("src/lib.rs");
+    assert!(source
+        .contains("let (computer_use_enabled, computer_use_checked) = computer_use_menu_state(&computer_use_view);"));
+    assert!(source.contains("computer_use_enabled,\n        computer_use_checked,\n        None::<&str>,"));
+}
+
+#[test]
 fn settings_open_in_the_shown_workbench_and_only_while_one_is_shown() {
     let source = shipping_source("src/lib.rs");
     let body = |name: &str| -> String {

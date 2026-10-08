@@ -71,19 +71,21 @@ def assemble_assets(root, source=SOURCE):
         output = work / "output"
         driver_args = {}
         if system == "macos":
+            pinned_driver = release.pinned_driver_source()
             driver = work / "cua-driver"
             driver.write_bytes(f"packaged driver for {target}".encode())
             provenance = work / "driver-provenance.json"
             provenance.write_text(json.dumps({
                 "schema_version": 1,
-                "version": "0.31.0",
-                "tag": "cua-driver-rs-v0.31.0",
-                "source_commit": "5272e492d61b96caf08e3bf434d91126c1f3dccc",
+                "version": pinned_driver["version"],
+                "tag": pinned_driver["tag"],
+                "source_commit": pinned_driver["source_commit"],
                 "target": target,
                 "arch": "arm64" if arch == "aarch64" else arch,
-                "release_checksums_sha256": "1" * 64,
-                "archive": "cua-driver-rs-0.31.0-darwin-universal-binary.tar.gz",
-                "archive_sha256": "2" * 64,
+                "release_checksums_sha256":
+                    pinned_driver["release_checksums_sha256"],
+                "archive": pinned_driver["archive"],
+                "archive_sha256": pinned_driver["archive_sha256"],
                 "extracted_universal_sha256": "3" * 64,
                 "thinned_upstream_sha256": "4" * 64,
                 "thinned_signature": "upstream_preserved",
@@ -254,6 +256,7 @@ def test_verify_rejects_schema_two_macos_metadata_without_driver(tmp_path):
         ("schema_version", 2),
         ("arch", "wrong-arch"),
         ("archive", "wrong-driver.tar.gz"),
+        ("archive_sha256", "f" * 64),
     ],
 )
 def test_verify_rejects_mismatched_driver_provenance(tmp_path, field, value):
@@ -291,6 +294,12 @@ def test_workflow_record_command_feeds_the_release_consumer(tmp_path, target):
     scripts.mkdir()
     for name in ("desktop_release.py", "release_package_version.py", "github_release.py"):
         shutil.copyfile(ROOT / "scripts" / name, scripts / name)
+    source_dir = work / "desktop/cua-driver"
+    source_dir.mkdir(parents=True)
+    shutil.copyfile(
+        ROOT / "desktop/cua-driver/sources.json",
+        source_dir / "sources.json",
+    )
     runtime = work / "desktop/src-tauri/resources/runtime"
     runtime.parent.mkdir(parents=True)
     shutil.copytree(work / "runtime", runtime)
@@ -515,6 +524,12 @@ def test_real_publication_shell_checks_assets_before_finalize(tmp_path, state):
     scripts.mkdir()
     for name in ("desktop_release.py", "release_package_version.py", "github_release.py"):
         shutil.copyfile(ROOT / "scripts" / name, scripts / name)
+    source_dir = tmp_path / "desktop/cua-driver"
+    source_dir.mkdir(parents=True)
+    shutil.copyfile(
+        ROOT / "desktop/cua-driver/sources.json",
+        source_dir / "sources.json",
+    )
     (tmp_path / "release.md").write_text("# TEST release\n")
     binaries = tmp_path / "bin"
     binaries.mkdir()

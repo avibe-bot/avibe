@@ -19,6 +19,7 @@ _versions = run_path(str(Path(__file__).with_name("release_package_version.py"))
 package_version_from_release_tag = _versions["package_version_from_release_tag"]
 _github = run_path(str(Path(__file__).with_name("github_release.py")))
 DESKTOP_SOURCE_SCHEMA_VERSION = 2
+CUA_DRIVER_SOURCES = Path(__file__).resolve().parents[1] / "desktop" / "cua-driver" / "sources.json"
 TARGETS = {
     "aarch64-apple-darwin": ("macos", "aarch64", ".dmg"),
     "x86_64-apple-darwin": ("macos", "x86_64", ".dmg"),
@@ -126,6 +127,18 @@ def asset_names(version: str, target: str) -> list[str]:
             prefix + ".SOURCE.json", prefix + ".SIGNATURE", prefix + ".SHA256SUMS"]
 
 
+def pinned_driver_source() -> dict:
+    source = json.loads(CUA_DRIVER_SOURCES.read_text(encoding="utf-8"))["driver"]
+    return {
+        "version": source["version"],
+        "tag": source["tag"],
+        "source_commit": source["source_commit"],
+        "release_checksums_sha256": source["release_checksums_sha256"],
+        "archive": source["macos"]["asset"],
+        "archive_sha256": source["macos"]["sha256"],
+    }
+
+
 def validate_manifest(manifest: dict, target: str, tag: str) -> None:
     expected_os, arch, _ = TARGETS[target]
     if (manifest.get("schema_version"), manifest.get("os"), manifest.get("arch")) != (2, expected_os, arch):
@@ -157,14 +170,12 @@ def driver_provenance(
         "extracted_universal_sha256",
         "thinned_upstream_sha256",
     )
+    pinned = pinned_driver_source()
     if (
         provenance.get("schema_version") != 1
-        or provenance.get("version") != "0.31.0"
-        or provenance.get("tag") != "cua-driver-rs-v0.31.0"
-        or provenance.get("source_commit") != "5272e492d61b96caf08e3bf434d91126c1f3dccc"
+        or any(provenance.get(field) != value for field, value in pinned.items())
         or provenance.get("target") != target
         or provenance.get("arch") != TARGETS[target][1].replace("aarch64", "arm64")
-        or provenance.get("archive") != "cua-driver-rs-0.31.0-darwin-universal-binary.tar.gz"
         or provenance.get("thinned_signature") != "upstream_preserved"
         or any(re.fullmatch(r"[0-9a-f]{64}", str(provenance.get(field))) is None for field in required_hashes)
     ):
@@ -260,6 +271,7 @@ def verify(directory: Path, tag: str, source_sha: str, *, updater_enabled: bool 
                            "package_version": package_version_from_release_tag(tag)}
         driver = source.pop("computer_use_driver", None)
         if TARGETS[target][0] == "macos":
+            pinned = pinned_driver_source()
             required_hashes = (
                 "release_checksums_sha256",
                 "archive_sha256",
@@ -275,12 +287,9 @@ def verify(directory: Path, tag: str, source_sha: str, *, updater_enabled: bool 
             elif (
                 not isinstance(driver, dict)
                 or driver.get("schema_version") != 1
+                or any(driver.get(field) != value for field, value in pinned.items())
                 or driver.get("target") != target
                 or driver.get("arch") != TARGETS[target][1].replace("aarch64", "arm64")
-                or driver.get("archive") != "cua-driver-rs-0.31.0-darwin-universal-binary.tar.gz"
-                or driver.get("version") != "0.31.0"
-                or driver.get("tag") != "cua-driver-rs-v0.31.0"
-                or driver.get("source_commit") != "5272e492d61b96caf08e3bf434d91126c1f3dccc"
                 or driver.get("thinned_signature") != "upstream_preserved"
                 or re.fullmatch(r"[0-9a-f]{40,64}", str(driver.get("packaged_cdhash"))) is None
                 or any(re.fullmatch(r"[0-9a-f]{64}", str(driver.get(field))) is None

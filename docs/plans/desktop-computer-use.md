@@ -575,9 +575,13 @@ running. The tray keeps the shell alive after the window closes.
       renewed holder speculatively.
     - Two first calls from different processes therefore serialize. One
       wins, and the other gets `desktop_busy` naming the holder.
-    - The holder refreshes the lease when each call starts, and every 10 s
-      while a call is still running. A long call, such as a 120 s
-      `get_accessibility_tree`, therefore keeps it.
+    - The holder starts an ownership-aware heartbeat immediately after
+      acquisition and refreshes every 10 s through proxy setup, session
+      revival, and forwarding. A long setup or call, such as a 120 s
+      `get_accessibility_tree`, therefore keeps the lease. If refresh proves
+      that another holder owns the lease, setup is cancelled before forwarding.
+      Loss after an input may already have reached Cua returns an error and
+      discards the proxy; it never claims that the delivered action was undone.
     - The lease lapses 60 s after the last refresh. A holder that crashed,
       even mid-call, stops refreshing and frees the desktop within a minute,
       without any PID check. Calling `end_session` releases it at once.
@@ -600,8 +604,10 @@ running. The tray keeps the shell alive after the window closes.
     - Each session remembers the epoch it last held. Another session may have
       held the desktop in between, so a session can reacquire the lease under a
       newer epoch. Before forwarding that call, the server runs `end_session`
-      and then `start_session` for its name. Cua then invalidates every element
-      token the session held, so a stale token fails with Cua's own error.
+      and then `start_session` for its name. A tool-level error from the
+      internal `end_session` aborts revival before any user tool is forwarded.
+      A successful handoff makes Cua invalidate every element token the session
+      held, so a stale token fails with Cua's own error.
       Coordinates from an old screenshot are not covered by that, so the server
       tracks `observe_first` per target window. After an epoch change, the
       server refuses input to a window (`pid`, `window_id`) with `observe_first`
@@ -1056,12 +1062,14 @@ redirected to test-owned fakes.
 
 ## Owner decision ledger
 
-- **2026-10-08 — bounded transport completion and deferred hardening.** The
-  request deadline covers write-lock wait, drain, and response wait without
-  replaying an input whose delivery is unknown. Keep pre-forward lease refresh
-  after a very long proxy/session setup, the narrow stale-admission/newer-proxy
-  interleaving, and retry after an already-removed old socket as follow-up
-  hardening; they do not add a server, lock, or state file to this review head.
+- **2026-10-08 — acquire-to-forward lease ownership.** The earlier deferral of
+  pre-forward lease protection is superseded: a 180 s proxy/session request can
+  outlive the 60 s lease TTL. One ownership-aware heartbeat now covers
+  acquisition through setup, revival, and forwarding, while preserving the
+  single server, lock, state file, bounded admission retry, and no-replay
+  contracts. Retained follow-ups are in-process proxy contention, the narrow
+  stale-admission/newer-proxy interleaving, retry after an already-removed old
+  socket, and the separate shell-lock startup retry.
 - **2026-10-08 — f043 review scope.** Keep `ComputerUseServer` as the single
   owner and close lease generation, proxy reader, admitted Codex prompt,
   Workbench provenance/remediation, workflow dependency, and release metadata

@@ -138,6 +138,105 @@ def _run_session(handler: SessionHandler, context: MessageContext):
     return asyncio.run(handler.get_or_create_claude_session(context))
 
 
+@pytest.mark.asyncio
+async def test_claude_prompt_guidance_respects_the_effective_tool_allowlist(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An admitted server does not imply guidance for tools the agent cannot call."""
+
+    captured: list[bool] = []
+
+    def build_prompt(**kwargs: Any) -> str:
+        captured.append(kwargs["include_computer_use"])
+        return "prompt"
+
+    monkeypatch.setattr(
+        session_handler_module,
+        "build_system_prompt_injection",
+        build_prompt,
+    )
+    handler = SessionHandler(_Controller(tmp_path))
+    context = MessageContext(user_id="U123", channel_id="C123")
+    spec = SimpleNamespace(name="avibe_computer")
+    common = {
+        "context": context,
+        "session_key": "test::C123",
+        "agent_name": "claude",
+        "session_anchor": "slack_C123",
+        "agent_system_prompt": None,
+        "computer_use_spec": spec,
+    }
+
+    await handler._build_claude_system_prompt(
+        **common,
+        agent_allowed_tools=["Read", "Bash"],
+    )
+    await handler._build_claude_system_prompt(
+        **common,
+        agent_allowed_tools=["Read", "mcp__avibe_computer__click"],
+    )
+
+    assert captured == [False, True]
+
+
+def test_empty_claude_agent_allowlist_stays_restricted_at_launch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An explicit empty agent allowlist cannot widen during MCP injection."""
+
+    captured: dict[str, Any] = {}
+    spec = SimpleNamespace(
+        name="avibe_computer",
+        fingerprint="managed-fixture",
+        claude_config=lambda: {
+            "type": "stdio",
+            "command": "/fixture/python",
+            "args": ["-I", "/fixture/core/computer_server.py"],
+            "env": {},
+        },
+    )
+
+    class Client:
+        def __init__(self, options: Any) -> None:
+            captured["options"] = options
+
+        async def connect(self) -> None:
+            return None
+
+    def build_prompt(**kwargs: Any) -> str:
+        captured["include_computer_use"] = kwargs["include_computer_use"]
+        return "prompt"
+
+    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", Client)
+    monkeypatch.setattr(session_handler_module, "managed_mcp_server_spec", lambda: spec)
+    monkeypatch.setattr(
+        session_handler_module,
+        "build_system_prompt_injection",
+        build_prompt,
+    )
+    handler = SessionHandler(_Controller(tmp_path))
+    monkeypatch.setattr(
+        handler,
+        "_load_agent_file",
+        lambda *_args: {"prompt": "restricted", "tools": []},
+    )
+
+    asyncio.run(
+        handler.get_or_create_claude_session(
+            MessageContext(user_id="U123", channel_id="C123"),
+            subagent_name="restricted",
+        )
+    )
+
+    options = captured["options"]
+    assert options.allowed_tools == []
+    assert options.mcp_servers == {"avibe_computer": spec.claude_config()}
+    assert captured["include_computer_use"] is False
+
+
 class _StubClaudeAgentOptions:
     def __init__(self, **kwargs: Any) -> None:
         for key, value in kwargs.items():

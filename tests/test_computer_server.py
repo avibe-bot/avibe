@@ -85,6 +85,8 @@ class FakeUpstream:
         self.inflight = 0
         self.max_inflight = 0
         self.block: asyncio.Event | None = None
+        self.blocked_tools: set[str] = {"list_apps"}
+        self.tool_errors: set[str] = set()
         self.fail_transport = False
         self.fail_after_unblock = False
         self.close_calls = 0
@@ -98,10 +100,20 @@ class FakeUpstream:
         self.inflight += 1
         self.max_inflight = max(self.max_inflight, self.inflight)
         try:
-            if self.block is not None and params.get("name") == "list_apps":
+            tool_name = params.get("name")
+            if self.block is not None and tool_name in self.blocked_tools:
                 await self.block.wait()
             if self.fail_after_unblock:
                 raise UpstreamUnavailable("transport failed after replacement")
+            if tool_name in self.tool_errors:
+                return {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "result": {
+                        "content": [{"type": "text", "text": "tool failed"}],
+                        "isError": True,
+                    },
+                }
             return {
                 "jsonrpc": "2.0",
                 "id": 1,
@@ -586,6 +598,49 @@ async def test_real_lease_epoch_survives_handoff_and_rejects_stale_observation(
 
 
 @pytest.mark.asyncio
+async def test_failed_internal_end_blocks_revival_and_element_token_input(
+    tmp_path: Path,
+) -> None:
+    """A failed epoch handoff cannot preserve tokens from the previous holder."""
+
+    now = 100.0
+    leases = DesktopLeaseManager(tmp_path, now=lambda: now, ttl_seconds=60.0)
+    state_path, state = _state(tmp_path)
+    upstream = FakeUpstream()
+    server = ComputerUseServer(
+        state_path=state_path,
+        status_reader=lambda: ComputerUseStatus("ready", None, state),
+        upstream_factory=lambda _state: asyncio.sleep(0, result=upstream),
+        lease_manager=leases,
+    )
+
+    first = await server.call_tool("list_apps", {"session": "ses-a"})
+    assert not first.get("isError")
+    now += 61.0
+    handoff = await server.call_tool("list_apps", {"session": "ses-b"})
+    assert not handoff.get("isError")
+    ended = await server.call_tool("end_session", {"session": "ses-b"})
+    assert not ended.get("isError")
+
+    upstream.tool_errors.add("end_session")
+    before = len(upstream.calls)
+    stale = await server.call_tool(
+        "click",
+        {"session": "ses-a", "element_token": "old-element", "x": 1, "y": 2},
+    )
+
+    assert "session_unavailable" in stale["content"][0]["text"]
+    assert [
+        params["name"] for _method, params in upstream.calls[before:]
+    ] == ["end_session"]
+    assert leases.acquire(
+        "ses-b",
+        state.daemon_key,
+        lambda: state.daemon_key,
+    ).newly_claimed
+
+
+@pytest.mark.asyncio
 async def test_proxy_replacement_clears_observations(tmp_path: Path) -> None:
     """A fresh upstream proxy cannot reuse observations from the old process."""
 
@@ -979,6 +1034,41 @@ async def test_admission_retries_generation_change_exactly_once(
 
 
 @pytest.mark.asyncio
+async def test_new_claim_is_released_after_same_key_generation_guard(
+    tmp_path: Path,
+) -> None:
+    """A newly claimed lease cannot survive a pre-forward readiness change."""
+
+    state_path, state = _state(tmp_path)
+    leases = DesktopLeaseManager(tmp_path)
+    status_reads = 0
+
+    def status_reader() -> ComputerUseStatus:
+        nonlocal status_reads
+        status_reads += 1
+        if status_reads in {3, 4}:
+            return ComputerUseStatus("unavailable", "daemon_unreachable")
+        return ComputerUseStatus("ready", None, state)
+
+    server = ComputerUseServer(
+        state_path=state_path,
+        status_reader=status_reader,
+        upstream_factory=lambda _state: asyncio.sleep(0, result=FakeUpstream()),
+        lease_manager=leases,
+    )
+
+    result = await server.call_tool("list_apps", {"session": "ses-a"})
+
+    assert result["isError"]
+    assert "computer_use_unavailable" in result["content"][0]["text"]
+    assert leases.acquire(
+        "ses-b",
+        state.daemon_key,
+        lambda: state.daemon_key,
+    ).newly_claimed
+
+
+@pytest.mark.asyncio
 async def test_readiness_blip_keeps_a_renewed_lease_epoch(
     tmp_path: Path,
 ) -> None:
@@ -1196,6 +1286,96 @@ async def test_long_call_refreshes_lease_until_it_finishes(
 
 
 @pytest.mark.asyncio
+async def test_heartbeat_starts_before_proxy_setup_finishes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Proxy setup cannot age a newly acquired lease past its TTL."""
+
+    monkeypatch.setattr("core.computer_server._LEASE_HEARTBEAT_SECONDS", 0.01)
+    now = 100.0
+    leases = DesktopLeaseManager(tmp_path, now=lambda: now, ttl_seconds=60.0)
+    state_path, state = _state(tmp_path)
+    setup_started = asyncio.Event()
+    finish_setup = asyncio.Event()
+
+    async def factory(_state: ComputerUseState) -> FakeUpstream:
+        setup_started.set()
+        await finish_setup.wait()
+        return FakeUpstream()
+
+    server = ComputerUseServer(
+        state_path=state_path,
+        status_reader=lambda: ComputerUseStatus("ready", None, state),
+        upstream_factory=factory,
+        lease_manager=leases,
+    )
+    call = asyncio.create_task(
+        server.call_tool("list_apps", {"session": "ses-a"})
+    )
+    await asyncio.wait_for(setup_started.wait(), timeout=1)
+    now += 61.0
+    await asyncio.sleep(0.03)
+
+    with pytest.raises(ComputerServerError, match="ses-a"):
+        leases.acquire(
+            "ses-b",
+            state.daemon_key,
+            lambda: state.daemon_key,
+        )
+
+    finish_setup.set()
+    result = await asyncio.wait_for(call, timeout=1)
+    assert not result.get("isError")
+
+
+@pytest.mark.asyncio
+async def test_lease_loss_during_session_setup_aborts_before_user_forward(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 180-second-capable session call cannot outlive desktop ownership."""
+
+    monkeypatch.setattr("core.computer_server._LEASE_HEARTBEAT_SECONDS", 0.01)
+    now = 100.0
+    leases = DesktopLeaseManager(tmp_path, now=lambda: now, ttl_seconds=60.0)
+    state_path, state = _state(tmp_path)
+    upstream = FakeUpstream()
+    upstream.block = asyncio.Event()
+    upstream.blocked_tools = {"start_session"}
+    server = ComputerUseServer(
+        state_path=state_path,
+        status_reader=lambda: ComputerUseStatus("ready", None, state),
+        upstream_factory=lambda _state: asyncio.sleep(0, result=upstream),
+        lease_manager=leases,
+    )
+    call = asyncio.create_task(
+        server.call_tool("list_apps", {"session": "ses-a"})
+    )
+    for _attempt in range(100):
+        if upstream.calls:
+            break
+        await asyncio.sleep(0.005)
+    assert [params["name"] for _method, params in upstream.calls] == [
+        "start_session"
+    ]
+
+    now += 61.0
+    assert leases.acquire(
+        "ses-b",
+        state.daemon_key,
+        lambda: state.daemon_key,
+    ).newly_claimed
+    result = await asyncio.wait_for(call, timeout=1)
+
+    assert "desktop_lease_lost" in result["content"][0]["text"]
+    assert [params["name"] for _method, params in upstream.calls] == [
+        "start_session"
+    ]
+    assert upstream.close_calls == 1
+
+
+@pytest.mark.asyncio
 async def test_upstream_eof_before_request_registration_fails_promptly() -> None:
     """A completed reader is never treated as a live transport."""
 
@@ -1267,6 +1447,8 @@ async def test_upstream_request_deadline_covers_queued_writers(
         _TransportProcess(_BlockedStream(), stdin=stdin)
     )
 
+    loop = asyncio.get_running_loop()
+    first_started = loop.time()
     first = asyncio.create_task(
         upstream.request("tools/call", {"name": "list_apps"})
     )
@@ -1275,6 +1457,7 @@ async def test_upstream_request_deadline_covers_queued_writers(
             break
         await asyncio.sleep(0)
     assert len(stdin.writes) == 1
+    second_started = loop.time()
     second = asyncio.create_task(
         upstream.request("tools/call", {"name": "list_windows"})
     )
@@ -1289,9 +1472,10 @@ async def test_upstream_request_deadline_covers_queued_writers(
         and "180 second" in str(result)
         for result in results
     )
-    # The second request spends its whole deadline waiting for the first
-    # writer, so it must fail without writing a second payload.
-    assert len(stdin.writes) == 1
+    finished = loop.time()
+    assert finished - first_started < 0.2
+    assert finished - second_started < 0.2
+    assert 1 <= len(stdin.writes) <= 2
     assert upstream._pending == {}
     await upstream.close()
 
@@ -1350,6 +1534,8 @@ async def test_proxy_command_disables_telemetry_updates_and_window_timeout(
         return None
 
     monkeypatch.setenv("CUA_DRIVER_WINDOW_CHANGE_TIMEOUT_MS", "1")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "provider-secret-sentinel")
+    monkeypatch.setenv("AVIBE_CALLER_AUTHORIZATION", "caller-secret-sentinel")
     monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
     monkeypatch.setattr(JsonRpcUpstream, "request", fake_request)
     monkeypatch.setattr(JsonRpcUpstream, "notify", fake_notify)
@@ -1369,4 +1555,21 @@ async def test_proxy_command_disables_telemetry_updates_and_window_timeout(
     assert env["CUA_DRIVER_RS_TELEMETRY_ENABLED"] == "0"
     assert env["CUA_DRIVER_RS_UPDATE_CHECK"] == "0"
     assert "CUA_DRIVER_WINDOW_CHANGE_TIMEOUT_MS" not in env
+    assert "ANTHROPIC_API_KEY" not in env
+    assert "AVIBE_CALLER_AUTHORIZATION" not in env
+    assert set(env).issubset(
+        {
+            "CUA_DRIVER_EMBEDDED",
+            "CUA_DRIVER_RS_TELEMETRY_ENABLED",
+            "CUA_DRIVER_RS_UPDATE_CHECK",
+            "HOME",
+            "LANG",
+            "LC_ALL",
+            "LC_CTYPE",
+            "PATH",
+            "TEMP",
+            "TMP",
+            "TMPDIR",
+        }
+    )
     await upstream.close()

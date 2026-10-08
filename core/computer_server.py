@@ -49,6 +49,16 @@ _UPSTREAM_RESPONSE_LIMIT = 128 * 1024 * 1024
 # reader from holding the desktop lease forever.
 _UPSTREAM_REQUEST_TIMEOUT_SECONDS = 180.0
 _ADMISSION_RETRY_LIMIT = 1
+_PROXY_PROCESS_ENV_KEYS = (
+    "HOME",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "PATH",
+    "TEMP",
+    "TMP",
+    "TMPDIR",
+)
 
 _INPUT_TOOLS = frozenset(
     {
@@ -83,6 +93,10 @@ class UpstreamUnavailable(RuntimeError):
 
 class _DaemonGenerationChanged(RuntimeError):
     """The desktop state changed before this call could be admitted."""
+
+
+class _LeaseLost(RuntimeError):
+    """The caller no longer owns the desktop lease."""
 
 
 class Upstream(Protocol):
@@ -334,7 +348,11 @@ class JsonRpcUpstream:
             or state.host_bundle_id is None
         ):
             raise UpstreamUnavailable("ready desktop state lacks proxy fields")
-        env = os.environ.copy()
+        env = {
+            key: value
+            for key in _PROXY_PROCESS_ENV_KEYS
+            if (value := os.environ.get(key))
+        }
         env.update(
             {
                 "CUA_DRIVER_EMBEDDED": "1",
@@ -342,7 +360,6 @@ class JsonRpcUpstream:
                 "CUA_DRIVER_RS_UPDATE_CHECK": "0",
             }
         )
-        env.pop("CUA_DRIVER_WINDOW_CHANGE_TIMEOUT_MS", None)
         process = await asyncio.create_subprocess_exec(
             state.proxy_executable,
             "mcp",
@@ -811,11 +828,16 @@ class ComputerUseServer:
             and session_state.last_epoch != lease.epoch
         )
         if active and epoch_changed:
-            await self._upstream_call(
+            result = await self._upstream_call(
                 upstream,
                 "end_session",
                 {"session": session},
             )
+            if result.get("isError"):
+                raise ComputerServerError(
+                    "session_unavailable",
+                    "The driver could not retire the previous computer-use session.",
+                )
             active = False
         if not active:
             result = await self._upstream_call(
@@ -839,9 +861,33 @@ class ComputerUseServer:
             while True:
                 await asyncio.sleep(_LEASE_HEARTBEAT_SECONDS)
                 if not await asyncio.to_thread(self._lease_manager.refresh, lease):
-                    return
+                    raise _LeaseLost("the desktop lease changed holders")
         except asyncio.CancelledError:
             raise
+        except _LeaseLost:
+            raise
+        except Exception as exc:
+            raise _LeaseLost("the desktop lease could not be refreshed") from exc
+
+    async def _run_while_lease_owned(
+        self,
+        heartbeat: asyncio.Task[None],
+        operation: Awaitable[Any],
+    ) -> Any:
+        """Run one setup or forwarding step while observing lease loss."""
+
+        operation_task = asyncio.ensure_future(operation)
+        done, _pending = await asyncio.wait(
+            (operation_task, heartbeat),
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if heartbeat in done:
+            operation_task.cancel()
+            with suppress(BaseException):
+                await operation_task
+            await heartbeat
+            raise _LeaseLost("the desktop lease heartbeat stopped")
+        return await operation_task
 
     def _require_observation(
         self,
@@ -891,6 +937,7 @@ class ComputerUseServer:
             for admission_attempt in range(_ADMISSION_RETRY_LIMIT + 1):
                 acquisition: LeaseAcquisition | None = None
                 upstream: Upstream | None = None
+                heartbeat: asyncio.Task[None] | None = None
                 pre_forward = True
                 try:
                     status = await asyncio.to_thread(self._status_reader)
@@ -909,59 +956,70 @@ class ComputerUseServer:
                         self._current_ready_daemon_key,
                     )
                     lease = acquisition.lease
-                    upstream = await self._ensure_upstream(state)
-                    await asyncio.to_thread(
-                        self._revalidate_daemon_key,
-                        state.daemon_key,
+                    heartbeat = asyncio.create_task(
+                        self._heartbeat(lease),
+                        name=f"computer-use-lease-heartbeat-{session}",
+                    )
+                    upstream = await self._run_while_lease_owned(
+                        heartbeat,
+                        self._ensure_upstream(state),
+                    )
+                    await self._run_while_lease_owned(
+                        heartbeat,
+                        asyncio.to_thread(
+                            self._revalidate_daemon_key,
+                            state.daemon_key,
+                        ),
                     )
                     session_state = self._sessions.setdefault(
                         session,
                         _SessionState(),
                     )
-                    await self._revive_session(
-                        upstream,
-                        session,
-                        state,
-                        lease,
-                        session_state,
+                    await self._run_while_lease_owned(
+                        heartbeat,
+                        self._revive_session(
+                            upstream,
+                            session,
+                            state,
+                            lease,
+                            session_state,
+                        ),
                     )
                     self._require_observation(name, arguments, session_state)
+                    await self._run_while_lease_owned(
+                        heartbeat,
+                        asyncio.sleep(0),
+                    )
                     pre_forward = False
 
                     forwarded = dict(arguments)
                     forwarded["session"] = session
                     if name not in self._upstream_accepts_session:
                         forwarded.pop("session", None)
-                    heartbeat = asyncio.create_task(
-                        self._heartbeat(lease),
-                        name=f"computer-use-lease-heartbeat-{session}",
-                    )
-                    try:
-                        if name == "start_session":
-                            result = {
-                                "content": [
-                                    {
-                                        "type": "text",
-                                        "text": json.dumps(
-                                            {
-                                                "session": session,
-                                                "status": "started",
-                                            },
-                                            sort_keys=True,
-                                        ),
-                                    }
-                                ]
-                            }
-                        else:
-                            result = await self._upstream_call(
+                    if name == "start_session":
+                        result = {
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": json.dumps(
+                                        {
+                                            "session": session,
+                                            "status": "started",
+                                        },
+                                        sort_keys=True,
+                                    ),
+                                }
+                            ]
+                        }
+                    else:
+                        result = await self._run_while_lease_owned(
+                            heartbeat,
+                            self._upstream_call(
                                 upstream,
                                 name,
                                 forwarded,
-                            )
-                    finally:
-                        heartbeat.cancel()
-                        with suppress(asyncio.CancelledError):
-                            await heartbeat
+                            ),
+                        )
 
                     if name in _OBSERVE_TOOLS and not result.get("isError"):
                         key = _window_key(arguments)
@@ -976,6 +1034,22 @@ class ComputerUseServer:
                             lease,
                         )
                     return result
+                except _LeaseLost:
+                    if upstream is not None:
+                        await self._discard_upstream(upstream)
+                    if (
+                        acquisition is not None
+                        and pre_forward
+                        and acquisition.newly_claimed
+                    ):
+                        await asyncio.to_thread(
+                            self._lease_manager.release,
+                            acquisition.lease,
+                        )
+                    return _error_result(
+                        "desktop_lease_lost",
+                        "The desktop lease changed before computer use completed.",
+                    )
                 except _DaemonGenerationChanged:
                     if upstream is not None:
                         await self._discard_upstream(upstream)
@@ -1048,6 +1122,11 @@ class ComputerUseServer:
                         "computer_use_error",
                         f"Computer use failed: {type(exc).__name__}",
                     )
+                finally:
+                    if heartbeat is not None:
+                        heartbeat.cancel()
+                        with suppress(BaseException):
+                            await heartbeat
 
             raise AssertionError("computer-use admission loop exhausted")
 
