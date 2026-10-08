@@ -605,6 +605,11 @@ def test_default_config_written(tmp_path, monkeypatch):
     config = runtime.ensure_config()
     assert config.mode == "self_host"
     assert (tmp_path / ".vibe_remote" / "config" / "config.json").exists()
+    # A service or UI that starts before the CLI seeds the first-run config the
+    # CLI would: no setup done and no IM platform enabled, not a phantom Slack.
+    assert config.setup_completed is False
+    assert config.platforms.enabled == []
+    assert config.platforms.primary == "avibe"
 
 
 def test_status_written(tmp_path, monkeypatch):
