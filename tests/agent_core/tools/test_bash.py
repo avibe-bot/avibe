@@ -19,6 +19,7 @@ import core.agent_core.tools.bash as bash_module
 from core.agent_core.tools.bash import BashTool, settle_bash_call
 import core.agent_core.tools.jobs as jobs_module
 from core.agent_core.tools.jobs import LocalJobHost
+from tests import hang_guard
 from tests.agent_core.tools.conftest import instance, result_text
 
 LABEL = "Output log (first 1.0MB, then the last 2.0MB in tail.log beside it)"
@@ -152,10 +153,17 @@ async def test_only_the_recorded_reason_makes_a_gone_job_a_timeout(tmp_path, mak
     go = tmp_path / "go"
     command = f"until [ -e {go} ]; do sleep 0.01; done; seq 1 1000; sleep 30"
     running = asyncio.ensure_future(BashTool(host).execute({"command": command, "timeout": 1.0}, make_ctx()))
-    job_id = None
-    while job_id is None or not os.path.exists(os.path.join(host.job_dir(job_id), "pid")):
-        await asyncio.sleep(0.01)
-        job_id = job_id or host.find_job(instance())
+    found: list[str] = []
+
+    def wrapper_started() -> bool:
+        # A call that ended before its wrapper wrote a pid surfaces its own result here.
+        assert not running.done(), running.result()
+        if not found and (job_id := host.find_job(instance())) is not None:
+            found.append(job_id)
+        return bool(found) and os.path.exists(os.path.join(host.job_dir(found[0]), "pid"))
+
+    await hang_guard.until(wrapper_started, "the job wrapper to write its pid")
+    job_id = found[0]
     # The wrapper cannot write its tail snapshot once the head is full, as on a full disk.
     wrapper_pid = open(os.path.join(host.job_dir(job_id), "pid")).read().strip()
     os.mkdir(os.path.join(host.job_dir(job_id), f"tail.log.{wrapper_pid}.tmp"))
@@ -433,11 +441,14 @@ async def test_watch_true_returns_at_once(tmp_path, make_ctx, monkeypatch):
     async def next_read() -> None:
         clock.read.clear()
         reading = asyncio.ensure_future(clock.read.wait())
-        await asyncio.wait({reading, running}, return_when=asyncio.FIRST_COMPLETED)
+        await hang_guard.within(
+            asyncio.wait({reading, running}, return_when=asyncio.FIRST_COMPLETED), "bash to read its clock or end"
+        )
         reading.cancel()
 
     try:
         while clock.now != 100.0:
+            assert not running.done(), running.result()  # a call that failed to start
             await next_read()
         clock.now = 100.49
         # bash reads 100.49, then comes back for another reading: it decided to keep waiting.
