@@ -56,7 +56,8 @@ turns jobs that no Session owns, or give every checkpoint its own Session row.
 
 ```text
 ForkPoint = (as_of, units)
-  as_of  a committed context_seq of the source's context: its own rows or its inherited prefix
+  as_of  a committed context_seq of the source's context (its own rows or its inherited prefix), or 0: the empty
+         prefix, before the first row
   units  None, or a number of units (C-9 §5) of the view at as_of
 prefix(source, point) = context_view(rows(source), fork_point=as_of).prefix(units, or all units)
 ```
@@ -70,13 +71,14 @@ Both parts exist today:
 
 **Settled.** A fork point is legal only when it is settled: every tool call in the rows up to `as_of` has its result
 in those rows, so `open_tool_calls` over them is empty (`projection.py:273`). Unit boundaries are always settled. As
-a result, a fork never inherits, settles, or looks up a call it did not make (F3). A settled point may fall mid-Turn:
-after a complete tool batch, or between a response with no tool calls and a steer.
+a result, a fork never inherits an open call: it inherits settled calls with their results as history, and never
+settles or looks up a call it did not make (F3). A settled point may fall mid-Turn: after a complete tool batch, or
+between a response with no tool calls and a steer.
 
 - **A mid tool batch point is never legal.** Projection would have to invent interrupted results, and two Sessions
   would then settle one call.
 - **A job handed to a Watch does not block a point.** Its call already has a committed result ("still running, now
-  Watch `<id>`"), so the point is settled. The job keeps running for the source (F4).
+  Watch `<id>`"), so the point is settled. The job keeps running for the Session that started it (F4).
 - **A foreground job still running blocks a point.** Its call is open.
 
 **How each carrier uses the coordinates.**
@@ -107,13 +109,18 @@ shape.
 | --- | --- |
 | a response with no tool calls: a reply (`result`, `error`, a hidden final `assistant`) or an answer before a steer | its `context_seq` |
 | a response with tool calls | the `context_seq` of its last tool result, which ends its unit; refused while a result is missing (`session_fork_point_unsettled`) |
-| a consumed input (`user`, `harness`, `agent_initiated`, `annotation`) | the largest settled `context_seq` before it, so the fork asks again from there |
+| a consumed input (`user`, `harness`, `agent_initiated`, `annotation`) | the largest settled `context_seq` before it in the source's context, or 0 when there is none, so the fork asks again from there |
 | a row without `context_seq`: display-only, queued, or removed | refused (`session_fork_point_not_in_context`) |
 | no point, and the source has a live Turn | the largest settled `context_seq` before that Turn's first consumed input (of the whole context while the Turn has consumed none), so the live Turn is trimmed |
 | no point, and no live Turn | the largest settled `context_seq` of the source's context |
 
-- The requested row may be inherited, from the source's own fork prefix. It then resolves through the source's
-  ancestry, and the child's link still names the source.
+- **0 is the empty prefix.** A child with `fork_source_context_seq = 0` inherits no row, and its first own row is
+  `context_seq` 1. `fork_link` already accepts 0 (`agent_transcript.py:677-678`), and `context_view` over no row is
+  empty.
+- **The requested row must be one of the source's own rows.** A row the source inherited is refused
+  (`session_fork_point_inherited`), and the error names the Session that owns it. Forking that Session at that row
+  gives the same prefix, and the lineage then names the Session the message belongs to, so a link to the message
+  resolves in that Session.
 - Rows that receive a `context_seq` later never move into or out of the prefix (C-5 §4).
 
 **Trimming the live Turn changes today's behavior.**
@@ -172,8 +179,8 @@ Consequences:
 - **Shared identity.** Inherited rows keep their ids.
   - A `context_edit` in the child may target an inherited result by id.
   - The child's C-9 anchor may be an inherited response, when the route is the same (C-9 §2).
-- **Call instances.** An inherited call keeps its instance, which names the source Session's response. Because cuts
-  are settled, the child never acts on one. T2's branch for inherited open calls
+- **Call instances.** An inherited call keeps its instance, which names the response of the Session that made it.
+  Because cuts are settled, the child never acts on one. T2's branch for inherited open calls
   (`modules/agents/vibey/agent.py:726-731`) is deleted in Phase 1. `call_instance_result` stays, for J5 (`:412-422`).
 - **Deletion and retention (F8).**
   - No path deletes context rows today. A Session with messages is archived, not deleted
@@ -316,14 +323,16 @@ move; the API reserves this (§15).
   - For `vibey`, it resolves `as_of` (§2) inside the reservation's transaction and writes the metadata (§5).
   - For a backend without point-in-time support, `at_message_id` is refused with `session_fork_point_unsupported`
     (§11).
-- **It owns nothing its source started (F4).** A side turn, by contrast, starts nothing.
-  - Jobs, Watches, Tasks, delegated runs, and scratch stay with the source Session.
+- **It owns nothing its ancestors started (F4).** A side turn, by contrast, starts nothing.
+  - Jobs, Watches, Tasks, delegated runs, and scratch stay with the Session that started them. In a nested fork (P,
+    then C forked from P, then D forked from C), a job P started still reports to P, not to D's source C.
   - Watches and Tasks are run definitions of their own Session, and the reservation copies none of them. A job's
     Watch follows up to the job's Session (`core/watches.py:757-808`).
   - The child's environment block lists only the child's Watches (`agent.py:1041`).
   - The child's first input carries a fork notice, which the adapter renders from the fork's facts. It says the
-    Session is a fork of `<title>`, and that commands, Watches, Tasks, and runs started before the fork report to
-    that Session, not to this one. Today's fork prompt (`core/prompts/forked-session.md`) covers only the Session id.
+    Session is a fork of `<title>`, and that every command, Watch, Task, and run in the inherited history stays with
+    the Session that started it and reports there, not here. Today's fork prompt (`core/prompts/forked-session.md`)
+    covers only the Session id.
 - **Recovery.**
   - The child's recovery is its own: T1–T4 and J1–J6 apply to its own rows and jobs.
   - A settled cut leaves it nothing of the source's to settle.
@@ -332,8 +341,9 @@ move; the API reserves this (§15).
     `storage/models.py:875-879`).
   - The child has its own writer lock and its own transcript lock (`agent.py:1184-1212`, `agent_transcript.py:331-337`).
 - **Display.**
-  - The child's Workbench shows its own rows and the fork banner (`ChatPage.tsx:4071-4083`). The banner is extended to
-    name the message the fork was taken at, with a link to it **[O-3]**.
+  - The child's Workbench shows its own rows and the fork banner (`ChatPage.tsx:4071-4083`). For a fork taken at a
+    message, the banner is extended to name that message, with a link to it in the source Session, which owns it
+    (§2) **[O-3]**. A fork at the latest point keeps today's banner, which links to the source Session.
   - The inherited prefix is not rendered in the child.
   - The earlier-record hint already names the source and the seq (`modules/agents/vibey/context.py:86-87`).
 
@@ -498,8 +508,8 @@ already provide, plus work outside fork.
 | --- | --- | --- | --- |
 | F1 | A fork's messages through its cut equal `prefix(source, point)`, and a fork Session gets the same bytes on every request, whatever either Session commits later | harness, storage | a source with checkpoints and edits both before and after the cut, plus a cut before a later checkpoint; after N commits in each Session, the child's projection through `as_of` serializes equal to `project(source, fork_point=as_of)` |
 | F2 | A side turn's first request has the caller's endpoint, system prompt, tool definitions, tool choice, and reasoning settings, and its messages begin with the caller's latest request through the cut | agent | the stub's request log, for normal and rolling side turns |
-| F3 | Every fork point is settled; a fork never inherits, settles, or looks up a call it did not make | harness, storage | every row kind in §2's table, including mid batch, a job handed over, and a running foreground job: resolved settled, or refused |
-| F4 | A fork Session owns nothing its source started: jobs, Watches, Tasks, runs, scratch. A side turn starts nothing: its calls have no call instance | vibey, service, agent | a child of a source with a live job Watch neither lists it nor receives its follow-up, and its first input carries the notice; a side turn's `bash` call starts no job even when a policy allowed it |
+| F3 | Every fork point is settled; a fork never inherits an open call, and never settles or looks up a call it did not make (settled calls are inherited as history, F1) | harness, storage | every row kind in §2's table, including mid batch, a job handed over, a running foreground job, a Session's first input (0), and an inherited row (refused, naming its owner): resolved settled, or refused |
+| F4 | A fork Session owns nothing an ancestor started: jobs, Watches, Tasks, runs, scratch stay with the Session that started them. A side turn starts nothing: its calls have no call instance | vibey, service, agent | a child of a source with a live job Watch neither lists it nor receives its follow-up, and its first input carries the notice; a side turn's `bash` call starts no job even when a policy allowed it |
 | F5 | A fork Session never writes a row of its source. A side turn writes only its audit row and, after the reply, what its fold commits | agent, storage | the source's rows before and after a child's Turns; the caller's rows after a failed and after a successful side turn |
 | F6 | A fork has no capability its source lacks | agent, service | a side turn's call to every tool its policy does not allow is denied and never runs; a reservation without editor, chat, or selection authority is refused |
 | F7 | One `fork_turn` audit per side turn, on every exit except an abort, with its purpose, point, policy, messages, usage, outcome, and folded row | agent | each exit path of the turn, as C-9 §10 invariant 4 tests it today |
@@ -513,11 +523,12 @@ These are types and signatures, not code. Names follow the surrounding modules.
 # core/agent_core/harness/fork.py (pure)
 @dataclass(frozen=True)
 class ForkPoint:
-    as_of: int                    # a committed context_seq of the source context
+    as_of: int                    # a committed context_seq of the source context, or 0: the empty prefix
     units: Optional[int] = None   # side turns: the first `units` units of the view at as_of
 
 class ForkPointError(ValueError):
-    code: Literal["session_fork_point_not_in_context", "session_fork_point_unsettled"]
+    code: Literal["session_fork_point_not_in_context", "session_fork_point_inherited",
+                  "session_fork_point_unsettled"]
 
 def settled(entries: Sequence[ContextEntry], as_of: int) -> bool: ...
 def fork_cut(entries: Sequence[ContextEntry], target_row_id: Optional[str], *,
@@ -579,7 +590,7 @@ def resolve_fork_point(conn: Connection, source_session_id: str, at_message_id: 
 def reserve_forked_session(*, source_session_id: str, at_message_id: Optional[str] = None,
                            ...) -> SessionForkResult: ...
 # SessionForkError codes added: session_fork_point_unsupported, session_fork_point_not_in_context,
-# session_fork_point_unsettled
+# session_fork_point_inherited (details name the owning Session), session_fork_point_unsettled
 
 # modules/agents/catalog.py
 FORK_AT_MESSAGE_BACKENDS: frozenset[str]   # {"vibey"} in Phase 1
@@ -629,9 +640,10 @@ Its optional fields are `detail` (for `checkpoint`: `{reason, mode}`), `error`, 
 | 2 | teammates and Agents: the descendant lookup and `fork_initiator`; the Harness bound [O-4]; a Session-invariant system prompt for warm fork Sessions; an Agent fork tool; side turns while idle | decided when the teams design is written |
 | 3 | point-in-time for native backends: Codex through `lastTurnId` from `session_turns.native_turn_id`, then Claude (store message UUIDs; `resume_session_at`) and OpenCode (store message ids; `messageID`) | F1 per backend, to the extent its native store allows |
 
-Phases 1a and 1b touch disjoint files, apart from adding `harness/fork.py`, which 1a writes and 1b only imports. Once
-this contract is frozen they can run as parallel lanes. 1b reopens review on C-9's code, the most-reviewed code on
-`avibe-agent`. Keeping 1b a pure refactor, with C-9's tests unchanged, keeps that review to the move itself.
+1b follows 1a; they are not parallel lanes. Both edit `storage/agent_transcript.py` (1a replaces the fork anchor
+resolution; 1b renames the audit kind), and 1b records the `ForkPoint` that 1a adds in `harness/fork.py`. 1b
+reopens review on C-9's code, the most-reviewed code on `avibe-agent`. Keeping 1b a pure refactor, with C-9's tests
+unchanged, keeps that review to the move itself.
 
 ## 18. Owner decisions
 
