@@ -6,7 +6,6 @@ import ipaddress
 import inspect
 import json
 import multiprocessing
-import multiprocessing.connection
 import os
 from pathlib import Path
 import queue
@@ -19,6 +18,7 @@ import pytest
 from config import paths
 from config.v2_config import RemoteAccessConfig, V2Config
 from storage import remote_access_authorization_service
+from tests import hang_guard
 from tests.test_remote_access_vibe_cloud import _config
 from tests.ui_server_test_helpers import csrf_headers
 from vibe import api, cli, remote_access, ui_server
@@ -116,16 +116,17 @@ class _ThreadRedeemGate:
             finally:
                 self._events.put("finished")
 
-        self._worker = threading.Thread(target=run)
+        self._worker = threading.Thread(target=run, daemon=True)
         self._worker.start()
         return self
 
     def wait_entered(self):
-        assert self._events.get() == "entered", "pair() finished before it reached redeem"
+        event = hang_guard.get(self._events, "the pairing worker to reach redeem")
+        assert event == "entered", "pair() finished before it reached redeem"
 
     def finish(self):
         self._release.set()
-        self._worker.join()
+        hang_guard.join(self._worker, "the released pairing worker to finish")
         return self.result
 
 
@@ -148,14 +149,16 @@ class _ProcessRedeemGate:
         return self._worker
 
     def wait_entered(self):
-        ready = multiprocessing.connection.wait([self._entered_reader, self._worker.sentinel])
+        ready = hang_guard.ready(
+            [self._entered_reader, self._worker.sentinel], "the pairing child to reach redeem or exit"
+        )
         assert self._entered_reader in ready, (
             f"worker exited with {self._worker.exitcode} before it reached redeem"
         )
 
     def finish(self):
         self._release.set()
-        self._worker.join()
+        hang_guard.join(self._worker, "the released pairing child to exit")
         return self._worker
 
 
@@ -1512,12 +1515,11 @@ def test_concurrent_resume_has_one_owner(pairing_host, monkeypatch):
         barrier.wait()
         results.append(remote_access.pair("", ""))
 
-    workers = [threading.Thread(target=resume) for _ in range(2)]
+    workers = [threading.Thread(target=resume, daemon=True) for _ in range(2)]
     for worker in workers:
         worker.start()
-    barrier.wait()
-    for worker in workers:
-        worker.join()
+    barrier.wait(hang_guard.HANG_GUARD_SECONDS)
+    hang_guard.join_all(workers, "the concurrent resumes to finish")
     assert sum(bool(result.get("ok")) for result in results) == 1
     assert sum(result.get("error") == "missing_pairing_key" for result in results) == 1
     assert V2Config.load().remote_access.vibe_cloud.instance_id == "inst_A"
@@ -1545,12 +1547,11 @@ def test_concurrent_resume_has_one_owner_across_processes(pairing_host, monkeypa
         worker.start()
     try:
         for (ready, _), worker in zip(readies, workers):
-            woke = multiprocessing.connection.wait([ready, worker.sentinel])
+            woke = hang_guard.ready([ready, worker.sentinel], "a resume child to be ready or exit")
             assert ready in woke, f"worker exited with {worker.exitcode} before it was ready"
     finally:
         start.set()
-        for worker in workers:
-            worker.join()
+        hang_guard.join_all(workers, "the resume children to exit")
     for worker in workers:
         assert worker.exitcode == 0
     results = [
