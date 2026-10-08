@@ -89,8 +89,10 @@ describe('derivePetState', () => {
     const messages = [user(), asking(), user('free text')];
     expect(openQuickReplies(messages)).toBeNull();
     expect(derivePetState({ ...quiet, messages, turn: { foreground: 'running', in_flight: true } })).toBe('running');
-    // Rows that are not the user's do not answer it.
+    // Rows that are not the user's input do not answer it: a harness message,
+    // or the user's own display-only Show Page annotation.
     expect(openQuickReplies([user(), asking(), row({ author: 'harness', type: 'harness' })])).not.toBeNull();
+    expect(openQuickReplies([user(), asking(), row({ author: 'user', type: 'annotation', source: 'user' })])).not.toBeNull();
   });
 
   it('ignores an older unanswered group once a newer result exists', () => {

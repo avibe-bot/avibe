@@ -5,6 +5,7 @@ import type {
   WorkbenchSession,
 } from '@/context/ApiContext';
 import { isTranscriptMessage } from '@/lib/chatMessageTypes';
+import { specFor } from '@/lib/messageTypes';
 
 import type { PetPose } from './PetAvatar';
 
@@ -41,6 +42,11 @@ export const quickReplyChosen = (message: WorkbenchMessage): string | null => {
 const isAgentResult = (message: WorkbenchMessage): boolean =>
   message.author === 'agent' && message.type === 'result';
 
+/** A row the user sent the agent as input (the catalog's `inputAuthors`), not
+ *  a display-only row such as a Show Page annotation. */
+const isUserInput = (message: WorkbenchMessage): boolean =>
+  message.author === 'user' && specFor(message.type).inputAuthors.includes('user');
+
 /** The latest agent result in the tail, or null. */
 export const latestAgentResult = (messages: WorkbenchMessage[]): WorkbenchMessage | null => {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
@@ -52,7 +58,7 @@ export const latestAgentResult = (messages: WorkbenchMessage[]): WorkbenchMessag
 /**
  * The quick-reply group the agent is waiting on now: the latest agent result's
  * group, while unanswered. A group is answered by a chosen option or by any
- * user message after it (a free-text reply, which then runs as a turn). An
+ * user input after it (a free-text reply, which then runs as a turn). An
  * older unanswered group is not an open question either — once a newer result
  * exists the agent has moved on — so it never counts (it stays clickable in
  * the Workbench).
@@ -60,7 +66,7 @@ export const latestAgentResult = (messages: WorkbenchMessage[]): WorkbenchMessag
 export const openQuickReplies = (messages: WorkbenchMessage[]): { message: WorkbenchMessage; options: string[] } | null => {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index];
-    if (message.author === 'user') return null;
+    if (isUserInput(message)) return null;
     if (!isAgentResult(message)) continue;
     if (quickReplyChosen(message)) return null;
     const options = quickReplyOptions(message);

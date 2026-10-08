@@ -422,7 +422,9 @@ indefinitely with no action that clears it. Older groups stay clickable in the
 Workbench, reached with "Open in Avibe". This also keeps the state computable
 from the bounded tail, with no history scan.
 
-A group is also answered by any user message after it. The user often answers
+A group is also answered by any user input after it (a row whose type lists
+`user` in the catalog's `inputAuthors`; a display-only Show Page annotation is
+not input). The user often answers
 in free text, and that message starts a turn: until the next result lands the
 agent is working on the answer, so the pet shows Running rather than Needs
 input for the whole turn.
