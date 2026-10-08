@@ -242,11 +242,15 @@ wires are drawn in the same 1040 space. Below 1024 the story and the assistants 
 two columns without wires; below 760 they stack. The intro card states its role under the
 name, inside the same `--ob-card-h` box as the assistant card, so both steps keep one card
 box. The built-in card on screen 3 may grow to offer models while the others keep
-`--ob-card-h`, top-aligned. Every band's stage floor reserves that card at its worst
-reading (`--ob-offer-h`), so opening the offer cannot move the action; while it is open,
-the shell's aside hangs under the action pair instead of resting on the band the card
-reaches into. The action and the gateway card are
-299 of 1040, centred.
+`--ob-card-h`, top-aligned. The assistants' readiness caption is the last row of their own
+grid (`.onboarding-setup-aside`), in flow under the cards, so it is never drawn over one;
+the built-in card offering its models spans that row and the caption takes the columns
+beside it. OpenCode's tool-call permission is requested in OpenCode's card (a note and an
+"Allow tool calls" row; a refused write takes the note's place), not in an aside. Every
+band's stage floor reserves the offer (`--ob-offer-h`), the permission row
+(`--ob-permission-extra`) and the caption row (`--ob-hint-row`), so none of them can move
+the action. The shell's post-action slot is left to the introduction's detection failure.
+The action and the gateway card are 299 of 1040, centred.
 
 **Motion bail-out.** Under `prefers-reduced-motion`, a hidden page, or an explicit pause the
 handoff is skipped and the screen changes instantly; on phones the view scrolls to top

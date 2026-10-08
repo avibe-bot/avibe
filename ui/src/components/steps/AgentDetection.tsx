@@ -1,5 +1,4 @@
 import React, { useCallback, useEffect, useImperativeHandle, useLayoutEffect, useRef, useState } from 'react';
-import { createPortal } from 'react-dom';
 import {
   ArrowLeft,
   ArrowRight,
@@ -653,7 +652,6 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
   // entering on another assistant would leave Vibey on a model nobody chose.
   const choiceHeld = BUILTIN_BACKENDS.some((backend) => choice.holds(backend));
 
-  const opencodeAgent = agents['opencode'];
   const requiresSource = canEditSetupRoute && modelHubEnabled;
   const hasSource = sharedRouteReady() && routeRead.sources.some(usableSource);
   const needsSource = requiresSource && sharedRouteReady() && !hasSource;
@@ -697,19 +695,6 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
       disabled: !canContinue || actionBusy, busy: actionBusy, icon: entering ? 'spinner' : 'arrow-right' });
   }, [active, onActionChange, entering, canContinue, actionBusy]);
 
-  // What sits under the shared pair in the shell: the readiness caption and the
-  // OpenCode permission callout. Both are ancillary to the action and both grow — a
-  // permission error carries a full diagnostic. Kept inside the screen they push the
-  // anchor the two steps share; lifted out of flow they cover the very buttons they
-  // explain. So the shell reserves a slot after the pair and the active screen portals
-  // them into it.
-  const setupRoot = useRef<HTMLDivElement>(null);
-  const [actionAside, setActionAside] = useState<HTMLElement | null>(null);
-  useEffect(() => {
-    setActionAside(onActionChange
-      ? setupRoot.current?.closest('.onboarding-step')?.querySelector<HTMLElement>('[data-setup-action-aside]') ?? null
-      : null);
-  }, [onActionChange]);
   // Only while the action is held. Once it lights up, the cards already say which
   // assistants are connected and the button says the rest; a caption repeating it is a
   // line of type under a settled screen. Held, it is the only place that says WHY the
@@ -753,21 +738,24 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
         {hintSentence}
         {entryError && <div role="alert" className="connection-error">{entryError} <Button variant="link" size="sm" disabled={!canContinue || actionBusy} onClick={() => void handlePrimaryAction()}>{t('common.retry')}</Button></div>}
   </>) : null;
-  // Hosted in one place so the order under the pair is the same every time, and so the
-  // standalone host keeps the arrangement it already had.
-  const permissionNode = <OpencodePermissionSetup cliReady={opencodeAgent?.status === 'ok'}
-    permissionAllowed={permission.permissionAllowed} state={permission.state} message={permission.message}
-    // Granting permission succeeds at permission. It says nothing about whether
-    // enabling the backend was persisted, so it reads the connection without
-    // spending a verdict that is about something else.
-    onSetup={() => void permission.setupPermission().then(() => refreshConnection('opencode'))} className="w-full" />;
-  // A portal leaves the screen root, and with it the `inert` the shell puts on a screen
-  // nobody is reading, so what it carries has to answer to the same activity itself.
-  const asideNode = onActionChange
-    ? (active && routeSurfaceActive && actionAside ? createPortal(<>
-        {hintInner && <div className="onboarding-setup-hint">{hintInner}</div>}
-        {permissionNode}
-      </>, actionAside) : null)
+  // OpenCode's tool-call permission is OpenCode's own state, so its card asks for it.
+  // Granting permission succeeds at permission. It says nothing about whether enabling
+  // the backend was persisted, so it reads the connection without spending a verdict
+  // that is about something else.
+  const opencodePermission = {
+    required: permission.statusLoaded && !permission.permissionAllowed,
+    pending: permission.state === 'loading',
+    error: permission.state === 'error' ? permission.message : undefined,
+    onAllow: () => void permission.setupPermission().then(() => refreshConnection('opencode')),
+  };
+  // In the shell, the readiness caption is a row of the assistants' own grid, under the
+  // cards it explains — in flow, so it can never be drawn over a card. The row is there
+  // even when it has nothing to say, so the cards do not move when it starts or stops
+  // saying something. The standalone host keeps the footer it always had.
+  const asideRow = onActionChange
+    ? <div className="onboarding-setup-aside">{hintInner && <div className="onboarding-setup-hint">{hintInner}</div>}</div>
+    : null;
+  const asideNode = onActionChange ? null
     : (
       <div className="onboarding-setup-footer">
         <Button type="button" variant="brand" className="group onboarding-action-w onboarding-primary-action" onClick={() => void handlePrimaryAction()}
@@ -952,7 +940,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
   }
 
   return (
-    <div className="onboarding-setup" ref={setupRoot}>
+    <div className="onboarding-setup">
       <header className="onboarding-heading">
         <h1 tabIndex={-1}>{t('onboarding.setup.title')}</h1>
         <p>{t('onboarding.setup.subtitle')}</p>
@@ -1026,6 +1014,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
             hubManaged={hubRoute}
             enabled={agent.enabled}
             route={routeViewFor(name)}
+            permission={name === 'opencode' ? opencodePermission : undefined}
             connectionPending={connectionPending[name]}
             connectionError={connectionErrors[name] || connections[name]?.message}
             onRefreshConnection={() => void refreshConnection(name, { acknowledge: true })}
@@ -1072,9 +1061,9 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
             ) : undefined}
           />;
         })}
+        {asideRow}
         </div>
       </div>
-      {!onActionChange && permissionNode}
       </div>
       {providerDialog}
       {pickerFor && (

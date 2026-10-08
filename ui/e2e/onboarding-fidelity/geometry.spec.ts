@@ -560,12 +560,6 @@ const pair = (page: Page) => page.evaluate(() => {
   return { primary: read('.onboarding-primary-action'), back: read('.onboarding-back-action') };
 });
 
-/** The height of the stage the pair currently sits under — every screen keeps one. */
-const stageHeight = (page: Page) => page.evaluate(() => {
-  const stage = [...document.querySelectorAll('.onboarding-stage')].find((node) => node.getBoundingClientRect().height);
-  return stage ? stage.getBoundingClientRect().height : 0;
-});
-
 type Pair = Awaited<ReturnType<typeof pair>>;
 
 const expectSamePair = async (page: Page, before: Pair) => {
@@ -745,14 +739,13 @@ test.describe('shared action anchor', () => {
 /**
  * The anchor fence above walks a journey where nothing goes wrong, and everything the
  * shell's post-action slot exists for appears only when something does: a detection that
- * failed, a permission write that was refused, a completion that found a saved platform
- * it cannot use. All three carry a server's own sentence, so all three GROW — and each of
+ * failed, or a completion that found a saved platform it cannot use. (OpenCode's
+ * permission request is in its card; `lineup.spec.ts` holds the pair through it.) All three carry a server's own sentence, so all three GROW — and each of
  * them used to be drawn inside the screen, above the footer, which is the one place in
  * this layout where content can drag the anchor. So the same tiers are walked again with
  * those states actually produced rather than mocked into place.
  */
 const LONG_DETAIL = `probe exited 1: ${'the cli-detect subprocess reported an unreadable execution environment; '.repeat(3)}see the service log for the full trace`;
-const LONG_PERMISSION = `opencode.json could not be written: ${'the configuration directory is owned by another user and the write was refused; '.repeat(2)}resolve the ownership and try again`;
 
 /** The toast container, which is `fixed` and therefore a different surface with its own
  *  placement. It is dismissed before any pointer question is asked, so the answer is
@@ -773,25 +766,6 @@ async function switchableDetect(page: Page) {
     return route.fulfill({ json: { found: true, path: `/fixture/bin/${binary.split('/').pop()}` } });
   });
   return { recover: () => { failing = false; } };
-}
-
-/** OpenCode's permission write, held open so the callout's loading, refusal and success
- *  are three observable moments rather than one settled render. */
-async function deferredPermission(page: Page) {
-  const waiting: (() => void)[] = [];
-  let failing = true;
-  await page.route('**/api/opencode/permission-status', (route) =>
-    route.fulfill({ json: { ok: true, permission_allowed: false, config_path: '/fixture/opencode.json' } }));
-  await page.route('**/api/opencode/setup-permission', async (route) => {
-    await new Promise<void>((resolve) => { waiting.push(resolve); });
-    return route.fulfill({ json: failing
-      ? { ok: false, message: LONG_PERMISSION, config_path: '/fixture/opencode.json' }
-      : { ok: true, message: 'Allowed', config_path: '/fixture/opencode.json' } });
-  });
-  return {
-    settle: async () => { await expect.poll(() => waiting.length).toBeGreaterThan(0); waiting.shift()!(); },
-    succeed: () => { failing = false; },
-  };
 }
 
 test.describe('post-action aside', () => {
@@ -841,88 +815,6 @@ test.describe('post-action aside', () => {
         expect(denied).toEqual([]);
       });
 
-      test(`${size(viewport)} ${lang} holds a refused permission write under the pair`, async ({ page }) => {
-        await page.setViewportSize(viewport);
-        const denied = await serveProduct(page);
-        await serveModelHub(page);
-        const permission = await deferredPermission(page);
-        await openOnboarding(page, { lang });
-        // The fence starts one screen earlier than the state it is about. The reservation
-        // claims the pair is in the same place on the introduction as on a connection step
-        // carrying the offer and the refused permission write at once, so the introduction's
-        // pair is what every box below is compared against — not the first setup render.
-        await toTop(page);
-        const before = await pair(page);
-        await openSetup(page, lang);
-
-        // The permission callout is in the slot after the pair: an aside under the anchor.
-        const callout = page.locator('.onboarding-action-aside').getByText(
-          lang === 'zh' ? '不设置时 OpenCode' : 'Without this, OpenCode');
-        await expect(callout).toBeVisible();
-        await expectSamePair(page, before);
-
-        // A write that has not answered yet: the callout says so and nothing moves.
-        const setup = page.locator('.onboarding-action-aside').getByRole('button', {
-          name: lang === 'zh' ? '在 opencode.json 写入 allow' : 'Allow tool calls in opencode.json' });
-        await setup.scrollIntoViewIfNeeded();
-        await setup.click();
-        await expect(setup).toBeDisabled();
-        await expectSamePair(page, before);
-
-        await permission.settle();
-        await expect(page.locator('.onboarding-action-aside').getByText(LONG_PERMISSION)).toBeVisible();
-        await expectSamePair(page, before);
-        expect(await page.evaluate(() => document.documentElement.scrollWidth <= globalThis.innerWidth)).toBe(true);
-        await clearToasts(page);
-        expect(await hitSelf(page, '.onboarding-primary-action')).toBe(true);
-        expect(await hitSelf(page, '.onboarding-back-action')).toBe(true);
-
-        // Granted, the callout is not a cleared message but an absent one.
-        permission.succeed();
-        await setup.click();
-        await permission.settle();
-        await expect(page.locator('.onboarding-action-aside').getByText(LONG_PERMISSION)).toHaveCount(0);
-        await expect(callout).toHaveCount(0);
-        await expectSamePair(page, before);
-        await clearToasts(page);
-
-        // The stage is floored at the tallest step's cards, so a card that wraps past
-        // `--ob-card-h` cannot move the pair either.
-        const stageBefore = await stageHeight(page);
-        await expectSamePair(page, before);
-        expect(await page.evaluate(() => document.documentElement.scrollWidth <= globalThis.innerWidth)).toBe(true);
-        expect(await hitSelf(page, '.onboarding-primary-action')).toBe(true);
-        expect(await hitSelf(page, '.onboarding-back-action')).toBe(true);
-
-        // A portal escapes `inert`, so leaving the screen has to empty the slot rather
-        // than leave reachable content behind a hidden screen.
-        await page.locator('.onboarding-back-action').click();
-        await page.clock.runFor(950);
-        await expect(page.locator('[data-setup-sequence]')).toHaveAttribute('data-setup-screen', 'intro');
-        expect(await page.locator('.onboarding-action-aside').evaluate((node) => ({
-          children: node.childElementCount,
-          focusable: node.querySelectorAll('a[href], button, input, select, textarea, [tabindex]').length,
-        }))).toEqual({ children: 0, focusable: 0 });
-        // Back is the other half of the cross-screen claim: the introduction the pair
-        // returns to is the one it started on, after the step it came from had spent a
-        // permission write.
-        await expectSamePair(page, before);
-
-        // And re-entering is not a third position. The clock here is frozen and only a
-        // test moves it, so the handoff is nudged until the screen has arrived rather
-        // than once, which races the click's own commit.
-        await page.getByRole('button', { name: lang === 'zh' ? '立即开始' : 'Get started' }).click();
-        await expect.poll(async () => {
-          await page.clock.runFor(950);
-          return page.locator('[data-setup-sequence]').getAttribute('data-setup-screen');
-        }).toBe('assistants');
-        await page.locator('.onboarding-assistants').waitFor();
-        await expectSamePair(page, before);
-        expect(await stageHeight(page)).toBeCloseTo(stageBefore, 1);
-        expect(await hitSelf(page, '.onboarding-primary-action')).toBe(true);
-        expect(await hitSelf(page, '.onboarding-back-action')).toBe(true);
-        expect(denied).toEqual([]);
-      });
     }
   }
 });
