@@ -392,6 +392,24 @@ describe('PetPage other conversations', () => {
     expect(api.getRunningAgents.mock.calls.length).toBe(settled);
   }, 15000);
 
+  it('re-reads on every event that can change who is working, and catches up on visibility', async () => {
+    const { REFRESH_TRIGGERS } = await import('./useConversationAgentWorking');
+    canUseAgents = true;
+    runningAgents = workingIn('T');
+    devBind('S');
+    render(<PetPage />);
+    await waitFor(() => expect(pose()).toBe('running'));
+    for (const trigger of REFRESH_TRIGGERS) {
+      const before = api.getRunningAgents.mock.calls.length;
+      await emit((h) => (h[trigger] as ((data: unknown) => void) | undefined)?.({ session_id: 'T', scope_id: null, event: 'updated' }));
+      await waitFor(() => expect(api.getRunningAgents.mock.calls.length, trigger).toBeGreaterThan(before));
+    }
+    // T moved to the background: its agent no longer counts.
+    runningAgents = { ...runningAgents, agents: runningAgents.agents.map((agent) => ({ ...agent, visibility: 'background' })) };
+    await emit((h) => h.onSessionActivity?.({ session_id: 'T', scope_id: null, event: 'visibility', visibility: 'background' }));
+    await waitFor(() => expect(pose()).toBe('idle'));
+  });
+
   it('also looks busy with no binding at all', async () => {
     canUseAgents = true;
     runningAgents = workingIn('T');

@@ -384,10 +384,13 @@ comes from an API the Workbench already uses:
     source), on any surface. Background runs, Runtime-owned sessions and
     session-less processes do not count; an unreachable snapshot counts as
     nothing working.
-  - It is read only with `can_use_agents`, refreshed on `turn.start`,
-    `turn.end`, `session.status`, `runs.updated`, reconnect and page return,
-    with a 30-second reconcile while visible for IM turns and agents that stop
-    without an event.
+  - It is read only with `can_use_agents`. It is re-read on every event that
+    can change an input of the rule, declared once as `REFRESH_TRIGGERS`:
+    agent state (`turn.start`, `turn.end`, `session.status`,
+    `runs.updated`), a session's visibility or existence
+    (`session.activity`), what the reader may see (authorization changes),
+    and gaps (reconnect, page return). A 30-second reconcile while visible
+    covers IM turns and agents that stop without an event.
   - `turn.start` is published before the backend registers the agent as
     active, so a started session is re-read every 2 seconds until the
     snapshot shows it active, its `turn.end` arrives, or 30 seconds pass.

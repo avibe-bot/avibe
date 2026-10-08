@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 
-import { useApi, type RunningAgentsResult } from '@/context/ApiContext';
+import { useApi, type RunningAgentsResult, type WorkbenchEventHandlers } from '@/context/ApiContext';
 import { onPageReactivated } from '@/lib/pageActivity';
 
 import { FencedSource } from './fencedSource';
@@ -16,6 +16,22 @@ const RECONCILE_INTERVAL_MS = 30 * 1000;
 const REGISTRATION_RETRY_MS = 2 * 1000;
 const REGISTRATION_CAP_MS = 30 * 1000;
 const ALL = 'all';
+
+/**
+ * Every event that can change an input of `conversationAgentWorking` and is
+ * answered by a plain re-read: an agent's state (`session.status`,
+ * `runs.updated`), a session's visibility or existence (`session.activity`),
+ * which agents this reader may see (authorization), and an event gap
+ * (reconnect). `turn.start` and `turn.end` also re-read, through the
+ * registration wait below.
+ */
+export const REFRESH_TRIGGERS = [
+  'onConnected',
+  'onSessionStatus',
+  'onRunsUpdated',
+  'onSessionActivity',
+  'onAuthorizationChanged',
+] as const satisfies readonly (keyof WorkbenchEventHandlers)[];
 
 /** Sessions with an active agent in the snapshot, whatever their visibility. */
 const activeSessions = (result: RunningAgentsResult): Set<string> =>
@@ -96,13 +112,12 @@ export function useConversationAgentWorking(enabled: boolean): boolean {
     if (!enabled) return undefined;
     const refresh = () => source.refresh();
     refresh();
-    const disconnect = api.connectWorkbenchEvents({
-      onConnected: refresh,
+    const handlers: WorkbenchEventHandlers = {
       onTurnStart: ({ session_id }) => source.turnStarted(session_id),
       onTurnEnd: ({ session_id }) => source.turnEnded(session_id),
-      onSessionStatus: refresh,
-      onRunsUpdated: refresh,
-    });
+    };
+    for (const trigger of REFRESH_TRIGGERS) handlers[trigger] = refresh;
+    const disconnect = api.connectWorkbenchEvents(handlers);
     const stopReactivation = onPageReactivated(refresh);
     const interval = window.setInterval(() => {
       if (document.visibilityState === 'visible') refresh();
