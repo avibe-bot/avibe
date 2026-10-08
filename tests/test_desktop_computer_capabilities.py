@@ -9,7 +9,7 @@ import pytest
 
 from core import internal_server
 from core.computer_use import ComputerUseStatus
-from vibe import internal_client, ui_server
+from vibe import desktop_runtime, internal_client, ui_server
 from vibe.ui_server import app
 
 
@@ -108,19 +108,24 @@ def test_ui_desktop_capabilities_classify_transient_controller_failures(
     }
 
 
-def test_workbench_status_uses_the_shared_effective_status_contract(
+def test_workbench_status_supports_adopted_runtime_when_native_shell_is_live(
     monkeypatch,
 ) -> None:
-    """Workbench must not infer availability from the capabilities endpoint."""
+    """An untagged adopted Runtime still consumes the live shell state."""
 
-    monkeypatch.setattr(ui_server.sys, "platform", "darwin")
     monkeypatch.setattr(
-        ui_server,
+        desktop_runtime,
         "desktop_caller_provenance",
-        lambda: frozenset({"desktop-runtime"}),
+        lambda: frozenset(),
     )
     monkeypatch.setattr(
-        "core.computer_use.effective_computer_use_status",
+        ui_server,
+        "desktop_computer_use_shell_is_live",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        ui_server,
+        "effective_computer_use_status",
         lambda: ComputerUseStatus("needs_permission", "screen_recording"),
     )
     response = app.test_client().get(
@@ -136,12 +141,49 @@ def test_workbench_status_uses_the_shared_effective_status_contract(
     assert response.headers["Cache-Control"] == "no-store"
 
 
-def test_workbench_status_hides_computer_use_on_unsupported_hosts(monkeypatch) -> None:
-    monkeypatch.setattr(ui_server.sys, "platform", "darwin")
+def test_workbench_status_supports_shell_started_runtime_from_the_same_state_source(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        desktop_runtime,
+        "desktop_caller_provenance",
+        lambda: frozenset({"desktop-runtime"}),
+    )
     monkeypatch.setattr(
         ui_server,
+        "desktop_computer_use_shell_is_live",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        ui_server,
+        "effective_computer_use_status",
+        lambda: ComputerUseStatus("off", "toggle_off"),
+    )
+    response = app.test_client().get(
+        "/api/desktop/computer-use/status",
+        base_url="http://127.0.0.1:5123",
+    )
+    assert response.status_code == 200
+    assert response.get_json() == {
+        "supported": True,
+        "status": "off",
+        "reason": "toggle_off",
+    }
+    assert response.headers["Cache-Control"] == "no-store"
+
+
+def test_workbench_status_hides_computer_use_without_live_native_shell(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        desktop_runtime,
         "desktop_caller_provenance",
-        lambda: frozenset(),
+        lambda: frozenset({"desktop-runtime"}),
+    )
+    monkeypatch.setattr(
+        ui_server,
+        "desktop_computer_use_shell_is_live",
+        lambda: False,
     )
     response = app.test_client().get(
         "/api/desktop/computer-use/status",
@@ -154,16 +196,3 @@ def test_workbench_status_hides_computer_use_on_unsupported_hosts(monkeypatch) -
         "reason": "unsupported_host",
     }
     assert response.headers["Cache-Control"] == "no-store"
-
-
-def test_workbench_status_stays_hidden_outside_macos_desktop_runtime(
-    monkeypatch,
-) -> None:
-    monkeypatch.setattr(ui_server.sys, "platform", "linux")
-    monkeypatch.setattr(
-        ui_server,
-        "desktop_caller_provenance",
-        lambda: frozenset({"desktop-runtime"}),
-    )
-
-    assert not ui_server._desktop_computer_use_supported()

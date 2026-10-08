@@ -51,6 +51,10 @@ from vibe.ui_compat import (
 
 from config import paths
 from config.v2_config import CONFIG_LOCK, V2Config
+from core.computer_use import (
+    desktop_computer_use_shell_is_live,
+    effective_computer_use_status,
+)
 from core.show_pages import (
     SHOW_CLI_EVENT_TOKEN_HEADER,
     SHOW_EVENT_WRITE_TOKEN_COOKIE,
@@ -74,7 +78,6 @@ from core.show_session_events import (
 )
 from core.terminal_service import TERMINAL_SUPPORTED, TerminalService, TerminalServiceError, sanitize_session_id
 from modules.agents.catalog import AGENT_BACKENDS, supports_runtime_refresh
-from vibe.desktop_runtime import desktop_caller_provenance
 from vibe.i18n import get_supported_languages, t
 from vibe.logging_config import application_log_paths
 from vibe.runtime import get_ui_dist_path, get_working_dir
@@ -89,7 +92,7 @@ logger = logging.getLogger(__name__)
 
 
 def _desktop_computer_use_supported() -> bool:
-    return sys.platform == "darwin" and bool(desktop_caller_provenance())
+    return desktop_computer_use_shell_is_live()
 
 
 class _ShowEventDispatchOutcome(str, Enum):
@@ -3389,8 +3392,6 @@ async def desktop_computer_use_status():
         )
         response_payload.headers["Cache-Control"] = "no-store"
         return response_payload
-
-    from core.computer_use import effective_computer_use_status
 
     status = await asyncio.to_thread(effective_computer_use_status)
     response_payload = jsonify(

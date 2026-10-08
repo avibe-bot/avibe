@@ -811,13 +811,34 @@ class ComputerUseServer:
         )
         return _fold_tool_result(response)
 
-    async def _revive_session(
+    @staticmethod
+    def _commit_session_ended(session_state: _SessionState) -> None:
+        session_state.active_proxy_serial = None
+        session_state.active_daemon_key = None
+        session_state.observed_windows.clear()
+
+    @staticmethod
+    def _commit_session_started(
+        session_state: _SessionState,
+        upstream: Upstream,
+        state: ComputerUseState,
+        lease: Lease,
+    ) -> None:
+        if session_state.last_epoch is None or session_state.last_epoch != lease.epoch:
+            session_state.observed_windows.clear()
+        session_state.active_proxy_serial = upstream.serial
+        session_state.active_daemon_key = state.daemon_key
+        session_state.last_epoch = lease.epoch
+
+    async def _prepare_session(
         self,
         upstream: Upstream,
         session: str,
         state: ComputerUseState,
         lease: Lease,
         session_state: _SessionState,
+        *,
+        explicit_start: bool,
     ) -> None:
         active = (
             session_state.active_proxy_serial == upstream.serial
@@ -838,8 +859,9 @@ class ComputerUseServer:
                     "session_unavailable",
                     "The driver could not retire the previous computer-use session.",
                 )
+            self._commit_session_ended(session_state)
             active = False
-        if not active:
+        if not active and not explicit_start:
             result = await self._upstream_call(
                 upstream,
                 "start_session",
@@ -850,11 +872,12 @@ class ComputerUseServer:
                     "session_unavailable",
                     "The driver could not create the named computer-use session.",
                 )
-        if epoch_changed or session_state.last_epoch is None:
-            session_state.observed_windows.clear()
-        session_state.active_proxy_serial = upstream.serial
-        session_state.active_daemon_key = state.daemon_key
-        session_state.last_epoch = lease.epoch
+            self._commit_session_started(
+                session_state,
+                upstream,
+                state,
+                lease,
+            )
 
     async def _heartbeat(self, lease: Lease) -> None:
         try:
@@ -977,12 +1000,13 @@ class ComputerUseServer:
                     )
                     await self._run_while_lease_owned(
                         heartbeat,
-                        self._revive_session(
+                        self._prepare_session(
                             upstream,
                             session,
                             state,
                             lease,
                             session_state,
+                            explicit_start=name == "start_session",
                         ),
                     )
                     self._require_observation(name, arguments, session_state)
@@ -996,39 +1020,35 @@ class ComputerUseServer:
                     forwarded["session"] = session
                     if name not in self._upstream_accepts_session:
                         forwarded.pop("session", None)
-                    if name == "start_session":
-                        result = {
-                            "content": [
-                                {
-                                    "type": "text",
-                                    "text": json.dumps(
-                                        {
-                                            "session": session,
-                                            "status": "started",
-                                        },
-                                        sort_keys=True,
-                                    ),
-                                }
-                            ]
-                        }
-                    else:
-                        result = await self._run_while_lease_owned(
-                            heartbeat,
-                            self._upstream_call(
-                                upstream,
-                                name,
-                                forwarded,
-                            ),
-                        )
+                    result = await self._run_while_lease_owned(
+                        heartbeat,
+                        self._upstream_call(
+                            upstream,
+                            name,
+                            forwarded,
+                        ),
+                    )
 
                     if name in _OBSERVE_TOOLS and not result.get("isError"):
                         key = _window_key(arguments)
                         if key is not None:
                             session_state.observed_windows.add(key)
-                    if name == "end_session":
-                        session_state.active_proxy_serial = None
-                        session_state.active_daemon_key = None
-                        session_state.observed_windows.clear()
+                    if name == "start_session":
+                        if result.get("isError"):
+                            if acquisition.newly_claimed:
+                                await asyncio.to_thread(
+                                    self._lease_manager.release,
+                                    lease,
+                                )
+                        else:
+                            self._commit_session_started(
+                                session_state,
+                                upstream,
+                                state,
+                                lease,
+                            )
+                    elif name == "end_session" and not result.get("isError"):
+                        self._commit_session_ended(session_state)
                         await asyncio.to_thread(
                             self._lease_manager.release,
                             lease,

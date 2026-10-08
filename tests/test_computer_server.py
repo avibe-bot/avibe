@@ -476,6 +476,138 @@ async def test_named_sessions_start_independently_and_revive_after_end(
 
 
 @pytest.mark.asyncio
+async def test_failed_explicit_end_keeps_session_observations_and_real_lease(
+    tmp_path: Path,
+) -> None:
+    """A driver refusal to end cannot publish or lease an inactive session."""
+
+    state_path, state = _state(tmp_path)
+    leases = DesktopLeaseManager(tmp_path)
+    upstream = FakeUpstream()
+    server = ComputerUseServer(
+        state_path=state_path,
+        status_reader=lambda: ComputerUseStatus("ready", None, state),
+        upstream_factory=lambda _state: asyncio.sleep(0, result=upstream),
+        lease_manager=leases,
+    )
+    observed = await server.call_tool(
+        "get_window_state",
+        {"session": "ses-a", "pid": 7, "window_id": 9},
+    )
+    assert not observed.get("isError")
+    session_state = server._sessions["ses-a"]
+    expected_proxy = session_state.active_proxy_serial
+    expected_key = session_state.active_daemon_key
+    expected_epoch = session_state.last_epoch
+    expected_observations = set(session_state.observed_windows)
+
+    upstream.tool_errors.add("end_session")
+    ended = await server.call_tool("end_session", {"session": "ses-a"})
+
+    assert ended.get("isError")
+    assert session_state.active_proxy_serial == expected_proxy
+    assert session_state.active_daemon_key == expected_key
+    assert session_state.last_epoch == expected_epoch
+    assert session_state.observed_windows == expected_observations
+    with pytest.raises(ComputerServerError, match="ses-a"):
+        leases.acquire(
+            "ses-b",
+            state.daemon_key,
+            lambda: state.daemon_key,
+        )
+
+
+@pytest.mark.asyncio
+async def test_explicit_start_forwards_options_and_normalized_session(
+    tmp_path: Path,
+) -> None:
+    """The public start tool reaches the driver instead of fabricating success."""
+
+    state_path, state = _state(tmp_path)
+    upstream = FakeUpstream()
+    server = ComputerUseServer(
+        state_path=state_path,
+        status_reader=lambda: ComputerUseStatus("ready", None, state),
+        upstream_factory=lambda _state: asyncio.sleep(0, result=upstream),
+        lease_manager=FakeLeaseManager(),  # type: ignore[arg-type]
+    )
+    result = await server.call_tool(
+        "start_session",
+        {
+            "session": "  ses-a  ",
+            "capture_scope": "window",
+            "cursor_theme": {
+                "theme_id": "high-contrast",
+                "reduced_motion": "on",
+            },
+        },
+    )
+
+    assert not result.get("isError")
+    assert [
+        (params["name"], params["arguments"])
+        for _method, params in upstream.calls
+    ] == [
+        (
+            "start_session",
+            {
+                "session": "ses-a",
+                "capture_scope": "window",
+                "cursor_theme": {
+                    "theme_id": "high-contrast",
+                    "reduced_motion": "on",
+                },
+            },
+        )
+    ]
+    session_state = server._sessions["ses-a"]
+    assert session_state.active_proxy_serial == upstream.serial
+    assert session_state.active_daemon_key == state.daemon_key
+    assert session_state.last_epoch == 1
+
+
+@pytest.mark.asyncio
+async def test_failed_explicit_start_does_not_change_committed_epoch(
+    tmp_path: Path,
+) -> None:
+    """A failed explicit restart cannot publish a new session generation."""
+
+    state_path, state = _state(tmp_path)
+    leases = DesktopLeaseManager(tmp_path)
+    upstream = FakeUpstream()
+    server = ComputerUseServer(
+        state_path=state_path,
+        status_reader=lambda: ComputerUseStatus("ready", None, state),
+        upstream_factory=lambda _state: asyncio.sleep(0, result=upstream),
+        lease_manager=leases,
+    )
+    started = await server.call_tool("list_apps", {"session": "ses-a"})
+    assert not started.get("isError")
+    session_state = server._sessions["ses-a"]
+    expected_proxy = session_state.active_proxy_serial
+    expected_key = session_state.active_daemon_key
+    expected_epoch = session_state.last_epoch
+
+    upstream.tool_errors.add("start_session")
+    result = await server.call_tool(
+        "start_session",
+        {"session": "ses-a", "capture_scope": "desktop"},
+    )
+
+    assert result.get("isError")
+    assert [params["name"] for _method, params in upstream.calls][-1] == "start_session"
+    assert session_state.active_proxy_serial == expected_proxy
+    assert session_state.active_daemon_key == expected_key
+    assert session_state.last_epoch == expected_epoch
+    with pytest.raises(ComputerServerError, match="ses-a"):
+        leases.acquire(
+            "ses-b",
+            state.daemon_key,
+            lambda: state.daemon_key,
+        )
+
+
+@pytest.mark.asyncio
 async def test_session_label_is_normalized_before_forwarding(
     tmp_path: Path,
 ) -> None:

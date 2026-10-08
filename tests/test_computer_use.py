@@ -14,6 +14,7 @@ from core.computer_use import (
     SnapshotVerifier,
     computer_use_config_fingerprint,
     desktop_computer_use_dir,
+    desktop_computer_use_shell_is_live,
     effective_computer_use_status,
     managed_mcp_server_spec,
 )
@@ -84,6 +85,44 @@ def test_desktop_state_path_ignores_avibe_home(tmp_path: Path) -> None:
         home=tmp_path / "user",
         platform="darwin",
     ) == tmp_path / "isolated-desktop"
+
+
+@pytest.mark.parametrize(
+    ("arrange", "lock_held", "expected"),
+    [
+        ("missing", True, False),
+        ("invalid", True, False),
+        ("stopped", True, False),
+        ("off", True, True),
+        ("ready", False, False),
+        ("ready", True, True),
+    ],
+)
+def test_shell_support_requires_valid_state_owned_by_live_native_lock(
+    tmp_path: Path,
+    arrange: str,
+    lock_held: bool,
+    expected: bool,
+) -> None:
+    """Support follows shell ownership even while the optional feature is off."""
+
+    state_path = tmp_path / "computer-use.json"
+    if arrange == "invalid":
+        state_path.write_text("{", encoding="utf-8")
+    elif arrange != "missing":
+        _write_state(
+            tmp_path,
+            enabled=arrange != "off",
+            state="off" if arrange == "off" else arrange,
+        )
+
+    assert (
+        desktop_computer_use_shell_is_live(
+            state_path=state_path,
+            shell_lock_held=lambda _path: lock_held,
+        )
+        is expected
+    )
 
 
 @pytest.mark.parametrize(

@@ -444,6 +444,25 @@ def _shell_lock_is_held(lock_path: Path) -> bool:
         return False
 
 
+def desktop_computer_use_shell_is_live(
+    *,
+    state_path: Path | None = None,
+    lock_path: Path | None = None,
+    shell_lock_held: Callable[[Path], bool] = _shell_lock_is_held,
+) -> bool:
+    """Whether a valid native state record is still owned by a live shell."""
+
+    target = state_path or computer_use_state_path()
+    try:
+        state = read_computer_use_state(target)
+    except ComputerUseStateError:
+        return False
+    if state is None or state.state == "stopped":
+        return False
+    resolved_lock_path = lock_path or target.with_name(COMPUTER_USE_LOCK_FILE)
+    return shell_lock_held(resolved_lock_path)
+
+
 def _unix_socket_accepts(path: str, *, timeout: float = 0.1) -> bool:
     if os.name == "nt":
         return False

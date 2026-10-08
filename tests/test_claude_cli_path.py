@@ -237,6 +237,73 @@ def test_empty_claude_agent_allowlist_stays_restricted_at_launch(
     assert captured["include_computer_use"] is False
 
 
+def test_injected_agent_prompt_keeps_cold_selected_agent_allowlist(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Prompt injection cannot skip the selected agent's tool authority."""
+
+    captured: dict[str, Any] = {}
+    loads = 0
+    spec = SimpleNamespace(
+        name="avibe_computer",
+        fingerprint="managed-fixture",
+        claude_config=lambda: {
+            "type": "stdio",
+            "command": "/fixture/python",
+            "args": ["-I", "/fixture/core/computer_server.py"],
+            "env": {},
+        },
+    )
+
+    class Client:
+        def __init__(self, options: Any) -> None:
+            captured["options"] = options
+
+        async def connect(self) -> None:
+            return None
+
+    def build_prompt(**kwargs: Any) -> str:
+        captured["include_computer_use"] = kwargs["include_computer_use"]
+        captured["agent_instructions"] = kwargs["agent_instructions"]
+        return "resolved prompt"
+
+    def load_agent(*_args: Any) -> dict[str, Any]:
+        nonlocal loads
+        loads += 1
+        return {
+            "prompt": "Agent file prompt must not replace the injected prompt.",
+            "tools": ["Read", "Bash"],
+            "model": "inherit",
+        }
+
+    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", Client)
+    monkeypatch.setattr(session_handler_module, "managed_mcp_server_spec", lambda: spec)
+    monkeypatch.setattr(
+        session_handler_module,
+        "build_system_prompt_injection",
+        build_prompt,
+    )
+    handler = SessionHandler(_Controller(tmp_path))
+    monkeypatch.setattr(handler, "_load_agent_file", load_agent)
+
+    asyncio.run(
+        handler.get_or_create_claude_session(
+            MessageContext(user_id="U123", channel_id="C123"),
+            subagent_name="restricted",
+            agent_system_prompt="Injected owner policy.",
+        )
+    )
+
+    options = captured["options"]
+    assert loads == 1
+    assert options.allowed_tools == ["Read", "Bash"]
+    assert options.mcp_servers == {"avibe_computer": spec.claude_config()}
+    assert captured["include_computer_use"] is False
+    assert captured["agent_instructions"] == "Injected owner policy."
+
+
 class _StubClaudeAgentOptions:
     def __init__(self, **kwargs: Any) -> None:
         for key, value in kwargs.items():

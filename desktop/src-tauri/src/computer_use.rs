@@ -49,6 +49,16 @@ const PERMISSION_CHILD_TIMEOUT: Duration = Duration::from_secs(10);
 const START_BACKOFF: Duration = Duration::from_secs(1);
 const COMPUTER_USE_SCHEMA: u64 = COMPUTER_USE_SCHEMA_VERSION as u64;
 
+fn driver_command(driver: &Path) -> Command {
+    let mut command = Command::new(driver);
+    command
+        .env_clear()
+        .env("CUA_DRIVER_EMBEDDED", "1")
+        .env("CUA_DRIVER_RS_TELEMETRY_ENABLED", "0")
+        .env("CUA_DRIVER_RS_UPDATE_CHECK", "0");
+    command
+}
+
 #[link(name = "ApplicationServices", kind = "framework")]
 unsafe extern "C" {
     fn AXIsProcessTrusted() -> u8;
@@ -589,9 +599,8 @@ impl RuntimeState {
         if let Err(reason) = self.reclaim_endpoint().await {
             return HealthResult::Unhealthy(reason);
         }
-        let mut command = Command::new(&self.paths.driver);
+        let mut command = driver_command(&self.paths.driver);
         command
-            .env_clear()
             .args([
                 "serve",
                 "--embedded",
@@ -606,11 +615,8 @@ impl RuntimeState {
                 "--permission-mode",
                 "standard",
             ])
-            .env("CUA_DRIVER_EMBEDDED", "1")
             .env("CUA_DRIVER_EMBEDDED_HOST_PID", std::process::id().to_string())
             .env("CUA_DRIVER_MANAGED_POLICY_FILE", &self.paths.policy)
-            .env("CUA_DRIVER_RS_TELEMETRY_ENABLED", "0")
-            .env("CUA_DRIVER_RS_UPDATE_CHECK", "0")
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -974,9 +980,8 @@ async fn run_permission_child_with_stop_timeout(
         }
     }
 
-    let mut command = Command::new(driver);
+    let mut command = driver_command(driver);
     command
-        .env_clear()
         .args(["mcp", "--direct", "--embedded", "--no-overlay", "--host-bundle-id"])
         .arg(host_bundle_id)
         .env("HOME", &private_root)
@@ -988,12 +993,9 @@ async fn run_permission_child_with_stop_timeout(
         .env("TMPDIR", private_root.join("tmp"))
         .env("CUA_DRIVER_RS_HOME", private_root.join("driver"))
         .env("CUA_DRIVER_TELEMETRY_HOME", private_root.join("telemetry"))
-        .env("CUA_DRIVER_EMBEDDED", "1")
         .env("CUA_DRIVER_EMBEDDED_HOST_PID", std::process::id().to_string())
         .env("CUA_DRIVER_MANAGED_POLICY_FILE", policy)
         .env("CUA_DRIVER_PERMISSION_MODE", "standard")
-        .env("CUA_DRIVER_RS_TELEMETRY_ENABLED", "0")
-        .env("CUA_DRIVER_RS_UPDATE_CHECK", "0")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -1131,15 +1133,11 @@ async fn health_check(driver: &Path, socket: &Path, host_bundle_id: &str, full: 
 }
 
 async fn health_check_inner(driver: &Path, socket: &Path, host_bundle_id: &str, full: bool) -> HealthResult {
-    let mut command = Command::new(driver);
+    let mut command = driver_command(driver);
     command
         .args(["mcp", "--embedded", "--socket"])
         .arg(socket)
         .args(["--host-bundle-id", host_bundle_id])
-        .env("CUA_DRIVER_EMBEDDED", "1")
-        .env("CUA_DRIVER_RS_TELEMETRY_ENABLED", "0")
-        .env("CUA_DRIVER_RS_UPDATE_CHECK", "0")
-        .env_remove("CUA_DRIVER_WINDOW_CHANGE_TIMEOUT_MS")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -1907,6 +1905,37 @@ mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
 
+    #[tokio::test]
+    async fn driver_command_clears_parent_credentials_and_keeps_only_shared_driver_settings() {
+        const CHILD: &str = "AVIBE_TEST_DRIVER_ENV_CHILD";
+        const MARKER: &str = "AVIBE_TEST_PROVIDER_CREDENTIAL_DO_NOT_FORWARD";
+        if std::env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().expect("current test executable"))
+                .args([
+                    "--exact",
+                    "computer_use::tests::driver_command_clears_parent_credentials_and_keeps_only_shared_driver_settings",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env(MARKER, "fixture-secret")
+                .status()
+                .expect("run isolated driver environment test");
+            assert!(status.success());
+            return;
+        }
+
+        let mut command = driver_command(Path::new("/usr/bin/env"));
+        let output = command.output().await.expect("run environment fixture");
+        assert!(output.status.success());
+        let environment = String::from_utf8(output.stdout).expect("UTF-8 environment");
+        assert!(!environment.lines().any(|line| line.starts_with(&format!("{MARKER}="))));
+        assert!(environment.lines().any(|line| line == "CUA_DRIVER_EMBEDDED=1"));
+        assert!(environment
+            .lines()
+            .any(|line| line == "CUA_DRIVER_RS_TELEMETRY_ENABLED=0"));
+        assert!(environment.lines().any(|line| line == "CUA_DRIVER_RS_UPDATE_CHECK=0"));
+    }
+
     fn shell_quote(value: &Path) -> String {
         format!("'{}'", value.display().to_string().replace('\'', "'\"'\"'"))
     }
@@ -2161,7 +2190,7 @@ done
             &state_dir,
             &policy,
             "bot.avibe.desktop.test",
-            Duration::from_secs(1),
+            Duration::from_secs(3),
             Duration::from_millis(100),
             &mut cancelled,
         )
