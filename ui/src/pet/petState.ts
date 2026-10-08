@@ -1,5 +1,12 @@
-import type { SessionRuntimeState, WorkbenchMessage, WorkbenchSession } from '@/context/ApiContext';
+import type {
+  RunningAgentsResult,
+  SessionRuntimeState,
+  WorkbenchMessage,
+  WorkbenchSession,
+} from '@/context/ApiContext';
 import { isTranscriptMessage } from '@/lib/chatMessageTypes';
+
+import type { PetPose } from './PetAvatar';
 
 /**
  * What the desktop pet shows for its bound session. One pure derivation from
@@ -65,6 +72,31 @@ export const derivePetState = (inputs: PetStateInputs): PetState => {
   if (!isRunning(inputs.turn) && inputs.unreadCount > 0) return 'ready';
   if (isRunning(inputs.turn)) return 'running';
   return 'idle';
+};
+
+/**
+ * Whether an agent is mid-turn in any conversation the user can see: an
+ * active instance of a foreground session, on any surface. Background runs,
+ * Runtime-owned sessions and processes without a session do not count, and
+ * an unreachable snapshot says nothing is known to be working.
+ */
+export const conversationAgentWorking = (result: RunningAgentsResult): boolean =>
+  result.ok === true
+  && result.agents.some((agent) => agent.state === 'active' && agent.visibility === 'foreground');
+
+/**
+ * What the avatar draws. The bound session's state wins; when it has nothing
+ * to say, an agent working in another conversation keeps the pet busy (and
+ * awake). Only the pose follows other sessions: the panel, badge and
+ * `data-state` describe the bound session alone.
+ */
+export const derivePetPose = (
+  state: PetState,
+  { othersWorking, asleep }: { othersWorking: boolean; asleep: boolean },
+): PetPose => {
+  if (state !== 'idle') return state;
+  if (othersWorking) return 'running';
+  return asleep ? 'sleeping' : 'idle';
 };
 
 /**

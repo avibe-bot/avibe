@@ -4,7 +4,13 @@ import { act, cleanup, render, screen, waitFor, within } from '@testing-library/
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import type { WorkbenchEventHandlers, WorkbenchMessage, WorkbenchSession, WorkbenchSessionReadResult } from '@/context/ApiContext';
+import type {
+  RunningAgentsResult,
+  WorkbenchEventHandlers,
+  WorkbenchMessage,
+  WorkbenchSession,
+  WorkbenchSessionReadResult,
+} from '@/context/ApiContext';
 
 import { ApiError } from '@/context/ApiContext';
 
@@ -89,6 +95,17 @@ let sessionReads: Record<string, () => Promise<WorkbenchSessionReadResult>> = {}
 let tails: Record<string, WorkbenchMessage[]> = {};
 let switcherSessions: WorkbenchSession[] = [];
 let unreadBySession: Record<string, number> = {};
+let runningAgents: RunningAgentsResult = { ok: true, agents: [], counts: { total: 0, active: 0, idle: 0, orphan: 0, by_backend: {} } };
+const workingIn = (sessionId: string): RunningAgentsResult => ({
+  ok: true,
+  agents: [{
+    backend: 'claude', state: 'active', base_session_id: sessionId, composite_key: null, workdir: null, pid: null,
+    pid_shared: false, native_session_id: null, model: null, elapsed_seconds: 1, session_id: sessionId, title: null,
+    platform: 'avibe', scope_type: 'project', scope_display_name: null, visibility: 'foreground',
+    trigger_source: 'human', agent_name: 'claude', openable_in_chat: true,
+  }],
+  counts: { total: 1, active: 1, idle: 0, orphan: 0, by_backend: { claude: 1 } },
+});
 // Like the provider, a mark-read response installs a new unread map, so every
 // consumer re-renders with a new inbox object.
 let inboxVersion = 0;
@@ -110,6 +127,7 @@ const api = {
   getTurnState: vi.fn(async () => idleTurn),
   listSessions: vi.fn(async () => ({ sessions: switcherSessions, next_before_id: null })),
   getVaultRequests: vi.fn(async () => ({ requests: [] })),
+  getRunningAgents: vi.fn(async (): Promise<RunningAgentsResult> => runningAgents),
   sendSessionMessage: vi.fn(async () => message('sent', 'S', { author: 'user', type: 'user' })),
   connectWorkbenchEvents: (h: WorkbenchEventHandlers) => {
     handlers.add(h);
@@ -122,8 +140,9 @@ vi.mock('@/context/ApiContext', async (importOriginal) => ({
   useApi: () => api,
 }));
 let canChat = true;
+let canUseAgents = false;
 vi.mock('@/context/InstanceAuthorizationContext', () => ({
-  useInstanceAuthorization: () => ({ capabilities: { can_chat: canChat } }),
+  useInstanceAuthorization: () => ({ capabilities: { can_chat: canChat, can_use_agents: canUseAgents } }),
 }));
 vi.mock('@/context/WorkbenchInboxContext', async () => {
   const { useSyncExternalStore } = await import('react');
@@ -190,6 +209,9 @@ beforeEach(async () => {
   setupDone = true;
   windowFocused = true;
   canChat = true;
+  canUseAgents = false;
+  runningAgents = { ok: true, agents: [], counts: { total: 0, active: 0, idle: 0, orphan: 0, by_backend: {} } };
+  api.getRunningAgents.mockClear();
   sessionReads = {};
   tails = {};
   switcherSessions = [];
@@ -335,6 +357,38 @@ describe('PetPage state', () => {
     summon('show');
     expect(await screen.findByText('pet.moreInAvibe')).toBeTruthy();
     expect(markRead).not.toHaveBeenCalled();
+  });
+});
+
+describe('PetPage other conversations', () => {
+  const dataState = () => document.querySelector('[data-state]')?.getAttribute('data-state');
+
+  it('looks busy while another conversation\'s agent works, and the bound session stays idle', async () => {
+    canUseAgents = true;
+    runningAgents = workingIn('T');
+    devBind('S');
+    render(<PetPage />);
+    await waitFor(() => expect(pose()).toBe('running'));
+    expect(dataState()).toBe('idle');
+    runningAgents = { ...runningAgents, agents: [] };
+    await emit((h) => h.onTurnEnd?.({ session_id: 'T' }));
+    await waitFor(() => expect(pose()).toBe('idle'));
+  });
+
+  it('also looks busy with no binding at all', async () => {
+    canUseAgents = true;
+    runningAgents = workingIn('T');
+    render(<PetPage />);
+    await waitFor(() => expect(pose()).toBe('running'));
+  });
+
+  it('never reads other conversations without the agents permission', async () => {
+    runningAgents = workingIn('T');
+    devBind('S');
+    render(<PetPage />);
+    await waitFor(() => expect(api.getTurnState).toHaveBeenCalled());
+    expect(pose()).toBe('idle');
+    expect(api.getRunningAgents).not.toHaveBeenCalled();
   });
 });
 

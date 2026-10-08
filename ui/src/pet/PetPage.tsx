@@ -29,7 +29,8 @@ import {
 import { petComposer, usePetComposer } from './petComposer';
 import { petPanel, usePetPanel } from './petPanel';
 import { petShell, useOnSummon, usePetBinding } from './petShell';
-import { derivePetState, latestExchange, openQuickReplies } from './petState';
+import { derivePetPose, derivePetState, latestExchange, openQuickReplies } from './petState';
+import { useConversationAgentWorking } from './useConversationAgentWorking';
 import { usePetSession } from './usePetSession';
 import { usePetSetup } from './usePetSetup';
 import { useSessionSwitcher } from './useSessionSwitcher';
@@ -122,6 +123,8 @@ const PetSurface: React.FC = () => {
     pendingVaultRequests: vaultRequests.length,
     unreadCount,
   });
+  // Reading every conversation's agents is the Agents page's permission.
+  const othersWorking = useConversationAgentWorking(capabilities.can_use_agents === true);
 
   const summon = useCallback((intent: PetIntent, bound: string | null) => {
     void setPanel(true);
@@ -177,15 +180,15 @@ const PetSurface: React.FC = () => {
     return () => window.removeEventListener('blur', onBlur);
   }, [expanded, draft, setPanel]);
 
-  // Idle → asleep after a while without a state change.
+  // Idle → asleep after a while with nothing working anywhere.
   const [asleep, setAsleep] = useState(false);
   useEffect(() => {
     setAsleep(false);
-    if (state !== 'idle') return undefined;
+    if (state !== 'idle' || othersWorking) return undefined;
     const timer = window.setTimeout(() => setAsleep(true), SLEEP_AFTER_MS);
     return () => window.clearTimeout(timer);
-  }, [state, binding]);
-  const pose: PetPose = state === 'idle' && asleep ? 'sleeping' : state;
+  }, [state, binding, othersWorking]);
+  const pose: PetPose = derivePetPose(state, { othersWorking, asleep });
 
   const exchange = useMemo(
     () => latestExchange(data.messages, data.hasOlder, unreadCount),

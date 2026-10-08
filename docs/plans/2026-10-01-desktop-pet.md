@@ -374,6 +374,22 @@ comes from an API the Workbench already uses:
   (`turn_state.background_activities`) do not change the state. The panel
   shows them as an activity strip, and the collapsed pet shows a count. The pet
   is "Running" only when the agent itself is working.
+- **Other conversations move the pose only.** When the bound session is
+  Idle (or nothing is bound) and an agent is mid-turn in any other
+  conversation the user can see, the avatar shows the Running pose and does
+  not fall asleep. The state, the panel, the badge and `data-state` still
+  describe the bound session alone, so the panel never claims `S` is running.
+  - "Working" means an `active` instance of a `foreground` session in the
+    running-agents snapshot (`GET /api/running-agents`, the Agents page's
+    source), on any surface. Background runs, Runtime-owned sessions and
+    session-less processes do not count; an unreachable snapshot counts as
+    nothing working.
+  - It is read only with `can_use_agents`, refreshed on `turn.start`,
+    `turn.end`, `session.status`, `runs.updated`, reconnect and page return,
+    with a 30-second reconcile while visible for IM turns and agents that stop
+    without an event.
+  - `derivePetPose(state, {othersWorking, asleep})` is the pure rule; the
+    bound session's non-Idle states always win.
 - **Reading.** The pet marks read only what it rendered. The expanded panel
   renders every unread agent result in the loaded tail, oldest first, in a
   scrollable list, rather than only the latest one.
