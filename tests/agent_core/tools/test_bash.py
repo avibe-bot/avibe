@@ -405,26 +405,52 @@ async def test_the_foreground_window_hands_over_and_the_command_runs_once(tmp_pa
     assert watches.by_job == {job_id: "wch_1"}
 
 
+class SteppedClock:
+    """``bash``'s monotonic clock, moved only by the test; ``read`` is set each time ``bash`` looks at it."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+        self.read = asyncio.Event()
+
+    def monotonic(self) -> float:
+        self.read.set()
+        return self.now
+
+
 async def test_watch_true_returns_at_once(tmp_path, make_ctx, monkeypatch):
-    """After the 0.5 s grace from when the command may run, not the foreground window, however long the launch took."""
-    window_s = 60.0
+    """At the 0.5 s grace after the command may run, however long the launch itself took."""
+    clock = SteppedClock()
+    monkeypatch.setattr(bash_module, "time", clock)
     host = _host(tmp_path, Watches())
-    may_run_at = []
     real_start = host.start
 
-    async def start_and_note(*args, **kwargs):
+    async def slow_start(*args, **kwargs):
         job_id = await real_start(*args, **kwargs)
-        may_run_at.append(time.monotonic())
+        clock.now = 100.0  # the launch took 100 s; the grace counts from here
         return job_id
 
-    monkeypatch.setattr(host, "start", start_and_note)
+    monkeypatch.setattr(host, "start", slow_start)
+    running = asyncio.ensure_future(BashTool(host).execute({"command": "sleep 30", "watch": True}, make_ctx()))
 
-    # The command outlives the window, so only the grace can hand it over before the window ends.
-    result = await BashTool(host, foreground_window_s=window_s).execute(
-        {"command": "sleep 120", "watch": True}, make_ctx()
-    )
+    async def next_read() -> None:
+        clock.read.clear()
+        reading = asyncio.ensure_future(clock.read.wait())
+        await asyncio.wait({reading, running}, return_when=asyncio.FIRST_COMPLETED)
+        reading.cancel()
 
-    assert bash_module._WATCH_GRACE_S <= time.monotonic() - may_run_at[0] < window_s
+    try:
+        while clock.now != 100.0:
+            await next_read()
+        clock.now = 100.49
+        # bash reads 100.49, then comes back for another reading: it decided to keep waiting.
+        await next_read()
+        await next_read()
+        assert not running.done()
+        clock.now = 100.5
+        result = await asyncio.wait_for(running, timeout=10)
+    finally:
+        running.cancel()
+
     assert result_text(result).startswith("Command is still running and is now Watch wch_1.")
     assert host.status(result.details["job_id"]).state == "running"
     await host.kill(result.details["job_id"])
