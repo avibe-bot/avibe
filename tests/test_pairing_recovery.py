@@ -1519,8 +1519,7 @@ def test_concurrent_resume_has_one_owner(pairing_host, monkeypatch):
     for worker in workers:
         worker.start()
     barrier.wait(hang_guard.HANG_GUARD_SECONDS)
-    for worker in workers:
-        hang_guard.join(worker, "a concurrent resume to finish")
+    hang_guard.join_all(workers, "the concurrent resumes to finish")
     assert sum(bool(result.get("ok")) for result in results) == 1
     assert sum(result.get("error") == "missing_pairing_key" for result in results) == 1
     assert V2Config.load().remote_access.vibe_cloud.instance_id == "inst_A"
@@ -1552,8 +1551,7 @@ def test_concurrent_resume_has_one_owner_across_processes(pairing_host, monkeypa
             assert ready in woke, f"worker exited with {worker.exitcode} before it was ready"
     finally:
         start.set()
-        for worker in workers:
-            hang_guard.join(worker, "a resume child to exit")
+        hang_guard.join_all(workers, "the resume children to exit")
     for worker in workers:
         assert worker.exitcode == 0
     results = [

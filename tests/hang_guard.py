@@ -6,6 +6,11 @@ comes, because a regression hangs, the gate still fails loudly inside its test
 instead of leaving the CI per-file watchdog to kill the whole file.
 ``HANG_GUARD_SECONDS`` is far longer than any loaded runner needs, so it never
 decides a passing outcome.
+
+Invariant: when a gate fails, no worker it owns keeps running. Every stuck
+process is killed before the failure. A stuck thread cannot be stopped, and one
+left running would act inside the tests that follow, so the run ends instead
+(``pytest.exit``): that process can no longer isolate tests.
 """
 
 from __future__ import annotations
@@ -35,21 +40,41 @@ def wait(event: Any, what: str) -> None:
 
 
 def join(worker: Any, what: str) -> None:
-    """``worker.join()`` for a daemon Thread or a Process.
+    """``worker.join()`` for a daemon Thread or a Process; see ``join_all``."""
+    __tracebackhide__ = True
+    join_all([worker], what)
 
-    A thread that hangs cannot be stopped, so it must be a daemon: otherwise the
-    interpreter waits for it at exit and the watchdog kills the file after all. A
-    process that hangs is killed before the test fails.
+
+def join_all(workers: Iterable[Any], what: str) -> None:
+    """Join every worker within one shared bound before failing for any of them.
+
+    Every stuck process is killed first, so none outlives its test. A stuck thread
+    ends the run (see the module invariant); it must be a daemon, so that it cannot
+    hold the interpreter open at exit either.
     """
     __tracebackhide__ = True
-    if isinstance(worker, threading.Thread) and not worker.daemon:
-        raise ValueError(f"hang_guard.join needs a daemon thread, so a hang cannot block exit: {worker!r}")
-    worker.join(HANG_GUARD_SECONDS)
-    if worker.is_alive():
+    workers = list(workers)
+    for worker in workers:
+        if isinstance(worker, threading.Thread) and not worker.daemon:
+            raise ValueError(f"hang_guard needs a daemon thread, so a hang cannot block exit: {worker!r}")
+    give_up = time.monotonic() + HANG_GUARD_SECONDS
+    for worker in workers:
+        worker.join(max(0.0, give_up - time.monotonic()))
+    stuck = [worker for worker in workers if worker.is_alive()]
+    for worker in stuck:
         if not isinstance(worker, threading.Thread):
             worker.kill()
             worker.join()
-        _hung(what)
+    stuck_threads = [worker for worker in stuck if isinstance(worker, threading.Thread)]
+    if stuck_threads:
+        pytest.exit(
+            f"hung for {HANG_GUARD_SECONDS:.0f}s waiting for {what}: {len(stuck_threads)} thread(s) "
+            "still running, and a thread cannot be stopped, so this process can no longer "
+            "isolate tests",
+            returncode=pytest.ExitCode.TESTS_FAILED,
+        )
+    if stuck:
+        _hung(f"{what} ({len(stuck)} of {len(workers)} still running)")
 
 
 def get(items: queue.SimpleQueue | queue.Queue, what: str) -> Any:
