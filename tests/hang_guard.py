@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import multiprocessing.connection
 import queue
+import threading
 import time
 from typing import Any, Awaitable, Callable, Iterable
 
@@ -34,10 +35,20 @@ def wait(event: Any, what: str) -> None:
 
 
 def join(worker: Any, what: str) -> None:
-    """``worker.join()`` for a Thread or a Process."""
+    """``worker.join()`` for a daemon Thread or a Process.
+
+    A thread that hangs cannot be stopped, so it must be a daemon: otherwise the
+    interpreter waits for it at exit and the watchdog kills the file after all. A
+    process that hangs is killed before the test fails.
+    """
     __tracebackhide__ = True
+    if isinstance(worker, threading.Thread) and not worker.daemon:
+        raise ValueError(f"hang_guard.join needs a daemon thread, so a hang cannot block exit: {worker!r}")
     worker.join(HANG_GUARD_SECONDS)
     if worker.is_alive():
+        if not isinstance(worker, threading.Thread):
+            worker.kill()
+            worker.join()
         _hung(what)
 
 

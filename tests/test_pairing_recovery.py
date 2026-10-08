@@ -116,7 +116,7 @@ class _ThreadRedeemGate:
             finally:
                 self._events.put("finished")
 
-        self._worker = threading.Thread(target=run)
+        self._worker = threading.Thread(target=run, daemon=True)
         self._worker.start()
         return self
 
@@ -1515,7 +1515,7 @@ def test_concurrent_resume_has_one_owner(pairing_host, monkeypatch):
         barrier.wait()
         results.append(remote_access.pair("", ""))
 
-    workers = [threading.Thread(target=resume) for _ in range(2)]
+    workers = [threading.Thread(target=resume, daemon=True) for _ in range(2)]
     for worker in workers:
         worker.start()
     barrier.wait(hang_guard.HANG_GUARD_SECONDS)
