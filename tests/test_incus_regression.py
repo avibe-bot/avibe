@@ -26,18 +26,22 @@ SPEC.loader.exec_module(incus_regression)
 MASTER_NAMES = ("avr-master", "avibe-master")
 
 
-def daemon_listing(*names: str):
-    """Build a ``Runner.names`` stand-in that answers from a fixed inventory.
+def daemon_listing(*names: str, config: dict | None = None):
+    """Build ``Runner.names`` and ``Runner.records`` stand-ins that answer from a fixed inventory.
 
     Stubs describe what the daemon enumerated rather than a bare yes/no, because
     the runner has to tell "absent" apart from "could not ask": a stub that can
     only say True or False cannot express the difference the code now depends on.
+    ``config`` is every listed object's Incus config.
     """
 
     def listing(self, command, *, what):
         return list(names)
 
-    return listing
+    def records(self, command, *, what):
+        return [{"name": name, "config": dict(config or {})} for name in names]
+
+    return listing, records
 
 
 def stub_incus_result(returncode: int, *, stdout: str = "", stderr: str = ""):
@@ -665,7 +669,7 @@ def proxy_device_runner(observed: dict[str, str] | None, *, listable: bool = Tru
     commands = []
 
     class RecordingRunner:
-        names = daemon_listing(*MASTER_NAMES)
+        names, records = daemon_listing(*MASTER_NAMES)
 
         def run(self, command, *, check=True, capture=False, **kwargs):
             commands.append((command, check))
@@ -803,7 +807,7 @@ def test_existing_instance_is_not_reinitialised() -> None:
     commands = []
 
     class RecordingRunner:
-        names = daemon_listing(*MASTER_NAMES)
+        names, records = daemon_listing(*MASTER_NAMES)
 
         def run(self, command, *, check=True, **kwargs):
             commands.append((command, check))
@@ -829,6 +833,7 @@ def test_existing_instance_is_not_reinitialised() -> None:
         memory="4GiB",
         disk="20GiB",
         processes="4096",
+        seed="regression",
         remote=None,
     )
 
@@ -1725,18 +1730,18 @@ def test_runtime_env_payload_maps_show_runtime_and_llm_env(monkeypatch: pytest.M
     monkeypatch.setenv("REGRESSION_VOICE_REALTIME_ENABLED", "false")
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
 
-    payload = incus_regression.runtime_env_payload().decode()
+    runner_env, operator_env = incus_regression.runtime_env(None, seed="regression")
+    payload = {**runner_env, **operator_env}
 
-    assert "SETUPTOOLS_SCM_PRETEND_VERSION=0.0.0.dev0" in payload
-    assert "SETUPTOOLS_SCM_PRETEND_VERSION_FOR_AVIBE_OS=0.0.0.dev0" in payload
-    assert "AVIBE_ALLOW_DEV_STATE_MIGRATION=1" in payload
-    assert "VIBE_SHOW_RUNTIME_SOURCE=archive" in payload
-    assert "VIBE_SHOW_RUNTIME_ARCHIVE_PATH=/home/avibe/.cache/avibe-regression/vibe-show-runtime-node.tgz" in payload
-    assert "VIBE_SHOW_RUNTIME_ARCHIVE_PATH=/tmp/show-runtime.tgz" not in payload
-    assert "REGRESSION_SLACK_CHANNEL=C123" in payload
+    assert payload["SETUPTOOLS_SCM_PRETEND_VERSION"] == "0.0.0.dev0"
+    assert payload["SETUPTOOLS_SCM_PRETEND_VERSION_FOR_AVIBE_OS"] == "0.0.0.dev0"
+    assert payload["AVIBE_ALLOW_DEV_STATE_MIGRATION"] == "1"
+    assert payload["VIBE_SHOW_RUNTIME_SOURCE"] == "archive"
+    assert payload["VIBE_SHOW_RUNTIME_ARCHIVE_PATH"] == "/home/avibe/.cache/avibe-regression/vibe-show-runtime-node.tgz"
+    assert payload["REGRESSION_SLACK_CHANNEL"] == "C123"
     assert "VITE_VOICE_REALTIME_ENABLED" not in payload
     assert "REGRESSION_VOICE_REALTIME_ENABLED" not in payload
-    assert "OPENAI_API_KEY=sk-test" in payload
+    assert payload["OPENAI_API_KEY"] == "sk-test"
 
 
 @pytest.mark.parametrize("legacy_source", ["github", "github-source"])
@@ -1746,10 +1751,9 @@ def test_runtime_env_payload_migrates_legacy_github_source(
 ) -> None:
     monkeypatch.setenv("REGRESSION_SHOW_RUNTIME_SOURCE", legacy_source)
 
-    payload = incus_regression.runtime_env_payload().decode()
+    runner_env, _operator_env = incus_regression.runtime_env(None, seed="regression")
 
-    assert "VIBE_SHOW_RUNTIME_SOURCE=archive" in payload
-    assert f"VIBE_SHOW_RUNTIME_SOURCE={legacy_source}" not in payload
+    assert runner_env["VIBE_SHOW_RUNTIME_SOURCE"] == "archive"
 
 
 def test_runtime_env_payload_ignores_legacy_regression_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1758,10 +1762,11 @@ def test_runtime_env_payload_ignores_legacy_regression_env(monkeypatch: pytest.M
     monkeypatch.setenv("THREE_REGRESSION_SHOW_RUNTIME_ARCHIVE_PATH", "/tmp/legacy.tgz")
     monkeypatch.setenv("THREE_REGRESSION_SLACK_CHANNEL", "CLEGACY")
 
-    payload = incus_regression.runtime_env_payload().decode()
+    runner_env, operator_env = incus_regression.runtime_env(None, seed="regression")
+    payload = {**runner_env, **operator_env}
 
-    assert "VIBE_SHOW_RUNTIME_ARCHIVE_PATH=/home/avibe/.cache/avibe-regression/vibe-show-runtime-node.tgz" in payload
-    assert "REGRESSION_SLACK_CHANNEL=CLEGACY" not in payload
+    assert payload["VIBE_SHOW_RUNTIME_ARCHIVE_PATH"] == "/home/avibe/.cache/avibe-regression/vibe-show-runtime-node.tgz"
+    assert "REGRESSION_SLACK_CHANNEL" not in payload
     assert "THREE_REGRESSION_SLACK_CHANNEL" not in payload
 
 
@@ -1769,11 +1774,10 @@ def test_runtime_env_payload_forces_container_ui_host(monkeypatch: pytest.Monkey
     monkeypatch.setenv("REGRESSION_UI_HOST", "192.168.2.3")
     monkeypatch.setenv("THREE_REGRESSION_UI_HOST", "10.1.2.3")
 
-    payload = incus_regression.runtime_env_payload().decode()
+    runner_env, operator_env = incus_regression.runtime_env(None, seed="regression")
 
-    assert "REGRESSION_UI_HOST=127.0.0.1" in payload
-    assert "REGRESSION_UI_HOST=192.168.2.3" not in payload
-    assert "REGRESSION_UI_HOST=10.1.2.3" not in payload
+    assert runner_env["REGRESSION_UI_HOST"] == "127.0.0.1"
+    assert "REGRESSION_UI_HOST" not in operator_env
 
 
 def test_load_env_file_accepts_export_prefix(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1783,7 +1787,7 @@ def test_load_env_file_accepts_export_prefix(tmp_path: Path, monkeypatch: pytest
 
     loaded = incus_regression.load_env_file(tmp_path, env_file)
 
-    assert loaded == env_file
+    assert loaded.path == env_file
     assert incus_regression.os.environ["REGRESSION_SLACK_CHANNEL"] == "C123"
 
 
@@ -1843,6 +1847,290 @@ def test_require_runtime_seed_env_rejects_legacy_platform_credentials(monkeypatc
     assert "REGRESSION_SLACK_BOT_TOKEN" in str(excinfo.value)
 
 
+def test_env_file_replaces_shell_values_for_the_keys_it_defines(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The env file, not whatever the operator's shell exported, decides the keys it defines.
+
+    An agent session exports its own ANTHROPIC_* and OPENAI_*; when those won, the
+    instance received credentials nobody had declared for it. A key the file
+    leaves empty is defined too, and a key it does not mention stays the shell's.
+    """
+    env_file = tmp_path / ".env.regression"
+    env_file.write_text(
+        "ANTHROPIC_API_KEY=file-key\nANTHROPIC_BASE_URL=\nOPENAI_API_KEY=sk-equal\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "shell-key")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://shell.example")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-equal")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://shell-only.example")
+
+    loaded = incus_regression.load_env_file(tmp_path, env_file)
+
+    assert incus_regression.os.environ["ANTHROPIC_API_KEY"] == "file-key"
+    assert incus_regression.os.environ["ANTHROPIC_BASE_URL"] == ""
+    assert incus_regression.os.environ["OPENAI_BASE_URL"] == "https://shell-only.example"
+    assert loaded.keys == {"ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "OPENAI_API_KEY"}
+    report = capsys.readouterr().err
+    assert str(env_file) in report
+    assert "for: ANTHROPIC_API_KEY, ANTHROPIC_BASE_URL\n" in report
+    for value in ("file-key", "shell-key", "shell.example", "sk-equal"):
+        assert value not in report
+
+
+def test_runtime_env_report_names_the_source_of_each_key_without_values(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Every key written into the instance is attributed to the env file, the shell, or the runner."""
+    for key in incus_regression.LLM_ENV_KEYS:
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "file-key")
+    monkeypatch.setenv("OPENAI_API_KEY", "shell-key")
+    env_file = incus_regression.EnvFile(tmp_path / ".env.regression", frozenset({"ANTHROPIC_API_KEY"}))
+
+    class RecordingRunner:
+        dry_run = False
+
+        def run(self, command, **kwargs):
+            return subprocess.CompletedProcess(command, 0)
+
+    target = incus_regression.RegressionTarget(
+        target="worktree",
+        slug="demo",
+        project="avr-wt-demo",
+        instance="avibe-wt-demo",
+        host_port=15200,
+        ui_host="127.0.0.1",
+        ui_port=5123,
+    )
+
+    incus_regression.write_runtime_env(RecordingRunner(), target, seed="regression", env_file=env_file, remote=None)
+
+    report = capsys.readouterr().err
+    assert f"from {env_file.path}: ANTHROPIC_API_KEY\n" in report
+    assert "from shell: OPENAI_API_KEY" in report
+    assert "from runner: AVIBE_ALLOW_DEV_STATE_MIGRATION, REGRESSION_UI_HOST, SETUPTOOLS_SCM_PRETEND_VERSION" in report
+    assert "file-key" not in report
+    assert "shell-key" not in report
+
+
+@pytest.mark.parametrize(
+    ("target_name", "requested", "recorded", "reset_mode", "expected"),
+    [
+        ("worktree", None, None, "none", "regression"),
+        ("worktree", "none", None, "none", "none"),
+        ("worktree", None, "none", "none", "none"),
+        ("worktree", None, "absent", "none", "regression"),
+        ("worktree", "none", "regression", "all", "none"),
+        ("worktree", "regression", "none", "all", "regression"),
+        ("worktree", "none", "absent", "config", "needs --reset-mode all"),
+        ("worktree", "regression", "none", "none", "needs --reset-mode all"),
+        ("master", "none", None, "none", "for worktree environments"),
+        ("worktree", None, "switching", "none", "did not finish switching"),
+        ("worktree", None, "switching", "all", "did not finish switching"),
+        ("worktree", "none", "switching", "config", "did not finish switching"),
+        ("worktree", "none", "switching", "all", "none"),
+        ("worktree", "regression", "switching", "all", "regression"),
+    ],
+)
+def test_seed_mode_belongs_to_the_environment(
+    target_name: str, requested: str | None, recorded: str | None, reset_mode: str, expected: str
+) -> None:
+    """An environment keeps the seed mode it was built with until a full reset replaces its home.
+
+    An update that forgot `--seed none` would otherwise seed CLI logins and
+    credentials under the first-run wizard's state, and `--seed none` over a
+    seeded home would leave that home's logins behind while claiming a fresh one.
+    """
+    target = incus_regression.RegressionTarget(
+        target=target_name,
+        slug="demo",
+        project="avr-wt-demo",
+        instance="avibe-wt-demo",
+        host_port=15200,
+        ui_host="127.0.0.1",
+        ui_port=5123,
+    )
+    record = None
+    if recorded == "absent":
+        record = {"name": target.instance, "config": {}}
+    elif recorded is not None:
+        record = {"name": target.instance, "config": {incus_regression.SEED_CONFIG_KEY: recorded}}
+
+    if expected in incus_regression.SEED_MODES:
+        assert incus_regression.resolve_seed(target, requested=requested, record=record, reset_mode=reset_mode) == expected
+    else:
+        with pytest.raises(incus_regression.RegressionError, match=expected):
+            incus_regression.resolve_seed(target, requested=requested, record=record, reset_mode=reset_mode)
+
+
+def run_fresh_up(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    commands: list[str],
+    inputs: dict[str, str],
+    *,
+    requested: str | None,
+    recorded: str | None,
+    reset_mode: str,
+    fail_on: str | None = None,
+) -> int:
+    """Run `up` for worktree slug `fresh` against a daemon whose instance records `recorded`.
+
+    The operator's credentials are loaded and the platform tokens are absent.
+    Every command `up` issues lands in `commands`, and the stdin it writes in
+    `inputs` keyed by that command. A command containing `fail_on` fails.
+    """
+    write_ui_builder_stage(tmp_path)
+    inventory = () if recorded is None else ("avr-wt-fresh", "avibe-wt-fresh")
+    config = {} if recorded in (None, "regression") else {incus_regression.SEED_CONFIG_KEY: recorded}
+
+    class RecordingRunner:
+        def __init__(self, *, dry_run=False):
+            self.dry_run = dry_run
+
+        names, records = daemon_listing(*inventory, config=config)
+
+        def run(self, command, *, input_bytes=None, **kwargs):
+            commands.append(" ".join(command))
+            if input_bytes is not None:
+                inputs[commands[-1]] = input_bytes.decode()
+            if fail_on is not None and fail_on in commands[-1]:
+                raise subprocess.CalledProcessError(1, command)
+            return subprocess.CompletedProcess(command, 0, stdout="")
+
+    for key in incus_regression.required_platform_seed_envs():
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-operator")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai-operator")
+    monkeypatch.setenv("REGRESSION_SLACK_BOT_TOKEN", "xoxb-operator")
+    env_file = incus_regression.EnvFile(
+        tmp_path / ".env.regression",
+        frozenset({"ANTHROPIC_API_KEY", "OPENAI_API_KEY", "REGRESSION_SLACK_BOT_TOKEN"}),
+    )
+    monkeypatch.setattr(incus_regression, "git_common_root", lambda repo_root: repo_root)
+    monkeypatch.setattr(incus_regression, "current_repo_root", lambda: tmp_path)
+    monkeypatch.setattr(incus_regression, "load_env_file", lambda repo_root, env_file_arg: env_file)
+    monkeypatch.setattr(incus_regression, "require_incus", lambda: None)
+    monkeypatch.setattr(incus_regression, "Runner", RecordingRunner)
+    monkeypatch.setattr(incus_regression, "ensure_host_port_available", lambda host, port: None)
+    monkeypatch.setattr(incus_regression, "sync_source", lambda *args, **kwargs: None)
+    monkeypatch.setattr(incus_regression, "compute_fingerprints", lambda repo_root: {})
+    monkeypatch.setattr(incus_regression, "update_dependencies_and_build", lambda *args, **kwargs: set())
+    monkeypatch.setattr(incus_regression, "prepare_show_runtime", lambda *args, **kwargs: None)
+    monkeypatch.setattr(incus_regression, "restart_and_verify", lambda *args, **kwargs: None)
+
+    args = argparse.Namespace(
+        target="worktree",
+        slug="fresh",
+        host_port=15210,
+        ui_host="127.0.0.1",
+        ui_port=5123,
+        worktree_port_start=15200,
+        worktree_port_end=15399,
+        env_file=None,
+        dry_run=False,
+        image="avibe-regression-base-current",
+        storage_pool="default",
+        network="incusbr0",
+        cpus="2",
+        memory="4GiB",
+        disk="20GiB",
+        processes="4096",
+        remote=None,
+        clean=False,
+        force_deps=False,
+        no_build_ui=True,
+        force_ui=False,
+        reset_mode=reset_mode,
+        seed=requested,
+    )
+    return incus_regression.cmd_up(args)
+
+
+FRESH_SEED_SET = "config set avibe-wt-fresh user.avibe-regression.seed="
+FRESH_HOME_WIPE = "rm -rf /home/avibe/.avibe /home/avibe/.vibe_remote /home/avibe/.claude"
+
+
+@pytest.mark.parametrize(
+    ("case", "requested", "recorded", "reset_mode"),
+    [
+        ("create", "none", None, "none"),
+        ("update", None, "none", "none"),
+        ("switch", "none", "regression", "all"),
+        ("rerun an unfinished switch", "none", "switching", "all"),
+    ],
+)
+def test_fresh_install_environment_gets_no_seed_and_no_credentials(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
+    requested: str | None,
+    recorded: str | None,
+    reset_mode: str,
+) -> None:
+    """`--seed none` builds a home the first-run wizard has never seen.
+
+    No platform tokens are asked for, `prepare_regression.py` never runs, and the
+    instance's runtime env carries none of the operator's credentials although
+    the loaded env file has them -- on creation, on a later update that does not
+    repeat the flag, and when an environment is switched by a full reset.
+    """
+    commands: list[str] = []
+    inputs: dict[str, str] = {}
+
+    assert run_fresh_up(
+        tmp_path, monkeypatch, commands, inputs, requested=requested, recorded=recorded, reset_mode=reset_mode
+    ) == 0
+
+    joined = "\n".join(commands)
+    assert "prepare_regression.py --output-root" not in joined
+    (runtime_env,) = [payload for command, payload in inputs.items() if "/etc/avibe-regression.env" in command]
+    assert "VIBE_SHOW_RUNTIME_SOURCE=archive" in runtime_env
+    for name in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "REGRESSION_SLACK_BOT_TOKEN"):
+        assert name not in runtime_env
+    if case == "create":
+        assert "--config user.avibe-regression.seed=none" in joined
+    marks = [(i, command.rsplit("=", 1)[1]) for i, command in enumerate(commands) if FRESH_SEED_SET in command]
+    if reset_mode == "all":
+        wipe = next(i for i, command in enumerate(commands) if FRESH_HOME_WIPE in command)
+        # The new mode is recorded only once the reset has rebuilt the home.
+        assert [mode for _, mode in marks] == ["switching", "none"]
+        assert marks[0][0] < wipe < marks[1][0]
+        assert "rm -rf /home/avibe/.regression-seed" in joined
+    else:
+        assert marks == []
+        assert FRESH_HOME_WIPE not in joined
+
+
+def test_an_interrupted_seed_switch_is_never_read_as_finished(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A switch that stops before its reset rebuilt the home leaves no mode for the next `up` to trust.
+
+    Recording the new mode up front let a later plain `up` skip the reset it
+    still owed: seeded logins kept under a fresh-install mode, or a fresh home
+    under a seeded one. The instance stays marked as switching instead, and
+    only the switch itself may run on it.
+    """
+    commands: list[str] = []
+
+    with pytest.raises(subprocess.CalledProcessError):
+        run_fresh_up(
+            tmp_path,
+            monkeypatch,
+            commands,
+            {},
+            requested="none",
+            recorded="regression",
+            reset_mode="all",
+            fail_on=FRESH_HOME_WIPE,
+        )
+
+    assert [command.rsplit("=", 1)[1] for command in commands if FRESH_SEED_SET in command] == ["switching"]
+
+
 def test_prepare_state_skips_existing_state_without_reset() -> None:
     commands = []
 
@@ -1863,7 +2151,7 @@ def test_prepare_state_skips_existing_state_without_reset() -> None:
         ui_port=5123,
     )
 
-    incus_regression.run_prepare_state(RecordingRunner(), target, reset_mode="none", remote=None)
+    incus_regression.run_prepare_state(RecordingRunner(), target, reset_mode="none", seed="regression", remote=None)
 
     joined = "\n".join(" ".join(command) for command in commands)
     assert "test -f /home/avibe/.avibe/config/config.json" in joined
@@ -1892,7 +2180,7 @@ def test_prepare_state_reseeds_when_reset_requested(monkeypatch: pytest.MonkeyPa
         ui_port=5123,
     )
 
-    incus_regression.run_prepare_state(RecordingRunner(), target, reset_mode="config", remote=None)
+    incus_regression.run_prepare_state(RecordingRunner(), target, reset_mode="config", seed="regression", remote=None)
 
     joined = "\n".join(" ".join(command) for command in commands)
     assert "rm -rf /home/avibe/.avibe/config /home/avibe/.avibe/state /home/avibe/.avibe/runtime" in joined
@@ -1926,7 +2214,7 @@ def test_prepare_state_reset_all_deletes_target_home_before_copy(monkeypatch: py
         ui_port=5123,
     )
 
-    incus_regression.run_prepare_state(RecordingRunner(), target, reset_mode="all", remote=None)
+    incus_regression.run_prepare_state(RecordingRunner(), target, reset_mode="all", seed="regression", remote=None)
 
     joined = "\n".join(" ".join(command) for command in commands)
     assert "rm -rf /home/avibe/.avibe /home/avibe/.vibe_remote" in joined
@@ -2208,7 +2496,7 @@ def test_write_runtime_env_uses_stdin_not_command_line() -> None:
         ui_port=5123,
     )
 
-    incus_regression.write_runtime_env(RecordingRunner(), target, remote="lab")
+    incus_regression.write_runtime_env(RecordingRunner(), target, seed="regression", env_file=None, remote="lab")
 
     joined_command = " ".join(commands[0])
     assert commands[0][:5] == ["incus", "--project", "avr-master", "exec", "lab:avibe-master"]
@@ -3374,7 +3662,7 @@ def test_up_skips_host_port_preflight_for_existing_instance(tmp_path: Path, monk
         def __init__(self, *, dry_run=False):
             self.dry_run = dry_run
 
-        names = daemon_listing(*MASTER_NAMES)
+        names, records = daemon_listing(*MASTER_NAMES)
 
         def run(self, command, **kwargs):
             return subprocess.CompletedProcess(command, 0, stdout="{}")
@@ -3419,6 +3707,7 @@ def test_up_skips_host_port_preflight_for_existing_instance(tmp_path: Path, monk
         no_build_ui=True,
         force_ui=False,
         reset_mode="none",
+        seed=None,
     )
 
     assert incus_regression.cmd_up(args) == 0
@@ -3433,7 +3722,7 @@ def test_up_defers_master_port_preflight_until_after_instance_exists(
         def __init__(self, *, dry_run=False):
             self.dry_run = dry_run
 
-        names = daemon_listing(*MASTER_NAMES)
+        names, records = daemon_listing(*MASTER_NAMES)
 
         def run(self, command, **kwargs):
             return subprocess.CompletedProcess(command, 0, stdout="{}")
@@ -3488,6 +3777,7 @@ def test_up_defers_master_port_preflight_until_after_instance_exists(
         no_build_ui=True,
         force_ui=False,
         reset_mode="none",
+        seed=None,
     )
 
     assert incus_regression.cmd_up(args) == 0
@@ -3498,7 +3788,7 @@ def test_up_checks_host_port_preflight_for_new_local_instance(tmp_path: Path, mo
         def __init__(self, *, dry_run=False):
             self.dry_run = dry_run
 
-        names = daemon_listing()
+        names, records = daemon_listing()
 
         def run(self, command, **kwargs):
             return subprocess.CompletedProcess(command, 0, stdout="{}")
@@ -3547,6 +3837,7 @@ def test_up_checks_host_port_preflight_for_new_local_instance(tmp_path: Path, mo
         no_build_ui=True,
         force_ui=False,
         reset_mode="none",
+        seed=None,
     )
 
     assert incus_regression.cmd_up(args) == 0
@@ -3608,6 +3899,7 @@ def test_up_stops_when_the_daemon_cannot_say_whether_the_target_exists(
         no_build_ui=True,
         force_ui=False,
         reset_mode="none",
+        seed=None,
     )
 
     with pytest.raises(incus_regression.RegressionError, match="context deadline exceeded"):
@@ -3623,7 +3915,7 @@ def test_up_checks_seed_env_before_target_mutation(tmp_path: Path, monkeypatch: 
         def __init__(self, *, dry_run=False):
             self.dry_run = dry_run
 
-        names = daemon_listing()
+        names, records = daemon_listing()
 
         def run(self, command, **kwargs):
             return subprocess.CompletedProcess(command, 1, stdout="")
@@ -3672,6 +3964,7 @@ def test_up_checks_seed_env_before_target_mutation(tmp_path: Path, monkeypatch: 
         no_build_ui=True,
         force_ui=False,
         reset_mode="none",
+        seed=None,
     )
 
     with pytest.raises(SystemExit):
@@ -3687,7 +3980,7 @@ def test_up_checks_platform_seed_env_before_existing_reset_mutation(tmp_path: Pa
         def __init__(self, *, dry_run=False):
             self.dry_run = dry_run
 
-        names = daemon_listing(*MASTER_NAMES)
+        names, records = daemon_listing(*MASTER_NAMES)
 
         def run(self, command, **kwargs):
             return subprocess.CompletedProcess(command, 0, stdout="")
@@ -3733,6 +4026,7 @@ def test_up_checks_platform_seed_env_before_existing_reset_mutation(tmp_path: Pa
         no_build_ui=True,
         force_ui=False,
         reset_mode="config",
+        seed=None,
     )
 
     with pytest.raises(SystemExit):
@@ -3748,7 +4042,7 @@ def test_up_rejects_paired_master_reset_before_instance_mutation(tmp_path: Path,
         def __init__(self, *, dry_run=False):
             self.dry_run = dry_run
 
-        names = daemon_listing(*MASTER_NAMES)
+        names, records = daemon_listing(*MASTER_NAMES)
 
         def run(self, command, **kwargs):
             return subprocess.CompletedProcess(command, 0, stdout='{"state": "paired"}')
@@ -3792,6 +4086,7 @@ def test_up_rejects_paired_master_reset_before_instance_mutation(tmp_path: Path,
         no_build_ui=True,
         force_ui=False,
         reset_mode="config",
+        seed=None,
         allow_reset_paired_master=False,
     )
 
@@ -3808,7 +4103,7 @@ def test_up_dry_run_does_not_require_seed_env(tmp_path: Path, monkeypatch: pytes
         def __init__(self, *, dry_run=False):
             self.dry_run = dry_run
 
-        names = daemon_listing()
+        names, records = daemon_listing()
 
         def run(self, command, **kwargs):
             return subprocess.CompletedProcess(command, 0, stdout="{}")
@@ -3864,6 +4159,7 @@ def test_up_dry_run_does_not_require_seed_env(tmp_path: Path, monkeypatch: pytes
         no_build_ui=True,
         force_ui=False,
         reset_mode="none",
+        seed=None,
     )
 
     assert incus_regression.cmd_up(args) == 0
@@ -3890,7 +4186,7 @@ def test_up_stops_old_service_before_mutating_runtime(tmp_path: Path, monkeypatc
         def __init__(self, *, dry_run=False):
             self.dry_run = dry_run
 
-        names = daemon_listing(*MASTER_NAMES)
+        names, records = daemon_listing(*MASTER_NAMES)
 
         def run(self, command, **kwargs):
             return subprocess.CompletedProcess(command, 0, stdout="{}")
@@ -3945,6 +4241,7 @@ def test_up_stops_old_service_before_mutating_runtime(tmp_path: Path, monkeypatc
         no_build_ui=True,
         force_ui=False,
         reset_mode="none",
+        seed=None,
     )
 
     assert incus_regression.cmd_up(args) == 0
@@ -3970,7 +4267,7 @@ def test_up_preserves_runtime_env_when_existing_target_has_no_env_file(tmp_path:
         def __init__(self, *, dry_run=False):
             self.dry_run = dry_run
 
-        names = daemon_listing(*MASTER_NAMES)
+        names, records = daemon_listing(*MASTER_NAMES)
 
         def run(self, command, **kwargs):
             return subprocess.CompletedProcess(command, 0, stdout="{}")
@@ -4025,6 +4322,7 @@ def test_up_preserves_runtime_env_when_existing_target_has_no_env_file(tmp_path:
         no_build_ui=True,
         force_ui=False,
         reset_mode="none",
+        seed=None,
     )
 
     assert incus_regression.cmd_up(args) == 0
@@ -4041,7 +4339,7 @@ def test_up_rewrites_runtime_env_when_env_file_is_loaded(tmp_path: Path, monkeyp
         def __init__(self, *, dry_run=False):
             self.dry_run = dry_run
 
-        names = daemon_listing(*MASTER_NAMES)
+        names, records = daemon_listing(*MASTER_NAMES)
 
         def run(self, command, **kwargs):
             return subprocess.CompletedProcess(command, 0, stdout="{}")
@@ -4095,6 +4393,7 @@ def test_up_rewrites_runtime_env_when_env_file_is_loaded(tmp_path: Path, monkeyp
         no_build_ui=True,
         force_ui=False,
         reset_mode="none",
+        seed=None,
     )
 
     assert incus_regression.cmd_up(args) == 0
@@ -4122,7 +4421,7 @@ def test_up_reserves_worktree_port_under_both_locks_that_protect_it(tmp_path: Pa
         def __init__(self, *, dry_run=False):
             self.dry_run = dry_run
 
-        names = daemon_listing("avr-wt-demo-branch", "avibe-wt-demo-branch")
+        names, records = daemon_listing("avr-wt-demo-branch", "avibe-wt-demo-branch")
 
         def run(self, command, **kwargs):
             return subprocess.CompletedProcess(command, 0, stdout="{}")
@@ -4225,6 +4524,7 @@ def test_up_reserves_worktree_port_under_both_locks_that_protect_it(tmp_path: Pa
         no_build_ui=True,
         force_ui=False,
         reset_mode="none",
+        seed=None,
     )
 
     assert incus_regression.cmd_up(args) == 0
@@ -4310,7 +4610,7 @@ def test_up_gives_its_row_back_only_when_the_daemon_says_nothing_came_of_it(
     inventory = ("avr-wt-demo-branch",) if holds_project else ()
 
     class NewRunner(incus_regression.Runner):
-        names = daemon_listing(*inventory)
+        names, records = daemon_listing(*inventory)
 
     host_run = subprocess.run
 
@@ -4423,6 +4723,7 @@ def test_up_gives_its_row_back_only_when_the_daemon_says_nothing_came_of_it(
         no_build_ui=True,
         force_ui=False,
         reset_mode="none",
+        seed=None,
     )
 
     with pytest.raises(failure_type) as raised:
@@ -4471,7 +4772,7 @@ def test_up_leaves_behind_a_row_another_run_has_taken_over(
         def __init__(self, *, dry_run=False):
             self.dry_run = dry_run
 
-        names = daemon_listing()
+        names, records = daemon_listing()
 
         def run(self, command, **kwargs):
             return subprocess.CompletedProcess(command, 0, stdout="{}")
@@ -4512,6 +4813,7 @@ def test_up_leaves_behind_a_row_another_run_has_taken_over(
         no_build_ui=True,
         force_ui=False,
         reset_mode="none",
+        seed=None,
     )
 
     with pytest.raises(RuntimeError):
@@ -4559,7 +4861,7 @@ def test_no_end_of_a_reservation_writes_over_a_row_another_run_took(
         def __init__(self, *, dry_run=False):
             self.dry_run = dry_run
 
-        names = daemon_listing()
+        names, records = daemon_listing()
 
     mine = incus_regression.WorktreeMetadata(tmp_path, None).reserve(target_on(15200))
     theirs = incus_regression.WorktreeMetadata(tmp_path, None).reserve(target_on(15201))
@@ -4672,7 +4974,7 @@ def test_an_update_records_the_revision_its_sync_copied(
         def __init__(self, *, dry_run=False):
             self.dry_run = dry_run
 
-        names = daemon_listing()
+        names, records = daemon_listing()
 
         def run(self, command, **kwargs):
             commands.append(command)
@@ -4739,6 +5041,7 @@ def test_an_update_records_the_revision_its_sync_copied(
         no_build_ui=True,
         force_ui=False,
         reset_mode="none",
+        seed=None,
     )
 
     def served_builds() -> list[dict]:
@@ -4811,7 +5114,7 @@ def test_up_releases_its_reservation_when_the_run_is_interrupted(
         def __init__(self, *, dry_run=False):
             self.dry_run = dry_run
 
-        names = daemon_listing()
+        names, records = daemon_listing()
 
         def run(self, command, **kwargs):
             return subprocess.CompletedProcess(command, 0, stdout="{}")
@@ -4850,6 +5153,7 @@ def test_up_releases_its_reservation_when_the_run_is_interrupted(
         no_build_ui=True,
         force_ui=False,
         reset_mode="none",
+        seed=None,
     )
 
     with pytest.raises(KeyboardInterrupt):
@@ -5346,7 +5650,7 @@ def test_a_run_that_dies_mid_build_leaves_nothing_licensing_a_skip(
         def __init__(self, *, dry_run=False):
             self.dry_run = dry_run
 
-        names = daemon_listing(*MASTER_NAMES)
+        names, records = daemon_listing(*MASTER_NAMES)
 
         def run(self, command, **kwargs):
             return subprocess.CompletedProcess(command, 0, stdout="{}")
@@ -5399,6 +5703,7 @@ def test_a_run_that_dies_mid_build_leaves_nothing_licensing_a_skip(
         no_build_ui=True,
         force_ui=False,
         reset_mode="none",
+        seed=None,
     )
 
     with pytest.raises(RuntimeError):
