@@ -8,6 +8,7 @@ capability:
     - tests/test_model_hub_legacy_opencode_migration.py
     - tests/test_member_management_parity.py
     - tests/test_model_hub_resolution.py
+    - tests/test_model_hub_background_discovery.py
     - tests/test_model_hub_injection.py
     - tests/test_codex_request_routing.py
     - tests/test_model_hub_runtime.py
@@ -902,6 +903,22 @@ scenarios:
     kind: observation
     layer: unit
     test: tests/test_model_hub_quota.py::test_quota_parsers_reject_a_malformed_body_as_one_source_failure
+  - id: MH-DISCOVERY-SCHEDULE-001
+    name: Hub Source inventories refresh in the background, add-only, without changing Source state
+    status: covered
+    kind: lifecycle
+    layer: unit
+    test: tests/test_model_hub_background_discovery.py::test_due_sources_gain_new_models_and_fresh_sources_are_left_alone
+    related_tests:
+      - tests/test_model_hub_background_discovery.py::test_background_failure_keeps_source_untouched_and_backs_off_until_a_success
+      - tests/test_model_hub_background_discovery.py::test_background_success_keeps_a_blocked_source_state
+      - tests/test_model_hub_background_discovery.py::test_background_refresh_never_removes_a_model_or_route_hop
+      - tests/test_model_hub_background_discovery.py::test_unchanged_listing_writes_nothing_and_still_counts_as_a_listing
+      - tests/test_model_hub_background_discovery.py::test_listing_for_a_source_changed_during_discovery_is_dropped
+      - tests/test_model_hub_background_discovery.py::test_schedule_covers_hub_sources_and_skips_native_and_waiting_credentials
+      - tests/test_model_hub_background_discovery.py::test_stale_sources_catch_up_together_then_refresh_at_different_times
+      - tests/test_model_hub_background_discovery.py::test_listing_that_would_strand_a_menu_model_is_left_to_manual_refresh
+      - tests/test_model_hub_background_discovery.py::test_stop_retires_the_background_schedule
   - id: MH-QUOTA-005
     name: Each subscription's quota is re-read at most every five minutes and concurrent reads share one fetch
     status: covered

@@ -171,7 +171,8 @@ URL (api_key kind; prefilled for known vendors), a **model list** it can supply
 (auto-discovered where possible, e.g. `/models`; manually extendable via custom
 model entries), billing type (包月 | 按量 ¥), state (§4.5), and usage
 (subscription cycle % / monthly spend). Existing `last_discovered_at` records the last
-successful full inventory replacement; it is not a connectivity-check timestamp.
+committed discovery: a full inventory replacement, or a background refresh that changed
+the inventory. It is not a connectivity-check timestamp.
 Every Source read also carries the server-derived
 `adopted_by: [{backend, menu_model}]` projection of persisted Route references for
 backends currently in Hub mode. That unique projection is sorted by backend then menu
@@ -209,15 +210,16 @@ The Source workflow is complete at both entry points:
   tests the stored protocol, rediscovers inventory, updates Source health, and clears a
   `needs_action` or `error` blocker only when current evidence proves recovery. Before
   committing a smaller inventory it runs §4.5's configured-hop and supply-gap guards.
-  This is the **only saved-Source test/discovery mutation and the only corresponding
-  Source-details button**, labelled “Refresh models” / 「重新拉取」. Its request,
+  This is the **only user-triggered saved-Source test/discovery mutation and the only
+  corresponding Source-details button**, labelled “Refresh models” / 「重新拉取」. Its request,
   guarded refusal, and success are exactly the refresh row of §4.5's authoritative
   Source-mutation matrix. The UI displays the resulting inventory and state and never
   presents a second “Test connectivity” action.
 - **Model discovery.** Third-party Anthropic-compatible and OpenAI-compatible Sources
   expose an explicit “Fetch models” action while they are still in Add Source. A saved
   Source gets the same discovery behavior only through the refresh operation above;
-  there is no parallel saved discovery route. Discovery uses the observed protocol
+  there is no parallel saved discovery route, and the background refresh below only
+  adds. Discovery uses the observed protocol
   adapter, replaces only the discovered slice, preserves manual entries, and renders
   added, removed, unchanged, and failed results. Rediscovering an unchanged model id
   preserves its edited `reasoning_efforts`, `display_name`, `discovered_at`, and
@@ -230,6 +232,25 @@ The Source workflow is complete at both entry points:
   The saved Source surface may render freshness only as “Model list updated at …” /
   「型号列表更新于…」 from `last_discovered_at`. It carries no latency or “last checked”
   field or copy.
+- **Background inventory refresh.** While the runtime is enabled, the controller-owned
+  service lists every Hub-channel Source, API-key and OAuth alike, in the background;
+  native CLI Sources and credentials waiting on the user (`oauth_expired`,
+  `credential_revoked`, `account_banned`) are skipped. Each Source is due about every
+  6 hours, at a stable per-Source period within ±20% so Sources listed together drift
+  apart. The first pass runs one 5-minute tick after startup, never at boot, and catches up
+  every Source never listed or last listed more than 6 hours ago. The refresh is add-only:
+  it admits newly listed models and updates listed metadata such as reasoning tiers
+  through the same discovery application, but never removes a model or route hop, and
+  it leaves any listing that would remove effective hops or open a supply gap to the
+  manual refresh and its confirmation. Success never changes Source state: cooldown,
+  `needs_action`, `error`, and live recovery stay, because a listing is not inference
+  evidence, and no recovery event is recorded. An unchanged listing writes neither
+  config nor the engine projection; it advances only the process-local schedule. A
+  failure changes nothing persisted and records no event: it logs one redacted warning
+  and retries after 15 minutes, doubling up to 6 hours, until any later successful
+  listing, background or manual, resets the backoff. Discovery runs outside the mutation
+  lock, and its result applies only if the Source still has the identity and
+  `last_discovered_at` it was listed with.
 - **Model inventory and manual entries.** Model `id` is unique within a Source. Every
   model-list item has
   `{id, origin: "discovered" | "manual", reasoning_efforts: string[], retired?:

@@ -1156,6 +1156,21 @@ class Controller:
                 e,
                 exc_info=True,
             )
+        try:
+            # The service's own `stop()` retires the schedule at shutdown.
+            start_discovery = getattr(
+                getattr(self, "model_hub_service", None),
+                "start_background_discovery",
+                None,
+            )
+            if callable(start_discovery):
+                start_discovery()
+        except Exception as e:
+            logger.error(
+                "Failed to start Model Hub background discovery: %s",
+                e,
+                exc_info=True,
+            )
 
         try:
             if self.cleanup_task is None or self.cleanup_task.done():
