@@ -180,6 +180,15 @@ class _TestStdin:
         return None
 
 
+class _BlockingStdin(_TestStdin):
+    def __init__(self) -> None:
+        super().__init__()
+        self.release = asyncio.Event()
+
+    async def drain(self) -> None:
+        await self.release.wait()
+
+
 class _EofStream:
     async def readline(self) -> bytes:
         return b""
@@ -195,9 +204,9 @@ class _BlockedStream:
 
 
 class _TransportProcess:
-    def __init__(self, stdout) -> None:
+    def __init__(self, stdout, *, stdin=None) -> None:
         self.returncode = None
-        self.stdin = _TestStdin()
+        self.stdin = stdin or _TestStdin()
         self.stdout = stdout
         self.stderr = _EofStream()
 
@@ -789,13 +798,13 @@ async def test_new_server_process_requires_observation_again(tmp_path: Path) -> 
 
 @pytest.mark.asyncio
 async def test_setup_failure_releases_lease_before_returning(tmp_path: Path) -> None:
-    """A proxy/session setup error must not strand the cross-process lease."""
+    """A pre-forward transport failure must not strand a newly claimed lease."""
 
     state_path, state = _state(tmp_path)
     leases = DesktopLeaseManager(tmp_path)
 
     async def fail_upstream(_state: ComputerUseState) -> Any:
-        raise RuntimeError("proxy failed before the first tool call")
+        raise UpstreamUnavailable("proxy failed before the first tool call")
 
     server = ComputerUseServer(
         state_path=state_path,
@@ -807,6 +816,7 @@ async def test_setup_failure_releases_lease_before_returning(tmp_path: Path) -> 
     result = await server.call_tool("start_session", {"session": "ses-a"})
 
     assert result["isError"]
+    assert "upstream_unavailable" in result["content"][0]["text"]
     acquisition = leases.acquire(
         "ses-b",
         state.daemon_key,
@@ -887,6 +897,137 @@ async def test_stale_state_cannot_overwrite_current_generation_holder(
     assert "desktop_busy" in result["content"][0]["text"]
     assert starts == 0
     assert leases.refresh(current_claim.lease)
+
+
+@pytest.mark.asyncio
+async def test_post_proxy_creation_revalidates_generation_before_forwarding(
+    tmp_path: Path,
+) -> None:
+    """A proxy created from stale D is discarded before any user tool reaches it."""
+
+    state_path, initial = _state(tmp_path)
+    current = initial
+    upstreams: list[FakeUpstream] = []
+
+    def status_reader() -> ComputerUseStatus:
+        return ComputerUseStatus("ready", None, current)
+
+    async def factory(_state: ComputerUseState) -> FakeUpstream:
+        nonlocal current
+        upstream = FakeUpstream()
+        upstreams.append(upstream)
+        if len(upstreams) == 1:
+            current = ComputerUseState(
+                **{**initial.__dict__, "generation": initial.generation + 1}
+            )
+        return upstream
+
+    server = ComputerUseServer(
+        state_path=state_path,
+        status_reader=status_reader,
+        upstream_factory=factory,
+        lease_manager=DesktopLeaseManager(tmp_path),
+    )
+
+    result = await server.call_tool("list_apps", {"session": "ses-a"})
+
+    assert not result.get("isError")
+    assert len(upstreams) == 2
+    assert upstreams[0].calls == []
+    assert upstreams[0].close_calls == 1
+    assert [params["name"] for _method, params in upstreams[1].calls] == [
+        "start_session",
+        "list_apps",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_admission_retries_generation_change_exactly_once(
+    tmp_path: Path,
+) -> None:
+    """Two consecutive generation changes stop after one bounded retry."""
+
+    state_path, current = _state(tmp_path)
+    upstreams: list[FakeUpstream] = []
+
+    def status_reader() -> ComputerUseStatus:
+        return ComputerUseStatus("ready", None, current)
+
+    async def factory(_state: ComputerUseState) -> FakeUpstream:
+        nonlocal current
+        upstream = FakeUpstream()
+        upstreams.append(upstream)
+        current = ComputerUseState(
+            **{**current.__dict__, "generation": current.generation + 1}
+        )
+        return upstream
+
+    server = ComputerUseServer(
+        state_path=state_path,
+        status_reader=status_reader,
+        upstream_factory=factory,
+        lease_manager=DesktopLeaseManager(tmp_path),
+    )
+
+    result = await server.call_tool("list_apps", {"session": "ses-a"})
+
+    assert result["isError"]
+    assert "daemon_generation_changed" in result["content"][0]["text"]
+    assert len(upstreams) == 2
+    assert all(upstream.calls == [] for upstream in upstreams)
+    assert all(upstream.close_calls == 1 for upstream in upstreams)
+
+
+@pytest.mark.asyncio
+async def test_readiness_blip_keeps_a_renewed_lease_epoch(
+    tmp_path: Path,
+) -> None:
+    """A same-key not-ready read must not release and reclaim an existing holder."""
+
+    state_path, state = _state(tmp_path)
+    leases = DesktopLeaseManager(tmp_path)
+    blip = False
+    blip_reads = 0
+
+    def status_reader() -> ComputerUseStatus:
+        nonlocal blip_reads
+        if blip:
+            blip_reads += 1
+            if blip_reads == 3:
+                return ComputerUseStatus("unavailable", "daemon_unreachable")
+        return ComputerUseStatus("ready", None, state)
+
+    server = ComputerUseServer(
+        state_path=state_path,
+        status_reader=status_reader,
+        upstream_factory=lambda _state: asyncio.sleep(0, result=FakeUpstream()),
+        lease_manager=leases,
+    )
+
+    first = await server.call_tool("list_apps", {"session": "ses-a"})
+    assert not first.get("isError")
+    assert leases.acquire(
+        "ses-a",
+        state.daemon_key,
+        lambda: state.daemon_key,
+    ).lease.epoch == 1
+
+    blip = True
+    second = await server.call_tool("list_apps", {"session": "ses-a"})
+
+    assert not second.get("isError")
+    assert blip_reads >= 6
+    assert leases.acquire(
+        "ses-a",
+        state.daemon_key,
+        lambda: state.daemon_key,
+    ).lease.epoch == 1
+    with pytest.raises(ComputerServerError, match="ses-a"):
+        leases.acquire(
+            "ses-b",
+            state.daemon_key,
+            lambda: state.daemon_key,
+        )
 
 
 @pytest.mark.parametrize(
@@ -1085,6 +1226,73 @@ async def test_upstream_request_has_a_bounded_deadline(
     with pytest.raises(UpstreamUnavailable, match="180 second"):
         await upstream.request("tools/call", {"name": "list_apps"})
 
+    await upstream.close()
+
+
+@pytest.mark.asyncio
+async def test_upstream_request_deadline_covers_a_blocked_drain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The request bound starts before writing bytes to a stalled child."""
+
+    monkeypatch.setattr(
+        "core.computer_server._UPSTREAM_REQUEST_TIMEOUT_SECONDS",
+        0.01,
+    )
+    stdin = _BlockingStdin()
+    upstream = JsonRpcUpstream(  # type: ignore[arg-type]
+        _TransportProcess(_BlockedStream(), stdin=stdin)
+    )
+
+    with pytest.raises(UpstreamUnavailable, match="180 second"):
+        await upstream.request("tools/call", {"name": "list_apps"})
+
+    assert len(stdin.writes) == 1
+    assert upstream._pending == {}
+    await upstream.close()
+
+
+@pytest.mark.asyncio
+async def test_upstream_request_deadline_covers_queued_writers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every caller waiting for the shared write lock has its own full deadline."""
+
+    monkeypatch.setattr(
+        "core.computer_server._UPSTREAM_REQUEST_TIMEOUT_SECONDS",
+        0.02,
+    )
+    stdin = _BlockingStdin()
+    upstream = JsonRpcUpstream(  # type: ignore[arg-type]
+        _TransportProcess(_BlockedStream(), stdin=stdin)
+    )
+
+    first = asyncio.create_task(
+        upstream.request("tools/call", {"name": "list_apps"})
+    )
+    for _attempt in range(100):
+        if stdin.writes:
+            break
+        await asyncio.sleep(0)
+    assert len(stdin.writes) == 1
+    second = asyncio.create_task(
+        upstream.request("tools/call", {"name": "list_windows"})
+    )
+
+    results = await asyncio.wait_for(
+        asyncio.gather(first, second, return_exceptions=True),
+        timeout=0.2,
+    )
+
+    assert all(
+        isinstance(result, UpstreamUnavailable)
+        and "180 second" in str(result)
+        for result in results
+    )
+    # The second request spends its whole deadline waiting for the first
+    # writer, so it must fail without writing a second payload.
+    assert len(stdin.writes) == 1
+    assert upstream._pending == {}
     await upstream.close()
 
 

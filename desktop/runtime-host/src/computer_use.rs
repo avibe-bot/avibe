@@ -106,7 +106,7 @@ impl ComputerUseRecord {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum StoredComputerUseState {
     Missing,
-    Current(ComputerUseRecord),
+    Current(Box<ComputerUseRecord>),
     Invalid(String),
 }
 
@@ -141,7 +141,7 @@ impl ComputerUseStateStore {
             }
         };
         match record.validate() {
-            Ok(()) => StoredComputerUseState::Current(record),
+            Ok(()) => StoredComputerUseState::Current(Box::new(record)),
             Err(error) => StoredComputerUseState::Invalid(error),
         }
     }
@@ -607,7 +607,7 @@ impl ComputerUseLifecycle {
 
     fn failed(&mut self, reason: String, now: Duration) -> LifecycleDirective {
         let exhausted = self.failure_budget.record(now);
-        self.reason = Some(reason);
+        self.reason = Some(stable_failure_reason(&reason).to_owned());
         self.permission_edge_armed = false;
         self.phase = if exhausted {
             ComputerUsePhase::Error
@@ -620,6 +620,31 @@ impl ComputerUseLifecycle {
             stop_daemon: true,
             ..LifecycleDirective::default()
         }
+    }
+}
+
+fn stable_failure_reason(reason: &str) -> &'static str {
+    match reason {
+        "state_unwritable" => "state_unwritable",
+        "assets_invalid" => "assets_invalid",
+        "spawn_failed" => "spawn_failed",
+        "daemon_exited" => "daemon_exited",
+        "health_timeout" => "health_timeout",
+        "endpoint_busy" => "endpoint_busy",
+        "endpoint_unremovable" => "endpoint_unremovable",
+        "socket_unreachable" => "socket_unreachable",
+        "bundle_identity" => "bundle_identity",
+        "ax_capability" => "ax_capability",
+        "capture_missing" | "capture_protocol" => "capture_failed",
+        "health_initialize"
+        | "health_transport"
+        | "health_protocol"
+        | "health_tool_error"
+        | "health_proxy_spawn"
+        | "health_proxy_stdin"
+        | "health_proxy_stdout"
+        | "shutdown_requested" => "driver_health_failed",
+        _ => "driver_health_failed",
     }
 }
 
@@ -986,6 +1011,39 @@ mod tests {
         );
         assert!(lifecycle.toggle_off().stop_daemon);
         assert_eq!(lifecycle.phase(), ComputerUsePhase::Off);
+    }
+
+    #[test]
+    fn health_failures_persist_only_the_stable_reason_set() {
+        for (raw, expected) in [
+            ("spawn_failed", "spawn_failed"),
+            ("daemon_exited", "daemon_exited"),
+            ("health_timeout", "health_timeout"),
+            ("endpoint_busy", "endpoint_busy"),
+            ("endpoint_unremovable", "endpoint_unremovable"),
+            ("socket_unreachable", "socket_unreachable"),
+            ("bundle_identity", "bundle_identity"),
+            ("ax_capability", "ax_capability"),
+            ("capture_missing", "capture_failed"),
+            ("capture_protocol", "capture_failed"),
+            ("health_initialize", "driver_health_failed"),
+            ("health_transport", "driver_health_failed"),
+            ("health_protocol", "driver_health_failed"),
+            ("health_tool_error", "driver_health_failed"),
+            ("health_proxy_spawn", "driver_health_failed"),
+            ("health_proxy_stdin", "driver_health_failed"),
+            ("health_proxy_stdout", "driver_health_failed"),
+            ("shutdown_requested", "driver_health_failed"),
+            ("future_driver_failure", "driver_health_failed"),
+        ] {
+            let mut lifecycle = ComputerUseLifecycle::off();
+            lifecycle.enabled = true;
+            lifecycle.phase = ComputerUsePhase::Starting;
+
+            lifecycle.startup_health(HealthResult::Unhealthy(raw.to_owned()), Duration::ZERO);
+
+            assert_eq!(lifecycle.reason(), Some(expected), "raw reason: {raw}");
+        }
     }
 
     #[test]

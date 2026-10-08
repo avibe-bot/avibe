@@ -248,6 +248,41 @@ def test_verify_rejects_schema_two_macos_metadata_without_driver(tmp_path):
         release.verify(directory, TAG, SOURCE)
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("schema_version", 2),
+        ("arch", "wrong-arch"),
+        ("archive", "wrong-driver.tar.gz"),
+    ],
+)
+def test_verify_rejects_mismatched_driver_provenance(tmp_path, field, value):
+    directory = assemble_assets(tmp_path)
+    target = next(
+        target
+        for target, (system, _arch, _suffix) in release.TARGETS.items()
+        if system == "macos"
+    )
+    names = release.asset_names(VERSION, target)
+    source_path = directory / names[2]
+    source = json.loads(source_path.read_text(encoding="utf-8"))
+    source["computer_use_driver"][field] = value
+    source_path.write_text(
+        json.dumps(source, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    (directory / names[4]).write_text(
+        "".join(
+            f"{release.digest(directory / name)}  {name}\n"
+            for name in sorted(names[:4])
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="Driver provenance"):
+        release.verify(directory, TAG, SOURCE)
+
+
 @pytest.mark.parametrize("target", release.TARGETS)
 def test_workflow_record_command_feeds_the_release_consumer(tmp_path, target):
     directory = assemble_assets(tmp_path)

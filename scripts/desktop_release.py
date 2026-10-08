@@ -164,6 +164,7 @@ def driver_provenance(
         or provenance.get("source_commit") != "5272e492d61b96caf08e3bf434d91126c1f3dccc"
         or provenance.get("target") != target
         or provenance.get("arch") != TARGETS[target][1].replace("aarch64", "arm64")
+        or provenance.get("archive") != "cua-driver-rs-0.31.0-darwin-universal-binary.tar.gz"
         or provenance.get("thinned_signature") != "upstream_preserved"
         or any(re.fullmatch(r"[0-9a-f]{64}", str(provenance.get(field))) is None for field in required_hashes)
     ):
@@ -273,7 +274,10 @@ def verify(directory: Path, tag: str, source_sha: str, *, updater_enabled: bool 
                 pass
             elif (
                 not isinstance(driver, dict)
+                or driver.get("schema_version") != 1
                 or driver.get("target") != target
+                or driver.get("arch") != TARGETS[target][1].replace("aarch64", "arm64")
+                or driver.get("archive") != "cua-driver-rs-0.31.0-darwin-universal-binary.tar.gz"
                 or driver.get("version") != "0.31.0"
                 or driver.get("tag") != "cua-driver-rs-v0.31.0"
                 or driver.get("source_commit") != "5272e492d61b96caf08e3bf434d91126c1f3dccc"

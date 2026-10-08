@@ -394,7 +394,8 @@ class JsonRpcUpstream:
         request_id = self._request_id
         future = asyncio.get_running_loop().create_future()
         self._pending[request_id] = future
-        try:
+
+        async def round_trip() -> dict[str, Any]:
             # The reader can reach EOF between the first liveness check and
             # registration. Recheck after the future is visible so either the
             # reader completes it or this request fails promptly.
@@ -414,9 +415,12 @@ class JsonRpcUpstream:
                 raise UpstreamUnavailable(
                     "computer-use upstream reader exited before request delivery"
                 )
+            return await future
+
+        try:
             try:
                 return await asyncio.wait_for(
-                    future,
+                    round_trip(),
                     timeout=_UPSTREAM_REQUEST_TIMEOUT_SECONDS,
                 )
             except asyncio.TimeoutError as exc:
@@ -975,10 +979,11 @@ class ComputerUseServer:
                 except _DaemonGenerationChanged:
                     if upstream is not None:
                         await self._discard_upstream(upstream)
-                    if acquisition is not None:
-                        # A generation change voids this lease even when this
-                        # call merely renewed it. Exact-key release cannot
-                        # disturb a newer generation's holder.
+                    if acquisition is not None and acquisition.newly_claimed:
+                        # A transient not-ready status can use this same path
+                        # without changing the daemon key. Keep a lease this
+                        # call merely renewed; the next admission invalidates
+                        # it under the lock if the generation really changed.
                         await asyncio.to_thread(
                             self._lease_manager.release,
                             acquisition.lease,

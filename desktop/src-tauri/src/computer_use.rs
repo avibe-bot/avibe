@@ -2071,7 +2071,7 @@ done
             proxy_executable: None,
             host_bundle_id: None,
         };
-        let mut lifecycle = restored_lifecycle(&StoredComputerUseState::Current(record), false);
+        let mut lifecycle = restored_lifecycle(&StoredComputerUseState::Current(Box::new(record)), false);
 
         assert!(lifecycle.enabled());
         assert_eq!(lifecycle.phase(), ComputerUsePhase::Error);

@@ -22,6 +22,10 @@ export type ComputerUseCopyKey =
   | 'workbench.home.computerUse.spawnFailedDetail'
   | 'workbench.home.computerUse.daemonExitedDetail'
   | 'workbench.home.computerUse.healthTimeoutDetail'
+  | 'workbench.home.computerUse.bundleIdentityDetail'
+  | 'workbench.home.computerUse.axCapabilityDetail'
+  | 'workbench.home.computerUse.captureFailedDetail'
+  | 'workbench.home.computerUse.driverHealthFailedDetail'
   | 'workbench.home.computerUse.endpointBusyDetail'
   | 'workbench.home.computerUse.endpointUnremovableDetail'
   | 'workbench.home.computerUse.socketUnreachableDetail'
@@ -42,6 +46,10 @@ const errorDetailKeys: Record<string, ComputerUseCopyKey> = {
   spawn_failed: 'workbench.home.computerUse.spawnFailedDetail',
   daemon_exited: 'workbench.home.computerUse.daemonExitedDetail',
   health_timeout: 'workbench.home.computerUse.healthTimeoutDetail',
+  bundle_identity: 'workbench.home.computerUse.bundleIdentityDetail',
+  ax_capability: 'workbench.home.computerUse.axCapabilityDetail',
+  capture_failed: 'workbench.home.computerUse.captureFailedDetail',
+  driver_health_failed: 'workbench.home.computerUse.driverHealthFailedDetail',
   endpoint_busy: 'workbench.home.computerUse.endpointBusyDetail',
   endpoint_unremovable: 'workbench.home.computerUse.endpointUnremovableDetail',
   socket_unreachable: 'workbench.home.computerUse.socketUnreachableDetail',

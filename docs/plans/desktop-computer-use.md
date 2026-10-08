@@ -208,7 +208,13 @@ running. The tray keeps the shell alive after the window closes.
     start and each failure from `ready` counts once. When the count reaches
     3 within 5 minutes, the state becomes `error` with the reason. Otherwise
     it becomes `starting` and respawns after backoff. A daemon that passes
-    startup and then crashes therefore cannot restart forever.
+    startup and then crashes therefore cannot restart forever. Raw driver
+    health details are folded at this lifecycle boundary into the stable
+    user-facing reason set: `bundle_identity`, `ax_capability`,
+    `capture_failed`, or `driver_health_failed`. Process, endpoint, asset, and
+    state failures retain their existing stable reasons. The Workbench maps
+    every emitted reason to localized remediation instead of displaying raw
+    driver codes.
   - **Failed writes.** A failed `D` write never blocks a stop. Toggle-off,
     quit, and revocation always stop the daemon. If their write failed, the
     menu says the setting was not saved, and the shell retries the write every
@@ -563,8 +569,10 @@ running. The tray keeps the shell alive after the window closes.
     - Acquisition reports whether this call newly claimed the holder or merely
       renewed the same session. An ordinary pre-forward failure releases only
       a newly claimed lease; a renewed lease survives guards such as
-      `observe_first`. A daemon-generation change voids either form, and exact
-      key matching prevents that cleanup from releasing the newer generation.
+      `observe_first` and a transient same-key readiness failure. If the daemon
+      generation really changed, the next acquisition invalidates the old-key
+      lease while holding the lease lock; cleanup never needs to release a
+      renewed holder speculatively.
     - Two first calls from different processes therefore serialize. One
       wins, and the other gets `desktop_busy` naming the holder.
     - The holder refreshes the lease when each call starts, and every 10 s
@@ -584,10 +592,11 @@ running. The tray keeps the shell alive after the window closes.
       be unknown.
     - Proxy liveness includes the JSON-RPC reader task, not only the child
       process. Request registration checks reader completion on both sides of
-      publishing its future, and every request has a 180 s transport deadline,
-      above Cua's documented 120 s accessibility-call bound. EOF and timeout
-      discard only the failed transport; a late failure from an old proxy
-      cannot clear its replacement or the replacement's observations.
+      publishing its future. One 180 s transport deadline covers waiting for
+      the shared write lock, flushing the request, and waiting for the response;
+      this remains above Cua's documented 120 s accessibility-call bound. EOF
+      and timeout discard only the failed transport; a late failure from an old
+      proxy cannot clear its replacement or the replacement's observations.
     - Each session remembers the epoch it last held. Another session may have
       held the desktop in between, so a session can reacquire the lease under a
       newer epoch. Before forwarding that call, the server runs `end_session`
@@ -1006,12 +1015,14 @@ Each case lives in the suite of the component that owns the behavior.
   - Lease: simultaneous first calls from two processes yield exactly one
     holder, and the other gets `desktop_busy` until `end_session` or 60 s
     idle. Admission revalidates the daemon key under the lease lock, a renewed
-    holder survives `observe_first`, and a newly claimed setup failure releases
-    immediately. A 120 s call keeps its lease. A stop and re-enable voids
-    every lease.
+    holder survives `observe_first` and a same-key readiness blip, and a newly
+    claimed setup failure releases immediately. Proxy creation is followed by
+    generation revalidation; admission retries exactly once. A 120 s call keeps
+    its lease. A stop and re-enable voids every lease.
   - Transport: reader EOF before request registration fails promptly; a hung
-    request reaches the 180 s bound; and a late failure from an old proxy
-    leaves the current replacement and its observations intact.
+    response, blocked drain, or caller queued behind the write lock reaches the
+    same 180 s bound; and a late failure from an old proxy leaves the current
+    replacement and its observations intact.
   - Stale input: after an epoch change, old element tokens are rejected,
     and input to a window gets `observe_first` until that same window is
     observed. Observing window A does not clear window B. A new server
@@ -1045,6 +1056,12 @@ redirected to test-owned fakes.
 
 ## Owner decision ledger
 
+- **2026-10-08 — bounded transport completion and deferred hardening.** The
+  request deadline covers write-lock wait, drain, and response wait without
+  replaying an input whose delivery is unknown. Keep pre-forward lease refresh
+  after a very long proxy/session setup, the narrow stale-admission/newer-proxy
+  interleaving, and retry after an already-removed old socket as follow-up
+  hardening; they do not add a server, lock, or state file to this review head.
 - **2026-10-08 — f043 review scope.** Keep `ComputerUseServer` as the single
   owner and close lease generation, proxy reader, admitted Codex prompt,
   Workbench provenance/remediation, workflow dependency, and release metadata
