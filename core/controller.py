@@ -2610,12 +2610,20 @@ class Controller:
 
         async def reconcile() -> None:
             try:
-                await service.reconcile_builtin_models()
-            except Exception:
-                logger.warning(
-                    "Model Hub built-in reconciliation failed after snapshot refresh",
-                    exc_info=True,
-                )
+                try:
+                    await service.reconcile_builtin_models()
+                except Exception:
+                    logger.warning(
+                        "Model Hub built-in reconciliation failed after snapshot refresh",
+                        exc_info=True,
+                    )
+                try:
+                    await service.backfill_models_dev_limits()
+                except Exception:
+                    logger.warning(
+                        "Model Hub models.dev limit backfill failed after snapshot refresh",
+                        exc_info=True,
+                    )
             finally:
                 self._model_hub_snapshot_reconcile_task = None
                 if (
@@ -2744,6 +2752,7 @@ class Controller:
         from modules.agents.model_hub import ModelHubRuntimeRouter
         from vibe.api import resolve_cli_paths
         from vibe.backend_model_catalog import set_remote_catalog_refresh_completed
+        from vibe.models_dev_catalog import set_models_dev_copy_arrived
 
         def default_vibe_agent_model(backend: str) -> Optional[str]:
             agent = self.vibe_agent_store.get_default_agent()
@@ -2852,6 +2861,9 @@ class Controller:
         set_remote_catalog_refresh_completed(
             self._model_hub_snapshot_refresh_completed
         )
+        # A models.dev copy is another snapshot input: rows written before one
+        # was cached take their limits from it (backfill_models_dev_limits).
+        set_models_dev_copy_arrived(self._model_hub_snapshot_refresh_completed)
         try:
             asyncio.run(
                 self.model_hub_service.reconcile_builtin_models(notify=False)

@@ -147,6 +147,15 @@ scenarios:
       - tests/test_vibey_backend_registration.py::test_vibey_agent_runs_its_catalogs_first_model_until_it_has_one
       - tests/test_vibey_backend_registration.py::test_a_lost_vibey_model_hand_off_heals_on_the_next_start
       - tests/test_controller_im_ready.py::test_runtime_services_start_when_post_update_notification_fails
+  - id: MH-LIMITS-001
+    name: Provider rows written before any models.dev copy was cached take its limits once one arrives, keeping every limit already set
+    status: covered
+    kind: recovery
+    layer: contract
+    test: tests/test_model_hub_vibey_consumer.py::test_mh_limits_001_rows_written_before_a_models_dev_copy_take_its_limits_once_it_arrives
+    related_tests:
+      - tests/test_models_dev_catalog.py::test_mh_limits_001_every_saved_copy_signals_its_arrival
+      - tests/test_controller_model_hub_gate.py::test_controller_builds_one_model_hub_aggregate_by_default_or_explicit_enable
   - id: MH-VIBEY-004
     name: Vibey refuses native CLI sources and Direct mode
     status: covered

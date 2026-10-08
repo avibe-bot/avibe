@@ -5256,6 +5256,67 @@ class ModelHubService:
         except Exception as exc:  # noqa: BLE001 - optional metadata never fails a seed
             logger.info("Vibey seed has no models.dev metadata: %s", type(exc).__name__)
 
+    @staticmethod
+    def _rows_lacking_models_dev_limits(
+        config: ModelHubConfig,
+    ) -> list[tuple[BackendName, ModelHubBackendModelConfig]]:
+        return [
+            (backend, model)
+            for backend in MODEL_HUB_BACKENDS
+            for model in config.agents[backend].models
+            if model.origin == "provider"
+            and model.models_dev_id is None
+            and (model.context_window is None or model.max_output_tokens is None)
+        ]
+
+    async def backfill_models_dev_limits(self) -> list[BackendName]:
+        """Give provider rows written with no models.dev copy cached the limits one states.
+
+        A provider row takes models.dev's description as it is written (see
+        ``_provider_candidate``). Written before any copy was cached, by the
+        picker or a seed, it has none, and an Agent budgets it with default
+        limits. Once a copy names its id exactly, the row gets each limit it
+        lacks and the ``models_dev_id`` they came from. A limit already set
+        stands, and a row models.dev has described is not described again, so
+        a limit its user cleared stays cleared. Built-in rows are their CLI's
+        description and manual rows their user's; neither is filled. Returns
+        the backends whose catalog changed.
+        """
+
+        wanted = {model.id for _backend, model in self._rows_lacking_models_dev_limits(self.store.load())}
+        if not wanted:
+            return []
+        # The copy is parsed off the loop and outside the lock; the rows are
+        # read again under it.
+        described = await asyncio.to_thread(self._models_dev_descriptions, sorted(wanted))
+        if not described:
+            return []
+        async with self._mutation_lock:
+            if not self._reconcile_store_writable():
+                return []
+            previous = self.store.load()
+            config = self._clone_config(previous)
+            changed: list[BackendName] = []
+            for backend, model in self._rows_lacking_models_dev_limits(config):
+                match = described.get(model.id)
+                if match is None:
+                    continue
+                filled = False
+                for field in ("context_window", "max_output_tokens"):
+                    if getattr(model, field) is None and match[field] is not None:
+                        setattr(model, field, match[field])
+                        filled = True
+                if filled:
+                    model.models_dev_id = match["models_dev_id"]
+                    if backend not in changed:
+                        changed.append(backend)
+            if not changed:
+                return []
+            await self._commit_synced(previous, config)
+            for backend in changed:
+                await self._refresh_backend_catalog(backend)
+            return changed
+
     async def set_agent_mode(self, backend: str, mode: object) -> dict:
         if mode not in {"hub", "direct"} or (backend == "vibey" and mode != "hub"):
             raise ModelHubError("mode_switch_blocked")

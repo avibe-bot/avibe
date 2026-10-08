@@ -759,6 +759,77 @@ async def test_the_first_source_seed_fetches_a_models_dev_copy_when_none_is_cach
     assert (row["id"], row["context_window"], row["max_output_tokens"]) == ("claude-opus-5-5", 1_000_000, 128_000)
 
 
+@pytest.mark.asyncio
+async def test_mh_limits_001_rows_written_before_a_models_dev_copy_take_its_limits_once_it_arrives(
+    tmp_path, monkeypatch,
+):
+    """MH-LIMITS-001: a row written with no models.dev copy cached gets its limits when one arrives.
+
+    The seed's foreground fetch can fail while a background refresh lands later,
+    and a picker add on a cold cache has no metadata either; the Agent then
+    budgets the row with default limits. Only the limits a provider row lacks
+    are filled: what a user, a seed or models.dev already stated stands, and
+    built-in and manual rows are described by their CLI and their user.
+    """
+    catalog = {"anthropic": {"name": "Anthropic", "models": {
+        "claude-opus-5-5": {"name": "Claude Opus 5.5", "limit": {"context": 1_000_000, "output": 128_000}},
+        "claude-sonnet-5-5": {"name": "Claude Sonnet 5.5", "limit": {"context": 400_000, "output": 64_000}},
+    }}}
+    payload = ModelHubConfig().to_payload()
+    payload["agents"]["claude"]["models"] = [
+        {"id": "claude-opus-5-5", "origin": "builtin"},
+        {"id": "claude-sonnet-5-5", "origin": "manual"},
+    ]
+    payload["agents"]["opencode"]["models"] = [
+        # The user set the context window when adding it.
+        {"id": "claude-sonnet-5-5", "origin": "provider", "native_protocol": "anthropic", "context_window": 200_000},
+        # models.dev described it, and the user cleared both limits since.
+        {
+            "id": "claude-opus-5-5", "origin": "provider", "native_protocol": "anthropic",
+            "models_dev_id": "anthropic/claude-opus-5-5",
+        },
+    ]
+    payload["agents"]["codex"]["models"] = [{"id": "gpt-local-only", "origin": "provider"}]
+    service, store, announced = _seed_service(tmp_path, payload, [("claude", "claude-opus-5-5")])
+    cold = {}
+    service.models_dev_catalog = lambda: cold
+
+    def foreground_fetch_fails():
+        raise RuntimeError("models.dev catalog is unavailable")
+
+    monkeypatch.setattr("vibe.models_dev_catalog.load_models_dev_catalog", foreground_fetch_fails)
+    await service._commit_new_source_locked(copy.deepcopy(SEED_ANTHROPIC))
+    [seeded] = store.payload["agents"]["vibey"]["models"]
+    assert (seeded["id"], seeded["context_window"], seeded["max_output_tokens"]) == ("claude-opus-5-5", None, None)
+    assert announced == ["vibey"]
+    before = copy.deepcopy(store.payload)
+
+    assert await service.backfill_models_dev_limits() == []
+    assert store.payload == before
+
+    cold.update(catalog)
+    assert await service.backfill_models_dev_limits() == ["vibey", "opencode"]
+
+    def limits(backend):
+        return [
+            (row["id"], row["models_dev_id"], row["context_window"], row["max_output_tokens"])
+            for row in store.payload["agents"][backend]["models"]
+        ]
+
+    assert limits("vibey") == [("claude-opus-5-5", "anthropic/claude-opus-5-5", 1_000_000, 128_000)]
+    assert limits("opencode") == [
+        ("claude-sonnet-5-5", "anthropic/claude-sonnet-5-5", 200_000, 64_000),
+        ("claude-opus-5-5", "anthropic/claude-opus-5-5", None, None),
+    ]
+    for backend in ("claude", "codex"):
+        assert store.payload["agents"][backend] == before["agents"][backend]
+    # Committed as a catalog change, so each runtime takes it at its next turn.
+    assert announced == ["vibey", "vibey", "opencode"]
+    filled = copy.deepcopy(store.payload)
+    assert await service.backfill_models_dev_limits() == []
+    assert store.payload == filled
+
+
 def test_native_cli_and_direct_are_not_vibey_channels(tmp_path):
     """MH-VIBEY-004: neither invalid persisted state nor routing can select a CLI."""
     native = _source("src_native001", "Native", channel="native_cli", vendor="anthropic", protocol="anthropic")
