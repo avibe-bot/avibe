@@ -32,7 +32,8 @@ rule, decided under the Agent store's write lock so a chosen model stands, run
 on every Vibey catalog change (`_refresh_backend_catalog`, which each seed also
 announces) and at every start, so a lost hand-off heals on the next start. A
 seed with no models.dev copy cached first fetches one in the foreground, bounded,
-so its rows usually carry the limits the Agent budgets with; a starting model is
+so its rows usually carry the limits the Agent budgets with, and rows written
+without one take them once a copy arrives (MH-LIMITS-001); a starting model is
 one a placed Source's own non-retired inventory lists, never a passthrough route. A native Source that later moves
 to the Hub joins Vibey like a new Source.
 Where a user Agent already holds the name and no built-in exists, only the
