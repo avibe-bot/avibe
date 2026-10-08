@@ -388,6 +388,9 @@ comes from an API the Workbench already uses:
     `turn.end`, `session.status`, `runs.updated`, reconnect and page return,
     with a 30-second reconcile while visible for IM turns and agents that stop
     without an event.
+  - `turn.start` is published before the backend registers the agent as
+    active, so a started session is re-read every 2 seconds until the
+    snapshot shows it active, its `turn.end` arrives, or 30 seconds pass.
   - `derivePetPose(state, {othersWorking, asleep})` is the pure rule; the
     bound session's non-Idle states always win.
 - **Reading.** The pet marks read only what it rendered. The expanded panel

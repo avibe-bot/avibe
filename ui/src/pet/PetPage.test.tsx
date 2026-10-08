@@ -375,6 +375,23 @@ describe('PetPage other conversations', () => {
     await waitFor(() => expect(pose()).toBe('idle'));
   });
 
+  it('keeps re-reading a started turn until the backend registers it', async () => {
+    canUseAgents = true;
+    devBind('S');
+    render(<PetPage />);
+    await waitFor(() => expect(api.getRunningAgents).toHaveBeenCalled());
+    // turn.start lands before the agent is active in the snapshot.
+    await emit((h) => h.onTurnStart?.({ session_id: 'T' }));
+    await waitFor(() => expect(api.getRunningAgents.mock.calls.length).toBeGreaterThanOrEqual(2));
+    expect(pose()).toBe('idle');
+    runningAgents = workingIn('T');
+    await waitFor(() => expect(pose()).toBe('running'), { timeout: 5000 });
+    // Registered: no more retries for it.
+    const settled = api.getRunningAgents.mock.calls.length;
+    await new Promise((resolve) => setTimeout(resolve, 2500));
+    expect(api.getRunningAgents.mock.calls.length).toBe(settled);
+  }, 15000);
+
   it('also looks busy with no binding at all', async () => {
     canUseAgents = true;
     runningAgents = workingIn('T');
