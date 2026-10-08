@@ -358,11 +358,22 @@ def test_real_vault_timeout_terminates_detached_processes(real_vault, monkeypatc
         target=_expire_worker_deadline_once_written, args=(real_vault, request_id, signalled), daemon=True
     )
     alarm.start()
+    vault_runs = []
+
+    class RecordedPopen(subprocess.Popen):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            vault_runs.append(self)
+
+    monkeypatch.setattr(worker, "subprocess", SimpleNamespace(Popen=RecordedPopen, DEVNULL=subprocess.DEVNULL, PIPE=subprocess.PIPE))
     with pytest.raises(worker.FeedbackError) as raised:
         worker.submit(payload)
     assert real_vault.written.is_set()
     alarm.join()
     assert len(signalled) == 1
+    # The alarm itself ended the worker: the vault run reports its signal death, not the
+    # exit status 1 the worker gives once its stalled request times out on its own.
+    assert [run.returncode for run in vault_runs] == [128 + signal.SIGALRM]
     # The worker's own deadline ended the call, not the parent's.
     assert raised.value.status != 504
     assert worker.receipt(request_id)["state"] == "unknown"
