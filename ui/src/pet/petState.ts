@@ -51,15 +51,22 @@ export const latestAgentResult = (messages: WorkbenchMessage[]): WorkbenchMessag
 
 /**
  * The quick-reply group the agent is waiting on now: the latest agent result's
- * group, while unanswered. An older unanswered group is not an open question —
- * once a newer result exists the agent has moved on — so it never counts
- * (it stays clickable in the Workbench).
+ * group, while unanswered. A group is answered by a chosen option or by any
+ * user message after it (a free-text reply, which then runs as a turn). An
+ * older unanswered group is not an open question either — once a newer result
+ * exists the agent has moved on — so it never counts (it stays clickable in
+ * the Workbench).
  */
 export const openQuickReplies = (messages: WorkbenchMessage[]): { message: WorkbenchMessage; options: string[] } | null => {
-  const latest = latestAgentResult(messages);
-  if (!latest || quickReplyChosen(latest)) return null;
-  const options = quickReplyOptions(latest);
-  return options.length > 0 ? { message: latest, options } : null;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message.author === 'user') return null;
+    if (!isAgentResult(message)) continue;
+    if (quickReplyChosen(message)) return null;
+    const options = quickReplyOptions(message);
+    return options.length > 0 ? { message, options } : null;
+  }
+  return null;
 };
 
 const isRunning = (turn: PetStateInputs['turn']): boolean =>

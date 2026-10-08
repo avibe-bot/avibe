@@ -85,6 +85,14 @@ describe('derivePetState', () => {
     expect(derivePetState({ ...quiet, messages: [user(), asking('Yes')] })).toBe('idle');
   });
 
+  it('treats a free-text reply after the group as its answer, while that turn runs', () => {
+    const messages = [user(), asking(), user('free text')];
+    expect(openQuickReplies(messages)).toBeNull();
+    expect(derivePetState({ ...quiet, messages, turn: { foreground: 'running', in_flight: true } })).toBe('running');
+    // Rows that are not the user's do not answer it.
+    expect(openQuickReplies([user(), asking(), row({ author: 'harness', type: 'harness' })])).not.toBeNull();
+  });
+
   it('ignores an older unanswered group once a newer result exists', () => {
     const messages = [user(), asking(), user('free text'), result()];
     expect(openQuickReplies(messages)).toBeNull();
