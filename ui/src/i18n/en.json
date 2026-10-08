@@ -65,6 +65,11 @@
         "body": "Background work was canceled."
       }
     },
+    "pet": {
+      "toggle": "Show Pet",
+      "shortcutMenu": "Pet Shortcut",
+      "shortcutUnavailable": "{{shortcut}} is unavailable — another app may be using it"
+    },
     "uninstall": {
       "menuLabel": "Uninstall Avibe…",
       "confirmTitle": "Uninstall Avibe",
@@ -2919,6 +2924,7 @@
     "sessionReference": "Reference this session",
     "sessionFork": "Fork session",
     "sessionForkUnavailable": "This session has no native agent session to fork yet.",
+    "sessionShowInPet": "Show in pet",
     "sessionHideToBackground": "Hide to background",
     "sessionHiddenToast": "Hidden to background · Find it in Agents → Runs",
     "sessionArchive": "Archive session",
@@ -5465,6 +5471,8 @@
     "unreadBadge_one": "{{count}} unread reply",
     "unreadBadge_other": "{{count}} unread replies",
     "setupPending": "Finish setting up in Avibe to talk to your agent here.",
+    "showInPetOff": "The session is set for the pet. Turn on Show Pet in the Avibe tray menu to see it.",
+    "showInPetFailed": "The pet could not show this session.",
     "openAvibe": "Open Avibe",
     "toggle": "Show or hide the pet panel",
     "panel": "Pet panel",

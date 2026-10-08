@@ -13,6 +13,11 @@ import { openLinkInNewContext } from '@/lib/pwaNavigation';
  *   pet_open({ link })                   any link the deep-link parser accepts
  *   plugin:window|start_dragging         the `start-dragging` permission
  *
+ * Workbench → shell, granted only to the `main` window ("Show in pet"):
+ *   pet_bind({ sessionId }) -> PetBinding & { shown: boolean }
+ *                                        also brings the pet forward; `shown`
+ *                                        is false while the pet is turned off
+ *
  * Shell → page, DOM events dispatched on `window` by a shell-evaluated script
  * (the same channel as the Settings… menu, so no event permission is needed):
  *   avibe:pet-summon  detail { intent }  only after pet_ready(); earlier summons
@@ -137,6 +142,19 @@ export const petBridge = {
       return current.binding === sessionId ? writeDevBinding(null) : current;
     }
     return parseBinding(await invoke('pet_unbind', { sessionId }));
+  },
+
+  /**
+   * The Workbench's "Show in pet": binds the pet to `sessionId` and brings it
+   * forward. `shown` is false while the pet is turned off; the binding is kept
+   * for when it is turned on.
+   */
+  showInPet: async (sessionId: string): Promise<{ shown: boolean }> => {
+    const invoke = shellInvoke();
+    if (!invoke) throw new Error('the desktop pet is only available in the Avibe desktop app');
+    const result = (await invoke('pet_bind', { sessionId })) as { shown?: unknown } | null;
+    parseBinding(result);
+    return { shown: result?.shown === true };
   },
 
   /** Moves the native window with the pointer (`start-dragging`). */

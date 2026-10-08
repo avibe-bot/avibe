@@ -2,11 +2,21 @@ fn main() {
     println!("cargo:rerun-if-env-changed=AVIBE_DESKTOP_UPDATER_PUBLIC_KEY");
     // Application commands are ungated by default in Tauri v2: any page loaded in
     // any window could invoke them. Declaring them here makes `tauri-build`
-    // generate per-command permissions, so `capabilities/bootstrap.json`
-    // becomes the only thing that can hand them out — and it hands them only to
-    // the shell's own local page.
-    let manifest =
-        tauri_build::AppManifest::new().commands(&["bootstrap_status", "bootstrap_retry", "open_install_docs"]);
+    // generate per-command permissions, so the capability files become the only
+    // thing that can hand them out: `bootstrap.json` gives the bootstrap
+    // commands only to the shell's own local page, `pet.json` gives the pet
+    // commands only to the pet window, and `main-pet-bind.json` gives the
+    // Workbench `pet_bind` alone.
+    let manifest = tauri_build::AppManifest::new().commands(&[
+        "bootstrap_status",
+        "bootstrap_retry",
+        "open_install_docs",
+        "pet_ready",
+        "pet_set_expanded",
+        "pet_bind",
+        "pet_unbind",
+        "pet_open",
+    ]);
     let mut attributes = tauri_build::Attributes::new().app_manifest(manifest);
     // tauri-build embeds its Windows application manifest, which binds Common
     // Controls v6, into the app binary only. A test binary that builds a Tauri

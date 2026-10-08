@@ -27,10 +27,12 @@ serde.workspace = true
 serde_json.workspace = true
 sys-locale.workspace = true
 tar = "0.4"
-tauri = { version = "2", features = ["tray-icon"] }
+tauri = { version = "2", features = ["tray-icon", "macos-private-api"] }
 tauri-plugin-autostart = "2"
 tauri-plugin-deep-link = "2"
 tauri-plugin-dialog = "2"
+# The desktop pet's summon shortcut, registered from Rust only.
+tauri-plugin-global-shortcut = "~2.3" # 2.4 requires tauri 2.12
 tauri-plugin-notification = "2"
 tauri-plugin-opener = "2"
 tauri-plugin-single-instance = "2"
@@ -41,7 +43,7 @@ url.workspace = true
 
 [dev-dependencies]
 async-trait.workspace = true
-tauri = { version = "2", features = ["tray-icon", "test"] }
+tauri = { version = "2", features = ["tray-icon", "macos-private-api", "test"] }
 
 [target.'cfg(windows)'.dev-dependencies]
 # Reads a native menu item's text, where muda keeps its accelerator.
