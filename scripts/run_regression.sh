@@ -81,7 +81,7 @@ while [ $# -gt 0 ]; do
             incus_args+=("$1")
             shift
             ;;
-        --slug|--host-port|--ui-host|--ui-port|--worktree-port-start|--worktree-port-end|--image|--storage-pool|--network|--cpus|--memory|--disk|--processes)
+        --slug|--seed|--host-port|--ui-host|--ui-port|--worktree-port-start|--worktree-port-end|--image|--storage-pool|--network|--cpus|--memory|--disk|--processes)
             if [ $# -lt 2 ]; then
                 echo "$1 requires an argument" >&2
                 exit 1

@@ -93,7 +93,17 @@ an SSH daemon or host ownership metadata.
    When the runner is invoked from a task worktree, it looks for
    `.env.regression` in that current worktree first, then falls back to the
    primary checkout. Keep the worktree copy intentional because it shadows the
-   primary checkout's configuration.
+   primary checkout's configuration. `--env-file <path>` names the file
+   explicitly.
+
+   The loaded file is authoritative for every key it defines, including keys it
+   leaves empty: a value exported in the operator's shell under the same name
+   is replaced, so an agent session's own `ANTHROPIC_*` or `OPENAI_*` cannot
+   reach the instance in place of the declared one. Keys the file does not
+   mention keep their shell value. The runner prints the file it loaded and the
+   names of the shell values it replaced, and `up` prints the name and source
+   (env file, shell, or runner) of every key it writes into the instance. It
+   never prints values.
 
 4. Fill in `.env.regression` with:
 
@@ -183,6 +193,29 @@ python3 scripts/incus_regression.py delete --target worktree --yes
 python3 scripts/incus_regression.py reconcile
 python3 scripts/incus_regression.py reconcile --yes
 ```
+
+Fresh-install worktree environment, for testing the first-run experience:
+
+```bash
+python3 scripts/incus_regression.py up --target worktree --slug <slug> --seed none
+```
+
+`--seed none` builds the environment the way a new user's machine starts: an
+empty Avibe home, no agent CLI logins, no platform configuration, and an
+`/etc/avibe-regression.env` that holds only the runner's own settings, never the
+LLM credentials or `REGRESSION_*` values from the env file. No platform tokens
+are required. The service's first start writes the default configuration with
+setup not completed, so the Web UI opens the setup wizard; remote-access pairing
+happens in the product.
+
+The mode is recorded on the instance (`user.avibe-regression.seed`), so later
+updates of that slug stay unseeded without repeating the flag. An environment
+changes mode only together with `--reset-mode all`, which empties its Avibe home
+and agent CLI homes: `--seed none --reset-mode all` turns an existing worktree
+environment back into a fresh install, and `--seed regression --reset-mode all`
+seeds it again. `--reset-mode config` on a fresh environment removes the Avibe
+config and state to rerun the wizard while keeping CLI logins made in it. The
+master environment is always seeded.
 
 Delete worktree environments promptly after the worktree is merged, abandoned,
 or removed. The persistent `master` environment should stay running and preserve
@@ -317,6 +350,8 @@ Useful flags:
 - `--slug <slug>`: set the worktree environment slug.
 - `--reset-mode config`: re-seed config/state/runtime.
 - `--reset-mode all`: wipe and re-seed the environment state.
+- `--seed none`: build a worktree environment as a fresh install; see above.
+- `--env-file <path>`: load this env file instead of discovering `.env.regression`.
 - `--clean`: compatibility flag; normal syncs already remove stale source files.
 - `--force-deps`: force Python dependency refresh.
 - `--no-build-ui`: skip UI asset build.
@@ -393,4 +428,6 @@ content.
 - Never commit generated files under `.runtime/`.
 - Runtime secrets are written into the Incus instance through stdin to
   `/etc/avibe-regression.env`; they should not appear in command-line logs.
+- A `--seed none` environment receives no secrets: neither the runtime env file
+  nor the home contains credentials from the operator machine.
 - Share `.env.regression.example` if you only need to show the structure.

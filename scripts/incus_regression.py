@@ -90,6 +90,14 @@ DEFAULT_WORKTREE_PORT_START = 15200
 DEFAULT_WORKTREE_PORT_END = 15399
 ENV_FILE_NAME = ".env.regression"
 ENV_PREFIX = "REGRESSION_"
+LLM_ENV_KEYS = ("ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_API_BASE")
+# `regression` seeds platform config, agent CLI logins, and credentials into the
+# environment; `none` leaves a fresh install for the first-run wizard. The mode
+# is recorded on the instance, so later updates keep it without being told.
+SEED_REGRESSION = "regression"
+SEED_NONE = "none"
+SEED_MODES = (SEED_REGRESSION, SEED_NONE)
+SEED_CONFIG_KEY = "user.avibe-regression.seed"
 SHOW_RUNTIME_BUILD_TIMEOUT_SECONDS = 300
 SLUG_RE = re.compile(r"^[a-z][a-z0-9-]{1,38}[a-z0-9]$")
 DAEMON_UNREACHABLE_HINT = (
@@ -256,13 +264,21 @@ def project_exists(runner: Runner, remote: str | None, project: str) -> bool:
     return project in runner.names(command, what="Incus projects")
 
 
-def instance_exists(runner: Runner, remote: str | None, project: str, instance: str) -> bool:
+def instance_record(runner: Runner, remote: str | None, project: str, instance: str) -> dict | None:
+    """The daemon's record of the instance, or None when its listing does not hold it."""
     # An instance cannot outlive its project, so an absent project answers the
     # question without asking Incus to list inside a project it does not have.
     if not project_exists(runner, remote, project):
-        return False
+        return None
     command = incus("list", *optional_remote_ref(remote), "--format", "json", project=project)
-    return instance in runner.names(command, what=f"instances in project {project}")
+    for record in runner.records(command, what=f"instances in project {project}"):
+        if record["name"] == instance:
+            return record
+    return None
+
+
+def instance_exists(runner: Runner, remote: str | None, project: str, instance: str) -> bool:
+    return instance_record(runner, remote, project, instance) is not None
 
 
 def require_incus() -> None:
@@ -537,7 +553,22 @@ def worktree_mapping_lock(repo_root: Path, *, dry_run: bool):
             fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
 
 
-def load_env_file(repo_root: Path, env_file: Path | None) -> Path | None:
+@dataclass(frozen=True)
+class EnvFile:
+    """The regression env file a command loaded, and the keys it defines."""
+
+    path: Path
+    keys: frozenset[str]
+
+
+def load_env_file(repo_root: Path, env_file: Path | None) -> EnvFile | None:
+    """Load the regression env file; it is authoritative for every key it defines.
+
+    The operator's shell routinely exports keys of the same names -- an agent
+    session carries its own ANTHROPIC_* and OPENAI_* -- and letting those win
+    would put credentials nobody declared into the instance. A key the file
+    leaves empty is still defined by it. Only names are printed, never values.
+    """
     common_root = git_common_root(repo_root)
     candidates = [env_file] if env_file else [
         repo_root / ENV_FILE_NAME,
@@ -549,6 +580,7 @@ def load_env_file(repo_root: Path, env_file: Path | None) -> Path | None:
         path = candidate.resolve()
         if not path.is_file():
             continue
+        values: dict[str, str] = {}
         for raw_line in path.read_text(encoding="utf-8").splitlines():
             line = raw_line.strip()
             if not line or line.startswith("#") or "=" not in line:
@@ -556,10 +588,13 @@ def load_env_file(repo_root: Path, env_file: Path | None) -> Path | None:
             if line.startswith("export "):
                 line = line.removeprefix("export ").strip()
             key, value = line.split("=", 1)
-            key = key.strip()
-            value = value.strip().strip("'\"")
-            os.environ.setdefault(key, value)
-        return path
+            values[key.strip()] = value.strip().strip("'\"")
+        replaced = sorted(key for key, value in values.items() if os.environ.get(key, value) != value)
+        os.environ.update(values)
+        print(f"Loaded regression env file: {path}", file=sys.stderr)
+        if replaced:
+            print(f"  It replaces values exported in the shell for: {', '.join(replaced)}", file=sys.stderr)
+        return EnvFile(path, frozenset(values))
     return None
 
 
@@ -1586,6 +1621,7 @@ def ensure_project_and_instance(
     memory: str,
     disk: str,
     processes: str,
+    seed: str,
     remote: str | None,
 ) -> None:
     if not project_exists(runner, remote, target.project):
@@ -1607,6 +1643,8 @@ def ensure_project_and_instance(
                 "default",
                 "--config",
                 f"cloud-init.user-data={cloud_init_user_data()}",
+                "--config",
+                f"{SEED_CONFIG_KEY}={seed}",
                 project=target.project,
             )
         )
@@ -2057,31 +2095,57 @@ def write_metadata(
     runner.run(root_exec(target, command, remote=remote))
 
 
-def runtime_env_payload(repo_root: Path | None = None) -> bytes:
+def runtime_env(repo_root: Path | None, *, seed: str) -> tuple[dict[str, str], dict[str, str]]:
+    """The instance's runtime env: what the runner sets, and what the operator supplies.
+
+    The operator's part carries the LLM credentials and every REGRESSION_* value,
+    which includes the platform tokens. A fresh install has none of them, so
+    `--seed none` writes only the runner's part.
+    """
     scm_version = "0.0.0.dev0"
     if repo_root is not None:
         sha = commit_sha(repo_root)
         if sha:
             scm_version = f"0.0.0.dev0+{sha[:12]}"
-    mappings = {
+    runner_env = {
         "SETUPTOOLS_SCM_PRETEND_VERSION": scm_version,
         "SETUPTOOLS_SCM_PRETEND_VERSION_FOR_AVIBE_OS": scm_version,
         "REGRESSION_UI_HOST": CONTAINER_UI_HOST,
         "AVIBE_ALLOW_DEV_STATE_MIGRATION": "1",
         **regression_show_runtime_env(None, SERVICE_HOME),
-        "ANTHROPIC_API_KEY": os.environ.get("ANTHROPIC_API_KEY", ""),
-        "ANTHROPIC_BASE_URL": os.environ.get("ANTHROPIC_BASE_URL", ""),
-        "OPENAI_API_KEY": os.environ.get("OPENAI_API_KEY", ""),
-        "OPENAI_BASE_URL": os.environ.get("OPENAI_BASE_URL", ""),
-        "OPENAI_API_BASE": os.environ.get("OPENAI_API_BASE", ""),
     }
-    for key, value in os.environ.items():
-        if key in {"REGRESSION_UI_HOST", "REGRESSION_VOICE_REALTIME_ENABLED"}:
-            continue
-        if key.startswith(ENV_PREFIX):
-            mappings[key] = value
-    lines = [f"{key}={shlex.quote(value)}" for key, value in mappings.items() if value]
-    return ("\n".join(lines) + "\n").encode("utf-8")
+    operator_env: dict[str, str] = {}
+    if seed == SEED_REGRESSION:
+        operator_env = {key: os.environ.get(key, "") for key in LLM_ENV_KEYS}
+        for key, value in os.environ.items():
+            if key in {"REGRESSION_UI_HOST", "REGRESSION_VOICE_REALTIME_ENABLED"}:
+                continue
+            if key.startswith(ENV_PREFIX):
+                operator_env[key] = value
+    return (
+        {key: value for key, value in runner_env.items() if value},
+        {key: value for key, value in operator_env.items() if value},
+    )
+
+
+def report_runtime_env_sources(
+    target: RegressionTarget,
+    runner_env: dict[str, str],
+    operator_env: dict[str, str],
+    env_file: EnvFile | None,
+    *,
+    seed: str,
+) -> None:
+    """Name the source of every key written into the instance, never its value."""
+    sources: dict[str, list[str]] = {"runner": sorted(runner_env)}
+    for key in sorted(operator_env):
+        source = str(env_file.path) if env_file is not None and key in env_file.keys else "shell"
+        sources.setdefault(source, []).append(key)
+    print(f"Runtime env for {target.instance} (names only):", file=sys.stderr)
+    for source, keys in sources.items():
+        print(f"  from {source}: {', '.join(keys)}", file=sys.stderr)
+    if seed == SEED_NONE:
+        print("  no credentials or REGRESSION_* values (--seed none)", file=sys.stderr)
 
 
 def required_platform_seed_envs() -> tuple[str, ...]:
@@ -2108,7 +2172,18 @@ def require_runtime_seed_env() -> None:
         raise SystemExit(f"Missing required regression seed environment variables: {joined}")
 
 
-def write_runtime_env(runner: Runner, target: RegressionTarget, *, repo_root: Path | None = None, remote: str | None) -> None:
+def write_runtime_env(
+    runner: Runner,
+    target: RegressionTarget,
+    *,
+    repo_root: Path | None = None,
+    seed: str,
+    env_file: EnvFile | None,
+    remote: str | None,
+) -> None:
+    runner_env, operator_env = runtime_env(repo_root, seed=seed)
+    report_runtime_env_sources(target, runner_env, operator_env, env_file, seed=seed)
+    lines = [f"{key}={shlex.quote(value)}" for key, value in {**runner_env, **operator_env}.items()]
     runner.run(
         incus(
             "exec",
@@ -2119,7 +2194,7 @@ def write_runtime_env(runner: Runner, target: RegressionTarget, *, repo_root: Pa
             f"cat > /etc/avibe-regression.env && chown root:{SERVICE_USER} /etc/avibe-regression.env && chmod 0640 /etc/avibe-regression.env",
             project=target.project,
         ),
-        input_bytes=b"" if runner.dry_run else runtime_env_payload(repo_root),
+        input_bytes=b"" if runner.dry_run else ("\n".join(lines) + "\n").encode("utf-8"),
     )
 
 
@@ -2136,6 +2211,43 @@ def read_existing_fingerprints(runner: Runner, target: RegressionTarget, *, remo
     except json.JSONDecodeError:
         return {}
     return payload if isinstance(payload, dict) else {}
+
+
+def recorded_seed(record: dict) -> str:
+    """The seed mode an existing instance was built with.
+
+    Instances that predate the mode were all seeded, which is what an absent key means.
+    """
+    config = record.get("config")
+    value = config.get(SEED_CONFIG_KEY) if isinstance(config, dict) else None
+    if value is None:
+        return SEED_REGRESSION
+    if value not in SEED_MODES:
+        raise RegressionError(f"Instance {record['name']} records an unknown {SEED_CONFIG_KEY}: {value!r}")
+    return value
+
+
+def resolve_seed(target: RegressionTarget, *, requested: str | None, record: dict | None, reset_mode: str) -> str:
+    """The seed mode this `up` builds with: the requested one, else the one the instance records.
+
+    A mode describes the whole home, so it changes only together with a reset
+    that empties it. Otherwise `--seed none` over a seeded home would leave the
+    seeded logins behind, and `--seed regression` over a fresh one would seed
+    the CLI logins and credentials under whatever the first-run wizard wrote.
+    """
+    if requested == SEED_NONE and target.target == MASTER_TARGET:
+        raise RegressionError(
+            "--seed none is for worktree environments; master is the seeded four-platform environment."
+        )
+    if record is None:
+        return requested or SEED_REGRESSION
+    recorded = recorded_seed(record)
+    if requested is None or requested == recorded or reset_mode == "all":
+        return requested or recorded
+    raise RegressionError(
+        f"{target.instance} was built with --seed {recorded}. Switching it to --seed {requested} "
+        "needs --reset-mode all, which empties its Avibe home and agent CLI homes."
+    )
 
 
 def should_seed_state(runner: Runner, target: RegressionTarget, *, reset_mode: str, remote: str | None) -> bool:
@@ -2247,18 +2359,7 @@ def guard_paired_master_reset(
     )
 
 
-def run_prepare_state(runner: Runner, target: RegressionTarget, *, reset_mode: str, remote: str | None) -> None:
-    if not should_seed_state(runner, target, reset_mode=reset_mode, remote=remote):
-        print("Existing Avibe state found; skipping regression state seed.")
-        return
-    runner.run(root_exec(target, f"rm -rf /home/{SERVICE_USER}/.regression-seed", remote=remote))
-    runner.run(
-        tenant_exec(
-            target,
-            f"{VENV_DIR}/bin/python scripts/prepare_regression.py --output-root /home/{SERVICE_USER}/.regression-seed --reset-mode {shlex.quote(reset_mode)}",
-            remote=remote,
-        )
-    )
+def reset_state(runner: Runner, target: RegressionTarget, *, reset_mode: str, remote: str | None) -> None:
     if reset_mode == "config":
         runner.run(
             root_exec(
@@ -2278,6 +2379,29 @@ def run_prepare_state(runner: Runner, target: RegressionTarget, *, reset_mode: s
                 remote=remote,
             )
         )
+
+
+def run_prepare_state(runner: Runner, target: RegressionTarget, *, reset_mode: str, seed: str, remote: str | None) -> None:
+    if seed == SEED_NONE:
+        # Nothing is generated: a reset only removes, and the service's first
+        # start writes the default config with setup still to be completed.
+        reset_state(runner, target, reset_mode=reset_mode, remote=remote)
+        # The scratch seed a replaced home was built from holds that home's credentials.
+        runner.run(root_exec(target, f"rm -rf /home/{SERVICE_USER}/.regression-seed", remote=remote))
+        runner.run(tenant_exec(target, f"mkdir -p {AVIBE_HOME} && ln -sfn {AVIBE_HOME} {LEGACY_HOME}", remote=remote))
+        return
+    if not should_seed_state(runner, target, reset_mode=reset_mode, remote=remote):
+        print("Existing Avibe state found; skipping regression state seed.")
+        return
+    runner.run(root_exec(target, f"rm -rf /home/{SERVICE_USER}/.regression-seed", remote=remote))
+    runner.run(
+        tenant_exec(
+            target,
+            f"{VENV_DIR}/bin/python scripts/prepare_regression.py --output-root /home/{SERVICE_USER}/.regression-seed --reset-mode {shlex.quote(reset_mode)}",
+            remote=remote,
+        )
+    )
+    reset_state(runner, target, reset_mode=reset_mode, remote=remote)
     runner.run(
         tenant_exec(
             target,
@@ -2693,13 +2817,17 @@ def cmd_up(args: argparse.Namespace) -> int:
             with metadata.locked(dry_run=args.dry_run):
                 target = resolve_target(args, repo_root, dry_run=args.dry_run, slug=slug)
                 reservation = metadata.reserve(target, dry_run=args.dry_run)
-            target_exists = instance_exists(runner, args.remote, target.project, target.instance)
+            record = instance_record(runner, args.remote, target.project, target.instance)
+            target_exists = record is not None
+            seed = resolve_seed(target, requested=args.seed, record=record, reset_mode=args.reset_mode)
             if not args.dry_run and not target_exists and args.remote is None:
                 # Reached only once the daemon has enumerated its instances and this one
                 # was absent, so an occupied port is a real conflict with something else
                 # rather than this environment's own proxy device.
                 ensure_host_port_available(target.ui_host, target.host_port)
-            seed_requires_env = not args.dry_run and (args.reset_mode != "none" or not target_exists)
+            seed_requires_env = (
+                seed == SEED_REGRESSION and not args.dry_run and (args.reset_mode != "none" or not target_exists)
+            )
             if seed_requires_env:
                 require_runtime_seed_env()
             if target_exists:
@@ -2720,9 +2848,19 @@ def cmd_up(args: argparse.Namespace) -> int:
                 memory=args.memory,
                 disk=args.disk,
                 processes=args.processes,
+                seed=seed,
                 remote=args.remote,
             )
-            if not args.dry_run and not seed_requires_env and should_seed_state(runner, target, reset_mode=args.reset_mode, remote=args.remote):
+            if target_exists and seed != recorded_seed(record):
+                runner.run(
+                    incus("config", "set", remote_ref(args.remote, target.instance), f"{SEED_CONFIG_KEY}={seed}", project=target.project)
+                )
+            if (
+                seed == SEED_REGRESSION
+                and not args.dry_run
+                and not seed_requires_env
+                and should_seed_state(runner, target, reset_mode=args.reset_mode, remote=args.remote)
+            ):
                 require_runtime_seed_env()
             # The stop may take effect before an interrupted client returns.
             stopped_service_target = target
@@ -2730,8 +2868,10 @@ def cmd_up(args: argparse.Namespace) -> int:
             # Everything from here to the fingerprints reads the checkout, and the
             # records written at the end name the revision read here.
             identity = SourceIdentity.read(repo_root)
-            if seed_requires_env or loaded_env_file is not None or args.dry_run:
-                write_runtime_env(runner, target, repo_root=repo_root, remote=args.remote)
+            if args.dry_run or not target_exists or args.reset_mode != "none" or loaded_env_file is not None:
+                write_runtime_env(
+                    runner, target, repo_root=repo_root, seed=seed, env_file=loaded_env_file, remote=args.remote
+                )
             else:
                 print("No regression env file loaded; preserving existing runtime env file.")
             migrate_legacy_backend_runtimes(runner, target, remote=args.remote)
@@ -2755,7 +2895,7 @@ def cmd_up(args: argparse.Namespace) -> int:
             # ``prepare_show_runtime`` below is unconditional, so the run either
             # reconciles the show runtime or fails outright.
             reconciled = reconciled | {"show_runtime"}
-            run_prepare_state(runner, target, reset_mode=args.reset_mode, remote=args.remote)
+            run_prepare_state(runner, target, reset_mode=args.reset_mode, seed=seed, remote=args.remote)
             normalize_runtime_config(runner, target, remote=args.remote)
             write_metadata(
                 runner,
@@ -2788,11 +2928,11 @@ def cmd_up(args: argparse.Namespace) -> int:
                 if reservation is not None:
                     reservation.release(runner)
             raise
-    print_summary(target)
+    print_summary(target, seed=seed)
     return 0
 
 
-def print_summary(target: RegressionTarget) -> None:
+def print_summary(target: RegressionTarget, *, seed: str) -> None:
     print("")
     print("Incus regression environment is ready:")
     print(f"  URL: http://{target.ui_host}:{target.host_port}")
@@ -2800,6 +2940,8 @@ def print_summary(target: RegressionTarget) -> None:
     print(f"  Project: {target.project}")
     print(f"  Instance: {target.instance}")
     print(f"  Show Runtime source: {regression_show_runtime_source()}")
+    if seed == SEED_NONE:
+        print("  Seed: none (fresh install; complete setup in the Web UI)")
 
 
 def cmd_status(args: argparse.Namespace) -> int:
@@ -3066,7 +3208,11 @@ def add_common(parser: argparse.ArgumentParser) -> None:
 def add_target_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--target", choices=sorted(TARGETS), default=MASTER_TARGET)
     parser.add_argument("--slug", help="Explicit worktree slug for --target worktree.")
-    parser.add_argument("--env-file", type=Path)
+    parser.add_argument(
+        "--env-file",
+        type=Path,
+        help=f"Regression env file; its values replace the shell's for the keys it defines. Defaults to {ENV_FILE_NAME} in this worktree, then in the primary checkout.",
+    )
     parser.add_argument("--host-port", type=int, help="Host port for the Web UI proxy.")
     parser.add_argument("--ui-host", help="Host/interface for the Incus UI proxy. Defaults to REGRESSION_PORT_BIND_HOST or 127.0.0.1 after env loading.")
     parser.add_argument("--ui-port", type=int, default=DEFAULT_UI_PORT)
@@ -3107,6 +3253,16 @@ def build_parser() -> argparse.ArgumentParser:
     up.add_argument("--disk", default="80GiB")
     up.add_argument("--processes", default="8192")
     up.add_argument("--reset-mode", choices=["none", "config", "all"], default="none")
+    up.add_argument(
+        "--seed",
+        choices=SEED_MODES,
+        help=(
+            "regression (default for a new environment): seed platform config, agent CLI logins, and credentials. "
+            "none: a fresh install for the first-run wizard, worktree targets only; nothing is seeded and no "
+            "credentials are written. An existing environment keeps the mode it was built with; changing it "
+            "needs --reset-mode all."
+        ),
+    )
     up.add_argument(
         "--allow-reset-paired-master",
         action="store_true",
