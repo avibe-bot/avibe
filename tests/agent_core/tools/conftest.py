@@ -8,7 +8,12 @@ from typing import Callable, Optional
 import pytest
 
 from core.agent_core.cancel import CancelToken
-from core.agent_core.tools.base import ToolContext
+from core.agent_core.tools.base import CallInstance, ToolContext
+
+
+def instance(tool_call_id: str = "toolu_1", *, response_seq: int = 1) -> CallInstance:
+    """A call of the test Session's response at ``response_seq``; providers may reuse ``tool_call_id`` across them."""
+    return CallInstance("ses_test", f"msg_{response_seq}", response_seq, tool_call_id)
 
 
 @pytest.fixture
@@ -23,6 +28,7 @@ def make_ctx(tmp_path) -> Callable[..., ToolContext]:
         return ToolContext(
             session_id="ses_test",
             tool_call_id=tool_call_id,
+            call=instance(tool_call_id),
             cwd=cwd or str(tmp_path),
             env={"PATH": os.environ.get("PATH", "/usr/bin:/bin")},
             cancel=cancel or CancelToken(),

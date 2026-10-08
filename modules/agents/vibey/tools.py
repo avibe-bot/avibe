@@ -3,8 +3,8 @@
 ``ToolSuite`` is the adapter's whole dependency on ``core.agent_core.tools``:
 the job host, the tools built over the loop's tracking wrapper (``Agent.jobs``,
 so an abort kills foreground commands), the bash renderer recovery uses for open
-calls (``recovery.md`` T2), the lookup from a tool call to its job, and job
-pruning.
+calls (``recovery.md`` T2), the lookup from a call instance to its job, and
+job pruning.
 
 The job host lives in Watch's ``agent_jobs_dir()``, where ``vibe stop`` and the
 job-Watch sweep look, and hands a job over through Watch's own
@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Mapping, Optional, Sequence
 
 from core.agent_core.agent.recovery import RecoveryRenderer
-from core.agent_core.tools.base import JobHost, Tool
+from core.agent_core.tools.base import CallInstance, JobHost, Tool
 
 ImageSink = Callable[[bytes, str, str], Awaitable[str]]
 #: Whether a job's tool call has a durable ``tool_result`` (the adapter's half of J5).
@@ -32,8 +32,8 @@ class ToolSuite:
     jobs: JobHost
     create_tools: Callable[[JobHost, Optional[ImageSink]], Sequence[Tool]]
     render_recovered: RecoveryRenderer
-    # ``find_job(session_id, tool_call_id, *, created_since)``: the newest job the call started.
-    find_job: Callable[..., Optional[str]]
+    #: The job a call instance started, if any.
+    find_job: Callable[[CallInstance], Optional[str]]
     prune: Optional[Callable[[CallSettled], list[str]]] = None
 
 

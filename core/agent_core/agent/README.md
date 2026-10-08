@@ -215,7 +215,9 @@ Watch integration is a later layer.
 - Input rendering/environment deltas, delivery outbox, actual Session forking,
   job-to-call lookup, Watch implementation, and output governance belong to the
   adapter or tools. Recovery's renderer receives `(call, job_id, status, watch_id)`
-  and returns a governed `ToolResult`; job keys include the original Session.
+  and returns a governed `ToolResult`; jobs are keyed by call instance (the
+  owning response, in the original Session for a fork's inherited call, plus
+  the call id).
   The adapter serializes recovery with active runs. `JobHost.hand_over` must
   reuse a job's existing Watch when recovery retries an interrupted commit.
 - A stream error may persist its partial response as non-final evidence, but no

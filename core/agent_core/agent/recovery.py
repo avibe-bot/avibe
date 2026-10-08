@@ -13,7 +13,7 @@ from typing import Awaitable, Callable, Mapping, Optional
 from core.agent_core.harness.projection import interrupted_result, open_tool_calls, validate_message_append
 from core.agent_core.harness.store import ContextEntry, TranscriptStore
 from core.agent_core.messages import ToolCallBlock, ToolResultMessage, text
-from core.agent_core.tools.base import JobHost, JobStatus, ToolResult
+from core.agent_core.tools.base import CallInstance, JobHost, JobStatus, ToolResult
 
 #: ``None`` means the job holds no result for the call (it never ran, or ended for an unrecorded reason).
 RecoveryRenderer = Callable[[ToolCallBlock, str, JobStatus, Optional[str]], Awaitable[Optional[ToolResult]]]
@@ -29,14 +29,14 @@ async def settle_open_calls(
     session_id: str,
     store: TranscriptStore,
     jobs: JobHost,
-    job_ids: Mapping[tuple[str, str], str],
+    job_ids: Mapping[CallInstance, str],
     render_result: RecoveryRenderer,
 ) -> tuple[ContextEntry, ...]:
     """Commit one result per open call, using original-owner job lookup.
 
-    ``job_ids`` is keyed by (response's session_id, tool_call_id), so a fork can
-    find an inherited call's job. The adapter supplies bash's output-governance
-    renderer; it receives (call, job_id, status, watch_id). ``JobHost.hand_over``
+    ``job_ids`` is keyed by call instance, whose response may be one a fork
+    inherited. The adapter supplies bash's output-governance renderer; it
+    receives (call, job_id, status, watch_id). ``JobHost.hand_over``
     must reuse a job's existing Watch when recovery retries after an interrupted
     commit. The job host owns the launch-handshake reconciliation behind status.
 
@@ -51,7 +51,7 @@ async def settle_open_calls(
     committed: list[ContextEntry] = []
     rows = list(await store.load(session_id))
     for owner, call in open_tool_calls(rows):
-        job_id = job_ids.get((owner.session_id, call.id))
+        job_id = job_ids.get(CallInstance(owner.session_id, owner.row_id, owner.context_seq, call.id))
         message = interrupted_result(call)
         details = {RECOVERED: True}
         if job_id is None:

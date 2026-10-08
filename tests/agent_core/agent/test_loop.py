@@ -49,7 +49,7 @@ from core.agent_core.agent.models import ModelSelection
 from core.agent_core.harness.context import ContextConfig, budget
 from core.agent_core.harness.projection import project
 from core.agent_core.messages import AssistantMessage, ThinkingBlock, ToolCallBlock, ToolResultMessage, Usage, UserMessage, text
-from core.agent_core.tools.base import ToolResult
+from core.agent_core.tools.base import CallInstance, ToolResult
 from tests.agent_core.fakes import (
     FakeJobHost,
     FakeModelRouter,
@@ -107,8 +107,10 @@ async def test_C1_tool_set_is_captured_per_request_and_unavailable_calls_are_err
     release.set()
     await run
     assert [[spec.name for spec in request.tools] for request in provider.requests] == [["old"], ["new"], ["new"]]
-    assert [ctx.tool_call_id for _, ctx in old.calls] == ["a"]
-    assert [ctx.tool_call_id for _, ctx in new.calls] == ["c"]
+    # Each call runs as its instance: the committed response that made it, plus its id.
+    first, second, _ = [row for row in await agent.store.load("session") if row.kind == "response"]
+    assert [ctx.call for _, ctx in old.calls] == [CallInstance("session", first.row_id, first.context_seq, "a")]
+    assert [ctx.call for _, ctx in new.calls] == [CallInstance("session", second.row_id, second.context_seq, "c")]
     results = [row.message for row in await agent.store.load("session") if row.kind == "tool_result"]
     assert [result.tool_call_id for result in results] == ["a", "b", "c", "d"]
     assert [(result.is_error, result.content[0].text) for result in (results[1], results[3])] == [
@@ -880,9 +882,7 @@ async def test_abort_kills_foreground_through_JobHost_but_preserves_handed_over_
     agent = make_agent(provider, jobs=host)
 
     async def execute(arguments, ctx):
-        job = await agent.jobs.start(
-            "test", cwd=ctx.cwd, env=ctx.env, timeout_s=None, session_id=ctx.session_id, tool_call_id=ctx.tool_call_id
-        )
+        job = await agent.jobs.start("test", cwd=ctx.cwd, env=ctx.env, timeout_s=None, call=ctx.call)
         if ctx.tool_call_id == "bg":
             watch = await agent.jobs.hand_over(job)
             return ToolResult((text("watch"),), details={"watch_id": watch, "job_id": job})
@@ -927,9 +927,7 @@ async def test_abort_during_job_ownership_transition_waits_then_kills_only_foreg
     agent = make_agent(provider, jobs=host)
 
     async def execute(arguments, ctx):
-        job = await agent.jobs.start(
-            "test", cwd=ctx.cwd, env=ctx.env, timeout_s=None, session_id=ctx.session_id, tool_call_id=ctx.tool_call_id
-        )
+        job = await agent.jobs.start("test", cwd=ctx.cwd, env=ctx.env, timeout_s=None, call=ctx.call)
         if transition == "hand_over":
             await agent.jobs.hand_over(job)
         await asyncio.Event().wait()
@@ -1307,8 +1305,7 @@ async def test_run_lifecycle_owns_admission_and_releases_every_foreground_job(ph
                     cwd="/test-owned",
                     env={},
                     timeout_s=None,
-                    session_id=ctx.session_id,
-                    tool_call_id="cleanup",
+                    call=CallInstance(ctx.session_id, "msg_cleanup", 0, "cleanup"),
                 )
 
     async def stream(request, cancel):
@@ -1323,8 +1320,7 @@ async def test_run_lifecycle_owns_admission_and_releases_every_foreground_job(ph
             cwd=ctx.cwd,
             env=ctx.env,
             timeout_s=None,
-            session_id=ctx.session_id,
-            tool_call_id=ctx.tool_call_id,
+            call=ctx.call,
         )
         await agent.jobs.hand_over(watched)
         await agent.jobs.start(
@@ -1332,8 +1328,7 @@ async def test_run_lifecycle_owns_admission_and_releases_every_foreground_job(ph
             cwd=ctx.cwd,
             env=ctx.env,
             timeout_s=None,
-            session_id=ctx.session_id,
-            tool_call_id=ctx.tool_call_id,
+            call=ctx.call,
         )
         if phase == "dependency":
             raise asyncio.CancelledError()
@@ -1489,8 +1484,7 @@ async def test_failed_foreground_kill_is_reported_and_does_not_skip_other_handle
                 cwd=ctx.cwd,
                 env=ctx.env,
                 timeout_s=None,
-                session_id=ctx.session_id,
-                tool_call_id=ctx.tool_call_id,
+                call=ctx.call,
             )
             if index == 0:
                 await agent.jobs.hand_over(job)

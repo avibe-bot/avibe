@@ -19,7 +19,7 @@ import core.agent_core.tools.bash as bash_module
 from core.agent_core.tools.bash import BashTool, settle_bash_call
 import core.agent_core.tools.jobs as jobs_module
 from core.agent_core.tools.jobs import LocalJobHost
-from tests.agent_core.tools.conftest import result_text
+from tests.agent_core.tools.conftest import instance, result_text
 
 LABEL = "Output log (first 1.0MB, then the last 2.0MB in tail.log beside it)"
 
@@ -147,7 +147,7 @@ async def test_only_the_recorded_reason_makes_a_gone_job_a_timeout(tmp_path, mak
     job_id = None
     while job_id is None or not os.path.exists(os.path.join(host.job_dir(job_id), "pid")):
         await asyncio.sleep(0.01)
-        job_id = job_id or host.find_job("ses_test", "toolu_1")
+        job_id = job_id or host.find_job(instance())
     # The wrapper cannot write its tail snapshot once the head is full, as on a full disk.
     wrapper_pid = open(os.path.join(host.job_dir(job_id), "pid")).read().strip()
     os.mkdir(os.path.join(host.job_dir(job_id), f"tail.log.{wrapper_pid}.tmp"))
@@ -260,15 +260,14 @@ async def test_only_a_live_wrapper_decides_at_the_deadline(tmp_path, make_ctx, m
         job_id = None
         while job_id is None:
             await asyncio.sleep(0.01)
-            job_id = host.find_job("ses_test", "toolu_1")
+            job_id = host.find_job(instance())
     else:
         job_id = await host.start(
             command,
             cwd=str(tmp_path),
             env={"PATH": os.environ["PATH"]},
             timeout_s=60,
-            session_id="ses_test",
-            tool_call_id="toolu_1",
+            call=instance(),
         )
         running = asyncio.ensure_future(host.wait(job_id, deadline_s=None))
     wrapper_pid = os.path.join(host.job_dir(job_id), "pid")
@@ -353,8 +352,7 @@ async def test_a_handover_shows_the_latest_output_however_much_came_before(tmp_p
         cwd=str(tmp_path),
         env={"PATH": os.environ["PATH"]},
         timeout_s=None,
-        session_id="ses_test",
-        tool_call_id="toolu_1",
+        call=instance(),
     )
     tail = os.path.join(host.job_dir(job_id), "tail.log")
     try:
@@ -363,7 +361,7 @@ async def test_a_handover_shows_the_latest_output_however_much_came_before(tmp_p
                 break
             await asyncio.sleep(0.02)
 
-        result = await settle_bash_call(host, "ses_test", "toolu_1")
+        result = await settle_bash_call(host, instance())
 
         text = result_text(result)
         assert text.startswith("Command is still running and is now Watch wch_1.")
@@ -487,17 +485,17 @@ async def test_settlement_reports_each_job_state(tmp_path, make_ctx):
 
     recovery = LocalJobHost(str(tmp_path / "jobs"), on_hand_over=watches)
 
-    exited = await settle_bash_call(recovery, "ses_test", "exited")
+    exited = await settle_bash_call(recovery, instance("exited"))
     assert (result_text(exited), exited.is_error) == (result_text(foreground), True)
-    running = await settle_bash_call(recovery, "ses_test", "running")
+    running = await settle_bash_call(recovery, instance("running"))
     assert result_text(running).startswith("Command is still running and is now Watch wch_1.")
     # Settling again adopts the same Watch. (The output may still be arriving, so only the Watch is compared.)
-    again = await settle_bash_call(recovery, "ses_test", "running")
+    again = await settle_bash_call(recovery, instance("running"))
     assert result_text(again).startswith("Command is still running and is now Watch wch_1.")
     assert again.details["watch_id"] == running.details["watch_id"] == "wch_1"
-    assert await settle_bash_call(recovery, "ses_test", "unknown") is None
+    assert await settle_bash_call(recovery, instance("unknown")) is None
     await recovery.kill(running.details["job_id"])
-    assert await settle_bash_call(recovery, "ses_test", "running") is None
+    assert await settle_bash_call(recovery, instance("running")) is None
 
 
 async def test_a_timeout_holds_across_handover_and_a_restart(tmp_path, make_ctx):
@@ -522,6 +520,6 @@ async def test_a_timeout_holds_across_handover_and_a_restart(tmp_path, make_ctx)
 
     assert status.state == "gone"
     assert restarted.stop_reason(job_id) == "timeout"
-    settled = await settle_bash_call(restarted, "ses_test", "toolu_1")
+    settled = await settle_bash_call(restarted, instance())
     assert result_text(settled) == "begun\n\n\nCommand timed out after 60 seconds"
     assert not os.path.exists(os.path.join(restarted.job_dir(job_id), "exit"))

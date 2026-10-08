@@ -17,7 +17,7 @@ from core.agent_core.agent.models import RetryPolicy
 from core.agent_core.ai.provider import Done, ProviderError
 from core.agent_core.harness.projection import project
 from core.agent_core.messages import LargeRef, TextBlock, ToolCallBlock, UserMessage, text
-from core.agent_core.tools.base import ToolResult
+from core.agent_core.tools.base import CallInstance, ToolResult
 from tests.agent_core.fakes import (
     FakeJobHost,
     FakeModelRouter,
@@ -84,8 +84,7 @@ async def test_primary_outcome_cross_cleanup_keeps_reason_rows_and_event_order(
                     cwd="/test-owned",
                     env={},
                     timeout_s=None,
-                    session_id=ctx.session_id,
-                    tool_call_id="cleanup",
+                    call=CallInstance(ctx.session_id, "msg_cleanup", 0, "cleanup"),
                 )
             if cleanup == "after_run":
                 raise RuntimeError("after_run failed")

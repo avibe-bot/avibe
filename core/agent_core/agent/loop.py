@@ -126,7 +126,7 @@ from core.agent_core.messages import (
     text,
     usage_to_dict,
 )
-from core.agent_core.tools.base import JobHost, Tool, ToolContext, ToolResult
+from core.agent_core.tools.base import CallInstance, JobHost, Tool, ToolContext, ToolResult
 from core.agent_core.tools.paths import to_thread_joined
 
 T = TypeVar("T")
@@ -817,8 +817,11 @@ class Agent:
             }
             await self._audit("attempt", payload)
 
-    async def _commit_model_message(self, message: AssistantMessage, emit: Callable[..., Awaitable[None]]) -> bool:
-        """Finality and queued-input admission share one lock with the commit."""
+    async def _commit_model_message(
+        self, message: AssistantMessage, emit: Callable[..., Awaitable[None]]
+    ) -> tuple[ContextEntry, bool]:
+        """Commit the response: its row, and whether it is final. Finality and queued-input admission share one lock
+        with the commit."""
         pending: list[tuple[AgentInput, bool]] = []
         consumed: list[tuple[AgentInput, bool]] = []
         failed = message.stop_reason in {"error", "aborted"}
@@ -843,7 +846,7 @@ class Agent:
                 for item, is_steer in consumed:
                     if is_steer:
                         await emit(SteerApplied, message_id=item.message_id)
-        return final
+        return row, final
 
     async def _loop(self, system: str, emit: Callable[..., Awaitable[None]], selected: ModelSelection) -> RunEndReason:
         first_selection: Optional[ModelSelection] = selected
@@ -885,7 +888,7 @@ class Agent:
                         "local" if aborted else "source",
                         cause=decided,
                     )
-                final = await self._commit_model_message(message, emit)
+                response, final = await self._commit_model_message(message, emit)
                 empty_reply = final and not any(
                     isinstance(block, TextBlock) and block.text and block.text.strip() for block in message.content
                 )
@@ -919,6 +922,7 @@ class Agent:
                     self._scope.check()
                     await self._tool(
                         call,
+                        response,
                         tools,
                         True,
                         emit,
@@ -964,7 +968,7 @@ class Agent:
             terminate = False
             for call in message.tool_calls:
                 self._scope.check()
-                result, step_end = await self._tool(call, tools, skip or end, emit)
+                result, step_end = await self._tool(call, response, tools, skip or end, emit)
                 terminate = terminate or result.terminate
                 end = end or step_end
             if end:
@@ -1004,6 +1008,7 @@ class Agent:
     async def _tool(
         self,
         original: ToolCallBlock,
+        response: ContextEntry,
         tools: Mapping[str, Tool],
         skip: bool,
         emit: Callable[..., Awaitable[None]],
@@ -1028,7 +1033,8 @@ class Agent:
             if tool is None:
                 result = ToolResult((text(f"Tool {call.name} is not available."),), is_error=True)
             else:
-                result = await self._execute(tool, call, emit)
+                instance = CallInstance(response.session_id, response.row_id, response.context_seq, call.id)
+                result = await self._execute(tool, call, instance, emit)
         if not end and not skip:
             for hook in self.hooks:
                 decision = await self._hook(lambda: hook.after_tool(call, result, self._ctx))
@@ -1054,7 +1060,13 @@ class Agent:
         )
         return result, end
 
-    async def _execute(self, tool: Tool, call: ToolCallBlock, emit: Callable[..., Awaitable[None]]) -> ToolResult:
+    async def _execute(
+        self,
+        tool: Tool,
+        call: ToolCallBlock,
+        instance: Optional[CallInstance],
+        emit: Callable[..., Awaitable[None]],
+    ) -> ToolResult:
         # Progress is a latest-tail value, not an unbounded buffer of tool output.
         updates: asyncio.Queue[str] = asyncio.Queue(maxsize=1)
 
@@ -1066,6 +1078,7 @@ class Agent:
         ctx = ToolContext(
             self.session_id,
             call.id,
+            instance,
             self.cwd,
             dict(self.env),
             self._ctx.cancel,
@@ -1651,7 +1664,8 @@ class Agent:
         elif (tool := tools.get(call.name)) is None:
             result = ToolResult((text(f"Tool {call.name} is not available."),), is_error=True)
         else:
-            result = await self._execute(tool, call, _silent)
+            # A checkpoint turn's call has no committed response, so no instance: it starts no job.
+            result = await self._execute(tool, call, None, _silent)
         # Every other result that enters the turn is bounded to the room the window leaves (section 6).
         return ToolResultMessage(call.id, call.name, fit_result(result.content, limit), result.is_error)
 
