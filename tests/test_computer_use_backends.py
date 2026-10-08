@@ -30,16 +30,25 @@ def _spec() -> ManagedMcpServerSpec:
     )
 
 
-def test_claude_translation_preserves_native_config_and_agent_tool_allowlist() -> None:
-    """Managed MCP is additive and strict_mcp_config remains SDK-default false."""
+def test_claude_translation_uses_the_same_allowlist_boundary_as_guidance() -> None:
+    """Managed MCP exposure and guidance share one explicit authority check."""
 
-    options: dict = {}
+    restricted: dict = {}
     tools = apply_managed_computer_use_to_claude_options(
-        options,
+        restricted,
         ["Read", "Bash"],
         _spec(),
     )
-    assert options["mcp_servers"] == {
+    assert "mcp_servers" not in restricted
+    assert tools == ["Read", "Bash"]
+
+    exposed: dict = {}
+    tools = apply_managed_computer_use_to_claude_options(
+        exposed,
+        ["Read", "mcp__avibe_computer__click"],
+        _spec(),
+    )
+    assert exposed["mcp_servers"] == {
         "avibe_computer": {
             "type": "stdio",
             "command": "/Applications/Avibe.app/Contents/Resources/python",
@@ -47,8 +56,8 @@ def test_claude_translation_preserves_native_config_and_agent_tool_allowlist() -
             "env": {"AVIBE_COMPUTER_USE_STATE_DIR": "/tmp/desktop state"},
         }
     }
-    assert "strict_mcp_config" not in options
-    assert tools == ["Read", "Bash"]
+    assert "strict_mcp_config" not in exposed
+    assert tools == ["Read", "mcp__avibe_computer__click"]
 
     no_agent_allowlist: dict = {}
     assert (
@@ -59,7 +68,9 @@ def test_claude_translation_preserves_native_config_and_agent_tool_allowlist() -
         )
         is None
     )
-    assert "allowed_tools" not in no_agent_allowlist
+    assert no_agent_allowlist["mcp_servers"] == {
+        "avibe_computer": _spec().claude_config()
+    }
 
 
 def test_claude_guidance_requires_an_admitted_tool_in_an_explicit_allowlist() -> None:

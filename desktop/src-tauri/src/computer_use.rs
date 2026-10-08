@@ -599,36 +599,18 @@ impl RuntimeState {
         if let Err(reason) = self.reclaim_endpoint().await {
             return HealthResult::Unhealthy(reason);
         }
-        let mut command = driver_command(&self.paths.driver);
-        command
-            .args([
-                "serve",
-                "--embedded",
-                "--parent-liveness-stdio",
-                "--no-permissions-gate",
-                "--socket",
-            ])
-            .arg(&self.paths.socket)
-            .args([
-                "--host-bundle-id",
-                &self.host_bundle_id,
-                "--permission-mode",
-                "standard",
-            ])
-            .env("CUA_DRIVER_EMBEDDED_HOST_PID", std::process::id().to_string())
-            .env("CUA_DRIVER_MANAGED_POLICY_FILE", &self.paths.policy)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .kill_on_drop(true);
-        let mut child = match command.spawn() {
-            Ok(child) => child,
+        let daemon = match spawn_daemon(
+            &self.paths.driver,
+            &self.paths.socket,
+            &self.host_bundle_id,
+            &self.paths.policy,
+        ) {
+            Ok(daemon) => daemon,
             Err(_) => {
                 return HealthResult::Unhealthy("spawn_failed".to_owned());
             }
         };
-        let stdin = child.stdin.take();
-        self.daemon = Some(Daemon { child, stdin });
+        self.daemon = Some(daemon);
 
         timeout(HEALTH_TIMEOUT, async {
             loop {
@@ -894,6 +876,29 @@ async fn socket_accepts(path: &Path) -> bool {
     timeout(Duration::from_millis(300), tokio::net::UnixStream::connect(path))
         .await
         .is_ok_and(|result| result.is_ok())
+}
+
+fn spawn_daemon(driver: &Path, socket: &Path, host_bundle_id: &str, policy: &Path) -> io::Result<Daemon> {
+    let mut command = driver_command(driver);
+    command
+        .args([
+            "serve",
+            "--embedded",
+            "--parent-liveness-stdio",
+            "--no-permissions-gate",
+            "--socket",
+        ])
+        .arg(socket)
+        .args(["--host-bundle-id", host_bundle_id, "--permission-mode", "standard"])
+        .env("CUA_DRIVER_EMBEDDED_HOST_PID", std::process::id().to_string())
+        .env("CUA_DRIVER_MANAGED_POLICY_FILE", policy)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    let mut child = command.spawn()?;
+    let stdin = child.stdin.take();
+    Ok(Daemon { child, stdin })
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1903,41 +1908,202 @@ pub(crate) fn activation_plugin() -> TauriPlugin<tauri::Wry> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
     use std::os::unix::fs::PermissionsExt;
 
     #[tokio::test]
-    async fn driver_command_clears_parent_credentials_and_keeps_only_shared_driver_settings() {
-        const CHILD: &str = "AVIBE_TEST_DRIVER_ENV_CHILD";
+    async fn all_driver_launch_boundaries_clear_parent_credentials() {
+        const CHILD: &str = "AVIBE_TEST_DRIVER_BOUNDARY_CHILD";
+        const ROOT: &str = "AVIBE_TEST_DRIVER_BOUNDARY_ROOT";
         const MARKER: &str = "AVIBE_TEST_PROVIDER_CREDENTIAL_DO_NOT_FORWARD";
         if std::env::var_os(CHILD).is_none() {
+            let temporary = tempfile::tempdir().expect("temporary directory");
+            for directory in ["home", "config", "data", "state", "cache", "tmp"] {
+                std::fs::create_dir_all(temporary.path().join(directory)).expect("isolated test directory");
+            }
             let status = std::process::Command::new(std::env::current_exe().expect("current test executable"))
                 .args([
                     "--exact",
-                    "computer_use::tests::driver_command_clears_parent_credentials_and_keeps_only_shared_driver_settings",
+                    "computer_use::tests::all_driver_launch_boundaries_clear_parent_credentials",
                     "--nocapture",
                 ])
                 .env(CHILD, "1")
+                .env(ROOT, temporary.path())
                 .env(MARKER, "fixture-secret")
+                .env("HOME", temporary.path().join("home"))
+                .env("USERPROFILE", temporary.path().join("home"))
+                .env("XDG_CONFIG_HOME", temporary.path().join("config"))
+                .env("XDG_DATA_HOME", temporary.path().join("data"))
+                .env("XDG_STATE_HOME", temporary.path().join("state"))
+                .env("XDG_CACHE_HOME", temporary.path().join("cache"))
+                .env("TMPDIR", temporary.path().join("tmp"))
                 .status()
-                .expect("run isolated driver environment test");
+                .expect("run isolated launch-boundary test");
             assert!(status.success());
             return;
         }
 
-        let mut command = driver_command(Path::new("/usr/bin/env"));
-        let output = command.output().await.expect("run environment fixture");
-        assert!(output.status.success());
-        let environment = String::from_utf8(output.stdout).expect("UTF-8 environment");
-        assert!(!environment.lines().any(|line| line.starts_with(&format!("{MARKER}="))));
-        assert!(environment.lines().any(|line| line == "CUA_DRIVER_EMBEDDED=1"));
-        assert!(environment
-            .lines()
-            .any(|line| line == "CUA_DRIVER_RS_TELEMETRY_ENABLED=0"));
-        assert!(environment.lines().any(|line| line == "CUA_DRIVER_RS_UPDATE_CHECK=0"));
+        let root = PathBuf::from(std::env::var_os(ROOT).expect("isolated root"));
+        let state_dir = root.join("computer-use-state");
+        let policy = root.join("policy.yaml");
+        let socket = root.join("computer-use.sock");
+        std::fs::write(&policy, "version: 1\n").expect("policy fixture");
+        let driver = write_environment_driver(&root);
+
+        let mut daemon =
+            spawn_daemon(&driver, &socket, "bot.avibe.desktop.test", &policy).expect("spawn daemon fixture");
+        assert!(daemon.child.wait().await.expect("daemon fixture exit").success());
+
+        let (cancel, cancelled) = oneshot::channel();
+        let permission = run_permission_child(
+            &driver,
+            &state_dir,
+            &policy,
+            "bot.avibe.desktop.test",
+            Duration::from_secs(1),
+            cancelled,
+        )
+        .await;
+        drop(cancel);
+        assert_eq!(permission.outcome, PermissionChildOutcome::CaptureRejected);
+
+        assert_eq!(
+            health_check(&driver, &socket, "bot.avibe.desktop.test", false).await,
+            HealthResult::Pass
+        );
+
+        let daemon_environment = read_environment(&root.join("daemon.env"));
+        let permission_environment = read_environment(&root.join("permission.env"));
+        let health_environment = read_environment(&root.join("health.env"));
+        for environment in [&daemon_environment, &permission_environment, &health_environment] {
+            assert!(!environment.contains_key(MARKER));
+            assert_shared_driver_environment(environment);
+        }
+
+        assert_eq!(
+            daemon_environment.get("CUA_DRIVER_EMBEDDED_HOST_PID"),
+            Some(&std::process::id().to_string())
+        );
+        assert_eq!(
+            daemon_environment.get("CUA_DRIVER_MANAGED_POLICY_FILE"),
+            Some(&policy.display().to_string())
+        );
+        assert!(!daemon_environment.contains_key("HOME"));
+
+        let permission_root = state_dir.join("permission-probe");
+        for (name, expected) in [
+            ("HOME", permission_root.clone()),
+            ("USERPROFILE", permission_root.clone()),
+            ("XDG_CONFIG_HOME", permission_root.join("config")),
+            ("XDG_DATA_HOME", permission_root.join("data")),
+            ("XDG_STATE_HOME", permission_root.join("state")),
+            ("XDG_CACHE_HOME", permission_root.join("cache")),
+            ("TMPDIR", permission_root.join("tmp")),
+            ("CUA_DRIVER_RS_HOME", permission_root.join("driver")),
+            ("CUA_DRIVER_TELEMETRY_HOME", permission_root.join("telemetry")),
+        ] {
+            assert_eq!(
+                permission_environment.get(name),
+                Some(&expected.display().to_string()),
+                "{name} stays inside the test-owned permission root"
+            );
+        }
+        assert_eq!(
+            permission_environment.get("CUA_DRIVER_EMBEDDED_HOST_PID"),
+            Some(&std::process::id().to_string())
+        );
+        assert_eq!(
+            permission_environment.get("CUA_DRIVER_MANAGED_POLICY_FILE"),
+            Some(&policy.display().to_string())
+        );
+        assert_eq!(
+            permission_environment
+                .get("CUA_DRIVER_PERMISSION_MODE")
+                .map(String::as_str),
+            Some("standard")
+        );
+        assert!(!health_environment.contains_key("HOME"));
     }
 
     fn shell_quote(value: &Path) -> String {
         format!("'{}'", value.display().to_string().replace('\'', "'\"'\"'"))
+    }
+
+    fn write_environment_driver(root: &Path) -> PathBuf {
+        let path = root.join("fake-cua-driver");
+        let body = r#"#!/bin/sh
+set -eu
+case "${1:-}" in
+  serve)
+    /usr/bin/env > __DAEMON_ENV__
+    exit 0
+    ;;
+  mcp)
+    if [ "${2:-}" = "--direct" ]; then
+      /usr/bin/env > __PERMISSION_ENV__
+      while IFS= read -r line; do
+        case "$line" in
+          *'"id":1'*)
+            printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{}}'
+            ;;
+          *'"id":2'*)
+            printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"isError":true,"content":[{"type":"text","text":"permission fixture"}]}}'
+            break
+            ;;
+        esac
+      done
+    else
+      /usr/bin/env > __HEALTH_ENV__
+      while IFS= read -r line; do
+        case "$line" in
+          *'"id":1'*)
+            printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{}}'
+            ;;
+          *'"id":2'*)
+            printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"structuredContent":{"checks":[{"name":"tcc_accessibility","status":"pass"},{"name":"tcc_screen_recording","status":"pass"},{"name":"bundle_identity","status":"pass","data":{"identity_source":"parent_application"}},{"name":"ax_capability","status":"pass"}]}}}'
+            break
+            ;;
+        esac
+      done
+    fi
+    ;;
+  *)
+    exit 64
+    ;;
+esac
+"#
+        .replace("__DAEMON_ENV__", &shell_quote(&root.join("daemon.env")))
+        .replace(
+            "__PERMISSION_ENV__",
+            &shell_quote(&root.join("permission.env")),
+        )
+        .replace("__HEALTH_ENV__", &shell_quote(&root.join("health.env")));
+        std::fs::write(&path, body).expect("fake driver");
+        let mut permissions = std::fs::metadata(&path).expect("fake driver metadata").permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&path, permissions).expect("fake driver executable");
+        path
+    }
+
+    fn read_environment(path: &Path) -> BTreeMap<String, String> {
+        std::fs::read_to_string(path)
+            .unwrap_or_else(|error| panic!("{} is readable: {error}", path.display()))
+            .lines()
+            .map(|line| {
+                let (name, value) = line.split_once('=').expect("environment entry");
+                (name.to_owned(), value.to_owned())
+            })
+            .collect()
+    }
+
+    fn assert_shared_driver_environment(environment: &BTreeMap<String, String>) {
+        for (name, expected) in [
+            ("CUA_DRIVER_EMBEDDED", "1"),
+            ("CUA_DRIVER_RS_TELEMETRY_ENABLED", "0"),
+            ("CUA_DRIVER_RS_UPDATE_CHECK", "0"),
+        ] {
+            assert_eq!(environment.get(name).map(String::as_str), Some(expected));
+        }
     }
 
     fn write_permission_child(root: &Path, state_dir: &Path, policy: &Path, behavior: &str) -> PathBuf {

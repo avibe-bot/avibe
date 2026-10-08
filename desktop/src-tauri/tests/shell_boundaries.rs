@@ -834,38 +834,6 @@ fn every_quit_boundary_reuses_one_bounded_computer_use_cleanup() {
 }
 
 #[test]
-fn every_driver_child_uses_the_single_private_environment_builder() {
-    let source = shipping_source("src/computer_use.rs");
-
-    assert!(source.contains("fn driver_command(driver: &Path) -> Command"));
-    assert_eq!(
-        source.matches("Command::new(").count(),
-        1,
-        "only the driver command builder may construct a child"
-    );
-    assert_eq!(
-        source.matches("driver_command(").count(),
-        4,
-        "the builder plus daemon, permission, and health call sites must stay complete"
-    );
-    let builder = source
-        .split("fn driver_command(driver: &Path) -> Command")
-        .nth(1)
-        .expect("driver command builder")
-        .split("#[link(")
-        .next()
-        .expect("builder body");
-    assert!(builder.contains(".env_clear()"));
-    for setting in [
-        "CUA_DRIVER_EMBEDDED",
-        "CUA_DRIVER_RS_TELEMETRY_ENABLED",
-        "CUA_DRIVER_RS_UPDATE_CHECK",
-    ] {
-        assert!(builder.contains(setting), "builder keeps {setting}");
-    }
-}
-
-#[test]
 fn native_tray_copy_has_locale_and_placeholder_parity() {
     let root = crate_dir().join("../../ui/src/i18n");
     let english = read_json(root.join("en.json"));

@@ -180,70 +180,28 @@ async def test_claude_prompt_guidance_respects_the_effective_tool_allowlist(
     assert captured == [False, True]
 
 
-def test_empty_claude_agent_allowlist_stays_restricted_at_launch(
+@pytest.mark.parametrize(
+    ("allowed_tools", "exposes_computer_use"),
+    [
+        pytest.param(["Read", "Bash"], False, id="read-bash-only"),
+        pytest.param(
+            ["Read", "mcp__avibe_computer__click"],
+            True,
+            id="managed-tool",
+        ),
+        pytest.param(None, True, id="no-allowlist"),
+    ],
+)
+def test_selected_agent_computer_use_authority_matches_cold_and_cached_launch(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    allowed_tools: list[str] | None,
+    exposes_computer_use: bool,
 ) -> None:
-    """An explicit empty agent allowlist cannot widen during MCP injection."""
+    """Cold and cached launches render guidance only when they configure MCP."""
 
-    captured: dict[str, Any] = {}
-    spec = SimpleNamespace(
-        name="avibe_computer",
-        fingerprint="managed-fixture",
-        claude_config=lambda: {
-            "type": "stdio",
-            "command": "/fixture/python",
-            "args": ["-I", "/fixture/core/computer_server.py"],
-            "env": {},
-        },
-    )
-
-    class Client:
-        def __init__(self, options: Any) -> None:
-            captured["options"] = options
-
-        async def connect(self) -> None:
-            return None
-
-    def build_prompt(**kwargs: Any) -> str:
-        captured["include_computer_use"] = kwargs["include_computer_use"]
-        return "prompt"
-
-    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
-    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", Client)
-    monkeypatch.setattr(session_handler_module, "managed_mcp_server_spec", lambda: spec)
-    monkeypatch.setattr(
-        session_handler_module,
-        "build_system_prompt_injection",
-        build_prompt,
-    )
-    handler = SessionHandler(_Controller(tmp_path))
-    monkeypatch.setattr(
-        handler,
-        "_load_agent_file",
-        lambda *_args: {"prompt": "restricted", "tools": []},
-    )
-
-    asyncio.run(
-        handler.get_or_create_claude_session(
-            MessageContext(user_id="U123", channel_id="C123"),
-            subagent_name="restricted",
-        )
-    )
-
-    options = captured["options"]
-    assert options.allowed_tools == []
-    assert options.mcp_servers == {"avibe_computer": spec.claude_config()}
-    assert captured["include_computer_use"] is False
-
-
-def test_injected_agent_prompt_keeps_cold_selected_agent_allowlist(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Prompt injection cannot skip the selected agent's tool authority."""
-
-    captured: dict[str, Any] = {}
+    clients: list[Any] = []
+    rendered_prompts: list[str] = []
     loads = 0
     spec = SimpleNamespace(
         name="avibe_computer",
@@ -258,24 +216,33 @@ def test_injected_agent_prompt_keeps_cold_selected_agent_allowlist(
 
     class Client:
         def __init__(self, options: Any) -> None:
-            captured["options"] = options
+            self.options = options
+            self.disconnects = 0
+            clients.append(self)
 
         async def connect(self) -> None:
             return None
 
+        async def disconnect(self) -> None:
+            self.disconnects += 1
+
+    original_prompt_builder = session_handler_module.build_system_prompt_injection
+
     def build_prompt(**kwargs: Any) -> str:
-        captured["include_computer_use"] = kwargs["include_computer_use"]
-        captured["agent_instructions"] = kwargs["agent_instructions"]
-        return "resolved prompt"
+        prompt = original_prompt_builder(**kwargs)
+        rendered_prompts.append(prompt)
+        return prompt
 
     def load_agent(*_args: Any) -> dict[str, Any]:
         nonlocal loads
         loads += 1
-        return {
+        agent = {
             "prompt": "Agent file prompt must not replace the injected prompt.",
-            "tools": ["Read", "Bash"],
             "model": "inherit",
         }
+        if allowed_tools is not None:
+            agent["tools"] = allowed_tools
+        return agent
 
     monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
     monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", Client)
@@ -288,20 +255,38 @@ def test_injected_agent_prompt_keeps_cold_selected_agent_allowlist(
     handler = SessionHandler(_Controller(tmp_path))
     monkeypatch.setattr(handler, "_load_agent_file", load_agent)
 
-    asyncio.run(
-        handler.get_or_create_claude_session(
-            MessageContext(user_id="U123", channel_id="C123"),
+    async def run() -> tuple[Any, Any]:
+        context = MessageContext(user_id="U123", channel_id="C123")
+        first = await handler.get_or_create_claude_session(
+            context,
             subagent_name="restricted",
             agent_system_prompt="Injected owner policy.",
         )
-    )
+        second = await handler.get_or_create_claude_session(
+            context,
+            subagent_name="restricted",
+            agent_system_prompt="Injected owner policy.",
+        )
+        return first, second
 
-    options = captured["options"]
-    assert loads == 1
-    assert options.allowed_tools == ["Read", "Bash"]
-    assert options.mcp_servers == {"avibe_computer": spec.claude_config()}
-    assert captured["include_computer_use"] is False
-    assert captured["agent_instructions"] == "Injected owner policy."
+    first, second = asyncio.run(run())
+
+    assert second is first
+    assert len(clients) == 1
+    assert clients[0].disconnects == 0
+    assert loads == 2
+    assert len(rendered_prompts) == 2
+    assert all("Injected owner policy." in prompt for prompt in rendered_prompts)
+    assert all(
+        ("## Computer use" in prompt) is exposes_computer_use
+        for prompt in rendered_prompts
+    )
+    assert getattr(first.options, "allowed_tools", None) == allowed_tools
+    assert getattr(first.options, "mcp_servers", None) == (
+        {"avibe_computer": spec.claude_config()}
+        if exposes_computer_use
+        else None
+    )
 
 
 class _StubClaudeAgentOptions:

@@ -108,16 +108,14 @@ def apply_managed_computer_use_to_claude_options(
 ) -> list[str] | None:
     """Translate the shared MCP spec without widening an explicit allowlist."""
 
-    if computer_use_spec is None:
+    if not claude_allowlist_exposes_computer_use(
+        agent_allowed_tools,
+        computer_use_spec,
+    ):
         return agent_allowed_tools
     option_kwargs["mcp_servers"] = {
         computer_use_spec.name: computer_use_spec.claude_config()
     }
-    if agent_allowed_tools is None:
-        return None
-    # An explicit allowlist is an authority decision made by the agent owner.
-    # The managed server can be configured for the launch, but it must not add
-    # tools that the caller deliberately excluded.
     return agent_allowed_tools
 
 

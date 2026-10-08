@@ -1062,6 +1062,11 @@ redirected to test-owned fakes.
 
 ## Owner decision ledger
 
+- **2026-10-08 — Workbench support ownership follow-up.** The owner accepts
+  terminal-started Runtimes advertising the desktop shell's shared Computer Use
+  status as a Phase 1 limitation. Track `a per-Runtime shell-adoption signal for
+  Workbench support` as a follow-up rather than changing the support predicate
+  in this delivery.
 - **2026-10-08 — acquire-to-forward lease ownership.** The earlier deferral of
   pre-forward lease protection is superseded: a 180 s proxy/session request can
   outlive the 60 s lease TTL. One ownership-aware heartbeat now covers
