@@ -265,6 +265,11 @@ fn computer_use_label(catalog: &NativeComputerUseCatalog, view: &computer_use::M
     }
 }
 
+#[cfg(target_os = "macos")]
+fn computer_use_control_enabled(view: &computer_use::MenuView) -> bool {
+    !view.initialization_error
+}
+
 #[cfg(feature = "bundled-runtime")]
 fn native_uninstall_catalog_for_locales(locales: impl IntoIterator<Item = String>) -> NativeUninstallCatalog {
     native_catalog_for_locales(locales).uninstall
@@ -422,7 +427,7 @@ fn install_native_tray(app: &AppHandle) -> tauri::Result<()> {
             &computer_use_view,
         ),
         true,
-        computer_use_view.enabled,
+        computer_use_control_enabled(&computer_use_view),
         None::<&str>,
     )?;
     let updater = app.state::<updater::Updater>();
@@ -648,6 +653,7 @@ fn refresh_computer_use_control(app: &AppHandle) {
         if menus
             .computer_use
             .set_text(computer_use_label(&catalog, &view))
+            .and_then(|()| menus.computer_use.set_enabled(computer_use_control_enabled(&view)))
             .and_then(|()| menus.computer_use.set_checked(view.enabled))
             .is_err()
         {
@@ -2321,7 +2327,7 @@ mod tests {
             ..Default::default()
         };
 
-        assert!(!view.enabled);
+        assert!(!computer_use_control_enabled(&view));
         assert_eq!(computer_use_label(&catalog, &view), catalog.initialization_failed);
     }
 

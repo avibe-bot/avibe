@@ -861,11 +861,10 @@ mod tests {
         let stored = record(ComputerUsePhase::Ready, true);
         let mut lifecycle = ComputerUseLifecycle::from_record(&stored);
         assert_eq!(lifecycle.reason(), Some(RUNTIME_UNAVAILABLE_REASON));
-        assert_eq!(
+        assert!(
             lifecycle
                 .capabilities(RuntimeSupport::Unsupported, Grants::all())
-                .write_state,
-            true
+                .write_state
         );
         assert_eq!(lifecycle.reason(), Some(RUNTIME_TOO_OLD_REASON));
 

@@ -17,6 +17,7 @@ from core.computer_server import (
     ComputerUseServer,
     DesktopLeaseManager,
     JsonRpcUpstream,
+    UpstreamUnavailable,
     _fold_tool_result,
     _validate_input,
 )
@@ -84,9 +85,13 @@ class FakeUpstream:
         self.inflight = 0
         self.max_inflight = 0
         self.block: asyncio.Event | None = None
+        self.fail_transport = False
+        self.close_calls = 0
 
     async def request(self, method: str, params: Mapping[str, Any]) -> dict[str, Any]:
         assert method == "tools/call"
+        if self.fail_transport:
+            raise UpstreamUnavailable("transport failed")
         copied = json.loads(json.dumps(params))
         self.calls.append((method, copied))
         self.inflight += 1
@@ -109,6 +114,7 @@ class FakeUpstream:
         return None
 
     async def close(self) -> None:
+        self.close_calls += 1
         self.alive = False
 
 
@@ -527,6 +533,90 @@ async def test_proxy_replacement_clears_observations(tmp_path: Path) -> None:
         {"session": "ses-a", "pid": 7, "window_id": 9, "x": 1, "y": 2},
     )
     assert "observe_first" in stale["content"][0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_transport_failure_discards_an_alive_proxy_and_its_observations(
+    tmp_path: Path,
+) -> None:
+    """A broken reader cannot be reused merely because its process is alive."""
+
+    state_path, state = _state(tmp_path)
+    upstreams: list[FakeUpstream] = []
+
+    async def factory(_state):
+        upstream = FakeUpstream()
+        upstreams.append(upstream)
+        return upstream
+
+    server = ComputerUseServer(
+        state_path=state_path,
+        status_reader=lambda: ComputerUseStatus("ready", None, state),
+        upstream_factory=factory,
+        lease_manager=FakeLeaseManager(),  # type: ignore[arg-type]
+    )
+    await server.call_tool(
+        "get_window_state",
+        {"session": "ses-a", "pid": 7, "window_id": 9},
+    )
+    upstreams[0].fail_transport = True
+    failed = await server.call_tool("list_apps", {"session": "ses-a"})
+    assert "upstream_unavailable" in failed["content"][0]["text"]
+    assert upstreams[0].close_calls == 1
+    assert not upstreams[0].alive
+
+    upstreams[0].fail_transport = False
+    recovered = await server.call_tool("list_apps", {"session": "ses-a"})
+    assert not recovered.get("isError")
+    assert len(upstreams) == 2
+    stale = await server.call_tool(
+        "click",
+        {"session": "ses-a", "pid": 7, "window_id": 9, "x": 1, "y": 2},
+    )
+    assert "observe_first" in stale["content"][0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_late_failure_from_old_proxy_preserves_new_proxy_observations(
+    tmp_path: Path,
+) -> None:
+    """An old request cannot invalidate a replacement it no longer owns."""
+
+    state_path, first_state = _state(tmp_path)
+    current = first_state
+    upstreams: list[FakeUpstream] = []
+
+    async def factory(_state):
+        upstream = FakeUpstream()
+        upstreams.append(upstream)
+        return upstream
+
+    server = ComputerUseServer(
+        state_path=state_path,
+        status_reader=lambda: ComputerUseStatus("ready", None, current),
+        upstream_factory=factory,
+        lease_manager=FakeLeaseManager(),  # type: ignore[arg-type]
+    )
+    await server.call_tool("list_apps", {"session": "ses-a"})
+    old = upstreams[0]
+
+    current = ComputerUseState(**{**first_state.__dict__, "generation": 2})
+    observed = await server.call_tool(
+        "get_window_state",
+        {"session": "ses-a", "pid": 7, "window_id": 9},
+    )
+    assert not observed.get("isError")
+    replacement = upstreams[1]
+
+    await server._discard_upstream(old)
+
+    assert server._upstream is replacement
+    assert replacement.alive
+    clicked = await server.call_tool(
+        "click",
+        {"session": "ses-a", "pid": 7, "window_id": 9, "x": 1, "y": 2},
+    )
+    assert not clicked.get("isError")
 
 
 @pytest.mark.asyncio

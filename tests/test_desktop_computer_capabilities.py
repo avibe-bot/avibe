@@ -9,7 +9,7 @@ import pytest
 
 from core import internal_server
 from core.computer_use import ComputerUseStatus
-from vibe import internal_client
+from vibe import internal_client, ui_server
 from vibe.ui_server import app
 
 
@@ -117,13 +117,30 @@ def test_workbench_status_uses_the_shared_effective_status_contract(
         "core.computer_use.effective_computer_use_status",
         lambda: ComputerUseStatus("needs_permission", "screen_recording"),
     )
+    monkeypatch.setattr(ui_server, "_desktop_computer_use_supported", lambda: True)
     response = app.test_client().get(
         "/api/desktop/computer-use/status",
         base_url="http://127.0.0.1:5123",
     )
     assert response.status_code == 200
     assert response.get_json() == {
+        "supported": True,
         "status": "needs_permission",
         "reason": "screen_recording",
+    }
+    assert response.headers["Cache-Control"] == "no-store"
+
+
+def test_workbench_status_hides_computer_use_on_unsupported_hosts(monkeypatch) -> None:
+    monkeypatch.setattr(ui_server, "_desktop_computer_use_supported", lambda: False)
+    response = app.test_client().get(
+        "/api/desktop/computer-use/status",
+        base_url="http://127.0.0.1:5123",
+    )
+    assert response.status_code == 200
+    assert response.get_json() == {
+        "supported": False,
+        "status": "unavailable",
+        "reason": "unsupported_host",
     }
     assert response.headers["Cache-Control"] == "no-store"

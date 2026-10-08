@@ -289,11 +289,8 @@ impl RuntimeState {
         let shell_lock = ComputerUseShellLock::acquire(&paths.state_dir.join(COMPUTER_USE_LOCK_FILE))?;
         let store = ComputerUseStateStore::new(paths.state_file.clone());
         let stored = store.read();
-        let lifecycle = match &stored {
-            StoredComputerUseState::Current(record) => ComputerUseLifecycle::from_record(record),
-            StoredComputerUseState::Missing | StoredComputerUseState::Invalid(_) => ComputerUseLifecycle::off(),
-        };
         let assets_valid = paths.assets_valid();
+        let lifecycle = restored_lifecycle(&stored, assets_valid);
         let mut runtime = Self {
             app,
             events,
@@ -803,6 +800,20 @@ impl RuntimeState {
         });
         crate::refresh_computer_use_control(&self.app);
     }
+}
+
+fn restored_lifecycle(stored: &StoredComputerUseState, assets_valid: bool) -> ComputerUseLifecycle {
+    let mut lifecycle = match stored {
+        StoredComputerUseState::Current(record) => ComputerUseLifecycle::from_record(record),
+        StoredComputerUseState::Missing | StoredComputerUseState::Invalid(_) => ComputerUseLifecycle::off(),
+    };
+    if !assets_valid && lifecycle.enabled() {
+        // A persisted enablement must never turn an incomplete package into an
+        // automatic daemon launch. Keep the feature enabled so the user can
+        // turn it off, but fail closed with the same visible asset error.
+        lifecycle.set_error("assets_invalid");
+    }
+    lifecycle
 }
 
 fn retry_is_current(id: u64, current_id: u64, lifecycle: &ComputerUseLifecycle) -> bool {
@@ -2038,6 +2049,37 @@ done
         assert_eq!(
             configured_path_with_value(bundled, Some(injected.clone().into_os_string()), true),
             injected
+        );
+    }
+
+    #[test]
+    fn restored_enablement_with_invalid_assets_cannot_spawn() {
+        let record = ComputerUseRecord {
+            schema_version: COMPUTER_USE_SCHEMA_VERSION,
+            enabled: true,
+            state: ComputerUsePhase::NeedsRuntime,
+            reason: Some("runtime_unavailable".to_owned()),
+            shell_pid: 1,
+            instance_id: "restored-shell".to_owned(),
+            generation: 4,
+            driver_version: COMPUTER_USE_DRIVER_VERSION.to_owned(),
+            tool_snapshot: ToolSnapshot {
+                path: PathBuf::from("/tmp/tools.json"),
+                sha256: COMPUTER_USE_TOOL_SNAPSHOT_SHA256.to_owned(),
+            },
+            socket_path: None,
+            proxy_executable: None,
+            host_bundle_id: None,
+        };
+        let mut lifecycle = restored_lifecycle(&StoredComputerUseState::Current(record), false);
+
+        assert!(lifecycle.enabled());
+        assert_eq!(lifecycle.phase(), ComputerUsePhase::Error);
+        assert_eq!(lifecycle.reason(), Some("assets_invalid"));
+        assert!(
+            !lifecycle
+                .capabilities(RuntimeSupport::Supported, Grants::all())
+                .spawn_daemon
         );
     }
 

@@ -47,7 +47,7 @@ def test_claude_translation_preserves_native_config_and_agent_tool_allowlist() -
         }
     }
     assert "strict_mcp_config" not in options
-    assert tools == ["Read", "Bash", "mcp__avibe_computer__*"]
+    assert tools == ["Read", "Bash"]
 
     no_agent_allowlist: dict = {}
     assert (

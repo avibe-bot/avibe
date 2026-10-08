@@ -15,6 +15,7 @@ import secrets
 import shutil
 import socket
 import subprocess
+import sys
 import threading
 import time
 from collections import OrderedDict, deque
@@ -84,6 +85,10 @@ if TYPE_CHECKING:
     from vibe.runtime import DesktopRuntimeClaimRefused
 
 logger = logging.getLogger(__name__)
+
+
+def _desktop_computer_use_supported() -> bool:
+    return sys.platform == "darwin"
 
 
 class _ShowEventDispatchOutcome(str, Enum):
@@ -3373,11 +3378,23 @@ async def desktop_capabilities():
 async def desktop_computer_use_status():
     """Read the shell/daemon status from the shared desktop state contract."""
 
+    if not _desktop_computer_use_supported():
+        response_payload = jsonify(
+            {
+                "supported": False,
+                "status": "unavailable",
+                "reason": "unsupported_host",
+            }
+        )
+        response_payload.headers["Cache-Control"] = "no-store"
+        return response_payload
+
     from core.computer_use import effective_computer_use_status
 
     status = await asyncio.to_thread(effective_computer_use_status)
     response_payload = jsonify(
         {
+            "supported": True,
             "status": status.status,
             "reason": status.reason,
         }

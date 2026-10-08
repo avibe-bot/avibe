@@ -3,7 +3,8 @@
 import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { ComputerUseStatusLine, computerUseStatusCopy } from './ComputerUseStatusLine';
+import { ComputerUseStatusLine } from './ComputerUseStatusLine';
+import { computerUseStatusCopy } from './computerUseStatusCopy';
 
 const apiFetch = vi.hoisted(() => vi.fn());
 
@@ -71,5 +72,19 @@ describe('ComputerUseStatusLine', () => {
       '/api/desktop/computer-use/status',
       { cache: 'no-store' },
     );
+  });
+
+  it('does not render the macOS line on an unsupported host', async () => {
+    apiFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({ supported: false, status: 'unavailable', reason: 'unsupported_host' }),
+    });
+
+    render(<ComputerUseStatusLine />);
+
+    await waitFor(() => {
+      expect(apiFetch).toHaveBeenCalled();
+    });
+    expect(screen.queryByTestId('computer-use-status')).toBeNull();
   });
 });

@@ -695,6 +695,23 @@ class ComputerUseServer:
                 session_state.observed_windows.clear()
             return upstream
 
+    async def _discard_upstream(self, upstream: Upstream) -> None:
+        """Drop and close the exact transport that reported a failure."""
+
+        async with self._upstream_lock:
+            current = self._upstream is upstream
+            if current:
+                self._upstream = None
+                self._upstream_daemon_key = None
+                for session_state in self._sessions.values():
+                    session_state.active_proxy_serial = None
+                    session_state.active_daemon_key = None
+                    session_state.observed_windows.clear()
+        # Close even when another transport has already replaced the shared
+        # slot. The failed process still belongs to this request and must not
+        # remain alive merely because it lost the race to replacement.
+        await upstream.close()
+
     async def _upstream_call(
         self,
         upstream: Upstream,
@@ -798,6 +815,7 @@ class ComputerUseServer:
         async with lock:
             lease: Lease | None = None
             setup_complete = False
+            upstream: Upstream | None = None
             try:
                 _validate_input(name, arguments)
                 status = await asyncio.to_thread(self._status_reader)
@@ -876,10 +894,8 @@ class ComputerUseServer:
             except asyncio.CancelledError:
                 raise
             except UpstreamUnavailable:
-                async with self._upstream_lock:
-                    if self._upstream is not None and not self._upstream.alive:
-                        self._upstream = None
-                        self._upstream_daemon_key = None
+                if upstream is not None:
+                    await self._discard_upstream(upstream)
                 return _error_result(
                     "upstream_unavailable",
                     "The computer-use proxy exited. Observe again before retrying.",
