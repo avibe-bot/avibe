@@ -583,7 +583,15 @@ class UnavailableEngineAdapter:
     async def sync_sources(self, bindings) -> None:
         raise EngineUnavailableError
 
-    async def discover_models(self, vendor: str, protocol: str, base_url: str | None, credential_ref: str):
+    async def discover_models(
+        self,
+        vendor: str,
+        protocol: str,
+        base_url: str | None,
+        credential_ref: str,
+        *,
+        start_engine: bool = True,
+    ):
         raise EngineUnavailableError
 
     async def observe_source(
@@ -1813,9 +1821,10 @@ class ModelHubService:
         viewed, self._viewed_discovery_task = self._viewed_discovery_task, None
         if self._background_discovery_stop is not None:
             self._background_discovery_stop.set()
-        # Background listings never start the engine, so cancelling one cannot
-        # leave a starting engine beneath `adapter.stop()`; shutdown need not
-        # wait for an upstream listing.
+        # Background listings never start the engine, and an upstream listing
+        # is cancelled outright. An engine listing's worker is owned and
+        # bounded, so these return only once nothing still uses the engine
+        # that `adapter.stop()` retires.
         retiring = [task for task in (discovery, viewed) if task is not None and not task.done()]
         for task in retiring:
             task.cancel()

@@ -139,6 +139,8 @@ _HUB_SUBSCRIPTION_PROTOCOLS = {
 _INSTALL_RECOVERY_WAIT_SECONDS = 30.0
 _INSTALL_RECOVERY_INITIAL_DELAY_SECONDS = 0.25
 _INSTALL_RECOVERY_MAX_DELAY_SECONDS = 4.0
+# The engine answers a credential's model list from memory.
+_ENGINE_MODEL_LISTING_TIMEOUT_SECONDS = 5.0
 
 
 logger = logging.getLogger(__name__)
@@ -2231,14 +2233,18 @@ class CLIProxyEngineAdapter:
             if start_engine:
                 client = await asyncio.to_thread(self.supervisor.client)
             else:
-                client = await asyncio.to_thread(self.supervisor.client_if_running)
+                client = await run_owned_in_thread(self.supervisor.client_if_running)
                 if client is None:
                     raise ModelDiscoveryError("engine is not running")
-            payload = await asyncio.to_thread(
+            # Owned and bounded: a cancelled listing (Hub shutdown) returns only
+            # once its worker has stopped using the engine, within the
+            # controller's runtime-work shutdown grace.
+            payload = await run_owned_in_thread(
                 client.management_request,
                 "GET",
                 "/auth-files/models",
                 query={"name": str(metadata["auth_name"])},
+                timeout=_ENGINE_MODEL_LISTING_TIMEOUT_SECONDS,
             )
             prefix = metadata.get("prefix")
             return _discovered_models(

@@ -12,6 +12,7 @@ import pytest
 from config.v2_config import ModelHubModelConfig, ModelHubSourceStateConfig
 from core.handlers.model_hub.errors import ModelDiscoveryError
 from core.handlers.model_hub.rpc import dispatch_model_hub_rpc
+from core.handlers.model_hub.service import UnavailableEngineAdapter
 from tests.test_model_hub_resolution import FakeAdapter, _config, _service, _source
 from tests.test_model_hub_retry_policy import Clock
 
@@ -126,6 +127,20 @@ def test_background_failure_keeps_source_untouched_and_backs_off_until_a_success
     assert attempts_after(int(7.2 * 60)) == 1
     assert attempts_after(14) == 0
     assert attempts_after(1) == 1
+
+
+def test_background_listing_without_an_engine_fails_as_engine_down(tmp_path, caplog):
+    """MH-DISCOVERY-SCHEDULE-001: the fail-closed adapter answers a background listing as an engine failure."""
+
+    service, store, _, _ = _background(tmp_path, [_hub_source("src_noengine")], UnavailableEngineAdapter())
+
+    with caplog.at_level(logging.WARNING, logger="core.handlers.model_hub.service"):
+        _refresh(service)
+
+    assert [record.getMessage() for record in caplog.records] == [
+        "Model Hub background discovery failed for Source src_noengine (engine_down); retrying in 15 minutes"
+    ]
+    assert _model_ids(store) == [MENU_MODEL]
 
 
 @pytest.mark.parametrize(

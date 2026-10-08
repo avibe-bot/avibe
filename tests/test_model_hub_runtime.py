@@ -8428,6 +8428,49 @@ def test_background_oauth_discovery_never_starts_the_engine(tmp_path: Path, engi
         assert isinstance(listed, ModelDiscoveryError)
 
 
+def test_cancelled_background_oauth_listing_returns_after_its_engine_worker(tmp_path: Path) -> None:
+    """MH-DISCOVERY-SCHEDULE-001: shutdown cannot stop the engine beneath a cancelled listing."""
+
+    from core.controller import _RUNTIME_WORK_SHUTDOWN_GRACE_SECONDS
+
+    entered, release = threading.Event(), threading.Event()
+    timeouts: list[float | None] = []
+
+    class Client:
+        def management_request(self, method, path, *, query=None, payload=None, timeout=None):
+            timeouts.append(timeout)
+            entered.set()
+            release.wait(5)
+            return {"models": [{"id": "model-id"}]}
+
+    class Supervisor:
+        def client_if_running(self):
+            return Client()
+
+    async def run() -> bool:
+        store = EngineStateStore(tmp_path / "state")
+        store.prepare_instance("install-1")
+        (store.auth_dir / "claude-account.json").write_text("{}", encoding="utf-8")
+        credential_ref = store.bind_oauth_credential("src_fixture123", "anthropic", "claude-account.json")
+        adapter = CLIProxyEngineAdapter(supervisor=Supervisor(), state_store=store)  # type: ignore[arg-type]
+        listing = asyncio.create_task(
+            adapter.discover_models("anthropic", "anthropic", None, credential_ref, start_engine=False)
+        )
+        assert await asyncio.to_thread(entered.wait, 5)
+        listing.cancel()
+        done, _ = await asyncio.wait({listing}, timeout=0.2)
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await listing
+        return bool(done)
+
+    returned_while_worker_ran = asyncio.run(run())
+
+    assert returned_while_worker_ran is False
+    assert timeouts and timeouts[0] is not None
+    assert timeouts[0] < _RUNTIME_WORK_SHUTDOWN_GRACE_SECONDS
+
+
 @pytest.mark.parametrize(
     "oauth_record_case",
     [
