@@ -247,6 +247,8 @@ describe('AuthGuard General Settings over setup', () => {
       return <div>at {pathname}</div>;
     };
 
+    const addListener = vi.spyOn(window, 'addEventListener');
+
     try {
       render(
         <MemoryRouter initialEntries={['/setup']}>
@@ -259,6 +261,9 @@ describe('AuthGuard General Settings over setup', () => {
         </MemoryRouter>,
       );
       expect(await screen.findByText('at /setup')).toBeTruthy();
+      // The command listens from a passive effect, which can still be pending after the
+      // commit that shows the wizard; the shell's event is only answered once it listens.
+      await waitFor(() => expect(addListener).toHaveBeenCalledWith(DESKTOP_OPEN_SETTINGS_EVENT, expect.any(Function)));
 
       act(() => {
         window.dispatchEvent(new Event(DESKTOP_OPEN_SETTINGS_EVENT, { cancelable: true }));
@@ -268,6 +273,7 @@ describe('AuthGuard General Settings over setup', () => {
       expect(mounts.count).toBe(1);
       expect(api.getConfig).toHaveBeenCalledOnce();
     } finally {
+      addListener.mockRestore();
       Reflect.deleteProperty(window, '__AVIBE_DESKTOP_SHELL__');
     }
   });
