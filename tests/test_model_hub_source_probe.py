@@ -561,7 +561,7 @@ def test_discovery_deadline_saves_manual_inventory_and_drains_cancelled_work(tmp
     async def scenario():
         cancelled = asyncio.Event()
 
-        async def stalled(*args):
+        async def stalled(*args, **_kwargs):
             try:
                 await asyncio.Event().wait()
             finally:

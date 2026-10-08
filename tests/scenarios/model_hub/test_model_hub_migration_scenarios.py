@@ -186,6 +186,8 @@ class MigrationAdapter:
         protocol: str,
         base_url: str | None,
         credential_ref: str,
+        *,
+        start_engine: bool = True,
     ) -> tuple[DiscoveredModel, ...]:
         return (DiscoveredModel(id=f"{vendor}-model"),)
 

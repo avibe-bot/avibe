@@ -380,7 +380,7 @@ class FakeHubOAuthAdapter(UnavailableEngineAdapter):
     async def sync_sources(self, bindings) -> None:
         self.synced.append(tuple(bindings))
 
-    async def discover_models(self, vendor, protocol, base_url, credential_ref):
+    async def discover_models(self, vendor, protocol, base_url, credential_ref, *, start_engine=True):
         return (DiscoveredModel(id="claude-opus-4-6"),)
 
     async def observe_source(

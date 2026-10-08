@@ -3952,7 +3952,7 @@ def test_hub_oauth_model_free_observation_closed_loop(
     }
     state_store._secure_write_json(state_store.auth_dir / auth_name, grant)
 
-    def management_request(method, path, *, query=None, payload=None):
+    def management_request(method, path, *, query=None, payload=None, timeout=None):
         if path == "/auth-files":
             return {"files": [{
                 "id": "codex-test", "auth_index": "auth-index-test",

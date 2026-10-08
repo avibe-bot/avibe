@@ -276,6 +276,21 @@ AGENT_CHAIN_CONTRACT_VERSION = 10
 PROBE_RESULT_CONTRACT_VERSION = 10
 _SOURCE_DISCOVERY_TIMEOUT_SECONDS = 15
 _SOURCE_PROBE_TIMEOUT_SECONDS = 60
+# Background inventory refresh. The first tick doubles as the startup delay, so
+# a stale Source catches up shortly after boot without boot waiting on upstream.
+_BACKGROUND_DISCOVERY_INTERVAL = timedelta(hours=6)
+_BACKGROUND_DISCOVERY_JITTER = 0.2
+_BACKGROUND_DISCOVERY_TICK = timedelta(minutes=5)
+_BACKGROUND_DISCOVERY_RETRY_BASE = timedelta(minutes=15)
+_BACKGROUND_DISCOVERY_RETRY_CAP = timedelta(hours=6)
+# A viewer of Source inventory asks for listings at most this old.
+_VIEWED_DISCOVERY_AGE = timedelta(minutes=30)
+# A credential waiting on the user cannot list models until the user acts.
+_UNDISCOVERABLE_SOURCE_DETAILS = frozenset({
+    "models.source.needs_action.oauth_expired",
+    "models.source.needs_action.credential_revoked",
+    "models.source.needs_action.account_banned",
+})
 _REORDER_ORDER_UNSET = object()
 # Settlement generations are minted per attempt start and live only in this
 # runtime's ledger, which restarts with the process. Every generation this
@@ -568,7 +583,15 @@ class UnavailableEngineAdapter:
     async def sync_sources(self, bindings) -> None:
         raise EngineUnavailableError
 
-    async def discover_models(self, vendor: str, protocol: str, base_url: str | None, credential_ref: str):
+    async def discover_models(
+        self,
+        vendor: str,
+        protocol: str,
+        base_url: str | None,
+        credential_ref: str,
+        *,
+        start_engine: bool = True,
+    ):
         raise EngineUnavailableError
 
     async def observe_source(
@@ -651,6 +674,26 @@ AttemptObserver = Callable[
     ],
     None,
 ]
+
+
+@dataclass(frozen=True)
+class _DiscoveryRetry:
+    identity: tuple
+    failed_at: datetime
+    delay: timedelta
+
+
+def _background_discovery_period(source_id: str) -> timedelta:
+    """A stable per-Source period within the jitter window around the interval.
+
+    Sources listed together then drift apart instead of refreshing in lockstep,
+    and a restart keeps each Source's phase.
+    """
+
+    fraction = int.from_bytes(hashlib.sha256(source_id.encode()).digest()[:8], "big") / 2**64
+    return _BACKGROUND_DISCOVERY_INTERVAL * (
+        1 - _BACKGROUND_DISCOVERY_JITTER + 2 * _BACKGROUND_DISCOVERY_JITTER * fraction
+    )
 
 
 def _same_json_value(left: object, right: object) -> bool:
@@ -1089,6 +1132,15 @@ class ModelHubService:
         self._runtime_install_reconciled = False
         self._runtime_lifecycle_lock = asyncio.Lock()
         self._runtime_resume_task: asyncio.Task[None] | None = None
+        self._background_discovery_task: asyncio.Task[None] | None = None
+        self._background_discovery_stop: asyncio.Event | None = None
+        # Process-local schedule state: an unchanged listing persists nothing,
+        # and a restart rediscovers stale Sources one tick after startup.
+        self._background_discovery_checked: dict[str, datetime] = {}
+        self._background_discovery_retries: dict[str, _DiscoveryRetry] = {}
+        self._background_discovery_caught_up = False
+        self._background_discovery_inflight: set[str] = set()
+        self._viewed_discovery_task: asyncio.Task[None] | None = None
         self._builtin_snapshot_generations: dict[BackendName, str] = {}
         self._builtin_snapshot_cache: dict[BackendName, list[dict[str, Any]]] = {}
         self._pending_builtin_catalog_refresh: set[BackendName] = set()
@@ -1765,6 +1817,18 @@ class ModelHubService:
             # that cancellation cannot stop, and the adapter must not stop
             # beneath it. A retired resume never starts the engine.
             await await_owned_task(resume)
+        discovery, self._background_discovery_task = self._background_discovery_task, None
+        viewed, self._viewed_discovery_task = self._viewed_discovery_task, None
+        if self._background_discovery_stop is not None:
+            self._background_discovery_stop.set()
+        # Background listings never start the engine, and an upstream listing
+        # is cancelled outright. An engine listing's worker is owned and
+        # bounded, so these return only once nothing still uses the engine
+        # that `adapter.stop()` retires.
+        retiring = [task for task in (discovery, viewed) if task is not None and not task.done()]
+        for task in retiring:
+            task.cancel()
+        await asyncio.gather(*retiring, return_exceptions=True)
         async with self._runtime_lifecycle_lock:
             await self.adapter.stop()
 
@@ -1877,7 +1941,12 @@ class ModelHubService:
             return False
         return True
 
-    async def _discover(self, source: ModelHubSourceConfig) -> list[DiscoveredModel]:
+    async def _discover(
+        self,
+        source: ModelHubSourceConfig,
+        *,
+        start_engine: bool = True,
+    ) -> list[DiscoveredModel]:
         if not source.credential_ref:
             return [
                 DiscoveredModel(id=model.id)
@@ -1891,6 +1960,7 @@ class ModelHubService:
                     source.protocol,
                     source.base_url,
                     source.credential_ref,
+                    start_engine=start_engine,
                 )
             )
         )
@@ -4111,6 +4181,24 @@ class ModelHubService:
                 if normalized_model_hub_override(route) is None:
                     agent.routes.pop(menu_model)
 
+    def _inventory_removed_hops(
+        self,
+        previous: ModelHubConfig,
+        updated: ModelHubConfig,
+    ) -> list[dict]:
+        # Inventory evidence narrows speculative candidates without deleting routes.
+        return [
+            item for item in self._removed_effective_hops(previous, updated)
+            if not (
+                effective_model_route(
+                    previous, cast(BackendName, item["backend"]), item["menu_model"],
+                ).route_origin == "passthrough"
+                and effective_model_route(
+                    updated, cast(BackendName, item["backend"]), item["menu_model"],
+                ).route_origin == "automatic"
+            )
+        ]
+
     def _guard_inventory_mutation(
         self,
         previous: ModelHubConfig,
@@ -4123,19 +4211,8 @@ class ModelHubService:
     ) -> tuple[list[dict], list[dict]]:
         invalidated = self._invalidated_route_hops(updated, source_id)
         self._prune_invalidated_route_hops(updated, invalidated)
-        # Inventory evidence narrows speculative candidates without deleting routes.
         # Keep explicit invalidations and newly introduced supply gaps guarded below.
-        would_remove_hops = [
-            item for item in self._removed_effective_hops(previous, updated)
-            if not (
-                effective_model_route(
-                    previous, cast(BackendName, item["backend"]), item["menu_model"],
-                ).route_origin == "passthrough"
-                and effective_model_route(
-                    updated, cast(BackendName, item["backend"]), item["menu_model"],
-                ).route_origin == "automatic"
-            )
-        ]
+        would_remove_hops = self._inventory_removed_hops(previous, updated)
         would_remove_hops.extend(item for item in invalidated if item not in would_remove_hops)
         would_interrupt = self._introduced_interruptions(previous, updated)
         self._require_guard_plan(
@@ -4293,6 +4370,262 @@ class ModelHubService:
                 "removed_hops": removed_hops,
                 "interrupted": would_interrupt,
             }
+
+    def start_background_discovery(self) -> None:
+        """Keep Hub Source inventories current until `stop()` retires the schedule."""
+
+        task = self._background_discovery_task
+        if task is not None and not task.done():
+            return
+        stopping = asyncio.Event()
+        self._background_discovery_stop = stopping
+        self._background_discovery_task = asyncio.create_task(
+            self._background_discovery_loop(stopping),
+            name="model-hub-background-discovery",
+        )
+
+    async def _background_discovery_loop(self, stopping: asyncio.Event) -> None:
+        while True:
+            try:
+                await asyncio.wait_for(
+                    stopping.wait(), _BACKGROUND_DISCOVERY_TICK.total_seconds(),
+                )
+                return
+            except asyncio.TimeoutError:
+                pass
+            await self._refresh_due_sources_logged()
+
+    async def _refresh_due_sources_logged(self, *, max_age: timedelta | None = None) -> None:
+        try:
+            await self._refresh_due_sources(max_age=max_age)
+        except Exception as exc:
+            logger.warning(
+                "Model Hub background discovery pass failed: %s", type(exc).__name__,
+            )
+
+    def request_inventory_refresh(self) -> None:
+        """A viewer read Source inventory: list Sources older than 30 minutes.
+
+        Fire-and-forget and coalesced into one pass. It runs only while the
+        background schedule does, so it shares that schedule's backoff and
+        shutdown and never starts work for a stopped runtime.
+        """
+
+        schedule = self._background_discovery_task
+        stopping = self._background_discovery_stop
+        if schedule is None or schedule.done() or stopping is None or stopping.is_set():
+            return
+        viewed = self._viewed_discovery_task
+        if viewed is not None and not viewed.done():
+            return
+        self._viewed_discovery_task = asyncio.get_running_loop().create_task(
+            self._refresh_due_sources_logged(max_age=_VIEWED_DISCOVERY_AGE),
+            name="model-hub-viewed-discovery",
+        )
+
+    async def _refresh_due_sources(self, *, max_age: timedelta | None = None) -> None:
+        """Refresh, one at a time, each Hub Source whose background listing is due.
+
+        ``max_age`` tightens the period for a viewer's pass; backoff still holds.
+        """
+
+        config = self.store.load()
+        if not config.enabled:
+            # A stopped runtime is an explicit opt-out, and an OAuth listing
+            # would start the engine.
+            return
+        sources = [
+            source for source in config.sources
+            if self._background_discovery_eligible(source)
+        ]
+        live_ids = {source.id for source in sources}
+        for table in (self._background_discovery_checked, self._background_discovery_retries):
+            for source_id in [item for item in table if item not in live_ids]:
+                del table[source_id]
+        now = self.now()
+        due = sorted(
+            (due_at, source.id)
+            for source in sources
+            if (due_at := self._background_discovery_due(source, now, max_age=max_age)) <= now
+        )
+        if max_age is None:
+            self._background_discovery_caught_up = True
+        for _due_at, source_id in due:
+            stopping = self._background_discovery_stop
+            if stopping is not None and stopping.is_set():
+                return
+            await self._refresh_source_in_background(source_id)
+
+    @staticmethod
+    def _background_discovery_eligible(source: ModelHubSourceConfig) -> bool:
+        # A native CLI keeps its own catalog.
+        return (
+            source.supply_channel == "hub"
+            and bool(source.credential_ref)
+            and source.state.detail_key not in _UNDISCOVERABLE_SOURCE_DETAILS
+        )
+
+    def _background_listed_at(self, source: ModelHubSourceConfig) -> datetime | None:
+        """The latest successful listing, persisted or process-local."""
+
+        listed = [
+            instant for instant in (
+                parse_model_hub_timestamp(source.last_discovered_at)
+                if source.last_discovered_at else None,
+                self._background_discovery_checked.get(source.id),
+            )
+            if instant is not None
+        ]
+        return max(listed, default=None)
+
+    def _background_discovery_retry(self, source: ModelHubSourceConfig) -> _DiscoveryRetry | None:
+        retry = self._background_discovery_retries.get(source.id)
+        if retry is None or retry.identity != source_identity(source):
+            return None
+        listed_at = self._background_listed_at(source)
+        # Any later successful listing, including a manual refresh, resets backoff.
+        return None if listed_at is not None and listed_at > retry.failed_at else retry
+
+    def _background_discovery_due(
+        self,
+        source: ModelHubSourceConfig,
+        now: datetime,
+        *,
+        max_age: timedelta | None = None,
+    ) -> datetime:
+        retry = self._background_discovery_retry(source)
+        if retry is not None:
+            return retry.failed_at + retry.delay
+        listed_at = self._background_listed_at(source)
+        if listed_at is None:
+            return now
+        period = _background_discovery_period(source.id)
+        if not self._background_discovery_caught_up:
+            # The first pass catches up every Source past the nominal interval.
+            period = min(period, _BACKGROUND_DISCOVERY_INTERVAL)
+        if max_age is not None:
+            period = min(period, max_age)
+        return listed_at + period
+
+    async def _refresh_source_in_background(self, source_id: str) -> None:
+        """Add newly listed models without touching health or removing anything.
+
+        A listing is not inference evidence, and removals move supply, so Source
+        state, removals, and their guards stay with a manual `refresh_source`.
+        """
+
+        if source_id in self._background_discovery_inflight:
+            # The schedule and a viewer's pass never list one Source twice at once.
+            return
+        self._background_discovery_inflight.add(source_id)
+        try:
+            await self._refresh_listed_source_in_background(source_id)
+        finally:
+            self._background_discovery_inflight.discard(source_id)
+
+    async def _refresh_listed_source_in_background(self, source_id: str) -> None:
+        config = self.store.load()
+        if not config.enabled:
+            # Re-read per Source: a runtime stopped mid-pass is not listed again.
+            return
+        observed = next(
+            (item for item in config.sources if item.id == source_id),
+            None,
+        )
+        if observed is None or not self._background_discovery_eligible(observed):
+            return
+        basis = (source_identity(observed), observed.last_discovered_at)
+        try:
+            discovered = await asyncio.wait_for(
+                self._discover(observed, start_engine=False),
+                timeout=_SOURCE_DISCOVERY_TIMEOUT_SECONDS,
+            )
+            async with self._mutation_lock:
+                previous = self.store.load()
+                current = next(
+                    (item for item in previous.sources if item.id == source_id),
+                    None,
+                )
+                if current is None or (
+                    source_identity(current), current.last_discovered_at,
+                ) != basis:
+                    # The listing describes a Source another owner has changed
+                    # since; the next tick lists the current one.
+                    return
+                updated = self._clone_config(previous)
+                source = self._source(updated, source_id)
+                overrides = self._merge_discovered_models(source, discovered)
+                if self._inventory_fingerprint(source) != self._inventory_fingerprint(current):
+                    if self._inventory_removed_hops(previous, updated) or self._introduced_interruptions(
+                        previous, updated,
+                    ):
+                        logger.info(
+                            "Model Hub background discovery left a supply change "
+                            "for Source %s to a manual refresh",
+                            source_id,
+                        )
+                    else:
+                        await self._commit_synced(previous, updated)
+                        self._record_reasoning_tier_overrides(source, overrides)
+        except Exception as exc:
+            self._record_background_discovery_failure(observed, exc)
+            return
+        self._background_discovery_checked[source_id] = self.now()
+
+    def _record_background_discovery_failure(
+        self,
+        source: ModelHubSourceConfig,
+        error: Exception,
+    ) -> None:
+        previous = self._background_discovery_retry(source)
+        delay = (
+            _BACKGROUND_DISCOVERY_RETRY_BASE
+            if previous is None
+            else min(previous.delay * 2, _BACKGROUND_DISCOVERY_RETRY_CAP)
+        )
+        self._background_discovery_retries[source.id] = _DiscoveryRetry(
+            source_identity(source), self.now(), delay,
+        )
+        # Codes and type names only: engine and upstream errors may carry
+        # upstream context.
+        logger.warning(
+            "Model Hub background discovery failed for Source %s (%s); retrying in %d minutes",
+            source.id,
+            error.code if isinstance(error, ModelHubError) else type(error).__name__,
+            delay.total_seconds() // 60,
+        )
+
+    def _merge_discovered_models(
+        self,
+        source: ModelHubSourceConfig,
+        discovered: list[DiscoveredModel],
+    ) -> list[tuple[str, Literal["upstream", "catalog"]]]:
+        """Admit newly listed models and refresh listed metadata; keep every row."""
+
+        existing = list(source.models)
+        manual = [model for model in existing if model.provenance == "manual"]
+        overrides = self._apply_discovered_models(source, manual, discovered, allow_empty=True)
+        listed = {model.id: model for model in source.models}
+        merged = [listed.pop(model.id, model) for model in existing]
+        # Existing rows keep their order, so an upstream that reorders its
+        # listing changes nothing; new rows follow the active discovered slice.
+        insert_at = max(
+            (
+                index + 1 for index, model in enumerate(existing)
+                if model.provenance == "discovered" and not model.retired
+            ),
+            default=0,
+        )
+        source.models = [*merged[:insert_at], *listed.values(), *merged[insert_at:]]
+        return overrides
+
+    @staticmethod
+    def _inventory_fingerprint(source: ModelHubSourceConfig) -> list[dict]:
+        # When a model was last listed is not inventory.
+        return [
+            {key: value for key, value in model.to_payload().items() if key != "discovered_at"}
+            for model in source.models
+        ]
 
     @staticmethod
     def _eligible_for_agent(source: ModelHubSourceConfig, backend: str) -> bool:

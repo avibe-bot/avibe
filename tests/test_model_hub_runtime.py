@@ -40,6 +40,7 @@ from core.handlers.model_hub.classification import (
     classify_outcome,
     terminal_outcome_category,
 )
+from core.handlers.model_hub.errors import ModelDiscoveryError
 from core.handlers.model_hub.events import redact_untrusted_text
 from core.handlers.model_hub.request import ModelHubRequest
 from core.handlers.model_hub.stream_wire import (
@@ -8382,6 +8383,92 @@ def test_oauth_model_discovery_accepts_engine_definition_fields(tmp_path: Path) 
         )
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("engine_running", [True, False])
+def test_background_oauth_discovery_never_starts_the_engine(tmp_path: Path, engine_running: bool) -> None:
+    """MH-DISCOVERY-SCHEDULE-001: a background listing reads a running engine and never starts one."""
+
+    class Client:
+        def management_request(self, method, path, *, query=None, payload=None, timeout=None):
+            return {"models": [{"id": "model-id"}]}
+
+    class Supervisor:
+        def __init__(self) -> None:
+            self.started = False
+
+        def client(self):
+            self.started = True
+            return Client()
+
+        def client_if_running(self):
+            return Client() if engine_running else None
+
+    async def run() -> tuple[Supervisor, object]:
+        store = EngineStateStore(tmp_path / "state")
+        store.prepare_instance("install-1")
+        (store.auth_dir / "claude-account.json").write_text("{}", encoding="utf-8")
+        credential_ref = store.bind_oauth_credential("src_fixture123", "anthropic", "claude-account.json")
+        supervisor = Supervisor()
+        adapter = CLIProxyEngineAdapter(supervisor=supervisor, state_store=store)  # type: ignore[arg-type]
+        try:
+            listed = await adapter.discover_models(
+                "anthropic", "anthropic", None, credential_ref, start_engine=False,
+            )
+        except ModelDiscoveryError as error:
+            listed = error
+        return supervisor, listed
+
+    supervisor, listed = asyncio.run(run())
+
+    assert supervisor.started is False
+    if engine_running:
+        assert listed == (DiscoveredModel(id="model-id"),)
+    else:
+        assert isinstance(listed, ModelDiscoveryError)
+
+
+def test_cancelled_background_oauth_listing_returns_after_its_engine_worker(tmp_path: Path) -> None:
+    """MH-DISCOVERY-SCHEDULE-001: shutdown cannot stop the engine beneath a cancelled listing."""
+
+    from core.controller import _RUNTIME_WORK_SHUTDOWN_GRACE_SECONDS
+
+    entered, release = threading.Event(), threading.Event()
+    timeouts: list[float | None] = []
+
+    class Client:
+        def management_request(self, method, path, *, query=None, payload=None, timeout=None):
+            timeouts.append(timeout)
+            entered.set()
+            release.wait(5)
+            return {"models": [{"id": "model-id"}]}
+
+    class Supervisor:
+        def client_if_running(self):
+            return Client()
+
+    async def run() -> bool:
+        store = EngineStateStore(tmp_path / "state")
+        store.prepare_instance("install-1")
+        (store.auth_dir / "claude-account.json").write_text("{}", encoding="utf-8")
+        credential_ref = store.bind_oauth_credential("src_fixture123", "anthropic", "claude-account.json")
+        adapter = CLIProxyEngineAdapter(supervisor=Supervisor(), state_store=store)  # type: ignore[arg-type]
+        listing = asyncio.create_task(
+            adapter.discover_models("anthropic", "anthropic", None, credential_ref, start_engine=False)
+        )
+        assert await asyncio.to_thread(entered.wait, 5)
+        listing.cancel()
+        done, _ = await asyncio.wait({listing}, timeout=0.2)
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await listing
+        return bool(done)
+
+    returned_while_worker_ran = asyncio.run(run())
+
+    assert returned_while_worker_ran is False
+    assert timeouts and timeouts[0] is not None
+    assert timeouts[0] < _RUNTIME_WORK_SHUTDOWN_GRACE_SECONDS
 
 
 @pytest.mark.parametrize(
