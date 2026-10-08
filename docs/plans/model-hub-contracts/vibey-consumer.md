@@ -34,7 +34,8 @@ announces) and at every start, so a lost hand-off heals on the next start. A
 seed with no models.dev copy cached first fetches one in the foreground, bounded,
 so its rows usually carry the limits the Agent budgets with; a starting model is
 one a placed Source's own non-retired inventory lists, never a passthrough route. A native Source that later moves
-to the Hub joins Vibey like a new Source.
+to the Hub joins Vibey like a new Source, as it joins OpenCode and every other
+backend its native CLI could not serve.
 Where a user Agent already holds the name and no built-in exists, only the
 supply is seeded.
 The persisted row then belongs to the user and is never seeded again. Existing
