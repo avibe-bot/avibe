@@ -628,6 +628,7 @@ fn stable_failure_reason(reason: &str) -> &'static str {
         "state_unwritable" => "state_unwritable",
         "assets_invalid" => "assets_invalid",
         "spawn_failed" => "spawn_failed",
+        "socket_path_too_long" => "socket_path_too_long",
         "daemon_exited" => "daemon_exited",
         "health_timeout" => "health_timeout",
         "endpoint_busy" => "endpoint_busy",
@@ -1018,6 +1019,7 @@ mod tests {
     fn health_failures_persist_only_the_stable_reason_set() {
         for (raw, expected) in [
             ("spawn_failed", "spawn_failed"),
+            ("socket_path_too_long", "socket_path_too_long"),
             ("daemon_exited", "daemon_exited"),
             ("health_timeout", "health_timeout"),
             ("endpoint_busy", "endpoint_busy"),

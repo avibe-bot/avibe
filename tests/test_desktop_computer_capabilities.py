@@ -141,6 +141,33 @@ def test_workbench_status_supports_adopted_runtime_when_native_shell_is_live(
     assert response.headers["Cache-Control"] == "no-store"
 
 
+@pytest.mark.parametrize(
+    ("status", "reason"),
+    [("off", "never_enabled"), ("unavailable", "invalid_state_file")],
+)
+def test_workbench_keeps_first_install_and_recovery_visible_for_live_shell(
+    monkeypatch, status, reason
+):
+    monkeypatch.setattr(ui_server, "desktop_computer_use_shell_is_live", lambda: True)
+    monkeypatch.setattr(
+        ui_server,
+        "effective_computer_use_status",
+        lambda: ComputerUseStatus(status, reason),
+    )
+
+    response = app.test_client().get(
+        "/api/desktop/computer-use/status",
+        base_url="http://127.0.0.1:5123",
+    )
+
+    assert response.status_code == 200
+    assert response.get_json() == {
+        "supported": True,
+        "status": status,
+        "reason": reason,
+    }
+
+
 def test_workbench_status_supports_shell_started_runtime_from_the_same_state_source(
     monkeypatch,
 ) -> None:

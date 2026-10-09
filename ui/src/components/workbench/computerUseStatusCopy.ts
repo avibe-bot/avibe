@@ -29,6 +29,7 @@ export type ComputerUseCopyKey =
   | 'workbench.home.computerUse.endpointBusyDetail'
   | 'workbench.home.computerUse.endpointUnremovableDetail'
   | 'workbench.home.computerUse.socketUnreachableDetail'
+  | 'workbench.home.computerUse.socketPathTooLongDetail'
   | 'workbench.home.computerUse.unavailable'
   | 'workbench.home.computerUse.unavailableDetail'
   | 'workbench.home.computerUse.invalidStateFileDetail'
@@ -53,6 +54,7 @@ const errorDetailKeys: Record<string, ComputerUseCopyKey> = {
   endpoint_busy: 'workbench.home.computerUse.endpointBusyDetail',
   endpoint_unremovable: 'workbench.home.computerUse.endpointUnremovableDetail',
   socket_unreachable: 'workbench.home.computerUse.socketUnreachableDetail',
+  socket_path_too_long: 'workbench.home.computerUse.socketPathTooLongDetail',
 };
 
 const unavailableDetailKeys: Record<string, ComputerUseCopyKey> = {

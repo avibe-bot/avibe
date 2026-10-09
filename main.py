@@ -132,6 +132,22 @@ def _stop_macos_session_diagnostics(monitor: Any) -> None:
         logging.getLogger(__name__).debug("macOS session diagnostics cleanup failed")
 
 
+def _stop_owned_desktop_runtime_ui(logger: logging.Logger) -> None:
+    """Reap the UI that belongs to this desktop Runtime before service exit."""
+
+    try:
+        from vibe import runtime
+        from vibe.desktop_runtime import desktop_caller_provenance
+
+        runtime_ids = desktop_caller_provenance()
+        if not runtime_ids:
+            return
+        if not runtime.stop_ui(stop_remote_access=False, runtime_ids=runtime_ids):
+            logger.warning("Desktop Runtime UI did not stop during service shutdown")
+    except Exception:
+        logger.warning("Failed to stop the desktop Runtime UI during service shutdown", exc_info=True)
+
+
 def _request_controller_loop_stop(controller: Any) -> bool:
     """Ask a running controller loop to exit so its finally block can clean up."""
 
@@ -226,6 +242,7 @@ def main():
         try:
             controller.run()
         finally:
+            _stop_owned_desktop_runtime_ui(logger)
             _stop_macos_session_diagnostics(macos_session_diagnostics)
         
     except ServiceAlreadyRunningError as e:
