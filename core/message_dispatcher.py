@@ -12,6 +12,7 @@ import logging
 import re
 import tempfile
 import time
+import unicodedata
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -283,10 +284,13 @@ _WECHAT_CONSOLIDATED_SPLIT_THRESHOLD = 1700
 _ACTION_TIME_HINT_S = 10.0
 # An intermediate assistant message this substantial is also shown in the Web
 # transcript as a muted ``interim`` bubble, so the user sees it without opening
-# the Activity log. Either bound qualifies: three non-empty lines, or a single
-# long paragraph (CJK prose often carries a whole thought on one line).
-_INTERIM_MIN_LINES = 3
-_INTERIM_MIN_CHARS = 150
+# the Activity log. Either bound qualifies: five non-empty lines, or a long
+# paragraph (CJK prose often carries a whole thought on one line). Both sit
+# above a per-step "now doing X" preamble, which stays in Activity. Length is
+# display width, a wide (CJK) character counting two columns, so one bound
+# means about 250 Chinese or 500 Latin characters.
+_INTERIM_MIN_LINES = 5
+_INTERIM_MIN_WIDTH = 500
 # Name the result attachment gets when a platform has no native Markdown upload
 # and the full text has to ride its ordinary file path instead.
 _RESULT_DOCUMENT_NAME = "result.md"
@@ -2565,7 +2569,8 @@ class ConsolidatedMessageDispatcher:
     @staticmethod
     def _is_interim_worthy(text: Optional[str]) -> bool:
         body = (text or "").strip()
-        if len(body) >= _INTERIM_MIN_CHARS:
+        width = sum(2 if unicodedata.east_asian_width(ch) in "WF" else 1 for ch in body)
+        if width >= _INTERIM_MIN_WIDTH:
             return True
         return sum(1 for line in body.splitlines() if line.strip()) >= _INTERIM_MIN_LINES
 
