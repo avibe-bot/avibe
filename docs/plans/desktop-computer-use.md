@@ -1095,3 +1095,76 @@ redirected to test-owned fakes.
   helper CHECKIN under the outer bundle identity and no recorded helper
   frontmost assertion. It did not establish generic idle focus, pointer, or
   cursor acceptance, and it remains ungranted.
+
+## 2026-10-09 follow-up contract
+
+This follow-up is based on the post-merge acceptance ledger at
+`/tmp/avibe-cua-final-acceptance-ses9qeb46suvv-84fcff21/acceptance-ledger.md`
+and the frozen evidence roots
+`/tmp/avibe-cua-final-sd` and
+`/tmp/avibe-cua-phase1-acceptance-ses9qeb46suvv-be8e909/home`.
+The implementation branch starts from exact base
+`84fcff2101223a65ddc6f5b878d7ba61805ffb96`. The sensitive
+`live-step9-consented-retry-outcome.json` is excluded from implementation and
+publication.
+
+The five findings and their owning contracts are:
+
+1. **F1, Darwin socket and diagnostics.** The native shell derives a stable
+   per-user socket directory under `/tmp` from the current state-directory
+   flavor, keeps that directory owned by the current user with mode `0700`,
+   and records the absolute socket path in the existing state record. A
+   preflight rejects any Darwin socket path over 103 bytes with the stable
+   reason `socket_path_too_long`; it must not be reported as `daemon_exited`.
+   The managed daemon's stderr is drained into a bounded tail and appended to
+   the existing shell bootstrap diagnostics. Owning tests cover path
+   construction, flavor isolation, permissions, over-limit classification, and
+   stderr propagation.
+2. **F2, Screen Recording guidance.** English and Chinese native and
+   Workbench guidance must state that macOS may quit and reopen Avibe after the
+   Screen Recording grant. The two locales keep the same recovery steps and
+   consuming catalog/UI tests protect the parity.
+3. **F3, Workbench support on first install.** Workbench support is derived
+   from the live native shell's lock ownership. A live shell therefore keeps
+   Computer Use visible when the state record is missing or invalid; the
+   status reader remains responsible for returning `off/never_enabled` or
+   `unavailable/invalid_state_file`. This preserves the Phase 1 accepted
+   limitation that a terminal-started Runtime on the same machine may advertise
+   the shell's native Computer Use. A per-Runtime shell-adoption signal remains
+   future work.
+4. **F4, Runtime bootout cleanup.** The service shutdown boundary reaps the
+   exact UI process belonging to its desktop Runtime before releasing the
+   service lock. Ownership is checked through the existing Runtime id and the
+   existing UI process identity; no pattern kill is introduced. A managed
+   service shutdown reaps the UI only when no managed shutdown intent was
+   consumed, which covers launchd bootout and external termination. Every
+   managed stop or restart caller retains its existing UI lifecycle ownership,
+   regardless of its reason; this includes Workbench service stop,
+   service-only and full restart, and explicit unscoped `vibe stop`. The
+   lifecycle test covers unmanaged signal-driven service exit and exact UI
+   ownership, while the desktop Runtime stop tests retain the real process scan
+   and rescan contract.
+5. **F5, Runtime re-adoption.** When enablement persists in
+   `needs_runtime/runtime_unavailable`, the shell retains the last monitored
+   origin and normal ticks probe the Runtime capability endpoint again. A
+   supported response transitions through the existing lifecycle contract and
+   launches one new driver generation, preserving the current lease,
+   ownership, and no-replay behavior. An explicit user Runtime stop uses a
+   separate stopped event that clears the retained origin, so the shell does
+   not re-adopt a Runtime the user has stopped. Transient and unsupported
+   responses do not start a driver.
+
+Validation for this follow-up must include the owning Python, UI, and Rust
+tests; Ruff on changed Python; the UI build and relevant UI tests; Rust
+formatting, tests, and required Clippy/package/workflow checks; repository CI;
+an exact-head Codex review; and zero unresolved review threads. The PR is
+non-draft and remains unmerged until the owner authorizes merge.
+
+Known-by-design limits remain explicit: Step 9b, one normal Workbench Claude
+tool-driven desktop action, is deferred to real-machine acceptance; no Claude
+run, login, credential access, GUI action, TCC mutation, release, candidate
+Runtime restart, or owner Runtime restart is part of implementation. The
+accepted ad-hoc macOS Screen Recording `+`/drag recovery remains the Phase 1
+path. The optional resource-governance hermeticity and server-level Claude
+allowlist follow-ups are recorded for later triage and do not expand this
+change unless they remain strictly local and necessary.

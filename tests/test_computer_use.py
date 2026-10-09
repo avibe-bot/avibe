@@ -90,15 +90,15 @@ def test_desktop_state_path_ignores_avibe_home(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("arrange", "lock_held", "expected"),
     [
-        ("missing", True, False),
-        ("invalid", True, False),
+        ("missing", True, True),
+        ("invalid", True, True),
         ("stopped", True, False),
         ("off", True, True),
         ("ready", False, False),
         ("ready", True, True),
     ],
 )
-def test_shell_support_requires_valid_state_owned_by_live_native_lock(
+def test_shell_support_follows_live_native_lock_across_optional_state_shapes(
     tmp_path: Path,
     arrange: str,
     lock_held: bool,

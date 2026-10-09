@@ -3,6 +3,8 @@
 use std::ffi::c_void;
 use std::fs::File;
 use std::io::{self, Read};
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::ptr;
@@ -31,8 +33,9 @@ use tauri::plugin::{Builder as PluginBuilder, TauriPlugin};
 use tauri::{AppHandle, Manager, RunEvent};
 use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStdin, Command};
+use tokio::process::{Child, ChildStderr, ChildStdin, Command};
 use tokio::sync::{mpsc, oneshot};
+use tokio::task::JoinHandle;
 use tokio::time::{sleep, timeout, timeout_at};
 
 const STATE_DIR_ENV: &str = "AVIBE_COMPUTER_USE_STATE_DIR";
@@ -48,6 +51,10 @@ const PERMISSION_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const PERMISSION_CHILD_TIMEOUT: Duration = Duration::from_secs(10);
 const START_BACKOFF: Duration = Duration::from_secs(1);
 const COMPUTER_USE_SCHEMA: u64 = COMPUTER_USE_SCHEMA_VERSION as u64;
+const DARWIN_SOCKET_PATH_MAX_BYTES: usize = 103;
+const SOCKET_DIRECTORY_MODE: u32 = 0o700;
+const SOCKET_FLAVOR_HEX_BYTES: usize = 12;
+const DAEMON_STDERR_TAIL_BYTES: usize = 8 * 1024;
 
 fn driver_command(driver: &Path) -> Command {
     let mut command = Command::new(driver);
@@ -120,6 +127,7 @@ enum Event {
     Toggle,
     RuntimeReady { origin: LoopbackOrigin, adoption: bool },
     RuntimeLost,
+    RuntimeStopped,
     Activated,
     RetryStart { id: u64 },
     PermissionProbeFinished { id: u64, result: PermissionChildRun },
@@ -173,6 +181,10 @@ impl Controller {
         let _ = self.sender.send(Event::RuntimeLost);
     }
 
+    pub(crate) fn runtime_stopped(&self) {
+        let _ = self.sender.send(Event::RuntimeStopped);
+    }
+
     pub(crate) fn activated(&self) {
         let _ = self.sender.send(Event::Activated);
     }
@@ -201,6 +213,10 @@ struct Paths {
 impl Paths {
     fn resolve(app: &AppHandle) -> Result<Self, Box<dyn std::error::Error>> {
         let state_dir = configured_path(app.path().app_data_dir()?, STATE_DIR_ENV);
+        std::fs::create_dir_all(&state_dir)?;
+        let owner_uid = std::fs::metadata(&state_dir)?.uid();
+        let socket = short_socket_path(&state_dir, owner_uid);
+        ensure_private_socket_directory(socket.parent().expect("socket directory"), owner_uid)?;
         let executable = std::env::current_exe()?;
         let resource_dir = app.path().resource_dir()?;
         let driver = configured_path(bundled_driver_path(&executable), DRIVER_PATH_ENV);
@@ -208,7 +224,7 @@ impl Paths {
         let snapshot = configured_path(resource_dir.join("computer-use/tools-v0.31.0.json"), SNAPSHOT_PATH_ENV);
         Ok(Self {
             state_file: state_dir.join(COMPUTER_USE_STATE_FILE),
-            socket: state_dir.join(COMPUTER_USE_SOCKET_FILE),
+            socket,
             state_dir,
             driver,
             policy,
@@ -221,6 +237,47 @@ impl Paths {
             && self.policy.is_file()
             && sha256_file(&self.snapshot).as_deref() == Some(COMPUTER_USE_TOOL_SNAPSHOT_SHA256)
     }
+}
+
+fn short_socket_path(state_dir: &Path, owner_uid: u32) -> PathBuf {
+    let mut digest = Sha256::new();
+    digest.update(state_dir.as_os_str().as_bytes());
+    let flavor = format!("{:x}", digest.finalize());
+    let flavor = &flavor[..SOCKET_FLAVOR_HEX_BYTES];
+    PathBuf::from("/tmp")
+        .join(format!("avibe-cua-{owner_uid}-{flavor}"))
+        .join(COMPUTER_USE_SOCKET_FILE)
+}
+
+fn ensure_private_socket_directory(path: &Path, owner_uid: u32) -> io::Result<()> {
+    match std::fs::create_dir(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error),
+    }
+    let metadata = std::fs::symlink_metadata(path)?;
+    if !metadata.file_type().is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "computer-use socket directory is not a real directory",
+        ));
+    }
+    if metadata.uid() != owner_uid {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "computer-use socket directory is not owned by the desktop user",
+        ));
+    }
+    let mut permissions = metadata.permissions();
+    permissions.set_mode(SOCKET_DIRECTORY_MODE);
+    std::fs::set_permissions(path, permissions)
+}
+
+fn socket_path_preflight(path: &Path) -> Result<(), &'static str> {
+    if path.as_os_str().as_bytes().len() > DARWIN_SOCKET_PATH_MAX_BYTES {
+        return Err("socket_path_too_long");
+    }
+    Ok(())
 }
 
 fn configured_path(default: PathBuf, variable: &str) -> PathBuf {
@@ -254,6 +311,7 @@ fn bundled_driver_path(executable: &Path) -> PathBuf {
 struct Daemon {
     child: Child,
     stdin: Option<ChildStdin>,
+    stderr_tail: JoinHandle<Vec<u8>>,
 }
 
 struct PermissionProbe {
@@ -360,6 +418,7 @@ impl RuntimeState {
                             self.runtime_ready(origin, adoption).await;
                         }
                         Event::RuntimeLost => self.runtime_lost().await,
+                        Event::RuntimeStopped => self.runtime_stopped().await,
                         Event::Activated => self.activated().await,
                         Event::RetryStart { id } => self.retry_start(id).await,
                         Event::PermissionProbeFinished { id, result } => {
@@ -438,8 +497,18 @@ impl RuntimeState {
     }
 
     async fn runtime_lost(&mut self) {
+        self.set_runtime_lost(false).await;
+    }
+
+    async fn runtime_stopped(&mut self) {
+        self.set_runtime_lost(true).await;
+    }
+
+    async fn set_runtime_lost(&mut self, clear_origin: bool) {
         self.invalidate_start_retry();
-        self.origin = None;
+        if clear_origin {
+            self.origin = None;
+        }
         self.capabilities.begin_adoption();
         let directive = self.lifecycle.capabilities(RuntimeSupport::Unknown, silent_grants());
         self.apply(directive).await;
@@ -464,10 +533,17 @@ impl RuntimeState {
                 self.publish_view();
             }
         }
-        if !self.lifecycle.enabled()
-            || self.lifecycle.phase() == ComputerUsePhase::Error
-            || self.capabilities.current() != RuntimeSupport::Supported
-        {
+        if !self.lifecycle.enabled() || self.lifecycle.phase() == ComputerUsePhase::Error {
+            return;
+        }
+        if self.lifecycle.phase() == ComputerUsePhase::NeedsRuntime {
+            if let Some(directive) =
+                runtime_reprobe_directive(&mut self.lifecycle, &mut self.capabilities, self.origin.as_ref()).await
+            {
+                self.apply(directive).await;
+            }
+        }
+        if self.capabilities.current() != RuntimeSupport::Supported {
             return;
         }
         match self.lifecycle.phase() {
@@ -596,6 +672,16 @@ impl RuntimeState {
             return HealthResult::Unhealthy("shutdown_requested".to_owned());
         }
         self.stop_daemon().await;
+        if let Err(reason) = socket_path_preflight(&self.paths.socket) {
+            self.diagnostics.record(
+                "computer-use.socket-preflight",
+                &[
+                    ("reason", reason.to_owned()),
+                    ("path_bytes", self.paths.socket.as_os_str().as_bytes().len().to_string()),
+                ],
+            );
+            return HealthResult::Unhealthy(reason.to_owned());
+        }
         if let Err(reason) = self.reclaim_endpoint().await {
             return HealthResult::Unhealthy(reason);
         }
@@ -665,6 +751,9 @@ impl RuntimeState {
         if timeout(PROCESS_STOP_TIMEOUT, daemon.child.wait()).await.is_err() {
             let _ = daemon.child.kill().await;
             let _ = daemon.child.wait().await;
+        }
+        if let Ok(Ok(stderr_tail)) = timeout(PROCESS_STOP_TIMEOUT, daemon.stderr_tail).await {
+            record_daemon_stderr(&self.diagnostics, &stderr_tail);
         }
         let _ = std::fs::remove_file(&self.paths.socket);
     }
@@ -804,6 +893,27 @@ fn restored_lifecycle(stored: &StoredComputerUseState, assets_valid: bool) -> Co
     lifecycle
 }
 
+async fn runtime_reprobe_directive(
+    lifecycle: &mut ComputerUseLifecycle,
+    capabilities: &mut CapabilityCache,
+    origin: Option<&LoopbackOrigin>,
+) -> Option<LifecycleDirective> {
+    if !lifecycle.enabled() || lifecycle.phase() != ComputerUsePhase::NeedsRuntime {
+        return None;
+    }
+    let origin = origin?;
+    let support = capabilities.observe(probe_capabilities(origin).await);
+    let grants = if support == RuntimeSupport::Supported {
+        silent_grants()
+    } else {
+        Grants {
+            accessibility: false,
+            screen_recording: false,
+        }
+    };
+    Some(lifecycle.capabilities(support, grants))
+}
+
 fn retry_is_current(id: u64, current_id: u64, lifecycle: &ComputerUseLifecycle) -> bool {
     id == current_id && lifecycle.enabled() && lifecycle.phase() == ComputerUsePhase::Starting
 }
@@ -894,11 +1004,52 @@ fn spawn_daemon(driver: &Path, socket: &Path, host_bundle_id: &str, policy: &Pat
         .env("CUA_DRIVER_MANAGED_POLICY_FILE", policy)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .kill_on_drop(true);
     let mut child = command.spawn()?;
     let stdin = child.stdin.take();
-    Ok(Daemon { child, stdin })
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| io::Error::other("computer-use daemon stderr pipe was not available"))?;
+    let stderr_tail = tokio::spawn(capture_stderr_tail(stderr));
+    Ok(Daemon {
+        child,
+        stdin,
+        stderr_tail,
+    })
+}
+
+async fn capture_stderr_tail(mut stderr: ChildStderr) -> Vec<u8> {
+    let mut tail = Vec::with_capacity(DAEMON_STDERR_TAIL_BYTES);
+    let mut chunk = [0_u8; 4096];
+    loop {
+        let read = match tokio::io::AsyncReadExt::read(&mut stderr, &mut chunk).await {
+            Ok(0) | Err(_) => break,
+            Ok(read) => read,
+        };
+        if read >= DAEMON_STDERR_TAIL_BYTES {
+            tail.clear();
+            tail.extend_from_slice(&chunk[read - DAEMON_STDERR_TAIL_BYTES..read]);
+            continue;
+        }
+        let overflow = (tail.len() + read).saturating_sub(DAEMON_STDERR_TAIL_BYTES);
+        if overflow > 0 {
+            tail.drain(..overflow);
+        }
+        tail.extend_from_slice(&chunk[..read]);
+    }
+    tail
+}
+
+fn record_daemon_stderr(diagnostics: &BootstrapLog, stderr_tail: &[u8]) {
+    if stderr_tail.is_empty() {
+        return;
+    }
+    diagnostics.record(
+        "computer-use.daemon-stderr",
+        &[("tail", String::from_utf8_lossy(stderr_tail).into_owned())],
+    );
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2234,6 +2385,86 @@ done
     }
 
     #[test]
+    fn socket_path_is_short_and_isolated_by_state_directory_flavor() {
+        let first = short_socket_path(Path::new("/tmp/first-computer-use-state"), 501);
+        let second = short_socket_path(Path::new("/tmp/second-computer-use-state"), 501);
+
+        assert_ne!(first, second);
+        assert_eq!(
+            first.file_name().and_then(|name| name.to_str()),
+            Some(COMPUTER_USE_SOCKET_FILE)
+        );
+        assert!(first.as_os_str().as_bytes().len() <= DARWIN_SOCKET_PATH_MAX_BYTES);
+        assert!(first
+            .parent()
+            .and_then(Path::to_str)
+            .unwrap()
+            .starts_with("/tmp/avibe-cua-"));
+    }
+
+    #[test]
+    fn socket_directory_is_private_and_owned_by_the_state_directory_owner() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let state_dir = temporary.path().join("state");
+        std::fs::create_dir_all(&state_dir).expect("state directory");
+        let owner_uid = std::fs::metadata(&state_dir).expect("state metadata").uid();
+        let socket_dir = short_socket_path(&state_dir, owner_uid)
+            .parent()
+            .expect("socket directory")
+            .to_owned();
+
+        ensure_private_socket_directory(&socket_dir, owner_uid).expect("private socket directory");
+
+        let metadata = std::fs::metadata(socket_dir).expect("socket directory metadata");
+        assert_eq!(metadata.uid(), owner_uid);
+        assert_eq!(metadata.permissions().mode() & 0o777, SOCKET_DIRECTORY_MODE);
+        std::fs::remove_dir(short_socket_path(&state_dir, owner_uid).parent().unwrap())
+            .expect("remove socket directory");
+    }
+
+    #[test]
+    fn over_limit_socket_paths_are_classified_before_spawn() {
+        let path = PathBuf::from("/tmp").join("x".repeat(DARWIN_SOCKET_PATH_MAX_BYTES));
+        assert_eq!(socket_path_preflight(&path), Err("socket_path_too_long"));
+    }
+
+    #[tokio::test]
+    async fn daemon_stderr_tail_is_bounded_and_reaches_shell_diagnostics() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let driver = temporary.path().join("fake-cua-driver");
+        std::fs::write(
+            &driver,
+            "#!/bin/sh\nprintf 'daemon failed: %s\\n' 'socket unavailable' >&2\nexit 1\n",
+        )
+        .expect("stderr fixture");
+        let mut permissions = std::fs::metadata(&driver)
+            .expect("stderr fixture metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&driver, permissions).expect("stderr fixture executable");
+        let policy = temporary.path().join("policy.yaml");
+        std::fs::write(&policy, "version: 1\n").expect("policy fixture");
+        let mut daemon = spawn_daemon(
+            &driver,
+            &temporary.path().join("driver.sock"),
+            "bot.avibe.desktop.test",
+            &policy,
+        )
+        .expect("spawn stderr fixture");
+        daemon.child.wait().await.expect("stderr fixture exit");
+        let tail = daemon.stderr_tail.await.expect("stderr reader");
+
+        let path = temporary.path().join(BOOTSTRAP_LOG_NAME);
+        let diagnostics = BootstrapLog::at(path.clone());
+        record_daemon_stderr(&diagnostics, &tail);
+
+        let written = std::fs::read_to_string(path).expect("diagnostic log");
+        assert!(tail.len() <= DAEMON_STDERR_TAIL_BYTES);
+        assert!(written.contains("computer-use.daemon-stderr"));
+        assert!(written.contains("socket unavailable"));
+    }
+
+    #[test]
     fn release_path_resolution_ignores_test_environment_overrides() {
         let bundled = PathBuf::from("/Applications/Avibe.app/Contents/Helpers/cua-driver");
         let injected = PathBuf::from("/tmp/replaced-driver");
@@ -2275,6 +2506,67 @@ done
             !lifecycle
                 .capabilities(RuntimeSupport::Supported, Grants::all())
                 .spawn_daemon
+        );
+    }
+
+    #[tokio::test]
+    async fn normal_runtime_reprobe_relaunches_persisted_enablement_on_the_same_origin() {
+        let record = ComputerUseRecord {
+            schema_version: COMPUTER_USE_SCHEMA_VERSION,
+            enabled: true,
+            state: ComputerUsePhase::NeedsRuntime,
+            reason: Some("runtime_unavailable".to_owned()),
+            shell_pid: 1,
+            instance_id: "reprobe-shell".to_owned(),
+            generation: 4,
+            driver_version: COMPUTER_USE_DRIVER_VERSION.to_owned(),
+            tool_snapshot: ToolSnapshot {
+                path: PathBuf::from("/tmp/tools.json"),
+                sha256: COMPUTER_USE_TOOL_SNAPSHOT_SHA256.to_owned(),
+            },
+            socket_path: None,
+            proxy_executable: None,
+            host_bundle_id: None,
+        };
+        let mut lifecycle = ComputerUseLifecycle::from_record(&record);
+        let mut capabilities = CapabilityCache::default();
+        capabilities.begin_adoption();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("capability listener");
+        let address = listener.local_addr().expect("capability listener address");
+        let origin = LoopbackOrigin::parse(&format!("http://{address}")).expect("loopback origin");
+        let server = tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+            let (mut stream, _) = listener.accept().await.expect("capability request");
+            let mut request = [0_u8; 1024];
+            let read = stream.read(&mut request).await.expect("capability request bytes");
+            assert!(String::from_utf8_lossy(&request[..read]).starts_with("GET /api/desktop/capabilities "));
+            let body =
+                format!(r#"{{"controller_id":"restarted-runtime","computer_use_schema":{COMPUTER_USE_SCHEMA}}}"#);
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .expect("capability response");
+        });
+        let directive = runtime_reprobe_directive(&mut lifecycle, &mut capabilities, Some(&origin))
+            .await
+            .expect("normal tick reprobe");
+        server.await.expect("capability server");
+
+        assert!(directive.spawn_daemon);
+        assert!(directive.write_state);
+        assert_eq!(capabilities.controller_id(), Some("restarted-runtime"));
+        assert_eq!(lifecycle.phase(), ComputerUsePhase::Starting);
+        assert_eq!(
+            runtime_reprobe_directive(&mut lifecycle, &mut capabilities, Some(&origin)).await,
+            None
         );
     }
 

@@ -3,6 +3,8 @@
 import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import en from '../../i18n/en.json';
+import zh from '../../i18n/zh.json';
 import { ComputerUseStatusLine } from './ComputerUseStatusLine';
 import { computerUseStatusCopy } from './computerUseStatusCopy';
 
@@ -27,6 +29,11 @@ describe('computerUseStatusCopy', () => {
     expect(copy.label).toBe('workbench.home.computerUse.needsPermission');
     expect(copy.detail).toBe('workbench.home.computerUse.screenRecordingDetail');
     expect(copy.detail).not.toContain('screen_recording');
+  });
+
+  it('keeps the Screen Recording relaunch guidance in both consumed locales', () => {
+    expect(en.workbench.home.computerUse.screenRecordingDetail).toContain('quit and reopen');
+    expect(zh.workbench.home.computerUse.screenRecordingDetail).toContain('退出并重新打开');
   });
 
   it('keeps unknown permission reasons localized', () => {
@@ -62,6 +69,7 @@ describe('computerUseStatusCopy', () => {
     ['endpoint_busy', 'endpointBusyDetail'],
     ['endpoint_unremovable', 'endpointUnremovableDetail'],
     ['socket_unreachable', 'socketUnreachableDetail'],
+    ['socket_path_too_long', 'socketPathTooLongDetail'],
   ])('maps error reason %s to dedicated localized remediation', (reason, key) => {
     const detail = computerUseStatusCopy(
       { status: 'error', reason },

@@ -902,7 +902,7 @@ fn stop_runtime(app: AppHandle, quit: bool) {
     notifications::stop(&app);
     #[cfg(target_os = "macos")]
     if let Some(controller) = app.try_state::<computer_use::Controller>() {
-        controller.runtime_lost();
+        controller.runtime_stopped();
     }
     tauri::async_runtime::spawn(async move {
         let outcome = host.stop_owned_runtime().await;
@@ -2267,11 +2267,13 @@ mod tests {
         assert!(english.screen_recording_title.contains("Screen Recording"));
         assert!(english.screen_recording_guide.to_lowercase().contains("click +"));
         assert!(english.screen_recording_guide.contains("drag"));
+        assert!(english.screen_recording_guide.contains("quit and reopen"));
 
         let chinese = native_catalog_for_locales(["zh-CN".to_owned()]).computer_use;
         assert!(chinese.screen_recording_title.contains("屏幕"));
         assert!(chinese.screen_recording_guide.contains("拖"));
         assert!(chinese.screen_recording_guide.contains("+"));
+        assert!(chinese.screen_recording_guide.contains("退出并重新打开"));
     }
 
     #[cfg(target_os = "macos")]

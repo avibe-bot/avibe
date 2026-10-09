@@ -54,7 +54,7 @@
       "needsPermissionAccessibility": "Computer Use — Accessibility permission needed",
       "needsPermissionScreenRecording": "Computer Use — Screen Recording needed; add Avibe in System Settings",
       "screenRecordingTitle": "Screen Recording permission needed",
-      "screenRecordingGuide": "Avibe opened System Settings → Privacy & Security → Screen & System Audio Recording. Click + or drag Avibe into the list, then enable it. Return to Avibe; it will start automatically after both permissions are granted.",
+      "screenRecordingGuide": "Avibe opened System Settings → Privacy & Security → Screen & System Audio Recording. Click + or drag Avibe into the list, then enable it. macOS may quit and reopen Avibe after the Screen Recording grant; return to Avibe when it reopens. It will start automatically after both permissions are granted.",
       "needsRuntime": "Computer Use — restart the Avibe service",
       "runtimeUnavailable": "Computer Use — waiting for the Avibe service",
       "runtimeTooOld": "Computer Use — restart the Avibe service",
@@ -70,7 +70,8 @@
         "driver_health_failed": "Computer Use — the managed driver failed its health check; reopen, update, or reinstall Avibe",
         "endpoint_busy": "Computer Use — its previous driver endpoint is still busy; turn it off and on to retry",
         "endpoint_unremovable": "Computer Use — its previous driver endpoint could not be cleared; turn it off and on to retry",
-        "socket_unreachable": "Computer Use — the managed driver could not be reached; turn it off and on to retry"
+        "socket_unreachable": "Computer Use — the managed driver could not be reached; turn it off and on to retry",
+        "socket_path_too_long": "Computer Use — macOS could not create its driver socket; update or reinstall Avibe"
       },
       "invalidState": "Computer Use — state file needs repair; toggle to replace it",
       "unavailable": "Computer Use — bundled driver unavailable",
@@ -2940,7 +2941,7 @@
         "readyDetail": "The managed driver is available for the current Workbench session.",
         "needsPermission": "Computer Use needs permission",
         "accessibilityDetail": "Allow Avibe under Privacy & Security → Accessibility, then return here.",
-        "screenRecordingDetail": "In Screen & System Audio Recording, click + or drag Avibe into the list, then enable it.",
+        "screenRecordingDetail": "In Screen & System Audio Recording, click + or drag Avibe into the list, then enable it. macOS may quit and reopen Avibe after the grant; return when it reopens.",
         "unknownPermissionDetail": "Allow Avibe in the required Privacy & Security permission pane, then return here.",
         "needsRuntime": "Computer Use is waiting for the Avibe service",
         "runtimeUnavailableDetail": "The service is restarting or has not confirmed Computer Use support yet.",
@@ -2964,7 +2965,8 @@
         "invalidStateFileDetail": "The native Computer Use state is damaged. Use the native toggle to replace it.",
         "snapshotInvalidDetail": "The verified Computer Use tool snapshot is missing or changed. Update or reinstall the Avibe desktop app.",
         "shellNotRunningDetail": "Open or reopen the Avibe desktop app to make Computer Use available.",
-        "daemonUnreachableDetail": "The desktop driver is not reachable. Turn Computer Use off and on; reopen Avibe if it repeats."
+        "daemonUnreachableDetail": "The desktop driver is not reachable. Turn Computer Use off and on; reopen Avibe if it repeats.",
+        "socketPathTooLongDetail": "macOS could not create the managed driver socket. Update or reinstall the Avibe desktop app."
       },
       "continueOnPhone": "Continue on your phone",
       "connectChatApps": "Connect chat apps in <settings>Settings</settings>"

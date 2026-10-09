@@ -1059,7 +1059,7 @@ def _pid_reservation_is_fresh(pid_path: Path, pid: int, *, max_age: float = SERV
     return time.time() - latest_signal <= max_age
 
 
-def stop_pid(pid: int, timeout: float = 5) -> bool:
+def stop_pid(pid: int, timeout: float = 5, *, shutdown_reason: str = "stop_pid") -> bool:
     if not isinstance(pid, int) or pid <= 0:
         return False
     if not pid_alive(pid):
@@ -1068,7 +1068,7 @@ def stop_pid(pid: int, timeout: float = 5) -> bool:
     if os.name == "nt":
         return _terminate_process_windows(pid, timeout=timeout)
 
-    write_shutdown_intent(pid, signum=signal.SIGTERM, reason="stop_pid")
+    write_shutdown_intent(pid, signum=signal.SIGTERM, reason=shutdown_reason)
     try:
         logger.info(
             "Sending managed SIGTERM to pid=%s command=%s",
@@ -2516,7 +2516,11 @@ def start_ui(
     return pid
 
 
-def stop_service(*, runtime_ids: frozenset[str] = frozenset()):
+def stop_service(
+    *,
+    runtime_ids: frozenset[str] = frozenset(),
+    shutdown_reason: str = "stop_service",
+):
     """Stop every service process; with ``runtime_ids``, only when all are that Runtime's.
 
     The ids are checked on the very processes this stop selected, before any
@@ -2542,7 +2546,10 @@ def stop_service(*, runtime_ids: frozenset[str] = frozenset()):
 
         stopped_all = True
         for pid in target_pids:
-            stopped = stop_pid(pid, timeout=5)
+            if shutdown_reason == "stop_service":
+                stopped = stop_pid(pid, timeout=5)
+            else:
+                stopped = stop_pid(pid, timeout=5, shutdown_reason=shutdown_reason)
             if stopped:
                 _clear_service_pid_reservation(pid)
                 continue

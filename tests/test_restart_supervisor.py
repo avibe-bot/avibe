@@ -905,6 +905,25 @@ def test_stop_runtime_for_restart_stops_ui_and_service(monkeypatch, tmp_path):
     assert sorted(calls) == ["stop_service", "stop_ui"]
 
 
+def test_service_only_restart_marks_shutdown_to_preserve_ui(monkeypatch):
+    captured = {}
+
+    def stop_service(**kwargs):
+        captured.update(kwargs)
+        return True
+
+    monkeypatch.setattr(runtime, "stop_service", stop_service)
+
+    assert restart_supervisor._stop_runtime_for_restart(
+        stop_ui=False,
+        runtime_ids=frozenset({"runtime-a"}),
+    )[4] is True
+    assert captured == {
+        "runtime_ids": frozenset({"runtime-a"}),
+        "shutdown_reason": "service_restart",
+    }
+
+
 def test_schedule_restart_service_scope_adds_flag(monkeypatch, tmp_path):
     """A service-only restart passes ``--scope service`` to the supervisor job;
     the default ``all`` scope adds no flag (back-compat for CLI/upgrade)."""

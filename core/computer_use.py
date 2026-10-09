@@ -450,17 +450,23 @@ def desktop_computer_use_shell_is_live(
     lock_path: Path | None = None,
     shell_lock_held: Callable[[Path], bool] = _shell_lock_is_held,
 ) -> bool:
-    """Whether a valid native state record is still owned by a live shell."""
+    """Whether the native shell owns the Computer Use lock.
+
+    Missing or damaged optional state does not mean that the native shell is
+    absent: the shell acquires the lock before it reads or repairs that state.
+    The lock is therefore the support signal, while a valid state record
+    remains the source for the feature's effective status.
+    """
 
     target = state_path or computer_use_state_path()
     try:
         state = read_computer_use_state(target)
     except ComputerUseStateError:
-        return False
-    if state is None or state.state == "stopped":
-        return False
+        state = None
     resolved_lock_path = lock_path or target.with_name(COMPUTER_USE_LOCK_FILE)
-    return shell_lock_held(resolved_lock_path)
+    if not shell_lock_held(resolved_lock_path):
+        return False
+    return state is None or state.state != "stopped"
 
 
 def _unix_socket_accepts(path: str, *, timeout: float = 0.1) -> bool:
