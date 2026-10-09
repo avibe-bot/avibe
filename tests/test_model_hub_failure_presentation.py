@@ -14,6 +14,9 @@ from core.controller import Controller
 from core.handlers.model_hub.adapter import RawOutcomeKind
 from core.handlers.model_hub.provenance import (
     ENGINE_DOWN_TURN_OUTCOME,
+    TurnOutcomeProjectionInput,
+    TurnSupplyFacts,
+    TurnUpstreamFailure,
     render_turn_outcome_copy,
 )
 from core.handlers.model_hub.turn_gateway import ModelHubTurnGateway
@@ -297,6 +300,71 @@ async def test_upstream_refusal_text_reaches_reply_record_and_log(
         assert detail in logged[0]
     finally:
         await gateway.close()
+
+
+@pytest.mark.parametrize("language", ["en", "zh"])
+def test_request_incompatible_copy_preserves_nonfallback_guidance(language):
+    detail = "response protection is unavailable"
+    projection = TurnOutcomeProjectionInput(
+        outcome="failed_terminal",
+        discriminator="request_nonfallback",
+        upstream_detail=detail,
+    )
+
+    text = render_turn_outcome_copy(projection, language)
+
+    assert text == t(
+        "modelHub.launch.request_incompatible_detail",
+        language,
+        detail=detail,
+    )
+    assert (
+        "switching Sources will not help" in text
+        if language == "en"
+        else "切换模型供应商也无法解决" in text
+    )
+
+
+@pytest.mark.parametrize("language", ["en", "zh"])
+def test_http_200_sse_failure_is_presented_as_upstream_error(language):
+    detail = "response protection is unavailable"
+    projection = TurnOutcomeProjectionInput(
+        outcome="exhausted",
+        discriminator="final_supply_state",
+        supply_facts=TurnSupplyFacts(
+            backend="codex",
+            model="gpt-6-astra",
+            supply_state="waiting",
+            source="Relay 服务",
+        ),
+        last_upstream_failure=TurnUpstreamFailure(
+            source="Relay 服务",
+            http_status=None,
+            detail=detail,
+        ),
+    )
+
+    text = render_turn_outcome_copy(projection, language)
+
+    assert t(
+        "modelHub.launch.last_upstream_failure_without_status",
+        language,
+        source="Relay 服务",
+        detail=detail,
+    ) in text
+    assert t(
+        "modelHub.launch.last_connection_failure",
+        language,
+        source="Relay 服务",
+        detail=detail,
+    ) not in text
+    assert "HTTP 200" not in text
+    assert (
+        "switching Sources will not help" not in text
+        if language == "en"
+        else "切换模型供应商也无法解决" not in text
+    )
+    assert detail in text
 
 
 @pytest.mark.parametrize("language", ["en", "zh"])

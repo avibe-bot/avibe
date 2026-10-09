@@ -6330,6 +6330,45 @@ def test_documented_incomplete_output_is_served_without_source_failure(
     assert classify_outcome(outcome).action == "return"
 
 
+def test_relay_response_failed_without_json_type_preserves_upstream_failure() -> None:
+    state = client_module.ProtocolSSEState("openai_responses")
+    state.observe(
+        b'event: response.failed\ndata: '
+        b'{"response":{"error":{"code":"upstream_error",'
+        b'"message":"response protection is unavailable"}}}\n\n'
+    )
+
+    observation = state.terminal_observation()
+    assert observation is not None
+    assert observation.outcome == "failed_terminal"
+    assert observation.error_message == "response protection is unavailable"
+
+    source = SourceRecord(
+        source_id="src_fixture123",
+        vendor="custom",
+        protocol="openai_responses",
+        base_url="https://api.example.test/v1",
+        credential_ref="cred_fixture123",
+        allowed_origins=(),
+        model_ids=("model-a",),
+        prefix="source-fixture123",
+    )
+    outcome = client_module._observed_stream_terminal_outcome(
+        state,
+        source,
+        "model-a",
+        200,
+    )
+    assert outcome is not None
+    assert outcome.kind is RawOutcomeKind.HTTP_ERROR
+    assert outcome.http_status == 200
+    assert outcome.upstream_detail == "response protection is unavailable"
+
+    decision = classify_outcome(outcome)
+    assert decision.action == "fallback"
+    assert decision.reason == "server_error"
+
+
 @pytest.mark.parametrize(
     "finish_reason",
     ("stop", "length", "content_filter", "tool_calls", "function_call"),

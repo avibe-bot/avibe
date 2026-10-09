@@ -135,6 +135,16 @@ STREAM_ENVELOPE_FIXTURES = (
     {
         "protocol": "openai_responses",
         "terminal_fact": "failed_terminal",
+        "event_name": "response.failed",
+        "selector_path": ("response", "error"),
+        "selector_value": None,
+        "error_paths": (("response", "error"),),
+        "payload": b'{"response":{"error":{"code":"upstream_error"}}}',
+        "source": "https://platform.openai.com/docs/api-reference/responses-streaming/response/failed",
+    },
+    {
+        "protocol": "openai_responses",
+        "terminal_fact": "failed_terminal",
         "event_name": "response.incomplete",
         "selector_path": ("type",),
         "selector_value": "response.incomplete",
@@ -255,7 +265,13 @@ MACHINE_ERROR_FAMILY_FIXTURES = {
         "model_not_found",
         "not_found_error",
     ),
-    "server": ("server_error", "internal_error", "api_error"),
+    "server": (
+        "server_error",
+        "internal_error",
+        "api_error",
+        "service_unavailable_error",
+        "upstream_error",
+    ),
     "transient": (
         "rate_limit_error",
         "rate_limit_exceeded",

@@ -1326,12 +1326,15 @@ refusal that only says "server error" cannot be diagnosed, so persisted provenan
 it per attempt (`failed_attempts[].upstream_detail`, `terminal_error.upstream_detail`),
 each failed Hub attempt logs it once, and the `turn.exhausted`,
 `turn.no_candidate.blocked`, and `turn.streamed_fallback` rows append the last
-fallback-class failure of the pending request to their summary copy. An upstream
-refusal renders `modelHub.launch.last_upstream_failure` (Source, HTTP status, text).
-The engine's own transport envelope (`network_failure.transport_before_first_byte`)
-carries no upstream status and renders `modelHub.launch.last_connection_failure`
-(Source, text), and Failure details labels that text as a connection error, never as
-what the upstream said. The text is the same projection in every place:
+fallback-class failure of the pending request to their summary copy. A refusal with a
+valid upstream HTTP status (300–599) renders
+`modelHub.launch.last_upstream_failure` (Source, HTTP status, text). A protocol-level
+refusal carried inside an HTTP 2xx SSE envelope renders
+`modelHub.launch.last_upstream_failure_without_status` (Source, text); the envelope's
+HTTP 2xx status is not presented as the upstream status. The engine's own transport
+envelope (`network_failure.transport_before_first_byte`) carries no upstream status and
+renders `modelHub.launch.last_connection_failure` (Source, text), and Failure details
+labels that text as a connection error, never as what the upstream said. The text is the same projection in every place:
 credential-redacted, C0/C1 and Unicode Bidi_Control characters removed,
 whitespace-collapsed, and bounded to 400 characters.
 

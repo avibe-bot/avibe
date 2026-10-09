@@ -196,6 +196,7 @@ def test_turn_outcome_rendering_authority_covers_matrix_and_locales() -> None:
         for key in (
             *(key for _variant, key in rule.copy_keys),
             rule.upstream_failure_key,
+            rule.upstream_failure_without_status_key,
             rule.connection_failure_key,
         )
         if key is not None

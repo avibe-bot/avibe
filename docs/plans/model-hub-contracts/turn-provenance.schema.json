@@ -208,6 +208,8 @@
             "server_error",
             "internal_error",
             "api_error",
+            "service_unavailable_error",
+            "upstream_error",
             null
           ],
           "description": "Optional observed machine code from classification.UPSTREAM_MACHINE_ERROR_CODES. If model_not_found was observed and classification returned upstream_request_invalid, retain that specific code over a co-occurring generic invalid_request_error type; otherwise use existing specificity order. This diagnostic selection never reranks or changes classification. Never derive a code from invalid_parameter; unknown codes, bodies, headers and credentials are not retained. Absent evidence is null; historical records may omit the field."
