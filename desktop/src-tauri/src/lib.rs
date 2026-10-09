@@ -902,7 +902,7 @@ fn stop_runtime(app: AppHandle, quit: bool) {
     notifications::stop(&app);
     #[cfg(target_os = "macos")]
     if let Some(controller) = app.try_state::<computer_use::Controller>() {
-        controller.runtime_lost();
+        controller.runtime_stopped();
     }
     tauri::async_runtime::spawn(async move {
         let outcome = host.stop_owned_runtime().await;

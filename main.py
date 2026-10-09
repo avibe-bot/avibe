@@ -110,17 +110,22 @@ def _log_shutdown_signal(logger: logging.Logger, signum: int) -> None:
         logger.info("Received signal %s", signum)
 
 
-def _log_shutdown_intent(logger: logging.Logger, signum: int) -> None:
+def _log_shutdown_intent(logger: logging.Logger, signum: int) -> dict | None:
     if signum != signal.SIGTERM or not shutdown_intent_required():
-        return
+        return None
     intent = consume_shutdown_intent(os.getpid(), signum)
     if intent is None:
         logger.warning(
             "No managed shutdown intent found for SIGTERM pid=%s; honoring signal",
             os.getpid(),
         )
-        return
+        return None
     logger.info("Accepted managed shutdown intent: %s", intent)
+    return intent
+
+
+def _should_reap_desktop_runtime_ui(shutdown_intent: dict | None) -> bool:
+    return (shutdown_intent or {}).get("reason") != "service_restart"
 
 
 def _stop_macos_session_diagnostics(monitor: Any) -> None:
@@ -163,6 +168,7 @@ def main():
     lock_acquired = False
     macos_session_diagnostics = None
     controller = None
+    shutdown_intent = None
     try:
         acquire_service_instance_lock()
         lock_acquired = True
@@ -216,13 +222,13 @@ def main():
         shutdown_initiated = False
 
         def _handle_shutdown(signum, frame):
-            nonlocal shutdown_initiated
+            nonlocal shutdown_initiated, shutdown_intent
             if shutdown_initiated:
                 return
             shutdown_initiated = True
             try:
                 _log_shutdown_signal(logger, signum)
-                _log_shutdown_intent(logger, signum)
+                shutdown_intent = _log_shutdown_intent(logger, signum)
                 logger.info("Shutting down after signal %s", signum)
             except Exception:
                 pass
@@ -242,7 +248,8 @@ def main():
         try:
             controller.run()
         finally:
-            _stop_owned_desktop_runtime_ui(logger)
+            if _should_reap_desktop_runtime_ui(shutdown_intent):
+                _stop_owned_desktop_runtime_ui(logger)
             _stop_macos_session_diagnostics(macos_session_diagnostics)
         
     except ServiceAlreadyRunningError as e:

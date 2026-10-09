@@ -127,6 +127,7 @@ enum Event {
     Toggle,
     RuntimeReady { origin: LoopbackOrigin, adoption: bool },
     RuntimeLost,
+    RuntimeStopped,
     Activated,
     RetryStart { id: u64 },
     PermissionProbeFinished { id: u64, result: PermissionChildRun },
@@ -178,6 +179,10 @@ impl Controller {
 
     pub(crate) fn runtime_lost(&self) {
         let _ = self.sender.send(Event::RuntimeLost);
+    }
+
+    pub(crate) fn runtime_stopped(&self) {
+        let _ = self.sender.send(Event::RuntimeStopped);
     }
 
     pub(crate) fn activated(&self) {
@@ -413,6 +418,7 @@ impl RuntimeState {
                             self.runtime_ready(origin, adoption).await;
                         }
                         Event::RuntimeLost => self.runtime_lost().await,
+                        Event::RuntimeStopped => self.runtime_stopped().await,
                         Event::Activated => self.activated().await,
                         Event::RetryStart { id } => self.retry_start(id).await,
                         Event::PermissionProbeFinished { id, result } => {
@@ -491,7 +497,18 @@ impl RuntimeState {
     }
 
     async fn runtime_lost(&mut self) {
+        self.set_runtime_lost(false).await;
+    }
+
+    async fn runtime_stopped(&mut self) {
+        self.set_runtime_lost(true).await;
+    }
+
+    async fn set_runtime_lost(&mut self, clear_origin: bool) {
         self.invalidate_start_retry();
+        if clear_origin {
+            self.origin = None;
+        }
         self.capabilities.begin_adoption();
         let directive = self.lifecycle.capabilities(RuntimeSupport::Unknown, silent_grants());
         self.apply(directive).await;

@@ -1135,16 +1135,21 @@ The five findings and their owning contracts are:
 4. **F4, Runtime bootout cleanup.** The service shutdown boundary reaps the
    exact UI process belonging to its desktop Runtime before releasing the
    service lock. Ownership is checked through the existing Runtime id and the
-   existing UI process identity; no pattern kill is introduced. The lifecycle
-   test covers signal-driven service exit and exact UI ownership, while the
-   desktop Runtime stop tests retain the real process scan and rescan contract.
+   existing UI process identity; no pattern kill is introduced. A managed
+   service-only restart carries an explicit shutdown reason so this cleanup
+   preserves the already-running UI, while full restart and ordinary shutdown
+   paths retain the reap. The lifecycle test covers signal-driven service exit
+   and exact UI ownership, while the desktop Runtime stop tests retain the real
+   process scan and rescan contract.
 5. **F5, Runtime re-adoption.** When enablement persists in
    `needs_runtime/runtime_unavailable`, the shell retains the last monitored
    origin and normal ticks probe the Runtime capability endpoint again. A
    supported response transitions through the existing lifecycle contract and
    launches one new driver generation, preserving the current lease,
-   ownership, and no-replay behavior. Transient and unsupported responses do
-   not start a driver.
+   ownership, and no-replay behavior. An explicit user Runtime stop uses a
+   separate stopped event that clears the retained origin, so the shell does
+   not re-adopt a Runtime the user has stopped. Transient and unsupported
+   responses do not start a driver.
 
 Validation for this follow-up must include the owning Python, UI, and Rust
 tests; Ruff on changed Python; the UI build and relevant UI tests; Rust

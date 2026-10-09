@@ -800,6 +800,7 @@ fn native_lifecycle_authority_requires_the_runtime_identity_not_a_launch_attempt
     );
     assert!(stop.contains("ACTIVITY_IDLE"));
     assert!(stop.contains("focus_or_restore_main_window(&app)"));
+    assert!(stop.contains("controller.runtime_stopped()"));
     assert!(!stop.contains("start_runtime_monitor("));
     assert!(!stop.contains("spawn_bootstrap("));
 }
