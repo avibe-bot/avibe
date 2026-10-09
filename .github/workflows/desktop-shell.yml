@@ -78,11 +78,19 @@ jobs:
       - name: Verify bootstrap localization contract
         run: npm run test:i18n
 
+      - name: Install pinned driver validation dependency
+        working-directory: .
+        run: >-
+          python -m pip install --disable-pip-version-check
+          --only-binary=:all: "PyYAML==6.0.3"
+
       - name: Validate private Runtime build inputs
         working-directory: .
         run: |
           python -c "import json, pathlib; json.loads(pathlib.Path('desktop/runtime-sources.json').read_text(encoding='utf-8'))"
           python -m py_compile desktop/scripts/build-runtime-bundle.py
+          python -m py_compile desktop/scripts/prepare-cua-driver.py
+          python desktop/scripts/prepare-cua-driver.py --check-manifest
 
       # Must precede every cargo step: `tauri::generate_context!` embeds
       # `frontendDist` (../dist) at compile time, so the shell does not compile

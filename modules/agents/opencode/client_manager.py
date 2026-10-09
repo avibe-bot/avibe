@@ -173,12 +173,15 @@ class OpenCodeLaunchInputs:
     caller_context_path: str
     user_config: dict[str, Optional[str]]
     credentials: Optional[str]
+    computer_use_spec: Any = None
     # The ``agents.opencode`` settings the CLI path was read from. The turn
     # takes every per-turn setting from here, never from the live config.
     settings: Any = None
 
 
 def read_launch_inputs(binary: str, renew_epoch: int, settings: Any = None) -> OpenCodeLaunchInputs:
+    from core.computer_use import managed_mcp_server_spec
+
     executable, binary_identity = _binary_identity(binary)
     return OpenCodeLaunchInputs(
         settings=settings,
@@ -188,6 +191,7 @@ def read_launch_inputs(binary: str, renew_epoch: int, settings: Any = None) -> O
         caller_context_path=server_environment()["AVIBE_OPENCODE_CALLER_CONTEXT_PATH"],
         user_config={str(path): _user_config_digest(path) for path in _global_config_files()},
         credentials=_credential_digest(get_opencode_auth_path()),
+        computer_use_spec=managed_mcp_server_spec(),
     )
 
 
@@ -240,6 +244,11 @@ def compute_launch_spec(inputs: OpenCodeLaunchInputs, overlay: Any | None) -> Op
             "user_config": inputs.user_config,
             "credentials": inputs.credentials,
             "renew_epoch": inputs.renew_epoch,
+            "computer_use": (
+                inputs.computer_use_spec.fingerprint
+                if inputs.computer_use_spec is not None
+                else None
+            ),
         }
     )
     return OpenCodeLaunchSpec(
@@ -250,6 +259,7 @@ def compute_launch_spec(inputs: OpenCodeLaunchInputs, overlay: Any | None) -> Op
         overlay_provider_ids=provider_ids,
         overlay_file_content=file_content,
         overlay_inline_content=inline_content,
+        computer_use_spec=inputs.computer_use_spec,
     )
 
 

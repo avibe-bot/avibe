@@ -15,6 +15,8 @@
 //!   and [`ensure_shell_ui`] rejects the call a second time regardless. Only
 //!   the two built-in window drag commands are granted to the Workbench.
 
+#[cfg(target_os = "macos")]
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -25,6 +27,8 @@ mod pet;
 mod update_install;
 mod updater;
 
+#[cfg(target_os = "macos")]
+mod computer_use;
 #[cfg(target_os = "macos")]
 mod macos_deep_link;
 #[cfg(target_os = "macos")]
@@ -81,6 +85,8 @@ const STOP_MENU_ID: &str = "stop-runtime";
 const QUIT_MENU_ID: &str = "quit-avibe";
 const LOGIN_MENU_ID: &str = "start-at-login";
 const SETTINGS_MENU_ID: &str = "open-settings";
+#[cfg(target_os = "macos")]
+const COMPUTER_USE_MENU_ID: &str = "computer-use";
 /// Where Settings leads: the Workbench deep link, whose destination
 /// `parse_deep_link` owns. It is delivered as a page load only when the window
 /// has no Workbench able to open Settings in place.
@@ -107,6 +113,9 @@ struct ProductCatalog {
 #[derive(Deserialize)]
 struct DesktopBootstrapCatalog {
     tray: NativeTrayCatalog,
+    #[cfg(target_os = "macos")]
+    #[serde(rename = "computerUse")]
+    computer_use: NativeComputerUseCatalog,
     updater: updater::Catalog,
     notifications: notifications::NativeNotificationCatalog,
     pet: pet::NativePetCatalog,
@@ -139,6 +148,29 @@ struct NativeTrayCatalog {
     busy_message: String,
     failure_title: String,
     login_failure: String,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NativeComputerUseCatalog {
+    off: String,
+    starting: String,
+    ready: String,
+    needs_permission: String,
+    needs_permission_accessibility: String,
+    needs_permission_screen_recording: String,
+    screen_recording_title: String,
+    screen_recording_guide: String,
+    needs_runtime: String,
+    runtime_unavailable: String,
+    runtime_too_old: String,
+    error: String,
+    error_reasons: HashMap<String, String>,
+    invalid_state: String,
+    unavailable: String,
+    initialization_failed: String,
+    save_failed: String,
 }
 
 #[cfg(feature = "bundled-runtime")]
@@ -192,6 +224,57 @@ fn native_tray_catalog() -> NativeTrayCatalog {
     native_catalog_for_locales(sys_locale::get_locales()).tray
 }
 
+#[cfg(target_os = "macos")]
+fn computer_use_label(catalog: &NativeComputerUseCatalog, view: &computer_use::MenuView) -> String {
+    if view.save_failed {
+        return catalog.save_failed.clone();
+    }
+    if view.invalid_state {
+        return catalog.invalid_state.clone();
+    }
+    if view.initialization_error {
+        return catalog.initialization_failed.clone();
+    }
+    if view.asset_error {
+        return catalog.unavailable.clone();
+    }
+    if view.runtime_refused || view.phase == avibe_runtime_host::computer_use::ComputerUsePhase::NeedsRuntime {
+        return match view.reason.as_deref() {
+            Some("runtime_unavailable") => catalog.runtime_unavailable.clone(),
+            Some("runtime_too_old") => catalog.runtime_too_old.clone(),
+            _ => catalog.needs_runtime.clone(),
+        };
+    }
+    match view.phase {
+        avibe_runtime_host::computer_use::ComputerUsePhase::Off => catalog.off.clone(),
+        avibe_runtime_host::computer_use::ComputerUsePhase::NeedsPermission => match view.reason.as_deref() {
+            Some("accessibility") => catalog.needs_permission_accessibility.clone(),
+            Some("screen_recording") => catalog.needs_permission_screen_recording.clone(),
+            _ => catalog.needs_permission.clone(),
+        },
+        avibe_runtime_host::computer_use::ComputerUsePhase::Starting => catalog.starting.clone(),
+        avibe_runtime_host::computer_use::ComputerUsePhase::Ready => catalog.ready.clone(),
+        avibe_runtime_host::computer_use::ComputerUsePhase::Error => view
+            .reason
+            .as_deref()
+            .and_then(|reason| catalog.error_reasons.get(reason))
+            .cloned()
+            .unwrap_or_else(|| catalog.error.clone()),
+        avibe_runtime_host::computer_use::ComputerUsePhase::Stopped => catalog.off.clone(),
+        avibe_runtime_host::computer_use::ComputerUsePhase::NeedsRuntime => catalog.needs_runtime.clone(),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn computer_use_control_enabled(view: &computer_use::MenuView) -> bool {
+    !view.initialization_error
+}
+
+#[cfg(target_os = "macos")]
+fn computer_use_menu_state(view: &computer_use::MenuView) -> (bool, bool) {
+    (computer_use_control_enabled(view), view.enabled)
+}
+
 #[cfg(feature = "bundled-runtime")]
 fn native_uninstall_catalog_for_locales(locales: impl IntoIterator<Item = String>) -> NativeUninstallCatalog {
     native_catalog_for_locales(locales).uninstall
@@ -213,6 +296,7 @@ struct Shell {
     monitor_generation: Arc<AtomicU64>,
     dialog_pending: AtomicBool,
     exit_authorized: AtomicBool,
+    exit_cleanup_started: AtomicBool,
     bootstrap_url: Url,
 }
 
@@ -227,6 +311,7 @@ impl Shell {
             monitor_generation: Arc::new(AtomicU64::new(0)),
             dialog_pending: AtomicBool::new(false),
             exit_authorized: AtomicBool::new(false),
+            exit_cleanup_started: AtomicBool::new(false),
             bootstrap_url,
         }
     }
@@ -301,6 +386,8 @@ struct NativeMenus {
     settings: MenuItem<tauri::Wry>,
     login: CheckMenuItem<tauri::Wry>,
     notifications: CheckMenuItem<tauri::Wry>,
+    #[cfg(target_os = "macos")]
+    computer_use: CheckMenuItem<tauri::Wry>,
     stop_present: AtomicBool,
     displayed: Mutex<Option<(TrayRuntimeState, bool, bool)>>,
 }
@@ -334,7 +421,43 @@ fn install_native_tray(app: &AppHandle) -> tauri::Result<()> {
         None::<&str>,
     )?;
     let (pet_toggle, pet_shortcut) = pet::tray_items(app)?;
+    #[cfg(target_os = "macos")]
+    let computer_use_view = app.state::<computer_use::Controller>().view();
+    #[cfg(target_os = "macos")]
+    let (computer_use_enabled, computer_use_checked) = computer_use_menu_state(&computer_use_view);
+    #[cfg(target_os = "macos")]
+    let computer_use = CheckMenuItem::with_id(
+        app,
+        COMPUTER_USE_MENU_ID,
+        computer_use_label(
+            &native_catalog_for_locales(sys_locale::get_locales()).computer_use,
+            &computer_use_view,
+        ),
+        computer_use_enabled,
+        computer_use_checked,
+        None::<&str>,
+    )?;
     let updater = app.state::<updater::Updater>();
+    #[cfg(target_os = "macos")]
+    let tray = Menu::with_items(
+        app,
+        &[
+            &open,
+            &status,
+            &PredefinedMenuItem::separator(app)?,
+            &computer_use,
+            &settings,
+            &updater.menu,
+            &updater.channel_menu,
+            &login,
+            &notifications,
+            &pet_toggle,
+            &pet_shortcut,
+            &PredefinedMenuItem::separator(app)?,
+            &quit,
+        ],
+    )?;
+    #[cfg(not(target_os = "macos"))]
     let tray = Menu::with_items(
         app,
         &[
@@ -364,6 +487,8 @@ fn install_native_tray(app: &AppHandle) -> tauri::Result<()> {
         let settings_position = if cfg!(target_os = "macos") { 2 } else { 0 };
         submenu.insert_items(&[&settings, &PredefinedMenuItem::separator(app)?], settings_position)?;
         submenu.insert_items(&[&updater.menu, &updater.channel_menu], settings_position + 1)?;
+        #[cfg(target_os = "macos")]
+        submenu.insert(&computer_use, 0)?;
         submenu.insert_items(&[&open, &status, &login, &PredefinedMenuItem::separator(app)?], 0)?;
     }
     app.set_menu(application_menu)?;
@@ -380,6 +505,8 @@ fn install_native_tray(app: &AppHandle) -> tauri::Result<()> {
         settings,
         login,
         notifications,
+        #[cfg(target_os = "macos")]
+        computer_use,
         stop_present: AtomicBool::new(false),
         displayed: Mutex::new(None),
     });
@@ -518,6 +645,31 @@ fn refresh_native_controls(app: &AppHandle, requested: Option<TrayRuntimeState>)
     });
 }
 
+#[cfg(target_os = "macos")]
+fn refresh_computer_use_control(app: &AppHandle) {
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        let Some(menus) = handle.try_state::<NativeMenus>() else {
+            return;
+        };
+        let Some(controller) = handle.try_state::<computer_use::Controller>() else {
+            return;
+        };
+        let view = controller.view();
+        let (enabled, checked) = computer_use_menu_state(&view);
+        let catalog = native_catalog_for_locales(sys_locale::get_locales()).computer_use;
+        if menus
+            .computer_use
+            .set_text(computer_use_label(&catalog, &view))
+            .and_then(|()| menus.computer_use.set_enabled(enabled))
+            .and_then(|()| menus.computer_use.set_checked(checked))
+            .is_err()
+        {
+            eprintln!("failed to refresh native Computer Use control");
+        }
+    });
+}
+
 fn refresh_latest_tray(app: &AppHandle) {
     let state = app
         .state::<Shell>()
@@ -570,14 +722,53 @@ fn quit_choice(result: MessageDialogResult, catalog: &NativeTrayCatalog) -> Quit
 }
 
 fn exit_shell(app: &AppHandle) {
+    if !claim_exit_cleanup(app) {
+        return;
+    }
     authorize_exit(app);
+    #[cfg(target_os = "macos")]
+    {
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            shutdown_computer_use(&app).await;
+            app.exit(0);
+        });
+    }
+    #[cfg(not(target_os = "macos"))]
     app.exit(0);
+}
+
+fn claim_exit_cleanup(app: &AppHandle) -> bool {
+    claim_exit_cleanup_flag(&app.state::<Shell>().exit_cleanup_started)
+}
+
+fn claim_exit_cleanup_flag(started: &AtomicBool) -> bool {
+    !started.swap(true, Ordering::SeqCst)
 }
 
 /// Everything the shell does before it ends, however the end is carried out.
 fn authorize_exit(app: &AppHandle) {
     notifications::stop(app);
     app.state::<Shell>().exit_authorized.store(true, Ordering::SeqCst);
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) async fn shutdown_computer_use(app: &AppHandle) {
+    if let Some(controller) = app.try_state::<computer_use::Controller>() {
+        controller.shutdown().await;
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn restart_after_computer_use_shutdown(app: AppHandle) {
+    if !claim_exit_cleanup(&app) {
+        return;
+    }
+    authorize_exit(&app);
+    tauri::async_runtime::spawn(async move {
+        shutdown_computer_use(&app).await;
+        app.restart();
+    });
 }
 
 /// How long logout, restart or shutdown waits for this app's Runtime to stop.
@@ -603,9 +794,22 @@ fn stop_for_session_end(app: &AppHandle) -> Option<impl std::future::Future<Outp
     let shell = app.state::<Shell>();
     let stop = shell.host.has_owned_runtime() && claim_runtime_stop(&shell.activity);
     let host = shell.host.clone();
-    authorize_exit(app);
-    stop.then_some(async move {
-        let _ = tokio::time::timeout(SESSION_END_STOP_LIMIT, host.stop_owned_runtime()).await;
+    let cleanup = claim_exit_cleanup(app);
+    let app = app.clone();
+    authorize_exit(&app);
+    if !cleanup && !stop {
+        return None;
+    }
+    Some(async move {
+        let _ = tokio::time::timeout(SESSION_END_STOP_LIMIT, async {
+            if cleanup {
+                shutdown_computer_use(&app).await;
+            }
+            if stop {
+                let _ = host.stop_owned_runtime().await;
+            }
+        })
+        .await;
     })
 }
 
@@ -696,6 +900,10 @@ fn stop_runtime(app: AppHandle, quit: bool) {
     }
     refresh_runtime_tray(&app, TrayRuntimeState::Stopping);
     notifications::stop(&app);
+    #[cfg(target_os = "macos")]
+    if let Some(controller) = app.try_state::<computer_use::Controller>() {
+        controller.runtime_lost();
+    }
     tauri::async_runtime::spawn(async move {
         let outcome = host.stop_owned_runtime().await;
         if quit && outcome == CliOutcome::Completed {
@@ -1066,6 +1274,10 @@ fn open_workbench(app: &AppHandle, ready: &BootstrapStatus, activity: Arc<Atomic
             WorkbenchHandoff::Monitor => {
                 commit_deep_link_navigation(app, &navigation, true, observed_generation);
                 apply_pending_deep_link(app);
+                #[cfg(target_os = "macos")]
+                if let Some(controller) = app.try_state::<computer_use::Controller>() {
+                    controller.runtime_ready(origin.clone(), true);
+                }
                 start_runtime_monitor(app.clone(), origin, activity);
                 return;
             }
@@ -1127,8 +1339,12 @@ fn start_runtime_monitor(app: AppHandle, origin: LoopbackOrigin, activity: Arc<A
                     TrayRuntimeState::Unreachable
                 },
             );
-            if readiness_loss.begin_recovery(ready, &host, &activity, &generation, observed_generation)
-                && recover_after_readiness_loss(
+            if readiness_loss.begin_recovery(ready, &host, &activity, &generation, observed_generation) {
+                #[cfg(target_os = "macos")]
+                if let Some(controller) = app.try_state::<computer_use::Controller>() {
+                    controller.runtime_lost();
+                }
+                if recover_after_readiness_loss(
                     || restore_bootstrap_view(&app),
                     || notifications::stop(&app),
                     || spawn_owned_bootstrap(app.clone(), BootstrapTrigger::Recovery),
@@ -1137,9 +1353,14 @@ fn start_runtime_monitor(app: AppHandle, origin: LoopbackOrigin, activity: Arc<A
                             .compare_exchange(ACTIVITY_BOOTSTRAP, ACTIVITY_MONITOR, Ordering::SeqCst, Ordering::SeqCst)
                             .is_ok()
                     },
-                )
-            {
-                break;
+                ) {
+                    break;
+                }
+            } else if ready {
+                #[cfg(target_os = "macos")]
+                if let Some(controller) = app.try_state::<computer_use::Controller>() {
+                    controller.runtime_ready(origin.clone(), false);
+                }
             }
         }
     });
@@ -1739,6 +1960,8 @@ pub fn run() {
         .plugin(tauri_plugin_deep_link::init());
     #[cfg(target_os = "macos")]
     let builder = builder.plugin(macos_deep_link::init());
+    #[cfg(target_os = "macos")]
+    let builder = builder.plugin(computer_use::activation_plugin());
     builder
         .plugin(
             tauri_plugin_window_state::Builder::new()
@@ -1779,6 +2002,10 @@ pub fn run() {
                 }
                 pet::MENU_ID => pet::toggle(app),
                 id if id.starts_with(pet::SHORTCUT_MENU_PREFIX) => pet::choose_shortcut(app, id),
+                #[cfg(target_os = "macos")]
+                COMPUTER_USE_MENU_ID => {
+                    app.state::<computer_use::Controller>().toggle();
+                }
                 _ => {}
             }
             #[cfg(feature = "bundled-runtime")]
@@ -1916,6 +2143,8 @@ pub fn run() {
                 }
             };
             app.manage(Shell::new(host, bootstrap_url));
+            #[cfg(target_os = "macos")]
+            app.manage(computer_use::Controller::start(app.handle()));
             app.manage(notifications::Notifications::new(
                 app.path().app_local_data_dir()?.join("notifications.json"),
             ));
@@ -1932,6 +2161,8 @@ pub fn run() {
             updater::init(app.handle())?;
             install_native_tray(app.handle())?;
             pet::apply_shortcut(app.handle());
+            #[cfg(target_os = "macos")]
+            refresh_computer_use_control(app.handle());
             updater::check(app.handle().clone(), false);
             let _ = spawn_bootstrap(app.handle().clone(), BootstrapTrigger::Launch);
             Ok(())
@@ -2027,6 +2258,128 @@ mod tests {
                 assert_eq!(quit_choice(result, &catalog), QuitChoice::Cancel);
             }
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn computer_use_catalog_contains_screen_recording_recovery_guidance_in_each_locale() {
+        let english = native_catalog_for_locales(["en-US".to_owned()]).computer_use;
+        assert!(english.screen_recording_title.contains("Screen Recording"));
+        assert!(english.screen_recording_guide.to_lowercase().contains("click +"));
+        assert!(english.screen_recording_guide.contains("drag"));
+
+        let chinese = native_catalog_for_locales(["zh-CN".to_owned()]).computer_use;
+        assert!(chinese.screen_recording_title.contains("屏幕"));
+        assert!(chinese.screen_recording_guide.contains("拖"));
+        assert!(chinese.screen_recording_guide.contains("+"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn computer_use_native_labels_localize_permission_and_error_reasons() {
+        let catalog = native_catalog_for_locales(["en-US".to_owned()]).computer_use;
+        let accessibility = computer_use::MenuView {
+            reason: Some("accessibility".to_owned()),
+            phase: avibe_runtime_host::computer_use::ComputerUsePhase::NeedsPermission,
+            ..Default::default()
+        };
+        let screen_recording = computer_use::MenuView {
+            reason: Some("screen_recording".to_owned()),
+            phase: avibe_runtime_host::computer_use::ComputerUsePhase::NeedsPermission,
+            ..Default::default()
+        };
+        let known_error = computer_use::MenuView {
+            reason: Some("state_unwritable".to_owned()),
+            phase: avibe_runtime_host::computer_use::ComputerUsePhase::Error,
+            ..Default::default()
+        };
+        let runtime_unavailable = computer_use::MenuView {
+            reason: Some("runtime_unavailable".to_owned()),
+            phase: avibe_runtime_host::computer_use::ComputerUsePhase::NeedsRuntime,
+            ..Default::default()
+        };
+        let runtime_too_old = computer_use::MenuView {
+            reason: Some("runtime_too_old".to_owned()),
+            phase: avibe_runtime_host::computer_use::ComputerUsePhase::NeedsRuntime,
+            ..Default::default()
+        };
+        let unknown_error = computer_use::MenuView {
+            reason: Some("future_reason".to_owned()),
+            phase: avibe_runtime_host::computer_use::ComputerUsePhase::Error,
+            ..Default::default()
+        };
+
+        let accessibility_label = computer_use_label(&catalog, &accessibility);
+        let screen_recording_label = computer_use_label(&catalog, &screen_recording);
+        let known_error_label = computer_use_label(&catalog, &known_error);
+        let runtime_unavailable_label = computer_use_label(&catalog, &runtime_unavailable);
+        let runtime_too_old_label = computer_use_label(&catalog, &runtime_too_old);
+        let unknown_error_label = computer_use_label(&catalog, &unknown_error);
+
+        assert!(accessibility_label.contains("Accessibility"));
+        assert!(screen_recording_label.contains("Screen Recording"));
+        assert_ne!(accessibility_label, screen_recording_label);
+        assert!(!known_error_label.contains("state_unwritable"));
+        for reason in [
+            "bundle_identity",
+            "ax_capability",
+            "capture_failed",
+            "driver_health_failed",
+        ] {
+            let view = computer_use::MenuView {
+                reason: Some(reason.to_owned()),
+                phase: avibe_runtime_host::computer_use::ComputerUsePhase::Error,
+                ..Default::default()
+            };
+            let label = computer_use_label(&catalog, &view);
+            assert_eq!(label, catalog.error_reasons[reason]);
+            assert!(!label.contains(reason));
+        }
+        assert!(runtime_unavailable_label.contains("waiting"));
+        assert!(runtime_too_old_label.contains("restart"));
+        assert_ne!(runtime_unavailable_label, runtime_too_old_label);
+        assert_eq!(unknown_error_label, catalog.error);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn computer_use_initialization_failure_keeps_a_disabled_native_control() {
+        let catalog = native_catalog_for_locales(["en-US".to_owned()]).computer_use;
+        let view = computer_use::MenuView {
+            initialization_error: true,
+            ..Default::default()
+        };
+
+        assert!(!computer_use_control_enabled(&view));
+        assert_eq!(computer_use_menu_state(&view), (false, false));
+        assert_eq!(computer_use_label(&catalog, &view), catalog.initialization_failed);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn computer_use_menu_state_keeps_enabled_and_checked_independent() {
+        let off = computer_use::MenuView::default();
+        assert_eq!(computer_use_menu_state(&off), (true, false));
+
+        let on = computer_use::MenuView {
+            enabled: true,
+            ..Default::default()
+        };
+        assert_eq!(computer_use_menu_state(&on), (true, true));
+
+        let failed_on = computer_use::MenuView {
+            enabled: true,
+            initialization_error: true,
+            ..Default::default()
+        };
+        assert_eq!(computer_use_menu_state(&failed_on), (false, true));
+    }
+
+    #[test]
+    fn exit_cleanup_is_claimed_once_across_quit_and_restart_paths() {
+        let started = AtomicBool::new(false);
+        assert!(claim_exit_cleanup_flag(&started));
+        assert!(!claim_exit_cleanup_flag(&started));
     }
 
     #[test]

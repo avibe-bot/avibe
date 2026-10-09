@@ -14,6 +14,7 @@ import { shouldShowReadyBanner, useBackendReadiness, useSetupHandoff } from './w
 import { useInstanceAuthorization } from '../context/InstanceAuthorizationContext';
 import { canCreateLocalProject } from '../lib/sessionInfo';
 import { CreateViaChatDialog } from './workbench/CreateViaChatDialog';
+import { ComputerUseStatusLine } from './workbench/ComputerUseStatusLine';
 
 // The pill treatment the approved home puts under the heading. Disabled styling
 // is this home's own: the reference never shows a send in flight, but a pill
@@ -102,6 +103,9 @@ export const Workbench: React.FC = () => {
     // above the keyboard the way it does for any in-flow input, and the shell
     // already keeps the tab bar clear of the bottom of this page.
     <div className="flex w-full flex-col items-center gap-5 md:min-h-[calc(100dvh-7rem)] md:justify-center">
+      <div className="w-full max-w-[640px]">
+        <ComputerUseStatusLine />
+      </div>
       {showReadyBanner && currentBackend && (
         <div className="w-full max-w-[640px]">
           <ReadyBanner backend={currentBackend} onDismiss={dismissReadyBanner} />

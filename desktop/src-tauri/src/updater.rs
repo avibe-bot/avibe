@@ -462,10 +462,7 @@ fn install(app: AppHandle, manifest: Manifest) {
                 set_state(&app, Phase::Installed, None);
                 #[cfg(target_os = "macos")]
                 {
-                    app.state::<super::Shell>()
-                        .exit_authorized
-                        .store(true, Ordering::SeqCst);
-                    app.restart();
+                    super::restart_after_computer_use_shutdown(app);
                 }
             }
             Err(error) => {

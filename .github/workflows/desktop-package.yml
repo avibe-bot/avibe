@@ -106,7 +106,7 @@ jobs:
           python scripts/desktop_release.py prepare \
             --version "$AVIBE_DESKTOP_VERSION" --tag "$RELEASE_TAG" \
             --source-sha "$SOURCE_SHA" --config desktop/tauri.release.conf.json \
-            --env-file "$GITHUB_ENV"
+            --env-file "$GITHUB_ENV" --target "${{ matrix.target }}"
 
       - name: Configure signed updater or explicitly disable it
         shell: bash
@@ -123,6 +123,18 @@ jobs:
       - name: Build verified private Runtime
         run: >
           python desktop/scripts/build-runtime-bundle.py
+          --target "${{ matrix.target }}"
+
+      - name: Install pinned driver validation dependency
+        if: runner.os == 'macOS'
+        run: >-
+          python -m pip install --disable-pip-version-check
+          --only-binary=:all: "PyYAML==6.0.3"
+
+      - name: Prepare pinned Cua Driver sidecar
+        if: runner.os == 'macOS'
+        run: >
+          python desktop/scripts/prepare-cua-driver.py
           --target "${{ matrix.target }}"
 
       - name: Clean prior bundle output
@@ -219,7 +231,13 @@ jobs:
         run: |
           set -eu
           app="target/release/bundle/macos/Avibe.app"
+          driver="$app/Contents/Helpers/cua-driver"
           [ -d "$app" ] || { echo "Avibe.app not found at $app" >&2; exit 1; }
+          [ -f "$driver" ] || { echo "Cua Driver helper not found at $driver" >&2; exit 1; }
+          [ ! -e "$app/Contents/MacOS/cua-driver" ] || {
+            echo "stale Cua Driver copy found in Contents/MacOS" >&2
+            exit 1
+          }
           # Same detection as create-macos-dmg.sh: identity signatures print
           # `Signature size=...` and Authority lines (verbose=4); only ad-hoc
           # prints `Signature=adhoc`.
@@ -230,15 +248,46 @@ jobs:
               echo "signing credentials were exported but Avibe.app is not identity-signed" >&2
               exit 1
             fi
+            driver_authority="$(codesign -dv --verbose=4 "$driver" 2>&1 | sed -n 's/^Authority=//p' | head -1 || true)"
+            app_team="$(codesign -dv --verbose=4 "$app" 2>&1 | sed -n 's/^TeamIdentifier=//p' | head -1 || true)"
+            driver_team="$(codesign -dv --verbose=4 "$driver" 2>&1 | sed -n 's/^TeamIdentifier=//p' | head -1 || true)"
+            if [ -z "$driver_authority" ] || [ "$driver_authority" != "$authority" ] \
+              || [ -z "$app_team" ] || [ "$driver_team" != "$app_team" ]; then
+              echo "Cua Driver helper does not match the outer app signing identity" >&2
+              exit 1
+            fi
+            codesign --verify --strict "$driver"
             codesign --verify --deep --strict "$app"
             echo "signature_state=app-identity-signed (${authority})" >> "$GITHUB_ENV"
           else
-            # Seal the complete app before DMG staging and prove the TEST layer.
-            codesign --force --deep --sign - "$app"
+            # Sign nested code from the inside out. `--deep` is deliberately a
+            # verification option only; it must not choose what gets signed.
+            codesign --force --sign - \
+              --preserve-metadata=identifier,entitlements,flags,runtime \
+              "$driver"
+            codesign --force --sign - \
+              --preserve-metadata=identifier,entitlements,flags,runtime \
+              "$app"
+            codesign --verify --strict "$driver"
             codesign --verify --deep --strict "$app"
             codesign -dv "$app" 2>&1 | grep -q '^Signature=adhoc$'
+            codesign -dv "$driver" 2>&1 | grep -q '^Signature=adhoc$'
             echo "signature_state=app-adhoc" >> "$GITHUB_ENV"
           fi
+          APP_PATH="$app" python - <<'PY'
+          import os
+          import plistlib
+          from pathlib import Path
+
+          code_resources = Path(os.environ["APP_PATH"]) / "Contents/_CodeSignature/CodeResources"
+          files2 = plistlib.loads(code_resources.read_bytes()).get("files2", {})
+          helper = files2.get("Helpers/cua-driver")
+          if not isinstance(helper, dict) or not ({"cdhash", "requirement"} & helper.keys()):
+              raise SystemExit("Helpers/cua-driver is not sealed as nested code")
+          PY
+          echo "driver_packaged_path=$(pwd)/$driver" >> "$GITHUB_ENV"
+          echo "driver_provenance_path=$(pwd)/src-tauri/binaries/cua-driver-${{ matrix.target }}.provenance.json" >> "$GITHUB_ENV"
+          echo "driver_packaged_cdhash=$(codesign -dv --verbose=4 "$driver" 2>&1 | sed -n 's/^CDHash=//p' | head -1)" >> "$GITHUB_ENV"
 
       - name: Create headless-safe DMG
         if: runner.os == 'macOS'
@@ -268,8 +317,14 @@ jobs:
           set -euo pipefail
           installers=(${{ matrix.artifact_glob }})
           [ "${#installers[@]}" -eq 1 ] || { echo "Expected exactly one installer" >&2; exit 1; }
+          driver_args=()
           if [ "$RUNNER_OS" = "macOS" ]; then
             signing="${signature_state}"$'\ndmg-unsigned-unnotarized'
+            driver_args=(
+              --driver "$driver_packaged_path"
+              --driver-provenance-path "$driver_provenance_path"
+              --driver-cdhash "$driver_packaged_cdhash"
+            )
           else
             signing="installer-unsigned"
           fi
@@ -277,7 +332,7 @@ jobs:
             --version "$AVIBE_DESKTOP_VERSION" --target "$TARGET" --tag "$RELEASE_TAG" \
             --source-sha "$(git rev-parse HEAD)" --installer "${installers[0]}" \
             --runtime desktop/src-tauri/resources/runtime --output desktop-package \
-            --signing "$signing"
+            --signing "$signing" ${driver_args[@]+"${driver_args[@]}"}
 
       - name: Sign and verify final updater artifacts
         if: inputs.updater_enabled

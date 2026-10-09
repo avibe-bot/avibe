@@ -121,6 +121,10 @@ _CALLER_ENV = (
     # that Runtime, and every stop, restart and start refuses or claims by its id.
     "AVIBE_DESKTOP_RUNTIME_ID",
     "AVIBE_DESKTOP_RUNTIME_ROOT",
+    "AVIBE_COMPUTER_USE_DRIVER_PATH",
+    "AVIBE_COMPUTER_USE_POLICY_PATH",
+    "AVIBE_COMPUTER_USE_STATE_DIR",
+    "AVIBE_COMPUTER_USE_SNAPSHOT_PATH",
 )
 # What the run started with, for `uses_real_paths` tests and the tripwire.
 _AMBIENT_ENV = {name: os.environ.get(name) for name in (*_HOME_ENV, *_CALLER_ENV)}

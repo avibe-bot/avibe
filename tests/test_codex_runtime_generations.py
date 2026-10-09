@@ -58,11 +58,21 @@ class FakeAppServer:
     lose_next_resume = False
     _ids = itertools.count(1)
 
-    def __init__(self, binary, cwd, extra_args=None, runtime_args=None, runtime_env=None, model_hub_catalog=None):
+    def __init__(
+        self,
+        binary,
+        cwd,
+        extra_args=None,
+        runtime_args=None,
+        runtime_env=None,
+        model_hub_catalog=None,
+        managed_mcp_spec=None,
+    ):
         self.binary = binary
         self.cwd = cwd
         self.runtime_args = list(runtime_args or [])
         self.runtime_env = runtime_env
+        self.managed_mcp_spec = managed_mcp_spec
         self.loaded: set[str] = set()
         self.active: dict[str, str] = {}
         self.requests: list[tuple[str, dict]] = []
@@ -1374,4 +1384,3 @@ async def test_hfr_144_the_stuck_turn_backstop_never_forgets_a_turn_admitted_mea
 
     new_turn = agent._turn_registry.get_active_turn("s1")
     assert new_turn and _server_for(agent, "s1").active.get(agent._session_mgr.get_thread_id("s1")) == new_turn
-

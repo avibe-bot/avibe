@@ -11,6 +11,7 @@ from asyncio.subprocess import Process
 from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Mapping, Optional
 
+from core.computer_use import ManagedMcpServerSpec
 from core.process_diagnostics import log_process_snapshot, process_identity
 from core.process_isolation import KILL_SIGNAL, isolated_subprocess_kwargs, signal_process_tree
 from vibe.codex_config import format_toml_basic_string
@@ -77,6 +78,26 @@ def _avibe_app_server_config_args() -> list[str]:
     ]
 
 
+def _managed_mcp_config_args(
+    spec: ManagedMcpServerSpec | None,
+) -> list[str]:
+    if spec is None:
+        return []
+    args_array = ",".join(format_toml_basic_string(value) for value in spec.args)
+    overrides = [
+        f"mcp_servers.{spec.name}.command={format_toml_basic_string(spec.command)}",
+        f"mcp_servers.{spec.name}.args=[{args_array}]",
+        f'mcp_servers.{spec.name}.default_tools_approval_mode="approve"',
+    ]
+    if spec.env:
+        env_table = ",".join(
+            f"{format_toml_basic_string(key)}={format_toml_basic_string(value)}"
+            for key, value in sorted(spec.env.items())
+        )
+        overrides.append(f"mcp_servers.{spec.name}.env={{{env_table}}}")
+    return [argument for override in overrides for argument in ("-c", override)]
+
+
 class CodexRPCError(RuntimeError):
     """A structured server error, distinct from an ambiguous transport failure."""
 
@@ -114,6 +135,7 @@ class CodexTransport:
         runtime_args: list[str] | None = None,
         runtime_env: dict[str, str] | None = None,
         model_hub_catalog: CodexHubCatalog | None = None,
+        managed_mcp_spec: ManagedMcpServerSpec | None = None,
     ) -> None:
         self._binary = binary
         self._cwd = cwd
@@ -121,6 +143,7 @@ class CodexTransport:
         self._runtime_args = runtime_args or []
         self._runtime_env = runtime_env
         self._model_hub_catalog = model_hub_catalog.retain() if model_hub_catalog is not None else None
+        self._managed_mcp_spec = managed_mcp_spec
         self._catalog_required = model_hub_catalog is not None
         self._catalog_exit_task: asyncio.Task[None] | None = None
         self._process: Optional[Process] = None
@@ -169,6 +192,7 @@ class CodexTransport:
             + self._runtime_args
             + self._extra_args
             + _avibe_app_server_config_args()
+            + _managed_mcp_config_args(self._managed_mcp_spec)
         )
         if self._model_hub_catalog is not None:
             # The path actually consumed must be the one we pin, even if a
