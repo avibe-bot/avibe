@@ -1136,11 +1136,12 @@ The five findings and their owning contracts are:
    exact UI process belonging to its desktop Runtime before releasing the
    service lock. Ownership is checked through the existing Runtime id and the
    existing UI process identity; no pattern kill is introduced. A managed
-   service-only restart carries an explicit shutdown reason so this cleanup
-   preserves the already-running UI. An explicit unscoped `vibe stop` also
-   declares full-stop UI ownership so the service does not reap the UI before
-   the CLI's own stop step; full restart and ordinary shutdown paths retain
-   the reap. The lifecycle test covers signal-driven service exit and exact UI
+   service shutdown reaps the UI only when no managed shutdown intent was
+   consumed, which covers launchd bootout and external termination. Every
+   managed stop or restart caller retains its existing UI lifecycle ownership,
+   regardless of its reason; this includes Workbench service stop,
+   service-only and full restart, and explicit unscoped `vibe stop`. The
+   lifecycle test covers unmanaged signal-driven service exit and exact UI
    ownership, while the desktop Runtime stop tests retain the real process scan
    and rescan contract.
 5. **F5, Runtime re-adoption.** When enablement persists in

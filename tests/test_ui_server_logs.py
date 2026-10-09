@@ -311,6 +311,7 @@ def test_control_stop_uses_locked_service_stop(monkeypatch, tmp_path):
     assert response.status_code == 200
     assert calls == ["stop_service"]
     assert response.get_json()["status"]["state"] == "stopped"
+    assert response.get_json()["status"]["ui_pid"] == 67890
 
 
 def test_control_restart_schedules_restart_job(monkeypatch, tmp_path):
