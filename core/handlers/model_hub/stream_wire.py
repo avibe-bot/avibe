@@ -608,6 +608,17 @@ PROTOCOL_STREAM_TAXONOMY: Final[Mapping[str, ProtocolStreamTaxonomy]] = {
                 (("response", "error"),),
             ),
             ProtocolTerminalEnvelope(
+                # Some OpenAI-compatible relays preserve the SSE event name but
+                # omit the duplicated `type` member from the JSON data. The
+                # event name and the response error envelope are still enough
+                # to identify this terminal failure.
+                "response.failed",
+                ("response", "error"),
+                None,
+                "failed_terminal",
+                (("response", "error"),),
+            ),
+            ProtocolTerminalEnvelope(
                 # https://platform.openai.com/docs/api-reference/responses-streaming/response/incomplete
                 "response.incomplete",
                 ("type",),

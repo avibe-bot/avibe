@@ -7588,11 +7588,22 @@ class ModelHubService:
             return None
         if outcome.kind in {RawOutcomeKind.NETWORK_ERROR, RawOutcomeKind.TIMEOUT}:
             # The engine's own connection diagnostic: no upstream answered.
-            return TurnUpstreamFailure(source=source_label, http_status=None, detail=outcome.upstream_detail)
+            return TurnUpstreamFailure(
+                source=source_label,
+                http_status=None,
+                detail=outcome.upstream_detail,
+                connection_error=True,
+            )
         status = outcome.http_status
-        if type(status) is not int or not 100 <= status <= 599:
-            return None
-        return TurnUpstreamFailure(source=source_label, http_status=status, detail=outcome.upstream_detail)
+        return TurnUpstreamFailure(
+            source=source_label,
+            http_status=(
+                status
+                if type(status) is int and 300 <= status <= 599
+                else None
+            ),
+            detail=outcome.upstream_detail,
+        )
 
     @staticmethod
     def _produce_no_candidate_terminal_outcome(

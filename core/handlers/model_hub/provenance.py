@@ -150,10 +150,13 @@ class TurnUpstreamFailure:
     """The last upstream refusal or connection failure behind a failed turn."""
 
     source: str
-    # None when no upstream answered: the text is the connection failure.
+    # None when the transport did not expose an upstream HTTP status. A
+    # protocol-level failure can still have answered through an HTTP 2xx
+    # envelope, so this is not by itself a connection verdict.
     http_status: int | None
     # Redacted and bounded by the engine client; display only.
     detail: str
+    connection_error: bool = False
 
 
 @dataclass(frozen=True)
@@ -164,6 +167,7 @@ class TurnOutcomeRenderingRule:
     # Appended to the summary when the turn carries its last upstream failure:
     # an upstream refusal, or a connection that no upstream answered.
     upstream_failure_key: str | None = None
+    upstream_failure_without_status_key: str | None = None
     connection_failure_key: str | None = None
 
 
@@ -183,6 +187,7 @@ TURN_OUTCOME_RENDERING_AUTHORITY: dict[str, TurnOutcomeRenderingRule] = {
             ("interrupted", "modelHub.launch.interrupted"),
         ),
         upstream_failure_key="modelHub.launch.last_upstream_failure",
+        upstream_failure_without_status_key="modelHub.launch.last_upstream_failure_without_status",
         connection_failure_key="modelHub.launch.last_connection_failure",
     ),
     "turn.request_nonfallback": TurnOutcomeRenderingRule(
@@ -211,6 +216,7 @@ TURN_OUTCOME_RENDERING_AUTHORITY: dict[str, TurnOutcomeRenderingRule] = {
             ("transition_unpersisted", "modelHub.errors.stream_interrupted"),
         ),
         upstream_failure_key="modelHub.launch.last_upstream_failure",
+        upstream_failure_without_status_key="modelHub.launch.last_upstream_failure_without_status",
         connection_failure_key="modelHub.launch.last_connection_failure",
     ),
     "turn.no_candidate.unconfigured": TurnOutcomeRenderingRule(
@@ -232,6 +238,7 @@ TURN_OUTCOME_RENDERING_AUTHORITY: dict[str, TurnOutcomeRenderingRule] = {
             ("interrupted", "modelHub.launch.interrupted"),
         ),
         upstream_failure_key="modelHub.launch.last_upstream_failure",
+        upstream_failure_without_status_key="modelHub.launch.last_upstream_failure_without_status",
         connection_failure_key="modelHub.launch.last_connection_failure",
     ),
     "turn.canceled": TurnOutcomeRenderingRule(
@@ -594,8 +601,13 @@ def render_turn_outcome_copy(
     failure = projection.last_upstream_failure
     rule = _turn_outcome_rule(projection)
     suffix_key = (
-        rule.upstream_failure_key if failure is not None and failure.http_status is not None
-        else rule.connection_failure_key
+        rule.connection_failure_key
+        if failure is not None and failure.connection_error
+        else (
+            rule.upstream_failure_key
+            if failure is not None and failure.http_status is not None
+            else rule.upstream_failure_without_status_key
+        )
     )
     if failure is not None and suffix_key is not None:
         text = " ".join((
