@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import logging
 import os
+import signal
 from datetime import datetime
 from pathlib import Path
 
+import main as service_main
 from config import paths
-from vibe.ui_server import app
-from vibe import runtime
 from tests.ui_server_test_helpers import csrf_headers
+from vibe import runtime
+from vibe.ui_server import app
 
 
 def _set_mtime(path, timestamp: str) -> None:
@@ -301,8 +304,25 @@ def test_control_stop_uses_locked_service_stop(monkeypatch, tmp_path):
     paths.get_runtime_pid_path().write_text("12345", encoding="utf-8")
     calls = []
 
+    monkeypatch.setattr(service_main, "shutdown_intent_required", lambda: True)
+    monkeypatch.setattr(
+        service_main,
+        "consume_shutdown_intent",
+        lambda pid, signum: {"pid": pid, "signum": signum, "reason": "stop_pid"},
+    )
+
+    def stop_service():
+        calls.append("stop_service")
+        intent = service_main._log_shutdown_intent(
+            logging.getLogger("test.web-control-stop"),
+            signal.SIGTERM,
+        )
+        if service_main._should_reap_desktop_runtime_ui(intent):
+            calls.append("service_reaped_ui")
+        return True
+
     monkeypatch.setattr(runtime, "pid_alive", lambda pid: pid == 12345)
-    monkeypatch.setattr(runtime, "stop_service", lambda: calls.append("stop_service") or True)
+    monkeypatch.setattr(runtime, "stop_service", stop_service)
     monkeypatch.setattr(runtime, "stop_process", lambda pid_path: calls.append(("stop_process", pid_path)) or True)
 
     client = app.test_client()
