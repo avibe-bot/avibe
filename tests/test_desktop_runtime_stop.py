@@ -158,7 +158,11 @@ def stop_env(monkeypatch):
         return real_kill(pid, sig)
 
     monkeypatch.setattr(os, "kill", recording_kill)
-    monkeypatch.setattr(runtime, "stop_pid", lambda pid, timeout=5: effects["stop_pid"].append(pid) or False)
+    monkeypatch.setattr(
+        runtime,
+        "stop_pid",
+        lambda pid, timeout=5, **kwargs: effects["stop_pid"].append(pid) or False,
+    )
     # The OpenCode server is stopped with its tool tree; record that stop the same way.
     from modules.agents.opencode import server as opencode_server
 
@@ -563,6 +567,18 @@ def test_with_nothing_running_and_a_free_lock_the_stop_succeeds(stop_env):
     assert stop_env["signals"] == []
     assert stop_env["remote_access"] == [True]
     assert stop_env["status"] == [("stopped",)]
+
+
+def test_plain_stop_declares_ui_ownership_to_the_service(stop_env, monkeypatch):
+    captured = {}
+    monkeypatch.setattr(
+        runtime,
+        "stop_service",
+        lambda **kwargs: captured.update(kwargs) or False,
+    )
+
+    assert cli.cmd_stop() == 0
+    assert captured["shutdown_reason"] == "full_stop"
 
 
 def test_a_full_stop_keeps_a_surviving_opencode_server_non_fatal(spawn, stop_env, monkeypatch):

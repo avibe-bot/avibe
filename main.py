@@ -125,7 +125,7 @@ def _log_shutdown_intent(logger: logging.Logger, signum: int) -> dict | None:
 
 
 def _should_reap_desktop_runtime_ui(shutdown_intent: dict | None) -> bool:
-    return (shutdown_intent or {}).get("reason") != "service_restart"
+    return (shutdown_intent or {}).get("reason") not in {"service_restart", "full_stop"}
 
 
 def _stop_macos_session_diagnostics(monitor: Any) -> None:

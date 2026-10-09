@@ -216,6 +216,7 @@ def test_shutdown_intent_missing_is_logged_not_ignored(monkeypatch, caplog):
 
 def test_service_restart_shutdown_preserves_the_desktop_runtime_ui():
     assert main._should_reap_desktop_runtime_ui({"reason": "service_restart"}) is False
+    assert main._should_reap_desktop_runtime_ui({"reason": "full_stop"}) is False
     assert main._should_reap_desktop_runtime_ui({"reason": "stop_pid"}) is True
     assert main._should_reap_desktop_runtime_ui(None) is True
 
