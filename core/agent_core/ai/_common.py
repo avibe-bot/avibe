@@ -69,15 +69,17 @@ class WireField:
 # A provider that never answers or stops sending mid-stream must not hold an
 # agent turn forever, but a healthy one can stay silent for minutes: a
 # reasoning model before its first token, or a relay that buffers a long tool
-# call's arguments. Through Model Hub even the response headers wait for the
-# first model output. Codex, Claude Code, Pi, and OpenCode all allow 300s of
-# silence, so the same bound covers every wait on the provider: response
-# headers, the first chunk, and each next chunk. Connecting stays separately
-# short, so an unreachable provider still fails fast. Both bounds are shared
-# by every native adapter; the loop may retry the resulting error only when no
-# model output has been emitted.
+# call's arguments. One bound covers every wait on the provider: response
+# headers, the first chunk, and each next chunk. Codex, Claude Code, Pi, and
+# OpenCode allow 300s of silence; Avibe allows 600s (owner decision,
+# 2026-10-10), because Model Hub withholds even the response headers until the
+# first model output, so a high-effort reasoning model's thinking time is all
+# silence and can exceed five minutes. Connecting stays separately short, so an
+# unreachable provider still fails fast. Both bounds are shared by every native
+# adapter; the loop may retry the resulting error only when no model output has
+# been emitted.
 CONNECT_TIMEOUT_S = 10.0
-PROVIDER_SILENCE_TIMEOUT_S = 300.0
+PROVIDER_SILENCE_TIMEOUT_S = 600.0
 CLEANUP_TIMEOUT_S = 10.0
 MAX_CUMULATIVE_OUTPUT_CHARS = 32 * 1024 * 1024
 # Conservative structural allowances, not a one-byte item counter. These cover

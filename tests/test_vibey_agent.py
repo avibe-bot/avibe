@@ -1160,15 +1160,18 @@ async def test_a_failed_run_shows_localized_copy_and_a_refusal_shows_its_explana
 async def test_a_provider_stall_is_not_shown_as_a_connection_failure(
     engine, session, tmp_path, published, language
 ) -> None:
+    from core.agent_core.ai._common import PROVIDER_SILENCE_TIMEOUT_S
     from core.agent_core.ai.provider import ProviderError
 
-    stall = ProviderError("stalled", "provider sent no data for 300s", False)
+    stall = ProviderError("stalled", "provider sent no data for 600s", False)
     harness = _Harness(engine, tmp_path, "telegram", [[stall]], language=language)
 
     await harness.agent.handle_message(harness.request("write the page"))
 
-    # The copy names the 300-second silence bound in minutes.
-    stalled_copy = i18n_t("vibeyAgent.error.stalled", language, minutes="5")
+    # The shipped silence bound (owner decision, 2026-10-10), which the copy names in minutes.
+    assert PROVIDER_SILENCE_TIMEOUT_S == 600.0
+    stalled_copy = i18n_t("vibeyAgent.error.stalled", language, minutes="10")
+    assert "10" in stalled_copy and "{minutes}" not in stalled_copy
     assert harness.controller.im_client.sent == [f"❌ {stalled_copy}"]
     assert stalled_copy != i18n_t("vibeyAgent.error.network", language)
 
