@@ -362,6 +362,7 @@ impl RuntimeLauncher for InstalledVibeLauncher {
             // A development shell drives an install it does not own and has no
             // application data directory to write diagnostics into.
             log: BootstrapLog::disabled(),
+            login_path: OnceLock::new(),
         }))
     }
 }
@@ -411,6 +412,7 @@ impl RuntimeLauncher for BundledVibeLauncher {
             expected_runtime_id: Some(runtime_id),
             cleanup: Some((self.bundle.clone(), runtime.root)),
             log: self.log.clone(),
+            login_path: OnceLock::new(),
         }))
     }
 
@@ -457,6 +459,36 @@ struct ResolvedVibeExecutable {
     expected_runtime_id: Option<String>,
     cleanup: Option<(PrivateRuntimeBundle, PathBuf)>,
     log: BootstrapLog,
+    /// The `PATH` this attempt's Runtime start inherits. See `login_path`.
+    login_path: OnceLock<LoginPath>,
+}
+
+impl ResolvedVibeExecutable {
+    /// The `PATH` the Runtime about to be started inherits, looked up once per
+    /// start attempt.
+    ///
+    /// Only the start needs it: it is the one command whose process outlives
+    /// this call and runs the user's agents. Discovery and the lifecycle verbs
+    /// keep the shell's own `PATH`, so adopting a running Runtime never waits on
+    /// the user's shell startup files. Held for one attempt so `prepare_launch`
+    /// can run the lookup off the launch-state mutex and `launch` can reuse the
+    /// result. Every bootstrap run resolves a new attempt, so a lookup that
+    /// timed out, or a version manager installed while the app stays open, is
+    /// looked up again on the next start rather than kept until the app exits.
+    fn login_path(&self) -> &LoginPath {
+        self.login_path.get_or_init(|| {
+            let started = Instant::now();
+            let login_path = login_shell_path();
+            self.log.record(
+                "runtime.login_path",
+                &[
+                    ("outcome", login_path.outcome().to_owned()),
+                    ("ms", started.elapsed().as_millis().to_string()),
+                ],
+            );
+            login_path
+        })
+    }
 }
 
 impl ResolvedRuntimeLauncher for ResolvedVibeExecutable {
@@ -465,7 +497,7 @@ impl ResolvedRuntimeLauncher for ResolvedVibeExecutable {
     }
 
     fn prepare_launch(&self) {
-        let _ = cached_login_path(&self.log);
+        let _ = self.login_path();
     }
 
     fn launch(&self, hand_over: bool) -> Result<LaunchedRuntime, LaunchError> {
@@ -473,7 +505,7 @@ impl ResolvedRuntimeLauncher for ResolvedVibeExecutable {
         // which knows the flag and exits by the handover contract.
         let identified = self.expected_runtime_id.is_some();
         let hand_over = hand_over && identified;
-        let login_path = cached_login_path(&self.log);
+        let login_path = self.login_path();
         let started = Instant::now();
         let child = spawn_detached(&self.command, hand_over, login_path).map_err(LaunchError::Spawn)?;
         let pid = child.id();
@@ -1040,29 +1072,6 @@ fn is_executable(metadata: &std::fs::Metadata) -> bool {
 #[cfg(not(unix))]
 fn is_executable(_metadata: &std::fs::Metadata) -> bool {
     true
-}
-
-/// The `PATH` the Runtime about to be started inherits, recorded once.
-///
-/// Only the start needs it: it is the one command whose process outlives this
-/// call and runs the user's agents. Discovery and the lifecycle verbs keep the
-/// shell's own `PATH`, so adopting a running Runtime never waits on the user's
-/// shell startup files. Cached so `prepare_launch` can run the lookup off the
-/// launch-state mutex and `launch` can reuse the result without asking again.
-fn cached_login_path(log: &BootstrapLog) -> &'static LoginPath {
-    static LOGIN_PATH: OnceLock<LoginPath> = OnceLock::new();
-    LOGIN_PATH.get_or_init(|| {
-        let started = Instant::now();
-        let login_path = login_shell_path();
-        log.record(
-            "runtime.login_path",
-            &[
-                ("outcome", login_path.outcome().to_owned()),
-                ("ms", started.elapsed().as_millis().to_string()),
-            ],
-        );
-        login_path
-    })
 }
 
 fn spawn_detached(
@@ -1704,7 +1713,37 @@ mod tests {
             expected_runtime_id: Some("a".repeat(64)),
             cleanup: None,
             log: BootstrapLog::disabled(),
+            login_path: OnceLock::new(),
         }
+    }
+
+    /// A lookup that failed, or a version manager installed while the app
+    /// stays open, must not outlive the start attempt it served: the next
+    /// attempt asks the login shell again, while one attempt asks only once.
+    #[cfg(unix)]
+    #[test]
+    fn each_start_attempt_looks_up_the_login_path_once() {
+        let dir = scratch_dir("login-path-per-attempt");
+        let executable = write_fake_runtime(&dir, "#!/bin/sh\nexit 0\n");
+        let log_path = dir.join("bootstrap.log");
+        let lookups = || {
+            std::fs::read_to_string(&log_path)
+                .unwrap_or_default()
+                .lines()
+                .filter(|line| line.contains(" runtime.login_path "))
+                .count()
+        };
+
+        for attempt in 1..=2 {
+            let resolved = ResolvedVibeExecutable {
+                log: BootstrapLog::at(log_path.clone()),
+                ..identified(executable.clone())
+            };
+            resolved.prepare_launch();
+            resolved.launch(false).expect("the fake runtime starts");
+            assert_eq!(lookups(), attempt, "attempt {attempt}");
+        }
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// Asserts the launch contract against what the operating system actually
