@@ -8,6 +8,7 @@ import pytest
 
 from core.computer_use import (
     COMPUTER_USE_STATE_DIR_ENV,
+    COMPUTER_USE_TOOL_SNAPSHOT_SHA256,
     COMPUTER_USE_TOOL_NAMES,
     ComputerUseConfigFingerprint,
     ComputerUseConfigReconciler,
@@ -68,6 +69,24 @@ def test_tool_contract_has_exactly_the_approved_28_names() -> None:
         "move_cursor",
         "invoke_menu",
     }.isdisjoint(COMPUTER_USE_TOOL_NAMES)
+
+
+def test_tool_snapshot_digest_matches_core_and_manifest_pins() -> None:
+    """Every consumer must approve the exact shipped snapshot bytes."""
+
+    snapshot_path = Path("desktop/cua-driver/tools-v0.31.0.json")
+    snapshot_bytes = snapshot_path.read_bytes()
+    actual = hashlib.sha256(snapshot_bytes).hexdigest()
+    manifest = json.loads(
+        Path("desktop/cua-driver/sources.json").read_text(encoding="utf-8")
+    )
+
+    assert actual == COMPUTER_USE_TOOL_SNAPSHOT_SHA256
+    assert actual == manifest["driver"]["tool_snapshot_sha256"]
+
+    mutated = bytearray(snapshot_bytes)
+    mutated[0] ^= 1
+    assert hashlib.sha256(mutated).hexdigest() != COMPUTER_USE_TOOL_SNAPSHOT_SHA256
 
 
 def test_desktop_state_path_ignores_avibe_home(tmp_path: Path) -> None:

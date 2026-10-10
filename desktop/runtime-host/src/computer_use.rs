@@ -18,7 +18,7 @@ pub const COMPUTER_USE_STATE_FILE: &str = "computer-use.json";
 pub const COMPUTER_USE_LOCK_FILE: &str = "computer-use.lock";
 pub const COMPUTER_USE_SOCKET_FILE: &str = "cua-driver.sock";
 pub const COMPUTER_USE_DRIVER_VERSION: &str = "0.31.0";
-pub const COMPUTER_USE_TOOL_SNAPSHOT_SHA256: &str = "afe13d3cbe685daefc61d0ab9a363c401cb9172180bb72457224a8c7d6f474ae";
+pub const COMPUTER_USE_TOOL_SNAPSHOT_SHA256: &str = "4257e598f5a6ad7e632b48e96c03257d7c5ed618a93b72820b2d4fef0f196acf";
 pub const RUNTIME_TOO_OLD_REASON: &str = "runtime_too_old";
 pub const RUNTIME_UNAVAILABLE_REASON: &str = "runtime_unavailable";
 pub const FAILURE_LIMIT: usize = 3;
@@ -684,6 +684,24 @@ mod tests {
         assert_eq!(
             serde_json::from_value::<ComputerUseRecord>(payload).expect("parse"),
             record
+        );
+    }
+
+    #[test]
+    fn tool_snapshot_digest_matches_the_runtime_pin() {
+        use sha2::{Digest, Sha256};
+
+        const SNAPSHOT: &[u8] =
+            include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../cua-driver/tools-v0.31.0.json"));
+        let actual = format!("{:x}", Sha256::digest(SNAPSHOT));
+        assert_eq!(actual, COMPUTER_USE_TOOL_SNAPSHOT_SHA256);
+
+        let mut mutated = SNAPSHOT.to_vec();
+        mutated[0] ^= 1;
+        assert_ne!(
+            format!("{:x}", Sha256::digest(mutated)),
+            COMPUTER_USE_TOOL_SNAPSHOT_SHA256,
+            "a changed snapshot must fail the runtime pin"
         );
     }
 
