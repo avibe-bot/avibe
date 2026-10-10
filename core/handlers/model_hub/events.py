@@ -146,26 +146,31 @@ def _secret_label(text: str) -> re.Match[str] | None:
     return None
 
 
-def redact_untrusted_text(value: str) -> str:
-    """Redact credential shapes, then everything after the first labeled secret."""
+# OAuth grant material carried in a URL query, such as a pasted callback
+# address. ``code`` is not a secret label elsewhere: ``"code": "token_expired"``
+# is ordinary error text.
+_URL_GRANT_PARAMETER = re.compile(
+    r"(?i)(?<=[?&])(code|access_token|refresh_token|id_token)=[^&#\s\"'<>]+"
+)
 
-    redacted = redact_credential_material(value)
+
+def redact_untrusted_text(value: str) -> str:
+    """Redact credential shapes and URL grant parameters, then everything after
+    the first labeled secret."""
+
+    redacted = _URL_GRANT_PARAMETER.sub(
+        lambda match: f"{match.group(1)}=[redacted]",
+        redact_credential_material(value),
+    )
     match = _secret_label(redacted)
     if match is None:
         return redacted
     return redacted[: match.end()] + "[redacted]"
 
 
-# A whole ECMA-48 control sequence, 7-bit (ESC) or 8-bit (C1): a CSI with its
-# parameter and intermediate bytes; a control string (OSC, DCS, SOS, PM, APC)
-# with its payload up to BEL or ST; or an escape with its intermediate bytes
-# (nF) and final byte (Fp, Fe, Fs). Every branch stops at the next ESC or C1
-# terminator, which keeps matching linear on hostile input.
-_TERMINAL_CONTROL_SEQUENCE = re.compile(
-    r"(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]"
-    r"|(?:\x1b[\]PX^_]|[\x90\x98\x9d\x9e\x9f])[^\x07\x1b\x9c]*(?:\x07|\x1b\\|\x9c)?"
-    r"|\x1b[ -/]*[0-~]"
-)
+# A Select Graphic Rendition sequence (colour, weight) in its 7-bit or 8-bit
+# form. It changes how the following text looks, never where it lands.
+_SGR_SEQUENCE = re.compile(r"(?:\x1b\[|\x9b)[0-9;:]*m")
 # Unicode Default_Ignorable_Code_Point characters outside the C* categories
 # (DerivedCoreProperties.txt): like a format control, each renders as nothing.
 _DEFAULT_IGNORABLE_OUTSIDE_C = frozenset(
@@ -185,62 +190,28 @@ _DEFAULT_IGNORABLE_OUTSIDE_C = frozenset(
 )
 
 
-def _renders_as_nothing(character: str) -> bool:
-    return unicodedata.category(character)[0] == "C" or character in _DEFAULT_IGNORABLE_OUTSIDE_C
+def _displays_as_written(character: str) -> bool:
+    if character in "\t\n":
+        return True
+    return unicodedata.category(character)[0] != "C" and character not in _DEFAULT_IGNORABLE_OUTSIDE_C
 
 
-def _credential_spans(text: str) -> list[tuple[int, int]]:
-    """Spans of credential material, the remainder after a secret label included."""
+def untrusted_detail_line(value: str) -> str | None:
+    """Upstream text as one redacted line, or None when it cannot be shown.
 
-    spans = [match.span() for pattern in _CREDENTIAL_PATTERNS for match in pattern.finditer(text)]
-    label = _secret_label(text)
-    if label is not None:
-        spans.append((label.end(), len(text)))
-    return [(start, end) for start, end in spans if end > start]
-
-
-def untrusted_detail_line(value: str) -> str:
-    """Upstream text as one inert line with credential material redacted.
-
-    The line is what a reader sees: whole control sequences go, and so does
-    every C* character (control, format, surrogate, private use, unassigned)
-    and every other default-ignorable one; whitespace, such as a line break,
-    becomes a space. Credential material is looked for twice: in that display
-    form, and with every invisible character simply removed and no sequence
-    parsed. Anything either reading finds is redacted, so nothing that renders
-    as nothing can split a secret out of recognition, however a terminal would
-    parse it.
+    Colour sequences are removed. Anything else that can make what a reader
+    sees differ from the text itself (a control or escape such as a backspace,
+    a bare carriage return, or a cursor move; a format or other invisible
+    character such as a bidi override) withholds the whole detail: redaction
+    can only judge the text, so the text must be what is displayed. Line
+    breaks and tabs fold into spaces.
     """
 
-    hidden = bytearray(len(value))
-    for match in _TERMINAL_CONTROL_SEQUENCE.finditer(value):
-        hidden[match.start() : match.end()] = b"\x01" * (match.end() - match.start())
-    shown = [
-        index
-        for index, character in enumerate(value)
-        if not hidden[index] and (character.isspace() or not _renders_as_nothing(character))
-    ]
-    visible = [index for index, character in enumerate(value) if not _renders_as_nothing(character)]
-    display = "".join(" " if value[index].isspace() else value[index] for index in shown)
-    flat = "".join(value[index] for index in visible)
-
-    masked = bytearray(len(value))
-    for text, positions in ((display, shown), (flat, visible)):
-        for start, end in _credential_spans(text):
-            first, last = positions[start], positions[end - 1] + 1
-            masked[first:last] = b"\x01" * (last - first)
-
-    line: list[str] = []
-    in_redaction = False
-    for index, character in zip(shown, display):
-        if masked[index]:
-            if not in_redaction:
-                line.append("[redacted]")
-            in_redaction = True
-            continue
-        in_redaction = False
-        line.append(character)
-    return " ".join("".join(line).split())
+    text = _SGR_SEQUENCE.sub("", value).replace("\r\n", "\n")
+    if not all(_displays_as_written(character) for character in text):
+        return None
+    line = " ".join(text.split())
+    return redact_untrusted_text(line) if line else None
 
 
 def contains_credential_material(value: object) -> bool:

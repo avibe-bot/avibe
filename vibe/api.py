@@ -10634,7 +10634,7 @@ async def start_oauth_web_async(
     if flow.state == "failed":
         return {
             "ok": False,
-            "error": flow.error or "start_failed",
+            "error": service.web_flow_error(flow) or "start_failed",
             "flow_id": flow.flow_id,
         }
     return {

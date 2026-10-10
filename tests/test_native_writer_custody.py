@@ -167,14 +167,14 @@ async def test_im_native_setup_after_takeover_directs_to_hub_without_reset(langu
     config.language = language
     service = AgentAuthService(SimpleNamespace(config=config, _get_settings_key=lambda _: "fixture"))
     service._send_message = AsyncMock()
-    service._send_setup_start_failure = AsyncMock()
+    service._send_setup_failure = AsyncMock()
     service._start_codex_process = AsyncMock()
     context = SimpleNamespace(channel_id="fixture", user_id="fixture", platform="slack")
 
     await service.start_setup(context, backend="codex")
 
     assert service._send_message.await_args.args[1].casefold() == expected.casefold()
-    service._send_setup_start_failure.assert_not_awaited()
+    service._send_setup_failure.assert_not_awaited()
     service._start_codex_process.assert_not_awaited()
     assert service._flows == {}
 

@@ -4176,32 +4176,37 @@ def test_hub_oauth_mispaste_stays_recoverable_and_schemeless_address_signs_in(mo
     )
 
 
-def test_hub_oauth_failure_reason_reaches_dialog_and_log_inert_and_credential_free(monkeypatch, tmp_path, caplog):
+def test_hub_oauth_failure_reason_reaches_dialog_and_log_only_when_display_safe(monkeypatch, tmp_path, caplog):
     """Scenario: AUTH-SETUP-129
 
-    A provider refuses the sign-in and its reason quotes a credential through a
-    terminal colour code, a clipboard escape, and a Bidi override. The user
-    still reads the provider's words in the dialog's details, and the log
-    records the same line, with no control sequence and no credential in either.
+    A provider refuses two sign-ins. The first reason is coloured and quotes a
+    credential split by a colour code: the user reads the provider's words in
+    the dialog's details with the credential redacted, and the log records the
+    same line. The second reason carries a clipboard escape and a bidi
+    override, which can make its display differ from its text: neither the
+    dialog nor the log shows any of it.
     """
     from tests.test_model_hub_api import _service
     from vibe.model_hub_runtime.adapter import CLIProxyEngineAdapter
     from vibe.model_hub_runtime.state import EngineStateStore
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    reason = (
+    reasons = iter([
         "\x1b[31mtoken exchange failed\x1b[0m with status 401: invalid_grant for "
-        "client_se\x1b[1mcret=hunter2-hunter2\x1b]52;c;cGF5bG9hZA==\x07 \u202eresu\u202c"
-    )
+        "client_se\x1b[1mcret=hunter2-hunter2",
+        "token exchange failed for client_secret=hunter2-hunter2\x1b]52;c;cGF5bG9hZA==\x07 \u202eresu\u202c",
+    ])
     shown = "token exchange failed with status 401: invalid_grant for client_secret=[redacted]"
+    engine = SimpleNamespace(reason=None)
 
     def management_request(method, path, *, query=None, payload=None):
         if path == "/auth-files":
             return {"files": []}
         if path == "/codex-auth-url":
+            engine.reason = next(reasons)
             return {"state": "browser-state", "url": "https://auth.openai.com/oauth/authorize?state=browser-state"}
         if path == "/get-auth-status":
-            return {"status": "error", "error": reason}
+            return {"status": "error", "error": engine.reason}
         raise AssertionError((method, path))
 
     client = Mock()
@@ -4214,27 +4219,33 @@ def test_hub_oauth_failure_reason_reaches_dialog_and_log_inert_and_credential_fr
         monkeypatch.setattr(adapter, method, getattr(transport, method))
     runner = ScenarioRunner(SimpleNamespace())
 
-    async def start_login(h):
-        started = await service.oauth_start({"vendor": "openai", "channel": "hub"})
-        h.flow_id = started["flow"]["flow_id"]
+    def failure_logs():
+        return [record.getMessage() for record in caplog.records if "OAuth flow failed" in record.getMessage()]
 
-    async def provider_refuses(h):
-        terminal = (await service.oauth_status(h.flow_id))["flow"]
+    async def provider_refuses_with_a_display_safe_reason(h):
+        started = await service.oauth_start({"vendor": "openai", "channel": "hub"})
+        terminal = (await service.oauth_status(started["flow"]["flow_id"]))["flow"]
         assert terminal["state"] == "failed"
         assert terminal["error_detail"] == shown
+        assert failure_logs()[-1].endswith(f"detail={shown}")
 
-    def log_records_the_same_line(h):
-        failures = [record.getMessage() for record in caplog.records if "OAuth flow failed" in record.getMessage()]
-        assert len(failures) == 1
-        assert failures[0].endswith(f"detail={shown}")
+    async def provider_refuses_with_controls(h):
+        started = await service.oauth_start({"vendor": "openai", "channel": "hub"})
+        terminal = (await service.oauth_status(started["flow"]["flow_id"]))["flow"]
+        assert terminal["state"] == "failed"
+        assert "error_detail" not in terminal
+        assert failure_logs()[-1].endswith("detail=withheld")
+        assert "hunter2" not in caplog.text
 
     with caplog.at_level(logging.WARNING, logger="vibe.model_hub_runtime.adapter"):
         asyncio.run(runner.run(
-            ScenarioStep("start_login", start_login),
-            ScenarioStep("provider_refuses", provider_refuses),
-            ScenarioStep("log_records_the_same_line", log_records_the_same_line),
+            ScenarioStep("provider_refuses_with_a_display_safe_reason", provider_refuses_with_a_display_safe_reason),
+            ScenarioStep("provider_refuses_with_controls", provider_refuses_with_controls),
         ))
-    ScenarioExpect.step_history(runner, ["start_login", "provider_refuses", "log_records_the_same_line"])
+    ScenarioExpect.step_history(
+        runner,
+        ["provider_refuses_with_a_display_safe_reason", "provider_refuses_with_controls"],
+    )
 
 
 @pytest.mark.parametrize("status", [401, 403])

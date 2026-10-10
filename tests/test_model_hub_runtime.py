@@ -5,6 +5,7 @@ import hashlib
 import io
 import json
 import logging
+import re
 import subprocess
 import signal
 import stat
@@ -7560,27 +7561,29 @@ def test_engine_upstream_detail_keeps_email_addresses_usable() -> None:
     )
 
 
-def test_engine_upstream_detail_drops_terminal_control_characters() -> None:
-    payload = json.dumps(
-        {"error": {"message": (
-            "relay \x1b]52;c;cGF5bG9hZA==\x07 down\x1b[2J \x9b31mnow\x9b0m"
-            " \u202egnp.exe\u202c \u2066a\u2069\u2067b\u2068c\u200e\u200f\u061c end"
-        )}}
-    ).encode()
+@pytest.mark.parametrize(
+    ("message", "detail"),
+    [
+        # Colour codes, 7-bit or 8-bit, change only how the words look.
+        ("\x1b[1;31mrelay\x1b[0m down \x9b31mnow\x9b0m", "relay down now"),
+        # Anything else can make the display differ from the text.
+        ("relay \x1b]52;c;cGF5bG9hZA==\x07 down", None),
+        ("relay down\x1b[2J now", None),
+        ("relay \u202egnp.exe\u202c down", None),
+    ],
+)
+def test_engine_upstream_detail_withholds_text_that_does_not_display_as_written(
+    message: str, detail: str | None,
+) -> None:
+    payload = json.dumps({"error": {"message": message}}).encode()
 
-    detail = client_module._upstream_error_detail(payload, (("error",),))
-
-    # Whole sequences go, 7-bit or 8-bit, and controls render as nothing.
-    assert detail == "relay down now gnp.exe abc end"
+    assert client_module._upstream_error_detail(payload, (("error",),)) == detail
 
 
-def test_engine_upstream_detail_drops_lone_surrogates_so_it_can_persist() -> None:
+def test_engine_upstream_detail_withholds_a_lone_surrogate_so_nothing_unpersistable_is_kept() -> None:
     payload = b'{"error": {"message": "bad \\ud800 byte"}}'
 
-    detail = client_module._upstream_error_detail(payload, (("error",),))
-
-    assert detail == "bad byte"
-    detail.encode("utf-8")
+    assert client_module._upstream_error_detail(payload, (("error",),)) is None
 
 
 def test_engine_error_fields_ignore_machine_codes_outside_the_trusted_envelope() -> None:
@@ -9224,25 +9227,30 @@ def _ecma48_sequences() -> list[str]:
 def test_no_invisible_character_or_control_sequence_can_split_a_secret_out_of_redaction(
     template: str, secret: str,
 ) -> None:
-    # The words before the split always survive; an unterminated control
-    # string may swallow the secret instead of leaving it to be redacted.
-    lead = template.split(" ", 1)[0]
-    for splitter in _invisible_characters() + _ecma48_sequences():
+    """A colour code is removed and the rejoined secret redacted; anything else
+    that renders differently from its text withholds the whole detail."""
+
+    colour = re.compile(r"(?:\x1b\[|\x9b)[0-9;:]*m")
+    # A tab or line break is visible whitespace, displayed as written.
+    splitters = [splitter for splitter in _invisible_characters() if splitter not in "\t\n"]
+    for splitter in splitters + _ecma48_sequences():
         shown = untrusted_detail_line(template.format(splitter))
-        assert secret not in shown, repr(splitter)
-        assert shown.startswith(lead), repr(splitter)
-        assert not any(unicodedata.category(character)[0] == "C" for character in shown), repr(splitter)
+        if colour.fullmatch(splitter):
+            assert shown is not None and secret not in shown and "[redacted]" in shown, repr(splitter)
+        else:
+            assert shown is None, repr(splitter)
 
 
 @pytest.mark.parametrize(
     ("reason", "shown"),
     [
-        # A CLI's colour codes and a hostile reason's terminal controls are gone.
-        (
-            "\x1b[1;31mError:\x1b[0m invalid_grant\x07 \x1b]52;c;cGF5bG9hZA==\x07"
-            " \u202edenied\u202c\x9b",
-            "Error: invalid_grant denied",
-        ),
+        # A CLI's colour codes go; the words read as written.
+        ("\x1b[1;31mError:\x1b[0m invalid_grant", "Error: invalid_grant"),
+        # Anything else that can make the display differ withholds the reason.
+        ("Error: invalid_grant\x07 \x1b]52;c;cGF5bG9hZA==\x07", None),
+        ("client_seX\bcret=hunter2-hunter2", None),
+        ("token: abc\rError: invalid_grant", None),
+        ("Error: \u202edenied\u202c", None),
         # The 8-bit form of a colour code goes as whole as the 7-bit form.
         ("\x9b31mError\x9b0m: access_denied", "Error: access_denied"),
         # A colour code inside a credential cannot hide it from redaction.
@@ -9253,13 +9261,18 @@ def test_no_invisible_character_or_control_sequence_can_split_a_secret_out_of_re
             "token exchange failed with status 401: [redacted] rejected for [redacted]",
         ),
         ("refresh failed: client_secret=hunter2-hunter2 at provider", "refresh failed: client_secret=[redacted]"),
+        # A pasted callback's grant parameter is redacted; its other parameters stay.
+        (
+            "callback failed: GET http://localhost:1455/cb?code=ac_live123&state=s",
+            "callback failed: GET http://localhost:1455/cb?code=[redacted]&state=s",
+        ),
     ],
 )
 def test_oauth_failure_detail_is_inert_and_credential_free_for_the_browser_and_log(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
     reason: str,
-    shown: str,
+    shown: str | None,
 ) -> None:
     class Engine(_BrowserCallbackEngine):
         def management_request(self, method, path, *, query=None, payload=None, timeout=None):
@@ -9278,7 +9291,7 @@ def test_oauth_failure_detail_is_inert_and_credential_free_for_the_browser_and_l
     assert detail == shown
     logged = [record.getMessage() for record in caplog.records if "OAuth flow failed" in record.getMessage()]
     assert len(logged) == 1
-    assert logged[0].endswith(f"detail={shown}")
+    assert logged[0].endswith(f"detail={shown if shown is not None else 'withheld'}")
 
 
 def test_oauth_engine_400_fails_the_flow_rather_than_claiming_it_retryable(tmp_path: Path) -> None:

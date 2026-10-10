@@ -487,17 +487,17 @@ scenarios:
       - ui/src/components/settings/models/serverCopy.test.ts
       - ui/src/components/settings/models/SettingsModelsPage.render.test.tsx
   - id: AUTH-SETUP-129
-    name: A failed sign-in's provider reason reaches the dialog and the log inert and credential-free
+    name: A failed sign-in's provider reason reaches the dialog and the log only when display-safe, credentials redacted
     status: covered
     kind: negative_path
     layer: scenario
     backend: shared
-    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_hub_oauth_failure_reason_reaches_dialog_and_log_inert_and_credential_free
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_hub_oauth_failure_reason_reaches_dialog_and_log_only_when_display_safe
     supporting_tests:
       - tests/test_model_hub_runtime.py::test_oauth_failure_detail_is_inert_and_credential_free_for_the_browser_and_log
-      - tests/test_model_hub_runtime.py::test_engine_upstream_detail_drops_terminal_control_characters
+      - tests/test_model_hub_runtime.py::test_engine_upstream_detail_withholds_text_that_does_not_display_as_written
       - tests/test_model_hub_runtime.py::test_no_invisible_character_or_control_sequence_can_split_a_secret_out_of_redaction
-      - tests/test_web_oauth_flow.py::test_every_sign_in_failure_reaches_log_and_user_inert_and_credential_free
+      - tests/test_web_oauth_flow.py::test_every_sign_in_failure_leaves_through_the_upstream_detail_rule
   - id: AUTH-SETUP-128
     name: The desktop pet leaves its setup-pending state once setup is finished in the main window
     status: partial

@@ -3106,13 +3106,13 @@ class CLIProxyEngineAdapter:
         flow.state = "failed"
         flow.error_key = error_key
         flow.error_detail = oauth_failure_detail(detail)
-        if flow.error_detail is not None:
+        if flow.error_detail is not None or (detail and detail.strip()):
             logger.warning(
                 "OAuth flow failed: flow=%s provider=%s error_key=%s detail=%s",
                 flow.flow_id,
                 flow.callback_provider,
                 error_key,
-                flow.error_detail,
+                flow.error_detail if flow.error_detail is not None else "withheld",
             )
         self._release_provider(flow)
 
