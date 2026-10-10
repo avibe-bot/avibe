@@ -327,7 +327,8 @@ turn runs inside the caller's run, in these steps:
    3. **Execution.** A scratch write goes through the root's descriptor, as joined work that an abort waits for.
    4. **The bound.** The result is cut to `room - room_slack`.
 
-   The policy's fixed texts are never cut.
+   The policy's fixed texts are never cut. A response's calls take this pipeline one at a time, in call order, never
+   in the run's concurrent groups (C-3 §2): each call's `room` depends on the results before it.
 4. **End.** A response that stops with `stop` and calls no tool is the reply. Anything else fails the turn: an
    overflow, an error, a response refused at admission, a length stop, or calls after the budget closed.
 5. **Fold.** The caller's `fold(reply)` decides what enters the caller's context, if anything, and commits it. For

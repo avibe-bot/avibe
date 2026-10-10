@@ -34,7 +34,10 @@ commit input → loop:
         → provider stream (events out) → admission of the response
     if the response has tool calls:
         commit it as `assistant`
-        for each call, in order: before_tool → execute → after_tool → commit tool result
+        for each group of calls, in call order (below):
+            before_tool for each call of the group, in call order
+            start the calls the gates let run, in call order; they run at the same time
+            for each call of the group, in call order: its result → after_tool → commit tool result
         drain steers (commit each) → continue loop
     else, holding the queue lock:
         if a steer or follow-up is pending: commit the response as `assistant`, commit the pending inputs,
@@ -51,7 +54,31 @@ delivers committed rows through the shared emit path and nothing re-delivers the
 steer that arrives after the queues closed is refused by the running Turn, and Avibe's delivery falls back to the P3
 queue, which starts the next run.
 
-Tool calls in one response execute sequentially in call order in v1; results are always committed in call order.
+**The calls of one response.** Each tool says whether its calls may run concurrently (`Tool.concurrent`, C-7
+[`tools.md`](tools.md)); a tool that does not is exclusive. The loop walks the calls in call order: a maximal run of
+consecutive concurrent calls is one group, whose calls run at the same time, and every exclusive call is a group of its
+own. Groups run one after another. So an exclusive call starts only after every call before it has finished, and no
+call after it starts until it has finished: a reader-writer lock taken in call order, as Codex's `tools/parallel.rs`
+does. Whenever an `edit` or `write` is involved, the observable result equals running the calls one by one;
+concurrency only ever applies between neighbouring `read` and `bash` calls. A call to a tool that is not available runs
+nothing and never splits a group.
+
+- `tool_started` is emitted when a call starts. Results commit in call order: a call that finishes early waits for the
+  calls before it, and `tool_finished` follows the commits.
+- One call failing, by an exception (which becomes its error result) or by an error result, never cancels another
+  call.
+- No call outlives its batch: every call is awaited or cancelled before the run moves on or ends.
+- There is no cap on how many calls run at once, as in Pi and Codex.
+- Calls that run nothing keep one-at-a-time order: those of a response that stopped at its output limit, and those an
+  `after_model` `skip_tools` or `end` settles.
+- A side turn (C-10 [`fork.md`](fork.md) §7) runs its calls one at a time, in call order, and never through groups:
+  the room each call gets depends on the results before it.
+
+Pi differs (`packages/agent/src/agent-loop.ts` at `7fbbd5f`): it runs every call of a response at the same time unless
+a tool in it declares `executionMode: "sequential"`, and its `edit` and `write` serialize only per file path
+(`withFileMutationQueue`), which `bash` bypasses. Avibe makes mutations exclusive instead, so a command never races an
+edit and never sees a batch of edits half applied. `file_mutation_lock` (`tools/paths.py`) still serializes `edit` and
+`write` across Sessions and forks in the same process.
 
 ## 3. Hooks
 
@@ -71,6 +98,16 @@ reconstructible from the rows, and A10 is stated for requests without a transien
 a restart, or that context management must see, goes through C-5 rows (`context_edit`, `context_compaction`). `end`
 finishes the run after the current step commits.
 
+The tool hooks follow the groups of §2:
+
+- `before_tool` runs for each call, in call order, before that call starts. A group's gates all run before the group
+  starts, so no gate sees a result from its own group. `deny` and `alter_args` affect only their call. An `end`
+  settles its call and every later call `[skipped by policy]`; the calls before it in its group still run.
+- `after_tool` runs for each call, in call order, when its result is available, before its commit. An `end` settles
+  every call that has not started `[skipped by policy]`. The later calls of its group have already started: they
+  finish, pass `after_tool`, and commit their real results, because their effects happened and the committed result
+  is the truthful record.
+
 In v1 an Agent with a C-9 `ContextConfig` takes no user hooks: passing both is a configuration error, because C-9
 owns the request and the checkpoint turn's tools. Hooks with context management are a post-v1 design item
 (`context.md` §10, plan §10).
@@ -82,9 +119,10 @@ owns the request and the checkpoint turn's tools. Hooks with context management 
   running tool. Avibe P1 deliveries map to `steer`.
 - `follow_up(m)` enters only when the run would otherwise end. It exists for hooks and the future tension system;
   Avibe's P3 queue starts a new run after the Turn settles instead.
-- `abort(reason)` cancels the provider stream and the running tool: a foreground job's process tree is killed (Pi's
-  behavior). Jobs already handed to Watch are not affected. The run ends with `run_ended{reason: "aborted"}`; what was
-  committed stays committed.
+- `abort(reason)` cancels the provider stream and every running tool call of the batch: each foreground job's process
+  tree is killed (Pi's behavior). Jobs already handed to Watch are not affected. The run ends with
+  `run_ended{reason: "aborted"}`; what was committed stays committed, and T2 ([`recovery.md`](recovery.md)) gives each
+  call left open exactly one result.
 - A tool result with `terminate: true` ends the run after the batch commits.
 
 ## 5. Tools per call
