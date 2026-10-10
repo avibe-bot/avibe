@@ -30,7 +30,7 @@ Preferred CLI shape:
 - managed background watch for this conversation: `vibe watch add --message '...' -- <cmd>` (or `--shell '<cmd>'` to pass a single shell string)
 - watch that creates a visible sibling Session: `vibe watch add --create-session --same-scope --message '...' -- <cmd>`
 - update a watch: `vibe watch update <id> --name '...' --timeout 1200`
-- inspect a run: `vibe runs show <run-id>`
+- inspect a run: `vibe runs show <run-id>`; add `--brief` for only its status, timing, error, and callback fields
 - cancel a run: `vibe runs cancel <run-id>`
 
 Targeting and callbacks:

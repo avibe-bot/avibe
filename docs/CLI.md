@@ -350,12 +350,16 @@ List and inspect Agent run records.
 ```bash
 vibe runs list --session-id sesk8m4q2p7x --brief
 vibe runs show run_abc123
+vibe runs show run_abc123 --brief      # status, timing, error, and callback fields only
 vibe runs show                         # inside an Avibe Agent shell, show the caller Run
 ```
 
 `vibe runs list` keeps its global listing behavior unless a filter such as
 `--session-id` is provided. `vibe runs show` can omit the run id inside an
-Avibe-injected Agent run and defaults to `AVIBE_RUN_ID`.
+Avibe-injected Agent run and defaults to `AVIBE_RUN_ID`. It prints the full
+record, with the text sent to the Agent as `message` and the reply as
+`result_text`; `--brief` prints the same compact row as `vibe runs list`, for
+status checks.
 
 ### `vibe task`
 

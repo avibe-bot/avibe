@@ -98,14 +98,14 @@ the Agent's current definition. A Session's model and effort can change during
 its life and ordinary IM turns have no run record, so treat the Session row as
 the current setting and mark the target unconfirmed if it may have changed.
 Attribute a symptom only to prompt text that existed when it ran. Each run's
-`prompt` and `message` in `vibe runs show` snapshot what a Task or Watch
-actually sent; file-owned text needs Git or release history matching the run;
+`message` in `vibe runs show` snapshots what a Task or Watch actually
+sent; file-owned text needs Git or release history matching the run;
 Agent system prompts have no history. A long-lived Codex thread also keeps
 earlier injected prompt snapshots in its native history, so text since removed
 may still have been in view. Where the text may have changed since the run and
 no history covers it, say the attribution is unconfirmed.
 
-`vibe runs show <id>` gives one run's prompt, result, and callback state;
+`vibe runs show <id>` gives one run's message, result, and callback state;
 `vibe data query` is read-only SQLite over `agent_sessions`, `agent_runs`, and
 `messages`. Keep evidence to the Session the user reported, plus any others they point
 to — a channel's `scope_id` can hold other people's threads; the user's
