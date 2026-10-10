@@ -151,7 +151,7 @@ out, and §8 (d) applies.
 
 ## 6. Checkpoint turn
 
-A checkpoint is written by a **fork** of the conversation, the only delivery path:
+A checkpoint is written by a **side turn** of the conversation (C-10 `fork.md` §7), the only delivery path:
 
 - The request uses the same hop, system prompt, tool definitions, tool choice, and reasoning settings as the
   conversation's next request, and its messages begin with the conversation's projected messages unchanged, so its
@@ -161,11 +161,13 @@ A checkpoint is written by a **fork** of the conversation, the only delivery pat
   the cut, which is a prefix of the original request.
 - One user message is appended: the checkpoint request (§11).
 - The turn's requests take the request pipeline (§10, invariant 1; a request that cannot fit is never sent and
-  fails the attempt as an overflow), its responses the admission (invariant 6), and its tool calls the tool pipeline
-  (invariant 2). Its responses and results are never committed to the context, and nothing is shown to the user.
+  fails the attempt as an overflow), its responses the admission (invariant 6), and its tool calls the side turn's
+  tool pipeline (invariant 2, C-10 §7 step 3). Its responses and results are never committed to the context, and
+  nothing is shown to the user.
 
-**Tool policy** ("dreaming": cognition allowed, actuation blocked), a declarative table judged after the turn's
-budget (invariant 2):
+**Tool policy** ("dreaming": cognition allowed, actuation blocked), the side-turn policy `DREAMING` (C-10 §6), a
+declarative table judged after the turn's budget (invariant 2). C-9 owns its values: the table and the two texts
+below, and the budget's 5 rounds, 4,000-token floor, and 1,000-token slack; C-10 §7 step 3 applies them:
 
 | Tool | Rule |
 | --- | --- |
@@ -211,9 +213,9 @@ budget (invariant 2):
   the audit row. So is a checkpoint whose row the host cannot complete (§10, invariant 4).
 - The turn's messages, read from the attempt ledger (§10, invariant 4) with every failed or retried attempt's
   partial and its usage, and the turn's tool results, are recorded once per checkpoint turn, on every exit but an
-  abort (§10, invariant 4), outcome included, as an audit row
-  (`agent_events.event_type = 'context_checkpoint_turn'`, `visibility = 'audit'`, no `context_seq`; shape
-  `CheckpointTurn`), never as context.
+  abort (§10, invariant 4), outcome included, as the side turn's audit row (`agent_events.event_type = 'fork_turn'`,
+  `visibility = 'audit'`, no `context_seq`; shape `ForkTurn` with `purpose: checkpoint` and `detail: {reason,
+  mode}`; C-10 F7), never as context.
 
 ## 7. Checkpoint row and projection
 
@@ -353,7 +355,8 @@ ends the run `context_exhausted`, as in P1. The adapter supplies the following; 
 - A `TranscriptStore` (C-5 §2) implementing the whole protocol C-9 uses: `append_response(..., request=...)` keeps
   `ModelResponse.request` for the anchor (§2); `append_payloads(session_id, entries)` writes several payload rows in
   one transaction (invariant 3); `append_audit(session_id, kind, payload)` writes a non-context audit row,
-  `checkpoint_turn` (§6) or `attempt` (invariant 4), in every mode; every loaded row carries its `created_at` (§3).
+  `fork_turn` (§6, C-10 §7) or `attempt` (invariant 4), in every mode; every loaded row carries its `created_at`
+  (§3).
   The SQLite store and the adapter's implement it, and one contract suite runs the same tests on them and on the
   in-memory store the engine tests use (`tests/test_transcript_store_contract.py`).
 - The full environment block (C-7 §8) on the first input after a checkpoint: the summarized inputs that carried it
@@ -392,8 +395,9 @@ every-exit audit: `test_loop.py`) that fails when its order or owner is broken.
 1. **One request pipeline.** Projection, then `budget()` on that final request, once per composed request, then
    the C-9 stage, then the provider. Nothing changes a request after it is budgeted; a stage step that changes the
    context rebuilds the request from the top. Whether a request fits is always `budget()` on a request actually
-   composed: the request to send, the fork the stage would send first (the checkpoint turn composes its requests the
-   same way, so the dry run and the turn cannot differ), and the stop check's minimal request (§3: the drop's own
+   composed: the request to send, the side turn the stage would send first (`side_turn_fits`, which composes the
+   caller's rehydrated messages and prefix exactly as the side turn does, so the dry run and the turn cannot differ;
+   C-10 §7), and the stop check's minimal request (§3: the drop's own
    row for that cut, built by the one builder of checkpoint rows and projected like any context; with fewer than two
    units, the request itself). The one bound
    that extends a budget by arithmetic is the checkpoint turn's tool room, from its latest request's budget (§6);
@@ -401,10 +405,10 @@ every-exit audit: `test_loop.py`) that fails when its order or owner is broken.
    the stage, before provider admission. Checkpoint requests take the same pipeline. In v1 an Agent with a
    `ContextConfig` takes no user hooks (a configuration error), so nothing else can rewrite a request C-9 owns;
    hooks with context management are a post-v1 design item (plan §10).
-2. **One tool pipeline** in a checkpoint turn: the turn's budget (once closed, `BUDGET_USED`), then the checkpoint
-   table (a denial is its fixed text), then execution (a scratch `write` or `edit` relative to the root's
-   descriptor, as joined work an abort waits for), then the bound on the result of every call that ran (§6). The
-   two fixed texts are never cut.
+2. **One tool pipeline** in a checkpoint turn, the side turn's (C-10 §7 step 3): the turn's budget (once closed,
+   `BUDGET_USED`), then the checkpoint table (a denial is its fixed text), then execution (a scratch `write` or
+   `edit` relative to the root's descriptor, as joined work an abort waits for), then the bound on the result of
+   every call that ran (§6). The two fixed texts are never cut.
 3. **One commit for C-9 state.** A transition (its `context_edit` rows or its `context_compaction` row, and the hook
    state of that commit point in `AgentState`) is written in one transaction (`append_payloads`), before any event
    announces it; a failed commit leaves nothing. C-9 keeps no other durable state.
@@ -418,9 +422,9 @@ every-exit audit: `test_loop.py`) that fails when its order or owner is broken.
    mode, with or without `ContextConfig`, on every exit of the model call but an abort; a failed audit write is a
    diagnostic and is not retried. The cancelled run scope admits no further store write, so an aborted call's
    unaudited attempts are not kept. It is the one place that usage is kept. A checkpoint attempt's partials and
-   usage are kept in its `CheckpointTurn` row (§6), which the turn writes by the same rule: once, on every exit but
-   an abort, whichever step ends it (compose, provider, admission, the host's state or hint, building the row,
-   commit). A failed request or a host failure after the model answered is a failed checkpoint, counted by the
+   usage are kept in its side turn's `fork_turn` audit row (§6, C-10 F7), written by the same rule: once, on every
+   exit but an abort, whichever step ends it (compose, provider, admission, the host's state or hint, building the
+   row, commit). A failed request or a host failure after the model answered is a failed checkpoint, counted by the
    run's bound; an engine error building the row, or a failed commit, ends the run with nothing landed (invariant 3).
 5. **Route-scoped anchors.** An anchor answered by another origin (provider, api, model) is invalid (§2).
 6. **One admission path.** Every response, of every purpose (conversation, checkpoint), and every partial with
@@ -492,7 +496,8 @@ Rules: terse bullets, not paragraphs. Preserve exact paths, identifiers, command
 ## 12. Deferred
 
 Not built in v1: background precomputed compaction; server-side compaction (forbidden by hard constraint 8);
-automatic re-read of recently modified files; memory tools (the policy reserves their row); lowering effort for the
+automatic re-read of recently modified files; memory tools (the policy reserves their row; a memory side turn,
+C-10 §13); lowering effort for the
 checkpoint turn through a per-message system effort.
 
 Sources: the cut rule, cumulative file lists, and the overflow patterns from Pi (MIT, `7fbbd5f`); the merge rule from
