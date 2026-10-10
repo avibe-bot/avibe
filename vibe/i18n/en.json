@@ -1080,7 +1080,7 @@
       "ripgrepNotReady": "ripgrep not ready: {reason}"
     },
     "clean": {
-      "commandHelp": "Remove stale Show, Git, Model Hub, and tmux runtime installs and archives; exit nonzero if any cleanup fails.",
+      "commandHelp": "Remove stale Show, Git, Model Hub, tmux, and ripgrep runtime installs and archives; exit nonzero if any cleanup fails.",
       "dryRunHelp": "Report stale archives and cache entries without removing anything.",
       "wouldRemoveItems": "Would remove {count} Show Runtime cache item(s).",
       "wouldRemoveArchives": "Would remove {count} downloaded Show Runtime archive(s) ({size}).",

@@ -35,10 +35,11 @@ REPOSITORIES = {
     "tmux/tmux-builds": "tmux/",
     "BurntSushi/ripgrep": "ripgrep/",
 }
-# Repositories mirrored only for the release a packaged managed-runtime
-# manifest pins. The mirror is that release's backup, so a pinned archive
-# GitHub no longer publishes with the manifest's bytes fails the run instead
-# of leaving the mirror. ripgrep's older releases also carry no GitHub digest.
+# Repositories mirrored only for the releases packaged managed-runtime
+# manifests pin. The mirror is those releases' backup: a pinned archive GitHub
+# no longer publishes with the manifest's bytes fails the run, and a release an
+# earlier manifest pinned stays, since released Avibe versions still name it.
+# ripgrep's older releases also carry no GitHub digest.
 PINNED_BY_MANIFEST = {"BurntSushi/ripgrep": REPO_ROOT / "vibe" / "ripgrep_runtime_manifest.json"}
 # Repositories mirrored without prereleases. tmux-builds rebuilds its
 # ``preview`` prerelease in place, changing bytes under unchanged asset names,
@@ -209,13 +210,50 @@ def _indexed_digests(repository: str, index: bytes | None) -> dict[str, str]:
         return {}
 
 
+def with_earlier_pins(repository: str, releases: Sequence[Release], index: bytes | None) -> list[Release]:
+    """Add the releases the previous index holds that the current pin no longer selects."""
+    selected = {release.tag for release in releases}
+    try:
+        document = json.loads(index) if index is not None else {"releases": []}
+        earlier = [
+            Release(
+                repository=repository,
+                tag=item["tag"],
+                prerelease=bool(item["prerelease"]),
+                published_at=item["published_at"],
+                commit=item["commit"],
+                assets=tuple(
+                    Asset(
+                        name=asset["name"],
+                        size=int(asset["size"]),
+                        sha256=asset["sha256"],
+                        url=f"https://github.com/{repository}/releases/download/{quote(item['tag'])}/{quote(asset['name'])}",
+                        content_type="application/octet-stream",
+                    )
+                    for asset in item["assets"]
+                ),
+            )
+            for item in document["releases"]
+            if item["tag"] not in selected
+        ]
+    except (ValueError, KeyError, TypeError) as exc:
+        # The objects stay either way (``plan`` never deletes a pinned root); only the index omits them.
+        print(f"warning: ignoring unreadable mirror index: {exc}", file=sys.stderr)
+        earlier = []
+    return sorted([*releases, *earlier], key=lambda release: (release.published_at, release.tag), reverse=True)
+
+
 def plan(
     repository: str,
     releases: Sequence[Release],
     objects: Mapping[str, int],
     previous_index: bytes | None,
 ) -> Plan:
-    """Compare the selected releases with the repository's ``releases/`` objects."""
+    """Compare the selected releases with the repository's ``releases/`` objects.
+
+    A manifest-pinned repository's root only grows: its objects are the backup of
+    every release a published manifest pinned.
+    """
     if not releases:
         raise MirrorError(f"GitHub returned no published releases for {repository}; refusing to reconcile")
     prefix = release_prefix(repository)
@@ -232,7 +270,11 @@ def plan(
             elif prior is None or objects.get(key) != asset.size:
                 # Only an object this job verified and indexed is trusted.
                 uploads.append((key, asset))
-    deletions = sorted(key for key in objects if key.startswith(prefix) and key not in expected)
+    deletions = (
+        []
+        if repository in PINNED_BY_MANIFEST
+        else sorted(key for key in objects if key.startswith(prefix) and key not in expected)
+    )
     return Plan(
         uploads=tuple(uploads),
         deletions=tuple(deletions),
@@ -332,6 +374,8 @@ def reconcile(repository: str, bucket: Bucket, *, keep_prereleases: int, dry_run
     objects = bucket.objects()
     key = index_key(repository)
     previous_index = bucket.read(key) if key in objects else None
+    if repository in PINNED_BY_MANIFEST:
+        releases = with_earlier_pins(repository, releases, previous_index)
     result = plan(repository, releases, objects, previous_index)
     size = sum(asset.size for _, asset in result.uploads)
     print(

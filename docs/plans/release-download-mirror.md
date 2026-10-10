@@ -41,8 +41,8 @@ Each mirrored repository owns one bucket root:
 tmux runtime pins. Its releases are mirrored like Avibe's own, with their
 `LICENSES.tar.gz`.
 
-`BurntSushi/ripgrep` is third-party too, and only the release that
-`vibe/ripgrep_runtime_manifest.json` pins is mirrored. See
+`BurntSushi/ripgrep` is third-party too, and only the releases that
+`vibe/ripgrep_runtime_manifest.json` pins or once pinned are mirrored. See
 `docs/plans/ripgrep-runtime.md`.
 
 - `https://dl.avibe.bot/<root>releases/<tag>/<asset>` is byte-identical to
@@ -101,9 +101,12 @@ tmux runtime pins. Its releases are mirrored like Avibe's own, with their
 - tmux-builds keeps no prereleases. Its `preview` prerelease is rebuilt in
   place, changing bytes under unchanged asset names, which the reconciler must
   treat as published bytes changing.
-- ripgrep keeps only its manifest-pinned release. The mirror is that release's
-  backup: when GitHub no longer publishes a pinned archive with the manifest's
-  size and digest, the run fails before planning and deletes nothing.
+- ripgrep keeps every release a manifest has pinned, and nothing else; its
+  root only grows. The mirror is those releases' backup. When GitHub no longer
+  publishes a currently pinned archive with the manifest's size and digest, the
+  run fails before planning. A release an earlier manifest pinned stays in the
+  index and the bucket after the pin moves, because released Avibe versions
+  still name it.
 - At the time of writing Avibe is 89 releases and about 19 GB, most of it the
   desktop bundles in recent prereleases (about 0.7 GB each). askill adds 16
   releases and about 7 GB, avault 5 releases and 0.04 GB, tmux-builds 5

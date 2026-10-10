@@ -33,12 +33,14 @@ The prompt had stated a tool that did not exist.
 ## Availability
 
 Avibe cannot republish into or restore a third-party release, so the download
-mirror is the backup. `scripts/release_mirror.py` mirrors only the release the
-manifest pins under the `ripgrep/` root. It fails the hourly run if GitHub no
-longer publishes a pinned archive with the manifest's size and digest. A failed
-run deletes nothing, so clients, which try the mirror first, still get the
-verified copy. Mirroring all of ripgrep's releases would not work: releases up
-to 14.x have no GitHub digests, which the mirror requires.
+mirror is the backup. Under the `ripgrep/` root, `scripts/release_mirror.py`
+mirrors only releases a manifest pins. It fails the hourly run if GitHub no
+longer publishes a pinned archive with the manifest's size and digest. Clients
+try the mirror first, so they still get the verified copy. The root only grows:
+when the manifest moves to a newer ripgrep, the earlier pinned release stays
+mirrored, because released Avibe versions still install from it. Mirroring all
+of ripgrep's releases would not work: releases up to 14.x have no GitHub
+digests, which the mirror requires.
 
 ## Scope
 
@@ -50,6 +52,12 @@ to 14.x have no GitHub digests, which the mirror requires.
   - The Codex, Claude Code, and OpenCode CLIs bundle their own ripgrep.
 - ripgrep is not a `vibe doctor` dependency or repair target. Its absence only
   changes the prompt line, and `vibe runtime prepare` installs it again.
-- To move to a newer ripgrep, update the manifest. The mirror then selects the
-  new pinned release, and older Avibe builds fall back to GitHub for the
-  previous one.
+- To move to a newer ripgrep, update the manifest. The mirror then adds the new
+  pinned release and keeps the earlier one.
+- The upstream 15.2.0 `x86_64-unknown-linux-musl` binary is the artifact named
+  in ripgrep issue #3494. That issue is an occasional SIGSEGV during very large,
+  highly concurrent searches, which its analysis traces to a Linux kernel
+  page-table bug, and the same bytes ship inside Codex. The release has no
+  x86_64 glibc archive, and a glibc build would also tie the binary to the
+  host's glibc, so the static musl build stays. A crash fails that one search
+  command, not the Turn.

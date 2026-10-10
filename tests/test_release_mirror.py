@@ -187,6 +187,33 @@ def test_ripgrep_mirrors_only_the_release_its_runtime_manifest_pins(monkeypatch)
     ]
 
 
+@pytest.mark.parametrize("index_readable", [True, False])
+def test_ripgrep_keeps_the_releases_earlier_manifests_pinned(monkeypatch, index_readable):
+    manifest, items = ripgrep_releases()
+    (earlier,) = releases(
+        github_release("15.1.0", published_at="2025-10-22T13:00:26Z", assets=("ripgrep-15.1.0.tar.gz",),
+                       repository=RIPGREP),
+        repository=RIPGREP,
+    )
+    (earlier_asset,) = earlier.assets
+    prior = mirror.render_index(RIPGREP, [earlier]) if index_readable else b"{not json"
+    written = {}
+
+    class IndexBucket(RecordingBucket):
+        def put(self, key, path, **metadata):
+            super().put(key, path, **metadata)
+            if key == "ripgrep/index/releases.json":
+                written.update(json.loads(path.read_bytes()))
+
+    bucket = IndexBucket({earlier.key(earlier_asset): earlier_asset.size, "ripgrep/index/releases.json": 1}, prior)
+
+    # Avibe builds released with the earlier manifest still download that release.
+    assert reconcile_ripgrep(monkeypatch, items, bucket) == 0
+    assert earlier.key(earlier_asset) not in bucket.writes
+    indexed = [release["tag"] for release in written["releases"]]
+    assert indexed == ([manifest["release_tag"], "15.1.0"] if index_readable else [manifest["release_tag"]])
+
+
 @pytest.mark.parametrize(
     "diverge",
     [

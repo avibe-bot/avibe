@@ -16334,6 +16334,7 @@ def _format_byte_size(size: int) -> str:
 def _managed_runtime_cleaners() -> tuple[tuple[str, Callable[..., dict[str, Any]]], ...]:
     """Return the shared-runtime cleanup passes in stable output order."""
 
+    from core.ripgrep_runtime import RipgrepRuntimeManager
     from core.tmux_runtime import get_tmux_runtime_manager
     from vibe.model_hub_runtime.installer import EngineRuntimeManager
 
@@ -16350,10 +16351,17 @@ def _managed_runtime_cleaners() -> tuple[tuple[str, Callable[..., dict[str, Any]
             dry_run=dry_run,
         )
 
+    def clean_ripgrep(*, keep_previous: int, dry_run: bool) -> dict[str, Any]:
+        return RipgrepRuntimeManager().clean(
+            keep_previous=keep_previous,
+            dry_run=dry_run,
+        )
+
     return (
         ("git", _clean_git_runtime),
         ("model_hub_engine", clean_model_hub),
         ("tmux", clean_tmux),
+        ("ripgrep", clean_ripgrep),
     )
 
 
@@ -16414,6 +16422,7 @@ def _managed_runtime_label(runtime_id: str) -> str:
         "git": "Git Runtime",
         "model_hub_engine": "Model Hub Runtime",
         "tmux": "tmux Runtime",
+        "ripgrep": "ripgrep Runtime",
     }
     return labels.get(runtime_id, runtime_id.replace("-", " ").replace("_", " ").title())
 
