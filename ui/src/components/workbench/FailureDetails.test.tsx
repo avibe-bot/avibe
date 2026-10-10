@@ -33,13 +33,17 @@ const record = {
   requested_model_id: 'grok-4.6',
   outcome: 'failed_terminal',
   failed_attempts: [
-    { source_id: 'src_a', configured_model_id: 'grok-4.6', channel: 'hub', reason: 'rate_limited', http_status: 429 },
+    {
+      source_id: 'src_a', configured_model_id: 'grok-4.6', channel: 'hub', reason: 'rate_limited', http_status: 429,
+      upstream_detail: 'Rate limit reached: 60 requests per minute',
+    },
   ],
   served: null,
   canceled_attempt: null,
   terminal_error: {
     source_id: 'src_b', configured_model_id: 'grok-4.6-beta', channel: 'hub',
     reason: 'invalid_parameter', stream_started: false, http_status: 400, upstream_error_code: 'model_not_found',
+    upstream_detail: 'The model grok-4.6-beta does not exist',
   },
   model_supply_state: null,
   blockers: [{ source_id: 'src_c', model_id: 'grok-4.6', reason: 'source_missing' }],
@@ -139,7 +143,7 @@ describe('failed-turn upstream details', () => {
     expect(sources).toHaveBeenCalledTimes(1);
   });
 
-  it('expands to the upstream status, error code and reason for every attempt', async () => {
+  it('expands to the upstream status, error code, reason and message for every attempt', async () => {
     const read = vi.spyOn(modelsApi, 'getTurnProvenance').mockResolvedValue(record);
     mount();
     fireEvent.click(await screen.findByRole('button', { name: '查看详情' }));
@@ -148,11 +152,13 @@ describe('failed-turn upstream details', () => {
     expect(screen.getByText('xAI 官方 · grok-4.6')).toBeTruthy();
     expect(screen.getByText('429')).toBeTruthy();
     expect(screen.getByText('触发限流')).toBeTruthy();
+    expect(screen.getByText('Rate limit reached: 60 requests per minute')).toBeTruthy();
     // A source the Sources list no longer names still shows its stable id.
     expect(screen.getByText('src_b · grok-4.6-beta')).toBeTruthy();
     expect(screen.getByText('400')).toBeTruthy();
     expect(screen.getByText('model_not_found')).toBeTruthy();
     expect(screen.getByText('请求参数被拒绝')).toBeTruthy();
+    expect(screen.getByText('The model grok-4.6-beta does not exist')).toBeTruthy();
     expect(screen.getByText(/供应商已不存在/)).toBeTruthy();
     expect(screen.getByText(/由上游供应商的 API 返回/)).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: '收起详情' }));
@@ -189,11 +195,32 @@ describe('failed-turn upstream details', () => {
     }
   });
 
+  it('labels a network attempt\'s text as a connection error, not an upstream answer', async () => {
+    vi.spyOn(modelsApi, 'getTurnProvenance').mockResolvedValue({
+      ...record,
+      outcome: 'exhausted',
+      failed_attempts: [{
+        source_id: 'src_a', configured_model_id: 'grok-4.6', channel: 'hub', reason: 'network',
+        upstream_detail: 'read tcp 10.0.0.2:443: i/o timeout',
+      }],
+      terminal_error: null,
+    } as unknown as TurnProvenance);
+    mount();
+    fireEvent.click(await screen.findByRole('button', { name: '查看详情' }));
+    expect(screen.getByText('read tcp 10.0.0.2:443: i/o timeout')).toBeTruthy();
+    expect(screen.getByText(/连接错误/)).toBeTruthy();
+    expect(screen.queryByText(/上游返回/)).toBeNull();
+    expect(screen.queryByText(/由上游供应商的 API 返回/)).toBeNull();
+  });
+
   it('names Avibe-side terminal failures and localizes every blocker reason', async () => {
     vi.spyOn(modelsApi, 'getTurnProvenance').mockResolvedValue({
       ...record,
       failed_attempts: [],
-      terminal_error: { ...record.terminal_error, reason: 'engine_down', http_status: null, upstream_error_code: null },
+      terminal_error: {
+        ...record.terminal_error, reason: 'engine_down', http_status: null, upstream_error_code: null,
+        upstream_detail: undefined,
+      },
       blockers: [{ source_id: 'src_a', model_id: 'grok-4.6', reason: 'cooldown' }],
     } as unknown as TurnProvenance);
     mount();

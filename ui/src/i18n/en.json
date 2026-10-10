@@ -46,6 +46,38 @@
       "failureTitle": "Action Could Not Be Completed",
       "loginFailure": "The login setting could not be read or changed. Check your operating system's login settings and try again."
     },
+    "computerUse": {
+      "off": "Computer Use",
+      "starting": "Computer Use — starting…",
+      "ready": "Computer Use — ready",
+      "needsPermission": "Computer Use — permission needed",
+      "needsPermissionAccessibility": "Computer Use — Accessibility permission needed",
+      "needsPermissionScreenRecording": "Computer Use — Screen Recording needed; add Avibe in System Settings",
+      "screenRecordingTitle": "Screen Recording permission needed",
+      "screenRecordingGuide": "Avibe opened System Settings → Privacy & Security → Screen & System Audio Recording. Click + or drag Avibe into the list, then enable it. macOS may quit and reopen Avibe after the Screen Recording grant; return to Avibe when it reopens. It will start automatically after both permissions are granted.",
+      "needsRuntime": "Computer Use — restart the Avibe service",
+      "runtimeUnavailable": "Computer Use — waiting for the Avibe service",
+      "runtimeTooOld": "Computer Use — restart the Avibe service",
+      "error": "Computer Use — error; turn it off and on to retry",
+      "errorReasons": {
+        "state_unwritable": "Computer Use — could not save its state; turn it off and on to retry",
+        "spawn_failed": "Computer Use — the managed driver could not start; turn it off and on to retry",
+        "daemon_exited": "Computer Use — the managed driver exited; turn it off and on to retry",
+        "health_timeout": "Computer Use — the managed driver did not become ready; turn it off and on to retry",
+        "bundle_identity": "Computer Use — the managed driver cannot verify this Avibe app; update or reinstall it",
+        "ax_capability": "Computer Use — Accessibility is unavailable; check Avibe in System Settings, then reopen it",
+        "capture_failed": "Computer Use — screen capture failed; check Avibe in Screen & System Audio Recording, then retry",
+        "driver_health_failed": "Computer Use — the managed driver failed its health check; reopen, update, or reinstall Avibe",
+        "endpoint_busy": "Computer Use — its previous driver endpoint is still busy; turn it off and on to retry",
+        "endpoint_unremovable": "Computer Use — its previous driver endpoint could not be cleared; turn it off and on to retry",
+        "socket_unreachable": "Computer Use — the managed driver could not be reached; turn it off and on to retry",
+        "socket_path_too_long": "Computer Use — macOS could not create its driver socket; update or reinstall Avibe"
+      },
+      "invalidState": "Computer Use — state file needs repair; toggle to replace it",
+      "unavailable": "Computer Use — bundled driver unavailable",
+      "initializationFailed": "Computer Use — unavailable; restart Avibe and try again",
+      "saveFailed": "Computer Use — setting was not saved"
+    },
     "notifications": {
       "toggle": "Notifications",
       "approvalRequested": {
@@ -64,6 +96,11 @@
         "title": "Run canceled",
         "body": "Background work was canceled."
       }
+    },
+    "pet": {
+      "toggle": "Show Pet",
+      "shortcutMenu": "Pet Shortcut",
+      "shortcutUnavailable": "{{shortcut}} is unavailable — another app may be using it"
     },
     "uninstall": {
       "menuLabel": "Uninstall Avibe…",
@@ -1979,7 +2016,8 @@
         },
         "callback": {
           "hint": "After signing in, paste the callback URL your browser landed on",
-          "rejected": "That isn't the callback address. Paste the full address from the browser bar after you approve (it contains code=), then submit again."
+          "rejected": "That isn't the callback address. Paste the full address from the browser bar after you approve (it contains code=), then submit again.",
+          "otherAttempt": "This address comes from an earlier sign-in link and can't be used here. Sign in with the current link in step 1 above, then paste the full address it leads to."
         },
         "deviceCode": {
           "hint": "Enter the device code on that page; this continues automatically"
@@ -1995,7 +2033,11 @@
           "timeout": "Authorization timed out, please reconnect",
           "generic": "Connection failed, please retry",
           "finalize": "Authorized, but couldn't create the source — please retry",
-          "finalizeReauth": "Signed in, but this source still isn't working — please retry"
+          "finalizeReauth": "Signed in, but this source still isn't working — please retry",
+          "details": {
+            "show": "Show details",
+            "hide": "Hide details"
+          }
         }
       },
       "toast": {
@@ -2420,9 +2462,13 @@
       "engine_unavailable": "The Hub isn't responding, please retry",
       "submission_failed": "Couldn't submit what you pasted, please retry",
       "ambiguous_engine_binding": "Couldn't tell which account signed in — do one at a time, then retry",
-      "binding_failed": "That account is already used by another source",
+      "binding_failed": "Signed in, but couldn't attach this account to the source (another source may already use it). Please retry.",
       "account_already_added": "This account is already added. Sign in with a different account to add another subscription.",
-      "expired": "Authorization timed out, please reconnect"
+      "expired": "Authorization timed out, please reconnect",
+      "code_rejected": "The provider rejected this authorization code: the pasted address may be incomplete, come from an earlier sign-in link, or already be used or expired. Retry to get a new sign-in link, then paste the address it leads to.",
+      "exchange_failed": "Got the authorization code, but couldn't exchange it with the provider — a network or proxy problem, or the code is no longer valid. Retry to get a new sign-in link.",
+      "callback_mismatch": "The callback doesn't match this sign-in; it may come from an earlier link. Retry, then sign in only with the new link.",
+      "provider_denied": "The provider declined this authorization — it was cancelled, or this account can't use it. Retry to sign in again."
     },
     "probe": {
       "native_cli_unavailable": "Can't use the CLI's sign-in",
@@ -2893,6 +2939,42 @@
       "noProjectForChat": "No projects yet — add one before starting a chat",
       "ready": "{{backend}} is ready to go",
       "readyDismiss": "Dismiss",
+      "computerUse": {
+        "off": "Computer Use is off",
+        "offDetail": "Turn it on from the native Avibe control when you want to use it.",
+        "starting": "Computer Use is starting",
+        "startingDetail": "Avibe is checking the managed driver and preparing the session.",
+        "ready": "Computer Use is ready",
+        "readyDetail": "The managed driver is available for the current Workbench session.",
+        "needsPermission": "Computer Use needs permission",
+        "accessibilityDetail": "Allow Avibe under Privacy & Security → Accessibility, then return here.",
+        "screenRecordingDetail": "In Screen & System Audio Recording, click + or drag Avibe into the list, then enable it. macOS may quit and reopen Avibe after the grant; return when it reopens.",
+        "unknownPermissionDetail": "Allow Avibe in the required Privacy & Security permission pane, then return here.",
+        "needsRuntime": "Computer Use is waiting for the Avibe service",
+        "runtimeUnavailableDetail": "The service is restarting or has not confirmed Computer Use support yet.",
+        "runtimeTooOldDetail": "This Avibe service does not support the current Computer Use contract.",
+        "error": "Computer Use needs attention",
+        "errorDetail": "Turn Computer Use off and on once to retry.",
+        "stateUnwritableDetail": "Avibe could not save the native state. Check access to its app data, then turn Computer Use off and on.",
+        "assetsInvalidDetail": "The managed driver or policy failed verification. Update or reinstall the Avibe desktop app.",
+        "spawnFailedDetail": "The managed driver could not start. Turn Computer Use off and on; reopen Avibe if it keeps failing.",
+        "daemonExitedDetail": "The managed driver stopped unexpectedly. Turn Computer Use off and on; reopen Avibe if it repeats.",
+        "healthTimeoutDetail": "The managed driver did not become ready in time. Turn Computer Use off and on; reopen Avibe if it repeats.",
+        "bundleIdentityDetail": "The managed driver cannot verify this Avibe app. Update or reinstall the desktop app.",
+        "axCapabilityDetail": "The managed driver cannot use Accessibility. Check Avibe under Privacy & Security → Accessibility, then reopen the app.",
+        "captureFailedDetail": "The managed driver cannot capture the screen. Check Avibe in Screen & System Audio Recording and verify the app installation, then retry.",
+        "driverHealthFailedDetail": "The managed driver did not pass its health check. Reopen Avibe; update or reinstall the desktop app if it continues.",
+        "endpointBusyDetail": "Another Avibe desktop shell owns the Computer Use endpoint. Quit the other shell, then retry.",
+        "endpointUnremovableDetail": "Avibe could not replace the old Computer Use endpoint. Quit and reopen the desktop app.",
+        "socketUnreachableDetail": "Avibe cannot reach the managed driver. Turn Computer Use off and on; reopen Avibe if it repeats.",
+        "unavailable": "Computer Use is unavailable",
+        "unavailableDetail": "The managed Computer Use state is not available. Reopen the Avibe desktop app.",
+        "invalidStateFileDetail": "The native Computer Use state is damaged. Use the native toggle to replace it.",
+        "snapshotInvalidDetail": "The verified Computer Use tool snapshot is missing or changed. Update or reinstall the Avibe desktop app.",
+        "shellNotRunningDetail": "Open or reopen the Avibe desktop app to make Computer Use available.",
+        "daemonUnreachableDetail": "The desktop driver is not reachable. Turn Computer Use off and on; reopen Avibe if it repeats.",
+        "socketPathTooLongDetail": "macOS could not create the managed driver socket. Update or reinstall the Avibe desktop app."
+      },
       "continueOnPhone": "Continue on your phone",
       "connectChatApps": "Connect chat apps in <settings>Settings</settings>"
     },
@@ -2917,6 +2999,7 @@
     "sessionReference": "Reference this session",
     "sessionFork": "Fork session",
     "sessionForkUnavailable": "This session has no native agent session to fork yet.",
+    "sessionShowInPet": "Show in pet",
     "sessionHideToBackground": "Hide to background",
     "sessionHiddenToast": "Hidden to background · Find it in Agents → Runs",
     "sessionArchive": "Archive session",
@@ -4438,6 +4521,7 @@
       "quote": "Quote",
       "askInNew": "Ask in a new session",
       "copy": "Copy",
+      "selectAll": "Select all",
       "askFailed": "Couldn't start a new session from the selection."
     },
     "showPage": {
@@ -4740,7 +4824,9 @@
       "errorCode": "Error code",
       "reasonLabel": "Reason",
       "blockers": "Sources that were unavailable",
-      "upstreamNote": "These codes come from the upstream provider's API. Avibe keeps the status and error code but never stores the provider's raw response text, because it can echo credentials.",
+      "upstreamNote": "These come from the upstream provider's API. Avibe keeps the status, error code, and the provider's error message with credentials removed, up to 400 characters.",
+        "upstreamDetail": "Upstream said",
+        "connectionDetail": "Connection error",
       "copyRecord": "Copy record",
       "reason": {
         "quota_exhausted": "Quota exhausted",
@@ -5467,5 +5553,35 @@
       "gatewayRequired": "Setup requires Model Hub to be enabled. Your saved configuration is unchanged. Restore it through your existing configuration controls, then retry.",
       "completionUnconfirmed": "Setup completion could not be confirmed. Try again."
     }
+  },
+  "pet": {
+    "state": {
+      "idle": "Vibey is idle",
+      "sleeping": "Vibey is asleep",
+      "listening": "Listening",
+      "running": "Working…",
+      "ready": "Reply ready",
+      "needs_input": "Needs your input",
+      "blocked": "Something went wrong"
+    },
+    "unreadBadge_one": "{{count}} unread reply",
+    "unreadBadge_other": "{{count}} unread replies",
+    "setupPending": "Finish setting up in Avibe to talk to your agent here.",
+    "showInPetOff": "The session is set for the pet. Turn on Show Pet in the Avibe tray menu to see it.",
+    "showInPetFailed": "The pet could not show this session.",
+    "openAvibe": "Open Avibe",
+    "toggle": "Show or hide the pet panel",
+    "panel": "Pet panel",
+    "untitled": "Untitled session",
+    "chooseSession": "Choose a session",
+    "switchSession": "Switch session",
+    "openInAvibe": "Open in Avibe",
+    "inputPlaceholder": "Message the agent…",
+    "send": "Send",
+    "queued": "Queued — it will run after the current turn.",
+    "moreInAvibe": "More replies in Avibe",
+    "empty": "No messages yet. Say something to get started.",
+    "vaultRequest": "Approval needed — open in Avibe",
+    "noSessions": "No active sessions yet. Start one in Avibe."
   }
 }

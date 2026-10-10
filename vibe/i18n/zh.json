@@ -931,6 +931,7 @@
       "flow_not_found": "未找到授权流程。",
       "flow_expired": "授权流程已过期。",
       "submission_rejected": "这不是授权完成后的回调地址，请粘贴授权后地址栏里的完整网址。",
+      "submission_rejected_other_attempt": "这个地址来自之前的登录链接。请用当前弹窗里的链接登录，再粘贴登录后的地址。",
       "discovery_failed": "无法验证或识别此供应商。",
       "ambiguous_source": "已连接，但无法确认这是哪种模型接口。",
       "inventory_unavailable": "接口已确认，但暂时无法获取模型清单。",
@@ -1007,6 +1008,9 @@
       "waiting_without_retry": "本次请求未完成，自动恢复已结束。你可以重试模型 {model} 或切换模型。",
       "interrupted": "模型 {model} 当前不可用：{blockers}。请前往「模型」页处理。",
       "route_unconfigured": "模型 {model} 尚未配置路由。请前往「模型」页配置。",
+      "last_upstream_failure": "上游最后一次报错（{source}，HTTP {status}）：{detail}",
+      "last_upstream_failure_without_status": "上游最后一次报错（{source}）：{detail}",
+      "last_connection_failure": "最后一次连接错误（{source}）：{detail}",
       "model_unlisted": "模型 {model} 不在 {backend} 的模型列表中。请选择其他模型后继续。",
       "request_incompatible": "此请求不兼容；切换模型供应商也无法解决。",
       "request_incompatible_detail": "上游拒绝了此请求，切换模型供应商也无法解决。上游返回：{detail}"

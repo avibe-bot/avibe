@@ -1,0 +1,11 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main-pet-bind",
+  "description": "The Workbench's \"Show in pet\" action: bind the desktop pet to a session and bring it forward. Granted to the main window for the loopback Runtime origin only, never to the bundled bootstrap page. It is the only pet command the main window gets.",
+  "local": false,
+  "windows": ["main"],
+  "remote": {
+    "urls": ["http://127.0.0.1:*/*", "http://[\\:\\:1]:*/*"]
+  },
+  "permissions": ["allow-pet-bind"]
+}

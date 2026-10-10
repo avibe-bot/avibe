@@ -131,6 +131,10 @@ _MACHINE_ERROR_TAXONOMY: Final[Mapping[str, _MachineErrorRule]] = {
     "server_error": _MachineErrorRule("server", True, 70, "fallback", "server_error", None, 30, None),
     "internal_error": _MachineErrorRule("server", True, 70, "fallback", "server_error", None, 30, None),
     "api_error": _MachineErrorRule("server", True, 10, "fallback", "server_error", None, 30, None),
+    "service_unavailable_error": _MachineErrorRule(
+        "server", True, 70, "fallback", "server_error", None, 30, None
+    ),
+    "upstream_error": _MachineErrorRule("server", True, 70, "fallback", "server_error", None, 30, None),
 }
 MACHINE_ERROR_CODES: Final = frozenset(_MACHINE_ERROR_TAXONOMY)
 UPSTREAM_MACHINE_ERROR_CODES: Final = frozenset(

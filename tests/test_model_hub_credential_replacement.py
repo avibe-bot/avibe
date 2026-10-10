@@ -107,7 +107,7 @@ def test_cancelled_replacement_keeps_old_credential_and_settles_the_new_one(
         discovering = asyncio.Event()
         replacement: list[str] = []
 
-        async def discover_until_cancelled(vendor, protocol, base_url, credential_ref):
+        async def discover_until_cancelled(vendor, protocol, base_url, credential_ref, *, start_engine=True):
             replacement.append(credential_ref)
             discovering.set()
             await asyncio.Event().wait()

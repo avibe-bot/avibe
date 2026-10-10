@@ -21,6 +21,7 @@ use std::time::{Duration, Instant};
 use serde::Deserialize;
 
 use crate::bootstrap_log::BootstrapLog;
+use crate::login_path::{login_shell_path, LoginPath};
 use crate::origin::LoopbackOrigin;
 use crate::private_runtime::{InstalledPrivateRuntime, PrivateRuntimeBundle, PrivateRuntimeError};
 use crate::status::BootstrapNoticeCode;
@@ -63,7 +64,7 @@ const START_ARGS: [&str; 2] = ["start", "--no-open-browser"];
 const HAND_OVER_ARG: &str = "--hand-over";
 const ENDPOINT_ARGS: [&str; 3] = ["desktop", "endpoint", "--json"];
 const REMOVE_BACKENDS_ARGS: [&str; 2] = ["desktop", "remove-backends"];
-/// How long the shell waits for the Runtime to name its own address.
+/// How long one run of the endpoint helper may take before it is killed.
 ///
 /// Sized for a *cold* first launch, not a warm one. The bundle has just been
 /// extracted, so nothing in the runtime tree has been paged in or evaluated by
@@ -77,9 +78,25 @@ const REMOVE_BACKENDS_ARGS: [&str; 2] = ["desktop", "remove-backends"];
 /// This is the last step on the cold path that still held a warm number --
 /// readiness already allows 120s (`DEFAULT_READY_TIMEOUT`). Staying under that
 /// keeps discovery from dominating the launch, while 3x the worst measurement
-/// leaves room for slower hardware. The budget is only spent in full when the
-/// endpoint is genuinely broken, and that failure is already retryable.
+/// leaves room for slower hardware. Slower storage than that is what
+/// `ENDPOINT_ATTEMPTS` is for.
 const ENDPOINT_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// How many runs of the endpoint helper may time out before discovery fails.
+///
+/// No fixed budget fits every disk: an update on an IO-starved machine (#2316)
+/// spent 50.7s on this call in one run and was killed at 60s in another, and
+/// the window then showed a failure page while the previous Runtime kept
+/// serving. A timeout alone cannot tell a cold tree from a hung helper, but a
+/// second run can: what made the first one slow -- first reads, and the
+/// system's first scan of each new executable -- is paid once and survives the
+/// kill, while a hang repeats. So a timed-out run is run once more, and only a
+/// second timeout counts as a failure. A helper that exits or answers badly
+/// failed for a reason a repeat would not change, so it is never repeated.
+///
+/// `run_isolated_probe` in `core/install_integrity.py` applies the same rule
+/// to the CLI's probes of a freshly installed tree.
+const ENDPOINT_ATTEMPTS: u32 = 2;
 
 /// How much of a helper's stderr the shell keeps: the bootstrap log's
 /// diagnostic, and a lifecycle verb's closing JSON verdict.
@@ -194,6 +211,11 @@ pub trait RuntimeLauncher: Send + Sync {
 /// spawned; readiness is decided by the presence probe.
 pub trait ResolvedRuntimeLauncher: Send + Sync {
     fn endpoint(&self) -> Result<LoopbackOrigin, LaunchError>;
+    /// Work that must happen before `launch` and that must not hold the
+    /// launch-state mutex: the login-shell `PATH` lookup, which can wait 10 s
+    /// on a hanging startup file. The default is a no-op so a test launcher
+    /// that never starts a Runtime does not wait on the user's shell.
+    fn prepare_launch(&self) {}
     /// `hand_over` lets the start replace another desktop Runtime serving this
     /// home. The start owns that act and reports it in its exit.
     fn launch(&self, hand_over: bool) -> Result<LaunchedRuntime, LaunchError>;
@@ -385,7 +407,6 @@ impl RuntimeLauncher for BundledVibeLauncher {
                 runtime.npm_cli,
                 self.backend_root.clone(),
                 &runtime_id,
-                env::var_os("PATH").as_deref(),
             ),
             expected_runtime_id: Some(runtime_id),
             cleanup: Some((self.bundle.clone(), runtime.root)),
@@ -443,13 +464,18 @@ impl ResolvedRuntimeLauncher for ResolvedVibeExecutable {
         query_endpoint(&self.command, &self.log)
     }
 
+    fn prepare_launch(&self) {
+        let _ = cached_login_path(&self.log);
+    }
+
     fn launch(&self, hand_over: bool) -> Result<LaunchedRuntime, LaunchError> {
         // Only this shell's own Runtime is started by a CLI of its version,
         // which knows the flag and exits by the handover contract.
         let identified = self.expected_runtime_id.is_some();
         let hand_over = hand_over && identified;
+        let login_path = cached_login_path(&self.log);
         let started = Instant::now();
-        let child = spawn_detached(&self.command, hand_over).map_err(LaunchError::Spawn)?;
+        let child = spawn_detached(&self.command, hand_over, login_path).map_err(LaunchError::Spawn)?;
         let pid = child.id();
         let watch = LaunchWatch::default();
 
@@ -511,6 +537,9 @@ struct RuntimeCommand {
     executable: PathBuf,
     prefix_args: Vec<OsString>,
     environment: Vec<(OsString, OsString)>,
+    /// Directories that lead `PATH`, ahead of whatever `PATH` the command
+    /// inherits. Empty for an installed Runtime.
+    path_prefix: Vec<PathBuf>,
     /// Whether the shell's own `PYTHON*` variables are withheld from the child.
     ///
     /// Only the private Runtime sets this. `-I` protects just the interpreter
@@ -529,6 +558,7 @@ impl RuntimeCommand {
             executable,
             prefix_args: Vec::new(),
             environment: Vec::new(),
+            path_prefix: Vec::new(),
             withholds_inherited_python: false,
         }
     }
@@ -540,17 +570,11 @@ impl RuntimeCommand {
         npm_cli: PathBuf,
         backends_root: PathBuf,
         runtime_id: &str,
-        inherited_path: Option<&OsStr>,
     ) -> Self {
-        let tools_dir = node.parent().expect("validated private Node has a parent");
+        let tools_dir = node.parent().expect("validated private Node has a parent").to_owned();
         // The builder includes a relocatable vibe entry point in bin. Expose
         // only that directory, never python/bin (which would shadow user tools).
         let cli_dir = runtime_root.join("bin");
-        let mut path_entries = vec![cli_dir.clone(), tools_dir.to_owned()];
-        if let Some(path) = inherited_path {
-            path_entries.extend(env::split_paths(path).filter(|entry| !entry.as_os_str().is_empty()));
-        }
-        let private_path = env::join_paths(path_entries).unwrap_or_else(|_| cli_dir.into_os_string());
         Self {
             executable: python,
             // Isolated mode excludes the user site and PYTHONPATH. The Avibe
@@ -570,7 +594,6 @@ impl RuntimeCommand {
                 OsString::from("vibe"),
             ],
             environment: vec![
-                (OsString::from("PATH"), private_path),
                 (OsString::from("VIBE_SHOW_RUNTIME_NODE_BIN"), node.into_os_string()),
                 (OsString::from(DESKTOP_NPM_CLI_ENV), npm_cli.into_os_string()),
                 (
@@ -585,13 +608,48 @@ impl RuntimeCommand {
                 // what covers this process itself.
                 (OsString::from("PYTHONDONTWRITEBYTECODE"), OsString::from("1")),
             ],
+            path_prefix: vec![cli_dir, tools_dir],
             withholds_inherited_python: true,
         }
     }
 
-    fn apply(&self, command: &mut Command) {
+    /// Applies this command's arguments and environment. `inherited_path` is
+    /// the `PATH` the command would otherwise inherit; `None` means this
+    /// process's own.
+    fn apply(&self, command: &mut Command, inherited_path: Option<&OsStr>) {
         command.args(&self.prefix_args);
         self.apply_environment(command, env::vars_os());
+        if self.path_prefix.is_empty() {
+            // Nothing to put in front: the command gets the PATH it was given,
+            // or keeps this process's own, byte for byte.
+            if let Some(path) = inherited_path {
+                command.env("PATH", path);
+            }
+            return;
+        }
+        let inherited_path = inherited_path.map(OsStr::to_owned).or_else(|| env::var_os("PATH"));
+        if let Some(path) = self.path(inherited_path.as_deref()) {
+            command.env("PATH", path);
+        }
+    }
+
+    /// `path_prefix` ahead of `inherited`, or `None` when there is neither.
+    ///
+    /// Only a private Runtime has a prefix. Empty entries, which name the
+    /// current directory, are dropped as they always were for it.
+    fn path(&self, inherited: Option<&OsStr>) -> Option<OsString> {
+        let mut entries = self.path_prefix.clone();
+        if let Some(inherited) = inherited {
+            entries.extend(env::split_paths(inherited).filter(|entry| !entry.as_os_str().is_empty()));
+        }
+        if entries.is_empty() {
+            return None;
+        }
+        // An entry that cannot be joined (one containing the separator) is a
+        // PATH the user cannot have been running with; keep only the prefix.
+        env::join_paths(&entries)
+            .or_else(|_| env::join_paths(&self.path_prefix))
+            .ok()
     }
 
     /// The environment half of `apply`, over an explicit inherited set.
@@ -637,6 +695,8 @@ struct EndpointDescriptor {
 /// carry: how long it took, what it printed on stderr, and the exit status it
 /// actually had rather than the fact that it was not zero.
 struct EndpointAttempt {
+    /// 1 for the first run of this discovery, 2 for its one repeat.
+    number: u32,
     result: Result<LoopbackOrigin, LaunchError>,
     status: Option<std::process::ExitStatus>,
     stderr: Option<Vec<u8>>,
@@ -655,6 +715,21 @@ fn query_endpoint_within(
     log: &BootstrapLog,
     timeout: Duration,
 ) -> Result<LoopbackOrigin, LaunchError> {
+    let mut attempt = 1;
+    loop {
+        match query_endpoint_once(runtime, log, timeout, attempt) {
+            Err(LaunchError::EndpointTimeout) if attempt < ENDPOINT_ATTEMPTS => attempt += 1,
+            result => return result,
+        }
+    }
+}
+
+fn query_endpoint_once(
+    runtime: &RuntimeCommand,
+    log: &BootstrapLog,
+    timeout: Duration,
+    attempt: u32,
+) -> Result<LoopbackOrigin, LaunchError> {
     let started = Instant::now();
     let mut status = None;
     let mut stderr_reader = None;
@@ -662,14 +737,15 @@ fn query_endpoint_within(
     // Collected after the query returns, so a timeout that had to kill the child
     // still reports what that child said before it was killed.
     let stderr = stderr_reader.and_then(|reader| reader.recv_timeout(STDERR_DRAIN).ok());
-    let attempt = EndpointAttempt {
+    let run = EndpointAttempt {
+        number: attempt,
         result,
         status,
         stderr,
         elapsed: started.elapsed(),
     };
-    record_endpoint_attempt(log, &attempt);
-    attempt.result
+    record_endpoint_attempt(log, &run);
+    run.result
 }
 
 fn endpoint_descriptor(
@@ -679,7 +755,7 @@ fn endpoint_descriptor(
     stderr_slot: &mut Option<mpsc::Receiver<Vec<u8>>>,
 ) -> Result<LoopbackOrigin, LaunchError> {
     let mut command = Command::new(&runtime.executable);
-    runtime.apply(&mut command);
+    runtime.apply(&mut command, None);
     command
         .args(ENDPOINT_ARGS)
         .stdin(Stdio::null())
@@ -770,6 +846,7 @@ fn record_endpoint_attempt(log: &BootstrapLog, attempt: &EndpointAttempt) {
     let mut fields = vec![
         ("outcome", endpoint_outcome(&attempt.result).to_owned()),
         ("ms", attempt.elapsed.as_millis().to_string()),
+        ("attempt", attempt.number.to_string()),
     ];
     if let Some(status) = attempt.status {
         fields.push((
@@ -965,8 +1042,39 @@ fn is_executable(_metadata: &std::fs::Metadata) -> bool {
     true
 }
 
-fn spawn_detached(runtime: &RuntimeCommand, hand_over: bool) -> std::io::Result<std::process::Child> {
-    let mut command = lifecycle_command(runtime, &START_ARGS);
+/// The `PATH` the Runtime about to be started inherits, recorded once.
+///
+/// Only the start needs it: it is the one command whose process outlives this
+/// call and runs the user's agents. Discovery and the lifecycle verbs keep the
+/// shell's own `PATH`, so adopting a running Runtime never waits on the user's
+/// shell startup files. Cached so `prepare_launch` can run the lookup off the
+/// launch-state mutex and `launch` can reuse the result without asking again.
+fn cached_login_path(log: &BootstrapLog) -> &'static LoginPath {
+    static LOGIN_PATH: OnceLock<LoginPath> = OnceLock::new();
+    LOGIN_PATH.get_or_init(|| {
+        let started = Instant::now();
+        let login_path = login_shell_path();
+        log.record(
+            "runtime.login_path",
+            &[
+                ("outcome", login_path.outcome().to_owned()),
+                ("ms", started.elapsed().as_millis().to_string()),
+            ],
+        );
+        login_path
+    })
+}
+
+fn spawn_detached(
+    runtime: &RuntimeCommand,
+    hand_over: bool,
+    login_path: &LoginPath,
+) -> std::io::Result<std::process::Child> {
+    let inherited_path = match login_path {
+        LoginPath::Resolved(path) => Some(path.as_os_str()),
+        LoginPath::Inherited(_) => None,
+    };
+    let mut command = lifecycle_command(runtime, &START_ARGS, inherited_path);
     if hand_over {
         command.arg(HAND_OVER_ARG);
     }
@@ -986,7 +1094,7 @@ fn stop_arguments(runtime_id: &str) -> [&str; 3] {
 /// caller would then act against services that are still alive.
 fn run_lifecycle_verb(runtime: &RuntimeCommand, args: &[&str], log: &BootstrapLog, event: &str) -> CliOutcome {
     let started = Instant::now();
-    let mut command = lifecycle_command(runtime, args);
+    let mut command = lifecycle_command(runtime, args, None);
     // The verdict is on stderr. It stays in this process and the log.
     command.stderr(Stdio::piped());
     let mut child = match command.spawn() {
@@ -1049,9 +1157,9 @@ fn last_json_string(stderr: &[u8], field: &str) -> String {
         .unwrap_or_else(|| "unknown".to_owned())
 }
 
-fn lifecycle_command(runtime: &RuntimeCommand, args: &[&str]) -> Command {
+fn lifecycle_command(runtime: &RuntimeCommand, args: &[&str], inherited_path: Option<&OsStr>) -> Command {
     let mut command = Command::new(&runtime.executable);
-    runtime.apply(&mut command);
+    runtime.apply(&mut command, inherited_path);
     command
         .args(args)
         // Nothing the Runtime prints may reach the shell, and therefore the WebView.
@@ -1162,10 +1270,11 @@ mod tests {
             executable: PathBuf::from("/test-owned/Runtime Root/python"),
             prefix_args: vec![OsString::from("-m"), OsString::from("vibe")],
             environment: vec![(OsString::from("AVIBE_DESKTOP_MANAGED_RUNTIME"), OsString::from("1"))],
+            path_prefix: Vec::new(),
             withholds_inherited_python: true,
         };
         let runtime_id = "b".repeat(64);
-        let command = lifecycle_command(&runtime, &stop_arguments(&runtime_id));
+        let command = lifecycle_command(&runtime, &stop_arguments(&runtime_id), None);
         assert_eq!(command.get_program(), runtime.executable.as_os_str());
         assert_eq!(
             command.get_args().collect::<Vec<_>>(),
@@ -1772,7 +1881,6 @@ mod tests {
             tree.join("tools/npm/bin/npm-cli.js"),
             dir.join("backends"),
             &"a".repeat(64),
-            env::var_os("PATH").as_deref(),
         );
         let mut process = Command::new(&command.executable);
         for (name, value) in &command.environment {
@@ -1829,7 +1937,6 @@ mod tests {
             tree.join("tools/npm/bin/npm-cli.js"),
             dir.join("backends"),
             &"a".repeat(64),
-            env::var_os("PATH").as_deref(),
         );
         let inherited = [
             (
@@ -1978,7 +2085,16 @@ mod tests {
 
         assert!(matches!(failure, Err(LaunchError::EndpointTimeout)));
         let written = std::fs::read_to_string(dir.join("bootstrap.log")).expect("the attempt is recorded");
-        assert!(written.contains("outcome=\"timeout\""), "{written}");
+        let records: Vec<&str> = written.lines().collect();
+        assert_eq!(
+            records.len(),
+            2,
+            "a hang is repeated once, then reported, never retried without end: {written}"
+        );
+        for (record, attempt) in records.iter().zip(["1", "2"]) {
+            assert!(record.contains("outcome=\"timeout\""), "{written}");
+            assert!(record.contains(&format!("attempt=\"{attempt}\"")), "{written}");
+        }
         assert!(
             !written.contains(" exit="),
             "a child that was killed has no exit status to report: {written}"
@@ -1986,6 +2102,62 @@ mod tests {
         assert!(
             written.contains("still importing"),
             "output from before the kill is still worth having: {written}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// #2316: on an IO-starved disk the first run of a freshly extracted tree
+    /// outlived the whole budget, and the update stopped on a failure page. What
+    /// made that run slow is paid once, so the run after the kill answers.
+    ///
+    /// The fixture's first query stands in for the cold run: it leaves the flag
+    /// behind and then blocks past the deadline. Every later query finds the flag
+    /// and answers. The warm-up run (no arguments) pays this executable's own
+    /// first-exec cost outside the deadline, for the reason given in the test
+    /// above.
+    #[cfg(unix)]
+    #[test]
+    fn a_cold_endpoint_killed_at_its_deadline_answers_on_the_repeat() {
+        let dir = scratch_dir("endpoint-cold-repeat");
+        let paid = dir.join("paid");
+        let executable = write_fake_runtime(
+            &dir,
+            &format!(
+                "#!/bin/sh\n[ \"$1\" = desktop ] || exit 0\nif [ -e {flag} ]; then printf '%s\\n' '{{\"schema_version\":1,\"origin\":\"http://127.0.0.1:6123\"}}'; exit 0; fi\n: > {flag}\nexec sleep 30\n",
+                flag = paid.display()
+            ),
+        );
+        let warm_up = Command::new(&executable)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .expect("the fixture runs");
+        assert!(
+            warm_up.success() && !paid.exists(),
+            "the warm-up run must not pay the cold run"
+        );
+        let log = BootstrapLog::at(dir.join("bootstrap.log"));
+
+        let endpoint = query_endpoint_within(
+            &RuntimeCommand::installed(executable),
+            &log,
+            Duration::from_millis(1_500),
+        )
+        .expect("the run after a timed-out cold run answers");
+
+        assert_eq!(endpoint.as_str(), "http://127.0.0.1:6123");
+        let written = std::fs::read_to_string(dir.join("bootstrap.log")).expect("both runs are recorded");
+        let records: Vec<&str> = written.lines().collect();
+        assert_eq!(records.len(), 2, "{written}");
+        assert!(
+            records[0].contains("outcome=\"timeout\"") && records[0].contains("attempt=\"1\""),
+            "{written}"
+        );
+        assert!(
+            records[1].contains("outcome=\"ok\"") && records[1].contains("attempt=\"2\""),
+            "{written}"
         );
 
         std::fs::remove_dir_all(&dir).ok();
@@ -2145,7 +2317,15 @@ mod tests {
             npm_cli,
             backends_root,
             &"a".repeat(64),
-            Some(&inherited),
+        );
+        let path_entries: Vec<_> = env::split_paths(&command.path(Some(&inherited)).expect("private PATH")).collect();
+        assert_eq!(
+            path_entries,
+            [
+                runtime_root.join("bin"),
+                node.parent().unwrap().to_owned(),
+                PathBuf::from("/usr/bin")
+            ]
         );
 
         assert_eq!(command.executable, python);
@@ -2159,15 +2339,9 @@ mod tests {
             ]
         );
         let environment: std::collections::HashMap<_, _> = command.environment.into_iter().collect();
-        let path_entries: Vec<_> =
-            env::split_paths(environment.get(OsStr::new("PATH")).expect("private PATH")).collect();
-        assert_eq!(
-            path_entries,
-            [
-                runtime_root.join("bin"),
-                node.parent().unwrap().to_owned(),
-                PathBuf::from("/usr/bin")
-            ]
+        assert!(
+            !environment.contains_key(OsStr::new("PATH")),
+            "PATH is composed per command, from the PATH that command inherits"
         );
         assert_eq!(
             environment.get(OsStr::new("VIBE_SHOW_RUNTIME_NODE_BIN")),
@@ -2196,6 +2370,84 @@ mod tests {
         assert_eq!(
             environment.get(OsStr::new("PYTHONDONTWRITEBYTECODE")),
             Some(&OsString::from("1"))
+        );
+    }
+    /// The Runtime a desktop launch starts must see the PATH the user's login
+    /// shell has, not the one launchd gave the application: an npm-installed
+    /// backend is a `#!/usr/bin/env node` script, and nvm's `node` is only on
+    /// the former (#2378).
+    #[cfg(unix)]
+    #[test]
+    fn the_runtime_start_inherits_the_login_shell_path() {
+        let dir = scratch_dir("login-path");
+        let recording = dir.join("path");
+        let executable = write_fake_runtime(
+            &dir,
+            &format!("#!/bin/sh\nprintf '%s' \"$PATH\" > \"{}\"\n", recording.display()),
+        );
+        let runtime = RuntimeCommand::installed(executable);
+        let login_path = env::join_paths(["/login/nvm/bin", "/usr/bin", "/bin"]).expect("PATH");
+
+        let mut child = spawn_detached(&runtime, false, &LoginPath::Resolved(login_path.clone())).expect("start");
+        child.wait().expect("fake start exits");
+
+        assert_eq!(wait_for_file(&recording), login_path.to_string_lossy());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_private_runtime_keeps_its_own_tools_ahead_of_the_login_shell_path() {
+        let runtime = RuntimeCommand::private(
+            PathBuf::from("/private/runtime"),
+            PathBuf::from("/private/runtime/python/bin/python3"),
+            PathBuf::from("/private/runtime/tools/bin/node"),
+            PathBuf::from("/private/runtime/tools/npm/bin/npm-cli.js"),
+            PathBuf::from("/private/backends"),
+            &"a".repeat(64),
+        );
+        let login_path = env::join_paths(["/login/nvm/bin", "/usr/bin"]).expect("PATH");
+
+        let command = lifecycle_command(&runtime, &START_ARGS, Some(&login_path));
+
+        let path = command
+            .get_envs()
+            .find_map(|(name, value)| (name == "PATH").then_some(value))
+            .flatten()
+            .expect("the start sets PATH");
+        assert_eq!(
+            env::split_paths(path).collect::<Vec<_>>(),
+            [
+                PathBuf::from("/private/runtime/bin"),
+                PathBuf::from("/private/runtime/tools/bin"),
+                PathBuf::from("/login/nvm/bin"),
+                PathBuf::from("/usr/bin"),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_installed_runtime_inherits_path_verbatim() {
+        let runtime = RuntimeCommand::installed(PathBuf::from("/test-owned/vibe"));
+        let path_override = |command: &Command| {
+            command
+                .get_envs()
+                .find_map(|(name, value)| (name == "PATH").then(|| value.map(OsStr::to_owned)))
+        };
+
+        // Discovery, the lifecycle verbs, and a start whose login PATH could
+        // not be read leave this process's PATH untouched.
+        assert_eq!(path_override(&lifecycle_command(&runtime, &START_ARGS, None)), None);
+        assert_eq!(
+            path_override(&lifecycle_command(&runtime, &stop_arguments(&"b".repeat(64)), None)),
+            None
+        );
+
+        // A login PATH is passed on as the shell printed it, empty entries
+        // (the current directory) included.
+        let login_path = OsString::from(":/login/bin::/usr/bin:");
+        assert_eq!(
+            path_override(&lifecycle_command(&runtime, &START_ARGS, Some(&login_path))),
+            Some(Some(login_path))
         );
     }
 }

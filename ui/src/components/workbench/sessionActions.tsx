@@ -14,7 +14,7 @@ import { SESSION_ROW_ACTION_BUTTON_CLASS } from './sessionRowLayout';
 // header. The actions themselves (labels, writes, pending state) come from
 // useSessionActions.tsx; surfaces opt into only the capabilities they can render.
 
-export type SessionActionId = 'pin' | 'reference' | 'fork' | 'rename' | 'hide' | 'archive';
+export type SessionActionId = 'pin' | 'reference' | 'fork' | 'pet' | 'rename' | 'hide' | 'archive';
 
 /** Menu grouping — rendered with a hairline divider between groups. */
 export type SessionActionGroup = 'organize' | 'continue' | 'lifecycle';

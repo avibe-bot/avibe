@@ -63,6 +63,7 @@ capabilities:
       - tests/test_codex_request_provenance.py
       - tests/test_codex_request_routing.py
       - tests/test_model_hub_resolution.py
+      - tests/test_model_hub_background_discovery.py
       - tests/test_model_hub_routing_modes.py
       - tests/test_model_hub_transport_leases.py
       - tests/test_model_hub_injection.py

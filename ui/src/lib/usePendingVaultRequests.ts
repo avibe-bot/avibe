@@ -6,7 +6,8 @@ import { useLatestRef } from './useLatestRef';
 
 /**
  * Pending vault requests (access/sign/provision) for one chat session. Fed by
- * `vaults.updated`, with polling only when the controller event bridge is down.
+ * `vaults.updated`, with polling only when the controller event bridge is down,
+ * and cleared and re-read when the viewer's authorization changes.
  * A timer also refreshes at the earliest visible `expires_at` because expiry
  * emits no event. Lifted into a hook so the in-scroll cards and floating
  * approval bar share one source.
@@ -55,6 +56,16 @@ export function usePendingVaultRequests(sessionId: string): { requests: VaultReq
   }, [api, sessionId]);
 
   useVaultRequestRefresh(load);
+
+  // Requests read under the old authorization may no longer be this viewer's to
+  // approve, and no `vaults.updated` is promised for that: drop them at once and
+  // re-read. The new load's token fences any read still in flight.
+  useEffect(() => api.connectWorkbenchEvents({
+    onAuthorizationChanged: () => {
+      setRequests([]);
+      void load();
+    },
+  }), [api, load]);
 
   // Expiry has no SSE event → refresh at the earliest visible expires_at.
   useEffect(() => {

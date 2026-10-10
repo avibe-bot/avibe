@@ -1033,7 +1033,7 @@ def _pid_reservation_is_fresh(pid_path: Path, pid: int, *, max_age: float = SERV
     return time.time() - latest_signal <= max_age
 
 
-def stop_pid(pid: int, timeout: float = 5) -> bool:
+def stop_pid(pid: int, timeout: float = 5, *, shutdown_reason: str = "stop_pid") -> bool:
     if not isinstance(pid, int) or pid <= 0:
         return False
     if not pid_alive(pid):
@@ -1042,7 +1042,7 @@ def stop_pid(pid: int, timeout: float = 5) -> bool:
     if os.name == "nt":
         return _terminate_process_windows(pid, timeout=timeout)
 
-    write_shutdown_intent(pid, signum=signal.SIGTERM, reason="stop_pid")
+    write_shutdown_intent(pid, signum=signal.SIGTERM, reason=shutdown_reason)
     try:
         logger.info(
             "Sending managed SIGTERM to pid=%s command=%s",
@@ -2301,7 +2301,7 @@ def ui_server_healthy(host: str, port: int, timeout: float = 0.5) -> bool:
     return _ui_server_readiness(host, port, timeout=timeout) is True
 
 
-def _ui_server_compatible(
+def ui_server_compatible(
     host: str,
     port: int,
     timeout: float = UI_ADOPTION_PROBE_TIMEOUT_SECONDS,
@@ -2332,6 +2332,21 @@ def _pid_matches_ui_server(pid: int) -> bool:
 def ui_pid_file_points_to_running_ui(pid_path: Path | None = None) -> bool:
     pid = _read_pid_file(pid_path or paths.get_runtime_ui_pid_path())
     return bool(pid and pid_alive(pid) and _pid_matches_ui_server(pid))
+
+
+def recorded_ui_is_gone(pid_path: Path | None = None) -> bool:
+    """Whether no UI runs under the recorded pid, as far as can be known.
+
+    Gone means no record, a dead pid, or a pid now running another program. A
+    live pid whose command cannot be read is not gone: it may be the UI, and one
+    started beside it would only die on its port.
+    """
+
+    pid = _read_pid_file(pid_path or paths.get_runtime_ui_pid_path())
+    if not pid or not pid_alive(pid):
+        return True
+    command = get_process_command(pid)
+    return command is not None and not _is_ui_server_command(command)
 
 
 def resolve_localhost_family() -> str:
@@ -2420,7 +2435,7 @@ def start_ui(
             existing_pid = 0
         if existing_pid and pid_alive(existing_pid):
             is_ui_server = _claim_recorded_ui(existing_pid)
-            if is_ui_server and _ui_server_compatible(host, port):
+            if is_ui_server and ui_server_compatible(host, port):
                 if start_info is not None:
                     start_info.capture(existing_pid, reused=True)
                 return existing_pid
@@ -2475,7 +2490,11 @@ def start_ui(
     return pid
 
 
-def stop_service(*, runtime_ids: frozenset[str] = frozenset()):
+def stop_service(
+    *,
+    runtime_ids: frozenset[str] = frozenset(),
+    shutdown_reason: str = "stop_service",
+):
     """Stop every service process; with ``runtime_ids``, only when all are that Runtime's.
 
     The ids are checked on the very processes this stop selected, before any
@@ -2501,7 +2520,10 @@ def stop_service(*, runtime_ids: frozenset[str] = frozenset()):
 
         stopped_all = True
         for pid in target_pids:
-            stopped = stop_pid(pid, timeout=5)
+            if shutdown_reason == "stop_service":
+                stopped = stop_pid(pid, timeout=5)
+            else:
+                stopped = stop_pid(pid, timeout=5, shutdown_reason=shutdown_reason)
             if stopped:
                 _clear_service_pid_reservation(pid)
                 continue

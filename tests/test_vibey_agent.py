@@ -541,6 +541,36 @@ async def test_a_setup_failure_after_the_route_resolved_fails_the_turn_and_not_t
     assert harness.controller.terminals[-1]["is_error"] is True
 
 
+async def test_a_turn_in_flight_is_a_working_agent_in_the_running_agents_snapshot(
+    engine, session, tmp_path, published
+) -> None:
+    from core.services.running_agents import snapshot_running_agents
+
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def slow(arguments, ctx):
+        started.set()
+        await release.wait()
+        return ToolResult((text("a.py"),))
+
+    harness = _Harness(engine, tmp_path, "avibe", _tool_turn(), tools=[FakeTool("echo", execute=slow)])
+    controller = SimpleNamespace(agent_service=SimpleNamespace(agents={"vibey": harness.agent}))
+    running = asyncio.create_task(harness.agent.handle_message(harness.request("list files")))
+    await started.wait()
+
+    # The desktop pet and the Agents page read this snapshot for "an agent is working".
+    working = [
+        (row["backend"], row["session_id"], row["visibility"])
+        for row in snapshot_running_agents(controller)["agents"]
+        if row["state"] == "active"
+    ]
+    assert working == [("vibey", SESSION, "foreground")]
+
+    release.set()
+    await running
+    assert snapshot_running_agents(controller)["agents"] == []
+
+
 async def test_committed_rows_keep_the_agent_that_ran_the_turn(engine, session, tmp_path, published) -> None:
     started, release = asyncio.Event(), asyncio.Event()
 
@@ -1469,6 +1499,20 @@ async def test_the_system_prompt_lists_every_tool_the_run_offers(engine, session
     assert "Use edit for precise changes" in system
     # Short text between tool calls may never reach the user's transcript (the shared interim threshold).
     assert "- Only your final reply is reliably shown to the user; put anything the user must see in it" in system
+
+
+async def test_the_system_prompt_offers_no_computer_use_it_cannot_call(
+    engine, session, tmp_path, published, monkeypatch
+) -> None:
+    import core.computer_use as computer_use
+
+    # The desktop has Computer Use on: the MCP backends get the avibe_computer server, Vibey has no MCP client.
+    monkeypatch.setattr(computer_use, "managed_mcp_server_spec", lambda **_kwargs: object())
+    harness = _Harness(engine, tmp_path, "avibe", [[Done(assistant("ok"))]])
+
+    await harness.agent.handle_message(harness.request("click the Save button in Preview"))
+
+    assert "avibe_computer" not in harness.provider.requests[0].system
 
 
 async def test_an_idle_session_holds_no_adapter_state(engine, session, tmp_path, published) -> None:

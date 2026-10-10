@@ -15,6 +15,9 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 [features]
 default = []
 bundled-runtime = []
+# Test-only builds may redirect Computer Use state and assets to a hermetic lane.
+# Release packaging never enables this feature.
+computer-use-test-overrides = []
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -25,23 +28,26 @@ flate2 = "1"
 reqwest = { workspace = true, features = ["json", "rustls-tls"] }
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 sys-locale.workspace = true
 tar = "0.4"
-tauri = { version = "2", features = ["tray-icon"] }
+tauri = { version = "2", features = ["tray-icon", "macos-private-api"] }
 tauri-plugin-autostart = "2"
 tauri-plugin-deep-link = "2"
 tauri-plugin-dialog = "2"
+# The desktop pet's summon shortcut, registered from Rust only.
+tauri-plugin-global-shortcut = "~2.3" # 2.4 requires tauri 2.12
 tauri-plugin-notification = "2"
 tauri-plugin-opener = "2"
 tauri-plugin-single-instance = "2"
 tauri-plugin-window-state = "2"
 tempfile = "3"
-tokio.workspace = true
+tokio = { workspace = true, features = ["io-util", "macros", "net", "process", "sync"] }
 url.workspace = true
 
 [dev-dependencies]
 async-trait.workspace = true
-tauri = { version = "2", features = ["tray-icon", "test"] }
+tauri = { version = "2", features = ["tray-icon", "macos-private-api", "test"] }
 
 [target.'cfg(windows)'.dev-dependencies]
 # Reads a native menu item's text, where muda keeps its accelerator.
@@ -57,6 +63,8 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = [
   "NSEnumerator",
   "NSError",
   "NSGeometry",
+  "NSNotification",
+  "NSOperation",
   "NSString",
   "NSURL",
   "NSURLRequest",
@@ -64,6 +72,7 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = [
 ] }
 objc2-app-kit = { version = "0.3.2", default-features = false, features = [
   "std",
+  "NSApplication",
   "NSEvent",
   "NSGraphics",
   "NSResponder",

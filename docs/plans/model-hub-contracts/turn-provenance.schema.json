@@ -95,6 +95,12 @@
             "maximum": 599,
             "description": "Optional actual upstream HTTP status, independent of the native-compatible recovery-exhausted gateway response. Absent for unobserved/native transport failures and historical records."
           },
+          "upstream_detail": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 400,
+            "description": "Optional error text for this attempt, credential-redacted, stripped of control and bidi characters, whitespace-collapsed, and bounded to 400 characters by the engine client: the upstream's message, or for a network attempt the engine's connection diagnostic. Display only; never read by classification. Absent when no message was observed and in historical records."
+          },
           "reason": {
             "enum": [
               "quota_exhausted",
@@ -205,9 +211,17 @@
             "server_error",
             "internal_error",
             "api_error",
+            "service_unavailable_error",
+            "upstream_error",
             null
           ],
-          "description": "Optional observed machine code from classification.UPSTREAM_MACHINE_ERROR_CODES. If model_not_found was observed and classification returned upstream_request_invalid, retain that specific code over a co-occurring generic invalid_request_error type; otherwise use existing specificity order. This diagnostic selection never reranks or changes classification. Never derive a code from invalid_parameter; unknown codes, raw messages, bodies, headers and credentials are not retained. Absent evidence is null; historical records may omit the field."
+          "description": "Optional observed machine code from classification.UPSTREAM_MACHINE_ERROR_CODES. If model_not_found was observed and classification returned upstream_request_invalid, retain that specific code over a co-occurring generic invalid_request_error type; otherwise use existing specificity order. This diagnostic selection never reranks or changes classification. Never derive a code from invalid_parameter; unknown codes, bodies, headers and credentials are not retained. Absent evidence is null; historical records may omit the field."
+        },
+        "upstream_detail": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 400,
+          "description": "Optional upstream error message for this terminal attempt, under the same redaction and bound as failed_attempts[].upstream_detail. Display only; absent when no message was observed and in historical records."
         }
       },
       "dependencies": {

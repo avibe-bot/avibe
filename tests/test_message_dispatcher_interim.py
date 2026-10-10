@@ -13,9 +13,15 @@ from core.message_dispatcher import ConsolidatedMessageDispatcher
 from modules.im import MessageContext
 from tests.test_message_dispatcher_platform_limits import _StubController
 
-LONG_LINE = "根因已经定位：" + "并发下重入" * 40
-THREE_LINES = "Found it.\nThe cache is shared.\nFixing the lock next."
-TWO_LINES = "Reading a.py\nthen b.py"
+# Display width counts a CJK character as two columns: 252 characters reach the
+# 500-column bound, while 200 (a typical per-step preamble) and a 300-character
+# Latin paragraph stay in Activity.
+LONG_CJK = "根因已经定位：" + "并发下重入" * 49
+PREAMBLE_CJK = "并发下重入" * 40
+LONG_LATIN = "The cache is shared. " * 24
+PREAMBLE_LATIN = "Now the tests. " * 20
+FIVE_LINES = "Found it.\nThe cache is shared.\nTwo writers race.\nThe lock went in #12.\nFixing it next."
+FOUR_LINES = "Reading a.py\nthen b.py\nthen c.py\nthen d.py"
 
 
 class InterimBubbleTests(unittest.IsolatedAsyncioTestCase):
@@ -43,19 +49,22 @@ class InterimBubbleTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_promotion_rule(self):
         cases = [
-            ("avibe", THREE_LINES, {}, ["interim", "assistant"]),
-            ("avibe", LONG_LINE, {}, ["interim", "assistant"]),
-            ("avibe", TWO_LINES, {}, ["assistant"]),
-            ("avibe", "a\n\n\n\nb", {}, ["assistant"]),
-            ("avibe", THREE_LINES, {"level": "process"}, ["assistant"]),
-            ("slack", THREE_LINES, {}, ["assistant"]),
+            ("avibe", FIVE_LINES, {}, ["interim", "assistant"]),
+            ("avibe", LONG_CJK, {}, ["interim", "assistant"]),
+            ("avibe", LONG_LATIN, {}, ["interim", "assistant"]),
+            ("avibe", FOUR_LINES, {}, ["assistant"]),
+            ("avibe", PREAMBLE_CJK, {}, ["assistant"]),
+            ("avibe", PREAMBLE_LATIN, {}, ["assistant"]),
+            ("avibe", "a\n\n\n\n\n\nb", {}, ["assistant"]),
+            ("avibe", FIVE_LINES, {"level": "process"}, ["assistant"]),
+            ("slack", FIVE_LINES, {}, ["assistant"]),
         ]
         for platform, text, kwargs, expected in cases:
             with self.subTest(platform=platform, text=text[:20], kwargs=kwargs):
                 self.assertEqual(await self._persisted_types(platform, text, **kwargs), expected)
 
     async def test_bubble_owns_the_narration_and_its_quick_replies(self):
-        text = f"{THREE_LINES}\n\n---\n[Check backup] | [Skip]"
+        text = f"{FIVE_LINES}\n\n---\n[Check backup] | [Skip]"
         interim, assistant = await self._persisted("avibe", text, reply_enhancements=True)
 
         # The process-log row keeps the raw narration and tells Activity that the
@@ -63,15 +72,15 @@ class InterimBubbleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(assistant.args[1:3], ("assistant", text))
         self.assertEqual(assistant.kwargs["metadata"], {"transcript_copy": "interim"})
         # The bubble parses buttons exactly like a reply.
-        self.assertEqual(interim.args[1:3], ("interim", THREE_LINES))
+        self.assertEqual(interim.args[1:3], ("interim", FIVE_LINES))
         self.assertEqual(interim.kwargs["quick_replies"], ["Check backup", "Skip"])
 
         # Activity keeps the narration whenever no bubble holds it: below the
         # threshold, a body that is only buttons, or a bubble that failed to store.
         for text, kwargs in (
-            (TWO_LINES, {}),
-            ("\n\n---\n[A]\n[B]\n[C]", {"reply_enhancements": True}),
-            (THREE_LINES, {"interim_stored": False}),
+            (FOUR_LINES, {}),
+            ("\n\n---\n[A]\n[B]\n[C]\n[D]", {"reply_enhancements": True}),
+            (FIVE_LINES, {"interim_stored": False}),
         ):
             with self.subTest(text=text[:12], kwargs=kwargs):
                 calls = await self._persisted("avibe", text, **kwargs)

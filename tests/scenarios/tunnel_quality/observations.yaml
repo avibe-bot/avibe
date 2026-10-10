@@ -13,3 +13,7 @@ observations:
     scenario_ids: [RA-TQ-010, RA-TQ-011, RA-TQ-012, RA-TQ-013, RA-TQ-015, RA-TQ-016, RA-TQ-017, RA-TQ-018, RA-TQ-019, RA-TQ-020]
     source: live_local_ab
     note: Healthy QUIC edge RTT hid 1.8-2.7 second request tails; HTTP2 reduced the persistent-path worst case, motivating request-failure recovery, connector-gated comparison, durable rollback, and drain convergence.
+  - date: 2026-10-06
+    scenario_ids: [RA-TQ-033]
+    source: live_local_diagnosis
+    note: Egress UDP to the edge failed for about ten minutes while TCP 7844 stayed reachable. All QUIC connections dropped, cloudflared still reported one ready connection, and every public probe failed. Cooldown from an earlier tail-latency attempt blocked recovery until the owner pinned HTTP/2, after which four connections registered within seconds.

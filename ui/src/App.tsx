@@ -11,6 +11,7 @@ import {
 import { Wizard } from './components/Wizard';
 import { AppShell } from './components/AppShell';
 import { ErrorBoundary } from './components/ui/error-boundary';
+import { PetWindow } from './pet/PetWindow';
 import { Workbench } from './components/Workbench';
 import { InboxPage } from './components/workbench/InboxPage';
 import { SearchPage } from './components/workbench/SearchPage';
@@ -57,6 +58,7 @@ import type { ReactNode } from 'react';
 import {
     checkRemoteAuthForPath,
     isSetupCheckBypassed,
+    isSetupRedirectExempt,
     remoteLoginPath,
     REMOTE_AUTH_REQUIRED_EVENT,
     REMOTE_AUTH_STATE_EVENT,
@@ -79,6 +81,10 @@ const AppsTerminalPage = lazy(() =>
 const AppsEditorPage = lazy(() =>
   import('./components/workbench/AppsEditorPage').then((m) => ({ default: m.AppsEditorPage })),
 );
+// The desktop pet window's page: its own small surface, outside the Workbench
+// shell. It sits behind AuthGuard's login and authorization gates, and is
+// exempt only from the setup redirect (docs/plans/2026-10-01-desktop-pet.md).
+const PetPage = lazy(() => import('./pet/PetPage').then((m) => ({ default: m.PetPage })));
 const LibraryAppBody = lazy(() => import('./apps/LibraryApp').then((m) => ({ default: m.LibraryApp })));
 // The mobile full-screen Show Page route body. Lazy so the iframe frame + session
 // lookup load only when a pinned page is opened, not into the main entry.
@@ -94,7 +100,7 @@ const SettingsModelsPage = lazy(() =>
 import { ModelHubCapabilityGate } from './components/settings/models/ModelHubCapabilityGate';
 import { MODEL_HUB_SETTINGS_PATH } from './components/settings/models/modelHubRoutes';
 import { settingsOverlayOriginFromState, SETUP_VISIT_SETTINGS_PATHS } from './lib/settingsOverlay';
-import { hasConfiguredPlatformCredentials } from './lib/platforms';
+import { isSetupComplete } from './lib/setupState';
 import { isIosDevice, isStandalonePwa } from './lib/platform';
 import {
   readLastPwaPath,
@@ -300,6 +306,7 @@ export const AuthGuard = ({ children }: { children: ReactNode }) => {
     const [setupModelHubAllowed, setSetupModelHubAllowed] = useState(false);
     const authorizationUnavailableRef = useRef(false);
     const bypassSetupGuard = isSetupCheckBypassed(location.pathname);
+    const setupRedirectExempt = isSetupRedirectExempt(location.pathname);
     // Re-validate only when crossing the setup boundary, not on every
     // route change. The wizard completes by saving config and navigating
     // off /setup; that pathname flip re-runs the effect so the stale
@@ -421,11 +428,7 @@ export const AuthGuard = ({ children }: { children: ReactNode }) => {
                 // setup repair route. Unlike Diagnostics it is not a bypass.
                 setSetupModelHubAllowed(Boolean(config?.mode
                     && 'capabilities' in session && session.capabilities?.can_manage_instance));
-                const setupState = config?.setup_state;
-                const setupReady = typeof setupState?.needs_setup === 'boolean'
-                    ? setupState.needs_setup === false
-                    : hasConfiguredPlatformCredentials(config);
-                if (!config || !config.mode || !setupReady) {
+                if (!isSetupComplete(config)) {
                     setGuardStatus('needs-setup');
                     return;
                 }
@@ -486,10 +489,25 @@ export const AuthGuard = ({ children }: { children: ReactNode }) => {
         // completion clears the stale needs-setup status, while ordinary
         // sidebar navigation never re-runs (which would re-mount the
         // shell behind the Loading state).
-    }, [authCheckVersion, bypassSetupGuard, isSetupRoute, getConfig, getAuthSession]);
+    }, [authCheckVersion, bypassSetupGuard, setupRedirectExempt, isSetupRoute, getConfig, getAuthSession]);
+
+    // A route exempt from the setup redirect still needs a session: without one
+    // its capabilities would read as denied. When the first probe found none
+    // (the Runtime was unreachable), check again each time the page comes back.
+    const awaitingExemptSession = setupRedirectExempt && guardStatus === 'needs-setup' && !authorizationSession;
+    useEffect(() => {
+        if (!awaitingExemptSession) return undefined;
+        return onPageReactivated(() => setAuthCheckVersion((version) => version + 1));
+    }, [awaitingExemptSession]);
+
+    // `/pet` is a transparent native window. An opaque loading surface would
+    // show as a solid square for the whole recheck; leave the frame empty.
+    const guardLoading = setupRedirectExempt
+        ? null
+        : <div className="min-h-screen flex items-center justify-center bg-bg text-text">{t('common.loading')}</div>;
 
     if (guardStatus === 'loading') {
-        return <div className="min-h-screen flex items-center justify-center bg-bg text-text">{t('common.loading')}</div>;
+        return guardLoading;
     }
     if (guardStatus === 'remote-login-required') {
         return <RemoteLoginGate target={guardTarget} />;
@@ -513,7 +531,7 @@ export const AuthGuard = ({ children }: { children: ReactNode }) => {
     if (guardStatus === 'access-blocked') {
         return <AccessBlocked code={blockedCode} />;
     }
-    if (guardStatus === 'needs-setup' && !bypassSetupGuard) {
+    if (guardStatus === 'needs-setup' && !bypassSetupGuard && !setupRedirectExempt) {
         // Model Hub keeps its own grant; General needs only the wizard beneath it.
         if (authorizationSession && (location.pathname === '/setup'
             || (settingsOverSetup && location.pathname !== MODEL_HUB_SETTINGS_PATH)
@@ -532,7 +550,7 @@ export const AuthGuard = ({ children }: { children: ReactNode }) => {
         // (which owns the re-render) flips `guardStatus` to loading.
         // eslint-disable-next-line react-hooks/refs -- Deliberate one-frame bridge; see above.
         if (previousIsSetupRouteRef.current) {
-            return <div className="min-h-screen flex items-center justify-center bg-bg text-text">{t('common.loading')}</div>;
+            return guardLoading;
         }
         return <Navigate to="/setup" replace />;
     }
@@ -541,7 +559,7 @@ export const AuthGuard = ({ children }: { children: ReactNode }) => {
         // unfinished install can still inspect doctor output. Once the session
         // lands, wrap it so AppShell does not treat the owner as denied.
         if (bypassSetupGuard) return children;
-        return <div className="min-h-screen flex items-center justify-center bg-bg text-text">{t('common.loading')}</div>;
+        return guardLoading;
     }
     return (
         <>
@@ -818,11 +836,25 @@ function RouterRoot() {
 
 const router = createBrowserRouter(
   createRoutesFromElements(
+    <>
+    <Route
+      path="/pet"
+      element={(
+        <ErrorBoundary variant="page">
+          <PetWindow>
+            <AuthGuard>
+              <Suspense fallback={null}><PetPage /></Suspense>
+            </AuthGuard>
+          </PetWindow>
+        </ErrorBoundary>
+      )}
+    />
     <Route element={<ErrorBoundary variant="page"><RouterRoot /></ErrorBoundary>}>
       <Route element={<AuthGuard><AppShell /></AuthGuard>}>
         <Route path="*" element={<WorkbenchRouteSurface />} />
       </Route>
-    </Route>,
+    </Route>
+    </>,
   ),
 );
 

@@ -125,18 +125,30 @@ fn the_dmg_script_never_re_signs_an_identity_signed_app() {
         "the branch condition must test the ad-hoc/absent markers: {if_line}"
     );
     let if_offset = script.find(if_line.trim()).expect("if line offset");
-    let resign = script
-        .find("--sign -")
-        .expect("the script re-signs disposable ad-hoc copies");
+    let helper_sign = script
+        .find("\"$staging/Avibe.app/Contents/Helpers/cua-driver\"")
+        .expect("the script signs the nested helper explicitly");
+    let app_sign = script
+        .rfind("\"$staging/Avibe.app\"")
+        .expect("the script signs the outer app explicitly");
     assert!(
-        if_offset < resign,
-        "the ad-hoc re-sign must appear after (inside) the signature-state branch"
+        if_offset < helper_sign && helper_sign < app_sign,
+        "the ad-hoc branch must sign nested code before the outer app"
     );
-    // The re-sign appears exactly once and no second signing site exists
-    // outside the branch.
     assert_eq!(
         script.matches("--sign ").count(),
-        1,
-        "exactly one re-sign site: an identity-signed app is never re-signed"
+        2,
+        "only the helper and outer app are signed, both inside the ad-hoc branch"
+    );
+    assert_eq!(
+        script
+            .matches("--preserve-metadata=identifier,entitlements,flags,runtime")
+            .count(),
+        2,
+        "both ad-hoc signatures preserve the existing security metadata"
+    );
+    assert!(
+        !script.contains("--deep --sign"),
+        "--deep selects nested code only for verification, never for signing"
     );
 }

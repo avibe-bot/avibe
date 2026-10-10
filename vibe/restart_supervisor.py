@@ -335,9 +335,13 @@ def _stop_ui_for_restart(runtime_ids: frozenset[str]) -> tuple[bool, dict[str, f
     return bool(stopped), timings, _rounded_seconds(time.monotonic() - started_at), _read_recorded_ui_pid()
 
 
-def _stop_service_for_restart(runtime_ids: frozenset[str]) -> tuple[bool, float]:
+def _stop_service_for_restart(
+    runtime_ids: frozenset[str],
+    *,
+    shutdown_reason: str = "restart",
+) -> tuple[bool, float]:
     started_at = time.monotonic()
-    stopped = runtime.stop_service(runtime_ids=runtime_ids)
+    stopped = runtime.stop_service(runtime_ids=runtime_ids, shutdown_reason=shutdown_reason)
     return bool(stopped), _rounded_seconds(time.monotonic() - started_at)
 
 
@@ -349,7 +353,10 @@ def _stop_runtime_for_restart(
         # Service-only restart: leave the UI process untouched so the open Web
         # UI survives. Report its still-recorded pid; ``ui_stopped`` is True only
         # to satisfy the "did the UI stop" guard (we deliberately did not stop it).
-        service_stopped, stop_service_seconds = _stop_service_for_restart(runtime_ids)
+        service_stopped, stop_service_seconds = _stop_service_for_restart(
+            runtime_ids,
+            shutdown_reason="service_restart",
+        )
         return True, {}, 0.0, _read_recorded_ui_pid(), service_stopped, stop_service_seconds
     with ThreadPoolExecutor(max_workers=2, thread_name_prefix="avibe-restart-stop") as executor:
         ui_future = executor.submit(_stop_ui_for_restart, runtime_ids)

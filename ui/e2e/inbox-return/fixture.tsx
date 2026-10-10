@@ -27,7 +27,7 @@ const history = Array.from({ length: 90 }, (_, index) => makeRow(index + 1));
 const params = new URLSearchParams(window.location.search);
 const delay = Number(params.get('delay') ?? 0);
 
-function Chat({ markRead, addActivity }: { markRead: (id: string) => Promise<void>; addActivity: () => void }) {
+function Chat({ markRead, addActivity }: { markRead: (id: string) => Promise<boolean>; addActivity: () => void }) {
   const { sessionId } = useParams();
   const navigate = useNavigate();
   useEffect(() => {
@@ -55,6 +55,7 @@ export function Fixture() {
       delete next[id];
       return next;
     });
+    return true;
   }, []);
   const addActivity = () => {
     setSessions((prev) => prev.some((row) => row.session_id === 'session-100') ? prev : [makeRow(100), ...prev]);

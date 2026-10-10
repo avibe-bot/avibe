@@ -1,6 +1,7 @@
 """User-visible failure copy consumes exact Hub facts, not native error text."""
 
 import json
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -18,9 +19,13 @@ from core.controller import Controller
 from core.handlers.model_hub.adapter import RawOutcomeKind
 from core.handlers.model_hub.provenance import (
     ENGINE_DOWN_TURN_OUTCOME,
+    TurnOutcomeProjectionInput,
+    TurnSupplyFacts,
+    TurnUpstreamFailure,
     render_turn_outcome_copy,
 )
 from core.handlers.model_hub.turn_gateway import ModelHubTurnGateway
+from core.run_settlement import SETTLED_BY_TERMINAL_RESULT
 from modules.agents.catalog import AGENT_BACKENDS
 from modules.agents.model_hub import ModelHubRuntimeRouter, bind_launch
 from modules.im import MessageContext
@@ -225,6 +230,150 @@ async def test_gateway_terminal_survives_native_recorder_before_shared_notice(
         assert gateway.correlation.recovery_snapshot("turn-copy") == []
     finally:
         await gateway.close()
+
+
+@pytest.mark.parametrize("last_said", ["text", "nothing", "connection"])
+@pytest.mark.parametrize("backend,endpoint,status", [
+    ("codex", "responses", 400), ("claude", "messages", 424),
+])
+@pytest.mark.parametrize("language", ["en", "zh"])
+async def test_upstream_refusal_text_reaches_reply_record_and_log(
+    tmp_path, caplog, backend, endpoint, status, language, last_said,
+):
+    """MH-UPSTREAM-DETAIL-001: what the upstream said is shown, kept, and logged, not only its class."""
+    detail = "upstream request failed: read tcp 198.51.100.7:443: i/o timeout"
+    if last_said == "connection":
+        # The engine's own transport envelope: no upstream answered at all.
+        texts = [detail] * 12
+        failure = _outcome(RawOutcomeKind.NETWORK_ERROR, source_id="src_recovery01")
+    else:
+        # Only the first refusal carries text when the last one said nothing.
+        texts = [detail] + [detail if last_said == "text" else None] * 4
+        failure = _outcome(RawOutcomeKind.HTTP_ERROR, source_id="src_recovery01", status=500, code="server_error")
+    service, _clock = clock_service(tmp_path, outcomes=[
+        replace(failure, upstream_detail=text) for text in texts
+    ])
+    service.store.load().sources[0].display_name = "Relay 服务"
+    models = _canonicalize_fixed_test_routes(service)
+    gateway = ModelHubTurnGateway(service)
+    router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
+    context = MessageContext(
+        user_id="user", channel_id="channel", platform="avibe",
+        platform_specific={"turn_token": "turn-detail"},
+    )
+    controller = SimpleNamespace(
+        config=SimpleNamespace(language=language),
+        model_hub_turn_gateway=gateway,
+        emit_agent_message=AsyncMock(return_value="msg-failed"),
+    )
+    try:
+        launch = await router.resolve(
+            backend, models[backend], process_scope="fixture-detail", turn_id="turn-detail",
+        )
+        bind_launch(context, launch)
+        caplog.set_level("WARNING", logger="core.handlers.model_hub.provenance")
+        async with aiohttp.ClientSession(trust_env=False, timeout=aiohttp.ClientTimeout(total=5)) as client:
+            async with client.post(
+                f"{launch.gateway_base_url}/v1/{endpoint}",
+                headers={
+                    "Authorization": f"Bearer {launch.gateway_token}",
+                    **({"x-codex-turn-metadata": json.dumps(launch.gateway_request_metadata)}
+                       if launch.gateway_request_metadata else {}),
+                },
+                json={"model": launch.runtime_model, "stream": False},
+            ) as response:
+                assert response.status == status
+        attempts = len(service.adapter.invocations)
+        assert attempts >= 2
+        diagnostic = f"Native error {status}"
+        assert await router.record_native_failure(context, diagnostic) is False
+        await emit_backend_failure(controller, context, backend, diagnostic)
+        notice, _terminal = controller.emit_agent_message.await_args_list
+        projection = gateway.correlation.terminal_projection("turn-detail", backend=backend)
+        assert notice.args[2] == render_turn_outcome_copy(projection, language)
+        suffix = t(
+            "modelHub.launch.last_upstream_failure", language,
+            source="Relay 服务", status=500, detail=detail,
+        )
+        connection = t("modelHub.launch.last_connection_failure", language, source="Relay 服务", detail=detail)
+        # An older message never stands in for a newer refusal that had none,
+        # and a connection failure is never presented as an upstream answer.
+        assert (suffix in notice.args[2]) is (last_said == "text")
+        assert (connection in notice.args[2]) is (last_said == "connection")
+        gateway.correlation.settle("turn-detail", settled_by=SETTLED_BY_TERMINAL_RESULT)
+        record = service.provenance.get("turn-detail")
+        assert [attempt.get("upstream_detail") for attempt in record["failed_attempts"]] == texts[:attempts]
+        logged = [entry.getMessage() for entry in caplog.records if "Model Hub attempt failed" in entry.getMessage()]
+        status_text = "http_status=None" if last_said == "connection" else "http_status=500"
+        assert len(logged) == attempts and all(status_text in line for line in logged)
+        assert detail in logged[0]
+    finally:
+        await gateway.close()
+
+
+@pytest.mark.parametrize("language", ["en", "zh"])
+def test_request_incompatible_copy_preserves_nonfallback_guidance(language):
+    detail = "response protection is unavailable"
+    projection = TurnOutcomeProjectionInput(
+        outcome="failed_terminal",
+        discriminator="request_nonfallback",
+        upstream_detail=detail,
+    )
+
+    text = render_turn_outcome_copy(projection, language)
+
+    assert text == t(
+        "modelHub.launch.request_incompatible_detail",
+        language,
+        detail=detail,
+    )
+    assert (
+        "switching Sources will not help" in text
+        if language == "en"
+        else "切换模型供应商也无法解决" in text
+    )
+
+
+@pytest.mark.parametrize("language", ["en", "zh"])
+def test_http_200_sse_failure_is_presented_as_upstream_error(language):
+    detail = "response protection is unavailable"
+    projection = TurnOutcomeProjectionInput(
+        outcome="exhausted",
+        discriminator="final_supply_state",
+        supply_facts=TurnSupplyFacts(
+            backend="codex",
+            model="gpt-6-astra",
+            supply_state="waiting",
+            source="Relay 服务",
+        ),
+        last_upstream_failure=TurnUpstreamFailure(
+            source="Relay 服务",
+            http_status=None,
+            detail=detail,
+        ),
+    )
+
+    text = render_turn_outcome_copy(projection, language)
+
+    assert t(
+        "modelHub.launch.last_upstream_failure_without_status",
+        language,
+        source="Relay 服务",
+        detail=detail,
+    ) in text
+    assert t(
+        "modelHub.launch.last_connection_failure",
+        language,
+        source="Relay 服务",
+        detail=detail,
+    ) not in text
+    assert "HTTP 200" not in text
+    assert (
+        "switching Sources will not help" not in text
+        if language == "en"
+        else "切换模型供应商也无法解决" not in text
+    )
+    assert detail in text
 
 
 @pytest.mark.parametrize("language", ["en", "zh"])

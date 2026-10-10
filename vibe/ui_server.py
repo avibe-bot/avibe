@@ -15,6 +15,7 @@ import secrets
 import shutil
 import socket
 import subprocess
+import sys
 import threading
 import time
 from collections import OrderedDict, deque
@@ -50,6 +51,10 @@ from vibe.ui_compat import (
 
 from config import paths
 from config.v2_config import CONFIG_LOCK, V2Config
+from core.computer_use import (
+    desktop_computer_use_shell_is_live,
+    effective_computer_use_status,
+)
 from core.show_pages import (
     SHOW_CLI_EVENT_TOKEN_HEADER,
     SHOW_EVENT_WRITE_TOKEN_COOKIE,
@@ -84,6 +89,10 @@ if TYPE_CHECKING:
     from vibe.runtime import DesktopRuntimeClaimRefused
 
 logger = logging.getLogger(__name__)
+
+
+def _desktop_computer_use_supported() -> bool:
+    return desktop_computer_use_shell_is_live()
 
 
 class _ShowEventDispatchOutcome(str, Enum):
@@ -3340,6 +3349,60 @@ async def ready():
         # identity: it never authorizes handover or stopping the Controller.
         payload["desktop_ui_runtime_id"] = ui_runtime_id
     return response(payload)
+
+
+@app.route("/api/desktop/capabilities")
+async def desktop_capabilities():
+    """Expose Controller-owned desktop capability support to the native shell."""
+
+    from vibe import internal_client
+
+    try:
+        payload = await internal_client.desktop_capabilities()
+    except internal_client.InternalServerTimeout:
+        return jsonify(
+            {
+                "ok": False,
+                "error": "controller_timeout",
+            }
+        ), 503
+    except internal_client.InternalServerUnavailable:
+        return jsonify(
+            {
+                "ok": False,
+                "error": "controller_unavailable",
+            }
+        ), 503
+    response_payload = jsonify(payload)
+    response_payload.headers["Cache-Control"] = "no-store"
+    return response_payload
+
+
+@app.route("/api/desktop/computer-use/status")
+async def desktop_computer_use_status():
+    """Read the shell/daemon status from the shared desktop state contract."""
+
+    if not _desktop_computer_use_supported():
+        response_payload = jsonify(
+            {
+                "supported": False,
+                "status": "unavailable",
+                "reason": "unsupported_host",
+            }
+        )
+        response_payload.headers["Cache-Control"] = "no-store"
+        return response_payload
+
+    status = await asyncio.to_thread(effective_computer_use_status)
+    response_payload = jsonify(
+        {
+            "supported": True,
+            "status": status.status,
+            "reason": status.reason,
+        }
+    )
+    response_payload.headers["Cache-Control"] = "no-store"
+    return response_payload
 
 
 @app.websocket("/ws/echo")
@@ -9400,19 +9463,45 @@ async def sessions_fork(session_id: str):
     return jsonify(session), 201
 
 
+def _session_can_chat(conn, authorization_context, session_id: str) -> bool:
+    """Project-level chat grant for this principal on this session.
+
+    Same rule as session bootstrap: the effective project role must be editor.
+    """
+    from storage import project_access_service
+
+    return project_access_service.role_allows(
+        project_access_service.get_effective_session_role(
+            conn,
+            authorization_context,
+            session_id,
+        ),
+        "editor",
+    )
+
+
 @app.route("/api/sessions/<session_id>", methods=["GET"])
 def sessions_get(session_id: str):
     from core.services import sessions as workbench_sessions_service
 
+    authorization_context = getattr(g, "authorization_context", None)
     engine = _projects_engine()
     try:
         with engine.connect() as conn:
+            session = workbench_sessions_service.get_session(
+                conn,
+                session_id,
+                authorization_context=authorization_context,
+            )
             return jsonify(
-                workbench_sessions_service.get_session(
-                    conn,
-                    session_id,
-                    authorization_context=getattr(g, "authorization_context", None),
-                )
+                {
+                    **session,
+                    "capabilities": {
+                        "can_chat": _session_can_chat(
+                            conn, authorization_context, session_id
+                        ),
+                    },
+                }
             )
     except LookupError as err:
         return jsonify({"error": str(err)}), 404
@@ -9540,7 +9629,7 @@ async def sessions_bootstrap(session_id: str):
     """
     from core.services import sessions as workbench_sessions_service
     from core.services import settings as settings_service
-    from storage import messages_service, project_access_service
+    from storage import messages_service
     from vibe import api as vibe_api
     from vibe import internal_client
 
@@ -9555,12 +9644,7 @@ async def sessions_bootstrap(session_id: str):
             )
         except LookupError as err:
             return jsonify({"error": str(err)}), 404
-        effective_role = project_access_service.get_effective_session_role(
-            conn,
-            authorization_context,
-            session_id,
-        )
-        can_chat = project_access_service.role_allows(effective_role, "editor")
+        can_chat = _session_can_chat(conn, authorization_context, session_id)
         messages_result = messages_service.list_session_messages(
             conn,
             session_id=session_id,

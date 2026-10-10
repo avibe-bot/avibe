@@ -206,7 +206,10 @@ async def test_dispatch_renders_once_even_for_empty_prompt_and_transport_recover
     agent._start_turn = AsyncMock()
     set_dispatch_phase(request.context, DISPATCH_PHASE_PREWRITE)
     await agent.handle_message(request)
-    agent._build_thread_developer_instructions.assert_awaited_once_with(request)
+    agent._build_thread_developer_instructions.assert_awaited_once_with(
+        request,
+        include_computer_use=False,
+    )
     assert agent._start_or_resume_thread.await_args_list == [
         call(transport, request, developer_instructions=prompt),
         *([call(fresh, request, developer_instructions=prompt)] if recover else []),

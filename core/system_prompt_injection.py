@@ -194,6 +194,7 @@ def build_system_prompt_blocks(
     backend: str = "",
     include_quick_replies: bool = True,
     include_codex_generated_images: bool = False,
+    include_computer_use: bool | None = None,
     include_context_guidance: bool = True,
     context: Optional[MessageContext] = None,
     fallback_platform: Optional[str] = None,
@@ -230,6 +231,13 @@ def build_system_prompt_blocks(
         if correction:
             blocks.append(RenderedPromptBlock("forked-session-prompt", correction))
     blocks.append(render_prompt_block("base-capabilities-body"))
+    if include_computer_use is None:
+        from core.computer_use import managed_mcp_server_spec
+
+        # Vibey runs no MCP client, so the desktop's Computer Use server is never one of its tools.
+        include_computer_use = backend != "vibey" and managed_mcp_server_spec() is not None
+    if include_computer_use:
+        blocks.append(render_prompt_block("computer-use-prompt"))
     if backend == "codex":
         blocks.append(render_prompt_block("codex-skill-reuse"))
     if include_codex_generated_images:

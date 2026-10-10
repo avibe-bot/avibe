@@ -1,9 +1,10 @@
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
-import { Check, Copy, GitFork, TextQuote } from 'lucide-react';
+import { Check, Copy, GitFork, TextQuote, TextSelect } from 'lucide-react';
 
 import { Button } from '../ui/button';
+import { selectedMarkdown, wholeMarkdownRange } from '../../lib/markdownSource';
 import { copyTextToClipboard } from '../../lib/utils';
 
 type SelectionRect = {
@@ -16,7 +17,13 @@ type SelectionRect = {
 };
 
 type SelectionState = {
+  // What Quote and Ask in a new session take; empty for an image or a rule alone.
   text: string;
+  // What Copy writes: the selected Markdown source, or the plain text when the
+  // selection reaches no rendered Markdown.
+  copyText: string;
+  // The selection widened to the whole bubble(s); null outside any bubble.
+  whole: Range | null;
   top: number;
   bottom: number;
   left: number;
@@ -28,6 +35,8 @@ const TOOLBAR_H = 36;
 const GAP = 8;
 const EDGE = 8;
 const PRESS_GRACE_MS = 700;
+// The native click that follows a pointer or keyboard activation already handled.
+const CLICK_AFTER_ACTIVATION_MS = 700;
 // iOS keeps touch sequences that start within this padding around a selection
 // handle in its native selection gesture recognizer. Keep the web toolbar
 // outside that region so pointerup/touchend remains deliverable to the button.
@@ -47,7 +56,8 @@ const toSelectionRect = (rect: DOMRect | DOMRectReadOnly): SelectionRect => ({
 // transcript. "Quote" appends the (quoted) selection to the current composer
 // (only offered when the composer can accept it); "Ask in a new session" forks +
 // prefills the fork's draft (only offered when the session is forkable); "Copy"
-// (touch only) is a fallback for when the OS selection menu doesn't cooperate. It
+// copies the Markdown the selected part of the bubble was written in; "Select
+// all" widens the selection to the whole bubble and keeps the toolbar up. It
 // follows the selection through scrolling (hides while scrolling, re-shows at the
 // new spot) and only disappears when the selection is cleared — so the user can
 // scroll to dodge the OS menu.
@@ -64,6 +74,9 @@ export const SelectionQuoteToolbar: React.FC<{
   const { t } = useTranslation();
   const [sel, setSel] = useState<SelectionState | null>(null);
   const [copied, setCopied] = useState(false);
+  // Counts selection changes, so work finishing later (the clipboard write, the
+  // dismissal after it) applies only to the selection it was started for.
+  const generationRef = useRef(0);
   const toolbarRef = useRef<HTMLDivElement>(null);
   const pressRef = useRef<{
     pointerId: number;
@@ -72,10 +85,11 @@ export const SelectionQuoteToolbar: React.FC<{
     deferred: boolean;
   } | null>(null);
   const pressExpiryRef = useRef<number | null>(null);
+  const activatedAtRef = useRef(Number.NEGATIVE_INFINITY);
   const [width, setWidth] = useState(0);
   const [height, setHeight] = useState(TOOLBAR_H);
   // Touch (coarse pointer — phones AND tablets/iPads) is where the OS selection
-  // menu coexists; it drives the stagger-positioning + the touch-only Copy.
+  // menu coexists; it drives the stagger-positioning.
   const [isTouch] = useState(
     () => typeof window !== 'undefined' && !!window.matchMedia?.('(pointer: coarse)').matches,
   );
@@ -90,7 +104,13 @@ export const SelectionQuoteToolbar: React.FC<{
     }
     const text = selection.toString().trim();
     const range = selection.getRangeAt(0);
-    if (!text || !container.contains(range.commonAncestorContainer)) {
+    if (!container.contains(range.commonAncestorContainer)) {
+      setSel(null);
+      return;
+    }
+    // An image or a rule has no text but still has Markdown to copy.
+    const markdown = selectedMarkdown(range, container);
+    if (!text && !markdown) {
       setSel(null);
       return;
     }
@@ -104,6 +124,8 @@ export const SelectionQuoteToolbar: React.FC<{
     }
     setSel({
       text,
+      copyText: markdown ?? text,
+      whole: wholeMarkdownRange(range, container),
       top: rect.top,
       bottom: rect.bottom,
       left: rect.left + rect.width / 2,
@@ -144,6 +166,8 @@ export const SelectionQuoteToolbar: React.FC<{
       clearPress();
     };
     const onSelectionChange = () => {
+      generationRef.current += 1;
+      setCopied(false);
       const press = pressRef.current;
       const currentText = window.getSelection()?.toString().trim() ?? '';
       if (press && (!currentText || currentText === press.selectionText)) {
@@ -191,9 +215,9 @@ export const SelectionQuoteToolbar: React.FC<{
   }, [sel, onQuote, onAskInNew, isTouch]);
 
   if (!sel) return null;
-  // Nothing left to offer (read-only transcript on a pointer device, where the
-  // OS already provides copy) — render no chrome rather than an empty bar.
-  if (!onQuote && !onAskInNew && !isTouch) return null;
+  // Quote and Ask in a new session carry text, so an image or a rule alone offers neither.
+  const quote = sel.text ? onQuote : undefined;
+  const ask = sel.text ? onAskInNew : undefined;
 
   const dismiss = () => {
     clearPress(false);
@@ -210,16 +234,27 @@ export const SelectionQuoteToolbar: React.FC<{
     dismiss();
   };
   const runCopy = () => {
-    const text = sel.text;
-    void copyTextToClipboard(text).then((ok) => {
-      if (ok) {
-        setCopied(true);
-        window.setTimeout(dismiss, 800);
-      }
+    const generation = generationRef.current;
+    void copyTextToClipboard(sel.copyText).then((ok) => {
+      if (!ok || generationRef.current !== generation) return;
+      setCopied(true);
+      window.setTimeout(() => {
+        if (generationRef.current === generation) dismiss();
+      }, 800);
     });
   };
+  // Nothing dismisses, since the bubble is still selected: the toolbar is
+  // re-read over the widened selection at once, so Copy right after copies it.
+  const runSelectAll = () => {
+    const selection = window.getSelection();
+    if (!sel.whole || !selection) return;
+    selection.removeAllRanges();
+    selection.addRange(sel.whole.cloneRange());
+    recompute();
+  };
 
-  // Activate on pointerup (mouse + touch) and Enter/Space (keyboard). The
+  // Activate on pointerup (mouse + touch), Enter/Space (keyboard), or a click no
+  // pointer or key activation preceded (assistive technology). The
   // pointerdown preventDefault keeps the text selection alive. We deliberately
   // keep only a short-lived gesture match here: iOS can deliver pointerdown
   // for a touch near a selection handle without ever delivering pointerup, so
@@ -256,13 +291,21 @@ export const SelectionQuoteToolbar: React.FC<{
     if (!releasedInside) {
       return;
     }
+    activatedAtRef.current = e.timeStamp;
     run();
   };
   const handleKeyDown = (e: React.KeyboardEvent, run: () => void) => {
     if (e.key === 'Enter' || e.key === ' ') {
       e.preventDefault();
+      activatedAtRef.current = e.timeStamp;
       run();
     }
+  };
+  // Assistive technology (VoiceOver, TalkBack, switch access) activates a button
+  // with a click alone; a pointer or key activation is followed by one as well.
+  const handleClick = (e: React.MouseEvent, run: () => void) => {
+    if (e.timeStamp - activatedAtRef.current < CLICK_AFTER_ACTIVATION_MS) return;
+    run();
   };
 
   const toolbarHeight = height || TOOLBAR_H;
@@ -345,45 +388,60 @@ export const SelectionQuoteToolbar: React.FC<{
     >
       {/* Separators sit BEFORE each item after the first, so a hidden action
           never leaves a dangling divider at the edge of the bar. */}
-      {onQuote && (
+      {quote && (
         <Button
           variant="ghost"
           className={itemClass}
           onPointerDown={handlePointerDown}
           onPointerUp={(e) => handlePointerUp(e, runQuote)}
           onKeyDown={(e) => handleKeyDown(e, runQuote)}
+          onClick={(e) => handleClick(e, runQuote)}
         >
           <TextQuote className="size-3.5 text-muted" />
           {t('chat.selection.quote')}
         </Button>
       )}
-      {onAskInNew && (
+      {ask && (
         <>
-          {onQuote && <span className="h-5 w-px bg-border" />}
+          {quote && <span className="h-5 w-px bg-border" />}
           <Button
             variant="ghost"
             className={itemClass}
             onPointerDown={handlePointerDown}
             onPointerUp={(e) => handlePointerUp(e, runAsk)}
             onKeyDown={(e) => handleKeyDown(e, runAsk)}
+            onClick={(e) => handleClick(e, runAsk)}
           >
             <GitFork className="size-3.5 text-muted" />
             {t('chat.selection.askInNew')}
           </Button>
         </>
       )}
-      {isTouch && (
+      {(quote || ask) && <span className="h-5 w-px bg-border" />}
+      <Button
+        variant="ghost"
+        className={itemClass}
+        onPointerDown={handlePointerDown}
+        onPointerUp={(e) => handlePointerUp(e, runCopy)}
+        onKeyDown={(e) => handleKeyDown(e, runCopy)}
+        onClick={(e) => handleClick(e, runCopy)}
+      >
+        {copied ? <Check className="size-3.5 text-mint-ink" /> : <Copy className="size-3.5 text-muted" />}
+        {t('chat.selection.copy')}
+      </Button>
+      {sel.whole && (
         <>
-          {(onQuote || onAskInNew) && <span className="h-5 w-px bg-border" />}
+          <span className="h-5 w-px bg-border" />
           <Button
             variant="ghost"
             className={itemClass}
             onPointerDown={handlePointerDown}
-            onPointerUp={(e) => handlePointerUp(e, runCopy)}
-            onKeyDown={(e) => handleKeyDown(e, runCopy)}
+            onPointerUp={(e) => handlePointerUp(e, runSelectAll)}
+            onKeyDown={(e) => handleKeyDown(e, runSelectAll)}
+            onClick={(e) => handleClick(e, runSelectAll)}
           >
-            {copied ? <Check className="size-3.5 text-mint-ink" /> : <Copy className="size-3.5 text-muted" />}
-            {t('chat.selection.copy')}
+            <TextSelect className="size-3.5 text-muted" />
+            {t('chat.selection.selectAll')}
           </Button>
         </>
       )}

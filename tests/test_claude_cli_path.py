@@ -139,6 +139,157 @@ def _run_session(handler: SessionHandler, context: MessageContext):
     return asyncio.run(handler.get_or_create_claude_session(context))
 
 
+@pytest.mark.asyncio
+async def test_claude_prompt_guidance_respects_the_effective_tool_allowlist(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An admitted server does not imply guidance for tools the agent cannot call."""
+
+    captured: list[bool] = []
+
+    def build_prompt(**kwargs: Any) -> str:
+        captured.append(kwargs["include_computer_use"])
+        return "prompt"
+
+    monkeypatch.setattr(
+        session_handler_module,
+        "build_system_prompt_injection",
+        build_prompt,
+    )
+    handler = SessionHandler(_Controller(tmp_path))
+    context = MessageContext(user_id="U123", channel_id="C123")
+    spec = SimpleNamespace(name="avibe_computer")
+    common = {
+        "context": context,
+        "session_key": "test::C123",
+        "agent_name": "claude",
+        "session_anchor": "slack_C123",
+        "agent_system_prompt": None,
+        "computer_use_spec": spec,
+    }
+
+    await handler._build_claude_system_prompt(
+        **common,
+        agent_allowed_tools=["Read", "Bash"],
+    )
+    await handler._build_claude_system_prompt(
+        **common,
+        agent_allowed_tools=["Read", "mcp__avibe_computer__click"],
+    )
+
+    assert captured == [False, True]
+
+
+@pytest.mark.parametrize(
+    ("allowed_tools", "exposes_computer_use"),
+    [
+        pytest.param(["Read", "Bash"], False, id="read-bash-only"),
+        pytest.param(
+            ["Read", "mcp__avibe_computer__click"],
+            True,
+            id="managed-tool",
+        ),
+        pytest.param(None, True, id="no-allowlist"),
+    ],
+)
+def test_selected_agent_computer_use_authority_matches_cold_and_cached_launch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    allowed_tools: list[str] | None,
+    exposes_computer_use: bool,
+) -> None:
+    """Cold and cached launches render guidance only when they configure MCP."""
+
+    clients: list[Any] = []
+    rendered_prompts: list[str] = []
+    loads = 0
+    spec = SimpleNamespace(
+        name="avibe_computer",
+        fingerprint="managed-fixture",
+        claude_config=lambda: {
+            "type": "stdio",
+            "command": "/fixture/python",
+            "args": ["-I", "/fixture/core/computer_server.py"],
+            "env": {},
+        },
+    )
+
+    class Client:
+        def __init__(self, options: Any) -> None:
+            self.options = options
+            self.disconnects = 0
+            clients.append(self)
+
+        async def connect(self) -> None:
+            return None
+
+        async def disconnect(self) -> None:
+            self.disconnects += 1
+
+    original_prompt_builder = session_handler_module.build_system_prompt_injection
+
+    def build_prompt(**kwargs: Any) -> str:
+        prompt = original_prompt_builder(**kwargs)
+        rendered_prompts.append(prompt)
+        return prompt
+
+    def load_agent(*_args: Any) -> dict[str, Any]:
+        nonlocal loads
+        loads += 1
+        agent = {
+            "prompt": "Agent file prompt must not replace the injected prompt.",
+            "model": "inherit",
+        }
+        if allowed_tools is not None:
+            agent["tools"] = allowed_tools
+        return agent
+
+    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", Client)
+    monkeypatch.setattr(session_handler_module, "managed_mcp_server_spec", lambda: spec)
+    monkeypatch.setattr(
+        session_handler_module,
+        "build_system_prompt_injection",
+        build_prompt,
+    )
+    handler = SessionHandler(_Controller(tmp_path))
+    monkeypatch.setattr(handler, "_load_agent_file", load_agent)
+
+    async def run() -> tuple[Any, Any]:
+        context = MessageContext(user_id="U123", channel_id="C123")
+        first = await handler.get_or_create_claude_session(
+            context,
+            subagent_name="restricted",
+            agent_system_prompt="Injected owner policy.",
+        )
+        second = await handler.get_or_create_claude_session(
+            context,
+            subagent_name="restricted",
+            agent_system_prompt="Injected owner policy.",
+        )
+        return first, second
+
+    first, second = asyncio.run(run())
+
+    assert second is first
+    assert len(clients) == 1
+    assert clients[0].disconnects == 0
+    assert loads == 2
+    assert len(rendered_prompts) == 2
+    assert all("Injected owner policy." in prompt for prompt in rendered_prompts)
+    assert all(
+        ("## Computer use" in prompt) is exposes_computer_use
+        for prompt in rendered_prompts
+    )
+    assert getattr(first.options, "allowed_tools", None) == allowed_tools
+    assert getattr(first.options, "mcp_servers", None) == (
+        {"avibe_computer": spec.claude_config()}
+        if exposes_computer_use
+        else None
+    )
+
+
 class _StubClaudeAgentOptions:
     def __init__(self, **kwargs: Any) -> None:
         for key, value in kwargs.items():

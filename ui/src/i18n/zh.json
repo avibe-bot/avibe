@@ -46,6 +46,38 @@
       "failureTitle": "无法完成操作",
       "loginFailure": "无法读取或更改登录启动设置。请检查操作系统的登录设置后重试。"
     },
+    "computerUse": {
+      "off": "电脑操作",
+      "starting": "电脑操作 — 正在启动…",
+      "ready": "电脑操作 — 已就绪",
+      "needsPermission": "电脑操作 — 需要权限",
+      "needsPermissionAccessibility": "电脑操作 — 需要辅助功能权限",
+      "needsPermissionScreenRecording": "电脑操作 — 需要屏幕录制权限；请在系统设置中添加 Avibe",
+      "screenRecordingTitle": "需要屏幕录制权限",
+      "screenRecordingGuide": "Avibe 已打开“系统设置 → 隐私与安全性 → 屏幕与系统音频录制”。请点击 +，或将 Avibe 拖入列表，然后启用它。获得“屏幕录制”授权后，macOS 可能会退出并重新打开 Avibe；应用重新打开后请返回。两个权限都授权后，应用会自动启动。",
+      "needsRuntime": "电脑操作 — 请重启 Avibe 服务",
+      "runtimeUnavailable": "电脑操作 — 正在等待 Avibe 服务",
+      "runtimeTooOld": "电脑操作 — 请重启 Avibe 服务",
+      "error": "电脑操作 — 出错；请关闭后重新开启",
+      "errorReasons": {
+        "state_unwritable": "电脑操作 — 无法保存状态；请关闭后重新开启",
+        "spawn_failed": "电脑操作 — 受管理的驱动无法启动；请关闭后重新开启",
+        "daemon_exited": "电脑操作 — 受管理的驱动已退出；请关闭后重新开启",
+        "health_timeout": "电脑操作 — 受管理的驱动未能就绪；请关闭后重新开启",
+        "bundle_identity": "电脑操作 — 受管理的驱动无法验证当前 Avibe 应用；请更新或重新安装",
+        "ax_capability": "电脑操作 — 无法使用辅助功能；请在系统设置中检查 Avibe，然后重新打开",
+        "capture_failed": "电脑操作 — 屏幕捕获失败；请在“屏幕与系统音频录制”中检查 Avibe，然后重试",
+        "driver_health_failed": "电脑操作 — 受管理的驱动健康检查失败；请重新打开、更新或重新安装 Avibe",
+        "endpoint_busy": "电脑操作 — 上一个驱动端点仍在使用；请关闭后重新开启",
+        "endpoint_unremovable": "电脑操作 — 无法清理上一个驱动端点；请关闭后重新开启",
+        "socket_unreachable": "电脑操作 — 无法连接受管理的驱动；请关闭后重新开启",
+        "socket_path_too_long": "电脑操作 — macOS 无法创建驱动端点；请更新或重新安装 Avibe"
+      },
+      "invalidState": "电脑操作 — 状态文件需要修复；切换开关可替换",
+      "unavailable": "电脑操作 — 内置驱动不可用",
+      "initializationFailed": "电脑操作 — 当前不可用；请重启 Avibe 后重试",
+      "saveFailed": "电脑操作 — 设置未保存"
+    },
     "notifications": {
       "toggle": "通知",
       "approvalRequested": {
@@ -64,6 +96,11 @@
         "title": "运行已取消",
         "body": "后台工作已取消。"
       }
+    },
+    "pet": {
+      "toggle": "显示桌宠",
+      "shortcutMenu": "桌宠快捷键",
+      "shortcutUnavailable": "{{shortcut}} 不可用，可能已被其他应用占用"
     },
     "uninstall": {
       "menuLabel": "卸载 Avibe…",
@@ -1979,7 +2016,8 @@
         },
         "callback": {
           "hint": "登录后，把浏览器最终停留的回调地址粘贴回来",
-          "rejected": "这不是授权完成后的回调地址。请粘贴登录同意后浏览器地址栏里的完整网址（包含 code=），改好后重新提交。"
+          "rejected": "这不是授权完成后的回调地址。请粘贴登录同意后浏览器地址栏里的完整网址（包含 code=），改好后重新提交。",
+          "otherAttempt": "这个地址来自之前的登录链接，在这里用不了。请用上面第 1 步里当前的链接重新登录，再粘贴登录后的完整网址。"
         },
         "deviceCode": {
           "hint": "在那个页面输入设备码，这里会自动继续"
@@ -1995,7 +2033,11 @@
           "timeout": "授权超时，请重新连接",
           "generic": "连接失败，请重试",
           "finalize": "已完成授权，但创建模型供应商失败，请重试",
-          "finalizeReauth": "已重新登录，但这个供应商还是不可用，请重试"
+          "finalizeReauth": "已重新登录，但这个供应商还是不可用，请重试",
+          "details": {
+            "show": "查看详情",
+            "hide": "收起详情"
+          }
         }
       },
       "toast": {
@@ -2420,9 +2462,13 @@
       "engine_unavailable": "模型网关没有响应，请重试",
       "submission_failed": "粘贴的内容没能提交，请重试",
       "ambiguous_engine_binding": "分不清登录的是哪个账号，请一次只登一个再重试",
-      "binding_failed": "该账号已被另一个供应商使用",
+      "binding_failed": "登录成功了，但没能把这个账号接到当前供应商上（它可能已被其他供应商使用），请重试",
       "account_already_added": "这个账号已经添加过了，不能重复添加。要添加另一个订阅，请登录其他账号。",
-      "expired": "授权超时，请重新连接"
+      "expired": "授权超时，请重新连接",
+      "code_rejected": "供应商拒绝了这个授权码：粘贴的网址可能不完整、来自之前的登录链接，或者已经用过、过期了。点「重试」获取新的登录链接，登录后再粘贴。",
+      "exchange_failed": "已收到授权码，但没能向供应商换到登录凭据，可能是网络或代理问题，也可能授权码已失效。点「重试」获取新的登录链接。",
+      "callback_mismatch": "回调和这次登录对不上，可能来自之前打开的登录链接。点「重试」后，只用新出现的链接登录。",
+      "provider_denied": "供应商拒绝了这次授权，比如授权被取消，或这个账号无权使用。点「重试」重新登录。"
     },
     "probe": {
       "native_cli_unavailable": "无法使用 Agent 的登录",
@@ -2893,6 +2939,42 @@
       "noProjectForChat": "还没有项目 — 先添加一个，再开始对话",
       "ready": "{{backend}} 已连接，可以开始工作",
       "readyDismiss": "关闭",
+      "computerUse": {
+        "off": "电脑操作未开启",
+        "offDetail": "需要使用时，请从 Avibe 原生控制中开启。",
+        "starting": "电脑操作正在启动",
+        "startingDetail": "Avibe 正在检查受管理的驱动并准备会话。",
+        "ready": "电脑操作已就绪",
+        "readyDetail": "当前工作台会话可以使用受管理的驱动。",
+        "needsPermission": "电脑操作需要权限",
+        "accessibilityDetail": "请在“隐私与安全性 → 辅助功能”中允许 Avibe，然后返回这里。",
+        "screenRecordingDetail": "在“屏幕与系统音频录制”中点击 +，或将 Avibe 拖入列表，然后启用它。授权后 macOS 可能会退出并重新打开 Avibe；应用重新打开后请返回。",
+        "unknownPermissionDetail": "请在“隐私与安全性”中允许 Avibe 所需的权限，然后返回这里。",
+        "needsRuntime": "电脑操作正在等待 Avibe 服务",
+        "runtimeUnavailableDetail": "服务正在重启，或尚未确认支持电脑操作。",
+        "runtimeTooOldDetail": "当前 Avibe 服务不支持这项电脑操作协议。",
+        "error": "电脑操作需要处理",
+        "errorDetail": "请关闭电脑操作后重新开启一次。",
+        "stateUnwritableDetail": "Avibe 无法保存原生状态。请检查应用数据访问权限，然后关闭并重新开启电脑操作。",
+        "assetsInvalidDetail": "受管理的驱动或策略验证失败。请更新或重新安装 Avibe 桌面应用。",
+        "spawnFailedDetail": "受管理的驱动无法启动。请关闭并重新开启电脑操作；如果持续失败，请重新打开 Avibe。",
+        "daemonExitedDetail": "受管理的驱动意外停止。请关闭并重新开启电脑操作；如果问题重复出现，请重新打开 Avibe。",
+        "healthTimeoutDetail": "受管理的驱动未能及时就绪。请关闭并重新开启电脑操作；如果问题重复出现，请重新打开 Avibe。",
+        "bundleIdentityDetail": "受管理的驱动无法验证当前 Avibe 应用。请更新或重新安装桌面应用。",
+        "axCapabilityDetail": "受管理的驱动无法使用辅助功能。请在“隐私与安全性 → 辅助功能”中检查 Avibe，然后重新打开应用。",
+        "captureFailedDetail": "受管理的驱动无法捕获屏幕。请在“屏幕与系统音频录制”中检查 Avibe，并确认应用安装完整后重试。",
+        "driverHealthFailedDetail": "受管理的驱动未通过健康检查。请重新打开 Avibe；如果问题持续出现，请更新或重新安装桌面应用。",
+        "endpointBusyDetail": "另一个 Avibe 桌面进程正在占用电脑操作端点。请退出另一个进程后重试。",
+        "endpointUnremovableDetail": "Avibe 无法替换旧的电脑操作端点。请退出并重新打开桌面应用。",
+        "socketUnreachableDetail": "Avibe 无法连接受管理的驱动。请关闭并重新开启电脑操作；如果问题重复出现，请重新打开 Avibe。",
+        "unavailable": "电脑操作不可用",
+        "unavailableDetail": "受管理的电脑操作状态不可用。请重新打开 Avibe 桌面应用。",
+        "invalidStateFileDetail": "原生电脑操作状态已损坏。请使用原生开关重新生成状态。",
+        "snapshotInvalidDetail": "已验证的电脑操作工具快照缺失或发生变化。请更新或重新安装 Avibe 桌面应用。",
+        "shellNotRunningDetail": "请打开或重新打开 Avibe 桌面应用，以使用电脑操作。",
+        "daemonUnreachableDetail": "桌面驱动当前无法连接。请关闭并重新开启电脑操作；如果问题重复出现，请重新打开 Avibe。",
+        "socketPathTooLongDetail": "macOS 无法创建受管理的驱动端点。请更新或重新安装 Avibe 桌面应用。"
+      },
       "continueOnPhone": "在手机 APP 上继续",
       "connectChatApps": "聊天应用可在<settings>设置</settings>中连接"
     },
@@ -2917,6 +2999,7 @@
     "sessionReference": "引用该会话",
     "sessionFork": "复刻会话",
     "sessionForkUnavailable": "此会话还没有可复刻的原生 Agent 会话。",
+    "sessionShowInPet": "在桌宠中显示",
     "sessionHideToBackground": "隐藏到后台",
     "sessionHiddenToast": "已隐藏到后台 · 可在 Agents→Runs 找回",
     "sessionArchive": "归档会话",
@@ -4438,6 +4521,7 @@
       "quote": "引用",
       "askInNew": "在新会话询问",
       "copy": "复制",
+      "selectAll": "全选",
       "askFailed": "无法从选中内容新建会话，请重试。"
     },
     "showPage": {
@@ -4740,7 +4824,9 @@
       "errorCode": "错误码",
       "reasonLabel": "原因",
       "blockers": "当时不可用的供应商",
-      "upstreamNote": "以上状态码与错误码均由上游供应商的 API 返回。Avibe 会保留状态码和错误码，但不会保存供应商返回的原始报文，因为其中可能包含凭据。",
+      "upstreamNote": "以上内容均由上游供应商的 API 返回。Avibe 会保留状态码、错误码，以及去除凭据后的上游报错信息（最多 400 字）。",
+        "upstreamDetail": "上游返回",
+        "connectionDetail": "连接错误",
       "copyRecord": "复制记录",
       "reason": {
         "quota_exhausted": "额度用尽",
@@ -5467,5 +5553,35 @@
       "gatewayRequired": "设置流程需要启用模型网关。已有配置未改变，请通过现有配置管理恢复后重试。",
       "completionUnconfirmed": "无法确认设置已完成，请重试"
     }
+  },
+  "pet": {
+    "state": {
+      "idle": "歪比空闲中",
+      "sleeping": "歪比睡着了",
+      "listening": "正在听",
+      "running": "正在处理…",
+      "ready": "有新回复",
+      "needs_input": "需要你回应",
+      "blocked": "出了点问题"
+    },
+    "unreadBadge_one": "{{count}} 条未读回复",
+    "unreadBadge_other": "{{count}} 条未读回复",
+    "setupPending": "先在 Avibe 里完成设置，就可以在这里和 agent 对话了。",
+    "showInPetOff": "桌宠已切换到这个会话。在 Avibe 托盘菜单中打开“显示桌宠”即可看到。",
+    "showInPetFailed": "桌宠无法显示这个会话。",
+    "openAvibe": "打开 Avibe",
+    "toggle": "展开或收起宠物面板",
+    "panel": "宠物面板",
+    "untitled": "未命名会话",
+    "chooseSession": "选择一个会话",
+    "switchSession": "切换会话",
+    "openInAvibe": "在 Avibe 中打开",
+    "inputPlaceholder": "给 agent 发消息…",
+    "send": "发送",
+    "queued": "已排队，当前这轮结束后执行。",
+    "moreInAvibe": "更多回复请在 Avibe 中查看",
+    "empty": "还没有消息，说点什么开始吧。",
+    "vaultRequest": "需要授权，在 Avibe 中打开",
+    "noSessions": "还没有进行中的会话，先在 Avibe 里新建一个。"
   }
 }

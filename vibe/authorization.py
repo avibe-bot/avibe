@@ -632,6 +632,8 @@ _MEMBER_HTTP_RULES = tuple(
         # Read-only instance state.
         ("GET", r"^/api/settings$"),
         ("GET", r"^/api/users$"),
+        ("GET", r"^/api/desktop/capabilities$"),
+        ("GET", r"^/api/desktop/computer-use/status$"),
     )
 )
 

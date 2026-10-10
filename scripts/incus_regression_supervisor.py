@@ -151,16 +151,11 @@ def main() -> int:
             _reap_child(service_pid)
             service_pid = current_service_pid
 
+        # The service starts a UI that died again (core/web_ui_watchdog.py), as
+        # it does outside Incus; this loop only reaps the one it started itself.
         current_ui_pid = _read_pid_file(paths.get_runtime_ui_pid_path()) or ui_pid
         if not current_ui_pid or not runtime.pid_alive(current_ui_pid):
             _reap_child(current_ui_pid)
-            if not _restart_in_progress():
-                config = _config()
-                ui_pid = runtime.start_ui(
-                    runtime.effective_ui_bind_host(config),
-                    config.ui.setup_port,
-                            )
-                runtime.write_status("running", "ui restarted in incus regression", service_pid, ui_pid)
         elif current_ui_pid != ui_pid:
             ui_pid = current_ui_pid
 

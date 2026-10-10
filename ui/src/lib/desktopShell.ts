@@ -5,6 +5,8 @@ declare global {
     readonly __AVIBE_DESKTOP_VERSION__?: string;
     /** The macOS shell grants Tauri window dragging to this page. */
     readonly __AVIBE_DESKTOP_DRAG__?: true;
+    /** The shell has a desktop pet this page can bind a session to (`pet_bind`). */
+    readonly __AVIBE_DESKTOP_PET__?: true;
   }
 }
 
@@ -33,4 +35,13 @@ export function desktopDragRegion(): '' | undefined {
   // Runtime UI version: a desktop shell can load an older loopback Workbench
   // whose HTML predates the optional metadata tag.
   return isDesktopShell() && window.__AVIBE_DESKTOP_DRAG__ === true ? '' : undefined;
+}
+
+/**
+ * True when this Workbench runs in a desktop shell that can show a session in
+ * its pet. An older shell has no pet, so the page offers "Show in pet" only on
+ * this marker, never on the shell marker alone.
+ */
+export function canShowInDesktopPet(): boolean {
+  return isDesktopShell() && window.__AVIBE_DESKTOP_PET__ === true;
 }

@@ -1,0 +1,8 @@
+/* The pet window is transparent: nothing but the pet and its panel paints.
+   Installed by PetWindow for the whole /pet route, including AuthGuard
+   loading and authorization rechecks. */
+html.pet-window,
+html.pet-window body,
+html.pet-window #root {
+  background: transparent;
+}

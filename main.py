@@ -110,17 +110,22 @@ def _log_shutdown_signal(logger: logging.Logger, signum: int) -> None:
         logger.info("Received signal %s", signum)
 
 
-def _log_shutdown_intent(logger: logging.Logger, signum: int) -> None:
+def _log_shutdown_intent(logger: logging.Logger, signum: int) -> dict | None:
     if signum != signal.SIGTERM or not shutdown_intent_required():
-        return
+        return None
     intent = consume_shutdown_intent(os.getpid(), signum)
     if intent is None:
         logger.warning(
             "No managed shutdown intent found for SIGTERM pid=%s; honoring signal",
             os.getpid(),
         )
-        return
+        return None
     logger.info("Accepted managed shutdown intent: %s", intent)
+    return intent
+
+
+def _should_reap_desktop_runtime_ui(shutdown_intent: dict | None) -> bool:
+    return shutdown_intent is None
 
 
 def _stop_macos_session_diagnostics(monitor: Any) -> None:
@@ -130,6 +135,22 @@ def _stop_macos_session_diagnostics(monitor: Any) -> None:
         monitor.stop()
     except Exception:
         logging.getLogger(__name__).debug("macOS session diagnostics cleanup failed")
+
+
+def _stop_owned_desktop_runtime_ui(logger: logging.Logger) -> None:
+    """Reap the UI that belongs to this desktop Runtime before service exit."""
+
+    try:
+        from vibe import runtime
+        from vibe.desktop_runtime import desktop_caller_provenance
+
+        runtime_ids = desktop_caller_provenance()
+        if not runtime_ids:
+            return
+        if not runtime.stop_ui(stop_remote_access=False, runtime_ids=runtime_ids):
+            logger.warning("Desktop Runtime UI did not stop during service shutdown")
+    except Exception:
+        logger.warning("Failed to stop the desktop Runtime UI during service shutdown", exc_info=True)
 
 
 def _request_controller_loop_stop(controller: Any) -> bool:
@@ -147,6 +168,7 @@ def main():
     lock_acquired = False
     macos_session_diagnostics = None
     controller = None
+    shutdown_intent = None
     try:
         acquire_service_instance_lock()
         lock_acquired = True
@@ -200,13 +222,13 @@ def main():
         shutdown_initiated = False
 
         def _handle_shutdown(signum, frame):
-            nonlocal shutdown_initiated
+            nonlocal shutdown_initiated, shutdown_intent
             if shutdown_initiated:
                 return
             shutdown_initiated = True
             try:
                 _log_shutdown_signal(logger, signum)
-                _log_shutdown_intent(logger, signum)
+                shutdown_intent = _log_shutdown_intent(logger, signum)
                 logger.info("Shutting down after signal %s", signum)
             except Exception:
                 pass
@@ -226,6 +248,8 @@ def main():
         try:
             controller.run()
         finally:
+            if _should_reap_desktop_runtime_ui(shutdown_intent):
+                _stop_owned_desktop_runtime_ui(logger)
             _stop_macos_session_diagnostics(macos_session_diagnostics)
         
     except ServiceAlreadyRunningError as e:

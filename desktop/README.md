@@ -26,6 +26,18 @@ product logic.
    window onto the Workbench; plain `vibe start` honours
    `config.ui.open_browser` and would leave the user with a second,
    browser-hosted view of the same Runtime.
+
+   On macOS that start inherits the `PATH` of the user's login shell rather than
+   launchd's minimal application `PATH`, so tools installed through nvm, npm, or
+   Homebrew resolve exactly as they do in a terminal. The shell runs `$SHELL -l
+   -i -c` once per start, reads only `PATH`, and keeps its own `PATH` when that
+   shell fails or takes longer than 10 seconds. A private Runtime still puts its
+   own `bin` and Node directories first. Discovery and the lifecycle verbs do
+   not consult the login shell, so adopting a running Runtime never waits on it.
+   The lookup runs on a blocking thread before the launch-state lock is taken, so
+   a concurrent Stop is not held for that budget. A successful lookup lets the
+   shell finish its logout hooks within the remaining time; only a fallback
+   (or a logout that itself hangs) ends the process group.
 5. Polls until the Runtime is ready or the bound expires, then navigates. The
    window never leaves the bootstrap page before combined readiness succeeds.
    If the launcher it started exits non-zero, it gives up immediately instead of
@@ -37,6 +49,10 @@ product logic.
 
 The Runtime outlives the shell. Closing the window never stops a Runtime,
 whether the shell adopted it or started it.
+
+See [Computer use on macOS](../docs/desktop-computer-use.md) for the native
+toggle, required Privacy & Security grants, stop behavior, remote-channel
+guidance, and macOS limitations.
 
 ### Native command boundaries
 
@@ -153,7 +169,11 @@ DMG/EXE download has a target-qualified `.SHA256SUMS`, `.SIGNATURE`,
 `.SOURCE.json`, and `.runtime-manifest.json` alongside it. `SIGNATURE` describes
 the verified layer; it is not a cryptographic signature. Hashes and source
 metadata are checked before upload and downloaded desktop bytes are checked
-again before publication. A failed build or check leaves the release unpublished.
+again before publication. New `.SOURCE.json` records use schema 2; every macOS
+record includes the pinned Cua Driver source, archive, extracted, thinned,
+packaged, and code-signing provenance. The verifier still accepts already
+published schema-1 records as legacy input. A failed build or check leaves the
+release unpublished.
 Existing asset bytes cannot be overwritten; a changed build requires a new rc.
 Already-published releases cannot be retrofitted with missing desktop assets.
 
@@ -401,6 +421,45 @@ because WebKit suspends page timers while the window is in the background. That
 is also why the Workbench's own `navigator.setAppBadge` call, which only browsers
 and PWAs implement, is not relied on here. Windows has no badge count in Tauri;
 a taskbar overlay icon is follow-up work.
+
+## Desktop pet
+
+The pet is a small always-on-top window that shows one session: its latest
+exchange, live activity, and a composer. It is off by default.
+
+- **Tray.** "Show Pet" turns it on and off. "Pet Shortcut" picks the summon
+  shortcut from three presets: `Control+Alt+Space` (the default),
+  `Control+Shift+Space` and `Alt+Shift+Space`. A preset the OS refuses (often
+  because another app holds it) is shown in that submenu instead of failing
+  silently. On macOS the default can collide with "Select next source in Input
+  menu"; pick another preset if it does.
+- **Summoning.** The shortcut registers only while the pet is on, and only its
+  press wakes the pet, with the composer focused. The tray switch and the
+  Workbench's "Show in pet" bring it forward without focusing input. Closing
+  the window only hides it.
+- **Lifecycle.** The window exists exactly when the pet is on and the shell
+  has handed the Workbench to a ready Runtime. It loads `/pet` from that
+  Runtime's origin and is destroyed when the Runtime stops, is lost, or
+  changes origin. It may navigate only to `/pet` on that origin and never
+  opens a second window.
+- **`pet.json`** sits next to `notifications.json` in the app's local data
+  directory: `{ "version": 1, "enabled", "shortcut", "anchor": { "x", "y",
+  "monitor" }, "binding" }`, every field but `version` optional. `anchor` is
+  where the user last dragged the pet, in points (on Windows and Linux, at the
+  primary display's scale), and is clamped back onto a connected display on
+  the next start. `binding` is the shown session id. A file the shell cannot read, or with another `version`, keeps the pet
+  off for that run and is never overwritten by a drag or a binding; turning
+  the pet on from the tray replaces it.
+
+The page reaches the shell through five commands, declared in `build.rs`:
+`pet_ready`, `pet_set_expanded`, `pet_bind`, `pet_unbind` and `pet_open`.
+`capabilities/pet.json` grants them, plus `start_dragging`, to the `pet`
+window for literal-loopback pages only; each command also checks that its
+caller is the pet window on its own `/pet` page. `capabilities/main-pet-bind.json`
+grants only `pet_bind` to the Workbench, for "Show in pet", which the shell
+offers through the top-level `__AVIBE_DESKTOP_PET__` marker. The shell talks
+back with two DOM events, `avibe:pet-summon` and `avibe:pet-bound`, so the
+pet has no event permission. `ui/src/pet/petBridge.ts` is the page contract.
 
 ## Microphone
 

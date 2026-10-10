@@ -1040,6 +1040,10 @@ class ModelHubTurnGateway:
                 terminalizer.engine_down(local_error_detail=exc.local_error_detail)
             elif turn_outcome is not None and turn_outcome.outcome == "no_candidate" and exc.supply_state is not None:
                 terminalizer.mark_no_candidate(exc.supply_state, exc.blockers)
+            elif turn_outcome is REQUEST_NONFALLBACK_TURN_OUTCOME:
+                # The resolver's local refusal (every Google hop skipped before
+                # admission) is classified like this gateway's own refusals above.
+                terminalizer.fail("protocol_error")
             if exc.code == RECOVERY_EXHAUSTED_CODE:
                 self._commit_and_render_turn_outcome(execution, terminalizer, turn_outcome)
                 # Native compatibility is keyed by the caller backend. Keep its
@@ -1522,9 +1526,12 @@ class ModelHubTurnGateway:
         """Commit terminal history before deriving any user-visible copy."""
 
         if execution.settlement_recorded:
+            terminalizer.commit_exit()
             return execution.rendered_turn_outcome or _RenderedTurnOutcome(None, None)
         if turn_outcome is not None:
             terminalizer.record_turn_outcome(turn_outcome)
+        else:
+            terminalizer.commit_exit()
         language = self._language_provider() or "en"
         copy = project_turn_outcome_copy(turn_outcome) if turn_outcome is not None else None
         message = render_turn_outcome_copy(turn_outcome, language) if turn_outcome is not None else None

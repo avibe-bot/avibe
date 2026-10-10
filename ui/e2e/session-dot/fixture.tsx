@@ -124,7 +124,7 @@ export function Fixture() {
     <WorkbenchProjectsProvider><WorkbenchInboxContext.Provider value={{
       inboxSessions: [], unreadBySession: {}, totalUnread: 0, unreadSessions: 0, nextCursor: null,
       loading: false, loadingMore: false, refresh: async () => {}, loadMore: async () => {},
-      markRead: async () => {}, activateFeed: () => noop,
+      markRead: async () => true, activateFeed: () => noop,
     }}><WindowManagerContext.Provider value={{ focusedId: null, focusCanvas: noop, openApp: noop } as unknown as WindowManagerValue}>
       <div className="flex h-dvh overflow-hidden bg-background text-foreground">
         <aside className="hidden h-full w-64 shrink-0 border-r border-border md:flex" data-testid="desktop-tree"><WorkbenchSidebar /></aside>

@@ -252,7 +252,7 @@ class FakeAdapter:
         if self.sync_block is not None:
             await self.sync_block.wait()
 
-    async def discover_models(self, vendor, protocol, base_url, credential_ref):
+    async def discover_models(self, vendor, protocol, base_url, credential_ref, *, start_engine=True):
         if self.discovery_started is not None:
             self.discovery_started.set()
         if self.discovery_block is not None:

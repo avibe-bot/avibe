@@ -1521,6 +1521,7 @@ class OpenCodeLaunchSpec:
     # The Hub overlay as Model Hub wrote it, and as OpenCode receives it inline.
     overlay_file_content: Optional[bytes] = field(default=None, repr=False)
     overlay_inline_content: Optional[str] = field(default=None, repr=False)
+    computer_use_spec: Any = field(default=None, repr=False)
 
 
 class OpenCodeGeneration(OpenCodeServerClient):
@@ -1759,7 +1760,10 @@ def _launch_environment(spec: OpenCodeLaunchSpec, overlay_path: Optional[Path]) 
     # Request-level ``tools.skill=false`` prevents native Skill calls. The
     # runtime override adds defense in depth, while the Avibe runtime plugin
     # removes OpenCode's independently assembled native Catalog.
-    env["OPENCODE_CONFIG_CONTENT"] = _managed_runtime_config_content(env.get("OPENCODE_CONFIG_CONTENT"))
+    env["OPENCODE_CONFIG_CONTENT"] = _managed_runtime_config_content(
+        env.get("OPENCODE_CONFIG_CONTENT"),
+        computer_use_spec=spec.computer_use_spec,
+    )
     return env
 
 
@@ -2377,5 +2381,4 @@ def _stop_unrecorded_process_sync(generation_id: str, pid: int, created_at: Opti
             return
     _disown(generation_id)
     _remove_quietly(generation_records_dir() / f"{generation_id}.overlay.json")
-
 

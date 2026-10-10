@@ -1,0 +1,18 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "pet",
+  "description": "The desktop pet window's whole native surface: report readiness, resize between the pet and its panel, bind or clear its one session, open an avibe:// link in the main window, and drag itself. Only the pet window gets it, and only for the loopback Runtime origin it loads; it never sees the bundled bootstrap page, so it has no bootstrap command and no event permission (the shell reaches the page through dispatched DOM events).",
+  "local": false,
+  "windows": ["pet"],
+  "remote": {
+    "urls": ["http://127.0.0.1:*/*", "http://[\\:\\:1]:*/*"]
+  },
+  "permissions": [
+    "allow-pet-ready",
+    "allow-pet-set-expanded",
+    "allow-pet-bind",
+    "allow-pet-unbind",
+    "allow-pet-open",
+    "core:window:allow-start-dragging"
+  ]
+}

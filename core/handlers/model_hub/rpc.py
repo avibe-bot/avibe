@@ -77,6 +77,7 @@ async def dispatch_model_hub_rpc(
     payload: dict[str, Any],
 ) -> Any:
     if operation == "list_sources":
+        service.request_inventory_refresh()
         return service.list_sources()
     if operation == "observe_source":
         return await service.observe_source(payload.get("observation"))
@@ -121,6 +122,7 @@ async def dispatch_model_hub_rpc(
             backend,
         )
     if operation == "agent_model_candidates":
+        service.request_inventory_refresh()
         backend = payload.get("backend")
         if backend in NATIVE_CLI_BACKENDS:
             await _refresh_agent_presence(service, (backend,))

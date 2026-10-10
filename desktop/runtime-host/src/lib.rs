@@ -22,12 +22,15 @@
 
 pub mod bootstrap;
 pub mod bootstrap_log;
+pub mod computer_use;
 pub mod deep_link;
 pub mod download;
 pub mod health;
 pub mod launcher;
+pub mod login_path;
 pub mod notifications;
 pub mod origin;
+pub mod pet;
 pub mod private_runtime;
 pub mod status;
 pub mod window_frame;

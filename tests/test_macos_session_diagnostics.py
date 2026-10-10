@@ -344,6 +344,8 @@ def test_service_main_owns_monitor_shutdown(monkeypatch) -> None:
     import core.process_diagnostics
     import main as service_main
     import vibe.sentry_integration
+    from vibe import runtime
+    from vibe import desktop_runtime
 
     calls: list[str] = []
     handlers = {}
@@ -388,6 +390,16 @@ def test_service_main_owns_monitor_shutdown(monkeypatch) -> None:
 
     monkeypatch.setattr(service_main, "acquire_service_instance_lock", lambda: calls.append("lock.acquire"))
     monkeypatch.setattr(service_main, "release_service_instance_lock", lambda: calls.append("lock.release"))
+    monkeypatch.setattr(
+        desktop_runtime,
+        "desktop_caller_provenance",
+        lambda: frozenset({"desktop-runtime"}),
+    )
+    monkeypatch.setattr(
+        runtime,
+        "stop_ui",
+        lambda **kwargs: calls.append(f"desktop-ui.stop:{kwargs}") or True,
+    )
     monkeypatch.setattr(service_main, "load_config", lambda: loaded_config)
     monkeypatch.setattr(service_main, "setup_logging", lambda level: None)
     monkeypatch.setattr(service_main, "apply_claude_sdk_patches", lambda: None)
@@ -425,3 +437,9 @@ def test_service_main_owns_monitor_shutdown(monkeypatch) -> None:
     assert "loop.stop.scheduled" not in calls
     assert calls.index("controller.run") < calls.index("diagnostics.stop")
     assert calls.index("controller.after-signal") < calls.index("lock.release")
+    desktop_ui_stop = (
+        "desktop-ui.stop:{'stop_remote_access': False, "
+        "'runtime_ids': frozenset({'desktop-runtime'})}"
+    )
+    assert calls.index("controller.after-signal") < calls.index(desktop_ui_stop)
+    assert calls.index(desktop_ui_stop) < calls.index("lock.release")

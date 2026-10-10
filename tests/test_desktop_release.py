@@ -69,9 +69,35 @@ def assemble_assets(root, source=SOURCE):
         installer = work / ("native installer" + suffix)
         installer.write_bytes(f"installer bytes for {target}".encode())
         output = work / "output"
+        driver_args = {}
+        if system == "macos":
+            pinned_driver = release.pinned_driver_source()
+            driver = work / "cua-driver"
+            driver.write_bytes(f"packaged driver for {target}".encode())
+            provenance = work / "driver-provenance.json"
+            provenance.write_text(json.dumps({
+                "schema_version": 1,
+                "version": pinned_driver["version"],
+                "tag": pinned_driver["tag"],
+                "source_commit": pinned_driver["source_commit"],
+                "target": target,
+                "arch": "arm64" if arch == "aarch64" else arch,
+                "release_checksums_sha256":
+                    pinned_driver["release_checksums_sha256"],
+                "archive": pinned_driver["archive"],
+                "archive_sha256": pinned_driver["archive_sha256"],
+                "extracted_universal_sha256": "3" * 64,
+                "thinned_upstream_sha256": "4" * 64,
+                "thinned_signature": "upstream_preserved",
+            }), encoding="utf-8")
+            driver_args = {
+                "driver": driver,
+                "driver_provenance_path": provenance,
+                "driver_cdhash": "5" * 40,
+            }
         release.record(version=VERSION, target=target, tag=TAG, source_sha=source,
                        installer=installer, runtime=runtime, output=output,
-                       signing=release.signature(target).strip())
+                       signing=release.signature(target).strip(), **driver_args)
         for path in output.iterdir():
             shutil.copyfile(path, directory / path.name)
     return directory
@@ -130,11 +156,134 @@ def test_manual_prepare_retains_optional_signing_and_native_version(tmp_path):
         release.prepare("2.0.0-01", "", "", config, environment)
 
 
+@pytest.mark.parametrize(
+    ("target", "expected_bundle"),
+    [
+        (
+            "aarch64-apple-darwin",
+            {
+                "macOS": {
+                    "files": {
+                        "Helpers/cua-driver": "binaries/cua-driver-aarch64-apple-darwin",
+                    },
+                },
+                "resources": {
+                    "../cua-driver/policy.yaml": "computer-use/policy.yaml",
+                    "../cua-driver/tools-v0.31.0.json": "computer-use/tools-v0.31.0.json",
+                    "../cua-driver/LICENSE.md": "computer-use/LICENSE.md",
+                    "../cua-driver/sources.json": "computer-use/sources.json",
+                    "binaries/cua-driver-aarch64-apple-darwin.provenance.json":
+                        "computer-use/driver-provenance.json",
+                },
+            },
+        ),
+        ("x86_64-pc-windows-msvc", None),
+    ],
+)
+def test_prepare_packages_computer_use_assets_only_for_macos(tmp_path, target, expected_bundle):
+    config, environment = tmp_path / "config.json", tmp_path / "env"
+    release.prepare("2.0.0", "", "", config, environment, target)
+    override = json.loads(config.read_text())
+    assert override["version"] == "2.0.0"
+    assert override.get("bundle") == expected_bundle
+    assert not environment.exists()
+
+
 def test_real_assembled_assets_pass_the_release_consumer(tmp_path):
     directory = assemble_assets(tmp_path)
     paths = release.verify(directory, TAG, SOURCE)
     assert len(paths) == len({path.name for path in paths}) == 15
     assert {path.suffix for path in paths} >= {".dmg", ".exe"}
+    for target in release.TARGETS:
+        source = json.loads(
+            (directory / release.asset_names(VERSION, target)[2]).read_text()
+        )
+        assert source["schema_version"] == 2
+
+
+def test_verify_accepts_published_schema_one_macos_metadata_without_driver(tmp_path):
+    directory = assemble_assets(tmp_path)
+    for target, (system, _arch, _suffix) in release.TARGETS.items():
+        if system != "macos":
+            continue
+        names = release.asset_names(VERSION, target)
+        source_path = directory / names[2]
+        source = json.loads(source_path.read_text(encoding="utf-8"))
+        source["schema_version"] = 1
+        source.pop("computer_use_driver", None)
+        source_path.write_text(json.dumps(source, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        (directory / names[4]).write_text(
+            "".join(
+                f"{release.digest(directory / name)}  {name}\n"
+                for name in sorted(names[:4])
+            ),
+            encoding="utf-8",
+        )
+    assert len(release.verify(directory, TAG, SOURCE)) == 15
+
+
+def test_verify_rejects_schema_two_macos_metadata_without_driver(tmp_path):
+    directory = assemble_assets(tmp_path)
+    target = next(
+        target
+        for target, (system, _arch, _suffix) in release.TARGETS.items()
+        if system == "macos"
+    )
+    names = release.asset_names(VERSION, target)
+    source_path = directory / names[2]
+    source = json.loads(source_path.read_text(encoding="utf-8"))
+    assert source["schema_version"] == 2
+    source.pop("computer_use_driver")
+    source_path.write_text(
+        json.dumps(source, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    (directory / names[4]).write_text(
+        "".join(
+            f"{release.digest(directory / name)}  {name}\n"
+            for name in sorted(names[:4])
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="Driver provenance"):
+        release.verify(directory, TAG, SOURCE)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("schema_version", 2),
+        ("arch", "wrong-arch"),
+        ("archive", "wrong-driver.tar.gz"),
+        ("archive_sha256", "f" * 64),
+    ],
+)
+def test_verify_rejects_mismatched_driver_provenance(tmp_path, field, value):
+    directory = assemble_assets(tmp_path)
+    target = next(
+        target
+        for target, (system, _arch, _suffix) in release.TARGETS.items()
+        if system == "macos"
+    )
+    names = release.asset_names(VERSION, target)
+    source_path = directory / names[2]
+    source = json.loads(source_path.read_text(encoding="utf-8"))
+    source["computer_use_driver"][field] = value
+    source_path.write_text(
+        json.dumps(source, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    (directory / names[4]).write_text(
+        "".join(
+            f"{release.digest(directory / name)}  {name}\n"
+            for name in sorted(names[:4])
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="Driver provenance"):
+        release.verify(directory, TAG, SOURCE)
 
 
 @pytest.mark.parametrize("target", release.TARGETS)
@@ -145,6 +294,12 @@ def test_workflow_record_command_feeds_the_release_consumer(tmp_path, target):
     scripts.mkdir()
     for name in ("desktop_release.py", "release_package_version.py", "github_release.py"):
         shutil.copyfile(ROOT / "scripts" / name, scripts / name)
+    source_dir = work / "desktop/cua-driver"
+    source_dir.mkdir(parents=True)
+    shutil.copyfile(
+        ROOT / "desktop/cua-driver/sources.json",
+        source_dir / "sources.json",
+    )
     runtime = work / "desktop/src-tauri/resources/runtime"
     runtime.parent.mkdir(parents=True)
     shutil.copytree(work / "runtime", runtime)
@@ -163,7 +318,10 @@ def test_workflow_record_command_feeds_the_release_consumer(tmp_path, target):
                             env={**os.environ, "PATH": f"{binaries}{os.pathsep}{os.environ['PATH']}",
                                  "AVIBE_DESKTOP_VERSION": VERSION, "RELEASE_TAG": TAG, "TARGET": target,
                                  "RUNNER_OS": "macOS" if "darwin" in target else "Windows",
-                                 "signature_state": "app-adhoc"},
+                                 "signature_state": "app-adhoc",
+                                 "driver_packaged_path": str(work / "cua-driver"),
+                                 "driver_provenance_path": str(work / "driver-provenance.json"),
+                                 "driver_packaged_cdhash": "5" * 40},
                             capture_output=True, text=True, timeout=10)
     assert result.returncode == 0, result.stderr
     for path in (work / "desktop-package").iterdir():
@@ -217,10 +375,17 @@ def test_producer_rejects_incorrect_runtime_or_signing(tmp_path, mutation):
         data["runtime_version"] = "0.1.0"
         path.write_text(json.dumps(data))
     with pytest.raises(ValueError):
+        driver_args = {}
+        if "darwin" in target:
+            driver_args = {
+                "driver": work / "cua-driver",
+                "driver_provenance_path": work / "driver-provenance.json",
+                "driver_cdhash": "5" * 40,
+            }
         release.record(version=VERSION, target=target, tag=TAG, source_sha=SOURCE,
                        installer=work / "native installer.dmg", runtime=work / "runtime",
                        output=work / "rejected", signing="identity" if mutation == "signing"
-                       else release.signature(target).strip())
+                       else release.signature(target).strip(), **driver_args)
     assert not (work / "rejected").exists()
 
 
@@ -242,9 +407,39 @@ def test_workflow_preserves_manual_path_and_isolates_test_signing():
     assert steps.index(step("Prepare package version")) < steps.index(step("Build verified private Runtime"))
     credentials = step("Export Apple signing credentials when configured")
     assert credentials["if"] == "runner.os == 'macOS' && inputs.release_tag == ''"
-    assert "codesign --force --deep --sign -" in step("Verify macOS app signature matches the signing path")["run"]
+    signing = step("Verify macOS app signature matches the signing path")["run"]
+    assert signing.count(
+        "--preserve-metadata=identifier,entitlements,flags,runtime"
+    ) == 2
+    assert "\"$driver\"" in signing
+    assert "\"$app\"" in signing
+    assert "--deep --sign" not in signing
+    assert "Contents/Helpers/cua-driver" in signing
+    assert "Contents/MacOS/cua-driver" in signing
     assert "NotSigned" in step("Verify unsigned Windows installer")["run"]
     assert steps[-1]["uses"] == "actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f"
+    workflow_text = (ROOT / ".github/workflows/desktop-package.yml").read_text(encoding="utf-8")
+    assert "computer-use-test-overrides" not in workflow_text
+    assert "AVIBE_COMPUTER_USE_DRIVER_PATH" not in workflow_text
+    assert "AVIBE_COMPUTER_USE_POLICY_PATH" not in workflow_text
+    assert "AVIBE_COMPUTER_USE_SNAPSHOT_PATH" not in workflow_text
+
+
+def test_driver_workflows_parse_and_install_yaml_before_driver_validation():
+    package = workflow("desktop-package.yml")["jobs"]["package"]["steps"]
+    shell = workflow("desktop-shell.yml")["jobs"]["shell"]["steps"]
+    for steps, consumer_name in (
+        (package, "Prepare pinned Cua Driver sidecar"),
+        (shell, "Validate private Runtime build inputs"),
+    ):
+        dependency = next(
+            item
+            for item in steps
+            if item.get("name") == "Install pinned driver validation dependency"
+        )
+        consumer = next(item for item in steps if item.get("name") == consumer_name)
+        assert steps.index(dependency) < steps.index(consumer)
+        assert "PyYAML==6.0.3" in dependency["run"]
 
 
 @pytest.mark.parametrize(("value", "names"), [
@@ -329,6 +524,12 @@ def test_real_publication_shell_checks_assets_before_finalize(tmp_path, state):
     scripts.mkdir()
     for name in ("desktop_release.py", "release_package_version.py", "github_release.py"):
         shutil.copyfile(ROOT / "scripts" / name, scripts / name)
+    source_dir = tmp_path / "desktop/cua-driver"
+    source_dir.mkdir(parents=True)
+    shutil.copyfile(
+        ROOT / "desktop/cua-driver/sources.json",
+        source_dir / "sources.json",
+    )
     (tmp_path / "release.md").write_text("# TEST release\n")
     binaries = tmp_path / "bin"
     binaries.mkdir()
