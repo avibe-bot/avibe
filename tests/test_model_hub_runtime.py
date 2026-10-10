@@ -7569,7 +7569,7 @@ def test_engine_upstream_detail_drops_terminal_control_characters() -> None:
 
     detail = client_module._upstream_error_detail(payload, (("error",),))
 
-    assert detail == "relay ]52;c;cGF5bG9hZA== down [2J now gnp.exe a b c end"
+    assert detail == "relay down now gnp.exe a b c end"
 
 
 def test_engine_upstream_detail_replaces_lone_surrogates_so_it_can_persist() -> None:
@@ -9172,6 +9172,49 @@ def test_oauth_failure_detail_is_the_engine_reason_on_one_bounded_line(tmp_path:
         assert second.error_detail.endswith("…")
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("reason", "shown"),
+    [
+        # A CLI's colour codes and a hostile reason's terminal controls are gone.
+        (
+            "\x1b[1;31mError:\x1b[0m invalid_grant\x07 \x1b]52;c;cGF5bG9hZA==\x07"
+            " \u202edenied\u202c\x9b",
+            "Error: invalid_grant denied",
+        ),
+        # Echoed grant material is redacted, and the rest still reads as written.
+        (
+            "token exchange failed with status 401: Bearer abcdefghijklmnop rejected for sk-live_abcdefgh123",
+            "token exchange failed with status 401: [redacted] rejected for [redacted]",
+        ),
+        ("refresh failed: client_secret=hunter2-hunter2 at provider", "refresh failed: client_secret=[redacted]"),
+    ],
+)
+def test_oauth_failure_detail_is_inert_and_credential_free_for_the_browser_and_log(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    reason: str,
+    shown: str,
+) -> None:
+    class Engine(_BrowserCallbackEngine):
+        def management_request(self, method, path, *, query=None, payload=None, timeout=None):
+            if path == "/get-auth-status":
+                return {"status": "error", "error": reason}
+            return super().management_request(method, path, query=query, payload=payload, timeout=timeout)
+
+    async def run() -> str | None:
+        adapter = _browser_callback_adapter(tmp_path, Engine())
+        flow = await adapter.oauth_status((await adapter.start_oauth("src_fixture123", "openai")).flow_id)
+        return flow.error_detail
+
+    with caplog.at_level(logging.WARNING, logger="vibe.model_hub_runtime.adapter"):
+        detail = asyncio.run(run())
+
+    assert detail == shown
+    logged = [record.getMessage() for record in caplog.records if "OAuth flow failed" in record.getMessage()]
+    assert len(logged) == 1
+    assert logged[0].endswith(f"detail={shown}")
 
 
 def test_oauth_engine_400_fails_the_flow_rather_than_claiming_it_retryable(tmp_path: Path) -> None:

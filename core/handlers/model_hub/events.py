@@ -138,6 +138,31 @@ def redact_untrusted_text(value: str) -> str:
     return redacted[: match.end()] + "[redacted]"
 
 
+# A whole terminal escape sequence (CSI, OSC, or a two-character escape), so a
+# CLI's colour codes leave no stray parameters behind. Every branch stops at
+# the next ESC, which keeps matching linear on hostile input.
+_TERMINAL_ESCAPE_SEQUENCE = re.compile(
+    r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)?|[@-Z\\-_])"
+)
+# C0/C1 controls and every Unicode Bidi_Control character: either can act on
+# whatever renders the text (a terminal, a log viewer, a browser).
+_UNTRUSTED_CONTROL_CHARACTERS = re.compile(
+    r"[\x00-\x1f\x7f-\x9f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]"
+)
+
+
+def untrusted_detail_line(value: str) -> str:
+    """Upstream text as one inert line with credential material redacted.
+
+    Escape sequences and control characters would act on whatever renders the
+    text, a log viewer included, and carry no message content.
+    """
+
+    text = _TERMINAL_ESCAPE_SEQUENCE.sub(" ", value)
+    text = " ".join(_UNTRUSTED_CONTROL_CHARACTERS.sub(" ", text).split())
+    return redact_untrusted_text(text)
+
+
 def contains_credential_material(value: object) -> bool:
     rendered = json.dumps(value, ensure_ascii=False, sort_keys=True)
     return any(pattern.search(rendered) for pattern in _CREDENTIAL_PATTERNS)
