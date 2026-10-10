@@ -547,11 +547,13 @@ running. The tray keeps the shell alive after the window closes.
       `params._meta.threadId`. Codex writes that metadata itself; the model
       controls only `arguments`.
     - OpenCode: MCP calls carry no session. Avibe's OpenCode plugin stamps
-      every `avibe_computer_*` call in `tool.execute.before` with
+      each exact managed Computer Use tool ID in `tool.execute.before` with
       `_avibe_opencode_caller = {session, token}`: the OpenCode session id and
       the binding token of its live caller-context Turn binding. The server
       accepts the stamp only when that token matches the unexpired binding in
-      the same file. The plugin deletes a model-written stamp first.
+      the same file, and takes the holder from the Avibe session id that
+      binding carries, so a replaced native session keeps its lease. The
+      plugin deletes a model-written stamp first.
     - A call without its backend's identity, including an undeclared backend,
       is refused with `caller_identity_unavailable` naming the missing
       integration. No other channel stands in for it.

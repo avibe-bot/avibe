@@ -25,6 +25,11 @@ from typing import Any, Mapping
 
 from config import paths
 from core.caller_context import caller_context_from_platform_payload
+from core.computer_use import (
+    COMPUTER_USE_OPENCODE_STAMP_ARGUMENT,
+    COMPUTER_USE_SERVER_NAME,
+    COMPUTER_USE_TOOL_NAMES,
+)
 
 PLUGIN_FILENAME = "avibe-caller-context.js"
 BINDINGS_FILENAME = "opencode_caller_context.json"
@@ -38,9 +43,10 @@ const bindingPath = process.env.AVIBE_OPENCODE_CALLER_CONTEXT_PATH
 const nativeSkillIntro = "Skills provide specialized instructions and workflows for specific tasks."
 const nativeSkillPrefix = "<available_skills>"
 const nativeSkillSuffix = "</available_skills>"
-// OpenCode names MCP tools "<server>_<tool>"; the server is avibe_computer.
-const computerToolPrefix = "avibe_computer_"
-const computerStampArgument = "_avibe_opencode_caller"
+// OpenCode names MCP tools "<server>_<tool>". Only these exact IDs receive the
+// stamp, so another server's tool can never see a binding token.
+const computerToolIDs = new Set(__AVIBE_COMPUTER_TOOL_IDS__)
+const computerStampArgument = __AVIBE_COMPUTER_STAMP_ARGUMENT__
 
 function readBindings() {
   if (!bindingPath) return {}
@@ -101,7 +107,7 @@ export const AvibeCallerContextPlugin = async () => ({
   "tool.execute.before": async (input, output) => {
     // Computer use trusts only this stamp, never a value the model wrote.
     const tool = input && typeof input.tool === "string" ? input.tool : ""
-    if (!bindingPath || !tool.startsWith(computerToolPrefix)) return
+    if (!bindingPath || !computerToolIDs.has(tool)) return
     const args = output && output.args
     if (!args || typeof args !== "object") return
     delete args[computerStampArgument]
@@ -120,7 +126,13 @@ export const AvibeCallerContextPlugin = async () => ({
     output.system.splice(0, output.system.length, ...transformed)
   },
 })
-""".lstrip()
+""".lstrip().replace(
+    "__AVIBE_COMPUTER_TOOL_IDS__",
+    json.dumps([f"{COMPUTER_USE_SERVER_NAME}_{name}" for name in COMPUTER_USE_TOOL_NAMES]),
+).replace(
+    "__AVIBE_COMPUTER_STAMP_ARGUMENT__",
+    json.dumps(COMPUTER_USE_OPENCODE_STAMP_ARGUMENT),
+)
 
 
 @dataclass(frozen=True)

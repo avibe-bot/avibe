@@ -106,7 +106,7 @@ def test_plugin_stamps_only_avibe_computer_calls_on_a_managed_server(tmp_path: P
 import {{ AvibeCallerContextPlugin }} from {json.dumps(plugin.as_uri())}
 const hooks = await AvibeCallerContextPlugin()
 const results = []
-for (const tool of ["avibe_computer_click", "bash"]) {{
+for (const tool of ["avibe_computer_click", "bash", "avibe_computer_export"]) {{
   const args = {{ x: 1, _avibe_opencode_caller: {json.dumps(forged)} }}
   await hooks["tool.execute.before"]({{ tool, sessionID: "oc-a", callID: "c" }}, {{ args }})
   results.push(args)
@@ -122,16 +122,16 @@ process.stdout.write(JSON.stringify(results))
         return json.loads(completed.stdout)
 
     managed_env = {**os.environ, "AVIBE_OPENCODE_CALLER_CONTEXT_PATH": str(bindings)}
+    # Only managed Computer Use IDs are stamped; another server's tool whose ID
+    # shares the prefix never receives a binding token.
     assert run(managed_env) == [
         {"x": 1, "_avibe_opencode_caller": {"session": "oc-a", "token": "token-a"}},
+        {"x": 1, "_avibe_opencode_caller": forged},
         {"x": 1, "_avibe_opencode_caller": forged},
     ]
     # Outside an Avibe-managed server the plugin leaves every call alone.
     direct_env = {key: value for key, value in os.environ.items() if key != "AVIBE_OPENCODE_CALLER_CONTEXT_PATH"}
-    assert run(direct_env) == [
-        {"x": 1, "_avibe_opencode_caller": forged},
-        {"x": 1, "_avibe_opencode_caller": forged},
-    ]
+    assert run(direct_env) == [{"x": 1, "_avibe_opencode_caller": forged}] * 3
 
 
 @pytest.mark.parametrize("hub_mode", [True, False])

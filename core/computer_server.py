@@ -31,6 +31,7 @@ if __package__ in {None, ""}:
         sys.path.insert(0, str(_PACKAGE_ROOT))
 
 from config.atomic_io import write_atomic
+from core.caller_context import AVIBE_SESSION_ID_ENV
 from core.computer_use import (
     COMPUTER_USE_CALLER_BACKEND_ENV,
     COMPUTER_USE_CALLER_SESSION_ENV,
@@ -583,11 +584,13 @@ def _driver_session_label(caller: str) -> str:
     return "avibe-" + hashlib.sha256(caller.encode("utf-8")).hexdigest()[:16]
 
 
-def _opencode_binding_token(session_id: str) -> str | None:
-    """Return the live caller-context binding token of one OpenCode session.
+def _opencode_binding(session_id: str) -> tuple[str, str] | None:
+    """Return the live binding token and caller identity of one OpenCode session.
 
-    The server reads the binding file directly: importing its owner would load
-    the whole agent package into this isolated process.
+    The binding names the Avibe Session it serves, which stays the same when
+    OpenCode replaces the native session behind it. The server reads the file
+    directly: importing its owner would load the whole agent package into this
+    isolated process.
     """
 
     path = os.environ.get(_OPENCODE_BINDINGS_PATH_ENV, "")
@@ -611,7 +614,11 @@ def _opencode_binding_token(session_id: str) -> str | None:
         return None
     if expiry.tzinfo is None or expiry <= datetime.now(timezone.utc):
         return None
-    return token
+    env = entry.get("env")
+    avibe_session = env.get(AVIBE_SESSION_ID_ENV) if isinstance(env, dict) else None
+    if isinstance(avibe_session, str) and avibe_session.strip():
+        return token, f"avibe:{avibe_session.strip()}"
+    return token, f"opencode:{session_id}"
 
 
 def _error_result(code: str, message: str, **details: Any) -> dict[str, Any]:
@@ -1017,12 +1024,12 @@ class ComputerUseServer:
                     and isinstance(token, str)
                     and token
                 ):
-                    expected = _opencode_binding_token(session_id)
-                    if expected is not None and hmac.compare_digest(
-                        expected.encode("utf-8"),
+                    binding = _opencode_binding(session_id)
+                    if binding is not None and hmac.compare_digest(
+                        binding[0].encode("utf-8"),
                         token.encode("utf-8"),
                     ):
-                        return f"opencode:{session_id}"
+                        return binding[1]
             raise ComputerServerError(
                 "caller_identity_unavailable",
                 "The Avibe OpenCode plugin did not identify this call's session.",

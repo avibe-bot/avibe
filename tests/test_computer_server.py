@@ -316,6 +316,7 @@ def _bind_opencode(
     monkeypatch: pytest.MonkeyPatch,
     bindings: Path,
     opencode_session: str,
+    avibe_session: str | None = None,
 ) -> str:
     """Publish a Turn binding through the real owner and return its token."""
 
@@ -328,7 +329,7 @@ def _bind_opencode(
         None,
         base_env={},
         working_dir=None,
-        extra_env={"AVIBE_SESSION_ID": f"avibe-{opencode_session}"},
+        extra_env={"AVIBE_SESSION_ID": avibe_session or f"avibe-{opencode_session}"},
         path=bindings,
     )
     data = json.loads(bindings.read_text(encoding="utf-8"))
@@ -417,6 +418,33 @@ async def test_opencode_session_presenting_the_holders_id_is_refused(
     refused = _error(await _tools_call(server, {**stamp("oc-b", token_b), "session": "oc-a"}))
     assert refused is not None and refused["code"] == "desktop_busy"
     assert "oc-a" not in json.dumps(refused)
+
+
+@pytest.mark.asyncio
+async def test_opencode_native_replacement_keeps_the_avibe_sessions_lease(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The holder is the Avibe Session a binding serves, not its native session."""
+
+    bindings = tmp_path / "bindings.json"
+    original = _bind_opencode(monkeypatch, bindings, "oc-a", "ses-a")
+    replacement = _bind_opencode(monkeypatch, bindings, "oc-a-repaired", "ses-a")
+    other = _bind_opencode(monkeypatch, bindings, "oc-b", "ses-b")
+    state_path, state = _state(tmp_path)
+    server = _launch(
+        monkeypatch, state_path, state, DesktopLeaseManager(tmp_path / "lease"), [],
+        AVIBE_COMPUTER_USE_CALLER_BACKEND="opencode",
+        AVIBE_OPENCODE_CALLER_CONTEXT_PATH=str(bindings),
+    )
+
+    def stamp(session: str, token: str) -> dict[str, Any]:
+        return {"_avibe_opencode_caller": {"session": session, "token": token}}
+
+    assert _error(await _tools_call(server, stamp("oc-a", original))) is None
+    assert _error(await _tools_call(server, stamp("oc-a-repaired", replacement))) is None
+    refused = _error(await _tools_call(server, stamp("oc-b", other)))
+    assert refused is not None and refused["code"] == "desktop_busy"
 
 
 @pytest.mark.asyncio
