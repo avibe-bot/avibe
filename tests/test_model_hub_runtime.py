@@ -9242,6 +9242,39 @@ def test_no_invisible_character_or_control_sequence_can_split_a_secret_out_of_re
 
 
 @pytest.mark.parametrize(
+    ("text", "secret"),
+    [
+        pytest.param("POST /token grant_type=authorization_code&code=ac_live123&redirect_uri=x", "ac_live123", id="RFC 6749 §4.1.3 code"),
+        pytest.param("POST /token client_id=c&client_secret=cs_live123&grant_type=x", "cs_live123", id="RFC 6749 §2.3.1 client_secret"),
+        pytest.param("grant_type=password&username=u&password=pw_live123", "pw_live123", id="RFC 6749 §4.3.2 password"),
+        pytest.param("redirected to http://localhost/cb#access_token=at_live123&token_type=bearer", "at_live123", id="RFC 6749 §4.2.2 access_token"),
+        pytest.param("grant_type=refresh_token&refresh_token=rt_live123", "rt_live123", id="RFC 6749 §6 refresh_token"),
+        pytest.param("invalid_grant for code=ac_1&code_verifier=cv_live123", "cv_live123", id="RFC 7636 §4.5 code_verifier"),
+        pytest.param("grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer&assertion=eyJlive123", "eyJlive123", id="RFC 7523 §2.1 assertion"),
+        pytest.param("client_assertion_type=jwt&client_assertion=eyJlive456", "eyJlive456", id="RFC 7523 §2.2 client_assertion"),
+        pytest.param("grant_type=device_code&device_code=dc_live123", "dc_live123", id="RFC 8628 §3.4 device_code"),
+        pytest.param("callback http://localhost/cb#id_token=eyJlive789&state=s", "eyJlive789", id="OpenID Connect Core §3.2.2.5 id_token"),
+        pytest.param("rejected Authorization: Basic dXNlcjpwYXNzd29yZA== at provider", "dXNlcjpwYXNzd29yZA", id="RFC 9110 §11.6.2 Authorization Basic"),
+        pytest.param('request headers {"authorization": "Bearer ya29live"}', "ya29live", id="RFC 9110 §11.6.2 Authorization Bearer"),
+        pytest.param('Proxy-Authorization: Digest username="u", response="r_live123"', "r_live123", id="RFC 9110 §11.7.2 Proxy-Authorization"),
+    ],
+)
+def test_oauth_credential_parameters_and_authorization_values_are_redacted_by_spec(
+    text: str, secret: str,
+) -> None:
+    shown = untrusted_detail_line(text)
+    assert shown is not None and secret not in shown and "[redacted]" in shown
+
+
+@pytest.mark.parametrize(
+    "text",
+    ['{"error": {"code": "token_expired", "message": "expired"}}', "error_code=bad_request for client_assertion_type=jwt"],
+)
+def test_oauth_parameter_names_inside_other_words_are_not_credentials(text: str) -> None:
+    assert untrusted_detail_line(text) == text
+
+
+@pytest.mark.parametrize(
     ("reason", "shown"),
     [
         # A CLI's colour codes go; the words read as written.

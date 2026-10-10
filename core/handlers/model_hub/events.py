@@ -125,7 +125,7 @@ def redact_credential_material(value: str) -> str:
 # patterns so benign labels such as ``max token: 4096`` in a model name are not
 # rejected.
 _LABELED_SECRET_PATTERN = re.compile(
-    r"(?i)(?:token|secret|password|passwd|pwd|key|credential|cookie|session|signature)"
+    r"(?i)(?:token|secret|password|passwd|pwd|key|credential|cookie|session|signature|authorization)"
     r"(?P<quote>[\"'`]?)\s*[:=]\s*"
 )
 
@@ -146,19 +146,29 @@ def _secret_label(text: str) -> re.Match[str] | None:
     return None
 
 
-# OAuth grant material carried in a URL query or fragment (the fragment
-# response mode), such as a pasted callback address. ``code`` is not a secret
-# label elsewhere: ``"code": "token_expired"`` is ordinary error text.
-_URL_GRANT_PARAMETER = re.compile(
-    r"(?i)(?<=[?&#])(code|access_token|refresh_token|id_token)=[^&#\s\"'<>]+"
+# The credential parameters of the OAuth sign-in protocols, wherever a URL
+# query or fragment or a form body carries them as ``name=value``:
+# ``code`` and ``password`` (RFC 6749 §4.1.3, §4.3.2), ``client_secret``
+# (§2.3.1), ``access_token`` and ``refresh_token`` (§5.1, §6),
+# ``code_verifier`` (RFC 7636 §4.5), ``assertion`` and ``client_assertion``
+# (RFC 7523 §2.1, §2.2), ``device_code`` (RFC 8628 §3.4), and ``id_token``
+# (OpenID Connect Core §3.2.2.5). The name must stand alone, so ``error_code=``
+# or prose such as ``"code": "token_expired"`` reads as written.
+_OAUTH_CREDENTIAL_PARAMETER = re.compile(
+    r"(?i)(?<![\w-])(code|code_verifier|client_secret|client_assertion|assertion|access_token|"
+    r"refresh_token|id_token|device_code|password)=[^&#\s\"'<>]+"
 )
 
 
 def redact_untrusted_text(value: str) -> str:
-    """Redact credential shapes and URL grant parameters, then everything after
-    the first labeled secret."""
+    """Redact credential shapes and OAuth credential parameters, then everything
+    after the first labeled secret.
 
-    redacted = _URL_GRANT_PARAMETER.sub(
+    ``Authorization`` and ``Proxy-Authorization`` are labels, so a header value
+    is dropped whatever its scheme (RFC 9110 §11.6.2, §11.7.2).
+    """
+
+    redacted = _OAUTH_CREDENTIAL_PARAMETER.sub(
         lambda match: f"{match.group(1)}=[redacted]",
         redact_credential_material(value),
     )
