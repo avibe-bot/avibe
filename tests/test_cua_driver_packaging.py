@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import json
 from pathlib import Path
 from runpy import run_path
 import tarfile
@@ -24,11 +25,15 @@ def test_patched_source_manifest_hash_locks_the_divergence() -> None:
     manifest = _SCRIPT["load_manifest"]()
     driver = manifest["driver"]
     patch = Path("desktop/cua-driver") / driver["patch"]["file"]
+    snapshot = json.loads(
+        (Path("desktop/cua-driver") / manifest["tool_snapshot"]).read_text()
+    )
 
     assert driver["patch"]["contract"] == "click.click_mode=raw"
     assert driver["patch"]["upstream_refs"]
     assert driver["patch"]["upgrade_plan"]
     assert _SCRIPT["digest"](patch) == driver["patch"]["sha256"]
+    assert snapshot["patch_sha256"] == driver["patch"]["sha256"]
 
 
 def test_source_extraction_is_scoped_to_the_driver_subtree(tmp_path: Path) -> None:

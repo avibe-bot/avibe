@@ -2,3 +2,4 @@
 vibe/show_router.tsx text eol=lf
 tests/fixtures/show_pages/router-history-pre-ssr.tsx text eol=lf
 desktop/cua-driver/patches/*.patch text eol=lf
+desktop/cua-driver/tools-v0.31.0.json text eol=lf

@@ -4,7 +4,7 @@
     "version": "0.31.0",
     "tag": "cua-driver-rs-v0.31.0",
     "source_commit": "5272e492d61b96caf08e3bf434d91126c1f3dccc",
-    "tool_snapshot_sha256": "afe13d3cbe685daefc61d0ab9a363c401cb9172180bb72457224a8c7d6f474ae",
+    "tool_snapshot_sha256": "4257e598f5a6ad7e632b48e96c03257d7c5ed618a93b72820b2d4fef0f196acf",
     "license": "MIT",
     "release_base_url": "https://github.com/trycua/cua/releases/download/cua-driver-rs-v0.31.0",
     "release_checksums_asset": "checksums.txt",

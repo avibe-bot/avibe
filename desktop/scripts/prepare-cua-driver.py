@@ -81,6 +81,15 @@ def load_manifest(path: Path = SOURCES) -> dict:
     patch = path.parent / driver["patch"]["file"]
     if not patch.is_file() or digest(patch) != driver["patch"]["sha256"]:
         raise ValueError("pinned Cua Driver patch hash mismatch")
+    try:
+        snapshot = json.loads(TOOL_SNAPSHOT.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError("pinned Cua Driver tool snapshot is unreadable") from exc
+    if (
+        not isinstance(snapshot, dict)
+        or snapshot.get("patch_sha256") != driver["patch"]["sha256"]
+    ):
+        raise ValueError("pinned Cua Driver tool snapshot patch hash mismatch")
     if digest(TOOL_SNAPSHOT) != driver["tool_snapshot_sha256"]:
         raise ValueError("pinned Cua Driver tool snapshot hash mismatch")
     if "perception" in json.dumps(payload).lower():
