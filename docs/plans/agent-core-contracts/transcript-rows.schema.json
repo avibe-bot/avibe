@@ -353,6 +353,7 @@
         "purpose",
         "policy",
         "point",
+        "detail",
         "outcome",
         "messages"
       ],
@@ -397,7 +398,7 @@
         },
         "detail": {
           "type": "object",
-          "description": "Purpose fields. For `checkpoint`: the C-9 reason and mode (context.md section 6).",
+          "description": "Purpose fields, required. For `checkpoint`, the only purpose in v1: the C-9 reason and mode (context.md section 6). A later purpose adds its own shape with a conditional schema.",
           "required": [
             "reason",
             "mode"

@@ -114,10 +114,11 @@ and the live Turn's first input.
 | --- | --- |
 | a user's fork (the latest point), and the source has a live Turn | the largest settled `context_seq` before that Turn's first consumed input (of the whole context while the Turn has consumed none) |
 | a user's fork, and the source has no live Turn | the largest settled `context_seq` of the source's context |
-| a system mechanism's fork at a given `context_seq` `s` (internal only) | `s`, when `0 <= s <=` the source's last `context_seq` and `s` is settled; otherwise refused (`ForkPointError`) |
+| a system mechanism's fork at a given `context_seq` `s` (internal only: `reserve_forked_session(..., as_of=s)`, which no CLI, HTTP, or Web path passes) | `s`, when `0 <= s <=` the source's last `context_seq` and `s` is settled; otherwise refused (`ForkPointError`) |
 
-**The owner's rule for a user's fork.** The cut is the end of the previous **ended** Turn: its final reply, or, for a
-Turn the user stopped or that failed, its last row once recovery has settled its calls (T2). The live Turn's input,
+**The owner's rule for a user's fork.** It applies to Vibey Sessions, whose context Avibe owns; native backends keep
+their own latest-point fork (§11). The cut is the end of the previous **ended** Turn: its final reply, or, for a Turn
+the user stopped or that failed, its last row once recovery has settled its calls (T2). The live Turn's input,
 its tool calls, and its intermediate responses never reach the child. This holds by construction:
 
 - The live Turn writes all of its rows after its first input, because the loop is the Session's single writer
@@ -336,9 +337,10 @@ move; the API reserves this (§15).
 
 ## 8. Fork Session
 
-- **Reservation.** `reserve_forked_session` (`session_fork.py:177`) keeps its signature and its callers. For `vibey`
-  it resolves the user's latest point (§2) inside the reservation's transaction and writes the metadata (§5). Native
-  backends keep their own latest-point fork and trimming (§11).
+- **Reservation.** `reserve_forked_session` (`session_fork.py:177`) keeps its callers. For `vibey` it resolves the
+  fork point (§2) inside the reservation's transaction and writes the metadata (§5): the user's latest point, or, with
+  the internal keyword `as_of`, a settled point a system mechanism names. No CLI, HTTP, or Web path passes `as_of`,
+  and it is refused for other backends. Native backends keep their own latest-point fork and trimming (§11).
 - **It owns nothing its ancestors started (F4).** A side turn, by contrast, starts nothing.
   - Jobs, Watches, Tasks, delegated runs, and scratch stay with the Session that started them. In a nested fork (P,
     then C forked from P, then D forked from C), a job P started still reports to P, not to D's source C.
@@ -419,7 +421,7 @@ information shown to the model.
 | `core/agent_core/agent` | side turn: `SideTurn`, `ForkPolicy`, `DREAMING`, `Agent.side_turn`, `Agent.side_turn_fits` | extract them from C-9 (§12) |
 | `storage/agent_transcript.py` | storage by reference, ancestry, `resolve_fork_point` (SQL around the harness rule) | replace `resolve_fork_anchor_seq` and `context_bound` |
 | `modules/agents/vibey` | the fork notice on the first input; T2 without the inherited branch | as listed |
-| `core/services/session_fork.py` | the reservation for every backend | for `vibey`, call `resolve_fork_point`; no new parameter |
+| `core/services/session_fork.py` | the reservation for every backend | for `vibey`, call `resolve_fork_point`; the internal keyword `as_of` (no product surface passes it) |
 
 ### Backend support
 
@@ -431,7 +433,11 @@ information shown to the model.
 | `opencode` | unchanged: `POST /session/{id}/fork`, with `messageID` to trim (`modules/agents/opencode/server.py:818-837`) | none |
 
 Point-in-time fork for native backends is cancelled (owner decision, 2026-10-10): they keep forking at the latest
-point, which they already support.
+point, which they already support. §2's cut rule is therefore claimed for Vibey only. Codex and OpenCode trim a live
+Turn at their own boundary; Claude Code copies its transcript as it stands when the child first runs, so a live or
+later Turn of the source can reach a Claude child (`tests/test_ui_session_stream.py:1101-1134`). Fixing that needs a
+cut Claude can be resumed at (`resume_session_at` and a map from Avibe message to Claude UUID), which is the cancelled
+native work.
 
 ### Surfaces
 
@@ -505,8 +511,9 @@ already provide, plus work outside fork.
 - **Self context management.**
   - Explore and come back: a background fork Session with full tools, because exploring needs `bash`. Its reply
     returns as a message.
-  - Go back: a system mechanism forks the Session at an earlier settled point through the internal API (§2, §15)
-    and continues there. Phase 1 provides the API; there is no user or Agent surface for it.
+  - Go back: a system mechanism forks the Session at an earlier settled point through the internal API
+    (`reserve_forked_session(..., as_of=s)`, §2, §15) and continues there. Phase 1 provides the API; there is no user
+    or Agent surface for it.
   - Rewrite part of its own context: a side turn with `dreaming` over a prefix, folded into a row. Summarizing a
     middle range while keeping the head needs a range checkpoint row in C-5 and C-9 projection, not a change to fork.
 - **Memory.**
@@ -602,8 +609,10 @@ def resolve_fork_point(conn: Connection, source_session_id: str, *, as_of: Optio
 # None: the user's latest point (§2), from the source's rows and its live Turn's first consumed input.
 # An int: an internal point, checked by fork_point.
 
-# core/services/session_fork.py: reserve_forked_session keeps its signature;
-# for vibey it calls resolve_fork_point(conn, source_session_id)
+# core/services/session_fork.py
+def reserve_forked_session(*, source_session_id: str, ..., as_of: Optional[int] = None) -> SessionForkResult: ...
+# vibey: resolve_fork_point(conn, source_session_id, as_of=as_of). as_of is internal (no CLI, HTTP, or Web path
+# passes it) and refused for other backends; ForkPointError surfaces as SessionForkError.
 ```
 
 The `ForkTurn` audit (`agent_events.event_type = 'fork_turn'`, `visibility = 'audit'`, no `context_seq`) replaces
@@ -615,11 +624,11 @@ The `ForkTurn` audit (`agent_events.event_type = 'fork_turn'`, `visibility = 'au
 | `purpose` | `checkpoint` |
 | `policy` | `dreaming` |
 | `point` | `{as_of, units}` |
+| `detail` | for `checkpoint`: `{reason, mode}` |
 | `outcome` | `completed` or `failed` |
 | `messages` | as in `CheckpointTurn` |
 
-Its optional fields are `detail` (for `checkpoint`: `{reason, mode}`), `error`, `folded_event_id`, `rounds`, and
-`usage`.
+Its optional fields are `error`, `folded_event_id`, `rounds`, and `usage`.
 
 ## 16. Contract delta at freeze
 
@@ -654,7 +663,7 @@ are those before the freeze PR.
 | Phase | Scope | Acceptance (properties) |
 | --- | --- | --- |
 | 0 | this contract; owner decisions; the §16 delta; freeze | done 2026-10-10 |
-| 1a | the fork point for Vibey: `harness/fork.py` (`ForkPoint`, `settled`, `latest_cut`, `fork_point`, `fork_prefix`), `resolve_fork_point` (no clock); the existing session fork wired to it for `vibey`, trimming the live Turn; the fork notice; T2's inherited branch removed; the internal API for an arbitrary settled point | F1, F3, F4, F6 (reservation), F8 pin; an E2E on a local dev instance with a throwaway home: fork a Vibey Session while it runs a long tool call, check the child's context, and check that the parent continues unaffected |
+| 1a | the fork point for Vibey: `harness/fork.py` (`ForkPoint`, `settled`, `latest_cut`, `fork_point`, `fork_prefix`), `resolve_fork_point` (no clock); the existing session fork wired to it for `vibey`, trimming the live Turn; the fork notice; T2's inherited branch removed; the internal API for an arbitrary settled point (`resolve_fork_point(..., as_of=)` and `reserve_forked_session(..., as_of=)`) | F1, F3, F4, F6 (reservation), F8 pin; an E2E on a local dev instance with a throwaway home: fork a Vibey Session while it runs a long tool call, check the child's context, and check that the parent continues unaffected |
 | 1b | C-9 on the side turn, as a pure refactor: `ForkPolicy` and `DREAMING`, `Agent.side_turn`, the `fork_turn` audit | F2, F5, F6 (policy), F7; the C-9 suite passes with only the audit kind renamed |
 | later | teams: the descendant lookup, a Session-invariant system prompt, an Agent fork tool, side turns while idle | a separate design |
 
