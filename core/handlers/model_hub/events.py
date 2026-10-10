@@ -146,11 +146,11 @@ def _secret_label(text: str) -> re.Match[str] | None:
     return None
 
 
-# OAuth grant material carried in a URL query, such as a pasted callback
-# address. ``code`` is not a secret label elsewhere: ``"code": "token_expired"``
-# is ordinary error text.
+# OAuth grant material carried in a URL query or fragment (the fragment
+# response mode), such as a pasted callback address. ``code`` is not a secret
+# label elsewhere: ``"code": "token_expired"`` is ordinary error text.
 _URL_GRANT_PARAMETER = re.compile(
-    r"(?i)(?<=[?&])(code|access_token|refresh_token|id_token)=[^&#\s\"'<>]+"
+    r"(?i)(?<=[?&#])(code|access_token|refresh_token|id_token)=[^&#\s\"'<>]+"
 )
 
 

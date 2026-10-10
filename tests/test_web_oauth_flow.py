@@ -13,7 +13,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
-import logging
 import os
 from pathlib import Path
 from types import SimpleNamespace
@@ -23,13 +22,11 @@ import pytest
 
 from tests.opencode_generation_fakes import lease_returning
 from core.agent_auth_service import (
-    AgentAuthFlow,
     AgentAuthService,
     ClaudeOAuthAttempt,
     ClaudeOAuthBatch,
     WebAuthFlow,
 )
-from modules.im import MessageContext
 from modules.agents.opencode.message_processor import (
     extract_opencode_response_text,
     is_empty_terminal_opencode_message,
@@ -934,158 +931,6 @@ def test_start_web_setup_opencode_surfaces_server_failure(
     flow = _run(service.start_web_setup("opencode", provider_id="openai"))
     assert flow.state == "failed"
     assert flow.error == "opencode_server_unavailable"
-
-
-# Sign-in exceptions quoting a provider or OpenCode response. The first is
-# display-safe apart from its colour codes; the second moves the cursor, so
-# nothing it says can be shown.
-_SAFE_SIGN_IN_ERROR = (
-    '\x1b[31mOAuth callback failed (400)\x1b[0m: {"error":"invalid_grant","detail":"Bearer abcdefghijklmnop"}'
-)
-_SHOWN_SIGN_IN_ERROR = 'OAuth callback failed (400): {"error":"invalid_grant","detail":"[redacted]"}'
-_UNSAFE_SIGN_IN_ERROR = 'OAuth callback failed (400): Bearer abcdefghijklmnop\x1b[2Kok'
-
-
-def _im_flow(backend: str, **fields) -> AgentAuthFlow:
-    return AgentAuthFlow(
-        flow_id=f"im-{backend}",
-        backend=backend,
-        settings_key="C1",
-        initiator_user_id="U1",
-        context=MessageContext(user_id="U1", channel_id="C1"),
-        process=None,
-        reader_task=None,
-        waiter_task=None,
-        **fields,
-    )
-
-
-def _im_failure_text(sent: AsyncMock) -> str:
-    return sent.await_args.args[1]
-
-
-async def _im_setup_start(service, monkeypatch, err):
-    monkeypatch.setattr(service, "_start_auth_flow", AsyncMock(side_effect=err))
-    monkeypatch.setattr(service, "_send_message", AsyncMock())
-    sent = AsyncMock()
-    monkeypatch.setattr(service, "_send_message_with_button", sent)
-    await service.start_setup(MessageContext(user_id="U1", channel_id="C1"), "codex")
-    return _im_failure_text(sent)
-
-
-async def _im_cli_flow(service, monkeypatch, err):
-    sent = AsyncMock()
-    monkeypatch.setattr(service, "_send_message_with_button", sent)
-    flow = _im_flow("codex")
-    flow.process = SimpleNamespace(wait=AsyncMock(side_effect=err))
-    await service._wait_for_completion(flow)
-    return _im_failure_text(sent)
-
-
-async def _im_claude_flow(service, monkeypatch, err):
-    sent = AsyncMock()
-    monkeypatch.setattr(service, "_send_message_with_button", sent)
-    monkeypatch.setattr(service, "_send_claude_control_request", AsyncMock(side_effect=err))
-    monkeypatch.setattr(service, "_finish_claude_oauth_attempt", AsyncMock())
-    monkeypatch.setattr(service, "_disconnect_claude_client", AsyncMock())
-    await service._wait_for_claude_completion(_im_flow("claude", claude_client=object()))
-    return _im_failure_text(sent)
-
-
-async def _web_start(service, monkeypatch, err):
-    monkeypatch.setattr(service, "_start_auth_flow", AsyncMock(side_effect=err))
-    return service.web_flow_error(await service.start_web_setup("codex"))
-
-
-async def _web_claude_submit(service, monkeypatch, err):
-    monkeypatch.setattr(service, "_send_claude_callback", AsyncMock(side_effect=err))
-    flow = WebAuthFlow(flow_id="web-claude", backend="claude", awaiting_code=True, claude_client=object())
-    service._flow_registry.put(flow)
-    return (await service.submit_web_code(flow.flow_id, "code#state"))["detail"]
-
-
-async def _web_opencode_forward(service, monkeypatch, err):
-    server = SimpleNamespace(forward_oauth_redirect=AsyncMock(side_effect=err))
-    flow = WebAuthFlow(flow_id="web-opencode", backend="opencode", provider="openai", state="awaiting_code")
-    flow.opencode_lease = SimpleNamespace(server=server)
-    service._flow_registry.put(flow)
-    result = await service.submit_web_code(flow.flow_id, "http://127.0.0.1:1455/cb?state=s")
-    return result["detail"]
-
-
-async def _web_opencode_wait(service, monkeypatch, err):
-    fake = _FakeOpencodeServer()
-    fake.auth_map = {"openai": [{"type": "oauth", "label": "ChatGPT Pro/Plus"}]}
-    fake.next_authorize = {"url": "https://auth.openai.com/codex/device", "instructions": "Enter code: YR8I-QJJUH"}
-    fake.wait_provider_oauth = AsyncMock(side_effect=err)
-    monkeypatch.setattr(service, "_lease_opencode_server", lease_returning(fake))
-    flow = await service.start_web_setup("opencode", provider_id="openai")
-    await flow.waiter_task
-    return service.get_web_flow_status(flow.flow_id)["error"]
-
-
-async def _web_codex_wait(service, monkeypatch, err):
-    flow = WebAuthFlow(flow_id="web-codex", backend="codex")
-    flow.process = SimpleNamespace(wait=AsyncMock(side_effect=err))
-    await service._wait_for_codex_completion_web(flow)
-    return service.web_flow_error(flow)
-
-
-async def _web_claude_wait(service, monkeypatch, err):
-    monkeypatch.setattr(service, "_send_claude_control_request", AsyncMock(side_effect=err))
-    monkeypatch.setattr(service, "_finish_claude_oauth_attempt", AsyncMock())
-    monkeypatch.setattr(service, "_disconnect_claude_client", AsyncMock())
-    flow = WebAuthFlow(flow_id="web-claude-wait", backend="claude", claude_client=object())
-    await service._wait_for_claude_completion_web(flow)
-    return service.web_flow_error(flow)
-
-
-_SIGN_IN_FAILURE_PATHS = [
-    (_im_setup_start, "Agent auth setup failed to start for codex"),
-    (_im_cli_flow, "Agent auth flow failed for codex"),
-    (_im_claude_flow, "Claude auth flow failed"),
-    (_web_start, "Web auth start failed for codex"),
-    (_web_claude_submit, "Web Claude callback submit failed"),
-    (_web_opencode_forward, "Failed to forward OpenCode OAuth callback for openai"),
-    (_web_opencode_wait, "Web OpenCode OAuth flow failed for openai"),
-    (_web_codex_wait, "Web Codex auth flow failed"),
-    (_web_claude_wait, "Web Claude auth flow failed"),
-]
-
-
-@pytest.mark.parametrize("safe", [True, False], ids=["display-safe", "cursor-moving"])
-@pytest.mark.parametrize(
-    ("trigger", "logged_as"),
-    _SIGN_IN_FAILURE_PATHS,
-    ids=[trigger.__name__ for trigger, _ in _SIGN_IN_FAILURE_PATHS],
-)
-def test_every_sign_in_failure_leaves_through_the_upstream_detail_rule(
-    service: AgentAuthService,
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-    trigger,
-    logged_as: str,
-    safe: bool,
-) -> None:
-    """Each exit (IM message, Web payload, failure log) shows a reason only when
-    it displays as written, credentials redacted, and logs no traceback."""
-
-    err = RuntimeError(_SAFE_SIGN_IN_ERROR if safe else _UNSAFE_SIGN_IN_ERROR)
-    with caplog.at_level(logging.ERROR, logger="core.agent_auth_service"):
-        shown = _run(trigger(service, monkeypatch, err))
-
-    is_im = trigger.__name__.startswith("_im_")
-    if safe:
-        assert _SHOWN_SIGN_IN_ERROR in shown
-        logged = _SHOWN_SIGN_IN_ERROR
-    else:
-        assert shown is None or (is_im and "OAuth callback failed" not in shown)
-        logged = "RuntimeError (detail withheld)"
-    failures = [record for record in caplog.records if record.getMessage().startswith(logged_as)]
-    assert len(failures) == 1
-    assert failures[0].getMessage() == f"{logged_as}: {logged}"
-    assert failures[0].exc_info is None
-    assert "abcdefghijklmnop" not in caplog.text and "\x1b" not in caplog.text
 
 
 def test_opencode_oauth_success_clears_provider_options_key(

@@ -9266,6 +9266,11 @@ def test_no_invisible_character_or_control_sequence_can_split_a_secret_out_of_re
             "callback failed: GET http://localhost:1455/cb?code=ac_live123&state=s",
             "callback failed: GET http://localhost:1455/cb?code=[redacted]&state=s",
         ),
+        # The fragment response mode carries the grant after ``#``.
+        (
+            "callback failed: http://localhost:1455/cb#code=ac_live123&state=s",
+            "callback failed: http://localhost:1455/cb#code=[redacted]&state=s",
+        ),
     ],
 )
 def test_oauth_failure_detail_is_inert_and_credential_free_for_the_browser_and_log(
