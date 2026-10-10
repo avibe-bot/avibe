@@ -93,8 +93,8 @@ FINAL_TYPES = ("result", "error")
 RESPONSE_TYPES = ("assistant", *FINAL_TYPES)
 CONTEXT_VISIBILITY = "context"
 AUDIT_VISIBILITY = "audit"
-AuditKind = Literal["attempt", "checkpoint_turn"]
-_AUDIT_EVENT_TYPE: dict[str, str] = {"attempt": "model_attempt", "checkpoint_turn": "context_checkpoint_turn"}
+AuditKind = Literal["attempt", "fork_turn"]
+_AUDIT_EVENT_TYPE: dict[str, str] = {"attempt": "model_attempt", "fork_turn": "fork_turn"}
 # Only Vibey writes context rows; the Session's routed backend may change mid-Turn.
 CONTEXT_WRITER = "vibey"
 PAYLOAD_VERSION = 1
@@ -304,7 +304,7 @@ class SQLiteTranscriptStore:
     async def append_audit(
         self, session_id: str, kind: AuditKind, payload: Mapping[str, Any], *, agent_name: Optional[str] = None
     ) -> str:
-        """A non-context audit row (C-9 ``ModelAttempt`` or ``CheckpointTurn``); its id. Never loaded as context."""
+        """A non-context audit row (C-9 ``ModelAttempt`` or C-10 ``ForkTurn``); its id. Never loaded as context."""
         if kind not in _AUDIT_EVENT_TYPE:
             raise ValueError(f"not an audit kind: {kind!r}")
         data = _canonical(dict(payload), f"{kind} audit")

@@ -78,11 +78,6 @@ CLEARED_PLACEHOLDER = (
 )
 
 CHECKPOINT_MAX_TOKENS = 16_000
-CHECKPOINT_TOOL_ROUNDS = 5
-#: A checkpoint turn's tool runs only while the window leaves this much room (context.md section 6).
-CHECKPOINT_TOOL_FLOOR = 4_000
-#: Room a tool result leaves for the checkpoint request's growth.
-CHECKPOINT_TOOL_SLACK = 1_000
 CHECKPOINT_TRUNCATED = (
     "[Output truncated to fit this checkpoint turn: showing about {shown} of {total} tokens. "
     "Read a smaller range if you need more.]"

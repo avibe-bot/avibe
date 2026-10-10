@@ -55,7 +55,7 @@ from tests.agent_core.fakes import (
 
 NOW = "2026-10-04T00:00:00.000000Z"
 SESSION = "session"
-_AUDIT_KINDS = {"model_attempt": "attempt", "context_checkpoint_turn": "checkpoint_turn"}
+_AUDIT_KINDS = {"model_attempt": "attempt", "fork_turn": "fork_turn"}
 
 
 class _Fake:
@@ -71,7 +71,7 @@ class _Fake:
         self.store.fork(Snapshot(source, anchor.context_seq, {}), session_id=child)
 
     def audits(self) -> list[tuple[str, dict]]:
-        return [("checkpoint_turn", payload) for _, _, payload in self.store.audits] + [
+        return [("fork_turn", payload) for _, _, payload in self.store.audits] + [
             ("attempt", payload) for _, _, payload in self.store.attempts
         ]
 
@@ -253,12 +253,12 @@ async def test_audit_rows_are_kept_outside_the_context(backend):
     before = [await _started(backend)]
     attempt = {"version": 1, "usage": {"input_tokens": 5, "output_tokens": 2}, "error": "rate_limit: busy"}
     turn = {"version": 1, "reason": "threshold", "mode": "normal", "messages": []}
-    ids = [await store.append_audit(SESSION, "attempt", attempt), await store.append_audit(SESSION, "checkpoint_turn", turn)]
+    ids = [await store.append_audit(SESSION, "attempt", attempt), await store.append_audit(SESSION, "fork_turn", turn)]
     assert all(isinstance(row_id, str) and row_id for row_id in ids) and len(set(ids)) == 2
     with pytest.raises(ValueError):
         await store.append_audit(SESSION, "compaction", {"version": 1})
     assert list(await store.load(SESSION)) == before
-    assert sorted(backend.audits(), key=repr) == sorted([("attempt", attempt), ("checkpoint_turn", turn)], key=repr)
+    assert sorted(backend.audits(), key=repr) == sorted([("attempt", attempt), ("fork_turn", turn)], key=repr)
 
 
 async def test_consuming_an_input_again_returns_its_entry_and_never_rewrites_it(backend):

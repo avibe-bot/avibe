@@ -167,12 +167,12 @@ class InMemoryTranscriptStore:
         return committed
 
     async def append_audit(self, session_id, kind, payload: Mapping) -> str:
-        if kind not in ("attempt", "checkpoint_turn"):
+        if kind not in ("attempt", "fork_turn"):
             raise ValueError(f"not an audit kind: {kind!r}")
         self._next_id += 1
         row_id = f"audit_{self._next_id}"
         record = (session_id, row_id, deepcopy(dict(payload)))
-        (self.audits if kind == "checkpoint_turn" else self.attempts).append(record)
+        (self.audits if kind == "fork_turn" else self.attempts).append(record)
         return row_id
 
 
