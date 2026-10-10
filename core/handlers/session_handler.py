@@ -105,8 +105,14 @@ def apply_managed_computer_use_to_claude_options(
     option_kwargs: dict[str, Any],
     agent_allowed_tools: list[str] | None,
     computer_use_spec: Any,
+    *,
+    agent_session_id: str | None,
 ) -> list[str] | None:
-    """Translate the shared MCP spec without widening an explicit allowlist."""
+    """Translate the shared MCP spec without widening an explicit allowlist.
+
+    Each Claude client starts its own server, so the launch names the one Avibe
+    Session that server acts for.
+    """
 
     if not claude_allowlist_exposes_computer_use(
         agent_allowed_tools,
@@ -114,7 +120,10 @@ def apply_managed_computer_use_to_claude_options(
     ):
         return agent_allowed_tools
     option_kwargs["mcp_servers"] = {
-        computer_use_spec.name: computer_use_spec.claude_config()
+        computer_use_spec.name: computer_use_spec.for_caller(
+            "claude",
+            session_id=agent_session_id,
+        ).claude_config()
     }
     return agent_allowed_tools
 
@@ -1824,6 +1833,7 @@ class SessionHandler(BaseHandler):
             option_kwargs,
             agent_allowed_tools,
             launch_inputs.computer_use_spec,
+            agent_session_id=(context.platform_specific or {}).get("agent_session_id"),
         )
         if tool_policy_hooks:
             option_kwargs["hooks"] = tool_policy_hooks

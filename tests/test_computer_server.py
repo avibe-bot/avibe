@@ -7,6 +7,7 @@ import multiprocessing
 import os
 from pathlib import Path
 import shutil
+import subprocess
 import time
 from typing import Any, Mapping
 
@@ -27,6 +28,12 @@ from core.computer_use import (
     ComputerUseStatus,
     ToolSnapshot,
 )
+
+
+def _label(caller: str) -> str:
+    """The driver session label: public, stable, and free of the caller id."""
+
+    return "avibe-" + hashlib.sha256(caller.encode("utf-8")).hexdigest()[:16]
 
 
 def _snapshot() -> dict[str, Any]:
@@ -158,7 +165,7 @@ class FakeLeaseManager:
             self.holder = None
             self.daemon_key = daemon_key
         if self.holder is not None and self.holder != session:
-            raise ComputerServerError("desktop_busy", f"held by {self.holder}")
+            raise ComputerServerError("desktop_busy", "Another Avibe session is using the desktop.")
         newly_claimed = self.holder != session
         self.holder = session
         return LeaseAcquisition(
@@ -250,10 +257,286 @@ def _acquire_lease_in_process(
         results.put(("ok", acquisition.lease.holder))
 
 
-def test_advertised_surface_requires_session_and_drops_output_schema(
+_CALLER_ENV = (
+    "AVIBE_COMPUTER_USE_CALLER_BACKEND",
+    "AVIBE_COMPUTER_USE_CALLER_SESSION",
+    "AVIBE_OPENCODE_CALLER_CONTEXT_PATH",
+)
+
+
+def _launch(
+    monkeypatch: pytest.MonkeyPatch,
+    state_path: Path,
+    state: ComputerUseState,
+    leases: DesktopLeaseManager,
+    upstreams: list[FakeUpstream],
+    **env: str,
+) -> ComputerUseServer:
+    """Start one server process as a backend launch would configure it."""
+
+    for key in _CALLER_ENV:
+        monkeypatch.delenv(key, raising=False)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+
+    async def factory(_state: ComputerUseState) -> FakeUpstream:
+        upstreams.append(FakeUpstream())
+        return upstreams[-1]
+
+    return ComputerUseServer(
+        state_path=state_path,
+        status_reader=lambda: ComputerUseStatus("ready", None, state),
+        upstream_factory=factory,
+        lease_manager=leases,
+    )
+
+
+async def _tools_call(
+    server: ComputerUseServer,
+    arguments: dict[str, Any],
+    meta: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    params: dict[str, Any] = {"name": "list_apps", "arguments": arguments}
+    if meta is not None:
+        params["_meta"] = meta
+    response = await server.handle(
+        {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": params}
+    )
+    assert response is not None
+    return response["result"]
+
+
+def _error(result: dict[str, Any]) -> dict[str, Any] | None:
+    if not result.get("isError"):
+        return None
+    return json.loads(result["content"][0]["text"])
+
+
+def _bind_opencode(
+    monkeypatch: pytest.MonkeyPatch,
+    bindings: Path,
+    opencode_session: str,
+) -> str:
+    """Publish a Turn binding through the real owner and return its token."""
+
+    from core import git_runtime
+    from modules.agents.opencode import caller_context
+
+    monkeypatch.setattr(git_runtime, "prepend_vendored_git_to_path", lambda *args, **kwargs: False)
+    assert caller_context.bind_session(
+        opencode_session,
+        None,
+        base_env={},
+        working_dir=None,
+        extra_env={"AVIBE_SESSION_ID": f"avibe-{opencode_session}"},
+        path=bindings,
+    )
+    data = json.loads(bindings.read_text(encoding="utf-8"))
+    return data["sessions"][opencode_session]["binding_token"]
+
+
+@pytest.mark.asyncio
+async def test_claude_session_presenting_the_holders_id_is_refused(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each Claude server acts for the Session its launch names, whatever the model writes."""
+
+    state_path, state = _state(tmp_path)
+    leases = DesktopLeaseManager(tmp_path / "lease")
+    upstreams: list[FakeUpstream] = []
+    first = _launch(
+        monkeypatch, state_path, state, leases, upstreams,
+        AVIBE_COMPUTER_USE_CALLER_BACKEND="claude",
+        AVIBE_COMPUTER_USE_CALLER_SESSION="ses-a",
+    )
+    second = _launch(
+        monkeypatch, state_path, state, leases, upstreams,
+        AVIBE_COMPUTER_USE_CALLER_BACKEND="claude",
+        AVIBE_COMPUTER_USE_CALLER_SESSION="ses-b",
+    )
+
+    assert _error(await _tools_call(first, {})) is None
+    refused = _error(await _tools_call(second, {"session": "ses-a"}))
+    assert refused is not None and refused["code"] == "desktop_busy"
+    assert "ses-a" not in json.dumps(refused)
+    assert _error(await _tools_call(first, {"session": "ses-b"})) is None
+
+
+@pytest.mark.asyncio
+async def test_codex_thread_presenting_the_holders_id_is_refused(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One shared Codex server tells callers apart only by Codex request metadata."""
+
+    state_path, state = _state(tmp_path)
+    upstreams: list[FakeUpstream] = []
+    server = _launch(
+        monkeypatch, state_path, state, DesktopLeaseManager(tmp_path / "lease"), upstreams,
+        AVIBE_COMPUTER_USE_CALLER_BACKEND="codex",
+    )
+
+    assert _error(await _tools_call(server, {}, {"sessionId": "root-a", "threadId": "root-a"})) is None
+    # A subagent thread belongs to its root thread's session.
+    assert _error(await _tools_call(server, {}, {"sessionId": "root-a", "threadId": "child-a"})) is None
+    forged = {"session": "root-a", "_meta": {"sessionId": "root-a", "threadId": "root-a"}}
+    refused = _error(await _tools_call(server, forged, {"sessionId": "root-b", "threadId": "root-b"}))
+    assert refused is not None and refused["code"] == "desktop_busy"
+    assert "root-a" not in json.dumps(refused)
+    # Codex releases older than sessionId still identify the thread.
+    legacy = _error(await _tools_call(server, forged, {"threadId": "root-b"}))
+    assert legacy is not None and legacy["code"] == "desktop_busy"
+
+
+@pytest.mark.asyncio
+async def test_opencode_session_presenting_the_holders_id_is_refused(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only a stamp carrying the live binding token identifies an OpenCode call."""
+
+    bindings = tmp_path / "bindings.json"
+    token_a = _bind_opencode(monkeypatch, bindings, "oc-a")
+    token_b = _bind_opencode(monkeypatch, bindings, "oc-b")
+    state_path, state = _state(tmp_path)
+    upstreams: list[FakeUpstream] = []
+    server = _launch(
+        monkeypatch, state_path, state, DesktopLeaseManager(tmp_path / "lease"), upstreams,
+        AVIBE_COMPUTER_USE_CALLER_BACKEND="opencode",
+        AVIBE_OPENCODE_CALLER_CONTEXT_PATH=str(bindings),
+    )
+
+    def stamp(session: str, token: str) -> dict[str, Any]:
+        return {"_avibe_opencode_caller": {"session": session, "token": token}}
+
+    assert _error(await _tools_call(server, stamp("oc-a", token_a))) is None
+    for forged in (stamp("oc-a", token_b), stamp("oc-a", "guess"), {"session": "oc-a"}):
+        refused = _error(await _tools_call(server, forged))
+        assert refused is not None and refused["code"] == "caller_identity_unavailable"
+    refused = _error(await _tools_call(server, {**stamp("oc-b", token_b), "session": "oc-a"}))
+    assert refused is not None and refused["code"] == "desktop_busy"
+    assert "oc-a" not in json.dumps(refused)
+
+
+@pytest.mark.asyncio
+async def test_server_accepts_exactly_the_stamp_the_opencode_plugin_writes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The plugin replaces any model-written stamp with the live binding's."""
+
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is required to execute the OpenCode runtime plugin")
+    from modules.agents.opencode import caller_context
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    plugin = caller_context.ensure_plugin_installed().path
+    bindings = tmp_path / "bindings.json"
+    _bind_opencode(monkeypatch, bindings, "oc-a")
+    forged = {"session": "oc-a", "token": "model-written"}
+    script = f"""
+import {{ AvibeCallerContextPlugin }} from {json.dumps(plugin.as_uri())}
+const hooks = await AvibeCallerContextPlugin()
+const results = []
+for (const sessionID of ["oc-a", "oc-unbound"]) {{
+  const args = {{ _avibe_opencode_caller: {json.dumps(forged)} }}
+  await hooks["tool.execute.before"]({{ tool: "avibe_computer_list_apps", sessionID, callID: "c" }}, {{ args }})
+  results.push(args)
+}}
+process.stdout.write(JSON.stringify(results))
+"""
+    completed = subprocess.run(
+        [node, "--input-type=module", "--eval", script],
+        check=True,
+        capture_output=True,
+        env={**os.environ, "AVIBE_OPENCODE_CALLER_CONTEXT_PATH": str(bindings)},
+        text=True,
+        timeout=10,
+    )
+    bound_args, unbound_args = json.loads(completed.stdout)
+    assert unbound_args == {}
+
+    state_path, state = _state(tmp_path)
+    server = _launch(
+        monkeypatch, state_path, state, DesktopLeaseManager(tmp_path / "lease"), [],
+        AVIBE_COMPUTER_USE_CALLER_BACKEND="opencode",
+        AVIBE_OPENCODE_CALLER_CONTEXT_PATH=str(bindings),
+    )
+    assert _error(await _tools_call(server, bound_args)) is None
+    refused = _error(await _tools_call(server, {"_avibe_opencode_caller": forged}))
+    assert refused is not None and refused["code"] == "caller_identity_unavailable"
+
+
+@pytest.mark.parametrize(
+    ("env", "arguments", "meta", "named"),
+    [
+        ({}, {"session": "ses-a"}, {"threadId": "root-a"}, "without an Avibe backend identity"),
+        ({"AVIBE_COMPUTER_USE_CALLER_BACKEND": "claude"}, {"session": "ses-a"}, None, "Claude launch"),
+        ({"AVIBE_COMPUTER_USE_CALLER_BACKEND": "codex"}, {"session": "ses-a"}, None, "Codex"),
+        ({"AVIBE_COMPUTER_USE_CALLER_BACKEND": "codex"}, {}, {"threadId": " "}, "Codex"),
+        (
+            {"AVIBE_COMPUTER_USE_CALLER_BACKEND": "opencode"},
+            {"_avibe_opencode_caller": {"session": "oc-a", "token": "abc"}},
+            {"sessionId": "root-a"},
+            "OpenCode plugin",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_call_without_its_runtime_identity_is_refused_before_admission(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    env: dict[str, str],
+    arguments: dict[str, Any],
+    meta: dict[str, Any] | None,
+    named: str,
+) -> None:
+    """A missing integration is named, and no argument or foreign channel stands in."""
+
+    state_path, state = _state(tmp_path)
+    upstreams: list[FakeUpstream] = []
+    server = _launch(
+        monkeypatch, state_path, state, DesktopLeaseManager(tmp_path / "lease"), upstreams, **env
+    )
+
+    refused = _error(await _tools_call(server, arguments, meta))
+    assert refused is not None and refused["code"] == "caller_identity_unavailable"
+    assert named in refused["message"]
+    assert upstreams == []
+    assert not (tmp_path / "lease" / "computer-lease.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_expired_opencode_binding_no_longer_identifies_the_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stamp outlives nothing: an expired Turn binding is refused."""
+
+    bindings = tmp_path / "bindings.json"
+    token = _bind_opencode(monkeypatch, bindings, "oc-a")
+    data = json.loads(bindings.read_text(encoding="utf-8"))
+    data["sessions"]["oc-a"]["expires_at"] = "2020-01-01T00:00:00+00:00"
+    bindings.write_text(json.dumps(data), encoding="utf-8")
+    state_path, state = _state(tmp_path)
+    server = _launch(
+        monkeypatch, state_path, state, DesktopLeaseManager(tmp_path / "lease"), [],
+        AVIBE_COMPUTER_USE_CALLER_BACKEND="opencode",
+        AVIBE_OPENCODE_CALLER_CONTEXT_PATH=str(bindings),
+    )
+
+    refused = _error(
+        await _tools_call(server, {"_avibe_opencode_caller": {"session": "oc-a", "token": token}})
+    )
+    assert refused is not None and refused["code"] == "caller_identity_unavailable"
+
+
+def test_advertised_surface_omits_session_and_drops_output_schema(
     tmp_path: Path,
 ) -> None:
-    """Schema-driven clients must identify every call, including list_sessions."""
+    """The model never names a session; the runtime identifies every call."""
 
     state_path, state = _state(tmp_path)
     server = ComputerUseServer(
@@ -265,8 +548,8 @@ def test_advertised_surface_requires_session_and_drops_output_schema(
     assert len(server.tools) == 28
     assert {tool["name"] for tool in server.tools} == set(COMPUTER_USE_TOOL_NAMES)
     for tool in server.tools:
-        assert "session" in tool["inputSchema"]["required"]
-        assert tool["inputSchema"]["properties"]["session"]["minLength"] == 1
+        assert "session" not in tool["inputSchema"]["properties"]
+        assert "session" not in tool["inputSchema"].get("required", [])
         assert "outputSchema" not in tool
 
 
@@ -318,7 +601,7 @@ async def test_non_ready_call_names_status_and_never_spawns_upstream(
         upstream_factory=factory,
         lease_manager=FakeLeaseManager(),  # type: ignore[arg-type]
     )
-    result = await server.call_tool("list_apps", {"session": "ses-a"})
+    result = await server.call_tool("list_apps", {}, caller="ses-a")
     assert result["isError"] is True
     payload = json.loads(result["content"][0]["text"])
     assert payload == {
@@ -352,8 +635,8 @@ async def test_daemon_generation_and_child_exit_each_replace_proxy_once(
         upstream_factory=factory,
         lease_manager=leases,  # type: ignore[arg-type]
     )
-    await server.call_tool("list_apps", {"session": "ses-a"})
-    await server.call_tool("list_apps", {"session": "ses-a"})
+    await server.call_tool("list_apps", {}, caller="ses-a")
+    await server.call_tool("list_apps", {}, caller="ses-a")
     assert len(upstreams) == 1
     assert [params["name"] for _method, params in upstreams[0].calls] == [
         "start_session",
@@ -368,7 +651,7 @@ async def test_daemon_generation_and_child_exit_each_replace_proxy_once(
         }
     )
     leases.epoch += 1
-    await server.call_tool("list_apps", {"session": "ses-a"})
+    await server.call_tool("list_apps", {}, caller="ses-a")
     assert len(upstreams) == 2
     assert [params["name"] for _method, params in upstreams[1].calls] == [
         "start_session",
@@ -376,7 +659,7 @@ async def test_daemon_generation_and_child_exit_each_replace_proxy_once(
     ]
 
     upstreams[-1].alive = False
-    await server.call_tool("list_apps", {"session": "ses-a"})
+    await server.call_tool("list_apps", {}, caller="ses-a")
     assert len(upstreams) == 3
     assert [params["name"] for _method, params in upstreams[2].calls] == [
         "start_session",
@@ -420,11 +703,11 @@ async def test_one_sessions_calls_are_serial_and_end_releases_after_queue(
         lease_manager=leases,  # type: ignore[arg-type]
     )
     first = asyncio.create_task(
-        server.call_tool("list_apps", {"session": "ses-a"})
+        server.call_tool("list_apps", {}, caller="ses-a")
     )
     await asyncio.sleep(0)
     ending = asyncio.create_task(
-        server.call_tool("end_session", {"session": "ses-a"})
+        server.call_tool("end_session", {}, caller="ses-a")
     )
     await asyncio.sleep(0)
     assert not ending.done()
@@ -453,25 +736,26 @@ async def test_named_sessions_start_independently_and_revive_after_end(
         lease_manager=leases,  # type: ignore[arg-type]
     )
 
-    await server.call_tool("list_apps", {"session": "ses-a"})
-    await server.call_tool("end_session", {"session": "ses-a"})
-    await server.call_tool("list_apps", {"session": "ses-b"})
-    await server.call_tool("end_session", {"session": "ses-b"})
-    await server.call_tool("list_apps", {"session": "ses-a"})
+    await server.call_tool("list_apps", {}, caller="ses-a")
+    await server.call_tool("end_session", {}, caller="ses-a")
+    await server.call_tool("list_apps", {}, caller="ses-b")
+    await server.call_tool("end_session", {}, caller="ses-b")
+    await server.call_tool("list_apps", {}, caller="ses-a")
 
     calls = [
         (params["name"], params["arguments"].get("session"))
         for _method, params in upstream.calls
     ]
+    label_a, label_b = _label("ses-a"), _label("ses-b")
     assert calls == [
-        ("start_session", "ses-a"),
-        ("list_apps", "ses-a"),
-        ("end_session", "ses-a"),
-        ("start_session", "ses-b"),
-        ("list_apps", "ses-b"),
-        ("end_session", "ses-b"),
-        ("start_session", "ses-a"),
-        ("list_apps", "ses-a"),
+        ("start_session", label_a),
+        ("list_apps", label_a),
+        ("end_session", label_a),
+        ("start_session", label_b),
+        ("list_apps", label_b),
+        ("end_session", label_b),
+        ("start_session", label_a),
+        ("list_apps", label_a),
     ]
 
 
@@ -492,7 +776,8 @@ async def test_failed_explicit_end_keeps_session_observations_and_real_lease(
     )
     observed = await server.call_tool(
         "get_window_state",
-        {"session": "ses-a", "pid": 7, "window_id": 9},
+        {"pid": 7, "window_id": 9},
+        caller="ses-a",
     )
     assert not observed.get("isError")
     session_state = server._sessions["ses-a"]
@@ -502,14 +787,14 @@ async def test_failed_explicit_end_keeps_session_observations_and_real_lease(
     expected_observations = set(session_state.observed_windows)
 
     upstream.tool_errors.add("end_session")
-    ended = await server.call_tool("end_session", {"session": "ses-a"})
+    ended = await server.call_tool("end_session", {}, caller="ses-a")
 
     assert ended.get("isError")
     assert session_state.active_proxy_serial == expected_proxy
     assert session_state.active_daemon_key == expected_key
     assert session_state.last_epoch == expected_epoch
     assert session_state.observed_windows == expected_observations
-    with pytest.raises(ComputerServerError, match="ses-a"):
+    with pytest.raises(ComputerServerError, match="Another Avibe session"):
         leases.acquire(
             "ses-b",
             state.daemon_key,
@@ -518,7 +803,7 @@ async def test_failed_explicit_end_keeps_session_observations_and_real_lease(
 
 
 @pytest.mark.asyncio
-async def test_explicit_start_forwards_options_and_normalized_session(
+async def test_explicit_start_forwards_options_under_the_caller_label(
     tmp_path: Path,
 ) -> None:
     """The public start tool reaches the driver instead of fabricating success."""
@@ -534,13 +819,13 @@ async def test_explicit_start_forwards_options_and_normalized_session(
     result = await server.call_tool(
         "start_session",
         {
-            "session": "  ses-a  ",
             "capture_scope": "window",
             "cursor_theme": {
                 "theme_id": "high-contrast",
                 "reduced_motion": "on",
             },
         },
+        caller="ses-a",
     )
 
     assert not result.get("isError")
@@ -551,7 +836,7 @@ async def test_explicit_start_forwards_options_and_normalized_session(
         (
             "start_session",
             {
-                "session": "ses-a",
+                "session": _label("ses-a"),
                 "capture_scope": "window",
                 "cursor_theme": {
                     "theme_id": "high-contrast",
@@ -581,7 +866,7 @@ async def test_failed_explicit_start_does_not_change_committed_epoch(
         upstream_factory=lambda _state: asyncio.sleep(0, result=upstream),
         lease_manager=leases,
     )
-    started = await server.call_tool("list_apps", {"session": "ses-a"})
+    started = await server.call_tool("list_apps", {}, caller="ses-a")
     assert not started.get("isError")
     session_state = server._sessions["ses-a"]
     expected_proxy = session_state.active_proxy_serial
@@ -591,7 +876,8 @@ async def test_failed_explicit_start_does_not_change_committed_epoch(
     upstream.tool_errors.add("start_session")
     result = await server.call_tool(
         "start_session",
-        {"session": "ses-a", "capture_scope": "desktop"},
+        {"capture_scope": "desktop"},
+        caller="ses-a",
     )
 
     assert result.get("isError")
@@ -599,7 +885,7 @@ async def test_failed_explicit_start_does_not_change_committed_epoch(
     assert session_state.active_proxy_serial == expected_proxy
     assert session_state.active_daemon_key == expected_key
     assert session_state.last_epoch == expected_epoch
-    with pytest.raises(ComputerServerError, match="ses-a"):
+    with pytest.raises(ComputerServerError, match="Another Avibe session"):
         leases.acquire(
             "ses-b",
             state.daemon_key,
@@ -608,10 +894,10 @@ async def test_failed_explicit_start_does_not_change_committed_epoch(
 
 
 @pytest.mark.asyncio
-async def test_session_label_is_normalized_before_forwarding(
+async def test_model_written_session_and_stamp_never_reach_the_driver(
     tmp_path: Path,
 ) -> None:
-    """Whitespace around one public label cannot create a second driver session."""
+    """Arguments cannot select another caller's driver session."""
 
     state_path, state = _state(tmp_path)
     upstream = FakeUpstream()
@@ -622,11 +908,18 @@ async def test_session_label_is_normalized_before_forwarding(
         lease_manager=FakeLeaseManager(),  # type: ignore[arg-type]
     )
 
-    await server.call_tool("list_apps", {"session": "  ses-a  "})
-    assert [
-        params["arguments"].get("session")
-        for _method, params in upstream.calls
-    ] == ["ses-a", "ses-a"]
+    await server.call_tool(
+        "list_apps",
+        {
+            "session": _label("ses-b"),
+            "_avibe_opencode_caller": {"session": "ses-b", "token": "forged"},
+        },
+        caller="ses-a",
+    )
+    assert [params["arguments"] for _method, params in upstream.calls] == [
+        {"session": _label("ses-a")},
+        {"session": _label("ses-a")},
+    ]
 
 
 @pytest.mark.asyncio
@@ -646,42 +939,45 @@ async def test_window_input_requires_observation_and_rejects_focus_routes(
 
     first = await server.call_tool(
         "click",
-        {"session": "ses-a", "pid": 7, "window_id": 9, "x": 1, "y": 2},
+        {"pid": 7, "window_id": 9, "x": 1, "y": 2},
+        caller="ses-a",
     )
     assert "observe_first" in first["content"][0]["text"]
 
     observed = await server.call_tool(
         "get_window_state",
-        {"session": "ses-a", "pid": 7, "window_id": 9},
+        {"pid": 7, "window_id": 9},
+        caller="ses-a",
     )
     assert not observed.get("isError")
     clicked = await server.call_tool(
         "click",
-        {"session": "ses-a", "pid": 7, "window_id": 9, "x": 1, "y": 2},
+        {"pid": 7, "window_id": 9, "x": 1, "y": 2},
+        caller="ses-a",
     )
     assert not clicked.get("isError")
 
     foreground = await server.call_tool(
         "click",
         {
-            "session": "ses-a",
             "pid": 7,
             "window_id": 9,
             "x": 1,
             "y": 2,
             "delivery_mode": "foreground",
         },
+        caller="ses-a",
     )
     assert "foreground_forbidden" in foreground["content"][0]["text"]
 
     shortcut = await server.call_tool(
         "hotkey",
         {
-            "session": "ses-a",
             "pid": 7,
             "window_id": 9,
             "keys": ["cmd", "shift", "["],
         },
+        caller="ses-a",
     )
     assert "focus_shortcut_forbidden" in shortcut["content"][0]["text"]
 
@@ -705,22 +1001,25 @@ async def test_real_lease_epoch_survives_handoff_and_rejects_stale_observation(
 
     observed = await server.call_tool(
         "get_window_state",
-        {"session": "ses-a", "pid": 7, "window_id": 9},
+        {"pid": 7, "window_id": 9},
+        caller="ses-a",
     )
     assert not observed.get("isError")
 
     now += 61.0
     observed_by_b = await server.call_tool(
         "get_window_state",
-        {"session": "ses-b", "pid": 8, "window_id": 10},
+        {"pid": 8, "window_id": 10},
+        caller="ses-b",
     )
     assert not observed_by_b.get("isError")
-    ended = await server.call_tool("end_session", {"session": "ses-b"})
+    ended = await server.call_tool("end_session", {}, caller="ses-b")
     assert not ended.get("isError")
 
     stale = await server.call_tool(
         "click",
-        {"session": "ses-a", "pid": 7, "window_id": 9, "x": 1, "y": 2},
+        {"pid": 7, "window_id": 9, "x": 1, "y": 2},
+        caller="ses-a",
     )
     assert "observe_first" in stale["content"][0]["text"]
     assert [params["name"] for _method, params in upstream.calls][-2:] == [
@@ -746,19 +1045,20 @@ async def test_failed_internal_end_blocks_revival_and_element_token_input(
         lease_manager=leases,
     )
 
-    first = await server.call_tool("list_apps", {"session": "ses-a"})
+    first = await server.call_tool("list_apps", {}, caller="ses-a")
     assert not first.get("isError")
     now += 61.0
-    handoff = await server.call_tool("list_apps", {"session": "ses-b"})
+    handoff = await server.call_tool("list_apps", {}, caller="ses-b")
     assert not handoff.get("isError")
-    ended = await server.call_tool("end_session", {"session": "ses-b"})
+    ended = await server.call_tool("end_session", {}, caller="ses-b")
     assert not ended.get("isError")
 
     upstream.tool_errors.add("end_session")
     before = len(upstream.calls)
     stale = await server.call_tool(
         "click",
-        {"session": "ses-a", "element_token": "old-element", "x": 1, "y": 2},
+        {"element_token": "old-element", "x": 1, "y": 2},
+        caller="ses-a",
     )
 
     assert "session_unavailable" in stale["content"][0]["text"]
@@ -792,13 +1092,15 @@ async def test_proxy_replacement_clears_observations(tmp_path: Path) -> None:
     )
     await server.call_tool(
         "get_window_state",
-        {"session": "ses-a", "pid": 7, "window_id": 9},
+        {"pid": 7, "window_id": 9},
+        caller="ses-a",
     )
     upstreams[0].alive = False
-    await server.call_tool("list_apps", {"session": "ses-a"})
+    await server.call_tool("list_apps", {}, caller="ses-a")
     stale = await server.call_tool(
         "click",
-        {"session": "ses-a", "pid": 7, "window_id": 9, "x": 1, "y": 2},
+        {"pid": 7, "window_id": 9, "x": 1, "y": 2},
+        caller="ses-a",
     )
     assert "observe_first" in stale["content"][0]["text"]
 
@@ -825,21 +1127,23 @@ async def test_transport_failure_discards_an_alive_proxy_and_its_observations(
     )
     await server.call_tool(
         "get_window_state",
-        {"session": "ses-a", "pid": 7, "window_id": 9},
+        {"pid": 7, "window_id": 9},
+        caller="ses-a",
     )
     upstreams[0].fail_transport = True
-    failed = await server.call_tool("list_apps", {"session": "ses-a"})
+    failed = await server.call_tool("list_apps", {}, caller="ses-a")
     assert "upstream_unavailable" in failed["content"][0]["text"]
     assert upstreams[0].close_calls == 1
     assert not upstreams[0].alive
 
     upstreams[0].fail_transport = False
-    recovered = await server.call_tool("list_apps", {"session": "ses-a"})
+    recovered = await server.call_tool("list_apps", {}, caller="ses-a")
     assert not recovered.get("isError")
     assert len(upstreams) == 2
     stale = await server.call_tool(
         "click",
-        {"session": "ses-a", "pid": 7, "window_id": 9, "x": 1, "y": 2},
+        {"pid": 7, "window_id": 9, "x": 1, "y": 2},
+        caller="ses-a",
     )
     assert "observe_first" in stale["content"][0]["text"]
 
@@ -868,7 +1172,7 @@ async def test_late_failure_from_old_proxy_preserves_new_proxy_observations(
         lease_manager=FakeLeaseManager(),  # type: ignore[arg-type]
     )
     old_call = asyncio.create_task(
-        server.call_tool("list_apps", {"session": "ses-a"})
+        server.call_tool("list_apps", {}, caller="ses-a")
     )
     for _attempt in range(100):
         if upstreams and upstreams[0].inflight:
@@ -881,7 +1185,8 @@ async def test_late_failure_from_old_proxy_preserves_new_proxy_observations(
     server._lease_manager.epoch += 1  # type: ignore[attr-defined]
     observed = await server.call_tool(
         "get_window_state",
-        {"session": "ses-b", "pid": 7, "window_id": 9},
+        {"pid": 7, "window_id": 9},
+        caller="ses-b",
     )
     assert not observed.get("isError")
     replacement = upstreams[1]
@@ -895,7 +1200,8 @@ async def test_late_failure_from_old_proxy_preserves_new_proxy_observations(
     assert replacement.alive
     clicked = await server.call_tool(
         "click",
-        {"session": "ses-b", "pid": 7, "window_id": 9, "x": 1, "y": 2},
+        {"pid": 7, "window_id": 9, "x": 1, "y": 2},
+        caller="ses-b",
     )
     assert not clicked.get("isError")
 
@@ -919,14 +1225,16 @@ async def test_epoch_change_restarts_session_and_requires_each_window_again(
     for window_id in (9, 10):
         result = await server.call_tool(
             "get_window_state",
-            {"session": "ses-a", "pid": 7, "window_id": window_id},
+            {"pid": 7, "window_id": window_id},
+            caller="ses-a",
         )
         assert not result.get("isError")
 
     leases.epoch += 1
     stale = await server.call_tool(
         "click",
-        {"session": "ses-a", "pid": 7, "window_id": 9, "x": 1, "y": 2},
+        {"pid": 7, "window_id": 9, "x": 1, "y": 2},
+        caller="ses-a",
     )
     assert "observe_first" in stale["content"][0]["text"]
     assert [params["name"] for _method, params in upstream.calls][-2:] == [
@@ -936,15 +1244,18 @@ async def test_epoch_change_restarts_session_and_requires_each_window_again(
 
     await server.call_tool(
         "get_window_state",
-        {"session": "ses-a", "pid": 7, "window_id": 9},
+        {"pid": 7, "window_id": 9},
+        caller="ses-a",
     )
     window_a = await server.call_tool(
         "click",
-        {"session": "ses-a", "pid": 7, "window_id": 9, "x": 1, "y": 2},
+        {"pid": 7, "window_id": 9, "x": 1, "y": 2},
+        caller="ses-a",
     )
     window_b = await server.call_tool(
         "click",
-        {"session": "ses-a", "pid": 7, "window_id": 10, "x": 1, "y": 2},
+        {"pid": 7, "window_id": 10, "x": 1, "y": 2},
+        caller="ses-a",
     )
     assert not window_a.get("isError")
     assert "observe_first" in window_b["content"][0]["text"]
@@ -965,9 +1276,10 @@ async def test_new_server_process_requires_observation_again(tmp_path: Path) -> 
     )
     await first.call_tool(
         "get_window_state",
-        {"session": "ses-a", "pid": 7, "window_id": 9},
+        {"pid": 7, "window_id": 9},
+        caller="ses-a",
     )
-    await first.call_tool("end_session", {"session": "ses-a"})
+    await first.call_tool("end_session", {}, caller="ses-a")
 
     second_upstream = FakeUpstream()
     second = ComputerUseServer(
@@ -978,7 +1290,8 @@ async def test_new_server_process_requires_observation_again(tmp_path: Path) -> 
     )
     result = await second.call_tool(
         "click",
-        {"session": "ses-a", "pid": 7, "window_id": 9, "x": 1, "y": 2},
+        {"pid": 7, "window_id": 9, "x": 1, "y": 2},
+        caller="ses-a",
     )
     assert "observe_first" in result["content"][0]["text"]
 
@@ -1000,7 +1313,7 @@ async def test_setup_failure_releases_lease_before_returning(tmp_path: Path) -> 
         lease_manager=leases,  # type: ignore[arg-type]
     )
 
-    result = await server.call_tool("start_session", {"session": "ses-a"})
+    result = await server.call_tool("start_session", {}, caller="ses-a")
 
     assert result["isError"]
     assert "upstream_unavailable" in result["content"][0]["text"]
@@ -1026,15 +1339,16 @@ async def test_renewed_lease_survives_observe_first_guard(tmp_path: Path) -> Non
         lease_manager=leases,
     )
 
-    started = await server.call_tool("list_apps", {"session": "ses-a"})
+    started = await server.call_tool("list_apps", {}, caller="ses-a")
     assert not started.get("isError")
     guarded = await server.call_tool(
         "click",
-        {"session": "ses-a", "pid": 7, "window_id": 9, "x": 1, "y": 2},
+        {"pid": 7, "window_id": 9, "x": 1, "y": 2},
+        caller="ses-a",
     )
     assert "observe_first" in guarded["content"][0]["text"]
 
-    with pytest.raises(ComputerServerError, match="ses-a"):
+    with pytest.raises(ComputerServerError, match="Another Avibe session"):
         leases.acquire(
             "ses-b",
             state.daemon_key,
@@ -1079,7 +1393,7 @@ async def test_stale_state_cannot_overwrite_current_generation_holder(
         upstream_factory=factory,
         lease_manager=leases,
     )
-    result = await server.call_tool("list_apps", {"session": "ses-stale"})
+    result = await server.call_tool("list_apps", {}, caller="ses-stale")
 
     assert "desktop_busy" in result["content"][0]["text"]
     assert starts == 0
@@ -1116,7 +1430,7 @@ async def test_post_proxy_creation_revalidates_generation_before_forwarding(
         lease_manager=DesktopLeaseManager(tmp_path),
     )
 
-    result = await server.call_tool("list_apps", {"session": "ses-a"})
+    result = await server.call_tool("list_apps", {}, caller="ses-a")
 
     assert not result.get("isError")
     assert len(upstreams) == 2
@@ -1156,7 +1470,7 @@ async def test_admission_retries_generation_change_exactly_once(
         lease_manager=DesktopLeaseManager(tmp_path),
     )
 
-    result = await server.call_tool("list_apps", {"session": "ses-a"})
+    result = await server.call_tool("list_apps", {}, caller="ses-a")
 
     assert result["isError"]
     assert "daemon_generation_changed" in result["content"][0]["text"]
@@ -1189,7 +1503,7 @@ async def test_new_claim_is_released_after_same_key_generation_guard(
         lease_manager=leases,
     )
 
-    result = await server.call_tool("list_apps", {"session": "ses-a"})
+    result = await server.call_tool("list_apps", {}, caller="ses-a")
 
     assert result["isError"]
     assert "computer_use_unavailable" in result["content"][0]["text"]
@@ -1226,7 +1540,7 @@ async def test_readiness_blip_keeps_a_renewed_lease_epoch(
         lease_manager=leases,
     )
 
-    first = await server.call_tool("list_apps", {"session": "ses-a"})
+    first = await server.call_tool("list_apps", {}, caller="ses-a")
     assert not first.get("isError")
     assert leases.acquire(
         "ses-a",
@@ -1235,7 +1549,7 @@ async def test_readiness_blip_keeps_a_renewed_lease_epoch(
     ).lease.epoch == 1
 
     blip = True
-    second = await server.call_tool("list_apps", {"session": "ses-a"})
+    second = await server.call_tool("list_apps", {}, caller="ses-a")
 
     assert not second.get("isError")
     assert blip_reads >= 6
@@ -1244,7 +1558,7 @@ async def test_readiness_blip_keeps_a_renewed_lease_epoch(
         state.daemon_key,
         lambda: state.daemon_key,
     ).lease.epoch == 1
-    with pytest.raises(ComputerServerError, match="ses-a"):
+    with pytest.raises(ComputerServerError, match="Another Avibe session"):
         leases.acquire(
             "ses-b",
             state.daemon_key,
@@ -1332,7 +1646,7 @@ def test_desktop_lease_expires_and_daemon_generation_voids_it(
         ("shell-a", 1),
         lambda: ("shell-a", 1),
     ).lease
-    with pytest.raises(Exception, match="ses-a"):
+    with pytest.raises(Exception, match="Another Avibe session"):
         manager.acquire(
             "ses-b",
             ("shell-a", 1),
@@ -1403,7 +1717,7 @@ async def test_long_call_refreshes_lease_until_it_finishes(
         lease_manager=leases,  # type: ignore[arg-type]
     )
     call = asyncio.create_task(
-        server.call_tool("list_apps", {"session": "ses-a"})
+        server.call_tool("list_apps", {}, caller="ses-a")
     )
     for _attempt in range(100):
         if leases.refresh_count >= 2:
@@ -1443,13 +1757,13 @@ async def test_heartbeat_starts_before_proxy_setup_finishes(
         lease_manager=leases,
     )
     call = asyncio.create_task(
-        server.call_tool("list_apps", {"session": "ses-a"})
+        server.call_tool("list_apps", {}, caller="ses-a")
     )
     await asyncio.wait_for(setup_started.wait(), timeout=1)
     now += 61.0
     await asyncio.sleep(0.03)
 
-    with pytest.raises(ComputerServerError, match="ses-a"):
+    with pytest.raises(ComputerServerError, match="Another Avibe session"):
         leases.acquire(
             "ses-b",
             state.daemon_key,
@@ -1482,7 +1796,7 @@ async def test_lease_loss_during_session_setup_aborts_before_user_forward(
         lease_manager=leases,
     )
     call = asyncio.create_task(
-        server.call_tool("list_apps", {"session": "ses-a"})
+        server.call_tool("list_apps", {}, caller="ses-a")
     )
     for _attempt in range(100):
         if upstream.calls:

@@ -83,6 +83,9 @@ def _managed_mcp_config_args(
 ) -> list[str]:
     if spec is None:
         return []
+    # One app-server serves every thread; Codex identifies each call in the
+    # request metadata it writes.
+    spec = spec.for_caller("codex")
     args_array = ",".join(format_toml_basic_string(value) for value in spec.args)
     overrides = [
         f"mcp_servers.{spec.name}.command={format_toml_basic_string(spec.command)}",

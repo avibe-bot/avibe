@@ -90,6 +90,50 @@ process.stdout.write(JSON.stringify(output.system))
     assert json.loads(direct.stdout) == [native, managed]
 
 
+def test_plugin_stamps_only_avibe_computer_calls_on_a_managed_server(tmp_path: Path, monkeypatch) -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is required to execute the OpenCode runtime plugin")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    plugin = bridge.ensure_plugin_installed().path
+    bindings = tmp_path / "bindings.json"
+    bindings.write_text(
+        json.dumps({"version": 1, "sessions": {"oc-a": {"binding_token": "token-a", "env": {}}}}),
+        encoding="utf-8",
+    )
+    forged = {"session": "oc-b", "token": "model-written"}
+    script = f"""
+import {{ AvibeCallerContextPlugin }} from {json.dumps(plugin.as_uri())}
+const hooks = await AvibeCallerContextPlugin()
+const results = []
+for (const tool of ["avibe_computer_click", "bash"]) {{
+  const args = {{ x: 1, _avibe_opencode_caller: {json.dumps(forged)} }}
+  await hooks["tool.execute.before"]({{ tool, sessionID: "oc-a", callID: "c" }}, {{ args }})
+  results.push(args)
+}}
+process.stdout.write(JSON.stringify(results))
+"""
+
+    def run(env: dict[str, str]) -> list[dict]:
+        completed = subprocess.run(
+            [node, "--input-type=module", "--eval", script],
+            check=True, capture_output=True, text=True, timeout=10, env=env,
+        )
+        return json.loads(completed.stdout)
+
+    managed_env = {**os.environ, "AVIBE_OPENCODE_CALLER_CONTEXT_PATH": str(bindings)}
+    assert run(managed_env) == [
+        {"x": 1, "_avibe_opencode_caller": {"session": "oc-a", "token": "token-a"}},
+        {"x": 1, "_avibe_opencode_caller": forged},
+    ]
+    # Outside an Avibe-managed server the plugin leaves every call alone.
+    direct_env = {key: value for key, value in os.environ.items() if key != "AVIBE_OPENCODE_CALLER_CONTEXT_PATH"}
+    assert run(direct_env) == [
+        {"x": 1, "_avibe_opencode_caller": forged},
+        {"x": 1, "_avibe_opencode_caller": forged},
+    ]
+
+
 @pytest.mark.parametrize("hub_mode", [True, False])
 def test_plugin_keeps_hub_provider_definitions_exact_after_native_merge(tmp_path, monkeypatch, hub_mode):
     node = shutil.which("node")

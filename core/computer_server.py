@@ -11,7 +11,9 @@ import asyncio
 from contextlib import suppress
 from copy import deepcopy
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 import hashlib
+import hmac
 import json
 import os
 from pathlib import Path
@@ -30,8 +32,11 @@ if __package__ in {None, ""}:
 
 from config.atomic_io import write_atomic
 from core.computer_use import (
+    COMPUTER_USE_CALLER_BACKEND_ENV,
+    COMPUTER_USE_CALLER_SESSION_ENV,
     COMPUTER_USE_LEASE_FILE,
     COMPUTER_USE_LEASE_LOCK_FILE,
+    COMPUTER_USE_OPENCODE_STAMP_ARGUMENT,
     COMPUTER_USE_TOOL_SNAPSHOT_SHA256,
     COMPUTER_USE_TOOL_NAMES,
     ComputerUseState,
@@ -49,6 +54,9 @@ _UPSTREAM_RESPONSE_LIMIT = 128 * 1024 * 1024
 # reader from holding the desktop lease forever.
 _UPSTREAM_REQUEST_TIMEOUT_SECONDS = 180.0
 _ADMISSION_RETRY_LIMIT = 1
+# ``modules.agents.opencode.caller_context`` owns this per-Turn binding file and
+# passes its path to the shared ``opencode serve`` process and its children.
+_OPENCODE_BINDINGS_PATH_ENV = "AVIBE_OPENCODE_CALLER_CONTEXT_PATH"
 _PROXY_PROCESS_ENV_KEYS = (
     "HOME",
     "LANG",
@@ -245,7 +253,7 @@ class DesktopLeaseManager:
                 if previous.holder:
                     raise ComputerServerError(
                         "desktop_busy",
-                        f"Desktop computer use is held by session {previous.holder!r}.",
+                        "Another Avibe session is using the desktop.",
                     )
             if valid and previous.holder == session:
                 epoch = previous.epoch
@@ -557,23 +565,53 @@ def _load_snapshot(state_path: Path) -> tuple[list[dict[str, Any]], set[str]]:
         if not isinstance(properties, dict):
             properties = {}
             schema["properties"] = properties
-        if "session" in properties:
+        # The server names the driver session from the caller's trusted
+        # identity, so the model never chooses it.
+        if properties.pop("session", None) is not None:
             accepted_session.add(name)
-        properties["session"] = {
-            "type": "string",
-            "minLength": 1,
-            "description": (
-                "Required Avibe session id from the current conversation. "
-                "Use the same value for every call in one task."
-            ),
-        }
         required = schema.get("required")
-        if not isinstance(required, list):
-            required = []
-        schema["required"] = [*dict.fromkeys([*required, "session"])]
+        if isinstance(required, list) and "session" in required:
+            schema["required"] = [value for value in required if value != "session"]
         tool.pop("outputSchema", None)
         advertised.append(tool)
     return advertised, accepted_session
+
+
+def _driver_session_label(caller: str) -> str:
+    """Name the caller's Cua session without publishing its identity."""
+
+    return "avibe-" + hashlib.sha256(caller.encode("utf-8")).hexdigest()[:16]
+
+
+def _opencode_binding_token(session_id: str) -> str | None:
+    """Return the live caller-context binding token of one OpenCode session.
+
+    The server reads the binding file directly: importing its owner would load
+    the whole agent package into this isolated process.
+    """
+
+    path = os.environ.get(_OPENCODE_BINDINGS_PATH_ENV, "")
+    if not path:
+        return None
+    try:
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    sessions = payload.get("sessions") if isinstance(payload, dict) else None
+    entry = sessions.get(session_id) if isinstance(sessions, dict) else None
+    if not isinstance(entry, dict):
+        return None
+    token = entry.get("binding_token")
+    expires_at = entry.get("expires_at")
+    if not isinstance(token, str) or not token or not isinstance(expires_at, str):
+        return None
+    try:
+        expiry = datetime.fromisoformat(expires_at)
+    except ValueError:
+        return None
+    if expiry.tzinfo is None or expiry <= datetime.now(timezone.utc):
+        return None
+    return token
 
 
 def _error_result(code: str, message: str, **details: Any) -> dict[str, Any]:
@@ -742,6 +780,8 @@ class ComputerUseServer:
         self._upstream_lock = asyncio.Lock()
         self._session_locks: dict[str, asyncio.Lock] = {}
         self._sessions: dict[str, _SessionState] = {}
+        self._caller_backend = os.environ.get(COMPUTER_USE_CALLER_BACKEND_ENV, "").strip()
+        self._caller_session = os.environ.get(COMPUTER_USE_CALLER_SESSION_ENV, "").strip()
 
     @property
     def tools(self) -> list[dict[str, Any]]:
@@ -933,24 +973,81 @@ class ComputerUseServer:
                 "Observe this exact window with get_window_state or zoom before sending input.",
             )
 
+    def _resolve_caller(
+        self,
+        params: Mapping[str, Any],
+        arguments: Mapping[str, Any],
+    ) -> str:
+        """Identify the calling Session from what its runtime supplied.
+
+        Each backend has exactly one trusted source. A call without it is
+        refused; nothing the model wrote into the arguments is a fallback.
+        """
+
+        backend = self._caller_backend
+        if backend == "claude":
+            if self._caller_session:
+                return f"avibe:{self._caller_session}"
+            raise ComputerServerError(
+                "caller_identity_unavailable",
+                "The Claude launch did not provide the calling Avibe session.",
+            )
+        if backend == "codex":
+            # Codex writes request metadata itself; the model controls only
+            # the arguments. sessionId covers a thread and its subagents.
+            meta = params.get("_meta")
+            if isinstance(meta, dict):
+                for key in ("sessionId", "threadId"):
+                    value = meta.get(key)
+                    if isinstance(value, str) and value.strip():
+                        return f"codex:{value.strip()}"
+            raise ComputerServerError(
+                "caller_identity_unavailable",
+                "Codex did not send its thread identity with this call. "
+                "Update Codex to use computer use.",
+            )
+        if backend == "opencode":
+            stamp = arguments.get(COMPUTER_USE_OPENCODE_STAMP_ARGUMENT)
+            if isinstance(stamp, dict):
+                session_id = stamp.get("session")
+                token = stamp.get("token")
+                if (
+                    isinstance(session_id, str)
+                    and session_id
+                    and isinstance(token, str)
+                    and token
+                ):
+                    expected = _opencode_binding_token(session_id)
+                    if expected is not None and hmac.compare_digest(
+                        expected.encode("utf-8"),
+                        token.encode("utf-8"),
+                    ):
+                        return f"opencode:{session_id}"
+            raise ComputerServerError(
+                "caller_identity_unavailable",
+                "The Avibe OpenCode plugin did not identify this call's session.",
+            )
+        raise ComputerServerError(
+            "caller_identity_unavailable",
+            "This computer-use server was started without an Avibe backend identity.",
+        )
+
     async def call_tool(
         self,
         name: str,
         arguments: Mapping[str, Any],
+        *,
+        caller: str,
     ) -> dict[str, Any]:
-        session = arguments.get("session")
-        if not isinstance(session, str) or not session.strip():
-            return _error_result(
-                "session_required",
-                "Every computer-use call requires the current Avibe session id.",
-            )
-        session = session.strip()
+        """Run one tool call for a caller identity resolved by ``handle``."""
+
         if name not in COMPUTER_USE_TOOL_NAMES:
             return _error_result("unknown_tool", f"Unknown computer-use tool: {name}")
         if not isinstance(arguments, dict):
             return _error_result("invalid_arguments", "Tool arguments must be an object.")
+        session = _driver_session_label(caller)
 
-        lock = self._session_locks.setdefault(session, asyncio.Lock())
+        lock = self._session_locks.setdefault(caller, asyncio.Lock())
         async with lock:
             try:
                 _validate_input(name, arguments)
@@ -974,7 +1071,7 @@ class ComputerUseServer:
                     state = status.state
                     acquisition = await asyncio.to_thread(
                         self._lease_manager.acquire,
-                        session,
+                        caller,
                         state.daemon_key,
                         self._current_ready_daemon_key,
                     )
@@ -995,7 +1092,7 @@ class ComputerUseServer:
                         ),
                     )
                     session_state = self._sessions.setdefault(
-                        session,
+                        caller,
                         _SessionState(),
                     )
                     await self._run_while_lease_owned(
@@ -1017,6 +1114,7 @@ class ComputerUseServer:
                     pre_forward = False
 
                     forwarded = dict(arguments)
+                    forwarded.pop(COMPUTER_USE_OPENCODE_STAMP_ARGUMENT, None)
                     forwarded["session"] = session
                     if name not in self._upstream_accepts_session:
                         forwarded.pop("session", None)
@@ -1195,7 +1293,12 @@ class ComputerUseServer:
                     "tools/call requires a tool name and argument object.",
                 )
             else:
-                result = await self.call_tool(name, arguments)
+                try:
+                    caller = self._resolve_caller(params, arguments)
+                except ComputerServerError as exc:
+                    result = _error_result(exc.code, str(exc))
+                else:
+                    result = await self.call_tool(name, arguments, caller=caller)
             return {
                 "jsonrpc": "2.0",
                 "id": request_id,

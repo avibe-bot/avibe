@@ -38,6 +38,7 @@ def test_claude_translation_uses_the_same_allowlist_boundary_as_guidance() -> No
         restricted,
         ["Read", "Bash"],
         _spec(),
+        agent_session_id="ses-claude",
     )
     assert "mcp_servers" not in restricted
     assert tools == ["Read", "Bash"]
@@ -47,13 +48,19 @@ def test_claude_translation_uses_the_same_allowlist_boundary_as_guidance() -> No
         exposed,
         ["Read", "mcp__avibe_computer__click"],
         _spec(),
+        agent_session_id="ses-claude",
     )
+    # One server per Claude client, so its launch names the calling Session.
     assert exposed["mcp_servers"] == {
         "avibe_computer": {
             "type": "stdio",
             "command": "/Applications/Avibe.app/Contents/Resources/python",
             "args": ["-I", "/Applications/Avibe.app/Contents/Resources/core/computer_server.py"],
-            "env": {"AVIBE_COMPUTER_USE_STATE_DIR": "/tmp/desktop state"},
+            "env": {
+                "AVIBE_COMPUTER_USE_STATE_DIR": "/tmp/desktop state",
+                "AVIBE_COMPUTER_USE_CALLER_BACKEND": "claude",
+                "AVIBE_COMPUTER_USE_CALLER_SESSION": "ses-claude",
+            },
         }
     }
     assert "strict_mcp_config" not in exposed
@@ -65,12 +72,11 @@ def test_claude_translation_uses_the_same_allowlist_boundary_as_guidance() -> No
             no_agent_allowlist,
             None,
             _spec(),
+            agent_session_id="ses-claude",
         )
         is None
     )
-    assert no_agent_allowlist["mcp_servers"] == {
-        "avibe_computer": _spec().claude_config()
-    }
+    assert no_agent_allowlist["mcp_servers"] == exposed["mcp_servers"]
 
 
 def test_claude_guidance_requires_an_admitted_tool_in_an_explicit_allowlist() -> None:
@@ -106,7 +112,11 @@ def test_codex_translation_is_fixed_last_and_approves_managed_tools() -> None:
         "command": "/Applications/Avibe.app/Contents/Resources/python",
         "args": ["-I", "/Applications/Avibe.app/Contents/Resources/core/computer_server.py"],
         "default_tools_approval_mode": "approve",
-        "env": {"AVIBE_COMPUTER_USE_STATE_DIR": "/tmp/desktop state"},
+        # One app-server serves every thread: identity is per call, not per launch.
+        "env": {
+            "AVIBE_COMPUTER_USE_CALLER_BACKEND": "codex",
+            "AVIBE_COMPUTER_USE_STATE_DIR": "/tmp/desktop state",
+        },
     }
 
 
@@ -142,6 +152,7 @@ def test_opencode_translation_preserves_user_mcp_and_owns_only_reserved_name() -
         ],
         "environment": {
             "AVIBE_COMPUTER_USE_STATE_DIR": "/tmp/desktop state",
+            "AVIBE_COMPUTER_USE_CALLER_BACKEND": "opencode",
         },
         "enabled": True,
     }
