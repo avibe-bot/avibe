@@ -90,7 +90,7 @@ async def test_disjoint_edits_apply_against_the_original(tmp_path, make_ctx):
         make_ctx, "f.py", {"oldText": "a = 1", "newText": "a = 10"}, {"oldText": "c = 3", "newText": "c = 30"}
     )
 
-    assert result_text(result) == "Successfully replaced 2 block(s) in f.py."
+    assert result_text(result) == "Successfully replaced 2 block(s) in f.py (lines 1, 3)."
     assert (tmp_path / "f.py").read_text() == "a = 10\nb = 2\nc = 30\n"
     assert "+1 a = 10" in result.details["diff"]
 
@@ -117,13 +117,13 @@ async def test_replace_all_replaces_every_occurrence(tmp_path, make_ctx):
     )
 
     # The model learns how many occurrences each item replaced without reading the file again.
-    assert result_text(result) == "Successfully replaced 4 occurrences in f.txt (edits[0]: 3, edits[1]: 1)."
+    assert result_text(result) == "Successfully replaced 4 occurrences in f.txt (lines 1-4; edits[0]: 3, edits[1]: 1)."
     assert (tmp_path / "f.txt").read_text() == "baz(1)\nqux\nbaz(2)\nbaz(3)\n"
 
 
 @pytest.mark.parametrize(("content", "summary"), [
-    ("color=red\nborder=red\naccent=red\n", "Successfully replaced 3 occurrences in f.txt."),
-    ("color=red\n", "Successfully replaced 1 occurrence in f.txt."),
+    ("color=red\nborder=red\naccent=red\n", "Successfully replaced 3 occurrences in f.txt (lines 1-3)."),
+    ("color=red\n", "Successfully replaced 1 occurrence in f.txt (line 1)."),
 ])
 async def test_a_single_replace_all_reports_its_occurrences(tmp_path, make_ctx, content, summary):
     (tmp_path / "f.txt").write_text(content)
@@ -131,6 +131,87 @@ async def test_a_single_replace_all_reports_its_occurrences(tmp_path, make_ctx, 
     result = await _edit(make_ctx, "f.txt", {"oldText": "red", "newText": "blue", "replaceAll": True})
 
     assert result_text(result) == summary
+
+
+@pytest.mark.parametrize(("original", "edits", "summary"), [
+    # The new file's lines: an edit that adds lines moves every later range down.
+    (
+        "a\nb\nc\nd\n",
+        [{"oldText": "a\n", "newText": "a\na2\na3\n"}, {"oldText": "d", "newText": "D"}],
+        "Successfully replaced 2 block(s) in f.txt (lines 2-3, 6).",
+    ),
+    # Unchanged context at an edit's ends, and an edit that changes nothing, are not rewritten lines.
+    ("a\nb\nc\nd\n", [{"oldText": "a\nb\nc", "newText": "a\nB\nc"}],
+     "Successfully replaced 1 block(s) in f.txt (line 2)."),
+    ("x\ny\nc\n", [{"oldText": "x", "newText": "x"}, {"oldText": "c", "newText": "C"}],
+     "Successfully replaced 2 block(s) in f.txt (line 3)."),
+    # A removed line is reported where it was.
+    ("a\nb\nc\n", [{"oldText": "b\n", "newText": ""}], "Successfully replaced 1 block(s) in f.txt (line 2)."),
+    # Numbered as read numbers them: a CRLF ends one line, a lone "\r" ends none.
+    ("x\ry\r\nz\r\n", [{"oldText": "z", "newText": "Z"}], "Successfully replaced 1 block(s) in f.txt (line 2)."),
+    # A normalized edit rewrites its whole line, break included, and that is still one line.
+    ("a\nt = \u201cq\u201d  \nb\n", [{"oldText": 't = "q"', "newText": 't = "r"'}],
+     "Successfully replaced 1 block(s) in f.txt (line 2)."),
+    # Touching ranges are one; past five ranges the rest are counted.
+    ("a\nb\n", [{"oldText": "a", "newText": "A"}, {"oldText": "b", "newText": "B"}],
+     "Successfully replaced 2 block(s) in f.txt (lines 1-2)."),
+    (
+        "k\n-\n" * 7,
+        [{"oldText": "k", "newText": "K", "replaceAll": True}],
+        "Successfully replaced 7 occurrences in f.txt (lines 1, 3, 5, 7, 9, ...and 2 more).",
+    ),
+])
+async def test_a_successful_edit_names_the_lines_it_changed(tmp_path, make_ctx, original, edits, summary):
+    (tmp_path / "f.txt").write_bytes(original.encode())
+
+    result = await _edit(make_ctx, "f.txt", *edits)
+
+    assert (result.is_error, result_text(result)) == (False, summary)
+
+
+_UNIQUE = "Please provide more context to make it unique. Occurrences:\n"
+
+
+@pytest.mark.parametrize(("original", "old_text", "occurrences"), [
+    # The first five, in file order, without indentation, then how many more.
+    (
+        "".join(f"    MODE = 'isolated'  # {n}\n" for n in range(1, 8)),
+        "MODE = 'isolated'",
+        "Found 7 occurrences of the text in f.txt. The text must be unique. " + _UNIQUE
+        + "\n".join(f"line {n}: MODE = 'isolated'  # {n}" for n in range(1, 6)) + "\n...and 2 more",
+    ),
+    # read's line numbers: a lone "\r" ends no line for read, a CRLF ends one.
+    ("a\rdup\r\ndup\n", "dup", "Found 2 occurrences of the text in f.txt. The text must be unique. " + _UNIQUE
+     + "line 1: dup\nline 2: dup"),
+    # Occurrences found only after normalization are shown as the file has them.
+    (
+        "say \u201cHi\u201d\nkeep\nsay \u201cHi\u201d  \n",
+        'say "Hi"',
+        "Found 2 occurrences of the text in f.txt. The text must be unique. " + _UNIQUE
+        + "line 1: say \u201cHi\u201d\nline 3: say \u201cHi\u201d",
+    ),
+    # A long line is shown only around the occurrence.
+    (
+        "a" * 120 + " dup " + "b" * 120 + "\ndup\n",
+        "dup",
+        "Found 2 occurrences of the text in f.txt. The text must be unique. " + _UNIQUE
+        + "line 1: ..." + "a" * 24 + " dup " + "b" * 71 + "...\nline 2: dup",
+    ),
+    # ... also when it was found after normalization lengthened the line before it (U+FB01 is "fi").
+    (
+        "\ufb01" * 150 + " say \u201cHi\u201d " + "b" * 100 + "\nsay \u201cHi\u201d\n",
+        'say "Hi"',
+        "Found 2 occurrences of the text in f.txt. The text must be unique. " + _UNIQUE
+        + "line 1: ..." + "\ufb01" * 24 + " say \u201cHi\u201d " + "b" * 66 + "...\nline 2: say \u201cHi\u201d",
+    ),
+])
+async def test_an_ambiguous_edit_lists_where_the_text_occurs(tmp_path, make_ctx, original, old_text, occurrences):
+    (tmp_path / "f.txt").write_bytes(original.encode())
+
+    result = await _edit(make_ctx, "f.txt", {"oldText": old_text, "newText": "x"})
+
+    assert (result.is_error, result_text(result)) == (True, occurrences)
+    assert (tmp_path / "f.txt").read_bytes() == original.encode()
 
 
 async def test_text_copied_from_read_edits_a_file_with_invalid_bytes(tmp_path, make_ctx):
@@ -825,12 +906,12 @@ async def test_an_edit_never_changes_bytes_outside_the_lines_it_replaces(tmp_pat
         (
             [{"oldText": "dup", "newText": "x"}],
             "Found 2 occurrences of the text in f.txt. The text must be unique. Please provide more context to make "
-            "it unique.",
+            "it unique. Occurrences:\nline 2: dup one\nline 3: dup two",
         ),
         (
             [{"oldText": "alpha", "newText": "A"}, {"oldText": "dup", "newText": "x"}],
             "Found 2 occurrences of edits[1] in f.txt. Each oldText must be unique. Please provide more context to "
-            "make it unique.",
+            "make it unique. Occurrences:\nline 2: dup one\nline 3: dup two",
         ),
         (
             [{"oldText": "alpha beta", "newText": "x"}, {"oldText": "beta", "newText": "y"}],

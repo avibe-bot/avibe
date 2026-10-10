@@ -3,7 +3,10 @@
 Ported from Pi ``packages/coding-agent/src/core/tools/edit.ts`` (MIT, Copyright
 (c) 2025 Mario Zechner); the description and model-facing strings are Pi's.
 ``replaceAll`` is an Avibe addition, so its schema text and the "unless
-replaceAll is true" clause are Avibe's.
+replaceAll is true" clause are Avibe's. Avibe improvements to Pi's result
+texts: a successful edit names the lines it rewrote, and an ambiguous match
+lists its first occurrences (``edit_diff``), so the model can inspect the result
+or add context without another read; Pi reports only counts.
 """
 
 from __future__ import annotations
@@ -15,7 +18,14 @@ from typing import Any, Mapping
 
 from core.agent_core.tools.args import ToolInputError, error_result, str_arg, text_result
 from core.agent_core.tools.base import ToolContext, ToolResult, ToolSpec
-from core.agent_core.tools.edit_diff import Edit, EditError, ResultTooLarge, apply_edits, display_diff
+from core.agent_core.tools.edit_diff import (
+    MAX_LOCATIONS,
+    Edit,
+    EditError,
+    ResultTooLarge,
+    apply_edits,
+    display_diff,
+)
 from core.agent_core.tools.paths import (
     NotRegularFile,
     errno_name,
@@ -127,15 +137,29 @@ def _edits_arg(arguments: Mapping[str, Any]) -> list[Edit]:
     return parsed
 
 
-def edit_summary(path: str, edits: list[Edit], counts: tuple[int, ...]) -> str:
-    """Pi's result line, or, when an item used ``replaceAll`` (Avibe), the occurrences each item replaced."""
+def _line_ranges(changed: tuple[tuple[int, int], ...]) -> str:
+    """``lines 40-52, 88-90`` (``line 7`` for one line), the first ``MAX_LOCATIONS`` ranges then how many more."""
+    shown = [str(first) if first == last else f"{first}-{last}" for first, last in changed[:MAX_LOCATIONS]]
+    if len(changed) > MAX_LOCATIONS:
+        shown.append(f"...and {len(changed) - MAX_LOCATIONS} more")
+    single = len(changed) == 1 and changed[0][0] == changed[0][1]
+    return f"{'line' if single else 'lines'} {', '.join(shown)}"
+
+
+def edit_summary(
+    path: str, edits: list[Edit], counts: tuple[int, ...], changed: tuple[tuple[int, int], ...]
+) -> str:
+    """Pi's result line, or, when an item used ``replaceAll`` (Avibe), the occurrences each item replaced.
+
+    Avibe adds the new file's rewritten lines, so the model can read just those to check the result.
+    """
     if not any(edit.replace_all for edit in edits):
-        return f"Successfully replaced {len(edits)} block(s) in {path}."
+        return f"Successfully replaced {len(edits)} block(s) in {path} ({_line_ranges(changed)})."
     total = sum(counts)
-    summary = f"Successfully replaced {total} occurrence{'' if total == 1 else 's'} in {path}"
+    summary = f"Successfully replaced {total} occurrence{'' if total == 1 else 's'} in {path} ({_line_ranges(changed)}"
     if len(counts) > 1:
-        summary += " (" + ", ".join(f"edits[{index}]: {count}" for index, count in enumerate(counts)) + ")"
-    return summary + "."
+        summary += "; " + ", ".join(f"edits[{index}]: {count}" for index, count in enumerate(counts))
+    return summary + ")."
 
 
 class _TooLarge(Exception):
@@ -157,8 +181,8 @@ def _line_count(text: str) -> int:
 
 def _plan_edits(
     absolute: str, edits: list[Edit], path: str
-) -> tuple[int, bytes, str, str, FileIdentity, tuple[int, ...]]:
-    """Read the file and compute its new bytes: ``(size, data, view_before, view_after, identity, counts)``.
+) -> tuple[int, bytes, str, str, FileIdentity, tuple[int, ...], tuple[tuple[int, int], ...]]:
+    """Read the file and compute its new bytes: ``(size, data, view_before, view_after, identity, counts, changed)``.
 
     One descriptor gives the size and the contents, read up to the limit, so a file that grew after an
     earlier check by path cannot get past it. ``surrogateescape`` carries bytes that are not UTF-8
@@ -181,8 +205,8 @@ def _plan_edits(
     lines = _line_count(text)
     if lines > MAX_EDIT_LINES:
         raise _TooManyLines(lines)
-    new_text, before, after, counts = apply_edits(text, edits, path, max_result_chars=MAX_EDIT_BYTES)
-    return len(raw), encode_file(new_text), before, after, FileIdentity.of(real, st), counts
+    new_text, before, after, counts, changed = apply_edits(text, edits, path, max_result_chars=MAX_EDIT_BYTES)
+    return len(raw), encode_file(new_text), before, after, FileIdentity.of(real, st), counts, changed
 
 
 class EditTool:
@@ -217,7 +241,7 @@ class EditTool:
             if not os.access(absolute, os.R_OK | os.W_OK):
                 return error_result(f"Could not edit file: {path}. Error code: EACCES.")
             try:
-                size, data, base, new_content, identity, counts = await to_thread_joined(
+                size, data, base, new_content, identity, counts, changed = await to_thread_joined(
                     _plan_edits, absolute, edits, path
                 )
                 if len(data) > MAX_EDIT_BYTES:
@@ -258,7 +282,7 @@ class EditTool:
             except OSError as exc:
                 return error_result(f"Could not edit file: {path}. Error code: {errno_name(exc)}.")
 
-        result = edit_summary(path, edits, counts)
+        result = edit_summary(path, edits, counts, changed)
         if max(size, len(data)) > MAX_DIFF_BYTES:
             # The diff is for display only, and difflib is superlinear on large inputs.
             return text_result(result, details={"diff_skipped": True})

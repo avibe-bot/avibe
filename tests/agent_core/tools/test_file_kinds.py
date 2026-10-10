@@ -196,7 +196,7 @@ async def test_edit_has_a_defined_result_for_every_kind(tmp_path, make_ctx, plac
     result = await _run(EditTool(), arguments, make_ctx(), tmp_path)
 
     if kind in ("regular", "link_regular"):
-        assert (result.is_error, result_text(result)) == (False, f"Successfully replaced 1 block(s) in {path}.")
+        assert (result.is_error, result_text(result)) == (False, f"Successfully replaced 1 block(s) in {path} (line 1).")
         assert (tmp_path / "f").read_text() == "bye\n"
         assert (tmp_path / path).is_symlink() == (kind == "link_regular")
         return

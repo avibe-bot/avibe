@@ -10,6 +10,9 @@ tier, so one normalized edit no longer switches the whole batch to normalized
 text; uniqueness is counted in the tier that matched; and the file is never
 re-encoded: replacements are spliced into the original text, so its BOM, its
 line breaks (mixed or not), and every byte outside a replaced span survive.
+Avibe additions to Pi's messages: an ambiguous match lists where its first
+occurrences are, and a successful edit reports the lines it rewrote, so the
+model need not read the file again to disambiguate or to inspect the result.
 """
 
 from __future__ import annotations
@@ -111,6 +114,10 @@ _ASCII = re.compile("[\x00-\x7f]")
 #: Avibe: every edit scans the whole file (``str.count``/``find``, which hold the GIL), so the number of
 #: edits times the file's length is bounded: about a quarter second of scanning.
 MAX_EDIT_SCAN_CHARS = 256 * 1024 * 1024
+#: Avibe: occurrences an ambiguous match lists, and rewritten line ranges a result lists, before "...and N more".
+MAX_LOCATIONS = 5
+#: Avibe: characters of a long line an occurrence's excerpt shows.
+EXCERPT_CHARS = 100
 
 
 class ResultTooLarge(Exception):
@@ -162,15 +169,19 @@ def _not_found(path: str, index: int, total: int, *, loose_unavailable: bool = F
     )
 
 
-def _duplicate(path: str, index: int, total: int, occurrences: int) -> EditError:
+def _duplicate(path: str, index: int, total: int, occurrences: int, locations: list[str]) -> EditError:
+    # Avibe addition: where the first occurrences are, so the model can add context without reading the file.
+    shown_locations = "\n".join(locations)
+    if occurrences > len(locations):
+        shown_locations += f"\n...and {occurrences - len(locations)} more"
     if total == 1:
         return EditError(
             f"Found {occurrences} occurrences of the text in {path}. The text must be unique. Please provide more "
-            "context to make it unique."
+            f"context to make it unique. Occurrences:\n{shown_locations}"
         )
     return EditError(
         f"Found {occurrences} occurrences of edits[{index}] in {path}. Each oldText must be unique. Please provide "
-        "more context to make it unique."
+        f"more context to make it unique. Occurrences:\n{shown_locations}"
     )
 
 
@@ -273,6 +284,10 @@ class _Lines:
             view_pos += len(content) + 1
             pos += len(content) + len(brk)
 
+    def read_line(self, line: int) -> int:
+        """The number ``read`` shows for ``line``: read breaks lines only at ``\\n``, not at a lone ``\\r``."""
+        return self.text.count("\n", 0, self.starts[line]) + 1
+
     def to_original(self, view_offset: int) -> int:
         line = bisect.bisect_right(self.view_starts, view_offset) - 1
         return self.starts[line] + (view_offset - self.view_starts[line])
@@ -306,6 +321,121 @@ class _Lines:
         rest = lf_text[pos:]
         out.append(rest if fallback == "\n" else rest.replace("\n", fallback))
         return "".join(out)
+
+
+def _excerpt(line: str, column: int) -> str:
+    """``line`` without its indentation; a long line only around ``column``."""
+    if len(line) <= EXCERPT_CHARS:
+        return line.strip()
+    start = max(0, min(column - EXCERPT_CHARS // 4, len(line) - EXCERPT_CHARS))
+    end = start + EXCERPT_CHARS
+    return ("..." if start else "") + line[start:end].strip() + ("..." if end < len(line) else "")
+
+
+def _original_column(line: str, column: int) -> int:
+    """The column of ``line`` where its normalized form reaches ``column``.
+
+    Only NFKC changes lengths (the substitutions after it are one character for one, and trailing
+    whitespace is stripped after any occurrence). The line is measured in pieces ending just before an
+    ASCII character, as ``_bounded_fuzzy_view`` normalizes it; a piece already in NFKC maps one for
+    one, and the piece that changes length across ``column`` is bisected. ``_bounded_fuzzy_view``
+    gave up on any longer run that is not in NFKC, so a bisected piece stays bounded.
+    """
+    pos = reached = 0
+    while pos < len(line):
+        boundary = _ASCII.search(line, pos + _NFKC_CHUNK_CHARS)
+        end = boundary.start() if boundary else len(line)
+        piece = line[pos:end]
+        if unicodedata.is_normalized("NFKC", piece):
+            if reached + len(piece) > column:
+                return pos + column - reached
+            reached += len(piece)
+        else:
+            grown = len(unicodedata.normalize("NFKC", piece))
+            if reached + grown > column:
+                lo, hi = 0, len(piece)
+                while lo < hi:
+                    mid = (lo + hi + 1) // 2
+                    if len(unicodedata.normalize("NFKC", piece[:mid])) <= column - reached:
+                        lo = mid
+                    else:
+                        hi = mid - 1
+                return pos + lo
+            reached += grown
+        pos = end
+    return len(line)
+
+
+def _locations(lines: _Lines, haystack: str, needle: str, normalized: bool) -> list[str]:
+    """``line {n}: {excerpt}`` for the first ``MAX_LOCATIONS`` occurrences of ``needle`` in ``haystack``.
+
+    ``haystack`` is the view or, when ``normalized``, its normalized form, which keeps every line break,
+    so its line ``i`` is the view's line ``i``; the excerpt is that line of the view, as read showed it.
+    """
+    out = []
+    for at in _find_all(haystack, needle, MAX_LOCATIONS):
+        line = haystack.count("\n", 0, at)
+        column = at - (haystack.rfind("\n", 0, at) + 1)
+        start = lines.view_starts[line]
+        text = lines.view[start : start + len(lines.contents[line])]
+        if normalized and len(text) > EXCERPT_CHARS:
+            # A column of the normalized form; NFKC may have changed lengths earlier on the line.
+            column = _original_column(text, column)
+        out.append(f"line {lines.read_line(line)}: {_excerpt(text, column)}")
+    return out
+
+
+def _common_prefix(a: str, b: str, limit: int) -> int:
+    """How many leading characters, up to ``limit``, ``a`` and ``b`` share; bisected over slice
+    comparisons, so a long shared run costs a few memcmp calls rather than a loop per character."""
+    lo, hi = 0, limit
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if a[:mid] == b[:mid]:
+            lo = mid
+        else:
+            hi = mid - 1
+    return lo
+
+
+def _common_suffix(a: str, b: str, limit: int) -> int:
+    """How many trailing characters, up to ``limit``, ``a`` and ``b`` share."""
+    lo, hi = 0, limit
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if a[len(a) - mid :] == b[len(b) - mid :]:
+            lo = mid
+        else:
+            hi = mid - 1
+    return lo
+
+
+def _changed_lines(text: str, replacements: list[_Replacement]) -> tuple[tuple[int, int], ...]:
+    """The new file's rewritten line ranges, numbered as ``read`` shows them; touching ranges merge.
+
+    A replacement counts from its first to its last character that differs from the text it replaced,
+    so unchanged context at either end of an edit, or a replacement that changed nothing, is not
+    reported. This says where to look, not a line diff: an unchanged line between two changes of one
+    edit is part of its range.
+    """
+    ranges: list[tuple[int, int]] = []
+    line, pos = 1, 0
+    for replacement in sorted(replacements, key=lambda r: r.index):
+        line += text.count("\n", pos, replacement.index)
+        old, new = text[replacement.index : replacement.index + replacement.length], replacement.new_text
+        if old != new:
+            head = _common_prefix(old, new, min(len(old), len(new)))
+            tail = _common_suffix(old, new, min(len(old), len(new)) - head)
+            first = line + new.count("\n", 0, head)
+            # The last differing character's line; a removal marks the line it was removed from.
+            last = line + new.count("\n", 0, len(new) - tail - 1) if len(new) - tail > head else first
+            if ranges and first <= ranges[-1][1] + 1:
+                ranges[-1] = (ranges[-1][0], max(ranges[-1][1], last))
+            else:
+                ranges.append((first, last))
+        line += new.count("\n")
+        pos = replacement.index + replacement.length
+    return tuple(ranges)
 
 
 def _exact_replacements(lines: _Lines, matches: list[_Replacement]) -> list[_Replacement]:
@@ -353,9 +483,9 @@ def _line_groups(lines: _Lines, normalized: str, matches: list[_Replacement]) ->
 
 def apply_edits(
     text: str, edits: list[Edit], path: str, max_result_chars: Optional[int] = None
-) -> tuple[str, str, str, tuple[int, ...]]:
-    """Apply every edit to the file's ``text``; return the new text, the LF views before and after, and
-    how many occurrences each edit replaced.
+) -> tuple[str, str, str, tuple[int, ...], tuple[tuple[int, int], ...]]:
+    """Apply every edit to the file's ``text``; return the new text, the LF views before and after, how
+    many occurrences each edit replaced, and the new text's rewritten line ranges (``read``'s numbers).
 
     Each edit matches in its own tier against the original, in the file's LF view. Exact edits replace
     exactly the text they matched; a normalized edit rewrites the whole lines it touches from the
@@ -391,7 +521,7 @@ def apply_edits(
         if not count:
             raise _not_found(path, index, total, loose_unavailable=bool(cache) and cache[0] is None)
         if not edit.replace_all and count > 1:
-            raise _duplicate(path, index, total, count)
+            raise _duplicate(path, index, total, count, _locations(lines, haystack, needle, used_normalized))
         replacements_made += count
         counts.append(count)
         if replacements_made > MAX_REPLACEMENTS:
@@ -410,7 +540,7 @@ def apply_edits(
     new_text = _apply(text, replacements)
     if new_text == text:
         raise _no_change(path, total)
-    return new_text, lines.view, lf_view(new_text), tuple(counts)
+    return new_text, lines.view, lf_view(new_text), tuple(counts), _changed_lines(text, replacements)
 
 
 def lf_view(text: str) -> str:
