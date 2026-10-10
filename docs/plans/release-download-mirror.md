@@ -35,10 +35,15 @@ Each mirrored repository owns one bucket root:
 | `avibe-bot/askill` | `askill/` |
 | `avibe-bot/avault` | `avault/` |
 | `tmux/tmux-builds` | `tmux/` |
+| `BurntSushi/ripgrep` | `ripgrep/` |
 
 `tmux/tmux-builds` is third-party: the ISC-licensed tmux builds the managed
 tmux runtime pins. Its releases are mirrored like Avibe's own, with their
 `LICENSES.tar.gz`.
+
+`BurntSushi/ripgrep` is third-party too, and only the releases that
+`vibe/ripgrep_runtime_manifest.json` pins or once pinned are mirrored. See
+`docs/plans/ripgrep-runtime.md`.
 
 - `https://dl.avibe.bot/<root>releases/<tag>/<asset>` is byte-identical to
   `https://github.com/<repository>/releases/download/<tag>/<asset>`.
@@ -96,6 +101,12 @@ tmux runtime pins. Its releases are mirrored like Avibe's own, with their
 - tmux-builds keeps no prereleases. Its `preview` prerelease is rebuilt in
   place, changing bytes under unchanged asset names, which the reconciler must
   treat as published bytes changing.
+- ripgrep keeps every release a manifest has pinned, and nothing else; its
+  root only grows. The mirror is those releases' backup. When GitHub no longer
+  publishes a currently pinned archive with the manifest's size and digest, the
+  run fails before planning. A release an earlier manifest pinned stays in the
+  index and the bucket after the pin moves, because released Avibe versions
+  still name it.
 - At the time of writing Avibe is 89 releases and about 19 GB, most of it the
   desktop bundles in recent prereleases (about 0.7 GB each). askill adds 16
   releases and about 7 GB, avault 5 releases and 0.04 GB, tmux-builds 5
@@ -148,8 +159,8 @@ Cloudflare configuration lives outside the repository. The expected state:
 
 ## Client downloads
 
-The managed git and tmux runtimes, the model hub engine, Show Runtime manifest
-archives, and the askill and avault binaries download through
+The managed git, tmux, and ripgrep runtimes, the model hub engine, Show
+Runtime manifest archives, and the askill and avault binaries download through
 `core.dependency_network.fetch_to_path`:
 
 - A mirrored repository's release URL without a query tries the mirror, then

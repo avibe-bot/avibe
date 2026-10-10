@@ -15986,6 +15986,7 @@ def cmd_runtime(args) -> int:
         askill = _ensure_askill_during_prepare(offline=bool(offline), force=force)
         tmux = _ensure_tmux_during_prepare(offline=bool(offline), force=force)
         git = _ensure_git_during_prepare(offline=offline, force=force)
+        ripgrep = _ensure_ripgrep_during_prepare(offline=offline, force=force)
         avault = _ensure_avault_during_prepare(offline=bool(offline), force=force)
         model_hub_engine = _ensure_model_hub_engine_during_prepare(
             offline=bool(offline),
@@ -15996,6 +15997,7 @@ def cmd_runtime(args) -> int:
         payload["model_hub_engine"] = model_hub_engine
         payload["tmux"] = tmux
         payload["git"] = git
+        payload["ripgrep"] = ripgrep
         install = payload.get("install") if isinstance(payload.get("install"), dict) else {}
         policy = payload.get("policy") if isinstance(payload.get("policy"), dict) else {}
         runtime_prepared = bool(payload.get("ok"))
@@ -16089,6 +16091,22 @@ def cmd_runtime(args) -> int:
             else:
                 print(
                     f"git runtime not ready: {git.get('message') or git.get('reason') or 'install failed'}",
+                    file=sys.stderr,
+                )
+            if ripgrep.get("ok"):
+                print(
+                    i18n_t(
+                        "runtime.prepare.ripgrepInstalled" if ripgrep.get("changed") else "runtime.prepare.ripgrepReady",
+                        language,
+                    )
+                )
+            else:
+                print(
+                    i18n_t(
+                        "runtime.prepare.ripgrepNotReady",
+                        language,
+                        reason=ripgrep.get("message") or ripgrep.get("reason") or "install failed",
+                    ),
                     file=sys.stderr,
                 )
         strict_ok = runtime_prepared and _git_prepare_satisfies_strict(git)
@@ -16295,6 +16313,17 @@ def _ensure_git_during_prepare(offline: bool | None = None, force: bool = False)
         return {"ok": False, "message": str(exc)}
 
 
+def _ensure_ripgrep_during_prepare(offline: bool | None = None, force: bool = False) -> dict:
+    """Prepare the managed ripgrep for Agent commands; its absence never fails prepare."""
+
+    try:
+        from core.ripgrep_runtime import RipgrepRuntimeManager
+
+        return RipgrepRuntimeManager(offline=offline).ensure(force=force)
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "message": str(exc)}
+
+
 def _format_byte_size(size: int) -> str:
     if size < 1024:
         return f"{size} B"
@@ -16308,6 +16337,7 @@ def _format_byte_size(size: int) -> str:
 def _managed_runtime_cleaners() -> tuple[tuple[str, Callable[..., dict[str, Any]]], ...]:
     """Return the shared-runtime cleanup passes in stable output order."""
 
+    from core.ripgrep_runtime import RipgrepRuntimeManager
     from core.tmux_runtime import get_tmux_runtime_manager
     from vibe.model_hub_runtime.installer import EngineRuntimeManager
 
@@ -16324,10 +16354,17 @@ def _managed_runtime_cleaners() -> tuple[tuple[str, Callable[..., dict[str, Any]
             dry_run=dry_run,
         )
 
+    def clean_ripgrep(*, keep_previous: int, dry_run: bool) -> dict[str, Any]:
+        return RipgrepRuntimeManager().clean(
+            keep_previous=keep_previous,
+            dry_run=dry_run,
+        )
+
     return (
         ("git", _clean_git_runtime),
         ("model_hub_engine", clean_model_hub),
         ("tmux", clean_tmux),
+        ("ripgrep", clean_ripgrep),
     )
 
 
@@ -16388,6 +16425,7 @@ def _managed_runtime_label(runtime_id: str) -> str:
         "git": "Git Runtime",
         "model_hub_engine": "Model Hub Runtime",
         "tmux": "tmux Runtime",
+        "ripgrep": "ripgrep Runtime",
     }
     return labels.get(runtime_id, runtime_id.replace("-", " ").replace("_", " ").title())
 

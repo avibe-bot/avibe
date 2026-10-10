@@ -1493,6 +1493,26 @@ async def test_the_system_prompt_lists_every_tool_the_run_offers(engine, session
     assert "- Only your final reply is reliably shown to the user; put anything the user must see in it" in system
 
 
+@pytest.mark.parametrize("finds_rg", (True, False))
+async def test_the_bash_rule_names_rg_only_when_the_turns_commands_find_it(
+    engine, session, tmp_path, published, monkeypatch, finds_rg
+) -> None:
+    # The service's PATH, as the Turn's commands get it; no managed rg is installed.
+    service_bin = tmp_path / "service-bin"
+    service_bin.mkdir()
+    if finds_rg:
+        (service_bin / "rg").write_text("#!/bin/sh\n", encoding="utf-8")
+        (service_bin / "rg").chmod(0o755)
+    monkeypatch.setenv("PATH", str(service_bin))
+    harness = _Harness(engine, tmp_path, "avibe", [[Done(assistant("ok"))]], tools=[FakeTool("bash")])
+
+    await harness.agent.handle_message(harness.request("find the TODOs"))
+
+    system = harness.provider.requests[0].system
+    assert ("- Use bash for file operations like ls, rg, find" in system) is finds_rg
+    assert ("- Use bash for file operations like ls, grep, find" in system) is not finds_rg
+
+
 async def test_the_system_prompt_offers_no_computer_use_it_cannot_call(
     engine, session, tmp_path, published, monkeypatch
 ) -> None:
@@ -2036,6 +2056,29 @@ async def test_a_turn_runs_bash_through_the_real_job_host(engine, session, tmp_p
     assert [entry.kind for entry in rows] == ["input", "response", "tool_result", "response"]
     assert "hi from bash" in rows[2].message.content[0].text and not rows[2].message.is_error
     assert "hi from bash" in str(harness.provider.requests[1].messages[-1])
+
+
+async def test_a_turns_bash_runs_the_managed_rg_when_the_service_path_has_none(
+    engine, session, tmp_path, published, monkeypatch
+) -> None:
+    from tests.test_ripgrep_runtime import install_test_ripgrep
+
+    assert install_test_ripgrep(tmp_path / "ripgrep", monkeypatch)["ok"]
+    service_bin = tmp_path / "service-bin"
+    service_bin.mkdir()
+    monkeypatch.setenv("PATH", str(service_bin))
+    call = ToolCallBlock(id="call_rg", name="bash", arguments={"command": "rg --version"})
+    harness = _Harness(
+        engine, tmp_path, "avibe",
+        [[Done(assistant("", calls=(call,)))], [Done(assistant("done"))]],
+        suite=local_tool_suite(str(tmp_path / "jobs")),
+    )
+
+    await harness.agent.handle_message(harness.request("which ripgrep do you have"))
+
+    result = (await harness.context_rows())[2].message
+    assert not result.is_error and "ripgrep 15.2.0" in result.content[0].text
+    assert "- Use bash for file operations like ls, rg, find" in harness.provider.requests[0].system
 
 
 async def test_bash_runs_with_the_turns_caller_environment(engine, session, tmp_path, published) -> None:

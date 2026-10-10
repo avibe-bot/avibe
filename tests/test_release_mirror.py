@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from dataclasses import replace
 
@@ -145,6 +146,96 @@ def test_tmux_builds_mirrors_its_full_releases_but_not_its_rebuilt_preview(monke
     arguments = ["--repository", repository, "--bucket", "avibe", "--endpoint-url", "https://r2.invalid"]
     assert mirror.main(arguments) == 0
     assert bucket.writes == ["tmux/releases/v3.6b/tmux-3.6b-linux-x86_64.tar.gz", "tmux/index/releases.json"]
+
+
+RIPGREP = "BurntSushi/ripgrep"
+
+
+def ripgrep_releases():
+    """GitHub's view of ripgrep: the release the runtime manifest pins, and an older one without digests."""
+    manifest = json.loads(mirror.PINNED_BY_MANIFEST[RIPGREP].read_text(encoding="utf-8"))
+    tag = manifest["release_tag"]
+    pinned = github_release(tag, published_at="2026-07-15T16:26:10Z", assets=("ripgrep.deb",), repository=RIPGREP)
+    for archive in manifest["archives"].values():
+        pinned["assets"].append({
+            "name": archive["name"], "size": archive["size"], "digest": f"sha256:{archive['sha256']}",
+            "content_type": "application/gzip", "browser_download_url": archive["url"],
+        })
+    older = github_release("14.1.1", published_at="2024-09-09T02:28:54Z", assets=("old.tgz",), repository=RIPGREP)
+    older["assets"][0]["digest"] = None
+    return manifest, [pinned, older]
+
+
+def reconcile_ripgrep(monkeypatch, items, bucket):
+    monkeypatch.setattr(mirror, "Bucket", lambda name, endpoint_url: bucket)
+    monkeypatch.setattr(mirror, "github_releases", lambda repository: items)
+    monkeypatch.setattr(mirror, "tag_commits", lambda repository: {item["tag_name"]: "0" * 40 for item in items})
+    monkeypatch.setattr(mirror, "download", lambda asset, destination: destination.write_bytes(b""))
+    return mirror.main(["--repository", RIPGREP, "--bucket", "avibe", "--endpoint-url", "https://r2.invalid"])
+
+
+def test_ripgrep_mirrors_only_the_release_its_runtime_manifest_pins(monkeypatch):
+    manifest, items = ripgrep_releases()
+    bucket = RecordingBucket({}, None)
+
+    assert reconcile_ripgrep(monkeypatch, items, bucket) == 0
+    tag = manifest["release_tag"]
+    archives = sorted(archive["name"] for archive in manifest["archives"].values())
+    assert bucket.writes == [
+        *(f"ripgrep/releases/{tag}/{name}" for name in sorted([*archives, "ripgrep.deb"])),
+        "ripgrep/index/releases.json",
+    ]
+
+
+@pytest.mark.parametrize("index_readable", [True, False])
+def test_ripgrep_keeps_the_releases_earlier_manifests_pinned(monkeypatch, index_readable):
+    manifest, items = ripgrep_releases()
+    (earlier,) = releases(
+        github_release("15.1.0", published_at="2025-10-22T13:00:26Z", assets=("ripgrep-15.1.0.tar.gz",),
+                       repository=RIPGREP),
+        repository=RIPGREP,
+    )
+    (earlier_asset,) = earlier.assets
+    prior = mirror.render_index(RIPGREP, [earlier]) if index_readable else b"{not json"
+    written = {}
+
+    class IndexBucket(RecordingBucket):
+        def put(self, key, path, **metadata):
+            super().put(key, path, **metadata)
+            if key == "ripgrep/index/releases.json":
+                written.update(json.loads(path.read_bytes()))
+
+    bucket = IndexBucket({earlier.key(earlier_asset): earlier_asset.size, "ripgrep/index/releases.json": 1}, prior)
+
+    # Avibe builds released with the earlier manifest still download that release.
+    assert reconcile_ripgrep(monkeypatch, items, bucket) == 0
+    assert earlier.key(earlier_asset) not in bucket.writes
+    indexed = [release["tag"] for release in written["releases"]]
+    assert indexed == ([manifest["release_tag"], "15.1.0"] if index_readable else [manifest["release_tag"]])
+
+
+@pytest.mark.parametrize(
+    "diverge",
+    [
+        lambda pinned: pinned.update(tag_name="15.2.1"),
+        lambda pinned: pinned["assets"].pop(),
+        lambda pinned: pinned["assets"][-1].update(digest=f"sha256:{'0' * 64}"),
+    ],
+    ids=["release-gone", "archive-gone", "archive-changed"],
+)
+def test_ripgrep_diverging_from_its_manifest_fails_without_touching_the_mirror(monkeypatch, capsys, diverge):
+    manifest, items = ripgrep_releases()
+    tag = manifest["release_tag"]
+    mirrored = {
+        f"ripgrep/releases/{tag}/{archive['name']}": archive["size"] for archive in manifest["archives"].values()
+    }
+    bucket = RecordingBucket({**mirrored, "ripgrep/index/releases.json": 1}, b"{}")
+    diverge(items[0])
+
+    # The mirror keeps the verified copy clients try first; the failing run is the alarm.
+    assert reconcile_ripgrep(monkeypatch, items, bucket) == 1
+    assert bucket.writes == []
+    assert "error: BurntSushi/ripgrep: pinned" in capsys.readouterr().err
 
 
 def test_a_completed_reconcile_is_a_no_op_on_the_next_run():

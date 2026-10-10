@@ -63,14 +63,17 @@ FORK_HISTORY = "the conversation above is that Session's history through context
 FORK_NO_HISTORY = "it starts empty, before that Session's first finished Turn, so no history is inherited"
 
 
-def coding_prompt(tool_names: Iterable[str]) -> str:
-    """Pi's preamble, tool list, and rules for the tools actually offered."""
+def coding_prompt(tool_names: Iterable[str], *, rg: bool) -> str:
+    """Pi's preamble, tool list, and rules for the tools actually offered.
+
+    ``rg`` is whether the Session's commands find ripgrep; the bash rule names it only then, and ``grep`` otherwise.
+    """
     offered = set(tool_names)
     names = [name for name in TOOL_ORDER if name in offered]
     tools = "\n".join(f"- {name}: {TOOL_SNIPPETS[name]}" for name in names) or "(none)"
     rules: list[str] = []
     if "bash" in names:
-        rules.append("Use bash for file operations like ls, rg, find")
+        rules.append(f"Use bash for file operations like ls, {'rg' if rg else 'grep'}, find")
     for name in names:
         rules.extend(TOOL_GUIDELINES.get(name, ()))
     rules += ["Be concise in your responses", "Show file paths clearly when working with files", FINAL_REPLY_RULE]
@@ -83,8 +86,8 @@ def coding_prompt(tool_names: Iterable[str]) -> str:
     )
 
 
-def system_prompt(tool_names: Iterable[str], avibe_sections: str) -> str:
-    return "\n\n".join(part for part in (coding_prompt(tool_names), avibe_sections.strip()) if part)
+def system_prompt(tool_names: Iterable[str], avibe_sections: str, *, rg: bool) -> str:
+    return "\n\n".join(part for part in (coding_prompt(tool_names, rg=rg), avibe_sections.strip()) if part)
 
 
 # --- environment block ---------------------------------------------------------

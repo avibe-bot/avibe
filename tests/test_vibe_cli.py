@@ -3742,6 +3742,7 @@ def test_runtime_prepare_strict_does_not_report_policy_skip_as_ready(monkeypatch
     monkeypatch.setattr(cli, "_ensure_askill_during_prepare", lambda **_kwargs: {"ok": True})
     monkeypatch.setattr(cli, "_ensure_tmux_during_prepare", lambda **_kwargs: {"ok": True})
     monkeypatch.setattr(cli, "_ensure_git_during_prepare", lambda **_kwargs: {"ok": True, "mode": "system"})
+    monkeypatch.setattr(cli, "_ensure_ripgrep_during_prepare", lambda **_kwargs: {"ok": True})
     monkeypatch.setattr(cli, "_ensure_avault_during_prepare", lambda **_kwargs: {"ok": True})
     monkeypatch.setattr(cli, "_ensure_model_hub_engine_during_prepare", lambda **_kwargs: {"ok": True})
 
@@ -3783,6 +3784,7 @@ def test_runtime_prepare_reports_cpa_failure_without_blocking_avibe_upgrade(
     monkeypatch.setattr(cli, "_ensure_askill_during_prepare", lambda **_kwargs: {"ok": True})
     monkeypatch.setattr(cli, "_ensure_tmux_during_prepare", lambda **_kwargs: {"ok": True})
     monkeypatch.setattr(cli, "_ensure_git_during_prepare", lambda **_kwargs: {"ok": True, "mode": "system"})
+    monkeypatch.setattr(cli, "_ensure_ripgrep_during_prepare", lambda **_kwargs: {"ok": True})
     monkeypatch.setattr(cli, "_ensure_avault_during_prepare", lambda **_kwargs: {"ok": True})
     monkeypatch.setattr(
         cli,
@@ -3849,6 +3851,7 @@ def test_runtime_prepare_localizes_cpa_output(
     monkeypatch.setattr(cli, "_ensure_askill_during_prepare", lambda **_kwargs: {"ok": True})
     monkeypatch.setattr(cli, "_ensure_tmux_during_prepare", lambda **_kwargs: {"ok": True})
     monkeypatch.setattr(cli, "_ensure_git_during_prepare", lambda **_kwargs: {"ok": True, "mode": "system"})
+    monkeypatch.setattr(cli, "_ensure_ripgrep_during_prepare", lambda **_kwargs: {"ok": True})
     monkeypatch.setattr(cli, "_ensure_avault_during_prepare", lambda **_kwargs: {"ok": True})
     monkeypatch.setattr(
         cli,
@@ -3874,6 +3877,55 @@ def test_runtime_prepare_localizes_cpa_output(
     assert "Model Hub engine" not in captured.out + captured.err
 
 
+@pytest.mark.parametrize(
+    ("ripgrep_result", "expected", "stream"),
+    (
+        ({"ok": True, "changed": True}, "ripgrep 已安装。", "out"),
+        ({"ok": True, "changed": False}, "ripgrep 已就绪。", "out"),
+        (
+            {"ok": False, "reason": "ripgrep_platform_unsupported"},
+            "ripgrep 尚未就绪：ripgrep_platform_unsupported",
+            "err",
+        ),
+    ),
+)
+def test_strict_runtime_prepare_reports_ripgrep_without_requiring_it(
+    monkeypatch,
+    capsys,
+    ripgrep_result,
+    expected,
+    stream,
+):
+    manager = SimpleNamespace(
+        prepare=lambda **_kwargs: {
+            "ok": True,
+            "policy": {"state": "allowed", "reason": None},
+            "install": {"state": "installed", "reason": None},
+            "runtime": {"state": "unchecked", "reason": None},
+            "status": {"install": {"state": "installed", "install_dir": None}},
+        }
+    )
+    monkeypatch.setattr(cli, "_show_runtime_manager_from_args", lambda _args: manager)
+    monkeypatch.setattr(cli, "_configured_cli_language", lambda: "zh")
+    monkeypatch.setattr(cli, "_ensure_askill_during_prepare", lambda **_kwargs: {"ok": True})
+    monkeypatch.setattr(cli, "_ensure_tmux_during_prepare", lambda **_kwargs: {"ok": True})
+    monkeypatch.setattr(cli, "_ensure_git_during_prepare", lambda **_kwargs: {"ok": True, "mode": "system"})
+    monkeypatch.setattr(cli, "_ensure_ripgrep_during_prepare", lambda **_kwargs: ripgrep_result)
+    monkeypatch.setattr(cli, "_ensure_avault_during_prepare", lambda **_kwargs: {"ok": True})
+    monkeypatch.setattr(cli, "_ensure_model_hub_engine_during_prepare", lambda **_kwargs: {"ok": True})
+
+    # Agents fall back to grep without it, so it never fails an install or upgrade.
+    assert (
+        cli.cmd_runtime(
+            SimpleNamespace(runtime_command="prepare", offline=False, force=False, json=False, strict=True)
+        )
+        == 0
+    )
+
+    captured = capsys.readouterr()
+    assert expected in getattr(captured, stream)
+
+
 def test_runtime_prepare_force_does_not_report_explicit_command_as_replaced(monkeypatch, capsys):
     manager = SimpleNamespace(
         prepare=lambda **_kwargs: {
@@ -3892,6 +3944,7 @@ def test_runtime_prepare_force_does_not_report_explicit_command_as_replaced(monk
     monkeypatch.setattr(cli, "_ensure_askill_during_prepare", lambda **_kwargs: {"ok": True})
     monkeypatch.setattr(cli, "_ensure_tmux_during_prepare", lambda **_kwargs: {"ok": True})
     monkeypatch.setattr(cli, "_ensure_git_during_prepare", lambda **_kwargs: {"ok": True, "mode": "system"})
+    monkeypatch.setattr(cli, "_ensure_ripgrep_during_prepare", lambda **_kwargs: {"ok": True})
     monkeypatch.setattr(cli, "_ensure_avault_during_prepare", lambda **_kwargs: {"ok": True})
     monkeypatch.setattr(cli, "_ensure_model_hub_engine_during_prepare", lambda **_kwargs: {"ok": True})
 
@@ -4044,8 +4097,8 @@ def test_runtime_clean_json_keeps_nested_failure_payload_and_exits_nonzero(monke
 @pytest.mark.parametrize(
     ("language", "consumer_scope", "failure_contract"),
     [
-        ("en", "Show, Git, Model Hub, and tmux", "exit nonzero if any cleanup fails"),
-        ("zh", "Show、Git、Model Hub 和 tmux", "任一清理失败时以非零状态退出"),
+        ("en", "Show, Git, Model Hub, tmux, and ripgrep", "exit nonzero if any cleanup fails"),
+        ("zh", "Show、Git、Model Hub、tmux 和 ripgrep", "任一清理失败时以非零状态退出"),
     ],
 )
 def test_runtime_clean_help_names_consumers_and_failure_exit(
@@ -4693,7 +4746,7 @@ def test_shutdown_intent_rejects_stale_payload(tmp_path, monkeypatch):
     assert runtime.consume_shutdown_intent(12345, signal.SIGTERM) is None
 
 
-@pytest.mark.parametrize("consumer", ["model-hub", "tmux"])
+@pytest.mark.parametrize("consumer", ["model-hub", "tmux", "ripgrep"])
 def test_runtime_clean_reclaims_each_shared_consumer_in_preview_and_real_run(
     monkeypatch,
     capsys,
@@ -4707,11 +4760,18 @@ def test_runtime_clean_reclaims_each_shared_consumer_in_preview_and_real_run(
             runtime_dir=tmp_path / "model-hub-runtime",
             offline=True,
         )
-    else:
+    elif consumer == "tmux":
         from core.tmux_runtime import TmuxRuntimeManager
 
         manager = TmuxRuntimeManager(
             runtime_dir=tmp_path / "tmux-runtime",
+            offline=True,
+        )
+    else:
+        from core.ripgrep_runtime import RipgrepRuntimeManager
+
+        manager = RipgrepRuntimeManager(
+            runtime_dir=tmp_path / "ripgrep-runtime",
             offline=True,
         )
 
@@ -4807,7 +4867,7 @@ def test_runtime_clean_reclaims_each_shared_consumer_in_preview_and_real_run(
 
 
 def test_runtime_clean_registry_invokes_every_current_shared_consumer(monkeypatch):
-    from core import tmux_runtime
+    from core import ripgrep_runtime, tmux_runtime
     from vibe.model_hub_runtime import installer as model_hub_installer
 
     calls = []
@@ -4835,6 +4895,7 @@ def test_runtime_clean_registry_invokes_every_current_shared_consumer(monkeypatc
         "get_tmux_runtime_manager",
         lambda: FakeManager("tmux"),
     )
+    monkeypatch.setattr(ripgrep_runtime, "RipgrepRuntimeManager", lambda: FakeManager("ripgrep"))
 
     results = cli._clean_managed_runtime_consumers(keep_previous=2, dry_run=True)
 
@@ -4842,11 +4903,13 @@ def test_runtime_clean_registry_invokes_every_current_shared_consumer(monkeypatc
         "git",
         "model_hub_engine",
         "tmux",
+        "ripgrep",
     ]
     assert calls == [
         ("git", 2, True),
         ("model_hub_engine", 2, True),
         ("tmux", 2, True),
+        ("ripgrep", 2, True),
     ]
 
 

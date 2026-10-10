@@ -489,10 +489,10 @@ class SessionHandler(BaseHandler):
 
     @staticmethod
     def _claude_git_path_state(working_path: str) -> str:
-        from core.git_runtime import prepend_vendored_git_to_path
+        from core.agent_path import prepend_managed_tools_to_path
 
         env: dict[str, str] = {}
-        prepend_vendored_git_to_path(
+        prepend_managed_tools_to_path(
             env,
             base_env=os.environ,
             working_dir=working_path,
@@ -1774,7 +1774,7 @@ class SessionHandler(BaseHandler):
             CLAUDE_SETTING_SOURCES,
             build_claude_subprocess_env,
         )
-        from core.git_runtime import prepend_vendored_git_to_path
+        from core.agent_path import prepend_managed_tools_to_path
 
         claude_env = build_claude_subprocess_env(claude_config)
         if model_hub_launch is not None:
@@ -1787,7 +1787,7 @@ class SessionHandler(BaseHandler):
                 claude_cli_path=managed_skill_claude_cli_path(launch_config),
             )
         )
-        prepend_vendored_git_to_path(
+        prepend_managed_tools_to_path(
             claude_env,
             base_env=os.environ,
             working_dir=working_path,

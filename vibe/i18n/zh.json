@@ -1075,10 +1075,13 @@
       "modelHubEngineSkipped": "Model Hub 引擎：已跳过（{reason}）。",
       "modelHubEngineInstalled": "Model Hub 引擎已安装。",
       "modelHubEngineReady": "Model Hub 引擎已就绪。",
-      "modelHubEngineNotReady": "Model Hub 引擎尚未就绪：{reason}"
+      "modelHubEngineNotReady": "Model Hub 引擎尚未就绪：{reason}",
+      "ripgrepInstalled": "ripgrep 已安装。",
+      "ripgrepReady": "ripgrep 已就绪。",
+      "ripgrepNotReady": "ripgrep 尚未就绪：{reason}"
     },
     "clean": {
-      "commandHelp": "清理过期的 Show、Git、Model Hub 和 tmux 运行时安装与归档；任一清理失败时以非零状态退出。",
+      "commandHelp": "清理过期的 Show、Git、Model Hub、tmux 和 ripgrep 运行时安装与归档；任一清理失败时以非零状态退出。",
       "dryRunHelp": "仅报告可清理的归档与缓存条目，不删除任何内容。",
       "wouldRemoveItems": "将清理 {count} 项 Show Runtime 缓存。",
       "wouldRemoveArchives": "将清理 {count} 个已下载的 Show Runtime 归档（{size}）。",
