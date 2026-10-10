@@ -17111,7 +17111,7 @@ def build_parser():
     runs_show_parser.add_argument(
         "--brief",
         action="store_true",
-        help="Show only status, timing, error, and callback fields, as in vibe runs list",
+        help=i18n_t("harness.run.cli.help.showBrief", _configured_cli_language()),
     )
     _add_json_noop(runs_show_parser)
     runs_cancel_parser = runs_subparsers.add_parser(
