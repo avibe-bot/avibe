@@ -151,6 +151,10 @@ pub struct RuntimeHost {
     launcher: Arc<dyn RuntimeLauncher>,
     settings: RuntimeHostSettings,
     launched_runtime: Mutex<LaunchState>,
+    /// Reserves one run's prepare-and-launch step, so concurrent runs ask the
+    /// login shell once between them. Only that step takes it: stop and
+    /// removal use the launch-state mutex alone and never wait on a lookup.
+    launch_reservation: tokio::sync::Mutex<()>,
 }
 
 /// What the last successful bootstrap run adopted: the monitor's baseline.
@@ -243,6 +247,7 @@ impl RuntimeHost {
             launcher,
             settings,
             launched_runtime: Mutex::new(LaunchState::default()),
+            launch_reservation: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -472,7 +477,9 @@ impl RuntimeHost {
         // It runs here, on a blocking thread, before the launch-state mutex is
         // taken, so a concurrent recovery or stop is not held for that budget.
         // A run that finds an earlier launch still in flight starts nothing, so
-        // it does not ask the login shell either.
+        // it does not ask the login shell either. The reservation makes a
+        // concurrent run wait here and then find this run's launch in flight.
+        let reservation = self.launch_reservation.lock().await;
         let prepared = !self.launched_runtime().launch_pending();
         if prepared {
             let preparing = launcher.clone();
@@ -480,7 +487,9 @@ impl RuntimeHost {
         }
         // The lock makes the decision and launch atomic, so concurrent runs
         // cannot both start the Runtime.
-        if let Err(error) = self.launch_if_needed(launcher.clone(), trigger.allows_handover(), prepared) {
+        let launched = self.launch_if_needed(launcher.clone(), trigger.allows_handover(), prepared);
+        drop(reservation);
+        if let Err(error) = launched {
             return publish(
                 sink,
                 BootstrapStatus::failed(
@@ -971,6 +980,80 @@ mod tests {
 
         assert_eq!(counting.prepares.load(Ordering::SeqCst), 0);
         assert_eq!(counting.launches.load(Ordering::SeqCst), 0);
+    }
+
+    /// A launcher whose login-shell lookup blocks until the test releases it.
+    struct BlockedLookup {
+        started: std::sync::mpsc::SyncSender<()>,
+        release: Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+
+    struct ResolvesToBlockedLookup(Arc<BlockedLookup>);
+
+    impl RuntimeLauncher for ResolvesToBlockedLookup {
+        fn resolve(&self) -> Result<Arc<dyn ResolvedRuntimeLauncher>, LaunchError> {
+            Ok(Arc::new(self.0.clone()))
+        }
+
+        fn owns_private_files(&self) -> bool {
+            true
+        }
+    }
+
+    impl ResolvedRuntimeLauncher for Arc<BlockedLookup> {
+        fn endpoint(&self) -> Result<LoopbackOrigin, LaunchError> {
+            Ok(LoopbackOrigin::parse(ORIGIN).expect("test origin"))
+        }
+
+        fn prepare_launch(&self) {
+            let _ = self.started.send(());
+            let _ = self.release.lock().expect("release channel").recv();
+        }
+
+        fn launch(&self, _hand_over: bool) -> Result<LaunchedRuntime, LaunchError> {
+            Ok(LaunchedRuntime {
+                pid: 1,
+                watch: LaunchWatch::exited(LaunchExit::Started),
+            })
+        }
+    }
+
+    /// The launch reservation covers only preparing and launching: a stop or
+    /// a removal requested while a lookup holds it answers without waiting.
+    #[tokio::test]
+    async fn stop_and_removal_never_wait_on_a_launch_reservation() {
+        let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let blocked = Arc::new(BlockedLookup {
+            started: started_tx,
+            release: Mutex::new(release_rx),
+        });
+        let host = Arc::new(RuntimeHost::new(
+            Arc::new(AbsentProbe),
+            Arc::new(ResolvesToBlockedLookup(blocked)),
+            RuntimeHostSettings {
+                origin_override: None,
+                ready_timeout: Duration::from_millis(10),
+                poll_interval: Duration::from_millis(1),
+                probe_timeout: Duration::from_millis(10),
+            },
+        ));
+        let running = tokio::spawn({
+            let host = host.clone();
+            async move { host.bootstrap(&DiscardStatus, BootstrapTrigger::Launch).await }
+        });
+        tokio::task::spawn_blocking(move || started_rx.recv())
+            .await
+            .expect("lookup watcher")
+            .expect("the lookup started and holds the reservation");
+
+        let stop = tokio::time::timeout(Duration::from_secs(5), host.stop_owned_runtime()).await;
+        assert!(stop.is_ok(), "a stop waited on the launch reservation");
+        let removal = tokio::time::timeout(Duration::from_secs(5), host.remove_private_runtime(None)).await;
+        assert!(removal.is_ok(), "a removal waited on the launch reservation");
+
+        release_tx.send(()).expect("release the lookup");
+        running.await.expect("the bootstrap run finishes");
     }
 
     /// An attempt seen in flight may finish before the lock is taken. The run
