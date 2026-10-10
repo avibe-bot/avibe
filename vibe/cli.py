@@ -3787,6 +3787,9 @@ def _run_payload(run: dict, *, brief: bool = False) -> dict:
             "callback_run_id": normalized.get("callback_run_id"),
         }
     normalized["metadata"] = public_message_metadata(normalized.get("metadata") or {})
+    # `prompt` is the legacy copy of `message`: every writer stores the same text in both, and the
+    # store already falls back to it for `message`, so the record carries that text once.
+    normalized.pop("prompt", None)
     return normalized
 
 
@@ -6473,7 +6476,7 @@ def _resolve_callback_session_id(args, caller_context, *, target_session_id: Opt
     if no_callback:
         message = (
             "Started async Agent Run without a callback. This run will not post its final result back into a "
-            "Session automatically. Track it with `vibe runs show <run-id>` or by polling/listing runs for the "
+            "Session automatically. Track it with `vibe runs show <run-id> --brief` or by polling/listing runs for the "
             "target Session. To receive a follow-up message next time, use `--callback-session-id <session-id>` "
             "or run from a resolved caller context so Avibe can default the callback to the current Session."
         )
@@ -7083,7 +7086,7 @@ def cmd_runs_show(args):
     if run is None:
         _print_task_error(TaskCliError(f"run '{run_id}' not found", code="run_not_found", details={"run_id": run_id}))
         return 1
-    run_payload = _run_payload(run)
+    run_payload = _run_payload(run, brief=getattr(args, "brief", False))
     session_runtime = _live_session_runtime_for_run(run_payload)
     if session_runtime is not None:
         run_payload["session_runtime"] = session_runtime
@@ -17105,6 +17108,11 @@ def build_parser():
     _add_json_noop(runs_list_parser)
     runs_show_parser = runs_subparsers.add_parser("show", help="Show one Agent run")
     runs_show_parser.add_argument("run_id", nargs="?")
+    runs_show_parser.add_argument(
+        "--brief",
+        action="store_true",
+        help=i18n_t("harness.run.cli.help.showBrief", _configured_cli_language()),
+    )
     _add_json_noop(runs_show_parser)
     runs_cancel_parser = runs_subparsers.add_parser(
         "cancel",

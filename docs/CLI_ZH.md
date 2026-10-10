@@ -306,12 +306,15 @@ vibe session update --title 'Release review'                 # 在 Avibe Agent s
 ```bash
 vibe runs list --session-id sesk8m4q2p7x --brief
 vibe runs show run_abc123
+vibe runs show run_abc123 --brief      # 只看状态、时间、错误和回调字段
 vibe runs show                         # 在 Avibe Agent shell 内查看调用方 Run
 ```
 
 `vibe runs list` 无过滤参数时仍保持全局列表语义；传入 `--session-id` 等参数
 才会筛选。`vibe runs show` 在 Avibe 已注入 caller context 的 Agent run 内
-可以省略 run id，并默认使用 `AVIBE_RUN_ID`。
+可以省略 run id，并默认使用 `AVIBE_RUN_ID`。它输出完整记录：发给 Agent 的文本在
+`message`，回复在 `result_text`；`--brief` 只输出与 `vibe runs list` 相同的精简行，
+用于查看状态。
 
 ### `vibe task`
 
