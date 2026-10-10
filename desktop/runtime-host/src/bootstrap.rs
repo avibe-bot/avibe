@@ -473,13 +473,14 @@ impl RuntimeHost {
         // taken, so a concurrent recovery or stop is not held for that budget.
         // A run that finds an earlier launch still in flight starts nothing, so
         // it does not ask the login shell either.
-        if !self.launched_runtime().launch_pending() {
-            let prepared = launcher.clone();
-            let _ = tokio::task::spawn_blocking(move || prepared.prepare_launch()).await;
+        let prepared = !self.launched_runtime().launch_pending();
+        if prepared {
+            let preparing = launcher.clone();
+            let _ = tokio::task::spawn_blocking(move || preparing.prepare_launch()).await;
         }
         // The lock makes the decision and launch atomic, so concurrent runs
         // cannot both start the Runtime.
-        if let Err(error) = self.launch_if_needed(launcher.clone(), trigger.allows_handover()) {
+        if let Err(error) = self.launch_if_needed(launcher.clone(), trigger.allows_handover(), prepared) {
             return publish(
                 sink,
                 BootstrapStatus::failed(
@@ -718,7 +719,17 @@ impl RuntimeHost {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    fn launch_if_needed(&self, launcher: Arc<dyn ResolvedRuntimeLauncher>, hand_over: bool) -> Result<(), LaunchError> {
+    /// Starts the Runtime unless an attempt is still in flight. Only a
+    /// launcher this run `prepared` off the lock may start: launching another
+    /// would run the login-shell lookup under this mutex. An attempt seen in
+    /// flight that has finished since is what such a run waits for, and a
+    /// later run prepares before it launches again.
+    fn launch_if_needed(
+        &self,
+        launcher: Arc<dyn ResolvedRuntimeLauncher>,
+        hand_over: bool,
+        prepared: bool,
+    ) -> Result<(), LaunchError> {
         let mut state = self.launched_runtime();
         if state.stopping {
             return Err(LaunchError::RuntimeStop);
@@ -727,7 +738,7 @@ impl RuntimeHost {
             state.retain_completed_attempt_liveness();
             state.attempt = None;
         }
-        if state.attempt.is_none() {
+        if state.attempt.is_none() && prepared {
             // Spawning the helper is evidence that a Runtime may exist even
             // when the helper later reports failure. Keep that fact separate
             // from retry deduplication and stop authority.
@@ -871,7 +882,7 @@ mod tests {
         }
 
         assert!(matches!(
-            host.launch_if_needed(resolved.clone(), false),
+            host.launch_if_needed(resolved.clone(), false, true),
             Err(LaunchError::RuntimeStop)
         ));
         assert_eq!(counting.launches.load(Ordering::SeqCst), 0);
@@ -960,6 +971,29 @@ mod tests {
 
         assert_eq!(counting.prepares.load(Ordering::SeqCst), 0);
         assert_eq!(counting.launches.load(Ordering::SeqCst), 0);
+    }
+
+    /// An attempt seen in flight may finish before the lock is taken. The run
+    /// that saw it did not prepare, so it must not launch: launching would run
+    /// the login-shell lookup under the launch-state mutex.
+    #[test]
+    fn only_a_prepared_run_launches_after_an_in_flight_attempt_finishes() {
+        let counting = Arc::new(CountingLauncher::default());
+        let resolved: Arc<dyn ResolvedRuntimeLauncher> = Arc::new(counting.clone());
+        let host = RuntimeHost::new(Arc::new(AbsentProbe), counting.clone(), RuntimeHostSettings::default());
+        host.launched_runtime().attempt = Some(LaunchedRuntime {
+            pid: 1,
+            watch: LaunchWatch::exited(LaunchExit::Started),
+        });
+
+        host.launch_if_needed(resolved.clone(), false, false)
+            .expect("an unprepared run waits instead");
+        assert_eq!(counting.launches.load(Ordering::SeqCst), 0);
+        assert_eq!(counting.prepares.load(Ordering::SeqCst), 0);
+
+        host.launch_if_needed(resolved, false, true)
+            .expect("a prepared run launches");
+        assert_eq!(counting.launches.load(Ordering::SeqCst), 1);
     }
 
     #[test]
