@@ -1541,7 +1541,7 @@ def _as_agent(request: AgentRequest, agent) -> AgentRequest:
 async def test_the_built_in_agent_knows_it_is_vibey_on_every_turn(engine, session, tmp_path, published) -> None:
     # Owner decision (2026-10-10): the backend's built-in Agent is Vibey. Its preamble comes from the Agent record, so
     # the Session's system prompt is the same on every Turn, which keeps the provider's cache.
-    from modules.agents.vibey.prompt import CONCURRENT_CALLS_RULE, VIBEY_PREAMBLE
+    from modules.agents.vibey.prompt import CONCURRENT_CALLS_RULE
 
     store = _agent_store(engine)
     vibey = store.get_builtin_default_agent_for_backend("vibey", enabled_only=False)
@@ -1555,7 +1555,9 @@ async def test_the_built_in_agent_knows_it_is_vibey_on_every_turn(engine, sessio
     await harness.agent.handle_message(_as_agent(harness.request("and now?"), vibey))
 
     first, second = (request.system for request in harness.provider.requests)
-    assert first.startswith(VIBEY_PREAMBLE + "\n\nAvailable tools:")
+    head = first.split("\n\nAvailable tools:", 1)[0]
+    # The owner's wording, stated here rather than read from the constant it checks.
+    assert head.startswith("You are Vibey, the official agent of Avibe, a local-first Agent OS")
     assert "expert coding assistant" not in first and f"- {CONCURRENT_CALLS_RULE}" in first
     assert second == first
 
@@ -1563,7 +1565,7 @@ async def test_the_built_in_agent_knows_it_is_vibey_on_every_turn(engine, sessio
 async def test_another_agent_on_the_backend_is_not_told_it_is_vibey(engine, session, tmp_path, published) -> None:
     # Its own definition says who it is; the preamble only places it in Avibe. The roster of Agents may still list
     # the built-in one by name, which is not an identity.
-    from modules.agents.vibey.prompt import AGENT_PREAMBLE, CONCURRENT_CALLS_RULE
+    from modules.agents.vibey.prompt import CONCURRENT_CALLS_RULE
 
     store = _agent_store(engine)
     reviewer = store.create(name="reviewer", backend="vibey", system_prompt="You are Rex, a careful code reviewer.")
@@ -1576,7 +1578,7 @@ async def test_another_agent_on_the_backend_is_not_told_it_is_vibey(engine, sess
 
     system = harness.provider.requests[0].system
     head = system.split("\n\nAvailable tools:", 1)[0]
-    assert head == AGENT_PREAMBLE and "Vibey" not in head
+    assert head == "You are an agent running inside Avibe, a local-first Agent OS on the user's machine."
     assert "You are Vibey" not in system and "expert coding assistant" not in system
     assert "You are Rex, a careful code reviewer." in system and f"- {CONCURRENT_CALLS_RULE}" in system
 
