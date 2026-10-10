@@ -280,7 +280,7 @@ Two notes on the table:
   persisted, and a re-read on them can race. The fix is at the Runtime layer:
   when `set_quick_reply_chosen` newly records a choice, the messages endpoint
   publishes `message.updated` with the updated agent row after the write
-  commits. Every window then clears Needs input from one ordered event, and the
+  commits. Every window then closes the group from one ordered event, and the
   Workbench gains the same cross-tab lock for free. The window that clicked
   also locks optimistically, as `QuickReplies` does today. This is a small
   server change in the shell-and-state PR, with a pytest that the event follows
@@ -349,7 +349,7 @@ when the user changes the UI port, so it cannot own anything durable.
     late `404` for `A` cannot clear `B`: the route drops it, and
     `pet_unbind(A)` would be a no-op in the shell anyway.
   - Within one binding, a tail read started before a quick-reply
-    `message.updated` cannot land after it and restore Needs input.
+    `message.updated` cannot land after it and reopen the group.
   - The switcher list is not tied to a binding, so it is fenced by
     generation only: an older `listSessions` response cannot overwrite a
     newer refresh that already lists a new session.
@@ -363,7 +363,7 @@ comes from an API the Workbench already uses:
 
 | State | Condition | Source |
 |---|---|---|
-| Needs input | pending vault request for `S`, or the latest agent result has unanswered `quick_replies` (see note below) | `GET /api/vault/requests?status=pending&session=S` (`usePendingVaultRequests`, refreshed on `vaults.updated` and expiry); message `content.quick_replies` and `quick_reply_chosen` |
+| Needs input | pending vault request for `S` (quick replies do not count; see note below) | `GET /api/vault/requests?status=pending&session=S` (`usePendingVaultRequests`, refreshed on `vaults.updated` and expiry) |
 | Blocked | `agent_status = failed` | `getSession(S)` and `session.status` (see Input freshness) |
 | Ready | foreground idle and `unread_count > 0` | `inbox.unread.changed` (`unread_by_session`) |
 | Running | `turn_state.foreground = running` or `in_flight` | `turn.start`/`turn.end` with `GET /api/sessions/S/turn-state`, as the chat page does |
@@ -410,29 +410,28 @@ comes from an API the Workbench already uses:
     does not mark read at all. It shows "More in Avibe" (`pet_open` with
     the session link) and leaves reading to the Workbench.
 
-**Only the latest agent result's quick replies mean Needs input.** This is a
-deliberate difference from the Workbench, which keeps every unanswered group
-clickable regardless of age (`workbench-quick-replies.md`). Clickability is
-about not blocking a user who wants an earlier option; the pet's state is
-about what the agent is waiting for now. Once a newer agent result exists, the
-agent has moved on, often because the user answered in free text without
-pressing a button. An older unanswered group is therefore not an open
-question, and treating it as one would hold the pet in Needs input
-indefinitely with no action that clears it. Older groups stay clickable in the
-Workbench, reached with "Open in Avibe". This also keeps the state computable
-from the bounded tail, with no history scan.
+**Quick replies never change the state.** Agents end most replies with a
+quick-reply group, so treating an unanswered group as Needs input left a bound
+session in Needs input almost every time it was idle, and the state stopped
+meaning "the agent cannot go on without you". Quick replies are suggestions:
+the panel offers the open group as buttons, and answering one is a normal
+send. Needs input is reserved for a wait that blocks the agent, which today is
+a pending vault request.
 
-A group is also answered by any user input after it (a row whose type lists
-`user` in the catalog's `inputAuthors`; a display-only Show Page annotation is
-not input). The user often answers
-in free text, and that message starts a turn: until the next result lands the
-agent is working on the answer, so the pet shows Running rather than Needs
-input for the whole turn.
+The panel's open group (`openQuickReplies`) is the latest agent result's
+group, while unanswered. This is a deliberate difference from the Workbench,
+which keeps every unanswered group clickable regardless of age
+(`workbench-quick-replies.md`): once a newer agent result exists the agent has
+moved on, so the pet offers only the current group and older groups stay
+clickable in the Workbench, reached with "Open in Avibe". A group is also
+answered by any user input after it (a row whose type lists `user` in the
+catalog's `inputAuthors`; a display-only Show Page annotation is not input).
+This keeps the panel computable from the bounded tail, with no history scan.
 
 Tool approvals and `AskUserQuestion`-style waits do not exist today. Claude
-runs with permissions bypassed and Codex auto-approves, so vault requests and
-quick replies are the complete "needs input" set for now. A future backend that
-asks the user must add its source to `derivePetState`.
+runs with permissions bypassed and Codex auto-approves, so vault requests are
+the complete "needs input" set for now. A future backend that asks the user
+must add its source to `derivePetState`.
 
 ### Panel
 
@@ -450,8 +449,9 @@ Expanded, top to bottom:
    Token streaming would be a new Runtime transport and is a follow-up.
 3. **Activity strip** for `turn_state.background_activities`, reusing the chat
    page's strip in a compact variant.
-4. **Needs input.** Pending vault requests and quick-reply buttons. Quick
-   replies are answered in place, through the same path `QuickReplies` uses.
+4. **Needs input and suggestions.** Pending vault requests, and the open
+   quick-reply group as buttons. Quick replies are answered in place, through
+   the same path `QuickReplies` uses.
    Vault requests get "Open in Avibe" (`pet_open` with the request's vaults
    link), because approval UI stays in the Workbench in v1.
 
@@ -621,8 +621,9 @@ The microphone usage string and audio-input entitlement already ship (#2293).
     binding to the workspace-notices session is cleared on load, and the
     switcher lists a new active session that has no reply yet and omits
     read-only ones;
-  - an older unanswered quick-reply group under a newer agent result does not
-    derive Needs input; the hotkey with
+  - an open quick-reply group is offered in the panel but leaves the state
+    Idle, and only a pending vault request derives Needs input; an older
+    unanswered group under a newer agent result is not offered; the hotkey with
     no valid binding opens the switcher and never starts capture;
   - before setup is complete, `/pet` renders its setup-pending state and is
     not redirected to `/setup`;
@@ -641,7 +642,7 @@ The microphone usage string and audio-input entitlement already ship (#2293).
   - each row of the input-freshness table: the initial read on bind, each
     live trigger, and each gap fallback re-read the authoritative API, and
     live rows merge without duplicates;
-  - a `message.updated` row carrying `quick_reply_chosen` clears Needs input;
+  - a `message.updated` row carrying `quick_reply_chosen` closes the group;
   - a freshly bound session that is already failed derives Blocked from
     `getSession(S)`, with no provider row present;
   - any `runs.updated`, including one whose `session_id` is the executor and

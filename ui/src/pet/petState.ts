@@ -18,8 +18,6 @@ export type PetState = 'needs_input' | 'blocked' | 'ready' | 'running' | 'idle';
 
 export type PetStateInputs = {
   session: Pick<WorkbenchSession, 'agent_status'> | null;
-  /** The loaded tail, oldest first. */
-  messages: WorkbenchMessage[];
   turn: Pick<SessionRuntimeState, 'foreground' | 'in_flight'> | null;
   pendingVaultRequests: number;
   unreadCount: number;
@@ -56,8 +54,12 @@ export const latestAgentResult = (messages: WorkbenchMessage[]): WorkbenchMessag
 };
 
 /**
- * The quick-reply group the agent is waiting on now: the latest agent result's
- * group, while unanswered. A group is answered by a chosen option or by any
+ * The quick-reply group the panel offers now: the latest agent result's
+ * group, while unanswered. Quick replies are suggestions that end most agent
+ * replies, so they are answerable in the panel but never change the pet's
+ * state.
+ *
+ * The group is the latest agent result's, while unanswered. A group is answered by a chosen option or by any
  * user input after it (a free-text reply, which then runs as a turn). An
  * older unanswered group is not an open question either — once a newer result
  * exists the agent has moved on — so it never counts (it stays clickable in
@@ -78,9 +80,12 @@ export const openQuickReplies = (messages: WorkbenchMessage[]): { message: Workb
 const isRunning = (turn: PetStateInputs['turn']): boolean =>
   turn?.foreground === 'running' || turn?.in_flight === true;
 
-/** Priority: Needs input > Blocked > Ready > Running > Idle. */
+/**
+ * Priority: Needs input > Blocked > Ready > Running > Idle. Needs input means
+ * the agent cannot continue without the user: a pending vault request.
+ */
 export const derivePetState = (inputs: PetStateInputs): PetState => {
-  if (inputs.pendingVaultRequests > 0 || openQuickReplies(inputs.messages)) return 'needs_input';
+  if (inputs.pendingVaultRequests > 0) return 'needs_input';
   if (inputs.session?.agent_status === 'failed') return 'blocked';
   if (!isRunning(inputs.turn) && inputs.unreadCount > 0) return 'ready';
   if (isRunning(inputs.turn)) return 'running';

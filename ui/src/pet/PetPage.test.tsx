@@ -304,14 +304,25 @@ describe('PetPage binding', () => {
 });
 
 describe('PetPage state', () => {
-  it('shows Needs input for an open quick-reply group and clears it on message.updated', async () => {
+  it('offers an open quick-reply group in the panel without asking for attention', async () => {
     const asking = message('q', 'S', { content: { quick_replies: ['Yes', 'No'] } });
     tails.S = [message('u', 'S', { author: 'user', type: 'user' }), asking];
     devBind('S');
     render(<PetPage />);
-    await waitFor(() => expect(pose()).toBe('needs_input'));
-    await emit((h) => h.onMessageUpdated?.({ ...asking, content: { ...asking.content, quick_reply_chosen: 'Yes' } }));
-    await waitFor(() => expect(pose()).toBe('idle'));
+    summon('show');
+    expect(await screen.findByText('Yes')).toBeTruthy();
+    expect(pose()).toBe('idle');
+  });
+
+  it('asks for attention only for a pending vault request', async () => {
+    api.getVaultRequests.mockImplementation(async () => ({ requests: [{ id: 'v1', request_type: 'access' }] } as never));
+    try {
+      devBind('S');
+      render(<PetPage />);
+      await waitFor(() => expect(pose()).toBe('needs_input'));
+    } finally {
+      api.getVaultRequests.mockImplementation(async () => ({ requests: [] }));
+    }
   });
 
   it('derives Blocked from the first session read, with no provider row', async () => {

@@ -118,7 +118,6 @@ const PetSurface: React.FC = () => {
 
   const state = derivePetState({
     session: data.session,
-    messages: data.messages,
     turn: data.running ? { foreground: 'running', in_flight: true } : data.turn,
     pendingVaultRequests: vaultRequests.length,
     unreadCount,
@@ -238,7 +237,7 @@ const PetSurface: React.FC = () => {
   };
 
   // QuickReplies locks the group locally; the Runtime's message.updated for the
-  // answered row then clears Needs input in every window.
+  // answered row then closes the group in every window.
   const choose = (message: WorkbenchMessage, choice: string) => send(choice, { quick_reply_for: message.id });
 
   const pressRef = useRef<{ x: number; y: number; dragged: boolean } | null>(null);
