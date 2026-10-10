@@ -138,8 +138,13 @@ async def test_a_single_replace_all_reports_its_occurrences(tmp_path, make_ctx, 
     (
         "a\nb\nc\nd\n",
         [{"oldText": "a\n", "newText": "a\na2\na3\n"}, {"oldText": "d", "newText": "D"}],
-        "Successfully replaced 2 block(s) in f.txt (lines 1-3, 6).",
+        "Successfully replaced 2 block(s) in f.txt (lines 2-3, 6).",
     ),
+    # Unchanged context in an edit, and an edit that changes nothing, are not changed lines.
+    ("a\nb\nc\nd\n", [{"oldText": "a\nb\nc", "newText": "a\nB\nc"}],
+     "Successfully replaced 1 block(s) in f.txt (line 2)."),
+    ("x\ny\nc\n", [{"oldText": "x", "newText": "x"}, {"oldText": "c", "newText": "C"}],
+     "Successfully replaced 2 block(s) in f.txt (line 3)."),
     # A removed line is reported where it was.
     ("a\nb\nc\n", [{"oldText": "b\n", "newText": ""}], "Successfully replaced 1 block(s) in f.txt (line 2)."),
     # Numbered as read numbers them: a CRLF ends one line, a lone "\r" ends none.

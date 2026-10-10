@@ -385,20 +385,53 @@ def _locations(lines: _Lines, haystack: str, needle: str, normalized: bool) -> l
     return out
 
 
+def _common_prefix(a: str, b: str, limit: int) -> int:
+    """How many leading characters, up to ``limit``, ``a`` and ``b`` share; bisected over slice
+    comparisons, so a long shared run costs a few memcmp calls rather than a loop per character."""
+    lo, hi = 0, limit
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if a[:mid] == b[:mid]:
+            lo = mid
+        else:
+            hi = mid - 1
+    return lo
+
+
+def _common_suffix(a: str, b: str, limit: int) -> int:
+    """How many trailing characters, up to ``limit``, ``a`` and ``b`` share."""
+    lo, hi = 0, limit
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if a[len(a) - mid :] == b[len(b) - mid :]:
+            lo = mid
+        else:
+            hi = mid - 1
+    return lo
+
+
 def _changed_lines(text: str, replacements: list[_Replacement]) -> tuple[tuple[int, int], ...]:
-    """The new file's line ranges the replacements wrote, numbered as ``read`` shows them; touching ranges merge."""
+    """The new file's changed line ranges, numbered as ``read`` shows them; touching ranges merge.
+
+    A replacement counts from its first to its last character that differs from the text it replaced,
+    so unchanged context in an edit, or a replacement that changed nothing, is not reported.
+    """
     ranges: list[tuple[int, int]] = []
     line, pos = 1, 0
     for replacement in sorted(replacements, key=lambda r: r.index):
         line += text.count("\n", pos, replacement.index)
-        body = replacement.new_text
-        # A break that ends the text belongs to its last line; an empty text marks the line it was removed from.
-        end = line + body.count("\n", 0, len(body) - 1)
-        if ranges and line <= ranges[-1][1] + 1:
-            ranges[-1] = (ranges[-1][0], end)
-        else:
-            ranges.append((line, end))
-        line += body.count("\n")
+        old, new = text[replacement.index : replacement.index + replacement.length], replacement.new_text
+        if old != new:
+            head = _common_prefix(old, new, min(len(old), len(new)))
+            tail = _common_suffix(old, new, min(len(old), len(new)) - head)
+            first = line + new.count("\n", 0, head)
+            # The last differing character's line; a removal marks the line it was removed from.
+            last = line + new.count("\n", 0, len(new) - tail - 1) if len(new) - tail > head else first
+            if ranges and first <= ranges[-1][1] + 1:
+                ranges[-1] = (ranges[-1][0], max(ranges[-1][1], last))
+            else:
+                ranges.append((first, last))
+        line += new.count("\n")
         pos = replacement.index + replacement.length
     return tuple(ranges)
 
