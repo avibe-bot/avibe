@@ -36,7 +36,7 @@ def test_patched_source_manifest_hash_locks_the_divergence() -> None:
     assert snapshot["patch_sha256"] == driver["patch"]["sha256"]
 
 
-def test_built_contract_reads_mcp_input_schema_without_stderr_contamination(
+def test_built_contract_reads_dump_docs_input_schema_without_stderr_contamination(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     calls: list[list[str]] = []
@@ -51,7 +51,7 @@ def test_built_contract_reads_mcp_input_schema_without_stderr_contamination(
                 "tools": [
                     {
                         "name": "click",
-                        "inputSchema": {
+                        "input_schema": {
                             "properties": {
                                 "click_mode": {"enum": ["auto", "raw"]},
                             }
@@ -73,6 +73,30 @@ def test_built_contract_reads_mcp_input_schema_without_stderr_contamination(
         [str(tmp_path / "cua-driver"), "--version"],
         [str(tmp_path / "cua-driver"), "dump-docs", "--type", "mcp"],
     ]
+
+
+def test_built_contract_rejects_snapshot_input_schema_shape(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    snapshot = json.loads(
+        Path("desktop/cua-driver/tools-v0.31.0.json").read_text()
+    )
+
+    def fake_check_output(command: list[str], **_kwargs: object) -> str:
+        if command[1:] == ["--version"]:
+            return "cua-driver 0.31.0\n"
+        assert command[1:] == ["dump-docs", "--type", "mcp"]
+        return json.dumps(snapshot)
+
+    monkeypatch.setattr(
+        _SCRIPT["subprocess"], "check_output", fake_check_output
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="does not expose click.click_mode",
+    ):
+        _SCRIPT["verify_built_contract"](tmp_path / "cua-driver")
 
 
 def test_source_extraction_is_scoped_to_the_driver_subtree(tmp_path: Path) -> None:

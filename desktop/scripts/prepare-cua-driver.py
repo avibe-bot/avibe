@@ -243,7 +243,7 @@ def verify_built_contract(binary: Path) -> None:
             run([str(binary), "dump-docs", "--type", "mcp"], merge_stderr=False)
         )
         click = next(tool for tool in docs["tools"] if tool.get("name") == "click")
-        click_mode = click["inputSchema"]["properties"]["click_mode"]
+        click_mode = click["input_schema"]["properties"]["click_mode"]
     except (json.JSONDecodeError, KeyError, StopIteration, TypeError) as exc:
         raise ValueError("patched Cua Driver does not expose click.click_mode") from exc
     if click_mode.get("enum") != ["auto", "raw"]:

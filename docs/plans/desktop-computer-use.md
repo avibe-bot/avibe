@@ -50,6 +50,13 @@ updated in the core and Runtime host, and the package workflow now builds the
 patched source and emits schema-2 provenance containing source, patch, snapshot,
 prepared-binary, packaged-binary, and cdhash evidence.
 
+The package verifier keeps two generated schema surfaces distinct. The
+driver's `dump-docs --type mcp` output uses `input_schema`, while the managed
+MCP snapshot uses `inputSchema`. Packaging validates the former against the
+built binary; `core/computer_server.py` consumes the latter. Owning tests reject
+the snapshot shape at the `dump-docs` boundary so a guessed key cannot silently
+replace the producer's actual contract again.
+
 The test-owned AppKit fixture makes `AXPress` a hollow success and counts
 native `mouseDown`/`mouseUp`. Its ignored live harness is compiled in this
 lane but is not run here because live GUI/TCC actions are outside the current
