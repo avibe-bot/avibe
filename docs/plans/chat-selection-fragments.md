@@ -62,3 +62,33 @@ or fall back locally to plain selected text, not whole-block expansion.
   no production service restart or real user state/profile writes.
 - Ship independently from PR #2426 (notice layout and touchend handling), based
   on default-branch interfaces. No stacking or cherry-picking that PR.
+
+## Implemented boundary
+
+`ui/src/lib/markdownSource.ts` walks the rendered DOM of each bubble the
+selection reaches, reading the `data-md-start` / `data-md-end` spans the
+renderer already writes. It adds no source-offset alignment and no Markdown
+repair:
+
+- An element whose whole visible content (non-blank characters, images,
+  rules) lies inside the selection copies its source span, mapped back through
+  the mention/secret rewrite passes. The bubble root is the first such element,
+  which is what makes a whole-bubble selection byte-exact.
+- Any other element is walked into. Its text copies as the selected DOM
+  characters, so an escape or entity in a cut run copies as the character it
+  shows.
+- Table rows and cells never copy their own span (a cell's span starts at its
+  pipe); cut cells are separated by a tab and rows by a line break. A whole
+  table copies its source.
+- Inside a cut quote or list item, a covered element whose source spans
+  several lines is walked into instead, because those lines carry the
+  container's `>` or indentation. Single-line sources still copy as written.
+- Parts from different blocks are joined by one line break or a blank line,
+  following the newline count written between the two blocks.
+- Renderer-only text outside every source construct (the footnote section's
+  label) and the blank layout text between blocks are never copied.
+- A covered reference link appends its `[id]: url` definition, which renders
+  nowhere. Footnote bodies are never appended.
+
+Browser Range behavior (double-click, triple-click, hit-tested drags, Select
+all) is covered by the hermetic `npm run test:chat-selection` harness.

@@ -198,6 +198,25 @@ describe('chat selection action gesture lifetime', () => {
     expect(writeText).toHaveBeenCalledExactlyOnceWith(BUBBLE);
   });
 
+  it('copies no more of a bubble than is selected', async () => {
+    const container = mountBubble();
+    const strong = container.querySelector('strong')!;
+    const range = document.createRange();
+    range.setStart(strong.firstChild!, 0);
+    range.setEnd(strong.nextSibling!, ' no'.length);
+    window.getSelection()!.addRange(range);
+    settle();
+
+    await act(async () => {
+      const button = screen.getByRole('button', { name: 'chat.selection.copy' });
+      fireEvent.pointerDown(button, press);
+      fireEvent.pointerUp(button, press);
+      await Promise.resolve();
+    });
+
+    expect(writeText).toHaveBeenCalledExactlyOnceWith('**bold** no');
+  });
+
   it('offers Copy for an image alone, which has Markdown but no text', async () => {
     const containerRef = createRef<HTMLDivElement>();
     const image = '![chart](/api/media/abc123)';
