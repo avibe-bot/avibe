@@ -54,6 +54,12 @@ TOOL_GUIDELINES: dict[str, tuple[str, ...]] = {
 }
 TOOL_ORDER = ("read", "bash", "edit", "write")
 FINAL_REPLY_RULE = "Only your final reply is reliably shown to the user; put anything the user must see in it"
+#: Avibe's: the loop runs a response's neighbouring read and bash calls at the same time (C-3 loop-control.md section 2).
+CONCURRENT_CALLS_RULE = (
+    "Send independent calls (reads, searches, separate commands) together in one response: they run at the same "
+    "time. Edits and writes run one at a time, in order. A call that needs an earlier call's result goes in a later "
+    "response"
+)
 #: The first input of a fork (C-10 fork.md section 8): the inherited history is the source's, and so is its work.
 FORK_NOTICE = (
     "<fork>\nThis Session is a fork of {title} (Session {source}): {history}. Every command, Watch, Task, and run "
@@ -73,6 +79,8 @@ def coding_prompt(tool_names: Iterable[str]) -> str:
         rules.append("Use bash for file operations like ls, rg, find")
     for name in names:
         rules.extend(TOOL_GUIDELINES.get(name, ()))
+    if names:
+        rules.append(CONCURRENT_CALLS_RULE)
     rules += ["Be concise in your responses", "Show file paths clearly when working with files", FINAL_REPLY_RULE]
     return "\n\n".join(
         (
