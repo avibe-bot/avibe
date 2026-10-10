@@ -43,7 +43,6 @@ const asking = (chosen?: string) => result({
 
 const quiet: PetStateInputs = {
   session: { agent_status: 'idle' },
-  messages: [user(), result()],
   turn: { foreground: 'idle', in_flight: false },
   pendingVaultRequests: 0,
   unreadCount: 0,
@@ -57,7 +56,6 @@ describe('derivePetState', () => {
     ['a reply is unread and the agent is idle', { unreadCount: 2 }, 'ready'],
     ['the last run failed', { session: { agent_status: 'failed' } }, 'blocked'],
     ['a vault request is pending', { pendingVaultRequests: 1 }, 'needs_input'],
-    ['the latest result asks a quick-reply question', { messages: [user(), asking()] }, 'needs_input'],
   ])('is %s → %s', (_case, override, expected) => {
     expect(derivePetState({ ...quiet, ...override })).toBe(expected);
   });
@@ -65,30 +63,31 @@ describe('derivePetState', () => {
   it('orders Needs input > Blocked > Ready > Running > Idle', () => {
     const everything: PetStateInputs = {
       session: { agent_status: 'failed' },
-      messages: [user(), asking()],
       turn: { foreground: 'running', in_flight: true },
       pendingVaultRequests: 1,
       unreadCount: 3,
     };
     expect(derivePetState(everything)).toBe('needs_input');
-    expect(derivePetState({ ...everything, messages: [user(), result()], pendingVaultRequests: 0 })).toBe('blocked');
+    expect(derivePetState({ ...everything, pendingVaultRequests: 0 })).toBe('blocked');
     expect(derivePetState({
-      ...everything, messages: [], pendingVaultRequests: 0, session: { agent_status: 'idle' }, turn: null,
+      ...everything, pendingVaultRequests: 0, session: { agent_status: 'idle' }, turn: null,
     })).toBe('ready');
     // A running turn is not Ready even with unread replies: the reply is not final yet.
     expect(derivePetState({
-      ...everything, messages: [], pendingVaultRequests: 0, session: { agent_status: 'idle' },
+      ...everything, pendingVaultRequests: 0, session: { agent_status: 'idle' },
     })).toBe('running');
   });
 
-  it('clears Needs input once the question is answered', () => {
-    expect(derivePetState({ ...quiet, messages: [user(), asking('Yes')] })).toBe('idle');
+});
+
+describe('openQuickReplies', () => {
+  it('offers the latest result\'s group until an option is chosen', () => {
+    expect(openQuickReplies([user(), asking()])?.options).toEqual(['Yes', 'No']);
+    expect(openQuickReplies([user(), asking('Yes')])).toBeNull();
   });
 
-  it('treats a free-text reply after the group as its answer, while that turn runs', () => {
-    const messages = [user(), asking(), user('free text')];
-    expect(openQuickReplies(messages)).toBeNull();
-    expect(derivePetState({ ...quiet, messages, turn: { foreground: 'running', in_flight: true } })).toBe('running');
+  it('treats a free-text reply after the group as its answer', () => {
+    expect(openQuickReplies([user(), asking(), user('free text')])).toBeNull();
     // Rows that are not the user's input do not answer it: a harness message,
     // or the user's own display-only Show Page annotation.
     expect(openQuickReplies([user(), asking(), row({ author: 'harness', type: 'harness' })])).not.toBeNull();
@@ -96,9 +95,7 @@ describe('derivePetState', () => {
   });
 
   it('ignores an older unanswered group once a newer result exists', () => {
-    const messages = [user(), asking(), user('free text'), result()];
-    expect(openQuickReplies(messages)).toBeNull();
-    expect(derivePetState({ ...quiet, messages })).toBe('idle');
+    expect(openQuickReplies([user(), asking(), user('free text'), result()])).toBeNull();
   });
 });
 
