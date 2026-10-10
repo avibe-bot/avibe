@@ -17,6 +17,8 @@ class Agent:
     def abort(self, reason: str) -> None: ...
     def set_tools(self, tools: Sequence[Tool]) -> None: ...
     def snapshot(self) -> Snapshot: ...
+    def side_turn_fits(self, turn: SideTurn, route: ModelSelection) -> bool: ...      # C-10 fork.md §7, §15
+    async def side_turn(self, turn: SideTurn, route: ModelSelection) -> SideTurnResult: ...
 ```
 
 `Input` pairs a `UserMessage` with its `messages.id` row. `ModelRouter` returns the `ModelEndpoint` and
@@ -110,6 +112,7 @@ sent with that request gets the error result `Tool <name> is not available.`
 
 ## 7. Snapshot and fork
 
-`snapshot()` returns `(session_id, context_seq, state)`, where `state` is the JSON object hooks keep. A hook that sets
-state causes an `agent_state` row at the next commit point (C-5), so a fork starting at a later `context_seq` restores
-it. Forking is Avibe's existing Session fork; the child's context resolves through C-5.
+`snapshot()` returns `(session_id, context_seq, state)`, where `state` is the JSON object hooks keep; it is the state
+of the `after_run` outcome, not a fork API. A hook that sets state causes an `agent_state` row at the next commit
+point (C-5), so a fork whose point is at or after that row restores it. Fork is C-10 (`fork.md`): the fork point, the
+side turn (`side_turn`, above), and the fork Session, whose context resolves through C-5.

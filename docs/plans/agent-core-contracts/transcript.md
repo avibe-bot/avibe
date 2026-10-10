@@ -28,7 +28,8 @@ Display-only rows keep `context_seq` null: `interim`, `notify`, an `error` that 
 `output`, queued or removed inputs, and the `tool_call` trace row written at tool start (its `metadata_json` carries
 `tool_call_id` and `job_id` so the activity panel can pair it with the result). Audit rows are never context
 either: `agent_events` with `visibility = 'audit'` and no `context_seq`, written by `append_audit`, as
-`context_checkpoint_turn` (`CheckpointTurn`, C-9 `context.md` §6, with its own attempts' partials and usage) or
+`fork_turn` (`ForkTurn`, C-10 `fork.md` §7: one side turn, such as a C-9 checkpoint, with its own attempts' partials
+and usage) or
 `model_attempt` (`ModelAttempt`: the usage of a conversation attempt that did not become a response row, C-9
 `context.md` §10, invariant 4). The activity panel does not read them.
 
@@ -84,10 +85,12 @@ The child Session's metadata already records its parent as top-level keys `fork_
 `fork_source_message_id` (written by `reserve_forked_session`, read by `fork_metadata_from_session_metadata` in
 `core/services/session_fork.py`); C-5 reads those keys and adds no new fork shape.
 
-- `anchor_seq` is resolved once, when the fork is reserved, as the largest `context_seq` in the source Session among
-  rows at or before the anchor message, and persisted as the top-level metadata key `fork_source_context_seq`. Rows
-  that receive a `context_seq` later can never move into or out of the prefix. A released fork without that key
-  (forked from a non-`vibey` Session) has no Vibey context to inherit and starts empty.
+- `anchor_seq` is the fork point's `as_of` (C-10 `fork.md` §2): resolved once, in the reservation's transaction, from
+  `context_seq`, row shape, and the source's live Turn, never from a clock, and persisted as the top-level metadata
+  key `fork_source_context_seq`. A user's fork takes the latest point, the end of the previous ended Turn (a live Turn
+  is trimmed); a system mechanism may name any settled point. 0 is the empty prefix. Rows that receive a
+  `context_seq` later can never move into or out of the prefix. A released fork without that key (forked from a
+  non-`vibey` Session) has no Vibey context to inherit and starts empty.
 - The child's context = the source's context rows with `context_seq <= anchor_seq` (recursively through the source's
   own fork), then the child's rows.
 - The child's `context_seq` continues from `anchor_seq + 1`, so the combined order stays total.
@@ -99,4 +102,4 @@ The child Session's metadata already records its parent as top-level keys `fork_
 - The context content of a row never changes after commit: `context_seq` and `content_json.model` are written once
   (on an input row, when it is consumed). A response row's display columns (§2) may be written again when it is
   delivered; they are never context. Context rows are never deleted while a Session or a fork descendant references
-  them.
+  them (C-10 F8).

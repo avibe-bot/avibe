@@ -1,8 +1,8 @@
 # C-10 Fork
 
-Status: **draft**, 2026-10-08. Design only. Points the owner decides are marked **[O-n]** and collected in §18. Every
-`file:line` was read on `avibe-agent` at `ce169436c`. After the owner decides, the delta in §16 is applied to the
-contracts it touches, and this file is frozen before the Phase 1 lanes fork (README).
+Status: **frozen** 2026-10-10 by owner decision (§18). Every `file:line` was read on `avibe-agent` at `ce169436c`. The
+delta in §16 is applied to the contracts it touches. A change now needs orchestrator approval and lands here first
+(README).
 
 A fork is an execution context whose model-visible messages begin with a source context's projection at a **fork
 point**, and which then diverges on its own. Fork is the base other features build on: C-9's checkpoints today, and
@@ -10,18 +10,21 @@ later an Agent copying itself into a team, managing its own context, and consoli
 
 ## 0. Example
 
-Session P runs on Vibey and has 40 context rows. The user forks from the reply at message 12, whose row has
-`context_seq` 23. P keeps working on a later Turn meanwhile.
+Session P runs on Vibey and has 40 context rows. Its fourth Turn ended with Vibey's reply at `context_seq` 23. Its fifth
+Turn began with the user's input at 24 and is in the middle of a tool batch. The user clicks Fork.
 
-1. The reservation resolves the fork point. The reply is a response with no tool calls, so the cut is 23. No tool
-   call at or before 23 lacks its result, so the cut is legal. It writes Session C with `fork_source_session_id = P`,
-   `fork_source_message_id = <message 12>`, and `fork_source_context_seq = 23`, and copies no row.
+1. The reservation resolves the fork point. P has a live Turn whose first input is row 24, so the cut is the largest
+   settled `context_seq` before 24: 23, the end of the previous ended Turn. No tool call at or before 23 lacks its
+   result, so the cut is legal. It writes Session C with `fork_source_session_id = P` and
+   `fork_source_context_seq = 23`, and copies no row. Had the fourth Turn been stopped or failed, its open calls would
+   have been settled by recovery (T2), and the cut would be its last settled row.
 2. C's first Turn loads P's rows with `context_seq <= 23` and projects them. The result is what P's model saw at 23:
-   checkpoints and edits written up to 23 apply, later ones do not. The user's message becomes C's row 24.
+   checkpoints and edits written up to 23 apply, later ones do not. Nothing of the fifth Turn reaches C: not its input,
+   its tool calls, or its intermediate replies. The user's message becomes C's row 24.
 3. P commits 41, 42, and so on. P and C are different Sessions with different locks and `context_seq` spaces. C never
    sees what P writes after 23, and P never sees what C writes.
 4. P's Watch `w1`, started at row 18, stays P's, and its follow-up goes to P. C's environment block lists only C's
-   Watches. C's fork notice says that work started before the fork reports to P.
+   Watches. C's fork notice says that work started before the fork reports to the Session that started it.
 5. Later C's context passes its threshold. C-9 runs a **side turn** in C: the same idea of a fork point, without a
    new Session. Its prefix is C's latest request, its tools are C's own tool definitions run under the dreaming
    policy, and its reply is folded into one `context_compaction` row in C.
@@ -40,7 +43,7 @@ because identity is what an effect beyond the turn needs.
 | Result | a value, which the caller folds into its own context (§9) | nothing, or its replies delivered as inputs to another Session (§9) |
 | Persists | one audit row in the caller's Session, plus what the caller's fold commits | its own rows; the prefix by reference |
 | Layer | engine, `core/agent_core/agent` | storage and service (`storage/agent_transcript.py`, `core/services/session_fork.py`) |
-| Consumers | C-9 checkpoints, memory consolidation, rewriting its own context | the user's "fork from here", `vibe agent run --fork-*`, teammates, delegated exploration |
+| Consumers | C-9 checkpoints, memory consolidation, rewriting its own context | the user's Fork, `vibe agent run --fork-*`, later teammates and delegated exploration |
 
 **Why identity separates them.** A command is a job keyed by its call instance: the committed response that made the
 call, in a Session (`core/agent_core/tools/base.py:28-42`). Watches, T2 recovery, approvals, and the user's access
@@ -84,14 +87,16 @@ between a response with no tool calls and a steer.
 **How each carrier uses the coordinates.**
 
 - **A fork Session uses `units = None`.** The child stores one number, `fork_source_context_seq = as_of` (C-5 §4).
-  Its projection of the inherited rows is the source's view at `as_of`.
+  Its projection of the inherited rows is the source's view at `as_of`. A user's fork always takes the latest point
+  (below); an arbitrary settled point is an internal capability for system mechanisms, with no product surface
+  (owner decision O-2, §18).
 - **A side turn uses `as_of` = the caller's latest committed row.** That row is the run's own view. `units` selects
   a prefix of that view, which C-9's rolling checkpoint needs (`view.prefix(cut)`, `loop.py:1280-1282`). A side turn
   never forks an older view in v1: a side turn exists to reuse a byte prefix of the request just sent (§3).
 
 **Why two coordinates.** A later checkpoint or edit changes how earlier rows project.
 
-- The view at `as_of` is what the model saw then. A fork "from message 12" wants this view.
+- The view at `as_of` is what the model saw then. A fork Session wants this view.
 - A prefix of the current view is what the model sees now, cut short. C-9's rolling checkpoint wants this one.
 
 The view at `as_of` also defines the prefix of a cut in a compacted region:
@@ -102,26 +107,33 @@ The view at `as_of` also defines the prefix of a cut in a compacted region:
 ### Resolving a fork Session's point
 
 This replaces `resolve_fork_anchor_seq` and `context_bound` (`storage/agent_transcript.py:492-536`). Those match
-`agent_events` rows to an anchor message by wall clock (`:528-534`); this rule uses only `context_seq` and row
-shape.
+`agent_events` rows to an anchor message by wall clock (`:528-534`); this rule uses only `context_seq`, row shape,
+and the live Turn's first input.
 
 | Request | `as_of` |
 | --- | --- |
-| a response with no tool calls: a reply (`result`, `error`, a hidden final `assistant`) or an answer before a steer | its `context_seq` |
-| a response with tool calls | the `context_seq` of its last tool result, which ends its unit; refused while a result is missing (`session_fork_point_unsettled`) |
-| a consumed input (`user`, `harness`, `agent_initiated`, `annotation`) | the largest settled `context_seq` before it in the source's context, or 0 when there is none, so the fork asks again from there |
-| a row without `context_seq`: display-only, queued, or removed | refused (`session_fork_point_not_in_context`) |
-| no point, and the source has a live Turn | the largest settled `context_seq` before that Turn's first consumed input (of the whole context while the Turn has consumed none), so the live Turn is trimmed |
-| no point, and no live Turn | the largest settled `context_seq` of the source's context |
+| a user's fork (the latest point), and the source has a live Turn | the largest settled `context_seq` before that Turn's first consumed input (of the whole context while the Turn has consumed none) |
+| a user's fork, and the source has no live Turn | the largest settled `context_seq` of the source's context |
+| a system mechanism's fork at a given `context_seq` `s` (internal only) | `s`, when `0 <= s <=` the source's last `context_seq` and `s` is settled; otherwise refused (`ForkPointError`) |
+
+**The owner's rule for a user's fork.** The cut is the end of the previous **ended** Turn: its final reply, or, for a
+Turn the user stopped or that failed, its last row once recovery has settled its calls (T2). The live Turn's input,
+its tool calls, and its intermediate responses never reach the child. This holds by construction:
+
+- The live Turn writes all of its rows after its first input, because the loop is the Session's single writer
+  (C-5 §2), so every row before that input belongs to an ended Turn.
+- The cut is fixed once, in the reservation's transaction, from committed rows. Rows that receive a `context_seq`
+  later never move into or out of the prefix (C-5 §4).
+- The cut is settled, so an ended Turn whose calls recovery has not settled yet contributes only up to its last
+  settled row. The fork never waits on, or races with, a timing condition.
+
+Other rules:
 
 - **0 is the empty prefix.** A child with `fork_source_context_seq = 0` inherits no row, and its first own row is
   `context_seq` 1. `fork_link` already accepts 0 (`agent_transcript.py:677-678`), and `context_view` over no row is
   empty.
-- **The requested row must be one of the source's own rows.** A row the source inherited is refused
-  (`session_fork_point_inherited`), and the error names the Session that owns it. Forking that Session at that row
-  gives the same prefix, and the lineage then names the Session the message belongs to, so a link to the message
-  resolves in that Session.
-- Rows that receive a `context_seq` later never move into or out of the prefix (C-5 §4).
+- **An internal point may lie in the source's inherited prefix.** The ancestry walk bounds every ancestor by it
+  (`_ancestry`, `agent_transcript.py:682-698`), so the prefix is the same as a fork of the ancestor at that point.
 
 **Trimming the live Turn changes today's behavior.**
 
@@ -161,7 +173,7 @@ because they are rendered into the prompt (C-9 §6).
 - For a user's fork, correct identity is worth one cold prefix.
 - For N teammates forked from one large context, it is N cold copies of that context.
 - The remedy is a Session-invariant system prompt, with the Session id moved into the environment block of the
-  first input (C-7 §8). That is reserved for Phase 2 (§17).
+  first input (C-7 §8). That is left to the teams design (§17).
 
 ## 4. Storage: by reference
 
@@ -210,18 +222,17 @@ Consequences:
 
 - **Child to source.** The reservation writes top-level metadata on the child Session (`session_fork.py:368-399`):
   - `fork_source_session_id`
-  - `fork_source_message_id`: the requested message, or for "latest" the anchor where the backend trims
+  - `fork_source_message_id`: unchanged, the anchor message the reservation reads (for a live Turn, its first
+    input, which the cut excludes); native backends trim at it
   - `fork_source_context_seq`: Vibey only
   - `fork_created_at`
 
   Phase 1 adds no new shape.
 - **Source to children.** This is absent today. Lineage is recorded only child to parent, and the UI only shows the
-  child's banner (`ui/src/components/workbench/ChatPage.tsx:4071-4083`). Retention, teams, and runaway bounds need
-  the reverse lookup. Phase 2 adds:
-  - an expression index on `json_extract(metadata_json, '$.fork_source_session_id')`;
-  - one metadata key, `fork_initiator`: `user`, or the requesting Session and run.
-
-  No column is added. The metadata keys stay the one record.
+  child's banner (`ui/src/components/workbench/ChatPage.tsx:4071-4083`). Retention and teams need the reverse
+  lookup. When one of them is designed, it adds an expression index on
+  `json_extract(metadata_json, '$.fork_source_session_id')` rather than a column, so the metadata keys stay the one
+  record.
 - **Side turns.** Each leaves one `fork_turn` audit row in the caller's Session, recording its point, purpose,
   policy, and outcome (§7). That row is a side turn's lineage.
 
@@ -325,10 +336,9 @@ move; the API reserves this (§15).
 
 ## 8. Fork Session
 
-- **Reservation.** `reserve_forked_session` (`session_fork.py:177`) gains `at_message_id`.
-  - For `vibey`, it resolves `as_of` (§2) inside the reservation's transaction and writes the metadata (§5).
-  - For a backend without point-in-time support, `at_message_id` is refused with `session_fork_point_unsupported`
-    (§11).
+- **Reservation.** `reserve_forked_session` (`session_fork.py:177`) keeps its signature and its callers. For `vibey`
+  it resolves the user's latest point (§2) inside the reservation's transaction and writes the metadata (§5). Native
+  backends keep their own latest-point fork and trimming (§11).
 - **It owns nothing its ancestors started (F4).** A side turn, by contrast, starts nothing.
   - Jobs, Watches, Tasks, delegated runs, and scratch stay with the Session that started them. In a nested fork (P,
     then C forked from P, then D forked from C), a job P started still reports to P, not to D's source C.
@@ -347,10 +357,8 @@ move; the API reserves this (§15).
     `storage/models.py:875-879`).
   - The child has its own writer lock and its own transcript lock (`agent.py:1184-1212`, `agent_transcript.py:331-337`).
 - **Display.**
-  - The child's Workbench shows its own rows and the fork banner (`ChatPage.tsx:4071-4083`). For a fork taken at a
-    message, the banner is extended to name that message, with a link to it in the source Session, which owns it
-    (§2) **[O-3]**. A fork at the latest point keeps today's banner, which links to the source Session.
-  - The inherited prefix is not rendered in the child.
+  - The child's Workbench is unchanged: its own rows and today's fork banner, which links to the source Session
+    (`ChatPage.tsx:4071-4083`). The inherited prefix is not rendered in the child (owner decision O-3).
   - The earlier-record hint already names the source and the seq (`modules/agents/vibey/context.py:86-87`).
 
 ## 9. Merge-back
@@ -386,8 +394,9 @@ information shown to the model.
 - Today only the Harness's process-wide limit of 8 concurrent runs bounds them (`core/scheduled_tasks.py:3971`).
 - Model Hub does not cap spend, by design (`core/handlers/model_hub/usage.py:18-24`).
 - Delegation depth is recorded (`parent_run_id`, `vibe/cli.py:6898`) but not bounded.
-- Plain delegation, `vibe agent run --agent`, recurses the same way, so the bound on depth and on live descendants
-  belongs to the Harness, not to fork **[O-4]**.
+- Plain delegation, `vibe agent run --agent`, recurses the same way.
+- Owner decision O-4: no new limit. Agents keep forking themselves through `vibe agent run --fork-self` with no
+  depth or descendant bound.
 
 **Model Hub.**
 
@@ -406,35 +415,34 @@ information shown to the model.
 
 | Layer | Owns | Phase 1 change |
 | --- | --- | --- |
-| `core/agent_core/harness` | `ForkPoint`, `settled`, `fork_cut`, `fork_prefix` (pure, §2) | add them; `fork_prefix` is `context_view` plus `prefix` |
+| `core/agent_core/harness` | `ForkPoint`, `settled`, `latest_cut`, `fork_point`, `fork_prefix` (pure, §2) | add them in `harness/fork.py`; `fork_prefix` is `context_view` plus `prefix` |
 | `core/agent_core/agent` | side turn: `SideTurn`, `ForkPolicy`, `DREAMING`, `Agent.side_turn`, `Agent.side_turn_fits` | extract them from C-9 (§12) |
-| `storage/agent_transcript.py` | storage by reference, ancestry, `resolve_fork_point` (SQL around `fork_cut`) | replace `resolve_fork_anchor_seq` and `context_bound` |
+| `storage/agent_transcript.py` | storage by reference, ancestry, `resolve_fork_point` (SQL around the harness rule) | replace `resolve_fork_anchor_seq` and `context_bound` |
 | `modules/agents/vibey` | the fork notice on the first input; T2 without the inherited branch | as listed |
-| `core/services/session_fork.py` | the reservation for every backend, `at_message_id`, error codes | add `at_message_id` |
-| `modules/agents/catalog.py` | `FORK_AT_MESSAGE_BACKENDS`, a capability-specific set (C-8) | add `{"vibey"}` |
-| surfaces | CLI, HTTP, Web | below |
+| `core/services/session_fork.py` | the reservation for every backend | for `vibey`, call `resolve_fork_point`; no new parameter |
 
 ### Backend support
 
-| Backend | Fork today | Point-in-time | Phase |
-| --- | --- | --- | --- |
-| `vibey` | by reference, at the latest point (`session_fork.py:381-399`) | yes (§2) | 1 |
-| `codex` | `thread/fork` (`modules/agents/codex/agent.py:3316-3421`); `lastTurnId` is used only to trim a live Turn (`:3393-3408`) | `lastTurnId` accepts any completed Turn. Avibe maps only a Turn's initial input to its Codex Turn (`native_turn_id_for_initial_message`, `core/session_turns.py:8008-8044`); point-in-time needs a reply-to-Turn association and, for a fork before an input, the preceding Turn | 3, first |
-| `claude` | `resume` with `fork_session` (`core/handlers/session_handler.py:1558-1563`, `:1730-1731`) | the Agent SDK's `resume_session_at` takes a message UUID, used with `fork_session`; Avibe stores no map from message to UUID | 3; needs the map |
-| `opencode` | `POST /session/{id}/fork`; `messageID` is sent only to trim (`modules/agents/opencode/server.py:818-837`) | `messageID` accepts any message, and the fork excludes it; Avibe stores no map from message to OpenCode id | 3; needs the map |
+| Backend | Fork | Phase |
+| --- | --- | --- |
+| `vibey` | by reference, at the user's latest point (§2); arbitrary settled points internally | 1 |
+| `codex` | unchanged: `thread/fork` (`modules/agents/codex/agent.py:3316-3421`), with `lastTurnId` to trim a live Turn (`:3393-3408`) | none |
+| `claude` | unchanged: `resume` with `fork_session` (`core/handlers/session_handler.py:1558-1563`, `:1730-1731`) | none |
+| `opencode` | unchanged: `POST /session/{id}/fork`, with `messageID` to trim (`modules/agents/opencode/server.py:818-837`) | none |
 
-### Surfaces in v1 [O-2]
+Point-in-time fork for native backends is cancelled (owner decision, 2026-10-10): they keep forking at the latest
+point, which they already support.
 
-- **CLI.** `vibe agent run --fork-session <id> --at <message-id>`, and `--fork-self --at <message-id>`. `--at`
-  requires one of the fork flags. The CLI examples in the injected system prompt are live callers, so they need
-  parser-backed coverage (AGENTS.md §7).
-- **HTTP.** `POST /api/sessions/<id>/fork` accepts `{"at_message_id": ...}`. Today the route reads no body
-  (`vibe/ui_server.py:9377-9400`), and the UI posts `{}` (`ui/src/context/ApiContext.tsx:3702-3703`).
-- **Web.** A "Fork from here" action on a Vibey reply. It is a new UI element, so an approved `design.pen` frame
-  comes first **[O-3]**.
-- **IM.** None. The owner decided against slash commands.
-- **A fork tool for Agents.** Not in v1 **[O-4]**. Agents fork through `vibe agent run --fork-self [--at]`, and the
-  result returns by callback. A tool with typed merge-back, and side turns for Agents, come with teams.
+### Surfaces
+
+There is no new surface (owner decisions O-2 and O-3). The existing ones keep their shape and reach the cut rule
+through `reserve_forked_session`:
+
+- **Workbench.** The session menu's Fork (`ui/src/components/workbench/useSessionActions.tsx:141-161`) and "Ask in a
+  new session" (`ChatPage.tsx:487-503`) post `{}` to `POST /api/sessions/<id>/fork` (`vibe/ui_server.py:9377-9400`).
+- **CLI.** `vibe agent run --fork-session <id>` and `--fork-self` (`vibe/cli.py:6592-6640`).
+- **Not built:** CLI `--at`, an HTTP `at_message_id`, a Web "fork from here", an IM command, and a fork tool for
+  Agents. Agents fork themselves with `vibe agent run --fork-self`, and the result returns by callback.
 
 ## 12. C-9 on the primitive
 
@@ -492,13 +500,13 @@ already provide, plus work outside fork.
     now or a tool later. They run in the background with one task message each. Each shares the prefix by reference
     and runs concurrently as its own Session, and their replies come back as Harness inputs (§9).
   - Needs from fork: nothing more.
-  - Needs elsewhere, reserved for Phase 2: the descendant lookup and `fork_initiator` (§5); the Harness bound on
-    depth and live descendants **[O-4]**; a Session-invariant system prompt, so that N forks of one large context hit
-    the cache (§3).
+  - Needs elsewhere, left to the teams design: the descendant lookup (§5) and a Session-invariant system prompt, so
+    that N forks of one large context hit the cache (§3). No depth or descendant bound (O-4).
 - **Self context management.**
   - Explore and come back: a background fork Session with full tools, because exploring needs `bash`. Its reply
     returns as a message.
-  - Go back: `--fork-self --at <message>` continues from an earlier point. Phase 1 provides it.
+  - Go back: a system mechanism forks the Session at an earlier settled point through the internal API (§2, §15)
+    and continues there. Phase 1 provides the API; there is no user or Agent surface for it.
   - Rewrite part of its own context: a side turn with `dreaming` over a prefix, folded into a row. Summarizing a
     middle range while keeping the head needs a range checkpoint row in C-5 and C-9 projection, not a change to fork.
 - **Memory.**
@@ -514,7 +522,7 @@ already provide, plus work outside fork.
 | --- | --- | --- | --- |
 | F1 | A fork's messages through its cut equal `prefix(source, point)`, and a fork Session gets the same bytes on every request, whatever either Session commits later | harness, storage | a source with checkpoints and edits both before and after the cut, plus a cut before a later checkpoint; after N commits in each Session, the child's projection through `as_of` serializes equal to `project(source, fork_point=as_of)` |
 | F2 | A side turn's first request has the caller's endpoint, system prompt, tool definitions, tool choice, and reasoning settings, and its messages begin with the caller's latest request through the cut | agent | the stub's request log, for normal and rolling side turns |
-| F3 | Every fork point is settled; a fork never inherits an open call, and never settles or looks up a call it did not make (settled calls are inherited as history, F1) | harness, storage | every row kind in §2's table, including mid batch, a job handed over, a running foreground job, a Session's first input (0), and an inherited row (refused, naming its owner): resolved settled, or refused |
+| F3 | Every fork point is settled; a fork never inherits an open call, and never settles or looks up a call it did not make (settled calls are inherited as history, F1) | harness, storage | a user's fork while the live Turn is mid tool batch gets exactly the previous ended Turn's prefix; a stopped and a failed previous Turn are legal cuts; nothing of the live Turn (input, calls, responses) reaches the child; a job handed to a Watch does not block a cut; the internal API refuses an unsettled or out-of-range point and accepts 0 |
 | F4 | A fork Session owns nothing an ancestor started: jobs, Watches, Tasks, runs, scratch stay with the Session that started them. A side turn starts nothing: its calls have no call instance | vibey, service, agent | a child of a source with a live job Watch neither lists it nor receives its follow-up, and its first input carries the notice; a side turn's `bash` call starts no job even when a policy allowed it |
 | F5 | A fork Session never writes a row of its source. A side turn writes only its audit row and, after the reply, what its fold commits | agent, storage | the source's rows before and after a child's Turns; the caller's rows after a failed and after a successful side turn |
 | F6 | A side turn has no capability its caller lacks; a fork Session runs an Agent the requesting caller may select, on the source's backend | agent, service | a side turn's call to every tool its policy does not allow is denied and never runs; a reservation without editor on the source, chat in the destination, or selection authority for the Agent (inherited or `--agent`) is refused, as is an Agent on another backend |
@@ -533,12 +541,11 @@ class ForkPoint:
     units: Optional[int] = None   # side turns: the first `units` units of the view at as_of
 
 class ForkPointError(ValueError):
-    code: Literal["session_fork_point_not_in_context", "session_fork_point_inherited",
-                  "session_fork_point_unsettled"]
+    code: Literal["unsettled", "out_of_range"]       # internal: no product surface reaches it
 
 def settled(entries: Sequence[ContextEntry], as_of: int) -> bool: ...
-def fork_cut(entries: Sequence[ContextEntry], target_row_id: Optional[str], *,
-             live_input_seq: Optional[int]) -> int: ...                    # §2's table
+def latest_cut(entries: Sequence[ContextEntry], *, live_input_seq: Optional[int]) -> int: ...   # a user's fork
+def fork_point(entries: Sequence[ContextEntry], as_of: int) -> ForkPoint: ...   # internal; raises ForkPointError
 def fork_prefix(entries: Sequence[ContextEntry], point: ForkPoint) -> tuple[Message, ...]: ...
 
 # core/agent_core/agent/fork.py (replaces agent/checkpoint.py)
@@ -591,21 +598,12 @@ class Agent:
     # v1: only while a run is active. Reserved: while idle, under the adapter's Session writer lock.
 
 # storage/agent_transcript.py
-def resolve_fork_point(conn: Connection, source_session_id: str, at_message_id: Optional[str]) -> int: ...
+def resolve_fork_point(conn: Connection, source_session_id: str, *, as_of: Optional[int] = None) -> int: ...
+# None: the user's latest point (§2), from the source's rows and its live Turn's first consumed input.
+# An int: an internal point, checked by fork_point.
 
-# core/services/session_fork.py
-def reserve_forked_session(*, source_session_id: str, at_message_id: Optional[str] = None,
-                           ...) -> SessionForkResult: ...
-# SessionForkError codes added: session_fork_point_unsupported, session_fork_point_not_in_context,
-# session_fork_point_inherited (details name the owning Session), session_fork_point_unsettled
-
-# modules/agents/catalog.py
-FORK_AT_MESSAGE_BACKENDS: frozenset[str]   # {"vibey"} in Phase 1
-```
-
-```text
-vibe agent run (--fork-session <session-id> | --fork-self) [--at <message-id>] --message ...
-POST /api/sessions/<session-id>/fork   {"at_message_id"?: string}
+# core/services/session_fork.py: reserve_forked_session keeps its signature;
+# for vibey it calls resolve_fork_point(conn, source_session_id)
 ```
 
 The `ForkTurn` audit (`agent_events.event_type = 'fork_turn'`, `visibility = 'audit'`, no `context_seq`) replaces
@@ -625,14 +623,15 @@ Its optional fields are `detail` (for `checkpoint`: `{reason, mode}`), `error`, 
 
 ## 16. Contract delta at freeze
 
-Built from a search of `docs/plans` for every fork term and every identifier C-10 renames or replaces (`fork`,
-`anchor_seq`, `snapshot`, `dreaming`, `checkpoint_turn`, `CheckpointTurn`, `append_audit`). Rows not listed keep their
-meaning: their "fork" is the side turn or the fork Session as C-10 defines them.
+Applied in the freeze PR. Built from a search of `docs/plans` for every fork term and every identifier C-10 renames
+or replaces (`fork`, `anchor_seq`, `snapshot`, `dreaming`, `checkpoint_turn`, `CheckpointTurn`, `append_audit`). Rows
+not listed keep their meaning: their "fork" is the side turn or the fork Session as C-10 defines them. Line numbers
+are those before the freeze PR.
 
 | File | Location | Change |
 | --- | --- | --- |
 | `transcript.md` | §1, lines 30-31 | the audit kind `context_checkpoint_turn` (`CheckpointTurn`) becomes `fork_turn` (`ForkTurn`, C-10 §7) |
-| `transcript.md` | §4, lines 87-90 | `anchor_seq` resolution becomes C-10 §2's fork point: settled, 0 for the empty prefix, the source's own rows, no clock |
+| `transcript.md` | §4, lines 87-90 | `anchor_seq` resolution becomes C-10 §2's fork point: settled, the user's latest point, 0 for the empty prefix, no clock |
 | `transcript.md` | §5, lines 101-102 | points to F8 |
 | `transcript-rows.schema.json` | `CheckpointTurn`, lines 348-404 | becomes `ForkTurn` (§15); the `append_audit` kind in its description becomes `fork_turn` |
 | `context.md` | §6, lines 152-216 | the checkpoint is a side turn (C-10 §7); the dreaming table stays here as the value of `DREAMING`; the budget, room, rounds, and bound bullets point to C-10 §7; the audit becomes `fork_turn` with `purpose: checkpoint` and `detail: {reason, mode}` |
@@ -643,31 +642,31 @@ meaning: their "fork" is the side turn or the fork Session as C-10 defines them.
 | `context.md` | §12, lines 494-496 | the reserved memory row points to C-10 §13 |
 | `loop-control.md` | §1, lines 8-20 | the `Agent` surface adds `side_turn_fits` and `side_turn` (C-10 §15) |
 | `loop-control.md` | §7, lines 111-115 | "Snapshot and fork" points to C-10; `snapshot()` stays the `after_run` outcome's state |
-| `backend-registration.md` | its capability-specific sets | adds `FORK_AT_MESSAGE_BACKENDS` |
 | plan `avibe-agent-core.md` | §4, line 79 | `agent/` holds the side turn, not a "fork snapshot" |
 | plan | §5 table, lines 104 and 106 | C-3's "snapshot and fork" and C-5's "fork by reference" point to C-10 |
 | plan | §5.1, lines 165-167 | the child's context is the source's rows up to the fork point (C-10 §2) |
 | plan | §5.2, lines 195-199 | checkpoint delivery is a side turn under the `dreaming` policy |
 | plan | §6 A10, lines 330-332 | a checkpoint turn's request is a side turn's (C-10 §7) |
-| `README.md`, plan §5 | the C-10 rows | added by this PR as a draft; marked frozen at freeze |
+| `README.md`, plan §5 | the C-10 rows | added as a draft by #2397; marked frozen |
 
 ## 17. Phases
 
 | Phase | Scope | Acceptance (properties) |
 | --- | --- | --- |
-| 0 | this contract; owner decisions [O-1]–[O-4]; the §16 delta, then freeze | owner approval; `pr-delivery-loop` gates |
-| 1a | point-in-time fork for Vibey: `settled`, `fork_cut`, `resolve_fork_point` (no clock); trimming the live Turn; `at_message_id` with error codes; `FORK_AT_MESSAGE_BACKENDS`; CLI `--at`; the HTTP body; the fork notice; T2's inherited branch removed; the Web action and banner once the frame is approved | F1, F3, F4, F6 (reservation), F8 pin; an E2E on Workbench: fork from an earlier reply while the source runs, continue in the fork, and the source is unaffected (the E2E wave's S8) |
+| 0 | this contract; owner decisions; the §16 delta; freeze | done 2026-10-10 |
+| 1a | the fork point for Vibey: `harness/fork.py` (`ForkPoint`, `settled`, `latest_cut`, `fork_point`, `fork_prefix`), `resolve_fork_point` (no clock); the existing session fork wired to it for `vibey`, trimming the live Turn; the fork notice; T2's inherited branch removed; the internal API for an arbitrary settled point | F1, F3, F4, F6 (reservation), F8 pin; an E2E on a local dev instance with a throwaway home: fork a Vibey Session while it runs a long tool call, check the child's context, and check that the parent continues unaffected |
 | 1b | C-9 on the side turn, as a pure refactor: `ForkPolicy` and `DREAMING`, `Agent.side_turn`, the `fork_turn` audit | F2, F5, F6 (policy), F7; the C-9 suite passes with only the audit kind renamed |
-| 2 | teammates and Agents: the descendant lookup and `fork_initiator`; the Harness bound [O-4]; a Session-invariant system prompt for warm fork Sessions; an Agent fork tool; side turns while idle | decided when the teams design is written |
-| 3 | point-in-time for native backends: Codex through `lastTurnId`, after adding a reply-to-Turn association and preceding-Turn resolution, then Claude (store message UUIDs; `resume_session_at`) and OpenCode (store message ids; `messageID`) | F1 per backend, to the extent its native store allows |
+| later | teams: the descendant lookup, a Session-invariant system prompt, an Agent fork tool, side turns while idle | a separate design |
 
-Files each lane touches, from a search of the code, tests, prompts, and UI for the identifiers it changes
-(`resolve_fork_anchor_seq`, `context_bound`, `fork_source_context_seq`, `--fork-self`, `--fork-session`,
-`sessionFork`, `checkpoint_turn`, `CheckpointTurn`, `CheckpointPolicy`, `CHECKPOINT_TOOL_*`, `_fork_fits`):
+Point-in-time fork for native backends (the former Phase 3) and the Harness bound are cancelled by owner decision.
 
-| Lane | Code | Tests | Docs, prompts, copy |
+Files each lane touches, from a search of the code, tests, and prompts for the identifiers it changes
+(`resolve_fork_anchor_seq`, `context_bound`, `fork_source_context_seq`, `call_instance_result`, `checkpoint_turn`,
+`CheckpointTurn`, `CheckpointPolicy`, `CHECKPOINT_TOOL_*`, `_fork_fits`):
+
+| Lane | Code | Tests | Prompts |
 | --- | --- | --- | --- |
-| 1a | `core/agent_core/harness/fork.py` (new); `storage/agent_transcript.py` (fork resolution); `core/services/session_fork.py`; `modules/agents/vibey/agent.py` (T2's inherited branch, the fork notice); `modules/agents/catalog.py`; `vibe/cli.py`; `vibe/ui_server.py`; `ui/src` (`context/ApiContext.tsx`, `components/workbench/ChatPage.tsx`, the new action) | `tests/test_agent_transcript.py`, `tests/test_transcript_store_contract.py`, `tests/test_vibey_agent.py`, `tests/test_vibey_agent_context.py`, `tests/test_session_fork.py`, the CLI parser tests | `vibe/i18n/{en,zh}.json`, `ui/src/i18n/{en,zh}.json`, `core/prompts/harness-agents.md`, `docs/CLI.md`, `docs/CLI_ZH.md`, `skills/use-avibe-harness/SKILL.md`, `skills/use-avibe/references/harness.md` |
+| 1a | `core/agent_core/harness/fork.py` (new); `storage/agent_transcript.py` (fork resolution); `core/services/session_fork.py`; `modules/agents/vibey/agent.py` (T2's inherited branch, the fork notice) | `tests/agent_core/harness/` (the pure rule), `tests/test_agent_transcript.py`, `tests/test_transcript_store_contract.py`, `tests/test_vibey_agent.py`, `tests/test_vibey_agent_context.py`, `tests/test_session_fork.py` | the fork notice's text |
 | 1b | `core/agent_core/agent/loop.py`; `core/agent_core/agent/checkpoint.py` (becomes `fork.py`); `core/agent_core/harness/context.py` (the `CHECKPOINT_TOOL_*` constants); `core/agent_core/harness/store.py` (the audit kind); `storage/agent_transcript.py` (the audit map, lines 94-95); `modules/agents/vibey/store.py` (the audit kind) | `tests/agent_core/fakes.py`, `tests/agent_core/agent/test_compaction.py`, `tests/agent_core/agent/test_context.py`, `tests/test_agent_transcript.py`, `tests/test_transcript_store_contract.py` | none |
 
 1b follows 1a; they are not parallel lanes. Both edit `storage/agent_transcript.py` and its two test suites, and 1b
@@ -676,19 +675,23 @@ records the `ForkPoint` that 1a adds in `harness/fork.py`. 1b reopens review on 
 
 ## 18. Owner decisions
 
-| ID | Decision | Recommendation |
-| --- | --- | --- |
-| O-1 | The model: one primitive (the fork point) with two carriers separated by identity. A side turn can do nothing that outlives its turn; a fork Session does everything else. C-9's checkpoint becomes the first side turn. | Yes |
-| O-2 | Phase 1 scope: point-in-time fork for Vibey only, on CLI, HTTP, and Web. Native backends come in Phase 3, Codex first; each needs a new map first (Codex: reply to Turn; Claude and OpenCode: message ids). Until then, those backends keep forking at the latest point. | Yes |
-| O-3 | Web UX: "Fork from here" only on Vibey replies. The fork shows the banner naming that message, not the inherited history. Not in v1: "edit and resend" on a user message (the API supports it as "fork before this input"), and rendering inherited history in the child. The action needs a `design.pen` frame. | Yes, replies only, with the banner |
-| O-4 | Forks requested by Agents. There is no fork tool in v1. Bounding self-replication: an Agent can already recurse with `vibe agent run --fork-self` or `--agent`, bounded only by the 8-run concurrency limit. | A Harness bound on depth and live descendants per root, landing in Phase 2 before the tool. Pull it into Phase 1 only if today's exposure should close now: Phase 1 adds no new exposure, because user forks are not recursive |
+Decided 2026-10-10.
 
-Decided in this lane, all reversible:
+| ID | Decision |
+| --- | --- |
+| O-1 | Yes: one primitive (the fork point) with two carriers separated by identity. A side turn can do nothing that outlives its turn; a fork Session does everything else. C-9's checkpoint becomes the first side turn. "It must be implemented this way." |
+| O-2 | Point-in-time fork is internal only. Forking at an arbitrary settled point is an engine capability for system mechanisms (C-9, later memory and self context management), with no CLI, HTTP, or Web surface. A user's fork always takes the latest point: the end of the previous ended Turn, by construction (§2). |
+| O-3 | No new Web interaction. The existing Fork action stays and follows the cut rule. No banner change, no inherited-history rendering, no edit-and-resend, no `design.pen` frame. |
+| O-4 | No new limits. Agents keep forking themselves through `vibe agent run --fork-self`, with no depth or descendant bound. |
 
-- A fork Session at the latest point trims a live Turn for Vibey (§2).
+Also decided: point-in-time fork for native backends is cancelled, and teams stay a later design.
+
+Decided in the design lane, all reversible:
+
+- A user's fork of a Vibey Session trims a live Turn (§2), which O-2's rule confirms.
 - The audit kind is renamed `fork_turn` (§7).
 - Scratch is not forked (§4).
-- Making the system prompt Session-invariant waits for Phase 2 (§3).
+- Making the system prompt Session-invariant is left to the teams design (§3).
 
 ## 19. Rejected alternatives
 
@@ -702,3 +705,5 @@ Decided in this lane, all reversible:
 | Merge a child's turns back into the source | two writers of one context and a second copy of rows (§9) |
 | Store the parent-to-children relation in a new column | duplicates the metadata keys; an expression index serves the lookup (§5) |
 | Let a side turn run `bash` with a synthetic call instance | a job needs a committed response to be recovered and settled; work that acts belongs in a fork Session (§1) |
+| A user-facing point-in-time fork (CLI `--at`, HTTP `at_message_id`, Web "fork from here") | owner decision O-2: the arbitrary point is an internal capability |
+| A depth or descendant bound on Agent self-forks | owner decision O-4 |

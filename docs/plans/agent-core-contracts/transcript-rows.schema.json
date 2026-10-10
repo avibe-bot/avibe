@@ -345,13 +345,14 @@
         }
       }
     },
-    "CheckpointTurn": {
-      "description": "`agent_events.content_json` of a `context_checkpoint_turn` audit row (`TranscriptStore.append_audit(kind='checkpoint_turn')`, `visibility = 'audit'`, no `context_seq`): one checkpoint turn and the messages it produced, from the attempt ledger (context.md section 6). Never context.",
+    "ForkTurn": {
+      "description": "`agent_events.content_json` of a `fork_turn` audit row (`TranscriptStore.append_audit(kind='fork_turn')`, `visibility = 'audit'`, no `context_seq`): one side turn (C-10 fork.md section 7), such as a C-9 checkpoint turn, and the messages it produced, from the attempt ledger. Written once on every exit but an abort (C-10 F7). Never context.",
       "type": "object",
       "required": [
         "version",
-        "reason",
-        "mode",
+        "purpose",
+        "policy",
+        "point",
         "outcome",
         "messages"
       ],
@@ -360,17 +361,62 @@
         "version": {
           "const": 1
         },
-        "reason": {
+        "purpose": {
           "enum": [
-            "threshold",
-            "overflow"
-          ]
+            "checkpoint"
+          ],
+          "description": "What the side turn is for; grows with its consumers (C-10 section 13)."
         },
-        "mode": {
+        "policy": {
           "enum": [
-            "normal",
-            "rolling"
-          ]
+            "dreaming"
+          ],
+          "description": "The side-turn policy its calls ran under (C-10 section 6)."
+        },
+        "point": {
+          "type": "object",
+          "description": "The fork point (C-10 section 2): the caller's latest committed context_seq, and the number of units of that view the prefix kept (null: all of them).",
+          "required": [
+            "as_of",
+            "units"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "as_of": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "units": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0
+            }
+          }
+        },
+        "detail": {
+          "type": "object",
+          "description": "Purpose fields. For `checkpoint`: the C-9 reason and mode (context.md section 6).",
+          "required": [
+            "reason",
+            "mode"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "reason": {
+              "enum": [
+                "threshold",
+                "overflow"
+              ]
+            },
+            "mode": {
+              "enum": [
+                "normal",
+                "rolling"
+              ]
+            }
+          }
         },
         "outcome": {
           "enum": [
@@ -384,11 +430,16 @@
             "null"
           ]
         },
-        "compaction_event_id": {
+        "folded_event_id": {
           "type": [
             "string",
             "null"
-          ]
+          ],
+          "description": "The row the caller's fold committed (for a checkpoint, its `context_compaction` row), or null."
+        },
+        "rounds": {
+          "type": "integer",
+          "minimum": 0
         },
         "messages": {
           "type": "array",
