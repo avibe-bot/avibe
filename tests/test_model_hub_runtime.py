@@ -12,6 +12,7 @@ import sys
 import tarfile
 import threading
 import time
+import unicodedata
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -41,7 +42,7 @@ from core.handlers.model_hub.classification import (
     terminal_outcome_category,
 )
 from core.handlers.model_hub.errors import ModelDiscoveryError
-from core.handlers.model_hub.events import redact_untrusted_text
+from core.handlers.model_hub.events import redact_untrusted_text, untrusted_detail_line
 from core.handlers.model_hub.request import ModelHubRequest
 from core.handlers.model_hub.stream_wire import (
     ProtocolObservation,
@@ -7573,12 +7574,12 @@ def test_engine_upstream_detail_drops_terminal_control_characters() -> None:
     assert detail == "relay down now gnp.exe abc end"
 
 
-def test_engine_upstream_detail_replaces_lone_surrogates_so_it_can_persist() -> None:
+def test_engine_upstream_detail_drops_lone_surrogates_so_it_can_persist() -> None:
     payload = b'{"error": {"message": "bad \\ud800 byte"}}'
 
     detail = client_module._upstream_error_detail(payload, (("error",),))
 
-    assert detail == "bad \ufffd byte"
+    assert detail == "bad byte"
     detail.encode("utf-8")
 
 
@@ -9173,6 +9174,64 @@ def test_oauth_failure_detail_is_the_engine_reason_on_one_bounded_line(tmp_path:
         assert second.error_detail.endswith("…")
 
     asyncio.run(run())
+
+
+def _invisible_characters() -> list[str]:
+    """Every character that renders as nothing, generated from Unicode.
+
+    All of Cc, Cf, and Cs, the default-ignorable characters outside C*, and a
+    stride through the vast private-use and unassigned ranges.
+    """
+
+    characters = []
+    for code in range(0x110000):
+        character = chr(code)
+        category = unicodedata.category(character)
+        if category in {"Cc", "Cf", "Cs"} or (category in {"Co", "Cn"} and code % 509 == 0):
+            characters.append(character)
+    for first, last in (
+        (0x034F, 0x034F), (0x115F, 0x1160), (0x17B4, 0x17B5), (0x180B, 0x180F),
+        (0x3164, 0x3164), (0xFE00, 0xFE0F), (0xFFA0, 0xFFA0), (0xE0100, 0xE01EF),
+    ):
+        characters.extend(chr(code) for code in range(first, last + 1))
+    return characters
+
+
+def _ecma48_sequences() -> list[str]:
+    """Every ECMA-48 sequence shape, in 7-bit and 8-bit form."""
+
+    finals = [chr(code) for code in range(0x40, 0x7F)]
+    sequences = [f"\x1b[1;31{final}" for final in finals] + [f"\x9b0 {final}" for final in finals]
+    sequences += [
+        f"\x1b{chr(intermediate)}{chr(final)}"
+        for intermediate in range(0x20, 0x30)
+        for final in range(0x30, 0x7F)
+    ]
+    sequences += [f"\x1b{chr(final)}" for final in range(0x30, 0x7F) if chr(final) not in "[]PX^_"]
+    for introducer in ("\x1b]", "\x1bP", "\x1bX", "\x1b^", "\x1b_", "\x9d", "\x90", "\x98", "\x9e", "\x9f"):
+        sequences += [f"{introducer}0;payload{terminator}" for terminator in ("\x07", "\x1b\\", "\x9c")]
+    return sequences
+
+
+@pytest.mark.parametrize(
+    ("template", "secret"),
+    [
+        ("refresh failed: client_se{}cret=hunter2hunter2 at provider", "hunter2hunter2"),
+        ("exchange failed for sk-live_ab{}cdefgh123 today", "cdefgh123"),
+        ("rejected Authorization: Bearer abcd{}efgh12345678 here", "efgh12345678"),
+    ],
+)
+def test_no_invisible_character_or_control_sequence_can_split_a_secret_out_of_redaction(
+    template: str, secret: str,
+) -> None:
+    # The words before the split always survive; an unterminated control
+    # string may swallow the secret instead of leaving it to be redacted.
+    lead = template.split(" ", 1)[0]
+    for splitter in _invisible_characters() + _ecma48_sequences():
+        shown = untrusted_detail_line(template.format(splitter))
+        assert secret not in shown, repr(splitter)
+        assert shown.startswith(lead), repr(splitter)
+        assert not any(unicodedata.category(character)[0] == "C" for character in shown), repr(splitter)
 
 
 @pytest.mark.parametrize(

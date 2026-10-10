@@ -496,7 +496,8 @@ scenarios:
     supporting_tests:
       - tests/test_model_hub_runtime.py::test_oauth_failure_detail_is_inert_and_credential_free_for_the_browser_and_log
       - tests/test_model_hub_runtime.py::test_engine_upstream_detail_drops_terminal_control_characters
-      - tests/test_web_oauth_flow.py::test_opencode_oauth_failure_reaches_log_and_status_without_raw_provider_text
+      - tests/test_model_hub_runtime.py::test_no_invisible_character_or_control_sequence_can_split_a_secret_out_of_redaction
+      - tests/test_web_oauth_flow.py::test_every_sign_in_failure_reaches_log_and_user_inert_and_credential_free
   - id: AUTH-SETUP-128
     name: The desktop pet leaves its setup-pending state once setup is finished in the main window
     status: partial

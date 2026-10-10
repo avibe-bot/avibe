@@ -23,11 +23,13 @@ import pytest
 
 from tests.opencode_generation_fakes import lease_returning
 from core.agent_auth_service import (
+    AgentAuthFlow,
     AgentAuthService,
     ClaudeOAuthAttempt,
     ClaudeOAuthBatch,
     WebAuthFlow,
 )
+from modules.im import MessageContext
 from modules.agents.opencode.message_processor import (
     extract_opencode_response_text,
     is_empty_terminal_opencode_message,
@@ -934,43 +936,145 @@ def test_start_web_setup_opencode_surfaces_server_failure(
     assert flow.error == "opencode_server_unavailable"
 
 
-def test_opencode_oauth_failure_reaches_log_and_status_without_raw_provider_text(
-    service: AgentAuthService, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    """The first log of a failed exchange is already inert and credential-free.
+# A provider or OpenCode response quoted in a sign-in exception: a credential
+# and terminal control sequences.
+_HOSTILE_SIGN_IN_ERROR = (
+    'OAuth callback failed (400): {"error":"invalid_grant","detail":"Bearer abcdefghijklmnop"}'
+    "\x1b[2J\x1b]0;owned\x07"
+)
+_SHOWN_SIGN_IN_ERROR = 'OAuth callback failed (400): {"error":"invalid_grant","detail":"[redacted]"}'
 
-    OpenCode quotes the provider's response in the error it raises, so the
-    flow's failure line and its stored reason get the treatment every
-    upstream detail gets, and no traceback repeats the raw text.
-    """
+
+def _hostile() -> RuntimeError:
+    return RuntimeError(_HOSTILE_SIGN_IN_ERROR)
+
+
+def _im_flow(backend: str, **fields) -> AgentAuthFlow:
+    return AgentAuthFlow(
+        flow_id=f"im-{backend}",
+        backend=backend,
+        settings_key="C1",
+        initiator_user_id="U1",
+        context=MessageContext(user_id="U1", channel_id="C1"),
+        process=None,
+        reader_task=None,
+        waiter_task=None,
+        **fields,
+    )
+
+
+async def _im_setup_start(service, monkeypatch):
+    monkeypatch.setattr(service, "_start_auth_flow", AsyncMock(side_effect=_hostile()))
+    monkeypatch.setattr(service, "_send_message", AsyncMock())
+    failure = AsyncMock()
+    monkeypatch.setattr(service, "_send_setup_start_failure", failure)
+    await service.start_setup(MessageContext(user_id="U1", channel_id="C1"), "codex")
+    return failure.await_args.args[2]
+
+
+async def _im_cli_flow(service, monkeypatch):
+    sent = AsyncMock()
+    monkeypatch.setattr(service, "_send_message_with_button", sent)
+    flow = _im_flow("codex")
+    flow.process = SimpleNamespace(wait=AsyncMock(side_effect=_hostile()))
+    await service._wait_for_completion(flow)
+    return sent.await_args.args[1]
+
+
+async def _im_claude_flow(service, monkeypatch):
+    sent = AsyncMock()
+    monkeypatch.setattr(service, "_send_message_with_button", sent)
+    monkeypatch.setattr(service, "_send_claude_control_request", AsyncMock(side_effect=_hostile()))
+    monkeypatch.setattr(service, "_finish_claude_oauth_attempt", AsyncMock())
+    monkeypatch.setattr(service, "_disconnect_claude_client", AsyncMock())
+    await service._wait_for_claude_completion(_im_flow("claude", claude_client=object()))
+    return sent.await_args.args[1]
+
+
+async def _web_start(service, monkeypatch):
+    monkeypatch.setattr(service, "_start_auth_flow", AsyncMock(side_effect=_hostile()))
+    return (await service.start_web_setup("codex")).error
+
+
+async def _web_claude_submit(service, monkeypatch):
+    monkeypatch.setattr(service, "_send_claude_callback", AsyncMock(side_effect=_hostile()))
+    flow = WebAuthFlow(flow_id="web-claude", backend="claude", awaiting_code=True, claude_client=object())
+    return (await service._submit_web_code_owned(flow, "code#state"))["detail"]
+
+
+async def _web_opencode_forward(service, monkeypatch):
+    server = SimpleNamespace(forward_oauth_redirect=AsyncMock(side_effect=_hostile()))
+    flow = WebAuthFlow(flow_id="web-opencode", backend="opencode", provider="openai")
+    flow.opencode_lease = SimpleNamespace(server=server)
+    result = await service._submit_opencode_callback_url(flow, "http://127.0.0.1:1455/cb?code=c")
+    return result["detail"]
+
+
+async def _web_opencode_wait(service, monkeypatch):
     fake = _FakeOpencodeServer()
     fake.auth_map = {"openai": [{"type": "oauth", "label": "ChatGPT Pro/Plus"}]}
-    fake.next_authorize = {
-        "url": "https://auth.openai.com/codex/device",
-        "instructions": "Enter code: YR8I-QJJUH",
-    }
-    fake.wait_provider_oauth = AsyncMock(
-        side_effect=RuntimeError(
-            'OAuth callback failed (400): {"error":"invalid_grant",'
-            '"detail":"Bearer abcdefghijklmnop"}\x1b[2J\x1b]0;owned\x07'
-        )
-    )
+    fake.next_authorize = {"url": "https://auth.openai.com/codex/device", "instructions": "Enter code: YR8I-QJJUH"}
+    fake.wait_provider_oauth = AsyncMock(side_effect=_hostile())
     monkeypatch.setattr(service, "_lease_opencode_server", lease_returning(fake))
+    flow = await service.start_web_setup("opencode", provider_id="openai")
+    await flow.waiter_task
+    return flow.error
 
-    async def run_flow():
-        flow = await service.start_web_setup("opencode", provider_id="openai")
-        await flow.waiter_task
-        return flow
 
+async def _web_codex_wait(service, monkeypatch):
+    flow = WebAuthFlow(flow_id="web-codex", backend="codex")
+    flow.process = SimpleNamespace(wait=AsyncMock(side_effect=_hostile()))
+    await service._wait_for_codex_completion_web(flow)
+    return flow.error
+
+
+async def _web_claude_wait(service, monkeypatch):
+    monkeypatch.setattr(service, "_send_claude_control_request", AsyncMock(side_effect=_hostile()))
+    monkeypatch.setattr(service, "_finish_claude_oauth_attempt", AsyncMock())
+    monkeypatch.setattr(service, "_disconnect_claude_client", AsyncMock())
+    flow = WebAuthFlow(flow_id="web-claude-wait", backend="claude", claude_client=object())
+    await service._wait_for_claude_completion_web(flow)
+    return flow.error
+
+
+@pytest.mark.parametrize(
+    ("trigger", "logged_as"),
+    [
+        (_im_setup_start, "Agent auth setup failed to start for codex"),
+        (_im_cli_flow, "Agent auth flow failed for codex"),
+        (_im_claude_flow, "Claude auth flow failed"),
+        (_web_start, "Web auth start failed for codex"),
+        (_web_claude_submit, "Web Claude callback submit failed"),
+        (_web_opencode_forward, "Failed to forward OpenCode OAuth callback for openai"),
+        (_web_opencode_wait, "Web OpenCode OAuth flow failed for openai"),
+        (_web_codex_wait, "Web Codex auth flow failed"),
+        (_web_claude_wait, "Web Claude auth flow failed"),
+    ],
+    ids=lambda value: getattr(value, "__name__", None),
+)
+def test_every_sign_in_failure_reaches_log_and_user_inert_and_credential_free(
+    service: AgentAuthService,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    trigger,
+    logged_as: str,
+) -> None:
+    """The first log and the user's copy of a failed sign-in get the upstream treatment.
+
+    The exception can quote a provider or OpenCode response, so each failure
+    path logs and shows the same sanitized line, with no traceback that would
+    repeat the raw text.
+    """
     with caplog.at_level(logging.ERROR, logger="core.agent_auth_service"):
-        flow = _run(run_flow())
+        shown = _run(trigger(service, monkeypatch))
 
-    assert flow.state == "failed"
-    assert flow.error == 'OAuth callback failed (400): {"error":"invalid_grant","detail":"[redacted]"}'
-    failures = [record for record in caplog.records if "Web OpenCode OAuth flow failed" in record.getMessage()]
+    assert _SHOWN_SIGN_IN_ERROR in shown
+    assert "abcdefghijklmnop" not in shown and "\x1b" not in shown
+    failures = [record for record in caplog.records if record.getMessage().startswith(logged_as)]
     assert len(failures) == 1
-    assert failures[0].getMessage() == f"Web OpenCode OAuth flow failed for openai: {flow.error}"
+    assert failures[0].getMessage() == f"{logged_as}: {_SHOWN_SIGN_IN_ERROR}"
     assert failures[0].exc_info is None
+    assert "abcdefghijklmnop" not in caplog.text
 
 
 def test_opencode_oauth_success_clears_provider_options_key(

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import threading
+import unicodedata
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -120,59 +121,126 @@ def redact_credential_material(value: str) -> str:
 # parser that misjudges the end leaks the rest of the value, so the remainder of the
 # message is dropped instead. The label needs no word boundary (``client_secret``
 # still matches on ``secret``) and has no nested quantifier, so matching stays linear
-# on hostile input. A word that ends a URL path (``…/oauth/token": dial tcp``, as
-# a transport error quotes its request) is not a label. ``contains_credential_material``
-# keeps the narrower shape-based patterns so benign labels such as ``max token: 4096``
-# in a model name are not rejected.
+# on hostile input. ``contains_credential_material`` keeps the narrower shape-based
+# patterns so benign labels such as ``max token: 4096`` in a model name are not
+# rejected.
 _LABELED_SECRET_PATTERN = re.compile(
-    r"(?i)(?<!/)(?:token|secret|password|passwd|pwd|key|credential|cookie|session|signature)[\"'`]?\s*[:=]\s*"
+    r"(?i)(?:token|secret|password|passwd|pwd|key|credential|cookie|session|signature)"
+    r"(?P<quote>[\"'`]?)\s*[:=]\s*"
 )
+
+
+def _secret_label(text: str) -> re.Match[str] | None:
+    """The first secret label in ``text``.
+
+    One shape is not a label: a quoted URL that ends in the word, as a
+    transport error quotes its request (``Post "https://…/oauth/token": dial
+    tcp``). An unquoted ``/session=…`` or ``?token=…`` still is.
+    """
+
+    for match in _LABELED_SECRET_PATTERN.finditer(text):
+        start = match.start()
+        if match.group("quote") and start > 0 and text[start - 1] == "/":
+            continue
+        return match
+    return None
 
 
 def redact_untrusted_text(value: str) -> str:
     """Redact credential shapes, then everything after the first labeled secret."""
 
     redacted = redact_credential_material(value)
-    match = _LABELED_SECRET_PATTERN.search(redacted)
+    match = _secret_label(redacted)
     if match is None:
         return redacted
     return redacted[: match.end()] + "[redacted]"
 
 
-# A whole terminal control sequence, in its 7-bit (ESC) or 8-bit (C1) form: CSI
-# with its parameters, OSC/DCS/APC/PM/SOS with their payload up to BEL or ST,
-# or a two-character escape. Every branch stops at the next ESC or C1 string
+# A whole ECMA-48 control sequence, 7-bit (ESC) or 8-bit (C1): a CSI with its
+# parameter and intermediate bytes; a control string (OSC, DCS, SOS, PM, APC)
+# with its payload up to BEL or ST; or an escape with its intermediate bytes
+# (nF) and final byte (Fp, Fe, Fs). Every branch stops at the next ESC or C1
 # terminator, which keeps matching linear on hostile input.
 _TERMINAL_CONTROL_SEQUENCE = re.compile(
     r"(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]"
     r"|(?:\x1b[\]PX^_]|[\x90\x98\x9d\x9e\x9f])[^\x07\x1b\x9c]*(?:\x07|\x1b\\|\x9c)?"
-    r"|\x1b[@-Z\\-_]"
+    r"|\x1b[ -/]*[0-~]"
 )
-# C0/C1 controls and every Unicode Bidi_Control character: either can act on
-# whatever renders the text (a terminal, a log viewer, a browser).
-_UNTRUSTED_CONTROL_CHARACTERS = re.compile(
-    r"[\x00-\x1f\x7f-\x9f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]"
+# Unicode Default_Ignorable_Code_Point characters outside the C* categories
+# (DerivedCoreProperties.txt): like a format control, each renders as nothing.
+_DEFAULT_IGNORABLE_OUTSIDE_C = frozenset(
+    chr(code)
+    for first, last in (
+        (0x034F, 0x034F),
+        (0x115F, 0x1160),
+        (0x17B4, 0x17B5),
+        (0x180B, 0x180D),
+        (0x180F, 0x180F),
+        (0x3164, 0x3164),
+        (0xFE00, 0xFE0F),
+        (0xFFA0, 0xFFA0),
+        (0xE0100, 0xE01EF),
+    )
+    for code in range(first, last + 1)
 )
 
 
-def _drop_control(match: re.Match[str]) -> str:
-    # A line break or tab separates words; every other control renders as
-    # nothing, so dropping it rejoins the text around it as the reader saw it.
-    return " " if match.group().isspace() else ""
+def _renders_as_nothing(character: str) -> bool:
+    return unicodedata.category(character)[0] == "C" or character in _DEFAULT_IGNORABLE_OUTSIDE_C
+
+
+def _credential_spans(text: str) -> list[tuple[int, int]]:
+    """Spans of credential material, the remainder after a secret label included."""
+
+    spans = [match.span() for pattern in _CREDENTIAL_PATTERNS for match in pattern.finditer(text)]
+    label = _secret_label(text)
+    if label is not None:
+        spans.append((label.end(), len(text)))
+    return [(start, end) for start, end in spans if end > start]
 
 
 def untrusted_detail_line(value: str) -> str:
     """Upstream text as one inert line with credential material redacted.
 
-    Control sequences and characters would act on whatever renders the text,
-    a log viewer included, and carry no message content. They are removed
-    rather than replaced, so a sequence inside a credential cannot split it
-    into pieces that redaction no longer recognizes.
+    The line is what a reader sees: whole control sequences go, and so does
+    every C* character (control, format, surrogate, private use, unassigned)
+    and every other default-ignorable one; whitespace, such as a line break,
+    becomes a space. Credential material is looked for twice: in that display
+    form, and with every invisible character simply removed and no sequence
+    parsed. Anything either reading finds is redacted, so nothing that renders
+    as nothing can split a secret out of recognition, however a terminal would
+    parse it.
     """
 
-    text = _TERMINAL_CONTROL_SEQUENCE.sub("", value)
-    text = " ".join(_UNTRUSTED_CONTROL_CHARACTERS.sub(_drop_control, text).split())
-    return redact_untrusted_text(text)
+    hidden = bytearray(len(value))
+    for match in _TERMINAL_CONTROL_SEQUENCE.finditer(value):
+        hidden[match.start() : match.end()] = b"\x01" * (match.end() - match.start())
+    shown = [
+        index
+        for index, character in enumerate(value)
+        if not hidden[index] and (character.isspace() or not _renders_as_nothing(character))
+    ]
+    visible = [index for index, character in enumerate(value) if not _renders_as_nothing(character)]
+    display = "".join(" " if value[index].isspace() else value[index] for index in shown)
+    flat = "".join(value[index] for index in visible)
+
+    masked = bytearray(len(value))
+    for text, positions in ((display, shown), (flat, visible)):
+        for start, end in _credential_spans(text):
+            first, last = positions[start], positions[end - 1] + 1
+            masked[first:last] = b"\x01" * (last - first)
+
+    line: list[str] = []
+    in_redaction = False
+    for index, character in zip(shown, display):
+        if masked[index]:
+            if not in_redaction:
+                line.append("[redacted]")
+            in_redaction = True
+            continue
+        in_redaction = False
+        line.append(character)
+    return " ".join("".join(line).split())
 
 
 def contains_credential_material(value: object) -> bool:

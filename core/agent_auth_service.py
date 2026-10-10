@@ -1003,8 +1003,9 @@ class AgentAuthService:
                     self._t("command.setup.hubOwned", backend=resolved_backend),
                 )
                 return
-            logger.error("Agent auth setup failed to start for %s: %s", resolved_backend, err, exc_info=True)
-            await self._send_setup_start_failure(context, resolved_backend, str(err))
+            detail = _untrusted_error_text(err)
+            logger.error("Agent auth setup failed to start for %s: %s", resolved_backend, detail)
+            await self._send_setup_start_failure(context, resolved_backend, detail)
             return
 
         if resolved_backend == "claude":
@@ -1984,10 +1985,11 @@ class AgentAuthService:
         except asyncio.CancelledError:
             raise
         except Exception as err:  # noqa: BLE001
-            logger.error("Agent auth flow failed for %s: %s", flow.backend, err, exc_info=True)
+            detail = _untrusted_error_text(err)
+            logger.error("Agent auth flow failed for %s: %s", flow.backend, detail)
             await self._send_message_with_button(
                 flow.context,
-                f"❌ {self._t('command.setup.failed', backend=flow.backend, detail=str(err))}",
+                f"❌ {self._t('command.setup.failed', backend=flow.backend, detail=detail)}",
                 button_text=self._t("button.resetOAuth"),
                 callback_data=f"auth_setup:{flow.backend}",
             )
@@ -2040,10 +2042,11 @@ class AgentAuthService:
             raise
         except Exception as err:  # noqa: BLE001
             await self._finish_claude_oauth_attempt(flow.claude_oauth_attempt, succeeded=False)
-            logger.error("Claude auth flow failed: %s", err, exc_info=True)
+            detail = _untrusted_error_text(err)
+            logger.error("Claude auth flow failed: %s", detail)
             await self._send_message_with_button(
                 flow.context,
-                f"❌ {self._t('command.setup.failed', backend=flow.backend, detail=str(err))}",
+                f"❌ {self._t('command.setup.failed', backend=flow.backend, detail=detail)}",
                 button_text=self._t("button.resetOAuth"),
                 callback_data=f"auth_setup:{flow.backend}",
             )
@@ -2711,7 +2714,8 @@ class AgentAuthService:
         except (BackendLoginInProgressError, NativeMigrationBlockedError):
             raise
         except Exception as err:  # noqa: BLE001
-            logger.error("Web auth start failed for %s: %s", backend, err, exc_info=True)
+            detail = _untrusted_error_text(err)
+            logger.error("Web auth start failed for %s: %s", backend, detail)
             flow = WebAuthFlow(
                 flow_id=uuid.uuid4().hex[:12],
                 backend=backend,
@@ -2719,7 +2723,7 @@ class AgentAuthService:
                 source_id=owner_ref,
                 vendor=self._native_vendor_for_flow(backend, provider_id),
                 state="failed",
-                error=str(err),
+                error=detail,
             )
             self._flow_registry.put(flow)
         return flow
@@ -2776,8 +2780,9 @@ class AgentAuthService:
         try:
             await self._send_claude_callback(flow.claude_client, auth_code, state_val)
         except Exception as err:  # noqa: BLE001
-            logger.error("Web Claude callback submit failed: %s", err, exc_info=True)
-            return {"ok": False, "error": "submit_failed", "detail": str(err)}
+            detail = _untrusted_error_text(err)
+            logger.error("Web Claude callback submit failed: %s", detail)
+            return {"ok": False, "error": "submit_failed", "detail": detail}
 
         flow.awaiting_code = False
         flow.state = "verifying"
