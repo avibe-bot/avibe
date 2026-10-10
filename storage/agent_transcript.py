@@ -67,6 +67,7 @@ from sqlalchemy import and_, func, or_, select, text
 from sqlalchemy.engine import Connection, Engine
 
 from core.agent_core.harness.fork import fork_point, latest_cut
+from core.agent_core.harness.projection import open_tool_calls
 from core.agent_core.harness.store import ContextEntry, EntryKind
 from core.agent_core.messages import (
     AssistantMessage,
@@ -496,21 +497,29 @@ def resolve_fork_point(
     entries = _context_entries(conn, source_session_id)
     if as_of is not None:
         return fork_point(entries, as_of).as_of
-    live_input_seq = None if self_fork else _live_input_seq(conn, source_session_id)
-    return latest_cut(entries, live_input_seq=live_input_seq)
+    unended = None if self_fork else _unended_input_seq(conn, source_session_id, entries)
+    return latest_cut(entries, unended_input_seq=unended)
 
 
-def _live_input_seq(conn: Connection, session_id: str) -> Optional[int]:
-    """The ``context_seq`` of the live Turn's first input, once consumed: the input row its initial Delivery names."""
-    return conn.execute(
-        select(messages.c.context_seq)
+def _unended_input_seq(conn: Connection, session_id: str, entries: Sequence[ContextEntry]) -> Optional[int]:
+    """The first input of the earliest Turn that has not ended: the live Turn, or the Turn that owns an open call.
+
+    A Turn's input is the row its initial Delivery names. Turns run one at a time and each writes its rows after its
+    input, so the Turn owning an open call is the latest one whose input precedes that call.
+    """
+    turns = conn.execute(
+        select(session_turns.c.state, messages.c.context_seq)
         .select_from(session_turns.join(messages, messages.c.id == session_turns.c.initial_delivery_id))
-        .where(
-            session_turns.c.session_id == session_id,
-            session_turns.c.state.in_(TURN_OWNER_STATES),
-            messages.c.session_id == session_id,
-        )
-    ).scalar()
+        .where(session_turns.c.session_id == session_id, messages.c.session_id == session_id)
+    ).all()
+    inputs = sorted(seq for _, seq in turns if seq is not None)
+    candidates = [seq for state, seq in turns if state in TURN_OWNER_STATES and seq is not None]
+    open_calls = open_tool_calls(entries)
+    if open_calls:
+        first_open = min(owner.context_seq for owner, _ in open_calls)
+        owner_input = max((seq for seq in inputs if seq <= first_open), default=None)
+        candidates.append(owner_input if owner_input is not None else first_open)
+    return min(candidates, default=None)
 
 
 def _settled_result(conn: Connection, session_id: str, tool_call_id: str) -> Optional[ContextEntry]:

@@ -401,8 +401,9 @@ def reserve_forked_session(
             metadata.pop("fork_opencode_message_id", None)
             metadata.pop("fork_opencode_fork_empty_history", None)
             metadata.pop("fork_opencode_boundary_from_active_run", None)
-            # A source that is itself a fork carries its own anchor; the child's is resolved below.
+            # A source that is itself a fork carries its own point and kind; the child's are set below.
             metadata.pop("fork_source_context_seq", None)
+            metadata.pop("fork_self", None)
             metadata.update(
                 {
                     "created_via": "session_fork",

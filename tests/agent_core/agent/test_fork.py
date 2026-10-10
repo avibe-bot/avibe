@@ -46,9 +46,9 @@ def test_a_users_fork_of_a_turn_mid_tool_batch_cuts_at_the_previous_ended_turn()
     rows.result("a")
     rows.calls("b", "c")
     rows.result("b")  # c is still running
-    assert latest_cut(rows.rows, live_input_seq=live.context_seq) == ended
+    assert latest_cut(rows.rows, unended_input_seq=live.context_seq) == ended
     # Without the live Turn's first input the largest settled point is mid-Turn: what a self-fork takes.
-    assert latest_cut(rows.rows, live_input_seq=None) == 5
+    assert latest_cut(rows.rows, unended_input_seq=None) == 5
 
 
 @pytest.mark.parametrize("outcome", ["stopped", "failed"])
@@ -61,23 +61,28 @@ def test_a_stopped_or_failed_previous_turn_is_a_legal_cut_once_recovery_settled_
     # Recovery (T2) settles what the Stop or the failure left open, before the next Turn's input.
     settled_by_recovery = rows.result("b", f"[tool call interrupted: {outcome}]")
     live = rows.input("third")
-    assert latest_cut(rows.rows, live_input_seq=live.context_seq) == settled_by_recovery.context_seq
-    assert latest_cut(rows.rows, live_input_seq=None) == live.context_seq
+    assert latest_cut(rows.rows, unended_input_seq=live.context_seq) == settled_by_recovery.context_seq
+    assert latest_cut(rows.rows, unended_input_seq=None) == live.context_seq
 
 
-def test_an_ended_turn_recovery_has_not_settled_contributes_up_to_its_last_settled_row():
+def test_an_ended_turn_recovery_has_not_settled_is_cut_out_whole():
     rows = Rows()
-    _ended_turn_then(rows)
+    ended = _ended_turn_then(rows)
     ask = rows.input("second")
-    rows.calls("a")  # the Turn ended by a crash; T2 has not run yet
-    assert latest_cut(rows.rows, live_input_seq=None) == ask.context_seq
+    rows.calls("a")
+    rows.result("a")
+    rows.calls("b")  # the Turn ended by a crash; T2 has not settled b yet
+    # The storage layer names that Turn's first input; nothing of the partial Turn is kept.
+    assert latest_cut(rows.rows, unended_input_seq=ask.context_seq) == ended
+    # Without it, the largest settled point would fall mid-Turn: what a self-fork from inside a live Turn takes.
+    assert latest_cut(rows.rows, unended_input_seq=None) == 5
 
 
 def test_an_empty_or_unanswered_context_cuts_at_the_empty_prefix():
-    assert latest_cut([], live_input_seq=None) == 0
+    assert latest_cut([], unended_input_seq=None) == 0
     rows = Rows()
     live = rows.input("only")
-    assert latest_cut(rows.rows, live_input_seq=live.context_seq) == 0
+    assert latest_cut(rows.rows, unended_input_seq=live.context_seq) == 0
 
 
 def test_the_internal_point_must_be_in_range_and_settled():

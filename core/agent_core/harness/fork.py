@@ -39,16 +39,15 @@ def settled(entries: Sequence[ContextEntry], as_of: int) -> bool:
     return not open_tool_calls([entry for entry in entries if entry.context_seq <= as_of])
 
 
-def latest_cut(entries: Sequence[ContextEntry], *, live_input_seq: Optional[int]) -> int:
-    """A user's fork: the end of the previous ended Turn.
+def latest_cut(entries: Sequence[ContextEntry], *, unended_input_seq: Optional[int]) -> int:
+    """The largest settled point before ``unended_input_seq`` (anywhere when it is ``None``).
 
-    ``live_input_seq`` is the ``context_seq`` of the live Turn's first consumed input, when a Turn is live and has
-    consumed it. The live Turn writes every row of its own after that input (one writer per Session), so the largest
-    settled point before it ends the previous Turn; an ended Turn whose calls recovery has not settled yet
-    contributes only up to its last settled row.
+    A user's fork passes the first input of the earliest Turn that has not ended: the live Turn, or one whose calls
+    recovery has not settled yet. A Turn writes every row of its own after that input (one writer per Session), so
+    the point ends the previous ended Turn and no partial Turn is inherited. A self-fork passes ``None``.
     """
     seqs = sorted(
-        {entry.context_seq for entry in entries if live_input_seq is None or entry.context_seq < live_input_seq},
+        {entry.context_seq for entry in entries if unended_input_seq is None or entry.context_seq < unended_input_seq},
         reverse=True,
     )
     return next((seq for seq in seqs if settled(entries, seq)), 0)
