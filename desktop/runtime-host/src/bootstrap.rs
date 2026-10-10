@@ -471,8 +471,12 @@ impl RuntimeHost {
         // The login-shell PATH lookup can wait 10 s on a hanging startup file.
         // It runs here, on a blocking thread, before the launch-state mutex is
         // taken, so a concurrent recovery or stop is not held for that budget.
-        let prepared = launcher.clone();
-        let _ = tokio::task::spawn_blocking(move || prepared.prepare_launch()).await;
+        // A run that finds an earlier launch still in flight starts nothing, so
+        // it does not ask the login shell either.
+        if !self.launched_runtime().launch_pending() {
+            let prepared = launcher.clone();
+            let _ = tokio::task::spawn_blocking(move || prepared.prepare_launch()).await;
+        }
         // The lock makes the decision and launch atomic, so concurrent runs
         // cannot both start the Runtime.
         if let Err(error) = self.launch_if_needed(launcher.clone(), trigger.allows_handover()) {
@@ -928,6 +932,34 @@ mod tests {
         assert_eq!(counting.launches.load(Ordering::SeqCst), 0);
         assert_eq!(status.phase, BootstrapPhase::Failed);
         assert_eq!(status.notice.code, BootstrapNoticeCode::RuntimeSpawnFailed);
+    }
+
+    /// A Retry or recovery run that finds an earlier launch still in flight
+    /// starts nothing, so it must not spend the login-shell lookup either.
+    #[tokio::test]
+    async fn a_run_that_finds_a_launch_in_flight_does_not_prepare_another() {
+        let counting = Arc::new(CountingLauncher::default());
+        let host = RuntimeHost::new(
+            Arc::new(AbsentProbe),
+            Arc::new(PreparingLauncher {
+                inner: counting.clone(),
+            }),
+            RuntimeHostSettings {
+                origin_override: None,
+                ready_timeout: Duration::from_millis(10),
+                poll_interval: Duration::from_millis(1),
+                probe_timeout: Duration::from_millis(10),
+            },
+        );
+        host.launched_runtime().attempt = Some(LaunchedRuntime {
+            pid: 1,
+            watch: LaunchWatch::default(),
+        });
+
+        host.bootstrap(&DiscardStatus, BootstrapTrigger::Retry).await;
+
+        assert_eq!(counting.prepares.load(Ordering::SeqCst), 0);
+        assert_eq!(counting.launches.load(Ordering::SeqCst), 0);
     }
 
     #[test]
