@@ -274,8 +274,9 @@ class VibeyAgent(BaseAgent):
         if turn.stop_requested:
             return await self._settle_stopped(turn)
         sections, skill_catalog = await self._avibe_sections(request, cwd)
+        builtin_agent = await asyncio.to_thread(self._is_builtin_agent, request)
         environment = await asyncio.to_thread(self._turn_environment, request, cwd)
-        self._start_agent(turn, cwd, sections, environment)
+        self._start_agent(turn, cwd, sections, environment, builtin_agent=builtin_agent)
         runtime.cwd = cwd
         # Prepared before anything is dispatched (``core.native_dispatch_phase``).
         message = await self._render_input(session_id, request.message, request.files, request.input_metadata)
@@ -526,7 +527,9 @@ class VibeyAgent(BaseAgent):
 
         return HubModelRouter(resolve, self._providers, first=await resolve())
 
-    def _start_agent(self, turn: _Run, cwd: str, sections: str, environment: Mapping[str, str]) -> None:
+    def _start_agent(
+        self, turn: _Run, cwd: str, sections: str, environment: Mapping[str, str], *, builtin_agent: bool
+    ) -> None:
         """The Turn's loop, over its router, tools, system prompt, and the environment its commands run in.
 
         The bash rule names ``rg`` only when that environment's PATH finds it. That PATH is the service's
@@ -553,7 +556,9 @@ class VibeyAgent(BaseAgent):
         tools = mark_skill_loads(tuple(suite.create_tools(agent.jobs, self.media.image_sink(session_id))))
         agent.set_tools(tools)
         finds_rg = shutil.which("rg", path=environment.get("PATH", "")) is not None
-        agent.system = system_prompt([tool.spec.name for tool in tools], sections, rg=finds_rg)
+        agent.system = system_prompt(
+            [tool.spec.name for tool in tools], sections, builtin_agent=builtin_agent, rg=finds_rg
+        )
         turn.agent, turn.cwd = agent, cwd
 
     async def _on_event(self, run: _Run, event: AgentEvent) -> None:
@@ -990,6 +995,19 @@ class VibeyAgent(BaseAgent):
 
         sections = await asyncio.to_thread(build)
         return sections, (skill_catalog_sink[0] if skill_catalog_sink else None)
+
+    def _is_builtin_agent(self, request: AgentRequest) -> bool:
+        """Whether the Turn runs as the backend's built-in Agent, the one the system prompt names Vibey.
+
+        Read from the Agent record (the store's one owner of built-in identity), never from a name, so every Turn a
+        Session runs as that Agent gets the same preamble and no other Agent is told it is Vibey. A Turn with no
+        Agent record gets the neutral preamble.
+        """
+        store = getattr(self.controller, "vibe_agent_store", None)
+        if store is None or not request.vibe_agent_id:
+            return False
+        builtin = store.get_builtin_default_agent_for_backend(BACKEND, enabled_only=False)
+        return builtin is not None and builtin.id == request.vibe_agent_id
 
     def _turn_environment(self, request: AgentRequest, cwd: str) -> dict[str, str]:
         """The environment a Turn's commands run in, from the owners the other backends' shells use.
