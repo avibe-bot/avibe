@@ -234,7 +234,8 @@ def build_system_prompt_blocks(
     if include_computer_use is None:
         from core.computer_use import managed_mcp_server_spec
 
-        include_computer_use = managed_mcp_server_spec() is not None
+        # Vibey runs no MCP client, so the desktop's Computer Use server is never one of its tools.
+        include_computer_use = backend != "vibey" and managed_mcp_server_spec() is not None
     if include_computer_use:
         blocks.append(render_prompt_block("computer-use-prompt"))
     if backend == "codex":

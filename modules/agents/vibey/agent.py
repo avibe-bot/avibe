@@ -981,8 +981,6 @@ class VibeyAgent(BaseAgent):
             return build_system_prompt_injection(
                 agent_instructions=request.vibe_agent_system_prompt or "",
                 backend=BACKEND,
-                # Vibey runs no MCP client, so the desktop's Computer Use server is never one of its tools.
-                include_computer_use=False,
                 include_quick_replies=getattr(self.config, "reply_enhancements", True)
                 and context.platform != "wechat",
                 context=context,
