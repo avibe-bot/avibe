@@ -60,6 +60,15 @@ built binary; `core/computer_server.py` consumes the latter. Owning tests reject
 the snapshot shape at the `dump-docs` boundary so a guessed key cannot silently
 replace the producer's actual contract again.
 
+Driver provenance also keeps the unsigned and signed binary surfaces distinct.
+Immediately before Tauri packaging, the workflow hashes the prepared sidecar
+at `desktop/src-tauri/binaries/cua-driver-<target>` and requires it to match
+`prepared_binary_sha256`. Release recording separately hashes the signed helper
+inside the app as `packaged_sha256`; signing may make the two hashes differ.
+Owning mutation tests reject both an arbitrary valid-looking digest and the
+signed helper's digest when either is substituted for the prepared sidecar
+digest.
+
 The test-owned AppKit fixture makes `AXPress` a hollow success and counts
 native `mouseDown`/`mouseUp`. Its ignored live harness is compiled in this
 lane but is not run here because live GUI/TCC actions are outside the current

@@ -161,14 +161,16 @@ def validate_manifest(manifest: dict, target: str, tag: str) -> None:
 
 def driver_provenance(
     target: str,
-    driver: Path,
+    prepared_driver: Path,
     provenance_path: Path,
-    packaged_cdhash: str,
+    *,
+    packaged_driver: Path | None = None,
+    packaged_cdhash: str | None = None,
 ) -> dict:
     if TARGETS[target][0] != "macos":
         raise ValueError("Cua Driver provenance is macOS-only")
-    if re.fullmatch(r"[0-9a-f]{40,64}", packaged_cdhash) is None:
-        raise ValueError("Invalid packaged Cua Driver cdhash")
+    if prepared_driver.is_symlink() or not prepared_driver.is_file():
+        raise ValueError("Invalid prepared Cua Driver provenance")
     provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
     required_hashes = (
         "source_archive_sha256",
@@ -195,17 +197,28 @@ def driver_provenance(
         or provenance.get("arch") != TARGETS[target][1].replace("aarch64", "arm64")
         or provenance.get("build_origin") != "repository_patch_built"
         or any(re.fullmatch(r"[0-9a-f]{64}", str(provenance.get(field))) is None for field in required_hashes)
+        or digest(prepared_driver) != provenance.get("prepared_binary_sha256")
     ):
         raise ValueError("Invalid prepared Cua Driver provenance")
+    if packaged_driver is None and packaged_cdhash is None:
+        return provenance
+    if (
+        packaged_driver is None
+        or packaged_driver.is_symlink()
+        or not packaged_driver.is_file()
+        or re.fullmatch(r"[0-9a-f]{40,64}", str(packaged_cdhash)) is None
+    ):
+        raise ValueError("Invalid packaged Cua Driver provenance")
     return {
         **provenance,
-        "packaged_sha256": digest(driver),
+        "packaged_sha256": digest(packaged_driver),
         "packaged_cdhash": packaged_cdhash,
     }
 
 
 def record(*, version: str, target: str, tag: str, source_sha: str,
            installer: Path, runtime: Path, output: Path, signing: str,
+           prepared_driver: Path | None = None,
            driver: Path | None = None, driver_provenance_path: Path | None = None,
            driver_cdhash: str | None = None) -> None:
     if SHA.fullmatch(source_sha) is None:
@@ -233,15 +246,16 @@ def record(*, version: str, target: str, tag: str, source_sha: str,
         "version": version, "target": target,
         "package_version": manifest["runtime_version"],
     }
-    driver_values = (driver, driver_provenance_path, driver_cdhash)
+    driver_values = (prepared_driver, driver, driver_provenance_path, driver_cdhash)
     if TARGETS[target][0] == "macos":
         if any(value is None for value in driver_values):
             raise ValueError("macOS desktop artifacts require Cua Driver provenance")
         source["computer_use_driver"] = driver_provenance(
             target,
-            driver,
+            prepared_driver,
             driver_provenance_path,
-            driver_cdhash,
+            packaged_driver=driver,
+            packaged_cdhash=driver_cdhash,
         )
     elif any(value is not None for value in driver_values):
         raise ValueError("Windows desktop artifacts cannot carry macOS Cua Driver provenance")
@@ -430,9 +444,14 @@ def main() -> None:
     producer.add_argument("--runtime", type=Path, required=True)
     producer.add_argument("--output", type=Path, required=True)
     producer.add_argument("--signing", required=True)
+    producer.add_argument("--prepared-driver", type=Path)
     producer.add_argument("--driver", type=Path)
     producer.add_argument("--driver-provenance-path", type=Path)
     producer.add_argument("--driver-cdhash")
+    verifier = sub.add_parser("verify-driver-prepared")
+    verifier.add_argument("--target", choices=TARGETS, required=True)
+    verifier.add_argument("--driver", type=Path, required=True)
+    verifier.add_argument("--provenance-path", type=Path, required=True)
     for command in ("verify", "check-remote"):
         consumer = sub.add_parser(command)
         consumer.add_argument("--directory", type=Path, required=True)
@@ -453,6 +472,12 @@ def main() -> None:
         prepare(**args)
     elif command == "record":
         record(**args)
+    elif command == "verify-driver-prepared":
+        driver_provenance(
+            args["target"],
+            args["driver"],
+            args["provenance_path"],
+        )
     elif command == "verify":
         verify(**args)
     else:

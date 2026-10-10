@@ -46,6 +46,27 @@ def secret_references(value):
     return {name.upper() for name in canonical} | ({None} if other else set())
 
 
+def driver_provenance_payload(target, prepared_binary_sha256):
+    pinned_driver = release.pinned_driver_source()
+    arch = release.TARGETS[target][1]
+    return {
+        "schema_version": 2,
+        "version": pinned_driver["version"],
+        "tag": pinned_driver["tag"],
+        "source_commit": pinned_driver["source_commit"],
+        "target": target,
+        "arch": "arm64" if arch == "aarch64" else arch,
+        "source_archive": pinned_driver["source_archive"],
+        "source_archive_sha256": pinned_driver["source_archive_sha256"],
+        "patch_variant": pinned_driver["patch_variant"],
+        "patch_file": pinned_driver["patch_file"],
+        "patch_sha256": pinned_driver["patch_sha256"],
+        "tool_snapshot_sha256": pinned_driver["tool_snapshot_sha256"],
+        "prepared_binary_sha256": prepared_binary_sha256,
+        "build_origin": "repository_patch_built",
+    }
+
+
 def assemble_assets(root, source=SOURCE):
     """Use the real Runtime archive writer and desktop producer, then merge downloads."""
     directory = root / "desktop-dist"
@@ -71,29 +92,22 @@ def assemble_assets(root, source=SOURCE):
         output = work / "output"
         driver_args = {}
         if system == "macos":
-            pinned_driver = release.pinned_driver_source()
+            prepared_driver = work / "prepared-cua-driver"
+            prepared_driver.write_bytes(f"prepared driver for {target}".encode())
             driver = work / "cua-driver"
             driver.write_bytes(f"packaged driver for {target}".encode())
             provenance = work / "driver-provenance.json"
-            provenance.write_text(json.dumps({
-                "schema_version": 2,
-                "version": pinned_driver["version"],
-                "tag": pinned_driver["tag"],
-                "source_commit": pinned_driver["source_commit"],
-                "target": target,
-                "arch": "arm64" if arch == "aarch64" else arch,
-                "source_archive": pinned_driver["source_archive"],
-                "source_archive_sha256":
-                    pinned_driver["source_archive_sha256"],
-                "patch_variant": pinned_driver["patch_variant"],
-                "patch_file": pinned_driver["patch_file"],
-                "patch_sha256": pinned_driver["patch_sha256"],
-                "tool_snapshot_sha256":
-                    pinned_driver["tool_snapshot_sha256"],
-                "prepared_binary_sha256": "4" * 64,
-                "build_origin": "repository_patch_built",
-            }), encoding="utf-8")
+            provenance.write_text(
+                json.dumps(
+                    driver_provenance_payload(
+                        target,
+                        release.digest(prepared_driver),
+                    )
+                ),
+                encoding="utf-8",
+            )
             driver_args = {
+                "prepared_driver": prepared_driver,
                 "driver": driver,
                 "driver_provenance_path": provenance,
                 "driver_cdhash": "5" * 40,
@@ -290,6 +304,61 @@ def test_verify_rejects_mismatched_driver_provenance(tmp_path, field, value):
         release.verify(directory, TAG, SOURCE)
 
 
+def test_driver_provenance_binds_prepared_and_packaged_driver_bytes(tmp_path):
+    target = "aarch64-apple-darwin"
+    prepared = tmp_path / "prepared-cua-driver"
+    prepared.write_bytes(b"prepared driver")
+    packaged = tmp_path / "packaged-cua-driver"
+    packaged.write_bytes(b"signed packaged driver")
+    provenance = tmp_path / "driver-provenance.json"
+    provenance.write_text(
+        json.dumps(driver_provenance_payload(target, release.digest(prepared))),
+        encoding="utf-8",
+    )
+
+    result = release.driver_provenance(
+        target,
+        prepared,
+        provenance,
+        packaged_driver=packaged,
+        packaged_cdhash="5" * 40,
+    )
+
+    assert result["prepared_binary_sha256"] == release.digest(prepared)
+    assert result["packaged_sha256"] == release.digest(packaged)
+    assert result["prepared_binary_sha256"] != result["packaged_sha256"]
+
+
+@pytest.mark.parametrize("digest_source", ["wrong", "packaged"])
+def test_driver_provenance_rejects_unbound_prepared_digest(
+    tmp_path, digest_source
+):
+    target = "aarch64-apple-darwin"
+    prepared = tmp_path / "prepared-cua-driver"
+    prepared.write_bytes(b"prepared driver")
+    packaged = tmp_path / "packaged-cua-driver"
+    packaged.write_bytes(b"signed packaged driver")
+    prepared_digest = (
+        "f" * 64
+        if digest_source == "wrong"
+        else release.digest(packaged)
+    )
+    provenance = tmp_path / "driver-provenance.json"
+    provenance.write_text(
+        json.dumps(driver_provenance_payload(target, prepared_digest)),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="Invalid prepared Cua Driver provenance"):
+        release.driver_provenance(
+            target,
+            prepared,
+            provenance,
+            packaged_driver=packaged,
+            packaged_cdhash="5" * 40,
+        )
+
+
 @pytest.mark.parametrize("target", release.TARGETS)
 def test_workflow_record_command_feeds_the_release_consumer(tmp_path, target):
     directory = assemble_assets(tmp_path)
@@ -312,12 +381,20 @@ def test_workflow_record_command_feeds_the_release_consumer(tmp_path, target):
     installer = work / matrix["artifact_glob"].replace("*", "Avibe_fixture")
     installer.parent.mkdir(parents=True)
     shutil.copyfile(work / ("native installer" + release.TARGETS[target][2]), installer)
+    if "darwin" in target:
+        prepared_driver = work / f"desktop/src-tauri/binaries/cua-driver-{target}"
+        prepared_driver.parent.mkdir(parents=True)
+        shutil.copyfile(work / "prepared-cua-driver", prepared_driver)
     binaries = work / "bin"
     binaries.mkdir()
     (binaries / "python").symlink_to(sys.executable)
     (binaries / "git").write_text(f"#!/bin/sh\nprintf '%s\\n' '{SOURCE}'\n")
     (binaries / "git").chmod(0o755)
-    command = step("Record artifact hashes")["run"].replace("${{ matrix.artifact_glob }}", matrix["artifact_glob"])
+    command = (
+        step("Record artifact hashes")["run"]
+        .replace("${{ matrix.artifact_glob }}", matrix["artifact_glob"])
+        .replace("${{ matrix.target }}", target)
+    )
     result = subprocess.run(["bash", "-e", "-o", "pipefail", "-c", command], cwd=work,
                             env={**os.environ, "PATH": f"{binaries}{os.pathsep}{os.environ['PATH']}",
                                  "AVIBE_DESKTOP_VERSION": VERSION, "RELEASE_TAG": TAG, "TARGET": target,
@@ -382,6 +459,7 @@ def test_producer_rejects_incorrect_runtime_or_signing(tmp_path, mutation):
         driver_args = {}
         if "darwin" in target:
             driver_args = {
+                "prepared_driver": work / "prepared-cua-driver",
                 "driver": work / "cua-driver",
                 "driver_provenance_path": work / "driver-provenance.json",
                 "driver_cdhash": "5" * 40,
@@ -411,6 +489,12 @@ def test_workflow_preserves_manual_path_and_isolates_test_signing():
     assert steps.index(step("Prepare package version")) < steps.index(step("Build verified private Runtime"))
     credentials = step("Export Apple signing credentials when configured")
     assert credentials["if"] == "runner.os == 'macOS' && inputs.release_tag == ''"
+    prepared_driver = step("Verify prepared Cua Driver provenance")
+    assert prepared_driver["if"] == "runner.os == 'macOS'"
+    assert "verify-driver-prepared" in prepared_driver["run"]
+    assert steps.index(prepared_driver) + 1 == steps.index(
+        step("Build self-contained installer")
+    )
     signing = step("Verify macOS app signature matches the signing path")["run"]
     assert signing.count(
         "--preserve-metadata=identifier,entitlements,flags,runtime"
