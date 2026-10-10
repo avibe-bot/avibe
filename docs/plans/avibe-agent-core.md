@@ -163,8 +163,8 @@ Rules:
   crash between commit and delivery re-delivers instead of losing or regenerating the reply: exactly once on
   Workbench, at least once on IM (C-5).
 - Fork reuses the existing fork metadata (`fork_source_session_id`, `fork_source_message_id`). The child's context is the parent
-  chain's rows with `context_seq` up to the fork point (C-10 `fork.md` §2: for a user's fork, the end of the previous
-  ended Turn), then the child's own rows. Nothing is copied. Scopes with history are dismissed, never deleted, so a
+  chain's rows with `context_seq` up to the fork point (C-10 `fork.md` §2: for a user's fork, before the earliest
+  unfinished Turn), then the child's own rows. Nothing is copied. Scopes with history are dismissed, never deleted, so a
   parent's prefix cannot disappear from under a child.
 - Compaction and clearing append rows; they never rewrite or delete. A fork anchored before a checkpoint sees the
   full original context.

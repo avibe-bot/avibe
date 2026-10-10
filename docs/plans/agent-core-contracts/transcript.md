@@ -86,9 +86,10 @@ The child Session's metadata already records its parent as top-level keys `fork_
 `core/services/session_fork.py`); C-5 reads those keys and adds no new fork shape.
 
 - `anchor_seq` is the fork point's `as_of` (C-10 `fork.md` §2): resolved once, in the reservation's transaction, from
-  `context_seq`, row shape, and the source's live Turn, never from a clock, and persisted as the top-level metadata
-  key `fork_source_context_seq`. A user's fork takes the latest point, the end of the previous ended Turn (a live Turn
-  is trimmed); a system mechanism may name any settled point. 0 is the empty prefix. Rows that receive a
+  `context_seq`, row shape, and the source's Turn rows, never from a clock, and persisted as the top-level metadata
+  key `fork_source_context_seq`. A user's fork cuts before the first input of the earliest unfinished Turn, as C-10
+  §2 defines it (live, holding a call awaiting T2, or with an accepted input awaiting T3); a self-fork takes the
+  largest settled point; a system mechanism may name any settled point. 0 is the empty prefix. Rows that receive a
   `context_seq` later can never move into or out of the prefix. A released fork without that key (forked from a
   non-`vibey` Session) has no Vibey context to inherit and starts empty.
 - The child's context = the source's context rows with `context_seq <= anchor_seq` (recursively through the source's
