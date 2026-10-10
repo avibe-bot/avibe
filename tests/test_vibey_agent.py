@@ -22,7 +22,9 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import struct
 import time
+import zlib
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Optional
@@ -33,7 +35,15 @@ from sqlalchemy import select, update
 from core.agent_core.agent.recovery import UNRECORDED_EFFECT
 from core.agent_core.ai.provider import Done
 from core.agent_core.harness.projection import project
-from core.agent_core.messages import AssistantMessage, TextBlock, ToolCallBlock, ToolResultMessage, UserMessage, text
+from core.agent_core.messages import (
+    AssistantMessage,
+    ImageBlock,
+    TextBlock,
+    ToolCallBlock,
+    ToolResultMessage,
+    UserMessage,
+    text,
+)
 from core.agent_core.tools.base import CallInstance, JobStatus, ToolResult
 from core.message_dispatcher import ConsolidatedMessageDispatcher
 from core.services.agent_steering import ActiveSteerTarget, SteerOutcome, SteerRequest
@@ -2137,6 +2147,98 @@ async def test_a_stop_settles_the_running_command_with_its_recorded_reason(engin
     assert body.startswith("started\n") and body.endswith("\n\nStopped by the user; the command was terminated.")
     assert suite.jobs.stop_reason(job_id) == "aborted" and suite.jobs.status(job_id).state != "running"
     assert harness.controller.terminals == [{"turn": _turn(request.context), "is_error": False, "settled_by": "stopped"}]
+
+
+async def test_a_stop_kills_every_command_of_a_concurrent_group_and_settles_each_once(
+    engine, session, tmp_path, published
+) -> None:
+    calls = tuple(
+        ToolCallBlock(id=f"call_{name}", name="bash", arguments={"command": f"echo started {name}; sleep 30"})
+        for name in ("a", "b")
+    )
+    suite = local_tool_suite(str(tmp_path / "jobs"))
+    harness = _Harness(engine, tmp_path, "avibe", [[Done(assistant("", calls=calls))]], suite=suite)
+    request = harness.request("run both")
+    before = asyncio.all_tasks()
+
+    running = asyncio.create_task(harness.agent.handle_message(request))
+
+    def jobs() -> list[Optional[str]]:
+        responses = harness.rows("assistant")
+        if not responses:
+            return [None, None]
+        return [suite.find_job(CallInstance(SESSION, responses[0]["id"], responses[0]["context_seq"], call.id)) for call in calls]
+
+    # Both commands of the one group are running at once.
+    await _until(lambda: all(jobs()), "the commands never both started")
+    job_ids = jobs()
+    await _until(lambda: all(b"started" in suite.jobs.output(job)[0] for job in job_ids), "a command printed nothing")
+    assert await harness.agent.handle_stop(AgentRequest(**{**request.__dict__, "message": "stop"})) is True
+    await running
+
+    for job in job_ids:
+        assert suite.jobs.stop_reason(job) == "aborted" and suite.jobs.status(job).state != "running"
+    # Each call is settled exactly once, at Stop, with why its command ended (T2).
+    results = [entry for entry in await harness.context_rows() if entry.kind == "tool_result"]
+    assert [entry.message.tool_call_id for entry in results] == ["call_a", "call_b"]
+    for entry, name in zip(results, ("a", "b")):
+        body = entry.message.content[0].text
+        assert body.startswith(f"started {name}\n") and body.endswith("Stopped by the user; the command was terminated.")
+    assert harness.controller.terminals == [{"turn": _turn(request.context), "is_error": False, "settled_by": "stopped"}]
+    # No call outlived the batch: what is left is the adapter's own job pruning after the run.
+    left = {task.get_name() for task in asyncio.all_tasks() - before if not task.done()}
+    assert left <= {"vibey-agent-job-prune"}
+
+
+def _png(pixel: bytes) -> bytes:
+    """A 1x1 RGB PNG of ``pixel`` (its filter byte, then three channel bytes)."""
+
+    def chunk(kind: bytes, body: bytes) -> bytes:
+        return struct.pack(">I", len(body)) + kind + body + struct.pack(">I", zlib.crc32(kind + body))
+
+    header = chunk(b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0))
+    return b"\x89PNG\r\n\x1a\n" + header + chunk(b"IDAT", zlib.compress(pixel)) + chunk(b"IEND", b"")
+
+
+async def test_images_read_together_reach_the_model_with_their_own_calls_in_call_order(
+    engine, session, tmp_path, published
+) -> None:
+    pictures = {"first": _png(b"\0\xff\0\0"), "second": _png(b"\0\0\xff\0")}
+    for name, data in pictures.items():
+        (tmp_path / f"{name}.png").write_bytes(data)
+    real = local_tool_suite(str(tmp_path / "jobs"))
+    second_stored = asyncio.Event()
+
+    def create_tools(jobs, sink):
+        async def later_call_first(data: bytes, mime_type: str, name: str) -> str:
+            # The first call's image is stored only after the second's: the later call finishes first.
+            if name == "first.png":
+                await second_stored.wait()
+            token = await sink(data, mime_type, name)
+            if name == "second.png":
+                second_stored.set()
+            return token
+
+        return real.create_tools(jobs, later_call_first)
+
+    suite = ToolSuite(
+        jobs=real.jobs, create_tools=create_tools, render_recovered=real.render_recovered, find_job=real.find_job
+    )
+    calls = tuple(ToolCallBlock(id=name, name="read", arguments={"path": f"{name}.png"}) for name in pictures)
+    harness = _Harness(
+        engine, tmp_path, "avibe", [[Done(assistant("", calls=calls))], [Done(assistant("Two pictures."))]], suite=suite
+    )
+
+    # Read one at a time, the first call would wait for the second forever.
+    await asyncio.wait_for(harness.agent.handle_message(harness.request("look at both")), 10)
+
+    results = [entry.message for entry in await harness.context_rows() if entry.kind == "tool_result"]
+    assert [message.tool_call_id for message in results] == ["first", "second"]
+    assert [message for message in harness.provider.requests[1].messages if isinstance(message, ToolResultMessage)] == results
+    for message, name in zip(results, pictures):
+        (image,) = [block for block in message.content if isinstance(block, ImageBlock)]
+        assert image.name == f"{name}.png"
+        assert (await harness.agent.media.load(image.media_token))[0] == pictures[name]
 
 
 @pytest.mark.parametrize("state", ["exited", "running"])

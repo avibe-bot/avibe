@@ -66,6 +66,9 @@ class ToolResult:
 
 
 class Tool(Protocol):
+    """``concurrent``, optional: ``True`` lets a call run at the same time as the neighbouring concurrent calls of its
+    response (C-3 loop-control.md section 2). A tool without it, or with ``False``, is exclusive."""
+
     @property
     def spec(self) -> ToolSpec: ...
 

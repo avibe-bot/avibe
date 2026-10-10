@@ -18,7 +18,7 @@ from collections import deque
 from contextlib import asynccontextmanager, suppress
 from copy import deepcopy
 from dataclasses import asdict, dataclass, replace
-from typing import Any, AsyncIterator, Awaitable, Callable, Literal, Mapping, Optional, Sequence, TypeVar
+from typing import Any, AsyncIterator, Awaitable, Callable, Iterable, Literal, Mapping, Optional, Sequence, TypeVar
 
 from core.agent_core.agent.events import (
     AgentError,
@@ -138,6 +138,9 @@ from core.agent_core.tools.paths import to_thread_joined
 
 T = TypeVar("T")
 logger = logging.getLogger(__name__)
+
+#: The result of a call a hook's ``end`` or ``skip_tools`` settled without running it (C-3 section 3).
+_SKIPPED = "[skipped by policy]"
 
 
 class _Ended(Exception):
@@ -351,14 +354,18 @@ class Agent:
         # Bounded delivery applies backpressure to provider streaming. No emit
         # awaits this queue while holding the input-admission lock.
         events: asyncio.Queue[AgentEvent] = asyncio.Queue(maxsize=64)
+        # Concurrent tool calls emit too, and a put can overtake one that waits for room in the full queue: events
+        # enter it one at a time, in ``seq`` order.
+        ordered = asyncio.Lock()
 
         async def emit(event_type: Any, **fields: Any) -> Optional[AgentEvent]:
-            if self._consumer_closed:
-                return None
-            event = event_type(turn_id=turn_id, seq=self._seq, **fields)
-            self._seq += 1
-            await events.put(event)
-            return event
+            async with ordered:
+                if self._consumer_closed:
+                    return None
+                event = event_type(turn_id=turn_id, seq=self._seq, **fields)
+                self._seq += 1
+                await events.put(event)
+                return event
 
         worker = asyncio.create_task(drive(emit))
         receive: Optional[asyncio.Task] = None
@@ -921,16 +928,7 @@ class Agent:
                     if reason == "length"
                     else f"Tool call not executed because the model stopped with {reason}."
                 )
-                for call in message.tool_calls:
-                    self._scope.check()
-                    await self._tool(
-                        call,
-                        response,
-                        tools,
-                        True,
-                        emit,
-                        skip_reason=skip_reason,
-                    )
+                await self._calls(message.tool_calls, response, tools, emit, skip=skip_reason)
                 if reason == "length":
                     if end:
                         return "ended_by_hook"
@@ -968,12 +966,10 @@ class Agent:
                     return "completed"
                 continue
 
-            terminate = False
-            for call in message.tool_calls:
-                self._scope.check()
-                result, step_end = await self._tool(call, response, tools, skip or end, emit)
-                terminate = terminate or result.terminate
-                end = end or step_end
+            terminate, step_end = await self._calls(
+                message.tool_calls, response, tools, emit, skip=_SKIPPED if skip or end else None
+            )
+            end = end or step_end
             if end:
                 return "ended_by_hook"
             if terminate:
@@ -1003,49 +999,101 @@ class Agent:
             if isinstance(decision, Deny):
                 return call, ToolResult((text(decision.reason),), is_error=True), False
             if isinstance(decision, End):
-                return call, ToolResult((text("[skipped by policy]"),), is_error=True), True
+                return call, ToolResult((text(_SKIPPED),), is_error=True), True
             if isinstance(decision, AlterArgs):
                 call = replace(call, arguments=deepcopy(decision.arguments))
         return call, None, False
 
-    async def _tool(
+    @staticmethod
+    def _groups(calls: Sequence[ToolCallBlock], tools: Mapping[str, Tool]) -> list[list[ToolCallBlock]]:
+        """C-3 section 2: each maximal run of consecutive concurrent calls is one group, and every other call is a
+        group of its own. A call to a tool that is not available runs nothing, so it never splits a group."""
+        groups: list[list[ToolCallBlock]] = []
+        joins = False
+        for call in calls:
+            tool = tools.get(call.name)
+            concurrent = tool is None or getattr(tool, "concurrent", False) is True
+            if concurrent and joins:
+                groups[-1].append(call)
+            else:
+                groups.append([call])
+            joins = concurrent
+        return groups
+
+    async def _calls(
         self,
-        original: ToolCallBlock,
+        calls: Sequence[ToolCallBlock],
         response: ContextEntry,
         tools: Mapping[str, Tool],
-        skip: bool,
         emit: Callable[..., Awaitable[None]],
         *,
-        skip_reason: str | None = None,
-    ) -> tuple[ToolResult, bool]:
-        call = deepcopy(original)
-        end = False
-        result = None
-        if skip:
-            result = ToolResult((text(skip_reason or "[skipped by policy]"),), is_error=True)
-        else:
-            call, result, end = await self._gate(call, self.hooks)
-        await emit(
-            ToolStarted,
-            tool_call_id=call.id,
-            name=call.name,
-            preview=json.dumps(call.arguments, ensure_ascii=False)[:500],
-        )
-        if result is None:
-            tool = tools.get(call.name)
-            if tool is None:
-                result = ToolResult((text(f"Tool {call.name} is not available."),), is_error=True)
-            else:
-                instance = CallInstance(response.session_id, response.row_id, response.context_seq, call.id)
-                result = await self._execute(tool, call, instance, emit)
-        if not end and not skip:
-            for hook in self.hooks:
-                decision = await self._hook(lambda: hook.after_tool(call, result, self._ctx))
-                if isinstance(decision, End):
-                    end = True
-                    break
-                if isinstance(decision, AlterResult):
-                    result = decision.result
+        skip: Optional[str] = None,
+    ) -> tuple[bool, bool]:
+        """A response's calls, group after group (C-3 sections 2 and 3): whether a result terminates the run, and
+        whether a hook ended it. ``skip`` settles every call with that text instead, one at a time, running none."""
+        terminate = end = False
+        for group in [[call] for call in calls] if skip is not None else self._groups(calls, tools):
+            self._scope.check()
+            # Every gate of the group runs before any of its calls starts: (call, result, whether after_tool runs).
+            gated: list[tuple[ToolCallBlock, Optional[ToolResult], bool]] = []
+            for original in group:
+                call = deepcopy(original)
+                if skip is not None or end:
+                    gated.append((call, ToolResult((text(skip or _SKIPPED),), is_error=True), False))
+                    continue
+                call, result, ended = await self._gate(call, self.hooks)
+                if result is None and call.name not in tools:
+                    result = ToolResult((text(f"Tool {call.name} is not available."),), is_error=True)
+                gated.append((call, result, not ended))
+                end = end or ended
+            running: dict[int, asyncio.Task[ToolResult]] = {}
+            try:
+                for index, (call, result, _) in enumerate(gated):
+                    await emit(
+                        ToolStarted,
+                        tool_call_id=call.id,
+                        name=call.name,
+                        preview=json.dumps(call.arguments, ensure_ascii=False)[:500],
+                    )
+                    if result is None:
+                        instance = CallInstance(response.session_id, response.row_id, response.context_seq, call.id)
+                        running[index] = asyncio.create_task(self._execute(tools[call.name], call, instance, emit))
+                # Results commit in call order. After an after_tool ``end``, the group's later calls have started
+                # already: they still pass after_tool and commit their real results.
+                for index, (call, result, after) in enumerate(gated):
+                    if index in running:
+                        result = await running[index]
+                    if after:
+                        for hook in self.hooks:
+                            decision = await self._hook(lambda: hook.after_tool(call, result, self._ctx))
+                            if isinstance(decision, End):
+                                end = True
+                                break
+                            if isinstance(decision, AlterResult):
+                                result = decision.result
+                    await self._commit_result(call, result, emit)
+                    terminate = terminate or result.terminate
+            finally:
+                await self._join(running.values())
+        return terminate, end
+
+    @staticmethod
+    async def _join(calls: Iterable[asyncio.Task]) -> None:
+        """No call outlives its batch: the calls still running are cancelled, and every one is awaited."""
+        calls = tuple(calls)
+        for task in calls:
+            if not task.done():
+                task.cancel()
+        joined = asyncio.gather(*calls, return_exceptions=True)
+        try:
+            await asyncio.shield(joined)
+        except asyncio.CancelledError:
+            await joined
+            raise
+
+    async def _commit_result(
+        self, call: ToolCallBlock, result: ToolResult, emit: Callable[..., Awaitable[None]]
+    ) -> None:
         message = ToolResultMessage(call.id, call.name, result.content, result.is_error)
         validate_message_append(self._rows, session_id=self.session_id, kind="tool_result", message=message)
         await self._save_state()
@@ -1061,7 +1109,6 @@ class Agent:
             is_error=result.is_error,
             watch_id=result.details.get("watch_id"),
         )
-        return result, end
 
     async def _execute(
         self,

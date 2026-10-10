@@ -1549,3 +1549,234 @@ async def test_admitted_commit_finishes_before_cancellation_releases_run_ownersh
     assert rows[-1].kind == "response"
     assert agent.snapshot().context_seq == rows[-1].context_seq
     assert await agent.steer(input_row("late", "late")) is False
+
+
+
+# --- The calls of one response (C-3 section 2) ------------------------------------------------------------------------
+#
+# ``ConcurrentTool`` declares ``concurrent`` as C-7 ``read`` and ``bash`` do; ``FakeTool`` is exclusive, as ``edit`` and
+# ``write`` are. A call that cannot finish until its siblings arrive proves that they run at the same time: run one at a
+# time, the first never finishes, and ``wait_for`` turns that deadlock into a failure.
+
+
+class ConcurrentTool(FakeTool):
+    concurrent = True
+
+
+class Gathering:
+    """Lets every caller through once ``parties`` calls have arrived."""
+
+    def __init__(self, parties: int) -> None:
+        self.parties, self.arrived, self.complete = parties, [], asyncio.Event()
+
+    async def arrive(self, name: str) -> None:
+        self.arrived.append(name)
+        if len(self.arrived) == self.parties:
+            self.complete.set()
+        await self.complete.wait()
+
+
+def calls(*specs: str) -> list[ToolCallBlock]:
+    """``"a:read"`` is call ``a`` to ``read``."""
+    return [ToolCallBlock(*spec.split(":")) for spec in specs]
+
+
+def tool_agent(response_calls, tools, *, hooks=(), then=([Done(assistant())],)):
+    return make_agent(ScriptedProvider([[Done(assistant(calls=response_calls))], *then]), tools=tools, hooks=hooks)
+
+
+def tool_events(events) -> list[tuple[str, str]]:
+    return [
+        ("started" if isinstance(event, ToolStarted) else "finished", event.tool_call_id)
+        for event in events
+        if isinstance(event, (ToolStarted, ToolFinished))
+    ]
+
+
+async def committed_results(agent) -> list[tuple[str, str, bool]]:
+    rows = await agent.store.load("session")
+    return [
+        (row.message.tool_call_id, row.message.content[0].text, row.message.is_error)
+        for row in rows
+        if row.kind == "tool_result"
+    ]
+
+
+async def test_neighbouring_concurrent_calls_start_together_and_commit_in_call_order():
+    gathering, finished, others_finished = Gathering(3), [], asyncio.Event()
+
+    async def execute(arguments, ctx):
+        await gathering.arrive(ctx.tool_call_id)
+        if ctx.tool_call_id == "a":
+            await others_finished.wait()  # the first call finishes last
+        finished.append(ctx.tool_call_id)
+        if len(finished) == 2:
+            others_finished.set()
+        return ToolResult((text(f"{ctx.tool_call_id} done"),))
+
+    tools = [ConcurrentTool("read", execute=execute), ConcurrentTool("bash", execute=execute)]
+    agent = tool_agent(calls("a:read", "b:read", "c:bash"), tools)
+    events = await asyncio.wait_for(collect(agent), 5)
+
+    assert finished[-1] == "a"
+    assert tool_events(events) == [
+        ("started", "a"), ("started", "b"), ("started", "c"),
+        ("finished", "a"), ("finished", "b"), ("finished", "c"),
+    ]
+    assert [event.seq for event in events] == list(range(len(events)))
+    assert await committed_results(agent) == [("a", "a done", False), ("b", "b done", False), ("c", "c done", False)]
+    assert events[-1].reason == "completed"
+
+
+async def test_an_exclusive_call_starts_after_the_calls_before_it_and_holds_the_calls_after_it():
+    gathering, running, seen = Gathering(2), set(), {}
+
+    async def execute(arguments, ctx):
+        seen[ctx.tool_call_id] = set(running)  # what was still running when this call started
+        running.add(ctx.tool_call_id)
+        if ctx.tool_call_id in {"r1", "r2"}:
+            await gathering.arrive(ctx.tool_call_id)
+        running.discard(ctx.tool_call_id)
+        return ToolResult((text(ctx.tool_call_id),))
+
+    tools = [ConcurrentTool("read", execute=execute), FakeTool("edit", execute=execute), FakeTool("write", execute=execute)]
+    agent = tool_agent(calls("r1:read", "r2:read", "e:edit", "r3:read", "w1:write", "w2:write"), tools)
+    events = await asyncio.wait_for(collect(agent), 5)
+
+    # The groups are [r1, r2], [e], [r3], [w1], [w2]; each starts after the one before it has committed.
+    assert tool_events(events) == [
+        ("started", "r1"), ("started", "r2"), ("finished", "r1"), ("finished", "r2"),
+        ("started", "e"), ("finished", "e"),
+        ("started", "r3"), ("finished", "r3"),
+        ("started", "w1"), ("finished", "w1"),
+        ("started", "w2"), ("finished", "w2"),
+    ]
+    assert {name: seen[name] for name in ("e", "r3", "w1", "w2")} == {"e": set(), "r3": set(), "w1": set(), "w2": set()}
+
+
+async def test_a_groups_gates_run_before_it_starts_and_each_decides_only_its_call():
+    gathering, gates = Gathering(2), []
+
+    class Gate(Hooks):
+        async def before_tool(self, call, ctx):
+            gates.append((call.id, list(gathering.arrived)))
+            return {"b": Deny("denied"), "c": AlterArgs({"altered": True}), "d": End()}.get(call.id)
+
+    async def execute(arguments, ctx):
+        await gathering.arrive(ctx.tool_call_id)
+        return ToolResult((text(f"{ctx.tool_call_id} {dict(arguments)}"),))
+
+    read, edit = ConcurrentTool("read", execute=execute), FakeTool("edit")
+    agent = tool_agent(calls("a:read", "b:read", "c:read", "d:read", "f:read", "e:edit"), [read, edit], hooks=[Gate()])
+    events = await asyncio.wait_for(collect(agent), 5)
+
+    # No call had started when a gate ran. The end at d settles d and every later call; a and c, before it in the
+    # group, still ran, together.
+    assert gates == [("a", []), ("b", []), ("c", []), ("d", [])]
+    assert await committed_results(agent) == [
+        ("a", "a {}", False),
+        ("b", "denied", True),
+        ("c", "c {'altered': True}", False),
+        ("d", "[skipped by policy]", True),
+        ("f", "[skipped by policy]", True),
+        ("e", "[skipped by policy]", True),
+    ]
+    assert [ctx.tool_call_id for _, ctx in read.calls] == ["a", "c"] and edit.calls == []
+    assert events[-1].reason == "ended_by_hook"
+
+
+async def test_an_after_tool_end_lets_the_calls_already_running_commit_their_real_results():
+    b_running, release_b, after = asyncio.Event(), asyncio.Event(), []
+
+    class Stop(Hooks):
+        async def after_tool(self, call, result, ctx):
+            after.append(call.id)
+            if call.id == "a":
+                await b_running.wait()
+                release_b.set()
+                return End()
+            return AlterResult(replace(result, content=(text(result.content[0].text + " seen"),)))
+
+    async def execute(arguments, ctx):
+        if ctx.tool_call_id == "b":
+            b_running.set()
+            await release_b.wait()
+        return ToolResult((text(f"{ctx.tool_call_id} done"),))
+
+    read, edit = ConcurrentTool("read", execute=execute), FakeTool("edit", execute=execute)
+    agent = tool_agent(calls("a:read", "b:read", "e:edit"), [read, edit], hooks=[Stop()])
+    events = await asyncio.wait_for(collect(agent), 5)
+
+    # b was running when a's hook ended the run: it finishes, passes after_tool, and commits what it did. The edit
+    # had not started, so it never runs.
+    assert after == ["a", "b"]
+    assert await committed_results(agent) == [
+        ("a", "a done", False),
+        ("b", "b done seen", False),
+        ("e", "[skipped by policy]", True),
+    ]
+    assert edit.calls == []
+    assert events[-1].reason == "ended_by_hook"
+
+
+async def test_a_failing_or_unavailable_call_never_cancels_its_group():
+    gathering = Gathering(2)
+
+    async def execute(arguments, ctx):
+        await gathering.arrive(ctx.tool_call_id)
+        if ctx.tool_call_id == "a":
+            raise RuntimeError("a broke")
+        return ToolResult((text("b done"),))
+
+    # The unavailable call between a and b runs nothing and does not split their group.
+    agent = tool_agent(calls("a:read", "x:missing", "b:read"), [ConcurrentTool("read", execute=execute)])
+    events = await asyncio.wait_for(collect(agent), 5)
+
+    assert await committed_results(agent) == [
+        ("a", "a broke", True),
+        ("x", "Tool missing is not available.", True),
+        ("b", "b done", False),
+    ]
+    assert events[-1].reason == "completed"
+
+
+async def test_no_call_outlives_its_batch_when_the_run_fails_while_a_group_runs():
+    b_running, cancelled = asyncio.Event(), []
+
+    class Store(InMemoryTranscriptStore):
+        async def append_tool_result(self, *args, **kwargs):
+            raise RuntimeError("the store refused the result")
+
+    async def execute(arguments, ctx):
+        if ctx.tool_call_id == "a":
+            await b_running.wait()
+            return ToolResult((text("a done"),))
+        b_running.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.append(ctx.tool_call_id)
+            raise
+
+    before = asyncio.all_tasks()
+    provider = ScriptedProvider([[Done(assistant(calls=calls("a:read", "b:read")))]])
+    agent = make_agent(provider, store=Store(), tools=[ConcurrentTool("read", execute=execute)])
+    events = await asyncio.wait_for(collect(agent), 5)
+
+    # a's commit fails while b still runs: the run ends in error only after b was cancelled and awaited.
+    assert events[-1].reason == "error" and cancelled == ["b"]
+    assert {task for task in asyncio.all_tasks() - before if not task.done()} == set()
+
+
+async def test_a_terminating_call_ends_the_run_after_its_whole_group_commits():
+    gathering = Gathering(2)
+
+    async def execute(arguments, ctx):
+        await gathering.arrive(ctx.tool_call_id)
+        return ToolResult((text(ctx.tool_call_id),), terminate=ctx.tool_call_id == "a")
+
+    agent = tool_agent(calls("a:read", "b:read"), [ConcurrentTool("read", execute=execute)], then=())
+    events = await asyncio.wait_for(collect(agent), 5)
+
+    assert await committed_results(agent) == [("a", "a", False), ("b", "b", False)]
+    assert events[-1].reason == "completed" and len(agent.models.provider.requests) == 1

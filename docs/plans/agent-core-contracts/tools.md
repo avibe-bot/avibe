@@ -5,6 +5,11 @@ The coding tools in `core/agent_core/tools/`. Names, parameters, logic, and mode
 are Pi's unless marked as an Avibe addition. tau 0.4.7 (MIT, Copyright (c) 2026 Alejandro AO) is the Python
 reference. One tool set serves every model.
 
+`Tool.concurrent` (Avibe) says whether a tool's calls may run at the same time as the neighbouring concurrent calls of
+the same response (C-3 [`loop-control.md`](loop-control.md) §2). When it is absent or `False`, every call of the tool
+is exclusive. `read` and `bash` are concurrent; `write` and `edit` are exclusive. Pi instead runs a response's calls at
+the same time unless a tool opts out, and serializes `write` and `edit` only per file path, which `bash` bypasses.
+
 ## 1. Constants
 
 | Name | Value |

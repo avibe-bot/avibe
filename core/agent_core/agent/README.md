@@ -106,9 +106,15 @@ localize that error rather than deliver a silent success.
   `empty_response` and end as error. A received terminal is never retried.
   Empty non-final responses with queued inputs can still continue to a reply;
   tool calls, explicit hook end, and tool termination retain their contracts.
-- A tool batch runs sequentially and commits results in call order. Steers
-  enter after the whole batch. Follow-ups enter at natural termination after
-  steers have been consumed. A terminating tool still finishes its batch.
+- A tool batch runs in groups (C-3 section 2): neighbouring calls to tools that
+  declare `concurrent` run at the same time, every other call runs alone, and
+  each group starts after the one before it has committed. Each group's
+  `before_tool` gates run before it starts; results, `after_tool`, and
+  `ToolFinished` follow call order. Every call task is awaited or cancelled
+  before the batch ends, and `emit` serializes events so their `seq` stays in
+  order across concurrent calls. Steers enter after the whole batch.
+  Follow-ups enter at natural termination after steers have been consumed. A
+  terminating tool still finishes its batch.
   An `Exception` from `Tool.execute` becomes an error result (at most 500
   characters), with a logged traceback; the run continues. `BaseException`,
   including `CancelledError`, retains lifecycle semantics.

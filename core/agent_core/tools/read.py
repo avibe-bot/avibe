@@ -69,6 +69,8 @@ READ_SCHEMA: Mapping[str, Any] = {
 
 
 class ReadTool:
+    concurrent = True
+
     def __init__(self, *, image_sink: Optional[ImageSink] = None) -> None:
         self._image_sink = image_sink
         self._spec = ToolSpec(name="read", description=READ_DESCRIPTION, input_schema=READ_SCHEMA)

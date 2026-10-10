@@ -186,6 +186,8 @@ async def settle_bash_call(jobs: LocalJobHost, call: CallInstance) -> Optional[T
 class BashTool:
     """``jobs`` is the loop's tracking wrapper around the adapter's host; ``bash`` never makes its own."""
 
+    concurrent = True
+
     def __init__(self, jobs: JobHost, *, foreground_window_s: float = DEFAULT_FOREGROUND_WINDOW_S) -> None:
         self._jobs = jobs
         self._window_s = foreground_window_s
