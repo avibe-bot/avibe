@@ -58,7 +58,12 @@ class ConversationWorkingSource {
         onWorking(conversationAgentWorking(result));
         this.settle(activeSessions(result));
       },
-      fail: () => onWorking(false),
+      fail: () => {
+        onWorking(false);
+        // A failed read registers nothing: keep waiting on every started turn
+        // until its cap, as `turn.start` is not replayed.
+        this.settle(new Set());
+      },
     });
   }
 
