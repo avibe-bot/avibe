@@ -120,8 +120,8 @@ Two kinds of fork, told apart by construction, never by timing:
 
 | Request (Vibey) | `as_of` |
 | --- | --- |
-| a user's fork, and the source has a live Turn | the largest settled `context_seq` before that Turn's first consumed input (of the whole context while the Turn has consumed none) |
-| a user's fork, and the source has no live Turn | the largest settled `context_seq` of the source's context |
+| a user's fork, and the source's latest Turn is live, or ended with calls recovery has not settled yet | the largest settled `context_seq` before that Turn's first consumed input (of the whole context while the Turn has consumed none) |
+| a user's fork, and the source's latest Turn ended and is settled | the largest settled `context_seq` of the source's context: the end of that Turn |
 | a self-fork | the largest settled `context_seq` of the source's context: the live Turn's input and finished steps, stopping before the response whose call is running the fork, which is still open |
 | a system mechanism's fork at a given `context_seq` `s` (internal only: `reserve_forked_session(..., as_of=s)`, which no CLI, HTTP, or Web path passes) | `s`, when `0 <= s <=` the source's last `context_seq` and `s` is settled; otherwise refused (`ForkPointError`) |
 
@@ -135,8 +135,9 @@ while it is live, by construction or by a check (§11). For Vibey it holds by co
   (C-5 §2), so every row before that input belongs to an ended Turn.
 - The cut is fixed once, in the reservation's transaction, from committed rows. Rows that receive a `context_seq`
   later never move into or out of the prefix (C-5 §4).
-- The cut is settled, so an ended Turn whose calls recovery has not settled yet contributes only up to its last
-  settled row. The fork never waits on, or races with, a timing condition.
+- An ended Turn whose calls recovery has not settled yet (T2 is pending or failed) is not yet ended in this sense:
+  it is cut out like a live Turn, before its first input, so a child never inherits a partial Turn whose recovery
+  results would land after its fixed point. The fork never waits on, or races with, a timing condition.
 
 Other rules:
 
@@ -237,7 +238,9 @@ Consequences:
     input, which the cut excludes); native backends trim at it
   - `fork_source_context_seq`: Vibey only
   - `fork_created_at`
-  - `fork_self`: `true` on a self-fork only, so a native backend's first Turn skips the live-Turn check (§11)
+  - `fork_self`: `true` on a self-fork only, so a native backend's first Turn skips the live-Turn check (§11). The
+    reservation copies the source's metadata, so it removes a `fork_self` inherited from a source that was itself a
+    self-fork; only a self-fork's reservation sets it.
 - **Source to children.** This is absent today. Lineage is recorded only child to parent, and the UI only shows the
   child's banner (`ui/src/components/workbench/ChatPage.tsx:4071-4083`). Retention and teams need the reverse
   lookup. When one of them is designed, it adds an expression index on
@@ -554,7 +557,7 @@ already provide, plus work outside fork.
 | --- | --- | --- | --- |
 | F1 | A fork's messages through its cut equal `prefix(source, point)`, and a fork Session gets the same bytes on every request, whatever either Session commits later | harness, storage | a source with checkpoints and edits both before and after the cut, plus a cut before a later checkpoint; after N commits in each Session, the child's projection through `as_of` serializes equal to `project(source, fork_point=as_of)` |
 | F2 | A side turn's first request has the caller's endpoint, system prompt, tool definitions, tool choice, and reasoning settings, and its messages begin with the caller's latest request through the cut | agent | the stub's request log, for normal and rolling side turns |
-| F3 | Every fork point is settled; a fork never inherits an open call, and never settles or looks up a call it did not make (settled calls are inherited as history, F1) | harness, storage, service, adapters | a user's fork while the live Turn is mid tool batch gets exactly the previous ended Turn's prefix; a stopped and a failed previous Turn are legal cuts; nothing of the live Turn (input, calls, responses) reaches the child; a self-fork keeps the live Turn's input and finished steps and no open call; `--fork-session` naming the caller's own Session is a user's fork; a Codex fork always passes `lastTurnId` resolved at first use, including for a source that was idle at reservation; an OpenCode user's fork trims a source that became live after reservation; a Claude user's fork is refused while the source has a live Turn, at reservation and at the child's first Turn, and a Claude self-fork is not; the internal API refuses an unsettled or out-of-range point and accepts 0 |
+| F3 | Every fork point is settled; a fork never inherits an open call, and never settles or looks up a call it did not make (settled calls are inherited as history, F1) | harness, storage, service, adapters | a user's fork while the live Turn is mid tool batch gets exactly the previous ended Turn's prefix; a stopped and a failed previous Turn are legal cuts; nothing of the live Turn (input, calls, responses) reaches the child; an ended Turn whose calls await recovery is cut out whole; a Vibey self-fork keeps the live Turn's input and finished steps and no open call (native self-forks keep their behavior, §11); a user's fork of a Session that was itself a self-fork carries no `fork_self`; `--fork-session` naming the caller's own Session is a user's fork; a Codex fork always passes `lastTurnId` resolved at first use, including for a source that was idle at reservation; an OpenCode user's fork trims a source that became live after reservation; a Claude user's fork is refused while the source has a live Turn, at reservation and at the child's first Turn, and a Claude self-fork is not; the internal API refuses an unsettled or out-of-range point and accepts 0 |
 | F4 | A fork Session owns nothing an ancestor started: jobs, Watches, Tasks, runs, scratch stay with the Session that started them. A side turn starts nothing: its calls have no call instance | vibey, service, agent | a child of a source with a live job Watch neither lists it nor receives its follow-up, and its first input carries the notice; a side turn's `bash` call starts no job even when a policy allowed it |
 | F5 | A fork Session never writes a row of its source. A side turn writes only its audit row and, after the reply, what its fold commits | agent, storage | the source's rows before and after a child's Turns; the caller's rows after a failed and after a successful side turn |
 | F6 | A side turn has no capability its caller lacks; a fork Session runs an Agent the requesting caller may select, on the source's backend | agent, service | a side turn's call to every tool its policy does not allow is denied and never runs; a reservation without editor on the source, chat in the destination, or selection authority for the Agent (inherited or `--agent`) is refused, as is an Agent on another backend |
