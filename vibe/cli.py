@@ -89,6 +89,7 @@ from vibe.upgrade import (
     generation_downgrade,
     get_latest_version_info,
     get_safe_cwd,
+    format_activation_failures,
     is_desktop_managed_runtime,
     _launcher_generation,
     _candidate_python,
@@ -15797,6 +15798,7 @@ def cmd_upgrade():
     restart_error = None
     deferred_activation = False
     restart_python = None
+    activation_outcome = None
 
     try:
         with atomic_upgrade_lock():
@@ -15829,7 +15831,7 @@ def cmd_upgrade():
                         deferred_activation = True
                     else:
                         restart_python = _candidate_python(plan.activation.candidate_launcher)
-                        activate_upgrade_candidate(plan.activation)
+                        activation_outcome = activate_upgrade_candidate(plan.activation)
                 except Exception as exc:  # noqa: BLE001
                     discard_atomic_uv_install_generation(plan.activation.candidate_launcher)
                     print(f"\033[31mUpgrade candidate failed integrity verification: {exc}\033[0m")
@@ -15854,6 +15856,13 @@ def cmd_upgrade():
                     restart_error = exc
         if result.returncode == 0:
             print("\033[32mUpgrade successful!\033[0m")
+            if activation_outcome is not None:
+                activation_notice = format_activation_failures(
+                    activation_outcome,
+                    _configured_cli_language(),
+                )
+                if activation_notice:
+                    print(activation_notice)
             if deferred_activation:
                 print("Upgrade validated; launcher activation will complete after this command exits.")
                 if runtime_was_running:
@@ -18418,8 +18427,14 @@ def _dispatch_deferred_upgrade_activation(argv: list[str]) -> int:
                 discard_atomic_uv_install_generation(activation.candidate_launcher)
                 print("deferred upgrade activation was superseded by another activation", file=sys.stderr)
                 return 1
-            activate_upgrade_candidate(activation)
+            activation_outcome = activate_upgrade_candidate(activation)
             activated = True
+            activation_notice = format_activation_failures(
+                activation_outcome,
+                _configured_cli_language(),
+            )
+            if activation_notice:
+                print(activation_notice)
             if args.restart:
                 schedule_restart(
                     delay_seconds=0.0,
@@ -18489,7 +18504,13 @@ def _dispatch_installer_activation(argv: list[str]) -> int:
     retention_logger.addHandler(handler)
     retention_logger.setLevel(logging.INFO)
     try:
-        activate_installer_candidate(activation)
+        activation_outcome = activate_installer_candidate(activation)
+        activation_notice = format_activation_failures(
+            activation_outcome,
+            _configured_cli_language(),
+        )
+        if activation_notice:
+            print(activation_notice)
     except Exception as exc:
         discard_atomic_uv_install_generation(activation.candidate_launcher)
         print(f"installer activation failed: {exc}", file=sys.stderr)

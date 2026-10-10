@@ -92,6 +92,7 @@ from vibe.upgrade import (
     get_latest_version_info,
     get_running_vibe_path,
     get_safe_cwd,
+    format_activation_failures,
     is_desktop_managed_runtime,
     launcher_is_current_process,
     restart_is_pending,
@@ -6196,6 +6197,7 @@ def do_upgrade(auto_restart: bool = True) -> dict:
     runtime_output = None
     deferred_activation = False
     restart_python = None
+    activation_outcome = None
 
     try:
         with atomic_upgrade_lock():
@@ -6241,7 +6243,7 @@ def do_upgrade(auto_restart: bool = True) -> dict:
                         deferred_activation = True
                     else:
                         restart_python = _candidate_python(plan.activation.candidate_launcher)
-                        activate_upgrade_candidate(plan.activation)
+                        activation_outcome = activate_upgrade_candidate(plan.activation)
                 except Exception as exc:  # noqa: BLE001
                     discard_atomic_uv_install_generation(plan.activation.candidate_launcher)
                     return {
@@ -6291,10 +6293,19 @@ def do_upgrade(auto_restart: bool = True) -> dict:
             else:
                 message = "Upgrade successful. Please restart vibe."
 
+            output = _append_upgrade_output(result.stdout, runtime_output)
+            if activation_outcome is not None:
+                output = _append_upgrade_output(
+                    output,
+                    format_activation_failures(
+                        activation_outcome,
+                        _configured_backend_language(),
+                    ),
+                )
             return {
                 "ok": True,
                 "message": message,
-                "output": _append_upgrade_output(result.stdout, runtime_output),
+                "output": output,
                 "restarting": restarting,
             }
         else:

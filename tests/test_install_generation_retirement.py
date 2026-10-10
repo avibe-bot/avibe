@@ -759,7 +759,7 @@ def test_root_launchers_move_together_through_either_activation(installation, mo
 
 def test_a_launcher_that_cannot_move_keeps_its_generation(installation, monkeypatch, tmp_path):
     root, launcher = installation
-    peer = tmp_path / "root-home" / ".local" / "bin" / "vibe"
+    peer = tmp_path / "root home 空格" / ".local" / "bin" / "vibe"
     peer.parent.mkdir(parents=True)
     monkeypatch.setattr(upgrade, "INSTALLER_LAUNCHER_DIRS", (str(peer.parent),))
     old = activate(root, launcher, "old")
@@ -769,12 +769,29 @@ def test_a_launcher_that_cannot_move_keeps_its_generation(installation, monkeypa
         raise PermissionError(f"{path} is read-only")
 
     monkeypatch.setattr(upgrade, "_activate_launcher_target_locked", read_only)
-    current = activate(root, launcher, "current")
+    current = candidate(root, "current")
+    outcome = upgrade.activate_installer_candidate(upgrade.AtomicActivation(
+        launcher, current, upgrade._launcher_generation(launcher, root),
+    ))
 
     assert launcher.resolve() == current.resolve()
     assert peer.resolve() == old.resolve()
     assert {path.name for path in root.iterdir()} == {"old", "current"}
     assert subprocess.run([str(peer)], check=False).returncode == 0
+    assert outcome.activated_launcher == launcher.absolute()
+    assert [(failure.launcher, failure.reason) for failure in outcome.peer_failures] == [
+        (peer.absolute(), f"{peer} is read-only"),
+    ]
+    for language, expected in (
+        ("en", "Upgrade activated the new version"),
+        ("zh", "升级已激活新版本"),
+    ):
+        notice = upgrade.format_activation_failures(outcome, language)
+        assert notice is not None
+        assert expected in notice
+        assert str(peer) in notice
+        assert "is read-only" in notice
+        assert "doctor repair stable-launchers" in notice
 
 
 def test_a_peer_replaced_after_discovery_is_left_alone(installation, monkeypatch, tmp_path):
@@ -800,10 +817,16 @@ def test_a_peer_replaced_after_discovery_is_left_alone(installation, monkeypatch
         return found
 
     monkeypatch.setattr(upgrade, "managed_stable_launchers", replaced_after_discovery)
-    current = activate(root, launcher, "current")
+    current = candidate(root, "current")
+    outcome = upgrade.activate_installer_candidate(upgrade.AtomicActivation(
+        launcher, current, upgrade._launcher_generation(launcher, root),
+    ))
 
     assert launcher.resolve() == current.resolve()
     assert os.readlink(peer) == str(foreign_target)
+    assert [(failure.launcher, failure.reason) for failure in outcome.peer_failures] == [
+        (peer.absolute(), "the launcher changed after discovery"),
+    ]
 
 
 def test_partial_removal_retains_uv_evidence_and_next_pass_finishes(installation, monkeypatch):

@@ -197,6 +197,22 @@ class AtomicActivation:
     source_generation: Path | None = None
 
 
+@dataclass(frozen=True)
+class LauncherActivationFailure:
+    """A managed peer launcher that remained on its previous generation."""
+
+    launcher: Path
+    reason: str
+
+
+@dataclass(frozen=True)
+class ActivationOutcome:
+    """The committed activation and any managed peers left behind."""
+
+    activated_launcher: Path
+    peer_failures: tuple[LauncherActivationFailure, ...] = ()
+
+
 def atomic_uv_install_root() -> Path:
     """Return the durable root for versioned uv tool environments."""
 
@@ -852,16 +868,16 @@ def _prepare_launcher_replacement(replacement: Path, target: Path) -> None:
         shutil.copy2(target, replacement)
 
 
-def activate_upgrade_candidate(activation: AtomicActivation) -> None:
+def activate_upgrade_candidate(activation: AtomicActivation) -> ActivationOutcome:
     """Atomically switch the stable launcher to a validated candidate."""
 
     # Runtime callers already own this lock; the lock is re-entrant so direct
     # activation and installer callers share the same collection boundary too.
     with atomic_upgrade_lock():
-        _activate_upgrade_candidate_locked(activation)
+        return _activate_upgrade_candidate_locked(activation)
 
 
-def _activate_upgrade_candidate_locked(activation: AtomicActivation) -> None:
+def _activate_upgrade_candidate_locked(activation: AtomicActivation) -> ActivationOutcome:
     from vibe.install_generations import (
         collect_install_generations,
         finish_install_generation,
@@ -892,17 +908,25 @@ def _activate_upgrade_candidate_locked(activation: AtomicActivation) -> None:
     # `vibe doctor`; it must not undo the committed activation. A peer that
     # now follows the primary, such as an alias of it, keeps its shape.
     activated = _generation_for_path(activation.candidate_launcher, root)
+    peer_failures: list[LauncherActivationFailure] = []
     for peer, selected in peers:
+        if selected == activated:
+            continue
         try:
-            if selected != activated:
-                move_managed_launcher_locked(peer, selected, activation.candidate_launcher)
-        except Exception:
+            if not move_managed_launcher_locked(peer, selected, activation.candidate_launcher):
+                reason = "the launcher changed after discovery"
+                peer_failures.append(LauncherActivationFailure(peer, reason))
+                logger.warning("Could not move stable launcher %s: %s", peer, reason)
+        except Exception as exc:
+            reason = str(exc).strip() or type(exc).__name__
+            peer_failures.append(LauncherActivationFailure(peer, reason))
             logger.warning("Could not move stable launcher %s to the activated generation", peer, exc_info=True)
     finish_install_generation(activation.candidate_launcher)
     collect_install_generations(launcher)
+    return ActivationOutcome(launcher.absolute(), tuple(peer_failures))
 
 
-def activate_installer_candidate(activation: AtomicActivation) -> None:
+def activate_installer_candidate(activation: AtomicActivation) -> ActivationOutcome:
     """Activate an installer candidate through the shared lifecycle owner."""
 
     with atomic_upgrade_lock():
@@ -911,7 +935,37 @@ def activate_installer_candidate(activation: AtomicActivation) -> None:
             raise RuntimeError("an Avibe restart is still in progress")
         if reason == "superseded":
             raise RuntimeError("the active Avibe generation changed while the installer was staging")
-        activate_upgrade_candidate(activation)
+        return activate_upgrade_candidate(activation)
+
+
+def activation_repair_command(launcher: str | os.PathLike[str]) -> str:
+    """Return a shell-safe repair command rooted at the activated launcher."""
+
+    full_path = os.path.abspath(os.path.expanduser(str(launcher)))
+    command = [full_path, "doctor", "repair", "stable-launchers"]
+    if os.name == "nt":
+        return subprocess.list2cmdline(command)
+    return shlex.join(command)
+
+
+def format_activation_failures(outcome: ActivationOutcome, language: str = "en") -> str | None:
+    """Render managed peer failures for a user-facing upgrade result."""
+
+    if not outcome.peer_failures:
+        return None
+    from vibe.i18n import t
+
+    repair_command = activation_repair_command(outcome.activated_launcher)
+    return "\n\n".join(
+        t(
+            "update.stableLauncherActivationFailed",
+            language,
+            launcher=str(failure.launcher),
+            reason=failure.reason,
+            repairCommand=repair_command,
+        )
+        for failure in outcome.peer_failures
+    )
 
 
 def activate_launcher_target(launcher: str | os.PathLike[str], target: str | os.PathLike[str]) -> None:
