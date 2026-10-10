@@ -3742,6 +3742,7 @@ def test_runtime_prepare_strict_does_not_report_policy_skip_as_ready(monkeypatch
     monkeypatch.setattr(cli, "_ensure_askill_during_prepare", lambda **_kwargs: {"ok": True})
     monkeypatch.setattr(cli, "_ensure_tmux_during_prepare", lambda **_kwargs: {"ok": True})
     monkeypatch.setattr(cli, "_ensure_git_during_prepare", lambda **_kwargs: {"ok": True, "mode": "system"})
+    monkeypatch.setattr(cli, "_ensure_ripgrep_during_prepare", lambda **_kwargs: {"ok": True})
     monkeypatch.setattr(cli, "_ensure_avault_during_prepare", lambda **_kwargs: {"ok": True})
     monkeypatch.setattr(cli, "_ensure_model_hub_engine_during_prepare", lambda **_kwargs: {"ok": True})
 
@@ -3783,6 +3784,7 @@ def test_runtime_prepare_reports_cpa_failure_without_blocking_avibe_upgrade(
     monkeypatch.setattr(cli, "_ensure_askill_during_prepare", lambda **_kwargs: {"ok": True})
     monkeypatch.setattr(cli, "_ensure_tmux_during_prepare", lambda **_kwargs: {"ok": True})
     monkeypatch.setattr(cli, "_ensure_git_during_prepare", lambda **_kwargs: {"ok": True, "mode": "system"})
+    monkeypatch.setattr(cli, "_ensure_ripgrep_during_prepare", lambda **_kwargs: {"ok": True})
     monkeypatch.setattr(cli, "_ensure_avault_during_prepare", lambda **_kwargs: {"ok": True})
     monkeypatch.setattr(
         cli,
@@ -3849,6 +3851,7 @@ def test_runtime_prepare_localizes_cpa_output(
     monkeypatch.setattr(cli, "_ensure_askill_during_prepare", lambda **_kwargs: {"ok": True})
     monkeypatch.setattr(cli, "_ensure_tmux_during_prepare", lambda **_kwargs: {"ok": True})
     monkeypatch.setattr(cli, "_ensure_git_during_prepare", lambda **_kwargs: {"ok": True, "mode": "system"})
+    monkeypatch.setattr(cli, "_ensure_ripgrep_during_prepare", lambda **_kwargs: {"ok": True})
     monkeypatch.setattr(cli, "_ensure_avault_during_prepare", lambda **_kwargs: {"ok": True})
     monkeypatch.setattr(
         cli,
@@ -3874,6 +3877,55 @@ def test_runtime_prepare_localizes_cpa_output(
     assert "Model Hub engine" not in captured.out + captured.err
 
 
+@pytest.mark.parametrize(
+    ("ripgrep_result", "expected", "stream"),
+    (
+        ({"ok": True, "changed": True}, "ripgrep 已安装。", "out"),
+        ({"ok": True, "changed": False}, "ripgrep 已就绪。", "out"),
+        (
+            {"ok": False, "reason": "ripgrep_platform_unsupported"},
+            "ripgrep 尚未就绪：ripgrep_platform_unsupported",
+            "err",
+        ),
+    ),
+)
+def test_strict_runtime_prepare_reports_ripgrep_without_requiring_it(
+    monkeypatch,
+    capsys,
+    ripgrep_result,
+    expected,
+    stream,
+):
+    manager = SimpleNamespace(
+        prepare=lambda **_kwargs: {
+            "ok": True,
+            "policy": {"state": "allowed", "reason": None},
+            "install": {"state": "installed", "reason": None},
+            "runtime": {"state": "unchecked", "reason": None},
+            "status": {"install": {"state": "installed", "install_dir": None}},
+        }
+    )
+    monkeypatch.setattr(cli, "_show_runtime_manager_from_args", lambda _args: manager)
+    monkeypatch.setattr(cli, "_configured_cli_language", lambda: "zh")
+    monkeypatch.setattr(cli, "_ensure_askill_during_prepare", lambda **_kwargs: {"ok": True})
+    monkeypatch.setattr(cli, "_ensure_tmux_during_prepare", lambda **_kwargs: {"ok": True})
+    monkeypatch.setattr(cli, "_ensure_git_during_prepare", lambda **_kwargs: {"ok": True, "mode": "system"})
+    monkeypatch.setattr(cli, "_ensure_ripgrep_during_prepare", lambda **_kwargs: ripgrep_result)
+    monkeypatch.setattr(cli, "_ensure_avault_during_prepare", lambda **_kwargs: {"ok": True})
+    monkeypatch.setattr(cli, "_ensure_model_hub_engine_during_prepare", lambda **_kwargs: {"ok": True})
+
+    # Agents fall back to grep without it, so it never fails an install or upgrade.
+    assert (
+        cli.cmd_runtime(
+            SimpleNamespace(runtime_command="prepare", offline=False, force=False, json=False, strict=True)
+        )
+        == 0
+    )
+
+    captured = capsys.readouterr()
+    assert expected in getattr(captured, stream)
+
+
 def test_runtime_prepare_force_does_not_report_explicit_command_as_replaced(monkeypatch, capsys):
     manager = SimpleNamespace(
         prepare=lambda **_kwargs: {
@@ -3892,6 +3944,7 @@ def test_runtime_prepare_force_does_not_report_explicit_command_as_replaced(monk
     monkeypatch.setattr(cli, "_ensure_askill_during_prepare", lambda **_kwargs: {"ok": True})
     monkeypatch.setattr(cli, "_ensure_tmux_during_prepare", lambda **_kwargs: {"ok": True})
     monkeypatch.setattr(cli, "_ensure_git_during_prepare", lambda **_kwargs: {"ok": True, "mode": "system"})
+    monkeypatch.setattr(cli, "_ensure_ripgrep_during_prepare", lambda **_kwargs: {"ok": True})
     monkeypatch.setattr(cli, "_ensure_avault_during_prepare", lambda **_kwargs: {"ok": True})
     monkeypatch.setattr(cli, "_ensure_model_hub_engine_during_prepare", lambda **_kwargs: {"ok": True})
 

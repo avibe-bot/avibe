@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "ripgrep_version": "15.2.0",
+  "source": "BurntSushi/ripgrep",
+  "source_url": "https://github.com/BurntSushi/ripgrep/releases/tag/15.2.0",
+  "release_tag": "15.2.0",
+  "archives": {
+    "darwin-arm64": {
+      "name": "ripgrep-15.2.0-aarch64-apple-darwin.tar.gz",
+      "url": "https://github.com/BurntSushi/ripgrep/releases/download/15.2.0/ripgrep-15.2.0-aarch64-apple-darwin.tar.gz",
+      "sha256": "3750b2e93f37e0c692657da574d7019a101c0084da05a790c83fd335bad973e4",
+      "binary_sha256": "a326a1fb48074202e9ad41e4cd1e389eeea372c8c6f7d7e80da81176d5d9430e",
+      "size": 1764284,
+      "bin_path": "ripgrep-15.2.0-aarch64-apple-darwin/rg"
+    },
+    "darwin-x64": {
+      "name": "ripgrep-15.2.0-x86_64-apple-darwin.tar.gz",
+      "url": "https://github.com/BurntSushi/ripgrep/releases/download/15.2.0/ripgrep-15.2.0-x86_64-apple-darwin.tar.gz",
+      "sha256": "af7825fcc69a2afc7a7aea55fc9af90e26421d8f20fe59df32e233c0b8a231c1",
+      "binary_sha256": "0c9a0066db0d26b640777db88045b0ccdd58509a746700e43e1c4ff8707a5ed0",
+      "size": 1878284,
+      "bin_path": "ripgrep-15.2.0-x86_64-apple-darwin/rg"
+    },
+    "linux-arm64": {
+      "name": "ripgrep-15.2.0-aarch64-unknown-linux-musl.tar.gz",
+      "url": "https://github.com/BurntSushi/ripgrep/releases/download/15.2.0/ripgrep-15.2.0-aarch64-unknown-linux-musl.tar.gz",
+      "sha256": "800b1e7206afe799dfb5a6901f23147cfaabe0e52210538100f61e86e1740915",
+      "binary_sha256": "c14cdb389f34e504d69e386cfc67d5c5d9a730a990de03ca6910b2a15e30386a",
+      "size": 1982561,
+      "bin_path": "ripgrep-15.2.0-aarch64-unknown-linux-musl/rg"
+    },
+    "linux-x64": {
+      "name": "ripgrep-15.2.0-x86_64-unknown-linux-musl.tar.gz",
+      "url": "https://github.com/BurntSushi/ripgrep/releases/download/15.2.0/ripgrep-15.2.0-x86_64-unknown-linux-musl.tar.gz",
+      "sha256": "33e15bcf1624b25cdd2a55813a47a2f95dbe126268203e76aa6a585d1e7b149c",
+      "binary_sha256": "e62198eb19b136b88c330af83647b5a962cb99b6b1f066758568f12de1974849",
+      "size": 2265718,
+      "bin_path": "ripgrep-15.2.0-x86_64-unknown-linux-musl/rg"
+    }
+  }
+}

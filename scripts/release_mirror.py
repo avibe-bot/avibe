@@ -25,6 +25,7 @@ from typing import Any, Mapping, Sequence
 from urllib.parse import quote
 
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
 # Bucket root of each mirrored repository. Avibe's own releases keep the bucket
 # root, where their mirror URLs were first published.
 REPOSITORIES = {
@@ -32,7 +33,13 @@ REPOSITORIES = {
     "avibe-bot/askill": "askill/",
     "avibe-bot/avault": "avault/",
     "tmux/tmux-builds": "tmux/",
+    "BurntSushi/ripgrep": "ripgrep/",
 }
+# Repositories mirrored only for the release a packaged managed-runtime
+# manifest pins. The mirror is that release's backup, so a pinned archive
+# GitHub no longer publishes with the manifest's bytes fails the run instead
+# of leaving the mirror. ripgrep's older releases also carry no GitHub digest.
+PINNED_BY_MANIFEST = {"BurntSushi/ripgrep": REPO_ROOT / "vibe" / "ripgrep_runtime_manifest.json"}
 # Repositories mirrored without prereleases. tmux-builds rebuilds its
 # ``preview`` prerelease in place, changing bytes under unchanged asset names,
 # which the mirror must treat as published bytes changing.
@@ -139,6 +146,23 @@ def parse_releases(
             )
         )
     return releases
+
+
+def pinned_releases(
+    repository: str, payload: Sequence[Mapping[str, Any]], manifest_path: Path
+) -> list[Mapping[str, Any]]:
+    """Return the release the manifest pins, once GitHub proves every pinned archive."""
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    tag = manifest["release_tag"]
+    pinned = [item for item in payload if item["tag_name"] == tag and not item["draft"]]
+    if not pinned:
+        raise MirrorError(f"pinned release is not published: {repository} {tag}")
+    published = {raw["name"]: raw for raw in pinned[0]["assets"]}
+    for archive in manifest["archives"].values():
+        raw = published.get(archive["name"]) or {}
+        if raw.get("size") != archive["size"] or raw.get("digest") != f"sha256:{archive['sha256']}":
+            raise MirrorError(f"pinned archive differs from its manifest: {repository} {tag}/{archive['name']}")
+    return pinned
 
 
 def select(releases: Sequence[Release], keep_prereleases: int) -> list[Release]:
@@ -301,7 +325,10 @@ class Bucket:
 
 
 def reconcile(repository: str, bucket: Bucket, *, keep_prereleases: int, dry_run: bool) -> int:
-    releases = select(parse_releases(repository, github_releases(repository), tag_commits(repository)), keep_prereleases)
+    payload = github_releases(repository)
+    if repository in PINNED_BY_MANIFEST:
+        payload = pinned_releases(repository, payload, PINNED_BY_MANIFEST[repository])
+    releases = select(parse_releases(repository, payload, tag_commits(repository)), keep_prereleases)
     objects = bucket.objects()
     key = index_key(repository)
     previous_index = bucket.read(key) if key in objects else None

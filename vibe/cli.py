@@ -15983,6 +15983,7 @@ def cmd_runtime(args) -> int:
         askill = _ensure_askill_during_prepare(offline=bool(offline), force=force)
         tmux = _ensure_tmux_during_prepare(offline=bool(offline), force=force)
         git = _ensure_git_during_prepare(offline=offline, force=force)
+        ripgrep = _ensure_ripgrep_during_prepare(offline=offline, force=force)
         avault = _ensure_avault_during_prepare(offline=bool(offline), force=force)
         model_hub_engine = _ensure_model_hub_engine_during_prepare(
             offline=bool(offline),
@@ -15993,6 +15994,7 @@ def cmd_runtime(args) -> int:
         payload["model_hub_engine"] = model_hub_engine
         payload["tmux"] = tmux
         payload["git"] = git
+        payload["ripgrep"] = ripgrep
         install = payload.get("install") if isinstance(payload.get("install"), dict) else {}
         policy = payload.get("policy") if isinstance(payload.get("policy"), dict) else {}
         runtime_prepared = bool(payload.get("ok"))
@@ -16086,6 +16088,22 @@ def cmd_runtime(args) -> int:
             else:
                 print(
                     f"git runtime not ready: {git.get('message') or git.get('reason') or 'install failed'}",
+                    file=sys.stderr,
+                )
+            if ripgrep.get("ok"):
+                print(
+                    i18n_t(
+                        "runtime.prepare.ripgrepInstalled" if ripgrep.get("changed") else "runtime.prepare.ripgrepReady",
+                        language,
+                    )
+                )
+            else:
+                print(
+                    i18n_t(
+                        "runtime.prepare.ripgrepNotReady",
+                        language,
+                        reason=ripgrep.get("message") or ripgrep.get("reason") or "install failed",
+                    ),
                     file=sys.stderr,
                 )
         strict_ok = runtime_prepared and _git_prepare_satisfies_strict(git)
@@ -16288,6 +16306,17 @@ def _ensure_git_during_prepare(offline: bool | None = None, force: bool = False)
         from core.git_runtime import GitRuntimeManager
 
         return GitRuntimeManager(offline=offline).ensure(force=force)
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "message": str(exc)}
+
+
+def _ensure_ripgrep_during_prepare(offline: bool | None = None, force: bool = False) -> dict:
+    """Prepare the managed ripgrep for Agent commands; its absence never fails prepare."""
+
+    try:
+        from core.ripgrep_runtime import RipgrepRuntimeManager
+
+        return RipgrepRuntimeManager(offline=offline).ensure(force=force)
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "message": str(exc)}
 

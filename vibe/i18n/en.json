@@ -1074,7 +1074,10 @@
       "modelHubEngineSkipped": "Model Hub engine: skipped ({reason}).",
       "modelHubEngineInstalled": "Model Hub engine installed.",
       "modelHubEngineReady": "Model Hub engine ready.",
-      "modelHubEngineNotReady": "Model Hub engine not ready: {reason}"
+      "modelHubEngineNotReady": "Model Hub engine not ready: {reason}",
+      "ripgrepInstalled": "ripgrep installed.",
+      "ripgrepReady": "ripgrep ready.",
+      "ripgrepNotReady": "ripgrep not ready: {reason}"
     },
     "clean": {
       "commandHelp": "Remove stale Show, Git, Model Hub, and tmux runtime installs and archives; exit nonzero if any cleanup fails.",

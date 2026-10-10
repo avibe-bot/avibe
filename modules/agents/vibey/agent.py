@@ -26,6 +26,7 @@ import asyncio
 import logging
 import os
 import secrets
+import shutil
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
@@ -526,7 +527,12 @@ class VibeyAgent(BaseAgent):
         return HubModelRouter(resolve, self._providers, first=await resolve())
 
     def _start_agent(self, turn: _Run, cwd: str, sections: str, environment: Mapping[str, str]) -> None:
-        """The Turn's loop, over its router, tools, system prompt, and the environment its commands run in."""
+        """The Turn's loop, over its router, tools, system prompt, and the environment its commands run in.
+
+        The bash rule names ``rg`` only when that environment's PATH finds it. That PATH is the service's
+        PATH plus the installed managed tools, which change only on an install or upgrade, so a Session's
+        Turns keep one system prompt, which changes only when ripgrep's availability does.
+        """
         request, session_id = turn.request, turn.session_id
         suite = self._tools()
         agent = Agent(
@@ -546,7 +552,8 @@ class VibeyAgent(BaseAgent):
         # Job-backed tools receive the loop's tracking wrapper, so Stop kills foreground commands.
         tools = mark_skill_loads(tuple(suite.create_tools(agent.jobs, self.media.image_sink(session_id))))
         agent.set_tools(tools)
-        agent.system = system_prompt([tool.spec.name for tool in tools], sections)
+        finds_rg = shutil.which("rg", path=environment.get("PATH", "")) is not None
+        agent.system = system_prompt([tool.spec.name for tool in tools], sections, rg=finds_rg)
         turn.agent, turn.cwd = agent, cwd
 
     async def _on_event(self, run: _Run, event: AgentEvent) -> None:
@@ -990,11 +997,11 @@ class VibeyAgent(BaseAgent):
         The service's environment without its own caller provenance, then this Turn's
         caller context (``AVIBE_SESSION_ID``, ``AVIBE_CALLER_*``, so a ``vibe`` call in a
         command records where it came from), the managed-skill bindings, and verified
-        Git on ``PATH``, composed as the Codex backend composes its shell environment.
+        Git and ripgrep on ``PATH``, composed as the Codex backend composes its shell environment.
         The Model Hub gateway token stays in the adapter.
         """
         from core.caller_context import caller_env_for_platform_payload, environment_without_caller_context
-        from core.git_runtime import prepend_vendored_git_to_path
+        from core.agent_path import prepend_managed_tools_to_path
         from core.managed_skills import (
             managed_skill_claude_cli_path,
             managed_skill_environment,
@@ -1017,7 +1024,7 @@ class VibeyAgent(BaseAgent):
                 claude_cli_path=managed_skill_claude_cli_path(self.config),
             )
         )
-        prepend_vendored_git_to_path(environment, base_env=environment, working_dir=cwd or None)
+        prepend_managed_tools_to_path(environment, base_env=environment, working_dir=cwd or None)
         return environment
 
     def _environment(self, session_id: str) -> dict[str, EnvironmentValue]:

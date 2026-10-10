@@ -1074,7 +1074,10 @@
       "modelHubEngineSkipped": "Model Hub 引擎：已跳过（{reason}）。",
       "modelHubEngineInstalled": "Model Hub 引擎已安装。",
       "modelHubEngineReady": "Model Hub 引擎已就绪。",
-      "modelHubEngineNotReady": "Model Hub 引擎尚未就绪：{reason}"
+      "modelHubEngineNotReady": "Model Hub 引擎尚未就绪：{reason}",
+      "ripgrepInstalled": "ripgrep 已安装。",
+      "ripgrepReady": "ripgrep 已就绪。",
+      "ripgrepNotReady": "ripgrep 尚未就绪：{reason}"
     },
     "clean": {
       "commandHelp": "清理过期的 Show、Git、Model Hub 和 tmux 运行时安装与归档；任一清理失败时以非零状态退出。",
