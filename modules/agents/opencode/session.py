@@ -13,7 +13,7 @@ import re
 import time
 from typing import Any, Dict, Optional, Tuple
 
-from core.services.session_fork import fork_source_state, pending_native_fork
+from core.services.session_fork import fork_source_state, pending_native_fork, source_has_live_turn
 from modules.agents.native_sessions.opencode import OpenCodeNativeSessionProvider
 from modules.agents.base import AgentRequest, BaseAgent
 from vibe.message_identity import is_input_turn
@@ -217,6 +217,20 @@ class OpenCodeSessionManager:
         fork: dict,
     ) -> tuple[bool, Optional[str]]:
         if not bool(fork.get("trim_latest_running_turn")):
+            # The native copy happens now, not at reservation: a user's fork of a source that became live since
+            # still leaves that Turn out (C-10 fork.md section 11). A self-fork was classified at reservation.
+            avibe_source = str(fork.get("source_session_id") or "").strip()
+            if fork.get("self_fork") or not avibe_source:
+                return True, None
+            if not await asyncio.to_thread(source_has_live_turn, avibe_source):
+                return True, None
+            point = self._current_running_fork_point(source_session_id)
+            if point.available:
+                return True, point.message_id
+            logger.warning(
+                "OpenCode fork of %s found the source live at first use but no fork point; preserving source history",
+                source_session_id,
+            )
             return True, None
         if bool(fork.get("opencode_fork_empty_history")):
             return False, None

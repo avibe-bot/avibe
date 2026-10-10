@@ -48,7 +48,7 @@ from core.services.agent_steering import (
     SteerResult,
     result as steer_result,
 )
-from core.services.session_fork import fork_source_state, pending_native_fork
+from core.services.session_fork import pending_native_fork
 from core.system_prompt_injection import (
     build_forked_session_correction_prompt,
     build_system_prompt_injection,
@@ -86,7 +86,6 @@ from vibe.codex_config import (
 from vibe.desktop_backends import desktop_backend_subprocess_environment
 from modules.agents.catalog import display_name_for_backend
 from vibe.i18n import t as i18n_t
-from vibe.message_identity import is_input_turn
 
 logger = logging.getLogger(__name__)
 
@@ -3390,27 +3389,17 @@ class CodexAgent(BaseAgent):
 
         self._mark_fork_correction_pending(request.base_session_id)
         try:
-            should_trim = await self._should_trim_forked_running_turn(fork)
-            if should_trim:
-                source_still_running, last_completed_turn_id = (
-                    await self._fork_source_last_completed_turn_id(transport, fork)
+            # A fork never carries a live Turn (C-10 fork.md section 11): the boundary is always the source's
+            # last completed Turn, resolved now, when the native copy is made, never from the reservation.
+            # `lastTurnId` is inclusive and applied by Codex itself, so a Turn that starts after this read is
+            # left out whatever the timing.
+            _, last_completed_turn_id = await self._fork_source_last_completed_turn_id(transport, fork)
+            if not last_completed_turn_id:
+                raise CodexForkBoundaryUnavailableError(
+                    "Cannot fork Codex thread while the source turn boundary "
+                    "is unknown"
                 )
-                if not last_completed_turn_id:
-                    raise CodexForkBoundaryUnavailableError(
-                        "Cannot fork Codex thread while the source turn boundary "
-                        "is unknown"
-                    )
-                # `lastTurnId` is the stable thread/fork boundary supported by
-                # the Codex app-server versions Avibe supports. It is
-                # inclusive: use the preceding terminal turn while the source
-                # is active, or the source turn itself if it completed during
-                # this race.
-                params["lastTurnId"] = last_completed_turn_id
-                if not source_still_running:
-                    logger.debug(
-                        "Codex source turn completed during fork boundary read; "
-                        "preserving completed history"
-                    )
+            params["lastTurnId"] = last_completed_turn_id
             resp = await transport.send_request("thread/fork", params)
             thread_id = resp.get("id", "")
             if not thread_id:
@@ -3502,32 +3491,6 @@ class CodexAgent(BaseAgent):
         logger.info("Forked Codex thread %s from %s for session %s", thread_id, source_thread_id, request.base_session_id)
         return thread_id
 
-    async def _should_trim_forked_running_turn(self, fork: dict[str, Any]) -> bool:
-        """Trim only when the reserved fork boundary still targets this turn."""
-
-        if not bool(fork.get("trim_latest_running_turn")):
-            return False
-        source_state = fork_source_state(fork)
-        if source_state.anchor_is_terminal_agent_output:
-            return False
-        anchor_is_running_input = is_input_turn(
-            getattr(source_state, "anchor_author", None),
-            getattr(source_state, "anchor_type", None),
-        )
-        if getattr(source_state, "has_input_turn_after_anchor", False):
-            return False
-        if anchor_is_running_input:
-            if source_state.has_messages_after_anchor:
-                return True
-            if bool(fork.get("native_turn_started")):
-                return True
-            return await self._fork_source_turn_now_started(fork)
-        if source_state.has_messages_after_anchor:
-            return not source_state.has_terminal_agent_output_after_anchor
-        if bool(fork.get("native_turn_started")):
-            return True
-        return await self._fork_source_turn_now_started(fork)
-
     async def _fork_source_turn_now_started(self, fork: dict[str, Any]) -> bool:
         source_session_id = str(fork.get("source_session_id") or "").strip()
         if not source_session_id:
@@ -3593,19 +3556,23 @@ class CodexAgent(BaseAgent):
         transport: CodexTransport,
         fork: dict[str, Any],
     ) -> tuple[bool, Optional[str]]:
-        """Resolve the inclusive fork boundary immediately before a live turn.
+        """Resolve the inclusive fork boundary: the source's last completed turn.
 
         ``thread/fork.lastTurnId`` cannot point at an in-progress turn. Page
-        through the source turns in reverse chronological order and return the
-        preceding terminal turn instead. If the reserved turn completed during
-        this race, use that turn itself: ``lastTurnId`` is inclusive, so this
-        still excludes any later turn that may have started while the fork
-        request was being prepared.
+        through the source turns in reverse chronological order. With a live
+        turn, return the terminal turn before it; if that turn completed during
+        this race, use it itself: ``lastTurnId`` is inclusive, so this still
+        excludes any later turn that may have started while the fork request
+        was being prepared. With no live turn, return the latest terminal turn,
+        passing over one that started since. A live turn this process cannot
+        name fails closed: another process would read it as interrupted.
         """
 
         active_turn_id = await self._fork_source_native_turn_id(fork)
         source_thread_id = str(fork.get("source_native_session_id") or "").strip()
-        if not active_turn_id or not source_thread_id:
+        if not source_thread_id:
+            return True, None
+        if not active_turn_id and await self._fork_source_turn_now_started(fork):
             return True, None
         # Another process reads a live turn as interrupted; only the generation
         # holding the source thread reports it in progress. ``source_session_id``
@@ -3640,6 +3607,12 @@ class CodexAgent(BaseAgent):
                         return True, None
                     turn_id = str(turn.get("id") or "").strip()
                     status = str(turn.get("status") or "").strip()
+                    if not active_turn_id:
+                        if status == "inProgress":
+                            continue
+                        if not turn_id or status not in {"completed", "interrupted", "failed"}:
+                            return True, None
+                        return False, turn_id
                     if turn_id == active_turn_id:
                         if status in {"completed", "interrupted", "failed"}:
                             return False, active_turn_id

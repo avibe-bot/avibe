@@ -718,35 +718,24 @@ class VibeyAgent(BaseAgent):
             return
         suite = self._tools()
 
-        def evidence() -> tuple[list[ContextEntry], dict[CallInstance, str]]:
-            # A call is its instance, the owning response plus its id (providers reuse ids).
-            # A call this Session inherited open takes the result its owner committed, matched
-            # in context order; any other call, the job its instance started.
-            inherited, found = [], {}
-            with self._engine.connect() as conn:
-                for owner, call in open_calls:
-                    if owner.session_id != session_id:
-                        result = call_instance_result(conn, owner.session_id, owner.context_seq, call.id)
-                        if result is not None:
-                            inherited.append(result)
-                            continue
-                    instance = CallInstance(owner.session_id, owner.row_id, owner.context_seq, call.id)
-                    job_id = suite.find_job(instance)
-                    if job_id is not None:
-                        found[instance] = job_id
-            return inherited, found
+        def evidence() -> dict[CallInstance, str]:
+            # A call is its instance, the owning response plus its id (providers reuse ids). A fork's
+            # point is settled (C-10 fork.md section 2), so every open call is this Session's own.
+            found = {}
+            for owner, call in open_calls:
+                instance = CallInstance(owner.session_id, owner.row_id, owner.context_seq, call.id)
+                job_id = suite.find_job(instance)
+                if job_id is not None:
+                    found[instance] = job_id
+            return found
 
         # Each job lookup lists the jobs directory: one pass, off the event loop.
-        inherited, job_ids = await asyncio.to_thread(evidence)
+        job_ids = await asyncio.to_thread(evidence)
         # A tool result is the Agent's that made the call: its owning response's author, not
         # the Turn writing it now (or none, at startup) or the Session's current selection.
         # Only the last response can hold open calls, so they share one owner.
         owner_agent = await asyncio.to_thread(self._author_of, open_calls[0][0].row_id)
         with self.store.writing_as(session_id, owner_agent):
-            for result in inherited:
-                await self.store.append_tool_result(
-                    session_id, result.message, details=dict(result.payload.get("details") or {})
-                )
             await settle_open_calls(
                 session_id=session_id,
                 store=self.store,

@@ -9292,17 +9292,15 @@ def _session_fork_error_response(err: Exception):
     treatment, so the whole mapping goes through it rather than one patched branch.
     """
     from core.services import settings as settings_service
-    from core.services.session_fork import (
-        SESSION_AGENT_UNAVAILABLE_CODE,
-        SESSION_AGENT_UNAVAILABLE_I18N_KEY,
-    )
+    from core.services.session_fork import SESSION_FORK_LOCALIZED_ERRORS
 
     message = str(err)
-    if getattr(err, "code", None) == SESSION_AGENT_UNAVAILABLE_CODE:
+    code = getattr(err, "code", None)
+    key = SESSION_FORK_LOCALIZED_ERRORS.get(code)
+    if key is not None:
         lang = settings_service.load_config_or_default().language
-        key = SESSION_AGENT_UNAVAILABLE_I18N_KEY
         return _coded_error_response(
-            SESSION_AGENT_UNAVAILABLE_CODE,
+            code,
             t(f"{key}.message", lang),
             409,
             hint=t(f"{key}.hint", lang),

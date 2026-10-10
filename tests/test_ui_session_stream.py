@@ -1098,20 +1098,49 @@ def test_fork_session_marks_running_source_for_trim(isolated_state, tmp_path, mo
     in_flight.assert_awaited_once_with(session_id)
 
 
-def test_fork_session_does_not_mark_claude_running_source_for_trim(isolated_state, tmp_path):
+def test_a_users_fork_of_a_running_claude_session_is_refused_with_localized_copy(isolated_state, tmp_path):
+    # Claude cannot cut a live Turn out of the copy it resumes, so the Workbench Fork waits for the Turn to end
+    # (C-10 fork.md section 11): a coded 409 the UI localizes, not a child that would carry the live Turn.
     from sqlalchemy import update
 
     from storage.db import create_sqlite_engine
     from storage.models import agent_sessions
+    from vibe.i18n import t
     from vibe.ui_server import app
 
-    _, session_id = _make_session(tmp_path)
+    scope_id, session_id = _make_session(tmp_path)
     engine = create_sqlite_engine()
     with engine.begin() as conn:
         conn.execute(
             update(agent_sessions)
             .where(agent_sessions.c.id == session_id)
             .values(native_session_id="claude-source-1", title="Source session")
+        )
+        delivery = message_deliveries.insert_delivery(
+            conn,
+            delivery_id=message_deliveries.new_delivery_id(),
+            session_id=session_id,
+            priority="p3",
+            state="reserved",
+            snapshot=message_deliveries.message_snapshot(
+                scope_id=scope_id,
+                session_id=session_id,
+                platform="avibe",
+                author="user",
+                source="user",
+                message_type="user",
+                text="still working",
+            ),
+            dispatch_text="still working",
+        )
+        message_deliveries.claim_start_batch(
+            conn,
+            turn_id=message_deliveries.new_turn_id(),
+            session_id=session_id,
+            backend="claude",
+            deliveries=[delivery],
+            dispatch_text="still working",
+            attempt_id=message_deliveries.new_attempt_id(),
         )
 
     in_flight = AsyncMock(
@@ -1121,18 +1150,21 @@ def test_fork_session_does_not_mark_claude_running_source_for_trim(isolated_stat
         }
     )
     with (
-        patch("vibe.sse_broker.broker.publish"),
+        patch("vibe.sse_broker.broker.publish") as publish,
         patch("vibe.internal_client.turn_state", in_flight),
     ):
         client = app.test_client()
         headers = csrf_headers(client)
         response = client.post(f"/api/sessions/{session_id}/fork", json={}, headers=headers)
 
-    assert response.status_code == 201
-    payload = response.get_json()
-    assert payload["metadata"]["fork_source_backend"] == "claude"
-    assert payload["metadata"]["fork_trim_latest_running_turn"] is False
-    assert payload["metadata"]["fork_native_turn_started"] is False
+    assert response.status_code == 409
+    body = response.get_json()
+    assert body["error"]["code"] == "session_fork_source_running"
+    assert body["error"]["message"] == t("error.sessionFork.sourceRunning.message", "en")
+    assert body["error"]["message"] == (
+        "This conversation is still running. Wait for the current turn to finish, then fork."
+    )
+    publish.assert_not_called()
 
 
 def test_fork_session_trims_post_accept_open_code_before_native_turn_starts(isolated_state, tmp_path, monkeypatch):

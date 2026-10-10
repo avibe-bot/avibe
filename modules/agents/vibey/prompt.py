@@ -54,6 +54,12 @@ TOOL_GUIDELINES: dict[str, tuple[str, ...]] = {
 }
 TOOL_ORDER = ("read", "bash", "edit", "write")
 FINAL_REPLY_RULE = "Only your final reply is reliably shown to the user; put anything the user must see in it"
+#: The first input of a fork (C-10 fork.md section 8): the inherited history is the source's, and so is its work.
+FORK_NOTICE = (
+    "<fork>\nThis Session is a fork of {title} (Session {source}): the conversation above is that Session's history "
+    "through context_seq {seq}. Every command, Watch, Task, and run in that history stays with the Session that "
+    "started it and reports there, not here.\n</fork>"
+)
 
 
 def coding_prompt(tool_names: Iterable[str]) -> str:
@@ -199,6 +205,19 @@ def environment_delta(
     return {
         name: value for name, value in current.items() if previous.get(name) != shown[name] or not _whole(name, value)
     }
+
+
+def with_fork_notice(message: UserMessage, *, source_session_id: str, source_title: str, through_seq: int) -> UserMessage:
+    """A fork's first input names whose history the model inherited and who owns the work in it (C-10 section 8).
+
+    Placed before the input's own content; the environment block, when there is one, still comes first.
+    """
+    notice = FORK_NOTICE.format(
+        title=display(source_title) if source_title else "an earlier Session",
+        source=display(source_session_id),
+        seq=int(through_seq),
+    )
+    return UserMessage(content=(TextBlock(text=notice), *message.content))
 
 
 def with_environment(message: UserMessage, delta: Mapping[str, EnvironmentValue]) -> UserMessage:

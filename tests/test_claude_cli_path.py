@@ -1081,6 +1081,62 @@ def test_session_handler_sets_claude_fork_session_for_pending_native_fork(monkey
     assert "use `ses-target` for Show Pages" not in prompt
 
 
+def test_a_users_claude_fork_does_not_copy_a_source_that_became_live(monkeypatch, tmp_path: Path) -> None:
+    # The native copy happens at the child's first Turn, so a user's fork re-checks the source there (C-10
+    # section 11): a source that became live since the reservation fails the Turn before anything is copied,
+    # with the input kept for an explicit retry. A self-fork from inside its live Turn is exempt.
+    created: list[Any] = []
+
+    class _StubClaudeSDKClient:
+        def __init__(self, options):
+            created.append(options)
+
+        async def connect(self) -> None:
+            return None
+
+    class _ForkSessions(_Sessions):
+        @staticmethod
+        def get_claude_session_id(settings_key, base_session_id):
+            return None
+
+    asked: list[dict] = []
+    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    monkeypatch.setattr(
+        session_handler_module,
+        "user_fork_source_is_running",
+        lambda fork: asked.append(dict(fork)) or not fork.get("self_fork"),
+    )
+
+    def context(fork: dict) -> MessageContext:
+        return MessageContext(
+            user_id="U1",
+            channel_id="ses-target",
+            platform="avibe",
+            platform_specific={
+                "agent_session_target": {
+                    "id": "ses-target",
+                    "agent_backend": "claude",
+                    "native_session_id": "",
+                    "native_session_fork": fork,
+                }
+            },
+        )
+
+    user_fork = {"source_session_id": "ses-source", "source_native_session_id": "claude-source", "source_backend": "claude"}
+    controller = _Controller(tmp_path)
+    controller.settings_manager.sessions = _ForkSessions()
+    with pytest.raises(session_handler_module.ClaudeInputNotSentError) as refused:
+        _run_session(SessionHandler(controller), context(user_fork))
+    assert refused.value.reason == "fork_source_running"
+    assert refused.value.message_key == "error.sessionFork.sourceRunning.message"
+    assert created == []
+
+    _run_session(SessionHandler(controller), context({**user_fork, "self_fork": True}))
+    assert created[-1].resume == "claude-source" and created[-1].fork_session is True
+    assert [fork.get("self_fork", False) for fork in asked] == [False, True]
+
+
 def test_session_handler_disallows_remote_unsafe_claude_tools(monkeypatch, tmp_path: Path) -> None:
     captured: dict[str, Any] = {}
 

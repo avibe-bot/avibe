@@ -6,6 +6,9 @@ Two adapter rules live at this boundary, where the loop consumes an input:
   it is consumed, with the fields the projected context does not already show
   (after a checkpoint, the summarized inputs' fields are not shown), so what
   ``consume_input`` stores is exactly what the model is sent;
+* a fork's first own input carries the fork notice (C-10 fork.md section 8):
+  whose history the model inherited, and that its work stays with the Session
+  that started it;
 * a steered input's ``messages`` row is inserted by the Delivery manager right
   after the backend accepts the steer. The loop can reach that input first, so
   consumption waits, bounded, for the row to exist.
@@ -17,6 +20,7 @@ owns it; nothing here keeps responses after that.
 from __future__ import annotations
 
 import asyncio
+import json
 from contextlib import contextmanager
 import time
 from typing import Any, Callable, Iterator, Literal, Mapping, Optional, Sequence
@@ -33,9 +37,10 @@ from modules.agents.vibey.prompt import (
     environment_delta,
     environment_state,
     with_environment,
+    with_fork_notice,
 )
-from storage.agent_transcript import SQLiteTranscriptStore
-from storage.models import messages
+from storage.agent_transcript import SQLiteTranscriptStore, fork_link
+from storage.models import agent_sessions, messages
 
 EnvironmentSource = Callable[[str], Mapping[str, EnvironmentValue]]
 ResponseObserver = Callable[[str, str, AssistantMessage], None]
@@ -104,8 +109,12 @@ class AdapterTranscriptStore:
         if previous is None:
             # What the model still sees: the inputs the projected context keeps. After a checkpoint the
             # summarized inputs are gone, so the next input carries every field the context no longer shows.
-            view = context_view(await self._store.load(session_id))
+            entries = await self._store.load(session_id)
+            view = context_view(entries)
             previous = environment_state([unit.lead for unit in view.units if unit.lead.kind == "input"])
+            if entries and all(entry.session_id != session_id for entry in entries):
+                # Every row is inherited: this is the fork's first own input.
+                message = await asyncio.to_thread(self._with_fork_notice, session_id, message)
         current = dict(self._environment(session_id))
         rendered = with_environment(message, environment_delta(previous, current))
         entry = await self._store.consume_input(session_id, message_id, rendered)
@@ -158,6 +167,18 @@ class AdapterTranscriptStore:
                 raise InputRowMissing(f"input {message_id} of Session {session_id} was never materialized")
             await asyncio.sleep(delay)
             delay = min(delay * 2, 0.25)
+
+    def _with_fork_notice(self, session_id: str, message: UserMessage) -> UserMessage:
+        with self._engine.connect() as conn:
+            link = fork_link(conn, session_id)
+            raw = conn.execute(select(agent_sessions.c.metadata_json).where(agent_sessions.c.id == session_id)).scalar()
+        if link is None:
+            return message
+        metadata = json.loads(raw or "{}")
+        title = metadata.get("fork_source_session_title") if isinstance(metadata, dict) else None
+        return with_fork_notice(
+            message, source_session_id=link[0], source_title=str(title or ""), through_seq=link[1]
+        )
 
     def _input_row_exists(self, session_id: str, message_id: str) -> bool:
         with self._engine.connect() as conn:

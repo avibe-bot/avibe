@@ -2510,6 +2510,7 @@
     "missing_share_id": "Enter a custom link first.",
     "not_public": "Make the Show Page public first to change its link.",
     "session_agent_unavailable": "The source session's Agent is no longer available. Choose an enabled Agent to fork this session.",
+    "session_fork_source_running": "This conversation is still running. Wait for the current turn to finish, then fork.",
     "session_archived": "This session is archived, so its Show Page can't be changed.",
     "reserved_session": "Avibe owns this session — it only receives workspace notifications.",
     "invalid_icon_type": "The icon must be an SVG, PNG, ICO, JPEG, or WebP image.",

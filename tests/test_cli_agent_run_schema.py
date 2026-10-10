@@ -1721,6 +1721,88 @@ def test_agent_run_fork_rejects_cross_backend_agent(tmp_path: Path, capsys) -> N
     assert payload["code"] == "session_fork_failed"
 
 
+@pytest.mark.parametrize(
+    ("flags", "self_fork"),
+    [(["--fork-self"], True), (["--fork-session", "SOURCE"], False)],
+    ids=["fork-self", "fork-session-naming-own-session"],
+)
+def test_only_fork_self_is_the_agents_own_fork(tmp_path: Path, capsys, flags, self_fork) -> None:
+    # C-10 section 2: --fork-self, which resolves the source from AVIBE_SESSION_ID, is the only self-fork;
+    # --fork-session stays a user's fork even when it names the caller's own Session from inside its Turn.
+    from storage.importer import ensure_sqlite_state
+
+    state_home = tmp_path / "home"
+    with patch.dict("os.environ", {"AVIBE_HOME": str(state_home)}):
+        ensure_sqlite_state()
+        db_path = state_home / "state" / "vibe.sqlite"
+        source_session_id = _seed_bound_session(db_path, tmp_path)
+        agent_store = cli.VibeAgentStore(db_path)
+        agent_store.create(name="worker", backend="codex")
+        request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
+        args = _parse_agent_run(
+            [
+                *[source_session_id if flag == "SOURCE" else flag for flag in flags],
+                "--agent",
+                "worker",
+                "--async",
+                "--no-callback",
+                "--message",
+                "try the other fix",
+            ]
+        )
+
+        with (
+            patch.dict("os.environ", {"AVIBE_SESSION_ID": source_session_id}),
+            patch("vibe.cli._agent_store", return_value=agent_store),
+            patch("vibe.cli._task_request_store", return_value=request_store),
+            patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
+            patch("vibe.cli._primary_platform", return_value="slack"),
+        ):
+            result = cli.cmd_agent_run(args)
+
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["forked_from_session_id"] == source_session_id
+    run = request_store.get_run(payload["run_id"])
+    assert bool(run["metadata"]["session_fork"].get("self_fork")) is self_fork
+
+
+def test_agent_run_fork_localizes_a_running_source(monkeypatch) -> None:
+    from core.services.session_fork import (
+        SESSION_FORK_SOURCE_RUNNING_CODE,
+        SESSION_FORK_SOURCE_RUNNING_I18N_KEY,
+        SessionForkError,
+    )
+    from vibe.i18n import t as i18n_t
+
+    error = SessionForkError(
+        "source session has a running turn; fork it after the turn ends",
+        code=SESSION_FORK_SOURCE_RUNNING_CODE,
+        details={"source_session_id": "ses-source"},
+    )
+    monkeypatch.setattr(cli.V2Config, "load", lambda: SimpleNamespace(language="zh"))
+    monkeypatch.setattr(
+        "core.services.session_fork.reserve_forked_session",
+        lambda **_kwargs: (_ for _ in ()).throw(error),
+    )
+
+    with pytest.raises(cli.TaskCliError) as exc_info:
+        cli._reserve_forked_cli_session(
+            source_session_id="ses-source",
+            agent_name=None,
+            model=None,
+            reasoning_effort=None,
+            scope_key=None,
+            visibility="foreground",
+        )
+
+    exc = exc_info.value
+    assert exc.code == SESSION_FORK_SOURCE_RUNNING_CODE
+    assert str(exc) == i18n_t(f"{SESSION_FORK_SOURCE_RUNNING_I18N_KEY}.message", "zh")
+    assert str(exc) == "这个会话还在运行。请等当前回合结束后再复刻。"
+    assert exc.hint == i18n_t(f"{SESSION_FORK_SOURCE_RUNNING_I18N_KEY}.hint", "zh")
+
+
 def test_agent_run_fork_localizes_unavailable_source_agent(monkeypatch) -> None:
     from core.services.session_fork import (
         SESSION_AGENT_UNAVAILABLE_CODE,

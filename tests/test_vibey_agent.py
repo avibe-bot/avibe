@@ -44,7 +44,7 @@ from modules.agents.base import AgentRequest
 from modules.agents.model_hub import ModelHubLaunch
 from modules.im import MessageContext
 from storage import message_deliveries
-from storage.agent_transcript import resolve_fork_anchor_seq
+from storage.agent_transcript import resolve_fork_point
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state
 from storage.models import agent_events, agent_sessions, messages, session_turns
@@ -941,103 +941,8 @@ async def test_resume_renders_a_recovered_steer_as_the_live_path_would(engine, s
     assert "From: #ses_source" in recovered.message.content[-1].text
 
 
-async def test_a_fork_from_an_earlier_message_continues_only_the_inherited_prefix(
-    engine, session, tmp_path, published
-) -> None:
-    source = _Harness(engine, tmp_path, "avibe", [[Done(assistant("first answer"))], [Done(assistant("later"))]])
-    await source.agent.handle_message(source.request("first question"))
-    [anchor] = source.rows("result")
-    with engine.begin() as conn:
-        # What fork reservation records (core/services/session_fork.py, C-5 section 4).
-        _insert_session(
-            conn,
-            "ses_child",
-            _SCOPES["avibe"],
-            {
-                "created_via": "session_fork",
-                "fork_source_session_id": SESSION,
-                "fork_source_message_id": anchor["id"],
-                "fork_source_context_seq": resolve_fork_anchor_seq(conn, SESSION, anchor["id"]),
-            },
-        )
-    # The source moves on after the fork; none of it may reach the child.
-    await source.agent.handle_message(source.request("source continues"))
-
-    child = _Harness(engine, tmp_path, "avibe", [[Done(assistant("child answer"))]], session_id="ses_child")
-    await child.agent.handle_message(child.request("child question"))
-
-    inherited = [entry for entry in await source.context_rows() if entry.context_seq <= 2]
-    rows = await child.context_rows()
-    assert rows[:2] == inherited
-    assert [(entry.session_id, entry.context_seq, entry.kind) for entry in rows[2:]] == [
-        ("ses_child", 3, "input"),
-        ("ses_child", 4, "response"),
-    ]
-    [request] = child.provider.requests
-    assert request.messages == project(rows[:3]).messages
-    assert "source continues" not in json.dumps([str(message) for message in request.messages], ensure_ascii=False)
-
-
-async def test_a_fork_settles_a_call_it_inherited_open_with_the_sources_result(
-    engine, session, tmp_path, published
-) -> None:
-    # The source's job is gone (J5 pruned it once the source's call settled).
-    suite = ToolSuite(
-        jobs=FakeJobHost(),
-        create_tools=lambda jobs_, sink: [FakeTool("bash")],
-        render_recovered=_unused_renderer,
-        find_job=lambda *_args, **_kwargs: None,
-    )
-    call = ToolCallBlock(id="call_1", name="bash", arguments={"command": "make release"})
-    source = _Harness(
-        engine, tmp_path, "avibe", [[Done(assistant("Releasing.", calls=(call,)))], [Done(assistant("Released."))]],
-        tools=[FakeTool("bash", result=ToolResult((text("release 1.2.0 published"),)))],
-    )
-    await source.agent.handle_message(source.request("ship it"))
-    narration = (await source.context_rows())[1]
-    with engine.begin() as conn:
-        # A fork from the narration message: its anchor precedes the call's result.
-        _insert_session(
-            conn,
-            "ses_child",
-            _SCOPES["avibe"],
-            {
-                "created_via": "session_fork",
-                "fork_source_session_id": SESSION,
-                "fork_source_message_id": narration.row_id,
-                "fork_source_context_seq": resolve_fork_anchor_seq(conn, SESSION, narration.row_id),
-            },
-        )
-    child = _Harness(engine, tmp_path, "avibe", [[Done(assistant("ok"))]], suite=suite, session_id="ses_child")
-
-    await child.agent.handle_message(child.request("what happened?"))
-
-    rows = await child.context_rows()
-    assert [(entry.session_id, entry.kind) for entry in rows[:3]] == [
-        (SESSION, "input"), (SESSION, "response"), ("ses_child", "tool_result")
-    ]
-    # The child settles with what the source recorded, not with an uncertain effect.
-    assert rows[2].message.content == (text("release 1.2.0 published"),)
-    assert child.provider.requests[0].messages == project(rows[:4]).messages
-
-
-async def test_a_nested_fork_takes_the_result_of_its_own_call_instance(engine, session, tmp_path, published) -> None:
-    # Grandparent SESSION -> parent ses_parent -> child ses_child; providers reuse the call id.
-    reused = ToolCallBlock(id="call_1", name="bash", arguments={})
-    grandparent = _Harness(
-        engine, tmp_path, "avibe",
-        [[Done(assistant("hello"))], [Done(assistant("", calls=(reused,)))], [Done(assistant("checked"))]],
-        tools=[FakeTool("bash", result=ToolResult((text("the grandparent's own check"),)))],
-    )
-    await grandparent.agent.handle_message(grandparent.request("hi"))
-    [anchor] = grandparent.rows("result")
-    with engine.begin() as conn:
-        _insert_session(conn, "ses_parent", _SCOPES["avibe"], {
-            "created_via": "session_fork",
-            "fork_source_session_id": SESSION,
-            "fork_source_message_id": anchor["id"],
-            "fork_source_context_seq": resolve_fork_anchor_seq(conn, SESSION, anchor["id"]),
-        })
+async def _blocked_second_turn(engine, tmp_path, *, finished_step: bool):
+    """A source whose first Turn ended with a reply and whose second Turn is live, blocked inside a tool call."""
     started, release = asyncio.Event(), asyncio.Event()
 
     async def release_build(arguments, ctx):
@@ -1045,37 +950,97 @@ async def test_a_nested_fork_takes_the_result_of_its_own_call_instance(engine, s
         await release.wait()
         return ToolResult((text("release 1.2.0 published"),))
 
-    parent = _Harness(
-        engine, tmp_path, "avibe",
-        [[Done(assistant("Releasing.", calls=(reused,)))], [Done(assistant("Released."))]],
-        tools=[FakeTool("bash", execute=release_build)], session_id="ses_parent",
+    read = ToolCallBlock(id="call_read", name="read", arguments={"path": "CHANGELOG.md"})
+    build = ToolCallBlock(id="call_build", name="bash", arguments={"command": "make release"})
+    second = [[Done(assistant("Reading first.", calls=(read,)))]] if finished_step else []
+    source = _Harness(
+        engine,
+        tmp_path,
+        "avibe",
+        [
+            [Done(assistant("first answer"))],
+            *second,
+            [Done(assistant("Releasing.", calls=(build,)))],
+            [Done(assistant("Released."))],
+        ],
+        tools=[
+            FakeTool("read", result=ToolResult((text("## 1.2.0"),))),
+            FakeTool("bash", execute=release_build),
+        ],
     )
-    running = asyncio.create_task(parent.agent.handle_message(parent.request("ship it")))
+    await source.agent.handle_message(source.request("first question"))
+    running = asyncio.create_task(source.agent.handle_message(source.request("ship it")))
     await started.wait()
-    # The grandparent continues on its own and settles its own call_1 first.
-    await grandparent.agent.handle_message(grandparent.request("check something"))
+    return source, running, release
+
+
+async def test_a_users_fork_of_a_turn_mid_tool_batch_gets_exactly_the_previous_ended_turn(
+    engine, session, tmp_path, published
+) -> None:
+    source, running, release = await _blocked_second_turn(engine, tmp_path, finished_step=True)
+    [first_answer] = source.rows("result")
+    with engine.begin() as conn:
+        # What reservation records for a user's fork (core/services/session_fork.py, C-10 section 2).
+        cut = resolve_fork_point(conn, SESSION)
+        _insert_session(
+            conn,
+            "ses_child",
+            _SCOPES["avibe"],
+            {
+                "created_via": "session_fork",
+                "fork_source_session_id": SESSION,
+                "fork_source_session_title": "Release work",
+                "fork_source_context_seq": cut,
+            },
+        )
+    live = [entry for entry in await source.context_rows() if entry.context_seq > cut]
+    # The previous Turn ended with its reply; the live Turn's input and finished step come after it.
+    assert cut == first_answer["context_seq"]
+    assert [entry.kind for entry in live] == ["input", "response", "tool_result", "response"]
+
+    # The source continues, unaffected by the fork.
     release.set()
     await running
-    narration = next(entry for entry in await parent.context_rows() if entry.session_id == "ses_parent"
-                     and entry.kind == "response")
+    assert [row["content_text"] for row in source.rows("result")] == ["first answer", "Released."]
+
+    child = _Harness(engine, tmp_path, "avibe", [[Done(assistant("child answer"))]], session_id="ses_child")
+    await child.agent.handle_message(child.request("child question"))
+
+    rows = await child.context_rows()
+    inherited = [entry for entry in await source.context_rows() if entry.context_seq <= cut]
+    assert rows[: len(inherited)] == inherited
+    assert [(entry.session_id, entry.context_seq, entry.kind) for entry in rows[len(inherited) :]] == [
+        ("ses_child", cut + 1, "input"),
+        ("ses_child", cut + 2, "response"),
+    ]
+    # Nothing of the live Turn reaches the child: not its input, its calls, or its replies.
+    live_ids = {entry.row_id for entry in live}
+    assert not live_ids & {entry.row_id for entry in rows}
+    [request] = child.provider.requests
+    sent = json.dumps([str(message) for message in request.messages], ensure_ascii=False)
+    assert "ship it" not in sent and "make release" not in sent and "Reading first." not in sent
+    assert request.messages == project(rows[: len(inherited) + 1]).messages
+    # The child's first input says whose history it inherited and who owns the work in it.
+    first_input = rows[len(inherited)].message.content
+    [notice] = [block.text for block in first_input if isinstance(block, TextBlock) and block.text.startswith("<fork>")]
+    assert "fork of Release work (Session " + SESSION + ")" in notice
+    assert f"through context_seq {cut}" in notice
+    assert "stays with the Session that started it" in notice
+
+
+async def test_a_self_fork_keeps_the_live_turns_input_and_finished_steps(engine, session, tmp_path, published) -> None:
+    source, running, release = await _blocked_second_turn(engine, tmp_path, finished_step=True)
     with engine.begin() as conn:
-        _insert_session(conn, "ses_child", _SCOPES["avibe"], {
-            "created_via": "session_fork",
-            "fork_source_session_id": "ses_parent",
-            "fork_source_message_id": narration.row_id,
-            "fork_source_context_seq": resolve_fork_anchor_seq(conn, "ses_parent", narration.row_id),
-        })
-    suite = ToolSuite(
-        jobs=FakeJobHost(), create_tools=lambda jobs_, sink: [FakeTool("bash")],
-        render_recovered=_unused_renderer, find_job=lambda *_args, **_kwargs: None,
-    )
-    child = _Harness(engine, tmp_path, "avibe", [[Done(assistant("ok"))]], suite=suite, session_id="ses_child")
-
-    await child.agent.handle_message(child.request("what happened?"))
-
-    [settled] = [entry for entry in await child.context_rows()
-                 if entry.session_id == "ses_child" and entry.kind == "tool_result"]
-    assert settled.message.content == (text("release 1.2.0 published"),)
+        user_cut = resolve_fork_point(conn, SESSION)
+        self_cut = resolve_fork_point(conn, SESSION, self_fork=True)
+    rows = await source.context_rows()
+    by_seq = {entry.context_seq: entry for entry in rows}
+    # The Agent's own fork from inside its live Turn keeps that Turn's input and its finished step, and stops
+    # before the response whose call is still running: no open call is inherited.
+    assert [by_seq[seq].kind for seq in range(user_cut + 1, self_cut + 1)] == ["input", "response", "tool_result"]
+    assert by_seq[self_cut + 1].message.tool_calls[0].id == "call_build"
+    release.set()
+    await running
 
 
 async def test_a_google_hop_is_called_over_chat_at_the_gateway_prefix(engine, session, tmp_path, published) -> None:

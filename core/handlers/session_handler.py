@@ -57,7 +57,11 @@ from core.resource_governance import (
     pids_failure_labels,
 )
 from core.runtime_activation import RuntimeActivationIdentity
-from core.services.session_fork import pending_native_fork_source
+from core.services.session_fork import (
+    pending_native_fork,
+    pending_native_fork_source,
+    user_fork_source_is_running,
+)
 from core.system_prompt_injection import (
     build_system_prompt_injection,
     get_enabled_agents_for_prompt,
@@ -1401,6 +1405,12 @@ class SessionHandler(BaseHandler):
         fork_source_claude_session_id: Optional[str] = None
         if not stored_claude_session_id and not subagent_name and not routing_subagent:
             fork_source_claude_session_id = pending_native_fork_source(context, "claude")
+        if fork_source_claude_session_id and await asyncio.to_thread(
+            user_fork_source_is_running, pending_native_fork(context, "claude")
+        ):
+            # Claude copies its transcript now, not at reservation, and cannot cut a live Turn out: a user's fork
+            # waits until the source's Turn ends (C-10 fork.md section 2). The input stays for an explicit retry.
+            raise ClaudeInputNotSentError("fork_source_running", "error.sessionFork.sourceRunning.message")
 
         # Read routing overrides via get_channel_routing which correctly
         # resolves DM users from the users store (not the stale channels store).

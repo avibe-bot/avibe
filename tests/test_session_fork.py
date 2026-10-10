@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import sqlite3
 from datetime import datetime, timezone
@@ -10,6 +11,8 @@ from sqlalchemy import func, select
 
 from core.services.session_fork import (
     SESSION_AGENT_UNAVAILABLE_CODE,
+    SESSION_FORK_LOCALIZED_ERRORS,
+    SESSION_FORK_SOURCE_RUNNING_CODE,
     SessionForkError,
     SourceMessageAnchor,
     fork_anchor_is_terminal_agent_output,
@@ -26,7 +29,7 @@ from modules.im import MessageContext
 from storage.agent_session_rows import create_agent_session_row
 from storage.db import create_sqlite_engine
 from storage import message_deliveries, messages_service
-from storage.models import agent_events, agent_runs, agent_sessions, messages, scope_settings
+from storage.models import agent_events, agent_runs, agent_sessions, messages, scope_settings, session_turns
 from storage.sessions_service import SQLiteSessionsService
 from storage.settings_service import upsert_scope
 
@@ -201,41 +204,176 @@ def test_reserve_forked_session_copies_row_and_applies_overrides(tmp_path: Path)
     assert metadata["fork_trim_latest_running_turn"] is False
 
 
-def test_reserve_forked_vibey_session_records_its_context_anchor(tmp_path: Path) -> None:
-    # The Avibe Agent's context is the source's rows up to the anchor (C-5 section 4):
-    # resolved once at reservation, so rows the source commits later never enter the prefix.
-    db_path = tmp_path / "vibe.sqlite"
-    source_id = _seed_source_session(db_path, tmp_path, backend="vibey")
-    engine = create_sqlite_engine(db_path)
-    try:
-        with engine.begin() as conn:
-            scope_id = conn.execute(
-                select(agent_sessions.c.scope_id).where(agent_sessions.c.id == source_id)
-            ).scalar_one()
-            turns = (("user", "user", "first question"), ("agent", "result", "first answer"),
-                     ("user", "user", "fyi"), ("agent", "assistant", ""))
-            # The last Turn ended silently: its final is a hidden row no message anchor names.
-            for seq, (author, mtype, text) in enumerate(turns, start=1):
-                row = messages_service.append(
-                    conn, scope_id=scope_id, session_id=source_id, platform="avibe", author=author,
-                    source=author, message_type=mtype, text=text,
-                )
-                conn.execute(messages.update().where(messages.c.id == row["id"]).values(context_seq=seq))
-    finally:
-        engine.dispose()
-
-    result = reserve_forked_session(source_session_id=source_id, db_path=db_path)
-
+def _source_scope(db_path: Path, source_id: str) -> str:
     engine = create_sqlite_engine(db_path)
     try:
         with engine.connect() as conn:
-            row = conn.execute(select(agent_sessions).where(agent_sessions.c.id == result.session_id)).mappings().one()
+            return conn.execute(select(agent_sessions.c.scope_id).where(agent_sessions.c.id == source_id)).scalar_one()
     finally:
         engine.dispose()
-    metadata = json.loads(row["metadata_json"])
+
+
+def _seed_vibey_turns(db_path: Path, source_id: str) -> dict[str, int]:
+    """An ended Turn with its reply, then a live Turn mid tool batch: one finished step, one call still running."""
+    from core.agent_core.messages import ToolCallBlock, ToolResultMessage, UserMessage, text
+    from storage.agent_transcript import SQLiteTranscriptStore
+    from tests.agent_core.fakes import assistant
+
+    scope_id = _source_scope(db_path, source_id)
+    engine = create_sqlite_engine(db_path)
+    store = SQLiteTranscriptStore(engine)
+
+    async def seed() -> dict[str, int]:
+        with engine.begin() as conn:
+            ask = messages_service.append(
+                conn, scope_id=scope_id, session_id=source_id, platform="avibe", author="user",
+                source="user", message_type="user", text="first question",
+            )
+        await store.consume_input(source_id, ask["id"], UserMessage((text("first question"),)))
+        answer = await store.append_response(source_id, assistant("first answer"), final=True)
+        with engine.begin() as conn:
+            turn_id = _seed_started_delivery(conn, scope_id=scope_id, session_id=source_id, text="ship it")
+            live_input = conn.execute(
+                select(session_turns.c.initial_delivery_id).where(
+                    session_turns.c.id == turn_id
+                )
+            ).scalar_one()
+        live = await store.consume_input(source_id, live_input, UserMessage((text("ship it"),)))
+        await store.append_response(
+            source_id, assistant("Reading.", calls=[ToolCallBlock("call_read", "read")]), final=False
+        )
+        step = await store.append_tool_result(
+            source_id, ToolResultMessage("call_read", "read", (text("## 1.2.0"),)), details={}
+        )
+        await store.append_response(
+            source_id, assistant("Releasing.", calls=[ToolCallBlock("call_build", "bash")]), final=False
+        )
+        return {"answer": answer.context_seq, "live": live.context_seq, "step": step.context_seq}
+
+    try:
+        return asyncio.run(seed())
+    finally:
+        engine.dispose()
+
+
+def _fork_metadata(db_path: Path, session_id: str) -> dict:
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.connect() as conn:
+            raw = conn.execute(
+                select(agent_sessions.c.metadata_json).where(agent_sessions.c.id == session_id)
+            ).scalar_one()
+    finally:
+        engine.dispose()
+    return json.loads(raw)
+
+
+def test_a_users_fork_of_a_vibey_turn_mid_tool_batch_cuts_at_the_previous_ended_turn(tmp_path: Path) -> None:
+    # C-10 section 2: a user's fork never carries a live Turn; the cut is the end of the previous ended Turn,
+    # fixed once at reservation from committed rows.
+    db_path = tmp_path / "vibe.sqlite"
+    source_id = _seed_source_session(db_path, tmp_path, backend="vibey")
+    seqs = _seed_vibey_turns(db_path, source_id)
+
+    result = reserve_forked_session(source_session_id=source_id, db_path=db_path)
+
+    metadata = _fork_metadata(db_path, result.session_id)
     assert result.fork.source_backend == "vibey"
-    # With no running Turn the child inherits the whole settled context, as a native fork does.
-    assert metadata["fork_source_context_seq"] == 4
+    assert metadata["fork_source_context_seq"] == seqs["answer"]
+    assert "fork_self" not in metadata
+
+
+def test_a_vibey_self_fork_keeps_its_live_turns_input_and_finished_steps(tmp_path: Path) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    source_id = _seed_source_session(db_path, tmp_path, backend="vibey")
+    seqs = _seed_vibey_turns(db_path, source_id)
+
+    result = reserve_forked_session(source_session_id=source_id, db_path=db_path, self_fork=True)
+
+    metadata = _fork_metadata(db_path, result.session_id)
+    # The largest settled point: after the finished step, before the response whose call runs the fork.
+    assert metadata["fork_source_context_seq"] == seqs["step"]
+    assert metadata["fork_self"] is True
+    assert result.fork.self_fork is True
+    assert fork_metadata_from_session_metadata(metadata)["self_fork"] is True
+
+
+def test_an_internal_fork_point_must_be_settled_and_needs_a_vibey_source(tmp_path: Path) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    source_id = _seed_source_session(db_path, tmp_path, backend="vibey")
+    seqs = _seed_vibey_turns(db_path, source_id)
+
+    earlier = reserve_forked_session(source_session_id=source_id, db_path=db_path, as_of=seqs["live"])
+    assert _fork_metadata(db_path, earlier.session_id)["fork_source_context_seq"] == seqs["live"]
+    with pytest.raises(SessionForkError) as unsettled:
+        reserve_forked_session(source_session_id=source_id, db_path=db_path, as_of=seqs["step"] + 1)
+    assert unsettled.value.code == "session_fork_point_unsettled"
+
+    native_db = tmp_path / "native" / "vibe.sqlite"
+    native_db.parent.mkdir()
+    native_id = _seed_source_session(native_db, tmp_path)
+    with pytest.raises(SessionForkError) as unsupported:
+        reserve_forked_session(source_session_id=native_id, db_path=native_db, as_of=0)
+    assert unsupported.value.code == "session_fork_point_unsupported"
+
+
+def test_a_users_fork_of_a_claude_session_waits_until_its_turn_ends(tmp_path: Path) -> None:
+    # Claude cannot cut a live Turn out of the copy it resumes, so a user's fork is refused while one is live
+    # (C-10 section 11); the Agent's own self-fork from inside that Turn keeps today's behavior (O-4).
+    db_path = tmp_path / "vibe.sqlite"
+    source_id = _seed_source_session(db_path, tmp_path, backend="claude")
+    scope_id = _source_scope(db_path, source_id)
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.begin() as conn:
+            turn_id = _seed_started_delivery(conn, scope_id=scope_id, session_id=source_id, text="still working")
+    finally:
+        engine.dispose()
+
+    with pytest.raises(SessionForkError) as refused:
+        reserve_forked_session(source_session_id=source_id, db_path=db_path)
+    assert refused.value.code == SESSION_FORK_SOURCE_RUNNING_CODE
+    assert refused.value.details == {"source_session_id": source_id}
+    assert SESSION_FORK_LOCALIZED_ERRORS[SESSION_FORK_SOURCE_RUNNING_CODE] == "error.sessionFork.sourceRunning"
+
+    own = reserve_forked_session(source_session_id=source_id, db_path=db_path, self_fork=True)
+    assert own.fork.self_fork is True
+
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                session_turns.update()
+                .where(session_turns.c.id == turn_id)
+                .values(state="terminal", terminal_outcome="completed", terminal_at="2026-08-01T00:02:00Z")
+            )
+    finally:
+        engine.dispose()
+    ended = reserve_forked_session(source_session_id=source_id, db_path=db_path)
+    assert ended.fork.source_backend == "claude"
+
+
+def test_the_native_first_turn_rechecks_a_users_claude_fork_but_not_a_self_fork(tmp_path: Path, monkeypatch) -> None:
+    from config import paths
+    from core.services.session_fork import user_fork_source_is_running
+
+    db_path = tmp_path / "vibe.sqlite"
+    source_id = _seed_source_session(db_path, tmp_path, backend="claude")
+    monkeypatch.setattr(paths, "get_sqlite_state_path", lambda: db_path)
+    user_fork = {"source_session_id": source_id, "source_backend": "claude", "source_native_session_id": "n"}
+    assert user_fork_source_is_running(user_fork) is False
+
+    # The source became live after the reservation, before the child's first Turn copied it.
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.begin() as conn:
+            _seed_started_delivery(conn, scope_id=_source_scope(db_path, source_id), session_id=source_id, text="go")
+    finally:
+        engine.dispose()
+    assert user_fork_source_is_running(user_fork) is True
+    assert user_fork_source_is_running({**user_fork, "self_fork": True}) is False
+    # Backends that trim a live Turn natively never need the refusal.
+    assert user_fork_source_is_running({**user_fork, "source_backend": "codex"}) is False
 
 
 def test_reserve_forked_codex_running_fork_marks_trim(tmp_path: Path) -> None:
