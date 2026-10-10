@@ -339,7 +339,8 @@ turn runs inside the caller's run, in these steps:
    fails.
 6. **Audit (F7).** The side turn writes one `fork_turn` audit row (`visibility = 'audit'`, no `context_seq`) on every
    exit except an abort. The row holds:
-   - its purpose, policy, and point;
+   - its purpose, policy, point, and `detail` (required: the purpose's own fields, checked when the side turn is
+     built);
    - every attempt's message, from the ledger, and the turn's tool results;
    - its usage, rounds, outcome, and error;
    - the id of the folded row.
@@ -457,7 +458,7 @@ construction; OpenCode and Claude enforce it by a check, with the residual windo
 | Backend | Fork | A user's fork while the source has a live Turn | Holds | A self-fork |
 | --- | --- | --- | --- | --- |
 | `vibey` | by reference (§2, §4); arbitrary settled points internally | **trim**: cut at the previous ended Turn, fixed at reservation | by construction | the largest settled point (§2) |
-| `codex` | `thread/fork` (`modules/agents/codex/agent.py:3316-3421`) | **trim**: `lastTurnId` is always the last completed Turn, resolved when the native fork runs (the child's first Turn), so a Turn that starts later is excluded by the backend's own boundary | by construction | unchanged (trims) |
+| `codex` | `thread/fork` (`modules/agents/codex/agent.py:3316-3421`) | **trim**: `lastTurnId` is always the last completed Turn, resolved when the native fork runs (the child's first Turn), so a Turn that starts later is excluded by the backend's own boundary; when the whole turn listing proves no Turn has completed (the source's first Turn is live), the child starts a fresh thread, the empty prefix; an unknown boundary fails closed | by construction | unchanged (trims) |
 | `opencode` | `POST /session/{id}/fork` (`modules/agents/opencode/server.py:818-837`) | **trim**: `messageID` before the live Turn's input; checked at reservation and again at the child's first Turn | by check | unchanged (trims) |
 | `claude` | `resume` with `fork_session` (`core/handlers/session_handler.py:1558-1563`, `:1730-1731`) | **refuse while live**: `session_fork_source_running`, "This conversation is still running. Wait for the current turn to finish, then fork." (en and zh); checked at reservation and again at the child's first Turn | by check | unchanged: copies the transcript as it stands |
 
@@ -569,7 +570,7 @@ already provide, plus work outside fork.
 | --- | --- | --- | --- |
 | F1 | A fork's messages through its cut equal `prefix(source, point)`, and a fork Session gets the same bytes on every request, whatever either Session commits later | harness, storage | a source with checkpoints and edits both before and after the cut, plus a cut before a later checkpoint; after N commits in each Session, the child's projection through `as_of` serializes equal to `project(source, fork_point=as_of)` |
 | F2 | A side turn's first request has the caller's endpoint, system prompt, tool definitions, tool choice, and reasoning settings, and its messages begin with the caller's latest request through the cut | agent | the stub's request log, for normal and rolling side turns |
-| F3 | Every fork point is settled; a fork never inherits an open call, and never settles or looks up a call it did not make (settled calls are inherited as history, F1) | harness, storage, service, adapters | a user's fork while the live Turn is mid tool batch gets exactly the previous ended Turn's prefix; a stopped and a failed previous Turn are legal cuts; nothing of the live Turn (input, calls, responses) reaches the child; every unfinished Turn (§2's definition: live, an open call awaiting T2, or an accepted input awaiting T3) is cut out whole; a Vibey self-fork keeps the live Turn's input and finished steps and no open call (native self-forks keep their behavior, §11); a user's fork of a Session that was itself a self-fork carries no `fork_self`; `--fork-session` naming the caller's own Session is a user's fork; a Codex fork always passes `lastTurnId` resolved at first use, including for a source that was idle at reservation; an OpenCode user's fork trims a source that became live after reservation; a Claude user's fork is refused while the source has a live Turn, at reservation and at the child's first Turn, and a Claude self-fork is not; the internal API refuses an unsettled or out-of-range point and accepts 0 |
+| F3 | Every fork point is settled; a fork never inherits an open call, and never settles or looks up a call it did not make (settled calls are inherited as history, F1) | harness, storage, service, adapters | a user's fork while the live Turn is mid tool batch gets exactly the previous ended Turn's prefix; a stopped and a failed previous Turn are legal cuts; nothing of the live Turn (input, calls, responses) reaches the child; every unfinished Turn (§2's definition: live, an open call awaiting T2, or an accepted input awaiting T3) is cut out whole; a Vibey self-fork keeps the live Turn's input and finished steps and no open call (native self-forks keep their behavior, §11); a user's fork of a Session that was itself a self-fork carries no `fork_self`; `--fork-session` naming the caller's own Session is a user's fork; a Codex fork always passes `lastTurnId` resolved at first use, including for a source that was idle at reservation, and starts a fresh thread when the listing proves no Turn has completed; an OpenCode user's fork trims a source that became live after reservation; a Claude user's fork is refused while the source has a live Turn, at reservation and at the child's first Turn, and a Claude self-fork is not; the internal API refuses an unsettled or out-of-range point and accepts 0 |
 | F4 | A fork Session owns nothing an ancestor started: jobs, Watches, Tasks, runs, scratch stay with the Session that started them. A side turn starts nothing: its calls have no call instance | vibey, service, agent | a child of a source with a live job Watch neither lists it nor receives its follow-up, and its first input carries the notice; a side turn's `bash` call starts no job even when a policy allowed it |
 | F5 | A fork Session never writes a row of its source. A side turn writes only its audit row and, after the reply, what its fold commits | agent, storage | the source's rows before and after a child's Turns; the caller's rows after a failed and after a successful side turn |
 | F6 | A side turn has no capability its caller lacks; a fork Session runs an Agent the requesting caller may select, on the source's backend | agent, service | a side turn's call to every tool its policy does not allow is denied and never runs; a reservation without editor on the source, chat in the destination, or selection authority for the Agent (inherited or `--agent`) is refused, as is an Agent on another backend |
@@ -624,15 +625,21 @@ class Folded:
     error: Optional[str] = None   # a fold that failed fails the turn
 
 @dataclass(frozen=True)
+class CheckpointDetail:                                    # a checkpoint side turn's purpose fields (C-9 section 6)
+    reason: Literal["threshold", "overflow"]
+    mode: Literal["normal", "rolling"]
+
+@dataclass(frozen=True)
 class SideTurn:
     purpose: Literal["checkpoint"]                         # grows with its consumers ("memory", ...)
+    detail: CheckpointDetail                               # required, no default; its type matches purpose, checked
+                                                           # in __post_init__, so every fork_turn audit has it
     units: Optional[int]                                   # the caller's current view: all of it, or its first units;
                                                            # the request puts the caller's rehydrated messages first
     prompt: UserMessage
     policy: ForkPolicy
     max_tokens: Callable[[ModelCapabilities], int]         # per route; C-9: min(16,000, O)
     fold: Callable[[SideReply], Awaitable[Folded]]
-    detail: Mapping[str, Any] = field(default_factory=dict)  # purpose fields for the audit; C-9: reason, mode
 
 @dataclass(frozen=True)
 class SideTurnResult:
