@@ -40,6 +40,7 @@ from core.native_dispatch_phase import (
 from core.handlers.model_hub.service import ModelHubError
 from modules.claude_sdk_compat import CLAUDE_SDK_MAX_BUFFER_SIZE
 from modules.im import MessageContext
+from tests import hang_guard
 from tests.scenario_harness.model_hub import (
     UNLISTED_MODEL,
     unlisted_model_copy,
@@ -663,7 +664,9 @@ def test_claude_launch_change_keeps_a_busy_client_until_its_session_is_idle(monk
         else:
             tokens[0] = "second-launch-token"
 
-        during = await asyncio.wait_for(handler.get_or_create_claude_session(context), timeout=1)
+        during = await hang_guard.within(
+            handler.get_or_create_claude_session(context), "the busy session to keep its client"
+        )
         if change in {"model_hub_launch", "caller"}:
             assert during is not first and first.disconnected
             controller.agent_service.force_end_runtime_activities.assert_called_once_with("claude", key)
@@ -672,7 +675,9 @@ def test_claude_launch_change_keeps_a_busy_client_until_its_session_is_idle(monk
         controller.agent_service.force_end_runtime_activities.assert_not_called()
 
         handler.active_sessions.remove(key)
-        after = await asyncio.wait_for(handler.get_or_create_claude_session(context), timeout=1)
+        after = await hang_guard.within(
+            handler.get_or_create_claude_session(context), "the idle session to take the new launch"
+        )
         assert first.disconnected and after is not first
         if change == "reasoning_effort":
             assert after.options.effort == "medium"
@@ -1474,7 +1479,7 @@ def test_session_handler_waits_for_receiver_cleanup_outside_generation_lock(
         await asyncio.sleep(0)
         assert not eviction.done()
         release_cleanup.set()
-        second_client = await asyncio.wait_for(eviction, timeout=1)
+        second_client = await hang_guard.within(eviction, "the eviction to finish after receiver cleanup")
         assert second_client is not first_client
         assert first_client.disconnects == 1
         assert len(captured["clients"]) == 2
@@ -1759,7 +1764,7 @@ def test_session_handler_retries_waiting_claude_create_after_cancellation(
         with pytest.raises(asyncio.CancelledError):
             await first
 
-        second_client = await asyncio.wait_for(second, timeout=1)
+        second_client = await hang_guard.within(second, "the waiting create to retry after the cancellation")
 
         composite_key = f"slack_C123:{tmp_path}"
         assert retry_connected.is_set()
@@ -2685,7 +2690,7 @@ def test_runtime_gen_006_a_client_connecting_when_claude_is_disabled_never_serve
         turn = asyncio.create_task(
             handler.get_or_create_claude_session(MessageContext(user_id="U123", channel_id="C123"))
         )
-        await asyncio.wait_for(connecting.wait(), 1)
+        await hang_guard.within(connecting.wait(), "the Claude client to start connecting")
         # The disable: Claude is turned off, then the live clients are captured.
         controller.config.claude.enabled = False
         assert handler.capture_claude_clients() == ()
@@ -2742,7 +2747,7 @@ def test_runtime_gen_006_a_turn_cancelled_while_its_client_connects_stops_the_cl
             turn = asyncio.create_task(
                 handler.get_or_create_claude_session(MessageContext(user_id="U123", channel_id="C123"))
             )
-            await asyncio.wait_for(started.wait(), 1)
+            await hang_guard.within(started.wait(), "the Claude CLI to spawn and its connect to start")
             turn.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await turn
