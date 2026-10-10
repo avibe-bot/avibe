@@ -36,6 +36,42 @@ def test_patched_source_manifest_hash_locks_the_divergence() -> None:
     assert snapshot["patch_sha256"] == driver["patch"]["sha256"]
 
 
+def test_built_contract_reads_mcp_input_schema_and_raw_click_mode(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls: list[list[str]] = []
+
+    def fake_check_output(command: list[str], **_: object) -> str:
+        calls.append(command)
+        if command[1:] == ["--version"]:
+            return "cua-driver 0.31.0\n"
+        assert command[1:] == ["dump-docs", "--type", "mcp"]
+        return json.dumps(
+            {
+                "tools": [
+                    {
+                        "name": "click",
+                        "inputSchema": {
+                            "properties": {
+                                "click_mode": {"enum": ["auto", "raw"]},
+                            }
+                        },
+                    }
+                ]
+            }
+        )
+
+    monkeypatch.setattr(
+        _SCRIPT["subprocess"], "check_output", fake_check_output
+    )
+    _SCRIPT["verify_built_contract"](tmp_path / "cua-driver")
+
+    assert calls == [
+        [str(tmp_path / "cua-driver"), "--version"],
+        [str(tmp_path / "cua-driver"), "dump-docs", "--type", "mcp"],
+    ]
+
+
 def test_source_extraction_is_scoped_to_the_driver_subtree(tmp_path: Path) -> None:
     archive = tmp_path / "source.tar.gz"
     root = "cua-fixture"
