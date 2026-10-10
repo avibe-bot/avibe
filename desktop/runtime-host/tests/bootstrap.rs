@@ -157,6 +157,7 @@ struct LauncherState {
     /// `None` keeps the launch helper running; `Some` has already seen it exit.
     exit: Option<LaunchExit>,
     resolvable: AtomicBool,
+    prepares: AtomicUsize,
     launches: AtomicUsize,
     /// Whether each launch asked `vibe start` to hand over a predecessor.
     handover_requests: Mutex<Vec<bool>>,
@@ -177,6 +178,7 @@ impl FakeLauncher {
             failures,
             exit,
             resolvable: AtomicBool::new(true),
+            prepares: AtomicUsize::new(0),
             launches: AtomicUsize::new(0),
             handover_requests: Mutex::new(Vec::new()),
             prunes: AtomicUsize::new(0),
@@ -218,6 +220,11 @@ impl FakeLauncher {
 
     fn calls(&self) -> usize {
         self.0.launches.load(Ordering::SeqCst)
+    }
+
+    /// How many times a run asked for the login-shell lookup.
+    fn prepares(&self) -> usize {
+        self.0.prepares.load(Ordering::SeqCst)
     }
 
     fn handover_requests(&self) -> Vec<bool> {
@@ -286,6 +293,10 @@ impl RuntimeLauncher for FakeLauncher {
 impl ResolvedRuntimeLauncher for FakeLauncher {
     fn endpoint(&self) -> Result<LoopbackOrigin, LaunchError> {
         Ok(origin())
+    }
+
+    fn prepare_launch(&self) {
+        self.0.prepares.fetch_add(1, Ordering::SeqCst);
     }
 
     fn launch(&self, hand_over: bool) -> Result<LaunchedRuntime, LaunchError> {
@@ -1410,6 +1421,11 @@ async fn concurrent_bootstraps_start_at_most_one_runtime() {
     assert_eq!(first.phase, BootstrapPhase::Ready);
     assert_eq!(second.phase, BootstrapPhase::Ready);
     assert_eq!(launcher.calls(), 1, "two racing runs must not start two Runtimes");
+    assert_eq!(
+        launcher.prepares(),
+        1,
+        "two racing runs must not ask the login shell twice"
+    );
 }
 
 #[tokio::test(start_paused = true)]
