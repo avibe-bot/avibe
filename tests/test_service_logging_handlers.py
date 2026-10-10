@@ -214,6 +214,16 @@ def test_shutdown_intent_missing_is_logged_not_ignored(monkeypatch, caplog):
     assert "honoring signal" in caplog.text
 
 
+def test_only_unmanaged_service_shutdown_reaps_the_desktop_runtime_ui():
+    assert main._should_reap_desktop_runtime_ui(None) is True
+    assert main._should_reap_desktop_runtime_ui({"reason": "stop_service"}) is False
+    assert main._should_reap_desktop_runtime_ui({"reason": "stop_pid"}) is False
+    assert main._should_reap_desktop_runtime_ui({"reason": "service_restart"}) is False
+    assert main._should_reap_desktop_runtime_ui({"reason": "full_stop"}) is False
+    assert main._should_reap_desktop_runtime_ui({"reason": "restart"}) is False
+    assert main._should_reap_desktop_runtime_ui({"reason": "future_managed_reason"}) is False
+
+
 def test_shutdown_signal_logging_is_lightweight(monkeypatch, caplog):
     monkeypatch.setattr(main.os, "getpid", lambda: 123)
     monkeypatch.setattr(main.os, "getppid", lambda: 1)

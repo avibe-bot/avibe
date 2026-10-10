@@ -45,6 +45,7 @@ from core.agent_tool_policy import (
 )
 from core.agent_session_context import resolve_context_agent_session_target
 from core.caller_context import caller_env_for_platform_payload
+from core.computer_use import managed_mcp_server_spec
 from core.managed_skills import (
     managed_skill_claude_cli_path,
     managed_skill_environment,
@@ -100,6 +101,41 @@ CLAUDE_REMOTE_SANDBOX = {"enabled": False}
 CLAUDE_ABANDONED_CONNECT_TIMEOUT_SECONDS = 10.0
 
 
+def apply_managed_computer_use_to_claude_options(
+    option_kwargs: dict[str, Any],
+    agent_allowed_tools: list[str] | None,
+    computer_use_spec: Any,
+) -> list[str] | None:
+    """Translate the shared MCP spec without widening an explicit allowlist."""
+
+    if not claude_allowlist_exposes_computer_use(
+        agent_allowed_tools,
+        computer_use_spec,
+    ):
+        return agent_allowed_tools
+    option_kwargs["mcp_servers"] = {
+        computer_use_spec.name: computer_use_spec.claude_config()
+    }
+    return agent_allowed_tools
+
+
+def claude_allowlist_exposes_computer_use(
+    agent_allowed_tools: list[str] | None,
+    computer_use_spec: Any,
+) -> bool:
+    """Whether this Claude launch can call at least one managed MCP tool."""
+
+    if computer_use_spec is None:
+        return False
+    if agent_allowed_tools is None:
+        return True
+    prefix = f"mcp__{computer_use_spec.name}__"
+    return any(
+        isinstance(tool, str) and tool.startswith(prefix)
+        for tool in agent_allowed_tools
+    )
+
+
 class ClaudeSessionNotFoundError(RuntimeError):
     """Claude Code could not resume a persisted session in the current cwd."""
 
@@ -144,6 +180,16 @@ class _ClaudeLaunchInputs:
     epoch: int
     config: Any
     hub_config: Any
+    computer_use_spec: Any
+
+
+@dataclass(frozen=True)
+class _ResolvedClaudeAgentInputs:
+    """One selected agent's effective prompt, authority, and model."""
+
+    system_prompt: Optional[str]
+    allowed_tools: list[str] | None
+    model: Optional[str]
 
 
 class SessionHandler(BaseHandler):
@@ -529,6 +575,16 @@ class SessionHandler(BaseHandler):
         caller_changed = getattr(client, "_vibe_caller_env", {}) != self._caller_env_for_context(context)
         changes = (
             ("model_hub_channel_changed", launch_changed),
+            (
+                "computer_use_changed",
+                getattr(client, "_vibe_computer_use_fingerprint", None)
+                != (
+                    launch_inputs.computer_use_spec.fingerprint
+                    if launch_inputs is not None
+                    and launch_inputs.computer_use_spec is not None
+                    else None
+                ),
+            ),
             ("caller_env_changed", caller_changed),
             ("reasoning_effort_changed", getattr(client, "_vibe_reasoning_effort", None) != effective_effort),
             (
@@ -698,6 +754,10 @@ class SessionHandler(BaseHandler):
             agent_system_prompt=agent_system_prompt,
             working_path=working_path,
             claude_config=launch_inputs.config if launch_inputs is not None else None,
+            computer_use_spec=(
+                launch_inputs.computer_use_spec if launch_inputs is not None else None
+            ),
+            agent_allowed_tools=None,
         )
         if await self._replace_stale_cached_claude_client(
             composite_key,
@@ -747,7 +807,7 @@ class SessionHandler(BaseHandler):
         desired_model: Optional[str],
         effective_effort: Optional[str],
         effective_agent: str,
-        agent_system_prompt: Optional[str],
+        resolved_agent: _ResolvedClaudeAgentInputs,
         model_hub_launch: "ModelHubLaunch",
         launch_inputs: "_ClaudeLaunchInputs | None" = None,
     ) -> ClaudeSDKClient | None:
@@ -765,18 +825,18 @@ class SessionHandler(BaseHandler):
             agent_name="claude",
             session_anchor=base_session_id,
         )
-        next_agent_system_prompt = agent_system_prompt
-        if next_agent_system_prompt is None:
-            agent_data = self._load_agent_file(effective_agent, working_path)
-            next_agent_system_prompt = agent_data.get("prompt") if agent_data else None
         next_system_prompt = await self._build_claude_system_prompt(
             context=context,
             session_key=session_key,
             agent_name="claude",
             session_anchor=base_session_id,
-            agent_system_prompt=next_agent_system_prompt,
+            agent_system_prompt=resolved_agent.system_prompt,
             working_path=working_path,
             claude_config=launch_inputs.config if launch_inputs is not None else None,
+            computer_use_spec=(
+                launch_inputs.computer_use_spec if launch_inputs is not None else None
+            ),
+            agent_allowed_tools=resolved_agent.allowed_tools,
         )
         if await self._replace_stale_cached_claude_client(
             composite_key,
@@ -1203,6 +1263,28 @@ class SessionHandler(BaseHandler):
         logger.warning(f"Agent file not found for '{agent_name}' in {search_paths}")
         return None
 
+    def _resolve_claude_agent_inputs(
+        self,
+        effective_agent: str | None,
+        working_path: str,
+        agent_system_prompt: str | None,
+    ) -> _ResolvedClaudeAgentInputs:
+        """Resolve selected-agent authority independently from prompt injection."""
+
+        agent_data = (
+            self._load_agent_file(effective_agent, working_path)
+            if effective_agent
+            else None
+        )
+        system_prompt = agent_system_prompt
+        if system_prompt is None and agent_data is not None:
+            system_prompt = agent_data.get("prompt")
+        return _ResolvedClaudeAgentInputs(
+            system_prompt=system_prompt,
+            allowed_tools=agent_data.get("tools") if agent_data is not None else None,
+            model=agent_data.get("model") if agent_data is not None else None,
+        )
+
     def get_session_info(self, context: MessageContext, source: str = "human") -> Tuple[str, str, str]:
         """Get session info: base_session_id, working_path, and composite_key"""
         base_session_id = self.get_base_session_id(context, source=source)
@@ -1381,6 +1463,7 @@ class SessionHandler(BaseHandler):
             epoch=getattr(self.controller, "claude_runtime_epoch", 0),
             config=getattr(self.config, "claude", None),
             hub_config=hub_snapshot() if callable(hub_snapshot) else None,
+            computer_use_spec=managed_mcp_server_spec(),
         )
         settings_key = self._get_settings_key(context)
         session_key = self._get_session_key(context)
@@ -1409,6 +1492,11 @@ class SessionHandler(BaseHandler):
         # Priority: subagent params > channel config > Agent model.
         # Note: agent frontmatter model is applied later after loading agent file
         effective_agent = subagent_name or (routing.claude_agent if routing else None)
+        resolved_agent = self._resolve_claude_agent_inputs(
+            effective_agent,
+            working_path,
+            agent_system_prompt,
+        )
         # Store explicit model override (not including default yet)
         from config.v2_settings import routing_model_for_backend, routing_reasoning_effort_for_backend
 
@@ -1420,9 +1508,8 @@ class SessionHandler(BaseHandler):
             explicit_effort = subagent_reasoning_effort or session_target.get("reasoning_effort") or explicit_effort
 
         launch_model = explicit_model
-        if not launch_model and effective_agent:
-            launch_agent_data = self._load_agent_file(effective_agent, working_path)
-            configured_agent_model = launch_agent_data.get("model") if launch_agent_data else None
+        if not launch_model:
+            configured_agent_model = resolved_agent.model
             if configured_agent_model and configured_agent_model.lower() not in ("inherit", ""):
                 launch_model = configured_agent_model
         cached_base = (
@@ -1498,7 +1585,7 @@ class SessionHandler(BaseHandler):
                 desired_model=cached_subagent_model,
                 effective_effort=effective_effort,
                 effective_agent=effective_agent,
-                agent_system_prompt=agent_system_prompt,
+                resolved_agent=resolved_agent,
                 model_hub_launch=model_hub_launch,
                 launch_inputs=launch_inputs,
             )
@@ -1526,7 +1613,7 @@ class SessionHandler(BaseHandler):
                     desired_model=cached_subagent_model,
                     effective_effort=effective_effort,
                     effective_agent=effective_agent,
-                    agent_system_prompt=agent_system_prompt,
+                    resolved_agent=resolved_agent,
                     model_hub_launch=model_hub_launch,
                     launch_inputs=launch_inputs,
                 )
@@ -1559,7 +1646,7 @@ class SessionHandler(BaseHandler):
                 effective_agent=effective_agent,
                 explicit_model=explicit_model,
                 effective_effort=effective_effort,
-                agent_system_prompt=agent_system_prompt,
+                resolved_agent=resolved_agent,
                 fork_session=bool(fork_source_claude_session_id),
                 launch_inputs=launch_inputs,
             )
@@ -1589,7 +1676,7 @@ class SessionHandler(BaseHandler):
         effective_agent: Optional[str],
         explicit_model: Optional[str],
         effective_effort: Optional[str],
-        agent_system_prompt: Optional[str],
+        resolved_agent: _ResolvedClaudeAgentInputs,
         fork_session: bool = False,
         launch_inputs: "_ClaudeLaunchInputs | None" = None,
     ) -> ClaudeSDKClient:
@@ -1602,6 +1689,7 @@ class SessionHandler(BaseHandler):
                 epoch=getattr(self.controller, "claude_runtime_epoch", 0),
                 config=getattr(self.config, "claude", None),
                 hub_config=None,
+                computer_use_spec=managed_mcp_server_spec(),
             )
         runtime_epoch = launch_inputs.epoch
         claude_config = launch_inputs.config
@@ -1616,25 +1704,12 @@ class SessionHandler(BaseHandler):
                 logger.error(f"Failed to create working directory {working_path}: {e}")
                 working_path = os.getcwd()
 
-        # Build system prompt from agent file if subagent is specified
-        # Claude Code has a bug where ~/.claude/agents/*.md files are not auto-discovered
-        # See: https://github.com/anthropics/claude-code/issues/11205
-        # Workaround: read the agent file and use its content as system_prompt
-        agent_allowed_tools: Optional[list] = None
-        agent_model: Optional[str] = None
-        if effective_agent and agent_system_prompt is None:
-            agent_data = self._load_agent_file(effective_agent, working_path)
-            if agent_data:
-                agent_system_prompt = agent_data.get("prompt")
-                agent_allowed_tools = agent_data.get("tools")
-                agent_model = agent_data.get("model")
-                logger.info(f"Loaded agent '{effective_agent}' system prompt ({len(agent_system_prompt or '')} chars)")
-                if agent_allowed_tools:
-                    logger.info(f"  Agent allowed tools: {agent_allowed_tools}")
-                if agent_model:
-                    logger.info(f"  Agent model from frontmatter: {agent_model}")
-            else:
-                logger.warning(f"Could not load agent file for '{effective_agent}'")
+        # Claude Code does not auto-discover every selected agent file. The
+        # turn-boundary resolver supplies one prompt, allowlist, and model to
+        # both cached and cold launch paths.
+        agent_system_prompt = resolved_agent.system_prompt
+        agent_allowed_tools = resolved_agent.allowed_tools
+        agent_model = resolved_agent.model
 
         # Filter out special values that aren't actual model names
         if agent_model and agent_model.lower() in ("inherit", ""):
@@ -1670,6 +1745,8 @@ class SessionHandler(BaseHandler):
             skill_catalog_sink=skill_catalog_sink,
             working_path=working_path,
             claude_config=claude_config,
+            computer_use_spec=launch_inputs.computer_use_spec,
+            agent_allowed_tools=agent_allowed_tools,
         )
 
         # Echo native input frames so the long-lived receiver can correlate
@@ -1743,6 +1820,11 @@ class SessionHandler(BaseHandler):
             "max_buffer_size": CLAUDE_SDK_MAX_BUFFER_SIZE,
             "can_use_tool": self._allow_claude_bypass_tool,
         }
+        agent_allowed_tools = apply_managed_computer_use_to_claude_options(
+            option_kwargs,
+            agent_allowed_tools,
+            launch_inputs.computer_use_spec,
+        )
         if tool_policy_hooks:
             option_kwargs["hooks"] = tool_policy_hooks
         cli_path_override = self._get_claude_cli_path_override(claude_config)
@@ -1756,7 +1838,7 @@ class SessionHandler(BaseHandler):
             option_kwargs["effort"] = effective_effort
         # Only set allowed_tools if agent file specifies tools.
         # Omitting the field keeps SDK default tool behavior.
-        if agent_allowed_tools:
+        if agent_allowed_tools is not None:
             option_kwargs["allowed_tools"] = agent_allowed_tools
 
         options = ClaudeAgentOptions(**option_kwargs)
@@ -1803,6 +1885,15 @@ class SessionHandler(BaseHandler):
         setattr(client, "_vibe_git_path_state", git_path_state)
         setattr(client, "_vibe_reasoning_effort", effective_effort)
         setattr(client, "_vibe_runtime_epoch", runtime_epoch)
+        setattr(
+            client,
+            "_vibe_computer_use_fingerprint",
+            (
+                launch_inputs.computer_use_spec.fingerprint
+                if launch_inputs.computer_use_spec is not None
+                else None
+            ),
+        )
         setattr(
             client,
             "_vibe_model_hub_fingerprint",
@@ -1913,6 +2004,8 @@ class SessionHandler(BaseHandler):
         working_path: Optional[str] = None,
         skill_catalog_sink: list[dict] | None = None,
         claude_config: Any = None,
+        computer_use_spec: Any = None,
+        agent_allowed_tools: list[str] | None = None,
     ) -> str | Dict[str, str]:
         if claude_config is None:
             claude_config = self.config.claude
@@ -1931,6 +2024,10 @@ class SessionHandler(BaseHandler):
             build_system_prompt_injection,
             agent_instructions=base_prompt or "",
             include_quick_replies=quick_replies_on and platform != "wechat",
+            include_computer_use=claude_allowlist_exposes_computer_use(
+                agent_allowed_tools,
+                computer_use_spec,
+            ),
             context=context,
             fallback_platform=platform,
             enabled_agents=get_enabled_agents_for_prompt(self.controller),

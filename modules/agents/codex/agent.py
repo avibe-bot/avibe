@@ -130,6 +130,7 @@ class CodexLaunchSpec:
     args: tuple[str, ...]
     extra_args: tuple[str, ...]
     env: Mapping[str, str] = field(repr=False)
+    computer_use_spec: Any = field(default=None, repr=False)
     hub: bool = False
     catalog: CodexHubCatalog | None = field(default=None, repr=False)
 
@@ -154,6 +155,7 @@ class _LaunchInputs:
     binary: str
     extra_args: tuple[str, ...]
     env: Mapping[str, str] = field(repr=False)
+    computer_use_spec: Any = field(repr=False)
     # Renewal epoch, binary and credential identity, and the cwd's inode.
     identity: Mapping[str, Any] = field(repr=False)
 
@@ -667,6 +669,9 @@ class CodexAgent(BaseAgent):
                 request.working_path,
                 hub_config=hub_snapshot() if callable(hub_snapshot) else None,
             )
+            include_computer_use = (
+                getattr(inputs, "computer_use_spec", None) is not None
+            )
             if router is not None:
                 from modules.agents.model_hub import bind_launch, resolve_model_hub_launch
 
@@ -749,7 +754,10 @@ class CodexAgent(BaseAgent):
             thread_id = self._session_mgr.get_thread_id(request.base_session_id)
 
             if not thread_id:
-                developer_instructions = await self._build_thread_developer_instructions(request)
+                developer_instructions = await self._build_thread_developer_instructions(
+                    request,
+                    include_computer_use=include_computer_use,
+                )
                 prompt_rendered = True
                 thread_id = await self._open_session_thread(
                     generation, request, developer_instructions=developer_instructions
@@ -786,7 +794,10 @@ class CodexAgent(BaseAgent):
             # payload byte-stable, this avoids repeating admission
             # side effects while the same request refreshes and starts.
             if not prompt_rendered:
-                developer_instructions = await self._build_thread_developer_instructions(request)
+                developer_instructions = await self._build_thread_developer_instructions(
+                    request,
+                    include_computer_use=include_computer_use,
+                )
                 prompt_rendered = True
             await self._refresh_thread_developer_instructions_if_needed(
                 transport,
@@ -825,7 +836,10 @@ class CodexAgent(BaseAgent):
                         self._touch_runtime(generation.runtime)
                         if not prompt_rendered:
                             self.ensure_agent_session_id(request)
-                            developer_instructions = await self._build_thread_developer_instructions(request)
+                            developer_instructions = await self._build_thread_developer_instructions(
+                                request,
+                                include_computer_use=include_computer_use,
+                            )
                             prompt_rendered = True
                         thread_id = await self._open_session_thread(
                             generation, request, developer_instructions=developer_instructions
@@ -2137,11 +2151,15 @@ class CodexAgent(BaseAgent):
             env.get("HOME") or os.path.expanduser("~"),
             ".codex",
         )
+        from core.computer_use import managed_mcp_server_spec
+
+        computer_use_spec = managed_mcp_server_spec()
         return _LaunchInputs(
             hub_config=hub_config,
             binary=binary,
             extra_args=tuple(codex_config.extra_args),
             env=env,
+            computer_use_spec=computer_use_spec,
             identity={
                 "epoch": self._runtime_epoch,
                 "binary": self._binary_identity(binary, env),
@@ -2149,6 +2167,11 @@ class CodexAgent(BaseAgent):
                 # A directory deleted and re-created under the same path leaves
                 # a running app-server in a dead inode (#561).
                 "cwd": [cwd, self._cwd_inode(cwd)],
+                "computer_use": (
+                    computer_use_spec.fingerprint
+                    if computer_use_spec is not None
+                    else None
+                ),
             },
         )
 
@@ -2235,6 +2258,7 @@ class CodexAgent(BaseAgent):
             args=tuple(args),
             extra_args=inputs.extra_args,
             env=env,
+            computer_use_spec=inputs.computer_use_spec,
             hub=catalog is not None,
             catalog=catalog,
         )
@@ -2309,6 +2333,7 @@ class CodexAgent(BaseAgent):
             runtime_args=list(spec.args),
             runtime_env=dict(spec.env),
             model_hub_catalog=spec.catalog,
+            managed_mcp_spec=spec.computer_use_spec,
         )
         runtime = _CodexRuntime(
             cwd=spec.cwd,
@@ -4002,7 +4027,12 @@ class CodexAgent(BaseAgent):
         # created under the ephemeral Hub provider can resume in Direct mode.
         return _CODEX_DEFAULT_PROVIDER_ID
 
-    async def _build_thread_developer_instructions(self, request: AgentRequest) -> Optional[str]:
+    async def _build_thread_developer_instructions(
+        self,
+        request: AgentRequest,
+        *,
+        include_computer_use: bool | None = None,
+    ) -> Optional[str]:
         """Render the developer instructions applied at the next Turn boundary."""
         _, _, _, agent_instructions = self._resolve_codex_agent_settings(request)
         platform = (
@@ -4016,6 +4046,7 @@ class CodexAgent(BaseAgent):
             build_system_prompt_injection,
             agent_instructions=agent_instructions or "",
             backend="codex",
+            include_computer_use=include_computer_use,
             include_quick_replies=getattr(self.controller.config, "reply_enhancements", True)
             and platform != "wechat",
             include_codex_generated_images=True,

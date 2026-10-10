@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter, Navigate, Route, Routes, useLocation } from 'react-router-dom';
 
 import { AuthGuard } from './App';
+import { PetWindow } from './pet/PetWindow';
 import { Summary } from './components/steps/Summary';
 import { useInstanceAuthorization } from './context/InstanceAuthorizationContext';
 import { DENIED_INSTANCE_CAPABILITIES, OWNER_INSTANCE_CAPABILITIES } from './lib/sessionInfo';
@@ -36,7 +37,8 @@ const api = vi.hoisted(() => ({
 }));
 const status = vi.hoisted(() => ({ control: vi.fn() }));
 
-vi.mock('./context/ApiContext', () => ({
+vi.mock('./context/ApiContext', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./context/ApiContext')>()),
   useApi: () => api,
 }));
 vi.mock('./context/StatusContext', () => ({ useStatus: () => status }));
@@ -226,6 +228,87 @@ describe('AuthGuard setup-bypass authorization', () => {
     expect(await screen.findByText('model-hub-page')).toBeTruthy();
     expect(api.getConfig).toHaveBeenCalledOnce();
     expect(api.mutateConfig).not.toHaveBeenCalled();
+  });
+});
+
+describe('AuthGuard on the desktop pet route', () => {
+  const localOwnerSession = {
+    remote: false as const,
+    instance_kind: 'personal' as const,
+    instance_role: 'owner' as const,
+    capabilities: OWNER_INSTANCE_CAPABILITIES,
+  };
+
+  it('renders the pet with its authorization while setup is pending, without the wizard', async () => {
+    api.getAuthSession.mockResolvedValue(localOwnerSession);
+    api.getConfig.mockResolvedValue({ mode: 'v2', setup_state: { needs_setup: true } });
+
+    render(
+      <MemoryRouter initialEntries={['/pet']}>
+        <AuthGuard>
+          <Routes>
+            <Route path="/pet" element={<CapabilityProbe />} />
+            <Route path="/setup" element={<div>setup-wizard</div>} />
+          </Routes>
+        </AuthGuard>
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText('owner-shell')).toBeTruthy();
+    expect(screen.queryByText('setup-wizard')).toBeNull();
+  });
+
+  it('keeps the transparent pet style while authorization is still loading', async () => {
+    api.getAuthSession.mockReturnValue(new Promise(() => undefined));
+
+    render(
+      <MemoryRouter initialEntries={['/pet']}>
+        <PetWindow>
+          <AuthGuard>
+            <CapabilityProbe />
+          </AuthGuard>
+        </PetWindow>
+      </MemoryRouter>,
+    );
+
+    expect(document.documentElement.classList.contains('pet-window')).toBe(true);
+    expect(screen.queryByText('common.loading')).toBeNull();
+    expect(document.querySelector('.bg-bg')).toBeNull();
+  });
+
+  it('does not render the pet without a session, and checks again when the page comes back', async () => {
+    let focused = true;
+    const hasFocus = vi.spyOn(document, 'hasFocus').mockImplementation(() => focused);
+    api.getAuthSession
+      .mockRejectedValueOnce(new Error('offline'))
+      .mockRejectedValueOnce(new Error('offline'))
+      .mockResolvedValue(localOwnerSession);
+    api.getConfig.mockResolvedValue({ mode: 'v2', setup_state: { needs_setup: false } });
+
+    render(
+      <MemoryRouter initialEntries={['/pet']}>
+        <AuthGuard>
+          <CapabilityProbe />
+        </AuthGuard>
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => expect(api.getAuthSession).toHaveBeenCalledTimes(2));
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 10)));
+    expect(screen.queryByText('denied-shell')).toBeNull();
+    expect(screen.queryByText('owner-shell')).toBeNull();
+
+    act(() => {
+      focused = false;
+      window.dispatchEvent(new Event('blur'));
+    });
+    act(() => {
+      focused = true;
+      window.dispatchEvent(new Event('focus'));
+    });
+
+    expect(await screen.findByText('owner-shell')).toBeTruthy();
+    hasFocus.mockRestore();
   });
 });
 

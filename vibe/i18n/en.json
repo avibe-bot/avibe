@@ -931,6 +931,7 @@
       "flow_not_found": "Authorization flow not found.",
       "flow_expired": "Authorization flow expired.",
       "submission_rejected": "That is not the authorization callback address. Paste the full address shown after authorizing.",
+      "submission_rejected_other_attempt": "That address answers an earlier sign-in link. Sign in with the link in this dialog, then paste the address it leads to.",
       "discovery_failed": "Could not validate or discover this source.",
       "ambiguous_source": "Connected, but we could not identify the model interface.",
       "inventory_unavailable": "The interface was confirmed, but its model list is unavailable.",
@@ -1007,6 +1008,9 @@
       "waiting_without_retry": "This request could not complete. Automatic recovery has ended. You can retry model {model} or choose another model.",
       "interrupted": "Model {model} is unavailable: {blockers}. Open Models to resolve it.",
       "route_unconfigured": "Model {model} has no configured route. Open Models to configure one.",
+      "last_upstream_failure": "Last upstream error ({source}, HTTP {status}): {detail}",
+      "last_upstream_failure_without_status": "Last upstream error ({source}): {detail}",
+      "last_connection_failure": "Last connection error ({source}): {detail}",
       "model_unlisted": "Model {model} is not in the {backend} model list. Choose another model to continue.",
       "request_incompatible": "This request is incompatible; switching Sources will not help.",
       "request_incompatible_detail": "This request was rejected upstream and switching Sources will not help. Upstream said: {detail}"

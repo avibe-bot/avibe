@@ -75,6 +75,7 @@ from tests.ui_server_test_helpers import (
     save_config,
 )
 from vibe import backend_model_catalog, remote_access, ui_server
+from vibe.i18n import t as i18n_t
 from vibe.model_hub_client import ModelHubRemoteService, _decode
 from vibe.model_hub_runtime.api_key_vendors import api_key_vendor_catalog
 from vibe.model_hub_runtime.state import EngineStateError, _validate_source_target
@@ -300,7 +301,7 @@ class FakeAdapter:
         if self.fail_sync:
             raise RuntimeError("upstream failure with sk-secret-material")
 
-    async def discover_models(self, vendor, protocol, base_url, credential_ref):
+    async def discover_models(self, vendor, protocol, base_url, credential_ref, *, start_engine=True):
         self.discovery_credential_refs.append(credential_ref)
         return (
             DiscoveredModel(id="claude-opus-4-6"),
@@ -1792,7 +1793,7 @@ def test_runtime_install_rejects_unsupported_server_host_without_mutation(
 
 def test_discovery_probe_failure_is_not_reported_as_engine_down(tmp_path):
     class DiscoveryFailureAdapter(FakeAdapter):
-        async def discover_models(self, vendor, protocol, base_url, credential_ref):
+        async def discover_models(self, vendor, protocol, base_url, credential_ref, *, start_engine=True):
             raise ModelDiscoveryError("upstream rejected the credential")
 
     store = MemoryStore()
@@ -6819,7 +6820,7 @@ def test_refresh_empty_inventory_returns_success_without_route_removal_confirmat
     store.config.agents["codex"].mode = mode
     models = [model.id for model in store.config.agents["codex"].models]
 
-    async def discover(*_args):
+    async def discover(*_args, **_kwargs):
         return tuple(DiscoveredModel(id=model) for model in models)
 
     adapter.discover_models = discover
@@ -6890,7 +6891,7 @@ def test_discovered_source_model_delete_persists_retirement_tombstone(
     assert store.config.sources[0].models[0].retired is True
     assert store.config.sources[0].models[0].reasoning_efforts == ["high"]
 
-    async def rediscover(*_args):
+    async def rediscover(*_args, **_kwargs):
         return (DiscoveredModel(id="gpt-5"), DiscoveredModel(id="gpt-5.1"))
 
     adapter.discover_models = rediscover
@@ -7105,7 +7106,7 @@ def test_refresh_overrides_user_tiers_only_after_commit_and_records_one_event(
     )
     store.config.sources.append(source)
 
-    async def discover(*_args):
+    async def discover(*_args, **_kwargs):
         return (metadata,)
 
     adapter.discover_models = discover
@@ -7708,6 +7709,8 @@ def test_concurrent_completed_hub_reauth_materializes_once(tmp_path):
                 protocol,
                 base_url,
                 credential_ref,
+                *,
+                start_engine=True,
             ):
                 self.discovery_calls += 1
                 if self.discovery_calls > 1:
@@ -8598,7 +8601,7 @@ def test_failed_same_handle_hub_reauth_requires_user_action(
         }
     )
 
-    async def fail_discovery(vendor, protocol, base_url, credential_ref):
+    async def fail_discovery(vendor, protocol, base_url, credential_ref, *, start_engine=True):
         raise ModelDiscoveryError("safe discovery failure")
 
     if failure == "discovery":
@@ -8750,7 +8753,7 @@ def test_failed_hub_reauth_preserves_prior_source_and_revokes_replacement(
         separators=(",", ":"),
     )
 
-    async def fail_discovery(vendor, protocol, base_url, credential_ref):
+    async def fail_discovery(vendor, protocol, base_url, credential_ref, *, start_engine=True):
         raise ModelDiscoveryError("safe discovery failure")
 
     adapter.discover_models = fail_discovery
@@ -8911,7 +8914,7 @@ def test_credential_inventory_narrowing_preserves_exact_routes(
     store.requested_model = lambda backend: ("claude-opus-4-6" if backend == "claude" else "")
     service.named_agents_override = lambda backend: ([("claude", "claude-opus-4-6")] if backend == "claude" else [])
 
-    async def discover_narrower(vendor, protocol, base_url, credential_ref):
+    async def discover_narrower(vendor, protocol, base_url, credential_ref, *, start_engine=True):
         return (DiscoveredModel(id="replacement-only-model"),)
 
     adapter.discover_models = discover_narrower
@@ -9562,12 +9565,45 @@ def test_expired_oauth_flow_is_rejected_before_submit(tmp_path):
     assert service.oauth_flows.channel(flow["flow_id"]) is None
 
 
-def test_rejected_oauth_submission_is_non_terminal_and_keeps_the_flow(tmp_path):
+@pytest.mark.parametrize("error_detail", [None, "token exchange failed with status 401: token_expired"])
+def test_failed_oauth_flow_carries_its_reason_only_when_there_is_one(tmp_path, error_detail):
+    service, _, adapter = _service(tmp_path)
+    flow_id = asyncio.run(service.oauth_start({"vendor": "openai", "channel": "hub"}))["flow"]["flow_id"]
+    adapter.flows[flow_id] = OAuthFlowState(
+        **{
+            **adapter.flows[flow_id].__dict__,
+            "state": "failed",
+            "error_key": "models.oauth.code_rejected",
+            "error_detail": error_detail,
+        }
+    )
+
+    result = asyncio.run(service.oauth_status(flow_id))
+
+    assert result["flow"]["error_key"] == "models.oauth.code_rejected"
+    assert result["flow"].get("error_detail") == error_detail
+    assert ("error_detail" in result["flow"]) is (error_detail is not None)
+    validator = Draft7Validator(
+        {"$ref": ("model-hub/api-response.schema.json#/definitions/OAuthResultResponse")},
+        registry=_api_response_registry(),
+        format_checker=FormatChecker(),
+    )
+    assert not list(validator.iter_errors({"ok": True, "contract_version": CONTRACT_VERSION, **result}))
+
+
+@pytest.mark.parametrize(
+    ("reason", "detail"),
+    [
+        ("no_answer", "modelHub.errors.submission_rejected"),
+        ("other_attempt", "modelHub.errors.submission_rejected_other_attempt"),
+    ],
+)
+def test_rejected_oauth_submission_is_non_terminal_and_keeps_the_flow(tmp_path, reason, detail):
     service, _, adapter = _service(tmp_path)
     flow = asyncio.run(service.oauth_start({"vendor": "openai", "channel": "hub"}))["flow"]
 
     async def reject(_flow_id, _value):
-        raise OAuthSubmissionRejectedError(_flow_id)
+        raise OAuthSubmissionRejectedError(_flow_id, reason)
 
     adapter.submit_oauth = reject
     with pytest.raises(ModelHubError) as exc_info:
@@ -9575,6 +9611,10 @@ def test_rejected_oauth_submission_is_non_terminal_and_keeps_the_flow(tmp_path):
 
     assert exc_info.value.code == "submission_rejected"
     assert exc_info.value.status == 422
+    # The detail tells the dialog what to paste instead, in both languages.
+    assert exc_info.value.detail == detail
+    for language in ("en", "zh"):
+        assert i18n_t(detail, language) != detail
     assert service.oauth_flows.channel(flow["flow_id"]) == "hub"
     status = asyncio.run(service.oauth_status(flow["flow_id"]))
     assert status["flow"]["state"] == "awaiting_action"
@@ -9810,7 +9850,7 @@ def test_concurrent_source_creates_preserve_both_aggregate_updates(tmp_path):
                 self.secret_lengths.append(len(secret))
                 return credential_ref
 
-            async def discover_models(self, vendor, protocol, base_url, credential_ref):
+            async def discover_models(self, vendor, protocol, base_url, credential_ref, *, start_engine=True):
                 self.discover_started += 1
                 if self.discover_started == 2:
                     self.all_discovering.set()
@@ -10159,7 +10199,7 @@ def test_source_patch_rejects_credential_bearing_discovered_model_id(tmp_path):
         )
     )
 
-    async def credential_bearing_models(vendor, protocol, base_url, credential_ref):
+    async def credential_bearing_models(vendor, protocol, base_url, credential_ref, *, start_engine=True):
         return (DiscoveredModel(id="sk-model-never-persist-this"),)
 
     adapter.discover_models = credential_bearing_models
@@ -10186,7 +10226,7 @@ def test_admitted_model_ids_are_stored_in_their_canonical_form(tmp_path):
 
     service, store, adapter = _service(tmp_path)
 
-    async def padded_models(vendor, protocol, base_url, credential_ref):
+    async def padded_models(vendor, protocol, base_url, credential_ref, *, start_engine=True):
         return (DiscoveredModel(id="  discovered-model  "),)
 
     adapter.discover_models = padded_models
@@ -10225,7 +10265,7 @@ def test_long_identity_source_lifecycle_preserves_api_binding_and_reload(monkeyp
     head = "模型🧪/e\u0301" * 3000
     discovered = [head + "-one", head + "-two", "é", "e\u0301"]
 
-    async def models(*_args):
+    async def models(*_args, **_kwargs):
         return tuple(DiscoveredModel(id="  " + identity + "  ") for identity in discovered)
 
     adapter.discover_models = models
@@ -10445,7 +10485,7 @@ def test_source_patch_rejects_one_discovered_model_under_two_spellings(tmp_path,
         )
     )
 
-    async def duplicate_spellings(vendor, protocol, base_url, credential_ref):
+    async def duplicate_spellings(vendor, protocol, base_url, credential_ref, *, start_engine=True):
         return (
             DiscoveredModel(id=identity),
             DiscoveredModel(id=" " + identity),
@@ -10483,7 +10523,7 @@ def test_base_url_change_preserves_missing_inventory_exact_hops(
     old_credential_ref = source["credential_ref"]
     discovery_refs: list[str] = []
 
-    async def discover_narrower(vendor, protocol, base_url, credential_ref):
+    async def discover_narrower(vendor, protocol, base_url, credential_ref, *, start_engine=True):
         discovery_refs.append(credential_ref)
         return (DiscoveredModel(id="replacement-only-model"),)
 

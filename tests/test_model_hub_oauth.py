@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from core.handlers.model_hub.native_oauth import _signed_in
+from core.handlers.model_hub.native_oauth import AgentAuthNativeOAuthAdapter, _signed_in
 from core.handlers.model_hub.oauth import OAuthFlowRegistry
 from core.handlers.model_hub.revocations import (
     CredentialRevocationJournal,
@@ -186,6 +186,41 @@ def test_flow_registry_returns_latest_pending_reauth_for_source(tmp_path):
     replaced = registry.pending_reauth("src_native001")
     assert replaced is not None
     assert replaced[0] == "oaf_replaced1"
+
+
+@pytest.mark.parametrize(
+    ("error", "error_key", "error_detail"),
+    [
+        # The CLI's own last words are what the user needs beside the generic key.
+        (
+            "Error logging in: token exchange failed (401)",
+            "settings.models.oauth.error.generic",
+            "Error logging in: token exchange failed (401)",
+        ),
+        # A timeout already has its own sentence; there is nothing to add.
+        ("timed_out", "settings.models.oauth.error.timeout", None),
+        (None, "settings.models.oauth.error.generic", None),
+    ],
+)
+def test_failed_native_login_carries_its_reason_beside_the_key(error, error_key, error_detail):
+    class AgentAuth:
+        def get_web_flow_status(self, flow_id):
+            return {
+                "ok": True,
+                "flow_id": flow_id,
+                "state": "failed",
+                "error": error,
+                "source_id": "src_native01",
+                "vendor": "anthropic",
+                "expires_at_iso": "2026-07-23T03:15:00+00:00",
+            }
+
+    adapter = AgentAuthNativeOAuthAdapter(AgentAuth(), auth_status_reader=lambda _backend: {})
+    state = asyncio.run(adapter.oauth_status("flow_native01"))
+
+    assert state.state == "failed"
+    assert state.error_key == error_key
+    assert state.error_detail == error_detail
 
 
 def test_native_status_trusts_codex_keyring_success_but_not_active_api_keys():

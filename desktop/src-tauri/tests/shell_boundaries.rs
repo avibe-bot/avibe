@@ -100,10 +100,10 @@ fn the_bootstrap_capability_grants_only_the_three_shell_commands() {
 }
 
 #[test]
-fn the_shell_enables_only_bootstrap_and_window_drag() {
+fn the_shell_enables_only_its_four_capabilities() {
     assert_eq!(
         config()["app"]["security"]["capabilities"],
-        serde_json::json!(["bootstrap", "window-drag"])
+        serde_json::json!(["bootstrap", "window-drag", "pet", "main-pet-bind"])
     );
 }
 
@@ -396,15 +396,32 @@ fn every_shell_command_is_declared_so_its_permission_exists() {
     // undeclared command has no `allow-*` permission and so no capability can
     // scope it.
     let build_rs = shipping_source("build.rs");
-    let lib_rs = shipping_source("src/lib.rs");
-
-    let declared: Vec<&str> = ["bootstrap_status", "bootstrap_retry", "open_install_docs"]
+    let commands = [
+        "bootstrap_status",
+        "bootstrap_retry",
+        "open_install_docs",
+        "pet_ready",
+        "pet_set_expanded",
+        "pet_bind",
+        "pet_unbind",
+        "pet_open",
+    ];
+    let declared: Vec<&str> = commands
         .into_iter()
-        .filter(|command| build_rs.contains(command))
+        .filter(|command| build_rs.contains(&format!("\"{command}\"")))
         .collect();
-    assert_eq!(declared, ["bootstrap_status", "bootstrap_retry", "open_install_docs"]);
+    assert_eq!(declared, commands);
 
-    let defined = lib_rs.matches("#[tauri::command]").count();
+    let defined: usize = std::fs::read_dir(crate_dir().join("src"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|extension| extension == "rs"))
+        .map(|path| {
+            shipping_text(&read_to_string(&path))
+                .matches("#[tauri::command]")
+                .count()
+        })
+        .sum();
     assert_eq!(
         defined,
         declared.len(),
@@ -783,8 +800,38 @@ fn native_lifecycle_authority_requires_the_runtime_identity_not_a_launch_attempt
     );
     assert!(stop.contains("ACTIVITY_IDLE"));
     assert!(stop.contains("focus_or_restore_main_window(&app)"));
+    assert!(stop.contains("controller.runtime_stopped()"));
     assert!(!stop.contains("start_runtime_monitor("));
     assert!(!stop.contains("spawn_bootstrap("));
+}
+
+#[test]
+fn every_quit_boundary_reuses_one_bounded_computer_use_cleanup() {
+    let shell = shipping_source("src/lib.rs");
+    let termination = shipping_source("src/macos_terminate.rs");
+    let updater = shipping_source("src/updater.rs");
+    let computer_use = shipping_source("src/computer_use.rs");
+
+    for required in [
+        "fn claim_exit_cleanup",
+        "shutdown_computer_use(&app).await",
+        "fn restart_after_computer_use_shutdown",
+        "fn stop_for_session_end",
+        "computer_use::Controller",
+        "app.restart()",
+    ] {
+        assert!(shell.contains(required), "shell cleanup boundary is missing {required}");
+    }
+    assert!(termination.contains("crate::request_runtime_lifecycle(app, true)"));
+    assert!(termination.contains("crate::stop_for_session_end(app)"));
+    assert!(updater.contains("super::restart_after_computer_use_shutdown(app)"));
+    assert!(computer_use.contains("_shell_lock: shell_lock"));
+    assert!(computer_use.contains("drop(shell_lock);"));
+    assert!(computer_use.contains("let _ = reply.send(());"));
+    assert!(
+        computer_use.find("drop(shell_lock);") < computer_use.find("let _ = reply.send(());"),
+        "the controller must release its lock before acknowledging shutdown"
+    );
 }
 
 #[test]
@@ -815,6 +862,14 @@ fn native_tray_copy_has_locale_and_placeholder_parity() {
             "placeholder parity for {key}"
         );
     }
+}
+
+#[test]
+fn computer_use_menu_constructor_keeps_enabled_and_checked_in_their_slots() {
+    let source = shipping_source("src/lib.rs");
+    assert!(source
+        .contains("let (computer_use_enabled, computer_use_checked) = computer_use_menu_state(&computer_use_view);"));
+    assert!(source.contains("computer_use_enabled,\n        computer_use_checked,\n        None::<&str>,"));
 }
 
 #[test]
@@ -1014,5 +1069,70 @@ fn workbench_window_permissions_are_narrow_and_match_literal_loopback_origins() 
     ] {
         let url = url::Url::parse(rejected).unwrap();
         assert!(!patterns.iter().any(|pattern| pattern.test(&url)), "{url}");
+    }
+}
+
+fn loopback_patterns(grant: &Value) -> Vec<tauri::utils::acl::RemoteUrlPattern> {
+    grant["remote"]["urls"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|pattern| pattern.as_str().unwrap().parse().unwrap())
+        .collect()
+}
+
+#[test]
+fn the_pet_and_the_workbench_get_only_their_pet_commands_on_loopback_pages() {
+    let pet = read_json(crate_dir().join("capabilities/pet.json"));
+    assert_eq!(pet["windows"], serde_json::json!(["pet"]));
+    assert_eq!(pet["local"], false, "the pet never loads the bundled bootstrap page");
+    assert_eq!(
+        pet["permissions"],
+        serde_json::json!([
+            "allow-pet-ready",
+            "allow-pet-set-expanded",
+            "allow-pet-bind",
+            "allow-pet-unbind",
+            "allow-pet-open",
+            "core:window:allow-start-dragging"
+        ])
+    );
+    let workbench = read_json(crate_dir().join("capabilities/main-pet-bind.json"));
+    assert_eq!(workbench["windows"], serde_json::json!([MAIN_WINDOW]));
+    assert_eq!(workbench["local"], false);
+    assert_eq!(workbench["permissions"], serde_json::json!(["allow-pet-bind"]));
+    // No other capability reaches a pet command, and the pet gets no
+    // bootstrap command and no event channel.
+    for name in ["bootstrap", "window-drag"] {
+        let grant = read_to_string(&crate_dir().join(format!("capabilities/{name}.json")));
+        assert!(!grant.contains("allow-pet-"), "{name} must not grant pet commands");
+    }
+    let pet_grant = pet["permissions"].to_string();
+    assert!(!pet_grant.contains("bootstrap") && !pet_grant.contains("core:event"));
+    // The summon shortcut is the shell's alone: no page may register one.
+    for grant in std::fs::read_dir(crate_dir().join("capabilities")).unwrap() {
+        let grant = read_to_string(&grant.unwrap().path());
+        assert!(!grant.contains("global-shortcut"), "no page may register a shortcut");
+    }
+    assert_eq!(
+        config()["app"]["macOSPrivateApi"],
+        true,
+        "a transparent pet needs it on macOS"
+    );
+    for grant in [&pet, &workbench] {
+        let patterns = loopback_patterns(grant);
+        for allowed in ["http://127.0.0.1:5123/pet", "http://[::1]:6174/chat/abc"] {
+            let url = url::Url::parse(allowed).unwrap();
+            assert!(patterns.iter().any(|pattern| pattern.test(&url)), "{url}");
+        }
+        for rejected in [
+            "https://example.com/pet",
+            "http://127.0.0.1.example.com/pet",
+            "http://192.168.1.2:5123/pet",
+            "http://localhost:5123/pet",
+        ] {
+            let url = url::Url::parse(rejected).unwrap();
+            assert!(!patterns.iter().any(|pattern| pattern.test(&url)), "{url}");
+        }
     }
 }

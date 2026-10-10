@@ -1064,6 +1064,152 @@ describe('Workbench session read ownership', () => {
     expect(inbox?.unreadBySession).toEqual({ [sessionB.id]: 4 });
   });
 
+  const renderInboxWithMarks = async (marks: Array<Promise<unknown>>) => {
+    const markSessionRead = vi.fn();
+    marks.forEach((mark) => markSessionRead.mockReturnValueOnce(mark));
+    apiRef.current = {
+      listInbox: vi.fn().mockResolvedValue({
+        sessions: [inboxRow],
+        next_cursor: null,
+        unread_by_session: { [session.id]: 3, [sessionB.id]: 5 },
+      }),
+      markSessionRead,
+      connectWorkbenchEvents: vi.fn(() => vi.fn()),
+    };
+    const holder: { inbox: ReturnType<typeof useWorkbenchInbox> | null } = { inbox: null };
+    const Probe = () => {
+      const value = useWorkbenchInbox();
+      useEffect(() => {
+        holder.inbox = value;
+      }, [value]);
+      return null;
+    };
+    render(
+      <WorkbenchInboxProvider>
+        <Probe />
+      </WorkbenchInboxProvider>,
+    );
+    await settle();
+    return holder;
+  };
+
+  it('does not let a mark-read overwrite a newer unread event for the same session', async () => {
+    const mark = deferred({ unread_by_session: {} as Record<string, number> });
+    let handlers: WorkbenchEventHandlers | null = null;
+    apiRef.current = {
+      listInbox: vi.fn().mockResolvedValue({
+        sessions: [inboxRow],
+        next_cursor: null,
+        unread_by_session: { [session.id]: 1 },
+      }),
+      markSessionRead: vi.fn().mockReturnValue(mark.promise),
+      connectWorkbenchEvents: vi.fn((next) => {
+        handlers = next;
+        return vi.fn();
+      }),
+    };
+    const holder: { inbox: ReturnType<typeof useWorkbenchInbox> | null } = { inbox: null };
+    const Probe = () => {
+      const value = useWorkbenchInbox();
+      useEffect(() => {
+        holder.inbox = value;
+      }, [value]);
+      return null;
+    };
+    render(
+      <WorkbenchInboxProvider>
+        <Probe />
+      </WorkbenchInboxProvider>,
+    );
+    await settle();
+    act(() => {
+      void holder.inbox?.markRead(session.id, 'msg_old');
+    });
+    await settle();
+    act(() => {
+      handlers?.onInboxUnreadChanged?.({
+        session_id: session.id,
+        scope_id: session.scope_id,
+        delta: 1,
+        unread_counts: { agent: 1 },
+        unread_by_session: { [session.id]: 1, [sessionB.id]: 2 },
+      });
+    });
+    await act(async () => {
+      mark.resolve({ unread_by_session: {} });
+      await mark.promise;
+    });
+    await settle();
+
+    expect(holder.inbox?.unreadBySession).toEqual({ [session.id]: 1, [sessionB.id]: 2 });
+  });
+
+  it('lets a newer mark-read for the same session land after an older one that finished first', async () => {
+    const older = deferred({ unread_by_session: {} as Record<string, number> });
+    const newer = deferred({ unread_by_session: {} as Record<string, number> });
+    const holder = await renderInboxWithMarks([older.promise, newer.promise]);
+
+    act(() => {
+      void holder.inbox?.markRead(session.id, 'msg_1');
+      void holder.inbox?.markRead(session.id, 'msg_2');
+    });
+    await act(async () => {
+      older.resolve({ unread_by_session: { [session.id]: 1, [sessionB.id]: 5 } });
+      await older.promise;
+    });
+    await act(async () => {
+      newer.resolve({ unread_by_session: { [sessionB.id]: 2 } });
+      await newer.promise;
+    });
+    await settle();
+
+    expect(holder.inbox?.unreadBySession).toEqual({ [sessionB.id]: 2 });
+  });
+
+  it('does not let an older mark-read for the same session land over a newer one', async () => {
+    const older = deferred({ unread_by_session: {} as Record<string, number> });
+    const newer = deferred({ unread_by_session: {} as Record<string, number> });
+    const holder = await renderInboxWithMarks([older.promise, newer.promise]);
+
+    act(() => {
+      void holder.inbox?.markRead(session.id, 'msg_1');
+      void holder.inbox?.markRead(session.id, 'msg_2');
+    });
+    await act(async () => {
+      newer.resolve({ unread_by_session: { [sessionB.id]: 2 } });
+      await newer.promise;
+    });
+    await act(async () => {
+      older.resolve({ unread_by_session: { [session.id]: 1, [sessionB.id]: 5 } });
+      await older.promise;
+    });
+    await settle();
+
+    expect(holder.inbox?.unreadBySession).toEqual({ [sessionB.id]: 2 });
+  });
+
+  it('merges only its own count from a mark-read whose account map another write has superseded', async () => {
+    const markA = deferred({ unread_by_session: {} as Record<string, number> });
+    const markB = deferred({ unread_by_session: {} as Record<string, number> });
+    const holder = await renderInboxWithMarks([markA.promise, markB.promise]);
+
+    act(() => {
+      void holder.inbox?.markRead(session.id);
+      void holder.inbox?.markRead(sessionB.id);
+    });
+    await act(async () => {
+      markB.resolve({ unread_by_session: { [session.id]: 3 } });
+      await markB.promise;
+    });
+    await act(async () => {
+      markA.resolve({ unread_by_session: { [sessionB.id]: 5 } });
+      await markA.promise;
+    });
+    await settle();
+
+    expect(holder.inbox?.unreadBySession).toEqual({});
+  });
+
   it('keeps a successful mark-read result when an older unread snapshot finishes last', async () => {
     const markReadResult = deferred({ unread_by_session: { [sessionB.id]: 5 } });
     const staleRefresh = deferred({

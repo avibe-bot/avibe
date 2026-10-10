@@ -40,6 +40,7 @@ from core.handlers.model_hub.classification import (
     classify_outcome,
     terminal_outcome_category,
 )
+from core.handlers.model_hub.errors import ModelDiscoveryError
 from core.handlers.model_hub.events import redact_untrusted_text
 from core.handlers.model_hub.request import ModelHubRequest
 from core.handlers.model_hub.stream_wire import (
@@ -6329,6 +6330,45 @@ def test_documented_incomplete_output_is_served_without_source_failure(
     assert classify_outcome(outcome).action == "return"
 
 
+def test_relay_response_failed_without_json_type_preserves_upstream_failure() -> None:
+    state = client_module.ProtocolSSEState("openai_responses")
+    state.observe(
+        b'event: response.failed\ndata: '
+        b'{"response":{"error":{"code":"upstream_error",'
+        b'"message":"response protection is unavailable"}}}\n\n'
+    )
+
+    observation = state.terminal_observation()
+    assert observation is not None
+    assert observation.outcome == "failed_terminal"
+    assert observation.error_message == "response protection is unavailable"
+
+    source = SourceRecord(
+        source_id="src_fixture123",
+        vendor="custom",
+        protocol="openai_responses",
+        base_url="https://api.example.test/v1",
+        credential_ref="cred_fixture123",
+        allowed_origins=(),
+        model_ids=("model-a",),
+        prefix="source-fixture123",
+    )
+    outcome = client_module._observed_stream_terminal_outcome(
+        state,
+        source,
+        "model-a",
+        200,
+    )
+    assert outcome is not None
+    assert outcome.kind is RawOutcomeKind.HTTP_ERROR
+    assert outcome.http_status == 200
+    assert outcome.upstream_detail == "response protection is unavailable"
+
+    decision = classify_outcome(outcome)
+    assert decision.action == "fallback"
+    assert decision.reason == "server_error"
+
+
 @pytest.mark.parametrize(
     "finish_reason",
     ("stop", "length", "content_filter", "tool_calls", "function_call"),
@@ -7282,6 +7322,156 @@ def test_engine_buffered_2xx_error_envelope_carries_upstream_detail() -> None:
     assert outcome.upstream_detail == "model retired"
 
 
+_ANTHROPIC_OUTPUT_STARTED = (
+    b'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_1","type":"message",'
+    b'"role":"assistant","content":[],"model":"model-a","usage":{"input_tokens":1,"output_tokens":0}}}\n\n'
+    b'event: content_block_start\ndata: {"type":"content_block_start","index":0,'
+    b'"content_block":{"type":"text","text":""}}\n\n'
+    b'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,'
+    b'"delta":{"type":"text_delta","text":"partial"}}\n\n'
+)
+
+
+@pytest.mark.parametrize(
+    "protocol,stream,status,body,kind,stream_started,reason",
+    [
+        # CPA's own Anthropic-shaped answer when the upstream read times out.
+        (
+            "anthropic", False, 500,
+            {"type": "error", "error": {"type": "api_error", "message": (
+                "read tcp 192.168.2.3:56860->47.131.95.123:443: read: operation timed out"
+            )}},
+            RawOutcomeKind.NETWORK_ERROR, False, "network",
+        ),
+        # CPA's OpenAI-shaped answer when the upstream connection cannot be made.
+        (
+            "openai_responses", False, 500,
+            {"error": {"type": "server_error", "code": "internal_server_error", "message": (
+                'Post "https://relay.example.test/v1/responses": dial tcp 203.0.113.7:443: i/o timeout'
+            )}},
+            RawOutcomeKind.NETWORK_ERROR, False, "network",
+        ),
+        # After output the turn is already lost; the stream keeps its class.
+        (
+            "anthropic", True, 200,
+            _ANTHROPIC_OUTPUT_STARTED + (
+                b'event: error\ndata: {"type":"error","error":{"type":"api_error",'
+                b'"message":"unexpected EOF"}}\n\n'
+            ),
+            RawOutcomeKind.HTTP_ERROR, True, "server_error",
+        ),
+        # An upstream that answered adds its own fields beyond the engine's shape.
+        (
+            "anthropic", False, 500,
+            {"type": "error", "request_id": "req_011", "error": {"type": "api_error", "message": (
+                "read tcp 10.0.0.2:443: read: connection reset by peer"
+            )}},
+            RawOutcomeKind.HTTP_ERROR, False, "server_error",
+        ),
+        (
+            "openai_responses", False, 500,
+            {"error": {"type": "server_error", "code": "vendor_backend_down", "message": (
+                "dial tcp 203.0.113.7:443: i/o timeout"
+            )}},
+            RawOutcomeKind.HTTP_ERROR, False, "server_error",
+        ),
+        # An upstream that answered keeps its own server verdict.
+        (
+            "anthropic", False, 500,
+            {"type": "error", "error": {"type": "api_error", "message": "Internal server error"}},
+            RawOutcomeKind.HTTP_ERROR, False, "server_error",
+        ),
+        (
+            "anthropic", False, 529,
+            {"type": "error", "error": {"type": "overloaded_error", "message": "read tcp: connection reset by peer"}},
+            RawOutcomeKind.HTTP_ERROR, False, "server_error",
+        ),
+        (
+            "openai_responses", False, 400,
+            {"error": {"type": "invalid_request_error", "message": "image fetch failed: connection refused"}},
+            RawOutcomeKind.HTTP_ERROR, False, None,
+        ),
+        # Without the engine's generic type the body is not the engine's own label.
+        (
+            "openai_responses", False, 500,
+            {"error": {"message": "connection refused"}},
+            RawOutcomeKind.HTTP_ERROR, False, "server_error",
+        ),
+    ],
+    ids=[
+        "anthropic-read-timeout",
+        "responses-dial-timeout",
+        "anthropic-mid-stream-eof",
+        "anthropic-upstream-request-id",
+        "responses-unknown-specific-code",
+        "anthropic-upstream-500",
+        "anthropic-overloaded",
+        "responses-request-error",
+        "responses-untyped-500",
+    ],
+)
+def test_engine_reported_upstream_transport_failure_takes_network_recovery(
+    protocol: str,
+    stream: bool,
+    status: int,
+    body: object,
+    kind: RawOutcomeKind,
+    stream_started: bool,
+    reason: str | None,
+) -> None:
+    """MH-RETRY-TRANSPORT-001: the engine's own transport failure takes network recovery."""
+
+    from aiohttp import web
+
+    async def run():
+        async def respond(_request: web.Request) -> web.Response:
+            if isinstance(body, bytes):
+                return web.Response(status=status, body=body, content_type="text/event-stream")
+            return web.json_response(body, status=status)
+
+        app = web.Application()
+        app.router.add_post("/{path:.*}", respond)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        await web.TCPSite(runner, "127.0.0.1", 0).start()
+        try:
+            handle = await EngineClient(
+                EngineConnection(
+                    base_url=f"http://127.0.0.1:{runner.addresses[0][1]}",
+                    management_key="management-key",
+                    gateway_token="gateway-token",
+                )
+            ).invoke(
+                SourceRecord(
+                    source_id="src_fixture123",
+                    vendor="custom",
+                    protocol=protocol,
+                    base_url="https://api.example.test",
+                    credential_ref="cred_fixture123",
+                    allowed_origins=(),
+                    model_ids=("model-a",),
+                    prefix="source-fixture123",
+                ),
+                "model-a",
+                {"stream": stream},
+                stream=stream,
+            )
+            if handle.stream is not None:
+                async for _chunk in handle.stream:
+                    pass
+            return await handle.outcome()
+        finally:
+            await runner.cleanup()
+
+    outcome = asyncio.run(run())
+
+    assert outcome.kind is kind
+    assert outcome.stream_started is stream_started
+    assert classify_outcome(outcome).reason == reason
+    # The engine's own 500 is not an upstream status.
+    assert (outcome.http_status is None) is (kind is RawOutcomeKind.NETWORK_ERROR)
+
+
 @pytest.mark.parametrize(
     "payload",
     [
@@ -7367,6 +7557,19 @@ def test_engine_upstream_detail_keeps_email_addresses_usable() -> None:
     assert client_module._bounded_upstream_detail("Contact support@example.com, cc @ops or x@everyone") == (
         "Contact support@example.com, cc @\u200bops or x@\u200beveryone"
     )
+
+
+def test_engine_upstream_detail_drops_terminal_control_characters() -> None:
+    payload = json.dumps(
+        {"error": {"message": (
+            "relay \x1b]52;c;cGF5bG9hZA==\x07 down\x1b[2J\x9b now"
+            " \u202egnp.exe\u202c \u2066a\u2069\u2067b\u2068c\u200e\u200f\u061c end"
+        )}}
+    ).encode()
+
+    detail = client_module._upstream_error_detail(payload, (("error",),))
+
+    assert detail == "relay ]52;c;cGF5bG9hZA== down [2J now gnp.exe a b c end"
 
 
 def test_engine_upstream_detail_replaces_lone_surrogates_so_it_can_persist() -> None:
@@ -8222,6 +8425,92 @@ def test_oauth_model_discovery_accepts_engine_definition_fields(tmp_path: Path) 
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("engine_running", [True, False])
+def test_background_oauth_discovery_never_starts_the_engine(tmp_path: Path, engine_running: bool) -> None:
+    """MH-DISCOVERY-SCHEDULE-001: a background listing reads a running engine and never starts one."""
+
+    class Client:
+        def management_request(self, method, path, *, query=None, payload=None, timeout=None):
+            return {"models": [{"id": "model-id"}]}
+
+    class Supervisor:
+        def __init__(self) -> None:
+            self.started = False
+
+        def client(self):
+            self.started = True
+            return Client()
+
+        def client_if_running(self):
+            return Client() if engine_running else None
+
+    async def run() -> tuple[Supervisor, object]:
+        store = EngineStateStore(tmp_path / "state")
+        store.prepare_instance("install-1")
+        (store.auth_dir / "claude-account.json").write_text("{}", encoding="utf-8")
+        credential_ref = store.bind_oauth_credential("src_fixture123", "anthropic", "claude-account.json")
+        supervisor = Supervisor()
+        adapter = CLIProxyEngineAdapter(supervisor=supervisor, state_store=store)  # type: ignore[arg-type]
+        try:
+            listed = await adapter.discover_models(
+                "anthropic", "anthropic", None, credential_ref, start_engine=False,
+            )
+        except ModelDiscoveryError as error:
+            listed = error
+        return supervisor, listed
+
+    supervisor, listed = asyncio.run(run())
+
+    assert supervisor.started is False
+    if engine_running:
+        assert listed == (DiscoveredModel(id="model-id"),)
+    else:
+        assert isinstance(listed, ModelDiscoveryError)
+
+
+def test_cancelled_background_oauth_listing_returns_after_its_engine_worker(tmp_path: Path) -> None:
+    """MH-DISCOVERY-SCHEDULE-001: shutdown cannot stop the engine beneath a cancelled listing."""
+
+    from core.controller import _RUNTIME_WORK_SHUTDOWN_GRACE_SECONDS
+
+    entered, release = threading.Event(), threading.Event()
+    timeouts: list[float | None] = []
+
+    class Client:
+        def management_request(self, method, path, *, query=None, payload=None, timeout=None):
+            timeouts.append(timeout)
+            entered.set()
+            release.wait(5)
+            return {"models": [{"id": "model-id"}]}
+
+    class Supervisor:
+        def client_if_running(self):
+            return Client()
+
+    async def run() -> bool:
+        store = EngineStateStore(tmp_path / "state")
+        store.prepare_instance("install-1")
+        (store.auth_dir / "claude-account.json").write_text("{}", encoding="utf-8")
+        credential_ref = store.bind_oauth_credential("src_fixture123", "anthropic", "claude-account.json")
+        adapter = CLIProxyEngineAdapter(supervisor=Supervisor(), state_store=store)  # type: ignore[arg-type]
+        listing = asyncio.create_task(
+            adapter.discover_models("anthropic", "anthropic", None, credential_ref, start_engine=False)
+        )
+        assert await asyncio.to_thread(entered.wait, 5)
+        listing.cancel()
+        done, _ = await asyncio.wait({listing}, timeout=0.2)
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await listing
+        return bool(done)
+
+    returned_while_worker_ran = asyncio.run(run())
+
+    assert returned_while_worker_ran is False
+    assert timeouts and timeouts[0] is not None
+    assert timeouts[0] < _RUNTIME_WORK_SHUTDOWN_GRACE_SECONDS
+
+
 @pytest.mark.parametrize(
     "oauth_record_case",
     [
@@ -8657,6 +8946,231 @@ def test_oauth_rejected_paste_keeps_flow_awaiting_a_corrected_value(tmp_path: Pa
         assert corrected.state == "verifying"
         # The code-less address never reached the engine.
         assert len(submitted) == 1
+
+    asyncio.run(run())
+
+
+_UI_BUNDLES = {
+    language: json.loads((Path(__file__).resolve().parents[1] / "ui/src/i18n" / f"{language}.json").read_text())
+    for language in ("en", "zh")
+}
+
+
+def _ui_text(language: str, key: str) -> object:
+    node: object = _UI_BUNDLES[language]
+    for part in key.split("."):
+        node = node.get(part) if isinstance(node, dict) else None
+    return node
+
+
+class _BrowserCallbackEngine:
+    """The engine's side of a browser OAuth flow, as far as a paste reaches it.
+
+    It records what Avibe hands to ``POST /oauth-callback``; whether that value
+    can ever exchange is the provider's business, decided by the code alone.
+    """
+
+    def __init__(self) -> None:
+        self.submitted: list[dict] = []
+
+    def management_request(self, method, path, *, query=None, payload=None, timeout=None):
+        if path == "/auth-files":
+            return {"files": []}
+        if path in {"/codex-auth-url", "/anthropic-auth-url", "/antigravity-auth-url"}:
+            return {"state": "browser-state", "url": "https://example.test/oauth"}
+        if path == "/oauth-callback":
+            self.submitted.append(dict(payload))
+            return {"status": "ok"}
+        raise AssertionError((method, path, query, payload, timeout))
+
+
+def _browser_callback_adapter(tmp_path: Path, engine: _BrowserCallbackEngine) -> CLIProxyEngineAdapter:
+    store = EngineStateStore(tmp_path / "state")
+    return CLIProxyEngineAdapter(
+        supervisor=SimpleNamespace(state_store=store, client=lambda: engine),  # type: ignore[arg-type]
+        state_store=store,
+    )
+
+
+@pytest.mark.parametrize("vendor", ["openai", "anthropic", "gemini"])
+@pytest.mark.parametrize(
+    ("pasted", "sent"),
+    [
+        # Browsers that fail to load the loopback page copy its address without
+        # the scheme. It is still the address, never a code.
+        (
+            "localhost:1455/auth/callback?code=ac_issued&state=browser-state",
+            {"redirect_url": "http://localhost:1455/auth/callback?code=ac_issued&state=browser-state"},
+        ),
+        (
+            "127.0.0.1:54545/callback?code=ac_issued&state=browser-state",
+            {"redirect_url": "http://127.0.0.1:54545/callback?code=ac_issued&state=browser-state"},
+        ),
+        (
+            "http://localhost:51121/oauth-callback?code=ac_issued&state=browser-state",
+            {"redirect_url": "http://localhost:51121/oauth-callback?code=ac_issued&state=browser-state"},
+        ),
+        # Bare provider codes stay codes, including shapes with a slash or a
+        # fragment-like suffix.
+        ("ac_issued", {"code": "ac_issued"}),
+        ("4/0AbCd-issued", {"code": "4/0AbCd-issued"}),
+        ("issued.part#browser-state", {"code": "issued.part#browser-state"}),
+        ("eyJhbGci.eyJzdWIi.c2lnbmF0dXJl", {"code": "eyJhbGci.eyJzdWIi.c2lnbmF0dXJl"}),
+    ],
+)
+def test_oauth_paste_reaches_the_engine_as_the_value_it_is(
+    tmp_path: Path, vendor: str, pasted: str, sent: dict,
+) -> None:
+    async def run() -> None:
+        engine = _BrowserCallbackEngine()
+        adapter = _browser_callback_adapter(tmp_path, engine)
+        flow = await adapter.start_oauth("src_fixture123", vendor)
+        result = await adapter.submit_oauth(flow.flow_id, pasted)
+        assert result.state == "verifying"
+        assert len(engine.submitted) == 1
+        submitted = engine.submitted[0]
+        assert submitted["state"] == "browser-state"
+        assert {key: submitted[key] for key in submitted if key in {"code", "redirect_url"}} == sent
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("pasted", "reason"),
+    [
+        ("localhost:1455/auth/callback?state=browser-state", "no_answer"),
+        # Only the authority survived the copy: still an address, still no answer.
+        ("localhost:1455", "no_answer"),
+        ("127.0.0.1:54545", "no_answer"),
+        ("chatgpt.com/", "no_answer"),
+        ("https://chatgpt.com/", "no_answer"),
+        # A code minted for an earlier sign-in link fails the provider's
+        # verifier check, and that failure would end this flow.
+        ("http://localhost:1455/auth/callback?code=ac_old&state=earlier-state", "other_attempt"),
+        ("localhost:1455/auth/callback?code=ac_old&state=earlier-state", "other_attempt"),
+    ],
+)
+def test_oauth_paste_that_cannot_exchange_keeps_the_flow_awaiting(
+    tmp_path: Path, pasted: str, reason: str,
+) -> None:
+    async def run() -> None:
+        engine = _BrowserCallbackEngine()
+        adapter = _browser_callback_adapter(tmp_path, engine)
+        flow = await adapter.start_oauth("src_fixture123", "openai")
+        with pytest.raises(OAuthSubmissionRejectedError) as rejected:
+            await adapter.submit_oauth(flow.flow_id, pasted)
+        assert rejected.value.reason == reason
+        held = adapter._oauth_flows[flow.flow_id]
+        assert held.state == "awaiting_action"
+        assert held.grant_write_possible is False
+        assert engine.submitted == []
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("engine_error", "error_key"),
+    [
+        # The pinned engine's own session errors, verbatim.
+        (
+            "Failed to exchange authorization code for tokens: token exchange failed with status 401: "
+            '{"error": {"message": "Could not validate your token. Please try signing in again.", '
+            '"type": "invalid_request_error", "param": null, "code": "token_expired"}}',
+            "models.oauth.code_rejected",
+        ),
+        (
+            "Failed to exchange authorization code for tokens: token exchange request failed: "
+            "Post \"https://auth.openai.com/oauth/token\": dial tcp: i/o timeout",
+            "models.oauth.exchange_failed",
+        ),
+        # Refusals that say nothing about the code: a proxy and a throttle.
+        (
+            "Failed to exchange authorization code for tokens: token exchange failed with status 407: "
+            "Proxy Authentication Required",
+            "models.oauth.exchange_failed",
+        ),
+        (
+            "Failed to exchange authorization code for tokens: token exchange failed with status 429: "
+            '{"error": {"message": "Too many requests", "code": "rate_limit_exceeded"}}',
+            "models.oauth.exchange_failed",
+        ),
+        (
+            "Failed to exchange authorization code for tokens: token exchange failed with status 403: "
+            '{"error": "invalid_grant", "error_description": "code already redeemed"}',
+            "models.oauth.code_rejected",
+        ),
+        ("Failed to exchange token", "models.oauth.exchange_failed"),
+        ("Timeout waiting for OAuth callback", "models.oauth.expired"),
+        ("OAuth flow timed out", "models.oauth.expired"),
+        ("State code error", "models.oauth.callback_mismatch"),
+        ("Authentication failed: state mismatch", "models.oauth.callback_mismatch"),
+        ("Bad Request", "models.oauth.provider_denied"),
+        ("Authentication failed", "models.oauth.provider_denied"),
+        ("Failed to save authentication tokens", "models.oauth.upstream_failed"),
+        # A timeout outside the callback wait says nothing about the callback.
+        ("Failed to save authentication tokens: timed out writing auth file", "models.oauth.upstream_failed"),
+        ("Authentication failed: device code expired", "models.oauth.upstream_failed"),
+    ],
+)
+def test_oauth_engine_failure_names_what_the_user_can_do(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, engine_error: str, error_key: str,
+) -> None:
+    class Engine(_BrowserCallbackEngine):
+        def management_request(self, method, path, *, query=None, payload=None, timeout=None):
+            if path == "/get-auth-status":
+                return {"status": "error", "error": engine_error}
+            return super().management_request(method, path, query=query, payload=payload, timeout=timeout)
+
+    async def run() -> None:
+        adapter = _browser_callback_adapter(tmp_path, Engine())
+        flow = await adapter.start_oauth("src_fixture123", "openai")
+        with caplog.at_level(logging.WARNING, logger="vibe.model_hub_runtime.adapter"):
+            failed = await adapter.oauth_status(flow.flow_id)
+        assert failed.state == "failed"
+        assert failed.error_key == error_key
+        # The engine's own words travel beside the key, for the dialog's
+        # details and for the log.
+        # The engine's own words travel beside the key, as written.
+        assert failed.error_detail == " ".join(engine_error.split())
+        assert any(
+            error_key in record.getMessage() and engine_error[:24] in record.getMessage()
+            for record in caplog.records
+        )
+
+    asyncio.run(run())
+    for language in ("en", "zh"):
+        assert isinstance(_ui_text(language, error_key), str), (language, error_key)
+
+
+def test_oauth_failure_detail_is_the_engine_reason_on_one_bounded_line(tmp_path: Path) -> None:
+    reasons = iter([
+        # What the user copies is what the provider said, unaltered.
+        "Failed to exchange authorization code for tokens: token exchange failed with status 401: {\n"
+        '  "error": {\n    "message": "Could not validate your token. Please try signing in again.",\n'
+        '    "type": "invalid_request_error",\n    "param": null,\n    "code": "token_expired"\n  }\n}',
+        # A proxy error page must not flood the dialog or the log.
+        "Failed to exchange authorization code for tokens: token exchange failed with status 502: " + "<p>bad gateway</p>" * 200,
+    ])
+
+    class Engine(_BrowserCallbackEngine):
+        def management_request(self, method, path, *, query=None, payload=None, timeout=None):
+            if path == "/get-auth-status":
+                return {"status": "error", "error": next(reasons)}
+            return super().management_request(method, path, query=query, payload=payload, timeout=timeout)
+
+    async def run() -> None:
+        adapter = _browser_callback_adapter(tmp_path, Engine())
+        first = await adapter.oauth_status((await adapter.start_oauth("src_fixture123", "openai")).flow_id)
+        assert first.error_detail == (
+            "Failed to exchange authorization code for tokens: token exchange failed with status 401: "
+            '{ "error": { "message": "Could not validate your token. Please try signing in again.", '
+            '"type": "invalid_request_error", "param": null, "code": "token_expired" } }'
+        )
+        second = await adapter.oauth_status((await adapter.start_oauth("src_fixture456", "openai")).flow_id)
+        assert second.error_detail is not None
+        assert len(second.error_detail) == 1000
+        assert second.error_detail.startswith("Failed to exchange authorization code for tokens: ")
+        assert second.error_detail.endswith("…")
 
     asyncio.run(run())
 

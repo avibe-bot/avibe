@@ -2990,7 +2990,7 @@ def optimize_route(config: V2Config | None = None, *, trigger: str = "manual") -
             name="vibe-tunnel-route-optimization",
             daemon=True,
         )
-        emergency = effective_trigger == "availability" and int(previous.get("ha_connections") or 0) == 0
+        emergency = tunnel_quality.route_unavailable(previous)
         if not _reserve_recovery(thread, manual=manual, emergency=emergency, now=now):
             return {**current, "ok": False, "error": "route_optimization_unavailable"}
         _RECOVERY_CANCEL_EVENT.clear()
@@ -3381,6 +3381,7 @@ def _run_route_optimization(
     previous_path = previous.get("request_path") if isinstance(previous.get("request_path"), dict) else None
     previous_p95 = _request_path_metric(previous_path, "p95")
     previous_p99 = _request_path_metric(previous_path, "p99")
+    route_down = False
     _report_runtime_status_async(event="route_optimization_started")
     try:
         loaded = config or V2Config.load()
@@ -3420,7 +3421,11 @@ def _run_route_optimization(
             if requested_protocol not in {"auto", "quic", "http2"}:
                 requested_protocol = _initial_connector_protocol(loaded)
             if recovery_trigger == "availability" and _configured_protocol(loaded) == "auto":
-                requested_protocol = "auto"
+                # cloudflared's auto mode starts on QUIC and falls back only after
+                # repeated dial failures, so it cannot replace a dead QUIC route
+                # within the candidate readiness window.
+                route_down = tunnel_quality.route_unavailable(previous)
+                requested_protocol = "http2" if route_down and previous_protocol == "quic" else "auto"
             candidate_pid, metrics_url = _start_candidate_connector(
                 loaded,
                 binary,
@@ -3437,6 +3442,9 @@ def _run_route_optimization(
         comparison_snapshot = previous
         if not isinstance(active_now_pid, int) or not _is_cloudflared_pid(active_now_pid):
             recovery_trigger = "availability"
+            comparison_snapshot = {**previous, "ha_connections": 0}
+        elif tunnel_quality.route_unavailable(previous):
+            # Reported connections are not evidence of service when no request succeeds.
             comparison_snapshot = {**previous, "ha_connections": 0}
         if candidate_snapshot is None or not tunnel_quality.candidate_is_better(
             comparison_snapshot,
@@ -3481,6 +3489,15 @@ def _run_route_optimization(
             _pid_path().write_text(str(candidate_pid), encoding="utf-8")
             _candidate_pid_path().unlink(missing_ok=True)
             promoted = True
+        if route_down:
+            # The previous transport failed; restarts must use the one just verified.
+            verified_protocol = (
+                requested_protocol
+                if requested_protocol in {"quic", "http2"}
+                else candidate_snapshot.get("protocol")
+            )
+            if verified_protocol in {"quic", "http2"}:
+                _set_preferred_protocol(verified_protocol)
         if isinstance(old_pid, int) and old_pid != candidate_pid:
             old_pid_state = _cloudflared_pid_state(old_pid)
             if old_pid_state == "cloudflared":

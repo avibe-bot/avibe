@@ -3,8 +3,11 @@ import hashlib
 import json
 import stat
 import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 from config.platform_registry import platform_descriptors
 from core import install_integrity
@@ -90,6 +93,41 @@ def test_verify_python_environment_probes_use_private_empty_directories(monkeypa
     assert all(call["cwd_mode"] & 0o077 == 0 for call in calls)
     assert all(call["cwd_entries"] == () for call in calls)
     assert calls[0]["cwd"] != calls[1]["cwd"]
+
+
+# Each run appends one line to the runs file. A "cold" probe stands in for
+# the first run of a freshly written tree: it blocks past the deadline once,
+# and every later run answers. A "hung" probe never answers.
+_PROBE_SCRIPT = """
+import pathlib, sys, time
+runs = pathlib.Path(sys.argv[1])
+with runs.open("a") as handle:
+    handle.write("run\\n")
+if sys.argv[2] == "cold" and len(runs.read_text().splitlines()) > 1:
+    print("answered")
+    sys.exit(0)
+time.sleep(60)
+"""
+
+
+@pytest.mark.parametrize(
+    ("behaviour", "answers", "runs"),
+    [("cold", True, 2), ("hung", False, 2)],
+)
+def test_a_timed_out_probe_runs_once_more_before_the_timeout_is_final(tmp_path, behaviour, answers, runs):
+    """#2316: a cold first run outlived its fixed budget and failed the install."""
+
+    runs_file = tmp_path / "runs"
+    command = [sys.executable, "-c", _PROBE_SCRIPT, str(runs_file), behaviour]
+
+    if answers:
+        result = install_integrity.run_isolated_probe(command, timeout=3)
+        assert result.returncode == 0
+        assert result.stdout.strip() == "answered"
+    else:
+        with pytest.raises(subprocess.TimeoutExpired):
+            install_integrity.run_isolated_probe(command, timeout=3)
+    assert len(runs_file.read_text().splitlines()) == runs
 
 
 def test_candidate_probe_does_not_inherit_pythonpath(monkeypatch, tmp_path):

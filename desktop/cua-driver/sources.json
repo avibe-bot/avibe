@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "driver": {
+    "version": "0.31.0",
+    "tag": "cua-driver-rs-v0.31.0",
+    "source_commit": "5272e492d61b96caf08e3bf434d91126c1f3dccc",
+    "license": "MIT",
+    "release_base_url": "https://github.com/trycua/cua/releases/download/cua-driver-rs-v0.31.0",
+    "release_checksums_asset": "checksums.txt",
+    "release_checksums_sha256": "b9e0f7a45a49f25de4824e53ae498d5d228d7bd1a80a746a06809707e9490275",
+    "macos": {
+      "asset": "cua-driver-rs-0.31.0-darwin-universal-binary.tar.gz",
+      "sha256": "06cd80b153bdf046dc067fb593e0fc648e780afa37a902ca0515ac25f32f9a4f"
+    }
+  },
+  "managed_policy": "policy.yaml",
+  "tool_snapshot": "tools-v0.31.0.json",
+  "upstream_focus_contract": "libs/cua-driver/rust/Skills/cua-driver/MACOS.md#the-no-foreground-contract"
+}

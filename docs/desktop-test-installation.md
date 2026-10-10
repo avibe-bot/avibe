@@ -13,9 +13,11 @@ downloaded `.SHA256SUMS` filename in the directory containing all five files.
 On Windows, use `Get-FileHash -Algorithm SHA256 <installer.exe>` and compare it
 with the installer entry in `.SHA256SUMS`. The source record identifies the tag,
 commit, desktop version, and bundled Avibe package version; the Runtime manifest
-records the embedded archive and toolchain hashes. `SIGNATURE` is descriptive
-metadata, **not a cryptographic signature file**. Hashes detect changed downloads;
-they do not establish a trusted developer identity.
+records the embedded archive and toolchain hashes. On macOS, a current schema-2
+source record also identifies the pinned Cua Driver source and its archive,
+extracted, thinned, packaged, and code-signing hashes. `SIGNATURE` is
+descriptive metadata, **not a cryptographic signature file**. Hashes detect
+changed downloads; they do not establish a trusted developer identity.
 
 The macOS **app inside the DMG is ad-hoc signed**. The outer DMG is unsigned and
 unnotarized; this is not Developer ID distribution. Open the DMG, drag Avibe to

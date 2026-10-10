@@ -9,6 +9,8 @@ vi.mock('./platform', () => platform);
 
 import {
   checkRemoteAuthForPath,
+  isSetupCheckBypassed,
+  isSetupRedirectExempt,
   deferRemoteAuthRedirect,
   reportRemoteAuthorizationState,
   remoteLoginPath,
@@ -71,6 +73,20 @@ describe('remote auth navigation', () => {
       expect(getSession).toHaveBeenCalledOnce();
     },
   );
+
+  it('checks setup on the desktop pet, which is only exempt from the wizard redirect', async () => {
+    await expect(checkRemoteAuthForPath(
+      '/pet',
+      async () => ({ remote: true, authenticated: true }),
+    )).resolves.toEqual({
+      session: { remote: true, authenticated: true },
+      loginRequired: false,
+      checkSetup: true,
+    });
+    expect(isSetupRedirectExempt('/pet')).toBe(true);
+    expect(isSetupCheckBypassed('/pet')).toBe(false);
+    expect(isSetupRedirectExempt('/settings/diagnostics')).toBe(false);
+  });
 
   it('checks setup after an authenticated remote session on regular app routes', async () => {
     await expect(checkRemoteAuthForPath(

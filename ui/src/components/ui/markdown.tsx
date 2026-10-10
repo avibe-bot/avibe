@@ -24,6 +24,12 @@ import { inAppChatPath } from '@/lib/applicationRoutes';
 import { isProxyMediaUrl, readMediaDims } from '@/lib/mediaProxy';
 import { isAbsoluteWindowsFileHref, resolveLocalFileLink, type LocalFileLinkTarget } from '@/lib/localFileLinks';
 import {
+  bindMarkdownSource,
+  rehypeSourceSpans,
+  remarkDefinitionSpans,
+  sourceSpanProps,
+} from '@/lib/markdownSource';
+import {
   MENTION_LINK_SCHEME,
   linkifyMentions,
   parseMentionHref,
@@ -348,11 +354,28 @@ function mentionUrlTransform(
   return defaultUrlTransform(literalAuthority ? repairIpv6Authority(url) : url);
 }
 
+// Every element is marked with the source range it came from, so a selection
+// can be copied back as the Markdown that was written (lib/markdownSource).
+const rehypePlugins = [rehypeSourceSpans];
+
+// A custom component draws its own element in place of the one react-markdown
+// would have, so it carries the marks itself. The wrapper takes no box of its own.
+function withSourceSpan<P extends { node?: unknown }>(render: (props: P) => React.ReactNode) {
+  return (props: P) => (
+    <span className="contents" {...sourceSpanProps(props.node)}>
+      {render(props)}
+    </span>
+  );
+}
+
 // A fenced code block with a hover/tap copy button. The button lives on a
 // relatively-positioned wrapper (not the <pre>, which scrolls horizontally) so
 // it stays pinned top-right while the code scrolls. The code text is read from
 // the rendered <pre> (textContent) rather than re-derived from the markdown AST.
-const CodeBlock: React.FC<{ children?: React.ReactNode }> = ({ children }) => {
+const CodeBlock: React.FC<{ children?: React.ReactNode; sourceSpan: Record<string, number> }> = ({
+  children,
+  sourceSpan,
+}) => {
   const { t } = useTranslation();
   const preRef = React.useRef<HTMLPreElement>(null);
   const [copied, setCopied] = React.useState(false);
@@ -365,7 +388,7 @@ const CodeBlock: React.FC<{ children?: React.ReactNode }> = ({ children }) => {
   }, []);
   const label = copied ? t('common.copied') : t('common.copy');
   return (
-    <div className="vr-code-block">
+    <div className="vr-code-block" {...sourceSpan}>
       <pre ref={preRef}>{children}</pre>
       <button
         type="button"
@@ -489,18 +512,27 @@ export const Markdown: React.FC<{
   const prepared = React.useMemo(() => {
     let text = content;
     let binding = citations ?? null;
+    const passes: TextEdit[][] = [];
     if (references && references.length) {
       const pass = linkifyMentions(text, references);
       text = pass.text;
       binding = remapCitations(binding, pass.edits);
+      passes.push(pass.edits);
     }
     if (secretRequests) {
       const pass = linkifySecretRequests(text);
       text = pass.text;
       binding = remapCitations(binding, pass.edits);
+      passes.push(pass.edits);
     }
-    return { text, binding };
+    return { text, binding, passes };
   }, [content, references, secretRequests, citations]);
+  const sourceRef = React.useCallback(
+    (root: HTMLDivElement | null) => {
+      if (root) bindMarkdownSource(root, { content, text: prepared.text, passes: prepared.passes });
+    },
+    [content, prepared],
+  );
 
   // The citation annotation is only ever read back on the surface that renders
   // badges, so the walk that writes it is attached only there — every other
@@ -528,6 +560,8 @@ export const Markdown: React.FC<{
       // Unconditional: which destinations were written with a bracketed host is
       // a fact about this text, not about whether it carries citations.
       remarkLiteralAuthority,
+      // Unconditional too: a copied reference needs its definition (lib/markdownSource).
+      remarkDefinitionSpans,
       ...(softBreaks ? [remarkBreaks] : []),
       ...(annotateCitations ? [remarkCitationSpans] : []),
     ],
@@ -542,7 +576,7 @@ export const Markdown: React.FC<{
       // render a real inline <img> for our OWN same-origin media proxy; every
       // other URL stays a click-through link (or plain text when
       // non-interactive) so nothing is fetched without an explicit action.
-      img: ({ src, alt }) => (
+      img: withSourceSpan(({ src, alt }) => (
         <MarkdownImage
           src={src ? String(src) : undefined}
           alt={alt || undefined}
@@ -550,12 +584,12 @@ export const Markdown: React.FC<{
           localFileWorkdir={localFileWorkdir}
           onOpenLocalFile={onOpenLocalFile}
         />
-      ),
+      )),
       // Links to our media proxy are agent-produced files → render the
       // download card (filename + type + download / preview). Other links keep
       // the normal anchor (interactive) or collapse to plain text inside a
       // clickable row (non-interactive).
-      a: ({ href, children, node }) => {
+      a: withSourceSpan(({ href, children, node }) => {
         const url = href ? String(href) : '';
         // @-agent / #-session mention chips (see lib/mentions). Rendered in both
         // interactive and non-interactive contexts — a chip is a span, safe inside
@@ -630,12 +664,12 @@ export const Markdown: React.FC<{
             <LinkedImageProvider>{children}</LinkedImageProvider>
           </a>
         );
-      },
+      }),
       // Wrap tables in a horizontal-scroll viewport so a wide table scrolls within
       // the bubble instead of squeezing its columns to fit (see index.css). A plain
       // <div> is valid in both interactive and preview (clickable-row) surfaces.
-      table: ({ children }) => (
-        <div className="vr-table-scroll">
+      table: ({ children, node }) => (
+        <div className="vr-table-scroll" {...sourceSpanProps(node)}>
           <table>{children}</table>
         </div>
       ),
@@ -644,7 +678,7 @@ export const Markdown: React.FC<{
             // Fenced code blocks get a hover/tap copy button. Only on the
             // interactive surface — a <button> nested in a clickable preview row
             // would be invalid interactive content.
-            pre: ({ children }) => <CodeBlock>{children}</CodeBlock>,
+            pre: ({ children, node }) => <CodeBlock sourceSpan={sourceSpanProps(node)}>{children}</CodeBlock>,
           }
         : {
             // GFM task lists render a checkbox <input>; even disabled, an
@@ -661,9 +695,10 @@ export const Markdown: React.FC<{
   const urlTransform = (url: string, _key: string, node: { properties?: Record<string, unknown> }) =>
     mentionUrlTransform(url, Boolean(onOpenLocalFile), node);
   return (
-    <div className={cn('vr-markdown', className)}>
+    <div ref={sourceRef} className={cn('vr-markdown', className)}>
       <ReactMarkdown
         remarkPlugins={remarkPlugins}
+        rehypePlugins={rehypePlugins}
         components={components}
         urlTransform={urlTransform}
       >

@@ -206,3 +206,9 @@ scenarios:
     kind: network_policy
     layer: contract
     test: tests/test_remote_access_vibe_cloud.py::test_ra_tq_032_remote_status_keeps_page_fields_and_drops_host_internals
+  - id: RA-TQ-033
+    name: A route that serves no public requests recovers over the other transport despite cooldown
+    status: covered
+    kind: lifecycle
+    layer: scenario
+    test: tests/test_tunnel_recovery.py::test_ra_tq_033_availability_recovery_protocol_follows_route_outage

@@ -24,7 +24,9 @@ export interface InboxState {
   loadingMore: boolean;
   refresh: () => Promise<void>;
   loadMore: () => Promise<void>;
-  markRead: (sessionId: string, untilMessageId?: string) => Promise<void>;
+  /** Resolves true when the server applied the read, false when it did not
+   *  (errors are not raised: clearing unread is best-effort). */
+  markRead: (sessionId: string, untilMessageId?: string) => Promise<boolean>;
   /** Refcounted activation for the FEED (see ``useConsumerActivation``). The
    *  unread map is unconditional — it badges the favicon and the app icon on
    *  every route — but ``inboxSessions`` is only rendered by the sidebar and the

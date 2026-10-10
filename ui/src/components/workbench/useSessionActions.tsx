@@ -1,7 +1,7 @@
 import type * as React from 'react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Archive, EyeOff, GitFork, Hash, Pencil, Pin, PinOff } from 'lucide-react';
+import { Archive, EyeOff, GitFork, Hash, PawPrint, Pencil, Pin, PinOff } from 'lucide-react';
 
 import { useApi } from '../../context/ApiContext';
 import type { WorkbenchSession } from '../../context/ApiContext';
@@ -9,7 +9,9 @@ import { useComposerInsertTarget } from '../../context/ComposerBridgeContext';
 import { useWorkbenchProjectsActions } from '../../context/WorkbenchProjectsContext';
 import { useToast } from '../../context/ToastContext';
 import { useUnsavedChangesActionGuard } from '../../context/useUnsavedChangesActionGuard';
+import { canShowInDesktopPet } from '../../lib/desktopShell';
 import { hideSessionToBackground } from '../../lib/sessionVisibilityActions';
+import { petBridge } from '../../pet/petBridge';
 import { archiveRequestIsLive, isSessionReadOnly } from './sessionArchived';
 import { ArchiveSessionDialog } from './ArchiveSessionDialog';
 import type { SessionActionDescriptor } from './sessionActions';
@@ -171,6 +173,16 @@ export const useSessionActions = ({
     });
   }, [target, api.setSessionVisibility, showToast, t]);
 
+  const showInPet = useCallback(() => {
+    if (!target) return;
+    petBridge.showInPet(target.id).then(
+      ({ shown }) => {
+        if (!shown) showToast(t('pet.showInPetOff'), 'warning');
+      },
+      () => showToast(t('pet.showInPetFailed'), 'error'),
+    );
+  }, [target, showToast, t]);
+
   const actions = useMemo<SessionActionDescriptor[]>(() => {
     if (!target) return [];
     const canFork = Boolean(target.native_session_id);
@@ -222,6 +234,17 @@ export const useSessionActions = ({
         onSelect: () => void fork(),
       });
     }
+    // Only a desktop shell with a pet can take the session; a browser tab or
+    // an older shell never sees the row.
+    if (canShowInDesktopPet()) {
+      rows.push({
+        id: 'pet',
+        group: 'continue',
+        icon: PawPrint,
+        label: t('workbench.sessionShowInPet'),
+        onSelect: showInPet,
+      });
+    }
     rows.push({
       id: 'hide',
       group: 'continue',
@@ -250,6 +273,7 @@ export const useSessionActions = ({
     togglePinned,
     onRenameStart,
     fork,
+    showInPet,
     hide,
     requestArchive,
     archiveHint,

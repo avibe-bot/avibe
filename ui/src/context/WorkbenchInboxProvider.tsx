@@ -452,15 +452,33 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
       // independent capabilities.
       const operation = readOwnershipRef.current.beginRead(`inbox-mark-read:${sessionId}`);
       const result = await api.markSessionRead(sessionId, untilMessageId, { handleError: false });
+      // With handleError off, a 4xx/5xx resolves with the error body rather
+      // than throwing; only the endpoint's success shape is an applied write.
+      const applied = typeof result?.updated === 'number' || Boolean(result?.unread_by_session);
+      // A later *started* write for this session (a second mark-read, or a
+      // read-changing event) supersedes this one. Completing an older write
+      // first must not fence a newer write that started after it: both share
+      // the same mutation epoch until one of them commits.
+      const laterMarkStarted = (readOwnershipRef.current.latestGeneration(`inbox-mark-read:${sessionId}`) ?? 0) > operation.generation;
       if (
-        !readOwnershipRef.current.isMutationCurrent(operation, `inbox-session:${sessionId}`)
+        !applied
+        || laterMarkStarted
+        || !readOwnershipRef.current.isMutationCurrent(operation, [
+          `inbox-session:${sessionId}`,
+          `inbox-unread-session:${sessionId}`,
+        ])
       ) {
-        return;
+        return applied;
       }
+      // The response carries the whole account map, but it describes the other
+      // sessions only as of this write. It is adopted whole only if nothing has
+      // changed or committed the whole map since this write began; otherwise
+      // only this session's count, which nothing newer has touched, is merged.
+      const wholeMapCurrent =
+        readOwnershipRef.current.isMutationCurrent(operation, 'inbox-unread')
+        && committedWholeUnreadGenerationRef.current <= operation.generation;
       // A successful write commits after every read that was already in flight,
-      // even when one of those reads started later and returns last. The endpoint
-      // mutates only this session, so merge only that count; concurrent mark-read
-      // writes for other sessions remain independent.
+      // even when one of those reads started later and returns last.
       readOwnershipRef.current.acceptMutation([
         'inbox-unread',
         `inbox-unread-session:${sessionId}`,
@@ -468,10 +486,12 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
       // The unread map is authoritative for badges; the card's unread styling
       // derives from it, so clearing here clears the dot without touching the
       // feed order (a read doesn't change last activity).
-      if (!result?.unread_by_session) return;
-      applyUnreadMap(result.unread_by_session);
+      const map = result.unread_by_session;
+      if (map && wholeMapCurrent) applyUnreadMap(map);
+      else if (map) applySessionUnread(sessionId, map[sessionId] ?? 0);
+      return true;
     },
-    [api, applyUnreadMap],
+    [api, applySessionUnread, applyUnreadMap],
   );
 
   // Resume reconcile: re-read the feed WITHOUT collapsing pagination. A
@@ -833,7 +853,17 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
       onInboxUnreadChanged: (data) => {
         if (data?.unread_by_session) {
           // The event IS the newest whole map: fence the reads in flight, then adopt it.
-          acceptUnreadMutation();
+          // Include the session slice when the event names one, so an in-flight
+          // mark-read for that session cannot merge its older count over this map.
+          if (data.session_id) {
+            readOwnershipRef.current.acceptMutation([
+              'inbox-unread',
+              'inbox-unread-all',
+              `inbox-unread-session:${data.session_id}`,
+            ]);
+          } else {
+            acceptUnreadMutation();
+          }
           applyUnreadMap(data.unread_by_session);
           return;
         }

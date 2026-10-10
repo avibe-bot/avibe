@@ -121,6 +121,10 @@ _CALLER_ENV = (
     # that Runtime, and every stop, restart and start refuses or claims by its id.
     "AVIBE_DESKTOP_RUNTIME_ID",
     "AVIBE_DESKTOP_RUNTIME_ROOT",
+    "AVIBE_COMPUTER_USE_DRIVER_PATH",
+    "AVIBE_COMPUTER_USE_POLICY_PATH",
+    "AVIBE_COMPUTER_USE_STATE_DIR",
+    "AVIBE_COMPUTER_USE_SNAPSHOT_PATH",
     # A pytest run as a `vibe watch` command inherits that cycle's identity, which
     # puts the bundled GitHub waiters under test into managed-watch mode.
     "AVIBE_WATCH_ID",

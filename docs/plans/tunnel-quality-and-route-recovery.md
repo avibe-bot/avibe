@@ -51,7 +51,12 @@ continue to exchange that payload.
 
 1. `cloudflared` protocol `auto` is a connectivity fallback, not a performance
    policy. It prefers QUIC and falls back to HTTP/2 only when QUIC cannot connect.
-   Avibe owns performance-driven protocol selection.
+   That fallback needs eight consecutive edge-address failures per connection
+   (`max-edge-addr-retries`) plus backoff, and a process that has ever connected
+   over QUIC never falls back. It therefore covers networks that block UDP from
+   the start, not a QUIC path that dies later.
+   Avibe owns performance-driven protocol selection and runtime transport
+   recovery.
 2. The user-facing grade is request-path-first once enough request samples exist.
    Connector RTT remains visible diagnostic evidence, never a substitute for
    request latency.
@@ -67,8 +72,12 @@ continue to exchange that payload.
    `auto` may remember the last verified protocol across service restarts, but
    a remembered explicit protocol that cannot establish four connections
    within eight seconds is replaced by Cloudflare `auto`. Availability recovery
-   in `auto` mode also uses Cloudflare `auto`, preserving connectivity fallback
-   when network policy changes.
+   in `auto` mode also uses Cloudflare `auto` for partial availability. When the
+   route is unavailable (zero ready connections, or a high-confidence request
+   window with no successful probe) on QUIC, the candidate uses explicit HTTP/2;
+   a dead HTTP/2 route already gets QUIC first through Cloudflare `auto`.
+   Promoting a candidate for an unavailable route persists the protocol it
+   verified as the remembered preference before the old connector drains.
 6. No raw URL, response body, IP, connector identifier, or per-request sample is
    reported to avibe.bot. Only the bounded V2 aggregate is uploaded.
 
@@ -95,7 +104,10 @@ does not replace the connector grade or trigger recovery.
 | Poor | P95 `< 1000 ms`, P99 `< 2000 ms`, and `< 10%` above 1 second |
 | Critical | Any remaining measured window, or failure rate `>= 10%` |
 
-Automatic tail-latency recovery requires high confidence and one of:
+A high-confidence window with zero successful requests is an availability
+episode, not tail latency, whatever connection count cloudflared reports; its
+candidate is compared as though the active connector had no ready connections.
+Otherwise, automatic tail-latency recovery requires high confidence and one of:
 
 - request failure rate `>= 10%`;
 - P95 `>= 750 ms`, or P95 at least twice the protocol-local baseline;
@@ -444,6 +456,7 @@ three-minute rule; a single spike changes the displayed number but not health.
 | --- | --- | --- |
 | No ready connections | `ha_connections == 0` | 15 seconds |
 | Partial availability | `ha_connections < 4` | 60 seconds |
+| No successful request | High-confidence request window with zero successes | Rolling request window |
 | Request errors | `>= 3/minute` | 2 consecutive windows |
 | Timeout packet loss | `>= 10/minute` across at least 2 connections | 2 consecutive windows |
 | Metrics unavailable | State becomes `unknown`; never rotate from this alone | 45 seconds |
@@ -511,8 +524,11 @@ Additional rules:
 - Thirty healthy minutes after the latest attempt reset the episode and attempt
   count.
 - Service restart resumes persisted cooldown instead of immediately retrying.
-- When the active connector has zero ready connections, availability restoration
-  takes priority over cooldown; one emergency candidate attempt is allowed.
+- When the active route is unavailable, availability restoration takes priority
+  over cooldown; one emergency candidate attempt is allowed. A route is
+  unavailable when the connector reports zero ready connections or the
+  high-confidence request window has no successful probe, because cloudflared
+  can keep reporting a ready connection after its transport has died.
 
 ## Make-Before-Break Recovery
 
@@ -895,6 +911,7 @@ the active Connector currently demonstrates QUIC. An unobserved UDP path stays
 | RA-TQ-029 | Edge IP and source-address controls accept only live assigned addresses | config and network-policy tests |
 | RA-TQ-030 | Connectivity diagnostics distinguish proven from unobserved paths | diagnostics contract test |
 | RA-TQ-031 | Tunnel controls remain usable on desktop and mobile | browser/runtime proof |
+| RA-TQ-033 | An unavailable route recovers over the other transport despite cooldown | supervisor scenario tests |
 
 ## Implementation Boundaries
 
@@ -939,5 +956,5 @@ changes must update the schema first.
   console is visible.
 - No secret or sensitive request data appears in local snapshots, logs, Doctor,
   status APIs, or cloud payloads.
-- RA-TQ-001 through RA-TQ-030 pass in their required evidence layers; RA-TQ-031
-  receives browser proof at desktop and mobile widths.
+- RA-TQ-001 through RA-TQ-030 and RA-TQ-033 pass in their required evidence
+  layers; RA-TQ-031 receives browser proof at desktop and mobile widths.

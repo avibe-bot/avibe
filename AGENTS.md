@@ -88,6 +88,10 @@ Hard rule:
 
 - **Never restart the local `vibe` service for routine verification.**
 - The local `vibe` process may be the coding agent runtime itself; restarting it can interrupt the session.
+- **Stop only processes you started, by the pid you recorded.** Never
+  pattern-kill (`pkill -f`, `killall`, `pgrep ... | xargs kill`): a test service
+  or UI runs the same command line as the user's live `vibe`, even under a
+  separate `AVIBE_HOME`, so the pattern also kills the live runtime.
 - **Tests and probes must be hermetic by default.** Treat `$HOME`, XDG dirs,
   keychains, CLI config/token stores, running services, browser profiles, and
   cloud accounts as production data unless the user explicitly asks otherwise.

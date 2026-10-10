@@ -355,6 +355,88 @@ def test_authorized_config_envelope_and_completion_persistence_closed_loop(monke
         SettingsStore.reset_instance()
 
 
+def test_pet_window_reads_setup_finished_in_the_main_window_closed_loop(monkeypatch, tmp_path):
+    """Scenarios: AUTH-SETUP-128 producer — the desktop pet leaves setup-pending once setup is
+    finished in the main window.
+
+    Two clients share one signed-in principal, as the pet and main windows share one
+    session. The `/pet` document is the non-sensitive SPA shell, served without a
+    session like every client route; what it shows is decided by `/api/config`, which
+    refuses an unauthenticated read and, for the signed-in pet, reports setup pending
+    with the `mode` and `setup_state` fields `isSetupComplete()` reads. The main window
+    then finishes setup through the same narrow CSRF-gated POSTs as the wizard, with no
+    message to the pet, and the pet's next read reports setup complete.
+
+    What this proves is the server half the pet relies on: its re-read is answered per
+    call, so a re-read after the main window's write sees it. When the pet re-reads
+    (summon, focus, visibility), its exemption from the setup redirect, and how it
+    orders overlapping reads are browser rules, asserted against controlled responses
+    in `ui/src/pet/PetPage.test.tsx` and `ui/src/lib/remoteAuth.test.ts`. Neither layer
+    runs the two real windows; that journey stays with the desktop shell PR.
+    """
+    from config.v2_settings import SettingsStore
+    from vibe import internal_client
+
+    config = _save_config(tmp_path, paired=True, instance_kind="personal")
+    ui_dist = tmp_path / "dist"
+    ui_dist.mkdir()
+    (ui_dist / "index.html").write_text("<html>avibe</html>", encoding="utf-8")
+    monkeypatch.setattr(ui_server, "get_ui_dist_path", lambda: ui_dist)
+    monkeypatch.setattr(ui_server, "_ensure_remote_access_monitoring", lambda *_args: None)
+    monkeypatch.setattr(
+        internal_client, "reconcile_platforms",
+        AsyncMock(return_value={"status_code": 200, "body": {"ok": True}}),
+    )
+    # Finishing setup may not reach a real runtime action.
+    monkeypatch.setattr(remote_access, "reconcile", Mock(side_effect=AssertionError("pairing changed")))
+    monkeypatch.setattr(
+        ui_server, "_schedule_service_restart_for_config_fallback",
+        Mock(side_effect=AssertionError("unexpected restart")),
+    )
+    base_url = "https://alex.avibe.bot"
+    peer = {"REMOTE_ADDR": "203.0.113.44"}
+
+    def signed_in():
+        client = app.test_client()
+        client.set_cookie(
+            remote_access.SESSION_COOKIE_NAME,
+            remote_session_cookie(config, "owner@example.com", "owner-1", role="owner", access_source="owner"),
+            domain="alex.avibe.bot",
+        )
+        return client
+
+    SettingsStore.reset_instance()
+    try:
+        anonymous = app.test_client()
+        shell = anonymous.get("/pet", base_url=base_url, environ_base=peer, headers={"Accept": "text/html"})
+        assert shell.status_code == 200
+        assert shell.headers["Cache-Control"] == "no-store, private"
+        refused = anonymous.get("/api/config", base_url=base_url, environ_base=peer)
+        assert refused.status_code == 401
+        assert refused.get_json()["error"] == "remote_access_login_required"
+
+        pet, main = signed_in(), signed_in()
+        pending = pet.get("/api/config", base_url=base_url, environ_base=peer)
+        assert pending.status_code == 200
+        assert pending.get_json()["mode"]
+        assert pending.get_json()["setup_state"]["needs_setup"] is True
+
+        headers = csrf_headers(main, base_url=base_url)
+        for payload in (
+            {"slack": {"bot_token": "xoxb-pet-fixture", "app_token": "xapp-pet-fixture"}},
+            {"setup_completed": True},
+        ):
+            response = main.post("/api/config", json=payload, headers=headers, base_url=base_url, environ_base=peer)
+            assert response.status_code == 200, response.get_json()
+
+        reread = pet.get("/api/config", base_url=base_url, environ_base=peer)
+        assert reread.status_code == 200
+        assert reread.get_json()["mode"]
+        assert reread.get_json()["setup_state"]["needs_setup"] is False
+    finally:
+        SettingsStore.reset_instance()
+
+
 def test_limited_show_identity_closed_loop_installs_guest_lease(monkeypatch, tmp_path):
     """Scenario: AUTH-SETUP-404"""
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
@@ -3883,7 +3965,7 @@ def test_hub_oauth_model_free_observation_closed_loop(
     }
     state_store._secure_write_json(state_store.auth_dir / auth_name, grant)
 
-    def management_request(method, path, *, query=None, payload=None):
+    def management_request(method, path, *, query=None, payload=None, timeout=None):
         if path == "/auth-files":
             return {"files": [{
                 "id": "codex-test", "auth_index": "auth-index-test",
@@ -3982,6 +4064,128 @@ def test_hub_oauth_model_free_observation_closed_loop(
         ScenarioStep("materialize_source", materialize_source),
     ))
     ScenarioExpect.step_history(runner, ["start_login", "complete_consent", "materialize_source"])
+
+
+def test_hub_oauth_mispaste_stays_recoverable_and_schemeless_address_signs_in(monkeypatch, tmp_path):
+    """Scenario: AUTH-SETUP-127
+
+    A user on another device pastes the callback address back. The first paste
+    answers an earlier sign-in link; the second is the right address with its
+    scheme dropped by the browser. Neither may end the flow: the first is refused
+    before it reaches the provider, and the second signs in and materializes the
+    subscription Source.
+    """
+    from core.handlers.model_hub.service import ModelHubError
+    from tests.test_model_hub_api import _service
+    from vibe.model_hub_runtime.adapter import CLIProxyEngineAdapter
+    from vibe.model_hub_runtime.state import EngineStateStore
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    state_store = EngineStateStore(tmp_path / "engine-state")
+    auth_name = "codex-account-test-plus.json"
+    engine = SimpleNamespace(files=[], callbacks=[], fields=[], signed_in=False)
+
+    # The engine's side of the browser flow: it exchanges a callback only when
+    # the address carries the code its own authorization issued, then saves
+    # the grant as an auth file, the way CLIProxyAPI does.
+    def management_request(method, path, *, query=None, payload=None):
+        if path == "/auth-files":
+            return {"files": list(engine.files)}
+        if path == "/codex-auth-url":
+            return {
+                "state": "browser-state",
+                "url": "https://auth.openai.com/oauth/authorize?state=browser-state",
+            }
+        if path == "/get-auth-status":
+            assert query == {"state": "browser-state"}
+            return {"status": "ok" if engine.signed_in else "wait"}
+        if path == "/oauth-callback":
+            engine.callbacks.append(dict(payload))
+            query_code = urllib.parse.parse_qs(urllib.parse.urlsplit(payload.get("redirect_url", "")).query).get("code")
+            code = query_code[0] if query_code else payload.get("code")
+            if code == "ac_issued":
+                state_store._secure_write_json(
+                    state_store.auth_dir / auth_name,
+                    {"type": "codex", "access_token": "test-access", "refresh_token": "test-refresh"},
+                )
+                engine.files.append({
+                    "id": auth_name,
+                    "auth_index": "auth-index-test",
+                    "name": auth_name,
+                    "provider": "codex",
+                    "account": "user@example.test",
+                    "id_token": {"chatgpt_account_id": "account-test"},
+                })
+                engine.signed_in = True
+            return {"status": "ok"}
+        if (method, path) == ("PATCH", "/auth-files/fields"):
+            engine.fields.append(dict(payload))
+            return {"status": "ok"}
+        raise AssertionError((method, path))
+
+    client = Mock()
+    client.management_request.side_effect = management_request
+    supervisor = Mock()
+    supervisor.client.return_value = client
+    transport = CLIProxyEngineAdapter(supervisor=supervisor, state_store=state_store)
+    service, store, adapter = _service(tmp_path)
+    for method in ("start_oauth", "oauth_status", "submit_oauth", "cancel_oauth"):
+        monkeypatch.setattr(adapter, method, getattr(transport, method))
+    harness = SimpleNamespace()
+    runner = ScenarioRunner(harness)
+
+    async def start_login(h):
+        started = await service.oauth_start({"vendor": "openai", "channel": "hub"})
+        h.flow_id = started["flow"]["flow_id"]
+        h.source_id = started["flow"]["source_id"]
+        assert started["flow"]["presentation"]["expects"] == "paste_callback_url"
+
+    async def paste_earlier_link_address(h):
+        with pytest.raises(ModelHubError) as rejected:
+            await service.oauth_submit({
+                "flow_id": h.flow_id,
+                "value": "http://localhost:1455/auth/callback?code=ac_old&state=earlier-state",
+            })
+        assert (rejected.value.code, rejected.value.status) == ("submission_rejected", 422)
+        assert rejected.value.detail == "modelHub.errors.submission_rejected_other_attempt"
+        assert engine.callbacks == []
+        assert (await service.oauth_status(h.flow_id))["flow"]["state"] == "awaiting_action"
+
+    async def paste_schemeless_address(h):
+        await service.oauth_submit({
+            "flow_id": h.flow_id,
+            "value": "localhost:1455/auth/callback?code=ac_issued&scope=openid&state=browser-state",
+        })
+        assert engine.callbacks == [{
+            "provider": "codex",
+            "state": "browser-state",
+            "redirect_url": "http://localhost:1455/auth/callback?code=ac_issued&scope=openid&state=browser-state",
+        }]
+
+    async def materialize_source(h):
+        terminal = await service.oauth_status(h.flow_id)
+        assert terminal["flow"]["state"] == "success"
+        source = terminal["source"]
+        assert source["id"] == h.source_id
+        assert (source["vendor"], source["kind"], source["supply_channel"]) == ("openai", "subscription", "hub")
+        credential_ref = state_store.oauth_credential_ref(auth_name)
+        assert source["credential_ref"] == credential_ref
+        assert engine.fields == [{
+            "name": auth_name,
+            "prefix": state_store.credential_metadata(credential_ref)["prefix"],
+        }]
+        assert [listed["id"] for listed in service.list_sources()] == [h.source_id]
+
+    asyncio.run(runner.run(
+        ScenarioStep("start_login", start_login),
+        ScenarioStep("paste_earlier_link_address", paste_earlier_link_address),
+        ScenarioStep("paste_schemeless_address", paste_schemeless_address),
+        ScenarioStep("materialize_source", materialize_source),
+    ))
+    ScenarioExpect.step_history(
+        runner,
+        ["start_login", "paste_earlier_link_address", "paste_schemeless_address", "materialize_source"],
+    )
 
 
 @pytest.mark.parametrize("status", [401, 403])
@@ -4377,7 +4581,7 @@ def test_explicit_opencode_model_recovery_preserves_agent_and_completes(monkeypa
 
 
 def test_builtin_vibey_model_pick_completes_setup_without_a_cli(monkeypatch, tmp_path):
-    """AUTH-SETUP-127: Vibey candidates -> catalog write -> Agent model -> runnable route -> completion.
+    """AUTH-SETUP-129: Vibey candidates -> catalog write -> Agent model -> runnable route -> completion.
 
     The setup card for the built-in backend reads its candidates, adds a pick its catalog
     lacks with the suppliers it displayed, names it as the built-in Agent's model and then

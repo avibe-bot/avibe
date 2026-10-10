@@ -18,6 +18,8 @@ const mocks = vi.hoisted(() => ({
   setSessionVisibility: vi.fn(),
   showToast: vi.fn(),
   authorizeRouteAction: vi.fn<() => UnsavedChangesActionAuthorization | null>(),
+  canShowInDesktopPet: vi.fn(() => false),
+  showInPet: vi.fn<(sessionId: string) => Promise<{ shown: boolean }>>(),
 }));
 
 vi.mock('../../context/ApiContext', () => ({
@@ -35,6 +37,8 @@ vi.mock('../../context/WorkbenchProjectsContext', () => ({
 vi.mock('../../context/useUnsavedChangesActionGuard', () => ({
   useUnsavedChangesActionGuard: () => mocks.authorizeRouteAction,
 }));
+vi.mock('../../lib/desktopShell', () => ({ canShowInDesktopPet: mocks.canShowInDesktopPet }));
+vi.mock('../../pet/petBridge', () => ({ petBridge: { showInPet: mocks.showInPet } }));
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (key: string) => key }) }));
 
 const session = (over: Partial<WorkbenchSession> = {}): WorkbenchSession =>
@@ -106,6 +110,8 @@ beforeEach(() => {
   mocks.setSessionPinned.mockResolvedValue(undefined);
   mocks.archiveSession.mockResolvedValue(undefined);
   mocks.authorizeRouteAction.mockImplementation(grantedAuthorization);
+  mocks.canShowInDesktopPet.mockReturnValue(false);
+  mocks.showInPet.mockResolvedValue({ shown: true });
 });
 
 describe('surface-specific actions', () => {
@@ -266,5 +272,40 @@ describe('a metadata-only session', () => {
     expect(h.actions.map((action) => action.id)).toEqual(['pin', 'rename', 'hide']);
     expect(h.canArchive).toBe(false);
     expect(h.archiveDialog).toBeNull();
+  });
+});
+
+// "Show in pet": the Workbench hands one session to the pet.
+describe('show in pet', () => {
+  it('is offered only by a desktop shell that has a pet', () => {
+    expect(mount(options()).actions.map((action) => action.id)).not.toContain('pet');
+
+    mocks.canShowInDesktopPet.mockReturnValue(true);
+    const ids = mount(options()).actions.map((action) => action.id);
+    expect(ids).toEqual(['pin', 'rename', 'fork', 'pet', 'hide', 'archive']);
+    // Read-only sessions still offer nothing.
+    expect(mount(options({ session: session({ status: 'archived' }) })).actions).toEqual([]);
+  });
+
+  it('binds the session and stays quiet when the pet shows it', async () => {
+    mocks.canShowInDesktopPet.mockReturnValue(true);
+    select(mount(options()), 'pet');
+
+    expect(mocks.showInPet).toHaveBeenCalledWith('ses_standalone');
+    await flush();
+    expect(mocks.showToast).not.toHaveBeenCalled();
+  });
+
+  it('says how to turn the pet on when it is off, and reports a failure', async () => {
+    mocks.canShowInDesktopPet.mockReturnValue(true);
+    mocks.showInPet.mockResolvedValueOnce({ shown: false });
+    select(mount(options()), 'pet');
+    await flush();
+    expect(mocks.showToast).toHaveBeenCalledWith('pet.showInPetOff', 'warning');
+
+    mocks.showInPet.mockRejectedValueOnce(new Error('denied'));
+    select(mount(options()), 'pet');
+    await flush();
+    expect(mocks.showToast).toHaveBeenLastCalledWith('pet.showInPetFailed', 'error');
   });
 });

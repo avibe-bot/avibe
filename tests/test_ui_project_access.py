@@ -238,6 +238,7 @@ def test_active_org_member_can_use_every_project_runtime_surface(monkeypatch, tm
     session = _get(client, f"/api/sessions/{ids['session_a']}").get_json()
     assert session["workdir"] == str((tmp_path / "project-a").resolve())
     assert session["metadata"] == {"created_via": "workbench"}
+    assert session["capabilities"] == {"can_chat": True}
     assert _get(client, f"/api/sessions/{ids['session_a']}/messages").status_code == 200
     assert _get(client, f"/api/sessions/{ids['session_b']}/messages").status_code == 404
     assert _get(client, f"/api/sessions/{ids['unscoped']}").status_code == 404
@@ -379,6 +380,11 @@ def test_session_bootstrap_uses_effective_project_chat_role(monkeypatch, tmp_pat
     assert viewer_project["folder_path"] == ""
     assert viewer_project["metadata"] == {}
 
+    viewer_session = _get(client, f"/api/sessions/{ids['session_a']}")
+    assert viewer_session.status_code == 200
+    assert viewer_session.get_json()["capabilities"] == {"can_chat": False}
+    assert viewer_session.get_json()["id"] == ids["session_a"]
+
     viewer_bootstrap = _get(client, f"/api/sessions/{ids['session_a']}/bootstrap")
 
     assert viewer_bootstrap.status_code == 200
@@ -400,6 +406,10 @@ def test_session_bootstrap_uses_effective_project_chat_role(monkeypatch, tmp_pat
                 "revision": 3,
             },
         )
+
+    editor_session = _get(client, f"/api/sessions/{ids['session_a']}")
+    assert editor_session.status_code == 200
+    assert editor_session.get_json()["capabilities"] == {"can_chat": True}
 
     editor_bootstrap = _get(client, f"/api/sessions/{ids['session_a']}/bootstrap")
 

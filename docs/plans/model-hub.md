@@ -171,7 +171,8 @@ URL (api_key kind; prefilled for known vendors), a **model list** it can supply
 (auto-discovered where possible, e.g. `/models`; manually extendable via custom
 model entries), billing type (包月 | 按量 ¥), state (§4.5), and usage
 (subscription cycle % / monthly spend). Existing `last_discovered_at` records the last
-successful full inventory replacement; it is not a connectivity-check timestamp.
+committed discovery: a full inventory replacement, or a background refresh that changed
+the inventory. It is not a connectivity-check timestamp.
 Every Source read also carries the server-derived
 `adopted_by: [{backend, menu_model}]` projection of persisted Route references for
 backends currently in Hub mode. That unique projection is sorted by backend then menu
@@ -209,15 +210,16 @@ The Source workflow is complete at both entry points:
   tests the stored protocol, rediscovers inventory, updates Source health, and clears a
   `needs_action` or `error` blocker only when current evidence proves recovery. Before
   committing a smaller inventory it runs §4.5's configured-hop and supply-gap guards.
-  This is the **only saved-Source test/discovery mutation and the only corresponding
-  Source-details button**, labelled “Refresh models” / 「重新拉取」. Its request,
+  This is the **only user-triggered saved-Source test/discovery mutation and the only
+  corresponding Source-details button**, labelled “Refresh models” / 「重新拉取」. Its request,
   guarded refusal, and success are exactly the refresh row of §4.5's authoritative
   Source-mutation matrix. The UI displays the resulting inventory and state and never
   presents a second “Test connectivity” action.
 - **Model discovery.** Third-party Anthropic-compatible and OpenAI-compatible Sources
   expose an explicit “Fetch models” action while they are still in Add Source. A saved
   Source gets the same discovery behavior only through the refresh operation above;
-  there is no parallel saved discovery route. Discovery uses the observed protocol
+  there is no parallel saved discovery route, and the background refresh below only
+  adds. Discovery uses the observed protocol
   adapter, replaces only the discovered slice, preserves manual entries, and renders
   added, removed, unchanged, and failed results. Rediscovering an unchanged model id
   preserves its edited `reasoning_efforts`, `display_name`, `discovered_at`, and
@@ -230,6 +232,29 @@ The Source workflow is complete at both entry points:
   The saved Source surface may render freshness only as “Model list updated at …” /
   「型号列表更新于…」 from `last_discovered_at`. It carries no latency or “last checked”
   field or copy.
+- **Background inventory refresh.** While the runtime is enabled, the controller-owned
+  service lists every Hub-channel Source, API-key and OAuth alike, in the background;
+  native CLI Sources and credentials waiting on the user (`oauth_expired`,
+  `credential_revoked`, `account_banned`) are skipped. Each Source is due about every
+  6 hours, at a stable per-Source period within ±20% so Sources listed together drift
+  apart. The first pass runs one 5-minute tick after startup, never at boot, and catches up
+  every Source never listed or last listed more than 6 hours ago. The refresh is add-only:
+  it admits newly listed models and updates listed metadata such as reasoning tiers
+  through the same discovery application, but never removes a model or route hop, and
+  it leaves any listing that would remove effective hops or open a supply gap to the
+  manual refresh and its confirmation. Success never changes Source state: cooldown,
+  `needs_action`, `error`, and live recovery stay, because a listing is not inference
+  evidence, and no recovery event is recorded. An unchanged listing writes neither
+  config nor the engine projection; it advances only the process-local schedule. A
+  failure changes nothing persisted and records no event: it logs one redacted warning
+  and retries after 15 minutes, doubling up to 6 hours, until any later successful
+  listing, background or manual, resets the backoff. Discovery runs outside the mutation
+  lock, and its result applies only if the Source still has the identity and
+  `last_discovered_at` it was listed with. A viewer's read of Source inventory
+  (`list_sources`, `agent_model_candidates`) also requests one coalesced background pass
+  with a 30-minute age instead of the period, so a model released upstream appears when
+  someone looks. The read never waits for it, the pass honors the same backoff and
+  rules, it runs only while the schedule runs, and no Source is listed twice at once.
 - **Model inventory and manual entries.** Model `id` is unique within a Source. Every
   model-list item has
   `{id, origin: "discovered" | "manual", reasoning_efforts: string[], retired?:
@@ -710,6 +735,19 @@ start the model-output stream.
 | `network_failure.shaped_after_first_byte` | explicit closed code/classification arrives only after model output began | `stream_started: true`; after first user-visible model output | apply that existing non-permanent family and its unchanged recovery rule | none | terminal, no replay; emit only the existing redacted event |
 | `network_failure.transport_after_first_byte` | stream interrupted without explicit code | `stream_started: true`; after first user-visible model output | none; the successful connection/authentication/output evidence wins | none | terminal, no replay; emit only the existing redacted `network` event |
 
+The engine answers its own failed upstream connection or read, before any upstream
+response, with one of exactly two JSON error bodies, both produced by the pinned
+engine's error writers: the Anthropic form
+`{"type":"error","error":{"type":"api_error","message":M}}` and the OpenAI form
+`{"error":{"type":"server_error","code":"internal_server_error","message":M}}`. The
+engine always sets that `code` for a 5xx in the OpenAI form; no code-less form exists.
+When `M` is the transport error text, such as `dial tcp ...: i/o timeout` or
+`read tcp ...: operation timed out`, that exact body is the engine's label, not an
+upstream verdict, so the engine client projects it to
+`network_failure.transport_before_first_byte`. An upstream that answered adds or
+omits fields (for example a request id, a specific code, or no code), so any other
+body, a 4xx, and any streamed error event keep their own classification.
+
 Connection backoff is live execution state, never Source/configuration state. For the
 same Source, consecutive `transport_before_first_byte` decisions use delays
 `1, 2, 4, 8, 16, 30, 30, ...` seconds. While the deadline is future, it overlays only
@@ -779,17 +817,21 @@ probe scheduler or prompt/Turn/Source blackout deduplication.
 Each pending model HTTP request has one 120-second automatic admission window,
 starting at its first retryable failure or temporarily blocked admission. Fallback
 passes and Source changes never reset it. The service re-reads the effective route
-after waits and immediately tries a runnable fallback. It waits only for
-all-temporary supply; empty routes and mixed action/process/capability blockers
-retain their existing terminal rules. If the next eligibility time is outside
+after waits and immediately tries a runnable fallback. It waits while any hop of the
+effective chain may heal unattended: an effective cooldown, live connection backoff,
+or half-open ownership. A hop that already owes user action keeps the chain
+`interrupted` for display and stays in its terminal blockers, but does not end the
+wait for another hop. An empty route, a chain with no such hop, or a non-retryable
+failure this request itself observed keeps its existing terminal rule. Runtime
+preflight launches on the same predicate. If the next eligibility time is outside
 the remaining window, it ends immediately; an in-flight owner may instead wake
-waiters before their window closes. Window expiry prevents another admission,
-never cancels an already connected slow inference, and never permits replay
-after output. Explicit Stop and downstream disconnection retain cancellation.
-An expired admission remains the explicit exhausted-recovery domain result even
-if another owner recovers or a route changes before this waiter resumes or
-finishes engine preparation. An actual admitted request's permanent, request,
-engine, or post-output failure retains its own terminal classification.
+waiters before their window closes. Window expiry prevents another admission, never
+cancels an already connected slow inference, and never permits replay after output.
+Explicit Stop and downstream disconnection retain cancellation. An expired admission
+remains the explicit exhausted-recovery domain result even if another owner recovers
+or a route changes before this waiter resumes or finishes engine preparation. An
+actual admitted request's permanent, request, engine, or post-output failure retains
+its own terminal classification.
 
 Consecutive failed HTTP attempts on the same Hub Source identity use:
 
@@ -814,18 +856,20 @@ timer-generated `recover` events. Unclassified native connection failures remain
 non-persistent and do not create a Hub backoff.
 
 An eligible affected Source admits one real request as half-open owner across
-waiting Sessions. Ownership and stale settlement fencing reuse the existing
-attempt-start generation. Cancellation releases that owner only after transport
-cleanup; old generations and replaced endpoint/credential identities cannot clear
-or extend the new identity's state. A valid recovery clears the streak and emits
-one `recover`; mere timer expiry emits none. Live reads expose optional
-`recovery: eligible | in_flight` on AgentChain hops. `in_flight` is not runnable;
-with no stronger blocker it is temporary `waiting`, with nullable `retry_at`.
-The same annotation feeds service, runtime launch, API chain and AgentSupply reads.
-If the adapter returns a completed local failure without transport admission,
-release the provisional half-open claim on that normal return as well as on
-exception or cancellation. Do not synthesize `on_admitted`, attempt observations
-or retry counts for a request the engine never owned.
+waiting Sessions. A waiter whose walk admits no attempt of its own ends as
+`turn.no_candidate.blocked`, never as a gateway protocol error. Ownership and stale
+settlement fencing reuse the existing attempt-start generation. Cancellation
+releases that owner only after transport cleanup; old generations and replaced
+endpoint/credential identities cannot clear or extend the new identity's state. A
+valid recovery clears the streak and emits one `recover`; mere timer expiry emits
+none. Live reads expose optional `recovery: eligible | in_flight` on AgentChain
+hops. `in_flight` is not runnable; with no stronger blocker it is temporary
+`waiting`, with nullable `retry_at`. The same annotation feeds service, runtime
+launch, API chain and AgentSupply reads. If the adapter returns a completed local
+failure without transport admission, release the provisional half-open claim on that
+normal return as well as on exception or cancellation. Do not synthesize
+`on_admitted`, attempt observations or retry counts for a request the engine never
+owned.
 
 Temporary cooldown persistence and recovery bookkeeping are observational.
 A failed write cannot destroy valid output or replace the actual upstream
@@ -1108,15 +1152,18 @@ the probe's typed `supply` sibling, the turn record's `model_supply_state` — a
 rollup stays what its name says. One taxonomy, two grains, and only one definition of
 「稍等即可」 vs 「需处理」 at each.
 
-The predicate itself is stated **once, here**, and every contract that carries either
-grain points back at this table rather than restating it: `interrupted` when the chain
-is empty **or at least one blocker needs the user**, `waiting` only when every blocker
-is an effective cooldown, live connection backoff, or half-open ownership. The asymmetry is deliberate and
-load-bearing — `interrupted` is the
+The predicate itself is stated **once, here**, and every contract that carries
+either grain points back at this table rather than restating it: `interrupted` when
+the chain is empty **or at least one blocker needs the user**, `waiting` only when
+every blocker is an effective cooldown, live connection backoff, or half-open
+ownership. The asymmetry is deliberate and load-bearing — `interrupted` is the
 OR-branch, `waiting` the AND-branch, so a chain holding one cooling source and one
-revoked key is `interrupted`. Reading it as "every member needs the user" leaves that
-mixed chain matching neither value and, worse, hides the action the user is owed for
-the revoked key behind the fact that something else in the chain is merely cooling.
+revoked key is `interrupted`. This answers what the user owes, not whether a pending
+request may wait: recovery admission (§ bounded automatic recovery) waits for that
+cooling source while the chain still reads `interrupted`. Reading it as "every
+member needs the user" leaves that mixed chain matching neither value and, worse,
+hides the action the user is owed for the revoked key behind the fact that something
+else in the chain is merely cooling.
 
 **Surfacing tiers** (the colleague test: ask for action only when action is owed):
 
@@ -1273,9 +1320,23 @@ checked mechanically against both `vibe/i18n` locale files. A new outcome, discr
 or supply message ships as one new matrix row plus its enum/key/mirror fixtures; none may
 land as standalone prose.
 
-`upstream_detail` is display-only reply text. It is never read by classification,
-never written to resolution events, probes, or persisted provenance, and lives only on
-the in-memory turn projection that renders this turn's reply.
+`upstream_detail` is display-only text. It is never read by classification and
+never written to resolution events or probes. Owner decision (2026-10-07): an upstream
+refusal that only says "server error" cannot be diagnosed, so persisted provenance keeps
+it per attempt (`failed_attempts[].upstream_detail`, `terminal_error.upstream_detail`),
+each failed Hub attempt logs it once, and the `turn.exhausted`,
+`turn.no_candidate.blocked`, and `turn.streamed_fallback` rows append the last
+fallback-class failure of the pending request to their summary copy. A refusal with a
+valid upstream HTTP status (300–599) renders
+`modelHub.launch.last_upstream_failure` (Source, HTTP status, text). A protocol-level
+refusal carried inside an HTTP 2xx SSE envelope renders
+`modelHub.launch.last_upstream_failure_without_status` (Source, text); the envelope's
+HTTP 2xx status is not presented as the upstream status. The engine's own transport
+envelope (`network_failure.transport_before_first_byte`) carries no upstream status and
+renders `modelHub.launch.last_connection_failure` (Source, text), and Failure details
+labels that text as a connection error, never as what the upstream said. The text is the same projection in every place:
+credential-redacted, C0/C1 and Unicode Bidi_Control characters removed,
+whitespace-collapsed, and bounded to 400 characters.
 
 For `turn.engine_down`, an optional `local_error_detail` carries the numeric OS
 errno and its system message, such as `[Errno 28] No space left on device`.

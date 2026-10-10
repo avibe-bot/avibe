@@ -2244,7 +2244,16 @@ def test_a_turn_keeps_the_opencode_settings_it_was_admitted_with(monkeypatch):
     async def _async_noop(*_args, **_kwargs):
         return None
 
-    monkeypatch.setattr("modules.agents.opencode.agent.build_system_prompt_injection", lambda **kwargs: "")
+    prompt_options: dict[str, object] = {}
+
+    def capture_prompt(**kwargs):
+        prompt_options.update(kwargs)
+        return ""
+
+    monkeypatch.setattr(
+        "modules.agents.opencode.agent.build_system_prompt_injection",
+        capture_prompt,
+    )
     monkeypatch.setattr("modules.agents.opencode.agent.bind_caller_context_session", lambda *args, **kwargs: None)
     agent.controller = SimpleNamespace(
         config=SimpleNamespace(platform="slack", reply_enhancements=False, remote_access=None, language="en", opencode=admitted),
@@ -2259,6 +2268,11 @@ def test_a_turn_keeps_the_opencode_settings_it_was_admitted_with(monkeypatch):
     agent._steering_states = {}
     agent._active_requests = {}
     serve_opencode_agent(agent, _Server())
+
+    async def admitted_launch(_context):
+        return None, None, SimpleNamespace(computer_use_spec=object()), admitted
+
+    agent._prepare_launch = admitted_launch
     agent._delete_ack = _async_noop
     agent._remove_ack_reaction = _async_noop
     request = AgentRequest(
@@ -2284,3 +2298,4 @@ def test_a_turn_keeps_the_opencode_settings_it_was_admitted_with(monkeypatch):
     assert prompts and prompts[0]["model"] == {"providerID": "openai", "modelID": "gpt-5.4"}
     assert prompts[0]["reasoning_effort"] == "high"
     assert polled == [admitted]
+    assert prompt_options["include_computer_use"] is True

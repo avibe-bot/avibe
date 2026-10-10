@@ -14028,7 +14028,7 @@ def cmd_stop(*, expect_runtime_id: str | None = None):
     ui_was_running = _pid_file_points_to_live_process(paths.get_runtime_ui_pid_path())
 
     try:
-        service_stopped = runtime.stop_service(runtime_ids=provenance)
+        service_stopped = runtime.stop_service(runtime_ids=provenance, shutdown_reason="full_stop")
         ui_stopped = runtime.stop_ui(runtime_ids=provenance)
     except runtime.DesktopRuntimeClaimRefused as refusal:
         _print_provenance_refusal("desktopRuntime.stopRefused", refusal)

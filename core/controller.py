@@ -7,6 +7,7 @@ import concurrent.futures
 import json
 import logging
 import threading
+import uuid
 from typing import TYPE_CHECKING, Optional, Dict, Any
 from config import paths
 from config.platform_registry import get_platform_descriptor
@@ -32,6 +33,7 @@ from core.handlers import (
 from core.agent_auth_service import AgentAuthService
 from core.audio_asr import AudioAsrService
 from core.citations import CitationBundle
+from core.computer_use import ComputerUseConfigReconciler
 from core.message_context import build_context_session_key
 from core.message_dispatcher import ConsolidatedMessageDispatcher
 from core.message_output import MessageOutput
@@ -46,10 +48,11 @@ from core.scheduled_tasks import ScheduledTaskService
 from core.show_git import ShowGitCheckpointService
 from core.update_checker import UpdateChecker
 from core.watches import ManagedWatchService
+from core.web_ui_watchdog import watch_web_ui
 from core.vibe_agents import VibeAgent, VibeAgentStore
 from core.blocking import run_blocking
 from vibe.i18n import get_supported_languages, t as i18n_t
-from vibe.runtime import mark_service_instance_started
+from vibe.runtime import current_process_owns_service_instance, mark_service_instance_started
 
 if TYPE_CHECKING:
     pass
@@ -215,6 +218,7 @@ class Controller:
         self._runtime_work_shutdown_task: asyncio.Task[None] | None = None
         self._shutdown_tainted = False
         self._service_lock_safe_to_release = False
+        self.controller_id = uuid.uuid4().hex
         self._runtime_work_shutdown_grace_seconds = (
             _RUNTIME_WORK_SHUTDOWN_GRACE_SECONDS
         )
@@ -285,6 +289,10 @@ class Controller:
         # Initialize agents (depends on handlers/session handler)
         self._init_agents()
         self.agent_auth_service = AgentAuthService(self)
+        self.computer_use_reconciler = ComputerUseConfigReconciler(
+            self.agent_auth_service.renew_backend_runtime,
+            lambda: list(getattr(self.agent_service, "agents", {})),
+        )
         from core.backend_restart import BackendRestartCoordinator
 
         self.backend_restart_coordinator = BackendRestartCoordinator(
@@ -323,6 +331,7 @@ class Controller:
         # The single owner of Vibey's settlement outside a Turn.
         self.vibey_recovery = VibeyRecovery(self)
         self.trace_retention_task: Optional[asyncio.Task] = None
+        self.web_ui_watchdog_task: Optional[asyncio.Task] = None
         self._trace_retention_executor: Optional[Any] = None
         self._trace_retention_cancel_event: Optional[threading.Event] = None
         self._trace_retention_future: Optional[Any] = None
@@ -1221,6 +1230,14 @@ class Controller:
             await self.runtime_command_watcher.start()
         except Exception as e:
             logger.error("Failed to start runtime command watcher: %s", e, exc_info=True)
+        try:
+            self.computer_use_reconciler.start()
+        except Exception as e:
+            logger.error(
+                "Failed to start computer-use configuration reconciliation: %s",
+                e,
+                exc_info=True,
+            )
 
         try:
             if "opencode" not in getattr(agent_service, "agents", {}):
@@ -1247,6 +1264,21 @@ class Controller:
                 e,
                 exc_info=True,
             )
+        try:
+            # The service's own `stop()` retires the schedule at shutdown.
+            start_discovery = getattr(
+                getattr(self, "model_hub_service", None),
+                "start_background_discovery",
+                None,
+            )
+            if callable(start_discovery):
+                start_discovery()
+        except Exception as e:
+            logger.error(
+                "Failed to start Model Hub background discovery: %s",
+                e,
+                exc_info=True,
+            )
 
         try:
             # Off the readiness path: on a first start the seed may wait for a
@@ -1266,6 +1298,15 @@ class Controller:
                 self.trace_retention_task = asyncio.create_task(self._agent_events_retention_loop())
         except Exception as e:
             logger.error("Failed to start agent trace-event retention: %s", e, exc_info=True)
+        try:
+            # Only the service process owns the runtime's Web UI; a controller
+            # embedded in a test or tool must never start one.
+            if current_process_owns_service_instance() and (
+                self.web_ui_watchdog_task is None or self.web_ui_watchdog_task.done()
+            ):
+                self.web_ui_watchdog_task = asyncio.create_task(watch_web_ui(lambda: self.shutdown_requested))
+        except Exception as e:
+            logger.error("Failed to start the Web UI watchdog: %s", e, exc_info=True)
 
     async def _recover_runtime_owners(self) -> None:
         """Restore durable execution owners before any producer can admit work."""
@@ -2428,6 +2469,16 @@ class Controller:
                     pass
             self.vibey_model_supply_task = None
 
+        async def _cancel_web_ui_watchdog_task() -> None:
+            task = self.web_ui_watchdog_task
+            if task and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+            self.web_ui_watchdog_task = None
+
         async def _cancel_trace_retention_task() -> None:
             cancel_event = getattr(self, "_trace_retention_cancel_event", None)
             if cancel_event is not None:
@@ -2473,6 +2524,7 @@ class Controller:
 
         _stop_loop_coroutine(_cancel_cleanup_task(), "Idle cleanup task")
         _stop_loop_coroutine(_cancel_vibey_model_supply_task(), "Vibey model supply seed")
+        _stop_loop_coroutine(_cancel_web_ui_watchdog_task(), "Web UI watchdog task")
         # Retention cancellation is cooperative at a delete-batch boundary;
         # wait for that bounded join instead of abandoning the worker after
         # the generic five-second cleanup timeout.
@@ -2486,6 +2538,10 @@ class Controller:
             "Runtime work stack",
         )
         _stop_loop_coroutine(self.runtime_command_watcher.stop(), "Runtime command watcher")
+        _stop_loop_coroutine(
+            self.computer_use_reconciler.stop(),
+            "Computer-use configuration reconciler",
+        )
         # Reconciliation, capture cancellation, accepted destructive work, and
         # runtime close share one deadline so no stage can block service exit or
         # starve the stages behind it.

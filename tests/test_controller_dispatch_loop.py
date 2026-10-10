@@ -796,6 +796,7 @@ def test_cleanup_sync_settles_the_internal_server_task(tmp_path, monkeypatch) ->
     controller.scheduled_task_service = _Stopper()
     controller.watch_service = _Stopper()
     controller.runtime_command_watcher = _Stopper()
+    controller.computer_use_reconciler = _Stopper()
     controller.update_checker = type("UpdateChecker", (), {"stop": lambda self: None})()
     controller.receiver_tasks = {}
     controller.im_client = None
@@ -856,6 +857,7 @@ def test_cleanup_sync_stops_watch_service_on_stopped_loop() -> None:
     controller.runtime_work_supervisor = _Supervisor("supervisor")
     controller.watch_service = _WatchStopper("watch")
     controller.runtime_command_watcher = _Stopper("runtime")
+    controller.computer_use_reconciler = _Stopper("computer-use")
 
     loop.run_until_complete(asyncio.sleep(0))
     controller.update_checker = type("UpdateChecker", (), {"stop": lambda self: None})()
@@ -896,6 +898,7 @@ def test_cleanup_sync_makes_a_last_attempt_at_pending_backend_teardowns() -> Non
     controller.scheduled_task_service = _Stopper()
     controller.watch_service = _Stopper()
     controller.runtime_command_watcher = _Stopper()
+    controller.computer_use_reconciler = _Stopper()
     controller.update_checker = type("UpdateChecker", (), {"stop": lambda self: None})()
     controller.receiver_tasks = {}
     controller.im_client = None

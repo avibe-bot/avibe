@@ -1,6 +1,7 @@
 # Desktop Pet
 
-Status: proposed (2026-10-01)
+Status: in progress (2026-10-04). Delivery is split into three PRs; see
+"Implementation notes".
 
 ## Background
 
@@ -129,7 +130,7 @@ extra window:
 The IPC surface is kept minimal. It is granted to window `pet` for the remote
 loopback origin only, through a new capability file:
 
-- command `pet_ready() -> {binding, summon_pending: null | {intent}}`, which
+- command `pet_ready() -> {binding, revision, summon_pending: null | {intent}}`, which
   the route calls once `/pet` has mounted and its listeners are installed. It
   returns the current binding and consumes any summon that arrived before the
   page was ready, so a summon that recreated the window is never lost;
@@ -143,12 +144,18 @@ loopback origin only, through a new capability file:
   chose, `{panel_side: left | right, panel_edge: top | bottom, pet_offset}`,
   and the route renders the pet and panel from that value. The native frame
   and the DOM therefore share one placement decision;
-- command `pet_bind(session_id) -> {shown}` and event `pet:bound`, which set
-  and carry the session binding (see Session binding). The pet uses
-  `pet_bind` for its switcher; a call from `main` also wakes the pet;
-- command `pet_unbind(session_id)`, a compare-and-clear: it clears the binding
-  only if it is still `session_id`, so a late result about an old session can
-  never clear a newer one;
+- command `pet_bind(session_id) -> {binding, revision, shown}` and event
+  `pet:bound {session_id, revision}`, which set and carry the session binding
+  (see Session binding). The pet uses `pet_bind` for its switcher; a call from
+  `main` also wakes the pet;
+- command `pet_unbind(session_id) -> {binding, revision}`, a compare-and-clear:
+  it clears the binding only if it is still `session_id`, so a late result
+  about an old session can never clear a newer one;
+- every binding the shell reports carries `revision`, a counter it raises by
+  one on each change. The page applies a report only if its revision is newer
+  than the last one it applied, so a `pet:bound` and a command answer that
+  cross can never leave the older binding shown; a report without a revision
+  is rejected;
 - command `pet_open(link)`, which takes any link the existing deep-link
   parser (`desktop-deep-links.md`) accepts: session, Show Page, settings, and
   vault request. It focuses `main` through the same path a clicked deep link
@@ -213,7 +220,13 @@ as it does for the Workbench.
 `/pet` is a new route in the same SPA.
 
 - It sits inside `AuthGuard` and the existing providers (Api, Inbox), but
-  outside `AppShell`, so it has no sidebar or chrome.
+  outside `AppShell`, so it has no sidebar or chrome. The transparent
+  `pet-window` style is installed by a route shell around the guard, so a
+  loading or authorization recheck never paints an opaque body into the
+  native window. AuthGuard itself returns nothing, not its usual loading
+  surface, while `/pet` is waiting on a session. Draft, in-flight send, and
+  per-session send-uncertainty live in a document store so the same recheck
+  cannot drop a lock or the text that belongs to it.
 - `/pet` is exempt from `AuthGuard`'s setup redirect. Before setup is
   complete, it renders its own setup-pending state ("Finish setting up in
   Avibe", which calls `pet_open("avibe://settings")`; `main`'s own guard then
@@ -309,7 +322,9 @@ when the user changes the UI port, so it cannot own anything durable.
   re-read on `session.activity` and `onConnected` while it is open, so a new
   session with no reply yet is listed.
 - The shell writes `pet.json` and emits `pet:bound` to the pet. On load, the
-  pet reads the binding from `pet_ready()`.
+  pet reads the binding from `pet_ready()`. Every report is ordered by its
+  revision, and the pet's own picks and clears are sent one at a time in the
+  order the user made them.
 - **A binding is valid only while `S` is a writable session**, by the chat
   page's own predicate: `getSession(S)` succeeds and
   `isSessionReadOnly(session)` is false. That rejects archived sessions and
@@ -359,6 +374,28 @@ comes from an API the Workbench already uses:
   (`turn_state.background_activities`) do not change the state. The panel
   shows them as an activity strip, and the collapsed pet shows a count. The pet
   is "Running" only when the agent itself is working.
+- **Other conversations move the pose only.** When the bound session is
+  Idle (or nothing is bound) and an agent is mid-turn in any other
+  conversation the user can see, the avatar shows the Running pose and does
+  not fall asleep. The state, the panel, the badge and `data-state` still
+  describe the bound session alone, so the panel never claims `S` is running.
+  - "Working" means an `active` instance of a `foreground` session in the
+    running-agents snapshot (`GET /api/running-agents`, the Agents page's
+    source), on any surface. Background runs, Runtime-owned sessions and
+    session-less processes do not count; an unreachable snapshot counts as
+    nothing working.
+  - It is read only with `can_use_agents`. It is re-read on every event that
+    can change an input of the rule, declared once as `REFRESH_TRIGGERS`:
+    agent state (`turn.start`, `turn.end`, `session.status`,
+    `runs.updated`), a session's visibility or existence
+    (`session.activity`), what the reader may see (authorization changes),
+    and gaps (reconnect, page return). A 30-second reconcile while visible
+    covers IM turns and agents that stop without an event.
+  - `turn.start` is published before the backend registers the agent as
+    active, so a started session is re-read every 2 seconds until the
+    snapshot shows it active, its `turn.end` arrives, or 30 seconds pass.
+  - `derivePetPose(state, {othersWorking, asleep})` is the pure rule; the
+    bound session's non-Idle states always win.
 - **Reading.** The pet marks read only what it rendered. The expanded panel
   renders every unread agent result in the loaded tail, oldest first, in a
   scrollable list, rather than only the latest one.
@@ -368,9 +405,10 @@ comes from an API the Workbench already uses:
     Workbench together.
   - A result that lands after rendering, for example from a queued turn,
     stays unread and keeps the badge.
-  - If the unread rows reach past the loaded tail, the panel does not mark
-    read at all. It shows "More in Avibe" (`pet_open` with the session link)
-    and leaves reading to the Workbench.
+  - If the unread rows reach past the loaded tail — including when the
+    inbox count is ahead of the unread results in that tail — the panel
+    does not mark read at all. It shows "More in Avibe" (`pet_open` with
+    the session link) and leaves reading to the Workbench.
 
 **Only the latest agent result's quick replies mean Needs input.** This is a
 deliberate difference from the Workbench, which keeps every unanswered group
@@ -383,6 +421,13 @@ question, and treating it as one would hold the pet in Needs input
 indefinitely with no action that clears it. Older groups stay clickable in the
 Workbench, reached with "Open in Avibe". This also keeps the state computable
 from the bounded tail, with no history scan.
+
+A group is also answered by any user input after it (a row whose type lists
+`user` in the catalog's `inputAuthors`; a display-only Show Page annotation is
+not input). The user often answers
+in free text, and that message starts a turn: until the next result lands the
+agent is working on the answer, so the pet shows Running rather than Needs
+input for the whole turn.
 
 Tool approvals and `AskUserQuestion`-style waits do not exist today. Claude
 runs with permissions bypassed and Codex auto-approves, so vault requests and
@@ -418,7 +463,9 @@ Workbench. The pet shows "Queued" and offers no steering control in v1.
 
 - **Hotkey tap with the pet collapsed or hidden** (`listen` intent). Show the
   pet, expand it, focus it, and start listening. If voice is unavailable, focus the text input
-  instead.
+  instead. Focus waits until the native frame has grown and the composer is
+  on screen (a cold load still waits on the session grant). The listen
+  request lives in the document store so an AuthGuard recheck cannot drop it.
 - **No valid binding** (none chosen yet, or cleared after an archive). The
   hotkey opens the panel on the session switcher and does not start listening
   or accept input, so nothing is ever captured without a destination.
@@ -538,9 +585,15 @@ The microphone usage string and audio-input entitlement already ship (#2293).
     lost recreates it through `pet_reconcile()`;
   - the saved anchor is the pet image position whichever side the panel
     opened on, and a restore onto a missing monitor is clamped on screen;
-  - `pet_set_expanded` returns the layout it applied, near each screen edge;
+  - `pet_set_expanded` returns the layout it applied, near each screen edge,
+    and calls are applied in the order they were made, so a late collapse
+    cannot overtake a later expand. The page sends `pet_set_expanded` one
+    at a time in that same order, and still keeps only the answer to its
+    latest request;
   - `pet_bind` persists to `pet.json` and emits `pet:bound`, and the binding
-    survives a Runtime origin change;
+    survives a Runtime origin change; every change raises the revision by
+    one, and `pet_ready`, `pet_bind`, `pet_unbind` and `pet:bound` all carry
+    it;
   - `main` gains only `pet_bind`, and `pet` is granted exactly `pet_ready`,
     `pet_set_expanded`, `pet_bind`, `pet_unbind`, `pet_open`, the two events,
     and `start-dragging`; `pet_unbind(A)` is a no-op when the binding is `B`;
@@ -632,6 +685,159 @@ The microphone usage string and audio-input entitlement already ship (#2293).
 - **Focus.** Summoning focuses the pet so that typing works. Confirm that the
   previously active app gets focus back when the panel collapses.
 
+## Implementation notes
+
+Decisions made while building, where the code is simpler than the text above.
+The code and its tests are the contract; this section records why.
+
+- **Three PRs instead of one for delivery 1.** (a) the Runtime
+  `message.updated` for quick-reply choices (#2357); (b) the `/pet` route,
+  state, panel, poses and i18n; (c) the shell: window, IPC, shortcut, tray,
+  `pet.json`, and "Show in pet". The pet stays invisible until (c) lands, so
+  (a) and (b) ship nothing a user can see.
+- **`/pet` sits inside `AuthGuard` with a setup-redirect exemption only.** It
+  keeps the login and authorization gates, and `SETUP_REDIRECT_EXEMPT_PATHS`
+  exempts it from the wizard redirect only. It is not a diagnostics-style
+  bypass (`SETUP_CHECK_BYPASS_PATHS`), so it never renders without a session:
+  if the first session probe fails, the guard keeps loading and checks again
+  each time the page comes back, and the pet always runs with its
+  authorization. Its own setup gate (`usePetSetup`)
+  applies the same rule through the shared `isSetupComplete` and shows
+  "finish setting up in Avibe" instead of a pet-sized wizard. The route stays
+  outside the Workbench chrome. The setup re-read bypasses the config cache
+  (`getConfig({ cache: false })`). Composing is shown only when both the
+  instance `can_chat` and the bound session's project `capabilities.can_chat`
+  are true. The session GET carries that flag with the same role rule as
+  bootstrap (`get_effective_session_role` + editor); unknown or failed reads
+  deny. The pet does not load bootstrap.
+- **Shell → page events are DOM events.** The shell dispatches
+  `avibe:pet-summon` and `avibe:pet-bound` on `window` through a
+  shell-evaluated script, the channel the Settings… menu already uses, so the
+  pet needs no Tauri event permission. Page → shell stays Tauri commands. The
+  contract lives in `ui/src/pet/petBridge.ts`.
+- **One summon store per document.** `petShell.ts` installs the listeners
+  from the first frame, before setup is known, and keeps the latest summon
+  until the pet surface takes it. A summon during setup-pending re-reads
+  setup and is then acted on, so a hotkey is never lost to loading order.
+- **`PetLayout` has no `pet_offset`.** The route places the pet and panel from
+  `panel_side` and `panel_edge` alone; the shell owns the offset.
+- **No `useSessionTurnState` extraction.** The chat page's turn logic is
+  interleaved with its Agent Activity buffer, so extracting it would be a
+  risky refactor of the chat page for a consumer that needs less. The pet
+  keeps the same rules in `usePetSession`: the authoritative
+  `GET /turn-state`, the same reconcile cadences, and the 4 s post-send grace.
+- **Generation fencing** is one class, `FencedSource`, used by every source
+  including the switcher list. A key change frees the in-flight slot at once,
+  so switching sessions never waits on the old session's read.
+- **The shell's revision orders bindings.** The page never infers order from
+  arrival: `pet_ready()`, `pet:bound`, and the answers to its own picks and
+  clears are applied only when newer than the last report it applied. Its own
+  changes are shown at once and queued, so a second pick is not sent before
+  the first is answered; when none is outstanding, it shows exactly what the
+  shell last reported. A failed pick shows the shell's binding again. A
+  failed clear is not undone, since re-showing an invalid session would only
+  fail validation and clear it again.
+- **An unknown send result is not a failure.** As in the chat composer
+  (`useNewSession`), a send counts as refused only for `400`, `403`, `404`,
+  `409` or `422`. Any other failure (a network error, a `5xx`, a
+  `dispatch_pending` `502`/`504`) may have been admitted, so the pet keeps the
+  draft, hides quick replies, closes input for that session and offers "Open
+  in Avibe"; opening the session there is how the user finds out, and lifts it.
+  Each session keeps its own lock, so inspecting B does not reopen A.
+  The lock lifts only after `pet_open` succeeds; a failed open leaves it.
+  Draft, in-flight send, those locks, and a pending listen-focus live
+  outside React so an AuthGuard recheck cannot drop them. A listen summon
+  focuses the input only after the panel has grown and the composer is on
+  screen.
+- **The panel opens after the shell grows the frame.** Closing hides it at
+  once; opening waits for `pet_set_expanded` to succeed, so replies are never
+  marked read while still clipped. Native resizes are sent one at a time in
+  the order they were asked, matching the shell's call-order contract, and
+  only the latest request updates React. A failed request restores the last
+  confirmed expansion, so a redundant expand of an already-open panel cannot
+  hide it. Expansion lives in `petPanel` so the setup-pending card grows the
+  native frame too; until it confirms, only the avatar is shown. The
+  setup-pending summon listener is stable, so a still-pending summon is not
+  replayed into an expand/recheck loop.
+- **Read-marking waits for a tail snapshot.** Live rows that arrive before the
+  first tail read lands say nothing about older unread rows, so the pet treats
+  the tail as having older rows until a read has landed. A live row or unread
+  change that arrives with no snapshot yet also starts that first read; a
+  mark-read in any window re-reads the bound session's tail so `read_at` is
+  not stale when the next result lands.
+- **Setup is monotonic.** One wake runs several setup reads (a summon also
+  focuses the window). Any read that sees setup complete wins; an incomplete
+  answer applies only from the latest read; a failure only settles the first
+  check and never turns a known state back.
+- **An authorization change drops what was read under the old one.** The
+  session, tail, turn state and switcher rows are cleared at once and re-read.
+  Pending vault requests do the same in the shared `usePendingVaultRequests`
+  (so the chat page gets it too), and the inbox has its own handler. A
+  `session.status` event that arrives with no session row starts a read
+  instead of patching nothing.
+- **Mark-read answers are ordered in the inbox provider.** A newer mark-read
+  or read-changing event for a session supersedes an older answer for it, and
+  the account-wide unread map in an answer is adopted only if no other write
+  or snapshot has committed since the write began; otherwise only that
+  session's count is merged.
+- **`design.pen` frames are deferred.** The panel reuses existing tokens and
+  primitives; frames follow once the shell PR makes the pet visible.
+- **Pet input uses the session GET's project grant.** Workbench Chat combines
+  instance `can_chat` with bootstrap `capabilities.can_chat`. The pet already
+  reads the session row, so GET `/api/sessions/<id>` now includes the same
+  `{capabilities:{can_chat}}` sibling (the session fields stay top-level; the
+  client strips `capabilities` before treating the rest as the row). An
+  instance editor who is a project viewer therefore sees state but no composer
+  or quick replies; POST remains rejected by project-role middleware.
+
+- **The shell's window has one owner, and the pet keeps no copy of the
+  Runtime.** `reconcile_now` alone creates and destroys `pet`: the window
+  exists exactly when the pet is on and the Workbench shows a Runtime, at that
+  Runtime's origin. The Shell's `active_origin` is the one record of that
+  Runtime, and `set_active_origin`, its only writer, reconciles the pet, so
+  every path that hands the Workbench a Runtime or takes it away (handoff,
+  return to bootstrap, explicit stop, `main` recreated) moves the pet with
+  it. The first review rounds found two call sites that forgot to tell an
+  earlier pet-side copy; removing the copy closes that class rather than the
+  instances. Every wake runs on the main thread and checks the switch first. `pet_bind` and `pet_open` move their
+  window work off the IPC callback, because creating a window inside one
+  deadlocks on Windows.
+- **Commands check their caller twice.** The `pet` capability (and
+  `main-pet-bind` for the Workbench) only grants literal-loopback pages, and
+  each command checks again that its caller is the pet window on its own
+  `/pet` page, or, for `pet_bind`, the `main` window on the active Runtime.
+  The Workbench learns "Show in pet" exists from a top-level
+  `__AVIBE_DESKTOP_PET__` marker, so an older shell never offers it.
+- **A summon before any Runtime waits as `show`.** The shortcut is live from
+  launch and the tray can turn the pet on during bootstrap, before a window
+  can exist. Such a summon is kept for the first page and delivered as
+  `show` with the window focused, so the pet answers once the Runtime is
+  ready, but a key pressed during a startup that can take a while never
+  opens the microphone long after. A Runtime that goes away first drops it.
+- **The shortcut plugin is pinned to 2.3.** `tauri-plugin-global-shortcut`
+  2.4 requires Tauri 2.12; `~2.3` keeps the locked Tauri 2.11 and adds only
+  the hotkey crates to the lock file. Lift the pin with the Tauri upgrade.
+- **Placement has one coordinate space per platform.** macOS places every
+  window in one space of points. Windows and Linux place windows on one
+  physical desktop, and the pet window's scale changes as it crosses
+  displays, so the saved anchor is that desktop divided by the primary
+  display's scale, both when saving and restoring, and the restored window is
+  positioned in physical pixels. In that space each display carries a `unit`,
+  the length of one of its own points: the pet's extent, its default margin,
+  its centre and the window's padding are all scaled by the unit of the
+  display they are measured on, so a pet clamped onto a denser display stays
+  whole. (Review found positions normalized but the extent not; every
+  quantity measured in the stored space now goes through the unit.) The anchor saved after a drag settles
+  (400 ms) is the pet's own top-left corner, rounded, with the display's name;
+  it is clamped back onto a connected display when the window is built.
+- **`⌃⌥Space` can collide with macOS input-source switching.** It is the
+  default "Select next source in Input menu" shortcut, which many users with
+  a second input method keep. The default stays as specified; a refused
+  registration shows in the tray, and the presets are the way out.
+- **Scenario.** `AUTH-SETUP-128` stays partial: its packaged two-window
+  journey is a manual check on the built shell. "Show in pet" has no scenario
+  catalog of its own; the session-actions tests cover it.
+
 ## Follow-ups
 
 - Bind to the main-agent session when the session type lands, and remove the
@@ -646,13 +852,15 @@ The microphone usage string and audio-input entitlement already ship (#2293).
 ## Todo
 
 - [x] Update G8 and G10 in `desktop-product-gaps.md` to point here.
-- [ ] Pet window, lifecycle invariants, capability file, and IPC.
-- [ ] Global shortcut, tray toggle and presets, `pet.json`.
-- [ ] `/pet` route, session binding, "Show in pet".
-- [ ] `derivePetState` with Vitest coverage.
-- [ ] Panel: latest exchange, activity strip, needs input, text send.
-- [ ] Input-freshness table for the pet route; extract `useSessionTurnState` from the chat page.
+- [x] Pet window, lifecycle invariants, capability file, and IPC.
+- [x] Global shortcut, tray toggle and presets, `pet.json`.
+- [x] `/pet` route, session binding, and "Show in pet".
+- [x] `derivePetState` with Vitest coverage.
+- [x] Panel: latest exchange, activity strip, needs input, text send.
+- [x] Input-freshness table for the pet route (`usePetSession`, `FencedSource`).
 - [ ] Shared dictation hook; cross-window voice claim; pet listening flow.
-- [ ] Vibey pose assets, CSS motion, and panel design in `design.pen`; i18n strings.
-- [ ] Rust boundary tests; manual checks on macOS and Windows.
-- [ ] User docs: `desktop/README.md` pet section.
+- [x] Vibey pose assets, CSS motion, i18n strings.
+- [ ] Panel frames in `design.pen`.
+- [x] Rust boundary tests.
+- [ ] Manual checks on macOS and Windows.
+- [x] User docs: `desktop/README.md` pet section.

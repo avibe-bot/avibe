@@ -14,6 +14,7 @@ import csv
 import hashlib
 import importlib.metadata as importlib_metadata
 import json
+import logging
 import os
 import subprocess
 import tempfile
@@ -30,6 +31,11 @@ from packaging.utils import canonicalize_name
 
 RUNTIME_DISTRIBUTIONS = ("avibe-os", "vibe-remote")
 RUNTIME_PROBE_PREFIX = "avibe-runtime-distributions:"
+# How many runs of one probe may time out before the timeout is raised. See
+# ``run_isolated_probe``.
+PROBE_ATTEMPTS = 2
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -71,18 +77,36 @@ def isolated_probe_environment() -> dict[str, str]:
 
 
 def run_isolated_probe(command: Sequence[str], *, timeout: float) -> subprocess.CompletedProcess[str]:
-    """Run a candidate probe from a private empty working directory."""
+    """Run a candidate probe from a private empty working directory.
 
-    with tempfile.TemporaryDirectory(prefix="avibe-integrity-") as working_directory:
-        return subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
-            cwd=working_directory,
-            env=isolated_probe_environment(),
-        )
+    A probe usually runs a tree that was written moments ago. Its first run pays
+    for first reads and the system's first scan of each new executable, and a
+    timeout alone cannot tell that cold start from a hang. That cost is paid
+    once and survives the kill, while a hang repeats, so a timed-out run is run
+    once more and only a second timeout is raised (#2316). A probe that exits,
+    however it exits, is returned as is. The desktop shell's endpoint discovery
+    follows the same rule (``ENDPOINT_ATTEMPTS`` in
+    ``desktop/runtime-host/src/launcher.rs``).
+    """
+
+    attempt = 1
+    while True:
+        try:
+            with tempfile.TemporaryDirectory(prefix="avibe-integrity-") as working_directory:
+                return subprocess.run(
+                    command,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout,
+                    check=False,
+                    cwd=working_directory,
+                    env=isolated_probe_environment(),
+                )
+        except subprocess.TimeoutExpired:
+            if attempt >= PROBE_ATTEMPTS:
+                raise
+            attempt += 1
+            logger.warning("probe %s timed out after %ss; running it once more", command[0], timeout)
 
 
 def site_packages_for_python(python_executable: str | os.PathLike[str]) -> list[Path]:

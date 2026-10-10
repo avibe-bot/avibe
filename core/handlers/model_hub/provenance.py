@@ -181,10 +181,29 @@ class TurnSupplyFacts:
 
 
 @dataclass(frozen=True)
+class TurnUpstreamFailure:
+    """The last upstream refusal or connection failure behind a failed turn."""
+
+    source: str
+    # None when the transport did not expose an upstream HTTP status. A
+    # protocol-level failure can still have answered through an HTTP 2xx
+    # envelope, so this is not by itself a connection verdict.
+    http_status: int | None
+    # Redacted and bounded by the engine client; display only.
+    detail: str
+    connection_error: bool = False
+
+
+@dataclass(frozen=True)
 class TurnOutcomeRenderingRule:
     outcome: str
     discriminator: str
     copy_keys: tuple[tuple[str, str | None], ...]
+    # Appended to the summary when the turn carries its last upstream failure:
+    # an upstream refusal, or a connection that no upstream answered.
+    upstream_failure_key: str | None = None
+    upstream_failure_without_status_key: str | None = None
+    connection_failure_key: str | None = None
 
 
 # This is the only executable projection of the authoritative section 4.5 matrix.
@@ -202,6 +221,9 @@ TURN_OUTCOME_RENDERING_AUTHORITY: dict[str, TurnOutcomeRenderingRule] = {
             ("waiting_without_retry", "modelHub.launch.waiting_without_retry"),
             ("interrupted", "modelHub.launch.interrupted"),
         ),
+        upstream_failure_key="modelHub.launch.last_upstream_failure",
+        upstream_failure_without_status_key="modelHub.launch.last_upstream_failure_without_status",
+        connection_failure_key="modelHub.launch.last_connection_failure",
     ),
     "turn.request_nonfallback": TurnOutcomeRenderingRule(
         outcome="failed_terminal",
@@ -228,6 +250,9 @@ TURN_OUTCOME_RENDERING_AUTHORITY: dict[str, TurnOutcomeRenderingRule] = {
             ("interrupted", "modelHub.launch.interrupted"),
             ("transition_unpersisted", "modelHub.errors.stream_interrupted"),
         ),
+        upstream_failure_key="modelHub.launch.last_upstream_failure",
+        upstream_failure_without_status_key="modelHub.launch.last_upstream_failure_without_status",
+        connection_failure_key="modelHub.launch.last_connection_failure",
     ),
     "turn.no_candidate.unconfigured": TurnOutcomeRenderingRule(
         outcome="no_candidate",
@@ -247,6 +272,9 @@ TURN_OUTCOME_RENDERING_AUTHORITY: dict[str, TurnOutcomeRenderingRule] = {
             ("waiting_without_retry", "modelHub.launch.waiting_without_retry"),
             ("interrupted", "modelHub.launch.interrupted"),
         ),
+        upstream_failure_key="modelHub.launch.last_upstream_failure",
+        upstream_failure_without_status_key="modelHub.launch.last_upstream_failure_without_status",
+        connection_failure_key="modelHub.launch.last_connection_failure",
     ),
     "turn.canceled": TurnOutcomeRenderingRule(
         outcome="canceled",
@@ -268,6 +296,8 @@ class TurnOutcomeProjectionInput:
     upstream_detail: str | None = None
     # An OS-generated reason, separate from summary copy and upstream text.
     local_error_detail: str | None = None
+    # The last fallback-class upstream refusal, appended to supply copy.
+    last_upstream_failure: TurnUpstreamFailure | None = None
 
 
 class TurnOutcomeProductionError(ValueError):
@@ -330,6 +360,7 @@ def produce_turn_outcome(
     stream_started: bool = False,
     source_transition_persisted: bool | None = None,
     upstream_detail: str | None = None,
+    last_upstream_failure: TurnUpstreamFailure | None = None,
 ) -> TurnOutcomeProjectionInput:
     """Produce complete terminal facts from one authoritative matrix row."""
 
@@ -400,6 +431,9 @@ def produce_turn_outcome(
             upstream_detail
             if "upstream_detail" in variants and upstream_detail
             else None
+        ),
+        last_upstream_failure=(
+            last_upstream_failure if rule.upstream_failure_key is not None else None
         ),
     )
     if _turn_outcome_variant(projection, rule) not in dict(rule.copy_keys):
@@ -598,7 +632,27 @@ def render_turn_outcome_copy(
         params["blockers"] = ", ".join(rendered)
     if params.get("backend"):
         params["backend"] = display_name_for_backend(params["backend"])
-    return i18n_t(copy.key, language, **params)
+    text = i18n_t(copy.key, language, **params)
+    failure = projection.last_upstream_failure
+    rule = _turn_outcome_rule(projection)
+    suffix_key = (
+        rule.connection_failure_key
+        if failure is not None and failure.connection_error
+        else (
+            rule.upstream_failure_key
+            if failure is not None and failure.http_status is not None
+            else rule.upstream_failure_without_status_key
+        )
+    )
+    if failure is not None and suffix_key is not None:
+        text = " ".join((
+            text,
+            i18n_t(
+                suffix_key, language,
+                source=failure.source, status=failure.http_status, detail=failure.detail,
+            ),
+        ))
+    return text
 
 
 # The request id for a turn's own single attempt: the native CLI path, where
@@ -728,6 +782,9 @@ class GatewayTurnTerminalizer:
         self._attempt_started = False
         self._downstream_canceled = False
         self._recovery_closed = False
+        # This request's exit, staged so it commits as one registry write.
+        self._staged_exit: dict | None = None
+        self._exit_committed = False
         self.on_attribution_released: Callable[[], None] | None = None
 
     def __enter__(self) -> "GatewayTurnTerminalizer":
@@ -736,6 +793,11 @@ class GatewayTurnTerminalizer:
     def __exit__(self, exc_type, _exc, _traceback) -> None:
         try:
             if self._downstream_canceled or exc_type is asyncio.CancelledError:
+                return
+            self.commit_exit()
+            if self._exit_committed:
+                # A classified exit is this request's whole ending; the
+                # unclassified fallback below is only for requests without one.
                 return
             self._registry._terminalize_gateway_exit(
                 self.turn_id,
@@ -768,13 +830,7 @@ class GatewayTurnTerminalizer:
         self,
         reason: Literal["invalid_parameter", "protocol_error"],
     ) -> None:
-        self._registry._terminalize_gateway_exit(
-            self.turn_id,
-            request_id=self._request_id,
-            reason=reason,
-            stream_started=self._stream_started,
-            force=True,
-        )
+        self._staged_exit = {**(self._staged_exit or {}), "fail_reason": reason}
 
     def engine_down(self, *, local_error_detail: str | None = None) -> None:
         self._registry._terminalize_gateway_exit(
@@ -791,12 +847,9 @@ class GatewayTurnTerminalizer:
         supply_state: SupplyState,
         blockers: Iterable[ExactHopBlocker] = (),
     ) -> None:
-        self._registry.mark_gateway_no_candidate(
-            self.turn_id,
-            supply_state,
-            blockers,
-            request_id=self._request_id,
-        )
+        self._staged_exit = {
+            **(self._staged_exit or {}), "no_candidate": (supply_state, tuple(blockers)),
+        }
 
     def begin_attempt(
         self,
@@ -854,8 +907,28 @@ class GatewayTurnTerminalizer:
     ) -> None:
         """Keep the settlement projection attached to the correlated turn event."""
 
-        if self.turn_id is not None:
-            self._registry.record_turn_outcome(self.turn_id, turn_outcome)
+        self.commit_exit(turn_outcome, has_outcome=True)
+
+    def commit_exit(
+        self,
+        turn_outcome: TurnOutcomeProjectionInput | None = None,
+        *,
+        has_outcome: bool = False,
+    ) -> None:
+        """Commit this request's staged exit and projection as one write."""
+
+        staged, self._staged_exit = self._staged_exit, None
+        if staged is None and not has_outcome:
+            return
+        self._exit_committed = True
+        self._registry.commit_gateway_exit(
+            self.turn_id,
+            request_id=self._request_id,
+            stream_started=self._stream_started,
+            turn_outcome=turn_outcome,
+            has_outcome=has_outcome,
+            **(staged or {}),
+        )
 
     def mark_downstream_canceled(self) -> None:
         """Clear a prepared-only attempt before the outer stopped settlement."""
@@ -1935,6 +2008,9 @@ class TurnCorrelationRegistry:
                     **({"local_error_detail": local_error_detail} if local_error_detail else {}),
                 }
                 return
+            if self._peer_request_open(trace, request_id):
+                trace.pending_attempts.pop(request_id, None)
+                return
             identity = trace.pending_attempts.get(request_id)
             if identity is None and (
                 trace.gateway_source_id is not None
@@ -2043,8 +2119,10 @@ class TurnCorrelationRegistry:
         with self._lock:
             trace = self._traces.get(turn_id)
             if trace is not None and not trace.outcome_frozen:
-                # Only this request found nothing to call; a peer still
-                # awaiting an upstream result keeps its identity.
+                # Only this request found nothing to call.
+                if self._peer_request_open(trace, request_id):
+                    trace.pending_attempts.pop(request_id, None)
+                    return
                 trace.pending_attempts.pop(request_id, None)
                 trace.served = None
                 trace.terminal_error = None
@@ -2062,6 +2140,43 @@ class TurnCorrelationRegistry:
             trace = self._traces.get(turn_id)
             if trace is not None and not trace.outcome_frozen:
                 trace.terminal_outcome = turn_outcome
+
+    def commit_gateway_exit(
+        self,
+        turn_id: Optional[str],
+        *,
+        request_id: str,
+        stream_started: bool,
+        turn_outcome: TurnOutcomeProjectionInput | None = None,
+        has_outcome: bool = False,
+        no_candidate: tuple[SupplyState, tuple[ExactHopBlocker, ...]] | None = None,
+        fail_reason: Literal["invalid_parameter", "protocol_error"] | None = None,
+    ) -> None:
+        """Commit one gateway request's whole exit under one lock.
+
+        Beside an open peer the exit drops only this request's identity, so
+        one exit is either wholly this request's or wholly the turn's.
+        """
+
+        if turn_id is None:
+            return
+        with self._lock:
+            trace = self._traces.get(turn_id)
+            if trace is None:
+                return
+            if self._peer_request_open(trace, request_id):
+                if not trace.outcome_frozen:
+                    trace.pending_attempts.pop(request_id, None)
+                return
+            if no_candidate is not None:
+                self.mark_gateway_no_candidate(turn_id, no_candidate[0], no_candidate[1], request_id=request_id)
+            if fail_reason is not None:
+                self._terminalize_gateway_exit(
+                    turn_id, request_id=request_id, reason=fail_reason,
+                    stream_started=stream_started, force=True,
+                )
+            if has_outcome:
+                self.record_turn_outcome(turn_id, turn_outcome)
 
     def begin_attempt(
         self,
@@ -2124,6 +2239,18 @@ class TurnCorrelationRegistry:
             trace.failed_attempts.append(
                 {**identity.payload(), "reason": reason}
             )
+
+    @staticmethod
+    def _peer_request_open(trace: TurnTrace, request_id: str) -> bool:
+        """Whether another request of this turn is still open.
+
+        Every gateway request arms an identity on arrival, so this covers a
+        peer that is waiting as well as one awaiting its upstream result. A
+        request ending beside it records only its own exit: the turn settles
+        on whichever request ends last.
+        """
+
+        return any(key != request_id for key in trace.pending_attempts)
 
     def fail_hub_attempt(self, turn_id: Optional[str]) -> None:
         """Replace a gateway success rejected by the backend terminal result."""
@@ -2189,11 +2316,20 @@ class TurnCorrelationRegistry:
                 trace.served = identity.payload()
                 trace.terminal_error = None
                 return
+            # The engine client already redacted and bounded this text.
+            detail = {"upstream_detail": outcome.upstream_detail} if outcome.upstream_detail else {}
+            logger.warning(
+                "Model Hub attempt failed turn=%s source=%s model=%s http_status=%s reason=%s "
+                "stream_started=%s detail=%s",
+                turn_id, identity.source_id, identity.resolved_model_id, outcome.http_status,
+                decision.reason or decision.error_code, outcome.stream_started, outcome.upstream_detail,
+            )
             if decision.action == "fallback" and decision.reason is not None:
                 trace.failed_attempts.append(
                     {
                         **identity.payload(), "reason": decision.reason,
                         **({"http_status": outcome.http_status} if type(outcome.http_status) is int and 100 <= outcome.http_status <= 599 else {}),
+                        **detail,
                     }
                 )
                 return
@@ -2214,6 +2350,7 @@ class TurnCorrelationRegistry:
                         else None
                     ),
                     "upstream_error_code": diagnostic_code,
+                    **detail,
                 }
 
     def close_turn_admission(self, turn_id: str, *, settled_by: Optional[str]) -> None:
