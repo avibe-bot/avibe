@@ -6598,6 +6598,7 @@ def _reserve_forked_cli_session(
     scope_key: Optional[str],
     visibility: str,
     authorization_context=None,
+    self_fork: bool = False,
 ):
     from core.services.session_fork import (
         SESSION_AGENT_UNAVAILABLE_CODE,
@@ -6616,6 +6617,7 @@ def _reserve_forked_cli_session(
             visibility=visibility,
             db_path=paths.get_sqlite_state_path(),
             authorization_context=authorization_context,
+            self_fork=self_fork,
         )
     except SessionForkError as exc:
         if exc.code == SESSION_AGENT_UNAVAILABLE_CODE:
@@ -6873,6 +6875,9 @@ def cmd_agent_run(args):
                 scope_key=scope_key,
                 visibility=visibility,
                 authorization_context=caller_authorization,
+                # Only --fork-self, which resolves the source from AVIBE_SESSION_ID, is the Agent's own fork
+                # from inside its live Turn; --fork-session is a user's fork even when it names that Session.
+                self_fork=bool(getattr(args, "fork_self", False)),
             )
             session_id = fork_result.session_id
             reserved_session_id = session_id

@@ -25,7 +25,7 @@ from core.agent_core.harness.store import TranscriptStore
 from core.agent_core.messages import AssistantMessage, ToolCallBlock, ToolResultMessage, Usage, text, usage_to_dict
 from modules.agents.vibey.store import AdapterTranscriptStore
 from storage import agent_events_service, messages_service
-from storage.agent_transcript import SQLiteTranscriptStore, resolve_fork_anchor_seq
+from storage.agent_transcript import SQLiteTranscriptStore, resolve_fork_point
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state
 from storage.models import agent_events
@@ -115,8 +115,7 @@ class _SQLite:
             metadata = {
                 "created_via": "session_fork",
                 "fork_source_session_id": source,
-                "fork_source_message_id": anchor.row_id,
-                "fork_source_context_seq": resolve_fork_anchor_seq(conn, source, anchor.row_id),
+                "fork_source_context_seq": resolve_fork_point(conn, source, as_of=anchor.context_seq),
             }
             _session(conn, child, self.scope, metadata)
 

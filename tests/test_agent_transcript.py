@@ -30,7 +30,7 @@ from core.agent_core.messages import (
 )
 from config.paths import get_sqlite_state_path
 from storage import message_deliveries, messages_service
-from storage.agent_transcript import SQLiteTranscriptStore, TranscriptError, resolve_fork_anchor_seq
+from storage.agent_transcript import SQLiteTranscriptStore, TranscriptError, resolve_fork_point
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state
 from storage.models import agent_events, messages
@@ -63,11 +63,13 @@ def _session(conn, session_id: str, scope_id: str, metadata: dict | None = None)
     )
 
 
-def _fork(conn, session_id: str, scope_id: str, source_id: str, anchor_id: str | None) -> None:
-    """A fork as reservation records it, with the anchor resolved by the transcript rule."""
-    metadata = {"created_via": "session_fork", "fork_source_session_id": source_id, "fork_source_message_id": anchor_id}
-    if anchor_id is not None:
-        metadata["fork_source_context_seq"] = resolve_fork_anchor_seq(conn, source_id, anchor_id)
+def _fork(conn, session_id: str, scope_id: str, source_id: str, *, as_of: int | None = None) -> None:
+    """A fork as reservation records it: a user's fork at the latest point, or an internal one at ``as_of``."""
+    metadata = {
+        "created_via": "session_fork",
+        "fork_source_session_id": source_id,
+        "fork_source_context_seq": resolve_fork_point(conn, source_id, as_of=as_of),
+    }
     _session(conn, session_id, scope_id, metadata)
 
 
@@ -338,7 +340,7 @@ async def test_concurrent_writers_never_share_a_context_seq(engine) -> None:
     assert [entry.context_seq for entry in loaded] == list(range(1, 62))
 
 
-async def test_fork_chain_reads_the_ancestry_up_to_each_anchor(engine) -> None:
+async def test_fork_chain_reads_the_ancestry_up_to_each_fork_point(engine) -> None:
     with engine.begin() as conn:
         home = _scope(conn, "C-home")
         _session(conn, "ses_root", home)
@@ -350,13 +352,13 @@ async def test_fork_chain_reads_the_ancestry_up_to_each_anchor(engine) -> None:
         await store.append_tool_result("ses_root", _tool_result("call_1", "ok"), details={}),
     ]
     with engine.begin() as conn:
-        # A steer accepted before the anchor but consumed after the fork, and a
-        # display-only anchor whose last preceding context row is a tool result.
+        # A steer accepted before the fork but consumed after it, and a display-only row: the latest settled
+        # point is the tool result.
         steer = _row(conn, "ses_root", home, "steer")
-        anchor = _row(conn, "ses_root", home, "progress", kind="notify")
-        _fork(conn, "ses_child", home, "ses_root", anchor)
-        # Released forks and forks of other backends carry no anchor_seq.
-        _session(conn, "ses_released", home, {"fork_source_session_id": "ses_root", "fork_source_message_id": anchor})
+        _row(conn, "ses_root", home, "progress", kind="notify")
+        _fork(conn, "ses_child", home, "ses_root")
+        # Released forks and forks of other backends carry no fork point.
+        _session(conn, "ses_released", home, {"fork_source_session_id": "ses_root"})
     await store.consume_input("ses_root", steer, _user("steer"))
     await store.append_payload("ses_root", "compaction", {**COMPACTION, "first_kept_seq": 4})
 
@@ -368,16 +370,16 @@ async def test_fork_chain_reads_the_ancestry_up_to_each_anchor(engine) -> None:
         await store.append_response("ses_child", _assistant("child done"), final=True),
     ]
     with engine.begin() as conn:
-        _fork(conn, "ses_grandchild", home, "ses_child", child[1].row_id)
+        _fork(conn, "ses_grandchild", home, "ses_child")
         grandchild_ask = _row(conn, "ses_grandchild", home, "grandchild ask")
-        # A fork at an earlier message of a Session that has moved on.
-        _fork(conn, "ses_early", home, "ses_root", ask)
+        # An internal fork at an earlier settled point of a Session that has moved on.
+        _fork(conn, "ses_early", home, "ses_root", as_of=root[0].context_seq)
         early_ask = _row(conn, "ses_early", home, "early ask")
     grandchild = await store.consume_input("ses_grandchild", grandchild_ask, _user("grandchild ask"))
     released = await store.consume_input("ses_released", released_ask, _user("fresh"))
     early = await store.consume_input("ses_early", early_ask, _user("early ask"))
 
-    # The child continues after the anchor; the root's later steer and checkpoint
+    # The child continues after its fork point; the root's later steer and checkpoint
     # (4, 5) are not in its context.
     assert [entry.context_seq for entry in child] == [4, 5]
     assert list(await store.load("ses_child")) == root + child

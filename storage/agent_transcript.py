@@ -31,17 +31,16 @@ Delivery, and that Turn's initial Delivery names the input row. That is the
 channel the Turn answers, where ``persist_agent_message`` attributes the same
 output, and a steer from another surface does not re-home the reply. An input
 without a Delivery link stands for itself. ``agent_events.turn_id`` is that
-Turn. A fork that settles the calls it inherited open before its first input
-attributes those rows to its own scope, with no Turn.
+Turn.
 
-Fork. A child inherits its source's context rows up to ``anchor_seq``, read
-from the top-level Session metadata ``fork_source_session_id`` and
-``fork_source_context_seq`` and followed through the source's own fork. The
-anchor is resolved once, when the fork is reserved
-(``resolve_fork_anchor_seq``), so rows that receive a ``context_seq`` later can
-never move into or out of the prefix. A fork without that key (a released fork,
-or one from another backend) inherits nothing. The child's own rows continue
-from ``anchor_seq + 1``.
+Fork (C-10 ``fork.md``). A child inherits its source's context rows up to its
+fork point, read from the top-level Session metadata ``fork_source_session_id``
+and ``fork_source_context_seq`` and followed through the source's own fork. The
+point is resolved once, when the fork is reserved (``resolve_fork_point``), and
+is settled, so a child never inherits an open call; rows that receive a
+``context_seq`` later can never move into or out of the prefix. A fork without
+that key (a released fork, or one from another backend) inherits nothing. The
+child's own rows continue from the point plus one.
 
 Display. A response row commits with the display text its renderer gives it.
 Its display columns (``content_text``, the display keys of ``content_json``,
@@ -67,6 +66,8 @@ from typing import Any, Callable, Literal, Mapping, Optional, Sequence, TypeVar
 from sqlalchemy import and_, func, or_, select, text
 from sqlalchemy.engine import Connection, Engine
 
+from core.agent_core.harness.fork import fork_point, latest_cut
+from core.agent_core.harness.projection import open_tool_calls
 from core.agent_core.harness.store import ContextEntry, EntryKind
 from core.agent_core.messages import (
     AssistantMessage,
@@ -79,6 +80,7 @@ from core.agent_core.messages import (
 )
 from storage import agent_events_service, messages_service
 from storage.agent_session_rows import reserve_write_lock
+from storage.message_deliveries import TURN_OWNER_STATES
 from storage.models import agent_events, agent_sessions, message_deliveries, messages, scopes, session_turns
 
 INPUT_TYPES = ("user", "harness", "agent_initiated", "annotation")
@@ -377,16 +379,7 @@ class SQLiteTranscriptStore:
             # One read snapshot across both tables and every ancestor.
             if not conn.connection.dbapi_connection.in_transaction:
                 conn.exec_driver_sql("BEGIN")
-            entries = [
-                entry for member, bound in _ancestry(conn, session_id) for entry in _context_rows(conn, member, bound)
-            ]
-        entries.sort(key=lambda entry: entry.context_seq)
-        for previous, current in zip(entries, entries[1:]):
-            if previous.context_seq == current.context_seq:
-                raise TranscriptError(
-                    f"rows {previous.row_id} and {current.row_id} share context_seq {current.context_seq}"
-                )
-        return entries
+            return _context_entries(conn, session_id)
 
 async def _settle(task: asyncio.Future[Any]) -> None:
     """Wait for ``task`` to finish, whatever cancellations arrive meanwhile."""
@@ -489,50 +482,62 @@ def _turn_origin(conn: Connection, session_id: str, agent_name: Optional[str] = 
 # --- fork ancestry -------------------------------------------------------------
 
 
-def context_bound(conn: Connection, session_id: str) -> int:
-    """The last ``context_seq`` of a Session's context, including the prefix it inherited.
+def resolve_fork_point(
+    conn: Connection, source_session_id: str, *, as_of: Optional[int] = None, self_fork: bool = False
+) -> int:
+    """The fork point of a new fork of ``source_session_id`` (C-10 ``fork.md`` section 2), in the caller's transaction.
 
-    A fork of a Session with no running Turn inherits all of it: a Turn that ended
-    silently or was stopped shows no row a message anchor could name.
-    """
-    link = fork_link(conn, session_id)
-    return max(value for value in (_own_bound(conn, session_id), link[1] if link else 0) if value is not None)
-
-
-def resolve_fork_anchor_seq(conn: Connection, source_session_id: str, anchor_message_id: Optional[str]) -> int:
-    """``anchor_seq`` for a fork of ``source_session_id`` at ``anchor_message_id`` (C-5 §4).
-
-    The largest ``context_seq`` of the source's context among rows at or before
-    the anchor in transcript order, including the prefix the source itself
-    inherited; the anchor may be a display-only row. The fork reservation calls
-    this in its own transaction and persists the result as the child's
+    A user's fork: the end of the previous ended Turn, so a live Turn's input, calls, and responses never reach the
+    child. ``self_fork``, the Agent's own fork from inside its live Turn: the largest settled point, which keeps that
+    Turn's input and finished steps and stops before the open call running the fork. ``as_of``: a point a system
+    mechanism names, which must be in range and settled (``ForkPointError`` otherwise). Decided from committed rows
+    and the live Turn's first input, never a clock. The reservation persists the result as the child's
     ``fork_source_context_seq``.
     """
-    link = fork_link(conn, source_session_id)
-    inherited = link[1] if link is not None else 0
-    if anchor_message_id is None:
-        return inherited
-    order = messages_service.transcript_order_value()
-    anchor = conn.execute(
-        select(messages.c.session_id, order.label("order_at")).where(messages.c.id == anchor_message_id)
-    ).first()
-    if anchor is None or anchor.session_id != source_session_id:
-        raise TranscriptError(f"fork anchor {anchor_message_id} is not a message of Session {source_session_id}")
-    own_messages = conn.execute(
-        select(func.max(messages.c.context_seq)).where(
-            messages.c.session_id == source_session_id,
-            messages.c.context_seq.is_not(None),
-            or_(order < anchor.order_at, and_(order == anchor.order_at, messages.c.id <= anchor_message_id)),
-        )
-    ).scalar()
-    own_events = conn.execute(
-        select(func.max(agent_events.c.context_seq)).where(
-            agent_events.c.session_id == source_session_id,
-            agent_events.c.context_seq.is_not(None),
-            agent_events.c.created_at <= anchor.order_at,
-        )
-    ).scalar()
-    return max(value for value in (inherited, own_messages, own_events) if value is not None)
+    entries = _context_entries(conn, source_session_id)
+    if as_of is not None:
+        return fork_point(entries, as_of).as_of
+    unended = None if self_fork else _unended_input_seq(conn, source_session_id, entries)
+    return latest_cut(entries, unended_input_seq=unended)
+
+
+def _unended_input_seq(conn: Connection, session_id: str, entries: Sequence[ContextEntry]) -> Optional[int]:
+    """The first input of the earliest unfinished Turn (C-10 ``fork.md`` section 2).
+
+    A Turn is unfinished while it is live, while it holds a call without a result (T2), or while an input it
+    accepted is not yet in the context (T3). A Turn's first input is the row its initial Delivery names; Turns run
+    one at a time and each writes its rows after that input, so the Turn owning an open call is the latest one whose
+    input precedes the call. A Turn whose first input is not consumed has no row in the context yet.
+    """
+    turns = conn.execute(
+        select(session_turns.c.id, session_turns.c.state, messages.c.context_seq)
+        .select_from(session_turns.join(messages, messages.c.id == session_turns.c.initial_delivery_id))
+        .where(session_turns.c.session_id == session_id, messages.c.session_id == session_id)
+    ).all()
+    awaiting_input = set(
+        conn.execute(
+            select(message_deliveries.c.turn_id)
+            .select_from(message_deliveries.join(messages, messages.c.id == message_deliveries.c.message_id))
+            .where(
+                messages.c.session_id == session_id,
+                messages.c.context_seq.is_(None),
+                messages.c.type.in_(INPUT_TYPES),
+                message_deliveries.c.state == "accepted",
+            )
+        ).scalars()
+    )
+    inputs = sorted(seq for _, _, seq in turns if seq is not None)
+    candidates = [
+        seq
+        for turn_id, state, seq in turns
+        if seq is not None and (state in TURN_OWNER_STATES or turn_id in awaiting_input)
+    ]
+    open_calls = open_tool_calls(entries)
+    if open_calls:
+        first_open = min(owner.context_seq for owner, _ in open_calls)
+        owner_input = max((seq for seq in inputs if seq <= first_open), default=None)
+        candidates.append(owner_input if owner_input is not None else first_open)
+    return min(candidates, default=None)
 
 
 def _settled_result(conn: Connection, session_id: str, tool_call_id: str) -> Optional[ContextEntry]:
@@ -696,6 +701,16 @@ def _ancestry(conn: Connection, session_id: str) -> list[tuple[str, Optional[int
 
 
 # --- reading rows --------------------------------------------------------------
+
+
+def _context_entries(conn: Connection, session_id: str) -> list[ContextEntry]:
+    """The Session's context rows and its fork ancestry's, in ``context_seq`` order, read on ``conn``."""
+    entries = [entry for member, bound in _ancestry(conn, session_id) for entry in _context_rows(conn, member, bound)]
+    entries.sort(key=lambda entry: entry.context_seq)
+    for previous, current in zip(entries, entries[1:]):
+        if previous.context_seq == current.context_seq:
+            raise TranscriptError(f"rows {previous.row_id} and {current.row_id} share context_seq {current.context_seq}")
+    return entries
 
 
 def _context_rows(conn: Connection, session_id: str, bound: Optional[int]) -> list[ContextEntry]:
