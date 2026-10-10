@@ -714,6 +714,7 @@ def test_deferred_upgrade_activation_uses_candidate_python(monkeypatch, tmp_path
     assert "--restart" in calls["command"]
     assert "--prepare-show-runtime" in calls["command"]
     assert calls["kwargs"]["env"] == {"PATH": "clean"}
+    assert process.activation_log_path.parent == tmp_path / "logs"
     assert (candidate.parent.parent / ".avibe-installing").read_text() == "456"
 
 
@@ -927,7 +928,7 @@ def test_cmd_upgrade_reports_peer_activation_failures(monkeypatch, tmp_path, cap
     outcome = vibe_upgrade.ActivationOutcome(
         activated_launcher=launcher,
         peer_failures=(
-            vibe_upgrade.LauncherActivationFailure(peer, "permission denied"),
+            vibe_upgrade.LauncherActivationFailure(peer, "permission denied", "permission_denied"),
         ),
     )
     plan = UpgradePlan(
@@ -1017,6 +1018,68 @@ def test_activation_repair_command_quotes_full_launcher_path(tmp_path):
         "repair",
         "stable-launchers",
     ])
+
+
+def test_activation_repair_command_is_power_shell_invocable(monkeypatch, tmp_path):
+    launcher = tmp_path / "用户's home 空格" / "vibe.exe"
+
+    class WindowsOsProxy:
+        name = "nt"
+        path = os.path
+
+    monkeypatch.setattr(vibe_upgrade, "os", WindowsOsProxy())
+
+    command = vibe_upgrade.activation_repair_command(launcher)
+
+    escaped = str(launcher.absolute()).replace("'", "''")
+    assert command == f"& '{escaped}' doctor repair stable-launchers"
+
+
+def test_do_upgrade_surfaces_deferred_activation_log(monkeypatch, tmp_path):
+    launcher = tmp_path / "bin" / "vibe.exe"
+    candidate = tmp_path / "generation" / "bin" / "vibe.exe"
+    log_path = tmp_path / "logs" / "upgrade-activation-test.log"
+    plan = UpgradePlan(
+        command=["uv", "tool", "install", "avibe-os", "--upgrade"],
+        env=None,
+        method="uv",
+        activation=AtomicActivation(launcher, candidate),
+    )
+
+    class WindowsOsProxy:
+        name = "nt"
+
+        def __getattr__(self, name):
+            return getattr(os, name)
+
+    monkeypatch.setattr(api, "os", WindowsOsProxy())
+    monkeypatch.setattr(api, "build_upgrade_plan", lambda **_kwargs: plan)
+    monkeypatch.setattr(api, "get_version_info", lambda: {"latest": "2.2.0"})
+    monkeypatch.setattr(api, "get_running_vibe_path", lambda: str(launcher))
+    monkeypatch.setattr(api, "_runtime_process_was_running", lambda: False)
+    monkeypatch.setattr(api, "_configured_backend_language", lambda: "en")
+    monkeypatch.setattr(api, "activation_block_reason", lambda _activation: None)
+    monkeypatch.setattr(api, "launcher_is_current_process", lambda _launcher: True)
+    monkeypatch.setattr(api, "verify_upgrade_candidate", lambda _activation: vibe_upgrade.IntegrityResult(True))
+    monkeypatch.setattr(api, "defer_upgrade_activation", lambda *_args, **_kwargs: SimpleNamespace(
+        activation_log_path=log_path,
+    ))
+    monkeypatch.setattr(
+        api,
+        "execute_upgrade_plan",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(plan.command, 0, stdout="done", stderr=""),
+    )
+    monkeypatch.setattr(
+        api.subprocess,
+        "run",
+        lambda cmd, **kwargs: subprocess.CompletedProcess(cmd, 0, stdout="done", stderr=""),
+    )
+
+    result = api.do_upgrade(auto_restart=False)
+
+    assert result["ok"] is True
+    assert str(log_path) in result["output"]
+    assert "deferred activation helper" in result["output"]
 
 
 def test_build_upgrade_plan_uses_env_package_spec(monkeypatch):

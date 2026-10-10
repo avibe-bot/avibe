@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import errno
 import json
 import logging
 import os
@@ -203,6 +204,7 @@ class LauncherActivationFailure:
 
     launcher: Path
     reason: str
+    reason_code: str = "move_failed"
 
 
 @dataclass(frozen=True)
@@ -406,7 +408,15 @@ def defer_upgrade_activation(
         with contextlib.suppress(OSError):
             process.terminate()
         raise
+    setattr(process, "activation_log_path", log_path)
     return process
+
+
+def get_deferred_activation_log_path(process: object) -> Path | None:
+    """Return the existing log path used by a detached activation helper."""
+
+    path = getattr(process, "activation_log_path", None)
+    return path if isinstance(path, Path) else None
 
 
 def get_cli_launcher_path(launcher: runtime_mod.ServiceLauncher) -> Path | None:
@@ -868,6 +878,17 @@ def _prepare_launcher_replacement(replacement: Path, target: Path) -> None:
         shutil.copy2(target, replacement)
 
 
+def _activation_failure_reason_code(exc: BaseException) -> str:
+    """Classify a peer move failure without discarding its concrete cause."""
+
+    if isinstance(exc, PermissionError) or getattr(exc, "errno", None) in {
+        errno.EACCES,
+        errno.EPERM,
+    } or getattr(exc, "winerror", None) == 5:
+        return "permission_denied"
+    return "move_failed"
+
+
 def activate_upgrade_candidate(activation: AtomicActivation) -> ActivationOutcome:
     """Atomically switch the stable launcher to a validated candidate."""
 
@@ -915,11 +936,15 @@ def _activate_upgrade_candidate_locked(activation: AtomicActivation) -> Activati
         try:
             if not move_managed_launcher_locked(peer, selected, activation.candidate_launcher):
                 reason = "the launcher changed after discovery"
-                peer_failures.append(LauncherActivationFailure(peer, reason))
+                peer_failures.append(
+                    LauncherActivationFailure(peer, reason, "launcher_changed_after_discovery")
+                )
                 logger.warning("Could not move stable launcher %s: %s", peer, reason)
         except Exception as exc:
             reason = str(exc).strip() or type(exc).__name__
-            peer_failures.append(LauncherActivationFailure(peer, reason))
+            peer_failures.append(
+                LauncherActivationFailure(peer, reason, _activation_failure_reason_code(exc))
+            )
             logger.warning("Could not move stable launcher %s to the activated generation", peer, exc_info=True)
     finish_install_generation(activation.candidate_launcher)
     collect_install_generations(launcher)
@@ -944,7 +969,8 @@ def activation_repair_command(launcher: str | os.PathLike[str]) -> str:
     full_path = os.path.abspath(os.path.expanduser(str(launcher)))
     command = [full_path, "doctor", "repair", "stable-launchers"]
     if os.name == "nt":
-        return subprocess.list2cmdline(command)
+        powershell_path = full_path.replace("'", "''")
+        return f"& '{powershell_path}' doctor repair stable-launchers"
     return shlex.join(command)
 
 
@@ -956,16 +982,34 @@ def format_activation_failures(outcome: ActivationOutcome, language: str = "en")
     from vibe.i18n import t
 
     repair_command = activation_repair_command(outcome.activated_launcher)
-    return "\n\n".join(
-        t(
-            "update.stableLauncherActivationFailed",
-            language,
-            launcher=str(failure.launcher),
-            reason=failure.reason,
-            repairCommand=repair_command,
+    messages = []
+    for failure in outcome.peer_failures:
+        if failure.reason_code == "permission_denied":
+            key = "update.stableLauncherActivationPermissionDenied"
+        elif failure.reason_code == "launcher_changed_after_discovery":
+            key = "update.stableLauncherActivationChanged"
+        else:
+            key = "update.stableLauncherActivationFailed"
+        messages.append(
+            t(
+                key,
+                language,
+                launcher=str(failure.launcher),
+                reason=failure.reason,
+                repairCommand=repair_command,
+            )
         )
-        for failure in outcome.peer_failures
-    )
+    return "\n\n".join(messages)
+
+
+def format_deferred_activation_log(log_path: Path | None, language: str = "en") -> str | None:
+    """Explain where a deferred activation helper records its result."""
+
+    if log_path is None:
+        return None
+    from vibe.i18n import t
+
+    return t("update.deferredActivationLog", language, logPath=str(log_path))
 
 
 def activate_launcher_target(launcher: str | os.PathLike[str], target: str | os.PathLike[str]) -> None:

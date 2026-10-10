@@ -89,10 +89,12 @@ from vibe.upgrade import (
     defer_upgrade_activation,
     discard_atomic_uv_install_generation,
     execute_upgrade_plan,
+    format_deferred_activation_log,
     get_latest_version_info,
     get_running_vibe_path,
     get_safe_cwd,
     format_activation_failures,
+    get_deferred_activation_log_path,
     is_desktop_managed_runtime,
     launcher_is_current_process,
     restart_is_pending,
@@ -6196,6 +6198,7 @@ def do_upgrade(auto_restart: bool = True) -> dict:
     restart_failed = False
     runtime_output = None
     deferred_activation = False
+    deferred_activation_log = None
     restart_python = None
     activation_outcome = None
 
@@ -6234,12 +6237,13 @@ def do_upgrade(auto_restart: bool = True) -> dict:
                         candidate_result = verify_upgrade_candidate(plan.activation)
                         if not candidate_result.ok:
                             raise RuntimeError(candidate_result.detail)
-                        defer_upgrade_activation(
+                        deferred_process = defer_upgrade_activation(
                             plan.activation,
                             parent_pid=os.getpid(),
                             restart_required=auto_restart and runtime_was_running,
                             prepare_show_runtime=not should_skip_show_runtime_prepare(),
                         )
+                        deferred_activation_log = get_deferred_activation_log_path(deferred_process)
                         deferred_activation = True
                     else:
                         restart_python = _candidate_python(plan.activation.candidate_launcher)
@@ -6281,7 +6285,13 @@ def do_upgrade(auto_restart: bool = True) -> dict:
                 return {
                     "ok": True,
                     "message": "Upgrade successful. Activation will complete after this process exits.",
-                    "output": _append_upgrade_output(result.stdout, None),
+                    "output": _append_upgrade_output(
+                        result.stdout,
+                        format_deferred_activation_log(
+                            deferred_activation_log,
+                            _configured_backend_language(),
+                        ),
+                    ),
                     "restarting": auto_restart and runtime_was_running,
                 }
             if not restarting and not restart_failed:

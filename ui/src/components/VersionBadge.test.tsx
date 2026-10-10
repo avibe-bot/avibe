@@ -8,6 +8,7 @@ import { VersionBadge } from './VersionBadge';
 const api = vi.hoisted(() => ({
   getVersion: vi.fn(async () => ({ current: '9.9.9', latest: '10.0.0', has_update: true, managed_by: 'desktop' })),
   getConfig: vi.fn(async () => ({ update: { auto_update: true } })),
+  doUpgrade: vi.fn(async () => ({ ok: true, message: 'Upgrade successful', output: null, restarting: false })),
 }));
 vi.mock('../context/ApiContext', () => ({ useApi: () => api }));
 vi.mock('../lib/useIsDesktop', () => ({ useIsDesktop: () => true }));
@@ -53,5 +54,22 @@ describe('desktop version ownership', () => {
     expect(await screen.findByRole('dialog')).toBeTruthy();
     expect(api.getVersion).toHaveBeenCalledOnce();
     expect(entry.querySelector('.animate-pulse')).toBeNull();
+  });
+
+  it('shows a successful upgrade warning returned in the output', async () => {
+    api.getVersion.mockResolvedValueOnce({ current: '9.9.9', latest: '10.0.0', has_update: true });
+    api.doUpgrade.mockResolvedValueOnce({
+      ok: true,
+      message: 'Upgrade successful',
+      output: 'Stable launcher repair is still required.',
+      restarting: false,
+    });
+    render(<I18nextProvider i18n={i18n}><VersionBadge /></I18nextProvider>);
+
+    fireEvent.click(await screen.findByTitle('v9.9.9'));
+    fireEvent.click(await screen.findByRole('button', { name: i18n.t('dashboard.upgradeNow') }));
+
+    expect(await screen.findByText('Stable launcher repair is still required.')).toBeTruthy();
+    expect(api.doUpgrade).toHaveBeenCalledOnce();
   });
 });

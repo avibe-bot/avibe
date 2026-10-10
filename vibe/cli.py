@@ -86,10 +86,12 @@ from vibe.upgrade import (
     current_generation,
     execute_upgrade_plan,
     defer_upgrade_activation,
+    format_deferred_activation_log,
     generation_downgrade,
     get_latest_version_info,
     get_safe_cwd,
     format_activation_failures,
+    get_deferred_activation_log_path,
     is_desktop_managed_runtime,
     _launcher_generation,
     _candidate_python,
@@ -15797,6 +15799,7 @@ def cmd_upgrade():
     restart = None
     restart_error = None
     deferred_activation = False
+    deferred_activation_log = None
     restart_python = None
     activation_outcome = None
 
@@ -15822,12 +15825,13 @@ def cmd_upgrade():
                         candidate_result = verify_upgrade_candidate(plan.activation)
                         if not candidate_result.ok:
                             raise RuntimeError(candidate_result.detail)
-                        defer_upgrade_activation(
+                        deferred_process = defer_upgrade_activation(
                             plan.activation,
                             parent_pid=os.getpid(),
                             restart_required=runtime_was_running,
                             prepare_show_runtime=not should_skip_show_runtime_prepare(),
                         )
+                        deferred_activation_log = get_deferred_activation_log_path(deferred_process)
                         deferred_activation = True
                     else:
                         restart_python = _candidate_python(plan.activation.candidate_launcher)
@@ -15865,6 +15869,12 @@ def cmd_upgrade():
                     print(activation_notice)
             if deferred_activation:
                 print("Upgrade validated; launcher activation will complete after this command exits.")
+                activation_log_notice = format_deferred_activation_log(
+                    deferred_activation_log,
+                    _configured_cli_language(),
+                )
+                if activation_log_notice:
+                    print(activation_log_notice)
                 if runtime_was_running:
                     print("Restart will be scheduled by the activation helper.")
                 return 0

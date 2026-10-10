@@ -782,6 +782,7 @@ def test_a_launcher_that_cannot_move_keeps_its_generation(installation, monkeypa
     assert [(failure.launcher, failure.reason) for failure in outcome.peer_failures] == [
         (peer.absolute(), f"{peer} is read-only"),
     ]
+    assert [failure.reason_code for failure in outcome.peer_failures] == ["permission_denied"]
     for language, expected in (
         ("en", "Upgrade activated the new version"),
         ("zh", "升级已激活新版本"),
@@ -792,6 +793,10 @@ def test_a_launcher_that_cannot_move_keeps_its_generation(installation, monkeypa
         assert str(peer) in notice
         assert "is read-only" in notice
         assert "doctor repair stable-launchers" in notice
+        if language == "en":
+            assert "Correct its permissions or ownership first" in notice
+        else:
+            assert "先修正其权限或所有者" in notice
 
 
 def test_a_peer_replaced_after_discovery_is_left_alone(installation, monkeypatch, tmp_path):
@@ -827,6 +832,9 @@ def test_a_peer_replaced_after_discovery_is_left_alone(installation, monkeypatch
     assert [(failure.launcher, failure.reason) for failure in outcome.peer_failures] == [
         (peer.absolute(), "the launcher changed after discovery"),
     ]
+    assert [failure.reason_code for failure in outcome.peer_failures] == ["launcher_changed_after_discovery"]
+    assert "the launcher changed after discovery" not in upgrade.format_activation_failures(outcome, "zh")
+    assert "发现后发生了变化" in upgrade.format_activation_failures(outcome, "zh")
 
 
 def test_partial_removal_retains_uv_evidence_and_next_pass_finishes(installation, monkeypatch):
