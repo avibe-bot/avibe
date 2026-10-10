@@ -99,7 +99,9 @@ class ScratchRoot:
                 return error_result(f"Could not edit file: {path}. It is not a regular file.")
             if len(raw) > MAX_EDIT_BYTES:
                 return error_result(f"File {path} is over the edit limit. Write it again instead.")
-            new_text, _, _, counts = apply_edits(decode_file(raw), edits, path, max_result_chars=MAX_EDIT_BYTES)
+            new_text, _, _, counts, changed = apply_edits(
+                decode_file(raw), edits, path, max_result_chars=MAX_EDIT_BYTES
+            )
             self._publish(name, encode_file(new_text), expected=identity)
         except EditError as exc:
             return error_result(str(exc))
@@ -109,7 +111,7 @@ class ScratchRoot:
             return error_result(f"Could not edit file: {path}. It changed while the edit was being applied; read it again.")
         except OSError as exc:
             return error_result(f"Could not edit file: {path}. {os.strerror(exc.errno) if exc.errno else exc}.")
-        return text_result(edit_summary(path, edits, counts))
+        return text_result(edit_summary(path, edits, counts, changed))
 
     # --- descriptor-relative steps ------------------------------------------------------------
 

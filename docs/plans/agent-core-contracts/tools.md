@@ -108,15 +108,22 @@ is true". Logic, from Pi's `edit-diff.ts`:
 4. Apply all edits against the original, restore line endings and BOM, write once. Nothing is written if any edit
    fails.
 
-Result: `Successfully replaced {n} block(s) in {path}.`; the diff goes to `details` for display only. Avibe: when an
-item uses `replaceAll`, the result counts occurrences instead, `Successfully replaced {total} occurrences in {path}.`
-(`1 occurrence` when singular), followed for several items by ` (edits[0]: {count}, edits[1]: {count})` before the
-period, so the model need not read the file again to count them. Errors:
+Result: Pi's `Successfully replaced {n} block(s) in {path}.`; the diff goes to `details` for display only. Avibe
+improvement: before the period, the result names the new file's changed lines, ` ({lines})`, for example
+`Successfully replaced 2 block(s) in {path} (lines 40-52, 88-90).` (`line 7` for a single line). Lines are numbered as
+`read` numbers them (only `\n` ends a line), touching ranges merge, and after five ranges the rest are counted
+(`..., ...and 3 more`). No diff is returned to the model. Avibe: when an item uses `replaceAll`, the result counts
+occurrences instead, `Successfully replaced {total} occurrences in {path} ({lines}).` (`1 occurrence` when singular),
+with `; edits[0]: {count}, edits[1]: {count}` after the lines for several items, so the model need not read the file
+again to count or inspect them. Errors:
 
 - `Could not find edits[{i}] in {path}. The oldText must match exactly including all whitespace and newlines.`; when
   the normalization budget was reached, Avibe ends it with `: the file is too large to match it loosely after Unicode
   normalization.` instead of the period
 - `Found {count} occurrences of edits[{i}] in {path}. Each oldText must be unique. Please provide more context to make it unique.`
+  Avibe improvement: it continues ` Occurrences:` and one `line {n}: {excerpt}` line per occurrence, for the first five
+  in file order, then `...and {k} more`. The excerpt is the text of the line it starts on, without indentation; a line over
+  100 characters is shown only around the occurrence, with `...` where it is cut.
 - `edits[{a}] and edits[{b}] overlap in {path}. Merge them into one edit or target disjoint regions.`
 - `edits[{i}].oldText must not be empty in {path}.`
 

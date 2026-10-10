@@ -10,6 +10,9 @@ tier, so one normalized edit no longer switches the whole batch to normalized
 text; uniqueness is counted in the tier that matched; and the file is never
 re-encoded: replacements are spliced into the original text, so its BOM, its
 line breaks (mixed or not), and every byte outside a replaced span survive.
+Avibe additions to Pi's messages: an ambiguous match lists where its first
+occurrences are, and a successful edit reports the lines it changed, so the
+model need not read the file again to disambiguate or to inspect the result.
 """
 
 from __future__ import annotations
@@ -111,6 +114,10 @@ _ASCII = re.compile("[\x00-\x7f]")
 #: Avibe: every edit scans the whole file (``str.count``/``find``, which hold the GIL), so the number of
 #: edits times the file's length is bounded: about a quarter second of scanning.
 MAX_EDIT_SCAN_CHARS = 256 * 1024 * 1024
+#: Avibe: occurrences an ambiguous match lists, and changed line ranges a result lists, before "...and N more".
+MAX_LOCATIONS = 5
+#: Avibe: characters of a long line an occurrence's excerpt shows.
+EXCERPT_CHARS = 100
 
 
 class ResultTooLarge(Exception):
@@ -162,15 +169,19 @@ def _not_found(path: str, index: int, total: int, *, loose_unavailable: bool = F
     )
 
 
-def _duplicate(path: str, index: int, total: int, occurrences: int) -> EditError:
+def _duplicate(path: str, index: int, total: int, occurrences: int, locations: list[str]) -> EditError:
+    # Avibe addition: where the first occurrences are, so the model can add context without reading the file.
+    shown_locations = "\n".join(locations)
+    if occurrences > len(locations):
+        shown_locations += f"\n...and {occurrences - len(locations)} more"
     if total == 1:
         return EditError(
             f"Found {occurrences} occurrences of the text in {path}. The text must be unique. Please provide more "
-            "context to make it unique."
+            f"context to make it unique. Occurrences:\n{shown_locations}"
         )
     return EditError(
         f"Found {occurrences} occurrences of edits[{index}] in {path}. Each oldText must be unique. Please provide "
-        "more context to make it unique."
+        f"more context to make it unique. Occurrences:\n{shown_locations}"
     )
 
 
@@ -273,6 +284,10 @@ class _Lines:
             view_pos += len(content) + 1
             pos += len(content) + len(brk)
 
+    def read_line(self, line: int) -> int:
+        """The number ``read`` shows for ``line``: read breaks lines only at ``\\n``, not at a lone ``\\r``."""
+        return self.text.count("\n", 0, self.starts[line]) + 1
+
     def to_original(self, view_offset: int) -> int:
         line = bisect.bisect_right(self.view_starts, view_offset) - 1
         return self.starts[line] + (view_offset - self.view_starts[line])
@@ -306,6 +321,47 @@ class _Lines:
         rest = lf_text[pos:]
         out.append(rest if fallback == "\n" else rest.replace("\n", fallback))
         return "".join(out)
+
+
+def _excerpt(line: str, column: int) -> str:
+    """``line`` as read shows it, without its indentation; a long line only around ``column``."""
+    if len(line) <= EXCERPT_CHARS:
+        return shown(line).strip()
+    start = max(0, min(column - EXCERPT_CHARS // 4, len(line) - EXCERPT_CHARS))
+    end = start + EXCERPT_CHARS
+    return ("..." if start else "") + shown(line[start:end]).strip() + ("..." if end < len(line) else "")
+
+
+def _locations(lines: _Lines, haystack: str, needle: str) -> list[str]:
+    """``line {n}: {excerpt}`` for the first ``MAX_LOCATIONS`` occurrences of ``needle`` in ``haystack``.
+
+    ``haystack`` is the view or its normalized form, which keeps every line break, so its line ``i`` is
+    the view's line ``i``, and the excerpt is that line of the view, not of the normalized form.
+    """
+    out = []
+    for at in _find_all(haystack, needle, MAX_LOCATIONS):
+        line = haystack.count("\n", 0, at)
+        column = at - (haystack.rfind("\n", 0, at) + 1)
+        out.append(f"line {lines.read_line(line)}: {_excerpt(lines.contents[line], column)}")
+    return out
+
+
+def _changed_lines(text: str, replacements: list[_Replacement]) -> tuple[tuple[int, int], ...]:
+    """The new file's line ranges the replacements wrote, numbered as ``read`` shows them; touching ranges merge."""
+    ranges: list[tuple[int, int]] = []
+    line, pos = 1, 0
+    for replacement in sorted(replacements, key=lambda r: r.index):
+        line += text.count("\n", pos, replacement.index)
+        body = replacement.new_text
+        # A break that ends the text belongs to its last line; an empty text marks the line it was removed from.
+        end = line + body.count("\n", 0, len(body) - 1)
+        if ranges and line <= ranges[-1][1] + 1:
+            ranges[-1] = (ranges[-1][0], end)
+        else:
+            ranges.append((line, end))
+        line += body.count("\n")
+        pos = replacement.index + replacement.length
+    return tuple(ranges)
 
 
 def _exact_replacements(lines: _Lines, matches: list[_Replacement]) -> list[_Replacement]:
@@ -353,9 +409,9 @@ def _line_groups(lines: _Lines, normalized: str, matches: list[_Replacement]) ->
 
 def apply_edits(
     text: str, edits: list[Edit], path: str, max_result_chars: Optional[int] = None
-) -> tuple[str, str, str, tuple[int, ...]]:
-    """Apply every edit to the file's ``text``; return the new text, the LF views before and after, and
-    how many occurrences each edit replaced.
+) -> tuple[str, str, str, tuple[int, ...], tuple[tuple[int, int], ...]]:
+    """Apply every edit to the file's ``text``; return the new text, the LF views before and after, how
+    many occurrences each edit replaced, and the new text's changed line ranges (``read``'s numbers).
 
     Each edit matches in its own tier against the original, in the file's LF view. Exact edits replace
     exactly the text they matched; a normalized edit rewrites the whole lines it touches from the
@@ -391,7 +447,7 @@ def apply_edits(
         if not count:
             raise _not_found(path, index, total, loose_unavailable=bool(cache) and cache[0] is None)
         if not edit.replace_all and count > 1:
-            raise _duplicate(path, index, total, count)
+            raise _duplicate(path, index, total, count, _locations(lines, haystack, needle))
         replacements_made += count
         counts.append(count)
         if replacements_made > MAX_REPLACEMENTS:
@@ -410,7 +466,7 @@ def apply_edits(
     new_text = _apply(text, replacements)
     if new_text == text:
         raise _no_change(path, total)
-    return new_text, lines.view, lf_view(new_text), tuple(counts)
+    return new_text, lines.view, lf_view(new_text), tuple(counts), _changed_lines(text, replacements)
 
 
 def lf_view(text: str) -> str:

@@ -1454,7 +1454,7 @@ async def test_scratch_edit_reads_and_publishes_through_the_root_descriptor(tmp_
         ToolCallBlock("d", "write", {"path": "state/scratch/session/..", "content": "no"}),
     ]
     results = await _scratch_checkpoint(tmp_path, scratch, calls, [])
-    assert results["e"].content[0].text == "Successfully replaced 1 block(s) in state/scratch/session/plan.md."
+    assert results["e"].content[0].text == "Successfully replaced 1 block(s) in state/scratch/session/plan.md (line 2)."
     assert (scratch / "plan.md").read_bytes() == "\ufeffa\r\nc\r\n".encode()  # BOM and CRLF kept
     assert results["l"].is_error and (outside / "secret.md").read_text() == "a\n"  # a symlink is never followed
     assert results["d"].content[0].text == DENIED
