@@ -359,10 +359,6 @@
       "agentUnavailable": {
         "message": "源会话的 Agent 已无法用于创建新的复刻会话。",
         "hint": "请选择使用相同 backend 的已启用 Agent 作为覆盖项。"
-      },
-      "sourceRunning": {
-        "message": "这个会话还在运行。请等当前回合结束后再复刻。",
-        "hint": "Claude Code 只能在两个回合之间复刻会话。"
       }
     },
     "sessionArchived": "该会话已归档，无法再修改。",

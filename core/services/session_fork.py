@@ -63,14 +63,6 @@ _FORK_ANCHOR_TYPES = tuple(
 
 SESSION_AGENT_UNAVAILABLE_CODE = "session_agent_unavailable"
 SESSION_AGENT_UNAVAILABLE_I18N_KEY = "error.sessionFork.agentUnavailable"
-# A user's fork never carries a live Turn (C-10 fork.md section 2): a backend that cannot trim one refuses instead.
-SESSION_FORK_SOURCE_RUNNING_CODE = "session_fork_source_running"
-SESSION_FORK_SOURCE_RUNNING_I18N_KEY = "error.sessionFork.sourceRunning"
-#: Coded refusals whose copy is localized (``<key>.message`` and ``<key>.hint``) wherever a fork is requested.
-SESSION_FORK_LOCALIZED_ERRORS = {
-    SESSION_AGENT_UNAVAILABLE_CODE: SESSION_AGENT_UNAVAILABLE_I18N_KEY,
-    SESSION_FORK_SOURCE_RUNNING_CODE: SESSION_FORK_SOURCE_RUNNING_I18N_KEY,
-}
 
 
 class SessionForkError(ValueError):
@@ -99,7 +91,6 @@ class SessionForkSpec:
     opencode_fork_message_id: Optional[str] = None
     opencode_fork_empty_history: bool = False
     opencode_boundary_from_active_run: bool = False
-    self_fork: bool = False
 
     def to_metadata(self) -> dict[str, Any]:
         metadata = {
@@ -119,8 +110,6 @@ class SessionForkSpec:
             metadata["opencode_fork_empty_history"] = True
         if self.opencode_boundary_from_active_run:
             metadata["opencode_boundary_from_active_run"] = True
-        if self.self_fork:
-            metadata["self_fork"] = True
         return metadata
 
 
@@ -209,15 +198,14 @@ def reserve_forked_session(
     id stays empty until the backend adapter successfully forks the native
     session.
 
-    The fork point (C-10 fork.md section 2). A user's fork never carries a live
-    Turn: Vibey cuts at the end of the previous ended Turn, Codex and OpenCode
-    trim the live Turn natively, and any other backend refuses while the source
-    has one (``session_fork_source_running``). ``self_fork`` is the Agent's own
-    fork from inside its live Turn, set only by ``vibe agent run --fork-self``:
-    Vibey then cuts at the largest settled point, which keeps that Turn's input
-    and finished steps, and native backends fork as they always have.
-    ``as_of`` is internal, for system mechanisms: a settled Vibey point, refused
-    for other backends. No product surface passes it.
+    A Vibey source's fork point (C-10 fork.md section 2) is resolved here. A
+    user's fork cuts before its earliest unfinished Turn, so the child never
+    inherits a partial Turn. ``self_fork`` is the Agent's own fork from inside
+    its live Turn, set only by ``vibe agent run --fork-self``; it cuts at the
+    largest settled point, keeping that Turn's input and finished steps.
+    ``as_of`` is internal, for system mechanisms: a settled Vibey point. No
+    product surface passes it. Native backends fork by their own existing
+    logic and ignore ``self_fork``; they refuse ``as_of``.
     """
 
     context = require_instance_role(authorization_context, "editor")
@@ -287,16 +275,6 @@ def reserve_forked_session(
                 raise SessionForkError(
                     "an explicit fork point needs a vibey source session",
                     code="session_fork_point_unsupported",
-                )
-            if (
-                not self_fork
-                and not _trims_live_turn(source_backend)
-                and _source_has_live_turn(conn, str(row["id"]))
-            ):
-                raise SessionForkError(
-                    "source session has a running turn; fork it after the turn ends",
-                    code=SESSION_FORK_SOURCE_RUNNING_CODE,
-                    details={"source_session_id": str(row["id"])},
                 )
             source_anchor = _latest_source_message_anchor(conn, str(row["id"]))
             source_has_active_run = _source_has_active_agent_run(conn, str(row["id"]))
@@ -401,9 +379,8 @@ def reserve_forked_session(
             metadata.pop("fork_opencode_message_id", None)
             metadata.pop("fork_opencode_fork_empty_history", None)
             metadata.pop("fork_opencode_boundary_from_active_run", None)
-            # A source that is itself a fork carries its own point and kind; the child's are set below.
+            # A source that is itself a fork carries its own point; the child's is resolved below.
             metadata.pop("fork_source_context_seq", None)
-            metadata.pop("fork_self", None)
             metadata.update(
                 {
                     "created_via": "session_fork",
@@ -419,9 +396,9 @@ def reserve_forked_session(
             )
             if source_backend == "vibey":
                 # Vibey's context is the source's rows up to the fork point, resolved once
-                # now so later rows never enter the prefix: the end of the previous ended
-                # Turn, so a live Turn's input, calls, and replies never reach the child
-                # (C-10 fork.md section 2).
+                # now so later rows never enter the prefix. A user's fork cuts before the
+                # earliest unfinished Turn, so a live Turn's input, calls, and replies never
+                # reach the child (C-10 fork.md section 2).
                 from core.agent_core.harness.fork import ForkPointError
                 from storage.agent_transcript import resolve_fork_point
 
@@ -431,8 +408,6 @@ def reserve_forked_session(
                     )
                 except ForkPointError as exc:
                     raise SessionForkError(str(exc), code=f"session_fork_point_{exc.code}") from exc
-            if self_fork:
-                metadata["fork_self"] = True
             if opencode_fork_message_id:
                 metadata["fork_opencode_message_id"] = opencode_fork_message_id
             if opencode_fork_empty_history:
@@ -506,7 +481,6 @@ def reserve_forked_session(
             opencode_fork_message_id=opencode_fork_message_id,
             opencode_fork_empty_history=opencode_fork_empty_history,
             opencode_boundary_from_active_run=opencode_boundary_from_active_run,
-            self_fork=self_fork,
         )
         return SessionForkResult(
             session_id=session_id,
@@ -551,8 +525,6 @@ def fork_metadata_from_request(metadata: dict[str, Any] | None) -> dict[str, Any
         result["opencode_fork_empty_history"] = True
     if bool(fork.get("opencode_boundary_from_active_run")):
         result["opencode_boundary_from_active_run"] = True
-    if bool(fork.get("self_fork")):
-        result["self_fork"] = True
     source_message = _clean_optional(fork.get("source_message_id"))
     if source_message:
         result["source_message_id"] = source_message
@@ -585,8 +557,6 @@ def fork_metadata_from_session_metadata(metadata: dict[str, Any] | None) -> dict
         result["opencode_fork_empty_history"] = True
     if bool(metadata.get("fork_opencode_boundary_from_active_run")):
         result["opencode_boundary_from_active_run"] = True
-    if bool(metadata.get("fork_self")):
-        result["self_fork"] = True
     source_message = _clean_optional(metadata.get("fork_source_message_id"))
     if source_message:
         result["source_message_id"] = source_message
@@ -939,59 +909,6 @@ def _latest_source_message_anchor(conn: Any, source_session_id: str) -> SourceMe
         message_type=str(row["type"] or "").strip() or None,
         running_turn=pre_materialized_start,
     )
-
-
-def _trims_live_turn(backend: str) -> bool:
-    """Whether a user's fork of this backend can leave a live Turn out: Vibey by its fork point, the others natively."""
-    return backend == "vibey" or backend in TRIM_LATEST_RUNNING_TURN_BACKENDS
-
-
-def _source_has_live_turn(conn: Any, source_session_id: str) -> bool:
-    from sqlalchemy import select
-
-    from storage.message_deliveries import TURN_OWNER_STATES
-    from storage.models import session_turns
-
-    return (
-        conn.execute(
-            select(session_turns.c.id)
-            .where(
-                session_turns.c.session_id == source_session_id,
-                session_turns.c.state.in_(TURN_OWNER_STATES),
-            )
-            .limit(1)
-        ).first()
-        is not None
-    )
-
-
-def source_has_live_turn(source_session_id: str, *, db_path: Optional[Path] = None) -> bool:
-    """Whether the Session has a live Turn now, from its Turn rows (never a clock)."""
-    from storage.db import create_sqlite_engine
-    from storage.importer import ensure_sqlite_state, resolve_primary_platform_from_config
-
-    if db_path is None:
-        ensure_sqlite_state(primary_platform=resolve_primary_platform_from_config(paths.get_state_dir()))
-    engine = create_sqlite_engine(db_path or paths.get_sqlite_state_path())
-    try:
-        with engine.connect() as conn:
-            return _source_has_live_turn(conn, source_session_id)
-    finally:
-        engine.dispose()
-
-
-def user_fork_source_is_running(fork: Mapping[str, Any] | None, *, db_path: Optional[Path] = None) -> bool:
-    """At a native fork's first Turn: a user's fork of a backend that cannot trim whose source has a live Turn.
-
-    The native copy happens now, not at reservation, so the refusal is checked again here (C-10 section 11).
-    """
-    if not isinstance(fork, Mapping) or fork.get("self_fork"):
-        return False
-    backend = str(fork.get("source_backend") or "")
-    source_session_id = _clean_optional(fork.get("source_session_id"))
-    if not source_session_id or _trims_live_turn(backend):
-        return False
-    return source_has_live_turn(source_session_id, db_path=db_path)
 
 
 def _source_has_active_agent_run(conn: Any, source_session_id: str) -> bool:

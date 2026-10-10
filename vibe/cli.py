@@ -6601,7 +6601,8 @@ def _reserve_forked_cli_session(
     self_fork: bool = False,
 ):
     from core.services.session_fork import (
-        SESSION_FORK_LOCALIZED_ERRORS,
+        SESSION_AGENT_UNAVAILABLE_CODE,
+        SESSION_AGENT_UNAVAILABLE_I18N_KEY,
         SessionForkError,
         reserve_forked_session,
     )
@@ -6619,12 +6620,12 @@ def _reserve_forked_cli_session(
             self_fork=self_fork,
         )
     except SessionForkError as exc:
-        key = SESSION_FORK_LOCALIZED_ERRORS.get(exc.code)
-        if key is not None:
+        if exc.code == SESSION_AGENT_UNAVAILABLE_CODE:
             try:
                 lang = V2Config.load().language
             except Exception:
                 lang = "en"
+            key = SESSION_AGENT_UNAVAILABLE_I18N_KEY
             raise TaskCliError(
                 i18n_t(f"{key}.message", lang),
                 code=exc.code,

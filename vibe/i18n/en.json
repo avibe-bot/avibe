@@ -359,10 +359,6 @@
       "agentUnavailable": {
         "message": "The source session's Agent is no longer available for a new fork.",
         "hint": "Choose an enabled Agent override that uses the same backend."
-      },
-      "sourceRunning": {
-        "message": "This conversation is still running. Wait for the current turn to finish, then fork.",
-        "hint": "Claude Code can fork a conversation only between turns."
       }
     },
     "sessionArchived": "This session is archived and can no longer be changed.",

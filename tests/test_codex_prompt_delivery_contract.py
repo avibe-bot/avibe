@@ -524,6 +524,7 @@ async def test_native_fork_uses_bounded_inclusive_turn_history(tmp_path, source_
 
         target = _agent({})
         target._turn_registry.get_active_turn = Mock(return_value=reserved_turn["id"])
+        target._should_trim_forked_running_turn = AsyncMock(return_value=True)
         target_id = await target._fork_thread(
             native,
             request,

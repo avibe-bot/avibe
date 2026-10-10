@@ -18,14 +18,6 @@ from modules.im import MessageContext
 from modules.sessions_facade import SessionsFacade
 
 
-@pytest.fixture(autouse=True)
-def _idle_source(monkeypatch):
-    """A fork's source Session has no live Turn unless a test says so (its Turn rows are not under test here)."""
-    live = Mock(return_value=False)
-    monkeypatch.setattr("modules.agents.opencode.session.source_has_live_turn", live)
-    return live
-
-
 def _request() -> AgentRequest:
     return AgentRequest(
         context=MessageContext(user_id="U1", channel_id="C1", platform_specific={}),
@@ -347,48 +339,6 @@ def test_opencode_forks_pending_native_source() -> None:
         vibe_agent_name=None,
         vibe_agent_backend=None,
     )
-
-
-def test_opencode_user_fork_trims_a_source_that_became_live_after_reservation(_idle_source) -> None:
-    # The reservation saw the source idle; by the child's first Turn it is live. The native copy happens now,
-    # so the fork still leaves that Turn out (C-10 fork.md section 11).
-    sessions = SimpleNamespace(
-        get_agent_session_id=Mock(return_value=None),
-        ensure_agent_session_id=Mock(return_value="ses-fork"),
-        bind_agent_session=Mock(return_value="ses-fork"),
-        bind_agent_session_by_id=Mock(return_value="ses-fork"),
-    )
-    manager = OpenCodeSessionManager(SimpleNamespace(sessions=sessions), "opencode")
-    manager._current_running_fork_point = Mock(
-        return_value=SimpleNamespace(available=True, message_id="oc-live-input", empty_history=False)
-    )
-    server = SimpleNamespace(fork_session=AsyncMock(return_value={"id": "oc-fork"}), create_session=AsyncMock())
-    fork = {"source_session_id": "ses-source", "source_native_session_id": "oc-source", "source_backend": "opencode"}
-
-    def run(fork_spec: dict) -> None:
-        request = _request()
-        request.context.platform_specific = {
-            "agent_session_id": "ses-fork",
-            "agent_session_target": {
-                "id": "ses-fork",
-                "agent_backend": "opencode",
-                "native_session_id": "",
-                "native_session_fork": fork_spec,
-            },
-        }
-        asyncio.run(manager.get_or_create_session_id(request, server))
-
-    _idle_source.return_value = True
-    run(fork)
-    server.fork_session.assert_awaited_once_with("oc-source", directory="/repo", message_id="oc-live-input")
-    _idle_source.assert_called_once_with("ses-source")
-
-    # A self-fork was classified at its reservation and is not re-checked (O-4).
-    server.fork_session.reset_mock()
-    _idle_source.reset_mock()
-    run({**fork, "self_fork": True})
-    server.fork_session.assert_awaited_once_with("oc-source", directory="/repo", message_id=None)
-    _idle_source.assert_not_called()
 
 
 def test_opencode_idle_fork_ignores_stale_native_message_point() -> None:

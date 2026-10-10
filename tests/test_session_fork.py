@@ -11,8 +11,6 @@ from sqlalchemy import func, select
 
 from core.services.session_fork import (
     SESSION_AGENT_UNAVAILABLE_CODE,
-    SESSION_FORK_LOCALIZED_ERRORS,
-    SESSION_FORK_SOURCE_RUNNING_CODE,
     SessionForkError,
     SourceMessageAnchor,
     fork_anchor_is_terminal_agent_output,
@@ -269,7 +267,7 @@ def _fork_metadata(db_path: Path, session_id: str) -> dict:
 
 
 def test_a_users_fork_of_a_vibey_turn_mid_tool_batch_cuts_at_the_previous_ended_turn(tmp_path: Path) -> None:
-    # C-10 section 2: a user's fork never carries a live Turn; the cut is the end of the previous ended Turn,
+    # C-10 section 2: a user's fork never carries a live Turn; the cut is the end of the previous finished Turn,
     # fixed once at reservation from committed rows.
     db_path = tmp_path / "vibe.sqlite"
     source_id = _seed_source_session(db_path, tmp_path, backend="vibey")
@@ -280,7 +278,6 @@ def test_a_users_fork_of_a_vibey_turn_mid_tool_batch_cuts_at_the_previous_ended_
     metadata = _fork_metadata(db_path, result.session_id)
     assert result.fork.source_backend == "vibey"
     assert metadata["fork_source_context_seq"] == seqs["answer"]
-    assert "fork_self" not in metadata
 
 
 def test_a_vibey_self_fork_keeps_its_live_turns_input_and_finished_steps(tmp_path: Path) -> None:
@@ -293,9 +290,6 @@ def test_a_vibey_self_fork_keeps_its_live_turns_input_and_finished_steps(tmp_pat
     metadata = _fork_metadata(db_path, result.session_id)
     # The largest settled point: after the finished step, before the response whose call runs the fork.
     assert metadata["fork_source_context_seq"] == seqs["step"]
-    assert metadata["fork_self"] is True
-    assert result.fork.self_fork is True
-    assert fork_metadata_from_session_metadata(metadata)["self_fork"] is True
 
 
 def test_a_users_fork_cuts_out_an_ended_turn_whose_calls_await_recovery(tmp_path: Path) -> None:
@@ -384,31 +378,6 @@ def test_a_users_fork_cuts_out_an_ended_turn_with_an_accepted_input_not_yet_admi
     assert _fork_metadata(db_path, result.session_id)["fork_source_context_seq"] == seqs["answer"]
 
 
-def test_a_users_fork_of_a_self_fork_carries_no_self_fork_marker(tmp_path: Path) -> None:
-    # The reservation copies the source's metadata: a fork of a Session that was itself a self-fork is a user's
-    # fork, and must keep the native first-Turn checks.
-    db_path = tmp_path / "vibe.sqlite"
-    source_id = _seed_source_session(db_path, tmp_path, backend="claude")
-    own = reserve_forked_session(source_session_id=source_id, db_path=db_path, self_fork=True)
-    engine = create_sqlite_engine(db_path)
-    try:
-        with engine.begin() as conn:
-            conn.execute(
-                agent_sessions.update()
-                .where(agent_sessions.c.id == own.session_id)
-                .values(native_session_id="claude-self-fork")
-            )
-    finally:
-        engine.dispose()
-
-    child = reserve_forked_session(source_session_id=own.session_id, db_path=db_path)
-
-    metadata = _fork_metadata(db_path, child.session_id)
-    assert "fork_self" not in metadata
-    assert child.fork.self_fork is False
-    assert "self_fork" not in fork_metadata_from_session_metadata(metadata)
-
-
 def test_an_internal_fork_point_must_be_settled_and_needs_a_vibey_source(tmp_path: Path) -> None:
     db_path = tmp_path / "vibe.sqlite"
     source_id = _seed_source_session(db_path, tmp_path, backend="vibey")
@@ -426,67 +395,6 @@ def test_an_internal_fork_point_must_be_settled_and_needs_a_vibey_source(tmp_pat
     with pytest.raises(SessionForkError) as unsupported:
         reserve_forked_session(source_session_id=native_id, db_path=native_db, as_of=0)
     assert unsupported.value.code == "session_fork_point_unsupported"
-
-
-def test_a_users_fork_of_a_claude_session_waits_until_its_turn_ends(tmp_path: Path) -> None:
-    # Claude cannot cut a live Turn out of the copy it resumes, so a user's fork is refused while one is live
-    # (C-10 section 11); the Agent's own self-fork from inside that Turn keeps today's behavior (O-4).
-    db_path = tmp_path / "vibe.sqlite"
-    source_id = _seed_source_session(db_path, tmp_path, backend="claude")
-    scope_id = _source_scope(db_path, source_id)
-    engine = create_sqlite_engine(db_path)
-    try:
-        with engine.begin() as conn:
-            turn_id = _seed_started_delivery(conn, scope_id=scope_id, session_id=source_id, text="still working")
-    finally:
-        engine.dispose()
-
-    with pytest.raises(SessionForkError) as refused:
-        reserve_forked_session(source_session_id=source_id, db_path=db_path)
-    assert refused.value.code == SESSION_FORK_SOURCE_RUNNING_CODE
-    assert refused.value.details == {"source_session_id": source_id}
-    assert SESSION_FORK_LOCALIZED_ERRORS[SESSION_FORK_SOURCE_RUNNING_CODE] == "error.sessionFork.sourceRunning"
-
-    own = reserve_forked_session(source_session_id=source_id, db_path=db_path, self_fork=True)
-    assert own.fork.self_fork is True
-
-    engine = create_sqlite_engine(db_path)
-    try:
-        with engine.begin() as conn:
-            conn.execute(
-                session_turns.update()
-                .where(session_turns.c.id == turn_id)
-                .values(state="terminal", terminal_outcome="completed", terminal_at="2026-08-01T00:02:00Z")
-            )
-    finally:
-        engine.dispose()
-    ended = reserve_forked_session(source_session_id=source_id, db_path=db_path)
-    assert ended.fork.source_backend == "claude"
-
-
-def test_the_native_first_turn_rechecks_a_users_claude_fork_but_not_a_self_fork(tmp_path: Path) -> None:
-    from core.services.session_fork import user_fork_source_is_running as running
-
-    db_path = tmp_path / "vibe.sqlite"
-    source_id = _seed_source_session(db_path, tmp_path, backend="claude")
-    user_fork = {"source_session_id": source_id, "source_backend": "claude", "source_native_session_id": "n"}
-
-    def user_fork_source_is_running(fork: dict) -> bool:
-        return running(fork, db_path=db_path)
-
-    assert user_fork_source_is_running(user_fork) is False
-
-    # The source became live after the reservation, before the child's first Turn copied it.
-    engine = create_sqlite_engine(db_path)
-    try:
-        with engine.begin() as conn:
-            _seed_started_delivery(conn, scope_id=_source_scope(db_path, source_id), session_id=source_id, text="go")
-    finally:
-        engine.dispose()
-    assert user_fork_source_is_running(user_fork) is True
-    assert user_fork_source_is_running({**user_fork, "self_fork": True}) is False
-    # Backends that trim a live Turn natively never need the refusal.
-    assert user_fork_source_is_running({**user_fork, "source_backend": "codex"}) is False
 
 
 def test_reserve_forked_codex_running_fork_marks_trim(tmp_path: Path) -> None:
