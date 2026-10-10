@@ -38,6 +38,9 @@ The smallest accepted contract is `click_mode`:
 - `"raw"` is opt-in and requires an exact `pid` + `window_id`, pixel `x/y`,
   background left-click delivery, `action` `press` or `click`, `count=1`, and
   no modifiers, element token, or portable target;
+- raw delivery defaults to background when `delivery_mode` is omitted; when
+  supplied, the field must be exactly `"background"` rather than null,
+  foreground, or an unknown future value;
 - raw mode bypasses only the macOS click tool's AX hit-test/`AXPress` shortcut
   and uses the existing routed CGEvent path;
 - unknown values and invalid combinations are structured

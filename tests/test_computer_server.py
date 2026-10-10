@@ -718,20 +718,35 @@ async def test_window_input_requires_observation_and_rejects_focus_routes(
 
 
 def test_raw_click_mode_is_admitted_only_for_exact_background_pixel_click() -> None:
+    valid_raw_click = {
+        "click_mode": "raw",
+        "pid": 7,
+        "window_id": 9,
+        "x": 1,
+        "y": 2,
+    }
+
+    _validate_input("click", valid_raw_click)
+    _validate_input(
+        "click",
+        {**valid_raw_click, "delivery_mode": "background"},
+    )
     with pytest.raises(ComputerServerError, match="only for the click tool"):
         _validate_input("get_window_state", {"click_mode": "raw"})
     with pytest.raises(ComputerServerError, match="exact pid"):
         _validate_input(
             "click",
             {
-                "click_mode": "raw",
-                "pid": 7,
-                "window_id": 9,
-                "x": 1,
-                "y": 2,
+                **valid_raw_click,
                 "modifier": ["cmd"],
             },
         )
+    for delivery_mode in (None, "foreground", "future-mode"):
+        with pytest.raises(ComputerServerError, match="background left-click"):
+            _validate_input(
+                "click",
+                {**valid_raw_click, "delivery_mode": delivery_mode},
+            )
     with pytest.raises(ComputerServerError, match="auto.*raw"):
         _validate_input("click", {"click_mode": "semantic"})
 

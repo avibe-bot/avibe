@@ -704,6 +704,7 @@ def _validate_input(tool_name: str, arguments: Mapping[str, Any]) -> None:
                 or arguments.get("target") is not None
                 or arguments.get("action", "press") not in {"press", "click"}
                 or arguments.get("button", "left") != "left"
+                or arguments.get("delivery_mode", "background") != "background"
                 or isinstance(count, bool)
                 or not isinstance(count, int)
                 or count != 1
