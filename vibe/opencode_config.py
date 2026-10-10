@@ -132,7 +132,8 @@ def managed_opencode_runtime_config_content(
                 str(computer_use_spec.command),
                 *[str(value) for value in computer_use_spec.args],
             ],
-            "environment": dict(computer_use_spec.env),
+            # The Avibe OpenCode plugin stamps each call with its session.
+            "environment": dict(computer_use_spec.for_caller("opencode").env),
             "enabled": True,
         }
     if managed_mcp:

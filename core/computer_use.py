@@ -15,7 +15,7 @@ that the shell can adopt.
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import json
 import logging
@@ -34,6 +34,13 @@ COMPUTER_USE_STATE_FILE = "computer-use.json"
 COMPUTER_USE_LOCK_FILE = "computer-use.lock"
 COMPUTER_USE_LEASE_FILE = "computer-lease.json"
 COMPUTER_USE_LEASE_LOCK_FILE = "computer-lease.lock"
+# Each backend launch declares how the server learns which Avibe Session is
+# calling. The identity never comes from a tool argument the model fills in.
+COMPUTER_USE_CALLER_BACKEND_ENV = "AVIBE_COMPUTER_USE_CALLER_BACKEND"
+COMPUTER_USE_CALLER_SESSION_ENV = "AVIBE_COMPUTER_USE_CALLER_SESSION"
+# Reserved argument the Avibe OpenCode plugin stamps on every computer-use call
+# with the OpenCode session id and its live caller-context binding token.
+COMPUTER_USE_OPENCODE_STAMP_ARGUMENT = "_avibe_opencode_caller"
 COMPUTER_USE_RECONCILE_INTERVAL_SECONDS = 2.0
 COMPUTER_USE_TOOL_SNAPSHOT_SHA256 = (
     "b03c3e48d1b00c8fe7c0e8b9813eb5ea104ad38313672fc4b68af203a827f43b"
@@ -142,6 +149,24 @@ class ManagedMcpServerSpec:
     args: tuple[str, ...]
     env: Mapping[str, str]
     fingerprint: str
+
+    def for_caller(
+        self,
+        backend: str,
+        *,
+        session_id: str | None = None,
+    ) -> "ManagedMcpServerSpec":
+        """Declare the backend whose runtime supplies the caller identity.
+
+        Claude starts one server per Session, so its launch also carries that
+        Session's id. Codex and OpenCode share one server across Sessions and
+        identify each call at the protocol layer instead.
+        """
+
+        env = {**self.env, COMPUTER_USE_CALLER_BACKEND_ENV: backend}
+        if session_id:
+            env[COMPUTER_USE_CALLER_SESSION_ENV] = session_id
+        return replace(self, env=env)
 
     def claude_config(self) -> dict[str, Any]:
         return {

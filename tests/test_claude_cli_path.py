@@ -29,6 +29,7 @@ from config.v2_config import (
 from config.v2_settings import RoutingSettings
 from core import git_runtime as git_runtime_module
 from core.agent_auth_service import AgentAuthService
+from core.computer_use import ManagedMcpServerSpec
 from core.handlers.session_handler import SessionHandler
 from core.runtime_activation import RuntimeActivationRegistry
 from core.runtime_ownership import RuntimeTargetOwnershipSnapshot, SessionRuntimeDisposition
@@ -203,15 +204,12 @@ def test_selected_agent_computer_use_authority_matches_cold_and_cached_launch(
     clients: list[Any] = []
     rendered_prompts: list[str] = []
     loads = 0
-    spec = SimpleNamespace(
+    spec = ManagedMcpServerSpec(
         name="avibe_computer",
+        command="/fixture/python",
+        args=("-I", "/fixture/core/computer_server.py"),
+        env={},
         fingerprint="managed-fixture",
-        claude_config=lambda: {
-            "type": "stdio",
-            "command": "/fixture/python",
-            "args": ["-I", "/fixture/core/computer_server.py"],
-            "env": {},
-        },
     )
 
     class Client:
@@ -255,8 +253,9 @@ def test_selected_agent_computer_use_authority_matches_cold_and_cached_launch(
     handler = SessionHandler(_Controller(tmp_path))
     monkeypatch.setattr(handler, "_load_agent_file", load_agent)
 
+    context = MessageContext(user_id="U123", channel_id="C123")
+
     async def run() -> tuple[Any, Any]:
-        context = MessageContext(user_id="U123", channel_id="C123")
         first = await handler.get_or_create_claude_session(
             context,
             subagent_name="restricted",
@@ -282,11 +281,23 @@ def test_selected_agent_computer_use_authority_matches_cold_and_cached_launch(
         for prompt in rendered_prompts
     )
     assert getattr(first.options, "allowed_tools", None) == allowed_tools
+    # The server a Claude client starts acts for that client's Avibe Session.
+    agent_session_id = (context.platform_specific or {}).get("agent_session_id")
     assert getattr(first.options, "mcp_servers", None) == (
-        {"avibe_computer": spec.claude_config()}
+        {
+            "avibe_computer": spec.for_caller(
+                "claude",
+                session_id=agent_session_id,
+            ).claude_config()
+        }
         if exposes_computer_use
         else None
     )
+    if exposes_computer_use:
+        assert first.options.mcp_servers["avibe_computer"]["env"][
+            "AVIBE_COMPUTER_USE_CALLER_SESSION"
+        ] == agent_session_id
+        assert agent_session_id
 
 
 class _StubClaudeAgentOptions:

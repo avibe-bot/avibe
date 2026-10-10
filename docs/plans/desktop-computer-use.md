@@ -536,12 +536,30 @@ running. The tray keeps the shell alive after the window closes.
     costs the other backends nothing.
   - **Concurrent sessions.** Claude spawns one server per session. Codex
     and OpenCode share one server across their conversations, so a caller
-    cannot be identified by process. Isolation uses the Avibe session id
-    that every session prompt already carries
-    (`core/prompts/session-start.md`), and the server enforces it:
-    - The server adds a required `session` string to every advertised
-      tool schema, so schema-driven clients always send it. The injected
-      prompt says to fill it with the session id.
+    cannot be identified by process. The caller identity therefore comes from
+    each backend's runtime, never from a tool argument the model fills in. The
+    launch declares its backend in `AVIBE_COMPUTER_USE_CALLER_BACKEND`, and the
+    server trusts only that backend's channel:
+    - Claude: the launch also sets `AVIBE_COMPUTER_USE_CALLER_SESSION` to the
+      Avibe session id of the one Session that client serves.
+    - Codex: every `tools/call` carries `params._meta.sessionId` (shared by a
+      root thread and its subagents) or, on older releases,
+      `params._meta.threadId`. Codex writes that metadata itself; the model
+      controls only `arguments`.
+    - OpenCode: MCP calls carry no session. Avibe's OpenCode plugin stamps
+      each exact managed Computer Use tool ID in `tool.execute.before` with
+      `_avibe_opencode_caller = {session, token}`: the OpenCode session id and
+      the binding token of its live caller-context Turn binding. The server
+      accepts the stamp only when that token matches the unexpired binding in
+      the same file, and takes the holder from the Avibe session id that
+      binding carries, so a replaced native session keeps its lease. The
+      plugin deletes a model-written stamp first.
+    - A call without its backend's identity, including an undeclared backend,
+      is refused with `caller_identity_unavailable` naming the missing
+      integration. No other channel stands in for it.
+    - Advertised schemas do not contain `session`. The server names the Cua
+      session `avibe-<first 16 hex of sha256(identity)>`, a public label that
+      does not reveal the identity, and overwrites any model-written value.
     - The server calls `start_session` for a session's name before forwarding in
       four cases: its first call, its first call after an `end_session`, its
       first call after the daemon key (`instance_id`, `generation`) changes, and
@@ -552,15 +570,15 @@ running. The tray keeps the shell alive after the window closes.
       rest. So a session never has two calls in flight. An `end_session`
       releases the lease only after the calls queued before it have
       finished.
-    - The server forwards the id as the named Cua session. Element tokens
-      and session state are therefore per Avibe session, even on one shared
+    - The server forwards that label as the named Cua session. Element tokens
+      and session state are therefore per caller, even on one shared
       upstream connection.
   - **Desktop lease.** There is one desktop, so only one session acts at a
     time.
     - Acquisition, refresh, and release run under an exclusive OS lock on
       `computer-lease.lock`, next to `D` (`flock` on macOS, `LockFileEx` on
       Windows). Inside that lock the server reads and writes the lease
-      record: holder session id, last refresh time, a lease `epoch` that
+      record: holder identity, last refresh time, a lease `epoch` that
       increases with each new holder, and the daemon key (`instance_id`,
       `generation`) it was taken under. Acquisition also re-reads the
       effective ready daemon key while holding this same lock. A caller that
@@ -574,7 +592,8 @@ running. The tray keeps the shell alive after the window closes.
       lease while holding the lease lock; cleanup never needs to release a
       renewed holder speculatively.
     - Two first calls from different processes therefore serialize. One
-      wins, and the other gets `desktop_busy` naming the holder.
+      wins, and the other gets `desktop_busy`. The refusal does not name the
+      holder.
     - The holder starts an ownership-aware heartbeat immediately after
       acquisition and refreshes every 10 s through proxy setup, session
       revival, and forwarding. A long setup or call, such as a 120 s
@@ -671,7 +690,7 @@ running. The tray keeps the shell alive after the window closes.
 - **Prompt.** Add a short section in `core/system_prompt_injection.py`, only
   when the server is configured. It says the tools can report a state such as
   `off` or `needs_permission`, and then the agent tells the user instead of
-  retrying. It says to fill the required `session` field with the session id. It
+  retrying. It says Avibe identifies the session on every call. It
   says `desktop_busy` means another session holds the desktop, so the agent
   waits or tells the user, and to call `end_session` when a GUI task is done. It
   also says to prefer CLI/API routes, use GUI tools for GUI-only steps, prefer
@@ -1013,8 +1032,10 @@ Each case lives in the suite of the component that owns the behavior.
   - Upstream: a call while not ready returns the named state and never
     spawns a child. An (`instance_id`, `generation`) change or a child exit
     respawns exactly once. Folding keeps image blocks.
-  - Sessions: every advertised schema requires `session`. Two sessions get
-    separate Cua sessions on one upstream connection. A session is revived
+  - Sessions: no advertised schema contains `session`. For each backend, a
+    second caller that presents the holder's id is refused, and a call
+    without its runtime identity is refused before admission. Two sessions
+    get separate Cua sessions on one upstream connection. A session is revived
     before its next call after `end_session`, after a daemon respawn, and
     after a child replacement. A session's calls run one at a time, and
     `end_session` waits for the calls queued before it.
@@ -1062,6 +1083,14 @@ redirected to test-owned fakes.
 
 ## Owner decision ledger
 
+- **2026-10-10 — runtime-supplied caller identity.** The lease holder and the
+  Cua session no longer come from a model-supplied `session` argument, which
+  let a refused conversation retry with the holder's id. Each backend's
+  runtime supplies the identity, as described under Concurrent sessions; a
+  call without it is refused rather than falling back to anything the model
+  wrote. Known by design: OpenCode identity requires the Avibe plugin and a
+  live Turn binding, so an OpenCode subagent's child session is refused, and
+  the same-user trust boundary below still applies.
 - **2026-10-08 — Workbench support ownership follow-up.** The owner accepts
   terminal-started Runtimes advertising the desktop shell's shared Computer Use
   status as a Phase 1 limitation. Track `a per-Runtime shell-adoption signal for

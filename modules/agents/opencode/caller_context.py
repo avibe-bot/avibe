@@ -4,9 +4,12 @@ OpenCode runs a shared ``opencode serve`` process, so per-Agent Avibe context
 cannot live in the server process environment. Instead Avibe installs a tiny
 OpenCode plugin that resolves each shell call's OpenCode session id through an
 Avibe-managed binding file and injects the AVIBE_* env vars for that call. The
-same process-scoped plugin removes OpenCode's native Skill Catalog after its
-system prompt is assembled and restores exact Hub provider definitions after
-native configuration merging; Avibe owns both projections.
+same binding identifies Computer Use calls: the plugin stamps each one with its
+OpenCode session id and binding token, which the computer-use server verifies
+against this file. The same process-scoped plugin removes OpenCode's native
+Skill Catalog after its system prompt is assembled and restores exact Hub
+provider definitions after native configuration merging; Avibe owns both
+projections.
 """
 
 from __future__ import annotations
@@ -22,6 +25,11 @@ from typing import Any, Mapping
 
 from config import paths
 from core.caller_context import caller_context_from_platform_payload
+from core.computer_use import (
+    COMPUTER_USE_OPENCODE_STAMP_ARGUMENT,
+    COMPUTER_USE_SERVER_NAME,
+    COMPUTER_USE_TOOL_NAMES,
+)
 
 PLUGIN_FILENAME = "avibe-caller-context.js"
 BINDINGS_FILENAME = "opencode_caller_context.json"
@@ -35,6 +43,10 @@ const bindingPath = process.env.AVIBE_OPENCODE_CALLER_CONTEXT_PATH
 const nativeSkillIntro = "Skills provide specialized instructions and workflows for specific tasks."
 const nativeSkillPrefix = "<available_skills>"
 const nativeSkillSuffix = "</available_skills>"
+// OpenCode names MCP tools "<server>_<tool>". Only these exact IDs receive the
+// stamp, so another server's tool can never see a binding token.
+const computerToolIDs = new Set(__AVIBE_COMPUTER_TOOL_IDS__)
+const computerStampArgument = __AVIBE_COMPUTER_STAMP_ARGUMENT__
 
 function readBindings() {
   if (!bindingPath) return {}
@@ -92,6 +104,18 @@ export const AvibeCallerContextPlugin = async () => ({
     if (expiresAt && Date.now() > expiresAt) return
     applyEnv(output, binding.env)
   },
+  "tool.execute.before": async (input, output) => {
+    // Computer use trusts only this stamp, never a value the model wrote.
+    const tool = input && typeof input.tool === "string" ? input.tool : ""
+    if (!bindingPath || !computerToolIDs.has(tool)) return
+    const args = output && output.args
+    if (!args || typeof args !== "object") return
+    delete args[computerStampArgument]
+    const sessionID = typeof input.sessionID === "string" ? input.sessionID : ""
+    const binding = sessionID ? readBindings()[sessionID] : undefined
+    const token = binding && typeof binding.binding_token === "string" ? binding.binding_token : ""
+    if (token) args[computerStampArgument] = { session: sessionID, token }
+  },
   "experimental.chat.system.transform": async (_input, output) => {
     // The plugin is installed in the user's global OpenCode directory, but this
     // policy belongs only to the Avibe-managed server process.
@@ -102,7 +126,13 @@ export const AvibeCallerContextPlugin = async () => ({
     output.system.splice(0, output.system.length, ...transformed)
   },
 })
-""".lstrip()
+""".lstrip().replace(
+    "__AVIBE_COMPUTER_TOOL_IDS__",
+    json.dumps([f"{COMPUTER_USE_SERVER_NAME}_{name}" for name in COMPUTER_USE_TOOL_NAMES]),
+).replace(
+    "__AVIBE_COMPUTER_STAMP_ARGUMENT__",
+    json.dumps(COMPUTER_USE_OPENCODE_STAMP_ARGUMENT),
+)
 
 
 @dataclass(frozen=True)
