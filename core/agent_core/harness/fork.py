@@ -42,9 +42,10 @@ def settled(entries: Sequence[ContextEntry], as_of: int) -> bool:
 def latest_cut(entries: Sequence[ContextEntry], *, unended_input_seq: Optional[int]) -> int:
     """The largest settled point before ``unended_input_seq`` (anywhere when it is ``None``).
 
-    A user's fork passes the first input of the earliest Turn that has not ended: the live Turn, or one whose calls
-    recovery has not settled yet. A Turn writes every row of its own after that input (one writer per Session), so
-    the point ends the previous ended Turn and no partial Turn is inherited. A self-fork passes ``None``.
+    A user's fork passes the first input of the earliest unfinished Turn (live, holding a call without a result, or
+    with an accepted input not yet in the context; C-10 section 2). A Turn writes every row of its own after that
+    input (one writer per Session), so the point ends the previous finished Turn and no partial Turn is inherited.
+    A self-fork passes ``None``.
     """
     seqs = sorted(
         {entry.context_seq for entry in entries if unended_input_seq is None or entry.context_seq < unended_input_seq},

@@ -502,18 +502,36 @@ def resolve_fork_point(
 
 
 def _unended_input_seq(conn: Connection, session_id: str, entries: Sequence[ContextEntry]) -> Optional[int]:
-    """The first input of the earliest Turn that has not ended: the live Turn, or the Turn that owns an open call.
+    """The first input of the earliest unfinished Turn (C-10 ``fork.md`` section 2).
 
-    A Turn's input is the row its initial Delivery names. Turns run one at a time and each writes its rows after its
-    input, so the Turn owning an open call is the latest one whose input precedes that call.
+    A Turn is unfinished while it is live, while it holds a call without a result (T2), or while an input it
+    accepted is not yet in the context (T3). A Turn's first input is the row its initial Delivery names; Turns run
+    one at a time and each writes its rows after that input, so the Turn owning an open call is the latest one whose
+    input precedes the call. A Turn whose first input is not consumed has no row in the context yet.
     """
     turns = conn.execute(
-        select(session_turns.c.state, messages.c.context_seq)
+        select(session_turns.c.id, session_turns.c.state, messages.c.context_seq)
         .select_from(session_turns.join(messages, messages.c.id == session_turns.c.initial_delivery_id))
         .where(session_turns.c.session_id == session_id, messages.c.session_id == session_id)
     ).all()
-    inputs = sorted(seq for _, seq in turns if seq is not None)
-    candidates = [seq for state, seq in turns if state in TURN_OWNER_STATES and seq is not None]
+    awaiting_input = set(
+        conn.execute(
+            select(message_deliveries.c.turn_id)
+            .select_from(message_deliveries.join(messages, messages.c.id == message_deliveries.c.message_id))
+            .where(
+                messages.c.session_id == session_id,
+                messages.c.context_seq.is_(None),
+                messages.c.type.in_(INPUT_TYPES),
+                message_deliveries.c.state == "accepted",
+            )
+        ).scalars()
+    )
+    inputs = sorted(seq for _, _, seq in turns if seq is not None)
+    candidates = [
+        seq
+        for turn_id, state, seq in turns
+        if seq is not None and (state in TURN_OWNER_STATES or turn_id in awaiting_input)
+    ]
     open_calls = open_tool_calls(entries)
     if open_calls:
         first_open = min(owner.context_seq for owner, _ in open_calls)

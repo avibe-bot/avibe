@@ -320,6 +320,70 @@ def test_a_users_fork_cuts_out_an_ended_turn_whose_calls_await_recovery(tmp_path
     assert _fork_metadata(db_path, result.session_id)["fork_source_context_seq"] == seqs["answer"]
 
 
+def test_a_users_fork_cuts_out_an_ended_turn_with_an_accepted_input_not_yet_admitted(tmp_path: Path) -> None:
+    # T3: the Turn ended (no open call left) while a steer it accepted is not in the context yet; recovery admits
+    # it later. The Turn is unfinished, so it is cut out whole rather than fixed without that input.
+    from core.agent_core.messages import ToolResultMessage, text
+    from storage.agent_transcript import SQLiteTranscriptStore
+    from tests.agent_core.fakes import assistant
+
+    db_path = tmp_path / "vibe.sqlite"
+    source_id = _seed_source_session(db_path, tmp_path, backend="vibey")
+    seqs = _seed_vibey_turns(db_path, source_id)
+    engine = create_sqlite_engine(db_path)
+    store = SQLiteTranscriptStore(engine)
+
+    async def finish_the_turn() -> None:
+        await store.append_tool_result(
+            source_id, ToolResultMessage("call_build", "bash", (text("built"),)), details={}
+        )
+        await store.append_response(source_id, assistant("Released."), final=True)
+
+    try:
+        asyncio.run(finish_the_turn())
+        with engine.begin() as conn:
+            turn = conn.execute(select(session_turns).where(session_turns.c.session_id == source_id)).mappings().one()
+            steer = message_deliveries.insert_delivery(
+                conn,
+                delivery_id=message_deliveries.new_delivery_id(),
+                session_id=source_id,
+                priority="p1",
+                state="reserved",
+                snapshot=message_deliveries.message_snapshot(
+                    scope_id=_source_scope(db_path, source_id),
+                    session_id=source_id,
+                    platform="avibe",
+                    author="user",
+                    source="user",
+                    message_type="user",
+                    text="also bump the version",
+                ),
+                dispatch_text="also bump the version",
+            )
+            assert message_deliveries.open_steer_attempt(
+                conn,
+                steer["id"],
+                expected_version=int(steer["version"]),
+                turn_id=turn["id"],
+                attempt_id="att_steer",
+                expected_native_turn_id=turn["native_turn_id"],
+            )
+            assert message_deliveries.materialize_steer_acceptance(
+                conn, leader_delivery_id=steer["id"], expected_attempt_id="att_steer", turn_id=turn["id"], evidence={}
+            )
+            conn.execute(
+                session_turns.update()
+                .where(session_turns.c.id == turn["id"])
+                .values(state="terminal", terminal_outcome="failed", terminal_at="2026-08-01T00:02:00Z")
+            )
+    finally:
+        engine.dispose()
+
+    result = reserve_forked_session(source_session_id=source_id, db_path=db_path)
+
+    assert _fork_metadata(db_path, result.session_id)["fork_source_context_seq"] == seqs["answer"]
+
+
 def test_a_users_fork_of_a_self_fork_carries_no_self_fork_marker(tmp_path: Path) -> None:
     # The reservation copies the source's metadata: a fork of a Session that was itself a self-fork is a user's
     # fork, and must keep the native first-Turn checks.
@@ -400,14 +464,16 @@ def test_a_users_fork_of_a_claude_session_waits_until_its_turn_ends(tmp_path: Pa
     assert ended.fork.source_backend == "claude"
 
 
-def test_the_native_first_turn_rechecks_a_users_claude_fork_but_not_a_self_fork(tmp_path: Path, monkeypatch) -> None:
-    from config import paths
-    from core.services.session_fork import user_fork_source_is_running
+def test_the_native_first_turn_rechecks_a_users_claude_fork_but_not_a_self_fork(tmp_path: Path) -> None:
+    from core.services.session_fork import user_fork_source_is_running as running
 
     db_path = tmp_path / "vibe.sqlite"
     source_id = _seed_source_session(db_path, tmp_path, backend="claude")
-    monkeypatch.setattr(paths, "get_sqlite_state_path", lambda: db_path)
     user_fork = {"source_session_id": source_id, "source_backend": "claude", "source_native_session_id": "n"}
+
+    def user_fork_source_is_running(fork: dict) -> bool:
+        return running(fork, db_path=db_path)
+
     assert user_fork_source_is_running(user_fork) is False
 
     # The source became live after the reservation, before the child's first Turn copied it.

@@ -2865,6 +2865,7 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
         )
         agent._session_mgr = SimpleNamespace(set_thread_id=Mock())
         agent._fork_correction_pending_base_sessions = set()
+        agent._fork_source_last_completed_turn_id = AsyncMock(return_value=(False, "turn-last"))
         request = SimpleNamespace(
             working_path="/tmp/work",
             context=SimpleNamespace(
@@ -2901,6 +2902,8 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
         method, params = transport.send_request.await_args_list[0].args
         self.assertEqual(method, "thread/fork")
         self.assertEqual(params["threadId"], "thread-source")
+        # The boundary is always the source's last completed Turn, resolved at first use (C-10 section 11).
+        self.assertEqual(params["lastTurnId"], "turn-last")
         self.assertTrue(params["excludeTurns"])
         self.assertEqual(params["cwd"], "/tmp/work")
         self.assertEqual(params["approvalPolicy"], "never")
@@ -2948,6 +2951,7 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
         )
         agent._session_mgr = SimpleNamespace(set_thread_id=Mock())
         agent._fork_correction_pending_base_sessions = set()
+        agent._fork_source_last_completed_turn_id = AsyncMock(return_value=(False, "turn-last"))
         request = SimpleNamespace(
             working_path="/tmp/work",
             context=SimpleNamespace(
@@ -3153,6 +3157,7 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
         )
         agent._session_mgr = SimpleNamespace(set_thread_id=Mock())
         agent._fork_correction_pending_base_sessions = set()
+        agent._fork_source_last_completed_turn_id = AsyncMock(return_value=(False, "turn-last"))
         request = SimpleNamespace(
             working_path="/tmp/work",
             context=SimpleNamespace(

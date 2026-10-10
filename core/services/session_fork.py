@@ -965,13 +965,14 @@ def _source_has_live_turn(conn: Any, source_session_id: str) -> bool:
     )
 
 
-def source_has_live_turn(source_session_id: str) -> bool:
+def source_has_live_turn(source_session_id: str, *, db_path: Optional[Path] = None) -> bool:
     """Whether the Session has a live Turn now, from its Turn rows (never a clock)."""
     from storage.db import create_sqlite_engine
     from storage.importer import ensure_sqlite_state, resolve_primary_platform_from_config
 
-    ensure_sqlite_state(primary_platform=resolve_primary_platform_from_config(paths.get_state_dir()))
-    engine = create_sqlite_engine(paths.get_sqlite_state_path())
+    if db_path is None:
+        ensure_sqlite_state(primary_platform=resolve_primary_platform_from_config(paths.get_state_dir()))
+    engine = create_sqlite_engine(db_path or paths.get_sqlite_state_path())
     try:
         with engine.connect() as conn:
             return _source_has_live_turn(conn, source_session_id)
@@ -979,7 +980,7 @@ def source_has_live_turn(source_session_id: str) -> bool:
         engine.dispose()
 
 
-def user_fork_source_is_running(fork: Mapping[str, Any] | None) -> bool:
+def user_fork_source_is_running(fork: Mapping[str, Any] | None, *, db_path: Optional[Path] = None) -> bool:
     """At a native fork's first Turn: a user's fork of a backend that cannot trim whose source has a live Turn.
 
     The native copy happens now, not at reservation, so the refusal is checked again here (C-10 section 11).
@@ -990,7 +991,7 @@ def user_fork_source_is_running(fork: Mapping[str, Any] | None) -> bool:
     source_session_id = _clean_optional(fork.get("source_session_id"))
     if not source_session_id or _trims_live_turn(backend):
         return False
-    return source_has_live_turn(source_session_id)
+    return source_has_live_turn(source_session_id, db_path=db_path)
 
 
 def _source_has_active_agent_run(conn: Any, source_session_id: str) -> bool:
