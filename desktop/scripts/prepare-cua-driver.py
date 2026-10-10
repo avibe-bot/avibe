@@ -179,8 +179,12 @@ def extract_driver_source(manifest: dict, archive_path: Path, destination: Path)
     return source_root
 
 
-def run(command: list[str]) -> str:
-    return subprocess.check_output(command, text=True, stderr=subprocess.STDOUT)
+def run(command: list[str], *, merge_stderr: bool = True) -> str:
+    return subprocess.check_output(
+        command,
+        text=True,
+        stderr=subprocess.STDOUT if merge_stderr else None,
+    )
 
 
 def apply_driver_patch(manifest: dict, source_root: Path) -> Path:
@@ -235,7 +239,9 @@ def verify_built_contract(binary: Path) -> None:
     if run([str(binary), "--version"]).strip() != "cua-driver 0.31.0":
         raise ValueError("patched Cua Driver reports an unexpected version")
     try:
-        docs = json.loads(run([str(binary), "dump-docs", "--type", "mcp"]))
+        docs = json.loads(
+            run([str(binary), "dump-docs", "--type", "mcp"], merge_stderr=False)
+        )
         click = next(tool for tool in docs["tools"] if tool.get("name") == "click")
         click_mode = click["inputSchema"]["properties"]["click_mode"]
     except (json.JSONDecodeError, KeyError, StopIteration, TypeError) as exc:

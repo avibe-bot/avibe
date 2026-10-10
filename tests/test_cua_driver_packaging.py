@@ -36,17 +36,17 @@ def test_patched_source_manifest_hash_locks_the_divergence() -> None:
     assert snapshot["patch_sha256"] == driver["patch"]["sha256"]
 
 
-def test_built_contract_reads_mcp_input_schema_and_raw_click_mode(
+def test_built_contract_reads_mcp_input_schema_without_stderr_contamination(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     calls: list[list[str]] = []
 
-    def fake_check_output(command: list[str], **_: object) -> str:
+    def fake_check_output(command: list[str], **kwargs: object) -> str:
         calls.append(command)
         if command[1:] == ["--version"]:
             return "cua-driver 0.31.0\n"
         assert command[1:] == ["dump-docs", "--type", "mcp"]
-        return json.dumps(
+        output = json.dumps(
             {
                 "tools": [
                     {
@@ -60,6 +60,9 @@ def test_built_contract_reads_mcp_input_schema_and_raw_click_mode(
                 ]
             }
         )
+        if kwargs.get("stderr") is _SCRIPT["subprocess"].STDOUT:
+            return "Cua Driver sends content-free product telemetry.\n" + output
+        return output
 
     monkeypatch.setattr(
         _SCRIPT["subprocess"], "check_output", fake_check_output
