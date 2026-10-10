@@ -120,11 +120,12 @@ def redact_credential_material(value: str) -> str:
 # parser that misjudges the end leaks the rest of the value, so the remainder of the
 # message is dropped instead. The label needs no word boundary (``client_secret``
 # still matches on ``secret``) and has no nested quantifier, so matching stays linear
-# on hostile input. ``contains_credential_material`` keeps the narrower shape-based
-# patterns so benign labels such as ``max token: 4096`` in a model name are not
-# rejected.
+# on hostile input. A word that ends a URL path (``…/oauth/token": dial tcp``, as
+# a transport error quotes its request) is not a label. ``contains_credential_material``
+# keeps the narrower shape-based patterns so benign labels such as ``max token: 4096``
+# in a model name are not rejected.
 _LABELED_SECRET_PATTERN = re.compile(
-    r"(?i)(?:token|secret|password|passwd|pwd|key|credential|cookie|session|signature)[\"'`]?\s*[:=]\s*"
+    r"(?i)(?<!/)(?:token|secret|password|passwd|pwd|key|credential|cookie|session|signature)[\"'`]?\s*[:=]\s*"
 )
 
 
