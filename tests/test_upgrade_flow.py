@@ -971,7 +971,7 @@ def test_do_upgrade_includes_peer_activation_failures_in_output(monkeypatch, tmp
     peer = tmp_path / "peer-vibe"
     outcome = vibe_upgrade.ActivationOutcome(
         activated_launcher=launcher,
-        peer_failures=(vibe_upgrade.LauncherActivationFailure(peer, "permission denied"),),
+        peer_failures=(vibe_upgrade.LauncherActivationFailure(peer, "transient I/O failure"),),
     )
     plan = UpgradePlan(
         command=["uv", "tool", "install", "avibe-os", "--upgrade"],
@@ -1002,9 +1002,11 @@ def test_do_upgrade_includes_peer_activation_failures_in_output(monkeypatch, tmp
     assert result["ok"] is True
     assert "升级已激活新版本" in result["output"]
     assert str(peer) in result["output"]
-    assert "permission denied" in result["output"]
+    assert "transient I/O failure" in result["output"]
     assert "doctor repair stable-launchers" in result["output"]
     assert str(launcher) in result["output"]
+    assert "请先处理所报告的原因" in result["output"]
+    assert "其余仍受管理的稳定启动器" in result["output"]
 
 
 def test_activation_repair_command_quotes_full_launcher_path(tmp_path):

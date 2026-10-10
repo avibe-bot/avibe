@@ -833,8 +833,20 @@ def test_a_peer_replaced_after_discovery_is_left_alone(installation, monkeypatch
         (peer.absolute(), "the launcher changed after discovery"),
     ]
     assert [failure.reason_code for failure in outcome.peer_failures] == ["launcher_changed_after_discovery"]
-    assert "the launcher changed after discovery" not in upgrade.format_activation_failures(outcome, "zh")
-    assert "发现后发生了变化" in upgrade.format_activation_failures(outcome, "zh")
+    notice_en = upgrade.format_activation_failures(outcome, "en")
+    notice_zh = upgrade.format_activation_failures(outcome, "zh")
+    assert notice_en is not None
+    assert notice_zh is not None
+    assert "the launcher changed after discovery" not in notice_zh
+    assert "so it was left untouched" in notice_en
+    assert "Inspect that launcher and confirm its intended target or installation" in notice_en
+    assert "other remaining managed stable launchers" in notice_en
+    assert "发现后发生了变化" in notice_zh
+    assert "因此该启动器保持原样" in notice_zh
+    assert "请检查该启动器并确认其目标或安装状态" in notice_zh
+    assert "其他仍受管理的稳定启动器" in notice_zh
+    assert "doctor repair stable-launchers" in notice_en
+    assert "doctor repair stable-launchers" in notice_zh
 
 
 def test_partial_removal_retains_uv_evidence_and_next_pass_finishes(installation, monkeypatch):
