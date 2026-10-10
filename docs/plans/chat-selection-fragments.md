@@ -70,13 +70,19 @@ selection reaches, reading the `data-md-start` / `data-md-end` spans the
 renderer already writes. It adds no source-offset alignment and no Markdown
 repair:
 
-- An element whose whole visible content (non-blank characters, images,
-  rules) lies inside the selection copies its source span, mapped back through
-  the mention/secret rewrite passes. The bubble root is the first such element,
-  which is what makes a whole-bubble selection byte-exact.
+- An element whose whole content lies inside the selection copies its source
+  span, mapped back through the mention/secret rewrite passes. Content is every
+  character, whitespace included (code indentation is content), plus images,
+  rules and hard breaks; only renderer layout is excluded: blank text between
+  blocks, the newline after a hard break, and the newline ending a code block.
+  The bubble root is the first such element, which is what makes a
+  whole-bubble selection byte-exact.
 - Any other element is walked into. Its text copies as the selected DOM
-  characters, so an escape or entity in a cut run copies as the character it
-  shows.
+  characters, selected edge whitespace included, so an escape or entity in a
+  cut run copies as the character it shows. A hard break the selection holds
+  copies its own source (two trailing spaces or a backslash, then the
+  newline); a newline the renderer draws as a line break without a source span
+  (soft-break bubbles) copies as a plain newline.
 - Table rows and cells never copy their own span (a cell's span starts at its
   pipe); cut cells are separated by a tab and rows by a line break. A whole
   table copies its source.

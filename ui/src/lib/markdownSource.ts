@@ -14,12 +14,15 @@ import type { TextEdit } from '@/lib/citations';
 // - A selection of everything in a bubble copies the bubble's source byte for
 //   byte. Select all does exactly that.
 //
-// Text in a cut construct copies as it reads, so an escape or an entity there
-// copies as the character it shows. A construct whose source would carry its
-// container's syntax onto later lines (a quote's `>`, an item's indent) copies
-// as a cut one unless that container is selected whole too. A complete
-// reference link brings along its definition, which renders nowhere; a
-// footnote's body is visible text and is never brought along.
+// Text in a cut construct copies as it reads, whitespace included, so an
+// escape or an entity there copies as the character it shows. Whitespace is
+// content (code indentation especially): a construct is covered only when the
+// selection holds all of it. A hard break the selection holds keeps its source.
+// A construct whose source would carry its container's syntax onto later lines
+// (a quote's `>`, an item's indent) copies as a cut one unless that container
+// is selected whole too. A complete reference link brings along its
+// definition, which renders nowhere; a footnote's body is visible text and is
+// never brought along.
 //
 // The renderer marks every element with the source range it came from
 // (`data-md-start` / `data-md-end`, UTF-16 offsets into the text ReactMarkdown
@@ -148,31 +151,41 @@ const CELLS = new Set(['TH', 'TD']);
 const LINE_PREFIXED = new Set(['BLOCKQUOTE', 'LI']);
 
 const isBlock = (node: Node | null) => node?.nodeType === Node.ELEMENT_NODE && BLOCKS.has((node as Element).tagName);
-const isLayout = (text: Text) => (
-  text.data.trim() === ''
-  && isBlock(text.parentNode)
-  && (!text.previousSibling || isBlock(text.previousSibling))
-  && (!text.nextSibling || isBlock(text.nextSibling))
-);
+const isMarkedBreak = (node: Node | null) => node?.nodeType === Node.ELEMENT_NODE
+  && (node as Element).tagName === 'BR' && (node as Element).hasAttribute(START);
+
+// How much of a text node is content. Every character is, whitespace included,
+// except what the renderer adds for layout: blank text between blocks, the
+// newline after a hard break (whose own source holds it), and the newline that
+// ends a code block.
+function contentLength(text: Text): number {
+  if (text.data.trim() === '' && isBlock(text.parentNode)
+    && (!text.previousSibling || isBlock(text.previousSibling))
+    && (!text.nextSibling || isBlock(text.nextSibling))) return 0;
+  if (text.data === '\n' && isMarkedBreak(text.previousSibling)) return 0;
+  const code = text.parentElement;
+  const endsBlockCode = code?.tagName === 'CODE' && code.parentElement?.tagName === 'PRE'
+    && !text.nextSibling && text.data.endsWith('\n');
+  return text.data.length - (endsBlockCode ? 1 : 0);
+}
 
 type Point = [Node, number];
 const before = (node: Node): Point => [node.parentNode!, Array.prototype.indexOf.call(node.parentNode!.childNodes, node)];
 const after = (node: Node): Point => [node.parentNode!, before(node)[1] + 1];
 
-// Where what `el` shows begins and ends: its first and last character that is
-// not blank, image or rule.
+// Where what `el` shows begins and ends: its first and last character of
+// content, image or rule. A hard break shows a line break, and is all of itself.
 function contentBounds(el: Element): [Point, Point] | null {
-  if (isTextless(el)) return [before(el), after(el)];
+  if (isTextless(el) || isMarkedBreak(el)) return [before(el), after(el)];
   let first: Point | null = null;
   let last: Point | null = null;
   const walker = el.ownerDocument.createTreeWalker(el, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT);
   for (let node = walker.nextNode(); node; node = walker.nextNode()) {
     if (node.nodeType === Node.TEXT_NODE) {
-      const text = (node as Text).data;
-      const at = text.search(/\S/);
-      if (at < 0) continue;
-      first ??= [node, at];
-      last = [node, text.trimEnd().length];
+      const length = contentLength(node as Text);
+      if (!length) continue;
+      first ??= [node, 0];
+      last = [node, length];
     } else if (isTextless(node)) {
       first ??= before(node);
       last = after(node);
@@ -285,10 +298,10 @@ function copyFromRoot(range: Range, root: Element): string {
     if (node.nodeType === Node.TEXT_NODE) {
       const text = node as Text;
       // Text no construct holds is the renderer's own, like a footnote section's label.
-      if (within === root || isLayout(text)) return;
+      if (within === root) return;
       const from = text === range.startContainer ? range.startOffset : 0;
       const to = text === range.endContainer ? range.endOffset : text.data.length;
-      write(text.data.slice(from, to), within);
+      write(text.data.slice(from, Math.min(to, contentLength(text))), within);
       return;
     }
     if (node.nodeType !== Node.ELEMENT_NODE) return;
@@ -338,9 +351,11 @@ function markdownRoots(range: Range, container: Element): Element[] {
  * timestamps) is not Markdown and is left out.
  */
 export function selectedMarkdown(range: Range, container: Element): string | null {
+  // The narrowed selection decides which bubbles are reached at all; within
+  // them, every character the selection holds is copied, whitespace included.
   const selected = selectedContent(range);
   if (!selected) return null;
-  const parts = markdownRoots(selected, container).map((root) => copyFromRoot(selected, root));
+  const parts = markdownRoots(selected, container).map((root) => copyFromRoot(range, root));
   return parts.filter((part) => part.trim() !== '').join('\n\n') || null;
 }
 

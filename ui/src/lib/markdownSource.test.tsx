@@ -110,6 +110,18 @@ describe('selectedMarkdown', () => {
     // Text in a cut construct copies as it reads; a covered one keeps what was written.
     ['escapes and entities in cut text', 'Keep \\*this\\* &amp; **that** too.', ['*this', 'before'], ['that', 'after'], '*this* & **that**'],
     ['escapes and entities in a whole paragraph', 'Keep \\*this\\* &amp; that.\n\nNext.', ['Keep', 'before'], ['that.', 'after'], 'Keep \\*this\\* &amp; that.'],
+    // Every selected character copies, whitespace included; code whitespace is content.
+    ['the spaces selected around an emphasis', BOLD, [' ', 'before'], [' ', 'after', 2], ' **bold words** '],
+    ['a code line without its indentation', 'Intro\n\n```\n  a\n```\n\nNext', ['a', 'before'], ['a', 'after'], 'a'],
+    ['the only code block without its indentation', '```\n  a\n```', ['a', 'before'], ['a', 'after'], 'a'],
+    ['the only code block with its indentation', '```\n  a\n```', ['  a', 'before'], ['  a', 'after'], '```\n  a\n```'],
+    ['an indented code block line', '    x = 1\n      y', ['  y', 'before'], ['  y', 'after'], '  y'],
+    // A hard break the selection holds keeps the source that makes it one.
+    ['a hard break', 'Prefix one  \ntwo end', ['one', 'before'], ['two', 'after'], 'one  \ntwo'],
+    ['a backslash hard break', 'Prefix one\\\ntwo end', ['one', 'before'], ['two', 'after'], 'one\\\ntwo'],
+    ['a hard break between emphases', 'Prefix **one**  \n*two* end', ['one', 'before'], ['two', 'after'], '**one**  \n*two*'],
+    ['the line before a hard break', 'Prefix one  \ntwo end', ['one', 'before'], ['one', 'after'], 'one'],
+    ['the line after a hard break', 'Prefix one  \ntwo end', ['two', 'before'], ['end', 'after'], 'two end'],
     ['emoji and the whitespace between them', 'Grow 🌱  **green** 🌳 tall', ['🌱', 'before'], ['🌳', 'after'], '🌱  **green** 🌳'],
     ['a soft line break', 'line one\nline **two** here', ['one', 'before'], ['two', 'after'], 'one\nline **two**'],
     ['part of a heading', '## Plan **now**\n\nBody.', ['Plan', 'before'], ['Plan', 'after'], 'Plan'],
@@ -138,6 +150,12 @@ describe('selectedMarkdown', () => {
   ])('copies only %s', (_case, content, start, end, expected) => {
     const container = renderDoc(content);
     expect(selectedMarkdown(rangeOver(container, start, end), container)).toBe(expected);
+  });
+
+  it('copies a line break of a bubble that renders every newline as one', () => {
+    const { container } = render(<Markdown content={'one\ntwo **three**\nfour'} softBreaks />);
+    expect(selectedMarkdown(rangeOver(container, ['two', 'before'], ['four', 'after']), container))
+      .toBe('two **three**\nfour');
   });
 
   // A whole chip copies as the marker that was typed; part of one is part of its label.
