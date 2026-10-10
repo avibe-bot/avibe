@@ -293,6 +293,28 @@ def _collect_opencode(controller: "Controller") -> list[dict[str, Any]]:
     return rows
 
 
+def _collect_vibey(controller: "Controller") -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    agent = _get_agent(controller, "vibey")
+    if agent is None:
+        return rows
+    # Vibey runs in process, so no pid. A Session's runtime holds its Turn's run
+    # until the run settles; like OpenCode, Vibey only ever surfaces as ``active``.
+    for _session_id, runtime in _safe_items(getattr(agent, "_runtimes", {}) or {}):
+        run = getattr(runtime, "run", None)
+        if run is None or run.settled:
+            continue
+        rows.append(
+            _make_row(
+                backend="vibey",
+                state="active",
+                base_session_id=run.request.base_session_id,
+                workdir=run.cwd or None,
+            )
+        )
+    return rows
+
+
 def _collect_orphans(seen_native: dict[str, Optional[int]], seen_pids: set[int]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     try:
@@ -1354,7 +1376,7 @@ def snapshot_running_agents(
                         native_session_id, model, elapsed_seconds, trigger_source,
                         session_id, agent_name, openable_in_chat }, ... ],
           "counts": { "total", "active", "idle", "orphan",
-                      "by_backend": {claude, codex, opencode} },
+                      "by_backend": {claude, codex, opencode, vibey} },
         }
 
     One row per live SESSION (F1): a Codex pid shared by several sessions yields
@@ -1371,6 +1393,7 @@ def snapshot_running_agents(
     rows.extend(_collect_claude(controller, now, seen_native, seen_pids))
     rows.extend(_collect_codex(controller))
     rows.extend(_collect_opencode(controller))
+    rows.extend(_collect_vibey(controller))
     rows.extend(_collect_orphans(seen_native, seen_pids))
 
     _enrich_from_db(rows)

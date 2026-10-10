@@ -5556,8 +5556,8 @@
   },
   "pet": {
     "state": {
-      "idle": "云团子空闲中",
-      "sleeping": "云团子睡着了",
+      "idle": "歪比空闲中",
+      "sleeping": "歪比睡着了",
       "listening": "正在听",
       "running": "正在处理…",
       "ready": "有新回复",
