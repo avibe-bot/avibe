@@ -120,14 +120,14 @@ Two kinds of fork, told apart by construction, never by timing:
 
 | Request (Vibey) | `as_of` |
 | --- | --- |
-| a user's fork, and the source's latest Turn is live, or ended with calls recovery has not settled yet | the largest settled `context_seq` before that Turn's first consumed input (of the whole context while the Turn has consumed none) |
-| a user's fork, and the source's latest Turn ended and is settled | the largest settled `context_seq` of the source's context: the end of that Turn |
+| a user's fork, and the source has an unfinished Turn (defined below) | the largest settled `context_seq` before the first input of the earliest unfinished Turn |
+| a user's fork, and every Turn of the source is finished | the largest settled `context_seq` of the source's context: the end of its last Turn |
 | a self-fork | the largest settled `context_seq` of the source's context: the live Turn's input and finished steps, stopping before the response whose call is running the fork, which is still open |
 | a system mechanism's fork at a given `context_seq` `s` (internal only: `reserve_forked_session(..., as_of=s)`, which no CLI, HTTP, or Web path passes) | `s`, when `0 <= s <=` the source's last `context_seq` and `s` is settled; otherwise refused (`ForkPointError`) |
 
 **The owner's rule for a user's fork**, for every backend: a fork never carries a live Turn. The cut is the end of the
 previous **ended** Turn: its final reply, or, for a Turn the user stopped or that failed, its last row once recovery
-has settled its calls (T2). The live Turn's input, its tool calls, and its intermediate responses never reach the
+has settled it (T2 and T3). The live Turn's input, its tool calls, and its intermediate responses never reach the
 child. Vibey enforces it through its fork point, as below; a native backend trims the live Turn or refuses the fork
 while it is live, by construction or by a check (§11). For Vibey it holds by construction:
 
@@ -135,9 +135,21 @@ while it is live, by construction or by a check (§11). For Vibey it holds by co
   (C-5 §2), so every row before that input belongs to an ended Turn.
 - The cut is fixed once, in the reservation's transaction, from committed rows. Rows that receive a `context_seq`
   later never move into or out of the prefix (C-5 §4).
-- An ended Turn whose calls recovery has not settled yet (T2 is pending or failed) is not yet ended in this sense:
-  it is cut out like a live Turn, before its first input, so a child never inherits a partial Turn whose recovery
-  results would land after its fixed point. The fork never waits on, or races with, a timing condition.
+- The fork never waits on, or races with, a timing condition.
+
+**Unfinished Turn**, the one definition the cut, §15, and F3 use. A Turn is unfinished while any of these holds:
+
+1. it is live (`session_turns.state` is `starting` or `active`);
+2. it holds a call without a result: T2 has not settled it. Turns run one at a time and each writes its rows after
+   its first input, so the Turn owning an open call is the latest Turn whose first input precedes that call;
+3. it accepted an input that is not in the context yet: a Delivery of that Turn is `accepted` and its input row has
+   no `context_seq`, which T3 admits later.
+
+A Turn's first input is the row its initial Delivery names (`session_turns.initial_delivery_id`; the Delivery and
+its input row share the id). One storage query over `session_turns`, `message_deliveries`, and `messages` finds the
+earliest unfinished Turn, and the cut falls before its first input, so a child never inherits a partial Turn whose
+recovery would land after its fixed point. When T2 or T3 is still pending, the cut falls one Turn earlier than it
+will once they finish; that is the same trade as for a live Turn, and it keeps timing out of the fork.
 
 Other rules:
 
@@ -557,7 +569,7 @@ already provide, plus work outside fork.
 | --- | --- | --- | --- |
 | F1 | A fork's messages through its cut equal `prefix(source, point)`, and a fork Session gets the same bytes on every request, whatever either Session commits later | harness, storage | a source with checkpoints and edits both before and after the cut, plus a cut before a later checkpoint; after N commits in each Session, the child's projection through `as_of` serializes equal to `project(source, fork_point=as_of)` |
 | F2 | A side turn's first request has the caller's endpoint, system prompt, tool definitions, tool choice, and reasoning settings, and its messages begin with the caller's latest request through the cut | agent | the stub's request log, for normal and rolling side turns |
-| F3 | Every fork point is settled; a fork never inherits an open call, and never settles or looks up a call it did not make (settled calls are inherited as history, F1) | harness, storage, service, adapters | a user's fork while the live Turn is mid tool batch gets exactly the previous ended Turn's prefix; a stopped and a failed previous Turn are legal cuts; nothing of the live Turn (input, calls, responses) reaches the child; an ended Turn whose calls await recovery is cut out whole; a Vibey self-fork keeps the live Turn's input and finished steps and no open call (native self-forks keep their behavior, §11); a user's fork of a Session that was itself a self-fork carries no `fork_self`; `--fork-session` naming the caller's own Session is a user's fork; a Codex fork always passes `lastTurnId` resolved at first use, including for a source that was idle at reservation; an OpenCode user's fork trims a source that became live after reservation; a Claude user's fork is refused while the source has a live Turn, at reservation and at the child's first Turn, and a Claude self-fork is not; the internal API refuses an unsettled or out-of-range point and accepts 0 |
+| F3 | Every fork point is settled; a fork never inherits an open call, and never settles or looks up a call it did not make (settled calls are inherited as history, F1) | harness, storage, service, adapters | a user's fork while the live Turn is mid tool batch gets exactly the previous ended Turn's prefix; a stopped and a failed previous Turn are legal cuts; nothing of the live Turn (input, calls, responses) reaches the child; every unfinished Turn (§2's definition: live, an open call awaiting T2, or an accepted input awaiting T3) is cut out whole; a Vibey self-fork keeps the live Turn's input and finished steps and no open call (native self-forks keep their behavior, §11); a user's fork of a Session that was itself a self-fork carries no `fork_self`; `--fork-session` naming the caller's own Session is a user's fork; a Codex fork always passes `lastTurnId` resolved at first use, including for a source that was idle at reservation; an OpenCode user's fork trims a source that became live after reservation; a Claude user's fork is refused while the source has a live Turn, at reservation and at the child's first Turn, and a Claude self-fork is not; the internal API refuses an unsettled or out-of-range point and accepts 0 |
 | F4 | A fork Session owns nothing an ancestor started: jobs, Watches, Tasks, runs, scratch stay with the Session that started them. A side turn starts nothing: its calls have no call instance | vibey, service, agent | a child of a source with a live job Watch neither lists it nor receives its follow-up, and its first input carries the notice; a side turn's `bash` call starts no job even when a policy allowed it |
 | F5 | A fork Session never writes a row of its source. A side turn writes only its audit row and, after the reply, what its fold commits | agent, storage | the source's rows before and after a child's Turns; the caller's rows after a failed and after a successful side turn |
 | F6 | A side turn has no capability its caller lacks; a fork Session runs an Agent the requesting caller may select, on the source's backend | agent, service | a side turn's call to every tool its policy does not allow is denied and never runs; a reservation without editor on the source, chat in the destination, or selection authority for the Agent (inherited or `--agent`) is refused, as is an Agent on another backend |
@@ -579,7 +591,9 @@ class ForkPointError(ValueError):
     code: Literal["unsettled", "out_of_range"]       # internal: no product surface reaches it
 
 def settled(entries: Sequence[ContextEntry], as_of: int) -> bool: ...
-def latest_cut(entries: Sequence[ContextEntry], *, live_input_seq: Optional[int]) -> int: ...   # a user's fork
+def latest_cut(entries: Sequence[ContextEntry], *, unended_input_seq: Optional[int]) -> int: ...
+# the largest settled point before unended_input_seq: for a user's fork, the first input of the earliest unfinished
+# Turn (§2); None for a self-fork
 def fork_point(entries: Sequence[ContextEntry], as_of: int) -> ForkPoint: ...   # internal; raises ForkPointError
 def fork_prefix(entries: Sequence[ContextEntry], point: ForkPoint) -> tuple[Message, ...]: ...
 
@@ -635,7 +649,7 @@ class Agent:
 # storage/agent_transcript.py
 def resolve_fork_point(conn: Connection, source_session_id: str, *, as_of: Optional[int] = None,
                        self_fork: bool = False) -> int: ...
-# Neither: the user's latest point (§2), from the source's rows and its live Turn's first consumed input.
+# Neither: the user's latest point (§2), before the first input of the earliest unfinished Turn (§2's definition).
 # self_fork: the largest settled point. as_of: an internal point, checked by fork_point.
 
 # core/services/session_fork.py
