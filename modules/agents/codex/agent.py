@@ -233,6 +233,16 @@ class CodexPromptRefreshUnavailableError(RuntimeError):
     """The current app-server cannot safely refresh a persisted thread prompt."""
 
 
+class _NoCompletedTurn:
+    """The source thread provably has no completed turn yet: a fork's prefix is empty (C-10 fork.md section 2)."""
+
+    def __repr__(self) -> str:
+        return "NO_COMPLETED_TURN"
+
+
+NO_COMPLETED_TURN = _NoCompletedTurn()
+
+
 class CodexForkBoundaryUnavailableError(RuntimeError):
     """The source history cannot prove a safe inclusive fork boundary."""
 
@@ -3394,6 +3404,12 @@ class CodexAgent(BaseAgent):
             # `lastTurnId` is inclusive and applied by Codex itself, so a Turn that starts after this read is
             # left out whatever the timing.
             _, last_completed_turn_id = await self._fork_source_last_completed_turn_id(transport, fork)
+            if last_completed_turn_id is NO_COMPLETED_TURN:
+                # Nothing completed yet, proven by the whole listing: the child starts with an empty prefix,
+                # a fresh thread, and no copied history needs a correction.
+                return await self._start_thread(
+                    transport, request, developer_instructions=developer_instructions
+                )
             if not last_completed_turn_id:
                 raise CodexForkBoundaryUnavailableError(
                     "Cannot fork Codex thread while the source turn boundary "
@@ -3555,7 +3571,7 @@ class CodexAgent(BaseAgent):
         self,
         transport: CodexTransport,
         fork: dict[str, Any],
-    ) -> tuple[bool, Optional[str]]:
+    ) -> tuple[bool, Optional[str] | _NoCompletedTurn]:
         """Resolve the inclusive fork boundary: the source's last completed turn.
 
         ``thread/fork.lastTurnId`` cannot point at an in-progress turn. Page
@@ -3564,8 +3580,12 @@ class CodexAgent(BaseAgent):
         this race, use it itself: ``lastTurnId`` is inclusive, so this still
         excludes any later turn that may have started while the fork request
         was being prepared. With no live turn, return the latest terminal turn,
-        passing over one that started since. A live turn this process cannot
-        name fails closed: another process would read it as interrupted.
+        passing over one that started since. ``NO_COMPLETED_TURN`` when the
+        whole listing, read to its last page, proves no turn has completed
+        (the source's first turn is live, or it has none). A live turn this
+        process cannot name, an unreadable listing, or one never shown to its
+        end fails closed with ``None``: another process would read a live turn
+        as interrupted.
         """
 
         active_turn_id = await self._fork_source_native_turn_id(fork)
@@ -3628,6 +3648,10 @@ class CodexAgent(BaseAgent):
                         return True, turn_id
 
                 next_cursor = response.get("nextCursor")
+                if next_cursor is None:
+                    # The last page: every turn has been seen, and none completed before the live one.
+                    proven = not active_turn_id or active_turn_seen
+                    return True, NO_COMPLETED_TURN if proven else None
                 if (
                     not isinstance(next_cursor, str)
                     or not next_cursor

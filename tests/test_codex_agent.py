@@ -205,6 +205,7 @@ CodexConnectionProbeRuntimeMismatchError = (
 )
 CodexPromptRefreshUnavailableError = _MODULE.CodexPromptRefreshUnavailableError
 CodexForkBoundaryUnavailableError = _MODULE.CodexForkBoundaryUnavailableError
+NO_COMPLETED_TURN = _MODULE.NO_COMPLETED_TURN
 CodexResumeUnavailableError = _MODULE.CodexResumeUnavailableError
 
 for name, module in _saved_modules.items():
@@ -3265,7 +3266,9 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
         transport.send_request.assert_not_awaited()
         agent._clear_fork_correction_pending.assert_called_once_with("ses-target")
 
-    async def test_fork_boundary_requires_a_completed_predecessor(self):
+    async def test_fork_boundary_proves_no_completed_turn_from_the_whole_listing(self):
+        # The source's first turn is live and the last page shows nothing before it: an empty prefix
+        # (C-10 section 11), not an unknown boundary.
         agent = init_generation_state(object.__new__(CodexAgent))
         agent._turn_registry = SimpleNamespace(
             get_active_turn=Mock(return_value="turn-source"),
@@ -3288,7 +3291,7 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
             },
         )
 
-        self.assertEqual(boundary, (True, None))
+        self.assertEqual(boundary, (True, NO_COMPLETED_TURN))
         transport.send_request.assert_awaited_once_with(
             "thread/turns/list",
             {
@@ -3298,6 +3301,21 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
                 "sortDirection": "desc",
             },
         )
+
+    async def test_a_fork_with_no_completed_turn_starts_a_fresh_thread(self):
+        # Forking a Codex Session during its first live turn: nothing completed, so the child gets the empty
+        # prefix as a new thread, and nothing is copied that would need a fork correction.
+        agent = self._fork_agent("turn-first")
+        agent._fork_source_last_completed_turn_id = AsyncMock(return_value=(True, NO_COMPLETED_TURN))
+        agent._start_thread = AsyncMock(return_value="thread-new")
+        transport = SimpleNamespace(send_request=AsyncMock())
+
+        thread_id = await agent._start_or_resume_thread(transport, self._fork_request({}))
+
+        self.assertEqual(thread_id, "thread-new")
+        agent._start_thread.assert_awaited_once()
+        self.assertNotIn("thread/fork", [call.args[0] for call in transport.send_request.await_args_list])
+        self.assertFalse(agent.is_fork_correction_pending("ses-target"))
 
     async def test_fork_boundary_keeps_completed_reserved_turn_inclusive(self):
         agent = init_generation_state(object.__new__(CodexAgent))
