@@ -72,7 +72,7 @@ class TranscriptStore(Protocol):
         ...
 
     async def append_audit(
-        self, session_id: str, kind: Literal["checkpoint_turn", "attempt"], payload: Mapping[str, Any]
+        self, session_id: str, kind: Literal["fork_turn", "attempt"], payload: Mapping[str, Any]
     ) -> str:
-        """An audit row outside the context (C-9 ``CheckpointTurn`` or ``ModelAttempt``); its id."""
+        """An audit row outside the context (C-10 ``ForkTurn`` or C-9 ``ModelAttempt``); its id."""
         ...

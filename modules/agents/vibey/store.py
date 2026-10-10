@@ -153,7 +153,7 @@ class AdapterTranscriptStore:
         return committed
 
     async def append_audit(
-        self, session_id: str, kind: Literal["attempt", "checkpoint_turn"], payload: Mapping[str, Any]
+        self, session_id: str, kind: Literal["attempt", "fork_turn"], payload: Mapping[str, Any]
     ) -> str:
         return await self._store.append_audit(session_id, kind, payload, agent_name=self._agents.get(session_id))
 

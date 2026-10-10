@@ -47,7 +47,7 @@ because identity is what an effect beyond the turn needs.
 
 **Why identity separates them.** A command is a job keyed by its call instance: the committed response that made the
 call, in a Session (`core/agent_core/tools/base.py:28-42`). Watches, T2 recovery, approvals, and the user's access
-all hang off a Session. A side turn commits no response, so its calls have no instance (`agent/loop.py:1667`), and
+all hang off a Session. A side turn commits no response, so its calls have no instance (`Agent._side_tool`), and
 `bash` refuses to start (`tools/bash.py:213-215`). So anything that may act beyond its own turn needs a Session, and
 anything that only thinks does not. Borrowing the caller's identity is also what keeps a side turn's prefix
 cache-warm (§3).
@@ -274,7 +274,7 @@ Any tool the policy does not name is denied with the policy's text and never run
 - An allowed tool must finish within the call and need no call instance. That rules out `bash`, which starts jobs,
   and anything that asks the user, since a side turn has nowhere to ask.
 - Policies are code. The contract that consumes a policy owns it, and this file lists it.
-- v1 has one policy, `dreaming` (C-9 §6, `agent/checkpoint.py:29-35`): `read` is allowed, and `write` and `edit` go
+- v1 has one policy, `dreaming` (C-9 §6, `DREAMING` in `agent/fork.py`): `read` is allowed, and `write` and `edit` go
   to scratch.
 - A tool missing from the caller's request cannot be granted, because the request is the caller's.
 
@@ -540,8 +540,8 @@ already provide, plus work outside fork.
     middle range while keeping the head needs a range checkpoint row in C-5 and C-9 projection, not a change to fork.
 - **Memory.**
   - How it uses fork: a side turn with a `memory` policy, under which memory tools are allowed and the rest denied
-    (C-9 already reserves that row, `checkpoint.py:34`). It sends a consolidation prompt and uses a fold that commits
-    nothing: its effect is the memory tools' writes.
+    (`DREAMING`'s table already reserves that row, `agent/fork.py`). It sends a consolidation prompt and uses a
+    fold that commits nothing: its effect is the memory tools' writes.
   - Those writes must be idempotent upserts, because a crash loses the turn.
   - Needs: the memory tools, and side turns while the Session is idle (§7).
 

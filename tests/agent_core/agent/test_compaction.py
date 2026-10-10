@@ -18,7 +18,7 @@ from dataclasses import replace
 
 import pytest
 
-from core.agent_core.agent.checkpoint import BUDGET_USED, DENIED, CheckpointPolicy, Decision
+from core.agent_core.agent.fork import DREAMING, Decision, PolicyGate
 from core.agent_core.agent.scratch import ScratchRoot
 from core.agent_core.agent.events import (
     AgentError,
@@ -72,6 +72,8 @@ from tests.agent_core.fakes import (
     assistant,
     input_row,
 )
+
+DENIED, BUDGET_USED = DREAMING.denied, DREAMING.budget_used
 
 #: The engine tests' route: a 64,000-token window read through a 32,000-token input limit, so M = 8,000 and
 #: T = 19,904 (section 1), the numbers every test here is sized against.
@@ -256,7 +258,7 @@ async def test_a_threshold_checkpoint_forks_the_exact_prefix_and_leaves_checkpoi
     assert len([event for event in events if isinstance(event, MessageCommitted)]) == 5
     assert events[-1] == RunEnded("input", events[-1].seq, "completed")
     (session_id, _, audit), = agent.store.audits
-    assert (audit["outcome"], audit["compaction_event_id"]) == ("completed", compaction.row_id)
+    assert (audit["outcome"], audit["folded_event_id"]) == ("completed", compaction.row_id)
     assert [message["role"] for message in audit["messages"]] == ["assistant"]
     # Append-only: every row before the checkpoint is exactly what was committed before it.
     assert all(row.kind != "compaction" for row in before) and rows.index(compaction) == len(before)
@@ -393,8 +395,8 @@ async def test_a_target_the_platform_cannot_compare_with_the_scratch_dir_is_deni
     def other_drive(paths):
         raise ValueError("Paths don't have the same drive")
 
-    policy = CheckpointPolicy(cwd=str(tmp_path), scratch_dir=str(tmp_path / "scratch"))
-    monkeypatch.setattr("core.agent_core.agent.checkpoint.os.path.commonpath", other_drive)
+    policy = PolicyGate(DREAMING, cwd=str(tmp_path), scratch_dir=str(tmp_path / "scratch"))
+    monkeypatch.setattr("core.agent_core.agent.fork.os.path.commonpath", other_drive)
     write = ToolCallBlock("w", "write", {"path": str(tmp_path / "elsewhere"), "content": "no"})
     assert policy.decide(write) == Decision(denial=DENIED)
 
@@ -1415,7 +1417,7 @@ async def _drain(stream):
 @pytest.mark.parametrize("swap", ["root", "target"])
 async def test_a_scratch_write_never_lands_outside_after_a_swap_between_policy_and_execution(tmp_path, monkeypatch, swap):
     scratch, outside = flat_scratch(tmp_path)
-    decide = CheckpointPolicy.decide
+    decide = PolicyGate.decide
 
     def decide_then_swap(policy, call):
         decision = decide(policy, call)
@@ -1427,7 +1429,7 @@ async def test_a_scratch_write_never_lands_outside_after_a_swap_between_policy_a
             (scratch / "plan.md").symlink_to(outside / "plan.md")
         return decision
 
-    monkeypatch.setattr(CheckpointPolicy, "decide", decide_then_swap)
+    monkeypatch.setattr(PolicyGate, "decide", decide_then_swap)
     calls = [ToolCallBlock("w", "write", {"path": "state/scratch/session/plan.md", "content": "plan"})]
     results = await _scratch_checkpoint(tmp_path, scratch, calls, [WriteTool()])
     assert not os.listdir(outside)  # nothing outside: no content, no temp file, no directory

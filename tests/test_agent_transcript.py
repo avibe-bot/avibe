@@ -279,7 +279,7 @@ async def test_rows_outside_the_context_never_load(engine) -> None:
         assert conn.execute(select(messages.c.context_seq).where(messages.c.id == queued)).scalar() is None
 
 
-@pytest.mark.parametrize("kind,event_type", [("attempt", "model_attempt"), ("checkpoint_turn", "context_checkpoint_turn")])
+@pytest.mark.parametrize("kind,event_type", [("attempt", "model_attempt"), ("fork_turn", "fork_turn")])
 async def test_an_audit_row_is_kept_outside_the_context(engine, kind, event_type) -> None:
     with engine.begin() as conn:
         home = _scope(conn, "C-home")

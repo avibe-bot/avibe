@@ -46,7 +46,7 @@ class CallInstance:
 class ToolContext:
     session_id: str
     tool_call_id: str
-    #: The call's instance when a committed response made it; ``None`` for a checkpoint turn's call (C-9),
+    #: The call's instance when a committed response made it; ``None`` for a side turn's call (C-10 F4),
     #: which starts no job.
     call: Optional[CallInstance]
     cwd: str

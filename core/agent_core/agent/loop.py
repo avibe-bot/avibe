@@ -3,8 +3,9 @@
 Queue semantics informed by Pi (MIT), packages/agent/src/agent-loop.ts, and the
 bare-loop control experiment. This is an Avibe implementation, not a port.
 With a ``ContextConfig`` the loop also applies C-9 before every model request:
-clearing, the forked checkpoint turn, and the overflow ladder
-(``agent-core-contracts/context.md``).
+clearing, the checkpoint turn, and the overflow ladder
+(``agent-core-contracts/context.md``). The checkpoint turn is a side turn
+(``agent-core-contracts/fork.md`` section 7), which ``Agent.side_turn`` runs.
 """
 
 from __future__ import annotations
@@ -16,10 +17,9 @@ import time
 from collections import deque
 from contextlib import asynccontextmanager, suppress
 from copy import deepcopy
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from typing import Any, AsyncIterator, Awaitable, Callable, Literal, Mapping, Optional, Sequence, TypeVar
 
-from core.agent_core.agent.checkpoint import BUDGET_USED, DENIED, CheckpointPolicy, Decision
 from core.agent_core.agent.events import (
     AgentError,
     AgentEvent,
@@ -52,6 +52,16 @@ from core.agent_core.agent.hooks import (
     SkipTools,
     Snapshot,
 )
+from core.agent_core.agent.fork import (
+    DREAMING,
+    CheckpointDetail,
+    Decision,
+    Folded,
+    PolicyGate,
+    SideReply,
+    SideTurn,
+    SideTurnResult,
+)
 from core.agent_core.agent.jobs import TrackingJobHost
 from core.agent_core.agent.lifecycle import RunAborted as _Aborted, RunScope
 from core.agent_core.agent.models import ModelRouter, ModelSelection, RetryPolicy
@@ -66,9 +76,6 @@ from core.agent_core.ai.provider import (
 )
 from core.agent_core.cancel import CancelToken
 from core.agent_core.harness.context import (
-    CHECKPOINT_TOOL_FLOOR,
-    CHECKPOINT_TOOL_ROUNDS,
-    CHECKPOINT_TOOL_SLACK,
     CLEAR_SOFT_RATIO,
     DEFAULT_MAX_OUTPUT_TOKENS,
     INEFFECTIVE_RATIO,
@@ -162,12 +169,8 @@ class _Exhausted(Exception):
 _CHECKPOINT_REQUEST = checkpoint_request()
 
 
-#: The most a checkpoint-turn call that does not run adds: one of the policy's two fixed texts (never cut).
-_FIXED_RESULT_TOKENS = max(text_tokens(DENIED), text_tokens(BUDGET_USED))
-
-
 async def _silent(*_: Any, **__: Any) -> None:
-    """The checkpoint turn's emit: it shows nothing (C-9 section 6)."""
+    """A side turn's emit: it shows nothing (C-10 section 7)."""
 
 
 @dataclass
@@ -190,7 +193,7 @@ class _Attempt:
     row; ``audited``: its usage went to a ``ModelAttempt`` audit row (context.md section 10, invariant 4).
     """
 
-    purpose: Literal["conversation", "checkpoint"]
+    purpose: Literal["conversation", "side_turn"]
     request: ModelRequest
     message: Optional[AssistantMessage]
     error: Optional[ProviderError] = None
@@ -204,8 +207,8 @@ class _Outcome:
     overflow: bool = False
 
 
-class _ForkTooLarge(Exception):
-    """A checkpoint request that cannot fit the window; it is never sent."""
+class _SideTurnTooLarge(Exception):
+    """A side turn's request that cannot fit the window; it is never sent."""
 
 
 class Agent:
@@ -429,7 +432,7 @@ class Agent:
         self._turn_inputs.add(row.context_seq)
 
     def _validate_response(self, message: AssistantMessage, *, after: Sequence[Message] = ()) -> None:
-        """A response is valid after the committed rows and then ``after`` (a checkpoint turn's own messages)."""
+        """A response is valid after the committed rows and then ``after`` (a side turn's own messages)."""
         entries = list(self._rows)
         seq = max((entry.context_seq for entry in entries), default=0)
         for item in after:
@@ -655,7 +658,7 @@ class Agent:
         selected: Optional[ModelSelection] = None,
         *,
         compose: Optional[Callable[[ModelSelection], Awaitable[tuple[ModelRequest, dict[str, Tool]]]]] = None,
-        purpose: Literal["conversation", "checkpoint"] = "conversation",
+        purpose: Literal["conversation", "side_turn"] = "conversation",
         after: Sequence[Message] = (),
     ) -> AsyncIterator[tuple[Done | ProviderError, dict[str, Tool]]]:
         """One model request with its transient retries.
@@ -663,11 +666,11 @@ class Agent:
         ``compose(selection)`` is the request pipeline: it returns the final request, which is sent unchanged.
         A conversation request's pipeline is ``_compose``. Every attempt enters the run's attempt ledger. A
         conversation request the provider rejects as overflow goes back through the pipeline with the ladder
-        told to shrink (C-9 section 8). A checkpoint attempt is never context.
+        told to shrink (C-9 section 8). A side turn's attempt is never context.
 
         Admission is here, for every purpose: the response the caller receives (or a partial with content) is
-        valid after the committed rows and ``after``, the messages the request carried beyond them (a checkpoint
-        turn's request and its own turn), or ``ProviderProtocolViolation`` is raised before anyone acts on it.
+        valid after the committed rows and ``after``, the messages the request carried beyond them (a side turn's
+        prompt and its own turn), or ``ProviderProtocolViolation`` is raised before anyone acts on it.
         """
         ladder = _Ladder()
         if compose is None:
@@ -1120,10 +1123,10 @@ class Agent:
     # --- C-9 context management (agent-core-contracts/context.md) ---------------
     #
     # The ordering and ownership invariants are context.md section 10 (1-6), the one statement of them. Their
-    # owners here: ``_compose``, ``_fork``, and ``_minimal`` (1, requests composed and budgeted; ``_compaction`` is
-    # the one builder of checkpoint rows), ``_checkpoint_tool`` (2), ``_commit_context`` (3), ``self._attempts``
-    # with ``_settle_attempts`` and ``_checkpoint``'s one audit (4), ``harness.context.budget`` (5), and ``_model``
-    # (6, admission).
+    # owners here: ``_compose``, ``_side_request``, and ``_minimal`` (1, requests composed and budgeted;
+    # ``_compaction`` is the one builder of checkpoint rows), ``_side_tool`` (2, the side turn's tool pipeline,
+    # C-10 section 7), ``_commit_context`` (3), ``self._attempts`` with ``_settle_attempts`` and ``side_turn``'s
+    # one audit (4), ``harness.context.budget`` (5), and ``_model`` (6, admission).
 
     def _cache_cold(self) -> bool:
         """No model request for longer than the provider cache TTL (section 3)."""
@@ -1190,12 +1193,11 @@ class Agent:
                 cut = normal_cut(view.units, plan.keep, turn_inputs=self._turn_inputs, pinned=view.pinned)
                 if cut is not None:
                     ladder.compacted = True
-                    if not self._fork_fits(system, selected, view, "normal", cut):
+                    turn = self._checkpoint_turn(request, view, plan, cut, mode="normal", reason="threshold")
+                    if not self.side_turn_fits(turn, selected, system=system):
                         shrink = True  # no fork can take the whole context: the ladder from (b)
                     else:
-                        outcome = await self._checkpoint(
-                            system, selected, request, view, plan, cut, mode="normal", reason="threshold", emit=emit
-                        )
+                        outcome = await self._checkpoint(system, selected, turn, emit)
                         if outcome.ok:
                             return True
                         # A checkpoint request that overflowed means the whole context cannot fit a fork (b).
@@ -1277,37 +1279,6 @@ class Agent:
             return True  # nothing to carry
         return (await self._minimal(system, selected, request, view, plan, carry=True))[1].can_fit
 
-    def _fork_base(self, view: ContextView, mode: str, cut: int) -> tuple[Message, ...]:
-        """What a fork carries before the checkpoint request: the whole context, or for a rolling fork its prefix."""
-        return tuple(view.messages) if mode == "normal" else view.prefix(cut)
-
-    def _fork(
-        self,
-        system: str,
-        route: ModelSelection,
-        base: Sequence[Message],
-        prompt: UserMessage,
-        turn: Sequence[Message],
-        anchor: Optional[Anchor],
-    ) -> tuple[ModelRequest, dict[str, Tool], Budget]:
-        """A checkpoint turn's request on ``route`` (section 6) and its budget: ``base``, the checkpoint request,
-        and the turn so far. The stage's dry run and the turn itself compose it here, so they cannot differ."""
-        transcript = (*base, prompt, *turn)
-        request, tools = self._built(
-            system,
-            route,
-            messages=(*self._rehydrated(), *transcript),
-            max_tokens=checkpoint_max_tokens(route.capabilities, self.max_tokens),
-        )
-        return request, tools, budget(request, route.capabilities, transcript=transcript, anchor=anchor)
-
-    def _fork_fits(self, system: str, selected: ModelSelection, view: ContextView, mode: str, cut: int) -> bool:
-        """A dry compose of the first request the checkpoint turn would send, budgeted: a choice, not admission."""
-        fork = self._fork(
-            system, selected, self._fork_base(view, mode, cut), _CHECKPOINT_REQUEST, (), last_anchor(self._rows, view)
-        )
-        return fork[2].can_fit
-
     async def _shrink(
         self,
         system: str,
@@ -1332,18 +1303,24 @@ class Agent:
             if not ladder.summary_failed and not ladder.compacted:
                 ladder.compacted = True
                 cut = normal_cut(units, plan.keep, turn_inputs=self._turn_inputs, pinned=view.pinned)
-                if cut is not None and self._fork_fits(system, selected, view, "normal", cut):
-                    outcome = await self._checkpoint(
-                        system, selected, request, view, plan, cut, mode="normal", reason="overflow", emit=emit
-                    )
+                turn = (
+                    None
+                    if cut is None
+                    else self._checkpoint_turn(request, view, plan, cut, mode="normal", reason="overflow")
+                )
+                if turn is not None and self.side_turn_fits(turn, selected, system=system):
+                    outcome = await self._checkpoint(system, selected, turn, emit)
                     if outcome.ok:
                         return True
                     ladder.summary_failed = not outcome.overflow
                 continue
             if not ladder.summary_failed and ladder.rolls < MAX_ROLLS:
+                def rolling(cut: int) -> SideTurn:
+                    return self._checkpoint_turn(request, view, plan, cut, mode="rolling", reason="overflow")
+
                 cut = rolling_cut(
                     units,
-                    lambda cut: self._fork_fits(system, selected, view, "rolling", cut),
+                    lambda cut: self.side_turn_fits(rolling(cut), selected, system=system),
                     turn_inputs=self._turn_inputs,
                     pinned=view.pinned,
                 )
@@ -1351,9 +1328,7 @@ class Agent:
                     ladder.rolls = MAX_ROLLS
                     continue
                 ladder.rolls += 1
-                outcome = await self._checkpoint(
-                    system, selected, request, view, plan, cut, mode="rolling", reason="overflow", emit=emit
-                )
+                outcome = await self._checkpoint(system, selected, rolling(cut), emit)
                 if outcome.ok:
                     return True
                 ladder.summary_failed = True
@@ -1459,57 +1434,143 @@ class Agent:
         return _Exhausted(plan.input_limit, tuple(parts), kind)
 
     async def _checkpoint(
-        self,
-        system: str,
-        selected: ModelSelection,
-        request: ModelRequest,
-        view: ContextView,
-        plan: Budget,
-        cut: int,
-        *,
-        mode: str,
-        reason: str,
-        emit: Callable[..., Awaitable[None]],
+        self, system: str, selected: ModelSelection, turn: SideTurn, emit: Callable[..., Awaitable[None]]
     ) -> _Outcome:
-        """Sections 6 and 7: a forked checkpoint turn; on success its row joins the context."""
+        """Sections 6 and 7: a checkpoint turn, the side turn ``_checkpoint_turn`` built; on success its row joins
+        the context. The events and the run's bound are the checkpoint's; the turn is ``side_turn``'s."""
+        reason, mode = turn.detail.reason, turn.detail.mode
         await emit(CompactionStarted, reason=reason)
-        prompt = _CHECKPOINT_REQUEST
-        base = self._fork_base(view, mode, cut)
+        result = await self.side_turn(turn, selected, system=system)
+        if result.outcome == "failed":
+            self._unproductive += 1
+            await emit(CompactionFailed, reason=reason, error=result.error)
+            return _Outcome(False, result.overflow)
+        row = result.folded
+        assert row is not None  # a checkpoint's fold commits its row or fails
+        if mode == "normal" and row.payload["tokens_after_estimate"] >= INEFFECTIVE_RATIO * row.payload["threshold"]:
+            self._unproductive += 1  # it made too little room to count as progress
+        await emit(
+            CompactionFinished,
+            event_id=row.row_id,
+            reason=reason,
+            mode=mode,
+            tokens_before=row.payload["tokens_before"],
+            tokens_after_estimate=row.payload["tokens_after_estimate"],
+        )
+        return _Outcome(True)
+
+    def _checkpoint_turn(
+        self, request: ModelRequest, view: ContextView, plan: Budget, cut: int, *, mode: str, reason: str
+    ) -> SideTurn:
+        """The checkpoint turn for ``cut`` as a side turn (C-10 section 12): the whole view, or for a rolling one its
+        prefix, then the checkpoint request, under ``DREAMING``; its fold commits the checkpoint row."""
+
+        async def fold(reply: SideReply) -> Folded:
+            checkpoint = checkpoint_text(reply.message)
+            if not checkpoint:
+                return Folded(None, "The checkpoint turn ended without checkpoint text.")
+            problem = checkpoint_problem(checkpoint)
+            if problem is not None:
+                # Not a checkpoint (a meta note, a partial one): it fails, and its text stays in the audit only; the
+                # old context is kept (section 6).
+                return Folded(None, f"The checkpoint turn's reply is not a checkpoint: {problem}.")
+            origin = reply.message.origin
+            summarizer = {
+                "origin": {"provider": origin.provider, "api": origin.api, "model": origin.model},
+                "prompt_version": PROMPT_VERSION,
+                "rounds": reply.rounds,
+            }
+            try:
+                hosted = await self._hosted(view, cut)
+            except (_Aborted, asyncio.CancelledError):
+                raise
+            except Exception as failure:
+                # Only the host's part after the model answered (state, lookup) is a failed checkpoint, counted; an
+                # error building the row itself ends the run, like any engine error.
+                return Folded(
+                    None, f"The checkpoint row could not be built: the host failed: {type(failure).__name__}: {failure}"
+                )
+            payload, _ = await self._compaction(
+                request,
+                view,
+                plan,
+                cut,
+                mode=mode,
+                reason=reason,
+                checkpoint=checkpoint,
+                summarizer=summarizer,
+                usage=reply.usage,
+                hosted=hosted,
+            )
+            (row,) = await self._commit_context([("compaction", payload)])
+            return Folded(row)
+
+        return SideTurn(
+            purpose="checkpoint",
+            detail=CheckpointDetail(reason=reason, mode=mode),
+            units=None if mode == "normal" else cut,
+            prompt=_CHECKPOINT_REQUEST,
+            policy=DREAMING,
+            max_tokens=lambda capabilities: checkpoint_max_tokens(capabilities, self.max_tokens),
+            fold=fold,
+        )
+
+    # --- C-10 side turn (agent-core-contracts/fork.md section 7) ----------------
+
+    def side_turn_fits(self, turn: SideTurn, route: ModelSelection, *, system: str) -> bool:
+        """A dry compose of the first request ``turn`` would send on ``route``, budgeted: a choice, not admission."""
+        view = context_view(self._rows)
+        return self._side_request(system, route, turn, view, (), last_anchor(self._rows, view))[2].can_fit
+
+    async def side_turn(self, turn: SideTurn, route: ModelSelection, *, system: str) -> SideTurnResult:
+        """``turn`` inside the caller's run, first on ``route``, with the run's ``system`` (section 7).
+
+        It goes through the run's model call, silently, and its calls through ``_side_tool``. A response that stops
+        with ``stop`` and calls no tool is its reply, which ``turn.fold`` folds into the context; anything else fails
+        it. One ``fork_turn`` audit on every exit but an abort (F7). v1 runs it only while a run is active, the
+        Session's one writer; a side turn while idle is reserved.
+        """
+        view = context_view(self._rows)
         anchor = last_anchor(self._rows, view)
-        policy = CheckpointPolicy(cwd=self.cwd, scratch_dir=self.context.scratch_dir)
-        turn: list[Message] = []  # what the turn's next request carries after the checkpoint request
+        point = {"as_of": view.context_seq, "units": turn.units}
+        policy = turn.policy
+        scratch_dir = self.context.scratch_dir if self.context is not None else None
+        gate = PolicyGate(policy, cwd=self.cwd, scratch_dir=scratch_dir)
+        # The most a call that does not run adds: one of the policy's two fixed texts (never cut).
+        fixed = max(text_tokens(policy.denied), text_tokens(policy.budget_used))
+        so_far: list[Message] = []  # what the turn's next request carries after its prompt
         produced: list[Message] = []  # the audit: every attempt's message from the ledger, and the tool results
         start = mark = len(self._attempts)
         measured: list[Budget] = []  # the budget of the turn's latest request, as sent
         rounds = 0
         error: Optional[str] = None
         overflow = False
-        checkpoint = ""
-        origin = None
-        selection: Optional[ModelSelection] = selected
+        reply: Optional[SideReply] = None
+        selection: Optional[ModelSelection] = route
 
-        async def compose(route: ModelSelection) -> tuple[ModelRequest, dict[str, Tool]]:
-            fork, tools, fork_plan = self._fork(system, route, base, prompt, turn, anchor)
-            if not fork_plan.can_fit:
-                raise _ForkTooLarge()
-            measured[:] = [fork_plan]
-            return fork, tools
+        async def compose(selected: ModelSelection) -> tuple[ModelRequest, dict[str, Tool]]:
+            request, tools, plan = self._side_request(system, selected, turn, view, so_far, anchor)
+            if not plan.can_fit:
+                raise _SideTurnTooLarge()
+            measured[:] = [plan]
+            return request, tools
 
-        finished: dict[str, Any] = {"outcome": "failed", "error": None, "compaction_event_id": None}
+        finished: dict[str, Any] = {"outcome": "failed", "error": None, "folded_event_id": None}
         aborted = False
         try:
             try:
                 while True:
                     try:
                         async with self._model(
-                            system, _silent, selection, compose=compose, purpose="checkpoint", after=(prompt, *turn)
+                            system, _silent, selection, compose=compose, purpose="side_turn", after=(turn.prompt, *so_far)
                         ) as (terminal, tools):
                             selection = None
-                    except _ForkTooLarge:
-                        overflow, error = True, "overflow: the checkpoint request does not fit the model's input limit."
+                    except _SideTurnTooLarge:
+                        overflow = True
+                        error = f"overflow: the {turn.purpose} request does not fit the model's input limit."
                         break
                     except ProviderProtocolViolation as violation:
-                        # Not admitted: a failed checkpoint, and none of its calls runs.
+                        # Not admitted: a failed side turn, and none of its calls runs.
                         error = str(violation)
                         break
                     finally:
@@ -1521,25 +1582,17 @@ class Agent:
                         break
                     message = terminal.message
                     self._scope.check()
-                    turn.append(message)
-                    origin = message.origin
+                    so_far.append(message)
                     if message.stop_reason == "stop" and not message.tool_calls:
-                        checkpoint = checkpoint_text(message)
-                        problem = checkpoint_problem(checkpoint) if checkpoint else None
-                        if not checkpoint:
-                            error = "The checkpoint turn ended without checkpoint text."
-                        elif problem is not None:
-                            # Not a checkpoint (a meta note, a partial one): it fails, and its text stays in the
-                            # audit only; the old context is kept (section 6).
-                            checkpoint, error = "", f"The checkpoint turn's reply is not a checkpoint: {problem}."
+                        reply = SideReply(message, rounds, self._turn_usage(start))
                         break
                     if message.stop_reason != "tool_use" or not message.tool_calls:
-                        # Only a stop with text and no call is a checkpoint, and only a tool-use stop carries calls.
-                        error = f"The checkpoint turn stopped with {message.stop_reason} and no usable checkpoint."
+                        # Only a stop with no call is a reply, and only a tool-use stop carries calls.
+                        error = f"The {turn.purpose} turn stopped with {message.stop_reason} and no usable {turn.purpose}."
                         break
-                    if not policy.open:
-                        # Its earlier calls were already answered with BUDGET_USED.
-                        error = "The checkpoint turn kept calling tools after its tool budget was used up."
+                    if not gate.open:
+                        # Its earlier calls were already answered with the policy's budget text.
+                        error = f"The {turn.purpose} turn kept calling tools after its tool budget was used up."
                         break
                     rounds += 1
                     sent = measured[0]
@@ -1549,85 +1602,73 @@ class Agent:
                         self._scope.check()
                         # The bound is the window of the turn's route: a tool runs only while the next request can
                         # still grow by the floor, after the fixed-text results every later call of the batch may
-                        # need are reserved (section 6).
-                        reserved = (len(calls) - index - 1) * _FIXED_RESULT_TOKENS
+                        # need are reserved (C-9 section 6).
+                        reserved = (len(calls) - index - 1) * fixed
                         room = sent.input_limit - grown - sent.output - reserved
-                        policy.open = policy.open and rounds <= CHECKPOINT_TOOL_ROUNDS and room >= CHECKPOINT_TOOL_FLOOR
-                        result = await self._checkpoint_tool(call, tools, policy, limit=room - CHECKPOINT_TOOL_SLACK)
-                        turn.append(result)
+                        gate.open = gate.open and rounds <= policy.max_rounds and room >= policy.room_floor
+                        result = await self._side_tool(call, tools, gate, limit=room - policy.room_slack)
+                        so_far.append(result)
                         produced.append(result)
                         grown += message_tokens(result)
             finally:
-                policy.close()  # the scratch root's descriptor lives for this turn only
-            payload = None
-            if checkpoint:
-                summarizer = {
-                    "origin": {"provider": origin.provider, "api": origin.api, "model": origin.model},
-                    "prompt_version": PROMPT_VERSION,
-                    "rounds": rounds,
-                }
-                try:
-                    hosted = await self._hosted(view, cut)
-                except (_Aborted, asyncio.CancelledError):
-                    raise
-                except Exception as failure:
-                    # Only the host's part after the model answered (state, lookup) is a failed checkpoint,
-                    # counted; an error building the row itself ends the run, like any engine error.
-                    error = f"The checkpoint row could not be built: the host failed: {type(failure).__name__}: {failure}"
-                else:
-                    payload, _ = await self._compaction(
-                        request,
-                        view,
-                        plan,
-                        cut,
-                        mode=mode,
-                        reason=reason,
-                        checkpoint=checkpoint,
-                        summarizer=summarizer,
-                        usage=self._turn_usage(start),
-                        hosted=hosted,
-                    )
-            if payload is None:
+                gate.close()  # the scratch root's descriptor lives for this turn only
+            folded = None
+            if reply is not None:
+                outcome = await turn.fold(reply)
+                folded, error = outcome.row, outcome.error
+            if reply is None or error is not None:
                 finished["error"] = error
-                self._unproductive += 1
-                await emit(CompactionFailed, reason=reason, error=error)
-                return _Outcome(False, overflow)
-            (row,) = await self._commit_context([("compaction", payload)])
-            if mode == "normal" and payload["tokens_after_estimate"] >= INEFFECTIVE_RATIO * payload["threshold"]:
-                self._unproductive += 1  # it made too little room to count as progress
-            finished.update(outcome="completed", compaction_event_id=row.row_id)
-            await emit(
-                CompactionFinished,
-                event_id=row.row_id,
-                reason=reason,
-                mode=mode,
-                tokens_before=row.payload["tokens_before"],
-                tokens_after_estimate=row.payload["tokens_after_estimate"],
-            )
-            return _Outcome(True)
+                return SideTurnResult("failed", None, error, overflow)
+            finished.update(outcome="completed", folded_event_id=folded.row_id if folded is not None else None)
+            return SideTurnResult("completed", folded, None)
         except (_Aborted, asyncio.CancelledError):
             aborted = True  # the cancelled run scope admits no further store write
             raise
         except BaseException as failure:
             if finished["outcome"] != "completed" and finished["error"] is None:
-                finished["error"] = f"{type(failure).__name__}: {failure}"  # a failed commit, or a failed compose
+                finished["error"] = f"{type(failure).__name__}: {failure}"  # a failed fold, or a failed compose
             raise
         finally:
             if not aborted:
-                # Invariant 4 for checkpoint turns: one audit, from the ledger, on every exit but an abort.
-                await self._record_turn(self._turn_record(reason, mode, produced, start, finished))
+                await self._audit("fork_turn", self._side_record(turn, point, rounds, produced, start, finished))
+
+    def _side_request(
+        self,
+        system: str,
+        route: ModelSelection,
+        turn: SideTurn,
+        view: ContextView,
+        so_far: Sequence[Message],
+        anchor: Optional[Anchor],
+    ) -> tuple[ModelRequest, dict[str, Tool], Budget]:
+        """A side turn's request on ``route`` and its budget (section 7 step 1): after the caller's rehydrated
+        messages, its view through the turn's units, the turn's prompt, and the turn so far. The dry run and the
+        turn itself compose it here, so they cannot differ."""
+        base = view.prefix(len(view.units) if turn.units is None else turn.units)
+        transcript = (*base, turn.prompt, *so_far)
+        request, tools = self._built(
+            system, route, messages=(*self._rehydrated(), *transcript), max_tokens=turn.max_tokens(route.capabilities)
+        )
+        return request, tools, budget(request, route.capabilities, transcript=transcript, anchor=anchor)
 
     def _turn_usage(self, start: int) -> Optional[Usage]:
-        """The usage every attempt of a checkpoint turn reported, from the ledger."""
+        """The usage every attempt of a side turn reported, from the ledger."""
         usage = None
         for item in self._attempts[start:]:
             usage = add_usage(usage, item.message.usage if item.message is not None else None)
         return usage
 
-    def _turn_record(
-        self, reason: str, mode: str, produced: Sequence[Message], start: int, finished: Mapping[str, Any]
+    def _side_record(
+        self,
+        turn: SideTurn,
+        point: Mapping[str, Any],
+        rounds: int,
+        produced: Sequence[Message],
+        start: int,
+        finished: Mapping[str, Any],
     ) -> dict[str, Any]:
-        """A checkpoint turn's audit (``CheckpointTurn``, section 6): its messages, usage, and outcome."""
+        """A side turn's audit (``ForkTurn``, section 15): its purpose, policy, point, detail, messages, usage, and
+        outcome."""
         messages = []
         for message in produced:
             try:
@@ -1635,38 +1676,46 @@ class Agent:
             except (ValueError, RecursionError) as invalid:
                 # Arguments a provider sent that are not JSON: refused at admission (the turn's error names
                 # them), and no JSON row can hold them either.
-                self._outcome.diagnostic(type(invalid).__name__, f"Checkpoint audit left out a message: {invalid}")
-        record: dict[str, Any] = {"version": 1, "reason": reason, "mode": mode, "messages": messages}
+                self._outcome.diagnostic(type(invalid).__name__, f"Side turn audit left out a message: {invalid}")
+        record: dict[str, Any] = {
+            "version": 1,
+            "purpose": turn.purpose,
+            "policy": turn.policy.name,
+            "point": dict(point),
+            "detail": asdict(turn.detail),
+            "rounds": rounds,
+            "messages": messages,
+        }
         usage = self._turn_usage(start)
         if usage is not None:
             record["usage"] = usage_to_dict(usage)
         return {**record, **finished}
 
-    async def _checkpoint_tool(
-        self, original: ToolCallBlock, tools: Mapping[str, Tool], policy: CheckpointPolicy, *, limit: int
+    async def _side_tool(
+        self, original: ToolCallBlock, tools: Mapping[str, Tool], gate: PolicyGate, *, limit: int
     ) -> ToolResultMessage:
-        """The checkpoint turn's tool pipeline (invariant 2); nothing it produces is committed.
+        """The side turn's tool pipeline (section 7 step 3); nothing it produces is committed.
 
-        The budget first, then the table, then execution (a scratch write or edit through the root's
-        descriptor), then the bound on whatever result came out. No user hook runs under C-9 (v1).
+        The budget first, then the policy, then execution (a scratch write or edit through the root's
+        descriptor), then the bound on whatever result came out. No user hook runs in a side turn (v1).
         """
         call = deepcopy(original)
-        decision = policy.decide(call) if policy.open else Decision(denial=BUDGET_USED)
+        decision = gate.decide(call) if gate.open else Decision(denial=gate.policy.budget_used)
         if decision.denial is not None:
             # The policy's fixed texts are short and never cut: a truncation note would invite another call.
             return ToolResultMessage(call.id, call.name, (text(decision.denial),), True)
         if decision.scratch is not None:
             # Relative to the scratch root's descriptor: no pathname is resolved again. Joined, never interrupted:
-            # the worker thread outlives a cancelled await, and the root closes only after it is done (section 6).
+            # the worker thread outlives a cancelled await, and the root closes only after it is done (C-9 section 6).
             result = await self._scope.call(
-                lambda: to_thread_joined(policy.run, call, decision.scratch), interruptible=False
+                lambda: to_thread_joined(gate.run, call, decision.scratch), interruptible=False
             )
         elif (tool := tools.get(call.name)) is None:
             result = ToolResult((text(f"Tool {call.name} is not available."),), is_error=True)
         else:
-            # A checkpoint turn's call has no committed response, so no instance: it starts no job.
+            # A side turn's call has no committed response, so no instance: it starts no job (F4).
             result = await self._execute(tool, call, None, _silent)
-        # Every other result that enters the turn is bounded to the room the window leaves (section 6).
+        # Every other result that enters the turn is bounded to the room the window leaves (C-9 section 6).
         return ToolResultMessage(call.id, call.name, fit_result(result.content, limit), result.is_error)
 
     async def _drop(
@@ -1770,11 +1819,7 @@ class Agent:
         self._committed_state, self._committed_state_json = state, representation
         return tuple(row for row in committed if row.kind != "agent_state")
 
-    async def _record_turn(self, payload: Mapping[str, Any]) -> None:
-        """The checkpoint turn's audit row (section 6)."""
-        await self._audit("checkpoint_turn", payload)
-
-    async def _audit(self, kind: Literal["checkpoint_turn", "attempt"], payload: Mapping[str, Any]) -> None:
+    async def _audit(self, kind: Literal["fork_turn", "attempt"], payload: Mapping[str, Any]) -> None:
         """A non-context audit row; never context, so losing it never fails the run."""
         try:
             await self._scope.call(
