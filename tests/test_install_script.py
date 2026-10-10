@@ -59,12 +59,46 @@ def _run(command: str, *, cwd: Path, env: dict[str, str], timeout: int = 30) -> 
 
 
 def _write_fake_uv(path: Path, uv_log: Path) -> None:
-    activation_driver = (
-        f"import sys; sys.path.insert(0, {str(REPO_ROOT)!r}); "
-        "from vibe import cli, upgrade, install_generations; "
-        "upgrade.verify_upgrade_candidate = lambda activation: upgrade.IntegrityResult(True, 1); "
-        "sys.exit(cli._dispatch_installer_activation(sys.argv[1:]))"
+    activation_driver_source = textwrap.dedent(
+        f"""
+        import io
+        import os
+        import sys
+        from pathlib import Path
+
+        sys.path.insert(0, {str(REPO_ROOT)!r})
+        from vibe import cli, upgrade
+
+        upgrade.verify_upgrade_candidate = lambda activation: upgrade.IntegrityResult(True, 1)
+        if os.environ.get("VIBE_TEST_ACTIVATION_PEER_FAILURE") == "1":
+            _activate = cli.activate_installer_candidate
+
+            def _activate_with_peer_failure(activation):
+                outcome = _activate(activation)
+                failure = upgrade.LauncherActivationFailure(
+                    Path(os.environ["VIBE_TEST_PEER_PATH"]),
+                    "permission denied",
+                    "permission_denied",
+                )
+                return upgrade.ActivationOutcome(outcome.activated_launcher, (failure,))
+
+            cli.activate_installer_candidate = _activate_with_peer_failure
+            cli._configured_cli_language = lambda: "zh"
+        if os.environ.get("VIBE_TEST_CP1252_DIAGNOSTIC") == "1":
+            sys.stdout = io.TextIOWrapper(
+                os.fdopen(os.dup(1), "wb"),
+                encoding="cp1252",
+                write_through=True,
+            )
+        if os.environ.get("VIBE_TEST_CLOSE_DIAGNOSTIC_PIPE") == "1":
+            _read_fd, _write_fd = os.pipe()
+            os.close(_read_fd)
+            os.dup2(_write_fd, 1)
+            os.close(_write_fd)
+        sys.exit(cli._dispatch_installer_activation(sys.argv[1:]))
+        """
     )
+    activation_driver = f"exec({activation_driver_source!r})"
     receipt_driver = (
         "import json, sys; from pathlib import Path; "
         "environment = Path(sys.argv[1]); environment.mkdir(parents=True, exist_ok=True); "
@@ -591,6 +625,40 @@ def test_install_script_uses_the_current_owner_for_a_legacy_candidate(tmp_path):
     assert second.returncode == 0, second.stdout + second.stderr
     assert Path(owner_log.read_text(encoding="utf-8")).samefile(first_owner)
     assert (path_dir / "vibe").resolve() != first_owner
+
+
+@pytest.mark.parametrize("sink", ["cp1252", "closed-pipe"])
+def test_install_script_preserves_committed_generation_when_advisory_sink_fails(tmp_path, sink):
+    home_dir = tmp_path / "home"
+    home_dir.mkdir()
+    path_dir = tmp_path / "path-bin"
+    path_dir.mkdir()
+    uv_log = tmp_path / "uv-tool-bin-dir.txt"
+    _write_fake_uv(path_dir / "uv", uv_log)
+
+    env = os.environ.copy()
+    env["HOME"] = str(home_dir)
+    env["PATH"] = os.pathsep.join([str(path_dir), "/usr/bin", "/bin"])
+    env["VIBE_TEST_SHARED_ACTIVATION"] = "1"
+    env["VIBE_TEST_ACTIVATION_PEER_FAILURE"] = "1"
+    env["VIBE_TEST_PEER_PATH"] = str(tmp_path / "peer 空格" / "vibe")
+    if sink == "cp1252":
+        env["VIBE_TEST_CP1252_DIAGNOSTIC"] = "1"
+    else:
+        env["VIBE_TEST_CLOSE_DIAGNOSTIC_PIPE"] = "1"
+
+    install_result = _install(env)
+    launcher = path_dir / "vibe"
+    version_result = _vibe_version(env)
+
+    assert install_result.returncode == 0, install_result.stdout + install_result.stderr
+    assert launcher.is_symlink()
+    assert launcher.resolve().is_file()
+    assert version_result.returncode == 0, version_result.stdout + version_result.stderr
+    assert "avibe-os 9.9.9" in version_result.stdout
+    if sink == "cp1252":
+        assert "doctor repair stable-launchers" in install_result.stdout
+        assert r"\u" in install_result.stdout
 
 
 def test_install_script_recovers_an_existing_3_0_13_generation(tmp_path):

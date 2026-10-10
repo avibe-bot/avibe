@@ -640,6 +640,43 @@ def test_deferred_activation_seeds_restart_before_releasing_install_lock(monkeyp
     assert events == ["lock-enter", "activate", "restart", "lock-exit"]
 
 
+def test_deferred_activation_notice_failure_does_not_skip_restart(monkeypatch, tmp_path):
+    from vibe import cli
+
+    events: list[str] = []
+    launcher = tmp_path / "vibe.exe"
+
+    monkeypatch.setattr(cli.runtime, "pid_alive", lambda _pid: False)
+    monkeypatch.setattr(cli, "atomic_upgrade_lock", lambda: nullcontext())
+    monkeypatch.setattr(cli, "activation_block_reason", lambda _activation: None)
+    monkeypatch.setattr(
+        cli,
+        "activate_upgrade_candidate",
+        lambda _activation: events.append("activate") or vibe_upgrade.ActivationOutcome(launcher),
+    )
+    monkeypatch.setattr(cli, "schedule_restart", lambda **_kwargs: events.append("restart"))
+    monkeypatch.setattr(
+        cli,
+        "format_activation_failures",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("notice failed")),
+    )
+
+    result = cli._dispatch_deferred_upgrade_activation(
+        [
+            "--parent-pid",
+            "123",
+            "--launcher",
+            str(launcher),
+            "--candidate",
+            str(tmp_path / "candidate.exe"),
+            "--restart",
+        ]
+    )
+
+    assert result == 0
+    assert events == ["activate", "restart"]
+
+
 def test_deferred_offline_activation_prepares_show_runtime(monkeypatch, tmp_path):
     from vibe import cli
 
@@ -966,6 +1003,39 @@ def test_cmd_upgrade_reports_peer_activation_failures(monkeypatch, tmp_path, cap
     assert str(launcher) in output
 
 
+def test_cmd_upgrade_prepares_show_runtime_before_activation_notice(monkeypatch, tmp_path):
+    launcher = tmp_path / "activated-vibe"
+    outcome = vibe_upgrade.ActivationOutcome(activated_launcher=launcher)
+    plan = UpgradePlan(
+        command=["uv", "tool", "install", "avibe-os", "--upgrade"],
+        env={},
+        method="uv",
+        activation=AtomicActivation(launcher, tmp_path / "candidate" / "vibe"),
+    )
+    events: list[str] = []
+    monkeypatch.setattr(cli, "get_latest_version", lambda: {
+        "error": None, "has_update": True, "latest": "2.2.0",
+    })
+    monkeypatch.setattr(cli, "cache_running_vibe_path", lambda: str(launcher))
+    monkeypatch.setattr(cli, "build_upgrade_plan", lambda **_kwargs: plan)
+    monkeypatch.setattr(cli, "_runtime_process_was_running", lambda: False)
+    monkeypatch.setattr(cli, "activate_upgrade_candidate", lambda _activation: events.append("activate") or outcome)
+    monkeypatch.setattr(
+        cli,
+        "execute_upgrade_plan",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(plan.command, 0, stdout="done", stderr=""),
+    )
+    monkeypatch.setattr(cli, "_prepare_show_runtime_after_install", lambda _path: events.append("prepare"))
+    monkeypatch.setattr(
+        cli,
+        "format_activation_failures",
+        lambda *_args, **_kwargs: events.append("notice") or None,
+    )
+
+    assert cli.cmd_upgrade() == 0
+    assert events == ["activate", "prepare", "notice"]
+
+
 def test_do_upgrade_includes_peer_activation_failures_in_output(monkeypatch, tmp_path):
     launcher = tmp_path / "activated-vibe"
     peer = tmp_path / "peer-vibe"
@@ -1071,6 +1141,9 @@ def test_windows_activation_notices_label_powershell_for_each_failure(
 
     assert notice is not None
     assert "PowerShell" in notice
+    if language == "en":
+        assert "in PowerShell, run" in notice
+        assert "In PowerShell, run" not in notice
     assert str(launcher.absolute()).replace("'", "''") in notice
     assert "doctor repair stable-launchers" in notice
 

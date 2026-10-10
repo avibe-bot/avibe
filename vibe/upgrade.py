@@ -15,7 +15,7 @@ import time
 import urllib.parse
 import urllib.request
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import cast
@@ -189,13 +189,19 @@ def _pip_dry_run_is_unsupported(result: subprocess.CompletedProcess[str]) -> boo
     )
 
 
-@dataclass(frozen=True)
+@dataclass
 class AtomicActivation:
-    """A validated candidate and the stable launcher it will replace."""
+    """A validated candidate and the stable launcher it will replace.
+
+    ``committed`` becomes true immediately after the stable launcher is
+    replaced. Callers use it to distinguish post-commit cleanup or reporting
+    failures from pre-commit activation failures.
+    """
 
     launcher: Path
     candidate_launcher: Path
     source_generation: Path | None = None
+    committed: bool = field(default=False, init=False, repr=False, compare=False)
 
 
 @dataclass(frozen=True)
@@ -408,6 +414,7 @@ def defer_upgrade_activation(
         with contextlib.suppress(OSError):
             process.terminate()
         raise
+    activation.committed = True
     setattr(process, "activation_log_path", log_path)
     return process
 
@@ -920,6 +927,7 @@ def _activate_upgrade_candidate_locked(activation: AtomicActivation) -> Activati
     try:
         _prepare_launcher_replacement(replacement, activation.candidate_launcher)
         os.replace(replacement, launcher)
+        activation.committed = True
     except Exception:
         with contextlib.suppress(OSError):
             replacement.unlink()
@@ -935,6 +943,8 @@ def _activate_upgrade_candidate_locked(activation: AtomicActivation) -> Activati
             continue
         try:
             if not move_managed_launcher_locked(peer, selected, activation.candidate_launcher):
+                if _launcher_generation(peer, root) == activated:
+                    continue
                 reason = "the launcher changed after discovery"
                 peer_failures.append(
                     LauncherActivationFailure(peer, reason, "launcher_changed_after_discovery")

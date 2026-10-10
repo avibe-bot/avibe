@@ -111,4 +111,22 @@ describe('desktop version ownership', () => {
     expect(screen.queryByText(/installer stdout/)).toBeNull();
     expect(screen.queryByText(/Show Runtime prepared/)).toBeNull();
   });
+
+  it('keeps the localized failure banner free of raw output', async () => {
+    api.getVersion.mockResolvedValueOnce({ current: '9.9.9', latest: '10.0.0', has_update: true });
+    api.doUpgrade.mockResolvedValueOnce({
+      ok: false,
+      message: '升级失败',
+      output: 'raw package-manager transcript',
+      activation_notice: null,
+      restarting: false,
+    });
+    render(<I18nextProvider i18n={i18n}><VersionBadge /></I18nextProvider>);
+
+    fireEvent.click(await screen.findByTitle('v9.9.9'));
+    fireEvent.click(await screen.findByRole('button', { name: i18n.t('dashboard.upgradeNow') }));
+
+    expect(await screen.findByText(i18n.t('dashboard.upgradeFailed'))).toBeTruthy();
+    expect(screen.queryByText('raw package-manager transcript')).toBeNull();
+  });
 });

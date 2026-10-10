@@ -308,9 +308,9 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
                   {upgradeResult.ok ? <Check size={16} className="shrink-0" /> : <AlertCircle size={16} className="shrink-0" />}
                   <div className="min-w-0 space-y-1">
                     {upgradeResult.ok ? t('dashboard.upgradeSuccess') : t('dashboard.upgradeFailed')}
-                    {(upgradeResult.ok ? upgradeResult.activation_notice : upgradeResult.output) && (
+                    {upgradeResult.ok && upgradeResult.activation_notice && (
                       <div className="whitespace-pre-wrap break-words text-xs">
-                        {upgradeResult.ok ? upgradeResult.activation_notice : upgradeResult.output}
+                        {upgradeResult.activation_notice}
                       </div>
                     )}
                   </div>

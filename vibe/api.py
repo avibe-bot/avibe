@@ -6218,6 +6218,7 @@ def do_upgrade(auto_restart: bool = True) -> dict:
     activation_outcome = None
     activation_notice = None
     activation_committed = False
+    activation_postcommit_error = None
 
     try:
         with atomic_upgrade_lock():
@@ -6273,19 +6274,21 @@ def do_upgrade(auto_restart: bool = True) -> dict:
                         activation_outcome = activate_upgrade_candidate(plan.activation)
                         activation_committed = True
                 except Exception as exc:  # noqa: BLE001
+                    activation_committed = activation_committed or plan.activation.committed
                     if not activation_committed:
                         discard_atomic_uv_install_generation(plan.activation.candidate_launcher)
-                    return {
-                        "ok": False,
-                        "message": (
-                            "Upgrade candidate failed integrity verification"
-                            if not activation_committed
-                            else "Upgrade activation completed, but post-activation diagnostics failed"
-                        ),
-                        "output": str(exc),
-                        "activation_notice": None,
-                        "restarting": False,
-                    }
+                        return {
+                            "ok": False,
+                            "message": "Upgrade candidate failed integrity verification",
+                            "output": str(exc),
+                            "activation_notice": None,
+                            "restarting": False,
+                        }
+                    deferred_activation = deferred_activation or (
+                        os.name == "nt" and launcher_is_current_process(plan.activation.launcher)
+                    )
+                    activation_postcommit_error = str(exc)
+                    logger.warning("Upgrade activation completed with a post-commit error", exc_info=True)
             elif result.returncode != 0 and plan.activation is not None:
                 discard_atomic_uv_install_generation(plan.activation.candidate_launcher)
             if result.returncode == 0 and plan.activation is None and plan.method == "pip":
@@ -6314,8 +6317,8 @@ def do_upgrade(auto_restart: bool = True) -> dict:
         if result.returncode == 0:
             if deferred_activation_log_error is not None:
                 return {
-                    "ok": False,
-                    "message": "Upgrade activation was handed off, but its diagnostics could not be read.",
+                    "ok": True,
+                    "message": "Upgrade successful. Activation will complete after this process exits.",
                     "output": _append_upgrade_output(result.stdout, deferred_activation_log_error),
                     "activation_notice": None,
                     "restarting": auto_restart and runtime_was_running,
@@ -6327,9 +6330,10 @@ def do_upgrade(auto_restart: bool = True) -> dict:
                         _configured_backend_language(),
                     )
                 except Exception as exc:  # noqa: BLE001
+                    logger.warning("Deferred activation notice could not be formatted", exc_info=True)
                     return {
-                        "ok": False,
-                        "message": "Upgrade activation was handed off, but its diagnostics could not be formatted.",
+                        "ok": True,
+                        "message": "Upgrade successful. Activation will complete after this process exits.",
                         "output": _append_upgrade_output(result.stdout, str(exc)),
                         "activation_notice": None,
                         "restarting": auto_restart and runtime_was_running,
@@ -6354,11 +6358,24 @@ def do_upgrade(auto_restart: bool = True) -> dict:
                 message = "Upgrade successful. Please restart vibe."
 
             output = _append_upgrade_output(result.stdout, runtime_output)
-            if activation_outcome is not None:
-                activation_notice = format_activation_failures(
-                    activation_outcome,
-                    _configured_backend_language(),
+            if activation_postcommit_error:
+                output = _append_upgrade_output(
+                    output,
+                    f"Upgrade activation cleanup reported: {activation_postcommit_error}",
                 )
+            if activation_outcome is not None:
+                try:
+                    activation_notice = format_activation_failures(
+                        activation_outcome,
+                        _configured_backend_language(),
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Activation notice could not be formatted", exc_info=True)
+                    activation_notice = None
+                    output = _append_upgrade_output(
+                        output,
+                        f"Stable launcher activation notice unavailable: {exc}",
+                    )
                 output = _append_upgrade_output(output, activation_notice)
             return {
                 "ok": True,
@@ -6376,6 +6393,8 @@ def do_upgrade(auto_restart: bool = True) -> dict:
                 "restarting": False,
             }
     except subprocess.TimeoutExpired:
+        if plan.activation is not None:
+            activation_committed = activation_committed or plan.activation.committed
         if plan.activation is not None and not activation_committed:
             discard_atomic_uv_install_generation(plan.activation.candidate_launcher)
         return {
@@ -6386,16 +6405,22 @@ def do_upgrade(auto_restart: bool = True) -> dict:
             "restarting": False,
         }
     except Exception as e:
+        if plan.activation is not None:
+            activation_committed = activation_committed or plan.activation.committed
         if plan.activation is not None and not activation_committed:
             discard_atomic_uv_install_generation(plan.activation.candidate_launcher)
+        if activation_committed:
+            return {
+                "ok": True,
+                "message": "Upgrade successful.",
+                "output": str(e),
+                "activation_notice": None,
+                "restarting": restarting,
+            }
         return {
             "ok": False,
-            "message": (
-                "Upgrade activation completed, but post-activation reporting failed"
-                if activation_committed
-                else str(e)
-            ),
-            "output": str(e) if activation_committed else None,
+            "message": str(e),
+            "output": None,
             "activation_notice": None,
             "restarting": restarting,
         }
