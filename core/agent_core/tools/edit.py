@@ -4,7 +4,7 @@ Ported from Pi ``packages/coding-agent/src/core/tools/edit.ts`` (MIT, Copyright
 (c) 2025 Mario Zechner); the description and model-facing strings are Pi's.
 ``replaceAll`` is an Avibe addition, so its schema text and the "unless
 replaceAll is true" clause are Avibe's. Avibe improvements to Pi's result
-texts: a successful edit names the lines it changed, and an ambiguous match
+texts: a successful edit names the lines it rewrote, and an ambiguous match
 lists its first occurrences (``edit_diff``), so the model can inspect the result
 or add context without another read; Pi reports only counts.
 """
@@ -151,7 +151,7 @@ def edit_summary(
 ) -> str:
     """Pi's result line, or, when an item used ``replaceAll`` (Avibe), the occurrences each item replaced.
 
-    Avibe adds the new file's changed lines, so the model can read just those to check the result.
+    Avibe adds the new file's rewritten lines, so the model can read just those to check the result.
     """
     if not any(edit.replace_all for edit in edits):
         return f"Successfully replaced {len(edits)} block(s) in {path} ({_line_ranges(changed)})."

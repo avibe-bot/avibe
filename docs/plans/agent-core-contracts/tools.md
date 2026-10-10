@@ -109,9 +109,12 @@ is true". Logic, from Pi's `edit-diff.ts`:
    fails.
 
 Result: Pi's `Successfully replaced {n} block(s) in {path}.`; the diff goes to `details` for display only. Avibe
-improvement: before the period, the result names the new file's changed lines, ` ({lines})`, for example
-`Successfully replaced 2 block(s) in {path} (lines 40-52, 88-90).` (`line 7` for a single line). Lines are numbered as
-`read` numbers them (only `\n` ends a line), touching ranges merge, and after five ranges the rest are counted
+improvement: before the period, the result names the new file's rewritten lines, ` ({lines})`, for example
+`Successfully replaced 2 block(s) in {path} (lines 40-52, 88-90).` (`line 7` for a single line). Each replacement's
+rewritten lines run from its first to its last character that differs from the text it replaced, so unchanged context
+at either end of an edit, and a replacement that changed nothing, are left out. The range says where to look, not a
+line diff: an unchanged line between two changes of one edit is inside its range. Lines are numbered as `read`
+numbers them (only `\n` ends a line), touching ranges merge, and after five ranges the rest are counted
 (`..., ...and 3 more`). No diff is returned to the model. Avibe: when an item uses `replaceAll`, the result counts
 occurrences instead, `Successfully replaced {total} occurrences in {path} ({lines}).` (`1 occurrence` when singular),
 with `; edits[0]: {count}, edits[1]: {count}` after the lines for several items, so the model need not read the file

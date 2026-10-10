@@ -11,7 +11,7 @@ text; uniqueness is counted in the tier that matched; and the file is never
 re-encoded: replacements are spliced into the original text, so its BOM, its
 line breaks (mixed or not), and every byte outside a replaced span survive.
 Avibe additions to Pi's messages: an ambiguous match lists where its first
-occurrences are, and a successful edit reports the lines it changed, so the
+occurrences are, and a successful edit reports the lines it rewrote, so the
 model need not read the file again to disambiguate or to inspect the result.
 """
 
@@ -114,7 +114,7 @@ _ASCII = re.compile("[\x00-\x7f]")
 #: Avibe: every edit scans the whole file (``str.count``/``find``, which hold the GIL), so the number of
 #: edits times the file's length is bounded: about a quarter second of scanning.
 MAX_EDIT_SCAN_CHARS = 256 * 1024 * 1024
-#: Avibe: occurrences an ambiguous match lists, and changed line ranges a result lists, before "...and N more".
+#: Avibe: occurrences an ambiguous match lists, and rewritten line ranges a result lists, before "...and N more".
 MAX_LOCATIONS = 5
 #: Avibe: characters of a long line an occurrence's excerpt shows.
 EXCERPT_CHARS = 100
@@ -411,10 +411,12 @@ def _common_suffix(a: str, b: str, limit: int) -> int:
 
 
 def _changed_lines(text: str, replacements: list[_Replacement]) -> tuple[tuple[int, int], ...]:
-    """The new file's changed line ranges, numbered as ``read`` shows them; touching ranges merge.
+    """The new file's rewritten line ranges, numbered as ``read`` shows them; touching ranges merge.
 
     A replacement counts from its first to its last character that differs from the text it replaced,
-    so unchanged context in an edit, or a replacement that changed nothing, is not reported.
+    so unchanged context at either end of an edit, or a replacement that changed nothing, is not
+    reported. This says where to look, not a line diff: an unchanged line between two changes of one
+    edit is part of its range.
     """
     ranges: list[tuple[int, int]] = []
     line, pos = 1, 0
@@ -483,7 +485,7 @@ def apply_edits(
     text: str, edits: list[Edit], path: str, max_result_chars: Optional[int] = None
 ) -> tuple[str, str, str, tuple[int, ...], tuple[tuple[int, int], ...]]:
     """Apply every edit to the file's ``text``; return the new text, the LF views before and after, how
-    many occurrences each edit replaced, and the new text's changed line ranges (``read``'s numbers).
+    many occurrences each edit replaced, and the new text's rewritten line ranges (``read``'s numbers).
 
     Each edit matches in its own tier against the original, in the file's LF view. Exact edits replace
     exactly the text they matched; a normalized edit rewrites the whole lines it touches from the
