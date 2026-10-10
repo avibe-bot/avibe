@@ -1007,6 +1007,7 @@ def test_do_upgrade_includes_peer_activation_failures_in_output(monkeypatch, tmp
     assert str(launcher) in result["output"]
     assert "请先处理所报告的原因" in result["output"]
     assert "其余仍受管理的稳定启动器" in result["output"]
+    assert result["activation_notice"] == result["output"].split("\n\n", 1)[1]
 
 
 def test_activation_repair_command_quotes_full_launcher_path(tmp_path):
@@ -1035,6 +1036,43 @@ def test_activation_repair_command_is_power_shell_invocable(monkeypatch, tmp_pat
 
     escaped = str(launcher.absolute()).replace("'", "''")
     assert command == f"& '{escaped}' doctor repair stable-launchers"
+
+
+@pytest.mark.parametrize(
+    "reason_code",
+    ["permission_denied", "launcher_changed_after_discovery", "move_failed"],
+)
+@pytest.mark.parametrize("language", ["en", "zh"])
+def test_windows_activation_notices_label_powershell_for_each_failure(
+    monkeypatch, tmp_path, reason_code, language,
+):
+    launcher = tmp_path / "用户's activated home 空格" / "vibe.exe"
+    peer = tmp_path / "peer home 空格" / "稳定-vibe.exe"
+
+    class WindowsOsProxy:
+        name = "nt"
+        path = os.path
+
+    monkeypatch.setattr(vibe_upgrade, "os", WindowsOsProxy())
+    outcome = vibe_upgrade.ActivationOutcome(
+        activated_launcher=launcher,
+        peer_failures=(
+            vibe_upgrade.LauncherActivationFailure(
+                peer,
+                "the launcher changed after discovery"
+                if reason_code == "launcher_changed_after_discovery"
+                else "move failed",
+                reason_code,
+            ),
+        ),
+    )
+
+    notice = vibe_upgrade.format_activation_failures(outcome, language)
+
+    assert notice is not None
+    assert "PowerShell" in notice
+    assert str(launcher.absolute()).replace("'", "''") in notice
+    assert "doctor repair stable-launchers" in notice
 
 
 def test_do_upgrade_surfaces_deferred_activation_log(monkeypatch, tmp_path):
@@ -1082,6 +1120,7 @@ def test_do_upgrade_surfaces_deferred_activation_log(monkeypatch, tmp_path):
     assert result["ok"] is True
     assert str(log_path) in result["output"]
     assert "deferred activation helper" in result["output"]
+    assert result["activation_notice"] == "The deferred activation helper will record its result in " + str(log_path) + "."
 
 
 def test_build_upgrade_plan_uses_env_package_spec(monkeypatch):
@@ -1224,6 +1263,7 @@ def test_do_upgrade_rejects_desktop_managed_runtime(monkeypatch):
         "ok": False,
         "message": "This Runtime is managed by the Avibe desktop app.",
         "output": None,
+        "activation_notice": None,
         "restarting": False,
         "code": "desktop_managed_runtime",
     }

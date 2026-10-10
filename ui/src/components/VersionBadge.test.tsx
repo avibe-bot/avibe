@@ -61,7 +61,8 @@ describe('desktop version ownership', () => {
     api.doUpgrade.mockResolvedValueOnce({
       ok: true,
       message: 'Upgrade successful',
-      output: 'Stable launcher repair is still required.',
+      output: 'raw installer transcript',
+      activation_notice: 'Stable launcher repair is still required.',
       restarting: false,
     });
     render(<I18nextProvider i18n={i18n}><VersionBadge /></I18nextProvider>);
@@ -70,6 +71,44 @@ describe('desktop version ownership', () => {
     fireEvent.click(await screen.findByRole('button', { name: i18n.t('dashboard.upgradeNow') }));
 
     expect(await screen.findByText('Stable launcher repair is still required.')).toBeTruthy();
+    expect(screen.queryByText('raw installer transcript')).toBeNull();
     expect(api.doUpgrade).toHaveBeenCalledOnce();
+  });
+
+  it('shows the deferred activation log notice without rendering raw output', async () => {
+    api.getVersion.mockResolvedValueOnce({ current: '9.9.9', latest: '10.0.0', has_update: true });
+    api.doUpgrade.mockResolvedValueOnce({
+      ok: true,
+      message: 'Upgrade successful. Activation will complete after this process exits.',
+      output: 'raw deferred helper transcript',
+      activation_notice: 'The deferred activation helper will record its result in /tmp/upgrade.log.',
+      restarting: false,
+    });
+    render(<I18nextProvider i18n={i18n}><VersionBadge /></I18nextProvider>);
+
+    fireEvent.click(await screen.findByTitle('v9.9.9'));
+    fireEvent.click(await screen.findByRole('button', { name: i18n.t('dashboard.upgradeNow') }));
+
+    expect(await screen.findByText(/deferred activation helper/)).toBeTruthy();
+    expect(screen.queryByText('raw deferred helper transcript')).toBeNull();
+  });
+
+  it('keeps a clean successful banner when only raw output is returned', async () => {
+    api.getVersion.mockResolvedValueOnce({ current: '9.9.9', latest: '10.0.0', has_update: true });
+    api.doUpgrade.mockResolvedValueOnce({
+      ok: true,
+      message: 'Upgrade successful',
+      output: 'installer stdout\nShow Runtime prepared.',
+      activation_notice: null,
+      restarting: false,
+    });
+    render(<I18nextProvider i18n={i18n}><VersionBadge /></I18nextProvider>);
+
+    fireEvent.click(await screen.findByTitle('v9.9.9'));
+    fireEvent.click(await screen.findByRole('button', { name: i18n.t('dashboard.upgradeNow') }));
+
+    expect(await screen.findByText(i18n.t('dashboard.upgradeSuccess'))).toBeTruthy();
+    expect(screen.queryByText(/installer stdout/)).toBeNull();
+    expect(screen.queryByText(/Show Runtime prepared/)).toBeNull();
   });
 });

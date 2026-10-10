@@ -15800,8 +15800,10 @@ def cmd_upgrade():
     restart_error = None
     deferred_activation = False
     deferred_activation_log = None
+    deferred_activation_log_error = None
     restart_python = None
     activation_outcome = None
+    activation_committed = False
 
     try:
         with atomic_upgrade_lock():
@@ -15831,15 +15833,23 @@ def cmd_upgrade():
                             restart_required=runtime_was_running,
                             prepare_show_runtime=not should_skip_show_runtime_prepare(),
                         )
-                        deferred_activation_log = get_deferred_activation_log_path(deferred_process)
+                        activation_committed = True
                         deferred_activation = True
+                        try:
+                            deferred_activation_log = get_deferred_activation_log_path(deferred_process)
+                        except Exception as exc:  # noqa: BLE001
+                            deferred_activation_log_error = str(exc)
                     else:
                         restart_python = _candidate_python(plan.activation.candidate_launcher)
                         activation_outcome = activate_upgrade_candidate(plan.activation)
+                        activation_committed = True
                 except Exception as exc:  # noqa: BLE001
-                    discard_atomic_uv_install_generation(plan.activation.candidate_launcher)
-                    print(f"\033[31mUpgrade candidate failed integrity verification: {exc}\033[0m")
-                    return 1
+                    if not activation_committed:
+                        discard_atomic_uv_install_generation(plan.activation.candidate_launcher)
+                        print(f"\033[31mUpgrade candidate failed integrity verification: {exc}\033[0m")
+                        return 1
+                    print(f"\033[33mUpgrade activation completed, but post-activation diagnostics failed: {exc}\033[0m")
+                    return 2
             elif result.returncode != 0 and plan.activation is not None:
                 discard_atomic_uv_install_generation(plan.activation.candidate_launcher)
             if result.returncode == 0 and plan.activation is None and plan.method == "pip":
@@ -15869,6 +15879,9 @@ def cmd_upgrade():
                     print(activation_notice)
             if deferred_activation:
                 print("Upgrade validated; launcher activation will complete after this command exits.")
+                if deferred_activation_log_error is not None:
+                    print(f"\033[33mDeferred activation diagnostics unavailable: {deferred_activation_log_error}\033[0m")
+                    return 2
                 activation_log_notice = format_deferred_activation_log(
                     deferred_activation_log,
                     _configured_cli_language(),
@@ -15895,8 +15908,11 @@ def cmd_upgrade():
             print(f"\033[31mUpgrade failed:\033[0m\n{result.stderr}")
             return 1
     except Exception as e:
-        if plan.activation is not None:
+        if plan.activation is not None and not activation_committed:
             discard_atomic_uv_install_generation(plan.activation.candidate_launcher)
+        if activation_committed:
+            print(f"\033[33mUpgrade activation completed, but post-activation reporting failed: {e}\033[0m")
+            return 2
         print(f"\033[31mUpgrade failed: {e}\033[0m")
         return 1
 
@@ -18426,6 +18442,7 @@ def _dispatch_deferred_upgrade_activation(argv: list[str]) -> int:
         source_generation=source_generation,
     )
     activated = False
+    postcommit_stage = "diagnostics"
     try:
         with atomic_upgrade_lock():
             reason = activation_block_reason(activation)
@@ -18446,6 +18463,7 @@ def _dispatch_deferred_upgrade_activation(argv: list[str]) -> int:
             if activation_notice:
                 print(activation_notice)
             if args.restart:
+                postcommit_stage = "restart"
                 schedule_restart(
                     delay_seconds=0.0,
                     vibe_path=args.launcher,
@@ -18457,6 +18475,8 @@ def _dispatch_deferred_upgrade_activation(argv: list[str]) -> int:
         if not activated:
             discard_atomic_uv_install_generation(activation.candidate_launcher)
             print(f"deferred upgrade activation failed: {exc}", file=sys.stderr)
+        elif postcommit_stage == "diagnostics":
+            print(f"deferred upgrade activation completed, but diagnostics failed: {exc}", file=sys.stderr)
         else:
             print(f"deferred upgrade restart scheduling failed: {exc}", file=sys.stderr)
         return 1
@@ -18513,8 +18533,10 @@ def _dispatch_installer_activation(argv: list[str]) -> int:
     previous_level = retention_logger.level
     retention_logger.addHandler(handler)
     retention_logger.setLevel(logging.INFO)
+    activation_committed = False
     try:
         activation_outcome = activate_installer_candidate(activation)
+        activation_committed = True
         activation_notice = format_activation_failures(
             activation_outcome,
             _configured_cli_language(),
@@ -18522,8 +18544,11 @@ def _dispatch_installer_activation(argv: list[str]) -> int:
         if activation_notice:
             print(activation_notice)
     except Exception as exc:
-        discard_atomic_uv_install_generation(activation.candidate_launcher)
-        print(f"installer activation failed: {exc}", file=sys.stderr)
+        if not activation_committed:
+            discard_atomic_uv_install_generation(activation.candidate_launcher)
+            print(f"installer activation failed: {exc}", file=sys.stderr)
+        else:
+            print(f"installer activation completed, but post-activation reporting failed: {exc}", file=sys.stderr)
         return 1
     finally:
         retention_logger.removeHandler(handler)

@@ -947,6 +947,170 @@ def test_installer_diagnostics_restore_logging_without_a_traceback(
     assert retention.logger.level == level
 
 
+def test_installer_postcommit_notice_failure_keeps_committed_generation(
+    installation, monkeypatch,
+):
+    from vibe import cli
+
+    root, launcher = installation
+    exported = candidate(root, "selected")
+    monkeypatch.setattr(
+        cli,
+        "format_activation_failures",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(BrokenPipeError("closed pipe")),
+    )
+
+    result = cli._dispatch_installer_activation([
+        "--launcher", str(launcher), "--candidate", str(exported),
+    ])
+
+    assert result == 1
+    assert launcher.resolve() == exported.resolve()
+    assert exported.exists()
+    assert (root / "selected").exists()
+
+
+def test_cli_postcommit_notice_failure_keeps_committed_generation(
+    installation, monkeypatch, capsys,
+):
+    from vibe import cli
+
+    root, launcher = installation
+    exported = candidate(root, "selected")
+    plan = upgrade.UpgradePlan(
+        command=["uv-fixture"],
+        env=None,
+        method="uv",
+        activation=upgrade.AtomicActivation(launcher, exported),
+    )
+    monkeypatch.setattr(
+        cli,
+        "get_latest_version",
+        lambda: {"error": None, "has_update": True, "latest": "99"},
+    )
+    monkeypatch.setattr(cli, "cache_running_vibe_path", lambda: str(launcher))
+    monkeypatch.setattr(cli, "build_upgrade_plan", lambda **_kwargs: plan)
+    monkeypatch.setattr(cli, "_runtime_process_was_running", lambda: False)
+    monkeypatch.setattr(
+        cli,
+        "execute_upgrade_plan",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(plan.command, 0, "", ""),
+    )
+    monkeypatch.setattr(cli, "_prepare_show_runtime_after_install", lambda *_args: None)
+    monkeypatch.setattr(
+        cli,
+        "format_activation_failures",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("notice failed")),
+    )
+
+    result = cli.cmd_upgrade()
+
+    assert result == 2
+    assert "post-activation reporting failed" in capsys.readouterr().out
+    assert launcher.resolve() == exported.resolve()
+    assert exported.exists()
+    assert (root / "selected").exists()
+
+
+def test_api_postcommit_notice_failure_keeps_committed_generation(
+    installation, monkeypatch,
+):
+    from vibe import api
+
+    root, launcher = installation
+    exported = candidate(root, "selected")
+    plan = upgrade.UpgradePlan(
+        command=["uv-fixture"],
+        env=None,
+        method="uv",
+        activation=upgrade.AtomicActivation(launcher, exported),
+    )
+    monkeypatch.setattr(api, "get_version_info", lambda: {"latest": "99"})
+    monkeypatch.setattr(api, "get_running_vibe_path", lambda: str(launcher))
+    monkeypatch.setattr(api, "build_upgrade_plan", lambda **_kwargs: plan)
+    monkeypatch.setattr(api, "_runtime_process_was_running", lambda: False)
+    monkeypatch.setattr(
+        api,
+        "execute_upgrade_plan",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(plan.command, 0, "", ""),
+    )
+    monkeypatch.setattr(api, "_prepare_show_runtime_after_upgrade", lambda *_args: None)
+    monkeypatch.setattr(
+        api,
+        "format_activation_failures",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("notice failed")),
+    )
+
+    result = api.do_upgrade(auto_restart=False)
+
+    assert result["ok"] is False
+    assert result["message"] == "Upgrade activation completed, but post-activation reporting failed"
+    assert result["output"] == "notice failed"
+    assert launcher.resolve() == exported.resolve()
+    assert exported.exists()
+    assert (root / "selected").exists()
+
+
+@pytest.mark.parametrize("failure", ["metadata", "format"])
+def test_deferred_parent_posthandoff_diagnostic_failure_keeps_generation(
+    installation, monkeypatch, failure,
+):
+    from vibe import api
+
+    root, launcher = installation
+    exported = candidate(root, "deferred")
+    plan = upgrade.UpgradePlan(
+        command=["uv-fixture"],
+        env=None,
+        method="uv",
+        activation=upgrade.AtomicActivation(launcher, exported),
+    )
+
+    class WindowsOsProxy:
+        name = "nt"
+
+        def __getattr__(self, name):
+            return getattr(os, name)
+
+    monkeypatch.setattr(api, "os", WindowsOsProxy())
+    monkeypatch.setattr(api, "build_upgrade_plan", lambda **_kwargs: plan)
+    monkeypatch.setattr(api, "get_version_info", lambda: {"latest": "99"})
+    monkeypatch.setattr(api, "get_running_vibe_path", lambda: str(launcher))
+    monkeypatch.setattr(api, "_runtime_process_was_running", lambda: False)
+    monkeypatch.setattr(api, "activation_block_reason", lambda _activation: None)
+    monkeypatch.setattr(api, "launcher_is_current_process", lambda _launcher: True)
+    monkeypatch.setattr(api, "verify_upgrade_candidate", lambda _activation: upgrade.IntegrityResult(True))
+    monkeypatch.setattr(
+        api,
+        "defer_upgrade_activation",
+        lambda *_args, **_kwargs: SimpleNamespace(activation_log_path=root / "upgrade.log"),
+    )
+    if failure == "metadata":
+        monkeypatch.setattr(
+            api,
+            "get_deferred_activation_log_path",
+            lambda _process: (_ for _ in ()).throw(RuntimeError("log metadata failed")),
+        )
+    else:
+        monkeypatch.setattr(
+            api,
+            "format_deferred_activation_log",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("log formatting failed")),
+        )
+    monkeypatch.setattr(
+        api,
+        "execute_upgrade_plan",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(plan.command, 0, "done", ""),
+    )
+
+    result = api.do_upgrade(auto_restart=False)
+
+    assert result["ok"] is False
+    assert "diagnostics could not be" in result["message"]
+    assert exported.exists()
+    assert (root / "deferred").exists()
+
+
 @pytest.mark.parametrize("state,owner,old_status,marker_job,deferred", [
     ("failed", "live", False, "active", False),
     ("error", "dead", False, "active", False),

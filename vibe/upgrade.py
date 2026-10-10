@@ -982,6 +982,12 @@ def format_activation_failures(outcome: ActivationOutcome, language: str = "en")
     from vibe.i18n import t
 
     repair_command = activation_repair_command(outcome.activated_launcher)
+    repair_instruction_key = (
+        "update.stableLauncherRepairPowerShellInstruction"
+        if os.name == "nt"
+        else "update.stableLauncherRepairInstruction"
+    )
+    repair_instruction = t(repair_instruction_key, language, repairCommand=repair_command)
     messages = []
     for failure in outcome.peer_failures:
         if failure.reason_code == "permission_denied":
@@ -997,6 +1003,7 @@ def format_activation_failures(outcome: ActivationOutcome, language: str = "en")
                 launcher=str(failure.launcher),
                 reason=failure.reason,
                 repairCommand=repair_command,
+                repairInstruction=repair_instruction,
             )
         )
     return "\n\n".join(messages)
