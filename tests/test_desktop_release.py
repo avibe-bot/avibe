@@ -76,19 +76,22 @@ def assemble_assets(root, source=SOURCE):
             driver.write_bytes(f"packaged driver for {target}".encode())
             provenance = work / "driver-provenance.json"
             provenance.write_text(json.dumps({
-                "schema_version": 1,
+                "schema_version": 2,
                 "version": pinned_driver["version"],
                 "tag": pinned_driver["tag"],
                 "source_commit": pinned_driver["source_commit"],
                 "target": target,
                 "arch": "arm64" if arch == "aarch64" else arch,
-                "release_checksums_sha256":
-                    pinned_driver["release_checksums_sha256"],
-                "archive": pinned_driver["archive"],
-                "archive_sha256": pinned_driver["archive_sha256"],
-                "extracted_universal_sha256": "3" * 64,
-                "thinned_upstream_sha256": "4" * 64,
-                "thinned_signature": "upstream_preserved",
+                "source_archive": pinned_driver["source_archive"],
+                "source_archive_sha256":
+                    pinned_driver["source_archive_sha256"],
+                "patch_variant": pinned_driver["patch_variant"],
+                "patch_file": pinned_driver["patch_file"],
+                "patch_sha256": pinned_driver["patch_sha256"],
+                "tool_snapshot_sha256":
+                    pinned_driver["tool_snapshot_sha256"],
+                "prepared_binary_sha256": "4" * 64,
+                "build_origin": "repository_patch_built",
             }), encoding="utf-8")
             driver_args = {
                 "driver": driver,
@@ -253,10 +256,11 @@ def test_verify_rejects_schema_two_macos_metadata_without_driver(tmp_path):
 @pytest.mark.parametrize(
     ("field", "value"),
     [
-        ("schema_version", 2),
+        ("schema_version", 1),
         ("arch", "wrong-arch"),
-        ("archive", "wrong-driver.tar.gz"),
-        ("archive_sha256", "f" * 64),
+        ("source_archive", "wrong-source.tar.gz"),
+        ("source_archive_sha256", "f" * 64),
+        ("patch_sha256", "e" * 64),
     ],
 )
 def test_verify_rejects_mismatched_driver_provenance(tmp_path, field, value):

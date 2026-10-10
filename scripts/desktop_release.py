@@ -136,6 +136,12 @@ def pinned_driver_source() -> dict:
         "release_checksums_sha256": source["release_checksums_sha256"],
         "archive": source["macos"]["asset"],
         "archive_sha256": source["macos"]["sha256"],
+        "source_archive": source["source"]["archive"],
+        "source_archive_sha256": source["source"]["sha256"],
+        "patch_variant": source["patch"]["variant"],
+        "patch_file": source["patch"]["file"],
+        "patch_sha256": source["patch"]["sha256"],
+        "tool_snapshot_sha256": source["tool_snapshot_sha256"],
     }
 
 
@@ -165,18 +171,29 @@ def driver_provenance(
         raise ValueError("Invalid packaged Cua Driver cdhash")
     provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
     required_hashes = (
-        "release_checksums_sha256",
-        "archive_sha256",
-        "extracted_universal_sha256",
-        "thinned_upstream_sha256",
+        "source_archive_sha256",
+        "patch_sha256",
+        "tool_snapshot_sha256",
+        "prepared_binary_sha256",
     )
     pinned = pinned_driver_source()
+    patched_fields = (
+        "version",
+        "tag",
+        "source_commit",
+        "source_archive",
+        "source_archive_sha256",
+        "patch_variant",
+        "patch_file",
+        "patch_sha256",
+        "tool_snapshot_sha256",
+    )
     if (
-        provenance.get("schema_version") != 1
-        or any(provenance.get(field) != value for field, value in pinned.items())
+        provenance.get("schema_version") != 2
+        or any(provenance.get(field) != pinned[field] for field in patched_fields)
         or provenance.get("target") != target
         or provenance.get("arch") != TARGETS[target][1].replace("aarch64", "arm64")
-        or provenance.get("thinned_signature") != "upstream_preserved"
+        or provenance.get("build_origin") != "repository_patch_built"
         or any(re.fullmatch(r"[0-9a-f]{64}", str(provenance.get(field))) is None for field in required_hashes)
     ):
         raise ValueError("Invalid prepared Cua Driver provenance")
@@ -272,11 +289,37 @@ def verify(directory: Path, tag: str, source_sha: str, *, updater_enabled: bool 
         driver = source.pop("computer_use_driver", None)
         if TARGETS[target][0] == "macos":
             pinned = pinned_driver_source()
-            required_hashes = (
+            legacy_fields = (
+                "version",
+                "tag",
+                "source_commit",
+                "release_checksums_sha256",
+                "archive",
+                "archive_sha256",
+            )
+            patched_fields = (
+                "version",
+                "tag",
+                "source_commit",
+                "source_archive",
+                "source_archive_sha256",
+                "patch_variant",
+                "patch_file",
+                "patch_sha256",
+                "tool_snapshot_sha256",
+            )
+            legacy_hashes = (
                 "release_checksums_sha256",
                 "archive_sha256",
                 "extracted_universal_sha256",
                 "thinned_upstream_sha256",
+                "packaged_sha256",
+            )
+            patched_hashes = (
+                "source_archive_sha256",
+                "patch_sha256",
+                "tool_snapshot_sha256",
+                "prepared_binary_sha256",
                 "packaged_sha256",
             )
             if driver is None and schema_version == 1:
@@ -284,17 +327,43 @@ def verify(directory: Path, tag: str, source_sha: str, *, updater_enabled: bool 
                 # provenance block. Keep those already-published artifacts
                 # verifiable. Schema 2 makes the block mandatory.
                 pass
-            elif (
-                not isinstance(driver, dict)
-                or driver.get("schema_version") != 1
-                or any(driver.get(field) != value for field, value in pinned.items())
-                or driver.get("target") != target
-                or driver.get("arch") != TARGETS[target][1].replace("aarch64", "arm64")
-                or driver.get("thinned_signature") != "upstream_preserved"
-                or re.fullmatch(r"[0-9a-f]{40,64}", str(driver.get("packaged_cdhash"))) is None
-                or any(re.fullmatch(r"[0-9a-f]{64}", str(driver.get(field))) is None
-                       for field in required_hashes)
-            ):
+            elif not isinstance(driver, dict):
+                raise ValueError("Desktop Cua Driver provenance mismatch")
+            elif driver.get("schema_version") == 1:
+                if (
+                    any(driver.get(field) != pinned[field] for field in legacy_fields)
+                    or driver.get("target") != target
+                    or driver.get("arch")
+                    != TARGETS[target][1].replace("aarch64", "arm64")
+                    or driver.get("thinned_signature") != "upstream_preserved"
+                    or re.fullmatch(
+                        r"[0-9a-f]{40,64}", str(driver.get("packaged_cdhash"))
+                    )
+                    is None
+                    or any(
+                        re.fullmatch(r"[0-9a-f]{64}", str(driver.get(field))) is None
+                        for field in legacy_hashes
+                    )
+                ):
+                    raise ValueError("Desktop Cua Driver provenance mismatch")
+            elif driver.get("schema_version") == 2:
+                if (
+                    any(driver.get(field) != pinned[field] for field in patched_fields)
+                    or driver.get("target") != target
+                    or driver.get("arch")
+                    != TARGETS[target][1].replace("aarch64", "arm64")
+                    or driver.get("build_origin") != "repository_patch_built"
+                    or re.fullmatch(
+                        r"[0-9a-f]{40,64}", str(driver.get("packaged_cdhash"))
+                    )
+                    is None
+                    or any(
+                        re.fullmatch(r"[0-9a-f]{64}", str(driver.get(field))) is None
+                        for field in patched_hashes
+                    )
+                ):
+                    raise ValueError("Desktop Cua Driver provenance mismatch")
+            else:
                 raise ValueError("Desktop Cua Driver provenance mismatch")
         elif driver is not None:
             raise ValueError("Windows desktop source unexpectedly carries Cua Driver provenance")
