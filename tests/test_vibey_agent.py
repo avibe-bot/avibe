@@ -1523,6 +1523,64 @@ async def test_the_bash_rule_names_rg_only_when_the_turns_commands_find_it(
     assert ("- Use bash for file operations like ls, grep, find" in system) is not finds_rg
 
 
+def _agent_store(engine):
+    from core.vibe_agents import VibeAgentStore
+
+    store = VibeAgentStore(Path(engine.url.database))
+    store.ensure_builtin_default_agents([])
+    return store
+
+
+def _as_agent(request: AgentRequest, agent) -> AgentRequest:
+    """``request`` running as ``agent``, as the message handler resolves the Session's Agent."""
+    request.vibe_agent_id, request.vibe_agent_name = agent.id, agent.name
+    request.vibe_agent_system_prompt = agent.system_prompt
+    return request
+
+
+async def test_the_built_in_agent_knows_it_is_vibey_on_every_turn(engine, session, tmp_path, published) -> None:
+    # Owner decision (2026-10-10): the backend's built-in Agent is Vibey. Its preamble comes from the Agent record, so
+    # the Session's system prompt is the same on every Turn, which keeps the provider's cache.
+    from modules.agents.vibey.prompt import CONCURRENT_CALLS_RULE, VIBEY_PREAMBLE
+
+    store = _agent_store(engine)
+    vibey = store.get_builtin_default_agent_for_backend("vibey", enabled_only=False)
+    harness = _Harness(
+        engine, tmp_path, "avibe", [[Done(assistant("ok"))], [Done(assistant("again"))]],
+        tools=[FakeTool("read"), FakeTool("bash")],
+    )
+    harness.controller.vibe_agent_store = store
+
+    await harness.agent.handle_message(_as_agent(harness.request("who are you?"), vibey))
+    await harness.agent.handle_message(_as_agent(harness.request("and now?"), vibey))
+
+    first, second = (request.system for request in harness.provider.requests)
+    assert first.startswith(VIBEY_PREAMBLE + "\n\nAvailable tools:")
+    assert "expert coding assistant" not in first and f"- {CONCURRENT_CALLS_RULE}" in first
+    assert second == first
+
+
+async def test_another_agent_on_the_backend_is_not_told_it_is_vibey(engine, session, tmp_path, published) -> None:
+    # Its own definition says who it is; the preamble only places it in Avibe. The roster of Agents may still list
+    # the built-in one by name, which is not an identity.
+    from modules.agents.vibey.prompt import AGENT_PREAMBLE, CONCURRENT_CALLS_RULE
+
+    store = _agent_store(engine)
+    reviewer = store.create(name="reviewer", backend="vibey", system_prompt="You are Rex, a careful code reviewer.")
+    harness = _Harness(
+        engine, tmp_path, "avibe", [[Done(assistant("ok"))]], tools=[FakeTool("read"), FakeTool("bash")]
+    )
+    harness.controller.vibe_agent_store = store
+
+    await harness.agent.handle_message(_as_agent(harness.request("who are you?"), reviewer))
+
+    system = harness.provider.requests[0].system
+    head = system.split("\n\nAvailable tools:", 1)[0]
+    assert head == AGENT_PREAMBLE and "Vibey" not in head
+    assert "You are Vibey" not in system and "expert coding assistant" not in system
+    assert "You are Rex, a careful code reviewer." in system and f"- {CONCURRENT_CALLS_RULE}" in system
+
+
 async def test_the_system_prompt_offers_no_computer_use_it_cannot_call(
     engine, session, tmp_path, published, monkeypatch
 ) -> None:

@@ -1,16 +1,21 @@
 """Vibey's system prompt and the environment block of each consumed input.
 
-The system prompt is stable so providers can cache it: Pi's coding-agent framing
-and tool snippets, then Avibe's injected sections. Facts that change (cwd, date,
-live Watches) travel in an ``<environment>`` block rendered into each consumed
-input instead (C-7 tools.md section 8), so the stored transcript is what the
-model saw.
+The system prompt is stable so providers can cache it: who the Agent is, Pi's
+tool snippets and rules, then Avibe's injected sections. Who the Agent is comes
+from its record, so it is the same on every Turn the Session runs as that Agent.
+Facts that change (cwd, date, live Watches) travel in an ``<environment>`` block
+rendered into each consumed input instead (C-7 tools.md section 8), so the
+stored transcript is what the model saw.
 
-Preamble, tool snippets, and rules ported from Pi (MIT, Copyright (c) 2025 Mario
-Zechner), ``packages/coding-agent/src/core/system-prompt.ts`` and
+Tool snippets and rules ported from Pi (MIT, Copyright (c) 2025 Mario Zechner),
+``packages/coding-agent/src/core/system-prompt.ts`` and
 ``packages/coding-agent/src/core/tools/{read,write,edit,bash}.ts`` at ``7fbbd5f``;
-Pi-specific lines (its docs, ``PI_*`` variables) are left out. ``FINAL_REPLY_RULE`` is
-Avibe's: text between tool calls reaches the user only above the shared interim
+Pi-specific lines (its docs, ``PI_*`` variables) are left out. Avibe's deviations:
+the preamble (owner product decision, 2026-10-10) replaces Pi's coding-assistant
+framing. The backend's built-in Agent is Vibey, Avibe's own agent
+(``VIBEY_PREAMBLE``); any other Agent on the backend gets ``AGENT_PREAMBLE``, and its
+own definition, in the Avibe sections, says who it is. ``FINAL_REPLY_RULE`` is
+Avibe's too: text between tool calls reaches the user only above the shared interim
 threshold (``ConsolidatedMessageDispatcher._is_interim_worthy``).
 """
 
@@ -29,10 +34,12 @@ from core.agent_core.harness.context import display, escape
 from core.agent_core.harness.store import ContextEntry
 from core.agent_core.messages import TextBlock, UserMessage
 
-PREAMBLE = (
-    "You are an expert coding assistant operating inside Avibe, a local-first agent runtime. You help users by "
-    "reading files, executing commands, editing code, and writing new files."
+VIBEY_PREAMBLE = (
+    "You are Vibey, the official agent of Avibe, a local-first Agent OS that runs on the user's own machine. You help "
+    "the user with whatever they are working on: you read files, run commands, edit and write files, and coordinate "
+    "work through Avibe."
 )
+AGENT_PREAMBLE = "You are an agent running inside Avibe, a local-first Agent OS on the user's machine."
 TOOL_SNIPPETS: dict[str, str] = {
     "read": "Read file contents",
     "bash": "Execute bash commands (ls, grep, find, etc.)",
@@ -69,8 +76,13 @@ FORK_HISTORY = "the conversation above is that Session's history through context
 FORK_NO_HISTORY = "it starts empty, before that Session's first finished Turn, so no history is inherited"
 
 
-def coding_prompt(tool_names: Iterable[str], *, rg: bool) -> str:
-    """Pi's preamble, tool list, and rules for the tools actually offered.
+def preamble(builtin_agent: bool) -> str:
+    """Who the Agent is: Vibey for the backend's built-in Agent, else a neutral line its own definition completes."""
+    return VIBEY_PREAMBLE if builtin_agent else AGENT_PREAMBLE
+
+
+def coding_prompt(tool_names: Iterable[str], *, builtin_agent: bool, rg: bool) -> str:
+    """The Agent's preamble, then Pi's tool list and rules for the tools actually offered.
 
     ``rg`` is whether the Session's commands find ripgrep; the bash rule names it only then, and ``grep`` otherwise.
     """
@@ -87,15 +99,16 @@ def coding_prompt(tool_names: Iterable[str], *, rg: bool) -> str:
     rules += ["Be concise in your responses", "Show file paths clearly when working with files", FINAL_REPLY_RULE]
     return "\n\n".join(
         (
-            PREAMBLE,
+            preamble(builtin_agent),
             f"Available tools:\n{tools}",
             "Guidelines:\n" + "\n".join(f"- {rule}" for rule in rules),
         )
     )
 
 
-def system_prompt(tool_names: Iterable[str], avibe_sections: str, *, rg: bool) -> str:
-    return "\n\n".join(part for part in (coding_prompt(tool_names, rg=rg), avibe_sections.strip()) if part)
+def system_prompt(tool_names: Iterable[str], avibe_sections: str, *, builtin_agent: bool, rg: bool) -> str:
+    head = coding_prompt(tool_names, builtin_agent=builtin_agent, rg=rg)
+    return "\n\n".join(part for part in (head, avibe_sections.strip()) if part)
 
 
 # --- environment block ---------------------------------------------------------
