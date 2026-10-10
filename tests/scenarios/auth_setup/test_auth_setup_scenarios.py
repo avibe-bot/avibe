@@ -2,6 +2,7 @@ import asyncio
 import errno
 import ipaddress
 import json
+import logging
 import os
 import re
 import socket
@@ -4173,6 +4174,67 @@ def test_hub_oauth_mispaste_stays_recoverable_and_schemeless_address_signs_in(mo
         runner,
         ["start_login", "paste_earlier_link_address", "paste_schemeless_address", "materialize_source"],
     )
+
+
+def test_hub_oauth_failure_reason_reaches_dialog_and_log_inert_and_credential_free(monkeypatch, tmp_path, caplog):
+    """Scenario: AUTH-SETUP-129
+
+    A provider refuses the sign-in and its reason quotes a credential through a
+    terminal colour code, a clipboard escape, and a Bidi override. The user
+    still reads the provider's words in the dialog's details, and the log
+    records the same line, with no control sequence and no credential in either.
+    """
+    from tests.test_model_hub_api import _service
+    from vibe.model_hub_runtime.adapter import CLIProxyEngineAdapter
+    from vibe.model_hub_runtime.state import EngineStateStore
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    reason = (
+        "\x1b[31mtoken exchange failed\x1b[0m with status 401: invalid_grant for "
+        "client_se\x1b[1mcret=hunter2-hunter2\x1b]52;c;cGF5bG9hZA==\x07 \u202eresu\u202c"
+    )
+    shown = "token exchange failed with status 401: invalid_grant for client_secret=[redacted]"
+
+    def management_request(method, path, *, query=None, payload=None):
+        if path == "/auth-files":
+            return {"files": []}
+        if path == "/codex-auth-url":
+            return {"state": "browser-state", "url": "https://auth.openai.com/oauth/authorize?state=browser-state"}
+        if path == "/get-auth-status":
+            return {"status": "error", "error": reason}
+        raise AssertionError((method, path))
+
+    client = Mock()
+    client.management_request.side_effect = management_request
+    supervisor = Mock()
+    supervisor.client.return_value = client
+    transport = CLIProxyEngineAdapter(supervisor=supervisor, state_store=EngineStateStore(tmp_path / "engine-state"))
+    service, _store, adapter = _service(tmp_path)
+    for method in ("start_oauth", "oauth_status", "submit_oauth", "cancel_oauth"):
+        monkeypatch.setattr(adapter, method, getattr(transport, method))
+    runner = ScenarioRunner(SimpleNamespace())
+
+    async def start_login(h):
+        started = await service.oauth_start({"vendor": "openai", "channel": "hub"})
+        h.flow_id = started["flow"]["flow_id"]
+
+    async def provider_refuses(h):
+        terminal = (await service.oauth_status(h.flow_id))["flow"]
+        assert terminal["state"] == "failed"
+        assert terminal["error_detail"] == shown
+
+    def log_records_the_same_line(h):
+        failures = [record.getMessage() for record in caplog.records if "OAuth flow failed" in record.getMessage()]
+        assert len(failures) == 1
+        assert failures[0].endswith(f"detail={shown}")
+
+    with caplog.at_level(logging.WARNING, logger="vibe.model_hub_runtime.adapter"):
+        asyncio.run(runner.run(
+            ScenarioStep("start_login", start_login),
+            ScenarioStep("provider_refuses", provider_refuses),
+            ScenarioStep("log_records_the_same_line", log_records_the_same_line),
+        ))
+    ScenarioExpect.step_history(runner, ["start_login", "provider_refuses", "log_records_the_same_line"])
 
 
 @pytest.mark.parametrize("status", [401, 403])

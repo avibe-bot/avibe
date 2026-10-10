@@ -7562,14 +7562,15 @@ def test_engine_upstream_detail_keeps_email_addresses_usable() -> None:
 def test_engine_upstream_detail_drops_terminal_control_characters() -> None:
     payload = json.dumps(
         {"error": {"message": (
-            "relay \x1b]52;c;cGF5bG9hZA==\x07 down\x1b[2J\x9b now"
+            "relay \x1b]52;c;cGF5bG9hZA==\x07 down\x1b[2J \x9b31mnow\x9b0m"
             " \u202egnp.exe\u202c \u2066a\u2069\u2067b\u2068c\u200e\u200f\u061c end"
         )}}
     ).encode()
 
     detail = client_module._upstream_error_detail(payload, (("error",),))
 
-    assert detail == "relay down now gnp.exe a b c end"
+    # Whole sequences go, 7-bit or 8-bit, and controls render as nothing.
+    assert detail == "relay down now gnp.exe abc end"
 
 
 def test_engine_upstream_detail_replaces_lone_surrogates_so_it_can_persist() -> None:
@@ -9183,6 +9184,10 @@ def test_oauth_failure_detail_is_the_engine_reason_on_one_bounded_line(tmp_path:
             " \u202edenied\u202c\x9b",
             "Error: invalid_grant denied",
         ),
+        # The 8-bit form of a colour code goes as whole as the 7-bit form.
+        ("\x9b31mError\x9b0m: access_denied", "Error: access_denied"),
+        # A colour code inside a credential cannot hide it from redaction.
+        ("refresh failed: client_se\x1b[31mcret=hunter2-hunter2", "refresh failed: client_secret=[redacted]"),
         # Echoed grant material is redacted, and the rest still reads as written.
         (
             "token exchange failed with status 401: Bearer abcdefghijklmnop rejected for sk-live_abcdefgh123",

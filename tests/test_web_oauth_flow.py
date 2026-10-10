@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 import os
 from pathlib import Path
 from types import SimpleNamespace
@@ -931,6 +932,45 @@ def test_start_web_setup_opencode_surfaces_server_failure(
     flow = _run(service.start_web_setup("opencode", provider_id="openai"))
     assert flow.state == "failed"
     assert flow.error == "opencode_server_unavailable"
+
+
+def test_opencode_oauth_failure_reaches_log_and_status_without_raw_provider_text(
+    service: AgentAuthService, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The first log of a failed exchange is already inert and credential-free.
+
+    OpenCode quotes the provider's response in the error it raises, so the
+    flow's failure line and its stored reason get the treatment every
+    upstream detail gets, and no traceback repeats the raw text.
+    """
+    fake = _FakeOpencodeServer()
+    fake.auth_map = {"openai": [{"type": "oauth", "label": "ChatGPT Pro/Plus"}]}
+    fake.next_authorize = {
+        "url": "https://auth.openai.com/codex/device",
+        "instructions": "Enter code: YR8I-QJJUH",
+    }
+    fake.wait_provider_oauth = AsyncMock(
+        side_effect=RuntimeError(
+            'OAuth callback failed (400): {"error":"invalid_grant",'
+            '"detail":"Bearer abcdefghijklmnop"}\x1b[2J\x1b]0;owned\x07'
+        )
+    )
+    monkeypatch.setattr(service, "_lease_opencode_server", lease_returning(fake))
+
+    async def run_flow():
+        flow = await service.start_web_setup("opencode", provider_id="openai")
+        await flow.waiter_task
+        return flow
+
+    with caplog.at_level(logging.ERROR, logger="core.agent_auth_service"):
+        flow = _run(run_flow())
+
+    assert flow.state == "failed"
+    assert flow.error == 'OAuth callback failed (400): {"error":"invalid_grant","detail":"[redacted]"}'
+    failures = [record for record in caplog.records if "Web OpenCode OAuth flow failed" in record.getMessage()]
+    assert len(failures) == 1
+    assert failures[0].getMessage() == f"Web OpenCode OAuth flow failed for openai: {flow.error}"
+    assert failures[0].exc_info is None
 
 
 def test_opencode_oauth_success_clears_provider_options_key(

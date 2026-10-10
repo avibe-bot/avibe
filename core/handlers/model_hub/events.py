@@ -138,11 +138,14 @@ def redact_untrusted_text(value: str) -> str:
     return redacted[: match.end()] + "[redacted]"
 
 
-# A whole terminal escape sequence (CSI, OSC, or a two-character escape), so a
-# CLI's colour codes leave no stray parameters behind. Every branch stops at
-# the next ESC, which keeps matching linear on hostile input.
-_TERMINAL_ESCAPE_SEQUENCE = re.compile(
-    r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)?|[@-Z\\-_])"
+# A whole terminal control sequence, in its 7-bit (ESC) or 8-bit (C1) form: CSI
+# with its parameters, OSC/DCS/APC/PM/SOS with their payload up to BEL or ST,
+# or a two-character escape. Every branch stops at the next ESC or C1 string
+# terminator, which keeps matching linear on hostile input.
+_TERMINAL_CONTROL_SEQUENCE = re.compile(
+    r"(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]"
+    r"|(?:\x1b[\]PX^_]|[\x90\x98\x9d\x9e\x9f])[^\x07\x1b\x9c]*(?:\x07|\x1b\\|\x9c)?"
+    r"|\x1b[@-Z\\-_]"
 )
 # C0/C1 controls and every Unicode Bidi_Control character: either can act on
 # whatever renders the text (a terminal, a log viewer, a browser).
@@ -151,15 +154,23 @@ _UNTRUSTED_CONTROL_CHARACTERS = re.compile(
 )
 
 
+def _drop_control(match: re.Match[str]) -> str:
+    # A line break or tab separates words; every other control renders as
+    # nothing, so dropping it rejoins the text around it as the reader saw it.
+    return " " if match.group().isspace() else ""
+
+
 def untrusted_detail_line(value: str) -> str:
     """Upstream text as one inert line with credential material redacted.
 
-    Escape sequences and control characters would act on whatever renders the
-    text, a log viewer included, and carry no message content.
+    Control sequences and characters would act on whatever renders the text,
+    a log viewer included, and carry no message content. They are removed
+    rather than replaced, so a sequence inside a credential cannot split it
+    into pieces that redaction no longer recognizes.
     """
 
-    text = _TERMINAL_ESCAPE_SEQUENCE.sub(" ", value)
-    text = " ".join(_UNTRUSTED_CONTROL_CHARACTERS.sub(" ", text).split())
+    text = _TERMINAL_CONTROL_SEQUENCE.sub("", value)
+    text = " ".join(_UNTRUSTED_CONTROL_CHARACTERS.sub(_drop_control, text).split())
     return redact_untrusted_text(text)
 
 

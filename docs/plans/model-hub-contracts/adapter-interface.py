@@ -403,8 +403,9 @@ class OAuthFlowState:
     channel: Literal["hub", "native_cli"] = "hub"
     retained_material_disposition: RetainedMaterialDisposition = RetainedMaterialDisposition.NONE
     retained_credential_ref: str | None = None
-    # What the provider, engine, or native CLI said when the flow failed,
-    # verbatim on one bounded line, for display beside ``error_key``. Null in
+    # What the provider, engine, or native CLI said when the flow failed, as
+    # written on one bounded line with control sequences removed and
+    # credential-shaped material redacted, for display beside ``error_key``. Null in
     # every other state and whenever there is nothing to add to the key.
     error_detail: str | None = None
 

@@ -296,6 +296,20 @@ def classify_auth_error(backend: str, error_text: str) -> bool:
     return False
 
 
+def _untrusted_error_text(err: BaseException) -> str:
+    """Exception text from a sign-in exchange, safe to log or show.
+
+    It can quote a provider or OpenCode response, so it gets the treatment
+    every upstream detail gets: control sequences removed and credential
+    material redacted. Callers log it without ``exc_info``, because the
+    traceback would repeat the raw text.
+    """
+
+    from core.handlers.model_hub.events import untrusted_detail_line
+
+    return untrusted_detail_line(str(err)) or type(err).__name__
+
+
 def sanitize_process_output(text: str) -> str:
     """Strip ANSI/control sequences so parsing works across TTY and non-TTY flows."""
     cleaned = ANSI_ESCAPE_RE.sub("", text)
@@ -3809,11 +3823,9 @@ class AgentAuthService:
         try:
             await lease.server.forward_oauth_redirect(provider_id, callback_url)
         except Exception as err:  # noqa: BLE001
-            logger.error(
-                "Failed to forward OpenCode OAuth callback for %s: %s",
-                provider_id, err, exc_info=True,
-            )
-            return {"ok": False, "error": "forward_failed", "detail": str(err)}
+            detail = _untrusted_error_text(err)
+            logger.error("Failed to forward OpenCode OAuth callback for %s: %s", provider_id, detail)
+            return {"ok": False, "error": "forward_failed", "detail": detail}
         # The blocking ``wait_provider_oauth`` task observes completion
         # on its own — the flow's state will flip to ``verifying`` then
         # ``success`` within seconds.
@@ -3863,11 +3875,10 @@ class AgentAuthService:
         except asyncio.CancelledError:
             raise
         except Exception as err:  # noqa: BLE001
-            logger.error(
-                "Web OpenCode OAuth flow failed for %s: %s", provider_id, err, exc_info=True
-            )
+            detail = _untrusted_error_text(err)
+            logger.error("Web OpenCode OAuth flow failed for %s: %s", provider_id, detail)
             flow.state = "failed"
-            flow.error = str(err)
+            flow.error = detail
         finally:
             await self._release_opencode_flow_lease(flow)
     async def _read_codex_output_web(self, flow: WebAuthFlow) -> None:
@@ -3945,9 +3956,10 @@ class AgentAuthService:
         except asyncio.CancelledError:
             raise
         except Exception as err:  # noqa: BLE001
-            logger.error("Web Codex auth flow failed: %s", err, exc_info=True)
+            detail = _untrusted_error_text(err)
+            logger.error("Web Codex auth flow failed: %s", detail)
             flow.state = "failed"
-            flow.error = str(err)
+            flow.error = detail
     async def _wait_for_claude_completion_web(self, flow: WebAuthFlow) -> None:
         try:
             if flow.claude_client is None:
@@ -3983,9 +3995,10 @@ class AgentAuthService:
             raise
         except Exception as err:  # noqa: BLE001
             await self._finish_claude_oauth_attempt(flow.claude_oauth_attempt, succeeded=False)
-            logger.error("Web Claude auth flow failed: %s", err, exc_info=True)
+            detail = _untrusted_error_text(err)
+            logger.error("Web Claude auth flow failed: %s", detail)
             flow.state = "failed"
-            flow.error = str(err)
+            flow.error = detail
         finally:
             if flow.claude_client is not None:
                 await self._disconnect_claude_client(flow.claude_client, strict=flow.native_lease is not None)

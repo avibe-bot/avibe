@@ -486,6 +486,17 @@ scenarios:
       - tests/test_model_hub_runtime.py::test_oauth_failure_detail_is_the_engine_reason_on_one_bounded_line
       - ui/src/components/settings/models/serverCopy.test.ts
       - ui/src/components/settings/models/SettingsModelsPage.render.test.tsx
+  - id: AUTH-SETUP-129
+    name: A failed sign-in's provider reason reaches the dialog and the log inert and credential-free
+    status: covered
+    kind: negative_path
+    layer: scenario
+    backend: shared
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_hub_oauth_failure_reason_reaches_dialog_and_log_inert_and_credential_free
+    supporting_tests:
+      - tests/test_model_hub_runtime.py::test_oauth_failure_detail_is_inert_and_credential_free_for_the_browser_and_log
+      - tests/test_model_hub_runtime.py::test_engine_upstream_detail_drops_terminal_control_characters
+      - tests/test_web_oauth_flow.py::test_opencode_oauth_failure_reaches_log_and_status_without_raw_provider_text
   - id: AUTH-SETUP-128
     name: The desktop pet leaves its setup-pending state once setup is finished in the main window
     status: partial
