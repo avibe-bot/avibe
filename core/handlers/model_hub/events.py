@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import threading
+import unicodedata
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -124,18 +125,103 @@ def redact_credential_material(value: str) -> str:
 # patterns so benign labels such as ``max token: 4096`` in a model name are not
 # rejected.
 _LABELED_SECRET_PATTERN = re.compile(
-    r"(?i)(?:token|secret|password|passwd|pwd|key|credential|cookie|session|signature)[\"'`]?\s*[:=]\s*"
+    r"(?i)(?:token|secret|password|passwd|pwd|key|credential|cookie|session|signature|authorization)"
+    r"(?P<quote>[\"'`]?)\s*[:=]\s*"
+)
+
+
+def _secret_label(text: str) -> re.Match[str] | None:
+    """The first secret label in ``text``.
+
+    One shape is not a label: a quoted URL that ends in the word, as a
+    transport error quotes its request (``Post "https://…/oauth/token": dial
+    tcp``). An unquoted ``/session=…`` or ``?token=…`` still is.
+    """
+
+    for match in _LABELED_SECRET_PATTERN.finditer(text):
+        start = match.start()
+        if match.group("quote") and start > 0 and text[start - 1] == "/":
+            continue
+        return match
+    return None
+
+
+# The credential parameters of the OAuth sign-in protocols, wherever a URL
+# query or fragment or a form body carries them as ``name=value``:
+# ``code`` and ``password`` (RFC 6749 §4.1.3, §4.3.2), ``client_secret``
+# (§2.3.1), ``access_token`` and ``refresh_token`` (§5.1, §6),
+# ``code_verifier`` (RFC 7636 §4.5), ``assertion`` and ``client_assertion``
+# (RFC 7523 §2.1, §2.2), ``device_code`` (RFC 8628 §3.4), and ``id_token``
+# (OpenID Connect Core §3.2.2.5). The name must stand alone, so ``error_code=``
+# or prose such as ``"code": "token_expired"`` reads as written.
+_OAUTH_CREDENTIAL_PARAMETER = re.compile(
+    r"(?i)(?<![\w-])(code|code_verifier|client_secret|client_assertion|assertion|access_token|"
+    r"refresh_token|id_token|device_code|password)=[^&#\s\"'<>]+"
 )
 
 
 def redact_untrusted_text(value: str) -> str:
-    """Redact credential shapes, then everything after the first labeled secret."""
+    """Redact credential shapes and OAuth credential parameters, then everything
+    after the first labeled secret.
 
-    redacted = redact_credential_material(value)
-    match = _LABELED_SECRET_PATTERN.search(redacted)
+    ``Authorization`` and ``Proxy-Authorization`` are labels, so a header value
+    is dropped whatever its scheme (RFC 9110 §11.6.2, §11.7.2).
+    """
+
+    redacted = _OAUTH_CREDENTIAL_PARAMETER.sub(
+        lambda match: f"{match.group(1)}=[redacted]",
+        redact_credential_material(value),
+    )
+    match = _secret_label(redacted)
     if match is None:
         return redacted
     return redacted[: match.end()] + "[redacted]"
+
+
+# A Select Graphic Rendition sequence (colour, weight) in its 7-bit or 8-bit
+# form. It changes how the following text looks, never where it lands.
+_SGR_SEQUENCE = re.compile(r"(?:\x1b\[|\x9b)[0-9;:]*m")
+# Unicode Default_Ignorable_Code_Point characters outside the C* categories
+# (DerivedCoreProperties.txt): like a format control, each renders as nothing.
+_DEFAULT_IGNORABLE_OUTSIDE_C = frozenset(
+    chr(code)
+    for first, last in (
+        (0x034F, 0x034F),
+        (0x115F, 0x1160),
+        (0x17B4, 0x17B5),
+        (0x180B, 0x180D),
+        (0x180F, 0x180F),
+        (0x3164, 0x3164),
+        (0xFE00, 0xFE0F),
+        (0xFFA0, 0xFFA0),
+        (0xE0100, 0xE01EF),
+    )
+    for code in range(first, last + 1)
+)
+
+
+def _displays_as_written(character: str) -> bool:
+    if character in "\t\n":
+        return True
+    return unicodedata.category(character)[0] != "C" and character not in _DEFAULT_IGNORABLE_OUTSIDE_C
+
+
+def untrusted_detail_line(value: str) -> str | None:
+    """Upstream text as one redacted line, or None when it cannot be shown.
+
+    Colour sequences are removed. Anything else that can make what a reader
+    sees differ from the text itself (a control or escape such as a backspace,
+    a bare carriage return, or a cursor move; a format or other invisible
+    character such as a bidi override) withholds the whole detail: redaction
+    can only judge the text, so the text must be what is displayed. Line
+    breaks and tabs fold into spaces.
+    """
+
+    text = _SGR_SEQUENCE.sub("", value).replace("\r\n", "\n")
+    if not all(_displays_as_written(character) for character in text):
+        return None
+    line = " ".join(text.split())
+    return redact_untrusted_text(line) if line else None
 
 
 def contains_credential_material(value: object) -> bool:

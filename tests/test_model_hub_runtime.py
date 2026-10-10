@@ -5,6 +5,7 @@ import hashlib
 import io
 import json
 import logging
+import re
 import subprocess
 import signal
 import stat
@@ -12,6 +13,7 @@ import sys
 import tarfile
 import threading
 import time
+import unicodedata
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -41,7 +43,7 @@ from core.handlers.model_hub.classification import (
     terminal_outcome_category,
 )
 from core.handlers.model_hub.errors import ModelDiscoveryError
-from core.handlers.model_hub.events import redact_untrusted_text
+from core.handlers.model_hub.events import redact_untrusted_text, untrusted_detail_line
 from core.handlers.model_hub.request import ModelHubRequest
 from core.handlers.model_hub.stream_wire import (
     ProtocolObservation,
@@ -7559,26 +7561,29 @@ def test_engine_upstream_detail_keeps_email_addresses_usable() -> None:
     )
 
 
-def test_engine_upstream_detail_drops_terminal_control_characters() -> None:
-    payload = json.dumps(
-        {"error": {"message": (
-            "relay \x1b]52;c;cGF5bG9hZA==\x07 down\x1b[2J\x9b now"
-            " \u202egnp.exe\u202c \u2066a\u2069\u2067b\u2068c\u200e\u200f\u061c end"
-        )}}
-    ).encode()
+@pytest.mark.parametrize(
+    ("message", "detail"),
+    [
+        # Colour codes, 7-bit or 8-bit, change only how the words look.
+        ("\x1b[1;31mrelay\x1b[0m down \x9b31mnow\x9b0m", "relay down now"),
+        # Anything else can make the display differ from the text.
+        ("relay \x1b]52;c;cGF5bG9hZA==\x07 down", None),
+        ("relay down\x1b[2J now", None),
+        ("relay \u202egnp.exe\u202c down", None),
+    ],
+)
+def test_engine_upstream_detail_withholds_text_that_does_not_display_as_written(
+    message: str, detail: str | None,
+) -> None:
+    payload = json.dumps({"error": {"message": message}}).encode()
 
-    detail = client_module._upstream_error_detail(payload, (("error",),))
-
-    assert detail == "relay ]52;c;cGF5bG9hZA== down [2J now gnp.exe a b c end"
+    assert client_module._upstream_error_detail(payload, (("error",),)) == detail
 
 
-def test_engine_upstream_detail_replaces_lone_surrogates_so_it_can_persist() -> None:
+def test_engine_upstream_detail_withholds_a_lone_surrogate_so_nothing_unpersistable_is_kept() -> None:
     payload = b'{"error": {"message": "bad \\ud800 byte"}}'
 
-    detail = client_module._upstream_error_detail(payload, (("error",),))
-
-    assert detail == "bad \ufffd byte"
-    detail.encode("utf-8")
+    assert client_module._upstream_error_detail(payload, (("error",),)) is None
 
 
 def test_engine_error_fields_ignore_machine_codes_outside_the_trusted_envelope() -> None:
@@ -9172,6 +9177,159 @@ def test_oauth_failure_detail_is_the_engine_reason_on_one_bounded_line(tmp_path:
         assert second.error_detail.endswith("…")
 
     asyncio.run(run())
+
+
+def _invisible_characters() -> list[str]:
+    """Every character that renders as nothing, generated from Unicode.
+
+    All of Cc, Cf, and Cs, the default-ignorable characters outside C*, and a
+    stride through the vast private-use and unassigned ranges.
+    """
+
+    characters = []
+    for code in range(0x110000):
+        character = chr(code)
+        category = unicodedata.category(character)
+        if category in {"Cc", "Cf", "Cs"} or (category in {"Co", "Cn"} and code % 509 == 0):
+            characters.append(character)
+    for first, last in (
+        (0x034F, 0x034F), (0x115F, 0x1160), (0x17B4, 0x17B5), (0x180B, 0x180F),
+        (0x3164, 0x3164), (0xFE00, 0xFE0F), (0xFFA0, 0xFFA0), (0xE0100, 0xE01EF),
+    ):
+        characters.extend(chr(code) for code in range(first, last + 1))
+    return characters
+
+
+def _ecma48_sequences() -> list[str]:
+    """Every ECMA-48 sequence shape, in 7-bit and 8-bit form."""
+
+    finals = [chr(code) for code in range(0x40, 0x7F)]
+    sequences = [f"\x1b[1;31{final}" for final in finals] + [f"\x9b0 {final}" for final in finals]
+    sequences += [
+        f"\x1b{chr(intermediate)}{chr(final)}"
+        for intermediate in range(0x20, 0x30)
+        for final in range(0x30, 0x7F)
+    ]
+    sequences += [f"\x1b{chr(final)}" for final in range(0x30, 0x7F) if chr(final) not in "[]PX^_"]
+    for introducer in ("\x1b]", "\x1bP", "\x1bX", "\x1b^", "\x1b_", "\x9d", "\x90", "\x98", "\x9e", "\x9f"):
+        sequences += [f"{introducer}0;payload{terminator}" for terminator in ("\x07", "\x1b\\", "\x9c")]
+    return sequences
+
+
+@pytest.mark.parametrize(
+    ("template", "secret"),
+    [
+        ("refresh failed: client_se{}cret=hunter2hunter2 at provider", "hunter2hunter2"),
+        ("exchange failed for sk-live_ab{}cdefgh123 today", "cdefgh123"),
+        ("rejected Authorization: Bearer abcd{}efgh12345678 here", "efgh12345678"),
+    ],
+)
+def test_no_invisible_character_or_control_sequence_can_split_a_secret_out_of_redaction(
+    template: str, secret: str,
+) -> None:
+    """A colour code is removed and the rejoined secret redacted; anything else
+    that renders differently from its text withholds the whole detail."""
+
+    colour = re.compile(r"(?:\x1b\[|\x9b)[0-9;:]*m")
+    # A tab or line break is visible whitespace, displayed as written.
+    splitters = [splitter for splitter in _invisible_characters() if splitter not in "\t\n"]
+    for splitter in splitters + _ecma48_sequences():
+        shown = untrusted_detail_line(template.format(splitter))
+        if colour.fullmatch(splitter):
+            assert shown is not None and secret not in shown and "[redacted]" in shown, repr(splitter)
+        else:
+            assert shown is None, repr(splitter)
+
+
+@pytest.mark.parametrize(
+    ("text", "secret"),
+    [
+        pytest.param("POST /token grant_type=authorization_code&code=ac_live123&redirect_uri=x", "ac_live123", id="RFC 6749 §4.1.3 code"),
+        pytest.param("POST /token client_id=c&client_secret=cs_live123&grant_type=x", "cs_live123", id="RFC 6749 §2.3.1 client_secret"),
+        pytest.param("grant_type=password&username=u&password=pw_live123", "pw_live123", id="RFC 6749 §4.3.2 password"),
+        pytest.param("redirected to http://localhost/cb#access_token=at_live123&token_type=bearer", "at_live123", id="RFC 6749 §4.2.2 access_token"),
+        pytest.param("grant_type=refresh_token&refresh_token=rt_live123", "rt_live123", id="RFC 6749 §6 refresh_token"),
+        pytest.param("invalid_grant for code=ac_1&code_verifier=cv_live123", "cv_live123", id="RFC 7636 §4.5 code_verifier"),
+        pytest.param("grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer&assertion=eyJlive123", "eyJlive123", id="RFC 7523 §2.1 assertion"),
+        pytest.param("client_assertion_type=jwt&client_assertion=eyJlive456", "eyJlive456", id="RFC 7523 §2.2 client_assertion"),
+        pytest.param("grant_type=device_code&device_code=dc_live123", "dc_live123", id="RFC 8628 §3.4 device_code"),
+        pytest.param("callback http://localhost/cb#id_token=eyJlive789&state=s", "eyJlive789", id="OpenID Connect Core §3.2.2.5 id_token"),
+        pytest.param("rejected Authorization: Basic dXNlcjpwYXNzd29yZA== at provider", "dXNlcjpwYXNzd29yZA", id="RFC 9110 §11.6.2 Authorization Basic"),
+        pytest.param('request headers {"authorization": "Bearer ya29live"}', "ya29live", id="RFC 9110 §11.6.2 Authorization Bearer"),
+        pytest.param('Proxy-Authorization: Digest username="u", response="r_live123"', "r_live123", id="RFC 9110 §11.7.2 Proxy-Authorization"),
+    ],
+)
+def test_oauth_credential_parameters_and_authorization_values_are_redacted_by_spec(
+    text: str, secret: str,
+) -> None:
+    shown = untrusted_detail_line(text)
+    assert shown is not None and secret not in shown and "[redacted]" in shown
+
+
+@pytest.mark.parametrize(
+    "text",
+    ['{"error": {"code": "token_expired", "message": "expired"}}', "error_code=bad_request for client_assertion_type=jwt"],
+)
+def test_oauth_parameter_names_inside_other_words_are_not_credentials(text: str) -> None:
+    assert untrusted_detail_line(text) == text
+
+
+@pytest.mark.parametrize(
+    ("reason", "shown"),
+    [
+        # A CLI's colour codes go; the words read as written.
+        ("\x1b[1;31mError:\x1b[0m invalid_grant", "Error: invalid_grant"),
+        # Anything else that can make the display differ withholds the reason.
+        ("Error: invalid_grant\x07 \x1b]52;c;cGF5bG9hZA==\x07", None),
+        ("client_seX\bcret=hunter2-hunter2", None),
+        ("token: abc\rError: invalid_grant", None),
+        ("Error: \u202edenied\u202c", None),
+        # The 8-bit form of a colour code goes as whole as the 7-bit form.
+        ("\x9b31mError\x9b0m: access_denied", "Error: access_denied"),
+        # A colour code inside a credential cannot hide it from redaction.
+        ("refresh failed: client_se\x1b[31mcret=hunter2-hunter2", "refresh failed: client_secret=[redacted]"),
+        # Echoed grant material is redacted, and the rest still reads as written.
+        (
+            "token exchange failed with status 401: Bearer abcdefghijklmnop rejected for sk-live_abcdefgh123",
+            "token exchange failed with status 401: [redacted] rejected for [redacted]",
+        ),
+        ("refresh failed: client_secret=hunter2-hunter2 at provider", "refresh failed: client_secret=[redacted]"),
+        # A pasted callback's grant parameter is redacted; its other parameters stay.
+        (
+            "callback failed: GET http://localhost:1455/cb?code=ac_live123&state=s",
+            "callback failed: GET http://localhost:1455/cb?code=[redacted]&state=s",
+        ),
+        # The fragment response mode carries the grant after ``#``.
+        (
+            "callback failed: http://localhost:1455/cb#code=ac_live123&state=s",
+            "callback failed: http://localhost:1455/cb#code=[redacted]&state=s",
+        ),
+    ],
+)
+def test_oauth_failure_detail_is_inert_and_credential_free_for_the_browser_and_log(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    reason: str,
+    shown: str | None,
+) -> None:
+    class Engine(_BrowserCallbackEngine):
+        def management_request(self, method, path, *, query=None, payload=None, timeout=None):
+            if path == "/get-auth-status":
+                return {"status": "error", "error": reason}
+            return super().management_request(method, path, query=query, payload=payload, timeout=timeout)
+
+    async def run() -> str | None:
+        adapter = _browser_callback_adapter(tmp_path, Engine())
+        flow = await adapter.oauth_status((await adapter.start_oauth("src_fixture123", "openai")).flow_id)
+        return flow.error_detail
+
+    with caplog.at_level(logging.WARNING, logger="vibe.model_hub_runtime.adapter"):
+        detail = asyncio.run(run())
+
+    assert detail == shown
+    logged = [record.getMessage() for record in caplog.records if "OAuth flow failed" in record.getMessage()]
+    assert len(logged) == 1
+    assert logged[0].endswith(f"detail={shown if shown is not None else 'withheld'}")
 
 
 def test_oauth_engine_400_fails_the_flow_rather_than_claiming_it_retryable(tmp_path: Path) -> None:

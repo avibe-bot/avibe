@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Callable, Literal, Optional, Protocol, get_args
 
 from .adapter import OAuthFlowState
+from .events import untrusted_detail_line
 from .state_file import write_state_document
 
 OAuthChannel = Literal["native_cli", "hub"]
@@ -21,19 +22,21 @@ OAUTH_FAILURE_DETAIL_CHARS = 1000
 
 
 def oauth_failure_detail(value: object) -> str | None:
-    """A failed sign-in's own reason, verbatim on one line and bounded.
+    """A failed sign-in's own reason on one bounded line.
 
     The reasons are the pinned engine's session errors (whose only quoted cause
     is the provider's OAuth error response — ``error``, ``error_description``,
     ``error_uri`` — or a transport error) and the native CLI's last output line.
-    None of them carries grant material, so they are shown as written: the
-    user's copy is only useful if it is what the provider said. Blank or
+    Display-safe text is shown as written, with credential material redacted:
+    the user's copy is only useful if it is what the provider said. A reason
+    that contains anything that can make its display differ from its text,
+    beyond colour codes, is withheld, as for every upstream detail. Blank or
     non-text input has no detail.
     """
 
     if not isinstance(value, str):
         return None
-    text = " ".join(value.split())
+    text = untrusted_detail_line(value)
     if not text:
         return None
     if len(text) > OAUTH_FAILURE_DETAIL_CHARS:

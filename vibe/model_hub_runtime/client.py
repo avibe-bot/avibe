@@ -30,7 +30,7 @@ from core.handlers.model_hub.adapter import (
 )
 from core.handlers.model_hub.async_owner import run_owned_in_thread
 from core.handlers.model_hub.classification import UPSTREAM_MACHINE_ERROR_CODES
-from core.handlers.model_hub.events import redact_untrusted_text
+from core.handlers.model_hub.events import untrusted_detail_line
 from core.handlers.model_hub.json_wire import (
     JSONEvent,
     JSONPath,
@@ -64,9 +64,6 @@ _ENGINE_TRANSPORT_FAILURE = re.compile(
     r"http2: (?:client connection lost|server sent GOAWAY)|server closed idle connection|"
     r"no such host|network is unreachable|proxyconnect"
 )
-# C0/C1 controls and every Unicode Bidi_Control character: either can act on
-# whatever renders the text (a terminal, a log viewer, a browser).
-_CONTROL_CHARACTERS = re.compile(r"[\x00-\x1f\x7f-\x9f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]")
 # This threshold only selects memory or a temporary file; it never rejects or
 # truncates upstream response bytes.
 _PRELUDE_MEMORY_BYTES = 256 * 1024
@@ -1800,12 +1797,10 @@ def _upstream_error_detail(
 
 
 def _bounded_upstream_detail(message: str) -> str | None:
-    # Control characters (terminal escapes, BEL) would act on whatever renders
-    # the text, a log viewer included; they carry no message content.
-    text = " ".join(_CONTROL_CHARACTERS.sub(" ", message).split())
+    text = untrusted_detail_line(message)
     if not text:
         return None
-    text = plain_untrusted_text(redact_untrusted_text(text))
+    text = plain_untrusted_text(text)
     if len(text) > _UPSTREAM_DETAIL_CHARS:
         text = text[: _UPSTREAM_DETAIL_CHARS - 1].rstrip() + "…"
     return text
