@@ -106,10 +106,11 @@ export const pasteRejectedKey = (detail: string | undefined): TranslationKey =>
 
 // A browser that cannot load the loopback callback page often copies its address
 // without the scheme (`localhost:1455/auth/callback?code=…`). Same rule as the
-// server's `_oauth_callback_address`: a host followed by a port, path or query is
-// an address; a provider code carries none of them.
+// server's `_oauth_callback_address`: a loopback or IP host is an address on its
+// own, with or without a port; a named host needs a port, path or query, since
+// `a.b.c` alone may be a code. A provider code carries none of them.
 const SCHEMELESS_CALLBACK_ADDRESS =
-  /^(?:localhost|\[[0-9a-f:.]+\]|\d{1,3}(?:\.\d{1,3}){3}|(?:[a-z0-9-]+\.)+[a-z]{2,})(?::\d{1,5})?[/?]/i;
+  /^(?:(?:localhost|\[[0-9a-f:.]+\]|\d{1,3}(?:\.\d{1,3}){3})(?::\d{1,5})?(?:[/?]|$)|(?:[a-z0-9-]+\.)+[a-z]{2,}(?::\d{1,5}(?:[/?]|$)|[/?]))/i;
 
 /**
  * Whether a pasted callback address carries the provider's answer. The engine
