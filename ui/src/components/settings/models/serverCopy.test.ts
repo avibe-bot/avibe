@@ -312,6 +312,16 @@ describe('pasted OAuth callback value', () => {
     expect(callbackValueCarriesResult('chatgpt.com/')).toBe(false);
   });
 
+  // The server reads these as addresses with no answer and refuses them, so the
+  // dialog does too instead of sending them as a code.
+  it('treats a bare scheme-less host and port as an address, as the server does', () => {
+    for (const value of ['localhost:1455', 'localhost', '127.0.0.1:54545', '[::1]:1455', 'example.com:1455']) {
+      expect(callbackValueCarriesResult(value), value).toBe(false);
+    }
+    // A named host alone may be a code: the server sends it as one.
+    expect(callbackValueCarriesResult('a.b.cd')).toBe(true);
+  });
+
   it('refuses a page address that carries no answer', () => {
     expect(callbackValueCarriesResult('https://chatgpt.com/')).toBe(false);
     expect(callbackValueCarriesResult('https://auth.openai.com/log-in')).toBe(false);
