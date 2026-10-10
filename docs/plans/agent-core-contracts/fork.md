@@ -129,7 +129,7 @@ Two kinds of fork, told apart by construction, never by timing:
 previous **ended** Turn: its final reply, or, for a Turn the user stopped or that failed, its last row once recovery
 has settled its calls (T2). The live Turn's input, its tool calls, and its intermediate responses never reach the
 child. Vibey enforces it through its fork point, as below; a native backend trims the live Turn or refuses the fork
-while it is live (§11). For Vibey it holds by construction:
+while it is live, by construction or by a check (§11). For Vibey it holds by construction:
 
 - The live Turn writes all of its rows after its first input, because the loop is the Session's single writer
   (C-5 §2), so every row before that input belongs to an ended Turn.
@@ -436,23 +436,33 @@ information shown to the model.
 ### Backend support and enforcement
 
 Point-in-time fork for native backends is cancelled (owner decision, 2026-10-10): they keep forking at the latest
-point, which they already support. The user-fork rule (§2) holds for every backend, by one of two mechanisms:
+point, which they already support. The user-fork rule (§2) holds for every backend. Vibey and Codex enforce it by
+construction; OpenCode and Claude enforce it by a check, with the residual window stated below:
 
-| Backend | Fork | A user's fork while the source has a live Turn | A self-fork |
-| --- | --- | --- | --- |
-| `vibey` | by reference (§2, §4); arbitrary settled points internally | **trim**: cut at the previous ended Turn | the largest settled point (§2) |
-| `codex` | `thread/fork` (`modules/agents/codex/agent.py:3316-3421`) | **trim**: `lastTurnId` at the last completed Turn (`:3393-3408`) | unchanged (trims) |
-| `opencode` | `POST /session/{id}/fork` (`modules/agents/opencode/server.py:818-837`) | **trim**: `messageID` before the live Turn's input | unchanged (trims) |
-| `claude` | `resume` with `fork_session` (`core/handlers/session_handler.py:1558-1563`, `:1730-1731`) | **refuse while live**: `session_fork_source_running`, "This conversation is still running. Wait for the current turn to finish, then fork." (en and zh) | unchanged: copies the transcript as it stands |
+| Backend | Fork | A user's fork while the source has a live Turn | Holds | A self-fork |
+| --- | --- | --- | --- | --- |
+| `vibey` | by reference (§2, §4); arbitrary settled points internally | **trim**: cut at the previous ended Turn, fixed at reservation | by construction | the largest settled point (§2) |
+| `codex` | `thread/fork` (`modules/agents/codex/agent.py:3316-3421`) | **trim**: `lastTurnId` is always the last completed Turn, resolved when the native fork runs (the child's first Turn), so a Turn that starts later is excluded by the backend's own boundary | by construction | unchanged (trims) |
+| `opencode` | `POST /session/{id}/fork` (`modules/agents/opencode/server.py:818-837`) | **trim**: `messageID` before the live Turn's input; checked at reservation and again at the child's first Turn | by check | unchanged (trims) |
+| `claude` | `resume` with `fork_session` (`core/handlers/session_handler.py:1558-1563`, `:1730-1731`) | **refuse while live**: `session_fork_source_running`, "This conversation is still running. Wait for the current turn to finish, then fork." (en and zh); checked at reservation and again at the child's first Turn | by check | unchanged: copies the transcript as it stands |
 
-Claude Code cannot cut a live Turn out of the copy it resumes. Enforcing a cut would need `resume_session_at` and a
-map from Avibe message to Claude UUID, which is the cancelled native work, so a user's fork waits until the source's
-Turn has ended. A native fork copies when the child first runs, not at reservation, so the refusal is checked at both
-points: the reservation refuses while the source has a live Turn, and the child's first Turn, when the native copy
-is made, fails with the same message (its input kept for an explicit retry) if the source has become live since.
-Every check reads the source's Turn rows (`uq_session_turns_live_session`, `storage/models.py:875-879`) in a
-transaction, never a clock. A self-fork is exempt from both checks: the reservation records `fork_self` on the
-child, so the first-Turn check skips it.
+A native fork copies when the child first runs, not at reservation, so each check runs at both points. The child's
+first Turn reads the source's Turn rows (`uq_session_turns_live_session`, `storage/models.py:875-879`) in a
+transaction, never a clock; for Claude a live source fails that Turn with the same message, its input kept for an
+explicit retry. A self-fork is exempt: the reservation records `fork_self` on the child, so the first-Turn checks
+skip it.
+
+**Residual window (OpenCode and Claude).** A source Turn that starts after the first-Turn check and before the
+backend makes its copy can still reach the child. Closing it needs no fence: the Turn owner's admission lock is
+best-effort, and Turn dispatch never awaits it (`core/session_turns.py:745-747`), so a fork must not block the
+source's next message. It needs a boundary the backend applies itself, which is the follow-up "native fork
+boundaries", scheduled after Phase 1b:
+
+- **OpenCode:** fork, then revert the private child to the last message of the last completed Turn, resolved before
+  the fork call. Nothing else writes to the child, so nothing races.
+- **Claude:** `resume_session_at` with the UUID of the last message of the last completed Turn, read from Claude's own
+  transcript when the native fork runs, with a fixture-based test against real transcripts. It replaces the refusal:
+  Claude then trims like the others.
 
 ### Surfaces
 
@@ -544,7 +554,7 @@ already provide, plus work outside fork.
 | --- | --- | --- | --- |
 | F1 | A fork's messages through its cut equal `prefix(source, point)`, and a fork Session gets the same bytes on every request, whatever either Session commits later | harness, storage | a source with checkpoints and edits both before and after the cut, plus a cut before a later checkpoint; after N commits in each Session, the child's projection through `as_of` serializes equal to `project(source, fork_point=as_of)` |
 | F2 | A side turn's first request has the caller's endpoint, system prompt, tool definitions, tool choice, and reasoning settings, and its messages begin with the caller's latest request through the cut | agent | the stub's request log, for normal and rolling side turns |
-| F3 | Every fork point is settled; a fork never inherits an open call, and never settles or looks up a call it did not make (settled calls are inherited as history, F1) | harness, storage, service | a user's fork while the live Turn is mid tool batch gets exactly the previous ended Turn's prefix; a stopped and a failed previous Turn are legal cuts; nothing of the live Turn (input, calls, responses) reaches the child; a self-fork keeps the live Turn's input and finished steps and no open call; `--fork-session` naming the caller's own Session is a user's fork; a Claude user's fork is refused while the source has a live Turn, at reservation and at the child's first Turn, and a Claude self-fork is not; the internal API refuses an unsettled or out-of-range point and accepts 0 |
+| F3 | Every fork point is settled; a fork never inherits an open call, and never settles or looks up a call it did not make (settled calls are inherited as history, F1) | harness, storage, service, adapters | a user's fork while the live Turn is mid tool batch gets exactly the previous ended Turn's prefix; a stopped and a failed previous Turn are legal cuts; nothing of the live Turn (input, calls, responses) reaches the child; a self-fork keeps the live Turn's input and finished steps and no open call; `--fork-session` naming the caller's own Session is a user's fork; a Codex fork always passes `lastTurnId` resolved at first use, including for a source that was idle at reservation; an OpenCode user's fork trims a source that became live after reservation; a Claude user's fork is refused while the source has a live Turn, at reservation and at the child's first Turn, and a Claude self-fork is not; the internal API refuses an unsettled or out-of-range point and accepts 0 |
 | F4 | A fork Session owns nothing an ancestor started: jobs, Watches, Tasks, runs, scratch stay with the Session that started them. A side turn starts nothing: its calls have no call instance | vibey, service, agent | a child of a source with a live job Watch neither lists it nor receives its follow-up, and its first input carries the notice; a side turn's `bash` call starts no job even when a policy allowed it |
 | F5 | A fork Session never writes a row of its source. A side turn writes only its audit row and, after the reply, what its fold commits | agent, storage | the source's rows before and after a child's Turns; the caller's rows after a failed and after a successful side turn |
 | F6 | A side turn has no capability its caller lacks; a fork Session runs an Agent the requesting caller may select, on the source's backend | agent, service | a side turn's call to every tool its policy does not allow is denied and never runs; a reservation without editor on the source, chat in the destination, or selection authority for the Agent (inherited or `--agent`) is refused, as is an Agent on another backend |
@@ -683,8 +693,9 @@ are those before the freeze PR.
 | Phase | Scope | Acceptance (properties) |
 | --- | --- | --- |
 | 0 | this contract; owner decisions; the §16 delta; freeze | done 2026-10-10 |
-| 1a | the fork point for Vibey: `harness/fork.py` (`ForkPoint`, `settled`, `latest_cut`, `fork_point`, `fork_prefix`), `resolve_fork_point` (no clock); the existing session fork wired to it for `vibey`, trimming the live Turn, and `self_fork` from `--fork-self`; Claude's refusal while live (reservation and first Turn, en and zh copy); the fork notice; T2's inherited branch removed; the internal API for an arbitrary settled point (`resolve_fork_point(..., as_of=)` and `reserve_forked_session(..., as_of=)`) | F1, F3, F4, F6 (reservation), F8 pin; an E2E on a local dev instance with a throwaway home: fork a Vibey Session while it runs a long tool call, check the child's context, and check that the parent continues unaffected |
+| 1a | the fork point for Vibey: `harness/fork.py` (`ForkPoint`, `settled`, `latest_cut`, `fork_point`, `fork_prefix`), `resolve_fork_point` (no clock); the existing session fork wired to it for `vibey`, trimming the live Turn, and `self_fork` from `--fork-self`; Codex's `lastTurnId` always resolved at first use; OpenCode's live check at first use; Claude's refusal while live (reservation and first Turn, en and zh copy); the fork notice; T2's inherited branch removed; the internal API for an arbitrary settled point (`resolve_fork_point(..., as_of=)` and `reserve_forked_session(..., as_of=)`) | F1, F3, F4, F6 (reservation), F8 pin; an E2E on a local dev instance with a throwaway home: fork a Vibey Session while it runs a long tool call, check the child's context, and check that the parent continues unaffected |
 | 1b | C-9 on the side turn, as a pure refactor: `ForkPolicy` and `DREAMING`, `Agent.side_turn`, the `fork_turn` audit | F2, F5, F6 (policy), F7; the C-9 suite passes with only the audit kind renamed |
+| after 1b | native fork boundaries: OpenCode (revert the private child to the boundary), then Claude (`resume_session_at` from its own transcript, replacing the refusal) (§11) | the user-fork rule by construction for every backend; Claude's parser tested on fixtures of real transcripts |
 | later | teams: the descendant lookup, a Session-invariant system prompt, an Agent fork tool, side turns while idle | a separate design |
 
 Point-in-time fork for native backends (the former Phase 3) and the Harness bound are cancelled by owner decision.
@@ -695,7 +706,7 @@ Files each lane touches, from a search of the code, tests, and prompts for the i
 
 | Lane | Code | Tests | Prompts |
 | --- | --- | --- | --- |
-| 1a | `core/agent_core/harness/fork.py` (new); `storage/agent_transcript.py` (fork resolution); `core/services/session_fork.py`; `modules/agents/vibey/{agent,store,prompt}.py` (T2's inherited branch, the fork notice); `vibe/cli.py` (`self_fork` from `--fork-self`; localized fork errors); `vibe/ui_server.py` (localized fork errors); `core/handlers/session_handler.py` (Claude's first-Turn check) | `tests/agent_core/agent/test_fork.py` (the pure rule), `tests/test_agent_transcript.py`, `tests/test_transcript_store_contract.py`, `tests/test_vibey_agent.py`, `tests/test_vibey_agent_context.py`, `tests/test_session_fork.py`, `tests/test_ui_session_stream.py` (the Claude fork) | the fork notice's text; `vibe/i18n/{en,zh}.json` and `ui/src/i18n/{en,zh}.json` (`session_fork_source_running`) |
+| 1a | `core/agent_core/harness/fork.py` (new); `storage/agent_transcript.py` (fork resolution); `core/services/session_fork.py`; `modules/agents/vibey/{agent,store,prompt}.py` (T2's inherited branch, the fork notice); `vibe/cli.py` (`self_fork` from `--fork-self`; localized fork errors); `vibe/ui_server.py` (localized fork errors); `core/handlers/session_handler.py` (Claude's first-Turn check); `modules/agents/codex/agent.py` (`lastTurnId` at first use); `modules/agents/opencode/session.py` (the live check at first use) | `tests/agent_core/agent/test_fork.py` (the pure rule), `tests/test_agent_transcript.py`, `tests/test_transcript_store_contract.py`, `tests/test_vibey_agent.py`, `tests/test_vibey_agent_context.py`, `tests/test_session_fork.py`, `tests/test_ui_session_stream.py` (the Claude fork), `tests/test_claude_cli_path.py`, `tests/test_cli_agent_run_schema.py`, `tests/test_codex_agent.py`, `tests/test_opencode_session_manager.py` | the fork notice's text; `vibe/i18n/{en,zh}.json` and `ui/src/i18n/{en,zh}.json` (`session_fork_source_running`) |
 | 1b | `core/agent_core/agent/loop.py`; `core/agent_core/agent/checkpoint.py` (becomes `fork.py`); `core/agent_core/harness/context.py` (the `CHECKPOINT_TOOL_*` constants); `core/agent_core/harness/store.py` (the audit kind); `storage/agent_transcript.py` (the audit map, lines 94-95); `modules/agents/vibey/store.py` (the audit kind) | `tests/agent_core/fakes.py`, `tests/agent_core/agent/test_compaction.py`, `tests/agent_core/agent/test_context.py`, `tests/test_agent_transcript.py`, `tests/test_transcript_store_contract.py` | none |
 
 1b follows 1a; they are not parallel lanes. Both edit `storage/agent_transcript.py` and its two test suites, and 1b
@@ -719,7 +730,9 @@ Decided in the design lane, all reversible:
 
 - A user's fork of a Vibey Session trims a live Turn (§2), which O-2's rule confirms.
 - The user-fork rule holds for every backend: trim, or refuse while live (Claude); a self-fork is part of the Turn
-  that requests it and keeps today's behavior (O-4). Confirmed by the orchestrator, 2026-10-10.
+  that requests it and keeps today's behavior (O-4). Vibey and Codex hold by construction in Phase 1; OpenCode and
+  Claude by a check until the native fork boundaries land; no fence on the Turn owner. Confirmed by the
+  orchestrator, 2026-10-10.
 - The audit kind is renamed `fork_turn` (§7).
 - Scratch is not forked (§4).
 - Making the system prompt Session-invariant is left to the teams design (§3).
