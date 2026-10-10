@@ -192,6 +192,13 @@ _UNIQUE = "Please provide more context to make it unique. Occurrences:\n"
         "Found 2 occurrences of the text in f.txt. The text must be unique. " + _UNIQUE
         + "line 1: ..." + "a" * 24 + " dup " + "b" * 71 + "...\nline 2: dup",
     ),
+    # ... also when it was found after normalization lengthened the line before it (U+FB01 is "fi").
+    (
+        "\ufb01" * 150 + " say \u201cHi\u201d " + "b" * 100 + "\nsay \u201cHi\u201d\n",
+        'say "Hi"',
+        "Found 2 occurrences of the text in f.txt. The text must be unique. " + _UNIQUE
+        + "line 1: ..." + "\ufb01" * 24 + " say \u201cHi\u201d " + "b" * 66 + "...\nline 2: say \u201cHi\u201d",
+    ),
 ])
 async def test_an_ambiguous_edit_lists_where_the_text_occurs(tmp_path, make_ctx, original, old_text, occurrences):
     (tmp_path / "f.txt").write_bytes(original.encode())

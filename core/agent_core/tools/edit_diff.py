@@ -324,25 +324,64 @@ class _Lines:
 
 
 def _excerpt(line: str, column: int) -> str:
-    """``line`` as read shows it, without its indentation; a long line only around ``column``."""
+    """``line`` without its indentation; a long line only around ``column``."""
     if len(line) <= EXCERPT_CHARS:
-        return shown(line).strip()
+        return line.strip()
     start = max(0, min(column - EXCERPT_CHARS // 4, len(line) - EXCERPT_CHARS))
     end = start + EXCERPT_CHARS
-    return ("..." if start else "") + shown(line[start:end]).strip() + ("..." if end < len(line) else "")
+    return ("..." if start else "") + line[start:end].strip() + ("..." if end < len(line) else "")
 
 
-def _locations(lines: _Lines, haystack: str, needle: str) -> list[str]:
+def _original_column(line: str, column: int) -> int:
+    """The column of ``line`` where its normalized form reaches ``column``.
+
+    Only NFKC changes lengths (the substitutions after it are one character for one, and trailing
+    whitespace is stripped after any occurrence). The line is measured in pieces ending just before an
+    ASCII character, as ``_bounded_fuzzy_view`` normalizes it; a piece already in NFKC maps one for
+    one, and the piece that changes length across ``column`` is bisected. ``_bounded_fuzzy_view``
+    gave up on any longer run that is not in NFKC, so a bisected piece stays bounded.
+    """
+    pos = reached = 0
+    while pos < len(line):
+        boundary = _ASCII.search(line, pos + _NFKC_CHUNK_CHARS)
+        end = boundary.start() if boundary else len(line)
+        piece = line[pos:end]
+        if unicodedata.is_normalized("NFKC", piece):
+            if reached + len(piece) > column:
+                return pos + column - reached
+            reached += len(piece)
+        else:
+            grown = len(unicodedata.normalize("NFKC", piece))
+            if reached + grown > column:
+                lo, hi = 0, len(piece)
+                while lo < hi:
+                    mid = (lo + hi + 1) // 2
+                    if len(unicodedata.normalize("NFKC", piece[:mid])) <= column - reached:
+                        lo = mid
+                    else:
+                        hi = mid - 1
+                return pos + lo
+            reached += grown
+        pos = end
+    return len(line)
+
+
+def _locations(lines: _Lines, haystack: str, needle: str, normalized: bool) -> list[str]:
     """``line {n}: {excerpt}`` for the first ``MAX_LOCATIONS`` occurrences of ``needle`` in ``haystack``.
 
-    ``haystack`` is the view or its normalized form, which keeps every line break, so its line ``i`` is
-    the view's line ``i``, and the excerpt is that line of the view, not of the normalized form.
+    ``haystack`` is the view or, when ``normalized``, its normalized form, which keeps every line break,
+    so its line ``i`` is the view's line ``i``; the excerpt is that line of the view, as read showed it.
     """
     out = []
     for at in _find_all(haystack, needle, MAX_LOCATIONS):
         line = haystack.count("\n", 0, at)
         column = at - (haystack.rfind("\n", 0, at) + 1)
-        out.append(f"line {lines.read_line(line)}: {_excerpt(lines.contents[line], column)}")
+        start = lines.view_starts[line]
+        text = lines.view[start : start + len(lines.contents[line])]
+        if normalized and len(text) > EXCERPT_CHARS:
+            # A column of the normalized form; NFKC may have changed lengths earlier on the line.
+            column = _original_column(text, column)
+        out.append(f"line {lines.read_line(line)}: {_excerpt(text, column)}")
     return out
 
 
@@ -447,7 +486,7 @@ def apply_edits(
         if not count:
             raise _not_found(path, index, total, loose_unavailable=bool(cache) and cache[0] is None)
         if not edit.replace_all and count > 1:
-            raise _duplicate(path, index, total, count, _locations(lines, haystack, needle))
+            raise _duplicate(path, index, total, count, _locations(lines, haystack, needle, used_normalized))
         replacements_made += count
         counts.append(count)
         if replacements_made > MAX_REPLACEMENTS:
