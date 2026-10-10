@@ -15941,7 +15941,7 @@ def cmd_upgrade():
                 except Exception as exc:
                     restart_error = exc
         if result.returncode == 0:
-            if not deferred_activation and restart is None:
+            if not deferred_activation and restart is None and restart_error is None:
                 _prepare_show_runtime_after_install(current_vibe_path)
             print("\033[32mUpgrade successful!\033[0m")
             if activation_postcommit_error:
@@ -15963,9 +15963,11 @@ def cmd_upgrade():
                     print("Restart will be scheduled by the activation helper.")
                 return 0
             if restart_error is not None:
-                print("\033[33mUpgrade installed, but restart scheduling failed.\033[0m")
-                print(f"Restart error: {restart_error}")
-                print("Run `vibe restart` to use the new version.")
+                _emit_upgrade_advisory(
+                    "\033[33mUpgrade installed, but restart scheduling failed.\033[0m\n"
+                    f"Restart error: {restart_error}\n"
+                    "Run `vibe restart` to use the new version."
+                )
                 return 2
             if restart is not None:
                 print("Restart scheduled to use the new version.")
@@ -15982,6 +15984,13 @@ def cmd_upgrade():
             activation_committed = activation_committed or plan.activation.committed
         if plan.activation is not None and not activation_committed:
             discard_atomic_uv_install_generation(plan.activation.candidate_launcher)
+        if restart_error is not None:
+            _emit_upgrade_advisory(
+                "\033[33mUpgrade installed, but restart scheduling failed.\033[0m\n"
+                f"Restart error: {restart_error}\n"
+                "Run `vibe restart` to use the new version."
+            )
+            return 2
         if activation_committed:
             _emit_upgrade_advisory(
                 f"Upgrade activated the new version, but post-activation reporting failed: {e}"
@@ -18518,6 +18527,7 @@ def _dispatch_deferred_upgrade_activation(argv: list[str]) -> int:
     activated = False
     activation_outcome = None
     activation_postcommit_error = None
+    prepare_show_runtime = False
     try:
         with atomic_upgrade_lock():
             reason = activation_block_reason(activation)
@@ -18547,7 +18557,7 @@ def _dispatch_deferred_upgrade_activation(argv: list[str]) -> int:
                     python_executable=sys.executable,
                 )
             elif args.prepare_show_runtime:
-                _prepare_show_runtime_after_install(args.launcher)
+                prepare_show_runtime = True
     except Exception as exc:
         activated = activated or activation.committed
         if not activated:
@@ -18557,13 +18567,24 @@ def _dispatch_deferred_upgrade_activation(argv: list[str]) -> int:
             print(f"deferred upgrade restart scheduling failed: {exc}", file=sys.stderr)
         return 1
 
+    if prepare_show_runtime:
+        try:
+            _prepare_show_runtime_after_install(args.launcher)
+        except Exception as exc:
+            _emit_upgrade_advisory(
+                f"deferred upgrade Show Runtime preparation failed: {exc}",
+                stream=sys.stderr,
+            )
+            return 1
+
     if activation_postcommit_error:
         _emit_upgrade_advisory(
             f"Deferred activation completed, but post-activation cleanup reported: "
             f"{activation_postcommit_error}",
             stream=sys.stderr,
         )
-    _emit_activation_notice(activation_outcome)
+    if activation_outcome is not None:
+        _emit_activation_notice(activation_outcome)
     return 0
 
 

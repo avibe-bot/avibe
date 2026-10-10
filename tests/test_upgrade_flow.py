@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import nullcontext
+import io
 import os
 import shlex
 import stat
@@ -677,20 +678,39 @@ def test_deferred_activation_notice_failure_does_not_skip_restart(monkeypatch, t
     assert events == ["activate", "restart"]
 
 
-def test_deferred_offline_activation_prepares_show_runtime(monkeypatch, tmp_path):
+def test_deferred_offline_activation_prepares_show_runtime_after_releasing_lock(
+    monkeypatch, tmp_path,
+):
     from vibe import cli
 
-    calls: list[str] = []
+    events: list[str] = []
     launcher = tmp_path / "vibe.exe"
+
+    class Lock:
+        def __enter__(self):
+            events.append("lock-enter")
+
+        def __exit__(self, *_args):
+            events.append("lock-exit")
+
     monkeypatch.setattr(cli.runtime, "pid_alive", lambda _pid: False)
-    monkeypatch.setattr(cli, "atomic_upgrade_lock", lambda: nullcontext())
+    monkeypatch.setattr(cli, "atomic_upgrade_lock", Lock)
     monkeypatch.setattr(cli, "activation_block_reason", lambda _activation: None)
     monkeypatch.setattr(
         cli,
         "activate_upgrade_candidate",
-        lambda _activation: calls.append("activate") or vibe_upgrade.ActivationOutcome(launcher),
+        lambda _activation: events.append("activate") or vibe_upgrade.ActivationOutcome(launcher),
     )
-    monkeypatch.setattr(cli, "_prepare_show_runtime_after_install", lambda path: calls.append(f"prepare:{path}"))
+    monkeypatch.setattr(
+        cli,
+        "_prepare_show_runtime_after_install",
+        lambda path: events.append(f"prepare:{path}"),
+    )
+    monkeypatch.setattr(
+        cli,
+        "format_activation_failures",
+        lambda *_args, **_kwargs: events.append("notice") or None,
+    )
 
     result = cli._dispatch_deferred_upgrade_activation(
         [
@@ -705,7 +725,46 @@ def test_deferred_offline_activation_prepares_show_runtime(monkeypatch, tmp_path
     )
 
     assert result == 0
-    assert calls == ["activate", f"prepare:{launcher}"]
+    assert events == ["lock-enter", "activate", "lock-exit", f"prepare:{launcher}", "notice"]
+
+
+def test_deferred_offline_activation_prepare_failure_is_truthful(
+    monkeypatch, tmp_path, capsys,
+):
+    from vibe import cli
+
+    events: list[str] = []
+    launcher = tmp_path / "vibe.exe"
+    monkeypatch.setattr(cli.runtime, "pid_alive", lambda _pid: False)
+    monkeypatch.setattr(cli, "atomic_upgrade_lock", lambda: nullcontext())
+    monkeypatch.setattr(cli, "activation_block_reason", lambda _activation: None)
+    monkeypatch.setattr(
+        cli,
+        "activate_upgrade_candidate",
+        lambda _activation: events.append("activate") or vibe_upgrade.ActivationOutcome(launcher),
+    )
+    monkeypatch.setattr(
+        cli,
+        "_prepare_show_runtime_after_install",
+        lambda _path: (_ for _ in ()).throw(RuntimeError("runtime unavailable")),
+    )
+    monkeypatch.setattr(cli, "_emit_activation_notice", lambda _outcome: events.append("notice"))
+
+    result = cli._dispatch_deferred_upgrade_activation(
+        [
+            "--parent-pid",
+            "123",
+            "--launcher",
+            str(launcher),
+            "--candidate",
+            str(tmp_path / "candidate.exe"),
+            "--prepare-show-runtime",
+        ]
+    )
+
+    assert result == 1
+    assert events == ["activate"]
+    assert "Show Runtime preparation failed: runtime unavailable" in capsys.readouterr().err
 
 
 def test_deferred_upgrade_activation_uses_candidate_python(monkeypatch, tmp_path):
@@ -1638,6 +1697,8 @@ def test_cmd_upgrade_reports_restart_scheduling_failure_as_partial_success(monke
         raise RuntimeError("bad launcher")
 
     monkeypatch.setattr(cli, "schedule_restart", fail_restart)
+    prepared: list[str] = []
+    monkeypatch.setattr(cli, "_prepare_show_runtime_after_install", lambda path: prepared.append(path))
     monkeypatch.setattr(
         cli.subprocess,
         "run",
@@ -1650,6 +1711,70 @@ def test_cmd_upgrade_reports_restart_scheduling_failure_as_partial_success(monke
     assert "Restart error: bad launcher" in output
     assert "Run `vibe restart` to use the new version." in output
     assert "Upgrade failed" not in output
+    assert prepared == []
+
+
+@pytest.mark.parametrize("sink", ["cp1252", "closed-pipe"])
+def test_cmd_upgrade_preserves_restart_failure_when_advisory_output_fails(
+    monkeypatch, sink,
+):
+    plan = UpgradePlan(
+        command=["/usr/local/bin/uv", "tool", "install", "avibe-os", "--upgrade"],
+        env=None,
+        method="uv",
+    )
+
+    monkeypatch.setattr(cli, "get_latest_version", lambda: {"error": None, "has_update": True, "latest": "2.2.0"})
+    monkeypatch.setattr(cli, "cache_running_vibe_path", lambda: "/custom/bin/vibe")
+    monkeypatch.setattr(cli, "build_upgrade_plan", lambda **kwargs: plan)
+    monkeypatch.setattr(cli, "_runtime_process_was_running", lambda: True)
+    monkeypatch.setattr(
+        cli,
+        "execute_upgrade_plan",
+        lambda _plan, **kwargs: subprocess.CompletedProcess(plan.command, 0, stdout="done", stderr=""),
+    )
+    monkeypatch.setattr(
+        cli,
+        "schedule_restart",
+        lambda **kwargs: (_ for _ in ()).throw(
+            PermissionError("权限不足") if sink == "cp1252" else RuntimeError("closed pipe")
+        ),
+    )
+
+    if sink == "cp1252":
+        class Cp1252Stream(io.StringIO):
+            @property
+            def encoding(self):
+                return "cp1252"
+
+            def write(self, text):
+                text.encode(self.encoding)
+                return super().write(text)
+
+        stream = Cp1252Stream()
+    else:
+        class ClosedReportStream:
+            encoding = "utf-8"
+
+            def __init__(self):
+                self.parts: list[str] = []
+
+            def write(self, text):
+                if "Restart error:" in text:
+                    raise BrokenPipeError("closed pipe")
+                self.parts.append(text)
+                return len(text)
+
+            def flush(self):
+                return None
+
+        stream = ClosedReportStream()
+
+    monkeypatch.setattr(cli.sys, "stdout", stream)
+
+    assert cli.cmd_upgrade() == 2
+    if sink == "cp1252":
+        assert r"\u6743\u9650" in stream.getvalue()
 
 
 def test_cmd_upgrade_keeps_runtime_stopped_when_it_was_not_running(monkeypatch):

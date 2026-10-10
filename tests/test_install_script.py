@@ -91,10 +91,11 @@ def _write_fake_uv(path: Path, uv_log: Path) -> None:
                 write_through=True,
             )
         if os.environ.get("VIBE_TEST_CLOSE_DIAGNOSTIC_PIPE") == "1":
-            _read_fd, _write_fd = os.pipe()
-            os.close(_read_fd)
-            os.dup2(_write_fd, 1)
-            os.close(_write_fd)
+            if "--candidate" in sys.argv:
+                _read_fd, _write_fd = os.pipe()
+                os.close(_read_fd)
+                os.dup2(_write_fd, 1)
+                os.close(_write_fd)
         sys.exit(cli._dispatch_installer_activation(sys.argv[1:]))
         """
     )
@@ -159,6 +160,9 @@ def _write_fake_uv(path: Path, uv_log: Path) -> None:
         #!/usr/bin/env bash
         set -euo pipefail
         if [ "${{VIBE_TEST_SHARED_ACTIVATION:-}}" = "1" ] && [ "${{1:-}}" = "__activate-install" ]; then
+            if [ -n "${{VIBE_TEST_SHARED_ACTIVATION_LOG:-}}" ]; then
+                printf '%s' "$*" > "$VIBE_TEST_SHARED_ACTIVATION_LOG"
+            fi
             exec "{sys.executable}" -c {shlex.quote(activation_driver)} "${{@:2}}"
         fi
         if [ "${{VIBE_TEST_REQUIRE_CANONICAL_HOME:-}}" = "1" ] && \
@@ -634,12 +638,14 @@ def test_install_script_preserves_committed_generation_when_advisory_sink_fails(
     path_dir = tmp_path / "path-bin"
     path_dir.mkdir()
     uv_log = tmp_path / "uv-tool-bin-dir.txt"
+    shared_activation_log = tmp_path / "shared-activation.txt"
     _write_fake_uv(path_dir / "uv", uv_log)
 
     env = os.environ.copy()
     env["HOME"] = str(home_dir)
     env["PATH"] = os.pathsep.join([str(path_dir), "/usr/bin", "/bin"])
     env["VIBE_TEST_SHARED_ACTIVATION"] = "1"
+    env["VIBE_TEST_SHARED_ACTIVATION_LOG"] = str(shared_activation_log)
     env["VIBE_TEST_ACTIVATION_PEER_FAILURE"] = "1"
     env["VIBE_TEST_PEER_PATH"] = str(tmp_path / "peer 空格" / "vibe")
     if sink == "cp1252":
@@ -655,6 +661,7 @@ def test_install_script_preserves_committed_generation_when_advisory_sink_fails(
     assert launcher.is_symlink()
     assert launcher.resolve().is_file()
     assert version_result.returncode == 0, version_result.stdout + version_result.stderr
+    assert shared_activation_log.read_text(encoding="utf-8").startswith("__activate-install ")
     assert "avibe-os 9.9.9" in version_result.stdout
     if sink == "cp1252":
         assert "doctor repair stable-launchers" in install_result.stdout
