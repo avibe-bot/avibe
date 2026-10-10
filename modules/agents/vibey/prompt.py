@@ -56,10 +56,11 @@ TOOL_ORDER = ("read", "bash", "edit", "write")
 FINAL_REPLY_RULE = "Only your final reply is reliably shown to the user; put anything the user must see in it"
 #: The first input of a fork (C-10 fork.md section 8): the inherited history is the source's, and so is its work.
 FORK_NOTICE = (
-    "<fork>\nThis Session is a fork of {title} (Session {source}): the conversation above is that Session's history "
-    "through context_seq {seq}. Every command, Watch, Task, and run in that history stays with the Session that "
-    "started it and reports there, not here.\n</fork>"
+    "<fork>\nThis Session is a fork of {title} (Session {source}): {history}. Every command, Watch, Task, and run "
+    "in that Session stays with the Session that started it and reports there, not here.\n</fork>"
 )
+FORK_HISTORY = "the conversation above is that Session's history through context_seq {seq}"
+FORK_NO_HISTORY = "it starts empty, before that Session's first finished Turn, so no history is inherited"
 
 
 def coding_prompt(tool_names: Iterable[str]) -> str:
@@ -215,7 +216,7 @@ def with_fork_notice(message: UserMessage, *, source_session_id: str, source_tit
     notice = FORK_NOTICE.format(
         title=display(source_title) if source_title else "an earlier Session",
         source=display(source_session_id),
-        seq=int(through_seq),
+        history=FORK_HISTORY.format(seq=int(through_seq)) if through_seq else FORK_NO_HISTORY,
     )
     return UserMessage(content=(TextBlock(text=notice), *message.content))
 

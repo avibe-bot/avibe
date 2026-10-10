@@ -112,8 +112,8 @@ class AdapterTranscriptStore:
             entries = await self._store.load(session_id)
             view = context_view(entries)
             previous = environment_state([unit.lead for unit in view.units if unit.lead.kind == "input"])
-            if entries and all(entry.session_id != session_id for entry in entries):
-                # Every row is inherited: this is the fork's first own input.
+            if not any(entry.session_id == session_id for entry in entries):
+                # No row of its own yet: a fork's first own input carries the notice, an empty prefix included.
                 message = await asyncio.to_thread(self._with_fork_notice, session_id, message)
         current = dict(self._environment(session_id))
         rendered = with_environment(message, environment_delta(previous, current))

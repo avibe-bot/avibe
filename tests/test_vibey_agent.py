@@ -1028,6 +1028,33 @@ async def test_a_users_fork_of_a_turn_mid_tool_batch_gets_exactly_the_previous_e
     assert "stays with the Session that started it" in notice
 
 
+async def test_a_fork_at_the_empty_prefix_still_carries_the_fork_notice(engine, session, tmp_path, published) -> None:
+    # A fork cut at 0 (the source's first Turn is live) inherits no row, yet its first input still says whose fork
+    # it is and that the source's work stays there.
+    with engine.begin() as conn:
+        _insert_session(
+            conn,
+            "ses_child",
+            _SCOPES["avibe"],
+            {
+                "created_via": "session_fork",
+                "fork_source_session_id": SESSION,
+                "fork_source_session_title": "Release work",
+                "fork_source_context_seq": 0,
+            },
+        )
+    child = _Harness(engine, tmp_path, "avibe", [[Done(assistant("child answer"))]], session_id="ses_child")
+    await child.agent.handle_message(child.request("child question"))
+
+    first = (await child.context_rows())[0]
+    assert first.context_seq == 1 and first.session_id == "ses_child"
+    blocks = [block.text for block in first.message.content if isinstance(block, TextBlock)]
+    [notice] = [text_value for text_value in blocks if text_value.startswith("<fork>")]
+    assert "fork of Release work (Session " + SESSION + ")" in notice
+    assert "no history is inherited" in notice
+    assert "stays with the Session that started it" in notice
+
+
 async def test_a_self_fork_keeps_the_live_turns_input_and_finished_steps(engine, session, tmp_path, published) -> None:
     source, running, release = await _blocked_second_turn(engine, tmp_path, finished_step=True)
     with engine.begin() as conn:
