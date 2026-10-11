@@ -1,11 +1,14 @@
-"""Shared Runtime contract for the desktop-owned computer-use daemon.
+"""Shared Runtime contract for the desktop-owned Computer Use daemon.
 
 The desktop shell is the only process allowed to start the Cua daemon and the
 only writer of ``computer-use.json``. Runtime processes use this module to:
 
 * derive the effective user-facing status,
-* decide whether the managed MCP server belongs in a backend launch, and
-* notice configuration changes without treating daemon availability as config.
+* derive the status consumed by the Workbench and the Controller-owned CLI, and
+* keep the daemon state contract independent from backend launch configuration.
+
+Computer Use requests enter through ``vibe computer`` and the Controller's
+internal IPC. Backend processes do not receive a Computer Use MCP server.
 
 The state directory intentionally does not use ``AVIBE_HOME``. It belongs to
 the operating-system desktop application and must be shared by every Runtime
@@ -14,7 +17,6 @@ that the shell can adopt.
 
 from __future__ import annotations
 
-import asyncio
 from dataclasses import dataclass
 import hashlib
 import json
@@ -23,18 +25,16 @@ import os
 from pathlib import Path
 import socket
 import sys
-from typing import Any, Awaitable, Callable, Mapping
+from typing import Any, Callable, Mapping
 
 logger = logging.getLogger(__name__)
 
 COMPUTER_USE_SCHEMA_VERSION = 1
-COMPUTER_USE_SERVER_NAME = "avibe_computer"
 COMPUTER_USE_STATE_DIR_ENV = "AVIBE_COMPUTER_USE_STATE_DIR"
 COMPUTER_USE_STATE_FILE = "computer-use.json"
 COMPUTER_USE_LOCK_FILE = "computer-use.lock"
 COMPUTER_USE_LEASE_FILE = "computer-lease.json"
 COMPUTER_USE_LEASE_LOCK_FILE = "computer-lease.lock"
-COMPUTER_USE_RECONCILE_INTERVAL_SECONDS = 2.0
 COMPUTER_USE_TOOL_SNAPSHOT_SHA256 = (
     "4257e598f5a6ad7e632b48e96c03257d7c5ed618a93b72820b2d4fef0f196acf"
 )
@@ -133,40 +133,6 @@ class ComputerUseStatus:
                 }
             )
         return payload
-
-
-@dataclass(frozen=True)
-class ManagedMcpServerSpec:
-    name: str
-    command: str
-    args: tuple[str, ...]
-    env: Mapping[str, str]
-    fingerprint: str
-
-    def claude_config(self) -> dict[str, Any]:
-        return {
-            "type": "stdio",
-            "command": self.command,
-            "args": list(self.args),
-            "env": dict(self.env),
-        }
-
-
-@dataclass(frozen=True)
-class ComputerUseConfigFingerprint:
-    enabled: bool
-    expected_snapshot_sha256: str | None
-    snapshot_valid: bool
-
-    def digest(self) -> str:
-        value = [
-            self.enabled,
-            self.expected_snapshot_sha256,
-            self.snapshot_valid,
-        ]
-        return hashlib.sha256(
-            json.dumps(value, separators=(",", ":")).encode("utf-8")
-        ).hexdigest()
 
 
 @dataclass
@@ -369,61 +335,6 @@ def _snapshot_valid(state: ComputerUseState, verifier: SnapshotVerifier) -> bool
     return valid
 
 
-def computer_use_config_fingerprint(
-    *,
-    state_path: Path | None = None,
-    verifier: SnapshotVerifier | None = None,
-) -> ComputerUseConfigFingerprint:
-    checker = verifier or _snapshot_verifier
-    try:
-        state = read_computer_use_state(state_path)
-    except ComputerUseStateError:
-        return ComputerUseConfigFingerprint(False, None, False)
-    if state is None or not state.enabled:
-        return ComputerUseConfigFingerprint(False, None, False)
-    return ComputerUseConfigFingerprint(
-        True,
-        state.tool_snapshot.sha256,
-        _snapshot_valid(state, checker),
-    )
-
-
-def managed_mcp_server_spec(
-    *,
-    state_path: Path | None = None,
-    verifier: SnapshotVerifier | None = None,
-    python_executable: str | None = None,
-) -> ManagedMcpServerSpec | None:
-    checker = verifier or _snapshot_verifier
-    try:
-        state = read_computer_use_state(state_path)
-    except ComputerUseStateError:
-        return None
-    if state is None or not state.enabled or not _snapshot_valid(state, checker):
-        return None
-
-    env: dict[str, str] = {}
-    resolved_state_path = state_path or computer_use_state_path()
-    default_path = computer_use_state_path(environ={})
-    if resolved_state_path != default_path:
-        env[COMPUTER_USE_STATE_DIR_ENV] = str(resolved_state_path.parent)
-    fingerprint = ComputerUseConfigFingerprint(
-        True,
-        state.tool_snapshot.sha256,
-        True,
-    ).digest()
-    return ManagedMcpServerSpec(
-        name=COMPUTER_USE_SERVER_NAME,
-        command=python_executable or sys.executable,
-        args=(
-            "-I",
-            str(Path(__file__).resolve().with_name("computer_server.py")),
-        ),
-        env=env,
-        fingerprint=fingerprint,
-    )
-
-
 def _shell_lock_is_held(lock_path: Path) -> bool:
     if os.name == "nt":
         # Phase 1 is macOS-only. A Windows state file cannot claim a live shell
@@ -512,100 +423,3 @@ def effective_computer_use_status(
     if not socket_accepts(state.socket_path):
         return ComputerUseStatus("unavailable", "daemon_unreachable", state)
     return ComputerUseStatus("ready", None, state)
-
-
-class ComputerUseConfigReconciler:
-    """Renew live backend generations only when managed MCP config changes."""
-
-    def __init__(
-        self,
-        renew_backend: Callable[[str], Awaitable[None]],
-        backend_names: Callable[[], list[str]],
-        *,
-        state_path: Path | None = None,
-        verifier: SnapshotVerifier | None = None,
-        interval_seconds: float = COMPUTER_USE_RECONCILE_INTERVAL_SECONDS,
-    ) -> None:
-        self._renew_backend = renew_backend
-        self._backend_names = backend_names
-        self._state_path = state_path
-        self._verifier = verifier or SnapshotVerifier()
-        self._interval_seconds = interval_seconds
-        self._fingerprint = computer_use_config_fingerprint(
-            state_path=state_path,
-            verifier=self._verifier,
-        )
-        self._consumer_fingerprints = {
-            backend: self._fingerprint
-            for backend in dict.fromkeys(self._backend_names())
-        }
-        self._task: asyncio.Task[None] | None = None
-
-    @property
-    def fingerprint(self) -> ComputerUseConfigFingerprint:
-        return self._fingerprint
-
-    async def check_once(self) -> bool:
-        current = computer_use_config_fingerprint(
-            state_path=self._state_path,
-            verifier=self._verifier,
-        )
-        self._fingerprint = current
-        live_backends = list(dict.fromkeys(self._backend_names()))
-        live_set = set(live_backends)
-        for backend in tuple(self._consumer_fingerprints):
-            if backend not in live_set:
-                self._consumer_fingerprints.pop(backend, None)
-        for backend in live_backends:
-            # A consumer that appeared since the prior poll was built from the
-            # current managed MCP spec, so it starts converged.
-            self._consumer_fingerprints.setdefault(backend, current)
-
-        changed = False
-        for backend in live_backends:
-            if self._consumer_fingerprints[backend] == current:
-                continue
-            changed = True
-            try:
-                await self._renew_backend(backend)
-            except Exception:
-                logger.warning(
-                    "Computer-use configuration did not reconcile backend %s; retrying",
-                    backend,
-                    exc_info=True,
-                )
-                continue
-            self._consumer_fingerprints[backend] = current
-        return changed
-
-    async def _run(self) -> None:
-        try:
-            while True:
-                await asyncio.sleep(self._interval_seconds)
-                try:
-                    await self.check_once()
-                except Exception:
-                    logger.warning(
-                        "Computer-use backend configuration reconciliation failed",
-                        exc_info=True,
-                    )
-        except asyncio.CancelledError:
-            raise
-
-    def start(self) -> None:
-        if self._task is None or self._task.done():
-            self._task = asyncio.create_task(
-                self._run(),
-                name="computer-use-config-reconciler",
-            )
-
-    async def stop(self) -> None:
-        task = self._task
-        self._task = None
-        if task is None or task.done():
-            return
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass

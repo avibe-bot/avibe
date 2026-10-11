@@ -50,12 +50,13 @@ _RESOURCE_USER_CONTEXT_METADATA_KEY = "resource_user_context"
 class CallerContext:
     """Caller identity resolved from Avibe-owned execution context.
 
-    The first five fields answer "which Avibe session/run made this call". The
-    ORIGIN fields below answer "where in the user's world was it made", which is a
-    different question and has to be captured separately: a failure notice is
-    context-free by construction (it may be delivered to an owner DM or to the
-    workspace inbox hours later), so it can only name the channel and thread the
-    definition came from if the creating turn wrote them down.
+    The identity fields answer "which Avibe Session, Turn, and Run made this
+    call". The ORIGIN fields below answer "where in the user's world was it
+    made", which is a different question and has to be captured separately: a
+    failure notice is context-free by construction (it may be delivered to an
+    owner DM or to the workspace inbox hours later), so it can only name the
+    channel and thread the definition came from if the creating turn wrote them
+    down.
 
     ``session_key`` and ``channel_id`` are BOTH kept, and are not redundant:
 
@@ -73,6 +74,7 @@ class CallerContext:
 
     session_id: str
     run_id: Optional[str] = None
+    turn_id: Optional[str] = None
     source: Optional[str] = None
     backend: Optional[str] = None
     native_session_id: Optional[str] = None
@@ -90,8 +92,10 @@ class CallerContext:
 
         For a backend whose caller env is written ONCE — the Claude SDK client is spawned
         per session and its environment cannot be refreshed afterwards — the per-message
-        fields are not merely useless, they are dangerous in two different ways:
+        fields are not merely useless, they are dangerous:
 
+        * ``turn_id`` changes on every Turn and is kept in the in-process context
+          only; it is never exported as a subprocess credential;
         * ``message_id`` changes on every message, so keeping it in the comparison that
           decides whether a cached client is still valid would tear down and respawn the
           Agent on EVERY turn;
@@ -116,9 +120,9 @@ class CallerContext:
         ``<platform>::user::<id>``, so the person is carried by the scope itself.
         """
 
-        if not self.user_id and not self.message_id:
+        if not self.user_id and not self.message_id and not self.turn_id:
             return self
-        return replace(self, user_id=None, message_id=None)
+        return replace(self, turn_id=None, user_id=None, message_id=None)
 
     def to_env(self) -> dict[str, str]:
         env = {AVIBE_SESSION_ID_ENV: self.session_id}
@@ -491,6 +495,7 @@ def caller_context_from_platform_payload(
     if not session_id:
         return None
     run_id = _clean(payload.get("task_execution_id"))
+    turn_id = _clean(payload.get("turn_token"))
     source_kind = _clean(payload.get("source_kind"))
     trigger_kind = _clean(payload.get("task_trigger_kind"))
     source = source_kind if source_kind == "callback" else trigger_kind or source_kind or "agent_turn"
@@ -542,6 +547,7 @@ def caller_context_from_platform_payload(
     return CallerContext(
         session_id=session_id,
         run_id=run_id or None,
+        turn_id=turn_id or None,
         source=source or None,
         backend=backend or None,
         native_session_id=native_session_id or None,

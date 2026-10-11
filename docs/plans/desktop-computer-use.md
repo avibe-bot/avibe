@@ -4,11 +4,77 @@
 
 - Owner: Avibe core
 - Date: 2026-10-01 (Phase 0 findings through 2026-10-03)
-- Stage: plan, Phase 0 spike done on macOS; the Windows run of Q6 is open
+- Stage: Slice 1 implementation in PR #2442; Route A is already on master
 - Upstream: [trycua/cua](https://github.com/trycua/cua) `libs/cua-driver`,
   release `cua-driver-rs-v0.31.0` (2026-09-30), MIT
 - Companion docs: `desktop-tray-lifecycle.md` (native toggle pattern),
   `desktop-auto-update.md` (signing), `desktop-product-gaps.md`
+
+## Current Slice 1 contract (2026-10-11)
+
+Route A is shipped on `master` at merge commit
+`61e315abef588657be7cca19940a289c588ba2c5`; the exact reviewed Route A head
+was `d8be44c74bf45b18e55ec35ffcd98edb97ef272f`. Its embedded Cua Driver,
+raw `click_mode`, native toggle and lifecycle, macOS permission flow,
+Workbench status line, lease, observe-first, exact-window, focus-shortcut, and
+same-user safety boundaries remain the foundation for this slice.
+
+Slice 1 delivers the user-facing path that replaced the earlier backend MCP
+proposal:
+
+- `vibe computer` covers the allowlisted observe, zoom, input, clipboard,
+  launch, and quit operations. Each request enters Controller IPC with only
+  the caller's injected Avibe Session. The Controller checks its own live
+  active-Turn registry before admission; no Turn identifier is accepted as a
+  client-presented capability. The existing `ComputerUseServer` checks still
+  run with the Session-keyed driver state and per-call desktop lease. Driver
+  state is reused across Turns and retired when the Session is explicitly
+  ended or archived.
+- A built-in managed `computer-use` Skill is loaded on demand. It contains the
+  CLI contract, untrusted-screen guidance, observe-before-input and
+  observe-before-retry rules, and the required unavailable-state handling.
+- Claude, Codex, and OpenCode receive no `avibe_computer` MCP configuration or
+  always-on Computer Use prompt. OpenCode removes stale released configuration
+  under that reserved name while preserving unrelated user MCP entries.
+- The Workbench status line describes Controller-owned CLI availability and is
+  valid for Vibey and every backend, including backends with no MCP client.
+
+The shipped surface has no compatibility layer: Computer Use was shipped only
+in `3.1.4rc4`, so released backend MCP injection is removed rather than
+maintained. Route B, live GUI/TCC verification, and self-drawn-app,
+QQ, and WeChat acceptance are explicit non-goals for this slice. Those checks
+belong to a later owner-gated Slice 2 from the mergeable Slice 1 head.
+
+F6 is not part of this slice. The macOS shell already unlinks the driver socket
+during endpoint reclamation and daemon stop; the embedded driver source is an
+external pinned asset rather than repository-owned code. Adding driver-side
+parent-liveness cleanup would therefore expand ownership and lifecycle scope
+without closing a demonstrated shell-owned gap.
+
+The earlier MCP injection sections below remain as implementation history for
+Route A and its safety review. They do not describe the current Slice 1
+backend contract. There is no compatibility layer for released backend MCP
+configuration: the CLI plus on-demand Skill is the only shipped backend path.
+
+### Slice 1 validation and gate
+
+The implementation must be validated through the real CLI → local IPC →
+Controller → `ComputerUseServer` path, with focused coverage for:
+
+- caller environment projection, server-side active-Turn admission, Session-keyed
+  driver reuse, explicit-end/archive retirement, and orphan-lease release;
+- the no-ID `desktop_busy` response, screenshot output handling, observation
+  rendering, and post-connect transport failures that may have completed a
+  mutation;
+- on-demand Skill loading, Claude hook identity, removal of `avibe_computer`
+  configuration and prompt injection for Claude, Codex, and OpenCode, and the
+  Workbench status line for Vibey and non-MCP backends.
+
+Route B, live GUI/TCC operation, and self-drawn-app, QQ, or WeChat verification
+are explicit non-goals. Those are the owner-gated Slice 2 manual gate and must
+start from a mergeable Slice 1 head; this plan does not authorize launching
+apps, touching TCC, using credentials, restarting Runtime, or performing live
+acceptance.
 
 ## Route A: raw single-click selector (2026-10-10)
 
@@ -103,9 +169,9 @@ Other parts of cua (Fleets, Lume, Bench, CUA-S1) are out of scope.
 
 ## Goal
 
-When a user enables computer use in the Avibe desktop app, every Avibe agent
-session gets the same set of computer-use tools, whichever backend runs it
-(Claude Code, Codex, OpenCode) and wherever the request came from (IM, Web,
+When a user enables computer use in the Avibe desktop app, every Avibe Agent
+Turn can use the same Controller-owned Computer Use CLI, whichever backend runs
+it (Claude Code, Codex, OpenCode) and wherever the request came from (IM, Web,
 Harness, scheduled run). Users grant OS permissions to Avibe once.
 
 ## Owner decision: IM-triggered computer use is allowed
@@ -139,8 +205,8 @@ Avibe.app (Tauri shell; owns TCC grants, toggle, lifecycle; writes state file D)
   └─ cua-driver serve --embedded --socket <S>   ← executes tools, checks TCC
 
 Avibe Runtime (adopted or shell-started; reads D, never spawns the daemon)
-  └─ agent backend process
-       └─ Avibe computer MCP server (stdio; stable for the backend's lifetime)
+  └─ Controller internal IPC
+       └─ vibe computer → ComputerUseServer
             └─ cua-driver mcp --embedded --socket <S>   ← per daemon generation
 ```
 
@@ -1135,6 +1201,12 @@ redirected to test-owned fakes.
 
 ## Owner decision ledger
 
+- **2026-10-11 — Slice 1 deferred follow-up.** The owner deferred the
+  orphaned lease retirement behavior, human status/reason rendering,
+  Workbench Controller health status, and remaining Computer Use documentation
+  polish to a follow-up. The false Turn-capability statement in
+  `docs/COMMANDS.md` is corrected in this delivery; the remaining P2 work does
+  not expand the Slice 1 contract.
 - **2026-10-08 — Workbench support ownership follow-up.** The owner accepts
   terminal-started Runtimes advertising the desktop shell's shared Computer Use
   status as a Phase 1 limitation. Track `a per-Runtime shell-adoption signal for

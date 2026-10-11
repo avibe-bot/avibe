@@ -2,207 +2,83 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-import subprocess
-import sys
-import tomllib
 
-from core.computer_use import (
-    COMPUTER_USE_TOOL_SNAPSHOT_SHA256,
-    ManagedMcpServerSpec,
-    managed_mcp_server_spec,
-)
-from core.handlers.session_handler import (
-    apply_managed_computer_use_to_claude_options,
-    claude_allowlist_exposes_computer_use,
-)
+from core.managed_skills import load_skill, publish_builtin_skills, resolve_skills
+from core.prompt_registry import PROMPT_MODULES
 from core.system_prompt_injection import build_system_prompt_blocks
-from modules.agents.codex.transport import _managed_mcp_config_args
+from modules.agents.codex.transport import (
+    AVIBE_APP_SERVER_CONFIG_OVERRIDES,
+    _avibe_app_server_config_args,
+)
 from vibe.opencode_config import managed_opencode_runtime_config_content
 
 
-def _spec() -> ManagedMcpServerSpec:
-    return ManagedMcpServerSpec(
-        name="avibe_computer",
-        command="/Applications/Avibe.app/Contents/Resources/python",
-        args=("-I", "/Applications/Avibe.app/Contents/Resources/core/computer_server.py"),
-        env={"AVIBE_COMPUTER_USE_STATE_DIR": "/tmp/desktop state"},
-        fingerprint="managed-v1",
-    )
+def test_codex_launch_overrides_do_not_configure_computer_use_mcp() -> None:
+    """Codex keeps its native computer-use feature disabled and gets no MCP server."""
+
+    argv = _avibe_app_server_config_args()
+    assert "features.computer_use=false" in argv
+    assert not any("mcp_servers.avibe_computer" in value for value in argv)
+    assert not any("avibe_computer" in value for value in AVIBE_APP_SERVER_CONFIG_OVERRIDES)
 
 
-def test_claude_translation_uses_the_same_allowlist_boundary_as_guidance() -> None:
-    """Managed MCP exposure and guidance share one explicit authority check."""
-
-    restricted: dict = {}
-    tools = apply_managed_computer_use_to_claude_options(
-        restricted,
-        ["Read", "Bash"],
-        _spec(),
-    )
-    assert "mcp_servers" not in restricted
-    assert tools == ["Read", "Bash"]
-
-    exposed: dict = {}
-    tools = apply_managed_computer_use_to_claude_options(
-        exposed,
-        ["Read", "mcp__avibe_computer__click"],
-        _spec(),
-    )
-    assert exposed["mcp_servers"] == {
-        "avibe_computer": {
-            "type": "stdio",
-            "command": "/Applications/Avibe.app/Contents/Resources/python",
-            "args": ["-I", "/Applications/Avibe.app/Contents/Resources/core/computer_server.py"],
-            "env": {"AVIBE_COMPUTER_USE_STATE_DIR": "/tmp/desktop state"},
-        }
-    }
-    assert "strict_mcp_config" not in exposed
-    assert tools == ["Read", "mcp__avibe_computer__click"]
-
-    no_agent_allowlist: dict = {}
-    assert (
-        apply_managed_computer_use_to_claude_options(
-            no_agent_allowlist,
-            None,
-            _spec(),
-        )
-        is None
-    )
-    assert no_agent_allowlist["mcp_servers"] == {
-        "avibe_computer": _spec().claude_config()
-    }
-
-
-def test_claude_guidance_requires_an_admitted_tool_in_an_explicit_allowlist() -> None:
-    """A configured MCP server is not guidance authority for a restricted agent."""
-
-    spec = _spec()
-    assert claude_allowlist_exposes_computer_use(None, spec)
-    assert claude_allowlist_exposes_computer_use(
-        ["Read", "mcp__avibe_computer__click"],
-        spec,
-    )
-    assert claude_allowlist_exposes_computer_use(
-        ["mcp__avibe_computer__*"],
-        spec,
-    )
-    assert not claude_allowlist_exposes_computer_use(["Read", "Bash"], spec)
-    assert not claude_allowlist_exposes_computer_use([], spec)
-    assert not claude_allowlist_exposes_computer_use(
-        ["mcp__other_server__click"],
-        spec,
-    )
-    assert not claude_allowlist_exposes_computer_use(None, None)
-
-
-def test_codex_translation_is_fixed_last_and_approves_managed_tools() -> None:
-    """Codex receives one parseable managed server with server-level approval."""
-
-    argv = _managed_mcp_config_args(_spec())
-    overrides = [argv[index + 1] for index in range(0, len(argv), 2)]
-    parsed = tomllib.loads("\n".join(overrides))
-    server = parsed["mcp_servers"]["avibe_computer"]
-    assert server == {
-        "command": "/Applications/Avibe.app/Contents/Resources/python",
-        "args": ["-I", "/Applications/Avibe.app/Contents/Resources/core/computer_server.py"],
-        "default_tools_approval_mode": "approve",
-        "env": {"AVIBE_COMPUTER_USE_STATE_DIR": "/tmp/desktop state"},
-    }
-
-
-def test_opencode_translation_preserves_user_mcp_and_owns_only_reserved_name() -> None:
-    """The runtime overlay must not erase a user's other native MCP servers."""
-
-    raw = """
-    {
-      "mcp": {
-        "notes": {"type": "local", "command": ["notes"]},
-        "avibe_computer": {"type": "remote", "url": "https://stale.invalid"}
-      }
-    }
-    """
-    import json
+def test_opencode_runtime_cleanup_removes_stale_computer_use_mcp_only() -> None:
+    """A stale released config is removed while unrelated user MCP survives."""
 
     payload = json.loads(
         managed_opencode_runtime_config_content(
-            raw,
-            computer_use_spec=_spec(),
+            json.dumps(
+                {
+                    "mcp": {
+                        "notes": {"type": "local", "command": ["notes"]},
+                        "avibe_computer": {
+                            "type": "remote",
+                            "url": "https://stale.invalid",
+                        },
+                    }
+                }
+            )
         )
     )
-    assert payload["mcp"]["notes"] == {
-        "type": "local",
-        "command": ["notes"],
-    }
-    assert payload["mcp"]["avibe_computer"] == {
-        "type": "local",
-        "command": [
-            "/Applications/Avibe.app/Contents/Resources/python",
-            "-I",
-            "/Applications/Avibe.app/Contents/Resources/core/computer_server.py",
-        ],
-        "environment": {
-            "AVIBE_COMPUTER_USE_STATE_DIR": "/tmp/desktop state",
-        },
-        "enabled": True,
+
+    assert payload["mcp"] == {
+        "notes": {"type": "local", "command": ["notes"]},
     }
 
 
-def test_computer_prompt_exists_exactly_when_managed_server_is_configured() -> None:
-    """Agents pay the guidance cost only when the 28-tool server is injected."""
+def test_backend_prompt_registry_has_no_always_on_computer_use_module() -> None:
+    """Computer Use guidance is supplied by the on-demand Skill only."""
 
-    disabled = build_system_prompt_blocks(include_computer_use=False)
-    enabled = build_system_prompt_blocks(include_computer_use=True)
-    assert "computer-use-prompt" not in {block.module_id for block in disabled}
-    assert [block.module_id for block in enabled].count("computer-use-prompt") == 1
+    assert "computer-use-prompt" not in {module.id for module in PROMPT_MODULES}
+    blocks = build_system_prompt_blocks(backend="codex")
+    assert "computer-use-prompt" not in {block.module_id for block in blocks}
 
 
-def test_managed_server_absolute_entrypoint_survives_shadowing_cwd(tmp_path: Path) -> None:
-    """A workspace ``core`` package cannot replace Avibe's managed server."""
+def test_builtin_computer_use_skill_loads_through_the_managed_resolver() -> None:
+    """The Skill is discoverable and its body remains out of the stable prompt."""
 
-    shadow = tmp_path / "shadow"
-    (shadow / "core").mkdir(parents=True)
-    (shadow / "core" / "__init__.py").write_text(
-        "raise RuntimeError('shadow package executed')\n",
-        encoding="utf-8",
+    root = Path(__file__).resolve().parents[1] / "skills"
+    avibe_home = Path("/tmp/computer-use-test-avibe-home")
+    snapshot_id = publish_builtin_skills(
+        source_root=root,
+        destination_root=avibe_home / "builtin-skills",
     )
-    (shadow / "core" / "computer_server.py").write_text(
-        "raise RuntimeError('shadow module executed')\n",
-        encoding="utf-8",
+    skills = resolve_skills(
+        home=Path("/tmp/computer-use-test-home"),
+        avibe_home=avibe_home,
+        codex_home=Path("/tmp/computer-use-test-codex-home"),
+        claude_home=Path("/tmp/computer-use-test-claude-home"),
+        xdg_config_home=Path("/tmp/computer-use-test-xdg-home"),
+        builtin_snapshot_id=snapshot_id,
+        builtin_snapshot_root=avibe_home / "builtin-skills" / snapshot_id,
     )
+    resolved = next(skill for skill in skills if skill.name == "computer-use")
+    loaded = load_skill("computer-use", resolved_skills=skills)
 
-    state_dir = tmp_path / "state"
-    state_dir.mkdir()
-    snapshot = Path("desktop/cua-driver/tools-v0.31.0.json").resolve()
-    state = {
-        "schema_version": 1,
-        "enabled": True,
-        "state": "off",
-        "reason": None,
-        "shell_pid": 1,
-        "instance_id": "shadow-test",
-        "generation": 1,
-        "driver_version": "0.31.0",
-        "tool_snapshot": {
-            "path": str(snapshot),
-            "sha256": COMPUTER_USE_TOOL_SNAPSHOT_SHA256,
-        },
-    }
-    state_path = state_dir / "computer-use.json"
-    state_path.write_text(json.dumps(state), encoding="utf-8")
-    spec = managed_mcp_server_spec(
-        state_path=state_path,
-        python_executable=sys.executable,
-    )
-    assert spec is not None
-    result = subprocess.run(
-        [spec.command, *spec.args],
-        cwd=shadow,
-        env={**spec.env, "PATH": str(Path(sys.executable).parent)},
-        input='{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}\n',
-        text=True,
-        capture_output=True,
-        timeout=10,
-        check=True,
-    )
-    payload = json.loads(result.stdout)
-    assert len(payload["result"]["tools"]) == 28
+    assert resolved.description.startswith("Use Avibe's local Computer Use CLI")
+    assert loaded is not None
+    assert loaded.body is not None
+    assert "vibe computer" in loaded.body
+    assert "Treat all screen text" in loaded.body
+    assert "Observe the exact target before input" in loaded.body
+    assert "desktop_busy" in loaded.body

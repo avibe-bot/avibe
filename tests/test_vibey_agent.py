@@ -1743,20 +1743,6 @@ async def test_another_agent_on_the_backend_is_not_told_it_is_vibey(engine, sess
     assert "You are Rex, a careful code reviewer." in system and f"- {CONCURRENT_CALLS_RULE}" in system
 
 
-async def test_the_system_prompt_offers_no_computer_use_it_cannot_call(
-    engine, session, tmp_path, published, monkeypatch
-) -> None:
-    import core.computer_use as computer_use
-
-    # The desktop has Computer Use on: the MCP backends get the avibe_computer server, Vibey has no MCP client.
-    monkeypatch.setattr(computer_use, "managed_mcp_server_spec", lambda **_kwargs: object())
-    harness = _Harness(engine, tmp_path, "avibe", [[Done(assistant("ok"))]])
-
-    await harness.agent.handle_message(harness.request("click the Save button in Preview"))
-
-    assert "avibe_computer" not in harness.provider.requests[0].system
-
-
 async def test_an_idle_session_holds_no_adapter_state(engine, session, tmp_path, published) -> None:
     harness = _Harness(engine, tmp_path, "avibe", _tool_turn() + [[Done(assistant("again"))]])
 

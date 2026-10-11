@@ -2946,7 +2946,7 @@
         "starting": "Computer Use is starting",
         "startingDetail": "Avibe is checking the managed driver and preparing the session.",
         "ready": "Computer Use is ready",
-        "readyDetail": "The managed driver is available for the current Workbench session.",
+        "readyDetail": "The Controller-owned Computer Use CLI is available to Avibe Agents.",
         "needsPermission": "Computer Use needs permission",
         "accessibilityDetail": "Allow Avibe under Privacy & Security → Accessibility, then return here.",
         "screenRecordingDetail": "In Screen & System Audio Recording, click + or drag Avibe into the list, then enable it. macOS may quit and reopen Avibe after the grant; return when it reopens.",

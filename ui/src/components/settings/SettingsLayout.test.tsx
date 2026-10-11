@@ -15,6 +15,7 @@ import { ShellSidebarContext } from '@/context/ShellSidebarContext';
 import { SETTINGS_MENU_PLACEMENT_STORAGE_KEY } from '@/lib/settingsMenuPlacement';
 import { SETTINGS_LAST_SECTION_STORAGE_KEY } from '@/lib/settingsSectionMemory';
 import { ModelHubCapabilityGate } from './models/ModelHubCapabilityGate';
+import { SettingsOverlayNavigationBoundary } from './SettingsOverlayNavigationBoundary';
 import { SettingsLayout } from './SettingsLayout';
 
 const api = vi.hoisted(() => {
@@ -104,6 +105,7 @@ const renderLayout = (
 ) => render(
   <MemoryRouter initialEntries={[entry]}>
     <ShellSidebarContext.Provider value={shellHasSidebar}>
+    <SettingsOverlayNavigationBoundary desktop={shellHasSidebar}>
     <Routes>
       <Route path="/settings" element={<SettingsLayoutHarness />}>
         <Route path="general" element={<div>general-body</div>} />
@@ -121,6 +123,7 @@ const renderLayout = (
       </Route>
       <Route path="/chat/:sessionId" element={<div>chat-body</div>} />
     </Routes>
+    </SettingsOverlayNavigationBoundary>
     </ShellSidebarContext.Provider>
   </MemoryRouter>,
 );
@@ -294,21 +297,37 @@ describe('SettingsLayout', () => {
     expect(standardFrame?.className).not.toContain('min-h-full');
   });
 
-  it('renders the three-group rail and feature-gated owner sections', async () => {
+  it('renders the three-group rail and feature-gated owner sections', () => {
     renderLayout('/settings/replies');
 
     expect(screen.getByText('replies-body')).toBeTruthy();
     expect(screen.getByText('settings.groups.agents')).toBeTruthy();
     expect(screen.getByText('settings.groups.connections')).toBeTruthy();
     expect(screen.getByText('settings.groups.system')).toBeTruthy();
-    await waitFor(() => {
-      expect(screen.getByRole('link', { name: 'settings.sections.models' })).toBeTruthy();
+    expect(screen.getByRole('link', { name: 'settings.sections.models' })).toBeTruthy();
+  });
+
+  it('keeps Models on the rail before config resolves and while Model Hub is disabled', async () => {
+    let resolveConfig: ((config: unknown) => void) | undefined;
+    api.getConfig.mockImplementation(
+      () => new Promise((resolve) => {
+        resolveConfig = resolve;
+      }),
+    );
+    renderLayout('/settings/replies');
+
+    expect(screen.getByRole('link', { name: 'settings.sections.models' })).toBeTruthy();
+    expect(resolveConfig).toBeTypeOf('function');
+
+    await act(async () => {
+      resolveConfig?.({ capabilities: { model_hub: { enabled: false } } });
     });
+    expect(screen.getByRole('link', { name: 'settings.sections.models' })).toBeTruthy();
   });
 
   // AUTH-SETUP-125: Settings opened over the wizard offers only the sections the
   // setup visit keeps, so no row leads out of the setup and loses its step.
-  it('offers only the setup visit sections over the wizard', async () => {
+  it('offers only the setup visit sections over the wizard', () => {
     const setup: Location = { pathname: '/setup', search: '', hash: '', state: null, key: 'setup' };
     renderLayout(
       { pathname: '/settings/general', state: settingsOverlayOpenState(setup, null) },
@@ -317,11 +336,28 @@ describe('SettingsLayout', () => {
 
     expect(screen.getByText('general-body')).toBeTruthy();
     expect(screen.getByRole('link', { name: 'settings.sections.general' })).toBeTruthy();
-    await waitFor(() => {
-      expect(screen.getByRole('link', { name: 'settings.sections.models' })).toBeTruthy();
-    });
+    expect(screen.getByRole('link', { name: 'settings.sections.models' })).toBeTruthy();
     const rail = screen.getByRole('navigation', { name: 'settings.navigationLabel' });
     expect(rail.querySelectorAll('a[href^="/settings/"]')).toHaveLength(2);
+    expect(screen.queryByRole('link', { name: 'settings.sections.replies' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'nav.messagingPlatforms' })).toBeNull();
+  });
+
+  it('keeps a disabled Model Hub inside the setup overlay instead of leaving for Backends', async () => {
+    const setup: Location = { pathname: '/setup', search: '', hash: '', state: null, key: 'setup' };
+    api.getConfig.mockResolvedValue({ capabilities: { model_hub: { enabled: false } } });
+    renderLayout(
+      { pathname: '/settings/models', state: settingsOverlayOpenState(setup, null) },
+      { shellHasSidebar: false, gateModelHub: true },
+    );
+
+    expect(await screen.findByText('general-body')).toBeTruthy();
+    expect(screen.queryByText('backends-body')).toBeNull();
+    expect(screen.queryByText('models-body')).toBeNull();
+    const rail = screen.getByRole('navigation', { name: 'settings.navigationLabel' });
+    expect(rail.querySelectorAll('a[href^="/settings/"]')).toHaveLength(2);
+    expect(screen.getByRole('link', { name: 'settings.sections.models' })).toBeTruthy();
+    expect(screen.getByRole('link', { name: 'settings.sections.general' })).toBeTruthy();
     expect(screen.queryByRole('link', { name: 'settings.sections.replies' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'nav.messagingPlatforms' })).toBeNull();
   });

@@ -245,7 +245,7 @@ class DesktopLeaseManager:
                 if previous.holder:
                     raise ComputerServerError(
                         "desktop_busy",
-                        f"Desktop computer use is held by session {previous.holder!r}.",
+                        "Desktop computer use is held by another Avibe Session.",
                     )
             if valid and previous.holder == session:
                 epoch = previous.epoch
@@ -301,6 +301,29 @@ class DesktopLeaseManager:
                 or current.epoch != lease.epoch
                 or current.daemon_key != lease.daemon_key
             ):
+                return
+            self._write(
+                Lease(
+                    holder="",
+                    refreshed_at=self._now(),
+                    epoch=current.epoch,
+                    daemon_instance_id=current.daemon_instance_id,
+                    daemon_generation=current.daemon_generation,
+                )
+            )
+
+        self._under_lock(operation)
+
+    def release_holder(self, holder: str) -> None:
+        """Release a current holder during explicit Avibe Session retirement."""
+
+        normalized = str(holder or "").strip()
+        if not normalized:
+            return
+
+        def operation() -> None:
+            current = self._read()
+            if current is None or current.holder != normalized:
                 return
             self._write(
                 Lease(
@@ -576,8 +599,8 @@ def _load_snapshot(state_path: Path) -> tuple[list[dict[str, Any]], set[str]]:
     return advertised, accepted_session
 
 
-def _error_result(code: str, message: str, **details: Any) -> dict[str, Any]:
-    payload = {"code": code, "message": message, **details}
+def _error_result(code: str, message: str | None = None, **params: Any) -> dict[str, Any]:
+    payload = {"code": code, "params": params}
     return {
         "content": [
             {
@@ -589,20 +612,24 @@ def _error_result(code: str, message: str, **details: Any) -> dict[str, Any]:
     }
 
 
-def _fold_tool_result(message: dict[str, Any]) -> dict[str, Any]:
+def _fold_tool_result(
+    message: dict[str, Any],
+    *,
+    tool_name: str | None = None,
+) -> dict[str, Any]:
     if "error" in message:
-        return _error_result(
-            "upstream_error",
-            "The computer-use driver rejected the request.",
-            upstream=message["error"],
-        )
+        return _error_result("upstream_error")
     result = deepcopy(message.get("result"))
     if not isinstance(result, dict):
-        return _error_result(
-            "upstream_protocol_error",
-            "The computer-use driver returned an invalid result.",
-        )
+        return _error_result("upstream_protocol_error")
     structured = result.pop("structuredContent", None)
+    if result.get("isError") is True:
+        if isinstance(structured, dict) and isinstance(structured.get("code"), str):
+            structured_params = structured.get("params")
+            if isinstance(structured_params, dict):
+                return _error_result(structured["code"], **structured_params)
+            return _error_result(structured["code"])
+        return _error_result("upstream_tool_error", tool=tool_name or "")
     if structured is not None:
         content = result.get("content")
         if not isinstance(content, list):
@@ -853,7 +880,7 @@ class ComputerUseServer:
             "tools/call",
             {"name": name, "arguments": dict(arguments)},
         )
-        return _fold_tool_result(response)
+        return _fold_tool_result(response, tool_name=name)
 
     @staticmethod
     def _commit_session_ended(session_state: _SessionState) -> None:
@@ -990,7 +1017,7 @@ class ComputerUseServer:
             )
         session = session.strip()
         if name not in COMPUTER_USE_TOOL_NAMES:
-            return _error_result("unknown_tool", f"Unknown computer-use tool: {name}")
+            return _error_result("unknown_tool", tool=name)
         if not isinstance(arguments, dict):
             return _error_result("invalid_arguments", "Tool arguments must be an object.")
 
@@ -1097,6 +1124,8 @@ class ComputerUseServer:
                             self._lease_manager.release,
                             lease,
                         )
+                        self._sessions.pop(session, None)
+                        self._session_locks.pop(session, None)
                     return result
                 except _LeaseLost:
                     if upstream is not None:
@@ -1184,7 +1213,7 @@ class ComputerUseServer:
                         )
                     return _error_result(
                         "computer_use_error",
-                        f"Computer use failed: {type(exc).__name__}",
+                        error_type=type(exc).__name__,
                     )
                 finally:
                     if heartbeat is not None:
@@ -1193,6 +1222,40 @@ class ComputerUseServer:
                             await heartbeat
 
             raise AssertionError("computer-use admission loop exhausted")
+
+    async def end_session_if_active(self, session: str) -> dict[str, Any]:
+        """Retire a session created by an earlier call without creating one."""
+
+        normalized = str(session or "").strip()
+        if not normalized:
+            return _error_result(
+                "session_required",
+                "Every computer-use call requires the current Avibe session id.",
+            )
+        session_state = self._sessions.get(normalized)
+        if session_state is None or session_state.active_proxy_serial is None:
+            return {"isError": False, "content": []}
+        return await self.call_tool("end_session", {"session": normalized})
+
+    async def retire_session(self, session: str) -> dict[str, Any]:
+        """Release all Controller-owned Computer Use state for an archived Session."""
+
+        normalized = str(session or "").strip()
+        if not normalized:
+            return _error_result(
+                "session_required",
+                "Every computer-use call requires the current Avibe session id.",
+            )
+
+        result = await self.end_session_if_active(normalized)
+        lock = self._session_locks.get(normalized)
+        if lock is not None:
+            async with lock:
+                self._sessions.pop(normalized, None)
+                if self._session_locks.get(normalized) is lock:
+                    self._session_locks.pop(normalized, None)
+        await asyncio.to_thread(self._lease_manager.release_holder, normalized)
+        return result
 
     async def handle(self, message: Mapping[str, Any]) -> dict[str, Any] | None:
         request_id = message.get("id")
