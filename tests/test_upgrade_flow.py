@@ -137,6 +137,31 @@ def test_build_upgrade_plan_stages_uv_install_for_a_stable_launcher(monkeypatch,
     assert bin_dir.parent.parent == tmp_path / "home" / "runtime" / "install-generations"
 
 
+@pytest.mark.parametrize("on_arm", [False, True])
+def test_build_upgrade_plan_keeps_windows_on_arm_on_x64_python(monkeypatch, tmp_path, on_arm):
+    """A staged uv upgrade picks its interpreter afresh; on Arm64 that must stay x64."""
+    launcher = tmp_path / "bin" / "vibe"
+    target = tmp_path / "old" / "vibe"
+    target.parent.mkdir(parents=True)
+    target.write_text("#!/bin/sh\n", encoding="utf-8")
+    launcher.parent.mkdir(parents=True)
+    launcher.symlink_to(target)
+    monkeypatch.setattr("vibe.upgrade.config_paths.get_vibe_remote_dir", lambda: tmp_path / "home")
+    monkeypatch.setattr("vibe.upgrade.os.path.exists", lambda path: True)
+    monkeypatch.setattr("vibe.upgrade.os.access", lambda path, mode: True)
+    monkeypatch.setattr("vibe.upgrade.windows_native_arm64", lambda: on_arm)
+
+    plan = build_upgrade_plan(
+        python_executable="/tmp/.local/share/uv/tools/avibe-os/bin/python",
+        uv_path="/usr/local/bin/uv",
+        vibe_path=str(launcher),
+        base_env={"PATH": "/usr/bin"},
+    )
+
+    pinned = ["--python", "cpython-3.12-windows-x86_64-none"]
+    assert (plan.command[4:6] == pinned) is on_arm, plan.command
+
+
 def test_build_upgrade_plan_refuses_uv_install_without_activation_point(monkeypatch):
     monkeypatch.setattr("vibe.upgrade.os.path.exists", lambda path: True)
     monkeypatch.setattr("vibe.upgrade.os.access", lambda path, mode: True)

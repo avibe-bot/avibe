@@ -33,6 +33,7 @@ from core.install_integrity import (
     run_isolated_probe,
     verify_python_environment,
 )
+from core.windows_arch import WINDOWS_ARM64_UV_PYTHON, windows_native_arm64
 from storage.lock import MigrationFileLock
 from vibe import runtime as runtime_mod
 
@@ -1642,6 +1643,10 @@ def build_upgrade_plan(
             env["UV_TOOL_DIR"] = str(tool_dir)
             env["UV_TOOL_BIN_DIR"] = str(bin_dir)
         command = [uv_binary, "tool", "install", package_spec]
+        if windows_native_arm64():
+            # The staged environment is new, so uv would pick a native arm64
+            # interpreter again; keep the x64 one install.ps1 chose.
+            command += ["--python", WINDOWS_ARM64_UV_PYTHON]
         if not version:
             command.append("--upgrade")
         if version or package_spec != PACKAGE_NAME or is_legacy_uv_tool_install(executable):

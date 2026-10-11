@@ -454,6 +454,20 @@ function Get-RuntimeHome {
     return Resolve-InstallPath $runtimeHome
 }
 
+# Windows on Arm, whatever this PowerShell process runs as: an emulated x64
+# shell can still find an arm64 uv, which would pick an arm64 Python.
+function Test-WindowsOnArm {
+    if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64" -or $env:PROCESSOR_ARCHITEW6432 -eq "ARM64") {
+        return $true
+    }
+    try {
+        # Win32_Processor.Architecture 12 is ARM64, reported for the hardware.
+        return [bool]@(Get-CimInstance -ClassName Win32_Processor -ErrorAction Stop | Where-Object { $_.Architecture -eq 12 }).Count
+    } catch {
+        return $false
+    }
+}
+
 function Invoke-UvToolInstallAttempt {
     param([string[]]$Arguments, [string]$PythonInstallMirror)
 
@@ -490,8 +504,16 @@ function Invoke-UvToolInstallAttempt {
         if ($PythonInstallMirror) {
             $env:UV_PYTHON_INSTALL_MIRROR = $PythonInstallMirror
         }
+        # Windows on Arm runs Avibe on x64 Python under Windows' x64 emulation:
+        # cryptography and claude-agent-sdk publish no win_arm64 wheels yet, so a
+        # native arm64 interpreter cannot install it. Drop this once both do.
+        # vibe upgrade carries the same rule (core/windows_arch.py).
+        $pythonArguments = @()
+        if (Test-WindowsOnArm) {
+            $pythonArguments = @("--python", "cpython-3.12-windows-x86_64-none")
+        }
         try {
-            $result = Invoke-NativeCommand -FilePath "uv" -Arguments (@("tool", "install") + $Arguments)
+            $result = Invoke-NativeCommand -FilePath "uv" -Arguments (@("tool", "install") + $pythonArguments + $Arguments)
         } finally {
             # Only an unset variable is ever given the mirror, so unset restores it.
             if ($PythonInstallMirror) { Remove-Item Env:UV_PYTHON_INSTALL_MIRROR -ErrorAction SilentlyContinue }
