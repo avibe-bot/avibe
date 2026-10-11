@@ -67,7 +67,7 @@ from vibe.model_hub_runtime.installer import (
     INSTALL_RECOVERY_TIMEOUT_REASON,
     InstallClaimTransition,
 )
-from vibe.model_hub_runtime.state import EngineStateError, EngineStateStore, SourceRecord
+from vibe.model_hub_runtime.state import EngineStateError, EngineStateStore
 from vibe.model_hub_runtime.supervisor import (
     EngineSupervisor,
     EngineUnavailableError,
@@ -139,10 +139,6 @@ _HUB_SUBSCRIPTION_PROTOCOLS = {
 _INSTALL_RECOVERY_WAIT_SECONDS = 30.0
 _INSTALL_RECOVERY_INITIAL_DELAY_SECONDS = 0.25
 _INSTALL_RECOVERY_MAX_DELAY_SECONDS = 4.0
-# Waits between retries of a request the engine has not registered yet, bounded
-# by the supervisor's registration settle window.
-_REGISTRATION_RETRY_FIRST_DELAY_SECONDS = 0.25
-_REGISTRATION_RETRY_MAX_DELAY_SECONDS = 2.0
 # The engine answers a credential's model list from memory.
 _ENGINE_MODEL_LISTING_TIMEOUT_SECONDS = 5.0
 
@@ -1943,7 +1939,6 @@ class CLIProxyEngineAdapter:
                     self.state_store.mark_oauth_engine_published,
                     credential_ref,
                 )
-                self._note_grant_change()
                 return
 
             # The local file is already visible. A GET followed by POST is
@@ -2820,67 +2815,8 @@ class CLIProxyEngineAdapter:
         *,
         on_admitted: Callable[[], None] | None = None,
     ) -> EngineInvokeHandle:
-        """Invoke once, retrying only while the engine may still be registering the model.
-
-        Right after an engine start, config reload, or OAuth grant write,
-        CLIProxyAPI answers a routed model it has not registered yet with a local
-        rejection, before any egress. Within that settle window the same request
-        is retried after a short wait, releasing the transport between attempts,
-        and only for the Source record it was admitted under: a Source a save
-        edited or removed meanwhile keeps the rejection, so configuration never
-        redirects an admitted request. Otherwise the rejection stays the terminal
-        ``engine_down`` it reports.
-        """
-
-        delay = _REGISTRATION_RETRY_FIRST_DELAY_SECONDS
-        handle, admitted = await self._invoke_once(
-            source_id,
-            model_id,
-            request,
-            stream,
-            origin,
-            on_admitted=on_admitted,
-        )
-        while handle.registration_pending and self.supervisor.models_registering():
-            await asyncio.sleep(delay)
-            if not self.supervisor.models_registering():
-                break
-            delay = min(2 * delay, _REGISTRATION_RETRY_MAX_DELAY_SECONDS)
-            retried, _source = await self._invoke_once(
-                source_id,
-                model_id,
-                request,
-                stream,
-                origin,
-                admitted=admitted,
-            )
-            if retried is None:
-                break
-            handle = retried
-        return handle
-
-    def _note_grant_change(self) -> None:
-        note_grant_change = getattr(self.supervisor, "note_grant_change", None)
-        if callable(note_grant_change):
-            note_grant_change()
-
-    async def _invoke_once(
-        self,
-        source_id: str,
-        model_id: str,
-        request: Mapping[str, Any],
-        stream: bool,
-        origin: str,
-        *,
-        on_admitted: Callable[[], None] | None = None,
-        admitted: SourceRecord | None = None,
-    ) -> tuple[EngineInvokeHandle | None, SourceRecord | None]:
-        """One attempt; with ``admitted``, None when the Source record changed since admission."""
-
         async with self._routing_lock:
             source = await asyncio.to_thread(self.state_store.get_source, source_id)
-            if admitted is not None and source != admitted:
-                return None, source
             if source is None:
                 raise EngineStateError("source is not registered")
             if source.allowed_origins and origin not in source.allowed_origins:
@@ -2899,7 +2835,7 @@ class CLIProxyEngineAdapter:
                         source_id=source_id,
                         os_errno=local_os_errno(exc),
                     )
-                ), source
+                )
             release = self._acquire_transport()
             request_sent = self._hold_unsent_request()
             try:
@@ -2923,7 +2859,7 @@ class CLIProxyEngineAdapter:
                 request_headers=getattr(request, "headers", None),
                 on_transport_done=release,
                 on_request_sent=request_sent,
-            ), source
+            )
         except BaseException:
             release()
             raise
@@ -3067,7 +3003,6 @@ class CLIProxyEngineAdapter:
                 "/auth-files/fields",
                 payload={"name": auth.name, "prefix": credential["prefix"]},
             )
-            self._note_grant_change()
             await asyncio.to_thread(self.state_store.audit_auth_permissions, enforce=True)
         except (EngineClientError, EngineStateError):
             if existing_credential_ref is not None:

@@ -45,10 +45,6 @@ _T = TypeVar("_T")
 MODEL_HUB_STARTUP_TIMEOUT_SECONDS = 30.0
 MODEL_HUB_CONFIG_RELOAD_TIMEOUT_SECONDS = 5.0
 _STARTUP_POLL_INTERVAL_SECONDS = 0.05
-# How long after an engine start, config reload, or OAuth grant write the
-# engine may still be registering models: CLIProxyAPI answers a routed model it
-# has not registered yet with a local 400, which is worth a short wait-and-retry.
-MODEL_REGISTRATION_SETTLE_SECONDS = 15.0
 # Durable identity of the engine this state root last spawned. A service that
 # dies without running ``atexit`` (SIGKILL, crash, forced restart) leaves its
 # isolated engine group running; the next start reaps it by identity. The marker
@@ -101,18 +97,6 @@ class EngineSupervisor:
         self._health_os_errno: int | None = None
         self._record_os_errno: int | None = None
         self._config_generation = 0
-        self._registration_changed_at: float | None = None
-
-    def models_registering(self) -> bool:
-        """Whether a recent start, reload, or grant write may still be registering models."""
-
-        changed_at = self._registration_changed_at
-        return changed_at is not None and time.monotonic() - changed_at < MODEL_REGISTRATION_SETTLE_SECONDS
-
-    def note_grant_change(self) -> None:
-        """Record an OAuth grant write the engine registers asynchronously."""
-
-        self._registration_changed_at = time.monotonic()
 
     def ensure_running(self) -> EngineConnection:
         with self._lock:
@@ -207,7 +191,6 @@ class EngineSupervisor:
         stale = frozenset(expected_model_names(previous_sources or (), self.state_store, generation)) - set(expected)
         self._await_models_locked(client, expected, stale)
         self._last_check = _utc_now()
-        self._registration_changed_at = time.monotonic()
 
     def _await_models_locked(
         self,
@@ -448,7 +431,6 @@ class EngineSupervisor:
                     self._stop_locked()
                     raise EngineUnavailableError("models.engine.unsafe_permissions") from exc
                 self._last_check = _utc_now()
-                self._registration_changed_at = time.monotonic()
                 logger.info(
                     "Model Hub engine startup outcome=ready managed_version=%s "
                     "elapsed_seconds=%.3f child_output_retained=false",

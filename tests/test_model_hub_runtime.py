@@ -4292,7 +4292,7 @@ def test_adapter_uses_origin_protocol_for_engine_translation(
             self.request_protocol = request_protocol
             self.request_headers = request_headers
             on_transport_done()
-            return client_module.EngineInvokeHandle(stream=None, outcome=asyncio.get_running_loop().create_future())
+            return object()
 
     class Supervisor:
         def __init__(self, client: Client) -> None:
@@ -4459,7 +4459,7 @@ def test_adapter_serializes_source_sync_with_new_invocations(tmp_path: Path) -> 
         ):
             invoked_refs.append(source.credential_ref)
             on_transport_done()
-            return client_module.EngineInvokeHandle(stream=None, outcome=asyncio.get_running_loop().create_future())
+            return object()
 
     class Supervisor:
         def __init__(self) -> None:
@@ -5783,7 +5783,7 @@ def _cpa_unknown_provider(protocol: str, routed_model: str, *, error_type: str =
 
 
 @pytest.mark.parametrize(
-    ("protocol", "status", "body", "expected_kind", "expected_code", "expected_reason", "pending"),
+    ("protocol", "status", "body", "expected_kind", "expected_code", "expected_reason"),
     (
         (
             "anthropic",
@@ -5792,7 +5792,6 @@ def _cpa_unknown_provider(protocol: str, routed_model: str, *, error_type: str =
             RawOutcomeKind.NETWORK_ERROR,
             "engine_down",
             None,
-            True,
         ),
         (
             "openai_chat",
@@ -5801,7 +5800,6 @@ def _cpa_unknown_provider(protocol: str, routed_model: str, *, error_type: str =
             RawOutcomeKind.NETWORK_ERROR,
             "engine_down",
             None,
-            True,
         ),
         (
             "anthropic",
@@ -5810,7 +5808,6 @@ def _cpa_unknown_provider(protocol: str, routed_model: str, *, error_type: str =
             RawOutcomeKind.HTTP_ERROR,
             "upstream_request_invalid",
             None,
-            False,
         ),
         (
             "anthropic",
@@ -5819,7 +5816,6 @@ def _cpa_unknown_provider(protocol: str, routed_model: str, *, error_type: str =
             RawOutcomeKind.HTTP_ERROR,
             None,
             "server_error",
-            False,
         ),
     ),
     ids=("anthropic", "openai_chat", "another_model", "older_engine_502"),
@@ -5832,7 +5828,6 @@ def test_engine_client_distinguishes_local_model_registration_failure(
     expected_kind: RawOutcomeKind,
     expected_code: str | None,
     expected_reason: str | None,
-    pending: bool,
 ) -> None:
     async def run() -> None:
         payload = json.dumps(body).encode()
@@ -5890,7 +5885,6 @@ def test_engine_client_distinguishes_local_model_registration_failure(
         assert outcome.kind is expected_kind
         assert decision.error_code == expected_code
         assert decision.reason == expected_reason
-        assert handle.registration_pending is pending
 
     asyncio.run(run())
 
@@ -9497,133 +9491,3 @@ def test_oauth_flow_adds_a_second_account_and_refuses_the_same_one(
             assert not client.patches
 
     asyncio.run(run())
-
-
-@pytest.mark.parametrize(
-    ("scenario", "expected_calls", "expected_pending", "expected_sleeps"),
-    [
-        ("settles", 3, False, [0.25, 0.5]),
-        ("outside_window", 1, True, []),
-        ("window_closes_while_waiting", 1, True, [0.25]),
-        ("source_edited_while_waiting", 1, True, [0.25]),
-    ],
-)
-def test_adapter_retries_a_routed_model_the_engine_is_still_registering(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    scenario: str,
-    expected_calls: int,
-    expected_pending: bool,
-    expected_sleeps: list[float],
-) -> None:
-    pending_answers = 2
-    calls = []
-    sleeps = []
-    registering = [scenario != "outside_window"]
-    store = EngineStateStore(tmp_path / "state")
-    credential_ref = store.store_api_key(
-        "upstream-secret",
-        vendor="custom",
-        protocol="anthropic",
-        base_url="https://api.example.test/v1",
-    )
-    store.sync_sources([_binding(credential_ref, protocol="anthropic", allowed_origins=("claude",))])
-
-    class Client:
-        async def invoke(self, source, model_id, request, *, stream, request_protocol=None, request_headers=None,
-                         on_transport_done=None, on_request_sent=None):
-            calls.append(source)
-            on_transport_done()
-            handle = client_module.EngineInvokeHandle(stream=None, outcome=asyncio.get_running_loop().create_future())
-            # The engine answers its local "unknown provider" rejection until it registers the model.
-            handle.registration_pending = len(calls) <= pending_answers
-            return handle
-
-    class Supervisor:
-        def client(self):
-            return Client()
-
-        def models_registering(self) -> bool:
-            return registering[0]
-
-    real_sleep = asyncio.sleep
-
-    async def sleep(delay: float) -> None:
-        sleeps.append(delay)
-        if scenario == "window_closes_while_waiting":
-            registering[0] = False
-        elif scenario == "source_edited_while_waiting":
-            # A save lands while the request waits: it must not redirect the request.
-            store.sync_sources(
-                [
-                    _binding(
-                        credential_ref,
-                        protocol="anthropic",
-                        allowed_origins=("claude",),
-                        model_ids=("model-a", "model-b"),
-                    )
-                ]
-            )
-        await real_sleep(0)
-
-    monkeypatch.setattr(asyncio, "sleep", sleep)
-
-    async def run() -> None:
-        adapter = CLIProxyEngineAdapter(supervisor=Supervisor(), state_store=store)  # type: ignore[arg-type]
-        admitted = []
-
-        handle = await adapter.invoke(
-            "src_fixture123",
-            "model-a",
-            ModelHubRequest({}, protocol="anthropic", headers={}),
-            False,
-            "claude",
-            on_admitted=lambda: admitted.append(True),
-        )
-
-        assert len(calls) == expected_calls
-        assert len(set(calls)) == 1  # every attempt used the admitted Source record
-        assert handle.registration_pending is expected_pending
-        assert admitted == [True]  # admission is reported once per request
-        assert sleeps == expected_sleeps
-
-    asyncio.run(run())
-
-
-def test_supervisor_reports_registration_settling_only_inside_its_window(monkeypatch: pytest.MonkeyPatch) -> None:
-    from vibe.model_hub_runtime import supervisor as supervisor_module
-
-    clock = [100.0]
-    monkeypatch.setattr(supervisor_module.time, "monotonic", lambda: clock[0])
-    supervisor = supervisor_module.EngineSupervisor.__new__(supervisor_module.EngineSupervisor)
-    supervisor._registration_changed_at = None
-
-    assert supervisor.models_registering() is False
-    supervisor.note_grant_change()
-    clock[0] += supervisor_module.MODEL_REGISTRATION_SETTLE_SECONDS - 0.1
-    assert supervisor.models_registering() is True
-    clock[0] += 0.2
-    assert supervisor.models_registering() is False
-
-
-def test_engine_start_and_reload_open_the_registration_settle_window(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    supervisor, store = _fixture_supervisor(tmp_path)
-    credential_ref = store.store_api_key("upstream-secret", base_url="https://api.example.test/v1")
-    store.sync_sources([_binding(credential_ref)])
-    adapter = CLIProxyEngineAdapter(supervisor=supervisor, state_store=store)
-    real_monotonic = supervisor_module.time.monotonic
-    later = [0.0]
-    monkeypatch.setattr(supervisor_module.time, "monotonic", lambda: real_monotonic() + later[0])
-    try:
-        assert supervisor.models_registering() is False
-        supervisor.ensure_running()
-        assert supervisor.models_registering() is True
-        later[0] = supervisor_module.MODEL_REGISTRATION_SETTLE_SECONDS + 1
-        assert supervisor.models_registering() is False
-
-        asyncio.run(adapter.sync_sources([_binding(credential_ref, route_model_ids=("model-b",))]))
-        assert supervisor.models_registering() is True
-    finally:
-        supervisor.stop()

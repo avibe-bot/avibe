@@ -285,8 +285,6 @@ class EngineInvokeHandle:
         self._observed = observed
         self._close_lock = asyncio.Lock()
         self._stream_closed = False
-        # The engine rejected the routed model before any egress: it has not registered it (yet).
-        self.registration_pending = False
 
     @property
     def stream(self) -> AsyncIterator[bytes] | None:
@@ -581,9 +579,7 @@ class EngineClient:
                     )
                     response.close()
                     await session.close()
-                    handle = ended(outcome)
-                    handle.registration_pending = True
-                    return handle
+                    return ended(outcome)
                 outcome = _reduce_protocol_observation(
                     replace(
                         observed_payload,
