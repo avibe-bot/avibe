@@ -1422,35 +1422,55 @@ def test_installing_projection_matches_live_owner_or_resumable_claim(
 
 
 @pytest.mark.parametrize(
-    ("host_platform", "asset_platform", "size_bytes", "archive_sha256", "binary_sha256"),
+    ("host_platform", "asset_platform", "size_bytes", "archive_sha256", "binary_sha256", "bin_path"),
     [
             (
                 "darwin-arm64",
                 "darwin-arm64",
-                39534924,
-                "bc046156ac880beb1c09b2b69a8f80513ce3caec92f34fbc00dbf8aaf2c91754",
-                "bfd39d09fd0f5f922ba5cd1a6d86cb86b928e31bcf1746cb763f5632af13c068",
+                40511180,
+                "bd863d04d950390b745dd4414ea8c8be715cb5c21b492d3c0d71504f64fca978",
+                "f953540b126b220352bb66991e9f8d1c29cf18054f4c75f17e49a7d73fb17e19",
+                "cli-proxy-api",
             ),
             (
                 "darwin-x64",
                 "darwin-x64",
-                41928346,
-                "6cdc647a2bb0ccc8d179f290cb1f90da28ef3d02e7c2d6aa96f5903760a78328",
-                "dc1339f5a5a50d7b8254c1b1662177beb9a597aab04ba647ee9b6f555de1b87d",
+                42973748,
+                "eda0092a9d1afecf8471fc95e4c077825a3db8059df7caa6a06816a2a8a438eb",
+                "f279440f5689b15f322bb9c4116fcf8434d0b48bfcac2c2f2e089557e6f59f36",
+                "cli-proxy-api",
             ),
             (
                 "linux-x64",
                 "linux-amd64",
-                39894112,
-                "88e0843bb5eaecb2748ff7fc5c4d61d301927ccd0aec7b35b1e20efc551957e9",
-                "8c500c984e056a2b191c8a3a2780062ca447659244d7b62b9544c5a4af29b0de",
+                40932246,
+                "e72351f5280f943233c9ddc8ab9f51556f57e9f95d68bf13a15b141a95e48b65",
+                "fa7fa7cd0289a4912587764c535adcd06a41fe1fb0dc92193925883bbfe8b3a1",
+                "cli-proxy-api",
             ),
             (
                 "linux-arm64",
                 "linux-arm64",
-                36618378,
-                "a289bbc2d409e5a54a2f65c9d331f7e968b0f18fba2f3b56477a30a2a3c08c3a",
-                "9ddb102bbd6b80c2651e5eb2939840142efb8068e802521ae0c1eac3877a84b9",
+                37548183,
+                "ca06e508c654d6c8cfc5af44341eeac339e0a033d217a480c44043b8e8c81ebc",
+                "5a514166e95e35b53a846030ab3cb4af5a1c52c06df2c3db8c764adde1bc6178",
+                "cli-proxy-api",
+            ),
+            (
+                "win32-x64",
+                "windows-amd64",
+                41444644,
+                "7d138744b44a7ee103f15d065712f97798db0259cdafce2a93819b4135b69006",
+                "c265136d64bc6fdb7a4737e28333ff58ed995407d50b0581857e6693a2952a32",
+                "cli-proxy-api.exe",
+            ),
+            (
+                "win32-arm64",
+                "windows-arm64",
+                37803078,
+                "969997f1dbe169c83e227def75ca51e105aafb9f3d30bb3bb615685fc289b525",
+                "0ba1b87a3c562f5121f2902507e6608713237a3daafa229bca5b4829b29c29ec",
+                "cli-proxy-api.exe",
             ),
     ],
 )
@@ -1462,6 +1482,7 @@ def test_engine_installer_selects_verified_packaged_asset(
     size_bytes: int,
     archive_sha256: str,
     binary_sha256: str,
+    bin_path: str,
 ) -> None:
     monkeypatch.setattr(managed_runtime, "runtime_platform_tag", lambda: host_platform)
     manager = EngineRuntimeManager(runtime_dir=tmp_path / host_platform, offline=True)
@@ -1475,6 +1496,7 @@ def test_engine_installer_selects_verified_packaged_asset(
     assert archive.size == size_bytes
     assert archive.sha256 == archive_sha256
     assert archive.binary_sha256 == binary_sha256
+    assert archive.bin_path == bin_path
 
 
 def test_engine_platform_identity_is_normalized_locally() -> None:
