@@ -340,18 +340,22 @@ def record_skill_observation_sync(
 def computer_use_sync(
     *,
     caller_session_id: str,
-    caller_turn_id: str,
     tool: str,
     arguments: dict[str, Any],
     socket_path: Optional[Path] = None,
-    timeout: float = 180.0,
+    timeout: float | None = None,
 ) -> dict[str, Any]:
-    """Run one Controller-owned Computer Use request for the caller's active Turn."""
+    """Run one Controller-owned Computer Use request for the caller's active Turn.
+
+    The Controller owns the active-Turn check. Once IPC connects, a transport
+    failure is acceptance-ambiguous because the driver operation may already
+    have completed, so callers receive the same observe-before-retry error as
+    a response timeout.
+    """
 
     endpoint = _resolve_endpoint(socket_path)
     payload = {
         "caller_session_id": caller_session_id,
-        "caller_turn_id": caller_turn_id,
         "tool": tool,
         "arguments": arguments,
     }
@@ -368,7 +372,13 @@ def computer_use_sync(
     except _SOCKET_CONNECT_ERRORS as exc:
         raise InternalServerUnavailable(str(exc)) from exc
     except httpx.TimeoutException as exc:
-        raise InternalServerTimeout(str(exc)) from exc
+        raise InternalServerTimeout(
+            f"Computer Use request may have completed; observe again before retrying: {exc}"
+        ) from exc
+    except httpx.TransportError as exc:
+        raise InternalServerTimeout(
+            f"Computer Use request may have completed; observe again before retrying: {exc}"
+        ) from exc
     if not isinstance(body, dict):
         raise InternalServerUnavailable("computer-use endpoint returned invalid JSON")
     return {"status_code": response.status_code, "body": body}

@@ -1227,42 +1227,25 @@ def test_session_handler_disallows_remote_unsafe_claude_tools(monkeypatch, tmp_p
     assert captured["options"].disallowed_tools == expected
 
 
-def test_claude_bash_hook_injects_the_active_computer_turn_capability(
+def test_claude_bash_hook_does_not_inject_a_turn_capability(
     tmp_path: Path,
 ) -> None:
     controller = _Controller(tmp_path)
     handler = SessionHandler(controller)
 
     async def exercise() -> dict[str, Any]:
-        task = asyncio.create_task(asyncio.sleep(60))
-        controller.session_turns = SimpleNamespace(
-            in_flight={
-                "ses-cli": SimpleNamespace(
-                    task=task,
-                    logical_turn_id="turn-1",
-                    computer_use_retired=False,
-                )
-            }
+        return await handler._guard_session_only_background_tools(
+            {
+                "tool_name": "Bash",
+                "tool_input": {"command": "vibe computer observe apps"},
+            },
+            None,
+            None,
         )
-        try:
-            return await handler._guard_session_only_background_tools(
-                {
-                    "tool_name": "Bash",
-                    "tool_input": {"command": "vibe computer observe apps"},
-                },
-                None,
-                None,
-                caller_session_id="ses-cli",
-            )
-        finally:
-            task.cancel()
-            with pytest.raises(asyncio.CancelledError):
-                await task
 
     result = asyncio.run(exercise())
-    updated = result["hookSpecificOutput"]["updatedInput"]["command"]
-    assert "export AVIBE_TURN_ID=turn-1" in updated
-    assert updated.endswith("vibe computer observe apps")
+    assert "updatedInput" not in result.get("hookSpecificOutput", {})
+    assert "AVIBE_TURN_ID" not in repr(result)
 
 
 def test_session_handler_ensures_agent_session_id_before_prompt(

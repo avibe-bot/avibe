@@ -245,7 +245,7 @@ class DesktopLeaseManager:
                 if previous.holder:
                     raise ComputerServerError(
                         "desktop_busy",
-                        f"Desktop computer use is held by session {previous.holder!r}.",
+                        "Desktop computer use is held by another Avibe Session.",
                     )
             if valid and previous.holder == session:
                 epoch = previous.epoch
@@ -301,6 +301,29 @@ class DesktopLeaseManager:
                 or current.epoch != lease.epoch
                 or current.daemon_key != lease.daemon_key
             ):
+                return
+            self._write(
+                Lease(
+                    holder="",
+                    refreshed_at=self._now(),
+                    epoch=current.epoch,
+                    daemon_instance_id=current.daemon_instance_id,
+                    daemon_generation=current.daemon_generation,
+                )
+            )
+
+        self._under_lock(operation)
+
+    def release_holder(self, holder: str) -> None:
+        """Release a current holder during explicit Avibe Session retirement."""
+
+        normalized = str(holder or "").strip()
+        if not normalized:
+            return
+
+        def operation() -> None:
+            current = self._read()
+            if current is None or current.holder != normalized:
                 return
             self._write(
                 Lease(
@@ -1097,6 +1120,8 @@ class ComputerUseServer:
                             self._lease_manager.release,
                             lease,
                         )
+                        self._sessions.pop(session, None)
+                        self._session_locks.pop(session, None)
                     return result
                 except _LeaseLost:
                     if upstream is not None:
@@ -1207,6 +1232,26 @@ class ComputerUseServer:
         if session_state is None or session_state.active_proxy_serial is None:
             return {"isError": False, "content": []}
         return await self.call_tool("end_session", {"session": normalized})
+
+    async def retire_session(self, session: str) -> dict[str, Any]:
+        """Release all Controller-owned Computer Use state for an archived Session."""
+
+        normalized = str(session or "").strip()
+        if not normalized:
+            return _error_result(
+                "session_required",
+                "Every computer-use call requires the current Avibe session id.",
+            )
+
+        result = await self.end_session_if_active(normalized)
+        lock = self._session_locks.get(normalized)
+        if lock is not None:
+            async with lock:
+                self._sessions.pop(normalized, None)
+                if self._session_locks.get(normalized) is lock:
+                    self._session_locks.pop(normalized, None)
+        await asyncio.to_thread(self._lease_manager.release_holder, normalized)
+        return result
 
     async def handle(self, message: Mapping[str, Any]) -> dict[str, Any] | None:
         request_id = message.get("id")

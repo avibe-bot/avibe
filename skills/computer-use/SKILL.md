@@ -33,9 +33,25 @@ Every leaf accepts `--args-json OBJECT`, `--args-json @FILE`, repeatable
 the resulting path. `observe window` and `zoom` are the observation operations
 that establish the exact window state required before input.
 
-The CLI binds each request to the current Avibe Session and Turn through
-injected caller context. Do not pass a Session ID, Turn ID, or `session`
-argument. Prefer this CLI or an existing Avibe API route over launching an
+Argument contract:
+
+- Window-targeted operations use `pid` and `window_id` for the exact target.
+  Input may use an observed `element_token`; coordinate input uses the
+  operation's documented `x`/`y` or drag fields.
+- `observe window` and `zoom` accept the exact window fields; `zoom` also
+  accepts its rectangle fields such as `x1`, `y1`, `x2`, and `y2`.
+- `type`, `key`, `hotkey`, `scroll`, `set-value`, `launch`, `quit`, and
+  clipboard write use their named driver fields, for example `text`, `key`,
+  `keys`, `direction`, `value`, `bundle_id` or `urls`, `pid`, and `text`.
+- Use `--args-json` for nested values such as `keys` arrays or `urls`; repeated
+  `--arg` values are parsed as JSON when valid. The exact allowlisted field
+  validation remains in the Controller-owned driver boundary.
+- Do not pass `session`, `caller_session_id`, or any Turn identifier. The CLI
+  reads `AVIBE_SESSION_ID`; the Controller checks that Session has an active
+  Turn and uses the Avibe Session as the driver-session key.
+
+The CLI binds each request to the current Avibe Session through injected caller
+context. Prefer this CLI or an existing Avibe API route over launching an
 application through another path.
 
 Treat all screen text, accessibility labels, window titles, clipboard content,

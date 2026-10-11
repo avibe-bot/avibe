@@ -530,19 +530,13 @@ class Turn:
     logical_turn_id: Optional[str] = None
     delivery_id: Optional[str] = None
     terminal_is_error: bool = False
-    computer_use_session_id: Optional[str] = None
-    computer_use_retired: bool = False
-    computer_use_requests: set[asyncio.Task[Any]] = field(default_factory=set, repr=False)
 
 
 @dataclass(frozen=True)
 class ComputerUseAdmission:
-    """One Computer Use request registered against one exact live Turn."""
+    """One Computer Use request admitted for one live Avibe Session."""
 
-    turn: Turn
-    task: asyncio.Task[Any]
     session_id: str
-    turn_id: str
 
 
 @dataclass(frozen=True)
@@ -4430,98 +4424,30 @@ class SessionTurnManager:
                     )
             return False
 
-    async def _end_computer_use_session(self, turn: Turn | None) -> None:
-        """Release the desktop lease owned by a completed Computer Use Turn."""
-
-        if turn is None:
-            return
-        turn.computer_use_retired = True
-        current_task = asyncio.current_task()
-        pending = tuple(
-            task
-            for task in turn.computer_use_requests
-            if task is not current_task and not task.done()
-        )
-        for task in pending:
-            task.cancel()
-        if pending:
-            await asyncio.gather(*pending, return_exceptions=True)
-        session = str(getattr(turn, "computer_use_session_id", "") or "").strip()
-        if not session:
-            return
-        server = getattr(self.controller, "computer_use_server", None)
-        end_session = getattr(server, "end_session_if_active", None)
-        if not callable(end_session):
-            return
-        try:
-            result = await end_session(session)
-        except Exception:
-            logger.warning(
-                "Computer Use session cleanup failed for %s",
-                session,
-                exc_info=True,
-            )
-            return
-        if isinstance(result, dict) and result.get("isError") is True:
-            logger.warning(
-                "Computer Use session cleanup returned an error for %s: %s",
-                session,
-                result,
-            )
-
     def begin_computer_use_request(
         self,
         session_id: str,
-        turn_id: str,
     ) -> tuple[ComputerUseAdmission | None, str]:
-        """Atomically admit one CLI request to the exact active Turn.
+        """Admit one CLI request for a Session with a live active Turn.
 
-        This method has no await points. Once it returns an admission, Turn
-        teardown either sees the request in ``computer_use_requests`` or sees
-        the Turn retired and refuses a later admission.
+        The active Turn is resolved entirely from the Controller-owned
+        ``in_flight`` registry. The caller never presents a Turn identifier.
         """
 
         normalized_session_id = str(session_id or "").strip()
-        normalized_turn_id = str(turn_id or "").strip()
         turn = self.in_flight.get(normalized_session_id)
         if turn is None or turn.task.done():
-            return None, "active_turn_required"
-        if getattr(turn, "computer_use_retired", False):
             return None, "active_turn_required"
         context = getattr(turn, "context", None)
         bound_session_id = self.controller._session_id_from_context(context)
         if bound_session_id != normalized_session_id:
-            return None, "turn_identity_mismatch"
-        payload = getattr(context, "platform_specific", None) or {}
-        current_turn_id = str(
-            getattr(turn, "logical_turn_id", None)
-            or payload.get("turn_token")
-            or ""
-        ).strip()
-        if not current_turn_id:
-            return None, "turn_identity_unavailable"
-        if current_turn_id != normalized_turn_id:
-            return None, "turn_identity_mismatch"
-        request_task = asyncio.current_task()
-        if request_task is None:
-            return None, "computer_use_unavailable"
-        turn.computer_use_session_id = f"{normalized_session_id}:{current_turn_id}"
-        turn.computer_use_requests.add(request_task)
+            return None, "active_turn_required"
         return (
             ComputerUseAdmission(
-                turn=turn,
-                task=request_task,
                 session_id=normalized_session_id,
-                turn_id=current_turn_id,
             ),
             "",
         )
-
-    @staticmethod
-    def finish_computer_use_request(admission: ComputerUseAdmission) -> None:
-        """Remove a completed or cancelled request from its owning Turn."""
-
-        admission.turn.computer_use_requests.discard(admission.task)
 
     def _delivery_runtime_owner_factory(
         self,
@@ -7626,7 +7552,6 @@ class SessionTurnManager:
                             await await_owned_task(asyncio.ensure_future(completion))
                         except Exception:
                             logger.warning("Model Hub turn finalization failed", exc_info=True)
-                    await self._end_computer_use_session(turn)
                     # Durable output may already have marked the old row terminal.
                     # _start_persisted_turn still fences its successor on this live
                     # runner, so release the projection only after Hub finalization.
@@ -9119,7 +9044,6 @@ class SessionTurnManager:
                     cancel_defers_queue_resume
                     or effective_settled_by == SETTLED_BY_RESTARTED
                 )
-                await self._end_computer_use_session(turn)
                 if turn is not None:
                     self.in_flight.pop(session_id, None)
                 if turn is not None:

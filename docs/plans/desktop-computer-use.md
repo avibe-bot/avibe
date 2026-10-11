@@ -4,7 +4,7 @@
 
 - Owner: Avibe core
 - Date: 2026-10-01 (Phase 0 findings through 2026-10-03)
-- Stage: plan, Phase 0 spike done on macOS; the Windows run of Q6 is open
+- Stage: Slice 1 implementation in PR #2442; Route A is already on master
 - Upstream: [trycua/cua](https://github.com/trycua/cua) `libs/cua-driver`,
   release `cua-driver-rs-v0.31.0` (2026-09-30), MIT
 - Companion docs: `desktop-tray-lifecycle.md` (native toggle pattern),
@@ -23,12 +23,13 @@ Slice 1 delivers the user-facing path that replaced the earlier backend MCP
 proposal:
 
 - `vibe computer` covers the allowlisted observe, zoom, input, clipboard,
-  launch, and quit operations. Each request enters Controller IPC with the
-  caller's injected Avibe Session and exact Turn capability. The Controller
-  rejects stale or mismatched Turn identities, registers each admitted request
-  with the live Turn, and retires in-flight requests before releasing that
-  Turn's desktop lease. The existing `ComputerUseServer` checks still run with
-  the Turn-scoped lease identity.
+  launch, and quit operations. Each request enters Controller IPC with only
+  the caller's injected Avibe Session. The Controller checks its own live
+  active-Turn registry before admission; no Turn identifier is accepted as a
+  client-presented capability. The existing `ComputerUseServer` checks still
+  run with the Session-keyed driver state and per-call desktop lease. Driver
+  state is reused across Turns and retired when the Session is explicitly
+  ended or archived.
 - A built-in managed `computer-use` Skill is loaded on demand. It contains the
   CLI contract, untrusted-screen guidance, observe-before-input and
   observe-before-retry rules, and the required unavailable-state handling.
@@ -52,7 +53,28 @@ without closing a demonstrated shell-owned gap.
 
 The earlier MCP injection sections below remain as implementation history for
 Route A and its safety review. They do not describe the current Slice 1
-backend contract.
+backend contract. There is no compatibility layer for released backend MCP
+configuration: the CLI plus on-demand Skill is the only shipped backend path.
+
+### Slice 1 validation and gate
+
+The implementation must be validated through the real CLI → local IPC →
+Controller → `ComputerUseServer` path, with focused coverage for:
+
+- caller environment projection, server-side active-Turn admission, Session-keyed
+  driver reuse, explicit-end/archive retirement, and orphan-lease release;
+- the no-ID `desktop_busy` response, screenshot output handling, observation
+  rendering, and post-connect transport failures that may have completed a
+  mutation;
+- on-demand Skill loading, Claude hook identity, removal of `avibe_computer`
+  configuration and prompt injection for Claude, Codex, and OpenCode, and the
+  Workbench status line for Vibey and non-MCP backends.
+
+Route B, live GUI/TCC operation, and self-drawn-app, QQ, or WeChat verification
+are explicit non-goals. Those are the owner-gated Slice 2 manual gate and must
+start from a mergeable Slice 1 head; this plan does not authorize launching
+apps, touching TCC, using credentials, restarting Runtime, or performing live
+acceptance.
 
 ## Route A: raw single-click selector (2026-10-10)
 

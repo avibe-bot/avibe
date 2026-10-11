@@ -646,24 +646,21 @@ def create_app(
     async def _computer_use(request: Request) -> Any:
         """Run one allowlisted Computer Use tool for the caller's active Turn.
 
-        The CLI supplies its caller Session and Turn capability from Avibe's
-        injected environment. The controller validates both against the live
-        Turn, so callers cannot choose a different Session or reuse a stale
-        Turn from the command line.
+        The CLI supplies only its injected Avibe Session identity. The
+        Controller checks its own live Turn registry, so no Turn identifier is
+        accepted as a client-presented capability.
         """
 
         from core.computer_cli import COMPUTER_CLI_TOOLS
 
         payload = await _safe_json(request)
         caller_session_id = payload.get("caller_session_id")
-        caller_turn_id = payload.get("caller_turn_id")
         tool = payload.get("tool")
         arguments = payload.get("arguments")
         if (
             not isinstance(caller_session_id, str)
             or not caller_session_id.strip()
-            or not isinstance(caller_turn_id, str)
-            or not caller_turn_id.strip()
+            or "caller_turn_id" in payload
             or not isinstance(tool, str)
             or tool not in set(COMPUTER_CLI_TOOLS.values())
             or not isinstance(arguments, dict)
@@ -673,30 +670,24 @@ def create_app(
                 content={
                     "ok": False,
                     "error": "invalid_computer_use_request",
-                    "message": "Computer Use requires a caller Turn, allowlisted tool, and object arguments.",
+                    "message": "Computer Use requires a caller Session, allowlisted tool, and object arguments; Turn IDs are not accepted.",
                 },
             )
         caller_session_id = caller_session_id.strip()
-        caller_turn_id = caller_turn_id.strip()
         if "session" in arguments:
             return JSONResponse(
                 status_code=400,
                 content={
                     "ok": False,
                     "error": "session_argument_forbidden",
-                    "message": "The Computer Use session is bound to the active Avibe Turn.",
+                    "message": "The Computer Use session is bound to the caller's Avibe Session.",
                 },
             )
 
-        admission, admission_error = manager.begin_computer_use_request(
-            caller_session_id,
-            caller_turn_id,
-        )
+        admission, admission_error = manager.begin_computer_use_request(caller_session_id)
         if admission is None:
             messages = {
                 "active_turn_required": "Computer Use is available only from the caller's active Avibe Turn.",
-                "turn_identity_mismatch": "The Computer Use caller Turn does not match the active Avibe Turn.",
-                "turn_identity_unavailable": "The active Turn has no stable identity.",
                 "computer_use_unavailable": "Computer Use is unavailable in this request context.",
             }
             return JSONResponse(
@@ -708,43 +699,38 @@ def create_app(
                     "session_id": caller_session_id,
                 },
             )
-        turn_id = admission.turn_id
 
-        try:
-            computer_server = getattr(controller, "computer_use_server", None)
-            if computer_server is None:
-                from core.computer_server import ComputerUseServer
+        computer_server = getattr(controller, "computer_use_server", None)
+        if computer_server is None:
+            from core.computer_server import ComputerUseServer
 
-                try:
-                    computer_server = ComputerUseServer()
-                except Exception:
-                    logger.exception("Computer Use server initialization failed")
-                    return JSONResponse(
-                        status_code=503,
-                        content={
-                            "ok": False,
-                            "error": "computer_use_unavailable",
-                            "message": "Computer Use could not initialize.",
-                        },
-                    )
-                controller.computer_use_server = computer_server
+            try:
+                computer_server = ComputerUseServer()
+            except Exception:
+                logger.exception("Computer Use server initialization failed")
+                return JSONResponse(
+                    status_code=503,
+                    content={
+                        "ok": False,
+                        "error": "computer_use_unavailable",
+                        "message": "Computer Use could not initialize.",
+                    },
+                )
+            controller.computer_use_server = computer_server
 
-            result = await computer_server.call_tool(
-                tool,
-                {
-                    **arguments,
-                    "session": admission.turn.computer_use_session_id,
-                },
-            )
-            return {
-                "ok": result.get("isError") is not True,
-                "tool": tool,
-                "session_id": caller_session_id,
-                "turn_id": turn_id,
-                "result": result,
-            }
-        finally:
-            manager.finish_computer_use_request(admission)
+        result = await computer_server.call_tool(
+            tool,
+            {
+                **arguments,
+                "session": admission.session_id,
+            },
+        )
+        return {
+            "ok": result.get("isError") is not True,
+            "tool": tool,
+            "session_id": caller_session_id,
+            "result": result,
+        }
 
     @app.post("/internal/show-access/settings-read")
     async def _show_access_settings_read(request: Request) -> Any:

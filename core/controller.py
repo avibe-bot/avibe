@@ -1565,6 +1565,26 @@ class Controller:
         if raw_session_id == WORKSPACE_NOTICE_SESSION_ID:
             raise workbench_sessions_service.ReservedSessionError(raw_session_id)
 
+        async def retire_computer_use_session() -> None:
+            computer_server = getattr(self, "computer_use_server", None)
+            retire_session = getattr(computer_server, "retire_session", None)
+            if not callable(retire_session):
+                return
+            try:
+                cleanup = await retire_session(raw_session_id)
+                if isinstance(cleanup, dict) and cleanup.get("isError") is True:
+                    logger.warning(
+                        "Computer Use session retirement returned an error for %s: %s",
+                        raw_session_id,
+                        cleanup,
+                    )
+            except Exception:
+                logger.warning(
+                    "Computer Use session retirement failed for %s",
+                    raw_session_id,
+                    exc_info=True,
+                )
+
         def read_session() -> dict[str, Any]:
             engine = create_sqlite_engine()
             try:
@@ -1578,6 +1598,7 @@ class Controller:
 
         existing = await asyncio.to_thread(read_session)
         if existing.get("status") == "archived":
+            await retire_computer_use_session()
             return existing
 
         def archive_session() -> dict[str, Any]:
@@ -1597,12 +1618,16 @@ class Controller:
         turn_manager = getattr(self, "session_turns", None)
         turn_lifecycle = getattr(turn_manager, "run_session_lifecycle", None)
         if callable(turn_lifecycle):
-            return await turn_lifecycle(
+            result = await turn_lifecycle(
                 raw_session_id,
                 archive_operation,
                 deadline_seconds=deadline_seconds,
             )
-        return await archive_operation()
+        else:
+            result = await archive_operation()
+
+        await retire_computer_use_session()
+        return result
 
 
     def update_thread_message_id(self, context: MessageContext) -> None:

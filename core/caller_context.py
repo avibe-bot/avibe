@@ -9,7 +9,6 @@ from typing import Any, Mapping, Optional
 
 AVIBE_SESSION_ID_ENV = "AVIBE_SESSION_ID"
 AVIBE_RUN_ID_ENV = "AVIBE_RUN_ID"
-AVIBE_TURN_ID_ENV = "AVIBE_TURN_ID"
 AVIBE_CALLER_SOURCE_ENV = "AVIBE_CALLER_SOURCE"
 AVIBE_CALLER_BACKEND_ENV = "AVIBE_CALLER_BACKEND"
 AVIBE_NATIVE_SESSION_ID_ENV = "AVIBE_NATIVE_SESSION_ID"
@@ -30,7 +29,6 @@ CALLER_CONTEXT_ENV_NAMES = frozenset(
     {
         AVIBE_SESSION_ID_ENV,
         AVIBE_RUN_ID_ENV,
-        AVIBE_TURN_ID_ENV,
         AVIBE_CALLER_SOURCE_ENV,
         AVIBE_CALLER_BACKEND_ENV,
         AVIBE_NATIVE_SESSION_ID_ENV,
@@ -96,8 +94,8 @@ class CallerContext:
         per session and its environment cannot be refreshed afterwards — the per-message
         fields are not merely useless, they are dangerous:
 
-        * ``turn_id`` changes on every Turn and must be injected at each command
-          boundary instead of becoming a Session credential;
+        * ``turn_id`` changes on every Turn and is kept in the in-process context
+          only; it is never exported as a subprocess credential;
         * ``message_id`` changes on every message, so keeping it in the comparison that
           decides whether a cached client is still valid would tear down and respawn the
           Agent on EVERY turn;
@@ -130,8 +128,6 @@ class CallerContext:
         env = {AVIBE_SESSION_ID_ENV: self.session_id}
         if self.run_id:
             env[AVIBE_RUN_ID_ENV] = self.run_id
-        if self.turn_id:
-            env[AVIBE_TURN_ID_ENV] = self.turn_id
         if self.source:
             env[AVIBE_CALLER_SOURCE_ENV] = self.source
         if self.backend:
@@ -455,7 +451,6 @@ def caller_context_from_env(env: Mapping[str, str] | None = None) -> Optional[Ca
     return CallerContext(
         session_id=session_id,
         run_id=_clean(source.get(AVIBE_RUN_ID_ENV)) or None,
-        turn_id=_clean(source.get(AVIBE_TURN_ID_ENV)) or None,
         source=_clean(source.get(AVIBE_CALLER_SOURCE_ENV)) or None,
         backend=_clean(source.get(AVIBE_CALLER_BACKEND_ENV)) or None,
         native_session_id=_clean(source.get(AVIBE_NATIVE_SESSION_ID_ENV)) or None,

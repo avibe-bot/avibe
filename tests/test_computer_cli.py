@@ -22,7 +22,7 @@ from core.computer_cli import (
 )
 from modules.im import MessageContext
 from vibe import cli
-from vibe.internal_client import computer_use_sync
+from vibe.internal_client import InternalServerTimeout, computer_use_sync
 from vibe.i18n import t as i18n_t
 
 
@@ -154,7 +154,6 @@ def test_cmd_computer_binds_the_caller_session_and_prints_structured_result(
     capsys,
 ) -> None:
     monkeypatch.setenv("AVIBE_SESSION_ID", "ses-cli")
-    monkeypatch.setenv("AVIBE_TURN_ID", "turn-1")
     captured: dict = {}
 
     def fake_computer_use_sync(**kwargs):
@@ -165,7 +164,6 @@ def test_cmd_computer_binds_the_caller_session_and_prints_structured_result(
                 "ok": True,
                 "tool": "list_apps",
                 "session_id": "ses-cli",
-                "turn_id": "turn-1",
                 "result": _structured({"apps": [{"pid": 7, "name": "Fixture"}]}),
             },
         }
@@ -176,7 +174,6 @@ def test_cmd_computer_binds_the_caller_session_and_prints_structured_result(
 
     assert captured == {
         "caller_session_id": "ses-cli",
-        "caller_turn_id": "turn-1",
         "tool": "list_apps",
         "arguments": {},
     }
@@ -191,7 +188,6 @@ def test_cmd_computer_reports_driver_error_before_writing_screenshot(
     tmp_path: Path,
 ) -> None:
     monkeypatch.setenv("AVIBE_SESSION_ID", "ses-cli")
-    monkeypatch.setenv("AVIBE_TURN_ID", "turn-1")
 
     def fake_computer_use_sync(**kwargs):
         assert kwargs["arguments"]["screenshot_out_file"] == str(
@@ -268,7 +264,6 @@ def test_internal_client_forwards_the_caller_identity_and_never_adds_a_session_a
             ):
                 result = computer_use_sync(
                     caller_session_id="ses-cli",
-                    caller_turn_id="turn-1",
                     tool="click",
                     arguments={"pid": 7, "window_id": 9},
                     socket_path=socket_path,
@@ -279,25 +274,49 @@ def test_internal_client_forwards_the_caller_identity_and_never_adds_a_session_a
     assert result["body"]["ok"] is True
     assert captured == {
         "caller_session_id": "ses-cli",
-        "caller_turn_id": "turn-1",
         "tool": "click",
         "arguments": {"pid": 7, "window_id": 9},
     }
 
 
-def test_internal_route_binds_computer_use_to_the_active_turn() -> None:
-    async def exercise() -> tuple[dict, dict, dict, str, list[str]]:
+def test_internal_client_treats_post_connect_transport_failure_as_ambiguous() -> None:
+    with tempfile.TemporaryDirectory(prefix="avibe-uds-", dir="/tmp") as directory:
+        socket_path = Path(directory) / "dispatch.sock"
+        listener = _bind_socket(socket_path)
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            raise httpx.ReadError(
+                "connection closed after the request",
+                request=request,
+            )
+
+        try:
+            with patch(
+                "vibe.internal_client.httpx.HTTPTransport",
+                return_value=httpx.MockTransport(handler),
+            ):
+                with pytest.raises(
+                    InternalServerTimeout,
+                    match="may have completed; observe again before retrying",
+                ):
+                    computer_use_sync(
+                        caller_session_id="ses-cli",
+                        tool="click",
+                        arguments={"pid": 7, "window_id": 9},
+                        socket_path=socket_path,
+                    )
+        finally:
+            listener.close()
+
+
+def test_internal_route_binds_computer_use_to_the_active_session() -> None:
+    async def exercise() -> tuple[dict, dict, dict, dict, list[tuple[str, dict]]]:
         calls: list[tuple[str, dict]] = []
-        ended: list[str] = []
 
         class ComputerServer:
             async def call_tool(self, name: str, arguments: dict) -> dict:
                 calls.append((name, arguments))
                 return _structured({"windows": []})
-
-            async def end_session_if_active(self, session: str) -> dict:
-                ended.append(session)
-                return {"isError": False, "content": []}
 
         controller = SimpleNamespace(
             computer_use_server=ComputerServer(),
@@ -322,7 +341,6 @@ def test_internal_route_binds_computer_use_to_the_active_turn() -> None:
                     "/internal/computer-use",
                     json={
                         "caller_session_id": "ses-cli",
-                        "caller_turn_id": "turn-1",
                         "tool": "list_windows",
                         "arguments": {"on_screen_only": True},
                     },
@@ -331,46 +349,53 @@ def test_internal_route_binds_computer_use_to_the_active_turn() -> None:
                     "/internal/computer-use",
                     json={
                         "caller_session_id": "ses-cli",
-                        "caller_turn_id": "turn-1",
                         "tool": "list_windows",
                         "arguments": {"session": "manual"},
+                    },
+                )
+                turn_capability = await client.post(
+                    "/internal/computer-use",
+                    json={
+                        "caller_session_id": "ses-cli",
+                        "caller_turn_id": "stale-turn",
+                        "tool": "list_windows",
+                        "arguments": {},
                     },
                 )
                 mismatch = await client.post(
                     "/internal/computer-use",
                     json={
                         "caller_session_id": "other-session",
-                        "caller_turn_id": "turn-1",
                         "tool": "list_windows",
                         "arguments": {},
                     },
                 )
-            turn = controller.session_turns.in_flight["ses-cli"]
-            await controller.session_turns._end_computer_use_session(turn)
             return (
                 success.json(),
                 forbidden.json(),
+                turn_capability.json(),
                 mismatch.json(),
-                turn.computer_use_session_id,
-                ended,
+                calls,
             )
         finally:
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await task
 
-    success, forbidden, mismatch, computer_session, ended = asyncio.run(exercise())
+    success, forbidden, turn_capability, mismatch, calls = asyncio.run(exercise())
 
     assert success["ok"] is True
     assert success["session_id"] == "ses-cli"
-    assert success["turn_id"] == "turn-1"
-    assert computer_session == "ses-cli:turn-1"
-    assert ended == ["ses-cli:turn-1"]
+    assert success.get("turn_id") is None
+    assert calls == [
+        ("list_windows", {"on_screen_only": True, "session": "ses-cli"}),
+    ]
     assert forbidden["error"] == "session_argument_forbidden"
+    assert turn_capability["error"] == "invalid_computer_use_request"
     assert mismatch["error"] == "active_turn_required"
 
 
-def test_internal_route_rejects_a_stale_turn_capability() -> None:
+def test_internal_route_requires_a_server_side_active_turn() -> None:
     async def exercise() -> tuple[dict, list[tuple[str, dict]]]:
         calls: list[tuple[str, dict]] = []
 
@@ -387,57 +412,35 @@ def test_internal_route_rejects_a_stale_turn_capability() -> None:
             ),
         )
         app = internal_server.create_app(controller)
-        task = asyncio.create_task(asyncio.sleep(60))
-        context = MessageContext(
-            user_id="user",
-            channel_id="channel",
-            platform="avibe",
-            platform_specific={"agent_session_id": "ses-cli", "turn_token": "turn-current"},
-        )
-        controller.session_turns.in_flight["ses-cli"] = session_turns.Turn(
-            task=task,
-            context=context,
-            logical_turn_id="turn-current",
-        )
-        try:
-            transport = httpx.ASGITransport(app=app)
-            async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-                response = await client.post(
-                    "/internal/computer-use",
-                    json={
-                        "caller_session_id": "ses-cli",
-                        "caller_turn_id": "turn-stale",
-                        "tool": "list_windows",
-                        "arguments": {},
-                    },
-                )
-            return response.json(), calls
-        finally:
-            task.cancel()
-            with pytest.raises(asyncio.CancelledError):
-                await task
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post(
+                "/internal/computer-use",
+                json={
+                    "caller_session_id": "ses-cli",
+                    "tool": "list_windows",
+                    "arguments": {},
+                },
+            )
+        return response.json(), calls
 
     response, calls = asyncio.run(exercise())
-    assert response["error"] == "turn_identity_mismatch"
+    assert response["error"] == "active_turn_required"
     assert calls == []
 
 
-def test_turn_teardown_retires_and_cancels_inflight_computer_use_request() -> None:
-    async def exercise() -> tuple[list[str], session_turns.Turn]:
+def test_turn_end_does_not_cancel_session_keyed_computer_use_request() -> None:
+    async def exercise() -> tuple[dict, list[tuple[str, dict]]]:
+        calls: list[tuple[str, dict]] = []
         started = asyncio.Event()
-        ended: list[str] = []
         release = asyncio.Event()
 
         class ComputerServer:
             async def call_tool(self, name: str, arguments: dict) -> dict:
-                del name, arguments
+                calls.append((name, arguments))
                 started.set()
                 await release.wait()
                 return _structured({"windows": []})
-
-            async def end_session_if_active(self, session: str) -> dict:
-                ended.append(session)
-                return {"isError": False, "content": []}
 
         controller = SimpleNamespace(
             computer_use_server=ComputerServer(),
@@ -454,12 +457,11 @@ def test_turn_teardown_retires_and_cancels_inflight_computer_use_request() -> No
             platform="avibe",
             platform_specific={"agent_session_id": "ses-cli", "turn_token": "turn-1"},
         )
-        turn = session_turns.Turn(
+        controller.session_turns.in_flight["ses-cli"] = session_turns.Turn(
             task=turn_task,
             context=context,
             logical_turn_id="turn-1",
         )
-        controller.session_turns.in_flight["ses-cli"] = turn
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
             request_task = asyncio.create_task(
@@ -467,22 +469,20 @@ def test_turn_teardown_retires_and_cancels_inflight_computer_use_request() -> No
                     "/internal/computer-use",
                     json={
                         "caller_session_id": "ses-cli",
-                        "caller_turn_id": "turn-1",
                         "tool": "list_windows",
                         "arguments": {},
                     },
                 )
             )
             await started.wait()
-            await controller.session_turns._end_computer_use_session(turn)
-            with pytest.raises(asyncio.CancelledError):
-                await request_task
+            controller.session_turns.in_flight.pop("ses-cli")
+            release.set()
+            response = await request_task
         turn_task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await turn_task
-        return ended, turn
+        return response.json(), calls
 
-    ended, turn = asyncio.run(exercise())
-    assert ended == ["ses-cli:turn-1"]
-    assert turn.computer_use_retired is True
-    assert turn.computer_use_requests == set()
+    response, calls = asyncio.run(exercise())
+    assert response["ok"] is True
+    assert calls == [("list_windows", {"session": "ses-cli"})]

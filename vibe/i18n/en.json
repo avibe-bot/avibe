@@ -831,7 +831,7 @@
     "cli": {
       "help": {
         "command": "Use the local desktop through the active Avibe Agent Turn",
-        "description": "Run an allowlisted Computer Use operation through the Avibe service. The caller Session and active Turn are taken from the Agent environment.",
+        "description": "Run an allowlisted Computer Use operation through the Avibe service. The caller Session is taken from the Agent environment and the service checks that it has an active Turn.",
         "argsJson": "JSON object of driver arguments, or @path to a JSON file.",
         "arg": "Override one driver argument; JSON values are parsed when valid.",
         "output": "Caller-selected screenshot path for 'observe window'.",
@@ -859,13 +859,13 @@
         "cannotReadArgsJson": "Cannot read the --args-json file: {error}",
         "argsJsonObject": "--args-json must contain a JSON object",
         "argNameValue": "--arg values must use name=value",
-        "sessionArgumentForbidden": "The Computer Use session is bound to the current Avibe Turn and cannot be supplied through --args-json or --arg.",
+        "sessionArgumentForbidden": "The Computer Use session is bound to the caller's Avibe Session and cannot be supplied through --args-json or --arg.",
         "outputArgumentConflict": "Use --output or screenshot_out_file in --args-json, not both.",
         "unsupportedCommand": "Unsupported Computer Use command: {command}",
         "screenshotMissing": "{tool} did not return an image that could be written to --output.",
         "outputUnsupported": "--output is supported only by observe window or zoom.",
         "missingCallerSession": "Computer Use requires an Avibe Agent caller Session.",
-        "missingCallerTurn": "Computer Use requires the current Avibe Agent Turn.",
+        "missingCallerTurn": "Computer Use requires the caller's Avibe Session to have an active Turn.",
         "serviceUnavailable": "Avibe service is unavailable: {error}",
         "requestTimedOut": "Computer Use request timed out before the service replied: {error}",
         "invalidResponse": "Computer Use service returned an invalid response.",
@@ -873,8 +873,8 @@
       },
       "hint": {
         "invalidArguments": "Check the command syntax and run `vibe computer --help` for the Computer Use contract.",
-        "missingCallerSession": "Run this command from an Avibe Agent Turn. The command binds to that Turn automatically and has no --session-id option.",
-        "missingCallerTurn": "Run this command from the current Avibe Agent Turn. The Turn identity is injected automatically.",
+        "missingCallerSession": "Run this command from an Avibe Agent Turn. The command binds to its Session automatically and has no --session-id option.",
+        "missingCallerTurn": "Run this command from an active Avibe Agent Turn. The Controller checks the active Turn; do not provide a Turn ID.",
         "serviceUnavailable": "Start the Avibe service before using Computer Use.",
         "requestTimedOut": "Observe again before retrying because the action may have completed."
       },

@@ -204,9 +204,11 @@ If you do not want future records or retained history, disable first, then clear
 ### `vibe computer`
 
 Computer Use is available to an Avibe Agent only from its active Turn. The CLI
-binds the request to the caller's injected Avibe Session and Turn capability;
-the Controller validates both against the live Turn. Callers cannot provide a
-Session ID, Turn ID, or driver `session` value.
+binds the request to the caller's injected Avibe Session; the Controller checks
+that Session against its own live active-Turn registry. Turn IDs are not
+exported to the subprocess, accepted in the IPC request, or used as driver
+authority. Callers cannot provide a Session ID, Turn ID, or driver `session`
+value.
 
 ```bash
 vibe computer observe apps
@@ -237,7 +239,10 @@ existing `require_bind`, observe-first, exact-window, focus-shortcut,
 single-holder lease, desktop state, and driver admission checks remain in the
 same enforcement path. A missing active Turn, `off`, `needs_permission`,
 `needs_runtime`, `starting`, `error`, `unavailable`, or `desktop_busy` result is
-reported to the caller; the CLI does not retry it automatically.
+reported to the caller; the CLI does not retry it automatically. The driver
+session and observation state are keyed by Avibe Session and are retired when
+the Session is explicitly ended or archived, rather than at every Turn
+boundary.
 
 ### `vibe data skill-usage`
 

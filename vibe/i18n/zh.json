@@ -831,7 +831,7 @@
     "cli": {
       "help": {
         "command": "通过当前 Avibe Agent Turn 使用本机桌面",
-        "description": "通过 Avibe 服务执行 allowlist 中的 Computer Use 操作。调用方 Session 和当前 Turn 来自 Agent 环境。",
+        "description": "通过 Avibe 服务执行 allowlist 中的 Computer Use 操作。调用方 Session 来自 Agent 环境，服务端会检查它是否有当前活动 Turn。",
         "argsJson": "Driver 参数 JSON 对象，或使用 @路径读取 JSON 文件。",
         "arg": "覆盖一个 driver 参数；有效 JSON 值会按 JSON 解析。",
         "output": "调用方选择的截图路径，用于“observe window”。",
@@ -859,13 +859,13 @@
         "cannotReadArgsJson": "无法读取 --args-json 文件：{error}",
         "argsJsonObject": "--args-json 必须包含 JSON 对象",
         "argNameValue": "--arg 的值必须使用 name=value 格式",
-        "sessionArgumentForbidden": "Computer Use session 已绑定当前 Avibe Turn，不能通过 --args-json 或 --arg 提供。",
+        "sessionArgumentForbidden": "Computer Use session 已绑定调用方 Avibe Session，不能通过 --args-json 或 --arg 提供。",
         "outputArgumentConflict": "请在 --output 和 --args-json 中的 screenshot_out_file 之间二选一，不能同时提供。",
         "unsupportedCommand": "不支持的 Computer Use 命令：{command}",
         "screenshotMissing": "{tool} 没有返回可写入 --output 的图像。",
         "outputUnsupported": "--output 只支持 observe window 或 zoom。",
         "missingCallerSession": "Computer Use 需要 Avibe Agent 调用方 Session。",
-        "missingCallerTurn": "Computer Use 需要当前 Avibe Agent Turn。",
+        "missingCallerTurn": "Computer Use 要求调用方 Avibe Session 当前有活动 Turn。",
         "serviceUnavailable": "Avibe 服务不可用：{error}",
         "requestTimedOut": "Computer Use 请求在服务响应前超时：{error}",
         "invalidResponse": "Computer Use 服务返回了无效响应。",
@@ -873,8 +873,8 @@
       },
       "hint": {
         "invalidArguments": "请检查命令语法，并运行 `vibe computer --help` 查看 Computer Use 约定。",
-        "missingCallerSession": "请在 Avibe Agent Turn 中运行此命令。命令会自动绑定当前 Turn，不支持 --session-id。",
-        "missingCallerTurn": "请在当前 Avibe Agent Turn 中运行此命令。Turn 身份会自动注入。",
+        "missingCallerSession": "请在 Avibe Agent Turn 中运行此命令。命令会自动绑定当前 Session，不支持 --session-id。",
+        "missingCallerTurn": "请在活动的 Avibe Agent Turn 中运行此命令。Controller 会检查活动 Turn，无需提供 Turn ID。",
         "serviceUnavailable": "请先启动 Avibe 服务，再使用 Computer Use。",
         "requestTimedOut": "重试前请先重新观察，因为刚才的操作可能已经完成。"
       },

@@ -496,6 +496,8 @@ async def test_end_session_if_active_releases_without_starting_unknown_session(
     assert idle["isError"] is False
     assert ended.get("isError") is not True
     assert leases.holder is None
+    assert "ses-a" not in server._sessions
+    assert "ses-a" not in server._session_locks
     names = [params["name"] for _method, params in upstream.calls]
     assert names == ["start_session", "list_apps", "end_session"]
 
@@ -534,12 +536,43 @@ async def test_failed_explicit_end_keeps_session_observations_and_real_lease(
     assert session_state.active_daemon_key == expected_key
     assert session_state.last_epoch == expected_epoch
     assert session_state.observed_windows == expected_observations
-    with pytest.raises(ComputerServerError, match="ses-a"):
+    with pytest.raises(
+        ComputerServerError,
+        match="Desktop computer use is held by another Avibe Session",
+    ):
         leases.acquire(
             "ses-b",
             state.daemon_key,
             lambda: state.daemon_key,
         )
+
+
+@pytest.mark.asyncio
+async def test_retire_session_releases_state_and_an_orphaned_lease(
+    tmp_path: Path,
+) -> None:
+    state_path, state = _state(tmp_path)
+    leases = DesktopLeaseManager(tmp_path)
+    upstream = FakeUpstream()
+    server = ComputerUseServer(
+        state_path=state_path,
+        status_reader=lambda: ComputerUseStatus("ready", None, state),
+        upstream_factory=lambda _state: asyncio.sleep(0, result=upstream),
+        lease_manager=leases,
+    )
+
+    await server.call_tool("list_apps", {"session": "ses-a"})
+    upstream.tool_errors.add("end_session")
+    retired = await server.retire_session("ses-a")
+
+    assert retired["isError"] is True
+    assert "ses-a" not in server._sessions
+    assert "ses-a" not in server._session_locks
+    assert leases.acquire(
+        "ses-b",
+        state.daemon_key,
+        lambda: state.daemon_key,
+    ).lease.holder == "ses-b"
 
 
 @pytest.mark.asyncio
@@ -624,7 +657,10 @@ async def test_failed_explicit_start_does_not_change_committed_epoch(
     assert session_state.active_proxy_serial == expected_proxy
     assert session_state.active_daemon_key == expected_key
     assert session_state.last_epoch == expected_epoch
-    with pytest.raises(ComputerServerError, match="ses-a"):
+    with pytest.raises(
+        ComputerServerError,
+        match="Desktop computer use is held by another Avibe Session",
+    ):
         leases.acquire(
             "ses-b",
             state.daemon_key,
@@ -1124,7 +1160,10 @@ async def test_renewed_lease_survives_observe_first_guard(tmp_path: Path) -> Non
     )
     assert "observe_first" in guarded["content"][0]["text"]
 
-    with pytest.raises(ComputerServerError, match="ses-a"):
+    with pytest.raises(
+        ComputerServerError,
+        match="Desktop computer use is held by another Avibe Session",
+    ):
         leases.acquire(
             "ses-b",
             state.daemon_key,
@@ -1334,7 +1373,10 @@ async def test_readiness_blip_keeps_a_renewed_lease_epoch(
         state.daemon_key,
         lambda: state.daemon_key,
     ).lease.epoch == 1
-    with pytest.raises(ComputerServerError, match="ses-a"):
+    with pytest.raises(
+        ComputerServerError,
+        match="Desktop computer use is held by another Avibe Session",
+    ):
         leases.acquire(
             "ses-b",
             state.daemon_key,
@@ -1422,7 +1464,10 @@ def test_desktop_lease_expires_and_daemon_generation_voids_it(
         ("shell-a", 1),
         lambda: ("shell-a", 1),
     ).lease
-    with pytest.raises(Exception, match="ses-a"):
+    with pytest.raises(
+        ComputerServerError,
+        match="Desktop computer use is held by another Avibe Session",
+    ):
         manager.acquire(
             "ses-b",
             ("shell-a", 1),
@@ -1443,6 +1488,28 @@ def test_desktop_lease_expires_and_daemon_generation_voids_it(
         lambda: ("shell-a", 2),
     ).lease
     assert third.epoch == second.epoch + 1
+
+
+def test_desktop_busy_does_not_disclose_the_current_session(
+    tmp_path: Path,
+) -> None:
+    manager = DesktopLeaseManager(tmp_path)
+    manager.acquire(
+        "secret-session-id",
+        ("shell-a", 1),
+        lambda: ("shell-a", 1),
+    )
+
+    with pytest.raises(ComputerServerError) as raised:
+        manager.acquire(
+            "other-session",
+            ("shell-a", 1),
+            lambda: ("shell-a", 1),
+        )
+
+    assert raised.value.code == "desktop_busy"
+    assert str(raised.value) == "Desktop computer use is held by another Avibe Session."
+    assert "secret-session-id" not in str(raised.value)
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Phase 1 cross-process lease is macOS-only")
@@ -1539,7 +1606,10 @@ async def test_heartbeat_starts_before_proxy_setup_finishes(
     now += 61.0
     await asyncio.sleep(0.03)
 
-    with pytest.raises(ComputerServerError, match="ses-a"):
+    with pytest.raises(
+        ComputerServerError,
+        match="Desktop computer use is held by another Avibe Session",
+    ):
         leases.acquire(
             "ses-b",
             state.daemon_key,

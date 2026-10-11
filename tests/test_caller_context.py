@@ -18,7 +18,6 @@ from core.caller_context import (
     AVIBE_NATIVE_SESSION_ID_ENV,
     AVIBE_RUN_ID_ENV,
     AVIBE_SESSION_ID_ENV,
-    AVIBE_TURN_ID_ENV,
     caller_context_from_env,
     caller_context_from_platform_payload,
     caller_resource_user_context,
@@ -48,7 +47,7 @@ def test_caller_context_from_env_round_trips_metadata_and_env() -> None:
         {
             AVIBE_SESSION_ID_ENV: "ses123",
             AVIBE_RUN_ID_ENV: "run456",
-            AVIBE_TURN_ID_ENV: "turn789",
+            "AVIBE_TURN_ID": "stale-turn-must-be-ignored",
             AVIBE_CALLER_SOURCE_ENV: "agent_run",
             AVIBE_CALLER_BACKEND_ENV: "codex",
             AVIBE_NATIVE_SESSION_ID_ENV: "thread789",
@@ -56,7 +55,7 @@ def test_caller_context_from_env_round_trips_metadata_and_env() -> None:
     )
 
     assert context is not None
-    assert context.turn_id == "turn789"
+    assert context.turn_id is None
     assert context.to_metadata() == {
         "session_id": "ses123",
         "run_id": "run456",
@@ -66,7 +65,7 @@ def test_caller_context_from_env_round_trips_metadata_and_env() -> None:
     }
     caller_env = context.to_env()
     assert caller_env[AVIBE_SESSION_ID_ENV] == "ses123"
-    assert caller_env[AVIBE_TURN_ID_ENV] == "turn789"
+    assert "AVIBE_TURN_ID" not in caller_env
     assert "PATH" not in caller_env
 
 
@@ -95,7 +94,7 @@ def test_caller_context_from_platform_payload_prefers_agent_session_target() -> 
     assert context.to_env()[AVIBE_NATIVE_SESSION_ID_ENV] == "oc-session"
 
 
-def test_caller_context_carries_turn_capability_without_persisting_it_as_origin() -> None:
+def test_caller_context_keeps_turn_identity_in_process_without_exporting_it() -> None:
     context = caller_context_from_platform_payload(
         {
             "agent_session_id": "ses123",
@@ -105,11 +104,11 @@ def test_caller_context_carries_turn_capability_without_persisting_it_as_origin(
 
     assert context is not None
     assert context.turn_id == "turn123"
-    assert context.to_env()[AVIBE_TURN_ID_ENV] == "turn123"
+    assert "AVIBE_TURN_ID" not in context.to_env()
     assert "turn_id" not in context.to_metadata()
     stable = context.session_stable()
     assert stable.turn_id is None
-    assert AVIBE_TURN_ID_ENV not in stable.to_env()
+    assert "AVIBE_TURN_ID" not in stable.to_env()
 
 
 def test_caller_context_from_platform_payload_preserves_callback_source() -> None:
@@ -487,7 +486,6 @@ def test_a_session_scoped_caller_env_drops_only_the_per_turn_origin() -> None:
     assert set(full) - set(scoped) == {
         AVIBE_CALLER_USER_ID_ENV,
         AVIBE_CALLER_MESSAGE_ID_ENV,
-        AVIBE_TURN_ID_ENV,
     }
 
 
