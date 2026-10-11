@@ -83,6 +83,7 @@ from vibe.codex_config import (
     MANAGED_PROVIDER_ID,
     codex_credential_identity,
 )
+from vibe.codex_launch_failure import CodexLaunchError
 from vibe.desktop_backends import desktop_backend_subprocess_environment
 from vibe.i18n import t as i18n_t
 from vibe.message_identity import is_input_turn
@@ -682,18 +683,6 @@ class CodexAgent(BaseAgent):
             binding = await self._acquire_generation(request.working_path, launch, inputs=inputs)
             bindings.append(binding)
             await self._move_session_to(binding.generation, request)
-        except FileNotFoundError:
-            await emit_backend_failure(
-                self.controller,
-                request.context,
-                self.name,
-                "Codex CLI not found",
-                display_text="❌ Codex CLI not found. Please install it or set CODEX_CLI_PATH.",
-                request=request,
-            )
-            await self._remove_ack_reaction(request)
-            self._event_handler._release_stream_turn(request.context)
-            return
         except Exception as e:
             from modules.agents.model_hub import launch_refusal_copy
 
@@ -713,6 +702,12 @@ class CodexAgent(BaseAgent):
                 display_text = (
                     f"❌ {i18n_t('error.agentRuntimeRetired', language, agent=i18n_t('backend.codex', language))}"
                 )
+            elif isinstance(e, CodexLaunchError):
+                # Not a source failure: no Hub cooldown. Every retry fails the
+                # same way until the CLI is repaired, so hold the unwritten
+                # input for an explicit retry after the repair.
+                mark_prewrite_recovery_required(request.context, e.retry_reason)
+                display_text = f"❌ {i18n_t(e.copy_key, language)}"
             elif isinstance(e, CodexModelHubCatalogUnavailableError):
                 await self._record_model_hub_native_failure(request.context, str(e))
                 display_text = f"❌ {i18n_t('modelHub.errors.codex_catalog_unavailable', language)}"
@@ -1610,6 +1605,9 @@ class CodexAgent(BaseAgent):
                 # The export runs in a thread and cannot be cancelled. Its
                 # result must still release its pin after the caller leaves.
                 preparation.add_done_callback(self._discard_model_hub_catalog)
+                raise
+            except CodexLaunchError:
+                # The binary itself cannot start; the turn reports that cause.
                 raise
             except Exception as exc:
                 raise CodexModelHubCatalogUnavailableError(

@@ -66,6 +66,7 @@ capabilities:
       - tests/test_model_hub_routing_modes.py
       - tests/test_model_hub_transport_leases.py
       - tests/test_model_hub_injection.py
+      - tests/test_codex_launch_failure.py
       - tests/test_model_hub_runtime.py
       - tests/test_model_hub_inference_wait.py
       - tests/test_model_hub_retry_advice.py

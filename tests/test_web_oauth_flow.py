@@ -31,6 +31,7 @@ from modules.agents.opencode.message_processor import (
     extract_opencode_response_text,
     is_empty_terminal_opencode_message,
 )
+from vibe.codex_launch_failure import CLI_NOT_FOUND, INSTALL_INCOMPLETE, CodexLaunchError
 from vibe.claude_config import (
     MANAGED_ENV_VALUES,
     clear_claude_oauth_credentials_files,
@@ -1490,17 +1491,26 @@ def test_test_web_auth_rejects_unsupported_backend(service: AgentAuthService) ->
     assert _run(service.test_web_auth("gemini")) == {"ok": False, "error": "unsupported_backend"}
 
 
-def test_test_web_auth_surfaces_cli_not_found(
-    service: AgentAuthService, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    ("failure", "error", "detail"),
+    [
+        (FileNotFoundError("no such cli"), "cli_not_found", "/usr/bin/echo"),
+        # What the app-server transport raises when the CLI cannot start.
+        (CodexLaunchError(CLI_NOT_FOUND), "cli_not_found", "/usr/bin/echo"),
+        (CodexLaunchError(INSTALL_INCOMPLETE), "spawn_failed", "Codex CLI installation is incomplete"),
+    ],
+)
+def test_test_web_auth_surfaces_a_cli_that_cannot_start(
+    service: AgentAuthService, monkeypatch: pytest.MonkeyPatch, failure, error, detail
 ) -> None:
     monkeypatch.setattr(
         service,
         "_run_codex_agent_probe",
-        AsyncMock(side_effect=FileNotFoundError("no such cli")),
+        AsyncMock(side_effect=failure),
     )
     result = _run(service.test_web_auth("codex"))
     assert result["ok"] is False
-    assert result["error"] == "cli_not_found"
+    assert (result["error"], result["detail"]) == (error, detail)
 
 
 def test_claude_probe_timeout_bounds_disconnect_and_reaps_process(

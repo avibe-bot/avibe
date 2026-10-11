@@ -26,6 +26,14 @@ class WatchWorkerProtocolError(ValueError):
         self.code = code
 
 
+class _CommandSpawnError(Exception):
+    """The operating system refused to start the requested command."""
+
+    def __init__(self, error: OSError):
+        super().__init__(str(error))
+        self.os_errno = error.errno if isinstance(error.errno, int) else None
+
+
 def encode_watch_worker_spec(
     *,
     command: list[str],
@@ -39,10 +47,17 @@ def encode_watch_worker_spec(
     return json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("ascii")
 
 
-def encode_watch_worker_error(code: str, detail: str | None = None) -> str:
-    payload = {"code": code}
+def encode_watch_worker_error(
+    code: str,
+    detail: str | None = None,
+    *,
+    spawn_errno: int | None = None,
+) -> str:
+    payload: dict[str, Any] = {"code": code}
     if detail:
         payload["detail"] = detail
+    if spawn_errno is not None:
+        payload["spawnErrno"] = spawn_errno
     return WATCH_WORKER_ERROR_PREFIX + json.dumps(
         payload,
         ensure_ascii=True,
@@ -50,17 +65,35 @@ def encode_watch_worker_error(code: str, detail: str | None = None) -> str:
     )
 
 
-def decode_watch_worker_error(stderr: str) -> tuple[str, str | None] | None:
+def _watch_worker_error_payload(stderr: str) -> dict[str, Any] | None:
     if not stderr.startswith(WATCH_WORKER_ERROR_PREFIX):
         return None
     try:
         payload = json.loads(stderr[len(WATCH_WORKER_ERROR_PREFIX) :].strip())
     except (json.JSONDecodeError, UnicodeDecodeError):
-        return ("supervisorFailed", None)
-    if not isinstance(payload, dict) or not isinstance(payload.get("code"), str):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def decode_watch_worker_error(stderr: str) -> tuple[str, str | None] | None:
+    payload = _watch_worker_error_payload(stderr)
+    if payload is None:
+        return None
+    if not isinstance(payload.get("code"), str):
         return ("supervisorFailed", None)
     detail = payload.get("detail")
     return payload["code"], detail if isinstance(detail, str) else None
+
+
+def decode_watch_worker_spawn_errno(stderr: str) -> int | None:
+    """The OS error number that stopped the worker from starting its command.
+
+    Structured, so a caller can tell a missing executable from one it may not
+    run without reading the platform's wording of either.
+    """
+
+    code = (_watch_worker_error_payload(stderr) or {}).get("spawnErrno")
+    return code if type(code) is int else None
 
 
 #: The leaf i18n key per handshake failure the worker can report. The PROTOCOL is one
@@ -310,14 +343,17 @@ def _run_watch_worker() -> int:
 
     try:
         popen_args: Any = shell_command if shell_command is not None else command
-        process = subprocess.Popen(
-            popen_args,
-            shell=shell_command is not None,
-            env=child_env,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
+        try:
+            process = subprocess.Popen(
+                popen_args,
+                shell=shell_command is not None,
+                env=child_env,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+        except OSError as exc:
+            raise _CommandSpawnError(exc) from exc
         if process.stdout is None or process.stderr is None:
             raise RuntimeError("watch worker output pipes are unavailable")
 
@@ -351,6 +387,15 @@ def main() -> int:
         return_code = _run_watch_worker()
     except WatchWorkerProtocolError as exc:
         print(encode_watch_worker_error(exc.code), file=sys.stderr, flush=True)
+        return 1
+    except _CommandSpawnError as exc:
+        print(
+            encode_watch_worker_error(
+                "supervisorFailed", str(exc), spawn_errno=exc.os_errno
+            ),
+            file=sys.stderr,
+            flush=True,
+        )
         return 1
     except Exception as exc:
         print(

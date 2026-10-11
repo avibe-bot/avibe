@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import ipaddress
 import json
 import os
 import re
@@ -11,6 +12,7 @@ import shutil
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Literal, Mapping, Optional, cast
+from urllib.parse import urlsplit
 
 from config import paths
 from config.atomic_io import write_atomic
@@ -421,6 +423,43 @@ def build_claude_hub_env(
     return result
 
 
+def _loopback_proxy_exemption(gateway_base_url: str) -> str | None:
+    """The ``NO_PROXY`` entry naming a loopback gateway, or None for any other host."""
+
+    host = (urlsplit(gateway_base_url).hostname or "").lower()
+    if host == "localhost":
+        return host
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return None
+    return str(address) if address.is_loopback else None
+
+
+def _exempt_loopback_gateway_from_proxies(env: dict[str, str], gateway_base_url: str) -> None:
+    """Let the CLI reach the gateway on this machine without a proxy.
+
+    Codex sends loopback requests through ``HTTP(S)_PROXY`` and through the
+    macOS system proxy, whose exception list it does not read, so a turn's
+    gateway request can end at a proxy that cannot reach it (the reported 502).
+    ``NO_PROXY`` is the exemption Codex honors. The gateway host joins each
+    exemption list the child already has, or a new ``NO_PROXY``; every other
+    entry and proxy setting stays as it was.
+    """
+
+    entry = _loopback_proxy_exemption(gateway_base_url)
+    if entry is None:
+        return
+    # Readers disagree on which spelling wins, and a present but empty value
+    # still wins for Codex, so each list the child has is extended on its own.
+    names = [name for name in ("NO_PROXY", "no_proxy") if name in env] or ["NO_PROXY"]
+    for name in names:
+        entries = [item.strip() for item in env.get(name, "").split(",") if item.strip()]
+        if "*" in entries or entry in (item.lower() for item in entries):
+            continue
+        env[name] = ",".join([*entries, entry])
+
+
 def build_codex_hub_launch(
     base_args: list[str],
     base_env: dict[str, str],
@@ -438,6 +477,7 @@ def build_codex_hub_launch(
     for key in ("OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_API_BASE", "CODEX_API_KEY"):
         env.pop(key, None)
     env["AVIBE_MODEL_HUB_TOKEN"] = launch.gateway_token
+    _exempt_loopback_gateway_from_proxies(env, launch.gateway_base_url)
     provider = "avibe_model_hub"
     gateway_v1 = f"{launch.gateway_base_url.rstrip('/')}/v1"
     overrides = [

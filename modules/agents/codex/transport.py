@@ -8,12 +8,19 @@ import logging
 import os
 import signal
 from asyncio.subprocess import Process
+from collections import deque
 from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Mapping, Optional
 
+from core.os_errors import local_os_errno
 from core.process_diagnostics import log_process_snapshot, process_identity
 from core.process_isolation import KILL_SIGNAL, isolated_subprocess_kwargs, signal_process_tree
 from vibe.codex_config import format_toml_basic_string
+from vibe.codex_launch_failure import (
+    CodexLaunchError,
+    launch_failure_from_errno,
+    launch_failure_from_stderr,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +28,9 @@ if TYPE_CHECKING:
     from vibe.backend_model_catalog import CodexHubCatalog
 
 STREAM_BUFFER_LIMIT = 128 * 1024 * 1024  # 128 MB
+# Enough of a launcher's last words to say why it exited before ``initialize``.
+_STDERR_TAIL_LINES = 64
+_LAUNCH_EXIT_GRACE_SECONDS = 2.0
 
 
 # Avibe owns the user-facing surface, durable automation, and agent delegation.
@@ -131,6 +141,8 @@ class CodexTransport:
         self.supports_turn_collaboration_mode = False
         self._reader_task: Optional[asyncio.Task[None]] = None
         self._stderr_task: Optional[asyncio.Task[None]] = None
+        # Read only to recognize a launch that cannot start; never reported.
+        self._stderr_tail: deque[str] = deque(maxlen=_STDERR_TAIL_LINES)
 
         # Callbacks
         self._notification_cb: Optional[Callable[[str, dict[str, Any]], Awaitable[None]]] = None
@@ -163,6 +175,7 @@ class CodexTransport:
             raise RuntimeError("A stopped Codex Hub transport needs a newly prepared catalog")
 
         self._closed_event.clear()
+        self._stderr_tail.clear()
         cmd = (
             [self._binary, "--dangerously-bypass-approvals-and-sandbox"]
             + ["app-server"]
@@ -203,6 +216,11 @@ class CodexTransport:
                 self._process = await spawn
                 await self.stop()
                 raise
+            except OSError as exc:
+                cause = launch_failure_from_errno(local_os_errno(exc))
+                if cause is None:
+                    raise
+                raise CodexLaunchError(cause) from exc
         if catalog is not None:
             self._catalog_exit_task = asyncio.create_task(
                 self._release_catalog_on_exit(self._process, catalog)
@@ -257,11 +275,37 @@ class CodexTransport:
                 logger.info("Codex app-server handshake cancelled, cleaning up")
             else:
                 logger.exception("Codex app-server handshake failed, cleaning up")
+            cause = None
             try:
-                await self.stop()
-            except Exception:
-                logger.exception("Failed to clean up Codex app-server after handshake failure")
+                if isinstance(exc, ConnectionError):
+                    cause = await self._exited_launch_failure()
+            finally:
+                try:
+                    await self.stop()
+                except Exception:
+                    logger.exception("Failed to clean up Codex app-server after handshake failure")
+            if cause is not None:
+                raise CodexLaunchError(cause) from exc
             raise
+
+    async def _exited_launch_failure(self) -> str | None:
+        """Why a process that ended before answering ``initialize`` cannot start.
+
+        Only a process that has exited explains its own failure; an app-server
+        still running lost its connection for another reason.
+        """
+        proc, stderr_task = self._process, self._stderr_task
+        if proc is None or stderr_task is None:
+            return None
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=_LAUNCH_EXIT_GRACE_SECONDS)
+            # The launcher's last words are complete once its stderr closes.
+            await asyncio.wait_for(asyncio.shield(stderr_task), timeout=_LAUNCH_EXIT_GRACE_SECONDS)
+        except asyncio.TimeoutError:
+            return None
+        if proc.returncode == 0:
+            return None
+        return launch_failure_from_stderr("\n".join(self._stderr_tail))
 
     async def stop(self) -> None:
         """Gracefully shut down the app-server process."""
@@ -555,6 +599,7 @@ class CodexTransport:
                 if not line:
                     break
                 decoded = line.decode(errors="ignore").rstrip()
+                self._stderr_tail.append(decoded[:2000])
                 logger.info("Codex stderr: %s", decoded[:2000])
         except asyncio.CancelledError:
             return
