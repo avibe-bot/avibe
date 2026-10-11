@@ -156,7 +156,19 @@ def _check_publishable(path: str, target: str, expected: Optional[FileIdentity])
         raise NotRegularFile("directory" if stat.S_ISDIR(st.st_mode) else "other")
     if not os.access(current, os.W_OK):
         raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), current)
+    if expected is not None and os.name == "nt":
+        # On Windows, os.stat gives the creation time as st_ctime, where the read's os.fstat gave the
+        # change time that FileIdentity needs: compare a descriptor's view with a descriptor's view.
+        st = _fstat_of(current)
     _require(expected, current, st)
+
+
+def _fstat_of(path: str) -> os.stat_result:
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_BINARY", 0))
+    try:
+        return os.fstat(fd)
+    finally:
+        os.close(fd)
 
 
 def write_bytes(path: str, data: bytes, expected: Optional[FileIdentity] = None) -> None:
@@ -164,9 +176,9 @@ def write_bytes(path: str, data: bytes, expected: Optional[FileIdentity] = None)
 
     A failed write (a full disk, a quota) leaves the original, or its absence, as it was. The temp
     file sits beside the real target (through symlinks). Replacing a file, it is private (0600) while
-    it receives the new contents and takes the file's mode once they are fsynced; a new file's temp is
-    created with the umask default it keeps, so the process umask is never read or changed. Then
-    ``os.replace`` puts it in place.
+    it receives the new contents and takes the file's mode once they are fsynced (POSIX; Windows keeps
+    privacy in the directory's ACL); a new file's temp is created with the umask default it keeps, so
+    the process umask is never read or changed. Then ``os.replace`` puts it in place.
 
     An existing file whose directory does not let a temp file be created is refused
     (``NotReplaceable``) rather than written in place, which a full disk could leave half-written.
@@ -185,7 +197,8 @@ def write_bytes(path: str, data: bytes, expected: Optional[FileIdentity] = None)
     # Short and not derived from the target's name, which may already be at NAME_MAX.
     tmp = os.path.join(os.path.dirname(target), f".avibe-{secrets.token_hex(6)}.tmp")
     try:
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600 if mode is not None else 0o666)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+        fd = os.open(tmp, flags, 0o600 if mode is not None else 0o666)
     except PermissionError:
         if mode is None:
             raise
@@ -195,7 +208,9 @@ def write_bytes(path: str, data: bytes, expected: Optional[FileIdentity] = None)
             handle.write(data)
             handle.flush()
             os.fsync(handle.fileno())
-            if mode is not None:
+            # On Windows a mode is only the read-only bit, which no file write replaces has; copying it from a
+            # file swapped in meanwhile would leave a temp file that cannot be deleted.
+            if mode is not None and os.name != "nt":
                 os.fchmod(handle.fileno(), mode)
         _check_publishable(path, target, expected)
         os.replace(tmp, target)

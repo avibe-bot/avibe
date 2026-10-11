@@ -25,7 +25,7 @@ async def _read(make_ctx, **arguments):
 
 
 async def test_head_is_cut_at_the_line_limit_with_the_next_offset(tmp_path, make_ctx):
-    (tmp_path / "log.txt").write_text("".join(f"line {i}\n" for i in range(1, 2501)))
+    (tmp_path / "log.txt").write_text("".join(f"line {i}\n" for i in range(1, 2501)), encoding="utf-8", newline="")
 
     result = await _read(make_ctx, path="log.txt")
 
@@ -37,7 +37,7 @@ async def test_head_is_cut_at_the_line_limit_with_the_next_offset(tmp_path, make
 
 async def test_head_is_cut_at_the_byte_limit(tmp_path, make_ctx):
     # 1,000-byte lines: the first takes 1,000 bytes and each further one 1,001, so 51 fit in 51,200.
-    (tmp_path / "wide.txt").write_text("".join(f"{i:04d}" + "x" * 996 + "\n" for i in range(100)))
+    (tmp_path / "wide.txt").write_text("".join(f"{i:04d}" + "x" * 996 + "\n" for i in range(100)), encoding="utf-8", newline="")
 
     text = result_text(await _read(make_ctx, path="wide.txt"))
 
@@ -46,7 +46,7 @@ async def test_head_is_cut_at_the_byte_limit(tmp_path, make_ctx):
 
 
 async def test_offset_and_limit_name_the_remaining_lines(tmp_path, make_ctx):
-    (tmp_path / "ten.txt").write_text("\n".join(f"l{i}" for i in range(1, 11)))
+    (tmp_path / "ten.txt").write_text("\n".join(f"l{i}" for i in range(1, 11)), encoding="utf-8", newline="")
 
     text = result_text(await _read(make_ctx, path="ten.txt", offset=3, limit=4))
 
@@ -54,7 +54,7 @@ async def test_offset_and_limit_name_the_remaining_lines(tmp_path, make_ctx):
 
 
 async def test_offset_beyond_the_end_is_an_error(tmp_path, make_ctx):
-    (tmp_path / "two.txt").write_text("a\nb")
+    (tmp_path / "two.txt").write_text("a\nb", encoding="utf-8", newline="")
 
     result = await _read(make_ctx, path="two.txt", offset=5)
 
@@ -64,7 +64,7 @@ async def test_offset_beyond_the_end_is_an_error(tmp_path, make_ctx):
 
 @pytest.mark.parametrize(("arguments", "message"), [({"offset": 0}, "offset"), ({"limit": 2.5}, "limit")])
 async def test_offset_and_limit_are_integers_of_at_least_one(tmp_path, make_ctx, arguments, message):
-    (tmp_path / "ten.txt").write_text("a\nb\n")
+    (tmp_path / "ten.txt").write_text("a\nb\n", encoding="utf-8", newline="")
 
     result = await _read(make_ctx, path="ten.txt", **arguments)
 
@@ -260,6 +260,7 @@ async def test_read_takes_the_image_size_from_the_file_it_reads(tmp_path, make_c
     assert "[Image omitted: the file is" in result_text(result)
 
 
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="Windows has no FIFOs")
 async def test_a_fifo_swapped_in_after_the_check_does_not_block_read(tmp_path, make_ctx, monkeypatch):
     os.mkfifo(tmp_path / "p")
     monkeypatch.setattr(read_module, "target_kind", lambda path: "regular")  # it was a file when checked

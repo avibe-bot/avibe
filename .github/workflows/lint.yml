@@ -613,3 +613,53 @@ jobs:
       # owner in both Windows PowerShell and PowerShell 7.
       - name: Verify the installer's launcher rule matches the Python owner
         run: python -m pytest tests/test_installer_uninstall.py -q -ra -k "rule_matches or dirs_match or powershell"
+
+  # Vibey's tools on real Windows: what the Linux shards cannot show is how
+  # the same Python behaves there (no O_NONBLOCK, no fchmod before 3.13,
+  # text-mode descriptors without O_BINARY, st_ctime that means creation time).
+  # Both runners use x64 Python: no win_arm64 wheel of cryptography exists, so
+  # Avibe runs on Windows on Arm through x64 Python.
+  windows-agent:
+    name: windows-agent (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            pytest-args: ""
+          # Emulated x64 Python is slower than the native interpreters the
+          # CPU-time bounds are set for; windows-latest still checks them.
+          - os: windows-11-arm
+            pytest-args: >-
+              -k "not without_walking_it and not bounded_by_lines and not stays_linear and not nfkc_expansion"
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+
+      - name: Prepare minimal UI asset placeholder
+        run: |
+          New-Item -ItemType Directory -Force ui/dist | Out-Null
+          Set-Content -Path ui/dist/index.html -Value '<!doctype html><html><body></body></html>'
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
+        with:
+          python-version: "3.12"
+          architecture: x64
+
+      - name: Install pinned uv
+        run: |
+          python -m pip install --disable-pip-version-check --only-binary=:all: --no-deps uv==0.12.10
+
+      - name: Install package and test deps
+        run: uv pip install --system -e . --group dev
+
+      - name: Verify the file tools
+        run: >-
+          python -m pytest -q -ra ${{ matrix.pytest-args }}
+          tests/agent_core/tools/test_read.py tests/agent_core/tools/test_write_edit.py
+          tests/agent_core/tools/test_file_kinds.py tests/agent_core/tools/test_normalize.py
+          tests/agent_core/tools/test_args.py
+
+      - name: Verify Vibey's tool lines
+        run: python -m pytest -q -ra tests/test_vibey_agent.py -k relative_tool_path

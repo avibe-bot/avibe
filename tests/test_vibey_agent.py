@@ -1632,9 +1632,14 @@ async def test_a_relative_tool_path_is_shown_under_the_runs_cwd(engine, session,
     project = tmp_path / "project"
     shown = _relative_to(str(project))
     # The tool reads src/app.py under the run's cwd; the line shows it as such, not under the controller's cwd.
-    assert shown("src/app.py") == "src/app.py"
-    assert shown(str(project / "core" / "foo.py")) == "core/foo.py"
-    assert shown("/etc/hosts") == "/etc/hosts"
+    assert shown("src/app.py") == os.path.join("src", "app.py")
+    assert shown(str(project / "core" / "foo.py")) == os.path.join("core", "foo.py")
+    outside = os.path.abspath(os.path.join(os.sep, "etc", "hosts"))
+    assert shown(outside) == outside
+    if os.name == "nt":
+        # Another drive has no relative path at all.
+        other_drive = "Z:\\x.py" if not str(project).upper().startswith("Z:") else "Y:\\x.py"
+        assert shown(other_drive) == other_drive
 
 
 async def test_the_system_prompt_lists_every_tool_the_run_offers(engine, session, tmp_path, published) -> None:

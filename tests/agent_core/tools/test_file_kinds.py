@@ -41,6 +41,24 @@ NOT_REGULAR = {"fifo", "socket", "device", "link_device"}
 DIRECTORY = {"directory", "link_directory"}
 ABSENT = {"dangling", "missing"}
 NOT_ROOT = pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root ignores file modes")
+WINDOWS = os.name == "nt"
+# Kinds Windows cannot make: a mode there is only the read-only bit, it has no FIFOs, the socket here needs
+# /tmp, and a link to NUL does not resolve.
+POSIX_ONLY = {"unreadable", "fifo", "socket", "link_device", "in_locked_dir"}
+NOT_ON_WINDOWS = pytest.mark.skipif(WINDOWS, reason="a POSIX kind of file")
+# The OS's own words for the rows where Windows says it differently.
+if WINDOWS:
+    NO_PATH = "the system cannot find the path specified"
+    ABSENT_REASON, UNDER_FILE_REASON = NO_PATH, NO_PATH
+    LOOP_REASON = "the name of the file cannot be resolved by the system"
+    # Write creates a missing parent; a file in the way of it says so.
+    UNDER_FILE_WRITE_REASON = "cannot create a file when that file already exists"
+    UNDER_FILE_CODE, LOOP_CODE = "ENOENT", "EINVAL"
+else:
+    ABSENT_REASON, UNDER_FILE_REASON = "no such file or directory", "not a directory"
+    LOOP_REASON = "too many levels of symbolic links"
+    UNDER_FILE_WRITE_REASON = UNDER_FILE_REASON
+    UNDER_FILE_CODE, LOOP_CODE = "ENOTDIR", "ELOOP"
 
 
 @pytest.fixture
@@ -50,7 +68,7 @@ def place(tmp_path):
 
     def make(kind: str) -> str:
         if kind in ("regular", "read_only", "unreadable"):
-            (tmp_path / "f").write_text("hello\n")
+            (tmp_path / "f").write_text("hello\n", encoding="utf-8", newline="")
             mode = {"regular": 0o644, "read_only": 0o444, "unreadable": 0o000}[kind]
             os.chmod(tmp_path / "f", mode)
             cleanups.append(lambda: os.chmod(tmp_path / "f", 0o644))
@@ -72,7 +90,7 @@ def place(tmp_path):
         if kind == "device":
             return os.devnull
         if kind == "link_regular":
-            (tmp_path / "f").write_text("hello\n")
+            (tmp_path / "f").write_text("hello\n", encoding="utf-8", newline="")
             (tmp_path / "l").symlink_to(tmp_path / "f")
             return "l"
         if kind == "link_directory":
@@ -88,12 +106,12 @@ def place(tmp_path):
         if kind == "missing":
             return "missing/sub/f"
         if kind == "under_file":
-            (tmp_path / "f").write_text("hello\n")
+            (tmp_path / "f").write_text("hello\n", encoding="utf-8", newline="")
             return "f/x"
         if kind == "in_locked_dir":
             # A writable file in a directory this user cannot add to.
             (tmp_path / "ro").mkdir()
-            (tmp_path / "ro" / "f").write_text("hello\n")
+            (tmp_path / "ro" / "f").write_text("hello\n", encoding="utf-8", newline="")
             os.chmod(tmp_path / "ro", 0o555)
             cleanups.append(lambda: os.chmod(tmp_path / "ro", 0o755))
             return "ro/f"
@@ -127,7 +145,15 @@ async def _run(tool, arguments, ctx, tmp_path):
 
 
 def _cases(kinds):
-    return [pytest.param(kind, marks=NOT_ROOT) if kind in ("unreadable", "in_locked_dir") else kind for kind in kinds]
+    def marks(kind):
+        found = []
+        if kind in ("unreadable", "in_locked_dir"):
+            found.append(NOT_ROOT)
+        if kind in POSIX_ONLY:
+            found.append(NOT_ON_WINDOWS)
+        return found
+
+    return [pytest.param(kind, marks=marks(kind)) for kind in kinds]
 
 
 @pytest.mark.parametrize("kind", _cases(KINDS))
@@ -141,11 +167,11 @@ async def test_read_has_a_defined_result_for_every_kind(tmp_path, make_ctx, plac
         return
     reason = {
         "unreadable": "permission denied",
-        "under_file": "not a directory",
-        "loop": "too many levels of symbolic links",
+        "under_file": UNDER_FILE_REASON,
+        "loop": LOOP_REASON,
         **dict.fromkeys(DIRECTORY, "it is a directory"),
         **dict.fromkeys(NOT_REGULAR, "it is not a regular file"),
-        **dict.fromkeys(ABSENT, "no such file or directory"),
+        **dict.fromkeys(ABSENT, ABSENT_REASON),
     }[kind]
     assert (result.is_error, result_text(result)) == (True, f"Cannot read {path}: {reason}.")
 
@@ -164,7 +190,7 @@ async def test_write_has_a_defined_result_for_every_kind(tmp_path, make_ctx, pla
     if kind in ("regular", "link_regular", "dangling", "missing"):
         assert (result.is_error, result_text(result)) == (False, f"Successfully wrote to {path}")
         target = {"regular": "f", "link_regular": "f", "dangling": "missing/f", "missing": "missing/sub/f"}[kind]
-        assert (tmp_path / target).read_text() == "new\n"
+        assert (tmp_path / target).read_text(encoding="utf-8") == "new\n"
         if kind in ("link_regular", "dangling"):
             assert (tmp_path / path).is_symlink()
         return
@@ -173,8 +199,8 @@ async def test_write_has_a_defined_result_for_every_kind(tmp_path, make_ctx, pla
         "unreadable": "permission denied",
         # Replacing needs a temp file beside it; writing in place could leave it half-written (ENOSPC).
         "in_locked_dir": "its directory is not writable, so the file cannot be replaced safely",
-        "under_file": "not a directory",
-        "loop": "too many levels of symbolic links",
+        "under_file": UNDER_FILE_WRITE_REASON,
+        "loop": LOOP_REASON,
         **dict.fromkeys(DIRECTORY, "it is a directory"),
         **dict.fromkeys(NOT_REGULAR, "it is not a regular file"),
     }[kind]
@@ -183,9 +209,9 @@ async def test_write_has_a_defined_result_for_every_kind(tmp_path, make_ctx, pla
     if before is not None:
         assert os.lstat(path if os.path.isabs(path) else tmp_path / path).st_mode == before
     if kind == "read_only":
-        assert (tmp_path / "f").read_text() == "hello\n"
+        assert (tmp_path / "f").read_text(encoding="utf-8") == "hello\n"
     if kind == "in_locked_dir":
-        assert (tmp_path / "ro" / "f").read_text() == "hello\n"
+        assert (tmp_path / "ro" / "f").read_text(encoding="utf-8") == "hello\n"
 
 
 @pytest.mark.parametrize("kind", _cases(KINDS))
@@ -197,15 +223,15 @@ async def test_edit_has_a_defined_result_for_every_kind(tmp_path, make_ctx, plac
 
     if kind in ("regular", "link_regular"):
         assert (result.is_error, result_text(result)) == (False, f"Successfully replaced 1 block(s) in {path} (line 1).")
-        assert (tmp_path / "f").read_text() == "bye\n"
+        assert (tmp_path / "f").read_text(encoding="utf-8") == "bye\n"
         assert (tmp_path / path).is_symlink() == (kind == "link_regular")
         return
     detail = {
         "read_only": "Error code: EACCES.",
         "unreadable": "Error code: EACCES.",
         "in_locked_dir": "Its directory is not writable, so the file cannot be replaced safely.",
-        "loop": "Error code: ELOOP.",
-        "under_file": "Error code: ENOTDIR.",
+        "loop": f"Error code: {LOOP_CODE}.",
+        "under_file": f"Error code: {UNDER_FILE_CODE}.",
         **dict.fromkeys(DIRECTORY, "Error code: EISDIR."),
         **dict.fromkeys(NOT_REGULAR, "It is not a regular file."),
         **dict.fromkeys(ABSENT, "Error code: ENOENT."),
@@ -214,4 +240,4 @@ async def test_edit_has_a_defined_result_for_every_kind(tmp_path, make_ctx, plac
     if kind == "read_only":
         assert stat.S_IMODE(os.stat(tmp_path / "f").st_mode) == 0o444
     if kind == "in_locked_dir":
-        assert (tmp_path / "ro" / "f").read_text() == "hello\n"
+        assert (tmp_path / "ro" / "f").read_text(encoding="utf-8") == "hello\n"
