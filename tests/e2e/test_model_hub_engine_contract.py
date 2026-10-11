@@ -350,15 +350,18 @@ def test_engine_management_surface_avibe_reads(tmp_path, monkeypatch) -> None:
     _write_evidence(tmp_path, evidence)
 
 
-# The engine's embedded Antigravity catalog (models.json at v8.0.23). An
-# entitlement answer naming them all leaves the engine's own list unfiltered.
+# The engine's embedded Antigravity catalog (models.json at v8.0.23). The
+# fixture's entitlement answer names all of them except one, so a narrowing
+# that the probe applies is observable.
 _ANTIGRAVITY_IDS = (
     "claude-opus-4-6-thinking", "claude-sonnet-4-6", "claude-opus-5-5-high", "claude-sonnet-5-5-high",
     "gemini-3.6-flash-high", "gemini-3.7-flash-high", "gemini-3.8-flash-high", "gemini-3-flash",
     "gemini-3.1-flash-image", "gemini-pro-agent", "gemini-3.1-pro-low", "gpt-oss-120b-medium",
     "gemini-3.1-flash-lite", "gemini-3.5-flash-lite",
 )
+_ANTIGRAVITY_NOT_ENTITLED = "gemini-3.1-flash-lite"
 _ANTIGRAVITY_PROBE_DELAY = 3.0
+_ANTIGRAVITY_PREFIX = "avibe-" + "a" * 24
 
 
 @contextmanager
@@ -375,7 +378,8 @@ def _antigravity_upstream(probe: str):
                     body, status = b'{"error":{"code":503,"message":"fixture outage"}}', 503
                 else:
                     time.sleep(_ANTIGRAVITY_PROBE_DELAY)
-                    body = json.dumps({"models": {model: {} for model in _ANTIGRAVITY_IDS}}).encode()
+                    entitled = [model for model in _ANTIGRAVITY_IDS if model != _ANTIGRAVITY_NOT_ENTITLED]
+                    body = json.dumps({"models": {model: {} for model in entitled}}).encode()
                     status = 200
                 self.send_response(status)
                 self.send_header("Content-Type", "application/json")
@@ -408,23 +412,19 @@ def _antigravity_upstream(probe: str):
         thread.join(timeout=5)
 
 
-def _routable_window(client: EngineClient, auth_name: str, model: str, started: float, *, seconds: float) -> dict:
-    """When the grant's models list, and what a request for one gets meanwhile."""
-    first_request = None
-    listed_after = None
-    deadline = started + seconds
-    while time.monotonic() < deadline:
-        listing = _call(client, "GET", "/auth-files/models", query={"name": auth_name})
-        count = len((listing.get("body") or {}).get("models") or [])
-        if first_request is None:
-            status, text = _engine_chat(client, model)
-            first_request = {"after_seconds": round(time.monotonic() - started, 2), "status": status,
-                             "body": text[:200]}
-        if count:
-            listed_after = round(time.monotonic() - started, 2)
-            break
-        time.sleep(0.25)
-    return {"first_request": first_request, "models_listed_after_seconds": listed_after}
+def _antigravity_grant(upstream: str, *, prefix: str | None = None) -> dict:
+    grant = {
+        "type": "antigravity",
+        "access_token": "synthetic-antigravity-token",
+        "refresh_token": "",
+        "email": "fixture@example.invalid",
+        "project_id": "synthetic-project",
+        "expired": "2099-01-01T00:00:00Z",
+        "base_url": upstream,
+    }
+    if prefix:
+        grant["prefix"] = prefix
+    return grant
 
 
 def _engine_chat(client: EngineClient, model: str) -> tuple[int, str]:
@@ -441,81 +441,85 @@ def _engine_chat(client: EngineClient, model: str) -> tuple[int, str]:
         return exc.code, exc.read().decode(errors="replace")
 
 
-def test_antigravity_grant_lists_models_once_the_entitlement_probe_answers(tmp_path, monkeypatch) -> None:
-    """A Gemini (Antigravity) grant becomes routable once the engine can name its models.
-
-    v7.3.16 listed its static catalog at load. Since v8.0.14 the engine lists
-    nothing until its per-account entitlement probe answers, so a request in
-    that window gets ``model_not_found``. Avibe discovers a new grant's models
-    right after the OAuth flow and routes to them right after every engine
-    start; the evidence records that window for both moments.
-    """
-    prefix = "avibe-" + "a" * 24
-    auth_name = "antigravity-window-fixture.json"
-    model = f"{prefix}/gemini-3-flash"
-    evidence: dict = {}
-    with _antigravity_upstream("delayed_success") as (upstream, seen), \
-            _isolated_engine_adapter(tmp_path, monkeypatch) as adapter:
-        client = EngineClient(adapter.supervisor.ensure_running())
-        adapter.state_store.write_oauth_auth_file(auth_name, {
-            "type": "antigravity",
-            "access_token": "synthetic-antigravity-token",
-            "refresh_token": "",
-            "email": "fixture@example.invalid",
-            "project_id": "synthetic-project",
-            "expired": "2099-01-01T00:00:00Z",
-            "base_url": upstream,
-            "prefix": prefix,
+def _antigravity_timeline(client: EngineClient, auth_name: str, started: float, *, seconds: float) -> list[dict]:
+    """Listing and routing, sampled from the moment the grant is loaded."""
+    entitled = f"{_ANTIGRAVITY_PREFIX}/gemini-3-flash"
+    excluded = f"{_ANTIGRAVITY_PREFIX}/{_ANTIGRAVITY_NOT_ENTITLED}"
+    samples = []
+    deadline = started + seconds
+    while time.monotonic() < deadline:
+        listing = _call(client, "GET", "/auth-files/models", query={"name": auth_name})
+        # A prefixed grant lists its routed IDs; compare the upstream model names.
+        ids = {str(item.get("id")).rsplit("/", 1)[-1] for item in (listing.get("body") or {}).get("models") or []}
+        samples.append({
+            "t": round(time.monotonic() - started, 2),
+            "listed": len(ids),
+            "excluded_listed": _ANTIGRAVITY_NOT_ENTITLED in ids,
+            "entitled_status": _engine_chat(client, entitled)[0],
+            "excluded_status": _engine_chat(client, excluded)[0],
         })
+        time.sleep(0.5)
+    return samples
+
+
+@pytest.mark.parametrize("probe", ["delayed_success", "failure"])
+def test_antigravity_grant_routes_at_once_and_narrows_when_the_probe_answers(tmp_path, monkeypatch, probe) -> None:
+    """A Gemini (Antigravity) grant routes from the moment the engine loads it.
+
+    Avibe discovers a new grant's models right after the OAuth flow and routes
+    to them right after every engine start. Since v8.0.14 the stock engine
+    lists nothing until its per-account entitlement probe answers; Avibe's
+    engine patch registers the static catalog meanwhile, the probe narrows it,
+    and a failed probe leaves it in place (router-for-me/CLIProxyAPI#6531).
+    """
+    auth_name = "antigravity-window-fixture.json"
+    evidence: dict = {"probe": probe}
+    with _antigravity_upstream(probe) as (upstream, seen), _isolated_engine_adapter(tmp_path, monkeypatch) as adapter:
+        client = EngineClient(adapter.supervisor.ensure_running())
+        adapter.state_store.write_oauth_auth_file(auth_name, _antigravity_grant(upstream, prefix=_ANTIGRAVITY_PREFIX))
         loaded = time.monotonic()
         _await(
             lambda: any(item.get("name") == auth_name
                         for item in client.management_request("GET", "/auth-files").get("files") or []),
             what="antigravity grant listed",
         )
-        evidence["after_grant_load"] = _routable_window(client, auth_name, model, loaded, seconds=12)
+        evidence["after_grant_load"] = _antigravity_timeline(
+            client, auth_name, loaded, seconds=_ANTIGRAVITY_PROBE_DELAY + 5)
         adapter.supervisor.stop()
         restarted = time.monotonic()
         client = EngineClient(adapter.supervisor.ensure_running())
-        evidence["after_engine_restart"] = _routable_window(client, auth_name, model, restarted, seconds=12)
-        evidence["after_listing"] = dict(zip(("status", "body"), _engine_chat(client, model)))
-        evidence["upstream_paths"] = [item["path"].split("?")[0] for item in seen]
+        evidence["after_engine_restart"] = _antigravity_timeline(
+            client, auth_name, restarted, seconds=_ANTIGRAVITY_PROBE_DELAY + 5)
+        evidence["probe_calls"] = sum(1 for item in seen if "fetchAvailableModels" in item["path"])
     _write_evidence(tmp_path, evidence)
     for phase in ("after_grant_load", "after_engine_restart"):
-        listed = evidence[phase]["models_listed_after_seconds"]
-        assert listed is not None and listed < _ANTIGRAVITY_PROBE_DELAY + 5, evidence
-    assert evidence["after_listing"]["status"] == 200, evidence
+        samples = evidence[phase]
+        assert samples[0]["listed"] > 0 and samples[0]["entitled_status"] == 200, (phase, samples)
+        assert all(sample["entitled_status"] == 200 for sample in samples), (phase, samples)
+        if probe == "delayed_success":
+            final = samples[-1]
+            assert not final["excluded_listed"] and final["excluded_status"] == 400, (phase, samples)
+        else:
+            assert all(sample["excluded_listed"] and sample["excluded_status"] == 200 for sample in samples), (
+                phase, samples)
 
 
 async def _refresh(service, source_id: str) -> dict:
     try:
         result = await service.refresh_source(source_id)
-        outcome = {"ok": True, "models": len(result["source"].get("models") or [])}
+        outcome = {"ok": True, "models": sorted(model["id"] for model in result["source"].get("models") or [])}
     except ModelHubError as exc:
         outcome = {"ok": False, "error": exc.code}
     state = service._source(service.store.load(), source_id).state
     return {**outcome, "source_state": [state.status, state.detail_key]}
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="CPA v8 lists no Antigravity models until its entitlement probe answers; "
-           "Avibe treats that empty listing as authoritative (needs the Avibe-side mitigation)",
-)
 async def test_antigravity_source_refresh_right_after_engine_start(tmp_path, monkeypatch) -> None:
     """A Gemini subscription Source refreshed right after the engine starts keeps its models."""
     auth_name = "antigravity-refresh-fixture.json"
     with _antigravity_upstream("delayed_success") as (upstream, seen), \
             _isolated_engine_adapter(tmp_path, monkeypatch) as adapter:
-        adapter.state_store.write_oauth_auth_file(auth_name, {
-            "type": "antigravity",
-            "access_token": "synthetic-antigravity-token",
-            "refresh_token": "",
-            "email": "fixture@example.invalid",
-            "project_id": "synthetic-project",
-            "expired": "2099-01-01T00:00:00Z",
-            "base_url": upstream,
-        })
+        adapter.state_store.write_oauth_auth_file(auth_name, _antigravity_grant(upstream))
         source = _source("src_gemini0001", "Gemini subscription", vendor="gemini", protocol="openai_chat",
                          model_id="gemini-3-flash")
         source.kind = "subscription"
@@ -528,11 +532,17 @@ async def test_antigravity_source_refresh_right_after_engine_start(tmp_path, mon
         first = await _refresh(service, "src_gemini0001")
         first["after_seconds"] = round(time.monotonic() - started, 2)
         client = adapter.supervisor.client_if_running()
-        await asyncio.to_thread(_await, lambda: (client.management_request(
-            "GET", "/auth-files/models", query={"name": auth_name}).get("models")), what="entitled models listed")
-        listed_after = round(time.monotonic() - started, 2)
+
+        def narrowed():
+            listing = client.management_request("GET", "/auth-files/models", query={"name": auth_name})
+            ids = {item.get("id") for item in listing.get("models") or []}
+            return ids and _ANTIGRAVITY_NOT_ENTITLED not in ids
+
+        await asyncio.to_thread(_await, narrowed, what="entitlement narrowing applied")
+        narrowed_after = round(time.monotonic() - started, 2)
         second = await _refresh(service, "src_gemini0001")
-    _write_evidence(tmp_path, {"refresh_at_start": first, "models_listed_after_seconds": listed_after,
-                               "refresh_after_listing": second})
-    assert first["ok"], first
-    assert second["ok"], second
+    _write_evidence(tmp_path, {"refresh_at_start": first, "narrowed_after_seconds": narrowed_after,
+                               "refresh_after_narrowing": second})
+    assert first["ok"] and "gemini-3-flash" in first["models"], first
+    assert second["ok"] and _ANTIGRAVITY_NOT_ENTITLED not in second["models"], second
+    assert second["source_state"][0] == "standby", second
