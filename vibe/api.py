@@ -89,9 +89,12 @@ from vibe.upgrade import (
     defer_upgrade_activation,
     discard_atomic_uv_install_generation,
     execute_upgrade_plan,
+    format_deferred_activation_log,
     get_latest_version_info,
     get_running_vibe_path,
     get_safe_cwd,
+    format_activation_failures,
+    get_deferred_activation_log_path,
     is_desktop_managed_runtime,
     launcher_is_current_process,
     restart_is_pending,
@@ -6159,13 +6162,20 @@ def do_upgrade(auto_restart: bool = True) -> dict:
         auto_restart: If True, restart vibe after successful upgrade
 
     Returns:
-        {"ok": bool, "message": str, "output": str | None, "restarting": bool}
+        {
+            "ok": bool,
+            "message": str,
+            "output": str | None,
+            "activation_notice": str | None,
+            "restarting": bool,
+        }
     """
     if is_desktop_managed_runtime():
         return {
             "ok": False,
             "message": backend_t("desktopRuntime.apiUpgrade", V2Config.load().language),
             "output": None,
+            "activation_notice": None,
             "restarting": False,
             "code": "desktop_managed_runtime",
         }
@@ -6177,12 +6187,19 @@ def do_upgrade(auto_restart: bool = True) -> dict:
             target_version=get_version_info().get("latest"),
         )
     except ValueError as exc:
-        return {"ok": False, "message": "Upgrade failed.", "output": str(exc), "restarting": False}
+        return {
+            "ok": False,
+            "message": "Upgrade failed.",
+            "output": str(exc),
+            "activation_notice": None,
+            "restarting": False,
+        }
     if plan.preflight_error:
         return {
             "ok": False,
             "message": "Upgrade cannot be activated safely",
             "output": plan.preflight_error,
+            "activation_notice": None,
             "restarting": False,
         }
     runtime_was_running = _runtime_process_was_running()
@@ -6195,7 +6212,13 @@ def do_upgrade(auto_restart: bool = True) -> dict:
     restart_failed = False
     runtime_output = None
     deferred_activation = False
+    deferred_activation_log = None
+    deferred_activation_log_error = None
     restart_python = None
+    activation_outcome = None
+    activation_notice = None
+    activation_committed = False
+    activation_postcommit_error = None
 
     try:
         with atomic_upgrade_lock():
@@ -6204,6 +6227,7 @@ def do_upgrade(auto_restart: bool = True) -> dict:
                     "ok": False,
                     "message": "Upgrade already has a restart in progress",
                     "output": "Wait for the pending restart to finish before starting another upgrade.",
+                    "activation_notice": None,
                     "restarting": False,
                 }
             if plan.activation is not None and activation_block_reason(plan.activation) == "superseded":
@@ -6211,6 +6235,7 @@ def do_upgrade(auto_restart: bool = True) -> dict:
                     "ok": False,
                     "message": "Upgrade was superseded by another activation",
                     "output": "The active Avibe generation changed while waiting for the upgrade lock; retry the upgrade.",
+                    "activation_notice": None,
                     "restarting": False,
                 }
             result = execute_upgrade_plan(
@@ -6232,24 +6257,38 @@ def do_upgrade(auto_restart: bool = True) -> dict:
                         candidate_result = verify_upgrade_candidate(plan.activation)
                         if not candidate_result.ok:
                             raise RuntimeError(candidate_result.detail)
-                        defer_upgrade_activation(
+                        deferred_process = defer_upgrade_activation(
                             plan.activation,
                             parent_pid=os.getpid(),
                             restart_required=auto_restart and runtime_was_running,
                             prepare_show_runtime=not should_skip_show_runtime_prepare(),
                         )
+                        activation_committed = True
                         deferred_activation = True
+                        try:
+                            deferred_activation_log = get_deferred_activation_log_path(deferred_process)
+                        except Exception as exc:  # noqa: BLE001
+                            deferred_activation_log_error = str(exc)
                     else:
                         restart_python = _candidate_python(plan.activation.candidate_launcher)
-                        activate_upgrade_candidate(plan.activation)
+                        activation_outcome = activate_upgrade_candidate(plan.activation)
+                        activation_committed = True
                 except Exception as exc:  # noqa: BLE001
-                    discard_atomic_uv_install_generation(plan.activation.candidate_launcher)
-                    return {
-                        "ok": False,
-                        "message": "Upgrade candidate failed integrity verification",
-                        "output": str(exc),
-                        "restarting": False,
-                    }
+                    activation_committed = activation_committed or plan.activation.committed
+                    if not activation_committed:
+                        discard_atomic_uv_install_generation(plan.activation.candidate_launcher)
+                        return {
+                            "ok": False,
+                            "message": "Upgrade candidate failed integrity verification",
+                            "output": str(exc),
+                            "activation_notice": None,
+                            "restarting": False,
+                        }
+                    deferred_activation = deferred_activation or (
+                        os.name == "nt" and launcher_is_current_process(plan.activation.launcher)
+                    )
+                    activation_postcommit_error = str(exc)
+                    logger.warning("Upgrade activation completed with a post-commit error", exc_info=True)
             elif result.returncode != 0 and plan.activation is not None:
                 discard_atomic_uv_install_generation(plan.activation.candidate_launcher)
             if result.returncode == 0 and plan.activation is None and plan.method == "pip":
@@ -6259,6 +6298,7 @@ def do_upgrade(auto_restart: bool = True) -> dict:
                         "ok": False,
                         "message": "Upgrade installed an incomplete Python environment",
                         "output": integrity.detail,
+                        "activation_notice": None,
                         "restarting": False,
                     }
             if result.returncode == 0 and auto_restart and runtime_was_running and not deferred_activation:
@@ -6275,11 +6315,37 @@ def do_upgrade(auto_restart: bool = True) -> dict:
                     restart_failed = True
                     runtime_output = f"Restart scheduling failed; run `vibe restart` to use the new version.\n{exc}"
         if result.returncode == 0:
-            if deferred_activation:
+            if deferred_activation_log_error is not None:
                 return {
                     "ok": True,
                     "message": "Upgrade successful. Activation will complete after this process exits.",
-                    "output": _append_upgrade_output(result.stdout, None),
+                    "output": _append_upgrade_output(result.stdout, deferred_activation_log_error),
+                    "activation_notice": None,
+                    "restarting": auto_restart and runtime_was_running,
+                }
+            if deferred_activation:
+                try:
+                    activation_notice = format_deferred_activation_log(
+                        deferred_activation_log,
+                        _configured_backend_language(),
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Deferred activation notice could not be formatted", exc_info=True)
+                    return {
+                        "ok": True,
+                        "message": "Upgrade successful. Activation will complete after this process exits.",
+                        "output": _append_upgrade_output(result.stdout, str(exc)),
+                        "activation_notice": None,
+                        "restarting": auto_restart and runtime_was_running,
+                    }
+                return {
+                    "ok": True,
+                    "message": "Upgrade successful. Activation will complete after this process exits.",
+                    "output": _append_upgrade_output(
+                        result.stdout,
+                        activation_notice,
+                    ),
+                    "activation_notice": activation_notice,
                     "restarting": auto_restart and runtime_was_running,
                 }
             if not restarting and not restart_failed:
@@ -6291,10 +6357,31 @@ def do_upgrade(auto_restart: bool = True) -> dict:
             else:
                 message = "Upgrade successful. Please restart vibe."
 
+            output = _append_upgrade_output(result.stdout, runtime_output)
+            if activation_postcommit_error:
+                output = _append_upgrade_output(
+                    output,
+                    f"Upgrade activation cleanup reported: {activation_postcommit_error}",
+                )
+            if activation_outcome is not None:
+                try:
+                    activation_notice = format_activation_failures(
+                        activation_outcome,
+                        _configured_backend_language(),
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Activation notice could not be formatted", exc_info=True)
+                    activation_notice = None
+                    output = _append_upgrade_output(
+                        output,
+                        f"Stable launcher activation notice unavailable: {exc}",
+                    )
+                output = _append_upgrade_output(output, activation_notice)
             return {
                 "ok": True,
                 "message": message,
-                "output": _append_upgrade_output(result.stdout, runtime_output),
+                "output": output,
+                "activation_notice": activation_notice,
                 "restarting": restarting,
             }
         else:
@@ -6302,21 +6389,41 @@ def do_upgrade(auto_restart: bool = True) -> dict:
                 "ok": False,
                 "message": "Upgrade failed",
                 "output": result.stderr or result.stdout,
+                "activation_notice": None,
                 "restarting": False,
             }
     except subprocess.TimeoutExpired:
         if plan.activation is not None:
+            activation_committed = activation_committed or plan.activation.committed
+        if plan.activation is not None and not activation_committed:
             discard_atomic_uv_install_generation(plan.activation.candidate_launcher)
         return {
             "ok": False,
             "message": "Upgrade timed out",
             "output": None,
+            "activation_notice": None,
             "restarting": False,
         }
     except Exception as e:
         if plan.activation is not None:
+            activation_committed = activation_committed or plan.activation.committed
+        if plan.activation is not None and not activation_committed:
             discard_atomic_uv_install_generation(plan.activation.candidate_launcher)
-        return {"ok": False, "message": str(e), "output": None, "restarting": False}
+        if activation_committed:
+            return {
+                "ok": True,
+                "message": "Upgrade successful.",
+                "output": str(e),
+                "activation_notice": None,
+                "restarting": restarting,
+            }
+        return {
+            "ok": False,
+            "message": str(e),
+            "output": None,
+            "activation_notice": None,
+            "restarting": restarting,
+        }
 
 
 def _append_upgrade_output(output: str | None, runtime_output: str | None) -> str | None:

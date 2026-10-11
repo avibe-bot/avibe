@@ -86,6 +86,9 @@ export const SelectionQuoteToolbar: React.FC<{
   } | null>(null);
   const pressExpiryRef = useRef<number | null>(null);
   const activatedAtRef = useRef(Number.NEGATIVE_INFINITY);
+  // A receipt for the touch action already run on pointerup, not a selection
+  // lock. Only its trailing touchend is consumed; a new gesture clears it.
+  const touchActivationRef = useRef<HTMLButtonElement | null>(null);
   const [width, setWidth] = useState(0);
   const [height, setHeight] = useState(TOOLBAR_H);
   // Touch (coarse pointer — phones AND tablets/iPads) is where the OS selection
@@ -163,6 +166,7 @@ export const SelectionQuoteToolbar: React.FC<{
     const onPointerDown = () => {
       // A new gesture invalidates any prior button press, including one whose
       // terminal event was delivered outside the toolbar or not delivered at all.
+      touchActivationRef.current = null;
       clearPress();
     };
     const onSelectionChange = () => {
@@ -292,7 +296,15 @@ export const SelectionQuoteToolbar: React.FC<{
       return;
     }
     activatedAtRef.current = e.timeStamp;
+    touchActivationRef.current = e.pointerType === 'touch' ? e.currentTarget : null;
     run();
+  };
+  const handleTouchEnd = (e: React.TouchEvent) => {
+    // iOS's native tap processing follows pointerup and can clear the range we
+    // just widened. Cancelling pointerdown only suppresses compatibility mouse
+    // events; consume this touch default too, but only for a completed action.
+    if (touchActivationRef.current?.contains(e.target as Node)) e.preventDefault();
+    touchActivationRef.current = null;
   };
   const handleKeyDown = (e: React.KeyboardEvent, run: () => void) => {
     if (e.key === 'Enter' || e.key === ' ') {
@@ -383,6 +395,7 @@ export const SelectionQuoteToolbar: React.FC<{
     <div
       ref={toolbarRef}
       role="toolbar"
+      onTouchEnd={handleTouchEnd}
       style={{ position: 'fixed', top, left, maxWidth: 'calc(100vw - 16px)', transform: 'translateX(-50%)', zIndex: 60 }}
       className="flex items-center overflow-x-auto rounded-lg border border-border-strong bg-surface-2 shadow-[0_12px_30px_-8px_rgba(0,0,0,0.7)]"
     >

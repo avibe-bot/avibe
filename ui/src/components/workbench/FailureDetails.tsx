@@ -171,8 +171,8 @@ export function FailureDetails({ message }: { message: WorkbenchMessage }) {
           </div>
         )}
         {upstreamFacts && <p className="text-gold-ink/70">{t('chat.failureDetails.upstreamNote')}</p>}
-        <span className="flex items-center gap-2 text-gold-ink/70">
-          <span className="font-mono">{record.turn_id}</span>
+        <span className="flex min-w-0 flex-col items-start gap-2 text-gold-ink/70">
+          <span className="max-w-full break-all font-mono">{record.turn_id}</span>
           <CopyButton value={JSON.stringify(record, null, 2)} label={t('chat.failureDetails.copyRecord') as string} />
         </span>
       </div>

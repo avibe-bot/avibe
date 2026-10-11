@@ -90,6 +90,7 @@ jobs:
           npm run test:badge-triggers
           npm run test:workbench-general -- sidebar-floating.spec.ts desktop-window-chrome.spec.ts
           npm run test:voice-shortcut
+          npm run test:chat-interactions
           npm run test:chat-selection
 
   show-router-integration:
