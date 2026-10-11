@@ -111,6 +111,8 @@ The run makes about ten Turns, plus their checkpoint turns, on the small window.
 - The leak fact finds the request's marks by keyword. Before the probe, the fixture's user mentions neither
   checkpoints nor tools, so here such a line is the request's. A checkpoint that writes "this checkpoint" under its
   next steps fails it.
+- Heading lines only set the section and are not read for leaks, so "## Next steps: write the checkpoint" would pass.
+  The recorded runs' headings contain neither word.
 - The model is recorded as requested, not as served. If Model Hub fails over to another hop during a run, the row
   would name the requested model. The recorded runs were served by it throughout (every checkpoint's and response's
   origin); check the origins in the Session before recording a row.
