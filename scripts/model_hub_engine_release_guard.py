@@ -21,15 +21,23 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MANIFEST = REPO_ROOT / "vibe" / "model_hub_runtime" / "cliproxyapi_manifest.json"
 OWNED_RELEASE_ROOT = "https://github.com/avibe-bot/avibe/releases/download"
-UPSTREAM_RELEASE_ROOT = "https://github.com/router-for-me/CLIProxyAPI/releases/download"
 EXPECTED_PLATFORMS = frozenset(
-    {"darwin-arm64", "darwin-x64", "linux-amd64", "linux-arm64"}
+    {
+        "darwin-arm64",
+        "darwin-x64",
+        "linux-amd64",
+        "linux-arm64",
+        "windows-amd64",
+        "windows-arm64",
+    }
 )
 UPSTREAM_PLATFORM_NAMES = {
     "darwin-arm64": "darwin_aarch64",
     "darwin-x64": "darwin_amd64",
     "linux-amd64": "linux_amd64",
     "linux-arm64": "linux_aarch64",
+    "windows-amd64": "windows_amd64",
+    "windows-arm64": "windows_aarch64",
 }
 ASSET_TAG_RE = re.compile(
     r"model-hub-engine-v[0-9]+\.[0-9]+\.[0-9]+-[1-9][0-9]*"
@@ -49,7 +57,6 @@ class ArchiveSpec:
     platform: str
     name: str
     owned_url: str
-    upstream_url: str
     size: int
     sha256: str
     binary_sha256: str
@@ -118,7 +125,6 @@ def load_release_spec(manifest_path: Path) -> ReleaseSpec:
         raise ReleaseGuardError("Model Hub engine source URL is invalid")
 
     owned_release_url = f"{OWNED_RELEASE_ROOT}/{asset_release_tag}"
-    upstream_release_url = f"{UPSTREAM_RELEASE_ROOT}/{upstream_release_tag}"
     raw_assets = payload.get("assets")
     if not isinstance(raw_assets, list):
         raise ReleaseGuardError("Model Hub engine manifest assets must be a list")
@@ -151,7 +157,7 @@ def load_release_spec(manifest_path: Path) -> ReleaseSpec:
             raise ReleaseGuardError(f"{context} has an invalid digest")
         if not isinstance(size, int) or isinstance(size, bool) or not 0 < size <= MAX_ARCHIVE_BYTES:
             raise ReleaseGuardError(f"{context}.size_bytes is invalid")
-        if bin_path != "cli-proxy-api":
+        if bin_path != ("cli-proxy-api.exe" if platform.startswith("windows-") else "cli-proxy-api"):
             raise ReleaseGuardError(f"{context}.bin_path is invalid")
         seen_platforms.add(platform)
         seen_names.add(name)
@@ -160,7 +166,6 @@ def load_release_spec(manifest_path: Path) -> ReleaseSpec:
                 platform=platform,
                 name=name,
                 owned_url=owned_url,
-                upstream_url=f"{upstream_release_url}/{name}",
                 size=size,
                 sha256=sha256,
                 binary_sha256=binary_sha256,
@@ -335,39 +340,25 @@ def _download(url: str, destination: Path, *, max_bytes: int, attempts: int = 3)
         time.sleep(float(attempt))
 
 
-def _materialize(
-    manifest_path: Path,
-    output_dir: Path,
-    *,
-    from_upstream: bool,
-) -> ReleaseSpec:
+def fetch_release_assets(manifest_path: Path, output_dir: Path) -> ReleaseSpec:
     spec = load_release_spec(manifest_path)
     output_dir.parent.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix=f".{output_dir.name}-", dir=output_dir.parent))
     try:
-        (staging / "model-hub-engine-manifest.json").write_bytes(spec.manifest_bytes)
         for archive in spec.archives:
-            url = archive.upstream_url if from_upstream else archive.owned_url
-            _download(url, staging / archive.name, max_bytes=archive.size)
+            _download(archive.owned_url, staging / archive.name, max_bytes=archive.size)
             if (staging / archive.name).stat().st_size != archive.size:
                 raise ReleaseGuardError(f"Model Hub engine archive size mismatch: {archive.name}")
-            if from_upstream:
-                (staging / f"{archive.name}.sha256").write_text(
-                    f"{archive.sha256}  {archive.name}\n",
-                    encoding="utf-8",
-                )
-            else:
-                _download(
-                    f"{archive.owned_url}.sha256",
-                    staging / f"{archive.name}.sha256",
-                    max_bytes=256,
-                )
-        if not from_upstream:
             _download(
-                f"{spec.owned_release_url}/model-hub-engine-manifest.json",
-                staging / "model-hub-engine-manifest.json",
-                max_bytes=max(len(spec.manifest_bytes), 1),
+                f"{archive.owned_url}.sha256",
+                staging / f"{archive.name}.sha256",
+                max_bytes=256,
             )
+        _download(
+            f"{spec.owned_release_url}/model-hub-engine-manifest.json",
+            staging / "model-hub-engine-manifest.json",
+            max_bytes=max(len(spec.manifest_bytes), 1),
+        )
         verify_release_assets(manifest_path, staging)
         if output_dir.exists():
             if not output_dir.is_dir() or output_dir.is_symlink():
@@ -378,10 +369,6 @@ def _materialize(
         if staging.exists():
             shutil.rmtree(staging)
     return spec
-
-
-def fetch_release_assets(manifest_path: Path, output_dir: Path) -> ReleaseSpec:
-    return _materialize(manifest_path, output_dir, from_upstream=False)
 
 
 def fetch_upstream_assets(manifest_path: Path, output_dir: Path) -> ReleaseSpec:

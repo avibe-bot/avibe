@@ -1097,6 +1097,19 @@ def _chat_stream_frames(model: str) -> list[bytes]:
             None,
             {
                 **common,
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {},
+                        "finish_reason": "stop",
+                    }
+                ],
+            },
+        ),
+        _sse(
+            None,
+            {
+                **common,
                 "choices": [],
                 "usage": {
                     "prompt_tokens": 12,

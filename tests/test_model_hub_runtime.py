@@ -890,37 +890,54 @@ def test_packaged_manifest_matches_frozen_runtime_dependency_values(
     assert manifest == {
         "name": "cliproxyapi",
         "resolution": "resolved",
-        "version": "v7.3.16",
-        "source_sha": "c404af96ebacedf8168b3c2bdbf4449a21cd1c1e",
+        "version": "v8.0.23",
+        "source_sha": "d318bcc3afb9ea8782862f5e8cdb541afdc9dfa5",
         "assets": [
             {
                 "platform": "darwin-arm64",
-                "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v7.3.16-3/CLIProxyAPI_7.3.16_darwin_aarch64.tar.gz",
-                "size_bytes": 39534924,
-                "sha256": "bc046156ac880beb1c09b2b69a8f80513ce3caec92f34fbc00dbf8aaf2c91754",
+                "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v8.0.23-1/CLIProxyAPI_8.0.23_darwin_aarch64.tar.gz",
+                "size_bytes": 40511180,
+                "sha256": "bd863d04d950390b745dd4414ea8c8be715cb5c21b492d3c0d71504f64fca978",
             },
             {
                 "platform": "darwin-x64",
-                "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v7.3.16-3/CLIProxyAPI_7.3.16_darwin_amd64.tar.gz",
-                "size_bytes": 41928346,
-                "sha256": "6cdc647a2bb0ccc8d179f290cb1f90da28ef3d02e7c2d6aa96f5903760a78328",
+                "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v8.0.23-1/CLIProxyAPI_8.0.23_darwin_amd64.tar.gz",
+                "size_bytes": 42973748,
+                "sha256": "eda0092a9d1afecf8471fc95e4c077825a3db8059df7caa6a06816a2a8a438eb",
             },
             {
                 "platform": "linux-amd64",
-                "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v7.3.16-3/CLIProxyAPI_7.3.16_linux_amd64.tar.gz",
-                "size_bytes": 39894112,
-                "sha256": "88e0843bb5eaecb2748ff7fc5c4d61d301927ccd0aec7b35b1e20efc551957e9",
+                "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v8.0.23-1/CLIProxyAPI_8.0.23_linux_amd64.tar.gz",
+                "size_bytes": 40932246,
+                "sha256": "e72351f5280f943233c9ddc8ab9f51556f57e9f95d68bf13a15b141a95e48b65",
             },
             {
                 "platform": "linux-arm64",
-                "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v7.3.16-3/CLIProxyAPI_7.3.16_linux_aarch64.tar.gz",
-                "size_bytes": 36618378,
-                "sha256": "a289bbc2d409e5a54a2f65c9d331f7e968b0f18fba2f3b56477a30a2a3c08c3a",
+                "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v8.0.23-1/CLIProxyAPI_8.0.23_linux_aarch64.tar.gz",
+                "size_bytes": 37548183,
+                "sha256": "ca06e508c654d6c8cfc5af44341eeac339e0a033d217a480c44043b8e8c81ebc",
+            },
+            {
+                "platform": "windows-amd64",
+                "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v8.0.23-1/CLIProxyAPI_8.0.23_windows_amd64.tar.gz",
+                "size_bytes": 41444644,
+                "sha256": "7d138744b44a7ee103f15d065712f97798db0259cdafce2a93819b4135b69006",
+            },
+            {
+                "platform": "windows-arm64",
+                "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v8.0.23-1/CLIProxyAPI_8.0.23_windows_aarch64.tar.gz",
+                "size_bytes": 37803078,
+                "sha256": "969997f1dbe169c83e227def75ca51e105aafb9f3d30bb3bb615685fc289b525",
             },
         ],
     }
 
-    monkeypatch.setattr(managed_runtime, "runtime_platform_tag", lambda: "win32-x64")
+    for host_platform, asset_platform in (("win32-x64", "windows-amd64"), ("win32-arm64", "windows-arm64")):
+        monkeypatch.setattr(managed_runtime, "runtime_platform_tag", lambda tag=host_platform: tag)
+        assert manager.host_platform() == asset_platform
+        assert manager.supports_host_platform() is True
+
+    monkeypatch.setattr(managed_runtime, "runtime_platform_tag", lambda: "linux-riscv64")
     unsupported = EngineRuntimeManager(
         runtime_dir=tmp_path / "unsupported-runtime",
         offline=True,
@@ -936,12 +953,12 @@ def test_contract_manifest_filters_unsupported_override_assets(
     payload = json.loads(Path("vibe/model_hub_runtime/cliproxyapi_manifest.json").read_text(encoding="utf-8"))
     payload["assets"].append(
         {
-            "platform": "win32-x64",
-            "url": "https://example.test/unsupported.zip",
+            "platform": "linux-riscv64",
+            "url": "https://example.test/unsupported.tar.gz",
             "size_bytes": 1,
             "sha256": "1" * 64,
             "binary_sha256": "2" * 64,
-            "bin_path": "cli-proxy-api.exe",
+            "bin_path": "cli-proxy-api",
         }
     )
     manifest_path = tmp_path / "override.json"
@@ -952,9 +969,9 @@ def test_contract_manifest_filters_unsupported_override_assets(
         offline=True,
     )
 
-    assert "win32-x64" not in {asset["platform"] for asset in manager.contract_manifest()["assets"]}
+    assert "linux-riscv64" not in {asset["platform"] for asset in manager.contract_manifest()["assets"]}
 
-    monkeypatch.setattr(managed_runtime, "runtime_platform_tag", lambda: "win32-x64")
+    monkeypatch.setattr(managed_runtime, "runtime_platform_tag", lambda: "linux-riscv64")
     assert manager.supports_host_platform() is False
     unsupported = manager.ensure()
     assert unsupported["ok"] is False
@@ -998,7 +1015,7 @@ def test_foreign_pointer_inspection_cannot_hide_an_unsupported_host(
         json.dumps({"platform": "linux-amd64"}),
         encoding="utf-8",
     )
-    monkeypatch.setattr(managed_runtime, "runtime_platform_tag", lambda: "win32-x64")
+    monkeypatch.setattr(managed_runtime, "runtime_platform_tag", lambda: "linux-riscv64")
     manager = EngineRuntimeManager(runtime_dir=runtime_dir, offline=True)
 
     status = manager.status()
@@ -1311,7 +1328,7 @@ def test_manifest_resolution_drives_admission_persistence_and_schema(
         )
     else:
         if resolution is ManifestResolution.UNSUPPORTED:
-            monkeypatch.setattr(managed_runtime, "runtime_platform_tag", lambda: "win32-x64")
+            monkeypatch.setattr(managed_runtime, "runtime_platform_tag", lambda: "linux-riscv64")
         elif resolution is not ManifestResolution.RESOLVED:
             raise AssertionError(f"unmodelled manifest resolution: {resolution}")
         manager = EngineRuntimeManager(
@@ -1406,35 +1423,55 @@ def test_installing_projection_matches_live_owner_or_resumable_claim(
 
 
 @pytest.mark.parametrize(
-    ("host_platform", "asset_platform", "size_bytes", "archive_sha256", "binary_sha256"),
+    ("host_platform", "asset_platform", "size_bytes", "archive_sha256", "binary_sha256", "bin_path"),
     [
             (
                 "darwin-arm64",
                 "darwin-arm64",
-                39534924,
-                "bc046156ac880beb1c09b2b69a8f80513ce3caec92f34fbc00dbf8aaf2c91754",
-                "bfd39d09fd0f5f922ba5cd1a6d86cb86b928e31bcf1746cb763f5632af13c068",
+                40511180,
+                "bd863d04d950390b745dd4414ea8c8be715cb5c21b492d3c0d71504f64fca978",
+                "f953540b126b220352bb66991e9f8d1c29cf18054f4c75f17e49a7d73fb17e19",
+                "cli-proxy-api",
             ),
             (
                 "darwin-x64",
                 "darwin-x64",
-                41928346,
-                "6cdc647a2bb0ccc8d179f290cb1f90da28ef3d02e7c2d6aa96f5903760a78328",
-                "dc1339f5a5a50d7b8254c1b1662177beb9a597aab04ba647ee9b6f555de1b87d",
+                42973748,
+                "eda0092a9d1afecf8471fc95e4c077825a3db8059df7caa6a06816a2a8a438eb",
+                "f279440f5689b15f322bb9c4116fcf8434d0b48bfcac2c2f2e089557e6f59f36",
+                "cli-proxy-api",
             ),
             (
                 "linux-x64",
                 "linux-amd64",
-                39894112,
-                "88e0843bb5eaecb2748ff7fc5c4d61d301927ccd0aec7b35b1e20efc551957e9",
-                "8c500c984e056a2b191c8a3a2780062ca447659244d7b62b9544c5a4af29b0de",
+                40932246,
+                "e72351f5280f943233c9ddc8ab9f51556f57e9f95d68bf13a15b141a95e48b65",
+                "fa7fa7cd0289a4912587764c535adcd06a41fe1fb0dc92193925883bbfe8b3a1",
+                "cli-proxy-api",
             ),
             (
                 "linux-arm64",
                 "linux-arm64",
-                36618378,
-                "a289bbc2d409e5a54a2f65c9d331f7e968b0f18fba2f3b56477a30a2a3c08c3a",
-                "9ddb102bbd6b80c2651e5eb2939840142efb8068e802521ae0c1eac3877a84b9",
+                37548183,
+                "ca06e508c654d6c8cfc5af44341eeac339e0a033d217a480c44043b8e8c81ebc",
+                "5a514166e95e35b53a846030ab3cb4af5a1c52c06df2c3db8c764adde1bc6178",
+                "cli-proxy-api",
+            ),
+            (
+                "win32-x64",
+                "windows-amd64",
+                41444644,
+                "7d138744b44a7ee103f15d065712f97798db0259cdafce2a93819b4135b69006",
+                "c265136d64bc6fdb7a4737e28333ff58ed995407d50b0581857e6693a2952a32",
+                "cli-proxy-api.exe",
+            ),
+            (
+                "win32-arm64",
+                "windows-arm64",
+                37803078,
+                "969997f1dbe169c83e227def75ca51e105aafb9f3d30bb3bb615685fc289b525",
+                "0ba1b87a3c562f5121f2902507e6608713237a3daafa229bca5b4829b29c29ec",
+                "cli-proxy-api.exe",
             ),
     ],
 )
@@ -1446,6 +1483,7 @@ def test_engine_installer_selects_verified_packaged_asset(
     size_bytes: int,
     archive_sha256: str,
     binary_sha256: str,
+    bin_path: str,
 ) -> None:
     monkeypatch.setattr(managed_runtime, "runtime_platform_tag", lambda: host_platform)
     manager = EngineRuntimeManager(runtime_dir=tmp_path / host_platform, offline=True)
@@ -1459,6 +1497,7 @@ def test_engine_installer_selects_verified_packaged_asset(
     assert archive.size == size_bytes
     assert archive.sha256 == archive_sha256
     assert archive.binary_sha256 == binary_sha256
+    assert archive.bin_path == bin_path
 
 
 def test_engine_platform_identity_is_normalized_locally() -> None:
@@ -5332,7 +5371,7 @@ def test_platform_refusal_never_creates_or_settles_an_install_claim(
     async def run() -> None:
         archive, binary = _write_fixture_archive(tmp_path / "fixture")
         manifest_path = _write_fixture_manifest(tmp_path / "fixture", archive, binary)
-        monkeypatch.setattr(managed_runtime, "runtime_platform_tag", lambda: "win32-x64")
+        monkeypatch.setattr(managed_runtime, "runtime_platform_tag", lambda: "linux-riscv64")
         installer = EngineRuntimeManager(
             runtime_dir=tmp_path / "runtime",
             manifest_path=manifest_path,
