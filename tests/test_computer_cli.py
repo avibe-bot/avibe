@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import re
+import shlex
 import socket
 import tempfile
 from pathlib import Path
@@ -10,10 +12,12 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import httpx
+from jsonschema import Draft7Validator
 import pytest
 
 from core import internal_server, session_turns
 from core.computer_cli import (
+    COMPUTER_CLI_TOOLS,
     build_driver_arguments,
     format_human_result,
     prepare_arguments_for_output,
@@ -83,6 +87,72 @@ def test_parser_covers_the_allowlisted_driver_operations_without_session_id() ->
 
     with pytest.raises(SystemExit):
         parser.parse_args(["computer", "click", "--session-id", "manual"])
+
+
+def test_packaged_skill_examples_parse_and_match_the_pinned_driver_schema() -> None:
+    skill = Path("skills/computer-use/SKILL.md").read_text(encoding="utf-8")
+    commands = [
+        line.strip()
+        for line in skill.splitlines()
+        if line.strip().startswith("vibe computer ")
+    ]
+    snapshot = json.loads(
+        Path("desktop/cua-driver/tools-v0.31.0.json").read_text(encoding="utf-8")
+    )
+    schemas = {
+        tool["name"]: tool["inputSchema"]
+        for tool in snapshot["tools"]
+        if tool["name"] in COMPUTER_CLI_TOOLS.values()
+    }
+    parser = cli.build_parser()
+    covered_tools: set[str] = set()
+
+    for command in commands:
+        argv = shlex.split(command)
+        assert argv[:2] == ["vibe", "computer"]
+        args = parser.parse_args(argv[1:])
+        if args.computer_command == "observe":
+            path = ("observe", args.computer_observe_command)
+        elif args.computer_command == "clipboard":
+            path = ("clipboard", args.computer_clipboard_command)
+        else:
+            path = (args.computer_command,)
+        tool = tool_for_command(path)
+        arguments = build_driver_arguments(args.args_json, args.arg)
+        arguments = prepare_arguments_for_output(tool, arguments, args.output)
+        errors = sorted(
+            Draft7Validator(schemas[tool]).iter_errors(arguments),
+            key=lambda error: tuple(error.path),
+        )
+        assert not errors, f"{command}: {[error.message for error in errors]}"
+        covered_tools.add(tool)
+
+    assert covered_tools == set(COMPUTER_CLI_TOOLS.values())
+    assert len(commands) == len(COMPUTER_CLI_TOOLS)
+    assert re.findall(
+        r"vibe computer clipboard read[^\n]*",
+        skill,
+    ) == ["vibe computer clipboard read --arg include_text=true"]
+
+    documented_flags = set(re.findall(r"(?<![\w-])--[a-z][a-z-]*", skill))
+    assert documented_flags == {
+        "--arg",
+        "--args-json",
+        "--json",
+        "--output",
+    }
+    parser.parse_args(
+        [
+            "computer",
+            "observe",
+            "windows",
+            "--args-json",
+            '{"on_screen_only":true}',
+            "--json",
+        ]
+    )
+    with pytest.raises(SystemExit):
+        parser.parse_args(["computer", "observe", "apps", "--session-id", "manual"])
 
 
 def test_computer_help_uses_the_configured_backend_locale(
@@ -182,23 +252,64 @@ def test_cmd_computer_binds_the_caller_session_and_prints_structured_result(
     assert payload["result"]["content"][0]["type"] == "text"
 
 
+@pytest.mark.parametrize(
+    ("argv", "expected_tool", "expected_arguments"),
+    [
+        (
+            ["observe", "window", "--arg", "pid=7", "--arg", "window_id=9"],
+            "get_window_state",
+            {"pid": 7, "window_id": 9},
+        ),
+        (
+            [
+                "zoom",
+                "--arg",
+                "pid=7",
+                "--arg",
+                "window_id=9",
+                "--arg",
+                "x1=0",
+                "--arg",
+                "y1=0",
+                "--arg",
+                "x2=100",
+                "--arg",
+                "y2=100",
+            ],
+            "zoom",
+            {
+                "pid": 7,
+                "window_id": 9,
+                "x1": 0,
+                "y1": 0,
+                "x2": 100,
+                "y2": 100,
+            },
+        ),
+    ],
+)
 def test_cmd_computer_reports_driver_error_before_writing_screenshot(
     monkeypatch: pytest.MonkeyPatch,
     capsys,
     tmp_path: Path,
+    argv: list[str],
+    expected_tool: str,
+    expected_arguments: dict,
 ) -> None:
     monkeypatch.setenv("AVIBE_SESSION_ID", "ses-cli")
     monkeypatch.setattr(cli, "_configured_cli_language", lambda: "zh")
+    output_path = tmp_path / f"{expected_tool}.png"
 
     def fake_computer_use_sync(**kwargs):
-        assert kwargs["arguments"]["screenshot_out_file"] == str(
-            (tmp_path / "missing.png").resolve()
-        )
+        assert kwargs["tool"] == expected_tool
+        if expected_tool == "get_window_state":
+            expected_arguments["screenshot_out_file"] = str(output_path.resolve())
+        assert kwargs["arguments"] == expected_arguments
         return {
             "status_code": 200,
             "body": {
                 "ok": False,
-                "tool": "get_window_state",
+                "tool": expected_tool,
                 "result": {
                     "isError": True,
                     "content": [
@@ -221,20 +332,99 @@ def test_cmd_computer_reports_driver_error_before_writing_screenshot(
 
     with patch("vibe.internal_client.computer_use_sync", fake_computer_use_sync):
         args = cli.build_parser().parse_args(
-            [
-                "computer",
-                "observe",
-                "window",
-                "--output",
-                str(tmp_path / "missing.png"),
-            ]
+            ["computer", *argv, "--output", str(output_path)]
         )
         assert cli.cmd_computer(args) == 1
 
     output = capsys.readouterr().out
     assert "桌面正被另一个 Avibe Session 使用" in output
     assert "desktop is held" not in output
-    assert not (tmp_path / "missing.png").exists()
+    assert not output_path.exists()
+
+
+@pytest.mark.parametrize(
+    ("status", "reason", "zh_status", "zh_reason"),
+    [
+        ("off", "toggle_off", "未开启", "原生电脑操作开关已关闭"),
+        (
+            "needs_permission",
+            "screen_recording",
+            "需要系统权限",
+            "缺少屏幕录制权限",
+        ),
+        ("starting", None, "桌面驱动正在启动", "未提供原因"),
+    ],
+)
+def test_human_unavailable_error_localizes_structured_status_and_reason(
+    status: str,
+    reason: str | None,
+    zh_status: str,
+    zh_reason: str,
+) -> None:
+    result = {
+        "isError": True,
+        "content": [
+            {
+                "type": "text",
+                "text": json.dumps(
+                    {
+                        "code": "computer_use_unavailable",
+                        "params": {"status": status, "reason": reason},
+                    }
+                ),
+            }
+        ],
+    }
+
+    output = format_human_result(
+        "list_apps",
+        result,
+        translate=lambda key, **kwargs: i18n_t(key, "zh", **kwargs),
+    )
+
+    assert f"状态={status}：{zh_status}" in output
+    assert zh_reason in output
+    assert "Computer use is not ready" not in output
+    assert "permission is required" not in output
+
+
+def test_json_unavailable_error_keeps_code_and_params(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys,
+) -> None:
+    monkeypatch.setenv("AVIBE_SESSION_ID", "ses-cli")
+    body = {
+        "ok": False,
+        "tool": "list_apps",
+        "result": {
+            "isError": True,
+            "content": [
+                {
+                    "type": "text",
+                    "text": json.dumps(
+                        {
+                            "code": "computer_use_unavailable",
+                            "params": {
+                                "status": "needs_permission",
+                                "reason": "screen_recording",
+                            },
+                        }
+                    ),
+                }
+            ],
+        },
+    }
+
+    with patch(
+        "vibe.internal_client.computer_use_sync",
+        lambda **_kwargs: {"status_code": 200, "body": body},
+    ):
+        args = cli.build_parser().parse_args(
+            ["computer", "observe", "apps", "--json"]
+        )
+        assert cli.cmd_computer(args) == 1
+
+    assert json.loads(capsys.readouterr().out) == body
 
 
 def test_cmd_computer_localizes_controller_error_in_zh(

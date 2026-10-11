@@ -36,6 +36,7 @@ export type ComputerUseCopyKey =
   | 'workbench.home.computerUse.snapshotInvalidDetail'
   | 'workbench.home.computerUse.shellNotRunningDetail'
   | 'workbench.home.computerUse.daemonUnreachableDetail'
+  | 'workbench.home.computerUse.controllerUnavailableDetail'
   | 'workbench.home.computerUse.off'
   | 'workbench.home.computerUse.offDetail';
 
@@ -62,6 +63,7 @@ const unavailableDetailKeys: Record<string, ComputerUseCopyKey> = {
   snapshot_invalid: 'workbench.home.computerUse.snapshotInvalidDetail',
   shell_not_running: 'workbench.home.computerUse.shellNotRunningDetail',
   daemon_unreachable: 'workbench.home.computerUse.daemonUnreachableDetail',
+  controller_unavailable: 'workbench.home.computerUse.controllerUnavailableDetail',
 };
 
 export const computerUseStatusCopy = (

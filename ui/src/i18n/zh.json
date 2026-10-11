@@ -2966,6 +2966,7 @@
         "snapshotInvalidDetail": "已验证的电脑操作工具快照缺失或发生变化。请更新或重新安装 Avibe 桌面应用。",
         "shellNotRunningDetail": "请打开或重新打开 Avibe 桌面应用，以使用电脑操作。",
         "daemonUnreachableDetail": "桌面驱动当前无法连接。请关闭并重新开启电脑操作；如果问题重复出现，请重新打开 Avibe。",
+        "controllerUnavailableDetail": "当前无法连接 Avibe Controller。请等待服务恢复后再使用电脑操作 CLI。",
         "socketPathTooLongDetail": "macOS 无法创建受管理的驱动端点。请更新或重新安装 Avibe 桌面应用。"
       },
       "continueOnPhone": "在手机 APP 上继续",

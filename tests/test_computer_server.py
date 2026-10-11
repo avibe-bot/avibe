@@ -549,24 +549,30 @@ async def test_failed_explicit_end_keeps_session_observations_and_real_lease(
 
 
 @pytest.mark.asyncio
-async def test_retire_session_releases_state_and_an_orphaned_lease(
+async def test_retire_session_releases_an_inactive_proxy_owned_lease_without_starting_driver(
     tmp_path: Path,
 ) -> None:
     state_path, state = _state(tmp_path)
     leases = DesktopLeaseManager(tmp_path)
-    upstream = FakeUpstream()
+    starts = 0
+
+    async def upstream_factory(_state):
+        nonlocal starts
+        starts += 1
+        return FakeUpstream()
+
     server = ComputerUseServer(
         state_path=state_path,
         status_reader=lambda: ComputerUseStatus("ready", None, state),
-        upstream_factory=lambda _state: asyncio.sleep(0, result=upstream),
+        upstream_factory=upstream_factory,
         lease_manager=leases,
     )
 
-    await server.call_tool("list_apps", {"session": "ses-a"})
-    upstream.tool_errors.add("end_session")
+    leases.acquire("ses-a", state.daemon_key, lambda: state.daemon_key)
     retired = await server.retire_session("ses-a")
 
-    assert retired["isError"] is True
+    assert retired["isError"] is False
+    assert starts == 0
     assert "ses-a" not in server._sessions
     assert "ses-a" not in server._session_locks
     assert leases.acquire(
@@ -574,6 +580,46 @@ async def test_retire_session_releases_state_and_an_orphaned_lease(
         state.daemon_key,
         lambda: state.daemon_key,
     ).lease.holder == "ses-b"
+
+
+@pytest.mark.asyncio
+async def test_retire_session_preserves_a_replacement_lease_holder(
+    tmp_path: Path,
+) -> None:
+    state_path, first_state = _state(tmp_path)
+    leases = DesktopLeaseManager(tmp_path)
+    server = ComputerUseServer(
+        state_path=state_path,
+        status_reader=lambda: ComputerUseStatus("ready", None, first_state),
+        upstream_factory=lambda _state: pytest.fail("retirement started a driver"),
+        lease_manager=leases,
+    )
+
+    leases.acquire(
+        "ses-retired",
+        first_state.daemon_key,
+        lambda: first_state.daemon_key,
+    )
+    replacement_key = (first_state.instance_id, first_state.generation + 1)
+    replacement = leases.acquire(
+        "ses-replacement",
+        replacement_key,
+        lambda: replacement_key,
+    ).lease
+
+    retired = await server.retire_session("ses-retired")
+
+    assert retired["isError"] is False
+    assert leases.refresh(replacement) is True
+    with pytest.raises(
+        ComputerServerError,
+        match="Desktop computer use is held by another Avibe Session",
+    ):
+        leases.acquire(
+            "ses-other",
+            replacement_key,
+            lambda: replacement_key,
+        )
 
 
 @pytest.mark.asyncio

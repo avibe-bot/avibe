@@ -199,6 +199,49 @@ def test_workbench_status_supports_shell_started_runtime_from_the_same_state_sou
     assert response.headers["Cache-Control"] == "no-store"
 
 
+@pytest.mark.parametrize(
+    ("controller_identity", "expected_status", "expected_reason"),
+    [
+        ({"service": "vibe-remote-internal"}, "ready", None),
+        (None, "unavailable", "controller_unavailable"),
+    ],
+)
+def test_workbench_ready_status_reflects_controller_ipc_health(
+    monkeypatch,
+    controller_identity,
+    expected_status,
+    expected_reason,
+) -> None:
+    monkeypatch.setattr(ui_server, "desktop_computer_use_shell_is_live", lambda: True)
+    monkeypatch.setattr(
+        ui_server,
+        "effective_computer_use_status",
+        lambda: ComputerUseStatus("ready", None),
+    )
+
+    async def controller_health():
+        return controller_identity
+
+    monkeypatch.setattr(
+        internal_client,
+        "health_identity",
+        controller_health,
+    )
+
+    response = app.test_client().get(
+        "/api/desktop/computer-use/status",
+        base_url="http://127.0.0.1:5123",
+    )
+
+    assert response.status_code == 200
+    assert response.get_json() == {
+        "supported": True,
+        "status": expected_status,
+        "reason": expected_reason,
+    }
+    assert response.headers["Cache-Control"] == "no-store"
+
+
 def test_workbench_status_hides_computer_use_without_live_native_shell(
     monkeypatch,
 ) -> None:

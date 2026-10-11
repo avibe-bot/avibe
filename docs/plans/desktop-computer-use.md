@@ -76,6 +76,38 @@ start from a mergeable Slice 1 head; this plan does not authorize launching
 apps, touching TCC, using credentials, restarting Runtime, or performing live
 acceptance.
 
+## 2026-10-11 P2 follow-up contract
+
+The invariant is that the shipped Session-keyed Computer Use path stays
+truthful at every existing boundary: retiring an Avibe Session releases only a
+lease still owned by that Session without starting or reviving a driver
+session; CLI and Workbench status copy describe the structured state that can
+actually be used; screenshot errors remain errors before any output write; and
+every packaged Skill example is accepted by the CLI and the pinned driver
+schema.
+
+The changed boundaries are limited to:
+
+- `ComputerUseServer` retirement and the existing desktop lease manager;
+- localized CLI rendering of `computer_use_unavailable` status and reason;
+- the Workbench status API and component copy when Controller IPC is unhealthy;
+- the packaged `computer-use` Skill examples and their parser/schema contract.
+
+Owning tests cover an inactive-proxy lease through the real retirement path,
+preservation of a replacement holder, localized human and unchanged JSON error
+output, API-to-component Controller-unavailable rendering, structured errors
+before both screenshot output paths, and every command and flag shown by the
+packaged Skill against the pinned allowed driver schema.
+
+Preserved behavior includes same-user local trust, Session-keyed state and
+archive admission fencing, exact transport ownership, lease TTL and heartbeat,
+ambiguous forwarded-action handling, observe-first and exact-window checks,
+focus and foreground restrictions, native toggle/lifecycle ownership, all
+backend CLI parity, no managed backend MCP, no always-on prompt, and the
+already-corrected no-Turn-capability documentation. This follow-up adds no
+authority mechanism, per-Turn teardown, credential, Route B behavior, GUI/TCC
+operation, service restart, installation, release, or publication.
+
 ## Route A: raw single-click selector (2026-10-10)
 
 Status: implementation lane, based on remote master

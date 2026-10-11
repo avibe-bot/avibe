@@ -52,6 +52,7 @@ from vibe.ui_compat import (
 from config import paths
 from config.v2_config import CONFIG_LOCK, V2Config
 from core.computer_use import (
+    ComputerUseStatus,
     desktop_computer_use_shell_is_live,
     effective_computer_use_status,
 )
@@ -3382,6 +3383,8 @@ async def desktop_capabilities():
 async def desktop_computer_use_status():
     """Read the shell/daemon status from the shared desktop state contract."""
 
+    from vibe import internal_client
+
     if not _desktop_computer_use_supported():
         response_payload = jsonify(
             {
@@ -3394,6 +3397,8 @@ async def desktop_computer_use_status():
         return response_payload
 
     status = await asyncio.to_thread(effective_computer_use_status)
+    if status.status == "ready" and await internal_client.health_identity() is None:
+        status = ComputerUseStatus("unavailable", "controller_unavailable")
     response_payload = jsonify(
         {
             "supported": True,

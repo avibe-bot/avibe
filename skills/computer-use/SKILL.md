@@ -21,7 +21,7 @@ vibe computer hotkey --arg keys='["cmd","c"]' --arg pid=123 --arg window_id=456
 vibe computer scroll --arg direction=down --arg pid=123 --arg window_id=456
 vibe computer drag --arg from_x=10 --arg from_y=10 --arg to_x=100 --arg to_y=100 --arg pid=123 --arg window_id=456
 vibe computer set-value --arg pid=123 --arg value=enabled --arg element_token=el_1
-vibe computer clipboard read
+vibe computer clipboard read --arg include_text=true
 vibe computer clipboard write --arg text="copied text"
 vibe computer launch --arg bundle_id=com.example.App
 vibe computer quit --arg pid=123
@@ -82,7 +82,8 @@ retrying automatically:
 - `error`: the desktop application reported a terminal setup or driver error.
 - `unavailable`: the state file, shell, or driver endpoint is unavailable.
 - `desktop_busy`: another Avibe Session holds the desktop lease.
-- `observe_first`: the exact target has not been observed in this Turn.
+- `observe_first`: the exact target has not been observed in the current
+  Session lease epoch.
 - `foreground_forbidden` or `focus_shortcut_forbidden`: the safety policy
   rejected the requested input.
 
