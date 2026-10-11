@@ -564,6 +564,24 @@ async def test_a_file_this_user_may_write_but_not_inspect_is_written(tmp_path, m
     assert [path.name for path in tmp_path.iterdir()] == ["f.txt"]
 
 
+@pytest.mark.skipif(not WINDOWS, reason="a Windows ACL")
+async def test_a_file_whose_acl_denies_reading_its_attributes_is_written(tmp_path, make_ctx):
+    """NTFS lets whoever may list a directory read the attributes of the files in it, whatever their own ACLs
+    say, so checking the file the rewrite opened asks for nothing that writing it does not already have."""
+    target = tmp_path / "f.txt"
+    target.write_bytes(b"old\n")
+    _icacls(target, "/deny", f"{getpass.getuser()}:(RA)")
+    try:
+        assert "(DENY)(RA)" in _icacls(target)
+        result = await WriteTool().execute({"path": "f.txt", "content": "new\n"}, make_ctx())
+    finally:
+        _icacls(target, "/remove:d", getpass.getuser())
+
+    assert not result.is_error, result_text(result)
+    assert target.read_bytes() == b"new\n"
+    assert [path.name for path in tmp_path.iterdir()] == ["f.txt"]
+
+
 def _read_data_only(path):
     import ctypes
     import msvcrt
