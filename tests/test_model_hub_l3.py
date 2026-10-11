@@ -3154,6 +3154,7 @@ def test_gateway_cooldown_uses_one_cancellable_recovery_window(
                                         "type": "model_hub_recovery_exhausted",
                                         "code": "model_hub_recovery_exhausted",
                                         "message": "Automatic recovery has ended. Try again or choose another model.",
+                                        "cause": "server_error",
                                     },
                                 }
                             assert "Retry-After" not in response.headers
