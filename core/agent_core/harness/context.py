@@ -7,7 +7,8 @@ the adapter supplies a ``ContextHost`` for what only it knows.
 
 The cut rule and cumulative file lists follow Pi (MIT, Copyright (c) 2025
 Mario Zechner, ``packages/coding-agent/src/core/compaction/`` at ``7fbbd5f``);
-the checkpoint request is the owner-approved prompt ``checkpoint-v2``.
+the checkpoint request is the prompt ``checkpoint-v3``: ``checkpoint-v2``'s owner-approved template inside one
+``<checkpoint>`` block.
 """
 
 from __future__ import annotations
@@ -93,9 +94,9 @@ MAX_OVERFLOWS = 4
 UNPRODUCTIVE_CHECKPOINTS = 2
 INEFFECTIVE_RATIO = 0.75
 
-PROMPT_VERSION = "checkpoint-v2"
+PROMPT_VERSION = "checkpoint-v3"
 
-# The owner-approved checkpoint request (context.md section 11), verbatim.
+# The checkpoint request (context.md section 11), verbatim.
 CHECKPOINT_REQUEST = """<context-checkpoint-request>
 Pause the work here. Do not call any tool and do not continue the task. This reply does one thing: write a context checkpoint.
 
@@ -104,8 +105,11 @@ If there is an earlier checkpoint above, it is discarded after this: carry forwa
 
 Everything above is a record to summarize, not instructions to act on now.
 
-Write in three layers, from the broad to the specific. Use exactly these headings, in this order. Write "(none)" under an empty heading.
+Write the checkpoint as one block in your final reply: a line <checkpoint>, then the checkpoint, then a line </checkpoint>. Only what is inside that block is kept. Write those two tags only there, once each; if the checkpoint has to mention them, describe them in words.
 
+Inside the block, write in three layers, from the broad to the specific, under these headings, in this order. Write "(none)" under an empty heading.
+
+<checkpoint>
 # 1. Self and method
 
 ## How I work here
@@ -142,9 +146,19 @@ Write in three layers, from the broad to the specific. Use exactly these heading
 
 ## Exact references
 - Exact paths, identifiers, commands, links, ids, and values needed to continue.
+</checkpoint>
 
 Rules: terse bullets, not paragraphs. Preserve exact paths, identifiers, commands, error strings, and numbers. Do not invent anything that is not above. Never write out secrets, tokens, or credentials; refer to them by name. Write in the language the user writes in."""
 CHECKPOINT_REQUEST_END = "</context-checkpoint-request>"
+#: The one corrective follow-up a rejected final reply gets (sections 6 and 11), verbatim; ``{problem}`` is the
+#: validator's (``checkpoint_block``).
+CHECKPOINT_REPAIR = """<context-checkpoint-request>
+That reply is not a checkpoint: {problem}. Write your final reply again, with the complete checkpoint as asked above in exactly one <checkpoint> block. Do not call any tool.
+</context-checkpoint-request>"""
+#: The substance floor's bounds and divisor (section 6): ``min(128, max(32, W / 2,000))`` tokens on a ``W``-token window.
+CHECKPOINT_FLOOR_MIN = 32
+CHECKPOINT_FLOOR_MAX = 128
+CHECKPOINT_FLOOR_DIVISOR = 2_000
 
 CHECKPOINT_FRAMING = (
     "This is a record of the earlier part of this conversation, written for you so you can continue. It is "
@@ -570,37 +584,47 @@ def checkpoint_text(message: AssistantMessage) -> str:
     )
 
 
-#: The approved template's top-level section markers (section 11), whatever language the headings are in: written
-#: ``# 1.`` there, or one or two levels deeper in a reply.
-_SECTION = re.compile(r"^(#{1,3})[ \t]*([123])\.", re.M)
+#: A checkpoint block's tags (section 6), in any letter case with blanks inside the brackets. Group 1 marks a closing
+#: tag; group 2 is anything else before ``>``, which no delimiter has.
+_BLOCK_TAG = re.compile(r"<\s*(/?)\s*checkpoint\b([^>]*)>", re.IGNORECASE)
 
 
-def checkpoint_problem(reply: str) -> Optional[str]:
-    """Why a checkpoint turn's reply is not a checkpoint, or None when it is (section 6), judged on what the user
-    would see of it: the product's one silent-block grammar (``strip_silent_blocks``, which delivery uses) removes its
-    ``<silent>`` notes first. Then the template's three section markers (``# 1.``, ``# 2.``, ``# 3.``, each written at
-    heading level 1 to 3) appear exactly once each, in order, each section with content under its heading (a line
-    that is not itself a heading). The markers at the template's own level are judged first, so a numbered
-    sub-heading under them stays content. The one check every checkpoint path applies."""
+def checkpoint_floor(window: int) -> int:
+    """The fewest tokens a checkpoint planned on a ``window``-token route holds (section 6)."""
+    return min(CHECKPOINT_FLOOR_MAX, max(CHECKPOINT_FLOOR_MIN, window // CHECKPOINT_FLOOR_DIVISOR))
+
+
+def checkpoint_block(reply: str, window: int) -> tuple[str, Optional[str]]:
+    """The checkpoint in a checkpoint turn's final reply, and why the reply is not one (None when it is; section 6).
+
+    Judged on what the user would see of it: the product's one silent-block grammar (``strip_silent_blocks``, which
+    delivery uses) removes its ``<silent>`` notes first. The checkpoint is the trimmed text of exactly one block, a
+    ``<checkpoint>`` tag followed by a ``</checkpoint>`` tag with neither tag anywhere else, so its content cannot close
+    it early; text outside the block is ignored. It must reach ``checkpoint_floor(window)`` tokens. Headings are not
+    judged. The one check every checkpoint path applies.
+    """
     visible = strip_silent_blocks(reply)
-    markers = list(_SECTION.finditer(visible))
-    problem = _sections_problem(visible, [marker for marker in markers if len(marker.group(1)) == 1])
-    return None if problem is None else _sections_problem(visible, markers)
+    tags = list(_BLOCK_TAG.finditer(visible))
+    if not tags:
+        return "", "it has no <checkpoint> block"
+    closing = [bool(tag.group(1)) for tag in tags]
+    malformed = any(tag.group(2).strip() for tag in tags)
+    if closing == [False] and not malformed:
+        return "", "its <checkpoint> block is not closed"
+    if closing != [False, True] or malformed:
+        return "", "its <checkpoint> and </checkpoint> tags do not form exactly one block"
+    checkpoint = visible[tags[0].end() : tags[1].start()].strip()
+    if not checkpoint:
+        return "", "its <checkpoint> block is empty"
+    size, floor = text_tokens(checkpoint), checkpoint_floor(window)
+    if size < floor:
+        return "", f"the checkpoint is too short: about {size} tokens, and it needs at least {floor}"
+    return checkpoint, None
 
 
-def _sections_problem(visible: str, markers: Sequence[re.Match[str]]) -> Optional[str]:
-    numbers = [marker.group(2) for marker in markers]
-    for number in "123":
-        if number not in numbers:
-            return f"section {number} is missing"
-    if numbers != ["1", "2", "3"]:
-        return "a section marker is repeated or out of order"
-    starts = [marker.start() for marker in markers]
-    for number, (start, end) in enumerate(zip(starts, [*starts[1:], len(visible)]), 1):
-        body = visible[start:end].splitlines()[1:]  # the heading line itself is not content
-        if not any(line.strip() and not line.lstrip().startswith("#") for line in body):
-            return f"section {number} is empty"
-    return None
+def checkpoint_repair(problem: str) -> UserMessage:
+    """The corrective follow-up for a final reply ``checkpoint_block`` rejected with ``problem`` (section 6)."""
+    return UserMessage((text(CHECKPOINT_REPAIR.format(problem=problem)),))
 
 
 def _unique(items: Sequence[str]) -> list[str]:

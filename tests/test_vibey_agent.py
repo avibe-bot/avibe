@@ -2249,6 +2249,60 @@ async def test_a_turn_runs_through_the_real_provider_registry(engine, session, t
     assert harness.controller.im_client.sent == ["hi"]
 
 
+# How a stream breaks off: the connection simply ends, or CLIProxyAPI (Model Hub's engine) reports the upstream
+# closing before its terminal in its own frame, byte for byte, which Model Hub forwards as it is.
+_THINKING_DROPS = {
+    "eof": ("", "network"),
+    "engine-frame": (
+        '\nevent: error\ndata: {"type":"error","error":{"code":"request_timeout","message":"stream error: stream '
+        'disconnected before completion: stream closed before response.completed","param":null,"type":"server_error"},'
+        '"sequence_number":2}\n\n',
+        "server",
+    ),
+}
+
+
+@pytest.mark.parametrize("drop", sorted(_THINKING_DROPS))
+@pytest.mark.parametrize("drops", [1, 2])
+async def test_a_stream_that_drops_after_thinking_alone_gets_one_retry_then_its_own_copy(
+    engine, session, tmp_path, published, drops, drop
+) -> None:
+    """Owner decision 2026-10-11: one retry after a stream that carried only thinking; a second drop shows the
+    drop's own copy, never the generic line."""
+    import httpx
+
+    from modules.agents.vibey.models import registry_providers
+
+    served = json.dumps({"provider": "upstream", "api": "openai_responses", "model": "served-model"}, separators=(",", ":"))
+    ending, copy = _THINKING_DROPS[drop]
+    thinking_then_cut = (
+        'data: {"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":"rs_1"}}\n\n'
+        'data: {"type":"response.reasoning_summary_text.delta","output_index":0,"delta":"**Checking the catalog**"}\n\n'
+        + ending
+    )
+    bodies = [thinking_then_cut] * drops + [_TEXT_STREAMS["openai_responses"][1]]
+    sent: list[dict] = []
+
+    def gateway(request: httpx.Request) -> httpx.Response:
+        sent.append(json.loads(request.content))
+        return httpx.Response(
+            200, headers={"content-type": "text/event-stream", "x-avibe-served-hop": served}, text=bodies.pop(0)
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(gateway)) as client:
+        harness = _Harness(
+            engine, tmp_path, "telegram", [], providers=registry_providers(media_loader=None, client=client)
+        )
+        harness.controller.hub_protocol = "openai_responses"
+        await harness.agent.handle_message(harness.request("hello"))
+
+    assert len(sent) == 2 and sent[1]["input"] == sent[0]["input"]
+    if drops == 1:
+        assert harness.controller.im_client.sent == ["hi"]
+    else:
+        assert harness.controller.im_client.sent == [f"❌ {i18n_t(f'vibeyAgent.error.{copy}', 'en')}"]
+
+
 async def test_a_turn_runs_bash_through_the_real_job_host(engine, session, tmp_path, published) -> None:
     command = "printf 'hi from bash'"
     call = ToolCallBlock(id="call_bash", name="bash", arguments={"command": command})

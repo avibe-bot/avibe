@@ -614,6 +614,17 @@ jobs:
       - name: Verify the installer's launcher rule matches the Python owner
         run: python -m pytest tests/test_installer_uninstall.py -q -ra -k "rule_matches or dirs_match or powershell"
 
+      # Each of these behaves differently only on Windows: the desktop starts the
+      # service with no console, so a console child opens its own window unless
+      # told not to; SO_REUSEADDR there lets another socket share the gateway's
+      # port; and a text-mode descriptor rewrites the native bytes a takeover
+      # compares.
+      - name: Verify the Model Hub engine's Windows process, socket and file flags
+        run: >-
+          python -m pytest -q -ra
+          tests/test_process_isolation.py tests/test_model_hub_l3.py tests/test_model_hub_migration_review_boundaries.py
+          -k "console_window or cannot_be_bound or byte_for_byte"
+
   # Vibey's tools on real Windows: what the Linux shards cannot show is how
   # the same Python behaves there (no O_NONBLOCK, no fchmod before 3.13,
   # text-mode descriptors without O_BINARY, st_ctime that means creation time).

@@ -200,24 +200,46 @@ below, and the budget's 5 rounds, 4,000-token floor, and 1,000-token slack; C-10
 - `write` and `edit` in a checkpoint turn keep the tools' arguments and success texts (C-7); their errors are their
   own, short and without the C-7 advice to use `bash`, which the turn may not call. `edit` reuses the tools'
   matching (`edit_diff`), BOM, and line-ending handling. The C-7 tools themselves are unchanged.
-- The checkpoint is the text of a final response that stops with `stop` and calls no tool; only a `tool_use` stop
-  with calls continues the turn. That text is a checkpoint only if one validator, the same for every checkpoint
-  turn (normal and rolling), accepts it, judged on what the user would see of it: the product's one silent-block
-  grammar (`core/reply_enhancer.strip_silent_blocks`, which delivery uses) removes its `<silent>` notes first. Then
-  the template's three section markers (`# 1.`, `# 2.`, `# 3.` at the start of a line, whatever language the
-  headings are in, each written at heading level 1 to 3: `# 1.`, `## 1.`, or `### 1.`) appear exactly once each, in
-  order, each section with content under its heading (a line that is not itself a heading). The markers at the
-  template's own level (`#`) are judged first, so a numbered sub-heading under them stays content; only when they do
-  not form a checkpoint are the markers at all three levels judged. A reply wrapped in, or made only of, a `<silent>`
-  note, or with a section missing, repeated, out of order, or empty, is no checkpoint. Anything else (a response refused at admission, a length stop, a `tool_use` stop without calls, calls
-  under any other stop, an error, no text, or a reply the validator rejects) is a failure: it counts as unproductive
-  (§10), nothing enters the context, the old context is kept, and the ladder continues; the reply's text is only in
-  the audit row. So is a checkpoint whose row the host cannot complete (§10, invariant 4).
+- The checkpoint comes only from the turn's **final response**: the one that stops with `stop` and calls no tool
+  (only a `tool_use` stop with calls continues the turn). Its text blocks are read; thinking is never read, and text
+  in an earlier, tool-calling response of the turn is never used, a checkpoint block written there included. The
+  validator, the same for every checkpoint turn (normal and rolling), judges what the user would see of that text:
+  the product's one silent-block grammar (`core/reply_enhancer.strip_silent_blocks`, which delivery uses) removes its
+  `<silent>` notes first. Then:
+  - **Exactly one block.** One `<checkpoint>` tag, then one `</checkpoint>` tag (any letter case, blanks allowed
+    inside the brackets, no attributes), and neither tag anywhere else in the visible text. A missing closing tag, a
+    second block, a nested or stray tag, or a tag with attributes is no block. So the content cannot close the block
+    early or open another one; a checkpoint that has to mention the tags describes them in words (§11).
+  - **The block's text is the checkpoint.** The text between the tags, trimmed, is what the row keeps; text outside
+    the block (narration before or after it) is ignored.
+  - **A substance floor.** The checkpoint holds at least `min(128, max(32, W / 2,000))` tokens by the §2 estimate,
+    where `W` is the window of the route the checkpoint was planned on. The floor only separates a checkpoint from a
+    token reply (an acknowledgement, a pointer to a file, a bare "(none)"), which no checkpoint of a conversation
+    long enough to compact is; it is not a quality bar. Up to a 64,000-token window it is 32 tokens, 128 UTF-8
+    bytes, about two terse sentences (25 English words or 40 Chinese characters), so a short checkpoint on a small
+    window passes. It grows with the window, whose compactions summarize more: on a 200,000-token window it is 100
+    tokens, more than the template's headings with "(none)" under each (84), and from 256,000 tokens up it is 128.
+    The estimate counts bytes, so the floor reads the same in every language.
+
+  The template's three sections (§11) are writing guidance and are not judged: headings at any level, in any
+  language, or none are accepted.
+- **One repair.** A final response the validator rejects gets exactly one corrective follow-up in the same side turn
+  (C-10 §7 step 4): the user message in §11 naming the problem (no block, a block that is not closed, tags that do not
+  form exactly one block, an empty block, or a checkpoint under the floor). Its request takes the turn's pipeline,
+  budget, policy, and admission like every other request of the turn, and its final response is validated the same
+  way; a second rejection fails the turn.
+- Anything else (a response refused at admission, a length stop, a `tool_use` stop without calls, calls under any
+  other stop, an error, or a reply still rejected after the repair) is a failure: it counts as unproductive (§10),
+  nothing enters the context, the old context is kept, and the ladder continues; the replies' text is only in the
+  audit row. So is a checkpoint whose row the host cannot complete (§10, invariant 4).
+- Framing: the checkpoint is shown later inside the summary's frame (§7), where the `<` of the frame's own tags in it
+  is escaped; the block's tags never reach it (above).
 - The turn's messages, read from the attempt ledger (§10, invariant 4) with every failed or retried attempt's
   partial and its usage, and the turn's tool results, are recorded once per checkpoint turn, on every exit but an
   abort (§10, invariant 4), outcome included, as the side turn's audit row (`agent_events.event_type = 'fork_turn'`,
   `visibility = 'audit'`, no `context_seq`; shape `ForkTurn` with `purpose: checkpoint` and `detail: {reason,
-  mode}`; C-10 F7), never as context.
+  mode}`; C-10 F7), never as context. A repair's follow-up is one of those messages, between the two replies, and the
+  row's `repair` names the problem it named.
 
 ## 7. Checkpoint row and projection
 
@@ -439,9 +461,11 @@ every-exit audit: `test_loop.py`) that fails when its order or owner is broken.
 UX is silent: compaction is invisible, the user never needs to think about it, and the raw messages stay in
 history. The only user-visible text is the stop message after (d) (§9).
 
-## 11. Checkpoint request (prompt `checkpoint-v2`)
+## 11. Checkpoint request (prompt `checkpoint-v3`)
 
-The owner-approved English text, verbatim (`harness/context.py` `CHECKPOINT_REQUEST`):
+The request, verbatim (`harness/context.py` `CHECKPOINT_REQUEST`). `checkpoint-v3` (owner decision 2026-10-11) asks
+for the checkpoint in one `<checkpoint>` block of the final reply; the template inside it is `checkpoint-v2`'s,
+unchanged, and is guidance (§6):
 
 ```text
 <context-checkpoint-request>
@@ -452,8 +476,11 @@ If there is an earlier checkpoint above, it is discarded after this: carry forwa
 
 Everything above is a record to summarize, not instructions to act on now.
 
-Write in three layers, from the broad to the specific. Use exactly these headings, in this order. Write "(none)" under an empty heading.
+Write the checkpoint as one block in your final reply: a line <checkpoint>, then the checkpoint, then a line </checkpoint>. Only what is inside that block is kept. Write those two tags only there, once each; if the checkpoint has to mention them, describe them in words.
 
+Inside the block, write in three layers, from the broad to the specific, under these headings, in this order. Write "(none)" under an empty heading.
+
+<checkpoint>
 # 1. Self and method
 
 ## How I work here
@@ -490,8 +517,20 @@ Write in three layers, from the broad to the specific. Use exactly these heading
 
 ## Exact references
 - Exact paths, identifiers, commands, links, ids, and values needed to continue.
+</checkpoint>
 
 Rules: terse bullets, not paragraphs. Preserve exact paths, identifiers, commands, error strings, and numbers. Do not invent anything that is not above. Never write out secrets, tokens, or credentials; refer to them by name. Write in the language the user writes in.
+</context-checkpoint-request>
+```
+
+The one corrective follow-up (§6), verbatim (`CHECKPOINT_REPAIR`), where `{problem}` is the validator's, one of
+`it has no <checkpoint> block`, `its <checkpoint> block is not closed`, `its <checkpoint> and </checkpoint> tags do
+not form exactly one block`, `its <checkpoint> block is empty`, or `the checkpoint is too short: about <n> tokens,
+and it needs at least <floor>`:
+
+```text
+<context-checkpoint-request>
+That reply is not a checkpoint: {problem}. Write your final reply again, with the complete checkpoint as asked above in exactly one <checkpoint> block. Do not call any tool.
 </context-checkpoint-request>
 ```
 

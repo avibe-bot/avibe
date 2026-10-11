@@ -273,7 +273,10 @@ def test_new_terminal_records_retain_only_safe_recognized_error_metadata(
         model_id="unknown-model",
         source_id="src_deleted01",
     )
-    registry.finish_attempt(turn_id, outcome=outcome, decision=classify_outcome(outcome))
+    # The record keeps only safe, recognized metadata whatever the outcome carried; which class the classifier
+    # assigns is not under test here (classification reads machine codes, never this text).
+    decision = ResolutionDecision("surface", error_code="upstream_request_invalid", downstream_status=400)
+    registry.finish_attempt(turn_id, outcome=outcome, decision=decision)
     registry.settle("turn-error", settled_by=SETTLED_BY_TERMINAL_RESULT)
     record = store.latest_for_model("claude", MODEL)
     assert record["terminal_error"] == {
@@ -309,6 +312,8 @@ def test_terminal_diagnostic_schema_uses_the_production_machine_code_authority()
         (Path(__file__).parents[1] / "docs/plans/model-hub-contracts/turn-provenance.schema.json").read_text()
     )
     enum = schema["properties"]["terminal_error"]["properties"]["upstream_error_code"]["enum"]
+    # Each code is listed once; the set comparison below would collapse a duplicate.
+    assert len(enum) == len(set(enum))
     assert set(enum) - {None} == UPSTREAM_MACHINE_ERROR_CODES
     assert "engine_down" not in enum
 

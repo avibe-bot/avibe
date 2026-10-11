@@ -6,10 +6,12 @@ import copy
 import inspect
 import json
 import re
+import socket
 import tempfile
 import threading
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -2317,6 +2319,32 @@ def test_gateway_models_endpoint_serves_authenticated_backend_catalog(
                 assert payload["has_more"] is False
                 assert payload["first_id"] == expected[0]
                 assert payload["last_id"] == expected[-1]
+        finally:
+            await gateway.close()
+
+    asyncio.run(exercise())
+
+
+def test_gateway_port_cannot_be_bound_by_another_socket(tmp_path: Path) -> None:
+    """Windows SO_REUSEADDR would let any local socket share the gateway's port and its traffic."""
+
+    async def exercise() -> None:
+        service = _service(tmp_path, sources=[_source("src_primary01", "Primary")])
+        gateway = ModelHubTurnGateway(service)
+        base_url, _token = await gateway.endpoint(
+            "codex",
+            process_scope="/repo",
+            turn_id="turn_exclusive_port",
+            requested_model_id="shared-model",
+            resolved_model_id="shared-model",
+            source_id="src_primary01",
+        )
+        port = int(base_url.rsplit(":", 1)[1].split("/", 1)[0])
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as intruder:
+                intruder.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                with pytest.raises(OSError):
+                    intruder.bind(("127.0.0.1", port))
         finally:
             await gateway.close()
 
@@ -10922,6 +10950,170 @@ def test_a_turn_cancelled_before_it_read_the_body_is_still_a_call_that_happened(
         metered = _usage_of(service, source.id)
         assert metered["requests"] == 1
         assert metered["token_reports"] == 0
+
+    asyncio.run(exercise())
+
+
+def _unnamed_stream_error(source_id: str, *, stream_started: bool = False) -> RawCallOutcome:
+    """A 2xx response whose error frame no machine-code row names, as the engine client reports it."""
+
+    return replace(
+        _outcome(
+            RawOutcomeKind.HTTP_ERROR,
+            status=200,
+            message="upstream returned a protocol error event",
+            source_id=source_id,
+            stream_started=stream_started,
+        ),
+        error_candidates=("relay_specific_error",),
+        upstream_detail="upstream protocol error",
+    )
+
+
+def _assert_source_health_untouched(service: ModelHubService, source_id: str) -> None:
+    source = next(item for item in service.store.load().sources if item.id == source_id)
+    assert (source.state.status, source.state.retry_at, source.state.detail_key) == ("standby", None, None)
+    assert source_id not in service.recovery.annotations(service.store.load())
+
+
+def test_an_unnamed_stream_error_before_output_falls_back_for_this_turn_only(
+    tmp_path: Path,
+) -> None:
+    """Orchestrator decision 2026-10-11: ambiguous evidence never writes Source health."""
+
+    async def exercise() -> None:
+        first = _source("src_primary01", "Primary")
+        second = _source("src_backup001", "Backup")
+        service = _service(
+            tmp_path,
+            sources=[first, second],
+            outcomes=[
+                _unnamed_stream_error(first.id),
+                _outcome(RawOutcomeKind.SUCCESS, source_id=second.id),
+                _outcome(RawOutcomeKind.SUCCESS, source_id=first.id),
+            ],
+        )
+        model = _canonicalize_fixed_test_routes(service)["codex"]
+        service.store.config.agents["codex"].routes[model] = ModelHubRouteConfig(
+            hops=(
+                ModelHubRouteHopConfig(first.id, "shared-model"),
+                ModelHubRouteHopConfig(second.id, "shared-model"),
+            )
+        )
+
+        served = await service.resolve(backend="codex", model_id=model, request={}, supply_channel="hub")
+
+        assert served.source_id == second.id
+        _assert_source_health_untouched(service, first.id)
+        # The turn's fallback is recorded under its own reason; no cooldown or error event exists.
+        assert [(event["kind"], event["reason"]) for event in service.events.list()] == [
+            ("switch", "unclassified_error")
+        ]
+
+        served = await service.resolve(backend="codex", model_id=model, request={}, supply_channel="hub")
+
+        assert served.source_id == first.id
+        assert [invocation[0] for invocation in service.adapter.invocations] == [first.id, second.id, first.id]
+
+    asyncio.run(exercise())
+
+
+def test_an_unnamed_stream_error_on_the_only_source_ends_the_turn_and_leaves_it_usable(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        source = _source("src_primary01", "Primary")
+        service = _service(
+            tmp_path,
+            sources=[source],
+            outcomes=[_unnamed_stream_error(source.id), _outcome(RawOutcomeKind.SUCCESS, source_id=source.id)],
+        )
+        model = _canonicalize_fixed_test_routes(service)["codex"]
+
+        with pytest.raises(ModelHubError) as failed:
+            await service.resolve(backend="codex", model_id=model, request={}, supply_channel="hub")
+
+        _assert_source_health_untouched(service, source.id)
+        assert service.events.list() == []
+        # No Source is blamed: the request could not complete, and the upstream's own words follow.
+        assert render_turn_outcome_copy(failed.value.turn_outcome, "en") == " ".join(
+            (
+                i18n_t("modelHub.launch.waiting_without_retry", "en", model=model),
+                i18n_t(
+                    "modelHub.launch.last_upstream_failure_without_status",
+                    "en",
+                    source=source.display_name,
+                    detail="upstream protocol error",
+                ),
+            )
+        )
+
+        served = await service.resolve(backend="codex", model_id=model, request={}, supply_channel="hub")
+
+        assert served.source_id == source.id
+
+    asyncio.run(exercise())
+
+
+def test_gateway_leaves_source_health_alone_for_an_unnamed_stream_error_after_output(
+    tmp_path: Path,
+) -> None:
+    """After output a shaped error keeps its class; with no named class it is event-only, never a rejected
+    request (which the engine client's own words, "upstream returned a protocol error event", once made it)."""
+
+    async def exercise() -> None:
+        source = _source("src_unnamed01", "Unnamed failure")
+        output = (
+            b'event: response.output_text.delta\ndata: {"type":'
+            b'"response.output_text.delta","sequence_number":1}\n\n'
+        )
+        service = _service(
+            tmp_path,
+            sources=[source],
+            live_handles=[
+                LiveInvokeHandle(
+                    _unnamed_stream_error(source.id, stream_started=True),
+                    (
+                        output,
+                        b'event: error\ndata: {"type":"error","code":"relay_specific_error",'
+                        b'"sequence_number":2}\n\n',
+                    ),
+                ),
+                LiveInvokeHandle(
+                    _outcome(RawOutcomeKind.SUCCESS, source_id=source.id, stream_started=True),
+                    (output, b'event: response.completed\ndata: {"type":"response.completed"}\n\n'),
+                ),
+            ],
+        )
+        requested_model = _canonicalize_fixed_test_routes(service)["codex"]
+        gateway = ModelHubTurnGateway(service)
+        request = _prepared_gateway_request(
+            gateway,
+            turn_id="turn_unnamed_failure",
+            requested_model=requested_model,
+            source_id=source.id,
+            stream=True,
+        )
+        with patch(
+            "core.handlers.model_hub.turn_gateway.web.StreamResponse",
+            return_value=FakeStreamResponse(),
+        ):
+            await gateway._handle_request(request)
+
+        _assert_source_health_untouched(service, source.id)
+        assert service.events.list() == []
+        gateway.correlation.settle(
+            "turn_unnamed_failure", settled_by=SETTLED_BY_TERMINAL_RESULT, ts=NOW.isoformat(),
+        )
+        record = service.provenance.get("turn_unnamed_failure")
+        assert record["terminal_error"]["reason"] == "stream_interrupted"
+
+        served = await service.resolve(
+            backend="codex", model_id=requested_model, request={}, supply_channel="hub",
+        )
+
+        assert served.source_id == source.id
+        assert [invocation[0] for invocation in service.adapter.invocations] == [source.id, source.id]
 
     asyncio.run(exercise())
 

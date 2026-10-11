@@ -710,3 +710,26 @@ def test_workflow_shell_syntax():
                 command = re.sub(r"\$\{\{.*?\}\}", "fixture", item["run"])
                 result = subprocess.run(["bash", "-n"], input=command, text=True, capture_output=True)
                 assert result.returncode == 0, (file, item.get("name"), result.stderr)
+
+
+@pytest.mark.parametrize("previous", ["v3.0.5", "gh-v3.0.6rc1"])
+def test_release_notes_start_at_the_previous_release_not_a_runtime_tag(tmp_path, previous):
+    def commit(*tags):
+        git(tmp_path, "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+            "commit", "--allow-empty", "-qm", "fixture")
+        for tag in tags:
+            git(tmp_path, "tag", tag)
+
+    git(tmp_path, "init", "-q")
+    commit(previous)
+    # Runtime asset tags and retired prerelease schemes are not release tags.
+    commit("git-runtime-v2.55.0-1", "staging-20260319-24b5356")
+    commit("model-hub-engine-v7.2.149-1", "pre-v3.0.6-rc1")
+    commit("gh-v3.0.6rc2")
+    command = step("Compute previous tag", job="release", file="release_ai.yml")["run"].replace(
+        "${{ steps.tag.outputs.tag }}", "gh-v3.0.6rc2")
+    output = tmp_path / "github_output"
+    result = subprocess.run(["bash", "-e", "-c", command], cwd=tmp_path, capture_output=True, text=True,
+                            env={**os.environ, "GITHUB_OUTPUT": str(output)}, timeout=10)
+    assert result.returncode == 0, result.stderr
+    assert output.read_text().splitlines() == [f"prev={previous}"]

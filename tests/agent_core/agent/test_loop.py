@@ -623,6 +623,118 @@ async def test_retry_obeys_provider_flag_and_allows_usage_only_partial(streamed,
         assert events[-1].reason == "completed"
 
 
+# OpenAI Responses streams, as the real adapter reads them: reasoning, then how the response ended.
+_REASONING = (
+    'data: {"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":"rs_1"}}\n\n'
+    'data: {"type":"response.reasoning_summary_text.delta","output_index":0,"delta":"**Checking the catalog**"}\n\n'
+)
+_TEXT = (
+    'data: {"type":"response.output_item.added","output_index":1,"item":{"type":"message","id":"msg_1"}}\n\n'
+    'data: {"type":"response.output_text.delta","output_index":1,"delta":"Checking"}\n\n'
+)
+_TOOL = (
+    'data: {"type":"response.output_item.added","output_index":1,'
+    '"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"echo","arguments":""}}\n\n'
+)
+_COMPLETED = (
+    'data: {"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_2"}}\n\n'
+    'data: {"type":"response.output_text.delta","output_index":0,"delta":"done"}\n\n'
+    'data: {"type":"response.completed","response":{"status":"completed"}}\n\n'
+)
+# How a stream drops: a cut connection, or an error frame with a code (Model Hub's own frame names a copy key).
+_DROPS = {
+    "network": "",
+    # CLIProxyAPI's frame, byte for byte, for an upstream stream that closed before its terminal: the class nested
+    # under `error` (sdk/api/handlers/openai_responses_stream_error.go). Model Hub forwards it as it is.
+    "server": (
+        '\nevent: error\ndata: {"type":"error","error":{"code":"request_timeout","message":"stream error: stream '
+        'disconnected before completion: stream closed before response.completed","param":null,"type":"server_error"},'
+        '"sequence_number":3}\n\n'
+    ),
+    "overloaded": 'data: {"type":"error","code":"overloaded","message":"busy"}\n\n',
+    "interrupted": 'data: {"type":"error","code":"modelHub.errors.stream_interrupted","message":"中断"}\n\n',
+    "unknown": 'data: {"type":"error","code":"a_code_nobody_names","message":"failed"}\n\n',
+    "auth": 'data: {"type":"error","code":"invalid_api_key","message":"denied"}\n\n',
+    "rate_limit": 'data: {"type":"error","code":"rate_limit_exceeded","message":"slow down"}\n\n',
+    "overflow": 'data: {"type":"error","code":"context_length_exceeded","message":"too long"}\n\n',
+    "invalid_request": 'data: {"type":"response.failed","response":{"status":"failed","error":"not an object"}}\n\n',
+}
+
+
+async def _run_responses(bodies, store=None):
+    """A run over the real OpenAI Responses adapter; returns its events and the request payloads it sent."""
+    import json
+
+    import httpx
+
+    from core.agent_core.ai.openai_responses import OpenAIResponsesAdapter
+    from core.agent_core.ai.provider import ModelEndpoint
+    from tests.agent_core.fakes import SELECTION
+
+    remaining, sent = list(bodies), []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.append(json.loads(request.content))
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=remaining.pop(0))
+
+    endpoint = ModelEndpoint("openai_responses", "https://model.test/v1", "m", "token")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        agent = Agent(
+            session_id="session",
+            models=FakeModelRouter(OpenAIResponsesAdapter(client), (replace(SELECTION, endpoint=endpoint),)),
+            tools=(FakeTool("echo"),),
+            hooks=(),
+            store=store or InMemoryTranscriptStore(),
+            jobs=FakeJobHost(),
+            cwd="/test-owned",
+            retry=RetryPolicy(initial_delay_s=0),
+        )
+        events = await collect(agent)
+    return events, sent
+
+
+@pytest.mark.parametrize("drop", ["network", "server", "overloaded", "interrupted", "unknown"])
+async def test_a_stream_that_dropped_after_thinking_alone_is_retried_once_and_the_run_completes(drop):
+    store = InMemoryTranscriptStore()
+
+    events, sent = await _run_responses([_REASONING + _DROPS[drop], _COMPLETED], store=store)
+
+    assert events[-1].reason == "completed"
+    # The dropped attempt's thinking is never context: the retry resends the original request unchanged.
+    assert len(sent) == 2 and sent[1]["input"] == sent[0]["input"]
+    responses = [row.message for row in await store.load("session") if row.kind == "response"]
+    assert [response.content for response in responses] == [(text("done"),)]
+
+
+async def test_a_second_drop_after_thinking_alone_ends_the_run_with_its_kind():
+    # Some prompts drop at the same point every time: one retry, never two.
+    events, sent = await _run_responses([_REASONING + _DROPS["server"]] * 2 + [_COMPLETED])
+
+    assert len(sent) == 2
+    assert events[-1].reason == "error"
+    assert (events[-1].cause.kind, events[-1].cause.origin) == ("server", "source")
+
+
+@pytest.mark.parametrize(
+    ("streamed", "drop"),
+    [
+        (_TEXT, "network"),
+        (_REASONING + _TEXT, "server"),
+        (_TOOL, "network"),
+        (_REASONING, "auth"),
+        (_REASONING, "rate_limit"),
+        (_REASONING, "overflow"),
+        (_REASONING, "invalid_request"),
+    ],
+    ids=["text", "thinking-then-text", "tool-call", "auth", "rate_limit", "overflow", "invalid_request"],
+)
+async def test_a_drop_after_visible_output_or_of_a_lasting_kind_is_never_retried(streamed, drop):
+    events, sent = await _run_responses([streamed + _DROPS[drop], _COMPLETED])
+
+    assert len(sent) == 1
+    assert events[-1].reason in {"error", "context_exhausted"}
+
+
 async def test_retry_keeps_a_usage_only_partial_out_of_the_context():
     # A usage-only partial is attempt data, never context: the retry resends the original request.
     store = InMemoryTranscriptStore()

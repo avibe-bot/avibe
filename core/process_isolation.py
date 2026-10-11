@@ -242,10 +242,19 @@ def probe_process_liveness(pid: int) -> ProcessLivenessStatus:
     return "alive"
 
 
-def isolated_subprocess_kwargs() -> dict[str, Any]:
-    """Return subprocess kwargs that put a child outside this process group."""
+def isolated_subprocess_kwargs(*, console: bool = True) -> dict[str, Any]:
+    """Return subprocess kwargs that put a child outside this process group.
+
+    ``console=False`` is for a console program that only ever runs in the
+    background. On Windows it then gets no console window, which a parent with
+    no console of its own -- the desktop app starts the service that way --
+    would otherwise open for it.
+    """
     if os.name == "nt":
-        return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+        flags = subprocess.CREATE_NEW_PROCESS_GROUP
+        if not console:
+            flags |= subprocess.CREATE_NO_WINDOW
+        return {"creationflags": flags}
     return {"start_new_session": True}
 
 

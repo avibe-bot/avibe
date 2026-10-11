@@ -392,7 +392,7 @@ class EngineSupervisor:
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 umask=0o077,
-                **isolated_subprocess_kwargs(),
+                **isolated_subprocess_kwargs(console=False),
             )
         except (OSError, ValueError) as exc:
             # No process was created, so nothing can carry this marker: retire the

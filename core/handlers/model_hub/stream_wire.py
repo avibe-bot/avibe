@@ -631,11 +631,14 @@ PROTOCOL_STREAM_TAXONOMY: Final[Mapping[str, ProtocolStreamTaxonomy]] = {
             ),
             ProtocolTerminalEnvelope(
                 # https://platform.openai.com/docs/api-reference/responses-streaming/error
+                # The reference carries the class at the root, as this hub's own
+                # terminal frame does. CLIProxyAPI nests it under `error`
+                # (sdk/api/handlers/openai_responses_stream_error.go).
                 "error",
                 ("type",),
                 "error",
                 "failed_terminal",
-                ((),),
+                ((), ("error",)),
             ),
             ProtocolTerminalEnvelope(
                 # https://platform.openai.com/docs/api-reference/responses-streaming/response/failed

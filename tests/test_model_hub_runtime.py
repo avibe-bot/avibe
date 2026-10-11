@@ -38,6 +38,7 @@ from core.handlers.model_hub.adapter import (
 )
 from core.handlers.model_hub.classification import (
     classify_outcome,
+    source_settlement_rule,
     terminal_outcome_category,
 )
 from core.handlers.model_hub.errors import ModelDiscoveryError
@@ -5772,56 +5773,64 @@ def test_engine_client_marks_loopback_stream_disconnect_as_engine_down(
     asyncio.run(run())
 
 
+def _cpa_unknown_provider(protocol: str, routed_model: str, *, error_type: str = "invalid_request_error") -> dict:
+    """CLIProxyAPI's body for a routed model it has not registered (handlers_routing.go)."""
+
+    message = f"unknown provider for model {routed_model}"
+    if protocol == "anthropic":
+        return {"type": "error", "error": {"type": error_type, "message": message}}
+    return {"error": {"message": message, "type": error_type, "code": "model_not_found", "param": "model"}}
+
+
 @pytest.mark.parametrize(
-    (
-        "status",
-        "reported_model",
-        "expected_kind",
-        "expected_code",
-        "expected_reason",
-    ),
+    ("protocol", "status", "body", "expected_kind", "expected_code", "expected_reason"),
     (
         (
-            502,
-            "source-fixture123/model-a",
+            "anthropic",
+            400,
+            _cpa_unknown_provider("anthropic", "source-fixture123/model-a"),
             RawOutcomeKind.NETWORK_ERROR,
             "engine_down",
             None,
         ),
         (
-            502,
-            "source-fixture123/model-b",
-            RawOutcomeKind.HTTP_ERROR,
+            "openai_chat",
+            400,
+            _cpa_unknown_provider("openai_chat", "source-fixture123/model-a"),
+            RawOutcomeKind.NETWORK_ERROR,
+            "engine_down",
             None,
-            "server_error",
         ),
         (
-            503,
-            "source-fixture123/model-a",
+            "anthropic",
+            400,
+            _cpa_unknown_provider("anthropic", "source-fixture123/model-b"),
+            RawOutcomeKind.HTTP_ERROR,
+            "upstream_request_invalid",
+            None,
+        ),
+        (
+            "anthropic",
+            502,
+            _cpa_unknown_provider("anthropic", "source-fixture123/model-a", error_type="api_error"),
             RawOutcomeKind.HTTP_ERROR,
             None,
             "server_error",
         ),
     ),
+    ids=("anthropic", "openai_chat", "another_model", "older_engine_502"),
 )
 def test_engine_client_distinguishes_local_model_registration_failure(
     monkeypatch: pytest.MonkeyPatch,
+    protocol: str,
     status: int,
-    reported_model: str,
+    body: dict,
     expected_kind: RawOutcomeKind,
     expected_code: str | None,
     expected_reason: str | None,
 ) -> None:
     async def run() -> None:
-        payload = json.dumps(
-            {
-                "type": "error",
-                "error": {
-                    "type": "api_error",
-                    "message": f"unknown provider for model {reported_model}",
-                },
-            }
-        ).encode()
+        payload = json.dumps(body).encode()
 
         class Content:
             reads = 0
@@ -5855,7 +5864,7 @@ def test_engine_client_distinguishes_local_model_registration_failure(
         source = SourceRecord(
             source_id="src_fixture123",
             vendor="custom",
-            protocol="anthropic",
+            protocol=protocol,
             base_url="https://api.example.test/v1",
             credential_ref="cred_fixture123",
             allowed_origins=(),
@@ -5874,7 +5883,6 @@ def test_engine_client_distinguishes_local_model_registration_failure(
         decision = classify_outcome(outcome)
 
         assert outcome.kind is expected_kind
-        assert outcome.error_code == expected_code
         assert decision.error_code == expected_code
         assert decision.reason == expected_reason
 
@@ -6713,6 +6721,218 @@ def test_engine_client_requires_a_protocol_terminal_event_before_clean_eof(
     asyncio.run(run())
 
 
+# CPA's Responses stream failures, byte for byte. Its error builder nests the class
+# under `error` (sdk/api/handlers/openai_responses_stream_error.go); a Codex caller gets
+# the same class under `response.failed`. A Codex upstream that closes before
+# response.completed is reported as request_timeout / server_error.
+_CPA_RESPONSES_DISCONNECT = (
+    b'{"code":"request_timeout","message":"stream error: stream disconnected before completion: '
+    b'stream closed before response.completed","param":null,"type":"server_error"}'
+)
+_RESPONSES_STREAM_FAILURES = {
+    "cpa-error": b'\nevent: error\ndata: {"type":"error","error":' + _CPA_RESPONSES_DISCONNECT
+    + b',"sequence_number":%d}\n\n',
+    "cpa-codex-response-failed": b'\nevent: response.failed\ndata: {"type":"response.failed",'
+    b'"sequence_number":%d,"response":{"status":"failed","error":' + _CPA_RESPONSES_DISCONNECT + b"}}\n\n",
+    # OpenAI's documented `error` event carries the class at the root.
+    "openai-root-error": b'event: error\ndata: {"type":"error","code":"server_error",'
+    b'"message":"The server had an error while processing your request.","param":null,'
+    b'"sequence_number":%d}\n\n',
+}
+_RESPONSES_REASONING_PRELUDE = (
+    b'event: response.created\ndata: {"type":"response.created","sequence_number":0,'
+    b'"response":{"id":"resp_1","object":"response","status":"in_progress","output":[]}}\n\n',
+    b'event: response.output_item.added\ndata: {"type":"response.output_item.added","sequence_number":1,'
+    b'"output_index":0,"item":{"id":"rs_1","type":"reasoning","summary":[]}}\n\n',
+    b'event: response.reasoning_summary_text.delta\ndata: {"type":"response.reasoning_summary_text.delta",'
+    b'"sequence_number":2,"item_id":"rs_1","output_index":0,"summary_index":0,"delta":"**Checking**"}\n\n',
+)
+
+
+@pytest.mark.parametrize("failure", sorted(_RESPONSES_STREAM_FAILURES))
+@pytest.mark.parametrize("after_reasoning", [False, True], ids=["before-output", "after-reasoning"])
+def test_engine_client_reads_the_class_of_a_responses_stream_failure_wherever_it_is_nested(
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+    after_reasoning: bool,
+) -> None:
+    """A dropped Responses stream is the Source's server failure, not a request the upstream rejected."""
+
+    async def run() -> None:
+        prelude = _RESPONSES_REASONING_PRELUDE if after_reasoning else _RESPONSES_REASONING_PRELUDE[:1]
+        body = [*prelude, _RESPONSES_STREAM_FAILURES[failure] % len(prelude)]
+        chunks = list(body)
+
+        class Content:
+            async def read(self, _size: int) -> bytes:
+                return chunks.pop(0) if chunks else b""
+
+            async def iter_chunked(self, _size: int):
+                while chunks:
+                    yield chunks.pop(0)
+
+        class Response:
+            status = 200
+            content = Content()
+            headers = {"Content-Type": "text/event-stream"}
+
+            def close(self) -> None:
+                return None
+
+        class Session:
+            async def post(self, *_args, **_kwargs):
+                return Response()
+
+            async def close(self) -> None:
+                return None
+
+        monkeypatch.setattr(client_module.aiohttp, "ClientSession", lambda **_kwargs: Session())
+        source = SourceRecord(
+            source_id="src_fixture123",
+            vendor="custom",
+            protocol="openai_responses",
+            base_url="https://api.example.test/v1",
+            credential_ref="cred_fixture123",
+            allowed_origins=(),
+            model_ids=("model-a",),
+            prefix="source-fixture123",
+        )
+        handle = await EngineClient(
+            EngineConnection(
+                base_url="http://127.0.0.1:15220",
+                management_key="management-key",
+                gateway_token="gateway-token",
+            )
+        ).invoke(source, "model-a", {}, stream=True, request_protocol="openai_responses")
+        if after_reasoning:
+            assert handle.stream is not None
+            assert b"".join([chunk async for chunk in handle.stream]) == b"".join(body)
+        else:
+            assert handle.stream is None
+        outcome = await handle.outcome()
+
+        assert outcome.kind is RawOutcomeKind.HTTP_ERROR
+        assert outcome.stream_started is after_reasoning
+        assert "server_error" in outcome.error_candidates
+        assert "processing your request" in outcome.upstream_detail if failure == "openai-root-error" else (
+            "stream disconnected before completion" in outcome.upstream_detail
+        )
+        decision = classify_outcome(outcome)
+        assert (decision.reason, decision.cooldown_seconds) == ("server_error", 30)
+        if after_reasoning:
+            # Output reached the caller, so the drop is terminal for the Turn.
+            assert (decision.action, decision.error_code) == ("surface", "stream_interrupted")
+        else:
+            assert decision.action == "fallback"
+
+    asyncio.run(run())
+
+
+_STREAM_OUTPUT = {
+    "anthropic": b'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,'
+    b'"delta":{"type":"text_delta","text":"Hi"}}\n\n',
+    "openai_chat": b'data: {"object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"Hi"}}]}\n\n',
+}
+# Error frames whose class no taxonomy row names. Their text says "protocol error",
+# which classification must not read: only machine codes decide a class.
+_UNNAMED_STREAM_ERRORS = {
+    "anthropic": b'event: error\ndata: {"type":"error","error":{"type":"relay_specific_error",'
+    b'"message":"upstream protocol error"}}\n\n',
+    "openai_chat": b'data: {"error":{"type":"relay_specific_error","message":"upstream protocol error"}}\n\n',
+}
+
+
+async def _stream_outcome(monkeypatch: pytest.MonkeyPatch, protocol: str, body: list[bytes]):
+    chunks = list(body)
+
+    class Content:
+        async def read(self, _size: int) -> bytes:
+            return chunks.pop(0) if chunks else b""
+
+        async def iter_chunked(self, _size: int):
+            while chunks:
+                yield chunks.pop(0)
+
+    class Response:
+        status = 200
+        content = Content()
+        headers = {"Content-Type": "text/event-stream"}
+
+        def close(self) -> None:
+            return None
+
+    class Session:
+        async def post(self, *_args, **_kwargs):
+            return Response()
+
+        async def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(client_module.aiohttp, "ClientSession", lambda **_kwargs: Session())
+    source = SourceRecord(
+        source_id="src_fixture123",
+        vendor="custom",
+        protocol=protocol,
+        base_url="https://api.example.test/v1",
+        credential_ref="cred_fixture123",
+        allowed_origins=(),
+        model_ids=("model-a",),
+        prefix="source-fixture123",
+    )
+    handle = await EngineClient(
+        EngineConnection(
+            base_url="http://127.0.0.1:15220",
+            management_key="management-key",
+            gateway_token="gateway-token",
+        )
+    ).invoke(source, "model-a", {}, stream=True, request_protocol=protocol)
+    if handle.stream is not None:
+        assert b"".join([chunk async for chunk in handle.stream]) == b"".join(body)
+    return await handle.outcome()
+
+
+@pytest.mark.parametrize("protocol", sorted(_UNNAMED_STREAM_ERRORS))
+@pytest.mark.parametrize("after_output", [False, True], ids=["before-output", "after-output"])
+def test_a_stream_error_no_rule_names_is_unclassified_whatever_its_text(
+    monkeypatch: pytest.MonkeyPatch,
+    protocol: str,
+    after_output: bool,
+) -> None:
+    """The gateway's placeholder, "upstream returned a protocol error event", once made this a rejected request."""
+
+    async def run() -> None:
+        body = [*([_STREAM_OUTPUT[protocol]] if after_output else []), _UNNAMED_STREAM_ERRORS[protocol]]
+        outcome = await _stream_outcome(monkeypatch, protocol, body)
+
+        assert outcome.kind is RawOutcomeKind.HTTP_ERROR
+        assert outcome.stream_started is after_output
+        assert outcome.upstream_detail == "upstream protocol error"
+        decision = classify_outcome(outcome)
+        assert decision.reason == "unclassified_error"
+        if after_output:
+            assert (decision.action, decision.error_code) == ("surface", "stream_interrupted")
+        else:
+            assert decision.action == "fallback"
+
+    asyncio.run(run())
+
+
+def test_cliproxyapis_claude_timeout_frame_is_a_server_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """CLIProxyAPI types an upstream 504, and since v8 a 408, as timeout_error in a Claude stream."""
+
+    async def run() -> None:
+        outcome = await _stream_outcome(
+            monkeypatch,
+            "anthropic",
+            [b'event: error\ndata: {"type":"error","error":{"type":"timeout_error","message":"upstream timeout"}}\n\n'],
+        )
+
+        decision = classify_outcome(outcome)
+        assert (decision.action, decision.reason, decision.cooldown_seconds) == ("fallback", "server_error", 30)
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("invalid_type", [None, [], {}])
 def test_engine_client_ignores_non_string_stream_event_types(
     monkeypatch: pytest.MonkeyPatch,
@@ -7323,6 +7543,26 @@ def test_engine_buffered_2xx_error_envelope_carries_upstream_detail() -> None:
     assert observation.outcome == "failed_terminal"
     assert outcome is not None
     assert outcome.upstream_detail == "model retired"
+
+
+def test_engine_claude_timeout_error_falls_back_with_a_server_cooldown() -> None:
+    # CLIProxyAPI v8 answers an upstream 408 on /v1/messages with this body.
+    body = json.dumps(
+        {"type": "error", "error": {"type": "timeout_error", "message": "upstream request timed out"}}
+    ).encode()
+
+    observation = observe_buffered_protocol_response("anthropic", io.BytesIO(body))
+    outcome = client_module._reduce_protocol_observation(
+        observation,
+        source=_detail_source(),
+        model_id="model-a",
+        http_status=408,
+        stream_started=False,
+    )
+    decision = classify_outcome(outcome)
+
+    assert (decision.action, decision.reason, decision.cooldown_seconds) == ("fallback", "server_error", 30)
+    assert source_settlement_rule(decision.reason).status == "cooldown"
 
 
 _ANTHROPIC_OUTPUT_STARTED = (

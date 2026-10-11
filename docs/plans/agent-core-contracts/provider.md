@@ -75,10 +75,19 @@ Error classification is part of the contract because the loop branches on it:
 | `kind` | Meaning | Loop action |
 | --- | --- | --- |
 | `overflow` | the request exceeded the model's context (Pi's overflow patterns, HTTP 413, `context_length_exceeded`) | overflow recovery (plan §5.2) |
-| `rate_limit`, `overloaded`, `network`, `stalled`, `server` | transient (`network`: the provider could not be reached; `stalled`: a connected provider sent nothing for the silence bound) | retry with backoff, honoring `retry_after_s`, only when nothing was streamed (no deltas, no `partial`), at most 3 retries within 120 s; then the run ends with that error. After streamed output the error is terminal for the request, matching Model Hub's first-byte rule |
+| `rate_limit`, `overloaded`, `network`, `stalled`, `server`, `interrupted` | transient (`network`: the provider could not be reached; `stalled`: a connected provider sent nothing for the silence bound; `interrupted`: the provider's stream ended after output without a terminal, as Model Hub reports with its own `modelHub.errors.stream_interrupted` frame) | retry with backoff, honoring `retry_after_s`, only when nothing was streamed (no deltas, no `partial`), at most 3 retries within 120 s; then the run ends with that error. After streamed text or a tool call the error is terminal for the request, matching Model Hub's first-byte rule; after thinking alone it is retried once (below) |
 | `auth`, `invalid_request` | not retryable | end the run with the error |
 | `aborted` | cancelled by the caller | end the run as aborted |
-| `unknown` | anything else | end the run with the error |
+| `unknown` | anything else | end the run with the error; after thinking alone, retry once (below) |
+
+**A stream that dropped after thinking alone** (owner decision, 2026-10-11). When a response fails after it
+streamed thinking and nothing else (no text, no tool call), with a `network`, `stalled`, `server`, `overloaded`,
+`interrupted`, or `unknown` error, the `ProviderError` has `retryable` and `after_thinking` set. The loop retries such an error at
+most once per request, inside the same count and time budget; a second drop ends the run with that error, because
+some prompts drop at the same point every time. The dropped attempt's thinking is never context: it stays in the
+attempt ledger and its audit (C-9 `context.md` §10, invariant 4), and the retry resends the original request.
+A refusal or safety stop is a response, not an error, and `auth`, `invalid_request`, `overflow`, and `rate_limit`
+after thinking stay terminal.
 
 A `ProviderError` whose `partial` is committed (a response that failed after output) carries the error's text as that
 partial's `error_message`, redacted like the error itself and bounded to 1,000 characters, so the transcript row says

@@ -33,6 +33,8 @@ _KIND_KEYS: dict[str, str] = {
     "network": "network",
     "stalled": "stalled",
     "server": "server",
+    # The provider's stream broke off before its terminal (Model Hub's own frame), not a run the user stopped.
+    "interrupted": "streamInterrupted",
     "auth": "auth",
     "invalid_request": "invalidRequest",
     # A provider failure C-2 could not classify: an unknown code, or an error frame no rule names.
