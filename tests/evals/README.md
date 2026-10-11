@@ -70,3 +70,6 @@ The run makes about a dozen Turns, plus their checkpoint turns, on the small win
   matter against deliberate gaming, or that the recorded runs already satisfy, are not added.
 - If the agent deleted or renamed a fixture file, the script stops with an error instead of the JSON report. The run
   is not scored either way.
+- The two check outputs are looked for in every tool result. A read of `check.py`, whose source contains the last
+  error's text, could therefore stand in for the second check run. The recorded runs ran both checks with `bash`;
+  confirm that in the Session when a run looks suspicious.
