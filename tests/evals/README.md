@@ -94,6 +94,11 @@ The run makes about ten Turns, plus their checkpoint turns, on the small window.
   recorded answer names the exact paths.
 - The fixture check takes the first `BURST = 5` or `REFILL_RATE = 1` line, not the effective last assignment. The
   recorded run's edits replaced the old lines.
+- The next step is checked for its verb, file and boundary, not its polarity: "do not write tests/test_burst.py for a
+  burst of exactly 5" would pass. The recorded answer states the plan.
+- The last error is compared ignoring case and wrapping quotes or backticks. The recorded answer is exact.
+- `--vibe` is split on whitespace, so a path with spaces needs a link without them. The documented run uses the
+  default.
 - The model is recorded as requested, not as served. If Model Hub fails over to another hop during a run, the row
   would name the requested model. The recorded runs were served by it throughout (every checkpoint's and response's
   origin); check the origins in the Session before recording a row.

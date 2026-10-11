@@ -121,7 +121,8 @@ def _refill_reason(answer: dict) -> bool:
 
 def _next_step(answer: dict) -> bool:
     """Whether the next step is still to add a test in tests/test_burst.py for a burst of exactly 5: the action and the
-    boundary as well as the file, so a remembered filename with a lost or reversed plan fails."""
+    boundary as well as the file, so a remembered filename with a lost or different action fails (polarity is not
+    checked; see the README's known limits)."""
     step = _text(answer.get("next_step"))
     return (
         "test_burst.py" in step
