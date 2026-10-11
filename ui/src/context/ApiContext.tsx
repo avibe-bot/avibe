@@ -1890,6 +1890,7 @@ export type UpgradeResult = {
   ok: boolean;
   message: string;
   output: string | null;
+  activation_notice?: string | null;
   restarting: boolean;
   code?: string;
 };
