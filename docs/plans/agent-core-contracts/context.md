@@ -1,10 +1,11 @@
 # C-9 Context management
 
 Frozen 2026-10-04 by owner decision; amended 2026-10-12 by owner decision (the estimate of opaque reasoning payloads
-and the anchor's validity, §2; the cache lifetime per route, §3). The `harness` owns the rules (`core/agent_core/harness/context.py`,
-`projection.py`); the loop applies them before every model request (`core/agent_core/agent/loop.py`); the adapter
-supplies the Session-specific parts (§9). Row shapes: [`transcript-rows.schema.json`](transcript-rows.schema.json);
-events: [`agent-event.schema.json`](agent-event.schema.json).
+and the anchor's validity, §2; the cache lifetime per route, §3). The `harness` owns the rules
+(`core/agent_core/harness/context.py`, `projection.py`); the loop applies them before every model request
+(`core/agent_core/agent/loop.py`); the adapter supplies the Session-specific parts (§9). Row shapes:
+[`transcript-rows.schema.json`](transcript-rows.schema.json); events:
+[`agent-event.schema.json`](agent-event.schema.json).
 
 Three tiers, cheapest first:
 
