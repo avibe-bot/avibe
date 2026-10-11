@@ -1,7 +1,8 @@
-# Avibe-owned CPA v8.0.23 compatibility patch
+# Avibe-owned CPA v8.0.23 compatibility patches
 
-This directory records the source patch carried by Avibe's
-`model-hub-engine-v8.0.23-1` build.
+This directory records the source patches carried by Avibe's
+`model-hub-engine-v8.0.23-1` build. Each patch applies independently to the
+pinned source.
 
 Base:
 
@@ -9,7 +10,7 @@ Base:
 - Release: `v8.0.23`
 - Source commit: `d318bcc3afb9ea8782862f5e8cdb541afdc9dfa5`
 
-## Contract
+## `openai-compat-native-token-field.patch`
 
 Avibe owns the OpenAI-compatible Source boundary. When an incoming Chat
 request contains `max_completion_tokens`, or `max_tokens`, the engine must
@@ -27,6 +28,27 @@ The patch is limited to the helper used by both OpenAI Chat execution paths
 (`openai_compat_executor.go`, buffered and streaming). The helper is
 byte-identical between v8.0.20 and v8.0.23 and differs from v7.3.16 only in
 its module import path, outside the patched hunk.
+
+## `antigravity-static-catalog-until-probe.patch`
+
+Avibe ships Gemini subscriptions through Antigravity OAuth grants and routes
+to them as soon as the engine has loaded a grant: right after every engine
+start and right after a new login. Since v8.0.14 the stock engine registers no
+Antigravity models until its per-account entitlement probe
+(`/v1internal:fetchAvailableModels`) answers. Until then a request gets
+`model_not_found` and model discovery sees an empty catalog; when the probe
+fails, the account stays unroutable until a backed-off retry succeeds
+(1-2 minutes at first, up to 30 minutes).
+
+The patch registers the static Antigravity catalog while no entitlement hints
+are cached. The probe that registration already queues narrows the catalog
+through the fenced `ReplaceClientModels` when it answers; a failed probe leaves
+the static catalog in place. This is the pre-v8.0.14 startup behavior plus
+the later narrowing. Upstream's
+`TestAntigravityModelRegistration_AsyncNonBlocking` asserts the stock behavior
+and fails with this patch by design.
+
+Drop the patch once router-for-me/CLIProxyAPI#6531 is fixed upstream.
 
 ## Rebuild
 

@@ -1,0 +1,17 @@
+diff --git a/sdk/cliproxy/service_models.go b/sdk/cliproxy/service_models.go
+index a444b64c..2ea086ef 100644
+--- a/sdk/cliproxy/service_models.go
++++ b/sdk/cliproxy/service_models.go
+@@ -123,6 +123,12 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
+ 				s.asyncProbeAntigravityCapabilities(ctx, a, provider)
+ 				return
+ 			}
++			// Avibe: until this account's entitlement probe has answered, register
++			// the static catalog so a fresh engine routes the account at once. The
++			// probe queued after registration below narrows it through the fenced
++			// ReplaceClientModels; a failed probe leaves the static list in place.
++			// Drop once router-for-me/CLIProxyAPI#6531 is fixed upstream.
++			models = registry.GetAntigravityModels()
+ 		} else {
+ 			models = registry.GetAntigravityModels()
+ 		}
