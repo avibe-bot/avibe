@@ -26,10 +26,13 @@ class OutcomeOwner:
             raise RuntimeError("the run has no primary outcome")
         return self._reason
 
-    def foreground_leaked(self) -> None:
-        # The sole cleanup exception to first-cause ownership.
+    def foreground_leaked(self) -> bool:
+        """The sole cleanup exception to first-cause ownership: a completed run whose foreground job cannot be
+        released ends ``error``. True when this decided the outcome, which makes the leak the run's cause."""
         if self._reason == "completed":
             self._reason = "error"
+            return True
+        return False
 
     def diagnostic(self, kind: str, message: str) -> None:
         self.diagnostics.append((kind, message))

@@ -1571,6 +1571,9 @@
       "modelError": "The model stopped with an error.",
       "toolsUnsupported": "The selected model does not support tools, which {backend} needs. Choose another model.",
       "providerProtocol": "The model provider sent a reply {backend} cannot use.",
+      "unclassified": "The request to the model failed with an error {backend} could not classify. Try again, or choose another model.",
+      "outputLimit": "The model kept running out of output space while writing a tool call. Ask for smaller steps, or choose a model with a larger output limit.",
+      "internal": "{backend} stopped because of an internal error. Try again; if it happens again, the service log names the cause.",
       "generic": "{backend}'s run failed."
     }
   }

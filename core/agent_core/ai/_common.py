@@ -1035,7 +1035,7 @@ class StreamAssembler:
         if self._terminal_seen:
             return None
         if isinstance(event, ProviderError):
-            event = self._sanitize_error(event)
+            event = _bounded_partial_error(self._sanitize_error(_partial_with_error(event)))
         self._terminal_seen = True
         return event
 
@@ -1837,6 +1837,27 @@ def assistant_message(
         usage=usage,
         error_message=error_message,
     )
+
+
+#: A failed response's committed partial keeps the error it ended with (C-1 ``error_message``), so its transcript row
+#: says why the response ended. Bounded after redaction: a non-JSON error body can be a whole page.
+PARTIAL_ERROR_MESSAGE_CHARS = 1000
+
+
+def _partial_with_error(error: ProviderError) -> ProviderError:
+    """The provider's error text on the partial it leaves; a Stop's partial needs none."""
+    partial = error.partial
+    if partial is None or partial.error_message is not None or error.kind == "aborted" or not error.message:
+        return error
+    return replace(error, partial=replace(partial, error_message=error.message))
+
+
+def _bounded_partial_error(error: ProviderError) -> ProviderError:
+    partial = error.partial
+    if partial is None or partial.error_message is None or len(partial.error_message) <= PARTIAL_ERROR_MESSAGE_CHARS:
+        return error
+    text = partial.error_message[: PARTIAL_ERROR_MESSAGE_CHARS - 1] + "…"
+    return replace(error, partial=replace(partial, error_message=text))
 
 
 def partial_message(

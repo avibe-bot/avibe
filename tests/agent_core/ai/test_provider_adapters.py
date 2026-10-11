@@ -4479,6 +4479,46 @@ async def test_a_relay_failure_frame_before_output_is_a_retryable_server_failure
     assert error.message == message
 
 
+# Reasoning streamed, then the response ended in an error frame: the shape Model Hub writes when an upstream stream
+# breaks after output (its code is a copy key, its message localized copy).
+_REASONING_THEN = (
+    'event: response.output_item.added\ndata: {"type":"response.output_item.added","output_index":0,'
+    '"item":{"type":"reasoning","id":"rs_1","summary":[]}}\n\n'
+    'event: response.reasoning_summary_text.delta\ndata: {"type":"response.reasoning_summary_text.delta",'
+    '"output_index":0,"delta":"**Checking catalog model metadata**"}\n\n'
+    "event: error\ndata: {}\n\n"
+)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("message", "kept"),
+    [
+        (
+            "The upstream stream was interrupted. Authorization: Bearer sk-proj-partial0secret0value",
+            "The upstream stream was interrupted. Authorization: Bearer [redacted]",
+        ),
+        ("x" * 5000, "x" * 999 + "\u2026"),
+    ],
+    ids=["redacted", "bounded"],
+)
+async def test_a_failed_response_keeps_its_error_on_the_partial_it_commits(message: str, kept: str) -> None:
+    """C-1 ``error_message``: the committed partial says why the response ended, redacted, then bounded."""
+    frame = json.dumps({"type": "error", "code": "modelHub.errors.stream_interrupted", "message": message})
+    body = _REASONING_THEN.replace("{}", frame)
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        events = await _events(OpenAIResponsesAdapter(client), _request("openai_responses"))
+
+    error = events[-1]
+    assert isinstance(error, ProviderError) and error.kind == "unknown"
+    assert error.partial is not None and error.partial.stop_reason == "error"
+    assert error.partial.error_message == kept
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("adapter_type", "protocol", "body", "outcome", "stop_reason", "error_kind", "partial"),

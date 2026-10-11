@@ -28,6 +28,7 @@ import os
 import secrets
 import shutil
 import time
+import traceback
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -128,6 +129,18 @@ def _relative_to(cwd: str) -> Callable[[str], str]:
 
 #: ``Agent.max_tokens`` for every Turn: the resolved hop's budgeted maximum decides the output (``budgeted``).
 _NO_OUTPUT_CAP = 1 << 30
+#: A failure's diagnostic in the service log: one redacted line, bounded, never a payload.
+_LOGGED_DIAGNOSTIC_CHARS = 500
+#: The served hop names what the gateway's ``x-avibe-served-hop`` header said, so it is bounded and kept on the line.
+_LOGGED_HOP_CHARS = 200
+
+
+def _loggable(text: str, limit: int = _LOGGED_DIAGNOSTIC_CHARS) -> str:
+    """``text`` as one redacted log field: whitespace collapsed, so it cannot start a line of its own, and bounded."""
+    from core.agent_core.ai.errors import redact_provider_text
+
+    line = " ".join(redact_provider_text(text).split())
+    return line if len(line) <= limit else line[: limit - 1] + "…"
 
 
 @dataclass
@@ -234,7 +247,7 @@ class VibeyAgent(BaseAgent):
         turn_id = str(payload.get("turn_token") or "").strip()
         input_id = str(payload.get("delivery_id") or "").strip()
         if not session_id or not turn_id or not input_id:
-            await self._fail(request, "generic", f"{display_name_for_backend(BACKEND)} turn has no Session, Turn, or input identity.")
+            await self._fail(request, None, f"{display_name_for_backend(BACKEND)} turn has no Session, Turn, or input identity.")
             return
         turn = _Run(request, session_id, turn_id, self._instance)
         async with self._held(session_id, run=turn) as runtime:
@@ -245,9 +258,13 @@ class VibeyAgent(BaseAgent):
                     # Raised during or after settlement (its emits, or a failure notice): the
                     # shared owner's fallback releases the runtime gate, so it must see it.
                     raise
-                logger.exception("Vibey turn failed for Session %s", session_id)
                 turn.settled = True
-                await self._fail(request, "generic", f"turn failed: {error}", cause=error)
+                self._log_failure(turn, "error", type(error).__name__, "local", f"turn failed: {error}")
+                # Where it was raised, for debugging only: the WARNING above is the failure's one line.
+                logger.debug(
+                    "Vibey turn %s raised in:\n%s", turn_id, "".join(traceback.format_tb(error.__traceback__))
+                )
+                await self._fail(request, type(error).__name__, f"turn failed: {error}", cause=error)
             finally:
                 await self._admit_returned_inputs(turn)
                 self.store.bind_agent(session_id, None)
@@ -599,6 +616,7 @@ class VibeyAgent(BaseAgent):
         cause = run.cause
         kind = cause.kind if cause is not None else None
         diagnostic = cause.message if cause is not None else run.errors[0].message if run.errors else reason
+        origin = cause.origin if cause is not None else None
         source = cause is not None and cause.origin == "source"
         final = run.responses.get(run.final_row) if run.final_row else None
         if final is not None:
@@ -606,6 +624,8 @@ class VibeyAgent(BaseAgent):
                 reason = "completed"
             run_failed_after_commit = reason not in _COMPLETED
             failed = final_outcome(final) == "failed" or run_failed_after_commit
+            if failed:
+                self._log_failure(run, reason, kind, origin, diagnostic)
             body = self._display_source(final, final=True)
             if failed and not body.strip():
                 # A silent final whose run failed after the commit: like a final without text
@@ -642,7 +662,26 @@ class VibeyAgent(BaseAgent):
                 context, "result", "", level="silent", output=terminal_output_for(request)
             )
             return
+        self._log_failure(run, reason, kind, origin, diagnostic)
         await self._fail(request, kind, diagnostic, reason=reason, refusal=run.refusal, source=source)
+
+    @staticmethod
+    def _log_failure(
+        run: _Run, reason: str, kind: Optional[str], origin: Optional[str], diagnostic: str
+    ) -> None:
+        """One WARNING for a failed run, so a failed Turn can be diagnosed from the log: its kind, who produced it,
+        the hop that served the last response, and the diagnostic, which is never display copy (``errors.py``)."""
+        served = next((message.origin for message in reversed(run.responses.values())), None)
+        logger.warning(
+            "Vibey run failed: session=%s turn=%s reason=%s kind=%s origin=%s served=%s diagnostic=%s",
+            run.session_id,
+            run.turn_id,
+            reason,
+            kind or "-",
+            origin or "-",
+            _loggable(f"{served.provider}/{served.api}/{served.model}", _LOGGED_HOP_CHARS) if served else "-",
+            _loggable(diagnostic or ""),
+        )
 
     async def _continuing_input(self, run: _Run) -> Optional[AgentInput]:
         """The input that continues a Turn whose run ended by design with inputs it accepted.
@@ -1153,6 +1192,10 @@ class VibeyAgent(BaseAgent):
         """
         if source:
             await self.record_model_hub_native_failure(request.context, diagnostic or (kind or "error"))
+        output = terminal_output_for(request)
+        if kind:
+            # The kind, never the diagnostic, so a failed Turn can be diagnosed from its notice row.
+            output = replace(output, metadata={**output.metadata, "error_kind": kind})
         await emit_backend_failure(
             self.controller,
             request.context,
@@ -1160,6 +1203,7 @@ class VibeyAgent(BaseAgent):
             diagnostic or (kind or "error"),
             display_text=f"❌ {refusal or error_text(kind, self._language(), reason=reason)}",
             request=request,
+            output=output,
             cause=cause,
         )
 
@@ -1172,7 +1216,7 @@ class VibeyAgent(BaseAgent):
         refusal = (
             await asyncio.to_thread(hub_supply_refusal, self.controller, BACKEND, language)
             or launch_refusal_copy(self.controller, error)
-            or error_text("generic", language)
+            or error_text(None, language)
         )
         # Recorded on every start failure, as the other backends do: a no-op unless a launch is bound.
         await self.record_model_hub_native_failure(request.context, str(error))

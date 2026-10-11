@@ -9,11 +9,13 @@ from __future__ import annotations
 
 from typing import Optional
 
+from core.agent_core.agent.events import NAMED_ERROR_KINDS
 from core.agent_core.ai._common import PROVIDER_SILENCE_TIMEOUT_S
 from modules.agents.catalog import display_name_for_backend
 from vibe.i18n import t as i18n_t
 
-# Engine and provider kinds (C-2 error classification, C-3 run outcomes) with their own copy.
+# Every named engine and provider kind (``NAMED_ERROR_KINDS``: C-2 error classification, C-3 run outcomes) has copy
+# of its own; a contract test holds the two sets equal.
 _KIND_KEYS: dict[str, str] = {
     "refusal": "refusal",
     "safety": "safety",
@@ -33,7 +35,14 @@ _KIND_KEYS: dict[str, str] = {
     "server": "server",
     "auth": "auth",
     "invalid_request": "invalidRequest",
+    # A provider failure C-2 could not classify: an unknown code, or an error frame no rule names.
+    "unknown": "unclassified",
     "error": "modelError",
+    # The model kept truncating a tool call at its output limit (C-3 section 2).
+    "length": "outputLimit",
+    # Tool calls under a stop reason that cannot carry them.
+    "stop": "providerProtocol",
+    "stream_cleanup": "internal",
     # The loop refuses a route that declares no tool support before any request.
     "UnsupportedModelRoute": "toolsUnsupported",
     # A provider answer the canonical transcript cannot hold.
@@ -47,8 +56,14 @@ _REASON_KEYS: dict[str, str] = {
 
 
 def error_key(kind: Optional[str], *, reason: Optional[str] = None) -> str:
-    """The i18n key for an error kind, falling back to the run reason, then to generic copy."""
-    name = _KIND_KEYS.get(kind or "") or _REASON_KEYS.get(reason or "") or "generic"
+    """The i18n key for an error kind, falling back to the run reason, then to generic copy.
+
+    A kind outside ``NAMED_ERROR_KINDS`` names an exception the loop did not expect: an internal error.
+    """
+    name = _KIND_KEYS.get(kind or "")
+    if name is None and kind and kind not in NAMED_ERROR_KINDS:
+        name = "internal"
+    name = name or _REASON_KEYS.get(reason or "") or "generic"
     return f"vibeyAgent.error.{name}"
 
 

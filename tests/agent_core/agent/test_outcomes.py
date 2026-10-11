@@ -153,6 +153,9 @@ async def test_primary_outcome_cross_cleanup_keeps_reason_rows_and_event_order(
     events = await collect(agent)
     assert isinstance(events[-1], RunEnded)
     assert events[-1].reason == ("error" if cleanup == "kill" and reason == "completed" else reason)
+    if cleanup == "kill" and reason == "completed":
+        # The leak decided the outcome, so it is the cause ``RunEnded`` names (C-3 section 6).
+        assert (events[-1].cause.kind, events[-1].cause.origin) == ("ForegroundCleanupError", "local")
     assert hook_outcomes == [reason]
     assert [event.seq for event in events] == list(range(len(events)))
     rows = await store.load("session")
