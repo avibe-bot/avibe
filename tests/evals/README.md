@@ -68,3 +68,5 @@ The run makes about a dozen Turns, plus their checkpoint turns, on the small win
   answer before trusting a drop.
 - A run is checked against the scripted end state, not against every way an agent could misbehave. Checks that only
   matter against deliberate gaming, or that the recorded runs already satisfy, are not added.
+- If the agent deleted or renamed a fixture file, the script stops with an error instead of the JSON report. The run
+  is not scored either way.
