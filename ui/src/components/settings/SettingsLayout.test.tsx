@@ -304,7 +304,7 @@ describe('SettingsLayout', () => {
     expect(screen.getByRole('link', { name: 'settings.sections.models' })).toBeTruthy();
   });
 
-  it('keeps Models on the rail before config resolves and while Model Hub is disabled', () => {
+  it('keeps Models on the rail before config resolves and while Model Hub is disabled', async () => {
     let resolveConfig: ((config: unknown) => void) | undefined;
     api.getConfig.mockImplementation(
       () => new Promise((resolve) => {
@@ -314,8 +314,9 @@ describe('SettingsLayout', () => {
     renderLayout('/settings/replies');
 
     expect(screen.getByRole('link', { name: 'settings.sections.models' })).toBeTruthy();
+    expect(resolveConfig).toBeTypeOf('function');
 
-    act(() => {
+    await act(async () => {
       resolveConfig?.({ capabilities: { model_hub: { enabled: false } } });
     });
     expect(screen.getByRole('link', { name: 'settings.sections.models' })).toBeTruthy();
