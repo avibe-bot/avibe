@@ -53,6 +53,7 @@ from core.agent_core.harness.context import (
 from core.agent_core.harness.projection import context_view, project
 from core.agent_core.messages import (
     AssistantMessage,
+    Origin,
     TextBlock,
     ThinkingBlock,
     ToolCallBlock,
@@ -1301,33 +1302,52 @@ async def test_clearing_runs_once_the_route_cache_has_gone_cold_and_spares_recen
     assert store.transactions == [["context_edit"] * 4]  # one transition, one transaction
 
 
-def served_by(endpoint: ModelEndpoint, script):
-    """``script``'s replies as the route's own origin serves them."""
-    return [replace(event, message=replace(event.message, origin=endpoint_origin(endpoint))) for event in script]
+#: A Model Hub Google hop as the adapter calls it: over Chat at the gateway, while the served-hop report names the
+#: Google protocol the gateway converted to (C-6). Its cache lifetime is unknown: an hour.
+GEMINI = ModelEndpoint("openai_chat", "http://model.invalid", "gemini-3-pro", "", provider="google")
+GEMINI_SERVED = Origin("google", "google", "gemini-3-pro")
+
+
+async def routed_turn(store, now, endpoint, scripts, row, served=None):
+    """One Turn in a new Agent over ``store`` on ``endpoint``, its replies served as ``served`` (the endpoint's own
+    origin by default); the ``context_edit`` rows after it."""
+    origin = served or endpoint_origin(endpoint)
+    model = Model([[replace(event, message=replace(event.message, origin=origin)) for event in s] for s in scripts])
+    route = ModelSelection(endpoint, LARGE.capabilities)
+    context = ContextConfig(clock=lambda: now[0])
+    agent = make_agent(model, store=store, tools=[reader(tokens(6_000))], selection=route, context=context)
+    assert (await run(agent, row=row))[-1].reason == "completed"
+    return [row for row in await store.load("session") if row.kind == "context_edit"]
 
 
 async def test_a_route_cache_counts_only_its_own_use():
-    # Each Turn runs in a new Agent over the same rows. Ten minutes after Claude's last reply, GPT answers for the first
-    # time: a route with no use yet takes the latest use of any route, well inside GPT's 30 minutes, so nothing clears.
-    # A minute later the Session is back on Claude, whose own cache went unused for eleven minutes: cold, although
-    # another route answered a minute ago.
+    # Ten minutes after Claude's last reply, GPT answers for the first time: a route with no use yet takes the latest
+    # use of any route, well inside GPT's 30 minutes, so nothing clears. A minute later the Session is back on Claude,
+    # whose own cache went unused for eleven minutes: cold, although another route answered a minute ago.
     now = [1_000.0]
     store = InMemoryTranscriptStore(clock=lambda: now[0])
-
-    async def turn(endpoint, scripts, row):
-        model = Model([served_by(endpoint, script) for script in scripts])
-        route = ModelSelection(endpoint, LARGE.capabilities)
-        context = ContextConfig(clock=lambda: now[0])
-        agent = make_agent(model, store=store, tools=[reader(tokens(6_000))], selection=route, context=context)
-        assert (await run(agent, row=row))[-1].reason == "completed"
-        return [row for row in await store.load("session") if row.kind == "context_edit"]
-
-    await turn(CLAUDE, [*_long_context(9), [Done(assistant("one"))]], "turn-1")
-    await turn(CLAUDE, [[Done(assistant("two"))]], "turn-2")
+    await routed_turn(store, now, CLAUDE, [*_long_context(9), [Done(assistant("one"))]], "turn-1")
+    await routed_turn(store, now, CLAUDE, [[Done(assistant("two"))]], "turn-2")
     now[0] += 600
-    assert not await turn(GPT, [[Done(assistant("three"))]], "turn-3")
+    assert not await routed_turn(store, now, GPT, [[Done(assistant("three"))]], "turn-3")
     now[0] += 60
-    assert len(await turn(CLAUDE, [[Done(assistant("four"))]], "turn-4")) == 4
+    assert len(await routed_turn(store, now, CLAUDE, [[Done(assistant("four"))]], "turn-4")) == 4
+
+
+async def test_a_converted_route_cache_is_its_upstream_provider_and_model():
+    # A Google hop's replies are served as the Google protocol though the request went over Chat: its cache is still
+    # its own. Fifty minutes after its last reply it is warm (an hour, unknown lifetime); after another route answers,
+    # it goes cold once its own reply is over an hour old, although that route answered under twelve minutes ago.
+    now = [1_000.0]
+    store = InMemoryTranscriptStore(clock=lambda: now[0])
+    await routed_turn(store, now, GEMINI, [*_long_context(9), [Done(assistant("one"))]], "turn-1", GEMINI_SERVED)
+    await routed_turn(store, now, GEMINI, [[Done(assistant("two"))]], "turn-2", GEMINI_SERVED)
+    now[0] += 3_000
+    assert not await routed_turn(store, now, GEMINI, [[Done(assistant("three"))]], "turn-3", GEMINI_SERVED)
+    now[0] += 3_000
+    assert not await routed_turn(store, now, ENDPOINT, [[Done(assistant("four"))]], "turn-4")
+    now[0] += 700
+    assert len(await routed_turn(store, now, GEMINI, [[Done(assistant("five"))]], "turn-5", GEMINI_SERVED)) == 4
 
 
 async def test_pressure_clearing_runs_on_a_warm_cache():

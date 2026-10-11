@@ -177,6 +177,12 @@ class _Exhausted(Exception):
 _CHECKPOINT_REQUEST = checkpoint_request()
 
 
+def _cache_of(origin: Origin) -> tuple[str, str]:
+    """The upstream prompt cache an origin's requests use: its provider and model (C-9 section 3). The protocol that
+    reaches the gateway, converted or not (a Google hop is called over Chat), does not change the cache."""
+    return origin.provider, origin.model
+
+
 async def _silent(*_: Any, **__: Any) -> None:
     """A side turn's emit: it shows nothing (C-10 section 7)."""
 
@@ -284,9 +290,9 @@ class Agent:
         self._turn_inputs: set[int] = set()
         # The run's attempt ledger (C-9): every model attempt, in order.
         self._attempts: list[_Attempt] = []
-        # When each route's provider cache was last used in this Agent: the end of its latest model call, by the
-        # origin that served it (C-9 section 3).
-        self._last_model_at: dict[Origin, float] = {}
+        # When each upstream prompt cache was last used in this Agent: the end of its latest model call, by the provider
+        # and model that served it (``_cache_of``, C-9 section 3).
+        self._last_model_at: dict[tuple[str, str], float] = {}
         self._seq = 0
 
     def set_tools(self, tools: Sequence[Tool]) -> None:
@@ -748,8 +754,8 @@ class Agent:
                         terminal = ProviderError("unknown", "Provider stream ended without a terminal event.", False)
                     if self.context is not None:
                         served = terminal.message if isinstance(terminal, Done) else terminal.partial
-                        cache = served.origin if served is not None else endpoint_origin(request.endpoint)
-                        self._last_model_at[cache] = self.context.clock()
+                        upstream = served.origin if served is not None else endpoint_origin(request.endpoint)
+                        self._last_model_at[_cache_of(upstream)] = self.context.clock()
                     self._attempts.append(
                         _Attempt(
                             purpose,
@@ -1198,17 +1204,16 @@ class Agent:
     def _cache_cold(self, endpoint: ModelEndpoint) -> bool:
         """The provider cache of the request's route has gone unused longer than it stays warm (section 3).
 
-        Its use is the latest model call's end or response row's commit served by that route (its origin), so a long
-        response counts as use until it ends, and a restarted Agent reads the rows. A route with no use in the Session
-        yet (its first, or one whose served origin the endpoint does not name, as a converted protocol's) takes the
-        latest use of any route: every error leans toward a warm cache.
+        Its use is the latest model call's end or response row's commit served by the route's upstream cache
+        (``_cache_of``), so a long response counts as use until it ends, and a restarted Agent reads the rows. A route
+        with no use in the Session yet takes the latest use of any route: every error leans toward a warm cache.
         """
         used = dict(self._last_model_at)
         for row in self._rows:
             if row.kind == "response" and row.created_at is not None:
-                origin = row.message.origin
-                used[origin] = max(used.get(origin, row.created_at), row.created_at)
-        last = used.get(endpoint_origin(endpoint), max(used.values(), default=None))
+                cache = _cache_of(row.message.origin)
+                used[cache] = max(used.get(cache, row.created_at), row.created_at)
+        last = used.get(_cache_of(endpoint_origin(endpoint)), max(used.values(), default=None))
         return last is not None and self.context.clock() - last > cache_ttl_s(endpoint)
 
     async def _compose(

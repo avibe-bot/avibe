@@ -133,11 +133,11 @@ results live, resolved on every request from the route's provider, protocol, and
 
 Clearing a warm cache forces a full-price re-read of the context, while skipping a clear on a cold one only keeps
 some old output, so an unknown lifetime counts as an hour, and relays and subscription sources that keep a shorter
-one err toward warm. The idle time is the route's own: it runs from the later of the latest model call's end and the
-latest response's commit served by the request's route (its origin), which overstates warmth by a response's
-duration, the same safe direction; another route's use never refreshes it. A route with no use in the Session yet,
-its first or one whose served origin the endpoint does not name (a converted protocol's), takes the latest use of any
-route.
+one err toward warm. The idle time is the route's own cache's: it runs from the later of the latest model call's end
+and the latest response's commit served by the same provider and model as the request's route (the protocol that
+reaches the gateway, converted or not, does not change the cache), which overstates warmth by a response's duration,
+the same safe direction; another route's use never refreshes it. A route with no use in the Session yet takes the
+latest use of any route.
 
 A request the provider rejects as overflow (`ProviderError.kind == "overflow"`, classified by
 `ai/errors.is_overflow_message`, HTTP 413, and `context_length_exceeded`) before anything was streamed, and with no
