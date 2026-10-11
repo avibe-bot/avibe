@@ -645,7 +645,12 @@ unclassified connection failure creates only live short backoff. The fact flips 
 the first user-visible model-output byte, never at HTTP status, headers, or another
 response byte. After it flips, a stream interruption creates only its existing redacted
 event and never mutates Source health or creates backoff. No post-output failure is
-replayed.
+replayed. An error frame whose class no machine-code row names, arriving inside a 2xx
+response, is ambiguous evidence (the relay, the engine, or a transient fault) and never
+writes Source health (orchestrator decision 2026-10-11): before output it falls back for
+this turn only, recorded as `unclassified_error`, with no cooldown, live backoff, or
+Source event; after output it is event-only, like a stream interruption. An
+unclassified HTTP-status failure keeps `error`.
 
 The read projection is `C` with live annotations plus `current`, never a reconstructed
 provider list. Takeover remains derived: the current hop is not `C[0]` and `C[0]` is
@@ -662,7 +667,9 @@ protocol conformance validator.
 The complete observation surface is limited to these facts:
 
 1. An official error envelope at a terminal position is `failed_terminal`; machine-code
-   extraction reads only the protocol's declared C12 trust roots.
+   extraction reads only the protocol's declared C12 trust roots. Classification reads
+   only those machine codes, never the engine client's own account of how the call
+   ended.
 2. An official success terminal is `served` when its discriminator identity matches. For
    named SSE events this is the minimal `(event name, data.type)` match. This is
    discriminator-only observation, not validation of the remaining envelope members or
@@ -993,7 +1000,7 @@ Three classes, because the action owed by the user differs in each.
 | `standby` | 正常 | — | healthy source; when `adopted_by` is non-empty it is shown as supplying the configured route |
 | `cooldown` | 暂不可用 (gold) | **yes** | shaped quota/rate/server result; persisted `retry_at` known; recovers unattended |
 | `needs_action` | 需处理 (rose) | **no** | OAuth expired, balance exhausted, key revoked/banned — dead until the user acts |
-| `error` | 异常 | **no** | unclassified failure — no `retry_at`, so nothing clears it unattended |
+| `error` | 异常 | **no** | unclassified HTTP-status failure — no `retry_at`, so nothing clears it unattended; an unclassified in-stream error frame never sets it |
 
 `needs_action`, introduced in v2 and retained by v3, carries a `detail_key` naming the cause, so the
 row can offer **one tap to fix it** (re-auth, top up, replace key) instead of a

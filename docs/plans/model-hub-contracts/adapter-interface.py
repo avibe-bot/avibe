@@ -145,7 +145,9 @@ class RawCallOutcome:
     kind: RawOutcomeKind
     http_status: int | None
     error_code: str | None  # upstream machine code if parseable, else None
-    redacted_message: str | None  # L1 guarantees no credential material
+    # L1's own account of how the call ended, never upstream text; classification
+    # does not read it. L1 guarantees no credential material.
+    redacted_message: str | None
     stream_started: bool
     model_id: str
     source_id: str
