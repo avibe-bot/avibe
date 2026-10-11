@@ -21,6 +21,8 @@ _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
 _JOB_OBJECT_QUERY = 0x0004
 _JOB_OBJECT_TERMINATE = 0x0008
 _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+_SYNCHRONIZE = 0x00100000
+_WAIT_TIMEOUT = 0x102
 _ERROR_FILE_NOT_FOUND = 2
 _ERROR_BROKEN_PIPE = 109
 _ERROR_ALREADY_EXISTS = 183
@@ -94,6 +96,7 @@ def _kernel32() -> Any:
         "IsProcessInJob": ([wintypes.HANDLE, wintypes.HANDLE, ctypes.POINTER(wintypes.BOOL)], wintypes.BOOL),
         "OpenProcess": ([wintypes.DWORD, wintypes.BOOL, wintypes.DWORD], wintypes.HANDLE),
         "GetCurrentProcess": ([], wintypes.HANDLE),
+        "WaitForSingleObject": ([wintypes.HANDLE, wintypes.DWORD], wintypes.DWORD),
         "CloseHandle": ([wintypes.HANDLE], wintypes.BOOL),
         "PeekNamedPipe": (
             [
@@ -177,6 +180,22 @@ def job_contains(job: int, pid: int) -> bool:
         if not kernel32.IsProcessInJob(process, job, ctypes.byref(member)):
             raise ctypes.WinError(ctypes.get_last_error())
         return bool(member.value)
+    finally:
+        kernel32.CloseHandle(process)
+
+
+def process_running(pid: int) -> bool:
+    """Whether the process ``pid`` exists and has not ended.
+
+    Its object is signaled once it has ended, which is the last step of its exit: a job counts a process out,
+    and its command line stops being readable, a little earlier.
+    """
+    kernel32 = _kernel32()
+    process = kernel32.OpenProcess(_SYNCHRONIZE, False, pid)
+    if not process:
+        return False
+    try:
+        return kernel32.WaitForSingleObject(process, 0) == _WAIT_TIMEOUT
     finally:
         kernel32.CloseHandle(process)
 

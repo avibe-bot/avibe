@@ -662,6 +662,8 @@ class LocalJobHost:
         identity = self._identity(job_id)
         if identity is None:
             return False
+        if _WINDOWS and not windows_job.process_running(identity.pid):
+            return False  # an ended process stays readable for a moment, and its object for as long as it is held
         try:
             argv = psutil.Process(identity.pid).cmdline()
         except (psutil.Error, OSError):
@@ -723,7 +725,8 @@ async def _terminate_job(
             return True
         windows_job.terminate_job(job)
         deadline = time.monotonic() + timeout_s
-        while windows_job.active_processes(job):
+        # The job counts a process out before the process has ended; ``status`` asks the wrapper itself.
+        while windows_job.active_processes(job) or windows_job.process_running(wrapper_pid):
             if time.monotonic() >= deadline:
                 return False
             await asyncio.sleep(0.02)
