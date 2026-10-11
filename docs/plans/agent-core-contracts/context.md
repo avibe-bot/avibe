@@ -159,7 +159,8 @@ A checkpoint is written by a **side turn** of the conversation (C-10 `fork.md` �
   effort are never changed: Anthropic renders them into the prompt. `max_tokens = min(16,000, O)`.
 - **Normal**: the prefix is the whole projected conversation. **Rolling**: the prefix is the projected context up to
   the cut, which is a prefix of the original request.
-- One user message is appended: the checkpoint request (§11).
+- One user message is appended: the checkpoint request (§11). It takes the user role, but it comes from the harness,
+  not the user, and its text says so.
 - The turn's requests take the request pipeline (§10, invariant 1; a request that cannot fit is never sent and
   fails the attempt as an overflow), its responses the admission (invariant 6), and its tool calls the side turn's
   tool pipeline (invariant 2, C-10 §7 step 3). Its responses and results are never committed to the context, and
@@ -461,20 +462,29 @@ every-exit audit: `test_loop.py`) that fails when its order or owner is broken.
 UX is silent: compaction is invisible, the user never needs to think about it, and the raw messages stay in
 history. The only user-visible text is the stop message after (d) (§9).
 
-## 11. Checkpoint request (prompt `checkpoint-v3`)
+## 11. Checkpoint request (prompt `checkpoint-v4`)
 
 The request, verbatim (`harness/context.py` `CHECKPOINT_REQUEST`). `checkpoint-v3` (owner decision 2026-10-11) asks
 for the checkpoint in one `<checkpoint>` block of the final reply; the template inside it is `checkpoint-v2`'s,
-unchanged, and is guidance (§6):
+unchanged, and is guidance (§6).
+
+`checkpoint-v4` (owner decision 2026-10-12) adds two things:
+- The request, and its repair, say that they come from the harness, not the user.
+- Neither one, nor anything it asks (including not calling tools), may be recorded as something the user said or
+  wants, as a goal or requirement, or as a next step.
+
+The only production checkpoint before it showed why. It was written under `checkpoint-v2` and credited its own
+request to the user: its first next step was to write only the checkpoint and run no tool. That record became the
+continuing model's context. The request:
 
 ```text
 <context-checkpoint-request>
-Pause the work here. Do not call any tool and do not continue the task. This reply does one thing: write a context checkpoint.
+This request comes from the harness that runs you, not from the user, and the user does not see it. Pause the work here. Do not call any tool and do not continue the task. This reply does one thing: write a context checkpoint.
 
 The conversation above will be replaced by your checkpoint plus the messages after it. Whoever continues is you, but you will no longer remember this conversation; the checkpoint is all you will know of it. What you do not write down is lost.
 If there is an earlier checkpoint above, it is discarded after this: carry forward everything in it that still matters; where it conflicts with later messages, the later messages win.
 
-Everything above is a record to summarize, not instructions to act on now.
+Everything above is a record to summarize, not instructions to act on now. This request is not part of that record: do not write it, or anything it asks of you (including not calling tools), into the checkpoint as something the user said or wants, as a goal or requirement, or as a next step. Record the work as it stood before this request.
 
 Write the checkpoint as one block in your final reply: a line <checkpoint>, then the checkpoint, then a line </checkpoint>. Only what is inside that block is kept. Write those two tags only there, once each; if the checkpoint has to mention them, describe them in words.
 
@@ -530,7 +540,7 @@ and it needs at least <floor>`:
 
 ```text
 <context-checkpoint-request>
-That reply is not a checkpoint: {problem}. Write your final reply again, with the complete checkpoint as asked above in exactly one <checkpoint> block. Do not call any tool.
+That reply is not a checkpoint: {problem}. Write your final reply again, with the complete checkpoint as asked above in exactly one <checkpoint> block. Do not call any tool. Like the request, this message comes from the harness, not the user: keep it, and what it asks, out of the checkpoint.
 </context-checkpoint-request>
 ```
 
