@@ -4,15 +4,19 @@ from __future__ import annotations
 
 import asyncio
 import errno
+import functools
 import getpass
 import os
 import random
 import re
+import secrets
+import shutil
 import stat
 import subprocess
 import threading
 import time
 import tracemalloc
+from pathlib import Path
 
 import pytest
 
@@ -323,14 +327,21 @@ async def test_a_cancelled_write_lands_before_the_next_writer_takes_the_lock(
                 raise OSError(errno.ENOSPC, "No space left on device")
         real_fsync(fd)
 
-    def counted_replace(source, target):
-        real_replace(source, target)
-        renames.append(target)
-        if len(renames) == expected_renames:
-            renamed.set()
+    def counted(publish):
+        def publish_and_count(source, target):
+            publish(source, target)
+            renames.append(target)
+            if len(renames) == expected_renames:
+                renamed.set()
+
+        return publish_and_count
 
     monkeypatch.setattr(write_module.os, "fsync", first_fsync_blocks)
-    monkeypatch.setattr(write_module.os, "replace", counted_replace)
+    # A new file is renamed into place; on Windows an existing one is replaced with ReplaceFileW.
+    monkeypatch.setattr(write_module.os, "replace", counted(real_replace))
+    monkeypatch.setattr(
+        write_module.windows_files, "replace_existing", counted(write_module.windows_files.replace_existing)
+    )
     tool = WriteTool() if "content" in first else EditTool()
     cancelled = asyncio.ensure_future(tool.execute(first, make_ctx()))
     await asyncio.to_thread(entered.wait, 10)
@@ -370,10 +381,18 @@ async def test_an_edit_publishes_only_over_the_file_it_read(tmp_path, make_ctx, 
         elif change == "rewritten":
             real.write_text("unrelated text\n", encoding="utf-8", newline="")
         else:
-            # Same size, in place, mtime put back (as rsync -t or tar do): only ctime still shows it.
+            # Same size, in place, mtime put back (as rsync -t or tar do): only ctime still shows it, once the
+            # filesystem's clock has moved past the read (Windows stamps a file at its timer's resolution).
             before = os.stat(real)
-            real.write_text("ALPHA\n", encoding="utf-8", newline="")
-            os.utime(real, ns=(before.st_atime_ns, before.st_mtime_ns))
+            read_ctime = planned[4].ctime_ns
+            deadline = time.monotonic() + 5
+            while True:
+                real.write_text("ALPHA\n", encoding="utf-8", newline="")
+                os.utime(real, ns=(before.st_atime_ns, before.st_mtime_ns))
+                with open(real, "rb") as handle:
+                    if os.fstat(handle.fileno()).st_ctime_ns != read_ctime or time.monotonic() > deadline:
+                        break
+                time.sleep(0.005)
         return planned
 
     monkeypatch.setattr(edit_module, "_plan_edits", plan_then_change)
@@ -456,13 +475,97 @@ async def test_a_replaced_file_keeps_an_acl_of_its_own(tmp_path, make_ctx, tool)
     assert _icacls(target) == before
 
 
+@pytest.mark.skipif(not WINDOWS, reason="Windows file metadata")
+@pytest.mark.parametrize("tool", ["write", "edit"])
+async def test_a_replaced_file_keeps_its_named_streams_and_encryption(tmp_path, make_ctx, tool):
+    """A downloaded file keeps its Mark of the Web, and a file encrypted on its own stays encrypted."""
+    target = tmp_path / "f.txt"
+    target.write_bytes(b"old\n")
+    zone = "[ZoneTransfer]\r\nZoneId=3\r\n"
+    with open(f"{target}:Zone.Identifier", "w", encoding="ascii", newline="") as stream:
+        stream.write(zone)
+    subprocess.run(["cipher", "/e", str(target)], capture_output=True, check=True)
+    assert os.stat(target).st_file_attributes & stat.FILE_ATTRIBUTE_ENCRYPTED
+
+    result = await _replace_with(tool, make_ctx, "f.txt")
+
+    assert not result.is_error, result_text(result)
+    assert target.read_bytes() == b"new\n"
+    with open(f"{target}:Zone.Identifier", encoding="ascii", newline="") as stream:
+        assert stream.read() == zone
+    assert os.stat(target).st_file_attributes & stat.FILE_ATTRIBUTE_ENCRYPTED
+    assert [p.name for p in tmp_path.iterdir()] == ["f.txt"]
+
+
+@pytest.mark.skipif(not WINDOWS, reason="Windows file sharing")
+async def test_a_replace_windows_refuses_leaves_the_file_as_it_was(tmp_path, make_ctx):
+    """Another program holds the file open without sharing delete: nothing is replaced, and nothing is left over."""
+    target = tmp_path / "f.txt"
+    target.write_bytes(b"old\n")
+    with open(target, "rb"):
+        result = await WriteTool().execute({"path": "f.txt", "content": "new\n"}, make_ctx())
+
+    assert result.is_error
+    assert result_text(result).startswith("Cannot write f.txt: ")
+    assert target.read_bytes() == b"old\n"
+    assert [p.name for p in tmp_path.iterdir()] == ["f.txt"]
+
+
+@pytest.mark.skipif(not WINDOWS, reason="ReplaceFileW")
+async def test_a_replaced_file_left_under_the_backup_name_is_put_back(tmp_path, make_ctx, monkeypatch):
+    """``ERROR_UNABLE_TO_MOVE_REPLACEMENT_2``: Windows moved the replaced file to the backup name and then could not
+    move the replacement into place. Simulated, since no test can make Windows fail at exactly that step."""
+    import ctypes
+
+    from core.agent_core.tools import windows_files
+
+    real = windows_files._kernel32()
+
+    class FailsAfterTheBackup:
+        def __getattr__(self, name):
+            return getattr(real, name)
+
+        def ReplaceFileW(self, replaced, replacement, backup, flags, exclude, reserved):
+            os.replace(replaced, backup)
+            ctypes.set_last_error(1177)
+            return False
+
+    monkeypatch.setattr(windows_files, "_kernel32", FailsAfterTheBackup)
+    target = tmp_path / "f.txt"
+    target.write_bytes(b"old\n")
+
+    result = await WriteTool().execute({"path": "f.txt", "content": "new\n"}, make_ctx())
+
+    assert result.is_error
+    assert target.read_bytes() == b"old\n"
+    assert [p.name for p in tmp_path.iterdir()] == ["f.txt"]
+
+
+@pytest.mark.skipif(not os.environ.get("AVIBE_TEST_FAT_DIR"), reason="needs a FAT volume (AVIBE_TEST_FAT_DIR)")
+@pytest.mark.parametrize("tool", ["write", "edit"])
+async def test_a_file_on_a_volume_without_acls_is_replaced(make_ctx, tool):
+    """FAT keeps no ACLs and no streams; a replace there keeps what it can and still succeeds."""
+    directory = Path(os.environ["AVIBE_TEST_FAT_DIR"]) / f"replace-{tool}-{secrets.token_hex(4)}"
+    directory.mkdir()
+    try:
+        (directory / "f.txt").write_bytes(b"old\n")
+        result = await _replace_with(tool, functools.partial(make_ctx, cwd=str(directory)), "f.txt")
+
+        assert not result.is_error, result_text(result)
+        assert (directory / "f.txt").read_bytes() == b"new\n"
+        assert [p.name for p in directory.iterdir()] == ["f.txt"]
+    finally:
+        shutil.rmtree(directory, ignore_errors=True)
+
+
 @pytest.mark.skipif(not WINDOWS, reason="a Windows ACL")
 @pytest.mark.parametrize("tool", ["write", "edit"])
 async def test_a_file_whose_acl_denies_writing_is_not_replaced(tmp_path, make_ctx, tool):
     """The directory still lets the file be renamed over, which would get past an ACL that denies writing it."""
     target = tmp_path / "f.txt"
     target.write_bytes(b"old\n")
-    _icacls(target, "/deny", f"{getpass.getuser()}:(W)")
+    # Only writing the data is denied: reading it, and so planning an edit, still works.
+    _icacls(target, "/deny", f"{getpass.getuser()}:(WD)")
     try:
         result = await _replace_with(tool, make_ctx, "f.txt")
     finally:

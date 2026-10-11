@@ -149,9 +149,9 @@ def _require(expected: Optional[FileIdentity], path: str, st: os.stat_result) ->
         raise FileChanged()
 
 
-def _check_publishable(path: str, target: str, expected: Optional[FileIdentity]) -> None:
+def _check_publishable(path: str, target: str, expected: Optional[FileIdentity]) -> bool:
     """Right before the rename: ``path`` still names ``target``, which is absent or a writable regular file
-    (for a read-modify-write, the one that was read)."""
+    (for a read-modify-write, the one that was read). Returns whether it exists."""
     current = os.path.realpath(path)
     if current != target:
         raise FileChanged()
@@ -160,7 +160,7 @@ def _check_publishable(path: str, target: str, expected: Optional[FileIdentity])
     except FileNotFoundError:
         if expected is not None:
             raise FileChanged() from None
-        return
+        return False
     if not stat.S_ISREG(st.st_mode):
         raise NotRegularFile("directory" if stat.S_ISDIR(st.st_mode) else "other")
     if not may_write(current):
@@ -170,6 +170,7 @@ def _check_publishable(path: str, target: str, expected: Optional[FileIdentity])
         # change time that FileIdentity needs: compare a descriptor's view with a descriptor's view.
         st = _fstat_of(current)
     _require(expected, current, st)
+    return True
 
 
 def _fstat_of(path: str) -> os.stat_result:
@@ -185,9 +186,11 @@ def write_bytes(path: str, data: bytes, expected: Optional[FileIdentity] = None)
 
     A failed write (a full disk, a quota) leaves the original, or its absence, as it was. The temp
     file sits beside the real target (through symlinks). Replacing a file, it is private (0600) while
-    it receives the new contents and takes the file's mode once they are fsynced (on Windows, its
-    ACL); a new file's temp is created with the umask default it keeps, so the process umask is
-    never read or changed. Then ``os.replace`` puts it in place.
+    it receives the new contents and takes the file's mode once they are fsynced; a new file's temp is
+    created with the umask default it keeps, so the process umask is never read or changed. Then
+    ``os.replace`` puts it in place. On Windows an existing file is replaced with ``ReplaceFileW``,
+    which keeps what a mode stands for there and more: its DACL, encryption, compression, named
+    streams, and creation time (``windows_files.replace_existing``).
 
     An existing file whose directory does not let a temp file be created is refused
     (``NotReplaceable``) rather than written in place, which a full disk could leave half-written.
@@ -219,12 +222,10 @@ def write_bytes(path: str, data: bytes, expected: Optional[FileIdentity] = None)
             os.fsync(handle.fileno())
             if mode is not None and not _WINDOWS:
                 os.fchmod(handle.fileno(), mode)
-        if mode is not None and _WINDOWS:
-            # A mode there is only the read-only bit, which no file write replaces has; its permissions are its
-            # ACL, and the temp file has only what its directory passes on.
-            windows_files.copy_dacl(target, tmp)
-        _check_publishable(path, target, expected)
-        os.replace(tmp, target)
+        if _check_publishable(path, target, expected) and _WINDOWS:
+            windows_files.replace_existing(tmp, target)
+        else:
+            os.replace(tmp, target)
     except BaseException:
         with contextlib.suppress(FileNotFoundError):
             os.unlink(tmp)

@@ -654,6 +654,24 @@ jobs:
       - name: Install package and test deps
         run: uv pip install --system -e . --group dev
 
+      # A volume without ACLs or named streams, where a replace keeps what it
+      # can: FAT32 on a small virtual disk.
+      - name: Prepare a FAT volume
+        run: |
+          $vhd = Join-Path $env:RUNNER_TEMP "fat.vhdx"
+          $script = Join-Path $env:RUNNER_TEMP "fat.diskpart"
+          @(
+            "create vdisk file=`"$vhd`" maximum=64 type=expandable",
+            "attach vdisk",
+            "create partition primary",
+            "format fs=fat32 quick label=AVIBEFAT",
+            "assign letter=T"
+          ) | Set-Content -Encoding ascii $script
+          diskpart /s $script
+          if ($LASTEXITCODE -ne 0) { throw "diskpart failed: $LASTEXITCODE" }
+          (Get-Volume -DriveLetter T).FileSystem
+          "AVIBE_TEST_FAT_DIR=T:\" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
       - name: Verify the file tools
         run: >-
           python -m pytest -q -ra ${{ matrix.pytest-args }}
