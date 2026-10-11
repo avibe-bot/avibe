@@ -8019,6 +8019,18 @@ class ModelHubService:
         settlement_rule = source_settlement_rule(event_reason)
         if decision.reason == "network" and outcome is not None and outcome.stream_started:
             return event_reason, False
+        if (
+            decision.reason == "unclassified_error"
+            and outcome is not None
+            and outcome.http_status is not None
+            and 200 <= outcome.http_status < 300
+        ):
+            # An error frame no machine code names, inside a response the upstream
+            # accepted, is ambiguous evidence: the relay, the engine, or a transient
+            # fault. It ends this attempt and never writes Source health, but a
+            # half-open attempt still gives its slot back.
+            self.recovery.release(source.id, settlement_generation)
+            return event_reason, False
         # Generations are minted at attempt start and nowhere else. A settlement
         # that carries none cannot prove it is not superseded, so it does not
         # write Source health; minting one here would let any stale attempt

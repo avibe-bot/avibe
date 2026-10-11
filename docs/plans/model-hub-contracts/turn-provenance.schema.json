@@ -209,6 +209,7 @@
             "overloaded",
             "overloaded_error",
             "server_error",
+            "timeout_error",
             "internal_error",
             "api_error",
             "service_unavailable_error",
