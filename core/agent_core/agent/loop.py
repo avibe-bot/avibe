@@ -89,9 +89,10 @@ from core.agent_core.harness.context import (
     StateRequest,
     add_usage,
     budget,
+    checkpoint_block,
     checkpoint_max_tokens,
+    checkpoint_repair,
     checkpoint_request,
-    checkpoint_problem,
     checkpoint_text,
     clear_edit,
     clearable_results,
@@ -1521,17 +1522,15 @@ class Agent:
         self, request: ModelRequest, view: ContextView, plan: Budget, cut: int, *, mode: str, reason: str
     ) -> SideTurn:
         """The checkpoint turn for ``cut`` as a side turn (C-10 section 12): the whole view, or for a rolling one its
-        prefix, then the checkpoint request, under ``DREAMING``; its fold commits the checkpoint row."""
+        prefix, then the checkpoint request, under ``DREAMING``. Its check accepts a final reply holding one checkpoint
+        block above the floor of the route it was planned on (section 6); its fold commits the checkpoint row."""
+
+        def check(message: AssistantMessage) -> Optional[str]:
+            return checkpoint_block(checkpoint_text(message), plan.window)[1]
 
         async def fold(reply: SideReply) -> Folded:
-            checkpoint = checkpoint_text(reply.message)
-            if not checkpoint:
-                return Folded(None, "The checkpoint turn ended without checkpoint text.")
-            problem = checkpoint_problem(checkpoint)
-            if problem is not None:
-                # Not a checkpoint (a meta note, a partial one): it fails, and its text stays in the audit only; the
-                # old context is kept (section 6).
-                return Folded(None, f"The checkpoint turn's reply is not a checkpoint: {problem}.")
+            # The side turn folds only a reply its check accepted: the block's text is the checkpoint.
+            checkpoint = checkpoint_block(checkpoint_text(reply.message), plan.window)[0]
             origin = reply.message.origin
             summarizer = {
                 "origin": {"provider": origin.provider, "api": origin.api, "model": origin.model},
@@ -1571,6 +1570,8 @@ class Agent:
             policy=DREAMING,
             max_tokens=lambda capabilities: checkpoint_max_tokens(capabilities, self.max_tokens),
             fold=fold,
+            check=check,
+            repair=checkpoint_repair,
         )
 
     # --- C-10 side turn (agent-core-contracts/fork.md section 7) ----------------
@@ -1585,8 +1586,9 @@ class Agent:
 
         It goes through the run's model call, silently, and its calls through ``_side_tool``. A response that stops
         with ``stop`` and calls no tool is its reply, which ``turn.fold`` folds into the context; anything else fails
-        it. One ``fork_turn`` audit on every exit but an abort (F7). v1 runs it only while a run is active, the
-        Session's one writer; a side turn while idle is reserved.
+        it. A reply ``turn.check`` rejects gets one corrective follow-up, ``turn.repair``, in this turn; a second
+        rejected reply fails it. One ``fork_turn`` audit on every exit but an abort (F7). v1 runs it only while a run
+        is active, the Session's one writer; a side turn while idle is reserved.
         """
         view = context_view(self._rows)
         anchor = last_anchor(self._rows, view)
@@ -1604,6 +1606,7 @@ class Agent:
         error: Optional[str] = None
         overflow = False
         reply: Optional[SideReply] = None
+        repaired: Optional[str] = None  # the problem the one corrective follow-up named
         selection: Optional[ModelSelection] = route
 
         async def compose(selected: ModelSelection) -> tuple[ModelRequest, dict[str, Tool]]:
@@ -1642,8 +1645,21 @@ class Agent:
                     self._scope.check()
                     so_far.append(message)
                     if message.stop_reason == "stop" and not message.tool_calls:
-                        reply = SideReply(message, rounds, self._turn_usage(start))
-                        break
+                        problem = turn.check(message) if turn.check is not None else None
+                        if problem is None:
+                            reply = SideReply(message, rounds, self._turn_usage(start))
+                            break
+                        if repaired is not None or turn.repair is None:
+                            # Its text stays in the audit only; the caller's context is untouched.
+                            error = f"The {turn.purpose} turn's reply is not a {turn.purpose}: {problem}."
+                            break
+                        # One corrective follow-up, inside this turn's own budget, policy, and admission.
+                        repaired = problem
+                        finished["repair"] = problem
+                        follow_up = turn.repair(problem)
+                        so_far.append(follow_up)
+                        produced.append(follow_up)
+                        continue
                     if message.stop_reason != "tool_use" or not message.tool_calls:
                         # Only a stop with no call is a reply, and only a tool-use stop carries calls.
                         error = f"The {turn.purpose} turn stopped with {message.stop_reason} and no usable {turn.purpose}."

@@ -45,6 +45,7 @@ from core.agent_core.harness.context import (
     TOOL_TRUNCATED,
     ContextConfig,
     StateRequest,
+    checkpoint_repair,
     compaction_payload,
     message_tokens,
     request_tokens,
@@ -79,8 +80,23 @@ DENIED, BUDGET_USED = DREAMING.denied, DREAMING.budget_used
 #: T = 19,904 (section 1), the numbers every test here is sized against.
 SELECTION = ModelSelection(ENDPOINT, replace(FAKE_SELECTION.capabilities, context_window=64_000, input_limit=32_000))
 THRESHOLD = 19_904
-#: A checkpoint with the template's three sections (section 11), which the validator accepts.
-CHECKPOINT = "# 1. Self and method\n- the checkpoint\n# 2. Goals and requirements\n- the goal\n# 3. Now and next\n- the next step"
+#: A checkpoint as the template lays it out (section 11), above every floor (section 6): 128 tokens and more.
+CHECKPOINT_BODY = (
+    "# 1. Self and method\n- Report results tersely; ask before deleting anything.\n"
+    "# 2. Goals and requirements\n- Goal: fix the failing parser test in src/parse.py without changing its public API.\n"
+    "- Every change needs a test; keep the existing fixtures.\n"
+    "# 3. Now and next\n- Done: reproduced the failure with `pytest -k parse` (KeyError: 'quote').\n"
+    "- Next: patch the tokenizer's quote handling in src/parse.py, then rerun the whole parser suite and report.\n"
+    "## Exact references\n- src/parse.py, tests/test_parse.py, `pytest -k parse`"
+)
+
+
+def block(body: str) -> str:
+    """A final reply holding ``body`` as its one checkpoint block (section 6)."""
+    return f"<checkpoint>\n{body}\n</checkpoint>"
+
+
+CHECKPOINT = block(CHECKPOINT_BODY)
 
 
 def tokens(count: int) -> str:
@@ -103,8 +119,8 @@ def checkpoint_message(request) -> str:
 
 
 def bulky(count: int) -> str:
-    """A checkpoint of the template's three sections, about ``count`` tokens long."""
-    return f"# 1. Self and method\n- {tokens(count)}\n# 2. Goals and requirements\n- the goal\n# 3. Now and next\n- next"
+    """A final reply whose checkpoint is about ``count`` tokens long."""
+    return block(f"# 1. Self and method\n- {tokens(count)}\n# 2. Goals and requirements\n- the goal\n# 3. Now and next\n- next")
 
 
 def call(name: str, call_id: str, **arguments) -> list[Done]:
@@ -236,7 +252,7 @@ async def test_a_threshold_checkpoint_forks_the_exact_prefix_and_leaves_checkpoi
     before = [row for row in rows if row.context_seq < compaction.context_seq]
     assert fork.messages[:-1] == project(before).messages  # the whole conversation, then the request
     assert compaction.payload["mode"] == "normal" and compaction.payload["reason"] == "threshold"
-    assert compaction.payload["checkpoint"] == CHECKPOINT
+    assert compaction.payload["checkpoint"] == CHECKPOINT_BODY
     assert host.states == [StateRequest("session")]
     assert host.records == [("session", compaction.payload["summarized_to_seq"])]
 
@@ -244,7 +260,7 @@ async def test_a_threshold_checkpoint_forks_the_exact_prefix_and_leaves_checkpoi
     # kept tool batch.
     pinned, checkpoint, *tail = after.messages
     summary, state = (block.text for block in checkpoint.content)
-    assert CHECKPOINT in summary and "<current-request>" not in summary
+    assert CHECKPOINT_BODY in summary and "<current-request>" not in summary
     assert pinned == next(row.message for row in rows if row.kind == "input")
     assert "lookup session through" in summary and state == "<state/>"
     assert [type(message).__name__ for message in tail] == ["AssistantMessage", "ToolResultMessage"]
@@ -557,9 +573,9 @@ async def test_a_checkpoint_request_that_cannot_fit_a_new_route_is_audited_and_t
     assert events[-1].reason == "completed"
 
 
+#: Checkpoint turns that fail without a repair: a length stop, and a provider error.
 FAILURES = [
     [Done(assistant(CHECKPOINT, stop_reason="length"))],
-    [Done(AssistantMessage((ThinkingBlock("only thinking"),), assistant().origin, "stop"))],
     [ProviderError("server", "upstream failed", False)],
 ]
 
@@ -612,7 +628,7 @@ async def test_failing_checkpoints_stop_after_two_in_a_run_and_the_next_run_trie
     assert not [row for row in await store.load("session") if row.kind == "compaction"]
     assert [event.error.split(":")[0] for event in events if isinstance(event, CompactionFailed)] == [
         "The checkpoint turn stopped with length and no usable checkpoint.",
-        "The checkpoint turn ended without checkpoint text.",
+        "server",
     ]
     assert [audit["outcome"] for _, _, audit in store.audits] == ["failed"] * 2
     assert events[-1].reason == "completed"
@@ -803,7 +819,7 @@ async def test_the_ladder_rolls_when_no_fork_can_take_the_whole_context():
     store = InMemoryTranscriptStore()
     await _history_on_a_large_window(store, [5_000] * 9)
     before = await store.load("session")
-    model = Model([[Done(assistant("done"))]], [[Done(assistant(f"{CHECKPOINT} ROLL ONE"))], [Done(assistant(f"{CHECKPOINT} ROLL TWO"))]])
+    model = Model([[Done(assistant("done"))]], [[Done(assistant(block(f"{CHECKPOINT_BODY} ROLL ONE")))], [Done(assistant(block(f"{CHECKPOINT_BODY} ROLL TWO")))]])
     agent = make_agent(model, store=store)
     events = await run(agent)
     first, second = model.checkpoint_requests
@@ -837,17 +853,25 @@ _E2E_NOTE = (
 )
 
 
-async def test_a_checkpoint_turn_that_replies_with_a_meta_note_fails_and_keeps_the_context():
+NO_BLOCK = "it has no <checkpoint> block"
+
+
+async def test_a_checkpoint_turn_that_replies_with_a_meta_note_fails_after_its_one_repair_and_keeps_the_context():
     # The E2E reply: the model tried to write the checkpoint to a file, was denied, then replied with a <silent> note.
-    # That is no checkpoint: it fails, counts, keeps the old context, and its text lives only in the audit row.
+    # That is no checkpoint; the one repair names the problem, and a second note fails the turn: it counts, keeps the
+    # old context, and both replies' text lives only in the audit row.
     model = Model(
         growing(4),
-        [[Done(AssistantMessage((_E2E_WRITE,), assistant().origin, "tool_use"))], [Done(assistant(_E2E_NOTE))]],
+        [
+            [Done(AssistantMessage((_E2E_WRITE,), assistant().origin, "tool_use"))],
+            [Done(assistant(_E2E_NOTE))],
+            [Done(assistant(_E2E_NOTE))],
+        ],
     )
     agent = make_agent(model, tools=[reader(tokens(6_000))])
     events = await run(agent)
     failed = [event for event in events if isinstance(event, CompactionFailed)]
-    assert len(failed) == 1 and "not a checkpoint" in failed[0].error
+    assert [event.error for event in failed] == [f"The checkpoint turn's reply is not a checkpoint: {NO_BLOCK}."]
     assert events[-1].reason == "completed" and agent._unproductive == 1
     rows = await agent.store.load("session")
     assert not [row for row in rows if row.kind == "compaction"]
@@ -856,32 +880,76 @@ async def test_a_checkpoint_turn_that_replies_with_a_meta_note_fails_and_keeps_t
     assert not any("<silent>" in (block.text or "") for message in sent.messages for block in message.content
                    if isinstance(block, TextBlock))
     (audit,) = [payload for _, _, payload in agent.store.audits]  # the checkpoint-turn audits
-    assert audit["outcome"] == "failed" and _E2E_NOTE in json.dumps(audit["messages"], ensure_ascii=False)
-    # The denial told the model where the checkpoint belongs.
+    assert audit["outcome"] == "failed" and audit["repair"] == NO_BLOCK
+    assert json.dumps(audit["messages"], ensure_ascii=False).count(_E2E_NOTE) == 2
+    # The denial told the model where the checkpoint belongs; the repair named what was missing.
     denied = model.checkpoint_requests[1].messages[-1]
     assert denied.content[0].text.endswith("Write the checkpoint as your reply text, not into a file.")
+    assert model.checkpoint_requests[2].messages[-1] == checkpoint_repair(NO_BLOCK)
 
 
-async def test_a_checkpoint_with_translated_headings_is_accepted():
-    translated = (
-        "# 1. 自我与方法\n## 我在这里的工作方式\n- 一步只读一个文件\n"
-        "# 2. 目标与要求\n## 目标\n- 收集 f01 到 f27 的口令\n"
-        "# 3. 现在与下一步\n## 进度\n- 已读 f01–f04"
-    )
-    model = Model(growing(4), [[Done(assistant(translated))]])
+async def test_one_repair_turns_a_reply_without_a_block_into_the_checkpoint():
+    model = Model(growing(4), [[Done(assistant(CHECKPOINT_BODY))], [Done(assistant(CHECKPOINT))]])
+    agent = make_agent(model, tools=[reader(tokens(6_000))])
+    events = await run(agent)
+    assert not [event for event in events if isinstance(event, CompactionFailed)]
+    first, repaired = model.checkpoint_requests
+    # The follow-up request is the first one, then the rejected reply, then the repair naming its problem.
+    assert repaired.messages[:-2] == first.messages
+    assert repaired.messages[-2].content[0].text == CHECKPOINT_BODY
+    assert repaired.messages[-1] == checkpoint_repair(NO_BLOCK)
+    (compaction,) = [row for row in await agent.store.load("session") if row.kind == "compaction"]
+    assert compaction.payload["checkpoint"] == CHECKPOINT_BODY
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "# 1. 自我与方法\n## 我在这里的工作方式\n- 一步只读一个文件，读完再汇报\n"
+        "# 2. 目标与要求\n## 目标\n- 收集 f01 到 f27 的口令，不要跳过任何一个文件\n"
+        "# 3. 现在与下一步\n## 进度\n- 已读 f01–f04，口令都已记下\n## 下一步\n1. 读 f05",
+        "The user wants the codewords of f01 to f27, one file per step, reported after each read. I have read f01 to "
+        "f04 and recorded their codewords; the next step is to read f05 and report its codeword before going on.",
+        "### Goal\n- Collect the codewords of f01 to f27, one file per step.\n### State\n- f01 to f04 are read and "
+        "recorded.\n### Next\n- Read f05 and report its codeword, then continue with f06.",
+    ],
+    ids=["translated-headings", "no-headings", "other-headings"],
+)
+async def test_a_checkpoint_block_with_any_headings_or_none_is_accepted_and_narration_around_it_is_dropped(body):
+    model = Model(growing(4), [[Done(assistant(f"Here is the checkpoint.\n{block(body)}\nI stop here."))]])
     agent = make_agent(model, tools=[reader(tokens(6_000))])
     await run(agent)
     (compaction,) = [row for row in await agent.store.load("session") if row.kind == "compaction"]
-    assert compaction.payload["checkpoint"] == translated
+    assert compaction.payload["checkpoint"] == body
+    assert "repair" not in agent.store.audits[0][2]  # accepted as written, with no follow-up
 
 
-async def test_a_checkpoint_missing_its_second_section_is_rejected():
-    partial = "# 1. Self and method\n- the checkpoint\n# 3. Now and next\n- the next step"
-    model = Model(growing(4), [[Done(assistant(partial))]])
+async def test_a_reply_that_continues_the_task_under_numbered_headings_is_no_checkpoint():
+    # The heading validator accepted this: three numbered sections, and the history would have been replaced by it.
+    continuation = (
+        "## 1. Reading the next file\nI'll read f05 now.\n## 2. The plan\nThen f06 and f07.\n"
+        "## 3. Next\nI will report each codeword as I go."
+    )
+    model = Model(growing(4), [[Done(assistant(continuation))], [Done(assistant(continuation))]])
     agent = make_agent(model, tools=[reader(tokens(6_000))])
     events = await run(agent)
     assert [event.error for event in events if isinstance(event, CompactionFailed)] == [
-        "The checkpoint turn's reply is not a checkpoint: section 2 is missing."
+        f"The checkpoint turn's reply is not a checkpoint: {NO_BLOCK}."
+    ]
+    assert len(model.checkpoint_requests) == 2
+    assert not [row for row in await agent.store.load("session") if row.kind == "compaction"]
+
+
+async def test_only_the_final_response_counts_a_block_written_in_a_tool_calling_response_or_in_thinking_is_never_used():
+    origin = assistant().origin
+    with_block = AssistantMessage((text(CHECKPOINT), ToolCallBlock("r", "read", {"path": "f"})), origin, "tool_use")
+    thinking = AssistantMessage((ThinkingBlock(CHECKPOINT), text("Done.")), origin, "stop")
+    model = Model(after_checkpoint(), [[Done(with_block)], [Done(thinking)], [Done(thinking)]])
+    agent = make_agent(model, tools=[reader(tokens(3_000))], selection=ROOMY)
+    await run(agent)
+    events = await cross(agent)
+    assert [event.error for event in events if isinstance(event, CompactionFailed)] == [
+        f"The checkpoint turn's reply is not a checkpoint: {NO_BLOCK}."
     ]
     assert not [row for row in await agent.store.load("session") if row.kind == "compaction"]
 
@@ -956,7 +1024,7 @@ async def test_the_ladder_drops_mechanically_once_a_checkpoint_request_fails():
     for dropped in drops:
         assert dropped.payload["mode"] == "dropped" and dropped.payload["summarizer"] is None
         # The older checkpoint is kept, with its framing; only the earliest verbatim part moved out.
-        assert dropped.payload["checkpoint"] == CHECKPOINT
+        assert dropped.payload["checkpoint"] == CHECKPOINT_BODY
         assert dropped.payload["summary"].startswith("<context-checkpoint>\nThis is a record")
         assert dropped.payload["first_kept_seq"] > first_row.payload["first_kept_seq"]
     assert checkpoint_message(model.conversation_requests[-1]) == drops[-1].payload["summary"]
@@ -1235,7 +1303,7 @@ async def test_chinese_output_reaches_the_threshold_by_its_utf8_size():
 async def test_a_long_session_keeps_every_conversation_request_under_T():
     model = Model(
         [*[call("read", f"r{index}", path=f"f{index % 7}") for index in range(60)], [Done(assistant("done"))]],
-        [[Done(assistant(f"{CHECKPOINT} {index}"))] for index in range(60)],
+        [[Done(assistant(block(f"{CHECKPOINT_BODY} {index}")))] for index in range(60)],
     )
     agent = make_agent(model, tools=[reader(tokens(2_500))])
     events = await run(agent)

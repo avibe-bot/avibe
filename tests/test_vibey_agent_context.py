@@ -21,6 +21,7 @@ from core.agent_core.harness.context import StateRequest, text_tokens
 from core.agent_core.messages import ToolCallBlock, UserMessage, text
 from core.agent_core.tools.base import ToolResult
 from modules.agents.vibey.context import VibeyContextHost, mark_skill_loads
+from tests.agent_core.agent.test_compaction import CHECKPOINT
 from tests.agent_core.fakes import FakeTool, assistant
 from tests.test_vibey_agent import (  # noqa: F401 (fixtures)
     SESSION,
@@ -32,9 +33,6 @@ from tests.test_vibey_agent import (  # noqa: F401 (fixtures)
     session,
 )
 from vibe.i18n import t as i18n_t
-
-#: A checkpoint with the template's three sections (section 11), which the validator accepts.
-CHECKPOINT = "# 1. Self and method\n- the checkpoint\n# 2. Goals and requirements\n- the goal\n# 3. Now and next\n- the next step"
 
 
 def tokens(count: int) -> str:

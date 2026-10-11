@@ -442,9 +442,13 @@
           "type": "integer",
           "minimum": 0
         },
+        "repair": {
+          "type": "string",
+          "description": "Present when the side turn sent its one corrective follow-up (C-10 fork.md section 7 step 4): the problem the purpose's check named in it; for a checkpoint, the C-9 validator's (context.md section 6)."
+        },
         "messages": {
           "type": "array",
-          "description": "Every attempt's response or partial (failed and retried ones included) and the turn's tool results, in order; a refused response that JSON cannot hold is left out (context.md section 10, invariant 6).",
+          "description": "Every attempt's response or partial (failed and retried ones included), the turn's tool results, and a repair's follow-up user message, in order; a refused response that JSON cannot hold is left out (context.md section 10, invariant 6).",
           "items": {
             "$ref": "message.schema.json"
           }
