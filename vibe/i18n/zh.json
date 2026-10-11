@@ -827,6 +827,72 @@
       }
     }
   },
+  "computer": {
+    "cli": {
+      "help": {
+        "command": "通过当前 Avibe Agent Turn 使用本机桌面",
+        "description": "通过 Avibe 服务执行 allowlist 中的 Computer Use 操作。调用方 Session 和当前 Turn 来自 Agent 环境。",
+        "argsJson": "Driver 参数 JSON 对象，或使用 @路径读取 JSON 文件。",
+        "arg": "覆盖一个 driver 参数；有效 JSON 值会按 JSON 解析。",
+        "output": "调用方选择的截图路径，用于“observe window”。",
+        "json": "输出结构化服务响应。",
+        "observe": "观察应用、窗口或一个精确窗口",
+        "observeApps": "列出可见应用",
+        "observeWindows": "列出窗口",
+        "observeWindow": "观察一个精确窗口，并可选择保存截图",
+        "zoom": "以易读比例检查一个精确窗口",
+        "click": "点击已观察的元素或精确窗口坐标",
+        "type": "向已观察的目标输入文本",
+        "key": "按下一个按键",
+        "hotkey": "按下组合键",
+        "scroll": "滚动已观察的目标",
+        "drag": "拖动已观察的目标",
+        "setValue": "设置已观察控件的值",
+        "launch": "启动应用或 URL",
+        "quit": "退出应用",
+        "clipboard": "读取或写入系统剪贴板",
+        "clipboardRead": "读取系统剪贴板",
+        "clipboardWrite": "写入系统剪贴板"
+      },
+      "error": {
+        "invalidArguments": "Computer Use 参数无效：{detail}",
+        "cannotReadArgsJson": "无法读取 --args-json 文件：{error}",
+        "argsJsonObject": "--args-json 必须包含 JSON 对象",
+        "argNameValue": "--arg 的值必须使用 name=value 格式",
+        "sessionArgumentForbidden": "Computer Use session 已绑定当前 Avibe Turn，不能通过 --args-json 或 --arg 提供。",
+        "outputArgumentConflict": "请在 --output 和 --args-json 中的 screenshot_out_file 之间二选一，不能同时提供。",
+        "unsupportedCommand": "不支持的 Computer Use 命令：{command}",
+        "screenshotMissing": "{tool} 没有返回可写入 --output 的图像。",
+        "outputUnsupported": "--output 只支持 observe window 或 zoom。",
+        "missingCallerSession": "Computer Use 需要 Avibe Agent 调用方 Session。",
+        "serviceUnavailable": "Avibe 服务不可用：{error}",
+        "requestTimedOut": "Computer Use 请求在服务响应前超时：{error}",
+        "invalidResponse": "Computer Use 服务返回了无效响应。",
+        "requestRejected": "Computer Use 请求被拒绝。"
+      },
+      "hint": {
+        "invalidArguments": "请检查命令语法，并运行 `vibe computer --help` 查看 Computer Use 约定。",
+        "missingCallerSession": "请在 Avibe Agent Turn 中运行此命令。命令会自动绑定当前 Turn，不支持 --session-id。",
+        "serviceUnavailable": "请先启动 Avibe 服务，再使用 Computer Use。",
+        "requestTimedOut": "重试前请先重新观察，因为刚才的操作可能已经完成。"
+      },
+      "result": {
+        "succeeded": "Computer Use：{tool} 已成功。",
+        "error": "Computer Use 错误 [{code}]：{message}",
+        "unknownError": "Computer Use driver 返回了没有详情的错误。",
+        "accessibility": "辅助功能：{state}",
+        "accessibilityState": {
+          "available": "可用",
+          "degraded": "降级（{reason}）",
+          "partial": "部分可用"
+        },
+        "elementTokens": "元素 token：",
+        "apps": "应用：",
+        "windows": "窗口：",
+        "screenshot": "截图：{path}"
+      }
+    }
+  },
   "debug": {
     "cli": {
       "help": {

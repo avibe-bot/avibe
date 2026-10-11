@@ -476,6 +476,31 @@ async def test_named_sessions_start_independently_and_revive_after_end(
 
 
 @pytest.mark.asyncio
+async def test_end_session_if_active_releases_without_starting_unknown_session(
+    tmp_path: Path,
+) -> None:
+    state_path, state = _state(tmp_path)
+    upstream = FakeUpstream()
+    leases = FakeLeaseManager()
+    server = ComputerUseServer(
+        state_path=state_path,
+        status_reader=lambda: ComputerUseStatus("ready", None, state),
+        upstream_factory=lambda _state: asyncio.sleep(0, result=upstream),
+        lease_manager=leases,  # type: ignore[arg-type]
+    )
+
+    idle = await server.end_session_if_active("ses-never-used")
+    await server.call_tool("list_apps", {"session": "ses-a"})
+    ended = await server.end_session_if_active("ses-a")
+
+    assert idle["isError"] is False
+    assert ended.get("isError") is not True
+    assert leases.holder is None
+    names = [params["name"] for _method, params in upstream.calls]
+    assert names == ["start_session", "list_apps", "end_session"]
+
+
+@pytest.mark.asyncio
 async def test_failed_explicit_end_keeps_session_observations_and_real_lease(
     tmp_path: Path,
 ) -> None:

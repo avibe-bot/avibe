@@ -735,6 +735,7 @@ def create_app(
                 )
             controller.computer_use_server = computer_server
 
+        turn.computer_use_session_id = f"{caller_session_id}:{turn_id}"
         result = await computer_server.call_tool(
             tool,
             {

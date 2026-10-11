@@ -1194,6 +1194,20 @@ class ComputerUseServer:
 
             raise AssertionError("computer-use admission loop exhausted")
 
+    async def end_session_if_active(self, session: str) -> dict[str, Any]:
+        """Retire a session created by an earlier call without creating one."""
+
+        normalized = str(session or "").strip()
+        if not normalized:
+            return _error_result(
+                "session_required",
+                "Every computer-use call requires the current Avibe session id.",
+            )
+        session_state = self._sessions.get(normalized)
+        if session_state is None or session_state.active_proxy_serial is None:
+            return {"isError": False, "content": []}
+        return await self.call_tool("end_session", {"session": normalized})
+
     async def handle(self, message: Mapping[str, Any]) -> dict[str, Any] | None:
         request_id = message.get("id")
         method = message.get("method")

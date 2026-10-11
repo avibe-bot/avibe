@@ -23,6 +23,7 @@ from core.computer_cli import (
 from modules.im import MessageContext
 from vibe import cli
 from vibe.internal_client import computer_use_sync
+from vibe.i18n import t as i18n_t
 
 
 def _structured(payload: dict) -> dict:
@@ -35,6 +36,10 @@ def _structured(payload: dict) -> dict:
             }
         ],
     }
+
+
+def _translate(key: str, **kwargs) -> str:
+    return i18n_t(key, "en", **kwargs)
 
 
 def _bind_socket(path: Path) -> socket.socket:
@@ -80,9 +85,19 @@ def test_parser_covers_the_allowlisted_driver_operations_without_session_id() ->
         parser.parse_args(["computer", "click", "--session-id", "manual"])
 
 
+def test_computer_help_uses_the_configured_backend_locale(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(cli, "_configured_cli_language", lambda: "zh")
+    help_text = cli.build_parser().format_help()
+    assert "通过当前 Avibe Agent Turn 使用本机桌面" in help_text
+    assert "Use the local desktop through the active Avibe Agent Turn" not in help_text
+
+
 def test_argument_contract_rejects_manual_session_and_maps_screenshot_output(tmp_path: Path) -> None:
-    with pytest.raises(ValueError, match="session is bound"):
+    with pytest.raises(ValueError) as exc_info:
         build_driver_arguments(None, ["session=manual"])
+    assert exc_info.value.key == "computer.cli.error.sessionArgumentForbidden"
 
     output = tmp_path / "zoom.png"
     arguments = prepare_arguments_for_output("zoom", {}, str(output))
@@ -91,7 +106,7 @@ def test_argument_contract_rejects_manual_session_and_maps_screenshot_output(tmp
         "get_window_state",
         {"pid": 7, "window_id": 9},
         str(output),
-    )["screenshot_out_file"] == str(output)
+    )["screenshot_out_file"] == str(output.resolve())
 
 
 def test_human_observation_output_surfaces_accessibility_and_tokens() -> None:
@@ -106,6 +121,7 @@ def test_human_observation_output_surfaces_accessibility_and_tokens() -> None:
                 ],
             }
         ),
+        translate=_translate,
     )
 
     assert "Accessibility: degraded (timeout)" in output
@@ -167,6 +183,58 @@ def test_cmd_computer_binds_the_caller_session_and_prints_structured_result(
     assert payload["result"]["content"][0]["type"] == "text"
 
 
+def test_cmd_computer_reports_driver_error_before_writing_screenshot(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AVIBE_SESSION_ID", "ses-cli")
+
+    def fake_computer_use_sync(**kwargs):
+        assert kwargs["arguments"]["screenshot_out_file"] == str(
+            (tmp_path / "missing.png").resolve()
+        )
+        return {
+            "status_code": 200,
+            "body": {
+                "ok": False,
+                "tool": "get_window_state",
+                "result": {
+                    "isError": True,
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": (
+                                "Structured content:\n"
+                                + json.dumps(
+                                    {
+                                        "code": "desktop_busy",
+                                        "message": "desktop is held",
+                                    }
+                                )
+                            ),
+                        }
+                    ],
+                },
+            },
+        }
+
+    with patch("vibe.internal_client.computer_use_sync", fake_computer_use_sync):
+        args = cli.build_parser().parse_args(
+            [
+                "computer",
+                "observe",
+                "window",
+                "--output",
+                str(tmp_path / "missing.png"),
+            ]
+        )
+        assert cli.cmd_computer(args) == 1
+
+    assert "Computer Use error [desktop_busy]: desktop is held" in capsys.readouterr().out
+    assert not (tmp_path / "missing.png").exists()
+
+
 def test_cmd_computer_requires_an_injected_caller_session(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -213,13 +281,18 @@ def test_internal_client_forwards_the_caller_identity_and_never_adds_a_session_a
 
 
 def test_internal_route_binds_computer_use_to_the_active_turn() -> None:
-    async def exercise() -> tuple[dict, dict, dict]:
+    async def exercise() -> tuple[dict, dict, dict, str, list[str]]:
         calls: list[tuple[str, dict]] = []
+        ended: list[str] = []
 
         class ComputerServer:
             async def call_tool(self, name: str, arguments: dict) -> dict:
                 calls.append((name, arguments))
                 return _structured({"windows": []})
+
+            async def end_session_if_active(self, session: str) -> dict:
+                ended.append(session)
+                return {"isError": False, "content": []}
 
         controller = SimpleNamespace(
             computer_use_server=ComputerServer(),
@@ -264,16 +337,26 @@ def test_internal_route_binds_computer_use_to_the_active_turn() -> None:
                         "arguments": {},
                     },
                 )
-            return success.json(), forbidden.json(), mismatch.json()
+            turn = controller.session_turns.in_flight["ses-cli"]
+            await controller.session_turns._end_computer_use_session(turn)
+            return (
+                success.json(),
+                forbidden.json(),
+                mismatch.json(),
+                turn.computer_use_session_id,
+                ended,
+            )
         finally:
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await task
 
-    success, forbidden, mismatch = asyncio.run(exercise())
+    success, forbidden, mismatch, computer_session, ended = asyncio.run(exercise())
 
     assert success["ok"] is True
     assert success["session_id"] == "ses-cli"
     assert success["turn_id"] == "turn-1"
+    assert computer_session == "ses-cli:turn-1"
+    assert ended == ["ses-cli:turn-1"]
     assert forbidden["error"] == "session_argument_forbidden"
     assert mismatch["error"] == "active_turn_required"

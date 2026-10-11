@@ -6,7 +6,7 @@ import base64
 import binascii
 import json
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 
 COMPUTER_CLI_TOOLS: dict[tuple[str, ...], str] = {
@@ -41,6 +41,11 @@ SCREENSHOT_TOOLS = frozenset({"get_window_state", "zoom"})
 class ComputerCliError(ValueError):
     """The CLI request cannot be translated into a driver call."""
 
+    def __init__(self, key: str, **params: Any) -> None:
+        self.key = key
+        self.params = params
+        super().__init__(key)
+
 
 def parse_arguments_json(raw: str | None) -> dict[str, Any]:
     if not raw:
@@ -50,13 +55,16 @@ def parse_arguments_json(raw: str | None) -> dict[str, Any]:
         try:
             source = Path(raw[1:]).read_text(encoding="utf-8")
         except OSError as exc:
-            raise ComputerCliError(f"cannot read --args-json file: {exc}") from exc
+            raise ComputerCliError(
+                "computer.cli.error.cannotReadArgsJson",
+                error=str(exc),
+            ) from exc
     try:
         payload = json.loads(source)
     except (TypeError, ValueError, json.JSONDecodeError) as exc:
-        raise ComputerCliError("--args-json must contain a JSON object") from exc
+        raise ComputerCliError("computer.cli.error.argsJsonObject") from exc
     if not isinstance(payload, dict):
-        raise ComputerCliError("--args-json must contain a JSON object")
+        raise ComputerCliError("computer.cli.error.argsJsonObject")
     return dict(payload)
 
 
@@ -65,7 +73,7 @@ def parse_argument_overrides(values: list[str] | None) -> dict[str, Any]:
     for raw in values or []:
         name, separator, value = raw.partition("=")
         if not separator or not name.strip():
-            raise ComputerCliError("--arg values must use name=value")
+            raise ComputerCliError("computer.cli.error.argNameValue")
         name = name.strip()
         try:
             parsed: Any = json.loads(value)
@@ -83,10 +91,7 @@ def build_driver_arguments(
     for key, value in parse_argument_overrides(overrides).items():
         arguments[key] = value
     if "session" in arguments:
-        raise ComputerCliError(
-            "session is bound to the current Avibe Turn and cannot be supplied "
-            "through --args-json or --arg"
-        )
+        raise ComputerCliError("computer.cli.error.sessionArgumentForbidden")
     return arguments
 
 
@@ -102,11 +107,9 @@ def prepare_arguments_for_output(
     if tool == "zoom":
         return arguments
     if "screenshot_out_file" in arguments:
-        raise ComputerCliError(
-            "use --output or screenshot_out_file in --args-json, not both"
-        )
+        raise ComputerCliError("computer.cli.error.outputArgumentConflict")
     prepared = dict(arguments)
-    prepared["screenshot_out_file"] = str(Path(output_path).expanduser())
+    prepared["screenshot_out_file"] = str(Path(output_path).expanduser().resolve())
     return prepared
 
 
@@ -115,7 +118,8 @@ def tool_for_command(path: tuple[str, ...]) -> str:
         return COMPUTER_CLI_TOOLS[path]
     except KeyError as exc:
         raise ComputerCliError(
-            f"unsupported Computer Use command: {' '.join(path)}"
+            "computer.cli.error.unsupportedCommand",
+            command=" ".join(path),
         ) from exc
 
 
@@ -150,7 +154,7 @@ def _error_payload(result: Mapping[str, Any]) -> dict[str, Any]:
         for item in content:
             if isinstance(item, dict) and isinstance(item.get("text"), str):
                 return {"message": item["text"]}
-    return {"message": "computer use failed"}
+    return {"code": "computer_use_error"}
 
 
 def _decode_image_content(result: Mapping[str, Any]) -> bytes | None:
@@ -186,29 +190,38 @@ def write_screenshot(
                 return str(Path(path).expanduser().resolve())
     image = _decode_image_content(result)
     if image is None:
-        raise ComputerCliError(
-            f"{tool} did not return an image that could be written to --output"
-        )
+        raise ComputerCliError("computer.cli.error.screenshotMissing", tool=tool)
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_bytes(image)
     return str(target.resolve())
 
 
-def _render_accessibility(payload: Mapping[str, Any]) -> list[str]:
+def _render_accessibility(
+    payload: Mapping[str, Any],
+    translate: Callable[..., str],
+) -> list[str]:
     lines: list[str] = []
     if "elements" not in payload and "tree_markdown" not in payload:
         return lines
     degraded = payload.get("degraded_reason")
     complete = payload.get("elements_complete")
-    state = "available"
+    state_key = "available"
     if degraded:
-        state = f"degraded ({degraded})"
+        state_key = "degraded"
     elif complete is False or payload.get("truncated") is True:
-        state = "partial"
-    lines.append(f"Accessibility: {state}")
+        state_key = "partial"
+    lines.append(
+        translate(
+            "computer.cli.result.accessibility",
+            state=translate(
+                f"computer.cli.result.accessibilityState.{state_key}",
+                reason=degraded,
+            ),
+        )
+    )
     elements = payload.get("elements")
     if isinstance(elements, list):
-        lines.append("Element tokens:")
+        lines.append(translate("computer.cli.result.elementTokens"))
         for element in elements:
             if not isinstance(element, dict):
                 continue
@@ -230,17 +243,25 @@ def format_human_result(
     result: Mapping[str, Any],
     *,
     output_path: str | None = None,
+    translate: Callable[..., str],
 ) -> str:
     if result.get("isError") is True:
         error = _error_payload(result)
         code = str(error.get("code") or "computer_use_error")
-        message = str(error.get("message") or "computer use failed")
-        return f"Computer Use error [{code}]: {message}"
+        message = str(
+            error.get("message")
+            or translate("computer.cli.result.unknownError")
+        )
+        return translate(
+            "computer.cli.result.error",
+            code=code,
+            message=message,
+        )
 
-    lines = [f"Computer Use: {tool} succeeded."]
+    lines = [translate("computer.cli.result.succeeded", tool=tool)]
     rendered = False
     for payload in _structured_payloads(result):
-        accessibility = _render_accessibility(payload)
+        accessibility = _render_accessibility(payload, translate)
         if accessibility:
             lines.extend(accessibility)
             rendered = True
@@ -248,14 +269,14 @@ def format_human_result(
         for key in ("apps", "windows"):
             value = payload.get(key)
             if isinstance(value, list):
-                lines.append(f"{key.title()}:")
+                lines.append(translate(f"computer.cli.result.{key}"))
                 lines.extend(f"  {json.dumps(item, ensure_ascii=False, sort_keys=True)}" for item in value)
                 rendered = True
         if not rendered:
             lines.append(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
             rendered = True
     if output_path:
-        lines.append(f"Screenshot: {output_path}")
+        lines.append(translate("computer.cli.result.screenshot", path=output_path))
     if not rendered:
         content = result.get("content")
         if isinstance(content, list):

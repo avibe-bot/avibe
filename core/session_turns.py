@@ -530,6 +530,7 @@ class Turn:
     logical_turn_id: Optional[str] = None
     delivery_id: Optional[str] = None
     terminal_is_error: bool = False
+    computer_use_session_id: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -4417,6 +4418,32 @@ class SessionTurnManager:
                     )
             return False
 
+    async def _end_computer_use_session(self, turn: Turn | None) -> None:
+        """Release the desktop lease owned by a completed Computer Use Turn."""
+
+        session = str(getattr(turn, "computer_use_session_id", "") or "").strip()
+        if not session:
+            return
+        server = getattr(self.controller, "computer_use_server", None)
+        end_session = getattr(server, "end_session_if_active", None)
+        if not callable(end_session):
+            return
+        try:
+            result = await end_session(session)
+        except Exception:
+            logger.warning(
+                "Computer Use session cleanup failed for %s",
+                session,
+                exc_info=True,
+            )
+            return
+        if isinstance(result, dict) and result.get("isError") is True:
+            logger.warning(
+                "Computer Use session cleanup returned an error for %s: %s",
+                session,
+                result,
+            )
+
     def _delivery_runtime_owner_factory(
         self,
         session_id: str,
@@ -7520,6 +7547,7 @@ class SessionTurnManager:
                             await await_owned_task(asyncio.ensure_future(completion))
                         except Exception:
                             logger.warning("Model Hub turn finalization failed", exc_info=True)
+                    await self._end_computer_use_session(turn)
                     # Durable output may already have marked the old row terminal.
                     # _start_persisted_turn still fences its successor on this live
                     # runner, so release the projection only after Hub finalization.
@@ -9012,6 +9040,7 @@ class SessionTurnManager:
                     cancel_defers_queue_resume
                     or effective_settled_by == SETTLED_BY_RESTARTED
                 )
+                await self._end_computer_use_session(turn)
                 if turn is not None:
                     self.in_flight.pop(session_id, None)
                 if turn is not None:
