@@ -595,10 +595,14 @@ class Agent:
                 reason = "aborted" if self._outcome.reason == "aborted" or self._ctx.cancel.cancelled else "killed"
                 await self.jobs.kill_foreground(self.session_id, reason=reason)
             except Exception as error:
-                self._outcome.foreground_leaked()
+                decided = self._outcome.foreground_leaked()
                 if self._consumer_closed:
                     raise
-                self._outcome.diagnostic(type(error).__name__, str(error))
+                if decided:
+                    # It decided the outcome, so it is the cause ``RunEnded`` names (C-3 section 6).
+                    await self._error(emit, type(error).__name__, str(error), "local", cause=True)
+                else:
+                    self._outcome.diagnostic(type(error).__name__, str(error))
             await self._flush_diagnostics(emit)
 
     @staticmethod

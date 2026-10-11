@@ -1502,8 +1502,9 @@ async def test_the_footer_reports_the_runs_final_outcome(engine, session, tmp_pa
     [("identity", None, "generic"), ("raise", "RuntimeError", "internal")],
 )
 async def test_a_turn_that_fails_before_settlement_names_its_kind_or_none(
-    engine, session, tmp_path, published, break_turn, kind, copy
+    engine, session, tmp_path, published, caplog, break_turn, kind, copy
 ) -> None:
+    secret = "sk-proj-runtime0secret0value"
     harness = _Harness(engine, tmp_path, "telegram", [])
     request = harness.request("hello")
     if break_turn == "identity":
@@ -1512,15 +1513,67 @@ async def test_a_turn_that_fails_before_settlement_names_its_kind_or_none(
     else:
 
         async def broken_turn(*_args, **_kwargs):
-            raise RuntimeError("the turn's runtime broke")
+            raise RuntimeError(f"the turn's runtime broke: Bearer {secret}")
 
         harness.agent._run_turn = broken_turn
 
-    await harness.agent.handle_message(request)
+    with caplog.at_level(logging.WARNING, logger="modules.agents.vibey.agent"):
+        await harness.agent.handle_message(request)
 
     assert harness.controller.im_client.sent == [f"❌ {i18n_t(f'vibeyAgent.error.{copy}', 'en', backend='Vibey')}"]
     [notice] = harness.rows("notify")
     assert json.loads(notice["metadata_json"]).get("error_kind") == kind
+    if break_turn == "raise":
+        # A failure before settlement takes the same structured, redacted line as any failed run.
+        [line] = [record.getMessage() for record in caplog.records if record.getMessage().startswith("Vibey run failed")]
+        assert f"turn={_turn(request.context)} reason=error kind=RuntimeError origin=local served=- " in line
+        assert line.endswith("diagnostic=turn failed: the turn's runtime broke: Bearer [redacted]")
+        assert secret not in caplog.text
+
+
+async def test_the_failure_log_keeps_a_crafted_served_hop_on_its_line(engine, session, tmp_path, published, caplog) -> None:
+    """The served hop is what the gateway's header said: it cannot start a log line of its own or grow unbounded."""
+    from core.agent_core.ai.provider import ProviderError
+    from core.agent_core.messages import Origin
+
+    crafted = Origin("hub\nWARNING forged line", "anthropic", "m" * 5000)
+    partial = AssistantMessage((ThinkingBlock("**Checking**"),), crafted, "error")
+    harness = _Harness(engine, tmp_path, "telegram", [[ProviderError("server", "failed", False, partial=partial)]])
+
+    with caplog.at_level(logging.WARNING, logger="modules.agents.vibey.agent"):
+        await harness.agent.handle_message(harness.request("hello"))
+
+    [record] = [record for record in caplog.records if record.getMessage().startswith("Vibey run failed")]
+    line = record.getMessage()
+    assert "\n" not in line
+    served = line.split(" served=", 1)[1].split(" diagnostic=", 1)[0]
+    assert served.startswith("hub WARNING forged line/anthropic/mmm") and len(served) == 200
+
+
+async def test_a_silent_final_whose_cleanup_fails_shows_the_internal_error(engine, session, tmp_path, published) -> None:
+    """The leak decided the outcome, so it is the cause: never the empty-reply copy for a reply that was silent."""
+
+    class _LeakyJobs(FakeJobHost):
+        async def kill(self, job_id, *, reason="killed") -> None:
+            raise RuntimeError("the job's process group cannot be signalled")
+
+    def tools(tracking, sink):
+        async def start_and_leave(arguments, ctx):
+            await tracking.start("sleep 600", cwd=ctx.cwd, env={}, timeout_s=None, call=ctx.call)
+            return ToolResult((text("started"),))
+
+        return [FakeTool("echo", execute=start_and_leave)]
+
+    call = ToolCallBlock(id="call_1", name="echo", arguments={"path": "src"})
+    scripts = [[Done(assistant("Listing.", calls=(call,)))], [Done(assistant("<silent>nothing to add</silent>"))]]
+    suite = ToolSuite(jobs=_LeakyJobs(), create_tools=tools, render_recovered=_unused_renderer, find_job=lambda *a: None)
+    harness = _Harness(engine, tmp_path, "avibe", scripts, suite=suite)
+
+    await harness.agent.handle_message(harness.request("start it"))
+
+    [result] = harness.rows("error")
+    assert result["content_text"] == i18n_t("vibeyAgent.error.internal", "en", backend="Vibey")
+    assert harness.controller.terminals[-1]["is_error"] is True
 
 
 @pytest.mark.parametrize("platform", ["avibe", "telegram"])

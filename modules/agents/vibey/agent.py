@@ -28,6 +28,7 @@ import os
 import secrets
 import shutil
 import time
+import traceback
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -130,13 +131,16 @@ def _relative_to(cwd: str) -> Callable[[str], str]:
 _NO_OUTPUT_CAP = 1 << 30
 #: A failure's diagnostic in the service log: one redacted line, bounded, never a payload.
 _LOGGED_DIAGNOSTIC_CHARS = 500
+#: The served hop names what the gateway's ``x-avibe-served-hop`` header said, so it is bounded and kept on the line.
+_LOGGED_HOP_CHARS = 200
 
 
-def _loggable_diagnostic(text: str) -> str:
+def _loggable(text: str, limit: int = _LOGGED_DIAGNOSTIC_CHARS) -> str:
+    """``text`` as one redacted log field: whitespace collapsed, so it cannot start a line of its own, and bounded."""
     from core.agent_core.ai.errors import redact_provider_text
 
     line = " ".join(redact_provider_text(text).split())
-    return line if len(line) <= _LOGGED_DIAGNOSTIC_CHARS else line[: _LOGGED_DIAGNOSTIC_CHARS - 1] + "…"
+    return line if len(line) <= limit else line[: limit - 1] + "…"
 
 
 @dataclass
@@ -254,8 +258,12 @@ class VibeyAgent(BaseAgent):
                     # Raised during or after settlement (its emits, or a failure notice): the
                     # shared owner's fallback releases the runtime gate, so it must see it.
                     raise
-                logger.exception("Vibey turn failed for Session %s", session_id)
                 turn.settled = True
+                self._log_failure(turn, "error", type(error).__name__, "local", f"turn failed: {error}")
+                # Where it was raised, without the message the line above already carries, redacted.
+                logger.warning(
+                    "Vibey turn %s raised in:\n%s", turn_id, "".join(traceback.format_tb(error.__traceback__))
+                )
                 await self._fail(request, type(error).__name__, f"turn failed: {error}", cause=error)
             finally:
                 await self._admit_returned_inputs(turn)
@@ -608,9 +616,7 @@ class VibeyAgent(BaseAgent):
         cause = run.cause
         kind = cause.kind if cause is not None else None
         diagnostic = cause.message if cause is not None else run.errors[0].message if run.errors else reason
-        # What the log names: the cause, else the diagnostic whose text stands in for it (a cleanup that failed after
-        # the reply committed decides the outcome without being its cause).
-        logged = cause or (run.errors[0] if run.errors else None)
+        origin = cause.origin if cause is not None else None
         source = cause is not None and cause.origin == "source"
         final = run.responses.get(run.final_row) if run.final_row else None
         if final is not None:
@@ -619,7 +625,7 @@ class VibeyAgent(BaseAgent):
             run_failed_after_commit = reason not in _COMPLETED
             failed = final_outcome(final) == "failed" or run_failed_after_commit
             if failed:
-                self._log_failure(run, reason, logged, diagnostic)
+                self._log_failure(run, reason, kind, origin, diagnostic)
             body = self._display_source(final, final=True)
             if failed and not body.strip():
                 # A silent final whose run failed after the commit: like a final without text
@@ -656,11 +662,13 @@ class VibeyAgent(BaseAgent):
                 context, "result", "", level="silent", output=terminal_output_for(request)
             )
             return
-        self._log_failure(run, reason, logged, diagnostic)
+        self._log_failure(run, reason, kind, origin, diagnostic)
         await self._fail(request, kind, diagnostic, reason=reason, refusal=run.refusal, source=source)
 
     @staticmethod
-    def _log_failure(run: _Run, reason: str, error: Optional[AgentError], diagnostic: str) -> None:
+    def _log_failure(
+        run: _Run, reason: str, kind: Optional[str], origin: Optional[str], diagnostic: str
+    ) -> None:
         """One WARNING for a failed run, so a failed Turn can be diagnosed from the log: its kind, who produced it,
         the hop that served the last response, and the diagnostic, which is never display copy (``errors.py``)."""
         served = next((message.origin for message in reversed(run.responses.values())), None)
@@ -669,10 +677,10 @@ class VibeyAgent(BaseAgent):
             run.session_id,
             run.turn_id,
             reason,
-            error.kind if error is not None else "-",
-            error.origin if error is not None else "-",
-            f"{served.provider}/{served.api}/{served.model}" if served is not None else "-",
-            _loggable_diagnostic(diagnostic or ""),
+            kind or "-",
+            origin or "-",
+            _loggable(f"{served.provider}/{served.api}/{served.model}", _LOGGED_HOP_CHARS) if served else "-",
+            _loggable(diagnostic or ""),
         )
 
     async def _continuing_input(self, run: _Run) -> Optional[AgentInput]:
