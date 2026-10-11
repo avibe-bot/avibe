@@ -304,7 +304,7 @@ Pi's separate `cacheWrite1h` (`:840-847`) has no canonical counterpart.
 | `cache_creation_input_tokens` | `cache_write_tokens`; non-null aggregate wins over every TTL value, including when aggregate is zero |
 | `cache_creation` | Nullable TTL breakdown container. If aggregate is missing/null, sum its non-null counters as the reported snapshot; missing/null/empty/all-null breakdown preserves current aggregate. Do not add a TTL snapshot to previous usage. |
 | `cache_creation.ephemeral_5m_input_tokens` | Part of fallback `cache_write_tokens` sum only; absent/null contributes nothing. Explicit zero is a reported value. No separate TTL field. |
-| `cache_creation.ephemeral_1h_input_tokens` | Same fallback policy as 5m; never added on top of an aggregate. No separate 1h billing field. |
+| `cache_creation.ephemeral_1h_input_tokens` | Same fallback policy as 5m; never added on top of an aggregate. No separate 1h billing field; Model Hub's usage ledger meters the one-hour part (`cache_write_1h_input_tokens`, `model-hub-contracts/api.md`). |
 | `output_tokens_details` | Nullable decomposition container; not itself a count |
 | `output_tokens_details.thinking_tokens` | `reasoning_tokens`; non-null merge at both message start and delta. This observability subset does not increase `output_tokens`. |
 | `server_tool_use` | Ignored: server-side request-count metadata, not tokens or canonical tool calls |
@@ -501,15 +501,16 @@ credential-free stubs and did not alter the Pi source or Avibe dependencies.
 
 | Canonical field | Request mapping |
 | --- | --- |
-| `system` | `system`, as a text string or one text block with `cache_control` when `cache="default"`. |
+| `system` | `system`, as a text string, or as one text block carrying the prefix breakpoint (Cache, below) when `cache="default"`. |
 | User text/image | `messages[].role="user"`; text blocks become `text`; images become `image` with a base64 `source`. |
 | Assistant text | `messages[].role="assistant"` with `text` blocks. |
 | Thinking | Same-origin signed thinking becomes `thinking` with `thinking` and `signature`; same-origin redacted thinking becomes `redacted_thinking` with `data`; unsigned thinking becomes text. |
 | Tool call | `tool_use` with `id`, `name`, and parsed `input`. |
 | Tool result | A user message containing `tool_result` with `tool_use_id`, `content`, and `is_error`. |
-| Tools | `tools[]` with `name`, `description`, and `input_schema`; the final tool receives a cache breakpoint for `cache="default"`. |
+| Tools | `tools[]` with `name`, `description`, and `input_schema`; the final tool carries the prefix breakpoint (Cache, below) for `cache="default"`. |
 | Reasoning effort | `none/off/disabled` → `thinking.type="disabled"`; other values → adaptive thinking and `output_config.effort` (`minimal` maps to `low`, `xhigh` to `max`). |
-| Cache | At most four breakpoints: system, final tool, and the two latest eligible user-message tails. |
+| Cache | For `cache="default"`, at most four breakpoints, in Anthropic's evaluation order: the final tool, the system block, and the two latest eligible user-message tails. On a Claude route (the hop's `provider` is exactly `anthropic` and its model id starts with `claude-`), the tool and system breakpoints are `{"type":"ephemeral","ttl":"1h"}`. Message tails are always `{"type":"ephemeral"}`, the five-minute default, so no longer lifetime follows a shorter one. Every other route, including another vendor's Anthropic-compatible endpoint even for a `claude-` id, sends `{"type":"ephemeral"}` everywhere. `cache="none"` sends no breakpoint. |
+| Cache TTL rejection | A 4xx `invalid_request` whose message names `ttl` or `cache_control`, answering a request that carried `ttl`, is resent once without it before any event reaches the loop. The route (`base_url`, `provider`, model id) then sends no `ttl` for the rest of the process; the downgrade is logged once per route. |
 
 Anthropic stream events:
 

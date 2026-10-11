@@ -8,6 +8,8 @@ httpx directly so Model Hub remains the only gateway boundary.
 from __future__ import annotations
 
 import json
+import logging
+import re
 from collections.abc import AsyncIterator, Mapping
 from typing import Any
 
@@ -32,6 +34,7 @@ from core.agent_core.ai._common import (
 )
 from core.agent_core.ai.provider import (
     Done,
+    ModelEndpoint,
     ModelRequest,
     ProviderAdapter,
     ProviderError,
@@ -48,8 +51,17 @@ from core.agent_core.messages import (
     UserMessage,
 )
 
+logger = logging.getLogger(__name__)
+
 ANTHROPIC_VERSION = "2023-06-01"
 _MAX_CACHE_BREAKPOINTS = 4
+# A Claude route caches its static prefix, the tools and then the system prompt, for an hour (``_prefix_ttl``); the
+# conversation's breakpoints keep the default five minutes. Anthropic evaluates breakpoints as tools, system, messages
+# and requires every longer lifetime to come before every shorter one, which this placement satisfies.
+_PREFIX_TTL = "1h"
+# Routes whose endpoint rejected the field. They keep the default lifetime for the rest of the process.
+_TTL_REJECTED_ROUTES: set[tuple[str, str, str]] = set()
+_TTL_REJECTION = re.compile(r"cache_control|\bttl\b", re.IGNORECASE)
 _LEGACY_THINKING_BUDGETS = {
     "minimal": 1024,
     "low": 2048,
@@ -191,13 +203,17 @@ class AnthropicAdapter(ProviderAdapter):
 
     async def _stream(self, request: ModelRequest, cancel: CancelToken) -> AsyncIterator[Any]:
         origin = endpoint_origin(request.endpoint)
-        assembler = StreamAssembler(
-            origin=origin,
-            protocol=self.protocol,
-            verified_origin=not self._gateway,
-            endpoint_url=request.endpoint.base_url,
-            sensitive_values=request_credential_values(request.endpoint),
-        )
+
+        def new_assembler() -> StreamAssembler:
+            return StreamAssembler(
+                origin=origin,
+                protocol=self.protocol,
+                verified_origin=not self._gateway,
+                endpoint_url=request.endpoint.base_url,
+                sensitive_values=request_credential_values(request.endpoint),
+            )
+
+        assembler = new_assembler()
         if cancel.cancelled:
             terminal = assembler.terminal(assembler.aborted(cancel.reason))
             if terminal is not None:
@@ -226,8 +242,8 @@ class AnthropicAdapter(ProviderAdapter):
         stop_reason: str | None = None
         message_started = False
         message_stopped = False
+        prefix_ttl = _prefix_ttl(request)
         try:
-            payload = build_messages_payload(request, transformed_messages, loaded_images=loaded_images)
             headers = auth_headers(request.endpoint, provider="anthropic", gateway=self._gateway)
             headers.update({"anthropic-version": ANTHROPIC_VERSION, "content-type": "application/json"})
             url = join_endpoint_url(request.endpoint.base_url, "/messages")
@@ -723,24 +739,39 @@ class AnthropicAdapter(ProviderAdapter):
                 terminal = assembler.terminal(assembler.incomplete())
                 if terminal is not None:
                     yield terminal
-            driver = drive_sse_stream(
-                self._client,
-                method="POST",
-                url=url,
-                json_body=payload,
-                headers=headers,
-                cancel=cancel,
-                assembler=assembler,
-                endpoint=request.endpoint,
-                resolver=self._served_hop_resolver,
-                gateway=self._gateway,
-                translate=translate,
-            )
-            try:
-                async for event in driver:
-                    yield event
-            finally:
-                await driver.aclose()
+            while True:
+                payload = build_messages_payload(
+                    request, transformed_messages, loaded_images=loaded_images, prefix_ttl=prefix_ttl
+                )
+                driver = drive_sse_stream(
+                    self._client,
+                    method="POST",
+                    url=url,
+                    json_body=payload,
+                    headers=headers,
+                    cancel=cancel,
+                    assembler=assembler,
+                    endpoint=request.endpoint,
+                    resolver=self._served_hop_resolver,
+                    gateway=self._gateway,
+                    translate=translate,
+                )
+                rejected = False
+                try:
+                    async for event in driver:
+                        if prefix_ttl is not None and _rejects_ttl(event):
+                            rejected = True
+                            break
+                        yield event
+                finally:
+                    await driver.aclose()
+                if not rejected:
+                    return
+                # The endpoint refused the request before answering, so the consumer saw nothing: send it once more
+                # with the default lifetime, which this route keeps from now on.
+                _remember_ttl_rejection(request.endpoint)
+                prefix_ttl = None
+                assembler = new_assembler()
         except Exception as exc:
             terminal = assembler.terminal(assembler.exception(exc))
             if terminal is not None:
@@ -752,8 +783,12 @@ def build_messages_payload(
     messages: tuple[Any, ...],
     *,
     loaded_images: Mapping[str, tuple[str, str]] | None = None,
+    prefix_ttl: str | None = None,
 ) -> dict[str, Any]:
-    """Build the Anthropic Messages request body."""
+    """Build the Anthropic Messages request body.
+
+    ``prefix_ttl`` is the lifetime of the tool and system breakpoints; message breakpoints keep the default.
+    """
 
     payload_messages: list[dict[str, Any]] = []
     for message in messages:
@@ -766,7 +801,7 @@ def build_messages_payload(
 
     system: Any = request.system
     if request.cache == "default" and request.system:
-        system = [{"type": "text", "text": request.system, "cache_control": {"type": "ephemeral"}}]
+        system = [{"type": "text", "text": request.system, "cache_control": _cache_control(prefix_ttl)}]
     if request.cache == "default":
         _mark_message_breakpoints(payload_messages)
     payload: dict[str, Any] = {
@@ -783,7 +818,7 @@ def build_messages_payload(
                 "description": tool.description,
                 "input_schema": dict(tool.input_schema),
                 **(
-                    {"cache_control": {"type": "ephemeral"}}
+                    {"cache_control": _cache_control(prefix_ttl)}
                     if request.cache == "default" and index == len(request.tools) - 1
                     else {}
                 ),
@@ -886,11 +921,68 @@ def _mark_message_breakpoints(messages: list[dict[str, Any]]) -> None:
     for index in candidates[-2:]:
         content = messages[index]["content"]
         if isinstance(content, str):
-            messages[index]["content"] = [{"type": "text", "text": content, "cache_control": {"type": "ephemeral"}}]
+            messages[index]["content"] = [{"type": "text", "text": content, "cache_control": _cache_control()}]
         elif content:
             last = content[-1]
             if isinstance(last, dict) and last.get("type") in {"text", "image", "tool_result"}:
-                last["cache_control"] = {"type": "ephemeral"}
+                last["cache_control"] = _cache_control()
+
+
+def _cache_control(ttl: str | None = None) -> dict[str, str]:
+    """One breakpoint; without ``ttl`` it keeps Anthropic's default five-minute lifetime."""
+
+    return {"type": "ephemeral", "ttl": ttl} if ttl else {"type": "ephemeral"}
+
+
+def _prefix_ttl(request: ModelRequest) -> str | None:
+    """The static prefix's lifetime: an hour where the field is known to work, else the default (``None``).
+
+    Known means a Claude model on the Anthropic vendor, read from the hop: the vendor id exactly, and a model id that
+    starts with ``claude-``. Another vendor's Anthropic-compatible endpoint keeps the default even for a Claude id.
+    """
+
+    endpoint = request.endpoint
+    if (
+        request.cache != "default"
+        or not (request.tools or request.system)
+        or endpoint.provider != "anthropic"
+        or not endpoint.model_id.startswith("claude-")
+        or _ttl_route(endpoint) in _TTL_REJECTED_ROUTES
+    ):
+        return None
+    return _PREFIX_TTL
+
+
+def _ttl_route(endpoint: ModelEndpoint) -> tuple[str, str, str]:
+    return (endpoint.base_url, endpoint.provider, endpoint.model_id)
+
+
+def _rejects_ttl(event: Any) -> bool:
+    """A request the endpoint refused with an error naming the field.
+
+    Only an HTTP error status sets ``status``, so such an error is the response's first and only event.
+    """
+
+    return (
+        isinstance(event, ProviderError)
+        and event.kind == "invalid_request"
+        and event.status is not None
+        and 400 <= event.status < 500
+        and _TTL_REJECTION.search(event.message) is not None
+    )
+
+
+def _remember_ttl_rejection(endpoint: ModelEndpoint) -> None:
+    route = _ttl_route(endpoint)
+    if route in _TTL_REJECTED_ROUTES:
+        return
+    _TTL_REJECTED_ROUTES.add(route)
+    logger.warning(
+        "The endpoint for %s model %s rejected the 1-hour prompt-cache TTL; "
+        "this route uses the default 5-minute TTL until the process restarts",
+        endpoint.provider,
+        endpoint.model_id,
+    )
 
 
 def _error_event_shape_error(chunk: Mapping[str, Any]) -> str | None:
