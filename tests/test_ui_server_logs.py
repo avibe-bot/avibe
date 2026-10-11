@@ -8,6 +8,7 @@ from pathlib import Path
 
 import main as service_main
 from config import paths
+from tests.fake_pid_helpers import fake_pid
 from tests.ui_server_test_helpers import csrf_headers
 from vibe import runtime
 from vibe.ui_server import app
@@ -300,8 +301,11 @@ def test_control_start_reuses_running_service_without_stop(monkeypatch, tmp_path
 def test_control_stop_uses_locked_service_stop(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
-    runtime.write_status("running", detail="running", service_pid=12345, ui_pid=67890)
-    paths.get_runtime_pid_path().write_text("12345", encoding="utf-8")
+    # The stop reads the recorded service's command line, which a literal pid
+    # reads off a real process.
+    service_pid = fake_pid()
+    runtime.write_status("running", detail="running", service_pid=service_pid, ui_pid=67890)
+    paths.get_runtime_pid_path().write_text(str(service_pid), encoding="utf-8")
     calls = []
 
     monkeypatch.setattr(service_main, "shutdown_intent_required", lambda: True)
@@ -321,7 +325,7 @@ def test_control_stop_uses_locked_service_stop(monkeypatch, tmp_path):
             calls.append("service_reaped_ui")
         return True
 
-    monkeypatch.setattr(runtime, "pid_alive", lambda pid: pid == 12345)
+    monkeypatch.setattr(runtime, "pid_alive", lambda pid: pid == service_pid)
     monkeypatch.setattr(runtime, "stop_service", stop_service)
     monkeypatch.setattr(runtime, "stop_process", lambda pid_path: calls.append(("stop_process", pid_path)) or True)
 
