@@ -57,13 +57,13 @@ def run(tmp_path, host):
     """Run a command through the powershell tool; return ``(is_error, text)``."""
     tool = BashTool(host, shell=host.shell)
 
-    async def run_command(command, **arguments):
+    async def run_command(command, *, env=None, **arguments):
         ctx = ToolContext(
             session_id="ses_test",
             tool_call_id="toolu_1",
             call=instance(),
             cwd=str(tmp_path),
-            env=dict(os.environ),
+            env=dict(os.environ) if env is None else env,
             cancel=CancelToken(),
             on_progress=None,
         )
@@ -195,6 +195,11 @@ async def test_a_command_keeps_powershell_script_semantics(run, command, output)
         ("end { cmd /c exit 4 }\nbegin { Write-Output begin }", 4),
         # The code an earlier block left is not the last statement's, whatever path led to it.
         ("begin { cmd /c exit 23 }\nend { Get-Item C:\\does-not-exist }", 1),
+        # ...or parameter binding: a param default runs before the only statement.
+        ("param($Ignored = $(cmd /c exit 23))\nGet-Item C:\\does-not-exist", 1),
+        # --% makes the rest of its line arguments: nothing may be added there.
+        ("cmd.exe --% /c exit 7", 7),
+        ("cmd.exe --% /c exit 23\nGet-Item C:\\does-not-exist", 1),
     ],
     ids=[
         "end",
@@ -204,6 +209,9 @@ async def test_a_command_keeps_powershell_script_semantics(run, command, output)
         "a-compound-statement",
         "blocks-out-of-order",
         "a-code-from-an-earlier-block",
+        "a-code-from-a-param-default",
+        "stop-parsing-last",
+        "stop-parsing-before-the-last",
     ],
 )
 async def test_the_exit_code_follows_the_statement_that_runs_last(run, command, code):
@@ -227,6 +235,23 @@ async def test_a_clean_block_runs_last(run, shell, tmp_path):
 
     assert after_process[0] and after_process[1].rstrip().endswith("Command exited with code 5")
     assert alone[0] is False
+    assert not marker.exists()
+
+
+@ON_WINDOWS
+def test_constrained_language_mode_is_refused_with_a_reason(shell, tmp_path):
+    """AppLocker and WDAC put PowerShell in ConstrainedLanguage mode, which blocks the bootstrap's .NET calls. A
+    session can enter that mode itself, which stands in for the policy here."""
+    marker = tmp_path / "ran"
+    argv = shell.prepare(f"New-Item -ItemType File -Path '{marker}' | Out-Null", str(tmp_path))
+    argv[-1] = "$ExecutionContext.SessionState.LanguageMode = 'ConstrainedLanguage'\n" + argv[-1]
+
+    completed = subprocess.run(
+        argv, capture_output=True, text=True, creationflags=subprocess.CREATE_NO_WINDOW, timeout=60
+    )
+
+    assert completed.returncode == 1
+    assert "ConstrainedLanguage mode" in completed.stderr and "Nothing was run" in completed.stderr, completed.stderr
     assert not marker.exists()
 
 

@@ -20,20 +20,28 @@ SHELL_ADVICE = "powershell (for example a short script)" if WINDOWS else "bash (
 #: Where a PowerShell job's command waits for the bootstrap, in the job directory.
 COMMAND_FILE = "command.ps1"
 
-# Runs ``command.ps1`` (C-7 tools.md section 5). It is passed with ``-Command``, where Windows PowerShell
+# Runs ``command.ps1`` (C-7 tools.md section 5). ConstrainedLanguage mode blocks the .NET calls it makes, so there it
+# says so and runs nothing. It is passed with ``-Command``, where Windows PowerShell
 # writes errors as text (with ``-EncodedCommand`` it writes them as CLIXML), so it holds no double quote,
 # which the command line would have to escape. The command runs whole, as one script block, so PowerShell's own
 # semantics hold. Only the statement that runs last (the last of the clean block, which PowerShell 7.3 and
 # later run after the others, else of the end, process, or begin block) is wrapped, by its place in the text and on the lines it already has, so the lines PowerShell reports
 # are the command's own: its status is taken right after it, and the value ``$LASTEXITCODE`` holds is noted
 # where every path into it passes: after the statement before it in its block, else as its block begins (a
-# ``clean`` block runs even after a ``return``). A native program stores a new value even when the code is the
+# ``clean`` block runs even after a ``return``), else after parameter binding. ``--%`` makes the rest of its line
+# arguments, so nothing is added on such a line. A native program stores a new value even when the code is the
 # same, so the exit code is one the last statement set, never a code an earlier one left there, and the
 # command sees ``$LASTEXITCODE`` exactly as PowerShell sets it. It does not exist until something sets it, so
 # the wrapping reads it through ``Get-Variable``, which strict mode allows. The edits go in from the end of the
 # text, since blocks may be written in any order. The loop around the script block is where a ``break`` or
 # ``continue`` outside any loop ends it.
 _BOOTSTRAP = """\
+if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') {
+    Write-Error -ErrorAction Continue -Message ('The powershell tool cannot run here: this PowerShell is in ' + \
+$ExecutionContext.SessionState.LanguageMode + ' mode (an AppLocker or WDAC policy), which blocks the .NET calls the \
+tool needs to read and run the command. Nothing was run.')
+    exit 1
+}
 $ProgressPreference = 'SilentlyContinue'
 if ($PSStyle) { $PSStyle.OutputRendering = 'PlainText' }
 $__avibe_utf8 = New-Object System.Text.UTF8Encoding $false
@@ -57,22 +65,29 @@ $__avibe_before = $null
 $__avibe_run = @(foreach ($__avibe_block in $__avibe_ast.DynamicParamBlock, $__avibe_ast.BeginBlock, \
 $__avibe_ast.ProcessBlock, $__avibe_ast.EndBlock, $__avibe_ast.CleanBlock) { if ($__avibe_block) { $__avibe_block.Statements } })
 $__avibe_edits = @()
-if ($__avibe_run.Count) {
-    $__avibe_edits += , @($__avibe_run[-1].Extent.EndOffset, '; $__avibe_status = $?; \
-$__avibe_var = Get-Variable LASTEXITCODE -Scope Global -ErrorAction Ignore; if ($__avibe_var) { \
-$__avibe_code = $__avibe_var.Value; \
-$__avibe_set = $__avibe_code -is [int] -and -not [object]::ReferenceEquals($__avibe_code, $__avibe_before) }')
-}
 $__avibe_note = '$__avibe_var = Get-Variable LASTEXITCODE -Scope Global -ErrorAction Ignore; \
 if ($__avibe_var) { $__avibe_before = $__avibe_var.Value }'
 if ($__avibe_run.Count) {
-    $__avibe_home = $__avibe_run[-1].Parent
+    $__avibe_last = $__avibe_run[-1]
+    $__avibe_after = '; '
+    if ($__avibe_last.Extent.Text.Contains('--%')) { $__avibe_after = [Environment]::NewLine }
+    $__avibe_edits += , @($__avibe_last.Extent.EndOffset, ($__avibe_after + '$__avibe_status = $?; \
+$__avibe_var = Get-Variable LASTEXITCODE -Scope Global -ErrorAction Ignore; if ($__avibe_var) { \
+$__avibe_code = $__avibe_var.Value; \
+$__avibe_set = $__avibe_code -is [int] -and -not [object]::ReferenceEquals($__avibe_code, $__avibe_before) }'))
+    $__avibe_home = $__avibe_last.Parent
     if ($__avibe_home.Statements.Count -gt 1) {
-        $__avibe_edits += , @($__avibe_home.Statements[$__avibe_home.Statements.Count - 2].Extent.EndOffset, \
-('; ' + $__avibe_note))
+        $__avibe_prev = $__avibe_home.Statements[$__avibe_home.Statements.Count - 2]
+        if ($__avibe_prev.Extent.Text.Contains('--%')) {
+            $__avibe_edits += , @($__avibe_last.Extent.StartOffset, ($__avibe_note + '; '))
+        } else {
+            $__avibe_edits += , @($__avibe_prev.Extent.EndOffset, ('; ' + $__avibe_note))
+        }
     } elseif (-not $__avibe_home.Unnamed) {
         $__avibe_edits += , @(($__avibe_home.Extent.StartOffset + $__avibe_home.Extent.Text.IndexOf('{') + 1), \
 ($__avibe_note + '; '))
+    } elseif ($__avibe_ast.ParamBlock) {
+        $__avibe_edits += , @($__avibe_ast.ParamBlock.Extent.EndOffset, (' ' + $__avibe_note + ';'))
     }
 }
 foreach ($__avibe_edit in $__avibe_edits | Sort-Object { $_[0] } -Descending) {
