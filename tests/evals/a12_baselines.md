@@ -13,7 +13,8 @@ changed files with a reason each, the last error verbatim, and the next step.
 ### 2026-10-11, `checkpoint-v3`
 
 **Run.** Session `ses396nx6ty94`. The 7 scripted Turns and the probe needed no extra reads. All 3 checkpoints were
-model-written, each accepted on its first final reply: no repair round, no failed checkpoint turn.
+model-written, each accepted on its first final reply: no repair round, no failed checkpoint turn. The probe Turn
+made no checkpoint of its own: the Session holds 3 checkpoint turns and 3 compactions.
 
 **Observation, not scored.** The first, normal checkpoint made little room (25,931 → 25,252 estimated tokens). The
 cut kept the latest log read verbatim, so the Turn reached the window and the ladder rolled twice. The facts still
@@ -24,5 +25,6 @@ survived all three checkpoints.
   design. Read the answer in the JSON before trusting a drop.
 - This run's answer gave the REFILL_RATE reason as "to enable token bucket refills". The first phrase list missed
   that wording and scored the run 8/9.
-- The list now also accepts "enable"; the fact's other check still requires "refill". The recorded answer was
-  re-scored offline at 9/9, with no new model call.
+- The list now also accepts "enable"; the fact's other check still requires "refill". The "last error" fact now
+  requires the whole error line.
+- The recorded answer was re-scored offline under both changes at 9/9, with no new model call.

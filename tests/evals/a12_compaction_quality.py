@@ -97,7 +97,7 @@ FACTS = (
         "why: a zero refill rate never refills",
         (("never refill", "never refills", "0 means", "zero means", "of 0", "enable"),),
     ),
-    Fact("last error, verbatim", (("burst window overlaps",),)),
+    Fact("last error, verbatim", ((LAST_ERROR,),)),
     Fact("next step: tests/test_burst.py", (("tests/test_burst.py", "test_burst.py"),)),
 )
 
@@ -171,6 +171,8 @@ def write_fixture(root: Path, window: int) -> None:
 
 
 def vibe(command: Sequence[str], *args: str) -> dict:
+    """One CLI call's JSON. A synchronous Agent run must have succeeded: one that failed, was canceled, or is still
+    running when the wait ends (detached) would let the next Turn read the previous Turn's reply."""
     result = subprocess.run([*command, *args], capture_output=True, text=True, timeout=TURN_TIMEOUT_S + 60)
     try:
         payload = json.loads(result.stdout)
@@ -178,6 +180,8 @@ def vibe(command: Sequence[str], *args: str) -> dict:
         raise SystemExit(f"vibe {' '.join(args[:2])} printed no JSON: {result.stderr.strip()[:500]}") from error
     if not payload.get("ok", False):
         raise SystemExit(f"vibe {' '.join(args[:2])} failed: {json.dumps(payload)[:800]}")
+    if "--sync" in args and (payload.get("run") or {}).get("status") != "succeeded":
+        raise SystemExit(f"vibe agent run did not succeed: {json.dumps(payload.get('run'))[:800]}")
     return payload
 
 
@@ -256,10 +260,14 @@ def run(args: argparse.Namespace) -> dict:
             if not turns and len(rows.compactions(session_id)) < 2 and extra < EXTRA_READS:
                 extra += 1
                 turns.append(EXTRA_TURN.format(index=4 + extra))
-        compactions = rows.compactions(session_id)
+        before = len(rows.compactions(session_id))
+        if before < 2:
+            # A12 scores a Session compacted at least twice; a probe of fewer would read the context it kept.
+            raise SystemExit(f"Session {session_id} compacted {before} time(s) before the probe; A12 needs at least 2")
         vibe(command, "agent", "run", "--session-id", session_id, "--sync", "--no-callback",
              "--wait-timeout", str(TURN_TIMEOUT_S), "--message", PROBE)
         answer = rows.last_result(session_id)
+        compactions = rows.compactions(session_id)  # including any the probe Turn itself made
     finally:
         if not args.keep:
             vibe(command, "agent", "remove", agent)

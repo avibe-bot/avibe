@@ -17,9 +17,12 @@ Plan: `docs/plans/avibe-agent-core.md` §6, A12. Script: `a12_compaction_quality
   - has it run a check that fails twice;
   - agrees on a next step.
 - Log reads sized from the model's window push the context over the threshold. The script adds up to three more
-  reads until the Session holds at least two checkpoints.
+  reads until the Session holds at least two checkpoints. If it still holds fewer, the script stops without probing.
+- Every Agent run must succeed within its wait. A failed, canceled, or detached run stops the script, so no Turn ever
+  reads an earlier Turn's reply.
 - A probe Turn then asks, from memory, for the ground rules, the files changed and why, the last error verbatim,
-  and the next step. The answer is scored against the nine planted facts.
+  and the next step. The answer is scored against the nine planted facts; the last error must appear in full.
+  Compactions are read again after the probe, so the JSON includes any checkpoint the probe Turn itself made.
 
 **Where it runs.** It writes real Sessions and spends real tokens, so it runs only inside a regression instance
 (`VIBE_DEPLOYMENT_ENV=regression`); elsewhere it exits with status 2.
