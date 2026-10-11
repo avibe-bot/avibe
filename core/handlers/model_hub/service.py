@@ -8027,7 +8027,9 @@ class ModelHubService:
         ):
             # An error frame no machine code names, inside a response the upstream
             # accepted, is ambiguous evidence: the relay, the engine, or a transient
-            # fault. It ends this attempt and never writes Source health.
+            # fault. It ends this attempt and never writes Source health, but a
+            # half-open attempt still gives its slot back.
+            self.recovery.release(source.id, settlement_generation)
             return event_reason, False
         # Generations are minted at attempt start and nowhere else. A settlement
         # that carries none cannot prove it is not superseded, so it does not

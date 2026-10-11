@@ -153,6 +153,48 @@ def test_unavailable_production_client_releases_unadmitted_half_open_claim(tmp_p
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("stream", [False, True])
+def test_an_unnamed_error_on_a_half_open_attempt_releases_the_claim_and_spares_the_source(tmp_path, stream):
+    """Ambiguous evidence writes no Source health (decision 2026-10-11), and it must not keep the half-open slot."""
+    async def run():
+        service, clock, models = configured_service(tmp_path)
+        source = service.store.load().sources[0]
+        responses = [
+            web.Response(
+                status=200,
+                content_type="text/event-stream",
+                body=b'event: error\ndata: {"type":"error","code":"relay_specific_error",'
+                b'"message":"upstream protocol error","param":null,"sequence_number":0}\n\n',
+            )
+            if stream
+            else web.json_response({"error": {"type": "relay_specific_error", "message": "upstream protocol error"}}),
+            web.Response(body=WIRE["openai_responses"][3], content_type="application/json"),
+        ]
+
+        async def respond(_request):
+            return responses.pop(0)
+
+        async with loopback_engine(tmp_path, service, respond):
+            await fail(service, source)
+            clock.advance(1)
+            before = copy.deepcopy(service.store.load().to_payload())
+            with pytest.raises(ModelHubError):
+                await service.resolve_with_recovery(
+                    backend="codex", model_id=models["codex"], request={}, stream=stream,
+                )
+            entry = service.recovery._sources[source.id]
+            assert entry.owner is None and entry.failures == 1
+            assert service.store.load().to_payload() == before
+            assert service.agent_chain("codex", models["codex"])["chain"][0]["recovery"] == "eligible"
+            # The next real request can acquire the same half-open admission.
+            async with gateway_client(service, "codex", models["codex"]) as (_gateway, client, url, headers):
+                async with client.post(url, headers=headers, json={"model": "shared-model"}) as response:
+                    assert response.status == 200
+                    assert await response.read() == WIRE["openai_responses"][3]
+            assert responses == []
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("backend", ["codex", "claude"])
 @pytest.mark.parametrize("diagnostic,delay", [
     ("503 server error", 30), ("429 rate limit", 60), ("quota exhausted", 300), ("connection failed", 0),
