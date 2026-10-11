@@ -76,7 +76,8 @@ def _probe_ripgrep_version(binary: Path | None) -> str | None:
             text=True,
             timeout=5,
             check=False,
-            **isolated_subprocess_kwargs(),
+            # Run while a status path resolves ripgrep, often under a service with no console of its own.
+            **isolated_subprocess_kwargs(console=False),
         )
     except Exception:  # noqa: BLE001
         return None

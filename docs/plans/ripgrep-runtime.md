@@ -44,12 +44,13 @@ digests, which the mirror requires.
 
 ## Scope
 
-- The platforms are darwin and linux on arm64 and x64, as for the Git runtime.
-  Windows reports `ripgrep_platform_unsupported` for these reasons:
-  - The managed-runtime core extracts only `.tar.gz`, and upstream ships a
-    Windows `.zip`.
-  - Vibey's job host does not run commands on Windows.
-  - The Codex, Claude Code, and OpenCode CLIs bundle their own ripgrep.
+- The platforms are darwin, linux, and Windows on arm64 and x64. On Windows the
+  manifest pins upstream's `.zip` (`"format": "zip"`, extracted by the
+  managed-runtime core with the same path and link checks as a `.tar.gz`), and
+  the binary is `rg.exe`. ripgrep matters more there than elsewhere: Windows
+  has no `grep`, `find` is a different program, and `Select-String` is slow, so
+  with `rg` on the Agent PATH Vibey's prompt names it. The Codex, Claude Code,
+  and OpenCode CLIs bundle their own ripgrep.
 - ripgrep is not a `vibe doctor` dependency or repair target. Its absence only
   changes the prompt line, and `vibe runtime prepare` installs it again.
 - To move to a newer ripgrep, update the manifest. The mirror then adds the new

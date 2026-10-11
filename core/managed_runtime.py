@@ -17,6 +17,7 @@ import threading
 import time
 import urllib.parse
 import urllib.request
+import zipfile
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -125,7 +126,8 @@ class ManagedRuntimeArchive:
     binary_sha256: str | None
     size: int | None
     bin_path: str
-    # One of ARCHIVE_FORMATS; ``binary`` means the asset is the executable itself.
+    # One of ARCHIVE_FORMATS; ``binary`` means the asset is the executable itself, ``zip`` is what
+    # upstream projects publish for Windows.
     format: str = "tar.gz"
 
 
@@ -2285,7 +2287,7 @@ def install_lock_for(runtime_id: str) -> threading.Lock:
         return _INSTALL_LOCKS.setdefault(runtime_id, threading.Lock())
 
 
-ARCHIVE_FORMATS = frozenset({"tar.gz", "binary"})
+ARCHIVE_FORMATS = frozenset({"tar.gz", "zip", "binary"})
 
 
 def stage_archive(archive_path: Path, archive_format: str, staging_dir: Path, *, bin_path: str) -> None:
@@ -2299,12 +2301,31 @@ def stage_archive(archive_path: Path, archive_format: str, staging_dir: Path, *,
     if archive_format == "tar.gz":
         with tarfile.open(archive_path, "r:gz") as archive_file:
             safe_extract_tar(archive_file, staging_dir)
+    elif archive_format == "zip":
+        with zipfile.ZipFile(archive_path) as archive_file:
+            safe_extract_zip(archive_file, staging_dir)
     elif archive_format == "binary":
         target = staging_dir / bin_path
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(archive_path, target)
     else:
         raise ValueError(f"unsupported archive format: {archive_format}")
+
+
+def safe_extract_zip(archive: zipfile.ZipFile, destination: Path) -> None:
+    """Extract a zip of regular files and directories into ``destination``, refusing what ``safe_extract_tar``
+    refuses: a path that leaves ``destination`` and a link (a zip records a symlink as a Unix file mode)."""
+    destination_resolved = destination.resolve()
+    for member in archive.infolist():
+        if archive_path_is_unsafe(member.filename):
+            raise ValueError(f"Unsafe managed runtime archive path: {member.filename}")
+        target = (destination / member.filename).resolve()
+        if target != destination_resolved and destination_resolved not in target.parents:
+            raise ValueError(f"Unsafe managed runtime archive path: {member.filename}")
+        mode = member.external_attr >> 16
+        if mode and not (stat.S_ISREG(mode) or stat.S_ISDIR(mode)):
+            raise ValueError(f"Unsupported managed runtime archive member: {member.filename}")
+    archive.extractall(destination)
 
 
 def safe_extract_tar(archive: tarfile.TarFile, destination: Path) -> None:
