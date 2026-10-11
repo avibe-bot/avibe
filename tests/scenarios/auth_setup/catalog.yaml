@@ -527,4 +527,25 @@ scenarios:
       - ui/src/components/onboarding/BuiltinAssistant.test.tsx
       - ui/src/components/onboarding/entryGate.test.ts
       - ui/e2e/onboarding-fidelity/lineup.spec.ts
+  - id: AUTH-SETUP-130
+    name: "Occupied vendor callback port: OAuth start succeeds and the pasted callback completes the login"
+    status: partial
+    kind: negative_path
+    layer: scenario
+    missing_layer: live-vendor-e2e
+    backend: shared
+    reason: >-
+      The engine relays a redirect login's callback through a forwarder on the
+      vendor's fixed loopback port (54545 Claude, 1455 Codex, 51121 Antigravity).
+      When something else holds that port, the start used to fail with a 500; the
+      engine now starts the login anyway and waits for the pasted callback that
+      Avibe always offers. The closed loop ends in the vendor's token exchange,
+      which cannot run hermetically, so the engine half and Avibe's paste half are
+      pinned separately and no harness case duplicates the paste scenario.
+    owning_layer: L4 integrated acceptance (real engine and a real vendor sign-in)
+    partial_evidence:
+      covers: the engine half at the real engine — with Claude's port taken the start succeeds and the session waits for a pasted callback, and Codex's forwarder listens on 127.0.0.1 only; it runs where AVIBE_E2E_ISOLATED_NETWORK=1, because it binds the vendors' fixed ports
+      test: tests/e2e/test_model_hub_engine_contract.py::test_oauth_callback_forwarder_is_loopback_only_and_optional
+    supporting_tests:
+      - tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_hub_oauth_mispaste_stays_recoverable_and_schemeless_address_signs_in
 next_priority: []

@@ -261,7 +261,9 @@ def test_engine_management_surface_avibe_reads(tmp_path, monkeypatch) -> None:
         "last_refresh": "2026-01-01T00:00:00Z",
     }
     evidence: dict = {}
-    with _capturing_server() as (upstream, seen), _isolated_engine_adapter(tmp_path, monkeypatch) as adapter:
+    with contextlib.ExitStack() as stack:
+        upstream, seen = stack.enter_context(_capturing_server())
+        adapter = stack.enter_context(_isolated_engine_adapter(tmp_path, monkeypatch))
         client = EngineClient(adapter.supervisor.ensure_running())
         adapter.state_store.write_oauth_auth_file(auth_name, grant)
 
@@ -299,7 +301,11 @@ def test_engine_management_surface_avibe_reads(tmp_path, monkeypatch) -> None:
         assert seen and seen[-1]["authorization"] == f"Bearer {access_token}"
 
         flows = {}
-        for endpoint in ("/codex-auth-url", "/anthropic-auth-url"):
+        # A redirect login binds the vendor's fixed callback port on this host,
+        # so these run only where the network belongs to the test (see
+        # test_oauth_callback_forwarder_is_loopback_only_and_optional).
+        redirect_logins = ("/codex-auth-url", "/anthropic-auth-url")
+        for endpoint in redirect_logins if os.environ.get("AVIBE_E2E_ISOLATED_NETWORK") == "1" else ():
             started = _call(client, "GET", endpoint, query={"is_webui": "true"})
             assert started["ok"], (endpoint, started)
             state = started["body"].get("state")
@@ -329,16 +335,11 @@ def test_engine_management_surface_avibe_reads(tmp_path, monkeypatch) -> None:
         _await(lambda: listed() is None, what="auth file removed")
 
         # Characterization only: whether a freshly loaded Gemini (Antigravity)
-        # grant lists models before the engine has talked to Google.
+        # grant lists models before its entitlement probe has answered. The
+        # probe goes to a loopback stand-in for Google, never to Google.
         antigravity = "antigravity-contract-fixture.json"
-        adapter.state_store.write_oauth_auth_file(antigravity, {
-            "type": "antigravity",
-            "access_token": "synthetic-antigravity-token",
-            "refresh_token": "",
-            "email": "fixture@example.invalid",
-            "project_id": "synthetic-project",
-            "expired": "2099-01-01T00:00:00Z",
-        })
+        google = stack.enter_context(_antigravity_upstream("delayed_success"))[0]
+        adapter.state_store.write_oauth_auth_file(antigravity, _antigravity_grant(google))
         _await(
             lambda: any(item.get("name") == antigravity
                         for item in client.management_request("GET", "/auth-files").get("files") or []),
@@ -380,10 +381,19 @@ def _port_free(port: int) -> bool:
 def test_oauth_callback_forwarder_is_loopback_only_and_optional(tmp_path, monkeypatch) -> None:
     """A redirect login relays its callback on loopback only, and starts without the relay.
 
-    Codex's forwarder must listen on 127.0.0.1 and nowhere else. With Claude's
-    fixed port already taken, the login still starts and waits for a pasted
-    callback, and the engine holds no listener there.
+    Scenario: AUTH-SETUP-130 (the engine half). Codex's forwarder must listen
+    on 127.0.0.1 and nowhere else. With Claude's fixed port already taken, the
+    login still starts and waits for a pasted callback, and the engine holds no
+    listener there.
+
+    The vendors' callback ports are fixed, so the engine and this test bind real
+    host ports; a login in a service on the same host could collide with them.
+    It runs only where the network belongs to the test: set
+    AVIBE_E2E_ISOLATED_NETWORK=1 in an isolated environment such as the Incus
+    regression env.
     """
+    if os.environ.get("AVIBE_E2E_ISOLATED_NETWORK") != "1":
+        pytest.skip("binds the vendors' fixed OAuth callback ports; set AVIBE_E2E_ISOLATED_NETWORK=1 to run")
     if not _port_free(1455):
         pytest.skip("Codex's fixed OAuth callback port 1455 is in use on this host")
     evidence: dict = {}
