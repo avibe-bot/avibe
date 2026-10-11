@@ -222,31 +222,25 @@ def pytest_runtest_teardown(item):
 
 
 @pytest.fixture
-def reap_helper_spawns(request, tmp_path, tmp_path_factory):
+def reap_helper_spawns(request, tmp_path):
     """Reap what the test's helper interpreters spawned, by identity, and fail the test for each one left.
 
     A helper started with ``process_reaper.record_spawns`` appends each spawn to
     ``helper_spawn_record(tmp_path)``; once the helper exits those spawns
     reparent to init, where no record of this pytest process reaches them.
-    Torn down after the test's own fixtures, so their cleanup runs first; the
-    warden reaps the record if the run is killed before then. An orphan that
-    names ``tmp_path`` but is in no record also fails the test, and is never
+    Torn down after the test's own fixtures, so their cleanup runs first. A run
+    killed before this teardown leaves them running. An orphan that names
+    ``tmp_path`` but is in no record also fails the test, and is never
     signalled. POSIX only, like the reaper.
     """
 
-    global _process_warden
-    if not _SIGNAL_GUARD_SUPPORTED:
-        yield
-        return
-    record = process_reaper.helper_spawn_record(tmp_path)
-    if _process_warden is None:
-        _process_warden = process_reaper.Warden()
-    _process_warden.watch_spawns(record, tmp_path_factory.getbasetemp())
     yield
+    if not _SIGNAL_GUARD_SUPPORTED:
+        return
     __tracebackhide__ = True
-    reaped, orphans = process_reaper.end_helper_spawns(record, tmp_path, request.node.stash.get(_TEST_PROCESSES, None))
-    # Only a finished teardown disarms the warden: an interrupted one leaves it the record.
-    _process_warden.forget_spawns(record)
+    reaped, orphans = process_reaper.end_helper_spawns(
+        process_reaper.helper_spawn_record(tmp_path), tmp_path, request.node.stash.get(_TEST_PROCESSES, None)
+    )
     problems = []
     if reaped:
         problems.append("spawns of this test's helper processes were still running and were killed: " + ", ".join(reaped))

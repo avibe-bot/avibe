@@ -10,7 +10,6 @@ import os
 import signal
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
 import psutil
@@ -148,10 +147,6 @@ def test_a_group_member_left_by_a_recorded_leader(tmp_path):
     _run_helper(tmp_path, "group")
 
 
-@pytest.mark.allow_foreign_signals(reason="the run kills itself, as the CI watchdog does")
-def test_a_killed_run_after_a_recorded_spawn(tmp_path):
-    _run_helper(tmp_path, "record")
-    os.kill(os.getpid(), signal.SIGKILL)
 '''
 
 
@@ -231,14 +226,6 @@ def test_a_recorded_spawn_is_killed_by_identity_and_fails_its_test(tmp_path):
     assert _running(record) == []
 
 
-async def test_a_recorded_spawn_ends_with_a_killed_run(tmp_path):
-    result, record = _run_inner(tmp_path, "killed_run_after_a_recorded_spawn", DETACHING)
-
-    assert result.returncode == -9, result.stdout + result.stderr
-    # The warden acts once it sees the run gone, after this pytest saw it exit.
-    await hang_guard.until(lambda: _running(record) == [], "the warden to reap the recorded spawn")
-
-
 def test_a_spawn_a_helper_records_during_teardown_is_reaped(tmp_path):
     result, record = _run_inner(tmp_path, "recorded_after_the_test_returned", DETACHING)
 
@@ -289,18 +276,6 @@ def test_a_process_with_a_live_parent_naming_tmp_path_is_neither_killed_nor_repo
         watcher.wait()
 
 
-@pytest.mark.parametrize("where", ["outside", "basetemp"])
-def test_a_spawn_record_not_inside_the_basetemp_is_refused(tmp_path_factory, where):
-    basetemp = tmp_path_factory.getbasetemp()
-    record = Path(tempfile.gettempdir()) / "helper-spawns" if where == "outside" else basetemp
-    warden = process_reaper.Warden()
-    try:
-        with pytest.raises(pytest.fail.Exception, match="not strictly inside"):
-            warden.watch_spawns(record, basetemp)
-    finally:
-        warden.close()
-
-
 @pytest.fixture
 def group_leader():
     """A live process leading its own group, as a stranger that reused a recorded pid would."""
@@ -320,34 +295,6 @@ def test_a_reap_never_signals_a_group_whose_pid_now_names_another_process(group_
     assert processes.reap() == []
 
     assert process_reaper._same(pid, created) is not None
-
-
-@pytest.mark.parametrize("forgotten", [False, True], ids=["armed", "forgotten"])
-def test_the_warden_reaps_a_helper_record_until_that_record_is_forgotten(tmp_path_factory, tmp_path, forgotten):
-    sleeper = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"], start_new_session=True)
-    created = psutil.Process(sleeper.pid).create_time()
-    record = process_reaper.helper_spawn_record(tmp_path)
-    process_reaper._append_spawn(record, sleeper.pid)
-    later = tmp_path / "later" / "helper-spawns"
-    basetemp = tmp_path_factory.getbasetemp()
-    warden = process_reaper.Warden()
-    try:
-        warden.watch_spawns(record, basetemp)
-        # Another test's record, armed and forgotten, leaves this one armed.
-        warden.watch_spawns(later, basetemp)
-        warden.forget_spawns(later)
-        if forgotten:
-            warden.forget_spawns(record)
-        warden.close()
-        warden = None
-
-        sleeper_running = process_reaper._same(sleeper.pid, created) is not None
-        assert sleeper_running is forgotten
-    finally:
-        if warden is not None:
-            warden.close()
-        sleeper.kill()
-        sleeper.wait()
 
 
 @pytest.mark.parametrize("settled", [False, True], ids=["stale", "settled"])
