@@ -670,7 +670,7 @@ def create_app(
                 content={
                     "ok": False,
                     "error": "invalid_computer_use_request",
-                    "message": "Computer Use requires a caller Session, allowlisted tool, and object arguments; Turn IDs are not accepted.",
+                    "params": {},
                 },
             )
         caller_session_id = caller_session_id.strip()
@@ -680,22 +680,18 @@ def create_app(
                 content={
                     "ok": False,
                     "error": "session_argument_forbidden",
-                    "message": "The Computer Use session is bound to the caller's Avibe Session.",
+                    "params": {},
                 },
             )
 
         admission, admission_error = manager.begin_computer_use_request(caller_session_id)
         if admission is None:
-            messages = {
-                "active_turn_required": "Computer Use is available only from the caller's active Avibe Turn.",
-                "computer_use_unavailable": "Computer Use is unavailable in this request context.",
-            }
             return JSONResponse(
                 status_code=409,
                 content={
                     "ok": False,
                     "error": admission_error,
-                    "message": messages.get(admission_error, "Computer Use request was rejected."),
+                    "params": {},
                     "session_id": caller_session_id,
                 },
             )
@@ -713,7 +709,7 @@ def create_app(
                     content={
                         "ok": False,
                         "error": "computer_use_unavailable",
-                        "message": "Computer Use could not initialize.",
+                        "params": {},
                     },
                 )
             controller.computer_use_server = computer_server

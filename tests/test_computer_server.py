@@ -323,9 +323,10 @@ async def test_non_ready_call_names_status_and_never_spawns_upstream(
     payload = json.loads(result["content"][0]["text"])
     assert payload == {
         "code": "computer_use_unavailable",
-        "message": "Computer use is not ready.",
-        "reason": reason,
-        "status": status,
+        "params": {
+            "reason": reason,
+            "status": status,
+        },
     }
     assert starts == 0
 
@@ -653,6 +654,11 @@ async def test_failed_explicit_start_does_not_change_committed_epoch(
     )
 
     assert result.get("isError")
+    payload = json.loads(result["content"][0]["text"])
+    assert payload == {
+        "code": "upstream_tool_error",
+        "params": {"tool": "start_session"},
+    }
     assert [params["name"] for _method, params in upstream.calls][-1] == "start_session"
     assert session_state.active_proxy_serial == expected_proxy
     assert session_state.active_daemon_key == expected_key

@@ -188,6 +188,7 @@ def test_cmd_computer_reports_driver_error_before_writing_screenshot(
     tmp_path: Path,
 ) -> None:
     monkeypatch.setenv("AVIBE_SESSION_ID", "ses-cli")
+    monkeypatch.setattr(cli, "_configured_cli_language", lambda: "zh")
 
     def fake_computer_use_sync(**kwargs):
         assert kwargs["arguments"]["screenshot_out_file"] == str(
@@ -208,7 +209,7 @@ def test_cmd_computer_reports_driver_error_before_writing_screenshot(
                                 + json.dumps(
                                     {
                                         "code": "desktop_busy",
-                                        "message": "desktop is held",
+                                        "params": {},
                                     }
                                 )
                             ),
@@ -230,8 +231,37 @@ def test_cmd_computer_reports_driver_error_before_writing_screenshot(
         )
         assert cli.cmd_computer(args) == 1
 
-    assert "Computer Use error [desktop_busy]: desktop is held" in capsys.readouterr().out
+    output = capsys.readouterr().out
+    assert "桌面正被另一个 Avibe Session 使用" in output
+    assert "desktop is held" not in output
     assert not (tmp_path / "missing.png").exists()
+
+
+def test_cmd_computer_localizes_controller_error_in_zh(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys,
+) -> None:
+    monkeypatch.setenv("AVIBE_SESSION_ID", "ses-cli")
+    monkeypatch.setattr(cli, "_configured_cli_language", lambda: "zh")
+
+    def fake_computer_use_sync(**kwargs):
+        del kwargs
+        return {
+            "status_code": 409,
+            "body": {
+                "ok": False,
+                "error": "session_archived",
+                "params": {},
+            },
+        }
+
+    with patch("vibe.internal_client.computer_use_sync", fake_computer_use_sync):
+        args = cli.build_parser().parse_args(["computer", "observe", "apps"])
+        assert cli.cmd_computer(args) == 1
+
+    output = capsys.readouterr().out
+    assert "当前 Avibe Session 已归档或正在归档" in output
+    assert "Computer Use is unavailable because" not in output
 
 
 def test_cmd_computer_requires_an_injected_caller_session(
@@ -391,8 +421,14 @@ def test_internal_route_binds_computer_use_to_the_active_session() -> None:
         ("list_windows", {"on_screen_only": True, "session": "ses-cli"}),
     ]
     assert forbidden["error"] == "session_argument_forbidden"
+    assert forbidden["params"] == {}
+    assert "message" not in forbidden
     assert turn_capability["error"] == "invalid_computer_use_request"
+    assert turn_capability["params"] == {}
+    assert "message" not in turn_capability
     assert mismatch["error"] == "active_turn_required"
+    assert mismatch["params"] == {}
+    assert "message" not in mismatch
 
 
 def test_internal_route_requires_a_server_side_active_turn() -> None:
@@ -426,6 +462,88 @@ def test_internal_route_requires_a_server_side_active_turn() -> None:
 
     response, calls = asyncio.run(exercise())
     assert response["error"] == "active_turn_required"
+    assert response["params"] == {}
+    assert "message" not in response
+    assert calls == []
+
+
+def test_archive_lifecycle_fences_computer_use_admission() -> None:
+    async def exercise() -> tuple[dict, dict, list[tuple[str, dict]]]:
+        calls: list[tuple[str, dict]] = []
+        archive_started = asyncio.Event()
+        release_archive = asyncio.Event()
+
+        class ComputerServer:
+            async def call_tool(self, name: str, arguments: dict) -> dict:
+                calls.append((name, arguments))
+                return _structured({"windows": []})
+
+        controller = SimpleNamespace(
+            computer_use_server=ComputerServer(),
+            controller_id="controller-test",
+            _session_id_from_context=lambda context: (
+                (getattr(context, "platform_specific", None) or {}).get("agent_session_id")
+            ),
+        )
+        app = internal_server.create_app(controller)
+        turn_task = asyncio.create_task(asyncio.sleep(60))
+        context = MessageContext(
+            user_id="user",
+            channel_id="channel",
+            platform="avibe",
+            platform_specific={"agent_session_id": "ses-cli", "turn_token": "turn-1"},
+        )
+        controller.session_turns.in_flight["ses-cli"] = session_turns.Turn(
+            task=turn_task,
+            context=context,
+            logical_turn_id="turn-1",
+        )
+
+        async def archive_operation() -> None:
+            archive_started.set()
+            await release_archive.wait()
+
+        archive_task = asyncio.create_task(
+            controller.session_turns.run_session_lifecycle(
+                "ses-cli",
+                archive_operation,
+            )
+        )
+        try:
+            await archive_started.wait()
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+                during_archive = await client.post(
+                    "/internal/computer-use",
+                    json={
+                        "caller_session_id": "ses-cli",
+                        "tool": "list_windows",
+                        "arguments": {},
+                    },
+                )
+                release_archive.set()
+                await archive_task
+                after_archive = await client.post(
+                    "/internal/computer-use",
+                    json={
+                        "caller_session_id": "ses-cli",
+                        "tool": "list_windows",
+                        "arguments": {},
+                    },
+                )
+            return during_archive.json(), after_archive.json(), calls
+        finally:
+            release_archive.set()
+            if not archive_task.done():
+                await archive_task
+            turn_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await turn_task
+
+    during_archive, after_archive, calls = asyncio.run(exercise())
+
+    assert during_archive["error"] == "session_archived"
+    assert after_archive["error"] == "session_archived"
     assert calls == []
 
 

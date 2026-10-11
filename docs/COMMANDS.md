@@ -686,8 +686,8 @@ vibe screenshot --json
 ### `vibe computer`
 
 `vibe computer` is the Agent-facing Computer Use surface. It can be run only
-from an active Avibe Agent Turn. The CLI supplies the injected Session and Turn
-capability, and the Controller validates both against the live Turn.
+from an active Avibe Agent Turn. The CLI supplies only the injected Avibe
+Session; the Controller resolves the active Turn server-side.
 
 ```bash
 vibe computer observe apps

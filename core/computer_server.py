@@ -599,8 +599,8 @@ def _load_snapshot(state_path: Path) -> tuple[list[dict[str, Any]], set[str]]:
     return advertised, accepted_session
 
 
-def _error_result(code: str, message: str, **details: Any) -> dict[str, Any]:
-    payload = {"code": code, "message": message, **details}
+def _error_result(code: str, message: str | None = None, **params: Any) -> dict[str, Any]:
+    payload = {"code": code, "params": params}
     return {
         "content": [
             {
@@ -612,20 +612,24 @@ def _error_result(code: str, message: str, **details: Any) -> dict[str, Any]:
     }
 
 
-def _fold_tool_result(message: dict[str, Any]) -> dict[str, Any]:
+def _fold_tool_result(
+    message: dict[str, Any],
+    *,
+    tool_name: str | None = None,
+) -> dict[str, Any]:
     if "error" in message:
-        return _error_result(
-            "upstream_error",
-            "The computer-use driver rejected the request.",
-            upstream=message["error"],
-        )
+        return _error_result("upstream_error")
     result = deepcopy(message.get("result"))
     if not isinstance(result, dict):
-        return _error_result(
-            "upstream_protocol_error",
-            "The computer-use driver returned an invalid result.",
-        )
+        return _error_result("upstream_protocol_error")
     structured = result.pop("structuredContent", None)
+    if result.get("isError") is True:
+        if isinstance(structured, dict) and isinstance(structured.get("code"), str):
+            structured_params = structured.get("params")
+            if isinstance(structured_params, dict):
+                return _error_result(structured["code"], **structured_params)
+            return _error_result(structured["code"])
+        return _error_result("upstream_tool_error", tool=tool_name or "")
     if structured is not None:
         content = result.get("content")
         if not isinstance(content, list):
@@ -876,7 +880,7 @@ class ComputerUseServer:
             "tools/call",
             {"name": name, "arguments": dict(arguments)},
         )
-        return _fold_tool_result(response)
+        return _fold_tool_result(response, tool_name=name)
 
     @staticmethod
     def _commit_session_ended(session_state: _SessionState) -> None:
@@ -1013,7 +1017,7 @@ class ComputerUseServer:
             )
         session = session.strip()
         if name not in COMPUTER_USE_TOOL_NAMES:
-            return _error_result("unknown_tool", f"Unknown computer-use tool: {name}")
+            return _error_result("unknown_tool", tool=name)
         if not isinstance(arguments, dict):
             return _error_result("invalid_arguments", "Tool arguments must be an object.")
 
@@ -1209,7 +1213,7 @@ class ComputerUseServer:
                         )
                     return _error_result(
                         "computer_use_error",
-                        f"Computer use failed: {type(exc).__name__}",
+                        error_type=type(exc).__name__,
                     )
                 finally:
                     if heartbeat is not None:

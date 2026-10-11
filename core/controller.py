@@ -1598,6 +1598,14 @@ class Controller:
 
         existing = await asyncio.to_thread(read_session)
         if existing.get("status") == "archived":
+            turn_manager = getattr(self, "session_turns", None)
+            mark_non_admitting = getattr(
+                turn_manager,
+                "mark_session_non_admitting",
+                None,
+            )
+            if callable(mark_non_admitting):
+                mark_non_admitting(raw_session_id)
             await retire_computer_use_session()
             return existing
 

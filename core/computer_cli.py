@@ -147,14 +147,57 @@ def _structured_payloads(result: Mapping[str, Any]) -> list[dict[str, Any]]:
 
 def _error_payload(result: Mapping[str, Any]) -> dict[str, Any]:
     for payload in _structured_payloads(result):
-        if "code" in payload or "message" in payload:
+        if "code" in payload:
             return payload
     content = result.get("content")
     if isinstance(content, list):
         for item in content:
             if isinstance(item, dict) and isinstance(item.get("text"), str):
-                return {"message": item["text"]}
-    return {"code": "computer_use_error"}
+                return {"code": "computer_use_error", "params": {}}
+    return {"code": "computer_use_error", "params": {}}
+
+
+_COMPUTER_ERROR_I18N_KEYS = {
+    "active_turn_required": "computer.cli.error.activeTurnRequired",
+    "computer_use_unavailable": "computer.cli.error.computerUseUnavailable",
+    "computer_use_error": "computer.cli.error.genericDriverError",
+    "desktop_busy": "computer.cli.error.desktopBusy",
+    "desktop_lease_lost": "computer.cli.error.desktopLeaseLost",
+    "focus_shortcut_forbidden": "computer.cli.error.focusShortcutForbidden",
+    "foreground_forbidden": "computer.cli.error.foregroundForbidden",
+    "invalid_arguments": "computer.cli.error.invalidDriverArguments",
+    "invalid_computer_use_request": "computer.cli.error.requestRejected",
+    "observe_first": "computer.cli.error.observeFirst",
+    "platform_unsupported": "computer.cli.error.platformUnsupported",
+    "session_archived": "computer.cli.error.sessionArchived",
+    "session_argument_forbidden": "computer.cli.error.sessionArgumentForbidden",
+    "session_required": "computer.cli.error.missingCallerSession",
+    "session_unavailable": "computer.cli.error.sessionUnavailable",
+    "unknown_tool": "computer.cli.error.unknownTool",
+    "upstream_error": "computer.cli.error.upstreamError",
+    "upstream_protocol_error": "computer.cli.error.upstreamProtocolError",
+    "upstream_tool_error": "computer.cli.error.upstreamToolError",
+    "upstream_unavailable": "computer.cli.error.upstreamUnavailable",
+    "window_target_required": "computer.cli.error.windowTargetRequired",
+}
+
+
+def translate_computer_error(
+    error: Mapping[str, Any],
+    *,
+    translate: Callable[..., str],
+) -> str:
+    """Render a Controller or driver error without trusting prose from it."""
+
+    code = str(error.get("code") or "computer_use_error")
+    key = _COMPUTER_ERROR_I18N_KEYS.get(
+        code,
+        "computer.cli.error.genericDriverError",
+    )
+    params = error.get("params")
+    if code == "unknown_tool" and isinstance(params, Mapping):
+        return translate(key, tool=str(params.get("tool") or ""))
+    return translate(key)
 
 
 def _decode_image_content(result: Mapping[str, Any]) -> bytes | None:
@@ -248,10 +291,7 @@ def format_human_result(
     if result.get("isError") is True:
         error = _error_payload(result)
         code = str(error.get("code") or "computer_use_error")
-        message = str(
-            error.get("message")
-            or translate("computer.cli.result.unknownError")
-        )
+        message = translate_computer_error(error, translate=translate)
         return translate(
             "computer.cli.result.error",
             code=code,

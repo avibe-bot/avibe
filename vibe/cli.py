@@ -729,6 +729,7 @@ def cmd_computer(args) -> int:
         build_driver_arguments,
         format_human_result,
         prepare_arguments_for_output,
+        translate_computer_error,
         tool_for_command,
         write_screenshot,
     )
@@ -799,9 +800,15 @@ def cmd_computer(args) -> int:
     result = body.get("result")
     if not isinstance(result, dict):
         code = str(body.get("error") or "computer_use_error")
-        message = str(
-            body.get("message")
-            or i18n_t("computer.cli.error.requestRejected", language)
+        error = {
+            "code": code,
+            "params": body.get("params")
+            if isinstance(body.get("params"), dict)
+            else {},
+        }
+        message = translate_computer_error(
+            error,
+            translate=translate,
         )
         if args.json:
             print(json.dumps(body, ensure_ascii=False, sort_keys=True))

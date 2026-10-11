@@ -1201,6 +1201,12 @@ redirected to test-owned fakes.
 
 ## Owner decision ledger
 
+- **2026-10-11 — Slice 1 deferred follow-up.** The owner deferred the
+  orphaned lease retirement behavior, human status/reason rendering,
+  Workbench Controller health status, and remaining Computer Use documentation
+  polish to a follow-up. The false Turn-capability statement in
+  `docs/COMMANDS.md` is corrected in this delivery; the remaining P2 work does
+  not expand the Slice 1 contract.
 - **2026-10-08 — Workbench support ownership follow-up.** The owner accepts
   terminal-started Runtimes advertising the desktop shell's shared Computer Use
   status as a Phase 1 limitation. Track `a per-Runtime shell-adoption signal for
