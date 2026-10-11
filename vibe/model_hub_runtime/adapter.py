@@ -67,7 +67,7 @@ from vibe.model_hub_runtime.installer import (
     INSTALL_RECOVERY_TIMEOUT_REASON,
     InstallClaimTransition,
 )
-from vibe.model_hub_runtime.state import EngineStateError, EngineStateStore
+from vibe.model_hub_runtime.state import EngineStateError, EngineStateStore, SourceRecord
 from vibe.model_hub_runtime.supervisor import (
     EngineSupervisor,
     EngineUnavailableError,
@@ -2825,25 +2825,39 @@ class CLIProxyEngineAdapter:
         Right after an engine start, config reload, or OAuth grant write,
         CLIProxyAPI answers a routed model it has not registered yet with a local
         rejection, before any egress. Within that settle window the same request
-        is retried after a short wait, releasing the transport between attempts;
-        otherwise the rejection stays the terminal ``engine_down`` it reports.
+        is retried after a short wait, releasing the transport between attempts,
+        and only for the Source record it was admitted under: a Source a save
+        edited or removed meanwhile keeps the rejection, so configuration never
+        redirects an admitted request. Otherwise the rejection stays the terminal
+        ``engine_down`` it reports.
         """
 
         delay = _REGISTRATION_RETRY_FIRST_DELAY_SECONDS
-        while True:
-            handle = await self._invoke_once(
+        handle, admitted = await self._invoke_once(
+            source_id,
+            model_id,
+            request,
+            stream,
+            origin,
+            on_admitted=on_admitted,
+        )
+        while handle.registration_pending and self.supervisor.models_registering():
+            await asyncio.sleep(delay)
+            if not self.supervisor.models_registering():
+                break
+            delay = min(2 * delay, _REGISTRATION_RETRY_MAX_DELAY_SECONDS)
+            retried, _source = await self._invoke_once(
                 source_id,
                 model_id,
                 request,
                 stream,
                 origin,
-                on_admitted=on_admitted,
+                admitted=admitted,
             )
-            if not handle.registration_pending or not self.supervisor.models_registering():
-                return handle
-            on_admitted = None  # admission is reported once per request
-            await asyncio.sleep(delay)
-            delay = min(2 * delay, _REGISTRATION_RETRY_MAX_DELAY_SECONDS)
+            if retried is None:
+                break
+            handle = retried
+        return handle
 
     def _note_grant_change(self) -> None:
         note_grant_change = getattr(self.supervisor, "note_grant_change", None)
@@ -2859,9 +2873,14 @@ class CLIProxyEngineAdapter:
         origin: str,
         *,
         on_admitted: Callable[[], None] | None = None,
-    ) -> EngineInvokeHandle:
+        admitted: SourceRecord | None = None,
+    ) -> tuple[EngineInvokeHandle | None, SourceRecord | None]:
+        """One attempt; with ``admitted``, None when the Source record changed since admission."""
+
         async with self._routing_lock:
             source = await asyncio.to_thread(self.state_store.get_source, source_id)
+            if admitted is not None and source != admitted:
+                return None, source
             if source is None:
                 raise EngineStateError("source is not registered")
             if source.allowed_origins and origin not in source.allowed_origins:
@@ -2880,7 +2899,7 @@ class CLIProxyEngineAdapter:
                         source_id=source_id,
                         os_errno=local_os_errno(exc),
                     )
-                )
+                ), source
             release = self._acquire_transport()
             request_sent = self._hold_unsent_request()
             try:
@@ -2904,7 +2923,7 @@ class CLIProxyEngineAdapter:
                 request_headers=getattr(request, "headers", None),
                 on_transport_done=release,
                 on_request_sent=request_sent,
-            )
+            ), source
         except BaseException:
             release()
             raise

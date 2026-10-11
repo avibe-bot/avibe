@@ -9499,22 +9499,40 @@ def test_oauth_flow_adds_a_second_account_and_refuses_the_same_one(
     asyncio.run(run())
 
 
-@pytest.mark.parametrize(("registering", "expected_calls", "expected_pending"), [(True, 3, False), (False, 1, True)])
+@pytest.mark.parametrize(
+    ("scenario", "expected_calls", "expected_pending", "expected_sleeps"),
+    [
+        ("settles", 3, False, [0.25, 0.5]),
+        ("outside_window", 1, True, []),
+        ("window_closes_while_waiting", 1, True, [0.25]),
+        ("source_edited_while_waiting", 1, True, [0.25]),
+    ],
+)
 def test_adapter_retries_a_routed_model_the_engine_is_still_registering(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    registering: bool,
+    scenario: str,
     expected_calls: int,
     expected_pending: bool,
+    expected_sleeps: list[float],
 ) -> None:
     pending_answers = 2
     calls = []
     sleeps = []
+    registering = [scenario != "outside_window"]
+    store = EngineStateStore(tmp_path / "state")
+    credential_ref = store.store_api_key(
+        "upstream-secret",
+        vendor="custom",
+        protocol="anthropic",
+        base_url="https://api.example.test/v1",
+    )
+    store.sync_sources([_binding(credential_ref, protocol="anthropic", allowed_origins=("claude",))])
 
     class Client:
         async def invoke(self, source, model_id, request, *, stream, request_protocol=None, request_headers=None,
                          on_transport_done=None, on_request_sent=None):
-            calls.append(model_id)
+            calls.append(source)
             on_transport_done()
             handle = client_module.EngineInvokeHandle(stream=None, outcome=asyncio.get_running_loop().create_future())
             # The engine answers its local "unknown provider" rejection until it registers the model.
@@ -9526,25 +9544,31 @@ def test_adapter_retries_a_routed_model_the_engine_is_still_registering(
             return Client()
 
         def models_registering(self) -> bool:
-            return registering
+            return registering[0]
 
     real_sleep = asyncio.sleep
 
     async def sleep(delay: float) -> None:
         sleeps.append(delay)
+        if scenario == "window_closes_while_waiting":
+            registering[0] = False
+        elif scenario == "source_edited_while_waiting":
+            # A save lands while the request waits: it must not redirect the request.
+            store.sync_sources(
+                [
+                    _binding(
+                        credential_ref,
+                        protocol="anthropic",
+                        allowed_origins=("claude",),
+                        model_ids=("model-a", "model-b"),
+                    )
+                ]
+            )
         await real_sleep(0)
 
     monkeypatch.setattr(asyncio, "sleep", sleep)
 
     async def run() -> None:
-        store = EngineStateStore(tmp_path / "state")
-        credential_ref = store.store_api_key(
-            "upstream-secret",
-            vendor="custom",
-            protocol="anthropic",
-            base_url="https://api.example.test/v1",
-        )
-        store.sync_sources([_binding(credential_ref, protocol="anthropic", allowed_origins=("claude",))])
         adapter = CLIProxyEngineAdapter(supervisor=Supervisor(), state_store=store)  # type: ignore[arg-type]
         admitted = []
 
@@ -9558,9 +9582,10 @@ def test_adapter_retries_a_routed_model_the_engine_is_still_registering(
         )
 
         assert len(calls) == expected_calls
+        assert len(set(calls)) == 1  # every attempt used the admitted Source record
         assert handle.registration_pending is expected_pending
         assert admitted == [True]  # admission is reported once per request
-        assert sleeps == ([0.25, 0.5] if registering else [])
+        assert sleeps == expected_sleeps
 
     asyncio.run(run())
 
