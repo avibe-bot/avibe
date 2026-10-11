@@ -76,6 +76,21 @@ def test_isolated_subprocess_kwargs_start_new_session_on_posix() -> None:
         assert isolated_subprocess_kwargs() == {"start_new_session": True}
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows console allocation")
+def test_background_console_program_opens_no_console_window() -> None:
+    """The desktop starts the service with no console, so a console child would open its own window."""
+    probe = "import ctypes; print(ctypes.windll.kernel32.GetConsoleWindow())"
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=60,
+        **isolated_subprocess_kwargs(console=False),
+    )
+    assert result.stdout.strip() == "0"
+
+
 def test_process_identity_reads_inherited_worker_marker(monkeypatch: pytest.MonkeyPatch) -> None:
     process = SimpleNamespace(
         create_time=lambda: 123.0,

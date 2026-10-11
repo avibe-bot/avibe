@@ -618,7 +618,7 @@ class EngineRuntimeManager(ManagedRuntimeManager):
                 timeout=10,
                 check=False,
                 env=engine_subprocess_environment(),
-                **isolated_subprocess_kwargs(),
+                **isolated_subprocess_kwargs(console=False),
             )
         except Exception as exc:  # noqa: BLE001
             self._set_install_failure(self._reason("binary_not_runnable"), exc)

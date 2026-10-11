@@ -143,8 +143,11 @@ class NativeFileEdit:
             if _read_regular(self.path) is not None:
                 raise TakeoverStateError("native configuration changed")
             return
+        # O_BINARY: a Windows text-mode descriptor would drop each CR and stop
+        # at 0x1A, so a CRLF native file never compared equal to its own bytes.
         descriptor = os.open(
-            self.path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
+            self.path,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0),
         )
         try:
             current = os.fstat(descriptor)

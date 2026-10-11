@@ -820,7 +820,9 @@ class EngineStateStore:
             # Do not turn an open/read failure into content corruption. Ref
             # recovery is safe only after a private regular file was read.
             descriptor = os.open(
-                path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
+                path,
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+                | getattr(os, "O_BINARY", 0),
             )
             with os.fdopen(descriptor, "rb") as handle:
                 mode = os.fstat(handle.fileno()).st_mode
@@ -1265,9 +1267,10 @@ class EngineStateStore:
             sort_keys=True,
         ).encode("utf-8") + b"\n"
         try:
+            # O_BINARY: Windows would otherwise write each LF as CRLF.
             descriptor = os.open(
                 path,
-                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0),
                 0o600,
             )
         except FileExistsError as exc:
@@ -1301,7 +1304,7 @@ class EngineStateStore:
             raise EngineStateError("credential reference collision")
         descriptor = -1
         try:
-            descriptor = os.open(temporary_path, os.O_WRONLY | os.O_TRUNC)
+            descriptor = os.open(temporary_path, os.O_WRONLY | os.O_TRUNC | getattr(os, "O_BINARY", 0))
             with os.fdopen(descriptor, "wb") as handle:
                 descriptor = -1
                 handle.write(serialized)
