@@ -74,7 +74,8 @@ export function SettingsBackendPage({ backend }: { backend: AgentBackendId }) {
               </div>
             )}
           />
-          {modelHubEnabled === true && <BackendSupplyModeCard backend={backend} />}
+          {/* Where no gateway engine is built, no supply mode can make this backend run. */}
+          {modelHubEnabled === true && supplyBlock !== 'engine_unsupported' && <BackendSupplyModeCard backend={backend} />}
         </div>
       )}
     </SettingsPageShell>

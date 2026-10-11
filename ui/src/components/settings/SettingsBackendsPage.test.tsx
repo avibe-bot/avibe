@@ -21,6 +21,7 @@ const mocks = vi.hoisted(() => ({
     restartBackend: vi.fn(),
   },
   showToast: vi.fn(),
+  modelHubEnabled: false,
 }));
 
 vi.mock('@/context/ApiContext', () => ({ useApi: () => mocks.api }));
@@ -28,13 +29,14 @@ vi.mock('@/context/ToastContext', () => ({ useToast: () => ({ showToast: mocks.s
 vi.mock('./SettingsPageShell', () => ({
   SettingsPageShell: ({ children, title }: { children: ReactNode; title: string }) => <main><h1>{title}</h1>{children}</main>,
 }));
-vi.mock('./models/useModelHubCapability', () => ({ useModelHubCapability: () => false }));
+vi.mock('./models/useModelHubCapability', () => ({ useModelHubCapability: () => mocks.modelHubEnabled }));
 vi.mock('./BackendLifecycleChip', () => ({
   BackendLifecycleChip: ({ name }: { name: string }) => <span data-testid={`lifecycle-${name}`} />,
 }));
 
 beforeEach(async () => {
   vi.clearAllMocks();
+  mocks.modelHubEnabled = false;
   await i18n.changeLanguage('en');
   mocks.api.getConfig.mockResolvedValue({ agents: {} });
   mocks.api.detectCli.mockImplementation(async (binary: string) => ({ found: true, path: binary }));
@@ -164,6 +166,8 @@ describe('backend attention', () => {
   // No gateway engine is built for this platform: the backend stays listed and enabled,
   // its status names that, and there is nothing on the Models page to turn on.
   it('says this platform has no gateway component, on the row and on the backend page', async () => {
+    // The Model Hub itself stays enabled on such a host; only its engine is missing.
+    mocks.modelHubEnabled = true;
     vi.spyOn(modelsApi, 'listAgents').mockResolvedValue(withoutModel);
     mocks.api.getConfig.mockResolvedValue({
       agents: {}, capabilities: { model_hub: { enabled: true } }, agent_supply_blocks: { vibey: 'engine_unsupported' },
