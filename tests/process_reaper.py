@@ -1,29 +1,33 @@
-"""Every process a test starts ends with that test, however the test ends.
+"""Every process a ``reap_processes`` test starts ends with that test, however it ends.
 
 A test that starts a real process and then fails, or waits on a gate until
 ``hang_guard`` gives up, never reaches its own cleanup. The process it started
 kept running: a job wrapper the test had stopped with SIGSTOP, and mock Model
 Hub engines, outlived their deleted worktrees by days. Two owners close that.
 
-- ``TestProcesses.reap`` runs once every fixture of a test is torn down
+- ``TestProcesses.reap`` runs once every fixture of a marked test is torn down
   (``tests/conftest.py``). It kills each process the test started that is still
-  running: every child the test recorded, with the process group the child
-  founded, and every other new descendant of this pytest process, each with its
-  own descendants.
+  running: every ``subprocess.Popen`` child the test recorded, with the process
+  group the child founded, and every other new descendant of this pytest
+  process, each with its own descendants.
 - A pytest that is killed outright (SIGKILL, the CI watchdog's ``_exit``) runs
-  no teardown. The warden, a process started with the run, reads the running
-  test's recorded children from a pipe. When pytest is gone, however it ended,
-  the warden kills each one still running and the group it founded.
+  no teardown. The warden, a process started with the first marked test, reads
+  the running test's recorded children from a pipe. When pytest is gone,
+  however it ended, the warden kills each one still running and the group it
+  founded.
 
-``tests/conftest.py`` records a child at every primitive that starts one:
-``subprocess.Popen`` (and so asyncio subprocesses), ``multiprocessing``'s
-``Process.start``, ``os.fork``, ``os.forkpty`` (``pty.fork``) and
-``os.posix_spawn``/``posix_spawnp``.
+Opt-in, for the suites whose children are real and long-lived: the job wrapper
+tests (``tests/agent_core/tools/test_bash.py``, ``test_jobs.py``,
+``tests/test_watch_job_target.py``) and the mock-engine tests
+(``tests/test_model_hub_runtime.py``, ``test_model_hub_local_error_details.py``).
+Each starts its children through ``subprocess.Popen`` in a session of their own,
+which is what the record covers. A marked test starts no ``multiprocessing``
+helper, which serves a whole run and would be reaped with the test.
 
-Invariant: once a test has ended, no process it started is still running, and
-when a run is killed, none its running test started is. A process is killed,
-not waited for, so a test that needs one to finish waits for it in its body.
-Every signal is proven to reach what the test started:
+Invariant: once a marked test has ended, no process it started is still
+running, and when a run is killed, none its running test started is. A process
+is killed, not waited for, so a test that needs one to finish waits for it in
+its body. Every signal is proven to reach what the test started:
 
 - a process is matched by pid and creation time, so a reused pid is never
   signalled;
@@ -31,10 +35,6 @@ Every signal is proven to reach what the test started:
   that pid names no process at all, which leaves only the leader's orphans in
   it. A pid reused by any live process makes the record stale. The warden
   forgets each test's records once its reap has confirmed them gone.
-
-``multiprocessing``'s resource tracker and forkserver are started lazily by
-whichever test first needs them and then serve the whole run. They end with
-pytest, so they are never reaped.
 
 Reports name a process by pid and executable name only: an argv can carry a
 credential.
@@ -62,16 +62,10 @@ _KILLPG = getattr(os, "killpg", None)
 _GETPGID = getattr(os, "getpgid", None)
 _GETPGRP = getattr(os, "getpgrp", None)
 
-# The ``-c`` programs multiprocessing starts its process-wide helpers with.
-_PROCESS_WIDE_HELPERS = (
-    "from multiprocessing.resource_tracker import main",
-    "from multiprocessing.forkserver import main",
-)
-
 
 class _Spawn(NamedTuple):
     created: float
-    # The spawn leads a process group of its own (``start_new_session``, ``setsid``, ``forkpty``).
+    # The spawn leads a process group of its own (``start_new_session``).
     founded_group: bool
 
 
@@ -101,14 +95,6 @@ def _group_is_ours(leader: int, created: float) -> bool:
         return True
     except psutil.Error:
         return False
-
-
-def _is_process_wide_helper(process: psutil.Process) -> bool:
-    try:
-        command = " ".join(process.cmdline())
-    except psutil.Error:
-        return False
-    return any(program in command for program in _PROCESS_WIDE_HELPERS)
 
 
 def _descendants() -> dict[int, float]:
@@ -150,7 +136,7 @@ class TestProcesses:
         self._spawned: dict[int, _Spawn] = {}
 
     def record(self, pid: int) -> None:
-        """Called for every child the test starts, once the child exists."""
+        """Called for every ``subprocess.Popen`` child the test starts, once the child exists."""
         created = _created(pid)
         if created is None:
             return
@@ -170,8 +156,7 @@ class TestProcesses:
         def add(process: psutil.Process) -> None:
             try:
                 for each in (process, *process.children(recursive=True)):
-                    if not _is_process_wide_helper(each):
-                        targets.setdefault(each.pid, each.create_time())
+                    targets.setdefault(each.pid, each.create_time())
             except psutil.Error:
                 pass
 
@@ -249,7 +234,12 @@ for pid, (created, founded_group) in records.items():
     except psutil.Error:
         continue
     if same:
-        for each in [*process.children(recursive=True), process]:
+        try:
+            tree = [*process.children(recursive=True), process]
+        except psutil.Error:
+            # It ended after the identity check; its group is still handled below.
+            tree = []
+        for each in tree:
             try:
                 each.send_signal(signal.SIGKILL)
             except psutil.Error:

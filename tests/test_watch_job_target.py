@@ -46,6 +46,9 @@ from vibe.ui_server import app as ui_app
 
 from tests.ui_server_test_helpers import csrf_headers
 
+# Starts real job wrappers: none may outlive its test (tests/process_reaper.py).
+pytestmark = pytest.mark.reap_processes
+
 SESSION_ID = "ses_job_watch"
 
 

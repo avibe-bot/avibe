@@ -1,7 +1,7 @@
-"""No process a test starts outlives it, however the test ends (tests/process_reaper.py).
+"""No process a ``reap_processes`` test starts outlives it, however it ends (tests/process_reaper.py).
 
 The run-level cases run a pytest of their own with this suite's conftest, so the
-reaper and the warden act exactly as they do for every test file.
+reaper and the warden act exactly as they do for every marked test file.
 """
 
 from __future__ import annotations
@@ -21,26 +21,21 @@ pytestmark = pytest.mark.skipif(os.name == "nt", reason="the reaper records spaw
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SUMMARY = "processes still running when their test ended were killed"
 
-# What leaked before, and every other way a test starts a child: a child stopped
-# with SIGSTOP in a session of its own (the job wrapper the deadline test stops),
-# a grandchild a spawned shell put in the background, orphaned once the shell
-# exits and found only through its group, a multiprocessing worker, and a pty
-# child. The spawn context also starts multiprocessing's resource tracker, which
-# serves the whole run and must survive the reap.
+# What leaked before: a child stopped with SIGSTOP in a session of its own (the
+# job wrapper the deadline test stops), and a grandchild a spawned shell put in
+# the background, orphaned once the shell exits and found only through its group.
 INNER = '''
-import multiprocessing
 import os
-import pty
 import signal
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 import psutil
 import pytest
 
 RECORD = Path(os.environ["REAPER_PROBE_RECORD"])
+pytestmark = pytest.mark.reap_processes
 
 
 def _spawn_tree():
@@ -51,27 +46,13 @@ def _spawn_tree():
     )
     orphan = int(shell.stdout.readline())
     shell.wait()
-    worker = multiprocessing.get_context("spawn").Process(target=time.sleep, args=(600,))
-    worker.start()
-    pid, _ = pty.fork()
-    if pid == 0:
-        os.execv("/bin/sleep", ["sleep", "600"])
     RECORD.write_text(
-        "".join(
-            f"{each} {psutil.Process(each).create_time()!r}\\n" for each in (stopped.pid, orphan, worker.pid, pid)
-        )
+        "".join(f"{pid} {psutil.Process(pid).create_time()!r}\\n" for pid in (stopped.pid, orphan))
     )
-
-
-def _tracker():
-    from multiprocessing import resource_tracker
-
-    return resource_tracker._resource_tracker._pid
 
 
 def test_a_failing_body():
     _spawn_tree()
-    assert _tracker() is not None
     raise AssertionError("fails on purpose")
 
 
@@ -83,7 +64,6 @@ def test_then_nothing_it_started_is_running():
             assert process.create_time() != float(created) or process.status() == psutil.STATUS_ZOMBIE
         except psutil.NoSuchProcess:
             pass
-    assert psutil.Process(_tracker()).status() != psutil.STATUS_ZOMBIE
 
 
 @pytest.mark.allow_foreign_signals(reason="the run kills itself, as the CI watchdog does")
@@ -93,9 +73,19 @@ def test_a_killed_run():
 '''
 
 
-def _run_inner(tmp_path: Path, selection: str) -> tuple[subprocess.CompletedProcess, Path]:
+# A run without a marked test is untouched: no warden, nothing recorded.
+UNMARKED = '''
+import psutil
+
+
+def test_an_unmarked_run_starts_no_warden():
+    assert psutil.Process().children() == []
+'''
+
+
+def _run_inner(tmp_path: Path, selection: str, source: str = INNER) -> tuple[subprocess.CompletedProcess, Path]:
     inner = tmp_path / "test_inner.py"
-    inner.write_text(INNER)
+    inner.write_text(source)
     record = tmp_path / "spawned"
     result = subprocess.run(
         [sys.executable, "-m", "pytest", "-p", "tests.conftest", "-p", "no:cacheprovider", "-q", str(inner), "-k", selection],
@@ -136,6 +126,12 @@ async def test_a_killed_run_leaves_nothing_it_started_running(tmp_path):
     assert result.returncode == -9, result.stdout + result.stderr
     # The warden acts once it sees the run gone, after this pytest saw it exit.
     await hang_guard.until(lambda: _running(record) == [], "the warden to kill what the killed run started")
+
+
+def test_a_run_without_a_marked_test_has_no_warden(tmp_path):
+    result, _ = _run_inner(tmp_path, "unmarked", UNMARKED)
+
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 @pytest.fixture

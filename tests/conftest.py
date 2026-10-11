@@ -50,7 +50,6 @@ import ast
 import errno
 import importlib
 import inspect
-import multiprocessing.process
 import os
 import re
 import shutil
@@ -177,13 +176,10 @@ def pytest_configure(config):
         raise pytest.UsageError(
             f"{sys.executable} is a desktop Runtime's private interpreter; run the tests with another Python"
         )
-    global _process_warden
-    if _SIGNAL_GUARD_SUPPORTED:
-        _process_warden = process_reaper.Warden()
 
 
-# Every process a test starts ends with it (tests/process_reaper.py): the
-# running test's record, the run's warden, and what the reaper had to kill.
+# Every process a `reap_processes` test starts ends with it (tests/process_reaper.py):
+# the running test's record, the run's warden, and what the reaper had to kill.
 _active_test_processes: process_reaper.TestProcesses | None = None
 _process_warden: process_reaper.Warden | None = None
 _reaped_processes: list[str] = []
@@ -192,14 +188,19 @@ _TEST_PROCESSES = pytest.StashKey[process_reaper.TestProcesses]()
 
 @pytest.fixture(autouse=True)
 def _record_test_processes(request):
-    """Record every process this test starts; ``pytest_runtest_teardown`` kills what is still running.
+    """For a ``reap_processes`` test, record every process it starts; ``pytest_runtest_teardown`` kills
+    what is still running.
 
-    A fixture, so the record begins after every module- and session-scoped
-    fixture is set up: what those start belongs to them, not to this test.
+    Opt-in: only the suites that start real children carry the marker. A fixture,
+    so the record begins after every module- and session-scoped fixture is set
+    up: what those start belongs to them, not to this test. The warden starts
+    with the first marked test, so a run without one never has it.
     """
 
-    global _active_test_processes
-    if _SIGNAL_GUARD_SUPPORTED:
+    global _active_test_processes, _process_warden
+    if _SIGNAL_GUARD_SUPPORTED and request.node.get_closest_marker("reap_processes") is not None:
+        if _process_warden is None:
+            _process_warden = process_reaper.Warden()
         _active_test_processes = request.node.stash[_TEST_PROCESSES] = process_reaper.TestProcesses(
             _process_warden
         )
@@ -546,12 +547,6 @@ _REAL_PSUTIL_PROCESS = psutil.Process
 _REAL_PSUTIL_PROCESS_INIT = psutil.Process.__init__
 _REAL_PSUTIL_PIDS = psutil.pids
 _REAL_POPEN_INIT = subprocess.Popen.__init__
-# Every other primitive that starts a child, for the reaper's record (tests/process_reaper.py).
-_REAL_OS_FORK = getattr(os, "fork", None)
-_REAL_OS_FORKPTY = getattr(os, "forkpty", None)
-_REAL_OS_POSIX_SPAWN = getattr(os, "posix_spawn", None)
-_REAL_OS_POSIX_SPAWNP = getattr(os, "posix_spawnp", None)
-_REAL_PROCESS_START = multiprocessing.process.BaseProcess.start
 
 # The packages the wheel ships: a process lookup made from one of them is the
 # product's, and that is where a test's fake pid must not reach the real table.
@@ -764,47 +759,15 @@ def _guarded_killpg(pgid, sig):
     return _REAL_OS_KILLPG(pgid, sig)
 
 
-def _record_child(pid) -> None:
-    processes = _active_test_processes
-    if processes is not None and isinstance(pid, int) and pid > 0:
-        processes.record(pid)
-
-
 @wraps(_REAL_POPEN_INIT)
 def _recording_popen_init(popen, *args, **kwargs):
     _REAL_POPEN_INIT(popen, *args, **kwargs)
     guard = _active_signal_guard
     if guard is not None:
         guard.owned.add(popen.pid)
-    _record_child(popen.pid)
-
-
-def _recording_fork():
-    pid = _REAL_OS_FORK()
-    _record_child(pid)
-    return pid
-
-
-def _recording_forkpty():
-    pid, fd = _REAL_OS_FORKPTY()
-    _record_child(pid)
-    return pid, fd
-
-
-def _recording_spawn(spawn):
-    @wraps(spawn)
-    def recording(*args, **kwargs):
-        pid = spawn(*args, **kwargs)
-        _record_child(pid)
-        return pid
-
-    return recording
-
-
-@wraps(_REAL_PROCESS_START)
-def _recording_process_start(process):
-    _REAL_PROCESS_START(process)
-    _record_child(process.pid)
+    processes = _active_test_processes
+    if processes is not None:
+        processes.record(popen.pid)
 
 
 @wraps(_REAL_PSUTIL_PROCESS_INIT)
@@ -840,8 +803,7 @@ def _listing_pids():
 # TerminateProcess through ctypes, so wrapping `os.kill` there would guard
 # nothing the product reaches. Every psutil lookup constructs a `Process`, and
 # `process_iter` lists through the module's `pids`; a test that replaces
-# `psutil.Process` with its own fake bypasses both, as it means to. The spawn
-# primitives record each child for the reaper, whichever way a test starts it.
+# `psutil.Process` with its own fake bypasses both, as it means to.
 _SIGNAL_GUARD_SUPPORTED = os.name != "nt" and _REAL_OS_KILLPG is not None
 if _SIGNAL_GUARD_SUPPORTED:
     os.kill = _guarded_kill
@@ -849,14 +811,6 @@ if _SIGNAL_GUARD_SUPPORTED:
     subprocess.Popen.__init__ = _recording_popen_init
     psutil.Process.__init__ = _guarded_process_init
     psutil.pids = _listing_pids
-    os.fork = wraps(_REAL_OS_FORK)(_recording_fork)
-    if _REAL_OS_FORKPTY is not None:
-        os.forkpty = wraps(_REAL_OS_FORKPTY)(_recording_forkpty)
-    if _REAL_OS_POSIX_SPAWN is not None:
-        os.posix_spawn = _recording_spawn(_REAL_OS_POSIX_SPAWN)
-    if _REAL_OS_POSIX_SPAWNP is not None:
-        os.posix_spawnp = _recording_spawn(_REAL_OS_POSIX_SPAWNP)
-    multiprocessing.process.BaseProcess.start = _recording_process_start
 
 
 @pytest.fixture(autouse=True)

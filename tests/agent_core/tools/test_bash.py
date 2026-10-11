@@ -22,6 +22,9 @@ from core.agent_core.tools.jobs import LocalJobHost
 from tests import hang_guard
 from tests.agent_core.tools.conftest import instance, result_text
 
+# Starts real job wrappers: none may outlive its test (tests/process_reaper.py).
+pytestmark = pytest.mark.reap_processes
+
 LABEL = "Output log (first 1.0MB, then the last 2.0MB in tail.log beside it)"
 
 
