@@ -119,7 +119,7 @@ ignored without parsing.
 | `response.output_text.done`, `response.reasoning_summary_text.done`, `response.reasoning_text.done` | none | `output_index: non-negative integer` |
 | `response.content_part.added`, `response.content_part.done` | none | `output_index: non-negative integer`, `part: object` |
 | `response.completed`, `response.incomplete` | `response: object` | `response.status: string`, `output: array`, `usage: object`, `incomplete_details: object`, `error: object` |
-| `response.failed` | `type: string` | `response: object`, `response.error: object`, `response.usage: object` |
+| `response.failed` | `type: string`, or the SSE event name `response.failed` with `response.error: object` (relays that omit the duplicated `type`) | `response: object`, `response.error: object`, `response.usage: object` |
 | top-level `error` | `error: object` or `message: string` | `error.type`/`error.message: string`, `error.code: string or integer` |
 
 `response.output` is validated even when empty. If it is present and is not an
@@ -137,8 +137,11 @@ or extracted message/code pair that its wire format makes available.
 | Anthropic | `authentication_error`, `invalid_api_key`, `permission_error`, `permission` | `rate_limit_error` | `overloaded_error` → `overloaded`; `api_error` → `server` | `invalid_request_error` with context text; `context_length_exceeded` → `overflow` |
 | OpenAI Chat | `authentication_error`, `invalid_api_key`, `permission` | `rate_limit_error`, `too_many_requests` | `server_error`, `api_error` | `context_length_exceeded`, `request_too_large` |
 | OpenAI Responses | `unauthenticated`, `permission_denied`, `invalid_api_key` | `rate_limit`, `rate_limit_error` | `overloaded`, `server_error`, `service_unavailable` | `context_length_exceeded`, `request_too_large` |
+| Model Hub relays, any protocol | | | `upstream_error`, `service_unavailable_error` → `server` | |
 HTTP `401/403` always map to `auth`, `413` to `overflow`, `429` to
-`rate_limit` with `Retry-After`, and `5xx` to `server` or `overloaded`.
+`rate_limit` with `Retry-After`, and `5xx` to `server` or `overloaded`. A server code follows the same rule as a
+`5xx`: it is `overloaded` when its message says overloaded (OpenAI's capacity shed is a `service_unavailable_error`
+that says so), otherwise `server`.
 Transport errors map to `network`, and the silence bound to `stalled`. Every classification is non-retryable once
 the assembler has emitted visible content or a tool-call event.
 
