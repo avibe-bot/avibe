@@ -605,6 +605,46 @@ Connector state writes are atomic. On startup:
   and
 - never clear shared logs or state belonging to the surviving connector.
 
+### Exited-connector restart
+
+A connector can exit on its own: after a reboot, when the network is not up yet
+at UI start, cloudflared exits within about a second. `start()` records a
+connector request (`remote-access-connector-requested` in the runtime
+directory) and `stop()` withdraws it before stopping the process. The monitor
+restarts a requested connector that is no longer running:
+
+- only while remote access is enabled with a tunnel token, and never while
+  recovery owns the connector lane: the restart checks
+  `_connector_lane_reserved_locked()` under the recovery lock before it takes
+  the connector lock, the same order settings and recovery use;
+- one backoff delay after the exit is first seen, starting at one sample
+  interval and doubling after each attempt up to two minutes; and
+- the delay resets once a connector reports a ready connection.
+
+The UI server, its monitor and recovery threads, and the `vibe remote` CLI all
+read and rewrite the connector's pid, state, and request files. One
+cross-process lifecycle lock, `runtime/remote-access-connector.lock`
+(`storage.lock.MigrationFileLock`, never unlinked), serializes every
+read-validate-mutate section: a start's status check, spawn, and publish; a
+stop's withdrawal, kill, and record removal; the restart's request check,
+spawn, and publish; status()'s removal of an exited connector's records; and
+recovery's candidate spawn, promote, and drain record transitions. The lock
+order is the lifecycle lock, then the recovery lock, then the connector lock.
+User starts and stops wait up to 20 seconds, longer than a start's own
+worst-case hold, and then report `remote_access_busy`; the monitor, the
+restart, reconciliation, and status() only try the lock and skip when it is
+busy, because a later tick repeats them, and a startup orphan-candidate
+reconciliation that found it busy is retried on later ticks. Record cleanups
+that nothing repeats (a discarded candidate, a drained connector, a cleared
+tail rollback) wait up to 60 seconds, three times the longest hold, and
+otherwise log an error and leave the records for reconciliation. Waits such as candidate warm-up and downloading a
+missing cloudflared run outside it, and the OS releases it when its holder
+dies. A request path that is not a regular file is no request.
+
+So only an explicit `stop()` withdraws the request, and no stop or start in
+any process interleaves with a restart. A tick that attempted a restart skips
+quality evaluation, because its samples describe the exited connector.
+
 ## Doctor Integration
 
 Doctor gains a `Remote Access` group. It is read-only and never starts a
@@ -912,6 +952,7 @@ the active Connector currently demonstrates QUIC. An unobserved UDP path stays
 | RA-TQ-030 | Connectivity diagnostics distinguish proven from unobserved paths | diagnostics contract test |
 | RA-TQ-031 | Tunnel controls remain usable on desktop and mobile | browser/runtime proof |
 | RA-TQ-033 | An unavailable route recovers over the other transport despite cooldown | supervisor scenario tests |
+| RA-TQ-034 | A requested connector that exits on its own restarts with backoff; a stopped or disabled one stays down | supervisor scenario tests |
 
 ## Implementation Boundaries
 
@@ -956,5 +997,5 @@ changes must update the schema first.
   console is visible.
 - No secret or sensitive request data appears in local snapshots, logs, Doctor,
   status APIs, or cloud payloads.
-- RA-TQ-001 through RA-TQ-030 and RA-TQ-033 pass in their required evidence
+- RA-TQ-001 through RA-TQ-030, RA-TQ-033, and RA-TQ-034 pass in their required evidence
   layers; RA-TQ-031 receives browser proof at desktop and mobile widths.
