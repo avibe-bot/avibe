@@ -377,18 +377,19 @@ def test_failure_persistence_error_keeps_temporary_admission_and_original_termin
         service.store = FreshStore(service.store.load())
         before = copy.deepcopy(service.store.persisted)
         service.store.write_error = True
+        reason = code or ("server_error" if status == 503 else "rate_limited")
         async with gateway_client(service, backend, models[backend]) as (gateway, client, url, headers):
             async with client.post(url, headers=headers, json={"model": "shared-model"}) as response:
                 assert response.status == (400 if backend == "codex" else 424)
-                assert (await response.json())["error"]["code"] == RECOVERY_EXHAUSTED_CODE
+                ending = (await response.json())["error"]
+                # The ending names the failure recovery waited out, whichever way the window closed.
+                assert (ending["code"], ending["cause"]) == (RECOVERY_EXHAUSTED_CODE, reason)
             projection = gateway.correlation.terminal_projection("turn_lifecycle", backend=backend)
             if backend == "opencode":
                 assert projection is None  # Shared-server HTTP does not prove an exact Turn.
             else:
                 assert projection is not None
-                assert [blocker.reason for blocker in projection.supply_facts.blockers] == [
-                    code or ("server_error" if status == 503 else "rate_limited"),
-                ]
+                assert [blocker.reason for blocker in projection.supply_facts.blockers] == [reason]
                 gateway.correlation.settle("turn_lifecycle", settled_by=SETTLED_BY_TERMINAL_RESULT)
                 record = service.provenance.get("turn_lifecycle")
                 assert [attempt["http_status"] for attempt in record["failed_attempts"]] == [status] * attempts
@@ -512,7 +513,7 @@ def test_expiry_remains_a_closed_terminal_when_live_supply_changes(tmp_path, bac
                     "type": "error",
                     "error": {
                         "type": RECOVERY_EXHAUSTED_CODE, "code": RECOVERY_EXHAUSTED_CODE,
-                        "message": RECOVERY_EXHAUSTED_MESSAGE,
+                        "message": RECOVERY_EXHAUSTED_MESSAGE, "cause": "network",
                     },
                 }
                 assert service.adapter.invocations == []

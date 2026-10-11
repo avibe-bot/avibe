@@ -199,7 +199,8 @@ and `bash` results with `context_edit` rows, on by default; and a checkpoint wri
   result saying so.
 - **Checkpoint delivery is a fork**, a side turn (C-10 `fork.md` §7): the same model, system prompt, tools, tool
   choice, and reasoning settings, the conversation prefix byte-identical, and the three-layer prompt appended
-  (`checkpoint-v3`), which asks for the checkpoint in one `<checkpoint>` block of the final reply; a reply without
+  (`checkpoint-v4`), which asks for the checkpoint in one `<checkpoint>` block of the final reply and says it comes
+  from the harness, not the user, so neither it nor what it asks is recorded as the user's; a reply without
   exactly one substantial block gets one repair, then fails. The checkpoint turn runs through the same loop under the
   "dreaming" policy: `read` allowed, writes only inside the Session's scratch directory, everything else denied; at
   most 5 tool rounds, each tool bounded by the room left in the window. Its messages are audit rows, never context.
@@ -364,7 +365,7 @@ breaker, review gates, and close-out follow the `pr-delivery-loop` skill.
 | Provider edge cases become permanent maintenance | port tau's fixtures; add cases derived from `pi-ai` for stop reasons, overflow, retry, SSE; one conformance suite per protocol |
 | The Model Hub extension lands late and blocks C-2 conformance | the Model Hub lane runs first in P1; the `ai` lane develops against the contract file, not the live gateway |
 | A second persistence model creeps back | C-5 forbids one; A10 tests it |
-| Compaction quietly loses user constraints | the template's "User requirements" heading (`checkpoint-v3`); A12 tracked per prompt version |
+| Compaction quietly loses user constraints | the template's "User requirements" heading (`checkpoint-v4`); A12 tracked per prompt version |
 | Database growth from inline tool output | output governance bounds each row; the reserved reference form allows moving it out without a schema change |
 | Scope creep toward the tension system or interactive terminals | §2 non-goals; §5.4 ships only the shape in v1 |
 | Python 3.10 floor versus ported code | port with `TypeAlias`; CI already covers 3.10 |

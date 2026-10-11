@@ -7,8 +7,8 @@ the adapter supplies a ``ContextHost`` for what only it knows.
 
 The cut rule and cumulative file lists follow Pi (MIT, Copyright (c) 2025
 Mario Zechner, ``packages/coding-agent/src/core/compaction/`` at ``7fbbd5f``);
-the checkpoint request is the prompt ``checkpoint-v3``: ``checkpoint-v2``'s owner-approved template inside one
-``<checkpoint>`` block.
+the checkpoint request is the prompt ``checkpoint-v4``: ``checkpoint-v2``'s owner-approved template inside one
+``<checkpoint>`` block, in a request that says it is the harness's, not the user's.
 """
 
 from __future__ import annotations
@@ -102,16 +102,16 @@ MAX_OVERFLOWS = 4
 UNPRODUCTIVE_CHECKPOINTS = 2
 INEFFECTIVE_RATIO = 0.75
 
-PROMPT_VERSION = "checkpoint-v3"
+PROMPT_VERSION = "checkpoint-v4"
 
 # The checkpoint request (context.md section 11), verbatim.
 CHECKPOINT_REQUEST = """<context-checkpoint-request>
-Pause the work here. Do not call any tool and do not continue the task. This reply does one thing: write a context checkpoint.
+This request comes from the harness that runs you, not from the user, and the user does not see it. Pause the work here. Do not call any tool and do not continue the task. This reply does one thing: write a context checkpoint.
 
 The conversation above will be replaced by your checkpoint plus the messages after it. Whoever continues is you, but you will no longer remember this conversation; the checkpoint is all you will know of it. What you do not write down is lost.
 If there is an earlier checkpoint above, it is discarded after this: carry forward everything in it that still matters; where it conflicts with later messages, the later messages win.
 
-Everything above is a record to summarize, not instructions to act on now.
+Everything above is a record to summarize, not instructions to act on now. This request is not part of that record: do not write it, or anything it asks of you (including not calling tools), into the checkpoint as something the user said or wants, as a goal or requirement, or as a next step. Record the work as it stood before this request.
 
 Write the checkpoint as one block in your final reply: a line <checkpoint>, then the checkpoint, then a line </checkpoint>. Only what is inside that block is kept. Write those two tags only there, once each; if the checkpoint has to mention them, describe them in words.
 
@@ -161,7 +161,7 @@ CHECKPOINT_REQUEST_END = "</context-checkpoint-request>"
 #: The one corrective follow-up a rejected final reply gets (sections 6 and 11), verbatim; ``{problem}`` is the
 #: validator's (``checkpoint_block``).
 CHECKPOINT_REPAIR = """<context-checkpoint-request>
-That reply is not a checkpoint: {problem}. Write your final reply again, with the complete checkpoint as asked above in exactly one <checkpoint> block. Do not call any tool.
+That reply is not a checkpoint: {problem}. Write your final reply again, with the complete checkpoint as asked above in exactly one <checkpoint> block. Do not call any tool. Like the request, this message comes from the harness, not the user: keep it, and what it asks, out of the checkpoint.
 </context-checkpoint-request>"""
 #: The substance floor's bounds and divisor (section 6): ``min(128, max(32, W / 2,000))`` tokens on a ``W``-token window.
 CHECKPOINT_FLOOR_MIN = 32

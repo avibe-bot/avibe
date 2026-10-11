@@ -1055,15 +1055,17 @@ class ModelHubTurnGateway:
                 self._commit_and_render_turn_outcome(execution, terminalizer, turn_outcome)
                 # Native compatibility is keyed by the caller backend. Keep its
                 # transport result separate from actual upstream provenance.
+                ending = {
+                    "type": RECOVERY_EXHAUSTED_CODE,
+                    "code": RECOVERY_EXHAUSTED_CODE,
+                    "message": RECOVERY_EXHAUSTED_MESSAGE,
+                }
+                cause = exc.data.get("cause")
+                if isinstance(cause, str):
+                    # The failure recovery waited out, so a caller can name it instead of blaming the request.
+                    ending["cause"] = cause
                 response = web.json_response(
-                    {
-                        "type": "error",
-                        "error": {
-                            "type": RECOVERY_EXHAUSTED_CODE,
-                            "code": RECOVERY_EXHAUSTED_CODE,
-                            "message": RECOVERY_EXHAUSTED_MESSAGE,
-                        },
-                    },
+                    {"type": "error", "error": ending},
                     status=400 if backend == "codex" else 424,
                     headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
                 )

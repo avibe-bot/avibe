@@ -4574,6 +4574,44 @@ async def test_model_hubs_stream_interrupted_frame_is_the_interrupted_kind(adapt
     assert (error.kind, error.retryable) == ("interrupted", True)
 
 
+# Model Hub's ending once its recovery window ran out (``turn_gateway.py``): an HTTP 424 whose envelope names the
+# failure the hub waited out. It already retried that failure, so the loop must not retry again, and the copy must
+# name the failure, not blame the request as the generic 4xx rule would.
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("adapter_type", "protocol"),
+    [(OpenAIResponsesAdapter, "openai_responses"), (OpenAIChatAdapter, "openai_chat"), (AnthropicAdapter, "anthropic")],
+)
+@pytest.mark.parametrize(
+    ("cause", "kind"),
+    [
+        ("server_error", "server"),
+        ("network", "network"),
+        ("rate_limited", "rate_limit"),
+        ("quota_exhausted", "rate_limit"),
+        (None, "server"),
+    ],
+)
+async def test_model_hubs_recovery_exhausted_ending_names_its_cause(adapter_type, protocol, cause, kind) -> None:
+    ending = {
+        "type": "model_hub_recovery_exhausted",
+        "code": "model_hub_recovery_exhausted",
+        "message": "Automatic recovery has ended. Try again or choose another model.",
+    }
+    if cause is not None:
+        ending["cause"] = cause
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(424, json={"type": "error", "error": ending})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        events = await _events(adapter_type(client), _request(protocol))
+
+    error = events[-1]
+    assert isinstance(error, ProviderError)
+    assert (error.kind, error.retryable) == (kind, False)
+
+
 # CLIProxyAPI nests the class under `error`; OpenAI's reference carries it at the root.
 _SERVER_ERROR_FRAMES = {
     "cpa-nested": 'data: {"type":"error","error":{"code":"request_timeout","message":"stream error: stream '

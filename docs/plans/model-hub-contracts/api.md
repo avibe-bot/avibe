@@ -1277,14 +1277,24 @@ Only exhaustion of automatic temporary recovery uses this exact terminal body:
   "error": {
     "type": "model_hub_recovery_exhausted",
     "code": "model_hub_recovery_exhausted",
-    "message": "Automatic recovery has ended. Try again or choose another model."
+    "message": "Automatic recovery has ended. Try again or choose another model.",
+    "cause": "server_error"
   }
 }
 ```
 
-The HTTP status is 400 for backend `codex`, 424 for backend `claude` or
-`opencode`, independently of protocol. No Retry-After, raw upstream text or
-upstream error detail is sent on this branch. Real provenance remains unchanged;
+`cause` names the failure the request was waiting out when recovery ended, in
+the structured recovery family the `recovery_snapshot` `reason` uses:
+`server_error`, `rate_limited`, `quota_exhausted` or `network`. The walk's own
+most recent failure wins over the waited hop's reason. It is omitted when no
+reason is known, and it is never raw upstream text. Native clients ignore it;
+Avibe's own agent classifies the ending by it, so the user is told what failed
+rather than that the request was rejected, and never retries an ending the hub
+already retried.
+
+The HTTP status is 400 for backend `codex`, 424 for backend `claude`,
+`opencode` or `vibey`, independently of protocol. No Retry-After, raw upstream
+text or upstream error detail is sent on this branch. Real provenance remains unchanged;
 the wire status is not reclassified as a Source/request failure. In particular,
 Codex's internal InvalidRequest interpretation is an intentional transport
 compatibility measure, not public `invalid_request_error`.
