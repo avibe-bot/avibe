@@ -48,10 +48,9 @@ Raw text, no line numbers, head kept. Model-facing suffixes:
   `{quoted_path}` is the path shell-quoted (Avibe change to Pi's text, so the suggested command is always safe to run).
   On Windows: `[Line {n} is {size}, exceeds 50KB limit. Use powershell: {command}]`, where `{command}` prints what
   `sed` and `head -c` would: line `{n}` read as UTF-8, at most its first 51200 bytes, cut at a character boundary,
-  with no newline added. The path is in single quotes with each `'` doubled, and `@()` keeps line 1 a line rather
-  than a string to index:
-  `@(Get-Content -LiteralPath {quoted_path} -TotalCount {n} -Encoding UTF8)[-1] | ForEach-Object { $b =
-  [Text.Encoding]::UTF8.GetBytes($_); $n = [Math]::Min($b.Length, 51200); while ($n -lt $b.Length -and ($b[$n]
+  with no newline added, streaming the lines before it. The path is in single quotes with each `'` doubled:
+  `Get-Content -LiteralPath {quoted_path} -TotalCount {n} -Encoding UTF8 | Select-Object -Last 1 | ForEach-Object {
+  $b = [Text.Encoding]::UTF8.GetBytes($_); $n = [Math]::Min($b.Length, 51200); while ($n -lt $b.Length -and ($b[$n]
   -band 0xC0) -eq 0x80) { $n-- }; [Console]::Out.Write([Text.Encoding]::UTF8.GetString($b, 0, $n)) }`
 - Error: `Offset {offset} is beyond end of file ({total} lines total)`
 
@@ -255,6 +254,9 @@ names `powershell` there, and "for example sed or a short script" becomes "for e
   before it; else the `$LASTEXITCODE` that statement set, when it is not 0, so a failed native program reports its
   code; else 1. A code an earlier statement left in `$LASTEXITCODE` is not the last statement's, and a function
   that writes an error and returns has succeeded, as `$?` says.
+- The command sees `$LASTEXITCODE` exactly as PowerShell sets it, and its named blocks may be written in any order.
+  A compound last statement (an `if`, a loop, a `try`) is one statement: when a native program in it fails and a
+  cmdlet after it fails too, the code is the native program's, which that statement set.
 - Errors are reported at the command's own lines: the wrapping adds no line. Only an error in a last statement that
   shares its line with the statement before it is reported at a later column. The wrapping reads nothing that
   `Set-StrictMode` forbids, so a command may turn strict mode on.
