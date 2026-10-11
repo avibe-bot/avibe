@@ -38,6 +38,7 @@ from core.handlers.model_hub.adapter import (
 )
 from core.handlers.model_hub.classification import (
     classify_outcome,
+    source_settlement_rule,
     terminal_outcome_category,
 )
 from core.handlers.model_hub.errors import ModelDiscoveryError
@@ -7430,6 +7431,26 @@ def test_engine_buffered_2xx_error_envelope_carries_upstream_detail() -> None:
     assert observation.outcome == "failed_terminal"
     assert outcome is not None
     assert outcome.upstream_detail == "model retired"
+
+
+def test_engine_claude_timeout_error_falls_back_with_a_server_cooldown() -> None:
+    # CLIProxyAPI v8 answers an upstream 408 on /v1/messages with this body.
+    body = json.dumps(
+        {"type": "error", "error": {"type": "timeout_error", "message": "upstream request timed out"}}
+    ).encode()
+
+    observation = observe_buffered_protocol_response("anthropic", io.BytesIO(body))
+    outcome = client_module._reduce_protocol_observation(
+        observation,
+        source=_detail_source(),
+        model_id="model-a",
+        http_status=408,
+        stream_started=False,
+    )
+    decision = classify_outcome(outcome)
+
+    assert (decision.action, decision.reason, decision.cooldown_seconds) == ("fallback", "server_error", 30)
+    assert source_settlement_rule(decision.reason).status == "cooldown"
 
 
 _ANTHROPIC_OUTPUT_STARTED = (
