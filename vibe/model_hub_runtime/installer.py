@@ -34,6 +34,8 @@ _ENGINE_PLATFORM_MAP = {
     "darwin-x64": "darwin-x64",
     "linux-x64": "linux-amd64",
     "linux-arm64": "linux-arm64",
+    "win32-x64": "windows-amd64",
+    "win32-arm64": "windows-arm64",
 }
 _ENGINE_ASSET_PLATFORMS = frozenset(_ENGINE_PLATFORM_MAP.values())
 _INSTALL_STATE_SCHEMA_VERSION = 3

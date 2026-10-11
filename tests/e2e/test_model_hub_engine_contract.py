@@ -15,6 +15,7 @@ import hashlib
 import json
 import os
 import re
+import socket
 import threading
 import time
 import urllib.error
@@ -347,6 +348,62 @@ def test_engine_management_surface_avibe_reads(tmp_path, monkeypatch) -> None:
             counts.append(len((listing.get("body") or {}).get("models") or []))
             time.sleep(1)
         evidence["antigravity_models_first_5s"] = counts
+    _write_evidence(tmp_path, evidence)
+
+
+def _external_address() -> str | None:
+    """Return this host's non-loopback address, without sending a packet."""
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+        try:
+            probe.connect(("192.0.2.1", 9))
+        except OSError:
+            return None
+        address = probe.getsockname()[0]
+    return None if address.startswith("127.") or address == "0.0.0.0" else address
+
+
+def _accepts(host: str, port: int) -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=1.0):
+            return True
+    except OSError:
+        return False
+
+
+def test_oauth_callback_forwarder_is_loopback_only_and_optional(tmp_path, monkeypatch) -> None:
+    """A redirect login relays its callback on loopback only, and starts without the relay.
+
+    Codex's forwarder port must accept on 127.0.0.1 and refuse on the host's
+    network address. With Claude's fixed port already taken, the login still
+    starts and waits for a pasted callback.
+    """
+    external = _external_address()
+    evidence: dict = {}
+    with _isolated_engine_adapter(tmp_path, monkeypatch) as adapter:
+        client = EngineClient(adapter.supervisor.ensure_running())
+
+        started = _call(client, "GET", "/codex-auth-url", query={"is_webui": "true"})
+        assert started["ok"], started
+        state = started["body"]["state"]
+        _await(lambda: _accepts("127.0.0.1", 1455), what="codex forwarder on loopback")
+        evidence["codex_forwarder"] = {
+            "loopback": True,
+            "external": _accepts(external, 1455) if external else None,
+        }
+        assert evidence["codex_forwarder"]["external"] in (False, None), evidence
+        assert _call(client, "DELETE", "/oauth-session", query={"state": state})["ok"]
+
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as holder:
+            holder.bind(("127.0.0.1", 54545))
+            holder.listen()
+            started = _call(client, "GET", "/anthropic-auth-url", query={"is_webui": "true"})
+            evidence["anthropic_port_taken"] = {"ok": started["ok"], "status": started.get("status")}
+            assert started["ok"], started
+            assert started["body"].get("url")
+            state = started["body"]["state"]
+            waiting = _call(client, "GET", "/get-auth-status", query={"state": state})
+            assert waiting["ok"] and waiting["body"].get("status") == "wait", waiting
+            assert _call(client, "DELETE", "/oauth-session", query={"state": state})["ok"]
     _write_evidence(tmp_path, evidence)
 
 

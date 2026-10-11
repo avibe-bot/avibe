@@ -57,7 +57,7 @@
             "required": ["platform", "url", "size_bytes", "sha256"],
             "additionalProperties": false,
             "properties": {
-              "platform": { "enum": ["darwin-arm64", "darwin-x64", "linux-amd64", "linux-arm64"] },
+              "platform": { "enum": ["darwin-arm64", "darwin-x64", "linux-amd64", "linux-arm64", "windows-amd64", "windows-arm64"] },
               "url": { "type": "string" },
               "size_bytes": { "type": "integer" },
               "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }

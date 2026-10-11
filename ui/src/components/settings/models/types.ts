@@ -741,7 +741,7 @@ export type OAuthFlow = {
 export type RuntimeHealth = 'ok' | 'degraded' | 'down' | 'not_started' | 'not_installed' | 'installing';
 
 type RuntimeManifestAsset = {
-  platform: 'darwin-arm64' | 'darwin-x64' | 'linux-amd64' | 'linux-arm64';
+  platform: 'darwin-arm64' | 'darwin-x64' | 'linux-amd64' | 'linux-arm64' | 'windows-amd64' | 'windows-arm64';
   url: string;
   size_bytes: number;
   sha256: string;
