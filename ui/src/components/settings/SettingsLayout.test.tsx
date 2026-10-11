@@ -294,21 +294,36 @@ describe('SettingsLayout', () => {
     expect(standardFrame?.className).not.toContain('min-h-full');
   });
 
-  it('renders the three-group rail and feature-gated owner sections', async () => {
+  it('renders the three-group rail and feature-gated owner sections', () => {
     renderLayout('/settings/replies');
 
     expect(screen.getByText('replies-body')).toBeTruthy();
     expect(screen.getByText('settings.groups.agents')).toBeTruthy();
     expect(screen.getByText('settings.groups.connections')).toBeTruthy();
     expect(screen.getByText('settings.groups.system')).toBeTruthy();
-    await waitFor(() => {
-      expect(screen.getByRole('link', { name: 'settings.sections.models' })).toBeTruthy();
+    expect(screen.getByRole('link', { name: 'settings.sections.models' })).toBeTruthy();
+  });
+
+  it('keeps Models on the rail before config resolves and while Model Hub is disabled', () => {
+    let resolveConfig: ((config: unknown) => void) | undefined;
+    api.getConfig.mockImplementation(
+      () => new Promise((resolve) => {
+        resolveConfig = resolve;
+      }),
+    );
+    renderLayout('/settings/replies');
+
+    expect(screen.getByRole('link', { name: 'settings.sections.models' })).toBeTruthy();
+
+    act(() => {
+      resolveConfig?.({ capabilities: { model_hub: { enabled: false } } });
     });
+    expect(screen.getByRole('link', { name: 'settings.sections.models' })).toBeTruthy();
   });
 
   // AUTH-SETUP-125: Settings opened over the wizard offers only the sections the
   // setup visit keeps, so no row leads out of the setup and loses its step.
-  it('offers only the setup visit sections over the wizard', async () => {
+  it('offers only the setup visit sections over the wizard', () => {
     const setup: Location = { pathname: '/setup', search: '', hash: '', state: null, key: 'setup' };
     renderLayout(
       { pathname: '/settings/general', state: settingsOverlayOpenState(setup, null) },
@@ -317,9 +332,7 @@ describe('SettingsLayout', () => {
 
     expect(screen.getByText('general-body')).toBeTruthy();
     expect(screen.getByRole('link', { name: 'settings.sections.general' })).toBeTruthy();
-    await waitFor(() => {
-      expect(screen.getByRole('link', { name: 'settings.sections.models' })).toBeTruthy();
-    });
+    expect(screen.getByRole('link', { name: 'settings.sections.models' })).toBeTruthy();
     const rail = screen.getByRole('navigation', { name: 'settings.navigationLabel' });
     expect(rail.querySelectorAll('a[href^="/settings/"]')).toHaveLength(2);
     expect(screen.queryByRole('link', { name: 'settings.sections.replies' })).toBeNull();
