@@ -650,6 +650,23 @@ async def test_window_input_requires_observation_and_rejects_focus_routes(
     )
     assert "observe_first" in first["content"][0]["text"]
 
+    raw_before_observation = await server.call_tool(
+        "click",
+        {
+            "session": "ses-a",
+            "pid": 7,
+            "window_id": 9,
+            "x": 1,
+            "y": 2,
+            "click_mode": "raw",
+        },
+    )
+    assert "observe_first" in raw_before_observation["content"][0]["text"]
+    assert not any(
+        params["arguments"].get("click_mode") == "raw"
+        for _method, params in upstream.calls
+    )
+
     observed = await server.call_tool(
         "get_window_state",
         {"session": "ses-a", "pid": 7, "window_id": 9},
@@ -660,6 +677,20 @@ async def test_window_input_requires_observation_and_rejects_focus_routes(
         {"session": "ses-a", "pid": 7, "window_id": 9, "x": 1, "y": 2},
     )
     assert not clicked.get("isError")
+
+    raw_after_observation = await server.call_tool(
+        "click",
+        {
+            "session": "ses-a",
+            "pid": 7,
+            "window_id": 9,
+            "x": 1,
+            "y": 2,
+            "click_mode": "raw",
+        },
+    )
+    assert not raw_after_observation.get("isError")
+    assert upstream.calls[-1][1]["arguments"]["click_mode"] == "raw"
 
     foreground = await server.call_tool(
         "click",
@@ -684,6 +715,40 @@ async def test_window_input_requires_observation_and_rejects_focus_routes(
         },
     )
     assert "focus_shortcut_forbidden" in shortcut["content"][0]["text"]
+
+
+def test_raw_click_mode_is_admitted_only_for_exact_background_pixel_click() -> None:
+    valid_raw_click = {
+        "click_mode": "raw",
+        "pid": 7,
+        "window_id": 9,
+        "x": 1,
+        "y": 2,
+    }
+
+    _validate_input("click", valid_raw_click)
+    _validate_input(
+        "click",
+        {**valid_raw_click, "delivery_mode": "background"},
+    )
+    with pytest.raises(ComputerServerError, match="only for the click tool"):
+        _validate_input("get_window_state", {"click_mode": "raw"})
+    with pytest.raises(ComputerServerError, match="exact pid"):
+        _validate_input(
+            "click",
+            {
+                **valid_raw_click,
+                "modifier": ["cmd"],
+            },
+        )
+    for delivery_mode in (None, "foreground", "future-mode"):
+        with pytest.raises(ComputerServerError, match="background left-click"):
+            _validate_input(
+                "click",
+                {**valid_raw_click, "delivery_mode": delivery_mode},
+            )
+    with pytest.raises(ComputerServerError, match="auto.*raw"):
+        _validate_input("click", {"click_mode": "semantic"})
 
 
 @pytest.mark.asyncio
