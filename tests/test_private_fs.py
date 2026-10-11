@@ -90,6 +90,14 @@ def test_windows_private_directory_makes_what_any_process_creates_inside_private
 
     for path in [private_root / "auth", nested, *created, child_file]:
         assert _private(path), path
+    # CPython's own mkdir(mode=0o700) protects a directory for SYSTEM,
+    # Administrators and its owner; released builds made Model Hub's auth
+    # directory that way, and what lands in it must still count as private.
+    legacy = private_root / "legacy"
+    legacy.mkdir(mode=0o700)
+    (legacy / "grant.json").write_text("{}", encoding="utf-8")
+    assert _private(legacy) and _private(legacy / "grant.json")
+
     descriptor = os.open(created[0], os.O_RDONLY)
     try:
         assert private_fs.is_private(created[0], os.fstat(descriptor).st_mode, fd=descriptor)

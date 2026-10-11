@@ -9,6 +9,7 @@ path is owned by this process and its DACL grants this user and SYSTEM alone.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import secrets
 import stat
@@ -517,13 +518,18 @@ class WindowsSecurity:
             self._validate_security_descriptor(owner, dacl, descriptor, path)
 
     def grants_only_self(self, path: Path, *, directory: bool, fd: Optional[int] = None) -> bool:
-        """Whether only this user and SYSTEM can open ``path``, inherited entries included.
+        """Whether nobody but this user and the machine can open ``path``, inherited entries included.
 
         What a private directory holds inherits its entries rather than carrying
         a copy, so this checks what the DACL grants, not that it equals one
-        descriptor. A directory's entries must also be inheritable, or what is
-        created inside it later would not start private. With ``fd`` the open
-        file is checked, not whatever ``path`` names now.
+        descriptor. Besides this user and SYSTEM it accepts the two other
+        entries CPython's own ``mkdir(mode=0o700)`` writes on Windows:
+        Administrators, who can take ownership of any file anyway, and OWNER
+        RIGHTS, which names the owner this already requires to be us. Model Hub
+        directories released builds made that way stay private. A directory's
+        entries must also be inheritable, or what is created inside it later
+        would not start private. With ``fd`` the open file is checked, not
+        whatever ``path`` names now.
         """
 
         reader = (
@@ -532,10 +538,11 @@ class WindowsSecurity:
         with reader as (owner, dacl, _descriptor):
             if not self._owner_is_self(owner) or not dacl:
                 return False
-            with self._descriptor_from_sddl(f"O:{self.current_user_sid}") as user, self._descriptor_from_sddl(
-                "O:SY"
-            ) as system:
-                trusted = (self._descriptor_owner(user), self._descriptor_owner(system))
+            with contextlib.ExitStack() as stack:
+                trusted = [
+                    self._descriptor_owner(stack.enter_context(self._descriptor_from_sddl(f"O:{sid}")))
+                    for sid in (self.current_user_sid, "SY", "BA", "S-1-3-4")
+                ]
                 for ace_type, flags, sid in self._aces(dacl):
                     if ace_type == self._ACCESS_DENIED_ACE_TYPE:
                         continue
