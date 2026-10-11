@@ -331,15 +331,20 @@ turn runs inside the caller's run, in these steps:
    in the run's concurrent groups (C-3 §2): each call's `room` depends on the results before it.
 4. **End.** A response that stops with `stop` and calls no tool is the reply. Anything else fails the turn: an
    overflow, an error, a response refused at admission, a length stop, or calls after the budget closed.
-5. **Fold.** The caller's `fold(reply)` decides what enters the caller's context, if anything, and commits it. For
-   C-9 that means validating the reply, building the `Compaction` row, and committing it. If the fold fails, the turn
-   fails.
+   - **Check and repair.** A purpose may supply `check(reply)`, which accepts the reply or names its problem, with
+     `repair(problem)`, the corrective follow-up (they come together). A rejected reply gets that follow-up once, as a
+     user message after it, and the turn continues: the next request carries both, under the same budget, policy,
+     and admission. Its reply is checked again; a second rejection fails the turn. C-9's check is its validator
+     (C-9 §6).
+5. **Fold.** The caller's `fold(reply)` decides what enters the caller's context, if anything, and commits it; it
+   sees only a reply the check accepted. For C-9 that means building the `Compaction` row from the reply's
+   checkpoint and committing it. If the fold fails, the turn fails.
 6. **Audit (F7).** The side turn writes one `fork_turn` audit row (`visibility = 'audit'`, no `context_seq`) on every
    exit except an abort. The row holds:
    - its purpose, policy, point, and `detail` (required: the purpose's own fields, checked when the side turn is
      built);
-   - every attempt's message, from the ledger, and the turn's tool results;
-   - its usage, rounds, outcome, and error;
+   - every attempt's message, from the ledger, the turn's tool results, and a repair's follow-up;
+   - its usage, rounds, outcome, and error, and the problem a repair named;
    - the id of the folded row.
 
 Rules that hold for every side turn:
@@ -490,7 +495,7 @@ through `reserve_forked_session`:
 - When to compact: the trigger, the overflow ladder, and the bounds.
 - Which prefix to use: the whole view for a normal checkpoint, or `units` from `rolling_cut` for a rolling one.
 - The checkpoint request and `max_tokens = min(16,000, O)`.
-- The validator, the row, and the events.
+- The validator (the side turn's check, with its one repair), the row, and the events.
 
 Behavior does not change. The C-9 tests pass, with only the audit kind renamed.
 
@@ -621,7 +626,9 @@ class SideTurn:
     prompt: UserMessage
     policy: ForkPolicy
     max_tokens: Callable[[ModelCapabilities], int]         # per route; C-9: min(16,000, O)
-    fold: Callable[[SideReply], Awaitable[Folded]]
+    fold: Callable[[SideReply], Awaitable[Folded]]         # sees only a reply the check accepted
+    check: Optional[Callable[[AssistantMessage], Optional[str]]] = None   # None accepts; else the problem
+    repair: Optional[Callable[[str], UserMessage]] = None  # the one corrective follow-up; comes with check
 
 @dataclass(frozen=True)
 class SideTurnResult:
@@ -662,7 +669,8 @@ The `ForkTurn` audit (`agent_events.event_type = 'fork_turn'`, `visibility = 'au
 | `outcome` | `completed` or `failed` |
 | `messages` | as in `CheckpointTurn` |
 
-Its optional fields are `error`, `folded_event_id`, `rounds`, and `usage`.
+Its optional fields are `error`, `folded_event_id`, `rounds`, `usage`, and `repair` (the problem the one corrective
+follow-up named, §7 step 4).
 
 ## 16. Contract delta at freeze
 

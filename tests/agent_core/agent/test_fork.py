@@ -172,6 +172,11 @@ def test_a_side_turn_is_built_only_with_its_purposes_detail():
         _side_turn(purpose="memory")
     with pytest.raises(TypeError):
         SideTurn("checkpoint", units=None, prompt=user("p"), policy=DREAMING, max_tokens=len, fold=None)
+    # A check names a problem only a repair can carry to the model, and a repair needs a check to send it.
+    with pytest.raises(ValueError):
+        _side_turn(check=lambda message: None)
+    with pytest.raises(ValueError):
+        _side_turn(repair=user)
 
 
 def _fork_turn_validator() -> Draft7Validator:
@@ -216,6 +221,18 @@ async def test_every_side_turn_leaves_one_fork_turn_audit_with_its_purpose_polic
     assert rolling["detail"] == {"reason": "overflow", "mode": "rolling"}
     assert rolling["point"]["as_of"] == latest and 0 < rolling["point"]["units"] < len(context_view(before).units)
     assert (rolling["outcome"], rolling["folded_event_id"], rolling["error"]) == ("completed", compaction.row_id, None)
+
+
+async def test_a_repaired_side_turn_audit_keeps_both_replies_the_follow_up_and_the_problem_it_named():
+    # Section 7 step 4: the check's rejection gets one follow-up inside the turn, and the F7 audit records all of it.
+    store = InMemoryTranscriptStore()
+    await run(make_agent(Model(history()), store=store, tools=[reader(tokens(3_000))], selection=ROOMY))
+    model = Model([[Done(assistant("after"))]], [[Done(assistant("Checkpoint written."))], [Done(assistant(CHECKPOINT))]])
+    await cross(make_agent(model, store=store, tools=[reader(tokens(3_000))], selection=ROOMY))
+    (audit,) = (audit for _, _, audit in store.audits)
+    _fork_turn_validator().validate(audit)
+    assert (audit["outcome"], audit["repair"]) == ("completed", "it has no <checkpoint> block")
+    assert [message["role"] for message in audit["messages"]] == ["assistant", "user", "assistant"]
 
 
 async def test_a_side_turn_call_has_no_instance_even_when_its_policy_allows_the_tool(monkeypatch):

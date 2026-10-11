@@ -178,6 +178,10 @@ class SideTurn:
     policy: ForkPolicy
     max_tokens: Callable[[ModelCapabilities], int]
     fold: Callable[[SideReply], Awaitable[Folded]]
+    #: The purpose's check of a reply (section 7 step 4): None accepts it; otherwise the problem, which ``repair``
+    #: names in one corrective follow-up. A second rejected reply fails the turn.
+    check: Optional[Callable[[AssistantMessage], Optional[str]]] = None
+    repair: Optional[Callable[[str], UserMessage]] = None
 
     def __post_init__(self) -> None:
         expected = _DETAILS.get(self.purpose)
@@ -185,6 +189,8 @@ class SideTurn:
             raise ValueError(f"not a side-turn purpose: {self.purpose!r}")
         if not isinstance(self.detail, expected):
             raise TypeError(f"a {self.purpose} side turn needs a {expected.__name__} detail, not {self.detail!r}")
+        if (self.check is None) != (self.repair is None):
+            raise ValueError("a side turn's check and its repair come together")
 
 
 @dataclass(frozen=True)
