@@ -101,7 +101,7 @@ def test_raw_binary_asset_installs_verified_at_its_bin_path(tmp_path: Path, monk
     ("override", "reason"),
     [
         ({"binary_sha256": "0" * 64}, "cloudflared_binary_checksum_mismatch"),
-        ({"format": "zip"}, "cloudflared_manifest_invalid"),
+        ({"format": "tar.xz"}, "cloudflared_manifest_invalid"),
     ],
 )
 def test_unverifiable_or_unknown_assets_do_not_install(

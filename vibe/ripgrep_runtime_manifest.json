@@ -36,6 +36,24 @@
       "binary_sha256": "e62198eb19b136b88c330af83647b5a962cb99b6b1f066758568f12de1974849",
       "size": 2265718,
       "bin_path": "ripgrep-15.2.0-x86_64-unknown-linux-musl/rg"
+    },
+    "win32-arm64": {
+      "name": "ripgrep-15.2.0-aarch64-pc-windows-msvc.zip",
+      "url": "https://github.com/BurntSushi/ripgrep/releases/download/15.2.0/ripgrep-15.2.0-aarch64-pc-windows-msvc.zip",
+      "sha256": "e4abca10c3a64ebea742667dd7009449d49403db5460dd6873e389fa2945360f",
+      "binary_sha256": "d33a29a9ef03c9f4c03be9e8d88498e6e2d2e566d64cdbdef97f9afc8f13120c",
+      "size": 1640124,
+      "bin_path": "ripgrep-15.2.0-aarch64-pc-windows-msvc/rg.exe",
+      "format": "zip"
+    },
+    "win32-x64": {
+      "name": "ripgrep-15.2.0-x86_64-pc-windows-msvc.zip",
+      "url": "https://github.com/BurntSushi/ripgrep/releases/download/15.2.0/ripgrep-15.2.0-x86_64-pc-windows-msvc.zip",
+      "sha256": "71b2fef860abe467217a538ff31de02f5258807c0129f771846f87bd029aafc5",
+      "binary_sha256": "14231169855ec5205cf5a1b6f1db358ff4aed4247c86b69ce8aae647c77f6680",
+      "size": 1789611,
+      "bin_path": "ripgrep-15.2.0-x86_64-pc-windows-msvc/rg.exe",
+      "format": "zip"
     }
   }
 }

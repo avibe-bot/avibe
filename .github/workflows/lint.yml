@@ -631,3 +631,13 @@ jobs:
           python -m pytest -q -ra
           tests/test_process_isolation.py tests/test_model_hub_l3.py tests/test_model_hub_migration_review_boundaries.py
           -k "console_window or cannot_be_bound or byte_for_byte"
+
+      # ripgrep's Windows release is a zip, which only this managed runtime
+      # extracts: install the bytes the manifest pins for this machine from a
+      # copy of upstream's archive, and run them.
+      - name: Verify the managed ripgrep installs from its Windows zip
+        shell: pwsh
+        run: |
+          $env:AVIBE_TEST_RIPGREP_ZIPS = Join-Path $env:RUNNER_TEMP "ripgrep-zips"
+          python -c "import json, os, pathlib, urllib.request; target = pathlib.Path(os.environ['AVIBE_TEST_RIPGREP_ZIPS']); target.mkdir(exist_ok=True); archives = json.load(open('vibe/ripgrep_runtime_manifest.json'))['archives']; [urllib.request.urlretrieve(entry['url'], target / entry['name']) for tag, entry in archives.items() if tag.startswith('win32-')]"
+          python -m pytest -q -ra tests/test_ripgrep_runtime.py -k "pinned_windows_zip or six_platform or zip_entry"
