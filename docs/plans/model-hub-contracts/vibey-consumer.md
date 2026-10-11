@@ -54,9 +54,10 @@ omitted. The caller supplies a Session-specific process scope
 and the current Vibey turn id on every resolution for durable turn provenance. It names
 the turn itself, because the loop's later model calls run in their own tasks, where the
 turn cannot be found by task. A resolution without a turn id would mark the scope's turns
-ambiguous. Vibey has no process that outlives a turn, so the existing turn settlement
-retires the scope's credentials once its last active turn settles, and the next turn
-receives fresh ones. A scope with untracked use is left to the native lifecycle rules.
+ambiguous. The consumer is the service: a Vibey Session's scope and credentials live
+until the service process exits, and its Turns reuse them. There is no per-Turn rotation,
+so no call can fail on a credential retired under it. The token never leaves the process
+and is never placed in a command environment.
 
 Planning capabilities retain the requested catalog row's authority, including for
 aliases. Unknown `context_window`, `max_output_tokens`, `supports_tools`, and

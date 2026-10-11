@@ -481,41 +481,44 @@ async def test_sequential_vibey_retry_replaces_route_and_retains_served_provenan
 
 
 
+
 @pytest.mark.asyncio
-async def test_vibey_credentials_retire_with_their_last_settled_turn(tmp_path):
-    """Vibey has no process that outlives a Turn: its scope's credentials serve its Turns only."""
+async def test_a_vibey_sessions_turns_share_its_scope_and_each_keeps_its_provenance(tmp_path):
+    """The consumer is the service: a Session's scope and credentials live until it exits, with no per-Turn rotation.
+
+    Every resolution names its Turn (a later model call's too), so each Turn on the shared scope settles exact.
+    """
     primary = _source("src_primary01", "Primary", vendor="anthropic", protocol="anthropic")
+    turns = ("turn-first", "turn-second", "turn-third")
     service = _vibey_service(tmp_path, [primary], handles=[
-        LiveInvokeHandle(_outcome(RawOutcomeKind.SUCCESS, source_id=primary.id), (b"{}",)),
-        LiveInvokeHandle(_outcome(RawOutcomeKind.SUCCESS, source_id=primary.id), (b"{}",)),
+        LiveInvokeHandle(_outcome(RawOutcomeKind.SUCCESS, source_id=primary.id), (b"{}",)) for _ in turns
     ])
     gateway = ModelHubTurnGateway(service)
     router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
+    tokens = []
     try:
         async with aiohttp.ClientSession() as client:
-
-            async def call(hop):
+            for turn_id in turns:
+                preflight = await router.resolve_hop("menu-alias", process_scope="vibey:session", turn_id=turn_id)
+                later = await router.resolve_hop("menu-alias", process_scope="vibey:session", turn_id=turn_id)
+                tokens += [preflight["token"], later["token"]]
                 async with client.post(
-                    f'{hop["base_url"]}/messages',
-                    headers={"Authorization": f'Bearer {hop["token"]}'},
-                    json={"model": hop["runtime_model"], "messages": []},
+                    f'{later["base_url"]}/messages',
+                    headers={"Authorization": f'Bearer {later["token"]}'},
+                    json={"model": later["runtime_model"], "messages": []},
                 ) as response:
+                    assert response.status == 200
                     await response.read()
-                    return response.status
-
-            first = await router.resolve_hop("menu-alias", process_scope="vibey:session", turn_id="turn-first")
-            assert await call(first) == 200
-            completion = router.settle_turn("turn-first", settled_by=SETTLED_BY_TERMINAL_RESULT, ts=NOW.isoformat())
-            if completion:
-                await completion
-            assert service.provenance.get("turn-first")["outcome"] == "served"
-            assert await call(first) == 401
-
-            second = await router.resolve_hop("menu-alias", process_scope="vibey:session", turn_id="turn-second")
-            assert second["token"] != first["token"]
-            assert await call(second) == 200
+                completion = router.settle_turn(turn_id, settled_by=SETTLED_BY_TERMINAL_RESULT, ts=NOW.isoformat())
+                if completion:
+                    await completion
+                record = service.provenance.get(turn_id)
+                assert record is not None and record["outcome"] == "served", turn_id
+                assert record["served"]["source_id"] == primary.id
+                _validate("turn-provenance.schema.json", record)
     finally:
         await gateway.close()
+    assert len(set(tokens)) == 1
 
 @pytest.mark.asyncio
 async def test_vibey_route_replacement_refuses_overlap_without_poisoning_current_request(tmp_path):
