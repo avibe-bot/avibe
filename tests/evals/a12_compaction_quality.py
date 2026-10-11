@@ -18,7 +18,7 @@ real Sessions, so it runs only inside a regression instance (``VIBE_DEPLOYMENT_E
 
     cd /opt/avibe/source && /opt/avibe/venv/bin/python tests/evals/a12_compaction_quality.py --model <vibey-model>
 
-``--model`` names a Vibey model whose Model Hub definition has a window of at most 64,000 tokens, so two checkpoints
+``--model`` names a Vibey model whose Model Hub definition has a window of at most 32,000 tokens, so two checkpoints
 happen within a bounded run. Results go to stdout as JSON; record them in ``tests/evals/a12_baselines.md`` per prompt
 version. See ``tests/evals/README.md``.
 """
@@ -42,8 +42,9 @@ from typing import Callable, Optional, Sequence
 # Run as a file from the source checkout: the product's modules are imported from it.
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-#: The largest window the fixture is sized for: two checkpoints within the scripted Turns plus a few extra reads.
-MAX_WINDOW = 64_000
+#: The largest window the fixture is sized and tested for: two checkpoints within the scripted Turns plus a few extra
+#: reads. Larger windows need more or larger reads than the fixture holds.
+MAX_WINDOW = 32_000
 #: Each log read is this share of the window, under the read tool's own cap.
 LOG_SHARE = 0.35
 LOG_TOKEN_CAP = 10_000
@@ -93,12 +94,15 @@ def _change(answer: dict, file: str) -> dict:
     return next((item for item in entries if _text(item.get("file")).endswith(file)), {})
 
 
-def _rule(answer: dict, kind: str, *subjects: str) -> bool:
-    """Whether a rule of ``kind`` names every subject in its action: polarity comes from ``kind``, by construction."""
+def _rule(answer: dict, kind: str, subjects: Sequence[str], verbs: Sequence[str] = ("",)) -> bool:
+    """Whether a rule of ``kind`` names every subject and one of the verbs in its action: polarity comes from ``kind``,
+    by construction, and the verbs keep a rule about the same file but another action from counting."""
     rules = answer.get("rules")
     entries = [item for item in rules if isinstance(item, dict)] if isinstance(rules, list) else []
     return any(
-        _text(item.get("kind")).strip() == kind and all(subject in _text(item.get("action")) for subject in subjects)
+        _text(item.get("kind")).strip() == kind
+        and all(subject in _text(item.get("action")) for subject in subjects)
+        and any(verb in _text(item.get("action")) for verb in verbs)
         for item in entries
     )
 
@@ -120,9 +124,15 @@ class Fact:
 #: the next step. A rule counts only with its polarity, a value only inside its own file's entry, a reason only in that
 #: entry's ``why``.
 FACTS = (
-    Fact("rule: vendor/legacy_api.py must not be modified", lambda a: _rule(a, "must_not", "vendor/legacy_api.py")),
-    Fact("rule: public functions must not be renamed", lambda a: _rule(a, "must_not", "rename", "public")),
-    Fact("rule: every change must be noted in CHANGES.md", lambda a: _rule(a, "must", "changes.md")),
+    Fact(
+        "rule: vendor/legacy_api.py must not be modified",
+        lambda a: _rule(a, "must_not", ("vendor/legacy_api.py",), ("modif", "edit", "change", "touch", "alter")),
+    ),
+    Fact("rule: public functions must not be renamed", lambda a: _rule(a, "must_not", ("rename", "public", "function"))),
+    Fact(
+        "rule: every change must be noted in CHANGES.md",
+        lambda a: _rule(a, "must", ("changes.md",), ("record", "note", "log", "document", "add", "write")),
+    ),
     Fact(
         "changed: src/rate_limit.py, BURST to 5",
         lambda a: "burst" in _text(_change(a, "rate_limit.py").get("change"))
@@ -242,14 +252,19 @@ def vibe(command: Sequence[str], *args: str) -> dict:
     return payload
 
 
-def model_window(model: str) -> tuple[int, Optional[int]]:
+def model_window(model: str) -> tuple[int, int]:
     from config.v2_config import V2Config
 
     supply = V2Config.load().model_hub.agents.get("vibey")
     definition = next((item for item in (supply.models if supply else ()) if item.id == model), None)
     if definition is None or not definition.context_window:
         raise SystemExit(f"Vibey has no model {model!r} with a context window in its Model Hub definition")
-    return definition.context_window, definition.max_output_tokens
+    from types import SimpleNamespace
+
+    from modules.agents.vibey.context import output_budget
+
+    # The output Vibey actually asks for on this route, which also sets the compaction threshold.
+    return definition.context_window, output_budget(SimpleNamespace(**vars(definition)))
 
 
 class Rows:
@@ -400,7 +415,7 @@ def run(args: argparse.Namespace) -> tuple[dict, bool]:
         "prompt_version": versions[0] if len(versions) == 1 else versions,
         "model": args.model,
         "window": window,
-        "max_output_tokens": max_output,
+        "output_budget": max_output,
         "session_id": session_id,
         "project_dir": str(root),
         "compactions": [
@@ -430,7 +445,7 @@ def run(args: argparse.Namespace) -> tuple[dict, bool]:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n", 1)[0])
-    parser.add_argument("--model", required=True, help="a Vibey model with a Model Hub window of at most 64,000 tokens")
+    parser.add_argument("--model", required=True, help="a Vibey model with a Model Hub window of at most 32,000 tokens")
     parser.add_argument("--project-dir", help="a new or empty directory for the fixture (default: a new temporary one)")
     beside = Path(sys.executable).with_name("vibe")  # the instance's own CLI, next to the Python running this script
     parser.add_argument(

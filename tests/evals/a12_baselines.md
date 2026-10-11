@@ -5,7 +5,7 @@ the previous prompt version. The score counts the planted facts the probe's JSON
 its own field: three ground rules with their polarity, two changed files with their values and a reason each, the last
 error verbatim, and the next step.
 
-| Date | Avibe | Prompt | Model (window / output) | Checkpoints (mode: tokens before → after) | Repairs / failed | Score | Missed |
+| Date | Avibe | Prompt | Model (window / output budget) | Checkpoints (mode: tokens before → after) | Repairs / failed | Score | Missed |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | 2026-10-11 | `de84d3b59` (master), Incus master env | `checkpoint-v3` | claude-haiku-4-5 (32,000 / 4,000) | normal: 26,009 → 25,272; rolling: 38,035 → 5,331; normal: 24,090 → 5,520 | 0 / 0 | 9/9 | — |
 
@@ -24,8 +24,11 @@ All 3 checkpoints were model-written under `checkpoint-v3`, each accepted on its
 no failed checkpoint turn. The script was launched without `vibe` on the PATH and drove the instance's CLI next to its
 Python.
 
-**Origins and re-scoring.** Every checkpoint and response in the Session was served by claude-haiku-4-5. Values
-are now judged as the new value ("to 5"); the recorded answer re-scores unchanged at 9/9.
+**Origins and re-scoring.**
+- Every checkpoint and response in the Session was served by claude-haiku-4-5.
+- The scorer has since tightened. Values count only as the new value ("to 5"), and rules only with their action. The
+  recorded answer re-scores unchanged at 9/9.
+- The output budget Vibey used is 4,000: the definition's maximum, under a quarter of the window.
 
 **Observation, not scored.** The first, normal checkpoint made little room (26,009 → 25,272 estimated tokens). The cut
 kept the latest log read verbatim, so the next request overflowed and the ladder rolled. Every run so far shows this.

@@ -20,7 +20,8 @@ Plan: `docs/plans/avibe-agent-core.md` §6, A12. Script: `a12_compaction_quality
   reads until the Session holds at least two checkpoints.
 - A probe Turn then asks, from memory, for the ground rules, the files changed and why, the last error verbatim, and
   the next step, as one JSON object. Each of the nine planted facts is judged on its own field:
-  - a rule only with its polarity: each rule is `{"action", "kind": "must" | "must_not"}`;
+  - a rule only with its polarity and its action: each rule is `{"action", "kind": "must" | "must_not"}`, and the
+    action must name the constrained act (modify, rename public functions, record);
   - a changed value only inside its file's entry and as the new value ("to 5", "= 5"), and a reason only in that
     entry's `why`;
   - the last error as the whole line.
@@ -44,7 +45,8 @@ summarizers'.
 (`VIBE_DEPLOYMENT_ENV=regression`); elsewhere it exits with status 2.
 
 **How to run it.**
-1. Give Vibey a model whose Model Hub definition has a window of at most 64,000 tokens. For example, add
+1. Give Vibey a model whose Model Hub definition has a window of at most 32,000 tokens (the size the fixture is
+   built and tested for). For example, add
    `claude-haiku-4-5` in Settings → Models → Vibey and edit its window to 32,000 and its max output to 4,000.
 2. In the instance (`python3 scripts/incus_regression.py shell --target ...`), run:
 
@@ -56,7 +58,7 @@ summarizers'.
 
 3. Read the JSON it prints:
    - whether the run is valid, and why not;
-   - the prompt version and model;
+   - the prompt version, the model, and the output budget Vibey used on it;
    - each compaction (mode, sizes, and whether the model wrote it);
    - each checkpoint turn's outcome and repair;
    - the per-fact score and the probe answer.
