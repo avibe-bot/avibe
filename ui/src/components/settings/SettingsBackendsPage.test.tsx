@@ -61,13 +61,13 @@ const rowOf = async (name: string) => (await screen.findByText(name)).closest('.
 describe('built-in backend settings', () => {
   // The built-in Vibey is part of the platform: listed first, always on,
   // and marked Built-in where every other backend has its enable switch.
-  it('lists Avibe first as Built-in with no switch, and its page has no switch or native actions', async () => {
+  it('uses the shared display order, with Vibey Built-in and no switch or native actions', async () => {
     renderBackends();
 
     const vibey = await rowOf('Vibey');
     const rows = [...document.querySelectorAll('.rounded-xl')];
     expect(rows.map((row) => row.querySelector('span.font-semibold')?.textContent)).toEqual([
-      'Vibey', 'OpenCode', 'Claude Code', 'Codex',
+      'Vibey', 'Claude Code', 'Codex', 'OpenCode',
     ]);
     expect(within(vibey).getByText('Built-in')).toBeTruthy();
     expect(within(vibey).queryByRole('switch')).toBeNull();

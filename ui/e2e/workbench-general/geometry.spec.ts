@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Locator, type Page } from '@playwright/test';
 
 import { DESKTOP, NARROW, ORIGIN, WIDE, config, open, serveProduct } from './support';
 
@@ -578,6 +578,71 @@ test.describe('general settings geometry', () => {
       expect(unexpectedModelReads).toEqual([]);
       expect(pageErrors).toEqual([]);
     });
+  }
+
+  // Class-based component tests cannot see a scoped Hub stylesheet overriding
+  // a shared token. Compare the actual marks and computed ink/tile in both themes.
+  for (const theme of ['light', 'dark'] as const) {
+    for (const viewport of [DESKTOP, NARROW]) {
+      test(`matches backend identity across Settings and Model Hub in ${theme} at ${viewport.width}px`, async ({ page }) => {
+        const { denied, unexpectedModelReads } = await serveModelHub(page);
+        const backends = ['vibey', 'claude', 'codex', 'opencode'];
+        const labels = ['Vibey', 'Claude Code', 'Codex', 'OpenCode'];
+        let direct = false;
+        await page.route('**/api/models/agents/*/chains', (route) => {
+          expect(route.request().method()).toBe('GET');
+          return route.fulfill({ json: { chains: [] } });
+        });
+        // This mount-time scan is answered entirely by the test, never the host.
+        await page.route('**/api/models/migration/scan', (route) => {
+          expect(route.request().method()).toBe('POST');
+          return route.fulfill({ json: { items: [] } });
+        });
+        await page.route(/\/api\/models\/agents(?:\?.*)?$/, (route) => {
+          expect(route.request().method()).toBe('GET');
+          return route.fulfill({ json: { agents: [...backends].reverse()
+            .filter((backend) => !direct || backend !== 'vibey')
+            .map((backend) => ({
+              backend, cli_present: backend !== 'vibey', mode: direct ? 'direct' : 'hub',
+              menu_kind: 'fixed', catalog_models: [], named_agents: [],
+            })) } });
+        });
+        const identity = (icon: Locator) => icon.evaluate((svg) => ({
+          mark: svg.innerHTML,
+          ink: getComputedStyle(svg).color,
+          tile: getComputedStyle(svg.parentElement!).backgroundColor,
+        }));
+        await page.setViewportSize(viewport);
+        await open(page, '/settings/backends', { theme });
+        const settingsIdentities = [];
+        for (const label of labels) {
+          const row = page.locator('.rounded-xl').filter({ has: page.getByText(label, { exact: true }) });
+          await expect(row).toBeVisible();
+          settingsIdentities.push(await identity(row.locator('svg').first()));
+        }
+        await page.screenshot({ path: `e2e/.artifacts/workbench-general/backends-${theme}-${viewport.width}.png`, fullPage: true });
+
+        await open(page, '/settings/models', { theme });
+        const cards = page.locator('[data-agent-backend]');
+        await expect(cards.locator('h2')).toHaveText(labels);
+        for (let index = 0; index < backends.length; index += 1) {
+          const icon = cards.nth(index).locator('.model-hub-agent-head-summary svg').first();
+          await expect.poll(() => identity(icon)).toEqual(settingsIdentities[index]);
+        }
+        await page.screenshot({ path: `e2e/.artifacts/workbench-general/hub-${theme}-${viewport.width}.png`, fullPage: true });
+
+        direct = true;
+        await open(page, '/settings/models', { theme });
+        const nativeRows = page.locator('.model-hub-direct-row--backend');
+        await expect(nativeRows.locator('.model-hub-direct-backend-name')).toHaveText(labels.slice(1));
+        for (let index = 0; index < 3; index += 1) {
+          await expect.poll(() => identity(nativeRows.nth(index).locator('svg').first()))
+            .toEqual(settingsIdentities[index + 1]);
+        }
+        expect(denied).toEqual([]);
+        expect(unexpectedModelReads).toEqual([]);
+      });
+    }
   }
 
   test('draws the preference card, the selector and the selected choice to spec', async ({ page }) => {

@@ -18,7 +18,7 @@ import { configChanges } from '@/lib/configMutations';
 import { errorMessage } from '@/lib/errorMessage';
 
 // Mirrors design.pen qVHh4 (VR/CM/Backends): one horizontal card per backend,
-// in catalog order with the built-in backend first. Each card
+// in shared display order: built-in first, then native setup order. Each card
 // surfaces icon + name/description + status chip + enable toggle (a
 // "Built-in" badge instead for the always-enabled backend) + a
 // "Configure" link that drills into the level-2 provider page. CLI path,

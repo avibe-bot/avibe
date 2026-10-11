@@ -7,6 +7,7 @@ import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import i18n from '@/i18n';
+import { BACKEND_BRAND_MARKS } from '@/components/visual/backendBrandMarks';
 import en from '../../../i18n/en.json';
 import zh from '../../../i18n/zh.json';
 import { AgentCard as RuntimeAgentCard } from './AgentCard';
@@ -73,26 +74,39 @@ afterEach(cleanup);
 describe('backend brand ownership', () => {
   // Card headings previously came from a second i18n brand table. Existing
   // fixtures used identical translations, masking divergence from the catalog.
-  it.each(['en', 'zh'] as const)('keeps every backend brand catalog-owned in %s', (language) => {
+  // The API's enumeration and the Hub's separate palette used to leak into the
+  // cards. Render the consumer: comparing palette entries to themselves missed it.
+  it.each(['en', 'zh'] as const)('uses the Settings backend order, marks and tile colors in %s', (language) => {
     const locale = localeInstance(language);
     const rows = [
-      { backend: 'claude', label: 'Claude Code' },
-      { backend: 'codex', label: 'Codex' },
-      { backend: 'opencode', label: 'OpenCode' },
-      { backend: 'vibey', label: 'Vibey' },
+      { backend: 'vibey', label: 'Vibey', tile: 'bg-mint-soft', ink: 'text-mint-ink', glyph: null },
+      { backend: 'claude', label: 'Claude Code', tile: 'bg-cyan-soft', ink: 'text-cyan-ink', glyph: 'lucide-sparkles' },
+      { backend: 'codex', label: 'Codex', tile: 'bg-gold', ink: 'text-gold-foreground', glyph: 'lucide-bot' },
+      { backend: 'opencode', label: 'OpenCode', tile: 'bg-violet-soft', ink: 'text-violet-ink', glyph: 'lucide-terminal' },
     ] as const;
+    const agents = [...rows].reverse().map(({ backend }) => ({ ...hubAgent, backend }));
+    const originalOrder = agents.map(({ backend }) => backend);
     for (const { backend } of rows) {
       locale.addResource(language, 'translation', `settings.models.backends.${backend}`, 'Obsolete localized brand');
     }
     render(<I18nextProvider i18n={locale}><AgentCard
-      agents={rows.map(({ backend }) => ({ ...hubAgent, backend }))}
+      agents={agents}
       sources={[]} chains={{}} pendingBackends={new Set()} switchFailures={new Set()}
       connectingBackend={null} onConnectHub={vi.fn()} onSwitchDirect={vi.fn()}
       onOpenOrder={vi.fn()} onOpenRoute={vi.fn()} onProbeSettled={vi.fn()}
     /></I18nextProvider>);
-    expect(screen.getAllByRole('heading', { level: 2 }).map((heading) => heading.textContent))
+    expect.soft(screen.getAllByRole('heading', { level: 2 }).map((heading) => heading.textContent))
       .toEqual(rows.map(({ label }) => label));
     expect(screen.queryByText('Obsolete localized brand')).toBeNull();
+    expect(agents.map(({ backend }) => backend)).toEqual(originalOrder);
+    for (const { label, tile, ink, glyph } of rows) {
+      const iconTile = screen.getByRole('heading', { level: 2, name: label }).previousElementSibling!;
+      expect.soft(iconTile.classList.contains(tile)).toBe(true);
+      const svg = iconTile.querySelector('svg')!;
+      expect.soft(svg.classList.contains(ink)).toBe(true);
+      if (glyph) expect(svg.classList.contains(glyph)).toBe(true);
+      else expect(svg.querySelector('path')?.getAttribute('d')).toBe(BACKEND_BRAND_MARKS.vibey.path);
+    }
   });
 });
 
