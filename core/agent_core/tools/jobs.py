@@ -28,13 +28,21 @@ J3: ``meta.json.deadline_at`` is absolute. The wrapper enforces it itself, so
 it holds while no host runs; ``wait`` and ``enforce_deadline`` are a second,
 idempotent owner. Whoever kills records ``stopped`` first.
 
-POSIX only in v1.
+Windows: the tree is the wrapper's job object, ``Local\\avibe-job-<job_id>``,
+which the wrapper creates and joins before it writes ``pid`` and which ends its
+members when the wrapper's handle closes (``windows_job``). J2 then asks for a
+wrapper that is a member of that job instead of a group leader, and a kill
+terminates the job. Nothing outlives the wrapper, so a job whose wrapper is
+gone is gone. Job files are replaced with POSIX semantics and read shared for
+delete (``windows_files``): a reader of ``tail.log``, which the wrapper
+replaces a few times a second, would otherwise make the replace fail.
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import io
 import json
 import logging
 import os
@@ -51,6 +59,7 @@ from typing import Any, Awaitable, Callable, Mapping, Optional
 
 import psutil
 
+from core.agent_core.tools import windows_files, windows_job
 from core.agent_core.tools.base import CallInstance, JobStatus
 from core.agent_core.tools.paths import os_reason, run_to_end
 from core.process_isolation import (
@@ -91,6 +100,7 @@ STOP_KILLED = "killed"
 #: The wrapper itself failed (a full disk, a bug) and stopped the command it could no longer follow.
 STOP_WRAPPER_ERROR = "wrapper_error"
 
+_WINDOWS = os.name == "nt"
 _WRAPPER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "job_wrapper.py")
 #: How long past the deadline the host leaves a live wrapper to decide (its poll interval, its
 #: 0.5 s drain, and margin) before stopping the job itself.
@@ -114,11 +124,26 @@ class JobHandOverUnavailable(RuntimeError):
     """This host has no Watch to hand a job to."""
 
 
-def default_shell() -> str:
-    """Pi's choice: ``/bin/bash``, then ``bash`` on PATH, then ``sh``."""
+def default_shell() -> Optional[str]:
+    """Pi's choice: ``/bin/bash``, then ``bash`` on PATH, then ``sh``. None on Windows, which has no such shell."""
+    if _WINDOWS:
+        return None
     if os.path.exists("/bin/bash"):
         return "/bin/bash"
     return shutil.which("bash") or "sh"
+
+
+def _job_object_name(job_id: str) -> str:
+    """The Windows job object of a job's tree; the wrapper creates it under the same name."""
+    return f"avibe-job-{job_id}"
+
+
+def _open_for_reading(path: str, *, binary: bool = False) -> Any:
+    """A job file, open for reading. On Windows it is shared for delete, so a writer can still replace it."""
+    if not _WINDOWS:
+        return open(path, "rb") if binary else open(path, encoding="utf-8", errors="replace")
+    handle = os.fdopen(windows_files.open_for_reading(path), "rb")
+    return handle if binary else io.TextIOWrapper(handle, encoding="utf-8", errors="replace")
 
 
 def _iso(moment: datetime) -> str:
@@ -139,7 +164,7 @@ def _write_atomic(path: str, data: str) -> None:
     tmp = f"{path}.{secrets.token_hex(4)}.tmp"
     with open(tmp, "w", encoding="utf-8") as handle:
         handle.write(data)
-    os.replace(tmp, path)
+    (windows_files.replace if _WINDOWS else os.replace)(tmp, path)
 
 
 def _meta_text(meta: Mapping[str, Any]) -> str:
@@ -160,7 +185,7 @@ def _read_text(path: str) -> Optional[str]:
     """A small state file (``pid``, ``decision``, ``exit``, ``stopped``), read in a bound: the job's
     directory is one its command can write to."""
     try:
-        with open(path, encoding="utf-8", errors="replace") as handle:
+        with _open_for_reading(path) as handle:
             return handle.read(_STATE_FILE_CHARS).strip()
     except FileNotFoundError:
         return None
@@ -217,7 +242,7 @@ class LocalJobHost:
         """The job's metadata. Read in a bound: the job's directory is one its command can write to, and a
         file over the bound is refused as corrupt (``ValueError``), as unreadable JSON is."""
         try:
-            with open(self._path(job_id, "meta.json"), encoding="utf-8", errors="replace") as handle:
+            with _open_for_reading(self._path(job_id, "meta.json")) as handle:
                 text = handle.read(_META_CHARS + 1)
         except FileNotFoundError:
             raise KeyError(job_id) from None
@@ -301,8 +326,8 @@ class LocalJobHost:
 
         Raises ``JobStartError`` when the command did not start.
         """
-        if os.name != "posix":
-            raise JobStartError("Command jobs are not supported on Windows yet.")
+        if self._shell is None:
+            raise JobStartError("No shell is available to run the command.")
         if not sys.executable:
             raise JobStartError("No Python interpreter is available to run the command.")
         # The host's own steps are small and synchronous, so the only await is the wait for the pid: a cancel
@@ -368,6 +393,7 @@ class LocalJobHost:
             sys.executable,
             "-I",
             "-S",
+            "-B",  # on Windows the wrapper loads its helpers by path: no bytecode written into the install
             _WRAPPER,
             "avibe-job",
             job_dir,
@@ -379,7 +405,16 @@ class LocalJobHost:
             repr(deadline.timestamp()) if deadline is not None else "-",
         ]
         open(self.output_path(job_id), "ab").close()
-        diagnostics = os.open(self._path(job_id, "wrapper.log"), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        diagnostics = os.open(
+            self._path(job_id, "wrapper.log"),
+            os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_BINARY", 0),
+            0o600,
+        )
+        # Windows: its own process group, so no console control event of the service reaches it, and no console
+        # window, which its shell and every console program under it share.
+        windows = (
+            {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW} if _WINDOWS else {}
+        )
         try:
             proc = subprocess.Popen(
                 argv,
@@ -389,6 +424,7 @@ class LocalJobHost:
                 stdout=diagnostics,
                 stderr=diagnostics,
                 start_new_session=True,
+                **windows,
             )
         except OSError as exc:
             self._create_decision(job_id, _ABANDON)
@@ -414,11 +450,10 @@ class LocalJobHost:
         while time.monotonic() < deadline:
             text = _read_text(pid_path)
             if text:
-                try:
-                    pgid = os.getpgid(proc.pid)
-                except ProcessLookupError:
+                heads = _heads_its_tree(job_id, proc.pid)
+                if heads is None:
                     return None
-                if text != str(proc.pid) or pgid != proc.pid:
+                if text != str(proc.pid) or not heads:
                     logger.error("Job %s wrapper reported pid %s, expected %s", job_id, text, proc.pid)
                     return None
                 return capture_spawned_process_identity(proc.pid, marker)
@@ -471,12 +506,12 @@ class LocalJobHost:
             self.meta(job_id)
             return b"", since
         if since < head_size:
-            with open(head_path, "rb") as handle:
+            with _open_for_reading(head_path, binary=True) as handle:
                 handle.seek(since)
                 data = handle.read(min(OUTPUT_CHUNK_BYTES, head_size - since))
             return data, since + len(data)
         try:
-            with open(self._path(job_id, "tail.log"), "rb") as handle:
+            with _open_for_reading(self._path(job_id, "tail.log"), binary=True) as handle:
                 header = _TAIL_HEADER.fullmatch(handle.readline(64))
                 if header is None:
                     raise ValueError("tail.log header")
@@ -502,7 +537,10 @@ class LocalJobHost:
         identity = self._verify_for_kill(job_id, reason)
         if identity is None:
             return
-        if not await _terminate_group(identity.pid):
+        if _WINDOWS:
+            if not await _terminate_job(job_id, identity.pid):
+                logger.warning("Job %s job object survived termination", job_id)
+        elif not await _terminate_group(identity.pid):
             logger.warning("Job %s process group %s survived termination", job_id, identity.pid)
 
     def _verify_for_kill(self, job_id: str, reason: str) -> Optional[PersistedProcessIdentity]:
@@ -514,7 +552,7 @@ class LocalJobHost:
             logger.warning("Job %s has no recorded process identity; not signaling", job_id)
             return None
         if not (self._alive(job_id) or self._group_carries_marker(identity)):
-            if _group_exists(identity.pid):
+            if not _WINDOWS and _group_exists(identity.pid):
                 logger.warning("Job %s process group %s cannot be verified; not signaling", job_id, identity.pid)
             return None
         try:
@@ -631,7 +669,12 @@ class LocalJobHost:
         return any(argv[i : i + 2] == ["avibe-job", job_dir] for i in range(len(argv) - 1))
 
     def _orphaned_group_runs(self, job_id: str) -> bool:
-        """The wrapper was killed on its own (SIGKILL), but its group still provably runs the job."""
+        """The wrapper was killed on its own (SIGKILL), but its group still provably runs the job.
+
+        Never on Windows: the tree ends with the wrapper's handle to its job object.
+        """
+        if _WINDOWS:
+            return False
         identity = self._identity(job_id)
         return identity is not None and _group_exists(identity.pid) and self._group_carries_marker(identity)
 
@@ -643,6 +686,48 @@ class LocalJobHost:
         proc.wait()
         if self._children.get(job_id) is proc:
             del self._children[job_id]
+
+
+def _heads_its_tree(job_id: str, pid: int) -> Optional[bool]:
+    """Whether the wrapper ``pid`` heads the job's tree: it leads its own process group, or on Windows it is
+    in the job object it creates before it writes ``pid``. ``None`` when the process is already gone."""
+    if _WINDOWS:
+        job = windows_job.open_job(_job_object_name(job_id))
+        if job is None:
+            return False
+        try:
+            return windows_job.job_contains(job, pid)
+        finally:
+            windows_job.close_handle(job)
+    try:
+        return os.getpgid(pid) == pid
+    except ProcessLookupError:
+        return None
+
+
+async def _terminate_job(
+    job_id: str, wrapper_pid: int, timeout_s: float = DEFAULT_PROCESS_TERMINATE_TIMEOUT_SECONDS
+) -> bool:
+    """Windows: end the verified job's tree through its job object; ``True`` once none of it runs.
+
+    The job is ended only while the wrapper is one of its members. A job that cannot be opened, or that the
+    wrapper has left, has lost or is losing its last handle, and with it every member (``KILL_ON_JOB_CLOSE``).
+    """
+    job = windows_job.open_job(_job_object_name(job_id))
+    if job is None:
+        return True
+    try:
+        if not windows_job.job_contains(job, wrapper_pid):
+            return True
+        windows_job.terminate_job(job)
+        deadline = time.monotonic() + timeout_s
+        while windows_job.active_processes(job):
+            if time.monotonic() >= deadline:
+                return False
+            await asyncio.sleep(0.02)
+        return True
+    finally:
+        windows_job.close_handle(job)
 
 
 def _group_exists(pgid: int) -> bool:

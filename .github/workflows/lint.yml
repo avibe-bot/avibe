@@ -760,3 +760,13 @@ jobs:
 
       - name: Verify Vibey's tool lines
         run: python -m pytest -q -ra tests/test_vibey_agent.py -k relative_tool_path
+
+      # The job host's Windows backend: a job object instead of a process
+      # group, and job files replaced and read in a way that cannot collide.
+      - name: Verify the job host
+        run: python -m pytest -q -ra tests/agent_core/tools/test_jobs_windows.py
+
+      # Its job object is the one the watch worker uses; no other job runs
+      # this file on Windows.
+      - name: Verify the watch worker's job object
+        run: python -m pytest -q -ra tests/test_watch_worker.py
