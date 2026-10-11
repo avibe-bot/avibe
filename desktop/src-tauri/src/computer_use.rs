@@ -457,7 +457,7 @@ impl RuntimeState {
             self.publish_view();
             return;
         }
-        if self.capabilities.current() != RuntimeSupport::Supported {
+        if enable_support(&mut self.capabilities, self.origin.as_ref()).await != RuntimeSupport::Supported {
             self.update_view(|view| view.runtime_refused = true);
             self.publish_view();
             return;
@@ -912,6 +912,19 @@ async fn runtime_reprobe_directive(
         }
     };
     Some(lifecycle.capabilities(support, grants))
+}
+
+/// The Runtime support an enable request acts on.
+///
+/// A transient capability probe leaves the cache unknown, and no tick probes
+/// while the feature is off. The request therefore asks the current Runtime
+/// again instead of refusing until the next Runtime-ready event or a restart.
+/// A definite answer, supported or not, stands until the Runtime changes.
+async fn enable_support(capabilities: &mut CapabilityCache, origin: Option<&LoopbackOrigin>) -> RuntimeSupport {
+    match (capabilities.current(), origin) {
+        (RuntimeSupport::Unknown, Some(origin)) => capabilities.observe(probe_capabilities(origin).await),
+        (support, _) => support,
+    }
 }
 
 fn retry_is_current(id: u64, current_id: u64, lifecycle: &ComputerUseLifecycle) -> bool {
@@ -2568,6 +2581,53 @@ done
             runtime_reprobe_directive(&mut lifecycle, &mut capabilities, Some(&origin)).await,
             None
         );
+    }
+
+    #[tokio::test]
+    async fn enabling_reprobes_a_runtime_whose_last_probe_was_transient() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("capability listener");
+        let address = listener.local_addr().expect("capability listener address");
+        let origin = LoopbackOrigin::parse(&format!("http://{address}")).expect("loopback origin");
+        // The Runtime-ready probe hits a 503; the user's later enable request
+        // finds the Runtime ready.
+        let server = tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+            let ready = format!(r#"{{"controller_id":"ready-runtime","computer_use_schema":{COMPUTER_USE_SCHEMA}}}"#);
+            for (status, body) in [("503 Service Unavailable", "{}".to_owned()), ("200 OK", ready)] {
+                let (mut stream, _) = listener.accept().await.expect("capability request");
+                let mut request = [0_u8; 1024];
+                let read = stream.read(&mut request).await.expect("capability request bytes");
+                assert!(String::from_utf8_lossy(&request[..read]).starts_with("GET /api/desktop/capabilities "));
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .await
+                    .expect("capability response");
+            }
+        });
+        let mut capabilities = CapabilityCache::default();
+        capabilities.begin_adoption();
+
+        assert_eq!(
+            capabilities.observe(probe_capabilities(&origin).await),
+            RuntimeSupport::Unknown
+        );
+        assert_eq!(
+            enable_support(&mut capabilities, Some(&origin)).await,
+            RuntimeSupport::Supported
+        );
+        server.await.expect("capability server");
+        assert_eq!(capabilities.controller_id(), Some("ready-runtime"));
+
+        // Without a Runtime there is nothing to ask.
+        let mut unknown = CapabilityCache::default();
+        assert_eq!(enable_support(&mut unknown, None).await, RuntimeSupport::Unknown);
     }
 
     #[test]
