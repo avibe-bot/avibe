@@ -1658,3 +1658,102 @@ def test_ra_tq_034_restart_takes_recovery_lock_before_connector_lock(monkeypatch
     finally:
         monkeypatch.setattr(remote_access, "_read_pid", real_read_pid)
         remote_access.stop()
+
+
+def test_ra_tq_034_start_racing_the_restart_cleanup_keeps_its_request(monkeypatch, tmp_path) -> None:
+    config, network_up = _setup_exiting_connector(monkeypatch, tmp_path)
+    schedule = remote_access._ConnectorRestartSchedule()
+    real_start = remote_access._start
+    real_read_pid = remote_access._read_pid
+    spawned = []
+
+    def start_then_stale_stop(loaded, *, record_request):
+        result = real_start(loaded, record_request=record_request)
+        if not spawned:
+            spawned.append(result["pid"])
+            # A stop in another process that read the exited pid withdraws the
+            # request and removes the records this restart just wrote.
+            remote_access._connector_requested_path().unlink()
+            remote_access._pid_path().unlink()
+            remote_access._state_path().unlink()
+        return result
+
+    explicit_starts = []
+
+    def read_pid_while_start_rerecords():
+        if (
+            spawned
+            and not explicit_starts
+            and remote_access._CONNECTOR_LOCK._is_owned()
+            and not remote_access._connector_requested_path().exists()
+        ):
+            # One explicit start in another process records the request again
+            # while the restart cleans up after the stop.
+            explicit_starts.append(True)
+            remote_access._connector_requested_path().touch()
+        return real_read_pid()
+
+    try:
+        remote_access.start()
+        _wait_connector_exit()
+        network_up.touch()
+        monkeypatch.setattr(remote_access, "_start", start_then_stale_stop)
+        monkeypatch.setattr(remote_access, "_read_pid", read_pid_while_start_rerecords)
+        remote_access._restart_exited_connector(config, schedule, 1000.0)
+        remote_access._restart_exited_connector(config, schedule, 1000.0 + schedule.delay_seconds)
+
+        assert not remote_access._is_cloudflared_pid(spawned[0])
+        assert remote_access._connector_requested_path().exists()
+
+        # The start's request persists, so the monitor brings a connector back.
+        now = 2000.0
+        remote_access._restart_exited_connector(config, schedule, now)
+        remote_access._restart_exited_connector(config, schedule, now + schedule.delay_seconds)
+        assert remote_access._is_cloudflared_pid(real_read_pid())
+    finally:
+        monkeypatch.setattr(remote_access, "_read_pid", real_read_pid)
+        remote_access.stop()
+
+
+class _StopMonitor(Exception):
+    pass
+
+
+def test_ra_tq_034_restart_tick_does_not_evaluate_the_exited_connector(monkeypatch, tmp_path) -> None:
+    _, network_up = _setup_exiting_connector(monkeypatch, tmp_path)
+    interval = remote_access.QUALITY_SAMPLE_SECONDS
+    clock = {"now": 1000.0}
+
+    def sleep(seconds: float) -> None:
+        clock["now"] += seconds
+        if clock["now"] >= 1000.0 + 2 * interval:
+            raise _StopMonitor  # end of the second tick
+
+    monkeypatch.setattr(
+        remote_access,
+        "time",
+        type("Clock", (), {"monotonic": staticmethod(lambda: clock["now"]), "sleep": staticmethod(sleep), "time": staticmethod(time.time)}),
+    )
+    monkeypatch.setattr(remote_access, "_public_health_url", lambda loaded: None)
+    # Outage evidence left by the exited connector would fire availability recovery.
+    monkeypatch.setattr(remote_access._QUALITY_EVALUATOR, "recovery_trigger", lambda snapshot, profile: "availability")
+    optimized_while_running = []
+    monkeypatch.setattr(
+        remote_access,
+        "optimize_route",
+        lambda **kwargs: optimized_while_running.append(remote_access._is_cloudflared_pid(remote_access._read_pid())),
+    )
+    try:
+        remote_access.start()
+        _wait_connector_exit()
+        network_up.touch()
+        remote_access._quality_state_path().parent.mkdir(parents=True, exist_ok=True)
+
+        # Tick 1 sees the exit and schedules the restart; tick 2 restarts.
+        with pytest.raises(_StopMonitor):
+            remote_access._quality_monitor_loop(interval, remote_access._quality_state_path())
+
+        assert remote_access._is_cloudflared_pid(remote_access._read_pid())
+        assert optimized_while_running == [False]
+    finally:
+        remote_access.stop()

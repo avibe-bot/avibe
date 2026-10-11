@@ -3595,47 +3595,53 @@ def _restart_exited_connector(
     config: V2Config | None,
     schedule: _ConnectorRestartSchedule,
     now: float,
-) -> None:
+) -> bool:
     """Restart an exited connector once it has stayed down for the backoff delay.
 
     A connector that cannot connect at start, for example when the network is
     not up yet after a reboot, exits within seconds. The delay doubles after
     each attempt up to ``CONNECTOR_RESTART_MAX_DELAY_SECONDS``; the monitor
-    resets it once a connector reports a ready connection.
+    resets it once a connector reports a ready connection. Returns whether a
+    restart was attempted.
     """
 
     if not _exited_connector_requested(config):
         schedule.due_at = None
-        return
+        return False
     with _RECOVERY_LOCK:
         recovery_owns_lane = _connector_lane_reserved_locked()
     if recovery_owns_lane:
         schedule.due_at = None
-        return
+        return False
     if schedule.due_at is None:
         schedule.due_at = now + schedule.delay_seconds
-        return
+        return False
     if now < schedule.due_at:
-        return
+        return False
     schedule.due_at = None
     schedule.delay_seconds = min(2 * schedule.delay_seconds, CONNECTOR_RESTART_MAX_DELAY_SECONDS)
     # Recovery takes ``_RECOVERY_LOCK`` before ``_CONNECTOR_LOCK``; the restart
     # never takes them in the other order.
     with _CONNECTOR_LOCK:
         if not _exited_connector_requested(config):
-            return
+            return False
         logger.warning("Tunnel connector exited; restarting it")
         # The restart never records the request itself, so a stop in another
         # process that withdraws it during this restart stays visible below.
         result = _start(None, record_request=False)
         if result.get("started") and not _connector_requested_path().exists():
-            # That stop may have read the exited pid, so stop the new connector here.
-            stop()
-            if _is_cloudflared_pid(result.get("pid")):
-                runtime.stop_pid(result["pid"], timeout=8)
-            return
+            # That stop may have read the exited pid. Stop only what this restart
+            # spawned and never withdraw a request: an explicit start landing
+            # meanwhile keeps its request, so the monitor brings its connector back.
+            pid = result.get("pid")
+            if _read_pid() == pid:
+                _stop_connector()
+            elif _is_cloudflared_pid(pid):
+                runtime.stop_pid(pid, timeout=8)
+            return True
     if not result.get("ok"):
         logger.warning("Tunnel connector restart failed: %s", result.get("error"))
+    return True
 
 
 def _quality_monitor_loop(interval_seconds: float, quality_path: Path) -> None:
@@ -3677,7 +3683,11 @@ def _quality_monitor_loop(interval_seconds: float, quality_path: Path) -> None:
                 loaded = None
             if sample is not None and sample.ready:
                 restart_schedule = _ConnectorRestartSchedule()
-            _restart_exited_connector(loaded, restart_schedule, started_at)
+            if _restart_exited_connector(loaded, restart_schedule, started_at):
+                # This tick's samples describe the exited connector. The next tick
+                # samples the new one and resets the request window for its pid.
+                time.sleep(max(0.1, interval_seconds - (time.monotonic() - started_at)))
+                continue
             configured_protocol = _configured_protocol(loaded) if loaded is not None else "auto"
             effective_protocol = _effective_protocol(active, sample)
             if (

@@ -621,9 +621,18 @@ restarts a requested connector that is no longer running:
   interval and doubling after each attempt up to two minutes; and
 - the delay resets once a connector reports a ready connection.
 
-The connector lock is per process, so a stop from another process can land
-while a restart runs. The restart therefore never records the request itself;
-when the request is gone after it spawns, it stops the connector it spawned.
+The connector lock is per process, so a stop or start from another process
+can land while a restart runs. Two invariants keep both explicit actions
+winning:
+
+- only an explicit `stop()` removes the request; and
+- the monitor restarts a dead connector whenever the request is present.
+
+The restart never records or withdraws the request. When the request is gone
+after it spawns, it stops only the connector it spawned. A start that lands
+during that cleanup keeps its request, so at worst its connector comes back
+one backoff delay later. A tick that attempted a restart skips quality
+evaluation, because its samples describe the exited connector.
 
 ## Doctor Integration
 
