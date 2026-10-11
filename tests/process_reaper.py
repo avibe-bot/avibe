@@ -216,8 +216,17 @@ def record_spawns(record: Path) -> None:
         try:
             _append_spawn(record, self.pid)
         except BaseException:
-            # The caller never gets this child, and no record names it: end it here.
-            self.kill()
+            # The caller never gets this child and no record names it: end it here,
+            # with what it already started, as a reap would.
+            targets: dict[int, float] = {}
+            groups: set[int] = set()
+            if (created := _created(self.pid)) is not None and (process := _same(self.pid, created)) is not None:
+                _add_tree(targets, process)
+                if _GETPGID is not None and _GETPGID(self.pid) == self.pid != _GETPGRP():
+                    groups.add(self.pid)
+            for member in _group_members(groups) if groups else ():
+                _add_tree(targets, member)
+            _kill_and_wait(targets, groups)
             self.wait()
             raise
 

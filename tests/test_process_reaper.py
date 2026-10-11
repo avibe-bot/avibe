@@ -276,10 +276,11 @@ def test_a_process_with_a_live_parent_naming_tmp_path_is_neither_killed_nor_repo
         watcher.wait()
 
 
-# A helper whose record write fails after `Popen` has started the child: the
-# disk filling up between the spawn and its fsync.
+# A helper whose record write fails after `Popen` has started the child, and
+# after that child, a shell, has put a command in the background: the disk
+# filling up between the spawn and its fsync.
 FAILING_RECORD = """
-import os, subprocess, sys
+import os, signal, subprocess, sys, time
 from pathlib import Path
 
 import psutil
@@ -287,21 +288,33 @@ import psutil
 from tests import process_reaper
 
 process_reaper.record_spawns(Path(sys.argv[1]))
+spawned = []
 
 
 def fail(fd):
+    deadline = time.monotonic() + 10
+    while not any(child.children() for child in psutil.Process().children()) and time.monotonic() < deadline:
+        time.sleep(0.01)
+    spawned.extend(child.pid for child in psutil.Process().children())
     raise OSError(28, "No space left on device")
 
 
 os.fsync = fail
 try:
-    subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"])
+    subprocess.Popen(["/bin/sh", "-c", "sleep 600 & sleep 600"], start_new_session=True)
 except OSError as exc:
     print("raised", exc.errno)
-left = [child for child in psutil.Process().children() if child.status() != psutil.STATUS_ZOMBIE]
+left = [
+    process
+    for process in psutil.process_iter()
+    if process.pid != os.getpid() and process.status() != psutil.STATUS_ZOMBIE and os.getpgid(process.pid) in spawned
+]
 print("left", len(left))
-for child in left:
-    child.kill()
+for pgid in spawned:
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except OSError:
+        pass
 """
 
 
