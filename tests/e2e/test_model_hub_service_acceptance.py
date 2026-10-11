@@ -112,6 +112,7 @@ class _Service:
     """The installed ``vibe`` against one isolated home, and its Web UI API."""
 
     def __init__(self, home: Path, port: int) -> None:
+        self.home = home
         self.avibe_home = home / ".avibe"
         self.port = port
         self.origin = f"http://127.0.0.1:{port}"
@@ -129,9 +130,12 @@ class _Service:
         )
         self._csrf: str | None = None
 
-    def vibe(self, *args: str, timeout: float = 300, check: bool = True) -> subprocess.CompletedProcess[str]:
+    def python(self, *args: str, timeout: float = 300, check: bool = True) -> subprocess.CompletedProcess[str]:
+        """Run this interpreter outside the checkout, so it imports the installed package."""
+
         result = subprocess.run(
-            [sys.executable, "-m", "vibe", *args],
+            [sys.executable, *args],
+            cwd=self.home,
             env=self.env,
             capture_output=True,
             text=True,
@@ -142,6 +146,9 @@ class _Service:
         if check:
             assert result.returncode == 0, (args, result.returncode, result.stdout[-4000:], result.stderr[-4000:])
         return result
+
+    def vibe(self, *args: str, timeout: float = 300, check: bool = True) -> subprocess.CompletedProcess[str]:
+        return self.python("-m", "vibe", *args, timeout=timeout, check=check)
 
     def request(self, method: str, path: str, payload: object | None = None, *, timeout: float = 60) -> tuple[int, Any]:
         headers = {"Accept": "application/json"}
@@ -180,15 +187,13 @@ class _Service:
         The default port may belong to a real service on a developer machine.
         """
 
-        from config import paths
-        from core.services import settings
-
-        config = settings.default_config()
-        config.ui.setup_port = self.port
-        config.ui.open_browser = False
-        path = paths.get_config_path()
-        assert path == self.avibe_home / "config" / "config.json", path
-        config.save(path)
+        self.python("-c", (
+            "from config import paths; from core.services import settings; "
+            "config = settings.default_config(); "
+            f"config.ui.setup_port = {self.port}; config.ui.open_browser = False; "
+            "config.save(paths.get_config_path())"
+        ))
+        assert (self.avibe_home / "config" / "config.json").is_file()
 
     def wait_ready(self) -> None:
         _await(
@@ -278,6 +283,7 @@ def _turn(service: _Service, agent: str) -> dict[str, Any]:
 
 
 def test_fresh_install_serves_vibey_and_claude_through_the_hub_and_reaps_an_orphaned_engine(tmp_path) -> None:
+    """Scenario: MH-SERVICE-001 — the installed service, end to end from a fresh home."""
     home = Path(os.environ["HOME"])
     service = _Service(home, _free_port())
     service.seed_config()
@@ -311,8 +317,8 @@ def test_fresh_install_serves_vibey_and_claude_through_the_hub_and_reaps_an_orph
                 "base_url": anthropic.url, "key": _ANTHROPIC_KEY, "protocol": "anthropic",
             }, timeout=120)["source"]
             # Avibe checks an Anthropic key with x-api-key; the engine sends a
-            # custom relay's key as a bearer token. Serve both from here on.
-            anthropic.configure(required_api_key=None)
+            # custom relay's key as a bearer token, so the turn must carry it so.
+            anthropic.configure(required_auth_scheme="bearer")
 
             # A Vibey turn gets the upstream's reply through the hub.
             _route(service, "vibey", _VIBEY_MODEL, chat_source["id"], _CHAT_MODEL)
