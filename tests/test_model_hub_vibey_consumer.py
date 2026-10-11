@@ -484,7 +484,7 @@ async def test_sequential_vibey_retry_replaces_route_and_retains_served_provenan
 
 @pytest.mark.asyncio
 async def test_a_vibey_sessions_turns_share_its_scope_and_each_keeps_its_provenance(tmp_path):
-    """The consumer is the service: a Session's scope and credentials live until it exits, with no per-Turn rotation.
+    """MH-VIBEY-008: the consumer is the service, so a Session's scope lives until it exits, with no per-Turn rotation.
 
     Every resolution names its Turn (a later model call's too), so each Turn on the shared scope settles exact.
     """

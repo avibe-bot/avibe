@@ -1288,7 +1288,7 @@ async def test_a_route_model_hub_refuses_mid_run_shows_the_hubs_copy(engine, ses
 
 
 async def test_every_model_hub_resolution_names_its_turn(engine, session, tmp_path, published) -> None:
-    """The loop's later model calls run in their own tasks, where a Turn cannot be found by task."""
+    """MH-VIBEY-008: the loop's later model calls run in their own tasks, where a Turn cannot be found by task."""
     harness = _Harness(engine, tmp_path, "telegram", _tool_turn())
     resolve, turns = harness.controller._resolve, []
 
