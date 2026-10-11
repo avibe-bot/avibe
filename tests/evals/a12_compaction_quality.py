@@ -1,16 +1,16 @@
 """A12 compaction quality: an offline, LLM-in-the-loop evaluation (``docs/plans/avibe-agent-core.md`` section 6).
 
 It drives a real Vibey Session through the instance's own ``vibe agent run``, so every model call goes through that
-instance's Model Hub and every checkpoint through the shipped C-9 code. A scripted long session states the user's
-ground rules, has the agent change two files for stated reasons, run a check that fails twice, and agree on a next
-step, while large log reads push the context over the threshold. Once the Session holds at least two checkpoints, a
-probe Turn asks, from memory, for the ground rules, the files changed and why, the last error verbatim, and the next
-step, as one JSON object. Each field is scored against the facts the script planted.
+instance's Model Hub and every checkpoint through the shipped C-9 code. A scripted session first plants the facts: it
+states the user's ground rules, has the agent change two files for stated reasons, run a check that fails twice, and
+agree on a next step. Large log reads then push the context over the threshold until at least two checkpoints have
+summarized every planted fact. A probe Turn asks, from memory, for the ground rules, the files changed and why, the
+last error verbatim, and the next step, as one JSON object. Each field is scored against the facts the script planted.
 
 A run counts only if ground truth says it happened as scripted: every Agent run succeeded, the fixture on disk ends in
-the scripted state, both check outputs are in the Session's tool results in order, the Session compacted at least twice
-before the probe, the probe called no tool, and every model-written checkpoint used the checkout's prompt version. An
-invalid run is reported with its reasons, not scored, and exits with status 3.
+the scripted state, both check outputs are in the Session's tool results in order, at least two checkpoints before the
+probe summarized the context past the last planted fact, the probe called no tool, and every model-written checkpoint
+used the checkout's prompt version. An invalid run is reported with its reasons, not scored, and exits with status 3.
 
 Not a test and not collected by pytest (no ``test_`` prefix); never run in CI. It makes real model calls and writes
 real Sessions, so it runs only inside a regression instance (``VIBE_DEPLOYMENT_ENV=regression``), for example through
@@ -19,8 +19,8 @@ real Sessions, so it runs only inside a regression instance (``VIBE_DEPLOYMENT_E
     cd /opt/avibe/source && /opt/avibe/venv/bin/python tests/evals/a12_compaction_quality.py --model <vibey-model>
 
 ``--model`` names a Vibey model whose Model Hub definition has a window of at most 32,000 tokens, so two checkpoints
-happen within a bounded run. Results go to stdout as JSON; record them in ``tests/evals/a12_baselines.md`` per prompt
-version. See ``tests/evals/README.md``.
+happen within the fixture's reads. Results go to stdout as JSON; record them in ``tests/evals/a12_baselines.md`` per
+prompt version. See ``tests/evals/README.md``.
 """
 
 from __future__ import annotations
@@ -42,14 +42,14 @@ from typing import Callable, Optional, Sequence
 # Run as a file from the source checkout: the product's modules are imported from it.
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-#: The largest window the fixture is sized and tested for: two checkpoints within the scripted Turns plus a few extra
-#: reads. Larger windows need more or larger reads than the fixture holds.
+#: The largest window the fixture is sized and tested for: two checkpoints past the planted facts within its reads.
+#: Larger windows need more or larger reads than the fixture holds.
 MAX_WINDOW = 32_000
 #: Each log read is this share of the window, under the read tool's own cap.
 LOG_SHARE = 0.35
 LOG_TOKEN_CAP = 10_000
-#: Extra log reads allowed when the scripted Turns compacted fewer than twice.
-EXTRA_READS = 3
+#: Log reads, one per Turn, allowed until two checkpoints have summarized every planted fact.
+LOG_READS = 7
 TURN_TIMEOUT_S = 900
 
 RULES = (
@@ -57,26 +57,26 @@ RULES = (
     "modify vendor/legacy_api.py; do not rename any public function; record every change you make as one line in "
     "CHANGES.md. First read src/rate_limit.py and src/config.py, then reply with one line."
 )
+#: The Turns that plant every scored fact. The log reads come only after them, so each checkpoint that counts has all
+#: of them to carry.
 TURNS = (
     RULES,
-    "Read logs/day1.log and logs/day2.log completely, then tell me in one line which warning is most common.",
     "Change BURST in src/rate_limit.py from 10 to 5, because the upstream API now rejects bursts above 5. Add the "
     "CHANGES.md line. Then run python3 check.py and show me its output.",
-    "Read logs/day3.log completely and summarize it in one line.",
     "Set REFILL_RATE in src/config.py to 1, because a refill rate of 0 means the bucket never refills. Add the "
     "CHANGES.md line, run python3 check.py again, and show me its output.",
-    "Read logs/day4.log completely and summarize it in one line.",
     "The next step will be to add a regression test in tests/test_burst.py that covers a burst of exactly 5. Do not "
     "write it yet; just confirm the plan in one line.",
 )
-EXTRA_TURN = "Read logs/day{index}.log completely and summarize it in one line."
+READ_TURN = "Read logs/day{index}.log completely and summarize it in one line."
 PROBE = (
     "Answer from memory only: do not read any file or run any command. Reply with one JSON object and nothing else, "
     'in this shape: {"rules": [{"action": "...", "kind": "must"}], "changes": [{"file": "...", "change": "...", '
     '"why": "..."}], "last_error": "...", "next_step": "..."}. rules: every ground rule I set for this session, one '
     'object each; action is the action the rule is about, written positively (for example "delete the cache"), and '
     'kind is "must_not" if I forbade that action or "must" if I required it. changes: each file you changed, what '
-    "you changed in it, and why. last_error: the last error check.py printed, verbatim. next_step: the next step."
+    "you changed in it, and why. last_error: the last error check.py printed, verbatim. next_step: the next step we "
+    "agreed on."
 )
 FIRST_ERROR = "ValueError: refill_rate must be > 0 (got 0)"
 LAST_ERROR = "AssertionError: burst window overlaps (bucket=5, window=0.5s)"
@@ -108,8 +108,20 @@ def _rule(answer: dict, kind: str, subjects: Sequence[str], verbs: Sequence[str]
 
 
 def _set_to(text: str, value: int) -> bool:
-    """Whether ``text`` gives ``value`` as the setting's new value ("to 5", "= 5", "→ 5"), not merely mentions it."""
-    return re.search(rf"(?:\bto|=|→|->)\s*{value}(?![\d.])", text) is not None
+    """Whether ``text`` gives ``value`` as the setting's new value ("to 5", "= 5", "→ 5"), not merely mentions it. A
+    sentence's closing period may follow it; a decimal part may not."""
+    return re.search(rf"(?:\bto|=|→|->)\s*{value}(?!\.?\d)", text) is not None
+
+
+def _next_step(answer: dict) -> bool:
+    """Whether the next step is still to add a test in tests/test_burst.py for a burst of exactly 5: the action and the
+    boundary as well as the file, so a remembered filename with a lost or reversed plan fails."""
+    step = _text(answer.get("next_step"))
+    return (
+        "test_burst.py" in step
+        and any(verb in step for verb in ("add", "write", "creat", "implement"))
+        and re.search(r"(?<![\d.])5(?!\.?\d)", step) is not None
+    )
 
 
 @dataclass(frozen=True)
@@ -152,7 +164,7 @@ FACTS = (
         ),
     ),
     Fact("last error, verbatim", lambda a: _text(a.get("last_error")).strip(" `'\"") == LAST_ERROR.lower()),
-    Fact("next step: tests/test_burst.py", lambda a: "test_burst.py" in _text(a.get("next_step"))),
+    Fact("next step: add a test in tests/test_burst.py for a burst of exactly 5", _next_step),
 )
 
 
@@ -229,7 +241,7 @@ def write_fixture(root: Path, window: int) -> None:
         "CHANGES.md": "# Changes\n",
         "check.py": CHECK_PY,
     }
-    for index in range(1, 5 + EXTRA_READS):
+    for index in range(1, 1 + LOG_READS):
         files[f"logs/day{index}.log"] = _log(index, log_tokens)
     for name, content in files.items():
         path = root / name
@@ -298,6 +310,16 @@ class Rows:
 
     def compactions(self, session_id: str) -> list[dict]:
         return self._events(session_id, "context_compaction")
+
+    def context_end(self, session_id: str) -> int:
+        """The Session's newest context position: what the Turns so far committed is at or before it."""
+        rows = self._query(
+            "select max(seq) as seq from (select max(context_seq) as seq from messages where session_id = ? "
+            "union all select max(context_seq) from agent_events where session_id = ?)",
+            session_id,
+            session_id,
+        )
+        return rows[0]["seq"] or 0
 
     def checkpoint_turns(self, session_id: str) -> list[dict]:
         return self._events(session_id, "fork_turn")
@@ -371,24 +393,36 @@ def run(args: argparse.Namespace) -> tuple[dict, bool]:
     vibe(command, "agent", "create", agent, "--backend", "vibey", "--model", args.model,
          "--description", "A12 compaction-quality evaluation (temporary)")
     rows, session_id, transcript = Rows(), None, []
+
+    def turn(message: str) -> None:
+        nonlocal session_id
+        target = ("--session-id", session_id) if session_id else ("--agent", agent, "--create-session", "--cwd", str(root))
+        payload = vibe(command, "agent", "run", *target, "--sync", "--no-callback",
+                       "--wait-timeout", str(TURN_TIMEOUT_S), "--message", message)
+        session_id = session_id or payload["session_id"]
+        transcript.append({"message": message, "reply": rows.last_result(session_id)})
+
+    def carried() -> int:
+        """Checkpoints that summarized the context past the last planted fact: each had every fact to carry."""
+        return sum(1 for item in rows.compactions(session_id) if (item.get("summarized_to_seq") or 0) >= facts_end)
+
     try:
-        turns, extra = list(TURNS), 0
-        while turns:
-            message = turns.pop(0)
-            target = ("--session-id", session_id) if session_id else ("--agent", agent, "--create-session", "--cwd", str(root))
-            payload = vibe(command, "agent", "run", *target, "--sync", "--no-callback",
-                           "--wait-timeout", str(TURN_TIMEOUT_S), "--message", message)
-            session_id = session_id or payload["session_id"]
-            transcript.append({"message": message, "reply": rows.last_result(session_id)})
-            if not turns and len(rows.compactions(session_id)) < 2 and extra < EXTRA_READS:
-                extra += 1
-                turns.append(EXTRA_TURN.format(index=4 + extra))
-        before_probe = len(rows.compactions(session_id))
+        for message in TURNS:
+            turn(message)
+        facts_end = rows.context_end(session_id)
+        for index in range(1, 1 + LOG_READS):
+            if carried() >= 2:
+                break
+            turn(READ_TURN.format(index=index))
+        before_probe = carried()
         problems = fixture_problems(root)
         if not check_outputs_in_order(rows.tool_outputs(session_id)):
             problems.append("the Session's tool results lack the two check outputs in order")
         if before_probe < 2:
-            problems.append(f"the Session compacted {before_probe} time(s) before the probe, not at least 2")
+            problems.append(
+                f"{before_probe} checkpoint(s) before the probe summarized the context past the last planted fact "
+                f"(position {facts_end}), not at least 2"
+            )
         answer, probe_calls = "", None
         if not problems:  # an invalid run is not probed
             mark = rows.mark()
@@ -418,9 +452,11 @@ def run(args: argparse.Namespace) -> tuple[dict, bool]:
         "output_budget": max_output,
         "session_id": session_id,
         "project_dir": str(root),
+        "facts_end": facts_end,
         "compactions": [
             {
                 "mode": item.get("mode"),
+                "summarized_to_seq": item.get("summarized_to_seq"),
                 "reason": item.get("reason"),
                 "tokens_before": item.get("tokens_before"),
                 "tokens_after_estimate": item.get("tokens_after_estimate"),

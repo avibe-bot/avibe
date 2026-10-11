@@ -11,20 +11,23 @@ Plan: `docs/plans/avibe-agent-core.md` §6, A12. Script: `a12_compaction_quality
 **What it does.**
 - It drives a real Vibey Session through the instance's own `vibe agent run`. Every model call goes through that
   instance's Model Hub, and every checkpoint through the shipped C-9 code.
-- The scripted session runs in a temporary project with a temporary Agent. Across its Turns the user:
+- The scripted session runs in a temporary project with a temporary Agent. Its first Turns plant every scored fact.
+  The user:
   - states three ground rules;
   - has the agent change two files, each for a stated reason;
   - has it run a check that fails twice;
   - agrees on a next step.
-- Log reads sized from the model's window push the context over the threshold. The script adds up to three more
-  reads until the Session holds at least two checkpoints.
+- Only then do log reads, sized from the model's window and one per Turn, push the context over the threshold. They
+  continue, up to seven, until two checkpoints have summarized the context past the last planted fact.
 - A probe Turn then asks, from memory, for the ground rules, the files changed and why, the last error verbatim, and
   the next step, as one JSON object. Each of the nine planted facts is judged on its own field:
   - a rule only with its polarity and its action: each rule is `{"action", "kind": "must" | "must_not"}`, and the
     action must name the constrained act (modify, rename public functions, record);
   - a changed value only inside its file's entry and as the new value ("to 5", "= 5"), and a reason only in that
     entry's `why`;
-  - the last error as the whole line.
+  - the last error as the whole line;
+  - the next step with its action and boundary (add a test in `tests/test_burst.py` for a burst of exactly 5), not
+    only the file.
 
 **Valid runs only.** A run is scored only if ground truth (the database rows and the fixture on disk) shows that it
 happened as scripted:
@@ -32,8 +35,10 @@ happened as scripted:
 - the fixture ends with BURST = 5, REFILL_RATE = 1, exactly the two CHANGES.md lines for those changes, `allow()`
   still defined, and `vendor/legacy_api.py` untouched;
 - both check outputs are in the Session's tool results, in order;
-- the Session compacted at least twice before the probe, and the probe ran no tool (judged by committed tool results,
-  not the display traces);
+- at least two checkpoints before the probe summarized the context past the last planted fact: their
+  `summarized_to_seq` reaches the Session's newest context position after the planting Turns, so every scored fact
+  went through both;
+- the probe ran no tool (judged by committed tool results, not the display traces);
 - every model-written checkpoint used the checkout's prompt version.
 
 Otherwise the JSON says `"valid": false` with the reasons, no score is given, and the script exits with status 3. A
@@ -59,12 +64,13 @@ summarizers'.
 3. Read the JSON it prints:
    - whether the run is valid, and why not;
    - the prompt version, the model, and the output budget Vibey used on it;
-   - each compaction (mode, sizes, and whether the model wrote it);
+   - the last planted fact's context position, and each compaction (mode, how far it summarized, sizes, and whether
+     the model wrote it);
    - each checkpoint turn's outcome and repair;
    - the per-fact score and the probe answer.
 4. Add a row to `a12_baselines.md`, then restore the model definition.
 
-The run makes about a dozen Turns, plus their checkpoint turns, on the small window.
+The run makes about ten Turns, plus their checkpoint turns, on the small window.
 
 **Known limits.** The threat model is an honest model behaving imperfectly, not an adversary gaming the scorer.
 - The scorer matches keywords inside the right field, so a correct reason in unexpected words can be missed. Read the
@@ -76,6 +82,10 @@ The run makes about a dozen Turns, plus their checkpoint turns, on the small win
 - The two check outputs are looked for in every tool result. A read of `check.py`, whose source contains the last
   error's text, could therefore stand in for the second check run. The recorded runs ran both checks with `bash`;
   confirm that in the Session when a run looks suspicious.
+- A checkpoint turn may read files: C-9 allows `read` while dreaming, and its results stay in the `fork_turn` audit
+  row instead of the Session's tool results. A checkpoint that read the fixture could recover a changed value from
+  disk instead of from the conversation. The recorded runs' checkpoint turns made no tool round (`rounds` is 0 in
+  every `fork_turn` row); check that in the Session before recording a row.
 - The model is recorded as requested, not as served. If Model Hub fails over to another hop during a run, the row
   would name the requested model. The recorded runs were served by it throughout (every checkpoint's and response's
   origin); check the origins in the Session before recording a row.
