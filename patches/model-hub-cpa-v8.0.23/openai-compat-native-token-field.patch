@@ -1,9 +1,8 @@
 diff --git a/internal/runtime/executor/helps/openai_compat_max_tokens.go b/internal/runtime/executor/helps/openai_compat_max_tokens.go
-index 71915c5b..9819da97 100644
+index 71915c5..9819da9 100644
 --- a/internal/runtime/executor/helps/openai_compat_max_tokens.go
 +++ b/internal/runtime/executor/helps/openai_compat_max_tokens.go
-@@ -55,6 +55,13 @@ func NormalizeOpenAIMaxTokens(payload []byte, useMaxCompletionTokens bool) []byte
- 	if !hasMaxTokens && !hasMaxCompletionTokens {
+@@ -55,6 +55,13 @@ func NormalizeOpenAIMaxTokens(payload []byte, useMaxCompletionTokens bool) []byt
  		return payload
  	}
  
@@ -17,4 +16,56 @@ index 71915c5b..9819da97 100644
  	if useMaxCompletionTokens {
  		if hasMaxTokens && !hasMaxCompletionTokens {
  			val := gjson.GetBytes(payload, "max_tokens")
- 			if val.Raw != "" {
+diff --git a/internal/runtime/executor/helps/openai_compat_max_tokens_test.go b/internal/runtime/executor/helps/openai_compat_max_tokens_test.go
+index f1bd20a..4f06037 100644
+--- a/internal/runtime/executor/helps/openai_compat_max_tokens_test.go
++++ b/internal/runtime/executor/helps/openai_compat_max_tokens_test.go
+@@ -147,27 +147,22 @@ func TestNormalizeOpenAIMaxTokens(t *testing.T) {
+ 		}
+ 	})
+ 
+-	t.Run("useMaxCompletionTokens=false converts max_completion_tokens to max_tokens", func(t *testing.T) {
++	// Avibe: false leaves the caller's native field unchanged.
++	t.Run("useMaxCompletionTokens=false keeps native max_completion_tokens", func(t *testing.T) {
+ 		input := []byte(`{"model":"deepseek","max_completion_tokens":1024,"messages":[]}`)
+ 		got := NormalizeOpenAIMaxTokens(input, false)
+ 
+-		if v := gjson.GetBytes(got, "max_tokens"); !v.Exists() || v.Int() != 1024 {
+-			t.Fatalf("max_tokens = %v, want 1024; out=%s", v, string(got))
+-		}
+-		if gjson.GetBytes(got, "max_completion_tokens").Exists() {
+-			t.Fatalf("max_completion_tokens should be deleted; out=%s", string(got))
++		if string(got) != string(input) {
++			t.Fatalf("payload changed; out=%s", string(got))
+ 		}
+ 	})
+ 
+-	t.Run("useMaxCompletionTokens=false preserves existing max_tokens and removes max_completion_tokens", func(t *testing.T) {
++	t.Run("useMaxCompletionTokens=false keeps both native fields", func(t *testing.T) {
+ 		input := []byte(`{"model":"deepseek","max_tokens":512,"max_completion_tokens":2048}`)
+ 		got := NormalizeOpenAIMaxTokens(input, false)
+ 
+-		if v := gjson.GetBytes(got, "max_tokens"); !v.Exists() || v.Int() != 512 {
+-			t.Fatalf("max_tokens = %v, want 512; out=%s", v, string(got))
+-		}
+-		if gjson.GetBytes(got, "max_completion_tokens").Exists() {
+-			t.Fatalf("max_completion_tokens should be deleted; out=%s", string(got))
++		if string(got) != string(input) {
++			t.Fatalf("payload changed; out=%s", string(got))
+ 		}
+ 	})
+ 
+@@ -199,11 +194,8 @@ func TestNormalizeOpenAIMaxTokens(t *testing.T) {
+ 		input := []byte(`{"model":"deepseek","max_completion_tokens":null}`)
+ 		got := NormalizeOpenAIMaxTokens(input, false)
+ 
+-		if v := gjson.GetBytes(got, "max_tokens"); !v.Exists() || v.Type != gjson.Null {
+-			t.Fatalf("max_tokens = %v, want null; out=%s", v, string(got))
+-		}
+-		if gjson.GetBytes(got, "max_completion_tokens").Exists() {
+-			t.Fatalf("max_completion_tokens should be deleted; out=%s", string(got))
++		if string(got) != string(input) {
++			t.Fatalf("payload changed; out=%s", string(got))
+ 		}
+ 	})
+ 
