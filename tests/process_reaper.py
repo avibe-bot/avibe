@@ -18,8 +18,10 @@ Hub engines, outlived their deleted worktrees by days. Two owners close that.
 
 Opt-in, for the suites whose children are real and long-lived: the job wrapper
 tests (``tests/agent_core/tools/test_bash.py``, ``test_jobs.py``,
-``tests/test_watch_job_target.py``) and the mock-engine tests
-(``tests/test_model_hub_runtime.py``, ``test_model_hub_local_error_details.py``).
+``tests/test_watch_job_target.py``), the mock-engine tests
+(``tests/test_model_hub_runtime.py``, ``test_model_hub_local_error_details.py``)
+and the remote-access process tests (``tests/test_tunnel_recovery.py``,
+``tests/test_cloudflared_runtime.py``).
 Each starts its children through ``subprocess.Popen`` in a session of their own,
 which is what the record covers. A marked test starts no ``multiprocessing``
 helper, which serves a whole run and would be reaped with the test.
@@ -36,6 +38,16 @@ its body. Every signal is proven to reach what the test started:
   it. A pid reused by any live process makes the record stale. The warden
   forgets each test's records once its reap has confirmed them gone.
 
+A process that a test's own child Python started is in no record: a connector
+a cross-process child brings up reparents to init once the child exits.
+``reap_naming`` covers it for the tests that opt into the
+``reap_tmp_path_processes`` fixture: everything such a test starts names its own
+``tmp_path`` (a fake cloudflared, the log sinks writing under the test's home),
+so a process whose executable or argv names it and is still running after the
+test's own cleanup is killed with its group, and the test fails. The warden
+holds the running test's ``tmp_path`` too, so when pytest is killed outright it
+kills what names that path as well.
+
 Reports name a process by pid and executable name only: an argv can carry a
 credential.
 
@@ -45,10 +57,13 @@ POSIX only, like the foreign-signal guard whose ``Popen`` hook records spawns.
 from __future__ import annotations
 
 import os
+import re
 import signal
 import subprocess
 import sys
 import time
+from collections.abc import Callable
+from pathlib import Path
 from typing import NamedTuple
 
 import psutil
@@ -125,6 +140,86 @@ def _describe(pid: int) -> str:
         return str(pid)
 
 
+# A log sink ends once the connector whose output it drains has: what the
+# test's own cleanup stopped gets this long to go before it counts as left behind.
+_NAMED_EXIT_SECONDS = 5.0
+
+
+def names_path(path: Path) -> Callable[[str], re.Match | None]:
+    """Search for ``path`` itself or a path inside it: the whole final component, so ``test_x1`` never names ``test_x10``."""
+    return re.compile(re.escape(str(path)) + r"(?![\w.-])").search
+
+
+def _naming(path: Path) -> dict[int, float]:
+    names = names_path(path)
+    found: dict[int, float] = {}
+    for process in psutil.process_iter():
+        if process.pid == os.getpid():
+            continue
+        try:
+            if process.status() == psutil.STATUS_ZOMBIE:
+                continue
+            words = [process.exe(), *process.cmdline()]
+            created = process.create_time()
+        except psutil.Error:
+            continue
+        if any(word and names(word) for word in words):
+            found[process.pid] = created
+    return found
+
+
+def reap_naming(path: Path) -> list[str]:
+    """Kill every process naming ``path`` that outlives a short grace, with its group and descendants; describe each.
+
+    Called once the test's own cleanup has run, for the processes no record
+    reaches.
+    """
+    __tracebackhide__ = True
+    give_up = time.monotonic() + _NAMED_EXIT_SECONDS
+    while (named := _naming(path)) and time.monotonic() < give_up:
+        time.sleep(0.05)
+    targets: dict[int, float] = {}
+    groups: set[int] = set()
+    for pid, created in named.items():
+        if (process := _same(pid, created)) is None:
+            continue
+        try:
+            for each in (process, *process.children(recursive=True)):
+                targets.setdefault(each.pid, each.create_time())
+            if _GETPGID(pid) == pid != _GETPGRP():
+                groups.add(pid)
+        except (OSError, psutil.Error):
+            pass
+    for member in _group_members(groups) if groups else ():
+        try:
+            targets.setdefault(member.pid, member.create_time())
+        except psutil.Error:
+            pass
+    targets.pop(os.getpid(), None)
+    reaped = [_describe(pid) for pid, created in named.items() if _same(pid, created) is not None]
+    for pgid in groups:
+        if _group_is_ours(pgid, named[pgid]):
+            try:
+                _KILLPG(pgid, signal.SIGKILL)
+            except OSError:
+                pass
+    for pid, created in targets.items():
+        if _same(pid, created) is not None:
+            try:
+                _KILL(pid, signal.SIGKILL)
+            except OSError:
+                pass
+    give_up = time.monotonic() + hang_guard.HANG_GUARD_SECONDS
+    while running := [pid for pid, created in targets.items() if _same(pid, created) is not None]:
+        if time.monotonic() >= give_up:
+            pytest.fail(
+                f"hung for {hang_guard.HANG_GUARD_SECONDS:.0f}s waiting for SIGKILLed processes to end: "
+                + ", ".join(map(_describe, running))
+            )
+        time.sleep(0.01)
+    return reaped
+
+
 class TestProcesses:
     """One test's spawns, and the descendants this pytest process had before it began."""
 
@@ -199,15 +294,18 @@ class TestProcesses:
 
 
 # Runs as ``python -I -c _WARDEN <pytest pid>`` with the record pipe on stdin. A
-# line is "<pid> <creation time> <1 if it founded its group>", or "settled" once
-# the running test's reap has confirmed every record gone. EOF, or a parent
-# that is no longer pytest, means the run is over.
+# line is "<pid> <creation time> <1 if it founded its group>", "settled" once
+# the running test's reap has confirmed every record gone, "root <path>" for a
+# ``reap_tmp_path_processes`` test's ``tmp_path``, or "unroot" once its
+# teardown has cleared that path. EOF, or a parent that is no longer pytest,
+# means the run is over.
 _WARDEN = r"""
-import os, select, signal, sys
+import os, re, select, signal, sys
 import psutil
 
 pytest_pid = int(sys.argv[1])
 records = {}
+roots = set()
 pending = b""
 while True:
     ready, _, _ = select.select([0], [], [], 1.0)
@@ -222,6 +320,12 @@ while True:
     for line in lines:
         if line == b"settled":
             records.clear()
+            continue
+        if line.startswith(b"root "):
+            roots.add(line[5:].decode())
+            continue
+        if line == b"unroot":
+            roots.clear()
             continue
         pid, created, founded_group = line.split()
         records[int(pid)] = (float(created), founded_group == b"1")
@@ -250,6 +354,19 @@ for pid, (created, founded_group) in records.items():
             os.killpg(pid, signal.SIGKILL)
         except OSError:
             pass
+# What names the running test's tmp_path is that test's, wherever it was reparented.
+for root in roots:
+    names = re.compile(re.escape(root) + r"(?![\w.-])").search
+    for process in psutil.process_iter():
+        try:
+            if not any(word and names(word) for word in [process.exe(), *process.cmdline()]):
+                continue
+            if os.getpgid(process.pid) == process.pid:
+                os.killpg(process.pid, signal.SIGKILL)
+            for each in [*process.children(recursive=True), process]:
+                each.send_signal(signal.SIGKILL)
+        except (OSError, psutil.Error):
+            pass
 """
 
 
@@ -277,6 +394,13 @@ class Warden:
 
     def record(self, pid: int, created: float, founded_group: bool) -> None:
         self._send(f"{pid} {created!r} {int(founded_group)}")
+
+    def watch_root(self, path: Path) -> None:
+        """Kill what names ``path`` if the run ends before ``forget_root``."""
+        self._send(f"root {path}")
+
+    def forget_root(self) -> None:
+        self._send("unroot")
 
     def settle(self) -> None:
         """Every record so far is confirmed gone: forget them, so none can go stale."""

@@ -83,6 +83,49 @@ def test_an_unmarked_run_starts_no_warden():
 '''
 
 
+# What a cross-process child does: it starts a detached connector and exits, so
+# the connector reparents to init and no record of this pytest process reaches it.
+ORPHANING = '''
+import os
+import signal
+import subprocess
+import sys
+from pathlib import Path
+
+import psutil
+import pytest
+
+RECORD = Path(os.environ["REAPER_PROBE_RECORD"])
+pytestmark = pytest.mark.usefixtures("reap_tmp_path_processes")
+
+CHILD = (
+    "import subprocess, sys; "
+    "print(subprocess.Popen([sys.argv[1]], start_new_session=True, stdin=subprocess.DEVNULL, "
+    "stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).pid)"
+)
+
+
+def _orphan_a_connector(tmp_path):
+    connector = tmp_path / "bin" / "cloudflared"
+    connector.parent.mkdir()
+    connector.write_text("#!/bin/sh\\nwhile :; do sleep 0.2; done\\n")
+    connector.chmod(0o755)
+    child = subprocess.run([sys.executable, "-c", CHILD, str(connector)], capture_output=True, text=True, check=True)
+    pid = int(child.stdout)
+    RECORD.write_text(f"{pid} {psutil.Process(pid).create_time()!r}\\n")
+
+
+def test_a_detached_connector_a_child_started(tmp_path):
+    _orphan_a_connector(tmp_path)
+
+
+@pytest.mark.allow_foreign_signals(reason="the run kills itself, as the CI watchdog does")
+def test_a_killed_run_after_a_child_detached_a_connector(tmp_path):
+    _orphan_a_connector(tmp_path)
+    os.kill(os.getpid(), signal.SIGKILL)
+'''
+
+
 def _run_inner(tmp_path: Path, selection: str, source: str = INNER) -> tuple[subprocess.CompletedProcess, Path]:
     inner = tmp_path / "test_inner.py"
     inner.write_text(source)
@@ -132,6 +175,29 @@ def test_a_run_without_a_marked_test_has_no_warden(tmp_path):
     result, _ = _run_inner(tmp_path, "unmarked", UNMARKED)
 
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_a_connector_a_child_started_is_killed_and_fails_its_test(tmp_path):
+    result, record = _run_inner(tmp_path, "detached_connector", ORPHANING)
+
+    output = result.stdout + result.stderr
+    assert result.returncode == 1, output
+    # The body passed; the teardown found the connector and failed the test.
+    assert "1 passed" in output and "1 error" in output, output
+    pid = record.read_text().split()[0]
+    reported = output.split("were still running and were killed: ")[1].splitlines()[0]
+    assert reported.startswith(f"{pid} (")
+    # A report names the process, never its arguments, which can carry a credential.
+    assert "/" not in reported
+    assert _running(record) == []
+
+
+async def test_a_connector_a_child_started_ends_with_a_killed_run(tmp_path):
+    result, record = _run_inner(tmp_path, "killed_run_after", ORPHANING)
+
+    assert result.returncode == -9, result.stdout + result.stderr
+    # The warden acts once it sees the run gone, after this pytest saw it exit.
+    await hang_guard.until(lambda: _running(record) == [], "the warden to kill the connector the child detached")
 
 
 @pytest.fixture

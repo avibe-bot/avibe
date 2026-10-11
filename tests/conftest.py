@@ -221,6 +221,35 @@ def pytest_runtest_teardown(item):
             _reaped_processes.extend(f"{item.nodeid}: {each}" for each in processes.reap())
 
 
+@pytest.fixture
+def reap_tmp_path_processes(tmp_path):
+    """Fail a test that leaves running a process naming its ``tmp_path``, once that process is killed.
+
+    ``reap_processes`` reaps what this pytest process started. A connector that a
+    test's child Python started reparents to init once the child exits, where no
+    record reaches it, but it names the test's ``tmp_path`` (tests/process_reaper.py).
+    Torn down after the test's own fixtures, so their cleanup runs first; the
+    warden covers a run killed before teardown. POSIX only, like the reaper.
+    """
+
+    global _process_warden
+    if not _SIGNAL_GUARD_SUPPORTED:
+        yield
+        return
+    if _process_warden is None:
+        _process_warden = process_reaper.Warden()
+    # A pytest killed outright runs no teardown: the warden then kills what names tmp_path.
+    _process_warden.watch_root(tmp_path)
+    yield
+    __tracebackhide__ = True
+    try:
+        reaped = process_reaper.reap_naming(tmp_path)
+    finally:
+        _process_warden.forget_root()
+    if reaped:
+        pytest.fail("processes naming this test's tmp_path were still running and were killed: " + ", ".join(reaped))
+
+
 def _module_uses_default_sqlite_state(request: pytest.FixtureRequest) -> bool:
     """Avoid creating a migration template for tests that never use SQLite state."""
 
@@ -601,7 +630,7 @@ class _ForeignSignalGuard:
     def __init__(self, test_temp: Path) -> None:
         self.me = _REAL_OS_GETPID()
         # The whole final component: `test_x1` must not claim `test_x10`.
-        self.names_test_temp = re.compile(re.escape(str(test_temp)) + r"(?![\w.-])").search
+        self.names_test_temp = process_reaper.names_path(test_temp)
         self.owned: set[int] = set()
         # Every pid psutil listed while this test ran: a scan finds real processes by design.
         self.listed: set[int] = set()

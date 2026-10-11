@@ -15,6 +15,9 @@ from config.v2_config import V2Config
 from tests.test_remote_access_vibe_cloud import _config
 from vibe import remote_access, runtime
 
+# Real fake-cloudflared connectors and log sinks, some started by child Pythons.
+pytestmark = [pytest.mark.reap_processes, pytest.mark.usefixtures("reap_tmp_path_processes")]
+
 
 def _quality(median: float) -> dict:
     return {
