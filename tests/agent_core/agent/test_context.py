@@ -7,6 +7,8 @@ the checkpoint's model-facing text and row.
 
 from __future__ import annotations
 
+import base64
+import json
 import math
 import os
 import random
@@ -22,6 +24,7 @@ from core.agent_core.harness.context import (
     CLEARED_PLACEHOLDER,
     ITEM_BYTES,
     budget,
+    cache_ttl_s,
     carried_skills,
     CHECKPOINT_REPAIR,
     checkpoint_block,
@@ -108,10 +111,59 @@ def test_the_estimate_counts_utf8_bytes_so_chinese_is_not_undercounted():
     assert message_tokens(user(chinese)) == 54
     image = UserMessage((TextBlock(text="see"), ImageBlock("image/png", "media-token")))
     assert message_tokens(image) == 1 + 1_600
-    call = ToolCallBlock("id", "read", {"path": "中"}, signature="sig")
-    reply = AssistantMessage((ThinkingBlock("ab", signature="cdef"), call), ORIGIN, "tool_use")
-    replayed = len("ab") + len("cdef") + len("read") + len('{"path":"中"}'.encode()) + len("sig")
+    call = ToolCallBlock("id", "read", {"path": "中"})
+    reply = AssistantMessage((ThinkingBlock("ab"), call), ORIGIN, "tool_use")  # unsigned thinking replays as text
+    replayed = len("ab") + len("read") + len('{"path":"中"}'.encode())
     assert message_tokens(reply) == math.ceil(replayed / 4)
+
+
+def responses_item(reasoning: int, summary: str = "") -> ThinkingBlock:
+    """An OpenAI Responses reasoning item as the adapter stores it: about 17 bytes of ciphertext per reasoning token."""
+    ciphertext = base64.b64encode(bytes(range(256)) * (reasoning // 15 + 1)).decode()[: 17 * reasoning]
+    summaries = [{"type": "summary_text", "text": summary}] if summary else []
+    item = {"type": "reasoning", "id": "rs_0", "encrypted_content": ciphertext, "summary": summaries}
+    return ThinkingBlock(summary, signature=json.dumps(item, separators=(",", ":")))
+
+
+#: Anthropic signed thinking as Claude Opus returns it with its text omitted: an empty text and a ~5 KB signature.
+ANTHROPIC_THINKING = ThinkingBlock("", signature=base64.b64encode(bytes(range(256)) * 15).decode())
+READ = ToolCallBlock("c", "read", {"path": "a"})  # "read" and '{"path":"a"}': 16 bytes, 4 tokens
+
+
+def _reply(*content, reasoning=None, output=0, usage=True) -> AssistantMessage:
+    reported = Usage(input_tokens=1, output_tokens=output, reasoning_tokens=reasoning) if usage else None
+    return AssistantMessage(tuple(content), ORIGIN, "tool_use", usage=reported)
+
+
+@pytest.mark.parametrize(
+    "reply,tokens",
+    [
+        # OpenAI Responses: the summary text rides inside the item, and the reported reasoning covers it.
+        (_reply(responses_item(400, summary="plan"), READ, reasoning=400, output=450), 4 + 400),
+        # Two reasoning items in one response: the response's reasoning, once.
+        (_reply(responses_item(300), responses_item(100), READ, reasoning=400, output=450), 4 + 400),
+        (_reply(ANTHROPIC_THINKING, READ, reasoning=900, output=960), 4 + 900),
+        (_reply(ThinkingBlock("", signature="opaque-redacted" * 100, redacted=True), READ, reasoning=300), 4 + 300),
+        (_reply(replace(READ, signature="thought-signature" * 100), reasoning=200, output=230), 4 + 200),  # Gemini
+        # A Chat marker signature: the text is the reasoning, replayed in its own field; never counted twice.
+        (_reply(ThinkingBlock("t" * 2_000, signature="reasoning_content"), READ, reasoning=480), 4 + 500),
+        # Without a reported reasoning count, the response's output, which includes it; without usage, nothing.
+        (_reply(ANTHROPIC_THINKING, READ, output=700), 4 + 700),
+        (_reply(ANTHROPIC_THINKING, READ, usage=False), 4),
+        # Thinking with no payload replays as plain text.
+        (_reply(ThinkingBlock("t" * 400), READ, reasoning=900), 4 + 100),
+    ],
+)
+def test_an_opaque_reasoning_payload_counts_its_reported_reasoning_never_its_ciphertext(reply, tokens):
+    assert message_tokens(reply) == tokens
+    # The ciphertext's size never matters: ten times the payload is the same estimate.
+    bigger = tuple(
+        replace(block, signature=block.signature * 10)
+        if isinstance(block, (ThinkingBlock, ToolCallBlock)) and block.signature not in (None, "reasoning_content")
+        else block
+        for block in reply.content
+    )
+    assert message_tokens(replace(reply, content=bigger)) == tokens
 
 
 def make_request(messages=(), *, system="system", tools=(), endpoint=ENDPOINT, max_tokens=4_096) -> ModelRequest:
@@ -159,8 +211,9 @@ def _usage(total: int) -> Usage:
 CAPABILITIES = ModelCapabilities(context_window=32_000, max_output_tokens=4_096)
 
 
-def _anchored_rows():
-    """A read, then a response R billed 5,000 whose row records its request, R's result, and a later reply."""
+def _anchored_rows(billed: int = 5_000):
+    """A read, then a response R billed ``billed`` whose row records its request (1,106 tokens), R's result, and a
+    later reply."""
     rows = Rows()
     rows.input("x" * 400)
     rows.tool("read", "w" * 4_000, call_id="before", path="a")
@@ -168,7 +221,7 @@ def _anchored_rows():
     sent = make_request(context_view(rows.rows).messages)
     anchored = rows.add(
         "response",
-        AssistantMessage((read,), ORIGIN, "tool_use", usage=_usage(5_000)),
+        AssistantMessage((read,), ORIGIN, "tool_use", usage=_usage(billed)),
         payload={"request": request_facts(sent)},
     )
     result = rows.result(read, "y" * 4_000)
@@ -180,6 +233,12 @@ def _est(rows, request=None):
     view = context_view(rows.rows)
     request = request or make_request(view.messages)
     return budget(request, CAPABILITIES, transcript=view.messages, anchor=last_anchor(rows.rows, view)).est
+
+
+def _whole(rows, request=None):
+    """``tokens()`` of the whole request, the estimate without an anchor."""
+    request = request or make_request(context_view(rows.rows).messages)
+    return request_tokens(request.system, request.tools, request.messages)
 
 
 def _edit_of(entry):
@@ -196,7 +255,7 @@ def test_the_anchor_holds_while_the_transcript_up_to_its_response_is_unchanged()
     messages = context_view(rows.rows).messages
     after = message_tokens(result.message) + message_tokens(messages[-1])
     assert _est(rows) == 5_000 + after
-    # Outside the transcript, a change adjusts the anchored usage by its UTF-8/4 delta.
+    # Outside the transcript, a change adjusts the anchored usage by its tokens() delta.
     longer = "system " * 100
     delta = request_tokens(longer, (), ()) - request_tokens("system", (), ())
     assert _est(rows, make_request(messages, system=longer)) == 5_000 + after + delta
@@ -211,19 +270,60 @@ def test_the_anchor_holds_while_the_transcript_up_to_its_response_is_unchanged()
     assert _est(rows) == 5_000 + message_tokens(cleared[-2]) + message_tokens(cleared[-1])
 
 
-def test_an_edit_or_checkpoint_before_the_anchor_or_another_route_invalidates_it():
-    def whole(rows, request=None):
-        request = request or make_request(context_view(rows.rows).messages)
-        return request_tokens(request.system, request.tools, request.messages)
+def test_the_anchor_survives_clearing_a_result_before_it_but_never_drops_below_the_request():
+    # The provider counted far more than the bytes (5,000 for 1,106): clearing the result before R (1,000 tokens) is
+    # a negative delta of its tokens() on the anchored usage, which still says more than the bytes.
+    rows, anchored, result = _anchored_rows()
+    messages = context_view(rows.rows).messages
+    after = message_tokens(result.message) + message_tokens(messages[-1])
+    freed = 1_000 - text_tokens(CLEARED_PLACEHOLDER)
+    rows.add("context_edit", payload=_edit_of(next(row for row in rows.rows if row.kind == "tool_result")))
+    assert _est(rows) == 5_000 + after - freed > _whole(rows)
+    # It counted less (a tokenizer that packs the text tighter than 4 bytes a token): the unchanged anchor lowers the
+    # estimate below the bytes. What a clearing removes is a local estimate taken from that provider count, so once
+    # a result before R is cleared the estimate is never below the request's own tokens().
+    rows, anchored, result = _anchored_rows(billed=600)
+    assert _est(rows) == 600 + after < _whole(rows)
+    rows.add("context_edit", payload=_edit_of(next(row for row in rows.rows if row.kind == "tool_result")))
+    assert 600 + after - freed < _est(rows) == _whole(rows)
 
+
+def test_a_stored_request_size_above_what_the_request_carried_never_lowers_the_estimate():
+    # Rows written by the earlier estimate record a request with each reasoning item at its ciphertext's UTF-8 / 4,
+    # about four times its reasoning. Taken as is, the anchored usage would lose more than R and everything after it
+    # are worth; the anchor never takes away more than the transcript accounts for, so it reads like a current row.
+    item = responses_item(4_000)
+    call = ToolCallBlock("s", "read", {"path": "a"})
+    reported = Usage(input_tokens=1_000, output_tokens=4_010, reasoning_tokens=4_000)
+    earlier_reply = AssistantMessage((item, call), ORIGIN, "tool_use", usage=reported)
+
+    def rows_storing(stored):
+        rows = Rows()
+        rows.input("x" * 400)
+        rows.add("response", earlier_reply)
+        rows.result(call, "w" * 4_000)
+        read = ToolCallBlock("r", "read", {"path": "f"})
+        current = request_facts(make_request(context_view(rows.rows).messages))["tokens"]
+        tokens = stored(current)
+        anchored = AssistantMessage((read,), ORIGIN, "tool_use", usage=_usage(9_000))
+        rows.add("response", anchored, payload={"request": {"tokens": tokens}})
+        result = rows.result(read, "y" * 4_000)
+        rows.response(value="z" * 40)
+        return rows, current, tokens, message_tokens(result.message) + 10
+
+    rows, current, _, after = rows_storing(lambda current: current)
+    assert _est(rows) == 9_000 + after
+    ciphertext = math.ceil((len(item.signature.encode()) + len('read{"path":"a"}')) / 4)
+    rows, current, earlier, after = rows_storing(lambda current: current - (4 + 4_000) + ciphertext)
+    assert earlier - current > 9_000 + after  # usage + tokens(this) - R.request.tokens - tokens(R) would be negative
+    assert _est(rows) == 9_000 + after
+
+
+def test_a_checkpoint_or_another_route_invalidates_the_anchor():
     rows, anchored, result = _anchored_rows()
     other_route = ModelEndpoint("anthropic", "http://model.invalid", "other-model", "", provider="test-provider")
     request = make_request(context_view(rows.rows).messages, endpoint=other_route)
-    assert _est(rows, request) == whole(rows, request)  # another model's tokenizer
-    # A context_edit of a result before the anchored response changes what its usage measured.
-    before = next(row for row in rows.rows if row.kind == "tool_result")
-    rows.add("context_edit", payload=_edit_of(before))
-    assert _est(rows) == whole(rows)
+    assert _est(rows, request) == _whole(rows, request)  # another model's tokenizer
     # A checkpoint that keeps the anchored response verbatim still replaces what came before it.
     rows, anchored, result = _anchored_rows()
     view = context_view(rows.rows)
@@ -234,7 +334,7 @@ def test_an_edit_or_checkpoint_before_the_anchor_or_another_route_invalidates_it
     )
     rows.add("compaction", payload=payload)
     assert context_view(rows.rows).units[0].seq == anchored.context_seq
-    assert _est(rows) == whole(rows)
+    assert _est(rows) == _whole(rows)
     # A failed or aborted response, or one without usage or request facts, never anchors.
     for message, facts in [
         (AssistantMessage((), ORIGIN, "error", usage=_usage(9_999)), True),
@@ -246,6 +346,27 @@ def test_an_edit_or_checkpoint_before_the_anchor_or_another_route_invalidates_it
         only.input("x")
         only.add("response", message, payload={"request": {"tokens": 1}} if facts else {})
         assert last_anchor(only.rows, context_view(only.rows)) is None
+
+
+@pytest.mark.parametrize(
+    "protocol,provider,model,lifetime",
+    [
+        ("anthropic", "anthropic", "claude-opus-5-5", 300),  # message breakpoints: ephemeral, no ttl
+        ("openai_responses", "openai", "gpt-6-astra", 1_800),
+        ("openai_responses", "openai", "gpt-6.1-sol", 1_800),
+        ("openai_chat", "openai", "gpt-5.6-mini", 1_800),
+        ("openai_responses", "openai", "gpt-5.5", 3_600),  # before GPT-5.6: in-memory, 5 minutes to an hour
+        ("openai_responses", "openai", "gpt-4o", 3_600),
+        ("openai_responses", "openai", "o3", 3_600),
+        ("openai_responses", "openai", "my-gpt-6-astra", 3_600),  # parsed whole, never searched for
+        ("openai_chat", "openrouter", "openai/gpt-6-astra", 3_600),  # a relay
+        ("openai_responses", "xai", "grok/grok-4.6", 3_600),
+        ("anthropic", "moonshot", "kimi-k2", 3_600),  # another vendor on the Anthropic protocol
+        ("anthropic", "test-provider", "test-model", 3_600),
+    ],
+)
+def test_a_route_cache_lives_as_long_as_its_family_documents_else_an_hour(protocol, provider, model, lifetime):
+    assert cache_ttl_s(ModelEndpoint(protocol, "http://model.invalid", model, "", provider=provider)) == lifetime
 
 
 def _random_rows(seed: int) -> list[ContextEntry]:

@@ -49,7 +49,7 @@
             "tokens": {
               "type": "integer",
               "minimum": 0,
-              "description": "UTF-8/4 tokens of the whole request: system prompt, tool definitions, and messages."
+              "description": "tokens() of the whole request (context.md section 2): system prompt, tool definitions, and messages at UTF-8 bytes / 4, 1,600 per image, and each opaque reasoning payload at its response's reported reasoning, never its size."
             }
           }
         }

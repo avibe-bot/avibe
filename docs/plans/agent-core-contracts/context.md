@@ -1,6 +1,7 @@
 # C-9 Context management
 
-Frozen 2026-10-04 by owner decision. The `harness` owns the rules (`core/agent_core/harness/context.py`,
+Frozen 2026-10-04 by owner decision; amended 2026-10-12 by owner decision (the estimate of opaque reasoning payloads
+and the anchor's validity, §2; the cache lifetime per route, §3). The `harness` owns the rules (`core/agent_core/harness/context.py`,
 `projection.py`); the loop applies them before every model request (`core/agent_core/agent/loop.py`); the adapter
 supplies the Session-specific parts (§9). Row shapes: [`transcript-rows.schema.json`](transcript-rows.schema.json);
 events: [`agent-event.schema.json`](agent-event.schema.json).
@@ -51,25 +52,44 @@ fit: at `est = T` it uses a few hundred tokens of `M` for the checkpoint request
 ## 2. Token estimate
 
 `tokens(x) = ceil(utf8_bytes(x) / 4)`: characters / 4 undercounts Chinese by about 65%, UTF-8 bytes / 4 is within 6%.
-A message counts its text, its thinking text and signature (replayed reasoning payloads), each tool call's name,
-JSON arguments, and signature, and 1,600 tokens per image.
+A message counts its text, its thinking text, each tool call's name and JSON arguments, and 1,600 tokens per image.
+
+An opaque reasoning payload (a thinking or tool-call `signature`, redacted thinking: Anthropic's signed thinking, an
+OpenAI Responses reasoning item's `encrypted_content`, and the like) is never counted by its size. It is
+ciphertext, about 17 UTF-8 bytes per reasoning token on OpenAI Responses, so bytes / 4 overstated a replayed item
+about 4.3 times. A message carrying one counts, once, the larger of its signed thinking text and its reasoning: the
+`reasoning_tokens` its usage reports, else its `output_tokens`, which include them, else 0 (a response that reports
+no usage: in practice a failed partial, which is never replayed). Measured on recorded Sessions: OpenAI Responses
+bills a replayed reasoning item at about its `reasoning_tokens`; Anthropic bills replayed thinking at about its
+`reasoning_tokens` until a tool result before it is edited, and not after that, which the next response's usage
+shows. A payload sent to another origin is dropped (C-1); it still counts, until that route's first answer anchors.
 
 The **anchor** is the latest response in the context that neither failed nor was aborted, reports non-zero usage,
 and records the request it answered on its row (`ModelResponse.request.tokens`: `tokens()` of that whole request as
 sent). It is rebuilt from the rows, so it holds across a new Agent and a new Turn.
 
 ```text
-est = usage(R) + tokens(this request) - R.request.tokens - tokens(R)       while the anchor R holds
-    = tokens(this request)                                                 otherwise
+est    = usage(R) - tokens(R) + growth                     while the anchor R holds
+growth = max(tokens(this request) - R.request.tokens, tokens(transcript) - tokens(R's transcript))
+est    = max(est, tokens(this request))                    while a tool result before R differs (b)
+       = tokens(this request)                              otherwise
 usage(R) = input_tokens + cache_read_tokens + cache_write_tokens + output_tokens
 ```
 
-The anchor holds while (a) this request goes to the route that answered it (`R.origin` equals the request
-endpoint's origin, because tokenizers differ), and (b) the transcript up to `R` is unchanged: the messages the rows
-put before `R` now are the ones they put before it when `R`'s request was built, and `R` follows them. A checkpoint,
-or an edit of a result before `R`, breaks (b). A changed system prompt, tool set, or rehydrated state
-does not invalidate the anchor: the difference between this request's `tokens()` and `R.request.tokens` carries it.
-So does anything after `R`, an edit there included.
+`transcript` is what the rows put in this request (rehydrated messages aside); `R's transcript` is what they put
+before `R` when its request was built. The anchor holds while (a) this request goes to the route that answered it
+(`R.origin` equals the request endpoint's origin, because tokenizers differ), and (b) the transcript up to `R` is the
+one `R`'s request carried, the content of tool results aside: the messages the rows put before `R` now are the ones
+they put there then, but a tool result's content may differ (its call id, tool name, and error flag the same), and
+`R` follows them. Clearing (§4) and a cut to fit (§3) change only that content, so the anchor survives them and the
+growth takes away what they removed by its `tokens()`; what they removed is a local estimate taken from a provider
+count, so while such a change stands the estimate is never below `tokens(this request)`. A checkpoint breaks (b), and
+so does any other change before `R`. A changed system prompt, tool set, or rehydrated state does not invalidate the
+anchor: the difference between this request's `tokens()` and `R.request.tokens` carries it, but only to add, since
+the growth is never less than the transcript's own. So a recorded size above this request's system prompt, tools,
+and rehydrated state plus `R`'s transcript (a row recorded while the estimate counted payload ciphertext) cannot take
+the estimate below `usage(R)` and what follows `R`. Anything after `R`, an edit there included, counts by its
+`tokens()`.
 
 ## 3. Before every model request
 
@@ -89,8 +109,9 @@ before a retry alike:
    to its own tool results (§6), one helper for both. The run continues and compacts as usual. A batch that does not
    fit even with every result cut to its note, or a last unit that is an input, stops the run: the provider never
    sees the request. A batch that fits once the conversation moves out is never cut; the ladder makes room for it.
-2. **Clear** (§4) when the provider cache is cold (no model request for longer than the cache TTL, 300 s by
-   default; after a restart, measured from the latest response row's `created_at`) or `est >= 0.8 * T`.
+2. **Clear** (§4) when the provider cache is cold (no model request for longer than the cache lifetime of the
+   request's route, below; after a restart, measured from the latest response row's `created_at`) or
+   `est >= 0.8 * T`, which does not depend on the lifetime.
 3. **Checkpoint** when `est >= T`, the run has not stopped compacting (§10), and there is something to summarize,
    at most once per model request: a normal checkpoint (§6, reason `threshold`) when the fork it would send can fit,
    otherwise the overflow ladder from (b) (§8, reason `overflow`). A checkpoint request that overflows continues at
@@ -99,6 +120,21 @@ before a retry alike:
    request other than by overflow, or the run has stopped compacting), a request that can fit is sent and the
    provider judges. Once the run has stopped compacting nothing is compacted at all: a request that cannot fit, or
    that the provider refuses as overflow, ends the run `context_exhausted` (§10).
+
+The cache lifetime is the documented lifetime of the cache mode Vibey requests for the conversation, where clearable
+results live, resolved on every request from the route's provider, protocol, and whole model id
+(`harness/context.py`, `CACHE_TTLS`):
+
+| Route | Lifetime |
+| --- | --- |
+| provider `anthropic` on the Anthropic protocol: the message breakpoints' `cache_control` is ephemeral, with no `ttl` | 300 s, refreshed on use |
+| provider `openai`, a model id `gpt-<major>[.<minor>][-<suffix>]` from GPT-5.6: `prompt_cache_options.ttl` is 30 minutes, its default and only value, and Vibey sends none | 1,800 s |
+| any other route, or one not identified unambiguously (older OpenAI models, other vendors on either protocol, relays) | 3,600 s |
+
+Clearing a warm cache forces a full-price re-read of the context, while skipping a clear on a cold one only keeps
+some old output, so an unknown lifetime counts as an hour, and relays and subscription sources that keep a shorter
+one err toward warm. Idle runs from the later of the latest model call's end and the latest response's commit,
+which overstates warmth by a response's duration, the same safe direction.
 
 A request the provider rejects as overflow (`ProviderError.kind == "overflow"`, classified by
 `ai/errors.is_overflow_message`, HTTP 413, and `context_length_exceeded`) before anything was streamed, and with no
@@ -119,7 +155,7 @@ each is sent only when it can fit.
   `{"target_event_id": <tool_result row id>, "replacement": {"text": PLACEHOLDER}, "reason": "clear_old_tool_result"}`.
 - `PLACEHOLDER` = `[Old tool result cleared to save context. Re-run the tool or re-read the file if you need it again.]`
 - Projection keeps the call id, name, and error flag, and replaces the content with the placeholder. The latest
-  edit of a target wins.
+  edit of a target wins. The estimate's anchor survives it (§2).
 
 ## 5. Cut point
 
@@ -356,6 +392,8 @@ The loop takes a `ContextConfig` (`harness/context.py`); without one, no context
 ends the run `context_exhausted`, as in P1. The adapter supplies the following; Vibey's are in
 `modules/agents/vibey` (`agent.py`, `context.py`, `store.py`), and every Turn of it runs with a `ContextConfig`.
 
+- The route's identity: its endpoint's `provider`, `protocol`, and `model_id` (the hop's `provider` and
+  `runtime_model`), from which the loop resolves the cache lifetime on every request (§3); nothing configures it.
 - The limits (§1): the route's capabilities come from the Model Hub model definition the user edits
   (`context_window`, `max_output_tokens`; `input_limit` stays unknown until Model Hub stores one, so `L_in = W`), and
   the Agent asks for `min(max_output_tokens, floor(W / 4))` (the maximum 8,192 when unknown) on every hop it resolves,
@@ -450,7 +488,9 @@ every-exit audit: `test_loop.py`) that fails when its order or owner is broken.
    exit but an abort, whichever step ends it (compose, provider, admission, the host's state or hint, building the
    row, commit). A failed request or a host failure after the model answered is a failed checkpoint, counted by the
    run's bound; an engine error building the row, or a failed commit, ends the run with nothing landed (invariant 3).
-5. **Route-scoped anchors.** An anchor answered by another origin (provider, api, model) is invalid (§2).
+5. **Route- and transcript-scoped anchors.** An anchor answered by another origin (provider, api, model) is invalid,
+   and so is one whose transcript a checkpoint, or any change but a tool result's content, altered; while a tool
+   result before it differs, the estimate is at least the request's own `tokens()` (§2).
 6. **One admission path.** Every response, of every purpose (conversation, checkpoint), and every partial with
    content is admitted in one place, the model call, before anything acts on it: it must be valid after the
    committed rows and, in a checkpoint turn, the turn's own request and messages (projection's rules: canonical

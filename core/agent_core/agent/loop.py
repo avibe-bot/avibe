@@ -69,6 +69,7 @@ from core.agent_core.agent.outcome import OutcomeOwner
 from core.agent_core.agent.state import HookStateError, state_representation
 from core.agent_core.ai.provider import (
     Done,
+    ModelEndpoint,
     ModelRequest,
     ProviderError,
     TextDelta,
@@ -89,6 +90,7 @@ from core.agent_core.harness.context import (
     StateRequest,
     add_usage,
     budget,
+    cache_ttl_s,
     checkpoint_block,
     checkpoint_max_tokens,
     checkpoint_repair,
@@ -1187,14 +1189,18 @@ class Agent:
     # C-10 section 7), ``_commit_context`` (3), ``self._attempts`` with ``_settle_attempts`` and ``side_turn``'s
     # one audit (4), ``harness.context.budget`` (5), and ``_model`` (6, admission).
 
-    def _cache_cold(self) -> bool:
-        """No model request for longer than the provider cache TTL (section 3)."""
+    def _cache_cold(self, endpoint: ModelEndpoint) -> bool:
+        """No model request for longer than the provider cache of the request's route stays warm (section 3).
+
+        Idle runs from the later of the latest model call's end and the latest response row's commit, so a long
+        response counts as use until it ends: the error leans toward a warm cache.
+        """
         last = self._last_model_at
         for row in reversed(self._rows):
             if row.kind == "response" and row.created_at is not None:
                 last = row.created_at if last is None else max(last, row.created_at)
                 break
-        return last is not None and self.context.clock() - last > self.context.cache_ttl_s
+        return last is not None and self.context.clock() - last > cache_ttl_s(endpoint)
 
     async def _compose(
         self, system: str, selected: ModelSelection, emit: Callable[..., Awaitable[None]], ladder: _Ladder
@@ -1242,7 +1248,7 @@ class Agent:
         shrink = refused
         if not shrink:
             if self.context.clear_tool_results and (
-                plan.est >= CLEAR_SOFT_RATIO * plan.threshold or self._cache_cold()
+                plan.est >= CLEAR_SOFT_RATIO * plan.threshold or self._cache_cold(request.endpoint)
             ):
                 targets = clearable_results(view)
                 if targets:
