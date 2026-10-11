@@ -2938,7 +2938,7 @@
         "starting": "电脑操作正在启动",
         "startingDetail": "Avibe 正在检查受管理的驱动并准备会话。",
         "ready": "电脑操作已就绪",
-        "readyDetail": "当前工作台会话可以使用受管理的驱动。",
+        "readyDetail": "Avibe Agent 可以使用由 Controller 管理的电脑操作 CLI。",
         "needsPermission": "电脑操作需要权限",
         "accessibilityDetail": "请在“隐私与安全性 → 辅助功能”中允许 Avibe，然后返回这里。",
         "screenRecordingDetail": "在“屏幕与系统音频录制”中点击 +，或将 Avibe 拖入列表，然后启用它。授权后 macOS 可能会退出并重新打开 Avibe；应用重新打开后请返回。",

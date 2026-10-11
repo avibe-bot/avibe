@@ -642,6 +642,114 @@ def create_app(
             "controller_id": str(controller.controller_id),
         }
 
+    @app.post("/internal/computer-use")
+    async def _computer_use(request: Request) -> Any:
+        """Run one allowlisted Computer Use tool for the caller's active Turn.
+
+        The CLI supplies its caller Session from Avibe's injected environment.
+        The controller resolves the live Turn here, so callers cannot choose a
+        different Session or reuse a stale Turn from the command line.
+        """
+
+        from core.computer_cli import COMPUTER_CLI_TOOLS
+
+        payload = await _safe_json(request)
+        caller_session_id = payload.get("caller_session_id")
+        tool = payload.get("tool")
+        arguments = payload.get("arguments")
+        if (
+            not isinstance(caller_session_id, str)
+            or not caller_session_id.strip()
+            or not isinstance(tool, str)
+            or tool not in set(COMPUTER_CLI_TOOLS.values())
+            or not isinstance(arguments, dict)
+        ):
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "ok": False,
+                    "error": "invalid_computer_use_request",
+                    "message": "Computer Use requires an allowlisted tool and object arguments.",
+                },
+            )
+        caller_session_id = caller_session_id.strip()
+        if "session" in arguments:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "ok": False,
+                    "error": "session_argument_forbidden",
+                    "message": "The Computer Use session is bound to the active Avibe Turn.",
+                },
+            )
+
+        turn = manager.in_flight.get(caller_session_id)
+        if turn is None or turn.task.done():
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "ok": False,
+                    "error": "active_turn_required",
+                    "message": "Computer Use is available only from the caller's active Avibe Turn.",
+                    "session_id": caller_session_id,
+                },
+            )
+        context = getattr(turn, "context", None)
+        bound_session_id = controller._session_id_from_context(context)
+        if bound_session_id != caller_session_id:
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "ok": False,
+                    "error": "turn_identity_mismatch",
+                    "message": "The active Turn is not bound to the caller Session.",
+                },
+            )
+        turn_payload = getattr(context, "platform_specific", None) or {}
+        turn_id = str(turn_payload.get("turn_token") or "").strip()
+        if not turn_id:
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "ok": False,
+                    "error": "turn_identity_unavailable",
+                    "message": "The active Turn has no stable identity.",
+                },
+            )
+
+        computer_server = getattr(controller, "computer_use_server", None)
+        if computer_server is None:
+            from core.computer_server import ComputerUseServer
+
+            try:
+                computer_server = ComputerUseServer()
+            except Exception:
+                logger.exception("Computer Use server initialization failed")
+                return JSONResponse(
+                    status_code=503,
+                    content={
+                        "ok": False,
+                        "error": "computer_use_unavailable",
+                        "message": "Computer Use could not initialize.",
+                    },
+                )
+            controller.computer_use_server = computer_server
+
+        result = await computer_server.call_tool(
+            tool,
+            {
+                **arguments,
+                "session": f"{caller_session_id}:{turn_id}",
+            },
+        )
+        return {
+            "ok": result.get("isError") is not True,
+            "tool": tool,
+            "session_id": caller_session_id,
+            "turn_id": turn_id,
+            "result": result,
+        }
+
     @app.post("/internal/show-access/settings-read")
     async def _show_access_settings_read(request: Request) -> Any:
         from core.show_pages import ShowPageError, ShowPageStore, show_access_payload

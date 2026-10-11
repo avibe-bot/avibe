@@ -32,7 +32,6 @@ from core.handlers import (
 from core.agent_auth_service import AgentAuthService
 from core.audio_asr import AudioAsrService
 from core.citations import CitationBundle
-from core.computer_use import ComputerUseConfigReconciler
 from core.message_context import build_context_session_key
 from core.message_dispatcher import ConsolidatedMessageDispatcher
 from core.message_output import MessageOutput
@@ -259,6 +258,10 @@ class Controller:
 
         self.runtime_activation = RuntimeActivationRegistry()
         self.session_turns = SessionTurnManager(self)
+        # The CLI reaches Computer Use through the controller's internal IPC.
+        # Keep the driver proxy lazy so an enabled desktop toggle does not
+        # create a driver process until an active Turn requests it.
+        self.computer_use_server = None
         self.runtime_ownership = RuntimeOwnershipProvider(
             self.session_turns._sqlite_engine()
         )
@@ -288,10 +291,6 @@ class Controller:
         # Initialize agents (depends on handlers/session handler)
         self._init_agents()
         self.agent_auth_service = AgentAuthService(self)
-        self.computer_use_reconciler = ComputerUseConfigReconciler(
-            self.agent_auth_service.renew_backend_runtime,
-            lambda: list(getattr(self.agent_service, "agents", {})),
-        )
         from core.backend_restart import BackendRestartCoordinator
 
         self.backend_restart_coordinator = BackendRestartCoordinator(
@@ -1137,15 +1136,6 @@ class Controller:
             await self.runtime_command_watcher.start()
         except Exception as e:
             logger.error("Failed to start runtime command watcher: %s", e, exc_info=True)
-        try:
-            self.computer_use_reconciler.start()
-        except Exception as e:
-            logger.error(
-                "Failed to start computer-use configuration reconciliation: %s",
-                e,
-                exc_info=True,
-            )
-
         try:
             if "opencode" not in getattr(agent_service, "agents", {}):
                 # OpenCode is disabled, so no agent will adopt the servers a
@@ -2392,10 +2382,17 @@ class Controller:
                     pass
             self._internal_server_task = None
 
+        async def _close_computer_use_server() -> None:
+            server = getattr(self, "computer_use_server", None)
+            self.computer_use_server = None
+            if server is not None:
+                await server.close()
+
         # Without this the task is never settled, so the done callback that
         # records "stopped" never runs and internal-server.json keeps saying
         # "ready" after the service exits.
         _stop_loop_coroutine(_cancel_internal_server_task(), "Internal dispatch server")
+        _stop_loop_coroutine(_close_computer_use_server(), "Computer Use server")
         try:
             from core import internal_server as _internal_server
 
@@ -2418,10 +2415,6 @@ class Controller:
             "Runtime work stack",
         )
         _stop_loop_coroutine(self.runtime_command_watcher.stop(), "Runtime command watcher")
-        _stop_loop_coroutine(
-            self.computer_use_reconciler.stop(),
-            "Computer-use configuration reconciler",
-        )
         # Reconciliation, capture cancellation, accepted destructive work, and
         # runtime close share one deadline so no stage can block service exit or
         # starve the stages behind it.

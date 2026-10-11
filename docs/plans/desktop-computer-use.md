@@ -10,6 +10,47 @@
 - Companion docs: `desktop-tray-lifecycle.md` (native toggle pattern),
   `desktop-auto-update.md` (signing), `desktop-product-gaps.md`
 
+## Current Slice 1 contract (2026-10-11)
+
+Route A is shipped on `master` at merge commit
+`61e315abef588657be7cca19940a289c588ba2c5`; the exact reviewed Route A head
+was `d8be44c74bf45b18e55ec35ffcd98edb97ef272f`. Its embedded Cua Driver,
+raw `click_mode`, native toggle and lifecycle, macOS permission flow,
+Workbench status line, lease, observe-first, exact-window, focus-shortcut, and
+same-user safety boundaries remain the foundation for this slice.
+
+Slice 1 delivers the user-facing path that replaced the earlier backend MCP
+proposal:
+
+- `vibe computer` covers the allowlisted observe, zoom, input, clipboard,
+  launch, and quit operations. Each request enters Controller IPC with the
+  caller's current Avibe Session, resolves the active Turn, and forwards the
+  existing `ComputerUseServer` checks with a Turn-scoped lease identity.
+- A built-in managed `computer-use` Skill is loaded on demand. It contains the
+  CLI contract, untrusted-screen guidance, observe-before-input and
+  observe-before-retry rules, and the required unavailable-state handling.
+- Claude, Codex, and OpenCode receive no `avibe_computer` MCP configuration or
+  always-on Computer Use prompt. OpenCode removes stale released configuration
+  under that reserved name while preserving unrelated user MCP entries.
+- The Workbench status line describes Controller-owned CLI availability and is
+  valid for Vibey and every backend, including backends with no MCP client.
+
+The shipped surface has no compatibility layer: Computer Use was shipped only
+in `3.1.4rc4`, so released backend MCP injection is removed rather than
+maintained. Route B, live GUI/TCC verification, and self-drawn-app,
+QQ, and WeChat acceptance are explicit non-goals for this slice. Those checks
+belong to a later owner-gated Slice 2 from the mergeable Slice 1 head.
+
+F6 is not part of this slice. The macOS shell already unlinks the driver socket
+during endpoint reclamation and daemon stop; the embedded driver source is an
+external pinned asset rather than repository-owned code. Adding driver-side
+parent-liveness cleanup would therefore expand ownership and lifecycle scope
+without closing a demonstrated shell-owned gap.
+
+The earlier MCP injection sections below remain as implementation history for
+Route A and its safety review. They do not describe the current Slice 1
+backend contract.
+
 ## Route A: raw single-click selector (2026-10-10)
 
 Status: implementation lane, based on remote master
@@ -103,9 +144,9 @@ Other parts of cua (Fleets, Lume, Bench, CUA-S1) are out of scope.
 
 ## Goal
 
-When a user enables computer use in the Avibe desktop app, every Avibe agent
-session gets the same set of computer-use tools, whichever backend runs it
-(Claude Code, Codex, OpenCode) and wherever the request came from (IM, Web,
+When a user enables computer use in the Avibe desktop app, every Avibe Agent
+Turn can use the same Controller-owned Computer Use CLI, whichever backend runs
+it (Claude Code, Codex, OpenCode) and wherever the request came from (IM, Web,
 Harness, scheduled run). Users grant OS permissions to Avibe once.
 
 ## Owner decision: IM-triggered computer use is allowed
@@ -139,8 +180,8 @@ Avibe.app (Tauri shell; owns TCC grants, toggle, lifecycle; writes state file D)
   └─ cua-driver serve --embedded --socket <S>   ← executes tools, checks TCC
 
 Avibe Runtime (adopted or shell-started; reads D, never spawns the daemon)
-  └─ agent backend process
-       └─ Avibe computer MCP server (stdio; stable for the backend's lifetime)
+  └─ Controller internal IPC
+       └─ vibe computer → ComputerUseServer
             └─ cua-driver mcp --embedded --socket <S>   ← per daemon generation
 ```
 

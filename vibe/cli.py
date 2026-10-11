@@ -714,6 +714,101 @@ def cmd_skill(args) -> int:
     return 1
 
 
+def cmd_computer(args) -> int:
+    """Run one Controller-owned Computer Use operation for the active Turn."""
+
+    from core.computer_cli import (
+        ComputerCliError,
+        build_driver_arguments,
+        format_human_result,
+        prepare_arguments_for_output,
+        tool_for_command,
+        write_screenshot,
+    )
+    from vibe.internal_client import (
+        InternalServerTimeout,
+        InternalServerUnavailable,
+        computer_use_sync,
+    )
+
+    caller_context = caller_context_from_env()
+    caller_session_id = _default_session_id_from_caller(caller_context)
+    if not caller_session_id:
+        raise TaskCliError(
+            "Computer Use requires an Avibe Agent caller Session.",
+            code="missing_caller_session",
+            hint=(
+                "Run this command from an Avibe Agent Turn. The command binds "
+                "to that Turn automatically and has no --session-id option."
+            ),
+            help_command="vibe computer --help",
+        )
+
+    if args.computer_command == "observe":
+        command_path = ("observe", args.computer_observe_command)
+    elif args.computer_command == "clipboard":
+        command_path = ("clipboard", args.computer_clipboard_command)
+    else:
+        command_path = (args.computer_command,)
+
+    try:
+        tool = tool_for_command(command_path)
+        if args.output and tool not in {"get_window_state", "zoom"}:
+            raise ComputerCliError("--output is supported only by observe window or zoom")
+        arguments = build_driver_arguments(args.args_json, args.arg)
+        arguments = prepare_arguments_for_output(tool, arguments, args.output)
+        response = computer_use_sync(
+            caller_session_id=caller_session_id,
+            tool=tool,
+            arguments=arguments,
+        )
+    except ComputerCliError as exc:
+        raise TaskCliError(str(exc), code="invalid_computer_use_arguments") from exc
+    except InternalServerUnavailable as exc:
+        raise TaskCliError(
+            f"Avibe service is unavailable: {exc}",
+            code="controller_unavailable",
+            hint="Start the Avibe service before using Computer Use.",
+        ) from exc
+    except InternalServerTimeout as exc:
+        raise TaskCliError(
+            f"Computer Use request timed out before the service replied: {exc}",
+            code="computer_use_timeout",
+            hint="Observe again before retrying because the action may have completed.",
+        ) from exc
+
+    body = response.get("body")
+    if not isinstance(body, dict):
+        raise TaskCliError(
+            "Computer Use service returned an invalid response.",
+            code="invalid_computer_use_response",
+        )
+    result = body.get("result")
+    if not isinstance(result, dict):
+        code = str(body.get("error") or "computer_use_error")
+        message = str(body.get("message") or "Computer Use request was rejected.")
+        if args.json:
+            print(json.dumps(body, ensure_ascii=False, sort_keys=True))
+        else:
+            print(f"Computer Use error [{code}]: {message}")
+        return 1
+
+    screenshot_path = write_screenshot(tool, result, args.output)
+    if screenshot_path:
+        body["screenshot_path"] = screenshot_path
+    if args.json:
+        print(json.dumps(body, ensure_ascii=False, sort_keys=True))
+    else:
+        print(
+            format_human_result(
+                tool,
+                result,
+                output_path=screenshot_path,
+            )
+        )
+    return 1 if result.get("isError") is True else 0
+
+
 def cmd_debug_prompt(args) -> int:
     """Export all authored sources, optionally with the production rendering."""
 
@@ -16828,6 +16923,91 @@ def build_parser():
         "name",
         help=i18n_t("skill.cli.help.name", skill_help_language),
     )
+    computer_parser = subparsers.add_parser(
+        "computer",
+        help="Use the local desktop through the active Avibe Agent Turn",
+        description=(
+            "Run an allowlisted Computer Use operation through the Avibe service. "
+            "The caller Session and active Turn are taken from the Agent environment."
+        ),
+        error_help_command="vibe computer --help",
+    )
+    computer_subparsers = computer_parser.add_subparsers(
+        dest="computer_command",
+        metavar="{observe,zoom,click,type,key,hotkey,scroll,drag,set-value,clipboard,launch,quit}",
+    )
+    computer_subparsers.required = True
+
+    def _add_computer_options(command_parser) -> None:
+        command_parser.add_argument(
+            "--args-json",
+            help="JSON object of driver arguments, or @path to a JSON file.",
+        )
+        command_parser.add_argument(
+            "--arg",
+            action="append",
+            default=[],
+            metavar="NAME=VALUE",
+            help="Override one driver argument; JSON values are parsed when valid.",
+        )
+        command_parser.add_argument(
+            "--output",
+            help="Caller-selected screenshot path for 'observe window'.",
+        )
+        command_parser.add_argument(
+            "--json",
+            action="store_true",
+            help="Print the structured service response.",
+        )
+
+    computer_observe_parser = computer_subparsers.add_parser(
+        "observe",
+        help="Observe apps, windows, or one exact window",
+    )
+    computer_observe_subparsers = computer_observe_parser.add_subparsers(
+        dest="computer_observe_command",
+        metavar="{apps,windows,window}",
+    )
+    computer_observe_subparsers.required = True
+    for name, help_text in (
+        ("apps", "List visible applications"),
+        ("windows", "List windows"),
+        ("window", "Observe one exact window and optionally save a screenshot"),
+    ):
+        leaf = computer_observe_subparsers.add_parser(name, help=help_text)
+        _add_computer_options(leaf)
+
+    for name, help_text in (
+        ("zoom", "Inspect one exact window at a readable scale"),
+        ("click", "Click an observed element or exact window coordinate"),
+        ("type", "Type text into an observed target"),
+        ("key", "Press one key"),
+        ("hotkey", "Press a key combination"),
+        ("scroll", "Scroll an observed target"),
+        ("drag", "Drag an observed target"),
+        ("set-value", "Set an observed control value"),
+        ("launch", "Launch an application or URL"),
+        ("quit", "Quit an application"),
+    ):
+        leaf = computer_subparsers.add_parser(name, help=help_text)
+        _add_computer_options(leaf)
+
+    computer_clipboard_parser = computer_subparsers.add_parser(
+        "clipboard",
+        help="Read or write the system clipboard",
+    )
+    computer_clipboard_subparsers = computer_clipboard_parser.add_subparsers(
+        dest="computer_clipboard_command",
+        metavar="{read,write}",
+    )
+    computer_clipboard_subparsers.required = True
+    for name, help_text in (
+        ("read", "Read the system clipboard"),
+        ("write", "Write the system clipboard"),
+    ):
+        leaf = computer_clipboard_subparsers.add_parser(name, help=help_text)
+        _add_computer_options(leaf)
+
     debug_help_language = _configured_cli_language()
     debug_parser = subparsers.add_parser(
         "debug",
@@ -18676,6 +18856,23 @@ _CLI_COMMAND_FLOORS: dict[tuple[str, ...], Optional[str]] = {
     ("status",): None,
     ("desktop", "endpoint"): "member",
     ("desktop", "remove-backends"): "member",
+    # Computer Use is admitted as a local member operation, then narrowed by
+    # the Controller to the caller's active Session and Turn.
+    ("computer", "observe", "apps"): "member",
+    ("computer", "observe", "windows"): "member",
+    ("computer", "observe", "window"): "member",
+    ("computer", "zoom"): "member",
+    ("computer", "click"): "member",
+    ("computer", "type"): "member",
+    ("computer", "key"): "member",
+    ("computer", "hotkey"): "member",
+    ("computer", "scroll"): "member",
+    ("computer", "drag"): "member",
+    ("computer", "set-value"): "member",
+    ("computer", "clipboard", "read"): "member",
+    ("computer", "clipboard", "write"): "member",
+    ("computer", "launch"): "member",
+    ("computer", "quit"): "member",
     # Host scope, not instance scope: these act on this machine's screen and on
     # authored files, and have no role contract to repair here.
     ("screenshot",): None,
@@ -18931,6 +19128,12 @@ def _dispatch_parsed_command(parser: argparse.ArgumentParser, args) -> None:
         sys.exit(cmd_status())
     if args.command == "skill":
         sys.exit(cmd_skill(args))
+    if args.command == "computer":
+        try:
+            sys.exit(cmd_computer(args))
+        except Exception as exc:
+            _print_task_error(exc, help_command="vibe computer --help")
+            sys.exit(1)
     if args.command == "debug":
         sys.exit(cmd_debug_prompt(args))
     if args.command == "doctor":

@@ -45,7 +45,6 @@ from core.agent_tool_policy import (
 )
 from core.agent_session_context import resolve_context_agent_session_target
 from core.caller_context import caller_env_for_platform_payload
-from core.computer_use import managed_mcp_server_spec
 from core.managed_skills import (
     managed_skill_claude_cli_path,
     managed_skill_environment,
@@ -101,41 +100,6 @@ CLAUDE_REMOTE_SANDBOX = {"enabled": False}
 CLAUDE_ABANDONED_CONNECT_TIMEOUT_SECONDS = 10.0
 
 
-def apply_managed_computer_use_to_claude_options(
-    option_kwargs: dict[str, Any],
-    agent_allowed_tools: list[str] | None,
-    computer_use_spec: Any,
-) -> list[str] | None:
-    """Translate the shared MCP spec without widening an explicit allowlist."""
-
-    if not claude_allowlist_exposes_computer_use(
-        agent_allowed_tools,
-        computer_use_spec,
-    ):
-        return agent_allowed_tools
-    option_kwargs["mcp_servers"] = {
-        computer_use_spec.name: computer_use_spec.claude_config()
-    }
-    return agent_allowed_tools
-
-
-def claude_allowlist_exposes_computer_use(
-    agent_allowed_tools: list[str] | None,
-    computer_use_spec: Any,
-) -> bool:
-    """Whether this Claude launch can call at least one managed MCP tool."""
-
-    if computer_use_spec is None:
-        return False
-    if agent_allowed_tools is None:
-        return True
-    prefix = f"mcp__{computer_use_spec.name}__"
-    return any(
-        isinstance(tool, str) and tool.startswith(prefix)
-        for tool in agent_allowed_tools
-    )
-
-
 class ClaudeSessionNotFoundError(RuntimeError):
     """Claude Code could not resume a persisted session in the current cwd."""
 
@@ -180,7 +144,6 @@ class _ClaudeLaunchInputs:
     epoch: int
     config: Any
     hub_config: Any
-    computer_use_spec: Any
 
 
 @dataclass(frozen=True)
@@ -575,16 +538,6 @@ class SessionHandler(BaseHandler):
         caller_changed = getattr(client, "_vibe_caller_env", {}) != self._caller_env_for_context(context)
         changes = (
             ("model_hub_channel_changed", launch_changed),
-            (
-                "computer_use_changed",
-                getattr(client, "_vibe_computer_use_fingerprint", None)
-                != (
-                    launch_inputs.computer_use_spec.fingerprint
-                    if launch_inputs is not None
-                    and launch_inputs.computer_use_spec is not None
-                    else None
-                ),
-            ),
             ("caller_env_changed", caller_changed),
             ("reasoning_effort_changed", getattr(client, "_vibe_reasoning_effort", None) != effective_effort),
             (
@@ -754,9 +707,6 @@ class SessionHandler(BaseHandler):
             agent_system_prompt=agent_system_prompt,
             working_path=working_path,
             claude_config=launch_inputs.config if launch_inputs is not None else None,
-            computer_use_spec=(
-                launch_inputs.computer_use_spec if launch_inputs is not None else None
-            ),
             agent_allowed_tools=None,
         )
         if await self._replace_stale_cached_claude_client(
@@ -833,9 +783,6 @@ class SessionHandler(BaseHandler):
             agent_system_prompt=resolved_agent.system_prompt,
             working_path=working_path,
             claude_config=launch_inputs.config if launch_inputs is not None else None,
-            computer_use_spec=(
-                launch_inputs.computer_use_spec if launch_inputs is not None else None
-            ),
             agent_allowed_tools=resolved_agent.allowed_tools,
         )
         if await self._replace_stale_cached_claude_client(
@@ -1463,7 +1410,6 @@ class SessionHandler(BaseHandler):
             epoch=getattr(self.controller, "claude_runtime_epoch", 0),
             config=getattr(self.config, "claude", None),
             hub_config=hub_snapshot() if callable(hub_snapshot) else None,
-            computer_use_spec=managed_mcp_server_spec(),
         )
         settings_key = self._get_settings_key(context)
         session_key = self._get_session_key(context)
@@ -1689,7 +1635,6 @@ class SessionHandler(BaseHandler):
                 epoch=getattr(self.controller, "claude_runtime_epoch", 0),
                 config=getattr(self.config, "claude", None),
                 hub_config=None,
-                computer_use_spec=managed_mcp_server_spec(),
             )
         runtime_epoch = launch_inputs.epoch
         claude_config = launch_inputs.config
@@ -1745,7 +1690,6 @@ class SessionHandler(BaseHandler):
             skill_catalog_sink=skill_catalog_sink,
             working_path=working_path,
             claude_config=claude_config,
-            computer_use_spec=launch_inputs.computer_use_spec,
             agent_allowed_tools=agent_allowed_tools,
         )
 
@@ -1820,11 +1764,6 @@ class SessionHandler(BaseHandler):
             "max_buffer_size": CLAUDE_SDK_MAX_BUFFER_SIZE,
             "can_use_tool": self._allow_claude_bypass_tool,
         }
-        agent_allowed_tools = apply_managed_computer_use_to_claude_options(
-            option_kwargs,
-            agent_allowed_tools,
-            launch_inputs.computer_use_spec,
-        )
         if tool_policy_hooks:
             option_kwargs["hooks"] = tool_policy_hooks
         cli_path_override = self._get_claude_cli_path_override(claude_config)
@@ -1885,15 +1824,6 @@ class SessionHandler(BaseHandler):
         setattr(client, "_vibe_git_path_state", git_path_state)
         setattr(client, "_vibe_reasoning_effort", effective_effort)
         setattr(client, "_vibe_runtime_epoch", runtime_epoch)
-        setattr(
-            client,
-            "_vibe_computer_use_fingerprint",
-            (
-                launch_inputs.computer_use_spec.fingerprint
-                if launch_inputs.computer_use_spec is not None
-                else None
-            ),
-        )
         setattr(
             client,
             "_vibe_model_hub_fingerprint",
@@ -2004,7 +1934,6 @@ class SessionHandler(BaseHandler):
         working_path: Optional[str] = None,
         skill_catalog_sink: list[dict] | None = None,
         claude_config: Any = None,
-        computer_use_spec: Any = None,
         agent_allowed_tools: list[str] | None = None,
     ) -> str | Dict[str, str]:
         if claude_config is None:
@@ -2024,10 +1953,6 @@ class SessionHandler(BaseHandler):
             build_system_prompt_injection,
             agent_instructions=base_prompt or "",
             include_quick_replies=quick_replies_on and platform != "wechat",
-            include_computer_use=claude_allowlist_exposes_computer_use(
-                agent_allowed_tools,
-                computer_use_spec,
-            ),
             context=context,
             fallback_platform=platform,
             enabled_agents=get_enabled_agents_for_prompt(self.controller),

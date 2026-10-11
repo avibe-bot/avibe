@@ -61,6 +61,32 @@ feature on, or issue permission changes. The line appears only in the
 desktop-managed macOS Runtime; a terminal-installed Avibe Runtime does not show
 a native desktop control it cannot own.
 
+## Agent CLI and Skill
+
+Agents use Computer Use through the Controller-owned CLI and the built-in
+on-demand `computer-use` Skill:
+
+```text
+vibe computer observe apps
+vibe computer observe windows
+vibe computer observe window --arg pid=123 --arg window_id=456 --output /tmp/window.png
+vibe computer click --arg pid=123 --arg window_id=456 --arg x=120 --arg y=80
+```
+
+The CLI runs only from an active Avibe Agent Turn. It takes the caller Session
+from the Agent environment and the Controller derives the Turn identity; an
+Agent cannot choose a different Session or pass a driver `session` value.
+Requests use the existing Controller and `ComputerUseServer` checks, including
+the authenticated `require_bind` entry path, observe-first, exact window
+targets, focus-shortcut rejection, the single-holder desktop lease, and native
+state/admission checks.
+
+`observe window` and `zoom` can write screenshots to a caller-selected path.
+Human output includes accessibility state and element tokens when available;
+`--json` returns the structured service response. The CLI reports `off`,
+`needs_permission`, `needs_runtime`, `starting`, `error`, `unavailable`,
+`desktop_busy`, and safety rejections instead of retrying automatically.
+
 ## Remote and shared-channel use
 
 Computer use follows Avibe's existing user binding rules. For Slack, Discord,
@@ -72,13 +98,13 @@ when you do not want remote or unattended sessions to access desktop apps.
 
 ### Same-user local trust boundary
 
-Computer Use is a cooperative control for Avibe's local agent processes. The
-managed MCP server and driver socket are reachable by other processes running
-as the same macOS user. A same-user local process that discovers those paths
-can call the driver directly and bypass the Python-layer `require_bind`,
+Computer Use is a cooperative control for Avibe's local Agent processes. The
+Controller IPC endpoint and driver socket are reachable by other processes
+running as the same macOS user. A same-user local process that discovers those
+paths can call the driver directly and bypass the Python-layer `require_bind`,
 `observe_first`, focus-shortcut, and window-target checks. `require_bind`
-protects shared-channel callers that go through Avibe; it cannot constrain an
-arbitrary local same-user process. Keep the macOS account and local process
+protects shared-channel callers that enter through Avibe; it cannot constrain
+an arbitrary local same-user process. Keep the macOS account and local process
 environment trusted when Computer Use is enabled.
 
 ## macOS limits

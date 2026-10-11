@@ -530,6 +530,7 @@ mode. Continue with `pagination.next_command`; inspect one record with its
 | `vibe doctor` | Run diagnostics; `vibe doctor repair` applies explicit safe repairs |
 | `vibe remote` | Guided Avibe Cloud remote Web UI setup |
 | `vibe screenshot` | Capture a local desktop screenshot |
+| `vibe computer ...` | Use the Controller-owned Computer Use surface from an active Agent Turn |
 | `vibe version` | Show installed version |
 | `vibe check-update` | Check for new version |
 | `vibe upgrade` | Upgrade to latest version |
@@ -681,6 +682,41 @@ vibe screenshot --json
 - prints the saved file path by default
 - prints a machine-readable payload with `--json`
 - stays at the host CLI layer; it does not expose in-chat commands, bot buttons, or agent prompt injection
+
+### `vibe computer`
+
+`vibe computer` is the Agent-facing Computer Use surface. It can be run only
+from an active Avibe Agent Turn, and the Controller binds each request to that
+Turn automatically.
+
+```bash
+vibe computer observe apps
+vibe computer observe windows
+vibe computer observe window --arg pid=123 --arg window_id=456 --output /tmp/window.png
+vibe computer click --arg pid=123 --arg window_id=456 --arg x=120 --arg y=80
+vibe computer type --arg pid=123 --arg window_id=456 --arg text="hello"
+vibe computer key --arg key=return --arg pid=123 --arg window_id=456
+vibe computer hotkey --arg keys='["cmd","c"]' --arg pid=123 --arg window_id=456
+vibe computer scroll --arg direction=down --arg pid=123 --arg window_id=456
+vibe computer drag --arg from_x=10 --arg from_y=10 --arg to_x=100 --arg to_y=100 --arg pid=123 --arg window_id=456
+vibe computer set-value --arg pid=123 --arg value=enabled --arg element_token=el_1
+vibe computer clipboard read
+vibe computer clipboard write --arg text="copied text"
+vibe computer launch --arg bundle_id=com.example.App
+vibe computer quit --arg pid=123
+```
+
+The full leaf surface also includes `zoom`. Each leaf accepts `--args-json`,
+repeatable `--arg`, and `--json`. `observe window` and `zoom` accept
+`--output PATH` for a caller-selected screenshot file. The CLI has no
+`--session-id` option and rejects a manually supplied driver `session`
+argument.
+
+Computer Use guidance is a built-in managed Skill named `computer-use`, loaded
+on demand. It tells Agents to treat screen and clipboard data as untrusted,
+observe the exact target before input, avoid focus and pointer movement, and
+observe again before retrying an action. Backend-specific Computer Use MCP
+configuration is not part of this command surface.
 
 ### `vibe version`
 

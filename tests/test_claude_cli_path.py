@@ -145,10 +145,10 @@ async def test_claude_prompt_guidance_respects_the_effective_tool_allowlist(
 ) -> None:
     """An admitted server does not imply guidance for tools the agent cannot call."""
 
-    captured: list[bool] = []
+    captured: list[dict[str, Any]] = []
 
     def build_prompt(**kwargs: Any) -> str:
-        captured.append(kwargs["include_computer_use"])
+        captured.append(kwargs)
         return "prompt"
 
     monkeypatch.setattr(
@@ -158,14 +158,12 @@ async def test_claude_prompt_guidance_respects_the_effective_tool_allowlist(
     )
     handler = SessionHandler(_Controller(tmp_path))
     context = MessageContext(user_id="U123", channel_id="C123")
-    spec = SimpleNamespace(name="avibe_computer")
     common = {
         "context": context,
         "session_key": "test::C123",
         "agent_name": "claude",
         "session_anchor": "slack_C123",
         "agent_system_prompt": None,
-        "computer_use_spec": spec,
     }
 
     await handler._build_claude_system_prompt(
@@ -177,42 +175,21 @@ async def test_claude_prompt_guidance_respects_the_effective_tool_allowlist(
         agent_allowed_tools=["Read", "mcp__avibe_computer__click"],
     )
 
-    assert captured == [False, True]
+    assert len(captured) == 2
+    assert all("include_computer_use" not in kwargs for kwargs in captured)
 
 
-@pytest.mark.parametrize(
-    ("allowed_tools", "exposes_computer_use"),
-    [
-        pytest.param(["Read", "Bash"], False, id="read-bash-only"),
-        pytest.param(
-            ["Read", "mcp__avibe_computer__click"],
-            True,
-            id="managed-tool",
-        ),
-        pytest.param(None, True, id="no-allowlist"),
-    ],
-)
-def test_selected_agent_computer_use_authority_matches_cold_and_cached_launch(
+@pytest.mark.parametrize("allowed_tools", [["Read", "Bash"], None])
+def test_selected_agent_launch_uses_cli_skill_path_without_computer_use_mcp(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     allowed_tools: list[str] | None,
-    exposes_computer_use: bool,
 ) -> None:
-    """Cold and cached launches render guidance only when they configure MCP."""
+    """Cold and cached Claude launches carry no backend-specific Computer Use MCP."""
 
     clients: list[Any] = []
     rendered_prompts: list[str] = []
     loads = 0
-    spec = SimpleNamespace(
-        name="avibe_computer",
-        fingerprint="managed-fixture",
-        claude_config=lambda: {
-            "type": "stdio",
-            "command": "/fixture/python",
-            "args": ["-I", "/fixture/core/computer_server.py"],
-            "env": {},
-        },
-    )
 
     class Client:
         def __init__(self, options: Any) -> None:
@@ -246,7 +223,6 @@ def test_selected_agent_computer_use_authority_matches_cold_and_cached_launch(
 
     monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
     monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", Client)
-    monkeypatch.setattr(session_handler_module, "managed_mcp_server_spec", lambda: spec)
     monkeypatch.setattr(
         session_handler_module,
         "build_system_prompt_injection",
@@ -277,16 +253,9 @@ def test_selected_agent_computer_use_authority_matches_cold_and_cached_launch(
     assert loads == 2
     assert len(rendered_prompts) == 2
     assert all("Injected owner policy." in prompt for prompt in rendered_prompts)
-    assert all(
-        ("## Computer use" in prompt) is exposes_computer_use
-        for prompt in rendered_prompts
-    )
+    assert all("Computer use" not in prompt for prompt in rendered_prompts)
     assert getattr(first.options, "allowed_tools", None) == allowed_tools
-    assert getattr(first.options, "mcp_servers", None) == (
-        {"avibe_computer": spec.claude_config()}
-        if exposes_computer_use
-        else None
-    )
+    assert getattr(first.options, "mcp_servers", None) is None
 
 
 class _StubClaudeAgentOptions:
