@@ -3458,6 +3458,45 @@ def test_supervisor_stop_without_a_handle_reaps_the_recorded_engine(tmp_path: Pa
     assert not (store.root / "engine-process.json").exists()
 
 
+@pytest.mark.parametrize("stop", ["full", "desktop"])
+def test_vibe_stop_ends_the_engine_a_terminated_service_left_running(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stop: str,
+) -> None:
+    """On Windows a stop ends the service with TerminateProcess, so its engine outlives it.
+
+    The engine then kept its port, and its executable locked, until the next
+    start. Both stops end it while no service holds the lock.
+    """
+    from vibe import cli
+    from vibe.model_hub_runtime.supervisor import set_engine_supervisor_for_tests
+
+    orphan = _orphan_engine(tmp_path)
+    supervisor, store = _fixture_supervisor(tmp_path)
+    set_engine_supervisor_for_tests(supervisor)
+    try:
+        if stop == "full":
+            monkeypatch.setattr(cli, "_pid_file_points_to_live_process", lambda path: False)
+            monkeypatch.setattr(cli.runtime, "stop_service", lambda **kwargs: False)
+            monkeypatch.setattr(cli.runtime, "stop_ui", lambda **kwargs: False)
+            monkeypatch.setattr(cli, "_stop_opencode_server", lambda *args: False)
+            monkeypatch.setattr(cli, "_stop_jobs", lambda: None)
+            monkeypatch.setattr(cli, "_write_status", lambda state, detail=None: None)
+            assert cli.cmd_stop() == 0
+        else:
+            stopped = SimpleNamespace(
+                outcome=cli.runtime.DesktopRuntimeStopOutcome.STOPPED, opencode_stopped=False, remaining=(),
+            )
+            monkeypatch.setattr(cli.runtime, "stop_desktop_runtime", lambda runtime_id: stopped)
+            monkeypatch.setattr(cli, "_stop_the_home_s_connector", lambda: 0)
+            monkeypatch.setattr(cli, "_print_left_running", lambda result: None)
+            assert cli.cmd_stop(expect_runtime_id="desktop-fixture") == 0
+
+        _wait_for(lambda: orphan.poll() is not None)
+        assert not (store.root / "engine-process.json").exists()
+    finally:
+        set_engine_supervisor_for_tests(None)
+
+
 def test_supervisor_refuses_to_start_beside_an_unconfirmed_engine(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
