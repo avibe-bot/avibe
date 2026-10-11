@@ -221,6 +221,35 @@ def pytest_runtest_teardown(item):
             _reaped_processes.extend(f"{item.nodeid}: {each}" for each in processes.reap())
 
 
+@pytest.fixture
+def reap_helper_spawns(request, tmp_path):
+    """Reap what the test's helper interpreters spawned, by identity, and fail the test for each one left.
+
+    A helper started with ``process_reaper.record_spawns`` appends each spawn to
+    ``helper_spawn_record(tmp_path)``; once the helper exits those spawns
+    reparent to init, where no record of this pytest process reaches them.
+    Torn down after the test's own fixtures, so their cleanup runs first. A run
+    killed before this teardown leaves them running. An orphan that names
+    ``tmp_path`` but is in no record also fails the test, and is never
+    signalled. POSIX only, like the reaper.
+    """
+
+    yield
+    if not _SIGNAL_GUARD_SUPPORTED:
+        return
+    __tracebackhide__ = True
+    reaped, orphans = process_reaper.end_helper_spawns(
+        process_reaper.helper_spawn_record(tmp_path), tmp_path, request.node.stash.get(_TEST_PROCESSES, None)
+    )
+    problems = []
+    if reaped:
+        problems.append("spawns of this test's helper processes were still running and were killed: " + ", ".join(reaped))
+    if orphans:
+        problems.append("orphans naming this test's tmp_path are in no spawn record and were left running: " + ", ".join(orphans))
+    if problems:
+        pytest.fail("\n".join(problems))
+
+
 def _module_uses_default_sqlite_state(request: pytest.FixtureRequest) -> bool:
     """Avoid creating a migration template for tests that never use SQLite state."""
 
@@ -601,7 +630,7 @@ class _ForeignSignalGuard:
     def __init__(self, test_temp: Path) -> None:
         self.me = _REAL_OS_GETPID()
         # The whole final component: `test_x1` must not claim `test_x10`.
-        self.names_test_temp = re.compile(re.escape(str(test_temp)) + r"(?![\w.-])").search
+        self.names_test_temp = process_reaper.names_path(test_temp)
         self.owned: set[int] = set()
         # Every pid psutil listed while this test ran: a scan finds real processes by design.
         self.listed: set[int] = set()

@@ -12,8 +12,12 @@ import psutil
 import pytest
 
 from config.v2_config import V2Config
+from tests import process_reaper
 from tests.test_remote_access_vibe_cloud import _config
 from vibe import remote_access, runtime
+
+# Real fake-cloudflared connectors and log sinks, some started by child Pythons.
+pytestmark = [pytest.mark.reap_processes, pytest.mark.usefixtures("reap_helper_spawns")]
 
 
 def _quality(median: float) -> dict:
@@ -1742,6 +1746,10 @@ _LIFECYCLE_CHILD = """
 import json, sys
 from pathlib import Path
 
+from tests import process_reaper
+
+process_reaper.record_spawns(Path(sys.argv[3]))
+
 import psutil
 
 from vibe import remote_access, runtime
@@ -1770,7 +1778,7 @@ report.write_text(json.dumps({"ok": result.get("ok"), "error": result.get("error
 def _lifecycle_child(tmp_path: Path, action: str, name: str) -> tuple[subprocess.Popen, Path]:
     report = tmp_path / f"{name}.json"
     process = subprocess.Popen(
-        [sys.executable, "-c", _LIFECYCLE_CHILD, action, str(report)],
+        [sys.executable, "-c", _LIFECYCLE_CHILD, action, str(report), str(process_reaper.helper_spawn_record(tmp_path))],
         cwd=str(Path(remote_access.__file__).resolve().parents[1]),
         env={**os.environ, "AVIBE_HOME": str(tmp_path)},
         stdin=subprocess.PIPE,
