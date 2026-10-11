@@ -713,6 +713,10 @@ def summarized_to_seq(view: ContextView, cut: int) -> int:
     return max([previous, *seqs])
 
 
+#: Separators a reader shows as a line break although they are not control characters (U+2028, U+2029).
+_BREAKS = frozenset({"Zl", "Zp"})
+
+
 def display(text: str) -> str:
     """One line of plain text for a path or a name the model reads (section 7): ``escape``d, then cut in the middle to
     ``ITEM_BYTES``. The row keeps the original."""
@@ -721,15 +725,17 @@ def display(text: str) -> str:
 
 def escape(text: str) -> str:
     """``text`` as one line of plain text that closes no tag, injectively: a backslash doubled, then control
-    characters and the markup delimiters ``<`` and ``>`` as ``\\uXXXX`` (``\\UXXXXXXXX`` past the BMP). Two texts
-    never escape alike, so only a cut can make two displays look the same (section 7)."""
+    characters, line and paragraph separators, and the markup delimiters ``<`` and ``>`` as ``\\uXXXX``
+    (``\\UXXXXXXXX`` past the BMP). Two texts never escape alike, so only a cut can make two displays look the same
+    (section 7)."""
     return "".join(_escaped(char) for char in text)
 
 
 def _escaped(char: str) -> str:
     if char == "\\":
         return "\\\\"
-    if char in "<>" or unicodedata.category(char).startswith("C"):
+    category = unicodedata.category(char)
+    if char in "<>" or category in _BREAKS or category.startswith("C"):
         code = ord(char)
         return f"\\u{code:04x}" if code <= 0xFFFF else f"\\U{code:08x}"
     return char
@@ -738,6 +744,11 @@ def _escaped(char: str) -> str:
 def artifacts_shown(window: int) -> int:
     """How many paths of each artifact list the model reads on a route with ``window`` tokens (section 7)."""
     return min(ARTIFACTS_LISTED, max(ARTIFACTS_SHOWN_MIN, window // ARTIFACTS_SHOWN_RATIO))
+
+
+#: The tags the summary frames a checkpoint with. The model wrote the checkpoint, so its text may neither close the
+#: frame nor open another section of it: their ``<`` reads as ``\\u003c``, as ``escape`` writes it.
+_SUMMARY_TAG = re.compile(r"<(?=/?(?:context-checkpoint|artifacts|skills-loaded|earlier-record)\b)", re.IGNORECASE)
 
 
 def render_summary(
@@ -756,7 +767,7 @@ def render_summary(
 ) -> str:
     lines = ["<context-checkpoint>"]
     if checkpoint:
-        lines += [CHECKPOINT_FRAMING, "", checkpoint, ""]
+        lines += [CHECKPOINT_FRAMING, "", _SUMMARY_TAG.sub(lambda _: "\\u003c", checkpoint), ""]
     elif checkpoint_omitted:
         lines.append(CHECKPOINT_OMITTED + ("; see the earlier record." if earlier_record else "."))
     # Only what is exact is counted: the stored paths the route does not show. Ones pushed out are marked, never

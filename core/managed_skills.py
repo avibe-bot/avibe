@@ -1263,13 +1263,18 @@ def _source_directory_still_matches(
     )
 
 
+def is_skill_name(name: str) -> bool:
+    """Whether ``name`` is one ``load_skill`` can load: portable, at most 64 characters."""
+    return 1 <= len(name) <= 64 and _PORTABLE_NAME_RE.fullmatch(name) is not None
+
+
 def load_skill(
     name: str,
     cwd: str | Path | None = None,
     *,
     resolved_skills: Sequence[ManagedSkill] | None = None,
 ) -> ManagedSkill | None:
-    if _PORTABLE_NAME_RE.fullmatch(name) is None or not 1 <= len(name) <= 64:
+    if not is_skill_name(name):
         return None
     catalog = resolve_skills(cwd) if resolved_skills is None else resolved_skills
     winner = next((skill for skill in catalog if skill.name == name), None)
