@@ -23,10 +23,12 @@ COMMAND_FILE = "command.ps1"
 # Runs ``command.ps1`` (C-7 tools.md section 5). It is passed with ``-Command``, where Windows PowerShell
 # writes errors as text (with ``-EncodedCommand`` it writes them as CLIXML), so it holds no double quote,
 # which the command line would have to escape. The command runs whole, as one script block, so PowerShell's own
-# semantics hold. Only the last statement of its end block is wrapped, found by its place in the text: a native
-# program sets ``$LASTEXITCODE`` as an int, so it is kept as a long of the same value just before that statement,
-# and the exit code is one the last statement set, never a code an earlier one left there. The loop around the
-# script block is where a ``break`` or ``continue`` outside any loop ends it.
+# semantics hold. Only the statement that runs last (the last of the end block, else of the process or begin
+# block) is wrapped, by its place in the text and on the lines it already has, so the lines PowerShell reports
+# are the command's own: its status is taken right after it, and, right after the statement that runs before
+# it, ``$LASTEXITCODE`` is kept as a long of the same value. A native program sets it as an int, so the exit
+# code is one the last statement set, never a code an earlier one left there. The loop around the script
+# block is where a ``break`` or ``continue`` outside any loop ends it.
 _BOOTSTRAP = """\
 $ProgressPreference = 'SilentlyContinue'
 if ($PSStyle) { $PSStyle.OutputRendering = 'PlainText' }
@@ -45,12 +47,15 @@ $__avibe_error.Extent.StartColumnNumber) + [Environment]::NewLine + $__avibe_err
     exit 1
 }
 $__avibe_status = $true
-if ($__avibe_ast.EndBlock -and $__avibe_ast.EndBlock.Statements.Count) {
-    $__avibe_last = $__avibe_ast.EndBlock.Statements[$__avibe_ast.EndBlock.Statements.Count - 1].Extent
-    $__avibe_script = $__avibe_script.Insert($__avibe_last.EndOffset, [Environment]::NewLine + \
-'$__avibe_status = $?; $__avibe_code = $global:LASTEXITCODE; $__avibe_set = $__avibe_code -is [int]').Insert(\
-$__avibe_last.StartOffset, 'if ($global:LASTEXITCODE -is [int]) { $global:LASTEXITCODE = [long]$global:LASTEXITCODE }' + \
-[Environment]::NewLine)
+$__avibe_run = @(foreach ($__avibe_block in $__avibe_ast.BeginBlock, $__avibe_ast.ProcessBlock, \
+$__avibe_ast.EndBlock) { if ($__avibe_block) { $__avibe_block.Statements } })
+if ($__avibe_run.Count) {
+    $__avibe_script = $__avibe_script.Insert($__avibe_run[-1].Extent.EndOffset, \
+'; $__avibe_status = $?; $__avibe_code = $global:LASTEXITCODE; $__avibe_set = $__avibe_code -is [int]')
+}
+if ($__avibe_run.Count -gt 1) {
+    $__avibe_script = $__avibe_script.Insert($__avibe_run[-2].Extent.EndOffset, \
+'; if ($global:LASTEXITCODE -is [int]) { $global:LASTEXITCODE = [long]$global:LASTEXITCODE }')
 }
 try {
     foreach ($__avibe_once in 1) { . ([ScriptBlock]::Create($__avibe_script)) | Out-Default }

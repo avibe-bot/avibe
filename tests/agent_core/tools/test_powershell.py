@@ -181,10 +181,32 @@ async def test_a_command_keeps_powershell_script_semantics(run, command, output)
 
 
 @ON_WINDOWS
-async def test_the_exit_code_is_the_last_statement_s_inside_an_end_block(run):
-    error, text = await run("begin { Write-Output first }\nend { Write-Output last; cmd /c exit 4 }")
+@pytest.mark.parametrize(
+    ("command", "code"),
+    [
+        ("begin { Write-Output first }\nend { Write-Output last; cmd /c exit 4 }", 4),
+        ("process { cmd /c exit 7 }", 7),
+        ("begin { cmd /c exit 6 }", 6),
+        # A function that writes an error and returns has succeeded, as $? says (C-7 tools.md section 5).
+        ("function Get-Twice { cmd /c exit 23; Get-Item C:\\does-not-exist }\nGet-Twice", 0),
+    ],
+    ids=["end", "process-only", "begin-only", "a-function-returns"],
+)
+async def test_the_exit_code_follows_the_statement_that_runs_last(run, command, code):
+    error, text = await run(command)
 
-    assert error and text.rstrip().endswith("Command exited with code 4")
+    assert error == bool(code)
+    if code:
+        assert text.rstrip().endswith(f"Command exited with code {code}")
+
+
+@ON_WINDOWS
+async def test_an_error_is_reported_at_the_command_s_own_line_and_column(run):
+    """The wrapping adds no line, so the model is pointed at the line it wrote (in the view that shows it)."""
+    error, text = await run("$ErrorView = 'NormalView'\nWrite-Output first\n  throw 'boom'")
+
+    assert error
+    assert "At line:3 char:3" in text, text
 
 
 @ON_WINDOWS
