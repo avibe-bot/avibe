@@ -67,22 +67,22 @@ creates parent directories.`
 
 Result: `Successfully wrote to {path}`. Writes are serialized per canonical path with `edit`.
 
-How a write lands (Avibe); `edit` publishes the same way:
+How a write lands (Avibe); `edit` publishes the same way. The new content is always written to a temp file beside the
+file first, the owner's alone while it is there (0600 on POSIX, an owner-only DACL on Windows), so a full disk or a
+quota fails before the file is touched.
 
-- A new file, or one this user owns, is replaced atomically, so a failure leaves it, or its absence, as it was. The new content is written beside
-  it, the owner's alone meanwhile (a 0600 temp file on POSIX, an owner-only DACL on Windows), and then stands in for
-  it. On POSIX the replacement takes the file's mode; its ACL, extended attributes, and hard links are not carried
-  over. On Windows it takes the file's DACL and explicit integrity label and is put in place with `ReplaceFileW`,
-  which keeps the file's encryption, compression, named streams (the Mark of the Web among them), and creation time;
-  audit entries (the rest of the SACL) are not carried, as POSIX has none. The replaced file passes through a backup
-  name: if `ReplaceFileW` leaves it there, it is put back without overwriting a file created meanwhile (if one was,
-  the backup is kept and the error names it), and a backup that cannot be removed after success is left and logged
-  with its path. "Owns" means the file already has the owner the replacement would get: on POSIX the effective uid;
-  on Windows the token's default owner, which is the user, or the Administrators group in an elevated session.
-- A file another account owns is rewritten in place, so the file object, and with it its owner, ACL or mode, audit
-  policy, label, links, and streams, stays exactly as it was: replacing it would hand it to this user. The new content
-  is first written to a temp file beside it, which proves the space and is then removed. A full disk or a crash in
-  the middle of the rewrite itself can leave such a file partly written.
+- A new file is that temp file, renamed into place, so a failure leaves its absence as it was.
+- On POSIX, a file this user owns (its uid is the effective uid) is replaced by the temp file, which takes its mode,
+  so a failure leaves it as it was; its ACL, extended attributes, and hard links are not carried over. A file another
+  account owns is rewritten in place instead, so its owner, mode, ACL, attributes, and links stay as they were: a
+  replacement would be this user's. Which of the two applies is decided right before publication, from the file the
+  path names then. A setuid or setgid file another account owns is refused: rewriting it would make the kernel clear
+  those bits.
+- On Windows an existing file is always rewritten in place, so it stays the same file object: its owner, DACL, audit
+  entries, integrity label, encryption, compression, named streams (the Mark of the Web among them), hard links, and
+  creation time stay as they were. Such a write is not all or nothing: a crash, or a failure of the disk itself, in
+  the middle of the rewrite can leave the file partly written. No other program can open the file for writing while
+  it is rewritten, and one that has it open for writing makes the write fail before a byte changes.
 - A file whose ACL denies writing it is refused, as a read-only one is.
 - `edit` writes only over the file it read: the same file id, size, mtime, and change time (Windows' NTFS change
   time, which `stat` does not report there on every Python).
