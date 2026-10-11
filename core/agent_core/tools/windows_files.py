@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 
 _FILE_WRITE_DATA = 0x0002
 _GENERIC_WRITE = 0x40000000
+_FILE_SHARE_READ = 0x1
 _FILE_SHARE_READ_WRITE = 0x1 | 0x2
 _FILE_SHARE_READ_WRITE_DELETE = 0x1 | 0x2 | 0x4
 _CREATE_NEW = 1
@@ -186,15 +187,17 @@ def may_write(path: str) -> bool:
 
 
 def open_for_rewriting(path: str) -> int:
-    """A binary, write-only descriptor of the existing file ``path`` that asks for writing the data alone.
+    """A binary, write-only descriptor of the existing file ``path`` that asks for writing the data alone, and
+    lets no other writer in while it is open.
 
     ``os.open`` asks for ``GENERIC_WRITE``, which includes reading the file's security, so it fails on a file
-    whose ACL grants writing but not ``READ_CONTROL``.
+    whose ACL grants writing but not ``READ_CONTROL``. Without write sharing, a program that has the file open
+    for writing makes this open fail before a byte changes, and none can open it for writing meanwhile.
     """
     import msvcrt
 
     kernel32 = _kernel32()
-    handle = kernel32.CreateFileW(path, _FILE_WRITE_DATA, _FILE_SHARE_READ_WRITE, None, _OPEN_EXISTING, 0, None)
+    handle = kernel32.CreateFileW(path, _FILE_WRITE_DATA, _FILE_SHARE_READ, None, _OPEN_EXISTING, 0, None)
     if _invalid(handle):
         raise _error(path)
     try:
@@ -249,10 +252,13 @@ def create_private(path: str) -> int:
 
 
 def owned_as_new_files_are(path: str) -> bool:
-    """Whether the file ``path`` has the owner this process gives the files it creates (its token's default owner:
-    the user, or the Administrators group in an elevated session); ``False`` when its owner cannot be read."""
+    """Whether a file this process creates in place of ``path`` would have its owner: the token's default owner
+    (the user, or the Administrators group in an elevated session) owns it, or its volume keeps no owners (FAT).
+    ``False`` when its owner cannot be read."""
     from ctypes import wintypes
 
+    if not _persistent_acls(path):
+        return True
     kernel32 = _kernel32()
     advapi32 = kernel32.advapi32
     token = wintypes.HANDLE()
@@ -279,6 +285,20 @@ def owned_as_new_files_are(path: str) -> bool:
         kernel32.LocalFree(descriptor)
 
 
+def _persistent_acls(path: str) -> bool:
+    """Whether the volume ``path`` is on keeps owners and ACLs (NTFS, ReFS); FAT and exFAT do not."""
+    from ctypes import wintypes
+
+    kernel32 = _kernel32()
+    root = ctypes.create_unicode_buffer(_MAX_PATH)
+    flags = wintypes.DWORD()
+    if not kernel32.GetVolumePathNameW(path, root, _MAX_PATH) or not kernel32.GetVolumeInformationW(
+        root.value, None, 0, None, None, ctypes.byref(flags), None, 0
+    ):
+        raise _error(path)
+    return bool(flags.value & _FILE_PERSISTENT_ACLS)
+
+
 def copy_security(source: str, destination: str) -> None:
     """Give ``destination`` exactly the DACL of ``source`` (its own entries, and whether it inherits from its
     directory, whose inheritable entries are then recomputed as for any file) and its explicit integrity label.
@@ -290,15 +310,9 @@ def copy_security(source: str, destination: str) -> None:
     """
     from ctypes import wintypes
 
-    kernel32 = _kernel32()
-    root = ctypes.create_unicode_buffer(_MAX_PATH)
-    flags = wintypes.DWORD()
-    if not kernel32.GetVolumePathNameW(source, root, _MAX_PATH) or not kernel32.GetVolumeInformationW(
-        root.value, None, 0, None, None, ctypes.byref(flags), None, 0
-    ):
-        raise _error(source)
-    if not flags.value & _FILE_PERSISTENT_ACLS:
+    if not _persistent_acls(source):
         return
+    kernel32 = _kernel32()
     advapi32 = kernel32.advapi32
     descriptor, dacl, sacl = ctypes.c_void_p(), ctypes.c_void_p(), ctypes.c_void_p()
     error = advapi32.GetNamedSecurityInfoW(

@@ -776,8 +776,16 @@ async def test_a_replaced_file_left_under_the_backup_name_is_put_back(tmp_path, 
 
 @pytest.mark.skipif(not os.environ.get("AVIBE_TEST_FAT_DIR"), reason="needs a FAT volume (AVIBE_TEST_FAT_DIR)")
 @pytest.mark.parametrize("tool", ["write", "edit"])
-async def test_a_file_on_a_volume_without_acls_is_replaced(make_ctx, tool):
-    """FAT keeps no ACLs and no streams; a replace there keeps what it can and still succeeds."""
+async def test_a_file_on_a_volume_without_acls_is_replaced(make_ctx, monkeypatch, tool):
+    """FAT keeps no owners, ACLs, or streams: nothing a replacement could lose, so the write stays all or nothing."""
+    replaced = []
+    real_replace = write_module.windows_files.replace_existing
+
+    def replace_existing(replacement, target):
+        replaced.append(target)
+        real_replace(replacement, target)
+
+    monkeypatch.setattr(write_module.windows_files, "replace_existing", replace_existing)
     directory = Path(os.environ["AVIBE_TEST_FAT_DIR"]) / f"replace-{tool}-{secrets.token_hex(4)}"
     directory.mkdir()
     try:
@@ -786,9 +794,26 @@ async def test_a_file_on_a_volume_without_acls_is_replaced(make_ctx, tool):
 
         assert not result.is_error, result_text(result)
         assert (directory / "f.txt").read_bytes() == b"new\n"
+        assert replaced == [os.path.realpath(directory / "f.txt")]  # replaced, not rewritten in place
         assert [p.name for p in directory.iterdir()] == ["f.txt"]
     finally:
         shutil.rmtree(directory, ignore_errors=True)
+
+
+@pytest.mark.skipif(not WINDOWS, reason="Windows file sharing")
+async def test_an_in_place_rewrite_lets_no_other_writer_in(tmp_path, make_ctx):
+    """Another program has the file open for writing: the rewrite fails before a byte changes, and leaves nothing."""
+    target = tmp_path / "f.txt"
+    target.write_bytes(b"old\n")
+    _icacls(target, "/setowner", "NT AUTHORITY\\SYSTEM")  # so it is rewritten in place
+
+    with open(target, "r+b"):
+        result = await WriteTool().execute({"path": "f.txt", "content": "new\n"}, make_ctx())
+
+    assert result.is_error
+    assert result_text(result).startswith("Cannot write f.txt: ")
+    assert target.read_bytes() == b"old\n"
+    assert [path.name for path in tmp_path.iterdir()] == ["f.txt"]
 
 
 @pytest.mark.skipif(not WINDOWS, reason="a Windows ACL")
