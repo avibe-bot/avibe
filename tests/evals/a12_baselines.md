@@ -2,36 +2,35 @@
 
 One row per valid run of `a12_compaction_quality.py`, newest first. A prompt change is judged against the last row of
 the previous prompt version. The score counts the planted facts the probe's JSON answer still states, each judged on
-its own field: three ground rules, two changed files with their values and a reason each, the last error verbatim, and
-the next step.
+its own field: three ground rules with their polarity, two changed files with their values and a reason each, the last
+error verbatim, and the next step.
 
 | Date | Avibe | Prompt | Model (window / output) | Checkpoints (mode: tokens before → after) | Repairs / failed | Score | Missed |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| 2026-10-11 | `de84d3b59` (master), Incus master env | `checkpoint-v3` | claude-haiku-4-5 (32,000 / 4,000) | normal: 27,149 → 25,331; rolling: 38,069 → 5,602; normal: 24,172 → 5,869; normal: 24,159 → 6,068 | 0 / 0 | 8/9 | the reason for REFILL_RATE (scorer recall; see notes) |
+| 2026-10-11 | `de84d3b59` (master), Incus master env | `checkpoint-v3` | claude-haiku-4-5 (32,000 / 4,000) | normal: 26,009 → 25,272; rolling: 38,035 → 5,331; normal: 24,090 → 5,520 | 0 / 0 | 9/9 | — |
 
 ## Notes
 
 ### 2026-10-11, `checkpoint-v3`
 
-**Run.** Session `sesvb45nauz87`, valid by every ground-truth check:
+**Run.** Session `sesy9fy2gnybu`. It was valid by every ground-truth check:
 - every Agent run succeeded;
-- the fixture ended as scripted;
+- the fixture ended as scripted, with exactly the two CHANGES.md lines;
 - both check outputs were in the tool results, in order;
-- the Session compacted three times before the probe, and the probe called no tool;
-- all 4 checkpoints were model-written under `checkpoint-v3`, each accepted on its first final reply: no repair round,
-  no failed checkpoint turn.
+- all 3 checkpoints came before the probe;
+- the probe committed no tool result.
 
-The probe's own input crossed the threshold, so its Turn checkpointed once more before answering: the fourth row.
+All 3 checkpoints were model-written under `checkpoint-v3`, each accepted on its first final reply: no repair round,
+no failed checkpoint turn. The script was launched without `vibe` on the PATH and drove the instance's CLI next to its
+Python.
 
-**The miss.** For `src/config.py` the answer's `why` was "REFILL_RATE=0 prevented any token refills, causing cascading
-denials". That is the planted reason in other words, but the fact's phrase list ("never refill", "0 means", "zero",
-"of 0", "enable") does not cover it. The miss is a recall limit of the keyword scorer, not lost context. The scorer
-was not changed after seeing this answer, so the row stands as measured. The values, the other reason, all rules, the
-verbatim error, and the next step were all stated.
+**Observation, not scored.** The first, normal checkpoint made little room (26,009 → 25,272 estimated tokens). The cut
+kept the latest log read verbatim, so the next request overflowed and the ladder rolled. Every run so far shows this.
 
-**Observation, not scored.** The first, normal checkpoint made little room (27,149 → 25,331 estimated tokens): the cut
-kept the latest log read verbatim, so the next request overflowed and the ladder rolled.
-
-**History.** An earlier run on the same day (Session `ses396nx6ty94`, 3 checkpoints, no repair or failure) used a
-free-text probe. Its keyword scorer could credit facts from the wrong part of the answer, and the run's validity was
-never checked. That row was replaced by this one; it is not comparable.
+**Earlier runs the same day, not comparable.**
+- `ses396nx6ty94` (9/9) used a free-text probe, and its validity was never checked.
+- `sesvb45nauz87` was valid under the then-current gate but used the rule format before polarity. It scored 8/9: its
+  REFILL_RATE reason, "REFILL_RATE=0 prevented any token refills", is the planted reason in other words, outside the
+  phrase list.
+- Neither run had a repair round or a failed checkpoint turn. This run's answer gave that reason as "enable token
+  bucket refills", which the list covers. Reason matching stays a keyword heuristic (README, known limits).

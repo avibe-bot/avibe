@@ -19,16 +19,19 @@ Plan: `docs/plans/avibe-agent-core.md` §6, A12. Script: `a12_compaction_quality
 - Log reads sized from the model's window push the context over the threshold. The script adds up to three more
   reads until the Session holds at least two checkpoints.
 - A probe Turn then asks, from memory, for the ground rules, the files changed and why, the last error verbatim, and
-  the next step, as one JSON object. Each of the nine planted facts is judged on its own field: a changed value only
-  inside its file's entry, a reason only in that entry's `why`, and the last error as the whole line.
+  the next step, as one JSON object. Each of the nine planted facts is judged on its own field:
+  - a rule only with its polarity: each rule is `{"action", "kind": "must" | "must_not"}`;
+  - a changed value only inside its file's entry, and a reason only in that entry's `why`;
+  - the last error as the whole line.
 
 **Valid runs only.** A run is scored only if ground truth (the database rows and the fixture on disk) shows that it
 happened as scripted:
 - every Agent run succeeded within its wait;
-- the fixture ends with BURST = 5, REFILL_RATE = 1, two CHANGES.md lines, `allow()` still defined, and
-  `vendor/legacy_api.py` untouched;
+- the fixture ends with BURST = 5, REFILL_RATE = 1, exactly the two CHANGES.md lines for those changes, `allow()`
+  still defined, and `vendor/legacy_api.py` untouched;
 - both check outputs are in the Session's tool results, in order;
-- the Session compacted at least twice before the probe, and the probe called no tool;
+- the Session compacted at least twice before the probe, and the probe ran no tool (judged by committed tool results,
+  not the display traces);
 - every model-written checkpoint used the checkout's prompt version.
 
 Otherwise the JSON says `"valid": false` with the reasons, no score is given, and the script exits with status 3. A
@@ -48,6 +51,8 @@ summarizers'.
    cd /opt/avibe/source && /opt/avibe/venv/bin/python tests/evals/a12_compaction_quality.py --model claude-haiku-4-5
    ```
 
+   It drives the `vibe` next to that Python (`/opt/avibe/venv/bin/vibe`); `--vibe` names another one.
+
 3. Read the JSON it prints:
    - whether the run is valid, and why not;
    - the prompt version and model;
@@ -57,3 +62,9 @@ summarizers'.
 4. Add a row to `a12_baselines.md`, then restore the model definition.
 
 The run makes about a dozen Turns, plus their checkpoint turns, on the small window.
+
+**Known limits.** The threat model is an honest model behaving imperfectly, not an adversary gaming the scorer.
+- The scorer matches keywords inside the right field, so a correct reason in unexpected words can be missed. Read the
+  answer before trusting a drop.
+- A run is checked against the scripted end state, not against every way an agent could misbehave. Checks that only
+  matter against deliberate gaming, or that the recorded runs already satisfy, are not added.

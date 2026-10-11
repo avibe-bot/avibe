@@ -71,9 +71,11 @@ TURNS = (
 EXTRA_TURN = "Read logs/day{index}.log completely and summarize it in one line."
 PROBE = (
     "Answer from memory only: do not read any file or run any command. Reply with one JSON object and nothing else, "
-    'in this shape: {"rules": ["..."], "changes": [{"file": "...", "change": "...", "why": "..."}], "last_error": '
-    '"...", "next_step": "..."}. rules: every ground rule I set for this session. changes: each file you changed, '
-    "what you changed in it, and why. last_error: the last error check.py printed, verbatim. next_step: the next step."
+    'in this shape: {"rules": [{"action": "...", "kind": "must"}], "changes": [{"file": "...", "change": "...", '
+    '"why": "..."}], "last_error": "...", "next_step": "..."}. rules: every ground rule I set for this session, one '
+    'object each; action is the action the rule is about, written positively (for example "delete the cache"), and '
+    'kind is "must_not" if I forbade that action or "must" if I required it. changes: each file you changed, what '
+    "you changed in it, and why. last_error: the last error check.py printed, verbatim. next_step: the next step."
 )
 FIRST_ERROR = "ValueError: refill_rate must be > 0 (got 0)"
 LAST_ERROR = "AssertionError: burst window overlaps (bucket=5, window=0.5s)"
@@ -91,9 +93,14 @@ def _change(answer: dict, file: str) -> dict:
     return next((item for item in entries if _text(item.get("file")).endswith(file)), {})
 
 
-def _rules(answer: dict) -> str:
+def _rule(answer: dict, kind: str, *subjects: str) -> bool:
+    """Whether a rule of ``kind`` names every subject in its action: polarity comes from ``kind``, by construction."""
     rules = answer.get("rules")
-    return " ".join(_text(rule) for rule in rules) if isinstance(rules, list) else ""
+    entries = [item for item in rules if isinstance(item, dict)] if isinstance(rules, list) else []
+    return any(
+        _text(item.get("kind")).strip() == kind and all(subject in _text(item.get("action")) for subject in subjects)
+        for item in entries
+    )
 
 
 def _number(text: str, value: int) -> bool:
@@ -109,11 +116,12 @@ class Fact:
 
 
 #: What A12 asks the agent to still state: the user's constraints, the files changed and why, the last error, and
-#: the next step. A value counts only inside its own file's entry, a reason only in that entry's ``why``.
+#: the next step. A rule counts only with its polarity, a value only inside its own file's entry, a reason only in that
+#: entry's ``why``.
 FACTS = (
-    Fact("rule: vendor/legacy_api.py untouched", lambda a: "vendor/legacy_api.py" in _rules(a)),
-    Fact("rule: no public function renamed", lambda a: "rename" in _rules(a) and "public" in _rules(a)),
-    Fact("rule: every change noted in CHANGES.md", lambda a: "changes.md" in _rules(a)),
+    Fact("rule: vendor/legacy_api.py must not be modified", lambda a: _rule(a, "must_not", "vendor/legacy_api.py")),
+    Fact("rule: public functions must not be renamed", lambda a: _rule(a, "must_not", "rename", "public")),
+    Fact("rule: every change must be noted in CHANGES.md", lambda a: _rule(a, "must", "changes.md")),
     Fact(
         "changed: src/rate_limit.py, BURST to 5",
         lambda a: "burst" in _text(_change(a, "rate_limit.py").get("change"))
@@ -278,8 +286,15 @@ class Rows:
     def checkpoint_turns(self, session_id: str) -> list[dict]:
         return self._events(session_id, "fork_turn")
 
-    def tool_calls(self, session_id: str, after: int) -> int:
-        return len(self._events(session_id, "tool_call", after))
+    def tool_results(self, session_id: str, after: int) -> int:
+        """Tool results committed to the context after ``after``: durable rows, unlike the best-effort call traces."""
+        rows = self._query(
+            "select count(*) as count from agent_events where session_id = ? and event_type = 'tool_result' "
+            "and context_seq is not null and rowid > ?",
+            session_id,
+            after,
+        )
+        return rows[0]["count"]
 
     def tool_outputs(self, session_id: str) -> list[str]:
         """Every tool result's text, in order."""
@@ -308,9 +323,9 @@ def fixture_problems(root: Path) -> list[str]:
         problems.append("src/rate_limit.py no longer defines allow()")
     if not re.search(r"^REFILL_RATE\s*=\s*1\s*$", (root / "src/config.py").read_text(encoding="utf-8"), re.M):
         problems.append("src/config.py does not set REFILL_RATE = 1")
-    notes = [line for line in (root / "CHANGES.md").read_text(encoding="utf-8").splitlines()[1:] if line.strip()]
-    if len(notes) < 2:
-        problems.append(f"CHANGES.md has {len(notes)} change line(s), not 2")
+    notes = [line.lower() for line in (root / "CHANGES.md").read_text(encoding="utf-8").splitlines()[1:] if line.strip()]
+    if len(notes) != 2 or not any("burst" in note for note in notes) or not any("refill" in note for note in notes):
+        problems.append(f"CHANGES.md does not hold exactly the BURST and REFILL_RATE lines: {notes}")
     if (root / "vendor/legacy_api.py").read_text(encoding="utf-8") != VENDOR:
         problems.append("vendor/legacy_api.py was modified")
     return problems
@@ -363,9 +378,9 @@ def run(args: argparse.Namespace) -> tuple[dict, bool]:
             mark = rows.mark()
             vibe(command, "agent", "run", "--session-id", session_id, "--sync", "--no-callback",
                  "--wait-timeout", str(TURN_TIMEOUT_S), "--message", PROBE)
-            answer, probe_calls = rows.last_result(session_id), rows.tool_calls(session_id, mark)
+            answer, probe_calls = rows.last_result(session_id), rows.tool_results(session_id, mark)
             if probe_calls:
-                problems.append(f"the probe called {probe_calls} tool(s) instead of answering from memory")
+                problems.append(f"the probe ran {probe_calls} tool(s) instead of answering from memory")
     finally:
         if not args.keep:
             vibe(command, "agent", "remove", agent)
@@ -416,7 +431,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n", 1)[0])
     parser.add_argument("--model", required=True, help="a Vibey model with a Model Hub window of at most 64,000 tokens")
     parser.add_argument("--project-dir", help="a new or empty directory for the fixture (default: a new temporary one)")
-    parser.add_argument("--vibe", default="vibe", help="the vibe command of the instance under evaluation")
+    beside = Path(sys.executable).with_name("vibe")  # the instance's own CLI, next to the Python running this script
+    parser.add_argument(
+        "--vibe", default=str(beside) if beside.exists() else "vibe", help="the vibe command of the instance under evaluation"
+    )
     parser.add_argument("--keep", action="store_true", help="keep the temporary Agent")
     args = parser.parse_args(argv)
     if os.environ.get("VIBE_DEPLOYMENT_ENV") != "regression":
