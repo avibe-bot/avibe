@@ -621,18 +621,23 @@ restarts a requested connector that is no longer running:
   interval and doubling after each attempt up to two minutes; and
 - the delay resets once a connector reports a ready connection.
 
-The connector lock is per process, so a stop or start from another process
-can land while a restart runs. Two invariants keep both explicit actions
-winning:
+The UI server, its monitor and recovery threads, and the `vibe remote` CLI all
+read and rewrite the connector's pid, state, and request files. One
+cross-process lifecycle lock, `runtime/remote-access-connector.lock`
+(`storage.lock.MigrationFileLock`, never unlinked), serializes every
+read-validate-mutate section: a start's status check, spawn, and publish; a
+stop's withdrawal, kill, and record removal; the restart's request check,
+spawn, and publish; status()'s removal of an exited connector's records; and
+recovery's candidate spawn, promote, and drain record transitions. The lock
+order is the lifecycle lock, then the recovery lock, then the connector lock.
+User starts and stops wait up to 15 seconds and then report
+`remote_access_busy`; the monitor, the restart, reconciliation, and status()
+only try the lock and skip when it is busy. Waits such as candidate warm-up
+run outside it, and the OS releases it when its holder dies.
 
-- only an explicit `stop()` removes the request; and
-- the monitor restarts a dead connector whenever the request is present.
-
-The restart never records or withdraws the request. When the request is gone
-after it spawns, it stops only the connector it spawned. A start that lands
-during that cleanup keeps its request, so at worst its connector comes back
-one backoff delay later. A tick that attempted a restart skips quality
-evaluation, because its samples describe the exited connector.
+So only an explicit `stop()` withdraws the request, and no stop or start in
+any process interleaves with a restart. A tick that attempted a restart skips
+quality evaluation, because its samples describe the exited connector.
 
 ## Doctor Integration
 

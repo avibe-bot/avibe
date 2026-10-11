@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -1560,14 +1563,10 @@ def test_ra_tq_034_connector_exited_before_network_is_restarted_with_backoff(mon
         remote_access.stop()
 
 
-@pytest.mark.parametrize(
-    "withdrawal",
-    ["user_stop", "remote_access_disabled", "stop_before_restart_spawns", "stop_after_restart_spawns"],
-)
+@pytest.mark.parametrize("withdrawal", ["user_stop", "remote_access_disabled"])
 def test_ra_tq_034_withdrawn_connector_request_is_not_restarted(monkeypatch, tmp_path, withdrawal) -> None:
     config, network_up = _setup_exiting_connector(monkeypatch, tmp_path)
     schedule = remote_access._ConnectorRestartSchedule()
-    real_check = remote_access._exited_connector_requested
     real_start = remote_access._start
     started = []
     try:
@@ -1576,44 +1575,19 @@ def test_ra_tq_034_withdrawn_connector_request_is_not_restarted(monkeypatch, tmp
         network_up.touch()
         if withdrawal == "user_stop":
             remote_access.stop()
-        elif withdrawal == "remote_access_disabled":
+        else:
             config.remote_access.vibe_cloud.enabled = False
             config.save()
 
-        # The connector lock is per process, so a stop from another process can
-        # land at any point of the restart; these hooks run one at each point.
-        def check_then_stop(loaded):
-            requested = real_check(loaded)
-            if (
-                withdrawal == "stop_before_restart_spawns"
-                and requested
-                and remote_access._CONNECTOR_LOCK._is_owned()
-            ):
-                remote_access.stop()  # lands right after the restart's last request check
-            return requested
+        def record_start(loaded, *, record_request):
+            started.append(record_request)
+            return real_start(loaded, record_request=record_request)
 
-        def start_then_stale_stop(loaded, *, record_request):
-            result = real_start(loaded, record_request=record_request)
-            started.append(result.get("pid"))
-            if withdrawal == "stop_after_restart_spawns":
-                # A stop that read the exited pid withdraws the request and
-                # removes the records this restart just wrote.
-                remote_access._connector_requested_path().unlink()
-                remote_access._pid_path().unlink()
-                remote_access._state_path().unlink()
-            return result
-
-        monkeypatch.setattr(remote_access, "_exited_connector_requested", check_then_stop)
-        monkeypatch.setattr(remote_access, "_start", start_then_stale_stop)
+        monkeypatch.setattr(remote_access, "_start", record_start)
         for now in (1000.0, 2000.0, 3000.0):
             remote_access._restart_exited_connector(config, schedule, now)
 
-        if withdrawal.startswith("stop_"):
-            assert len(started) == 1
-            assert not remote_access._is_cloudflared_pid(started[0])
-            assert not remote_access._connector_requested_path().exists()
-        else:
-            assert started == []
+        assert started == []
         assert not remote_access._is_cloudflared_pid(remote_access._read_pid())
     finally:
         remote_access.stop()
@@ -1655,61 +1629,6 @@ def test_ra_tq_034_restart_takes_recovery_lock_before_connector_lock(monkeypatch
         recovery.join(10)
 
         assert connector_lock_acquired == [True]
-    finally:
-        monkeypatch.setattr(remote_access, "_read_pid", real_read_pid)
-        remote_access.stop()
-
-
-def test_ra_tq_034_start_racing_the_restart_cleanup_keeps_its_request(monkeypatch, tmp_path) -> None:
-    config, network_up = _setup_exiting_connector(monkeypatch, tmp_path)
-    schedule = remote_access._ConnectorRestartSchedule()
-    real_start = remote_access._start
-    real_read_pid = remote_access._read_pid
-    spawned = []
-
-    def start_then_stale_stop(loaded, *, record_request):
-        result = real_start(loaded, record_request=record_request)
-        if not spawned:
-            spawned.append(result["pid"])
-            # A stop in another process that read the exited pid withdraws the
-            # request and removes the records this restart just wrote.
-            remote_access._connector_requested_path().unlink()
-            remote_access._pid_path().unlink()
-            remote_access._state_path().unlink()
-        return result
-
-    explicit_starts = []
-
-    def read_pid_while_start_rerecords():
-        if (
-            spawned
-            and not explicit_starts
-            and remote_access._CONNECTOR_LOCK._is_owned()
-            and not remote_access._connector_requested_path().exists()
-        ):
-            # One explicit start in another process records the request again
-            # while the restart cleans up after the stop.
-            explicit_starts.append(True)
-            remote_access._connector_requested_path().touch()
-        return real_read_pid()
-
-    try:
-        remote_access.start()
-        _wait_connector_exit()
-        network_up.touch()
-        monkeypatch.setattr(remote_access, "_start", start_then_stale_stop)
-        monkeypatch.setattr(remote_access, "_read_pid", read_pid_while_start_rerecords)
-        remote_access._restart_exited_connector(config, schedule, 1000.0)
-        remote_access._restart_exited_connector(config, schedule, 1000.0 + schedule.delay_seconds)
-
-        assert not remote_access._is_cloudflared_pid(spawned[0])
-        assert remote_access._connector_requested_path().exists()
-
-        # The start's request persists, so the monitor brings a connector back.
-        now = 2000.0
-        remote_access._restart_exited_connector(config, schedule, now)
-        remote_access._restart_exited_connector(config, schedule, now + schedule.delay_seconds)
-        assert remote_access._is_cloudflared_pid(real_read_pid())
     finally:
         monkeypatch.setattr(remote_access, "_read_pid", real_read_pid)
         remote_access.stop()
@@ -1793,46 +1712,161 @@ def test_ra_tq_034_failed_config_read_during_restart_keeps_the_request(monkeypat
         remote_access.stop()
 
 
-def test_ra_tq_034_failed_cleanup_of_an_unrecorded_restart_stays_tracked(monkeypatch, tmp_path) -> None:
+def test_ra_tq_034_stop_still_stops_when_the_request_cannot_be_withdrawn(monkeypatch, tmp_path) -> None:
+    _, network_up = _setup_exiting_connector(monkeypatch, tmp_path)
+    network_up.touch()
+    request = remote_access._connector_requested_path()
+    try:
+        remote_access.start()
+        pid = remote_access._read_pid()
+        assert remote_access._is_cloudflared_pid(pid)
+        request.unlink()
+        request.mkdir()  # a corrupted request that unlink() cannot remove
+
+        result = remote_access.stop()
+
+        assert result["ok"] is False
+        assert result["error"] == "remote_access_request_withdraw_failed"
+        assert not remote_access._is_cloudflared_pid(pid)
+    finally:
+        if request.is_dir():
+            request.rmdir()
+        remote_access.stop()
+
+
+_LIFECYCLE_CHILD = """
+import json, sys
+from pathlib import Path
+
+import psutil
+
+from vibe import remote_access, runtime
+
+runtime.get_process_command = lambda pid: (" ".join(psutil.Process(pid).cmdline()) or None) if psutil.pid_exists(pid) else None
+remote_access._version = lambda path: "cloudflared version test"
+remote_access._report_runtime_status_async = lambda *args, **kwargs: None
+
+action, report = sys.argv[1], Path(sys.argv[2])
+if action == "hold":
+    with remote_access._connector_lifecycle():
+        report.write_text("held", encoding="utf-8")
+        sys.stdin.read()  # held until the test kills this process
+    sys.exit(0)
+try:
+    with remote_access._connector_lifecycle(wait=False):
+        probe = "free"
+except remote_access._ConnectorLifecycleBusy:
+    probe = "busy"
+report.with_suffix(".probe").write_text(probe, encoding="utf-8")
+result = remote_access.stop() if action == "stop" else remote_access.start()
+report.write_text(json.dumps({"ok": result.get("ok"), "error": result.get("error")}), encoding="utf-8")
+"""
+
+
+def _lifecycle_child(tmp_path: Path, action: str, name: str) -> tuple[subprocess.Popen, Path]:
+    report = tmp_path / f"{name}.json"
+    process = subprocess.Popen(
+        [sys.executable, "-c", _LIFECYCLE_CHILD, action, str(report)],
+        cwd=str(Path(remote_access.__file__).resolve().parents[1]),
+        env={**os.environ, "AVIBE_HOME": str(tmp_path)},
+        stdin=subprocess.PIPE,
+    )
+    return process, report
+
+
+def _wait_for_file(path: Path, timeout: float = 20.0) -> str:
+    deadline = time.monotonic() + timeout
+    while not path.exists() or not path.read_text(encoding="utf-8"):
+        assert time.monotonic() < deadline, f"{path.name} never appeared"
+        time.sleep(0.05)
+    return path.read_text(encoding="utf-8")
+
+
+def _live_connectors(binary: Path) -> list[int]:
+    live = []
+    for process in psutil.process_iter(["pid", "cmdline", "status"]):
+        cmdline = process.info.get("cmdline") or []
+        if str(binary) in cmdline and process.info.get("status") != psutil.STATUS_ZOMBIE:
+            live.append(process.info["pid"])
+    return live
+
+
+@pytest.mark.parametrize("children", [("stop",), ("stop", "start")])
+def test_ra_tq_034_cross_process_stop_and_start_serialize_with_the_restart(monkeypatch, tmp_path, children) -> None:
     config, network_up = _setup_exiting_connector(monkeypatch, tmp_path)
+    binary = Path(config.remote_access.vibe_cloud.cloudflared_path)
     schedule = remote_access._ConnectorRestartSchedule()
     real_start = remote_access._start
-    real_stop_pid = runtime.stop_pid
-    spawned = []
-    failed_stops = []
+    launched = []
 
-    def start_then_stale_stop(loaded, *, record_request):
-        result = real_start(loaded, record_request=record_request)
-        spawned.append(result["pid"])
-        # A stop in another process that read the exited pid withdraws the
-        # request and removes the records this restart just wrote.
-        remote_access._connector_requested_path().unlink()
-        remote_access._pid_path().unlink()
-        remote_access._state_path().unlink()
-        return result
-
-    def stop_pid_failing_once(pid, timeout=5, **kwargs):
-        if pid in spawned and not failed_stops:
-            failed_stops.append(pid)
-            return False
-        return real_stop_pid(pid, timeout=timeout, **kwargs)
+    def start_while_other_processes_wait(loaded, *, record_request):
+        # The restart holds the lifecycle lock here, after its request check and
+        # before its spawn: the round-8 ordering would have the stop read the
+        # exited pid now. Each child finds the lock busy and must wait for it.
+        for name in children:
+            launched.append(_lifecycle_child(tmp_path, name, name))
+        for _process, report in launched:
+            assert _wait_for_file(report.with_suffix(".probe")) == "busy"
+        return real_start(loaded, record_request=record_request)
 
     try:
         remote_access.start()
         _wait_connector_exit()
         network_up.touch()
-        monkeypatch.setattr(remote_access, "_start", start_then_stale_stop)
-        monkeypatch.setattr(runtime, "stop_pid", stop_pid_failing_once)
+        monkeypatch.setattr(remote_access, "_start", start_while_other_processes_wait)
         remote_access._restart_exited_connector(config, schedule, 1000.0)
         remote_access._restart_exited_connector(config, schedule, 1000.0 + schedule.delay_seconds)
+        monkeypatch.setattr(remote_access, "_start", real_start)
+        for process, report in launched:
+            assert process.wait(timeout=60) == 0
+            assert json.loads(_wait_for_file(report))["ok"] is True
 
-        assert remote_access._is_cloudflared_pid(spawned[0])
-        assert remote_access._state_connector("draining") == {"pid": spawned[0]}
-
-        # The monitor's lifecycle reconciliation retries it.
-        remote_access._reconcile_connector_lifecycle()
-        assert not remote_access._is_cloudflared_pid(spawned[0])
-        assert remote_access._state_connector("draining") is None
+        live = _live_connectors(binary)
+        if remote_access._connector_requested_path().exists():
+            # A start won the last word: exactly the recorded connector serves.
+            assert live == [remote_access._read_pid()]
+        else:
+            # The stop won the last word: nothing serves, and the monitor keeps it down.
+            assert live == []
+            remote_access._restart_exited_connector(config, schedule, 5000.0)
+            remote_access._restart_exited_connector(config, schedule, 9000.0)
+            assert _live_connectors(binary) == []
     finally:
-        monkeypatch.setattr(runtime, "stop_pid", real_stop_pid)
+        for process, _report in launched:
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+        monkeypatch.setattr(remote_access, "_start", real_start)
         remote_access.stop()
+
+
+def test_ra_tq_034_lifecycle_lock_frees_when_its_holder_dies_and_status_never_waits(monkeypatch, tmp_path) -> None:
+    _setup_exiting_connector(monkeypatch, tmp_path)
+    holder, report = _lifecycle_child(tmp_path, "hold", "holder")
+    dead = subprocess.Popen([sys.executable, "-c", "pass"])
+    dead.wait()
+    try:
+        assert _wait_for_file(report) == "held"
+        remote_access._pid_path().parent.mkdir(parents=True, exist_ok=True)
+        remote_access._pid_path().write_text(str(dead.pid), encoding="utf-8")
+        with pytest.raises(remote_access._ConnectorLifecycleBusy):
+            with remote_access._connector_lifecycle(wait=False):
+                pass
+
+        started_at = time.monotonic()
+        result = remote_access.status()
+        assert time.monotonic() - started_at < remote_access.CONNECTOR_LIFECYCLE_WAIT_SECONDS / 3
+        assert result["running"] is False
+        # The holder owns the records, so status() left them for it.
+        assert remote_access._read_pid() == dead.pid
+
+        holder.kill()
+        holder.wait()
+        with remote_access._connector_lifecycle(wait=False):
+            pass
+        remote_access.status()
+        assert remote_access._read_pid() is None
+    finally:
+        if holder.poll() is None:
+            holder.kill()
+            holder.wait()
