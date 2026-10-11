@@ -201,6 +201,38 @@ async def test_the_exit_code_follows_the_statement_that_runs_last(run, command, 
 
 
 @ON_WINDOWS
+async def test_a_clean_block_runs_last(run, shell, tmp_path):
+    """PowerShell 7.3 and later run ``clean`` after the other blocks, so its last statement is the one that counts;
+    in a script with no other block, PowerShell runs none of it, and nothing fails."""
+    if shell.windows_powershell:
+        pytest.skip("Windows PowerShell 5.1 has no clean block")
+    marker = tmp_path / "clean-ran"
+
+    after_process = await run("process { Write-Output ok }\nclean { cmd /c exit 5 }")
+    alone = await run(f"clean {{ New-Item -ItemType File -Path '{marker}' | Out-Null; cmd /c exit 7 }}")
+
+    assert after_process[0] and after_process[1].rstrip().endswith("Command exited with code 5")
+    assert alone[0] is False
+    assert not marker.exists()
+
+
+@ON_WINDOWS
+@pytest.mark.parametrize(
+    ("command", "is_error", "ending"),
+    [
+        ("Set-StrictMode -Version Latest\nWrite-Output ok", False, "ok"),
+        ("Set-StrictMode -Version Latest\nWrite-Output ok; cmd /c exit 3", True, "Command exited with code 3"),
+    ],
+    ids=["ok", "native-fails"],
+)
+async def test_a_command_may_turn_strict_mode_on(run, command, is_error, ending):
+    """``$LASTEXITCODE`` does not exist until something sets it, and strict mode refuses to read it then."""
+    error, text = await run(command)
+
+    assert (error, text.rstrip().splitlines()[-1]) == (is_error, ending)
+
+
+@ON_WINDOWS
 async def test_an_error_is_reported_at_the_command_s_own_line_and_column(run):
     """The wrapping adds no line, so the model is pointed at the line it wrote (in the view that shows it)."""
     error, text = await run("$ErrorView = 'NormalView'\nWrite-Output first\n  throw 'boom'")
