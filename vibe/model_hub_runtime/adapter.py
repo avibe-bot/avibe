@@ -139,6 +139,10 @@ _HUB_SUBSCRIPTION_PROTOCOLS = {
 _INSTALL_RECOVERY_WAIT_SECONDS = 30.0
 _INSTALL_RECOVERY_INITIAL_DELAY_SECONDS = 0.25
 _INSTALL_RECOVERY_MAX_DELAY_SECONDS = 4.0
+# Waits between retries of a request the engine has not registered yet, bounded
+# by the supervisor's registration settle window.
+_REGISTRATION_RETRY_FIRST_DELAY_SECONDS = 0.25
+_REGISTRATION_RETRY_MAX_DELAY_SECONDS = 2.0
 # The engine answers a credential's model list from memory.
 _ENGINE_MODEL_LISTING_TIMEOUT_SECONDS = 5.0
 
@@ -1939,6 +1943,7 @@ class CLIProxyEngineAdapter:
                     self.state_store.mark_oauth_engine_published,
                     credential_ref,
                 )
+                self._note_grant_change()
                 return
 
             # The local file is already visible. A GET followed by POST is
@@ -2815,6 +2820,46 @@ class CLIProxyEngineAdapter:
         *,
         on_admitted: Callable[[], None] | None = None,
     ) -> EngineInvokeHandle:
+        """Invoke once, retrying only while the engine may still be registering the model.
+
+        Right after an engine start, config reload, or OAuth grant write,
+        CLIProxyAPI answers a routed model it has not registered yet with a local
+        rejection, before any egress. Within that settle window the same request
+        is retried after a short wait, releasing the transport between attempts;
+        otherwise the rejection stays the terminal ``engine_down`` it reports.
+        """
+
+        delay = _REGISTRATION_RETRY_FIRST_DELAY_SECONDS
+        while True:
+            handle = await self._invoke_once(
+                source_id,
+                model_id,
+                request,
+                stream,
+                origin,
+                on_admitted=on_admitted,
+            )
+            if not handle.registration_pending or not self.supervisor.models_registering():
+                return handle
+            on_admitted = None  # admission is reported once per request
+            await asyncio.sleep(delay)
+            delay = min(2 * delay, _REGISTRATION_RETRY_MAX_DELAY_SECONDS)
+
+    def _note_grant_change(self) -> None:
+        note_grant_change = getattr(self.supervisor, "note_grant_change", None)
+        if callable(note_grant_change):
+            note_grant_change()
+
+    async def _invoke_once(
+        self,
+        source_id: str,
+        model_id: str,
+        request: Mapping[str, Any],
+        stream: bool,
+        origin: str,
+        *,
+        on_admitted: Callable[[], None] | None = None,
+    ) -> EngineInvokeHandle:
         async with self._routing_lock:
             source = await asyncio.to_thread(self.state_store.get_source, source_id)
             if source is None:
@@ -3003,6 +3048,7 @@ class CLIProxyEngineAdapter:
                 "/auth-files/fields",
                 payload={"name": auth.name, "prefix": credential["prefix"]},
             )
+            self._note_grant_change()
             await asyncio.to_thread(self.state_store.audit_auth_permissions, enforce=True)
         except (EngineClientError, EngineStateError):
             if existing_credential_ref is not None:

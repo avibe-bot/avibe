@@ -4292,7 +4292,7 @@ def test_adapter_uses_origin_protocol_for_engine_translation(
             self.request_protocol = request_protocol
             self.request_headers = request_headers
             on_transport_done()
-            return object()
+            return client_module.EngineInvokeHandle(stream=None, outcome=asyncio.get_running_loop().create_future())
 
     class Supervisor:
         def __init__(self, client: Client) -> None:
@@ -4459,7 +4459,7 @@ def test_adapter_serializes_source_sync_with_new_invocations(tmp_path: Path) -> 
         ):
             invoked_refs.append(source.credential_ref)
             on_transport_done()
-            return object()
+            return client_module.EngineInvokeHandle(stream=None, outcome=asyncio.get_running_loop().create_future())
 
     class Supervisor:
         def __init__(self) -> None:
@@ -5773,56 +5773,69 @@ def test_engine_client_marks_loopback_stream_disconnect_as_engine_down(
     asyncio.run(run())
 
 
+def _cpa_unknown_provider(protocol: str, routed_model: str, *, error_type: str = "invalid_request_error") -> dict:
+    """CLIProxyAPI's body for a routed model it has not registered (handlers_routing.go)."""
+
+    message = f"unknown provider for model {routed_model}"
+    if protocol == "anthropic":
+        return {"type": "error", "error": {"type": error_type, "message": message}}
+    return {"error": {"message": message, "type": error_type, "code": "model_not_found", "param": "model"}}
+
+
 @pytest.mark.parametrize(
-    (
-        "status",
-        "reported_model",
-        "expected_kind",
-        "expected_code",
-        "expected_reason",
-    ),
+    ("protocol", "status", "body", "expected_kind", "expected_code", "expected_reason", "pending"),
     (
         (
-            502,
-            "source-fixture123/model-a",
+            "anthropic",
+            400,
+            _cpa_unknown_provider("anthropic", "source-fixture123/model-a"),
             RawOutcomeKind.NETWORK_ERROR,
             "engine_down",
             None,
+            True,
         ),
         (
+            "openai_chat",
+            400,
+            _cpa_unknown_provider("openai_chat", "source-fixture123/model-a"),
+            RawOutcomeKind.NETWORK_ERROR,
+            "engine_down",
+            None,
+            True,
+        ),
+        (
+            "anthropic",
+            400,
+            _cpa_unknown_provider("anthropic", "source-fixture123/model-b"),
+            RawOutcomeKind.HTTP_ERROR,
+            "upstream_request_invalid",
+            None,
+            False,
+        ),
+        (
+            "anthropic",
             502,
-            "source-fixture123/model-b",
+            _cpa_unknown_provider("anthropic", "source-fixture123/model-a", error_type="api_error"),
             RawOutcomeKind.HTTP_ERROR,
             None,
             "server_error",
-        ),
-        (
-            503,
-            "source-fixture123/model-a",
-            RawOutcomeKind.HTTP_ERROR,
-            None,
-            "server_error",
+            False,
         ),
     ),
+    ids=("anthropic", "openai_chat", "another_model", "older_engine_502"),
 )
 def test_engine_client_distinguishes_local_model_registration_failure(
     monkeypatch: pytest.MonkeyPatch,
+    protocol: str,
     status: int,
-    reported_model: str,
+    body: dict,
     expected_kind: RawOutcomeKind,
     expected_code: str | None,
     expected_reason: str | None,
+    pending: bool,
 ) -> None:
     async def run() -> None:
-        payload = json.dumps(
-            {
-                "type": "error",
-                "error": {
-                    "type": "api_error",
-                    "message": f"unknown provider for model {reported_model}",
-                },
-            }
-        ).encode()
+        payload = json.dumps(body).encode()
 
         class Content:
             reads = 0
@@ -5856,7 +5869,7 @@ def test_engine_client_distinguishes_local_model_registration_failure(
         source = SourceRecord(
             source_id="src_fixture123",
             vendor="custom",
-            protocol="anthropic",
+            protocol=protocol,
             base_url="https://api.example.test/v1",
             credential_ref="cred_fixture123",
             allowed_origins=(),
@@ -5875,9 +5888,9 @@ def test_engine_client_distinguishes_local_model_registration_failure(
         decision = classify_outcome(outcome)
 
         assert outcome.kind is expected_kind
-        assert outcome.error_code == expected_code
         assert decision.error_code == expected_code
         assert decision.reason == expected_reason
+        assert handle.registration_pending is pending
 
     asyncio.run(run())
 
@@ -9484,3 +9497,108 @@ def test_oauth_flow_adds_a_second_account_and_refuses_the_same_one(
             assert not client.patches
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize(("registering", "expected_calls", "expected_pending"), [(True, 3, False), (False, 1, True)])
+def test_adapter_retries_a_routed_model_the_engine_is_still_registering(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    registering: bool,
+    expected_calls: int,
+    expected_pending: bool,
+) -> None:
+    pending_answers = 2
+    calls = []
+    sleeps = []
+
+    class Client:
+        async def invoke(self, source, model_id, request, *, stream, request_protocol=None, request_headers=None,
+                         on_transport_done=None, on_request_sent=None):
+            calls.append(model_id)
+            on_transport_done()
+            handle = client_module.EngineInvokeHandle(stream=None, outcome=asyncio.get_running_loop().create_future())
+            # The engine answers its local "unknown provider" rejection until it registers the model.
+            handle.registration_pending = len(calls) <= pending_answers
+            return handle
+
+    class Supervisor:
+        def client(self):
+            return Client()
+
+        def models_registering(self) -> bool:
+            return registering
+
+    real_sleep = asyncio.sleep
+
+    async def sleep(delay: float) -> None:
+        sleeps.append(delay)
+        await real_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+
+    async def run() -> None:
+        store = EngineStateStore(tmp_path / "state")
+        credential_ref = store.store_api_key(
+            "upstream-secret",
+            vendor="custom",
+            protocol="anthropic",
+            base_url="https://api.example.test/v1",
+        )
+        store.sync_sources([_binding(credential_ref, protocol="anthropic", allowed_origins=("claude",))])
+        adapter = CLIProxyEngineAdapter(supervisor=Supervisor(), state_store=store)  # type: ignore[arg-type]
+        admitted = []
+
+        handle = await adapter.invoke(
+            "src_fixture123",
+            "model-a",
+            ModelHubRequest({}, protocol="anthropic", headers={}),
+            False,
+            "claude",
+            on_admitted=lambda: admitted.append(True),
+        )
+
+        assert len(calls) == expected_calls
+        assert handle.registration_pending is expected_pending
+        assert admitted == [True]  # admission is reported once per request
+        assert sleeps == ([0.25, 0.5] if registering else [])
+
+    asyncio.run(run())
+
+
+def test_supervisor_reports_registration_settling_only_inside_its_window(monkeypatch: pytest.MonkeyPatch) -> None:
+    from vibe.model_hub_runtime import supervisor as supervisor_module
+
+    clock = [100.0]
+    monkeypatch.setattr(supervisor_module.time, "monotonic", lambda: clock[0])
+    supervisor = supervisor_module.EngineSupervisor.__new__(supervisor_module.EngineSupervisor)
+    supervisor._registration_changed_at = None
+
+    assert supervisor.models_registering() is False
+    supervisor.note_grant_change()
+    clock[0] += supervisor_module.MODEL_REGISTRATION_SETTLE_SECONDS - 0.1
+    assert supervisor.models_registering() is True
+    clock[0] += 0.2
+    assert supervisor.models_registering() is False
+
+
+def test_engine_start_and_reload_open_the_registration_settle_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    supervisor, store = _fixture_supervisor(tmp_path)
+    credential_ref = store.store_api_key("upstream-secret", base_url="https://api.example.test/v1")
+    store.sync_sources([_binding(credential_ref)])
+    adapter = CLIProxyEngineAdapter(supervisor=supervisor, state_store=store)
+    real_monotonic = supervisor_module.time.monotonic
+    later = [0.0]
+    monkeypatch.setattr(supervisor_module.time, "monotonic", lambda: real_monotonic() + later[0])
+    try:
+        assert supervisor.models_registering() is False
+        supervisor.ensure_running()
+        assert supervisor.models_registering() is True
+        later[0] = supervisor_module.MODEL_REGISTRATION_SETTLE_SECONDS + 1
+        assert supervisor.models_registering() is False
+
+        asyncio.run(adapter.sync_sources([_binding(credential_ref, route_model_ids=("model-b",))]))
+        assert supervisor.models_registering() is True
+    finally:
+        supervisor.stop()

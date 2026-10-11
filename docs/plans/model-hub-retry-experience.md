@@ -175,7 +175,7 @@ whose settlement generation is stale.
 | Recoverable rate limit | 60, 120, 240, 300 seconds; cap 300 | Keep existing cooldown classification. |
 | Recoverable quota exhaustion | 300 seconds | Keep existing cooldown; normally beyond the automatic window. |
 | Refreshable credential rejection | Existing same-Source retry once | No independent retry loop; a second rejection follows the existing terminal rule. |
-| Bad key, revoked access, balance requiring action, request/schema/context/model errors, local engine failure | No new automatic retry | Keep existing classification/remedy; `engine_down` never blames or cools an upstream Source. |
+| Bad key, revoked access, balance requiring action, request/schema/context/model errors, local engine failure | No new automatic retry | Keep existing classification/remedy; `engine_down` never blames or cools an upstream Source. The engine's pre-egress "unknown provider" for a routed model it is still registering is retried by the runtime adapter only within the registration settle window ([model-hub.md](model-hub.md)). |
 
 Apply bounded positive jitter to the local base: a sampled delay in
 `[base, min(cap, base * 1.2)]`. This preserves minimum delays and hard caps;

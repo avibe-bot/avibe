@@ -285,6 +285,8 @@ class EngineInvokeHandle:
         self._observed = observed
         self._close_lock = asyncio.Lock()
         self._stream_closed = False
+        # The engine rejected the routed model before any egress: it has not registered it (yet).
+        self.registration_pending = False
 
     @property
     def stream(self) -> AsyncIterator[bytes] | None:
@@ -564,7 +566,8 @@ class EngineClient:
                     observed_payload = ProtocolObservation()
                 finally:
                     error_body.close()
-                if response.status == 502 and _is_local_model_registration_failure(
+                if _is_local_model_registration_failure(
+                    response.status,
                     payload,
                     routed_model=routed_model,
                 ):
@@ -574,11 +577,13 @@ class EngineClient:
                         model_id=model_id,
                         http_status=response.status,
                         error_code="engine_down",
-                        message="engine rejected its registered routed model",
+                        message="engine has not registered the routed model",
                     )
                     response.close()
                     await session.close()
-                    return ended(outcome)
+                    handle = ended(outcome)
+                    handle.registration_pending = True
+                    return handle
                 outcome = _reduce_protocol_observation(
                     replace(
                         observed_payload,
@@ -1301,27 +1306,36 @@ def _project_model_inventory_before_deadline(
 
 
 def _is_local_model_registration_failure(
+    status: int,
     payload: bytes,
     *,
     routed_model: str,
 ) -> bool:
-    """Identify CLIProxyAPI's local pre-egress model registry rejection."""
+    """Identify CLIProxyAPI's local pre-egress model registry rejection.
 
+    CLIProxyAPI (sdk/api/handlers/handlers_routing.go at c404af96 and in v8)
+    answers a model it has not registered with 400
+    ``{"error":{"message":"unknown provider for model <prefix>/<model>",
+    "type":"invalid_request_error","code":"model_not_found","param":"model"}}``;
+    its Claude surface rebuilds that as ``{"type":"error","error":{"type":
+    "invalid_request_error","message":...}}``. The routed model is Avibe's own
+    ``<prefix>/<model>``, so the exact message names a local registration gap,
+    not an upstream rejection.
+    """
+
+    if status != 400:
+        return False
     try:
         decoded = json.loads(payload)
     except (json.JSONDecodeError, UnicodeDecodeError):
         return False
-    if (
-        not isinstance(decoded, dict)
-        or "type" not in decoded
-        or decoded["type"] != "error"
-    ):
+    if not isinstance(decoded, dict) or ("type" in decoded and decoded["type"] != "error"):
         return False
     error = decoded.get("error")
     error_type, _, _ = _raw_error_fields(payload)
     return (
         isinstance(error, dict)
-        and error_type == "api_error"
+        and error_type == "invalid_request_error"
         and error.get("message") == f"unknown provider for model {routed_model}"
     )
 
