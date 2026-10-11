@@ -26,6 +26,7 @@ from sqlalchemy.engine import Engine
 
 from core.agent_core.harness.context import StateRequest, display
 from core.agent_core.tools.base import Tool, ToolContext, ToolResult, ToolSpec
+from core.managed_skills import is_skill_name
 from modules.agents.vibey.prompt import EnvironmentValue, render_environment
 
 #: The tags of the block ``vibe skill load`` writes for each skill it loads (``render_skill_content``).
@@ -135,8 +136,9 @@ class _SkillLoadMarking:
             if tag.group(1) is None:
                 depth = max(0, depth - 1)
                 continue
-            if depth == 0:
-                names.append(html.unescape(tag.group(1)))
+            # Only a name `vibe skill load` can load: any command's output can carry a tag like it.
+            if depth == 0 and is_skill_name(name := html.unescape(tag.group(1))):
+                names.append(name)
             depth += 1
         names = list(dict.fromkeys(names))
         if not names:
