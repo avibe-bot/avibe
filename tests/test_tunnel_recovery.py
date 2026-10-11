@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import threading
 import time
+from pathlib import Path
 
+import psutil
 import pytest
 
 from config.v2_config import V2Config
@@ -1483,3 +1485,117 @@ def test_ra_tq_009_restart_promotes_ready_candidate(monkeypatch, tmp_path) -> No
     assert remote_access._read_pid() == candidate_pid
     assert reconciled["active"]["pid"] == candidate_pid
     assert reconciled["candidate"] is None
+
+
+def _setup_exiting_connector(monkeypatch, tmp_path) -> tuple[V2Config, Path]:
+    """A real connector process that exits about half a second after start while the network is down."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    network_up = tmp_path / "network-up"
+    binary = tmp_path / "bin" / "cloudflared"
+    binary.parent.mkdir()
+    binary.write_text(
+        "#!/bin/sh\n"
+        f'if [ -e "{network_up}" ]; then while :; do sleep 0.2; done; fi\n'
+        'echo "failed to dial to edge: lookup region1.v2.argotunnel.com: no such host" >&2\n'
+        "sleep 0.5\n"
+        "exit 1\n",
+        encoding="utf-8",
+    )
+    binary.chmod(0o755)
+    config = _config()
+    config.remote_access.vibe_cloud.tunnel_token = "tunnel-token"
+    config.remote_access.vibe_cloud.cloudflared_path = str(binary)
+    config.save()
+    monkeypatch.setattr(remote_access, "_PREFERRED_PROTOCOL", None)
+    monkeypatch.setattr(remote_access, "_version", lambda path: "cloudflared version test")
+    monkeypatch.setattr(remote_access, "_report_runtime_status_async", lambda *args, **kwargs: None)
+
+    def process_command(pid: int) -> str | None:
+        # The macOS fallback runs setuid ``ps``, which a sandboxed test cannot exec.
+        try:
+            return " ".join(psutil.Process(pid).cmdline()) or None
+        except psutil.Error:
+            return None
+
+    monkeypatch.setattr(runtime, "get_process_command", process_command)
+    return config, network_up
+
+
+def _wait_connector_exit(timeout: float = 5.0) -> None:
+    deadline = time.monotonic() + timeout
+    while remote_access._cloudflared_pid_state(remote_access._read_pid()) not in {"dead", "other"}:
+        assert time.monotonic() < deadline, "connector did not exit"
+        time.sleep(0.05)
+
+
+def test_ra_tq_034_connector_exited_before_network_is_restarted_with_backoff(monkeypatch, tmp_path) -> None:
+    config, network_up = _setup_exiting_connector(monkeypatch, tmp_path)
+    schedule = remote_access._ConnectorRestartSchedule()
+    try:
+        # UI start after a reboot: the network is down, so the connector exits within a second.
+        remote_access.start()
+        _wait_connector_exit()
+
+        remote_access._restart_exited_connector(config, schedule, 1000.0)
+        assert not remote_access._is_cloudflared_pid(remote_access._read_pid())
+        remote_access._restart_exited_connector(config, schedule, 1000.0 + remote_access.QUALITY_SAMPLE_SECONDS)
+        assert schedule.delay_seconds == 2 * remote_access.QUALITY_SAMPLE_SECONDS
+        _wait_connector_exit()
+
+        network_up.touch()
+        now = 1100.0
+        remote_access._restart_exited_connector(config, schedule, now)
+        remote_access._restart_exited_connector(config, schedule, now + schedule.delay_seconds - 1)
+        assert not remote_access._is_cloudflared_pid(remote_access._read_pid())
+        remote_access._restart_exited_connector(config, schedule, now + schedule.delay_seconds)
+
+        pid = remote_access._read_pid()
+        time.sleep(1.0)  # longer than the offline connector lives
+        assert remote_access._is_cloudflared_pid(pid)
+        remote_access._restart_exited_connector(config, schedule, now + 1000)
+        assert remote_access._read_pid() == pid
+        assert schedule.due_at is None
+    finally:
+        remote_access.stop()
+
+
+@pytest.mark.parametrize("withdrawal", ["user_stop", "remote_access_disabled", "stop_during_restart"])
+def test_ra_tq_034_withdrawn_connector_request_is_not_restarted(monkeypatch, tmp_path, withdrawal) -> None:
+    config, network_up = _setup_exiting_connector(monkeypatch, tmp_path)
+    schedule = remote_access._ConnectorRestartSchedule()
+    real_start = remote_access.start
+    started = []
+    try:
+        real_start()
+        _wait_connector_exit()
+        network_up.touch()
+        if withdrawal == "user_stop":
+            remote_access.stop()
+        elif withdrawal == "remote_access_disabled":
+            config.remote_access.vibe_cloud.enabled = False
+            config.save()
+
+        def start_racing_a_stop():
+            result = real_start()
+            started.append(result.get("pid"))
+            if withdrawal == "stop_during_restart":
+                # Another process's stop() withdrew the request and, having read
+                # the exited pid, removed the records this restart just wrote.
+                remote_access._connector_requested_path().unlink()
+                remote_access._pid_path().unlink()
+                remote_access._state_path().unlink()
+            return result
+
+        monkeypatch.setattr(remote_access, "start", start_racing_a_stop)
+        for now in (1000.0, 2000.0, 3000.0):
+            remote_access._restart_exited_connector(config, schedule, now)
+
+        if withdrawal == "stop_during_restart":
+            assert len(started) == 1
+            assert not remote_access._is_cloudflared_pid(started[0])
+        else:
+            assert started == []
+        assert not remote_access._is_cloudflared_pid(remote_access._read_pid())
+    finally:
+        remote_access.stop()

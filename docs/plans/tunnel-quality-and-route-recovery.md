@@ -605,6 +605,23 @@ Connector state writes are atomic. On startup:
   and
 - never clear shared logs or state belonging to the surviving connector.
 
+### Exited-connector restart
+
+A connector can exit on its own: after a reboot, when the network is not up yet
+at UI start, cloudflared exits within about a second. `start()` records a
+connector request (`remote-access-connector-requested` in the runtime
+directory) and `stop()` withdraws it before stopping the process. The monitor
+restarts a requested connector that is no longer running:
+
+- only while remote access is enabled with a tunnel token, and never while a
+  candidate, draining connector, or tail rollback owns the connector lane;
+- one backoff delay after the exit is first seen, starting at one sample
+  interval and doubling after each attempt up to two minutes; and
+- the delay resets once a connector reports a ready connection.
+
+A stop from another process that withdraws the request while a restart runs
+also stops the connector that restart spawned.
+
 ## Doctor Integration
 
 Doctor gains a `Remote Access` group. It is read-only and never starts a
@@ -912,6 +929,7 @@ the active Connector currently demonstrates QUIC. An unobserved UDP path stays
 | RA-TQ-030 | Connectivity diagnostics distinguish proven from unobserved paths | diagnostics contract test |
 | RA-TQ-031 | Tunnel controls remain usable on desktop and mobile | browser/runtime proof |
 | RA-TQ-033 | An unavailable route recovers over the other transport despite cooldown | supervisor scenario tests |
+| RA-TQ-034 | A requested connector that exits on its own restarts with backoff; a stopped or disabled one stays down | supervisor scenario tests |
 
 ## Implementation Boundaries
 
@@ -956,5 +974,5 @@ changes must update the schema first.
   console is visible.
 - No secret or sensitive request data appears in local snapshots, logs, Doctor,
   status APIs, or cloud payloads.
-- RA-TQ-001 through RA-TQ-030 and RA-TQ-033 pass in their required evidence
+- RA-TQ-001 through RA-TQ-030, RA-TQ-033, and RA-TQ-034 pass in their required evidence
   layers; RA-TQ-031 receives browser proof at desktop and mobile widths.

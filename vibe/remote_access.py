@@ -122,6 +122,7 @@ STATUS_LOG_TAIL_BYTES = 64 * 1024
 STATUS_REPORT_DRAIN_SECONDS = 1.0
 RECOVERY_READY_TIMEOUT_SECONDS = 30.0
 START_PREFERRED_READY_TIMEOUT_SECONDS = 8.0
+CONNECTOR_RESTART_MAX_DELAY_SECONDS = 120.0
 RECOVERY_EVALUATION_SECONDS = 45.0
 RECOVERY_DRAIN_SECONDS = 35.0
 QUALITY_COMPARISON_MAX_AGE_SECONDS = 2 * QUALITY_SAMPLE_SECONDS
@@ -239,6 +240,10 @@ def _pid_path() -> Path:
 
 def _state_path() -> Path:
     return paths.get_runtime_dir() / "remote-access-cloudflared.json"
+
+
+def _connector_requested_path() -> Path:
+    return paths.get_runtime_dir() / "remote-access-connector-requested"
 
 
 def _active_hostnames_state_path() -> Path:
@@ -3555,11 +3560,82 @@ def _run_route_optimization(
                 _RECOVERY_THREAD = None
 
 
+@dataclass
+class _ConnectorRestartSchedule:
+    """Backoff for restarting a requested connector that exited on its own."""
+
+    delay_seconds: float = QUALITY_SAMPLE_SECONDS
+    due_at: float | None = None
+
+
+def _exited_connector_requested(config: V2Config | None) -> bool:
+    """Whether ``start()`` requested a connector that is no longer running.
+
+    ``stop()`` withdraws the request, so a connector the user stopped stays
+    down. A candidate, draining connector, or tail rollback means route
+    recovery owns the connector lane.
+    """
+
+    if config is None or config.remote_access.provider != "vibe_cloud":
+        return False
+    cloud = config.remote_access.vibe_cloud
+    if not cloud.enabled or not cloud.tunnel_token or not _connector_requested_path().exists():
+        return False
+    return (
+        _cloudflared_pid_state(_read_pid()) in {"dead", "other"}
+        and _state_connector("candidate") is None
+        and _state_connector("draining") is None
+        and _pending_tail_rollback() is None
+        and _read_pid_file(_candidate_pid_path()) is None
+        and _recovery_payload().get("state") not in {"evaluating", "draining"}
+    )
+
+
+def _restart_exited_connector(
+    config: V2Config | None,
+    schedule: _ConnectorRestartSchedule,
+    now: float,
+) -> None:
+    """Restart an exited connector once it has stayed down for the backoff delay.
+
+    A connector that cannot connect at start, for example when the network is
+    not up yet after a reboot, exits within seconds. The delay doubles after
+    each attempt up to ``CONNECTOR_RESTART_MAX_DELAY_SECONDS``; the monitor
+    resets it once a connector reports a ready connection.
+    """
+
+    if not _exited_connector_requested(config):
+        schedule.due_at = None
+        return
+    if schedule.due_at is None:
+        schedule.due_at = now + schedule.delay_seconds
+        return
+    if now < schedule.due_at:
+        return
+    schedule.due_at = None
+    schedule.delay_seconds = min(2 * schedule.delay_seconds, CONNECTOR_RESTART_MAX_DELAY_SECONDS)
+    with _CONNECTOR_LOCK:
+        if not _exited_connector_requested(config):
+            return
+        logger.warning("Tunnel connector exited; restarting it")
+        result = start()
+        if result.get("started") and not _connector_requested_path().exists():
+            # A stop in another process withdrew the request while this restart
+            # ran. It may have read the exited pid, so stop the new connector here.
+            stop()
+            if _is_cloudflared_pid(result.get("pid")):
+                runtime.stop_pid(result["pid"], timeout=8)
+            return
+    if not result.get("ok"):
+        logger.warning("Tunnel connector restart failed: %s", result.get("error"))
+
+
 def _quality_monitor_loop(interval_seconds: float, quality_path: Path) -> None:
     global _QUALITY_MONITOR_STARTED, _RECOVERY_MANUAL_BYPASS_USED, _RECOVERY_EMERGENCY_BYPASS_USED
     last_report_at = 0.0
     last_active_pid: int | None = None
     last_effective_protocol = "unknown"
+    restart_schedule = _ConnectorRestartSchedule()
     request_session = _public_probe_session()
     try:
         while quality_path == _quality_state_path() and quality_path.parent.exists():
@@ -3591,6 +3667,9 @@ def _quality_monitor_loop(interval_seconds: float, quality_path: Path) -> None:
                 loaded = V2Config.load()
             except Exception:
                 loaded = None
+            if sample is not None and sample.ha_connections > 0:
+                restart_schedule = _ConnectorRestartSchedule()
+            _restart_exited_connector(loaded, restart_schedule, started_at)
             configured_protocol = _configured_protocol(loaded) if loaded is not None else "auto"
             effective_protocol = _effective_protocol(active, sample)
             if (
@@ -3986,6 +4065,13 @@ def start_runtime_monitoring(config: V2Config | None = None) -> None:
 
 
 def stop(config: V2Config | None = None) -> dict[str, Any]:
+    """Stop the connector and withdraw the request that keeps one running."""
+
+    _connector_requested_path().unlink(missing_ok=True)
+    return _stop_connector(config)
+
+
+def _stop_connector(config: V2Config | None = None) -> dict[str, Any]:
     try:
         config = config or V2Config.load()
     except Exception:
@@ -4072,6 +4158,8 @@ def start(config: V2Config | None = None) -> dict[str, Any]:
         if not cloud.tunnel_token:
             stop_result = stop(config)
             return {**stop_result, "ok": False, "error": "missing_tunnel_token"}
+        _connector_requested_path().parent.mkdir(parents=True, exist_ok=True)
+        _connector_requested_path().touch()
         binary = _resolve_binary(config)
         if not binary:
             install_result = install_cloudflared()
@@ -4089,7 +4177,7 @@ def start(config: V2Config | None = None) -> dict[str, Any]:
             if running_sig == desired_sig and _running_connector_has_metrics(current.get("pid")):
                 _report_runtime_status_async(config, event="start")
                 return {**current, "ok": True, "started": False}
-            stop_result = stop(config)
+            stop_result = _stop_connector(config)
             if stop_result.get("ok") is False or stop_result.get("running"):
                 return {
                     **stop_result,

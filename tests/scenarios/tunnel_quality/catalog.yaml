@@ -212,3 +212,9 @@ scenarios:
     kind: lifecycle
     layer: scenario
     test: tests/test_tunnel_recovery.py::test_ra_tq_033_availability_recovery_protocol_follows_route_outage
+  - id: RA-TQ-034
+    name: A requested Connector that exits on its own restarts with backoff; a stopped or disabled one stays down
+    status: covered
+    kind: resilience
+    layer: scenario
+    test: tests/test_tunnel_recovery.py::test_ra_tq_034_connector_exited_before_network_is_restarted_with_backoff
