@@ -16,6 +16,9 @@ from vibe.model_hub_runtime.api_key_vendors import (
 )
 from vibe.model_hub_runtime.state import EngineStateError, EngineStateStore, RuntimeSecrets, SourceRecord
 
+# The engine rotates main.log at 10 MB and deletes the oldest rotated files beyond this total.
+ENGINE_LOGS_MAX_TOTAL_MB = 20
+
 
 def write_engine_config(
     path: Path,
@@ -76,8 +79,12 @@ def render_engine_config(
         "debug": False,
         "pprof": {"enable": False, "addr": "127.0.0.1:0"},
         "plugins": {"enabled": False, "dir": str(path.parent / "plugins"), "configs": {}},
+        # Commercial mode also skips the engine's request logging, so nothing it writes carries a body.
         "commercial-mode": True,
-        "logging-to-file": False,
+        # The engine's own log goes to a rotating logs/main.log in its instance directory instead of
+        # nowhere, bounded in total, so an engine-side stream failure can be diagnosed afterwards.
+        "logging-to-file": True,
+        "logs-max-total-size-mb": ENGINE_LOGS_MAX_TOTAL_MB,
         "request-log": False,
         "usage-statistics-enabled": False,
         "redis-usage-queue-retention-seconds": 60,
