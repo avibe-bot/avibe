@@ -1,0 +1,79 @@
+diff --git a/sdk/cliproxy/antigravity_models_timeout_test.go b/sdk/cliproxy/antigravity_models_timeout_test.go
+index fe25493e..8d3edee9 100644
+--- a/sdk/cliproxy/antigravity_models_timeout_test.go
++++ b/sdk/cliproxy/antigravity_models_timeout_test.go
+@@ -10,6 +10,7 @@ import (
+ 	"testing"
+ 	"time"
+ 
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+ 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+ 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+ 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
+@@ -59,14 +60,22 @@ func TestAntigravityCapabilityProbe_UsesFirstConfiguredEndpoint(t *testing.T) {
+ }
+ 
+ // TestAntigravityModelRegistration_AsyncNonBlocking verifies that registerModelsForAuth
+-// returns immediately without exposing unverified models and does not block on the probe.
++// returns immediately, registers the static catalog while the probe is pending, and
++// lets the probe narrow it once it answers (Avibe patch; router-for-me/CLIProxyAPI#6531).
+ func TestAntigravityModelRegistration_AsyncNonBlocking(t *testing.T) {
++	static := registry.GetAntigravityModels()
++	if len(static) < 2 {
++		t.Fatalf("static Antigravity catalog has %d models, want at least 2", len(static))
++	}
++	entitled := static[0].ID
++	release := make(chan struct{})
+ 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+ 		select {
+ 		case <-r.Context().Done():
+ 			return
+-		case <-time.After(10 * time.Second):
++		case <-release:
+ 		}
++		_, _ = w.Write([]byte(`{"models":{"` + entitled + `":{}}}`))
+ 	}))
+ 	t.Cleanup(func() {
+ 		server.CloseClientConnections()
+@@ -101,9 +110,21 @@ func TestAntigravityModelRegistration_AsyncNonBlocking(t *testing.T) {
+ 		t.Fatalf("registerModelsForAuth took %v, want non-blocking < 500ms", elapsed)
+ 	}
+ 
+-	models := GlobalModelRegistry().GetModelsForClient(auth.ID)
+-	if len(models) != 0 {
+-		t.Fatal("unverified models registered before probe completed")
++	if got := len(GlobalModelRegistry().GetModelsForClient(auth.ID)); got != len(static) {
++		t.Fatalf("registered %d models before the probe answered, want the static %d", got, len(static))
++	}
++
++	close(release)
++	deadline := time.Now().Add(5 * time.Second)
++	for {
++		models := GlobalModelRegistry().GetModelsForClient(auth.ID)
++		if len(models) == 1 && models[0].ID == entitled {
++			return
++		}
++		if time.Now().After(deadline) {
++			t.Fatalf("probe did not narrow the static catalog: %d models registered", len(models))
++		}
++		time.Sleep(20 * time.Millisecond)
+ 	}
+ }
+ 
+diff --git a/sdk/cliproxy/service_models.go b/sdk/cliproxy/service_models.go
+index a444b64c..2ea086ef 100644
+--- a/sdk/cliproxy/service_models.go
++++ b/sdk/cliproxy/service_models.go
+@@ -123,6 +123,12 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
+ 				s.asyncProbeAntigravityCapabilities(ctx, a, provider)
+ 				return
+ 			}
++			// Avibe: until this account's entitlement probe has answered, register
++			// the static catalog so a fresh engine routes the account at once. The
++			// probe queued after registration below narrows it through the fenced
++			// ReplaceClientModels; a failed probe leaves the static list in place.
++			// Drop once router-for-me/CLIProxyAPI#6531 is fixed upstream.
++			models = registry.GetAntigravityModels()
+ 		} else {
+ 			models = registry.GetAntigravityModels()
+ 		}

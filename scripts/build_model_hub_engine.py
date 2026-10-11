@@ -27,8 +27,10 @@ TARGETS = {
     "darwin-x64": ("darwin", "amd64", "darwin_amd64"),
     "linux-amd64": ("linux", "amd64", "linux_amd64"),
     "linux-arm64": ("linux", "arm64", "linux_aarch64"),
+    "windows-amd64": ("windows", "amd64", "windows_amd64"),
+    "windows-arm64": ("windows", "arm64", "windows_aarch64"),
 }
-ARCHIVE_MEMBERS = ("cli-proxy-api", "LICENSE", "README.md", "README_CN.md", "config.example.yaml")
+DOCUMENT_MEMBERS = ("LICENSE", "README.md", "README_CN.md", "config.example.yaml")
 
 
 class BuildError(RuntimeError):
@@ -112,18 +114,51 @@ def _checkout_source(
         raise BuildError(f"source checkout resolved {actual}, expected {source_sha}")
 
 
+def _binary_name(platform: str) -> str:
+    return "cli-proxy-api.exe" if TARGETS[platform][0] == "windows" else "cli-proxy-api"
+
+
+def _pinned_patches(build_metadata: Mapping[str, Any]) -> list[Path]:
+    """Return the manifest's patches in apply order, each checked against its digest."""
+
+    recorded = build_metadata.get("patches")
+    if not isinstance(recorded, list) or not recorded:
+        raise BuildError("Model Hub manifest compatibility patch identity is invalid")
+    patches: list[Path] = []
+    for item in recorded:
+        path = item.get("path") if isinstance(item, dict) else None
+        digest = item.get("sha256") if isinstance(item, dict) else None
+        if (
+            not isinstance(path, str)
+            or not path
+            or Path(path).is_absolute()
+            or ".." in Path(path).parts
+            or not isinstance(digest, str)
+            or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+        ):
+            raise BuildError("Model Hub manifest compatibility patch identity is invalid")
+        patch_path = REPO_ROOT / path
+        if not patch_path.is_file() or patch_path.is_symlink():
+            raise BuildError(f"Model Hub compatibility patch is missing or unsafe: {path}")
+        if _sha256(patch_path) != digest:
+            raise BuildError(f"Model Hub compatibility patch checksum differs from pinned manifest: {path}")
+        patches.append(patch_path.resolve())
+    if len(set(patches)) != len(patches):
+        raise BuildError("Model Hub manifest lists a compatibility patch twice")
+    return patches
+
+
 def _prepare_source(
     source_root: Path,
     *,
     repository: str,
     source_sha: str,
-    patch_path: Path,
+    patches: Sequence[Path],
 ) -> Path:
     checkout = source_root / "source"
     _checkout_source(checkout, repository=repository, source_sha=source_sha)
-    if not patch_path.is_file() or patch_path.is_symlink():
-        raise BuildError("Model Hub compatibility patch is missing or unsafe")
-    _run(["git", "apply", "--whitespace=error", str(patch_path)], cwd=checkout)
+    for patch_path in patches:
+        _run(["git", "apply", "--whitespace=error", str(patch_path)], cwd=checkout)
     return checkout
 
 
@@ -131,20 +166,21 @@ def _archive(
     source: Path,
     destination: Path,
     *,
+    binary_name: str,
     source_date_epoch: int,
 ) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     with destination.open("wb") as raw:
         with gzip.GzipFile(fileobj=raw, mode="wb", filename="", mtime=0) as compressed:
             with tarfile.open(fileobj=compressed, mode="w", format=tarfile.USTAR_FORMAT) as bundle:
-                for member_name in ARCHIVE_MEMBERS:
+                for member_name in (binary_name, *DOCUMENT_MEMBERS):
                     path = source / member_name
                     if not path.is_file() or path.is_symlink():
                         raise BuildError(f"source build is missing a safe archive member: {member_name}")
                     data = path.read_bytes()
                     member = tarfile.TarInfo(member_name)
                     member.size = len(data)
-                    member.mode = 0o755 if member_name == "cli-proxy-api" else 0o644
+                    member.mode = 0o755 if member_name == binary_name else 0o644
                     member.mtime = source_date_epoch
                     member.uid = 0
                     member.gid = 0
@@ -158,7 +194,7 @@ def _asset_name(version: str, platform: str) -> str:
 
 
 def _native_target() -> str | None:
-    goos = {"Darwin": "darwin", "Linux": "linux"}.get(platform.system())
+    goos = {"Darwin": "darwin", "Linux": "linux", "Windows": "windows"}.get(platform.system())
     goarch = {
         "aarch64": "arm64",
         "amd64": "amd64",
@@ -207,7 +243,6 @@ def build_source_release(
     output_dir: Path,
     *,
     source_repository: str = DEFAULT_SOURCE_REPOSITORY,
-    patch_path: Path | None = None,
     go_binary: str = "go",
 ) -> Path:
     """Build all pinned targets and return the checked-in manifest path."""
@@ -223,22 +258,7 @@ def build_source_release(
     build_metadata = payload.get("build")
     if not isinstance(build_metadata, dict):
         build_metadata = {}
-    recorded_patch = build_metadata.get("patch")
-    patch_digest = build_metadata.get("patch_sha256")
-    if (
-        not isinstance(recorded_patch, str)
-        or not recorded_patch
-        or Path(recorded_patch).is_absolute()
-        or ".." in Path(recorded_patch).parts
-        or not isinstance(patch_digest, str)
-        or re.fullmatch(r"[0-9a-f]{64}", patch_digest) is None
-    ):
-        raise BuildError("Model Hub manifest compatibility patch identity is invalid")
-    patch_path = patch_path if patch_path is not None else REPO_ROOT / recorded_patch
-    if not patch_path.is_file() or patch_path.is_symlink():
-        raise BuildError("Model Hub compatibility patch is missing or unsafe")
-    if _sha256(patch_path) != patch_digest:
-        raise BuildError("Model Hub compatibility patch checksum differs from pinned manifest")
+    patches = _pinned_patches(build_metadata)
     source_date_epoch = build_metadata.get("source_date_epoch", 0)
     if isinstance(source_date_epoch, bool) or not isinstance(source_date_epoch, int) or source_date_epoch < 0:
         raise BuildError("Model Hub build source_date_epoch is invalid")
@@ -248,7 +268,7 @@ def build_source_release(
             Path(temporary),
             repository=source_repository,
             source_sha=str(payload["source_sha"]),
-            patch_path=patch_path.resolve(),
+            patches=patches,
         )
         go_version = _go_toolchain_version(_run([go_binary, "version"], cwd=checkout))
         pinned_go_version = build_metadata.get("go_version")
@@ -262,7 +282,7 @@ def build_source_release(
             goos, goarch, _asset_arch = TARGETS[platform]
             build_dir = Path(temporary) / "artifacts" / platform
             build_dir.mkdir(parents=True)
-            binary = build_dir / "cli-proxy-api"
+            binary = build_dir / _binary_name(platform)
             environment = os.environ.copy()
             environment.update(
                 {
@@ -293,11 +313,16 @@ def build_source_release(
                 target=platform,
                 checkout=checkout,
             )
-            for member_name in ARCHIVE_MEMBERS[1:]:
+            for member_name in DOCUMENT_MEMBERS:
                 shutil.copy2(checkout / member_name, build_dir / member_name)
             archive_name = _asset_name(str(payload["version"]), platform)
             archive_path = output_dir / archive_name
-            _archive(build_dir, archive_path, source_date_epoch=source_date_epoch)
+            _archive(
+                build_dir,
+                archive_path,
+                binary_name=binary.name,
+                source_date_epoch=source_date_epoch,
+            )
             generated_assets.append(
                 {
                     "platform": platform,
@@ -309,7 +334,7 @@ def build_source_release(
                     "size_bytes": archive_path.stat().st_size,
                     "sha256": _sha256(archive_path),
                     "binary_sha256": _sha256(binary),
-                    "bin_path": "cli-proxy-api",
+                    "bin_path": binary.name,
                 }
             )
             (output_dir / f"{archive_name}.sha256").write_text(
@@ -339,10 +364,6 @@ def build_source_release(
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
-    parser.add_argument(
-        "--patch", type=Path,
-        help="Use a local copy of the manifest-pinned patch (checksum must match).",
-    )
     parser.add_argument("--source-repository", default=DEFAULT_SOURCE_REPOSITORY)
     parser.add_argument("--go", default="go", dest="go_binary")
     parser.add_argument("output_dir", type=Path)
@@ -356,7 +377,6 @@ def main(argv: list[str] | None = None) -> int:
             args.manifest,
             args.output_dir,
             source_repository=args.source_repository,
-            patch_path=args.patch,
             go_binary=args.go_binary,
         )
     except BuildError as exc:
