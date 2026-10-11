@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import errno
+import getpass
 import os
 import random
 import re
 import stat
+import subprocess
 import threading
 import time
 import tracemalloc
@@ -425,6 +427,54 @@ async def test_write_revalidates_the_target_right_before_replacing_it(tmp_path, 
     if swap == "read-only":
         assert (tmp_path / "f").read_text(encoding="utf-8") == "theirs\n"
     assert [p.name for p in tmp_path.iterdir()] == ["f"]
+
+
+def _icacls(path, *arguments):
+    """``icacls`` itself, so the ACL is checked by Windows' own tool rather than by the code under test."""
+    return subprocess.run(["icacls", str(path), *arguments], capture_output=True, text=True, check=True).stdout
+
+
+async def _replace_with(tool, make_ctx, path):
+    if tool == "write":
+        return await WriteTool().execute({"path": path, "content": "new\n"}, make_ctx())
+    return await _edit(make_ctx, path, {"oldText": "old", "newText": "new"})
+
+
+@pytest.mark.skipif(not WINDOWS, reason="a Windows ACL")
+@pytest.mark.parametrize("tool", ["write", "edit"])
+async def test_a_replaced_file_keeps_an_acl_of_its_own(tmp_path, make_ctx, tool):
+    """The replacement starts with what its directory passes on; a file kept private by its own ACL stays so."""
+    target = tmp_path / "secret.txt"
+    target.write_bytes(b"old\n")
+    _icacls(target, "/inheritance:r", "/grant:r", f"{getpass.getuser()}:(F)")
+    before = _icacls(target)
+
+    result = await _replace_with(tool, make_ctx, "secret.txt")
+
+    assert not result.is_error, result_text(result)
+    assert target.read_bytes() == b"new\n"
+    assert _icacls(target) == before
+
+
+@pytest.mark.skipif(not WINDOWS, reason="a Windows ACL")
+@pytest.mark.parametrize("tool", ["write", "edit"])
+async def test_a_file_whose_acl_denies_writing_is_not_replaced(tmp_path, make_ctx, tool):
+    """The directory still lets the file be renamed over, which would get past an ACL that denies writing it."""
+    target = tmp_path / "f.txt"
+    target.write_bytes(b"old\n")
+    _icacls(target, "/deny", f"{getpass.getuser()}:(W)")
+    try:
+        result = await _replace_with(tool, make_ctx, "f.txt")
+    finally:
+        _icacls(target, "/remove:d", getpass.getuser())
+
+    expected = {
+        "write": "Cannot write f.txt: permission denied.",
+        "edit": "Could not edit file: f.txt. Error code: EACCES.",
+    }[tool]
+    assert (result.is_error, result_text(result)) == (True, expected)
+    assert target.read_bytes() == b"old\n"
+    assert [p.name for p in tmp_path.iterdir()] == ["f.txt"]
 
 
 @pytest.mark.parametrize("tool", ["write", "edit"])

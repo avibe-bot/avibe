@@ -38,7 +38,7 @@ from core.agent_core.tools.paths import (
 )
 from core.agent_core.tools.text import decode_file, encode_file, model_text
 from core.agent_core.tools.truncate import format_size
-from core.agent_core.tools.write import FileChanged, FileIdentity, NotReplaceable, write_bytes
+from core.agent_core.tools.write import FileChanged, FileIdentity, NotReplaceable, may_write, write_bytes
 
 #: Avibe: larger files are refused rather than loaded whole; the display diff stops at a smaller size.
 MAX_EDIT_BYTES = 10 * 1024 * 1024
@@ -238,7 +238,7 @@ class EditTool:
                 return error_result(f"Could not edit file: {path}. Error code: EISDIR.")
             if kind == "other":
                 return error_result(f"Could not edit file: {path}. It is not a regular file.")
-            if not os.access(absolute, os.R_OK | os.W_OK):
+            if not (os.access(absolute, os.R_OK) and may_write(absolute)):
                 return error_result(f"Could not edit file: {path}. Error code: EACCES.")
             try:
                 size, data, base, new_content, identity, counts, changed = await to_thread_joined(

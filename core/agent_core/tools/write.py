@@ -16,6 +16,7 @@ from typing import Any, Mapping, Optional
 
 from core.agent_core.tools.args import ToolInputError, error_result, str_arg, text_result
 from core.agent_core.tools.base import ToolContext, ToolResult, ToolSpec
+from core.agent_core.tools import windows_files
 from core.agent_core.tools.paths import (
     KIND_REASON,
     NotRegularFile,
@@ -25,6 +26,8 @@ from core.agent_core.tools.paths import (
     target_kind,
     to_thread_joined,
 )
+
+_WINDOWS = os.name == "nt"
 
 WRITE_DESCRIPTION = (
     "Write content to a file. Creates the file if it doesn't exist, overwrites if it does. Automatically creates "
@@ -97,9 +100,15 @@ def _prepare_target(absolute: str) -> Optional[str]:
     if kind != "regular":
         return KIND_REASON[kind]
     # A rename checks the directory, not the file, so a read-only file must be refused here.
-    if not os.access(target, os.W_OK):
+    if not may_write(target):
         return "permission denied"
     return None
+
+
+def may_write(path: str) -> bool:
+    """Whether this user may write the existing file ``path``: by its mode on POSIX, and on Windows by its
+    ACL, which ``os.access`` does not consult there (it sees only the read-only bit)."""
+    return windows_files.may_write(path) if _WINDOWS else os.access(path, os.W_OK)
 
 
 def write_text(path: str, content: str) -> None:
@@ -154,9 +163,9 @@ def _check_publishable(path: str, target: str, expected: Optional[FileIdentity])
         return
     if not stat.S_ISREG(st.st_mode):
         raise NotRegularFile("directory" if stat.S_ISDIR(st.st_mode) else "other")
-    if not os.access(current, os.W_OK):
+    if not may_write(current):
         raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), current)
-    if expected is not None and os.name == "nt":
+    if expected is not None and _WINDOWS:
         # On Windows, os.stat gives the creation time as st_ctime, where the read's os.fstat gave the
         # change time that FileIdentity needs: compare a descriptor's view with a descriptor's view.
         st = _fstat_of(current)
@@ -176,9 +185,9 @@ def write_bytes(path: str, data: bytes, expected: Optional[FileIdentity] = None)
 
     A failed write (a full disk, a quota) leaves the original, or its absence, as it was. The temp
     file sits beside the real target (through symlinks). Replacing a file, it is private (0600) while
-    it receives the new contents and takes the file's mode once they are fsynced (POSIX; Windows keeps
-    privacy in the directory's ACL); a new file's temp is created with the umask default it keeps, so
-    the process umask is never read or changed. Then ``os.replace`` puts it in place.
+    it receives the new contents and takes the file's mode once they are fsynced (on Windows, its
+    ACL); a new file's temp is created with the umask default it keeps, so the process umask is
+    never read or changed. Then ``os.replace`` puts it in place.
 
     An existing file whose directory does not let a temp file be created is refused
     (``NotReplaceable``) rather than written in place, which a full disk could leave half-written.
@@ -208,10 +217,12 @@ def write_bytes(path: str, data: bytes, expected: Optional[FileIdentity] = None)
             handle.write(data)
             handle.flush()
             os.fsync(handle.fileno())
-            # On Windows a mode is only the read-only bit, which no file write replaces has; copying it from a
-            # file swapped in meanwhile would leave a temp file that cannot be deleted.
-            if mode is not None and os.name != "nt":
+            if mode is not None and not _WINDOWS:
                 os.fchmod(handle.fileno(), mode)
+        if mode is not None and _WINDOWS:
+            # A mode there is only the read-only bit, which no file write replaces has; its permissions are its
+            # ACL, and the temp file has only what its directory passes on.
+            windows_files.copy_dacl(target, tmp)
         _check_publishable(path, target, expected)
         os.replace(tmp, target)
     except BaseException:
