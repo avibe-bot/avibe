@@ -231,6 +231,10 @@ def _classify_kind(
     if status in {408, 409, 425}:
         return "server"
     normalized_code = (code or "").lower().replace("-", "_")
+    if normalized_code == "modelhub.errors.stream_interrupted":
+        # Model Hub's own frame, the one code of the gateway's that names a cause: the upstream stream ended after
+        # output without a terminal.
+        return "interrupted"
     if normalized_code in {
         "authentication_error",
         "authentication",
@@ -265,6 +269,10 @@ def _classify_kind(
         "service_unavailable_error",
         # A Model Hub relay's own failure, its upstream's status folded away.
         "upstream_error",
+        # CLIProxyAPI's codes for an upstream timeout, the 408 rule above: `request_timeout` (an upstream 408, or a
+        # stream that closed before its terminal) and its Claude type `timeout_error` (an upstream 408 or 504).
+        "request_timeout",
+        "timeout_error",
         "internal",
         "api_error",
         "unavailable",
