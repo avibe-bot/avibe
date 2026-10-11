@@ -473,7 +473,7 @@ def test_ui_checks_run_once_without_fencing_artifact_consumers() -> None:
         assert not job.get("if")
         assert not job.get("continue-on-error")
         assert all(not step.get("if") and not step.get("continue-on-error") for step in job["steps"])
-    for name in ("install-upgrade-shards", "windows-install-smoke"):
+    for name in ("install-upgrade-shards", "windows-install-smoke-runners"):
         assert jobs[name]["needs"] == "build-linux-artifacts"
 
 
@@ -544,7 +544,11 @@ def test_distribution_contracts_consume_same_run_artifacts_without_fencing_other
     assert "pytest tests/test_distribution_artifacts.py -v -ra" in contracts["run"]
     assert not contracts.get("continue-on-error")
     assert jobs["install-upgrade-regression"]["needs"] == "install-upgrade-shards"
-    assert jobs["windows-install-smoke"]["needs"] == "build-linux-artifacts"
+    assert jobs["windows-install-smoke-runners"]["needs"] == "build-linux-artifacts"
+    # Branch protection requires `windows-install-smoke`; the per-runner matrix
+    # reports under other names, so the required name gates on all of them.
+    assert jobs["windows-install-smoke"]["needs"] == "windows-install-smoke-runners"
+    assert jobs["windows-install-smoke"]["if"] == "always()"
 
 
 @pytest.mark.parametrize(("pytest_exit", "summary"), [(0, "21 passed"), (1, "1 failed"), (0, "14 passed, 7 skipped")])
