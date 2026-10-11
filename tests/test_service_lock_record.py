@@ -287,6 +287,26 @@ class ServiceLockContentionTests(unittest.TestCase):
         self._hold_like_a_check(record=json.dumps({"pid": gone.pid}))
         self._acquire()
 
+    def test_a_record_whose_pid_passed_to_another_process_is_not_a_running_service(self):
+        """After a kill or a reboot the record's pid can belong to anything."""
+
+        unrelated = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        self.addCleanup(unrelated.wait, 10)
+        self.addCleanup(unrelated.kill)
+        self._hold_like_a_check(record=json.dumps({"pid": unrelated.pid, "started_at": 1.0}))
+        self._acquire()
+
+    def test_a_record_from_a_release_that_wrote_no_start_time_is_taken_at_its_pid(self):
+        """An older release on rollback names itself by pid alone, and is still refused at once."""
+
+        older = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        self.addCleanup(older.wait, 10)
+        self.addCleanup(older.kill)
+        self._hold_like_a_check(record=json.dumps({"pid": older.pid}))
+        with self.assertRaises(runtime.ServiceAlreadyRunningError) as refused:
+            runtime.acquire_service_instance_lock()
+        self.assertEqual(refused.exception.holder_pid, older.pid)
+
     def test_a_service_started_right_after_the_last_was_killed_takes_the_lock(self):
         """The acceptance test's own order: kill the service outright, start the next."""
 

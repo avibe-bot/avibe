@@ -317,6 +317,29 @@ _SERVICE_LOCK_SETTLE_SECONDS = 2.0
 _SERVICE_LOCK_SETTLE_INTERVAL_SECONDS = 0.02
 
 
+def _lock_file_names_live_holder(lock_file) -> bool:
+    """Whether the record names a process that is running and is the one that wrote it.
+
+    A record outlives its holder when a service is killed or the machine stops,
+    and its pid can pass to an unrelated process. The holder's start time,
+    written beside the pid, tells the two apart; a record without one, as an
+    older release writes it, is taken at its pid.
+    """
+
+    pid = _lock_file_pid(lock_file)
+    if pid is None or not pid_alive(pid):
+        return False
+    try:
+        lock_file.seek(0)
+        started_at = json.loads(lock_file.read() or "{}").get("started_at")
+    except (OSError, json.JSONDecodeError, TypeError, AttributeError):
+        return False
+    if not isinstance(started_at, (int, float)):
+        return True
+    create_time = process_create_time(pid)
+    return create_time is not None and abs(create_time - started_at) < 1.0
+
+
 def _take_service_lock(lock_file) -> bool:
     """Take the service lock unless a service holds it; raises ``OSError`` when an attempt itself failed.
 
@@ -326,8 +349,7 @@ def _take_service_lock(lock_file) -> bool:
 
     deadline = time.monotonic() + _SERVICE_LOCK_SETTLE_SECONDS
     while not _take_lock_file(lock_file):
-        holder_pid = _lock_file_pid(lock_file)
-        if (holder_pid and pid_alive(holder_pid)) or time.monotonic() >= deadline:
+        if _lock_file_names_live_holder(lock_file) or time.monotonic() >= deadline:
             return False
         time.sleep(_SERVICE_LOCK_SETTLE_INTERVAL_SECONDS)
     return True
