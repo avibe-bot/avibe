@@ -40,7 +40,13 @@ def pytest_collection_modifyitems(
     config: pytest.Config,
     items: list[pytest.Item],
 ) -> None:
-    """Keep the macOS/Linux Model Hub process suites opt-in."""
+    """Keep the macOS/Linux Model Hub process suites and the service acceptance opt-in."""
+
+    if "e2e_service" not in (config.option.markexpr or ""):
+        skip = pytest.mark.skip(reason="Service acceptance is opt-in; run with -m e2e_service")
+        for item in items:
+            if item.get_closest_marker("e2e_service") is not None:
+                item.add_marker(skip)
 
     model_hub_items = [
         item
