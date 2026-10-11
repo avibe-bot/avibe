@@ -291,9 +291,14 @@ def test_fresh_install_serves_vibey_and_claude_through_the_hub_and_reaps_an_orph
             service.wait_ready()
 
             # The engine installs from the packaged manifest and becomes healthy.
-            service.ok("POST", "/api/models/runtime/start", timeout=_ENGINE_START_SECONDS)
+            runtime = service.ok("POST", "/api/models/runtime/start", timeout=_ENGINE_START_SECONDS)["runtime"]
             first = service.healthy_engine()
             started.append(first)
+            # CI names the asset each runner must get, which is not always
+            # Python's architecture: Windows on Arm runs x64 Python.
+            expected_platform = os.environ.get("AVIBE_EXPECT_ENGINE_PLATFORM")
+            if expected_platform:
+                assert runtime["host_platform"] == expected_platform, runtime
 
             # API-key Sources save through the real credential check, which
             # requires the listing to refuse a request without the key.
