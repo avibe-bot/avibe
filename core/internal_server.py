@@ -642,6 +642,92 @@ def create_app(
             "controller_id": str(controller.controller_id),
         }
 
+    @app.post("/internal/computer-use")
+    async def _computer_use(request: Request) -> Any:
+        """Run one allowlisted Computer Use tool for the caller's active Turn.
+
+        The CLI supplies only its injected Avibe Session identity. The
+        Controller checks its own live Turn registry, so no Turn identifier is
+        accepted as a client-presented capability.
+        """
+
+        from core.computer_cli import COMPUTER_CLI_TOOLS
+
+        payload = await _safe_json(request)
+        caller_session_id = payload.get("caller_session_id")
+        tool = payload.get("tool")
+        arguments = payload.get("arguments")
+        if (
+            not isinstance(caller_session_id, str)
+            or not caller_session_id.strip()
+            or "caller_turn_id" in payload
+            or not isinstance(tool, str)
+            or tool not in set(COMPUTER_CLI_TOOLS.values())
+            or not isinstance(arguments, dict)
+        ):
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "ok": False,
+                    "error": "invalid_computer_use_request",
+                    "params": {},
+                },
+            )
+        caller_session_id = caller_session_id.strip()
+        if "session" in arguments:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "ok": False,
+                    "error": "session_argument_forbidden",
+                    "params": {},
+                },
+            )
+
+        admission, admission_error = manager.begin_computer_use_request(caller_session_id)
+        if admission is None:
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "ok": False,
+                    "error": admission_error,
+                    "params": {},
+                    "session_id": caller_session_id,
+                },
+            )
+
+        computer_server = getattr(controller, "computer_use_server", None)
+        if computer_server is None:
+            from core.computer_server import ComputerUseServer
+
+            try:
+                computer_server = ComputerUseServer()
+            except Exception:
+                logger.exception("Computer Use server initialization failed")
+                return JSONResponse(
+                    status_code=503,
+                    content={
+                        "ok": False,
+                        "error": "computer_use_unavailable",
+                        "params": {},
+                    },
+                )
+            controller.computer_use_server = computer_server
+
+        result = await computer_server.call_tool(
+            tool,
+            {
+                **arguments,
+                "session": admission.session_id,
+            },
+        )
+        return {
+            "ok": result.get("isError") is not True,
+            "tool": tool,
+            "session_id": caller_session_id,
+            "result": result,
+        }
+
     @app.post("/internal/show-access/settings-read")
     async def _show_access_settings_read(request: Request) -> Any:
         from core.show_pages import ShowPageError, ShowPageStore, show_access_payload

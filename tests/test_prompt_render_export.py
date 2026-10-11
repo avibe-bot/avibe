@@ -72,7 +72,6 @@ def _inputs(backend="codex", history="managed", skill_mode="pages"):
             },
         },
         "include_codex_generated_images": backend == "codex",
-        "include_computer_use": True,
         "skills_cwd": "/fixture/project",
         "enabled_agents": [
             {"name": "zeta", "backend": "claude", "description": "Last"},
@@ -122,13 +121,13 @@ def test_export_reconstructs_production_text_with_source_for_every_block(monkeyp
     catalog = {module.id: module for module in PROMPT_MODULES}
     ids = [block["id"] for block in result["blocks"]]
     assert ids == [module_id for module_id in catalog if module_id in ids]
+    assert "computer-use-prompt" not in ids
     assert ids[-2 if backend == "codex" else -1] == "agent-instructions"
     for block in result["blocks"]:
         assert block["source_path"] == catalog[block["id"]].source_path
     assert result == render_prompt_context(request)
     assert request["options"]["context"]["platform"] == "avibe"
     if skill_mode in {"single", "pages"}:
-        assert ids[ids.index("computer-use-prompt") + 1] == "skills-prompt"
         assert production.count(prompt_text("skills-prompt")) == 1
         assert (
             "Consider whether any available Skills would help in the current situation. "
@@ -264,7 +263,6 @@ def test_working_principles_remain_without_session_skills_or_optional_capabiliti
         "options": {
             "include_quick_replies": False,
             "include_codex_generated_images": False,
-            "include_computer_use": False,
             "include_context_guidance": False,
         },
     }
@@ -520,7 +518,6 @@ def test_cli_localizes_invalid_context_files(monkeypatch, tmp_path, capsys, lang
 def test_approved_guidance_changes_preserve_all_other_injection_bytes(monkeypatch):
     outputs = []
     changed = {
-        "computer-use-prompt",
         "skills-prompt",
         "skills-manual-prompt",
         "codex-skill-reuse",

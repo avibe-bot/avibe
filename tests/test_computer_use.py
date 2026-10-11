@@ -10,14 +10,10 @@ from core.computer_use import (
     COMPUTER_USE_STATE_DIR_ENV,
     COMPUTER_USE_TOOL_SNAPSHOT_SHA256,
     COMPUTER_USE_TOOL_NAMES,
-    ComputerUseConfigFingerprint,
-    ComputerUseConfigReconciler,
     SnapshotVerifier,
-    computer_use_config_fingerprint,
     desktop_computer_use_dir,
     desktop_computer_use_shell_is_live,
     effective_computer_use_status,
-    managed_mcp_server_spec,
 )
 
 
@@ -212,125 +208,3 @@ def test_effective_status_table_is_total(
         verifier=SnapshotVerifier(),
     )
     assert (status.status, status.reason) == expected
-
-
-def test_managed_spec_exists_only_for_enabled_verified_snapshot(tmp_path: Path) -> None:
-    """Broken optional assets must disable injection without breaking agents."""
-
-    state_path, snapshot = _write_state(tmp_path)
-    spec = managed_mcp_server_spec(
-        state_path=state_path,
-        python_executable="/test/python",
-        verifier=SnapshotVerifier(),
-    )
-    assert spec is not None
-    assert spec.name == "avibe_computer"
-    assert spec.command == "/test/python"
-    assert spec.args[0] == "-I"
-    assert spec.args[1].endswith("/core/computer_server.py")
-    assert spec.env == {COMPUTER_USE_STATE_DIR_ENV: str(tmp_path)}
-
-    snapshot.write_text("corrupt", encoding="utf-8")
-    assert (
-        managed_mcp_server_spec(
-            state_path=state_path,
-            verifier=SnapshotVerifier(),
-        )
-        is None
-    )
-
-    _write_state(tmp_path, enabled=False)
-    assert (
-        managed_mcp_server_spec(
-            state_path=state_path,
-            verifier=SnapshotVerifier(),
-        )
-        is None
-    )
-
-
-def test_config_fingerprint_excludes_daemon_availability(tmp_path: Path) -> None:
-    """A daemon state change must not restart any backend process."""
-
-    state_path, _snapshot = _write_state(tmp_path, state="starting")
-    verifier = SnapshotVerifier()
-    before = computer_use_config_fingerprint(state_path=state_path, verifier=verifier)
-    _write_state(tmp_path, state="ready")
-    after = computer_use_config_fingerprint(state_path=state_path, verifier=verifier)
-    assert before == after == ComputerUseConfigFingerprint(True, before.expected_snapshot_sha256, True)
-
-
-@pytest.mark.asyncio
-async def test_reconciler_renews_only_after_the_final_config_triple_changes(
-    tmp_path: Path,
-) -> None:
-    """Polling compares final config, including snapshot deletion/restoration."""
-
-    state_path, snapshot = _write_state(tmp_path)
-    renewed: list[str] = []
-
-    async def renew(backend: str) -> None:
-        renewed.append(backend)
-
-    reconciler = ComputerUseConfigReconciler(
-        renew,
-        lambda: ["claude", "codex", "opencode"],
-        state_path=state_path,
-        verifier=SnapshotVerifier(),
-    )
-
-    _write_state(tmp_path, state="starting")
-    assert await reconciler.check_once() is False
-    assert renewed == []
-
-    snapshot.unlink()
-    assert await reconciler.check_once() is True
-    assert renewed == ["claude", "codex", "opencode"]
-
-    renewed.clear()
-    snapshot.write_bytes(b'{"tools":[]}\n')
-    assert await reconciler.check_once() is True
-    assert renewed == ["claude", "codex", "opencode"]
-
-    renewed.clear()
-    _write_state(tmp_path, enabled=False)
-    _write_state(tmp_path, enabled=True)
-    assert await reconciler.check_once() is False
-    assert renewed == []
-
-
-@pytest.mark.asyncio
-async def test_reconciler_confirms_each_consumer_and_retries_one_failure(
-    tmp_path: Path,
-) -> None:
-    """One failed backend must not strand itself or consumers after it."""
-
-    state_path, _snapshot = _write_state(tmp_path, enabled=False)
-    attempts: list[str] = []
-    failed_once = False
-
-    async def renew(backend: str) -> None:
-        nonlocal failed_once
-        attempts.append(backend)
-        if backend == "claude" and not failed_once:
-            failed_once = True
-            raise RuntimeError("transient")
-
-    reconciler = ComputerUseConfigReconciler(
-        renew,
-        lambda: ["claude", "codex", "opencode"],
-        state_path=state_path,
-        verifier=SnapshotVerifier(),
-    )
-    _write_state(tmp_path, enabled=True)
-
-    assert await reconciler.check_once() is True
-    assert attempts == ["claude", "codex", "opencode"]
-
-    attempts.clear()
-    assert await reconciler.check_once() is True
-    assert attempts == ["claude"]
-
-    attempts.clear()
-    assert await reconciler.check_once() is False
-    assert attempts == []
