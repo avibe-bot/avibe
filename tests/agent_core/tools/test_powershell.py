@@ -106,8 +106,21 @@ def test_the_tool_is_named_after_its_shell(path, name, legacy):
         ("exit 5", True, "Command exited with code 5"),
         ("throw 'boom'", True, "Command exited with code 1"),
         ("Write-Output ok\nif (", True, "Command exited with code 1"),
+        ("cmd /c exit 23; Get-Item C:\\does-not-exist", True, "Command exited with code 1"),
+        ("cmd /c exit 3; cmd /c exit 3", True, "Command exited with code 3"),
     ],
-    ids=["ok", "native-fails", "cmdlet-fails", "fails-then-ok", "ok-then-fails", "exit", "throw", "parse-error"],
+    ids=[
+        "ok",
+        "native-fails",
+        "cmdlet-fails",
+        "fails-then-ok",
+        "ok-then-fails",
+        "exit",
+        "throw",
+        "parse-error",
+        "native-then-cmdlet-fails",
+        "the-same-code-twice",
+    ],
 )
 async def test_the_exit_code_follows_bash(run, command, is_error, ending):
     error, text = await run(command)
@@ -121,6 +134,21 @@ async def test_a_command_that_does_not_parse_runs_nothing_and_says_why(run, tmp_
 
     assert error and "Missing condition in if statement" in text
     assert not (tmp_path / "ran").exists()
+
+
+@ON_WINDOWS
+@pytest.mark.parametrize("flow", ["return", "break", "continue"])
+async def test_a_top_level_return_ends_the_whole_script(run, tmp_path, flow):
+    """Run statement by statement, ``return`` would end only its own statement and the next would still run."""
+    marker = tmp_path / "after"
+    error, text = await run(
+        f"if ($true) {{ Write-Output before; {flow} }}\n"
+        f"New-Item -ItemType File -Path '{marker}' | Out-Null\n"
+        "Write-Output after"
+    )
+
+    assert (error, text.split()) == (False, ["before"])
+    assert not marker.exists()
 
 
 @ON_WINDOWS
@@ -201,11 +229,17 @@ async def test_a_process_started_with_start_process_stays_in_the_job_until_it_is
 
 
 @ON_WINDOWS
-def test_the_advice_read_gives_for_a_long_line_runs_as_given(tmp_path, shell):
-    """``read`` points at a command for a line too long to show; it must work whatever the path holds."""
+@pytest.mark.parametrize(
+    ("content", "line"),
+    [(b"short\n" + b"x" * 61_440 + b"\nafter\n", 2), (b"x" * 61_440, 1)],
+    ids=["a later line", "the only line"],
+)
+def test_the_advice_read_gives_for_a_long_line_runs_as_given(tmp_path, shell, content, line):
+    """``read`` points at a command for a line too long to show; it must work whatever the path holds, and for
+    line 1, which ``Get-Content`` alone gives as a string rather than a list of lines."""
     target = tmp_path / "it's big.txt"
-    target.write_bytes(b"short\n" + b"x" * 61_440 + b"\nafter\n")
-    advice = read_line_advice(str(target), 2, 51_200).removeprefix("Use powershell: ")
+    target.write_bytes(content)
+    advice = read_line_advice(str(target), line, 51_200).removeprefix("Use powershell: ")
 
     completed = subprocess.run(
         [shell.path, "-NoProfile", "-NonInteractive", "-Command", advice],

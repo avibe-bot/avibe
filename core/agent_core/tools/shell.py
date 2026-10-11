@@ -24,7 +24,10 @@ COMMAND_FILE = "command.ps1"
 # writes errors as text (with ``-EncodedCommand`` it writes them as CLIXML), so it holds no double quote,
 # which the command line would have to escape. Each top-level statement runs on its own and its output is
 # formatted before the next one runs, so an ``exit`` loses none of it; a script with parts that only work
-# whole (a param or named block, a top-level trap, using statements) runs whole.
+# whole (a param or named block, a top-level trap, using statements, or a return, break, or continue outside
+# any function or script block, which would otherwise end only its own statement) runs whole. A native program
+# sets ``$LASTEXITCODE`` as an int; between statements the bootstrap keeps it as a long of the same value, so
+# the exit code is one the last statement set, never a code an earlier one left there.
 _BOOTSTRAP = """\
 $ProgressPreference = 'SilentlyContinue'
 if ($PSStyle) { $PSStyle.OutputRendering = 'PlainText' }
@@ -41,22 +44,33 @@ $__avibe_error.Extent.StartColumnNumber) + [Environment]::NewLine + $__avibe_err
     }
     exit 1
 }
+$__avibe_flow = $__avibe_ast.Find({
+    param($__avibe_node)
+    if (-not ($__avibe_node -is [System.Management.Automation.Language.ReturnStatementAst] -or \
+$__avibe_node -is [System.Management.Automation.Language.BreakStatementAst] -or \
+$__avibe_node -is [System.Management.Automation.Language.ContinueStatementAst])) { return $false }
+    $__avibe_owner = $__avibe_node.Parent
+    while (-not ($__avibe_owner -is [System.Management.Automation.Language.ScriptBlockAst])) { \
+$__avibe_owner = $__avibe_owner.Parent }
+    [object]::ReferenceEquals($__avibe_owner, $__avibe_ast)
+}, $true)
 $__avibe_whole = $__avibe_ast.ParamBlock -or $__avibe_ast.BeginBlock -or $__avibe_ast.ProcessBlock -or \
-$__avibe_ast.DynamicParamBlock -or $__avibe_ast.UsingStatements.Count -or $__avibe_ast.EndBlock.Traps
+$__avibe_ast.DynamicParamBlock -or $__avibe_ast.UsingStatements.Count -or $__avibe_ast.EndBlock.Traps -or $__avibe_flow
 if ($__avibe_whole) { $__avibe_parts = @($__avibe_ast.Extent.Text) } else { \
 $__avibe_parts = @($__avibe_ast.EndBlock.Statements | ForEach-Object { $_.Extent.Text }) }
 $__avibe_status = $true
 try {
     foreach ($__avibe_part in $__avibe_parts) {
+        if ($global:LASTEXITCODE -is [int]) { $global:LASTEXITCODE = [long]$global:LASTEXITCODE }
         . ([ScriptBlock]::Create($__avibe_part + [Environment]::NewLine + [Environment]::NewLine + \
-'$__avibe_status = $?; $__avibe_code = $global:LASTEXITCODE')) | Out-Default
+'$__avibe_status = $?; $__avibe_code = $global:LASTEXITCODE; $__avibe_set = $__avibe_code -is [int]')) | Out-Default
     }
 } catch {
     [Console]::Error.Write(($_ | Out-String))
     exit 1
 }
 if ($__avibe_status) { exit 0 }
-if ($__avibe_code) { exit $__avibe_code }
+if ($__avibe_set -and $__avibe_code) { exit $__avibe_code }
 exit 1
 """
 
@@ -115,7 +129,7 @@ def read_line_advice(path: str, line: int, max_bytes: int) -> str:
     if WINDOWS:
         quoted = "'" + path.replace("'", "''") + "'"
         return (
-            f"Use powershell: (Get-Content -LiteralPath {quoted} -TotalCount {line})[-1] | "
+            f"Use powershell: @(Get-Content -LiteralPath {quoted} -TotalCount {line})[-1] | "
             f"ForEach-Object {{ $_.Substring(0, [Math]::Min($_.Length, {max_bytes})) }}"
         )
     return f"Use bash: sed -n '{line}p' {shlex.quote(path)} | head -c {max_bytes}"

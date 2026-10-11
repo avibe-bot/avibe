@@ -96,7 +96,7 @@ async def test_an_over_long_first_line_points_at_the_shell_with_the_file_read_op
     text = result_text(result)
 
     advice = (
-        f"Use powershell: (Get-Content -LiteralPath '{target}' -TotalCount 2)[-1] | "
+        f"Use powershell: @(Get-Content -LiteralPath '{target}' -TotalCount 2)[-1] | "
         "ForEach-Object { $_.Substring(0, [Math]::Min($_.Length, 51200)) }"
         if os.name == "nt"
         else f"Use bash: sed -n '2p' {shlex.quote(target)} | head -c 51200"
