@@ -322,8 +322,9 @@ def _lock_file_names_live_holder(lock_file) -> bool:
 
     A record outlives its holder when a service is killed or the machine stops,
     and its pid can pass to an unrelated process. The holder's start time,
-    written beside the pid, tells the two apart; a record without one, as an
-    older release writes it, is taken at its pid.
+    written beside the pid, tells the two apart. A record without one, as an
+    older release writes it, cannot be told apart and names no one: a holder
+    that wrote it keeps the lock, and is refused once the wait runs out.
     """
 
     pid = _lock_file_pid(lock_file)
@@ -335,7 +336,7 @@ def _lock_file_names_live_holder(lock_file) -> bool:
     except (OSError, json.JSONDecodeError, TypeError, AttributeError):
         return False
     if not isinstance(started_at, (int, float)):
-        return True
+        return False
     create_time = process_create_time(pid)
     return create_time is not None and abs(create_time - started_at) < 1.0
 

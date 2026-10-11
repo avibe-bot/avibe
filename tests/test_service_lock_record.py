@@ -201,20 +201,29 @@ class PosixServiceLockUnchangedTests(unittest.TestCase):
 
 
 # Holds the service lock the way a running service does, through the entry
-# point `main.py` uses, until it is killed.
+# point `main.py` uses, until it is killed. With a third argument it holds it
+# as an older release did: the lock, and a record naming only its pid.
 _HOLDER = """
-import sys, time
+import json, os, sys, time
 from pathlib import Path
 from unittest.mock import patch
 sys.path.insert(0, sys.argv[1])
 from vibe import runtime
 lock_path = Path(sys.argv[2])
-with patch("vibe.runtime.ensure_dirs", return_value=None), patch(
-    "vibe.runtime.paths.get_runtime_service_lock_path", return_value=lock_path
-), patch("vibe.runtime.paths.get_runtime_pid_path", return_value=lock_path.with_name("vibe.pid")):
-    runtime.acquire_service_instance_lock()
-    print("held", flush=True)
-    time.sleep(600)
+if len(sys.argv) > 3:
+    held = lock_path.open("a+", encoding="utf-8")
+    assert runtime._take_lock_file(held)
+    held.seek(0)
+    held.truncate()
+    held.write(json.dumps({"pid": os.getpid()}))
+    held.flush()
+else:
+    with patch("vibe.runtime.ensure_dirs", return_value=None), patch(
+        "vibe.runtime.paths.get_runtime_service_lock_path", return_value=lock_path
+    ), patch("vibe.runtime.paths.get_runtime_pid_path", return_value=lock_path.with_name("vibe.pid")):
+        runtime.acquire_service_instance_lock()
+print("held", flush=True)
+time.sleep(600)
 """
 
 
@@ -265,9 +274,12 @@ class ServiceLockContentionTests(unittest.TestCase):
         self.addCleanup(runtime.release_service_instance_lock)
         self.assertEqual(json.loads(self.lock_path.read_text(encoding="utf-8"))["pid"], os.getpid())
 
-    def _holder(self) -> subprocess.Popen:
+    def _holder(self, *, older_release: bool = False) -> subprocess.Popen:
         holder = subprocess.Popen(
-            [sys.executable, "-c", _HOLDER, str(Path(__file__).resolve().parents[1]), str(self.lock_path)],
+            [
+                sys.executable, "-c", _HOLDER, str(Path(__file__).resolve().parents[1]), str(self.lock_path),
+                *(["older-release"] if older_release else []),
+            ],
             stdout=subprocess.PIPE,
             text=True,
         )
@@ -296,16 +308,22 @@ class ServiceLockContentionTests(unittest.TestCase):
         self._hold_like_a_check(record=json.dumps({"pid": unrelated.pid, "started_at": 1.0}))
         self._acquire()
 
-    def test_a_record_from_a_release_that_wrote_no_start_time_is_taken_at_its_pid(self):
-        """An older release on rollback names itself by pid alone, and is still refused at once."""
+    def test_a_record_without_a_start_time_names_no_one_while_a_check_holds_the_lock(self):
+        """An older release's record cannot tell its holder from a pid reused since."""
 
-        older = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
-        self.addCleanup(older.wait, 10)
-        self.addCleanup(older.kill)
-        self._hold_like_a_check(record=json.dumps({"pid": older.pid}))
+        unrelated = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        self.addCleanup(unrelated.wait, 10)
+        self.addCleanup(unrelated.kill)
+        self._hold_like_a_check(record=json.dumps({"pid": unrelated.pid}))
+        self._acquire()
+
+    def test_a_holder_from_a_release_that_wrote_no_start_time_is_still_refused(self):
+        """It keeps the lock past the wait, so the refusal comes when the wait runs out."""
+
+        holder = self._holder(older_release=True)
         with self.assertRaises(runtime.ServiceAlreadyRunningError) as refused:
             runtime.acquire_service_instance_lock()
-        self.assertEqual(refused.exception.holder_pid, older.pid)
+        self.assertEqual(refused.exception.holder_pid, holder.pid)
 
     def test_a_service_started_right_after_the_last_was_killed_takes_the_lock(self):
         """The acceptance test's own order: kill the service outright, start the next."""
