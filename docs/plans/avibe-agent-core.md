@@ -340,7 +340,8 @@ Properties; the test suites enumerate cases.
   foreground-to-Watch handover, and a vibe restart in any of those states; Watch removal ends its process tree.
 - **A12 Compaction quality.** On a scripted long-session fixture compacted twice, the agent still states the user's
   constraints, the files changed and why, the last error, and the next step. This is an LLM-in-the-loop evaluation
-  tracked per prompt version, not a unit test.
+  tracked per prompt version, not a unit test: `tests/evals/a12_compaction_quality.py`, with baselines in
+  `tests/evals/a12_baselines.md`.
 
 ## 7. Delivery plan
 
