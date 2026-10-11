@@ -204,7 +204,7 @@ def test_startup_reconcile_installs_ripgrep_without_failing_startup(
 
 @pytest.mark.parametrize(
     "member",
-    ("../escape", "/absolute", "C:/drive", "inside/../../escape", "link"),
+    ("../escape", "/absolute", "C:/drive", "inside/../../escape", ".. /escape", "inside/name.", "link"),
 )
 def test_a_zip_entry_that_leaves_the_runtime_or_links_out_is_refused(tmp_path: Path, member: str) -> None:
     """The same rules ``safe_extract_tar`` applies: nothing lands outside the staging directory, and no links."""
@@ -253,3 +253,19 @@ def test_the_pinned_windows_zip_installs_and_runs(tmp_path: Path, monkeypatch: p
     env: dict[str, str] = {"PATH": os.environ.get("SystemRoot", r"C:\Windows")}
     assert prepend_managed_ripgrep_to_path(env, base_env={}) is True
     assert env["PATH"].split(os.pathsep)[0] == str(binary.parent)
+
+
+def test_a_zip_that_records_no_file_types_extracts(tmp_path: Path) -> None:
+    """A zip need not record a Unix file type: ``writestr`` gives a file a bare permission mode."""
+    archive = tmp_path / "archive.zip"
+    with zipfile.ZipFile(archive, "w") as zipped:
+        zipped.writestr("runtime/", "")
+        info = zipfile.ZipInfo("runtime/rg")
+        info.external_attr = 0o600 << 16
+        zipped.writestr(info, "binary")
+    staging = tmp_path / "staging"
+    staging.mkdir()
+
+    managed_runtime.stage_archive(archive, "zip", staging, bin_path="runtime/rg")
+
+    assert (staging / "runtime" / "rg").read_text(encoding="utf-8") == "binary"

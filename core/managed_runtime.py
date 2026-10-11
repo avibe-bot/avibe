@@ -2314,18 +2314,33 @@ def stage_archive(archive_path: Path, archive_format: str, staging_dir: Path, *,
 
 def safe_extract_zip(archive: zipfile.ZipFile, destination: Path) -> None:
     """Extract a zip of regular files and directories into ``destination``, refusing what ``safe_extract_tar``
-    refuses: a path that leaves ``destination`` and a link (a zip records a symlink as a Unix file mode)."""
+    refuses: a path that leaves ``destination`` and a link (a zip records a symlink as a Unix file mode).
+
+    Each member is written to the path checked here, never one ``zipfile`` derives itself: on Windows it
+    strips trailing spaces and periods from a name's parts, as Windows itself does, so ``.. /x`` would
+    become ``../x``. A part ending in either is refused for that reason.
+    """
     destination_resolved = destination.resolve()
+    planned: list[tuple[zipfile.ZipInfo, Path]] = []
     for member in archive.infolist():
-        if archive_path_is_unsafe(member.filename):
+        name = member.filename.replace("\\", "/")
+        parts = PurePosixPath(name).parts
+        if archive_path_is_unsafe(member.filename) or any(part != part.rstrip(" .") for part in parts):
             raise ValueError(f"Unsafe managed runtime archive path: {member.filename}")
-        target = (destination / member.filename).resolve()
+        target = destination.joinpath(*parts).resolve()
         if target != destination_resolved and destination_resolved not in target.parents:
             raise ValueError(f"Unsafe managed runtime archive path: {member.filename}")
-        mode = member.external_attr >> 16
-        if mode and not (stat.S_ISREG(mode) or stat.S_ISDIR(mode)):
+        # A zip need not record a file type; only a type that is neither a file nor a directory is refused.
+        if stat.S_IFMT(member.external_attr >> 16) not in (0, stat.S_IFREG, stat.S_IFDIR):
             raise ValueError(f"Unsupported managed runtime archive member: {member.filename}")
-    archive.extractall(destination)
+        planned.append((member, target))
+    for member, target in planned:
+        if member.is_dir():
+            target.mkdir(parents=True, exist_ok=True)
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with archive.open(member) as source, open(target, "wb") as sink:
+            shutil.copyfileobj(source, sink)
 
 
 def safe_extract_tar(archive: tarfile.TarFile, destination: Path) -> None:
