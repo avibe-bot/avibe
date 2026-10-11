@@ -3635,9 +3635,13 @@ def _restart_exited_connector(
             # meanwhile keeps its request, so the monitor brings its connector back.
             pid = result.get("pid")
             if _read_pid() == pid:
+                # Its records stay in place if it cannot be stopped, so a later stop reaches it.
                 _stop_connector()
-            elif _is_cloudflared_pid(pid):
-                runtime.stop_pid(pid, timeout=8)
+            elif _is_cloudflared_pid(pid) and not runtime.stop_pid(pid, timeout=8):
+                # No longer on record: track it as draining so lifecycle
+                # reconciliation and stop() keep retrying it.
+                logger.warning("Could not stop the connector pid=%s a withdrawn restart spawned", pid)
+                _replace_state_connector("draining", {"pid": pid})
             return True
     if not result.get("ok"):
         logger.warning("Tunnel connector restart failed: %s", result.get("error"))

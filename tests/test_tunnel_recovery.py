@@ -1791,3 +1791,48 @@ def test_ra_tq_034_failed_config_read_during_restart_keeps_the_request(monkeypat
     finally:
         monkeypatch.setattr(remote_access.V2Config, "load", real_load)
         remote_access.stop()
+
+
+def test_ra_tq_034_failed_cleanup_of_an_unrecorded_restart_stays_tracked(monkeypatch, tmp_path) -> None:
+    config, network_up = _setup_exiting_connector(monkeypatch, tmp_path)
+    schedule = remote_access._ConnectorRestartSchedule()
+    real_start = remote_access._start
+    real_stop_pid = runtime.stop_pid
+    spawned = []
+    failed_stops = []
+
+    def start_then_stale_stop(loaded, *, record_request):
+        result = real_start(loaded, record_request=record_request)
+        spawned.append(result["pid"])
+        # A stop in another process that read the exited pid withdraws the
+        # request and removes the records this restart just wrote.
+        remote_access._connector_requested_path().unlink()
+        remote_access._pid_path().unlink()
+        remote_access._state_path().unlink()
+        return result
+
+    def stop_pid_failing_once(pid, timeout=5, **kwargs):
+        if pid in spawned and not failed_stops:
+            failed_stops.append(pid)
+            return False
+        return real_stop_pid(pid, timeout=timeout, **kwargs)
+
+    try:
+        remote_access.start()
+        _wait_connector_exit()
+        network_up.touch()
+        monkeypatch.setattr(remote_access, "_start", start_then_stale_stop)
+        monkeypatch.setattr(runtime, "stop_pid", stop_pid_failing_once)
+        remote_access._restart_exited_connector(config, schedule, 1000.0)
+        remote_access._restart_exited_connector(config, schedule, 1000.0 + schedule.delay_seconds)
+
+        assert remote_access._is_cloudflared_pid(spawned[0])
+        assert remote_access._state_connector("draining") == {"pid": spawned[0]}
+
+        # The monitor's lifecycle reconciliation retries it.
+        remote_access._reconcile_connector_lifecycle()
+        assert not remote_access._is_cloudflared_pid(spawned[0])
+        assert remote_access._state_connector("draining") is None
+    finally:
+        monkeypatch.setattr(runtime, "stop_pid", real_stop_pid)
+        remote_access.stop()
