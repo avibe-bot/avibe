@@ -67,15 +67,25 @@ creates parent directories.`
 
 Result: `Successfully wrote to {path}`. Writes are serialized per canonical path with `edit`.
 
-A write is all or nothing (Avibe): the content is written beside the target and then replaces it, so a failure leaves
-the file, or its absence, as it was. `edit` publishes the same way. While an existing file's new content is written it
-is the owner's alone: a 0600 temp file on POSIX, an owner-only DACL on Windows. On POSIX the replacement takes the
-replaced file's mode; its owner, ACL, extended attributes, and hard links are not carried over. On Windows an existing
-file is replaced with `ReplaceFileW`, which keeps its DACL, encryption, compression, named streams (the Mark of the Web
-among them), and creation time, through a backup name beside it; a backup that cannot be removed afterwards is left and
-logged with its path. A file whose ACL denies writing it is refused, as a read-only one is. `edit` publishes only over
-the file it read: the same file id, size, mtime, and change time (Windows' NTFS change time, which `stat` does not
-report there on every Python).
+How a write lands (Avibe); `edit` publishes the same way:
+
+- A new file, or one this user owns (POSIX: the file's uid is the effective uid; Windows: its owner is the token's
+  user), is replaced atomically, so a failure leaves it, or its absence, as it was. The new content is written beside
+  it, the owner's alone meanwhile (a 0600 temp file on POSIX, an owner-only DACL on Windows), and then stands in for
+  it. On POSIX the replacement takes the file's mode; its ACL, extended attributes, and hard links are not carried
+  over. On Windows it takes the file's DACL and explicit integrity label and is put in place with `ReplaceFileW`,
+  which keeps the file's encryption, compression, named streams (the Mark of the Web among them), and creation time;
+  audit entries (the rest of the SACL) are not carried, as POSIX has none. The replaced file passes through a backup
+  name: if `ReplaceFileW` leaves it there, it is put back without overwriting a file created meanwhile (if one was,
+  the backup is kept and the error names it), and a backup that cannot be removed after success is left and logged
+  with its path.
+- A file another account owns is rewritten in place, so the file object, and with it its owner, ACL or mode, audit
+  policy, label, links, and streams, stays exactly as it was: replacing it would hand it to this user. The new content
+  is first written to a temp file beside it, which proves the space and is then removed. A full disk or a crash in
+  the middle of the rewrite itself can leave such a file partly written.
+- A file whose ACL denies writing it is refused, as a read-only one is.
+- `edit` writes only over the file it read: the same file id, size, mtime, and change time (Windows' NTFS change
+  time, which `stat` does not report there on every Python).
 
 ## 4. `edit`
 
