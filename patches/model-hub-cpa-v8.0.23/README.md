@@ -44,9 +44,11 @@ The patch registers the static Antigravity catalog while no entitlement hints
 are cached. The probe that registration already queues narrows the catalog
 through the fenced `ReplaceClientModels` when it answers; a failed probe leaves
 the static catalog in place. This is the pre-v8.0.14 startup behavior plus
-the later narrowing. Upstream's
-`TestAntigravityModelRegistration_AsyncNonBlocking` asserts the stock behavior
-and fails with this patch by design.
+the later narrowing. The patch also rewrites upstream's
+`TestAntigravityModelRegistration_AsyncNonBlocking`, which asserted the stock
+behavior, to assert this contract: the static catalog is registered before the
+probe answers, then narrowed to the entitled set. With both patches applied,
+`go test -run Antigravity ./sdk/cliproxy/` passes.
 
 Drop the patch once router-for-me/CLIProxyAPI#6531 is fixed upstream.
 
