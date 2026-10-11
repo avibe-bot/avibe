@@ -24,8 +24,11 @@ proposal:
 
 - `vibe computer` covers the allowlisted observe, zoom, input, clipboard,
   launch, and quit operations. Each request enters Controller IPC with the
-  caller's current Avibe Session, resolves the active Turn, and forwards the
-  existing `ComputerUseServer` checks with a Turn-scoped lease identity.
+  caller's injected Avibe Session and exact Turn capability. The Controller
+  rejects stale or mismatched Turn identities, registers each admitted request
+  with the live Turn, and retires in-flight requests before releasing that
+  Turn's desktop lease. The existing `ComputerUseServer` checks still run with
+  the Turn-scoped lease identity.
 - A built-in managed `computer-use` Skill is loaded on demand. It contains the
   CLI contract, untrusted-screen guidance, observe-before-input and
   observe-before-retry rules, and the required unavailable-state handling.

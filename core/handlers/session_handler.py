@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 import re
+import shlex
 import time
 from dataclasses import dataclass
 from types import SimpleNamespace
@@ -44,7 +45,7 @@ from core.agent_tool_policy import (
     session_only_background_tool_names,
 )
 from core.agent_session_context import resolve_context_agent_session_target
-from core.caller_context import caller_env_for_platform_payload
+from core.caller_context import AVIBE_SESSION_ID_ENV, AVIBE_TURN_ID_ENV, caller_env_for_platform_payload
 from core.managed_skills import (
     managed_skill_claude_cli_path,
     managed_skill_environment,
@@ -937,10 +938,12 @@ class SessionHandler(BaseHandler):
 
         SESSION-STABLE ONLY, and that is not a shortcut. This env is baked into a Claude
         SDK client at spawn and is also the value compared to decide whether a cached
-        client may be reused, so ordinary IM author/message fields are dropped. A trusted
-        remote Workbench ACL snapshot is retained: changing remote identity or revision
-        must recreate the client rather than let one user's resource authority leak into
-        another user's turn. ``CallerContext.session_stable`` documents both cases.
+        client may be reused, so the Turn capability and ordinary IM author/message
+        fields are dropped. The PreToolUse hook injects the current capability into
+        each Bash process instead. A trusted remote Workbench ACL snapshot is retained:
+        changing remote identity or revision must recreate the client rather than let
+        one user's resource authority leak into another user's turn.
+        ``CallerContext.session_stable`` documents both cases.
         """
 
         return caller_env_for_platform_payload(
@@ -1103,6 +1106,8 @@ class SessionHandler(BaseHandler):
         input_data: Dict[str, Any],
         tool_use_id: Optional[str],
         context: Any,
+        *,
+        caller_session_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """PreToolUse hook governing backend-native, session-only background work.
 
@@ -1119,12 +1124,28 @@ class SessionHandler(BaseHandler):
             tool_input = input_data.get("tool_input") or {}
             decision = check_tool_call(tool_name, tool_input)
             if decision.allowed:
-                if not decision.advice:
+                updated_input: Optional[Dict[str, Any]] = None
+                if tool_name == "Bash" and caller_session_id:
+                    turn_id = self._active_computer_use_turn_id(caller_session_id)
+                    command = tool_input.get("command")
+                    if turn_id and isinstance(command, str) and command:
+                        updated_input = dict(tool_input)
+                        updated_input["command"] = (
+                            f"export {AVIBE_TURN_ID_ENV}={shlex.quote(turn_id)}\n"
+                            f"{command}"
+                        )
+                if not decision.advice and updated_input is None:
                     return {}
+                specific_output: Dict[str, Any] = {
+                    "hookEventName": "PreToolUse",
+                }
+                if decision.advice:
+                    specific_output["additionalContext"] = decision.advice
+                if updated_input is not None:
+                    specific_output["updatedInput"] = updated_input
                 return {
                     "hookSpecificOutput": {
-                        "hookEventName": "PreToolUse",
-                        "additionalContext": decision.advice,
+                        **specific_output,
                     }
                 }
             logger.info(
@@ -1143,16 +1164,44 @@ class SessionHandler(BaseHandler):
             logger.exception("Session-only background tool guard failed; allowing the call")
             return {}
 
-    def _build_claude_tool_policy_hooks(self) -> Optional[Dict[str, Any]]:
+    def _active_computer_use_turn_id(self, session_id: str) -> Optional[str]:
+        manager = getattr(self.controller, "session_turns", None)
+        turn = getattr(manager, "in_flight", {}).get(session_id)
+        if turn is None or turn.task.done() or getattr(turn, "computer_use_retired", False):
+            return None
+        payload = getattr(getattr(turn, "context", None), "platform_specific", None) or {}
+        return str(
+            getattr(turn, "logical_turn_id", None)
+            or payload.get("turn_token")
+            or ""
+        ).strip() or None
+
+    def _build_claude_tool_policy_hooks(
+        self,
+        caller_session_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
         """Hook config enforcing the shared tool policy, or None when unavailable."""
         if not CLAUDE_SDK_HOOKS_AVAILABLE or HookMatcher is None:
             return None
         matcher = "|".join(session_only_background_tool_names())
+
+        async def guard(
+            input_data: Dict[str, Any],
+            tool_use_id: Optional[str],
+            context: Any,
+        ) -> Dict[str, Any]:
+            return await self._guard_session_only_background_tools(
+                input_data,
+                tool_use_id,
+                context,
+                caller_session_id=caller_session_id,
+            )
+
         return {
             "PreToolUse": [
                 HookMatcher(
                     matcher=matcher,
-                    hooks=[self._guard_session_only_background_tools],
+                    hooks=[guard],
                 )
             ]
         }
@@ -1742,7 +1791,9 @@ class SessionHandler(BaseHandler):
             claude_env["IS_SANDBOX"] = "1"
             logger.info("Detected Claude bypassPermissions running as root; marking Claude subprocess as isolated")
 
-        tool_policy_hooks = self._build_claude_tool_policy_hooks()
+        tool_policy_hooks = self._build_claude_tool_policy_hooks(
+            claude_env.get(AVIBE_SESSION_ID_ENV),
+        )
 
         option_kwargs: Dict[str, Any] = {
             "permission_mode": CLAUDE_REMOTE_PERMISSION_MODE,

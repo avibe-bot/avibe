@@ -74,12 +74,12 @@ vibe computer click --arg pid=123 --arg window_id=456 --arg x=120 --arg y=80
 ```
 
 The CLI runs only from an active Avibe Agent Turn. It takes the caller Session
-from the Agent environment and the Controller derives the Turn identity; an
-Agent cannot choose a different Session or pass a driver `session` value.
-Requests use the existing Controller and `ComputerUseServer` checks, including
-the authenticated `require_bind` entry path, observe-first, exact window
-targets, focus-shortcut rejection, the single-holder desktop lease, and native
-state/admission checks.
+and exact Turn capability from the Agent environment, and the Controller
+validates both against the live Turn. An Agent cannot choose a different
+Session or Turn or pass a driver `session` value. Requests use the existing
+Controller and `ComputerUseServer` checks, including the authenticated
+`require_bind` entry path, observe-first, exact window targets, focus-shortcut
+rejection, the single-holder desktop lease, and native state/admission checks.
 
 `observe window` and `zoom` can write screenshots to a caller-selected path.
 Human output includes accessibility state and element tokens when available;

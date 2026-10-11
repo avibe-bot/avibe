@@ -204,9 +204,9 @@ If you do not want future records or retained history, disable first, then clear
 ### `vibe computer`
 
 Computer Use is available to an Avibe Agent only from its active Turn. The CLI
-binds the request to the caller's injected Avibe Session and the Controller
-resolves the active Turn; callers cannot provide a Session ID or driver
-`session` value.
+binds the request to the caller's injected Avibe Session and Turn capability;
+the Controller validates both against the live Turn. Callers cannot provide a
+Session ID, Turn ID, or driver `session` value.
 
 ```bash
 vibe computer observe apps

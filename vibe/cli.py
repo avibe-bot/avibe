@@ -752,6 +752,14 @@ def cmd_computer(args) -> int:
             hint=translate("computer.cli.hint.missingCallerSession"),
             help_command="vibe computer --help",
         )
+    caller_turn_id = str(getattr(caller_context, "turn_id", "") or "").strip()
+    if not caller_turn_id:
+        raise TaskCliError(
+            translate("computer.cli.error.missingCallerTurn"),
+            code="missing_caller_turn",
+            hint=translate("computer.cli.hint.missingCallerTurn"),
+            help_command="vibe computer --help",
+        )
 
     if args.computer_command == "observe":
         command_path = ("observe", args.computer_observe_command)
@@ -768,6 +776,7 @@ def cmd_computer(args) -> int:
         arguments = prepare_arguments_for_output(tool, arguments, args.output)
         response = computer_use_sync(
             caller_session_id=caller_session_id,
+            caller_turn_id=caller_turn_id,
             tool=tool,
             arguments=arguments,
         )

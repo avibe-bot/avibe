@@ -865,6 +865,7 @@
         "screenshotMissing": "{tool} 没有返回可写入 --output 的图像。",
         "outputUnsupported": "--output 只支持 observe window 或 zoom。",
         "missingCallerSession": "Computer Use 需要 Avibe Agent 调用方 Session。",
+        "missingCallerTurn": "Computer Use 需要当前 Avibe Agent Turn。",
         "serviceUnavailable": "Avibe 服务不可用：{error}",
         "requestTimedOut": "Computer Use 请求在服务响应前超时：{error}",
         "invalidResponse": "Computer Use 服务返回了无效响应。",
@@ -873,6 +874,7 @@
       "hint": {
         "invalidArguments": "请检查命令语法，并运行 `vibe computer --help` 查看 Computer Use 约定。",
         "missingCallerSession": "请在 Avibe Agent Turn 中运行此命令。命令会自动绑定当前 Turn，不支持 --session-id。",
+        "missingCallerTurn": "请在当前 Avibe Agent Turn 中运行此命令。Turn 身份会自动注入。",
         "serviceUnavailable": "请先启动 Avibe 服务，再使用 Computer Use。",
         "requestTimedOut": "重试前请先重新观察，因为刚才的操作可能已经完成。"
       },

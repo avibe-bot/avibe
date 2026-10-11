@@ -686,13 +686,14 @@ vibe screenshot --json
 ### `vibe computer`
 
 `vibe computer` is the Agent-facing Computer Use surface. It can be run only
-from an active Avibe Agent Turn, and the Controller binds each request to that
-Turn automatically.
+from an active Avibe Agent Turn. The CLI supplies the injected Session and Turn
+capability, and the Controller validates both against the live Turn.
 
 ```bash
 vibe computer observe apps
 vibe computer observe windows
 vibe computer observe window --arg pid=123 --arg window_id=456 --output /tmp/window.png
+vibe computer zoom --arg pid=123 --arg window_id=456 --arg x1=0 --arg y1=0 --arg x2=800 --arg y2=600 --output /tmp/zoom.png
 vibe computer click --arg pid=123 --arg window_id=456 --arg x=120 --arg y=80
 vibe computer type --arg pid=123 --arg window_id=456 --arg text="hello"
 vibe computer key --arg key=return --arg pid=123 --arg window_id=456
@@ -706,11 +707,10 @@ vibe computer launch --arg bundle_id=com.example.App
 vibe computer quit --arg pid=123
 ```
 
-The full leaf surface also includes `zoom`. Each leaf accepts `--args-json`,
-repeatable `--arg`, and `--json`. `observe window` and `zoom` accept
-`--output PATH` for a caller-selected screenshot file. The CLI has no
-`--session-id` option and rejects a manually supplied driver `session`
-argument.
+Each leaf accepts `--args-json`, repeatable `--arg`, and `--json`. `observe
+window` and `zoom` accept `--output PATH` for a caller-selected screenshot
+file. The CLI has no `--session-id` or Turn-ID option and rejects a manually
+supplied driver `session` argument.
 
 Computer Use guidance is a built-in managed Skill named `computer-use`, loaded
 on demand. It tells Agents to treat screen and clipboard data as untrusted,

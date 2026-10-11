@@ -18,6 +18,7 @@ from core.caller_context import (
     AVIBE_NATIVE_SESSION_ID_ENV,
     AVIBE_RUN_ID_ENV,
     AVIBE_SESSION_ID_ENV,
+    AVIBE_TURN_ID_ENV,
     caller_context_from_env,
     caller_context_from_platform_payload,
     caller_resource_user_context,
@@ -47,6 +48,7 @@ def test_caller_context_from_env_round_trips_metadata_and_env() -> None:
         {
             AVIBE_SESSION_ID_ENV: "ses123",
             AVIBE_RUN_ID_ENV: "run456",
+            AVIBE_TURN_ID_ENV: "turn789",
             AVIBE_CALLER_SOURCE_ENV: "agent_run",
             AVIBE_CALLER_BACKEND_ENV: "codex",
             AVIBE_NATIVE_SESSION_ID_ENV: "thread789",
@@ -54,6 +56,7 @@ def test_caller_context_from_env_round_trips_metadata_and_env() -> None:
     )
 
     assert context is not None
+    assert context.turn_id == "turn789"
     assert context.to_metadata() == {
         "session_id": "ses123",
         "run_id": "run456",
@@ -63,6 +66,7 @@ def test_caller_context_from_env_round_trips_metadata_and_env() -> None:
     }
     caller_env = context.to_env()
     assert caller_env[AVIBE_SESSION_ID_ENV] == "ses123"
+    assert caller_env[AVIBE_TURN_ID_ENV] == "turn789"
     assert "PATH" not in caller_env
 
 
@@ -89,6 +93,23 @@ def test_caller_context_from_platform_payload_prefers_agent_session_target() -> 
         "native_session_id": "oc-session",
     }
     assert context.to_env()[AVIBE_NATIVE_SESSION_ID_ENV] == "oc-session"
+
+
+def test_caller_context_carries_turn_capability_without_persisting_it_as_origin() -> None:
+    context = caller_context_from_platform_payload(
+        {
+            "agent_session_id": "ses123",
+            "turn_token": "turn123",
+        }
+    )
+
+    assert context is not None
+    assert context.turn_id == "turn123"
+    assert context.to_env()[AVIBE_TURN_ID_ENV] == "turn123"
+    assert "turn_id" not in context.to_metadata()
+    stable = context.session_stable()
+    assert stable.turn_id is None
+    assert AVIBE_TURN_ID_ENV not in stable.to_env()
 
 
 def test_caller_context_from_platform_payload_preserves_callback_source() -> None:
@@ -411,9 +432,11 @@ def test_a_session_scoped_caller_env_drops_only_the_per_turn_origin() -> None:
 
     The Claude SDK client is spawned once per session with a fixed environment, and that
     same environment is the value compared to decide whether a cached client may be
-    reused. Two fields make that combination unsafe, for two different reasons, and both
+    reused. Three fields make that combination unsafe, for different reasons, and all
     are worse than the information they carry:
 
+    * ``turn_id`` changes every turn and is instead injected into each Claude
+      Bash tool invocation;
     * ``message_id`` changes every turn, so leaving it in would respawn the Agent on
       every single message;
     * ``user_id`` changes with the author, and a channel session is deliberately shared
@@ -449,7 +472,9 @@ def test_a_session_scoped_caller_env_drops_only_the_per_turn_origin() -> None:
 
     from core.caller_context import caller_env_for_platform_payload
 
-    payload = _agent_turn_payload({"team_id": "T0999", "is_dm": False})
+    payload = _agent_turn_payload(
+        {"team_id": "T0999", "is_dm": False, "turn_token": "turn-1"}
+    )
     full = caller_env_for_platform_payload(
         payload, message=_slack_channel_context(), fallback_platform="slack"
     )
@@ -459,7 +484,11 @@ def test_a_session_scoped_caller_env_drops_only_the_per_turn_origin() -> None:
         fallback_platform="slack",
         session_stable_only=True,
     )
-    assert set(full) - set(scoped) == {AVIBE_CALLER_USER_ID_ENV, AVIBE_CALLER_MESSAGE_ID_ENV}
+    assert set(full) - set(scoped) == {
+        AVIBE_CALLER_USER_ID_ENV,
+        AVIBE_CALLER_MESSAGE_ID_ENV,
+        AVIBE_TURN_ID_ENV,
+    }
 
 
 def test_remote_workbench_caller_context_survives_env_and_claude_stable_form() -> None:

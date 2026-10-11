@@ -340,6 +340,7 @@ def record_skill_observation_sync(
 def computer_use_sync(
     *,
     caller_session_id: str,
+    caller_turn_id: str,
     tool: str,
     arguments: dict[str, Any],
     socket_path: Optional[Path] = None,
@@ -350,6 +351,7 @@ def computer_use_sync(
     endpoint = _resolve_endpoint(socket_path)
     payload = {
         "caller_session_id": caller_session_id,
+        "caller_turn_id": caller_turn_id,
         "tool": tool,
         "arguments": arguments,
     }
