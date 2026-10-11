@@ -235,7 +235,7 @@ backend they are required.
 
 | Operation | v1 | Meaning |
 | --- | --- | --- |
-| `start(command, cwd, env, timeout, call)` → `job_id` | yes | create the job directory and metadata for the call instance `call`, then spawn the wrapper in its own session |
+| `start(command, cwd, env, timeout, call)` → `job_id` | yes | create the job directory and metadata for the call instance `call`, then spawn the wrapper in its own session (on Windows, its own job object) |
 | `status(job_id)` | yes | `running`, `exited{code}`, or `gone` (ended without an exit code) |
 | `wait(job_id, deadline_s)` | yes | until exit, or at most `deadline_s` seconds from now (`None`: until exit) |
 | `output_path(job_id)` | yes | absolute path of `output.log`, named in truncated and handover results |
@@ -254,6 +254,20 @@ launch mechanism needs. The job host meets recovery invariants J1–J6 ([`recove
 at most once and recovery can always decide whether it did; its identity is recorded before it runs; `timeout` is an
 absolute deadline that survives handover and restarts; output on disk is bounded; files are kept until the call is
 durably settled; handover creates at most one Watch per job.
+
+On Windows the wrapper's tree is a job object it creates and joins before it can run the command, named after the
+job and ended when the wrapper's handle to it closes. Every process the command starts is in it and cannot leave it.
+`kill` terminates the job object; a kill of the wrapper alone (`TerminateProcess`, which nothing can catch) also ends
+the tree but records no reason, so T2 settles that call as interrupted rather than `killed`. A process the command
+leaves running keeps the wrapper, and so the job, alive until it ends or is killed; on POSIX it runs on in the process
+group. On both, the deadline is the command's (J3): once the shell has exited, it reaches no such process. Job files are replaced with POSIX rename semantics and Avibe reads them with delete sharing, so no reader of
+Avibe's makes the wrapper's replacement of `tail.log` fail; while another program holds it open without that sharing,
+the wrapper keeps the tail and writes it at a later snapshot. The last snapshot, taken when the command exits, cannot
+wait: it is written into `tail.log` itself, which such a program shares for writing (Python's `open`,
+`Get-Content -Wait`); one that shares neither leaves the previous tail there while it holds the file. The command's
+exit stands either way.
+A decision or a stop reason is created once by a rename, which never replaces on Windows, rather than by a hard link,
+so job files work on a volume without hard links (FAT, exFAT).
 
 ## 8. Environment section
 

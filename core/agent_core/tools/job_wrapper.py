@@ -1,13 +1,21 @@
 """The process that runs one job's command (``LocalJobHost``'s ``pipe`` backend).
 
-Run as ``python -I -S job_wrapper.py avibe-job <job_dir> <shell> <command>
+Run as ``python -I -S -B job_wrapper.py avibe-job <job_dir> <shell> <command>
 <decision_timeout_s> <head_cap> <tail_cap> <deadline_epoch_s or ->`` in a new
 session, so its pid is the job's process group. Standard library only: ``-S``
 skips site-packages.
 
+On Windows the tree is held by a job object instead of a process group: the
+wrapper creates ``Local\\avibe-job-<job_id>`` with ``KILL_ON_JOB_CLOSE`` and
+joins it before it writes ``pid``, so every process the command starts is in it,
+and none outlives the wrapper (``windows_job.py``). Files are replaced with
+POSIX semantics (``windows_files.py``), so a host reading ``tail.log`` never
+makes its replacement fail.
+
 1. Write ``pid`` (temporary file, rename).
 2. Wait for ``decision``, at most ``decision_timeout_s``; on timeout, decide
-   ``abandon`` itself through the same exclusive ``link(2)`` the host uses.
+   ``abandon`` itself through the same exclusive ``link(2)`` the host uses (on
+   Windows a rename, which never replaces there).
 3. Only on ``go``: run ``<shell> -c <command>`` with stdin closed and stdout and
    stderr into one pipe.
 4. Keep the output bounded on disk: the first ``head_cap`` bytes are appended
@@ -22,7 +30,11 @@ skips site-packages.
    a catchable signal reaches the wrapper alone (``pkill -f python``), write
    ``stopped`` (``timeout``, ``wrapper_error``, or ``killed``) and end the whole
    process group: SIGTERM, then SIGKILL after 3 s. The wrapper decides timeout
-   versus exit, and it looks at the shell first.
+   versus exit, and it looks at the shell first. On Windows the job object ends
+   at once, with no graceful phase.
+7. Windows only: once the shell has exited and its output is closed, stay
+   while processes it started still run. They are in the job, which ends with
+   its last handle, the wrapper's; on POSIX they run on in the process group.
 
 Every wait is bounded or watches the deadline: the decision wait (30 s), the
 check just before the shell is spawned, the read loop, the wait after the
@@ -39,8 +51,9 @@ import subprocess
 import sys
 import time
 import traceback
-from typing import Optional
+from typing import Any, Optional
 
+_WINDOWS = os.name == "nt"
 _SNAPSHOT_INTERVAL_S = 0.25
 _DRAIN_LIMIT_S = 0.5
 _TERMINATE_GRACE_S = 3.0
@@ -49,29 +62,54 @@ _TERMINATE_GRACE_S = 3.0
 # "killed" instead. Python already ignores SIGPIPE and SIGXFSZ; SIGKILL cannot be caught.
 _STOP_SIGNALS = tuple(
     getattr(signal, name)
-    for name in "SIGTERM SIGHUP SIGINT SIGQUIT SIGUSR1 SIGUSR2 SIGALRM SIGVTALRM SIGPROF SIGXCPU SIGPWR SIGIO".split()
+    for name in (
+        "SIGTERM SIGHUP SIGINT SIGQUIT SIGUSR1 SIGUSR2 SIGALRM SIGVTALRM SIGPROF SIGXCPU SIGPWR SIGIO SIGBREAK"
+    ).split()
     if hasattr(signal, name)
 )
+#: Polling the output pipe on Windows, where ``select`` takes only sockets.
+_PIPE_POLL_S = 0.01
+
+
+def _load_beside(name: str) -> Any:
+    """A module beside this file, by its path: ``-I -S`` leaves the package and site-packages off ``sys.path``."""
+    import importlib.util
+
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), f"{name}.py")
+    spec = importlib.util.spec_from_file_location(f"avibe_{name}", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+_job_objects = _load_beside("windows_job") if _WINDOWS else None
+_files = _load_beside("windows_files") if _WINDOWS else None
+#: Windows: the handle of the job object that holds this wrapper and its command's tree.
+_job: Optional[int] = None
 
 
 def _write_atomic(path: str, data: bytes) -> None:
     tmp = f"{path}.{os.getpid()}.tmp"
     with open(tmp, "wb") as handle:
         handle.write(data)
-    os.replace(tmp, path)
+    (_files.replace if _WINDOWS else os.replace)(tmp, path)
 
 
 def _create_once(path: str, value: str) -> None:
-    """Create ``path`` holding ``value`` unless it exists: ``link(2)`` of a written temp file, as the host does."""
+    """Create ``path`` holding ``value`` unless it exists: ``link(2)`` of a written temp file, as the host does.
+
+    On Windows a rename, which never replaces there, and works on volumes without hard links (FAT).
+    """
     tmp = f"{path}.{value}.{os.getpid()}.tmp"
     with open(tmp, "w") as handle:
         handle.write(f"{value}\n")
     try:
-        os.link(tmp, path)
+        (os.rename if _WINDOWS else os.link)(tmp, path)
     except FileExistsError:
         pass
     finally:
-        os.unlink(tmp)
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(tmp)
 
 
 def _wait_for_decision(job_dir: str, timeout_s: float) -> str:
@@ -84,13 +122,17 @@ def _wait_for_decision(job_dir: str, timeout_s: float) -> str:
             break
         time.sleep(delay)
         delay = min(delay * 2, 0.05)
-    with open(decision) as handle:
-        return handle.read(64).strip()
+    # With delete sharing, as Avibe reads every job file: on Windows the host creates ``decision`` by a rename,
+    # whose handle asks for delete until it closes, and a plain ``open`` meanwhile is a sharing violation.
+    fd = _files.open_for_reading(decision) if _WINDOWS else os.open(decision, os.O_RDONLY)
+    with os.fdopen(fd, "rb") as handle:
+        return handle.read(64).decode("ascii", "replace").strip()
 
 
 class _BoundedLog:
     def __init__(self, job_dir: str, head_cap: int, tail_cap: int) -> None:
-        self._fd = os.open(os.path.join(job_dir, "output.log"), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_BINARY", 0)
+        self._fd = os.open(os.path.join(job_dir, "output.log"), flags, 0o600)
         self._tail_path = os.path.join(job_dir, "tail.log")
         self._head_cap = head_cap
         self._tail_cap = tail_cap
@@ -119,9 +161,41 @@ class _BoundedLog:
         if not self._dirty or (not force and now - self._last_snapshot < _SNAPSHOT_INTERVAL_S):
             return
         kept = bytes(self._tail[-self._tail_cap :])
-        _write_atomic(self._tail_path, b"[output from byte %d]\n" % (self._total - len(kept)) + kept)
+        data = b"[output from byte %d]\n" % (self._total - len(kept)) + kept
+        try:
+            _write_atomic(self._tail_path, data)
+        except PermissionError:
+            # Windows: another program holds tail.log open without sharing delete (an editor, ``Get-Content
+            # -Wait``). The tail is still here, so a periodic snapshot leaves it to the next one. The last one
+            # cannot wait: it goes into the file itself, which such a program shares for writing; one that shares
+            # neither keeps the previous tail while it holds the file, and the command's exit still stands.
+            if not _WINDOWS:
+                raise
+            if not (force and _rewrite_in_place(self._tail_path, data)):
+                self._last_snapshot = now
+                return
         self._dirty = False
         self._last_snapshot = now
+
+
+def _rewrite_in_place(path: str, data: bytes) -> bool:
+    """Windows: write ``data`` over the existing file ``path`` itself; whether its readers' sharing allowed it.
+
+    Not atomic: a reader in the middle of it may see part of each, so it stands in only for the last
+    snapshot, which cannot wait for the next.
+    """
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_BINARY)
+    except PermissionError:
+        return False
+    try:
+        view = memoryview(data)
+        while view:
+            view = view[os.write(fd, view) :]
+        os.ftruncate(fd, len(data))
+    finally:
+        os.close(fd)
+    return True
 
 
 def _stop_group(job_dir: str, reason: str, proc: Optional[subprocess.Popen]) -> None:
@@ -136,6 +210,11 @@ def _stop_group(job_dir: str, reason: str, proc: Optional[subprocess.Popen]) -> 
         _create_once(os.path.join(job_dir, "stopped"), reason)  # the first stopper's reason wins
     except OSError:
         pass  # the kill matters more than the record
+    if _WINDOWS:
+        if _job is not None:
+            with contextlib.suppress(OSError):
+                _job_objects.terminate_job(_job)  # every process of the job, this wrapper included
+        os._exit(1)  # no job yet, or it could not be ended: its last handle closes with us (KILL_ON_JOB_CLOSE)
     group = os.getpgrp()
     with contextlib.suppress(OSError):
         os.killpg(group, signal.SIGTERM)
@@ -143,6 +222,19 @@ def _stop_group(job_dir: str, reason: str, proc: Optional[subprocess.Popen]) -> 
     while proc is not None and proc.poll() is None and time.monotonic() < deadline:
         time.sleep(0.02)
     os.killpg(group, signal.SIGKILL)
+
+
+def _readable(fd: int, timeout_s: float) -> bool:
+    """Whether reading ``fd``, the command's output pipe, would not block, waiting at most ``timeout_s``."""
+    if not _WINDOWS:
+        return bool(select.select([fd], [], [], timeout_s)[0])
+    end = time.monotonic() + timeout_s
+    while not _job_objects.pipe_readable(fd):
+        remaining = end - time.monotonic()
+        if remaining <= 0:
+            return False
+        time.sleep(min(remaining, _PIPE_POLL_S))
+    return True
 
 
 def _run(job_dir: str, proc: subprocess.Popen, log: _BoundedLog, deadline: Optional[float]) -> None:
@@ -163,8 +255,7 @@ def _run(job_dir: str, proc: subprocess.Popen, log: _BoundedLog, deadline: Optio
 
     while not eof:
         enforce_deadline()
-        ready, _, _ = select.select([fd], [], [], 0.05)
-        if ready:
+        if _readable(fd, 0.05):
             chunk = os.read(fd, 65536)
             if chunk:
                 log.write(chunk)
@@ -173,7 +264,7 @@ def _run(job_dir: str, proc: subprocess.Popen, log: _BoundedLog, deadline: Optio
         if not exit_written and proc.poll() is not None:
             # Everything the shell wrote is in the pipe by now; take it before reporting the exit.
             drain_until = time.monotonic() + _DRAIN_LIMIT_S
-            while not eof and time.monotonic() < drain_until and select.select([fd], [], [], 0)[0]:
+            while not eof and time.monotonic() < drain_until and _readable(fd, 0):
                 chunk = os.read(fd, 65536)
                 if chunk:
                     log.write(chunk)
@@ -192,6 +283,17 @@ def _run(job_dir: str, proc: subprocess.Popen, log: _BoundedLog, deadline: Optio
         write_exit()
 
 
+def _stay_while_the_job_runs() -> None:
+    """Windows: keep the job object open while processes the command started still run in it.
+
+    The job ends with its last handle, this wrapper's, so a background process the command left running
+    would die with the wrapper. On POSIX it runs on in the process group, where ``kill`` still reaches it;
+    here the wrapper stays, so ``kill`` reaches it through the job.
+    """
+    while _job_objects.active_processes(_job) > 1:
+        time.sleep(_SNAPSHOT_INTERVAL_S)
+
+
 def main(argv: list[str]) -> int:
     if len(argv) != 9 or argv[1] != "avibe-job":
         return 64
@@ -205,6 +307,11 @@ def main(argv: list[str]) -> int:
 
     for signum in _STOP_SIGNALS:
         signal.signal(signum, stop_on_signal)
+    if _WINDOWS:
+        global _job
+        # Before ``pid``: the host records the identity only of a wrapper that is in its job (J2). The host
+        # names it the same way (``jobs._job_object_name``).
+        _job = _job_objects.create_kill_on_close_job(f"avibe-job-{os.path.basename(job_dir)}")
     _write_atomic(os.path.join(job_dir, "pid"), b"%d\n" % os.getpid())
     if _wait_for_decision(job_dir, decision_timeout_s) != "go":
         return 0
@@ -217,6 +324,8 @@ def main(argv: list[str]) -> int:
             [shell, "-c", command], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT
         )
         _run(job_dir, proc, log, deadline)
+        if _WINDOWS:
+            _stay_while_the_job_runs()
     except BaseException:
         # A wrapper that cannot follow its command (a full disk, a bug) must not leave it running unmanaged.
         # The diagnostics may fail for the same reason (ENOSPC), so they can never stand in the way.

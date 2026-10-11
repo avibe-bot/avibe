@@ -21,6 +21,7 @@ from concurrent.futures import Executor
 from typing import Any, AsyncIterator, Awaitable, Callable, Literal, Optional, TypeVar
 from urllib.parse import unquote
 
+from core.agent_core.tools import windows_files
 from core.agent_core.tools.args import ToolInputError
 
 T = TypeVar("T")
@@ -227,8 +228,14 @@ def open_regular(path: str, flags: int = os.O_RDONLY) -> int:
     kind is taken from the descriptor (``fstat``), so sizes and contents come from the same file.
     Windows has no FIFO to block on, and needs ``O_BINARY``: a text-mode descriptor would drop CRs
     and stop reading at the first 0x1A byte. Raises ``NotRegularFile`` or the ``OSError`` of the open.
+
+    On Windows a file is opened for reading shared for delete, as POSIX always shares it, so a job's
+    wrapper can still replace the ``tail.log`` the model is told to read (``windows_files``).
     """
-    fd = os.open(path, flags | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0) | getattr(os, "O_CLOEXEC", 0))
+    if os.name == "nt" and flags == os.O_RDONLY:
+        fd = windows_files.open_for_reading(path)
+    else:
+        fd = os.open(path, flags | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0) | getattr(os, "O_CLOEXEC", 0))
     try:
         mode = os.fstat(fd).st_mode
         if not stat.S_ISREG(mode):
