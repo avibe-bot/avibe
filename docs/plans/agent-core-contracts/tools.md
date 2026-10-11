@@ -247,11 +247,15 @@ names `powershell` there, and "for example sed or a short script" becomes "for e
   `PYTHONUTF8=1` is set unless the environment sets it.
 - A command that does not parse fails with exit code 1 and the parser's messages before anything runs. Otherwise
   it runs whole, as one script block, so PowerShell's own semantics hold (`return`, classes, named blocks, traps,
-  `using`). Only the last statement of its end block is wrapped, to record how it ended; a `return`, `break`, or
+  `using`). Only the statement that runs last is wrapped, to record how it ended; a `return`, `break`, or
   `continue` at the top level ends the command.
-- The exit code follows bash: the command's own `exit N`; else 0 when the last statement succeeded, or the command
-  ended before it; else the `$LASTEXITCODE` that statement set, when it is not 0, so a failed native program
-  reports its code; else 1. A code an earlier statement left in `$LASTEXITCODE` is not the last statement's.
+- The exit code follows PowerShell's `$?` for the last statement of the last block that runs (`end`, else
+  `process`, else `begin`): the command's own `exit N`; else 0 when that statement succeeded, or the command ended
+  before it; else the `$LASTEXITCODE` that statement set, when it is not 0, so a failed native program reports its
+  code; else 1. A code an earlier statement left in `$LASTEXITCODE` is not the last statement's, and a function
+  that writes an error and returns has succeeded, as `$?` says.
+- Errors are reported at the command's own lines: the wrapping adds no line. Only an error in a last statement that
+  shares its line with the statement before it is reported at a later column.
 - Known limit, as with `powershell -Command`: an `exit` ends the process before PowerShell formats objects that are
   still waiting to be laid out as a table, so `Get-ChildItem | Select-Object Name; exit 2` can print nothing.
   Strings and the output of native programs are written as they come.
