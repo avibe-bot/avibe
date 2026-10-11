@@ -67,6 +67,7 @@ from core.agent_core.agent.lifecycle import RunAborted as _Aborted, RunScope
 from core.agent_core.agent.models import ModelRouter, ModelSelection, RetryPolicy
 from core.agent_core.agent.outcome import OutcomeOwner
 from core.agent_core.agent.state import HookStateError, state_representation
+from core.agent_core.ai._common import endpoint_origin
 from core.agent_core.ai.provider import (
     Done,
     ModelEndpoint,
@@ -127,6 +128,7 @@ from core.agent_core.harness.store import ContextEntry, EntryKind, TranscriptSto
 from core.agent_core.messages import (
     AssistantMessage,
     Message,
+    Origin,
     TextBlock,
     ToolCallBlock,
     ToolResultMessage,
@@ -282,7 +284,9 @@ class Agent:
         self._turn_inputs: set[int] = set()
         # The run's attempt ledger (C-9): every model attempt, in order.
         self._attempts: list[_Attempt] = []
-        self._last_model_at: Optional[float] = None
+        # When each route's provider cache was last used in this Agent: the end of its latest model call, by the
+        # origin that served it (C-9 section 3).
+        self._last_model_at: dict[Origin, float] = {}
         self._seq = 0
 
     def set_tools(self, tools: Sequence[Tool]) -> None:
@@ -740,10 +744,12 @@ class Agent:
                             await emit(AssistantTextDelta, delta=event.delta)
                         elif isinstance(event, ThinkingDelta):
                             await emit(AssistantThinkingDelta, delta=event.delta)
-                    if self.context is not None:
-                        self._last_model_at = self.context.clock()
                     if terminal is None:
                         terminal = ProviderError("unknown", "Provider stream ended without a terminal event.", False)
+                    if self.context is not None:
+                        served = terminal.message if isinstance(terminal, Done) else terminal.partial
+                        cache = served.origin if served is not None else endpoint_origin(request.endpoint)
+                        self._last_model_at[cache] = self.context.clock()
                     self._attempts.append(
                         _Attempt(
                             purpose,
@@ -1190,16 +1196,19 @@ class Agent:
     # one audit (4), ``harness.context.budget`` (5), and ``_model`` (6, admission).
 
     def _cache_cold(self, endpoint: ModelEndpoint) -> bool:
-        """No model request for longer than the provider cache of the request's route stays warm (section 3).
+        """The provider cache of the request's route has gone unused longer than it stays warm (section 3).
 
-        Idle runs from the later of the latest model call's end and the latest response row's commit, so a long
-        response counts as use until it ends: the error leans toward a warm cache.
+        Its use is the latest model call's end or response row's commit served by that route (its origin), so a long
+        response counts as use until it ends, and a restarted Agent reads the rows. A route with no use in the Session
+        yet (its first, or one whose served origin the endpoint does not name, as a converted protocol's) takes the
+        latest use of any route: every error leans toward a warm cache.
         """
-        last = self._last_model_at
-        for row in reversed(self._rows):
+        used = dict(self._last_model_at)
+        for row in self._rows:
             if row.kind == "response" and row.created_at is not None:
-                last = row.created_at if last is None else max(last, row.created_at)
-                break
+                origin = row.message.origin
+                used[origin] = max(used.get(origin, row.created_at), row.created_at)
+        last = used.get(endpoint_origin(endpoint), max(used.values(), default=None))
         return last is not None and self.context.clock() - last > cache_ttl_s(endpoint)
 
     async def _compose(

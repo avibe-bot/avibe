@@ -1301,6 +1301,35 @@ async def test_clearing_runs_once_the_route_cache_has_gone_cold_and_spares_recen
     assert store.transactions == [["context_edit"] * 4]  # one transition, one transaction
 
 
+def served_by(endpoint: ModelEndpoint, script):
+    """``script``'s replies as the route's own origin serves them."""
+    return [replace(event, message=replace(event.message, origin=endpoint_origin(endpoint))) for event in script]
+
+
+async def test_a_route_cache_counts_only_its_own_use():
+    # Each Turn runs in a new Agent over the same rows. Ten minutes after Claude's last reply, GPT answers for the first
+    # time: a route with no use yet takes the latest use of any route, well inside GPT's 30 minutes, so nothing clears.
+    # A minute later the Session is back on Claude, whose own cache went unused for eleven minutes: cold, although
+    # another route answered a minute ago.
+    now = [1_000.0]
+    store = InMemoryTranscriptStore(clock=lambda: now[0])
+
+    async def turn(endpoint, scripts, row):
+        model = Model([served_by(endpoint, script) for script in scripts])
+        route = ModelSelection(endpoint, LARGE.capabilities)
+        context = ContextConfig(clock=lambda: now[0])
+        agent = make_agent(model, store=store, tools=[reader(tokens(6_000))], selection=route, context=context)
+        assert (await run(agent, row=row))[-1].reason == "completed"
+        return [row for row in await store.load("session") if row.kind == "context_edit"]
+
+    await turn(CLAUDE, [*_long_context(9), [Done(assistant("one"))]], "turn-1")
+    await turn(CLAUDE, [[Done(assistant("two"))]], "turn-2")
+    now[0] += 600
+    assert not await turn(GPT, [[Done(assistant("three"))]], "turn-3")
+    now[0] += 60
+    assert len(await turn(CLAUDE, [[Done(assistant("four"))]], "turn-4")) == 4
+
+
 async def test_pressure_clearing_runs_on_a_warm_cache():
     # From 0.8 T old results clear whatever the cache's lifetime (section 3): on this window T = 59,904, and nine
     # results of 6,000 tokens hold 0.9 T. The third Turn is the first whose old results are not protected.

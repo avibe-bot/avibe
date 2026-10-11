@@ -109,9 +109,9 @@ before a retry alike:
    to its own tool results (§6), one helper for both. The run continues and compacts as usual. A batch that does not
    fit even with every result cut to its note, or a last unit that is an input, stops the run: the provider never
    sees the request. A batch that fits once the conversation moves out is never cut; the ladder makes room for it.
-2. **Clear** (§4) when the provider cache is cold (no model request for longer than the cache lifetime of the
-   request's route, below; after a restart, measured from the latest response row's `created_at`) or
-   `est >= 0.8 * T`, which does not depend on the lifetime.
+2. **Clear** (§4) when the provider cache is cold (the request's route has not used it for longer than its
+   lifetime, below; after a restart, measured from the response rows' `created_at`) or `est >= 0.8 * T`, which does
+   not depend on the lifetime.
 3. **Checkpoint** when `est >= T`, the run has not stopped compacting (§10), and there is something to summarize,
    at most once per model request: a normal checkpoint (§6, reason `threshold`) when the fork it would send can fit,
    otherwise the overflow ladder from (b) (§8, reason `overflow`). A checkpoint request that overflows continues at
@@ -133,8 +133,11 @@ results live, resolved on every request from the route's provider, protocol, and
 
 Clearing a warm cache forces a full-price re-read of the context, while skipping a clear on a cold one only keeps
 some old output, so an unknown lifetime counts as an hour, and relays and subscription sources that keep a shorter
-one err toward warm. Idle runs from the later of the latest model call's end and the latest response's commit,
-which overstates warmth by a response's duration, the same safe direction.
+one err toward warm. The idle time is the route's own: it runs from the later of the latest model call's end and the
+latest response's commit served by the request's route (its origin), which overstates warmth by a response's
+duration, the same safe direction; another route's use never refreshes it. A route with no use in the Session yet,
+its first or one whose served origin the endpoint does not name (a converted protocol's), takes the latest use of any
+route.
 
 A request the provider rejects as overflow (`ProviderError.kind == "overflow"`, classified by
 `ai/errors.is_overflow_message`, HTTP 413, and `context_length_exceeded`) before anything was streamed, and with no
