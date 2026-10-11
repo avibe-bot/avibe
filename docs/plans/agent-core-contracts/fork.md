@@ -288,8 +288,8 @@ already checks that the caller has:
 It also requires the source's backend (`:295-298`). A fork requested by an agent runs with the authority of the
 requesting Turn's caller context, which the Harness records (`vibe/cli.py:6898`), and never more.
 
-**Approvals.** Vibey has no approval flow yet: its Agent runs with `hooks=()` (`agent.py:536`), and the flow is
-planned for P3 (plan §7). The order is fixed now:
+**Approvals.** Vibey has no approval flow: its Agent runs with `hooks=()` (`agent.py:545`), and a cross-backend
+permission design is deferred past v1 (plan §10). If one is built, the order is fixed now:
 
 - The policy is checked first, then approval.
 - A side turn denies any call that would ask.
