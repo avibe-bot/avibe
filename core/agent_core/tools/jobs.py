@@ -86,6 +86,10 @@ FINISHED_JOB_RETENTION_S = 7 * 24 * 3600
 
 STOP_TIMEOUT = "timeout"
 STOP_ABORTED = "aborted"
+#: A stop by anyone else, the wrapper's catchable signals included; ``kill``'s default.
+STOP_KILLED = "killed"
+#: The wrapper itself failed (a full disk, a bug) and stopped the command it could no longer follow.
+STOP_WRAPPER_ERROR = "wrapper_error"
 
 _WRAPPER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "job_wrapper.py")
 #: How long past the deadline the host leaves a live wrapper to decide (its poll interval, its
@@ -484,7 +488,7 @@ class LocalJobHost:
             return b"", since
         return data, start + len(data)
 
-    async def kill(self, job_id: str, *, reason: str = "killed") -> None:
+    async def kill(self, job_id: str, *, reason: str = STOP_KILLED) -> None:
         """Terminate the job's process tree, background children included, if it is provably the job's.
 
         ``reason`` is recorded first (``stop_reason``), so whoever reports the

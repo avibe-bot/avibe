@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import time
 from typing import Any, Mapping, Optional
 
@@ -38,7 +39,9 @@ from core.agent_core.tools.base import (
 )
 from core.agent_core.tools.jobs import (
     STOP_ABORTED,
+    STOP_KILLED,
     STOP_TIMEOUT,
+    STOP_WRAPPER_ERROR,
     JobHandOverUnavailable,
     JobStartError,
     LocalJobHost,
@@ -110,7 +113,7 @@ async def final_result(output: JobOutput, status: JobStatus, *, note: Optional[s
 
 
 async def stopped_result(output: JobOutput, status_line: str) -> ToolResult:
-    """The result of a job that was killed (timeout, abort): the output so far, then why it stopped."""
+    """The result of a job that was stopped: the output so far, then why it stopped (``_stopped_line``)."""
     await output.finish_off_loop()
     text, truncation = output.render("")
     return error_result(_append_status(text, status_line), details=output.details(truncation))
@@ -124,13 +127,31 @@ def _timed_out_line(timeout_s: float) -> str:
 ABORTED_LINE = "Stopped by the user; the command was terminated."
 
 
+KILLED_LINE = "Command was killed before it finished"
+WRAPPER_ERROR_LINE = "Command ended because the job wrapper running it failed"
+# A reason another owner records (``vibe stop``, a Watch) is named as recorded, if it reads as a name: the
+# job's directory is one its command can write to.
+_RECORDED_REASON = re.compile(r"^[a-z][a-z0-9_]{0,39}$")
+
+
 def _stopped_line(reason: Optional[str], timeout_s: Optional[float]) -> Optional[str]:
-    """The status line for a job someone stopped, from the reason recorded when it was stopped."""
-    if reason == STOP_TIMEOUT and timeout_s is not None:
-        return _timed_out_line(timeout_s)
+    """The status line for a job someone stopped, from the reason recorded when it was stopped.
+
+    Every recorded reason has one (``recovery.md`` T2); ``None`` means no stop was recorded.
+    """
+    if not reason:
+        return None
+    if reason == STOP_TIMEOUT:
+        return _timed_out_line(timeout_s) if timeout_s is not None else "Command timed out"
     if reason == STOP_ABORTED:
         return ABORTED_LINE
-    return None
+    if reason == STOP_KILLED:
+        return KILLED_LINE
+    if reason == STOP_WRAPPER_ERROR:
+        return WRAPPER_ERROR_LINE
+    if _RECORDED_REASON.match(reason):
+        return f"Command was stopped before it finished ({reason})"
+    return "Command was stopped before it finished"
 
 
 async def handover_result(output: JobOutput, watch_id: str) -> ToolResult:
@@ -157,9 +178,10 @@ async def recovered_result(
     """The result of a ``bash`` call whose run ended before it committed one (``recovery.md`` T2).
 
     The one renderer for a crash, a restart, and a Stop: a job handed to ``watch_id``
-    gets the hand-over result, a finished job its final output, and a job stopped at
-    its deadline or by an abort that result. ``None`` means the job is gone for
-    another reason or never ran: the caller commits the synthetic interrupted result.
+    gets the hand-over result, a finished job its final output, and a job stopped
+    with a recorded reason its output so far and why it stopped. ``None`` means the
+    job is gone with no recorded stop, or never ran: the caller commits the
+    synthetic interrupted result.
     """
     output = JobOutput(jobs, job_id)
     if watch_id is not None:
