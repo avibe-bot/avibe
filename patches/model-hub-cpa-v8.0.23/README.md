@@ -1,7 +1,7 @@
 # Avibe-owned CPA v8.0.23 compatibility patches
 
 This directory records the source patches carried by Avibe's
-`model-hub-engine-v8.0.23-1` build. Each patch applies independently to the
+`model-hub-engine-v8.0.23-2` build. Each patch applies independently to the
 pinned source; the build applies them in the order the manifest's
 `build.patches` records.
 
@@ -29,6 +29,13 @@ The patch is limited to the helper used by both OpenAI Chat execution paths
 (`openai_compat_executor.go`, buffered and streaming). The helper is
 byte-identical between v8.0.20 and v8.0.23 and differs from v7.3.16 only in
 its module import path, outside the patched hunk.
+
+The patch also updates the three `useMaxCompletionTokens=false` cases of
+upstream's `TestNormalizeOpenAIMaxTokens`, which asserted the stock rewrite,
+to assert this contract: the payload, including a `null` limit, is returned
+unchanged. With all patches applied,
+`go test ./internal/runtime/executor/helps/` passes. The test change does not
+alter the engine binary.
 
 ## `oauth-callback-forwarder-loopback.patch`
 
@@ -79,6 +86,42 @@ probe answers, then narrowed to the entitled set. With both patches applied,
 `go test -run Antigravity ./sdk/cliproxy/` passes.
 
 Drop the patch once router-for-me/CLIProxyAPI#6531 is fixed upstream.
+
+## `codex-utls-h2-ping-health-check.patch`
+
+Codex subscription requests to `https://chatgpt.com` go through a dedicated
+Chrome uTLS connection per request. When ALPN selects HTTP/2, stock CPA wraps
+that connection in a zero-value `http2.Transport{}`: no PING health check, no
+client timeout, nothing that bounds the body read. A path that stops
+delivering packets without a FIN or RST reaching the engine, which a NAT or a
+TCP-terminating proxy can leave behind and TCP keepalive cannot see past,
+therefore blocks the stream until the caller gives up. Avibe's turns then
+waited out their 600-second bound with no byte and no error. The same code is
+in v7.3.16, so this is not a v8 regression.
+
+The patch sets `ReadIdleTimeout` 30 s and `PingTimeout` 15 s on that
+connection's `http2.Transport` only. After 30 s without a frame the transport
+sends one PING and closes the connection when no ACK arrives within 15 s, so
+the stream fails with an in-stream `request_timeout` error at about 45 s.
+Model Hub's recovery then retries on a new connection. A live upstream that
+is silent, for example during a long reasoning phase, acknowledges the PING
+and is not cut; an active stream sends no PING. The shared transports, the
+proxy transports, the HTTP/1.1 Claude round tripper and the WebSocket path
+are untouched. The patch adds `utls_client_health_test.go`: a dead path fails
+the stream, and a silent healthy stream survives ten idle periods.
+
+Measured on the shipped v8.0.23 engine on the uTLS HTTP/2 path through a
+black-holing CONNECT proxy: stock sent no byte and no error for 9 min 38 s,
+until it was killed; patched sent `event: error` (`request_timeout`) at
+45.0 s. A live stream silent for 120 s completed on both.
+
+Upstream: router-for-me/CLIProxyAPI#6535. Upstream made the health check an
+opt-in setting, `streaming.http2-health-check-seconds`
+(`requests.streaming.http2-health-check-seconds` in the v8 layout), which
+defaults to 0, off. This patch stays unconditional. Once a tagged CPA release
+that Avibe adopts contains that setting, drop this patch and render
+`http2-health-check-seconds: 30` in `vibe/model_hub_runtime/config.py`
+alongside the other fixed keys, in the layout that config uses.
 
 ## Rebuild
 
