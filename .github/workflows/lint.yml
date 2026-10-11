@@ -626,14 +626,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: windows-latest
-            pytest-args: ""
-          # Emulated x64 Python is slower than the native interpreters the
-          # CPU-time bounds are set for; windows-latest still checks them.
-          - os: windows-11-arm
-            pytest-args: >-
-              -k "not without_walking_it and not bounded_by_lines and not stays_linear and not nfkc_expansion"
+        os: [windows-latest, windows-11-arm]
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
 
@@ -650,6 +643,11 @@ jobs:
       - name: Install pinned uv
         run: |
           python -m pip install --disable-pip-version-check --only-binary=:all: --no-deps uv==0.12.10
+
+      - uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25  # v5
+        with:
+          path: ~/.cache/uv
+          key: ${{ runner.os }}-${{ runner.arch }}-ci-uv-0.12.10-py3.12-${{ hashFiles('pyproject.toml', 'uv.lock') }}
 
       - name: Install package and test deps
         run: uv pip install --system -e . --group dev
@@ -672,9 +670,12 @@ jobs:
           (Get-Volume -DriveLetter T).FileSystem
           "AVIBE_TEST_FAT_DIR=T:\" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
+      # The four CPU-time bounds are set for the Linux shards, which run them;
+      # Windows' interpreter is slower, and on Arm it is emulated.
       - name: Verify the file tools
         run: >-
-          python -m pytest -q -ra ${{ matrix.pytest-args }}
+          python -m pytest -q -ra
+          -k "not without_walking_it and not bounded_by_lines and not stays_linear and not nfkc_expansion"
           tests/agent_core/tools/test_read.py tests/agent_core/tools/test_write_edit.py
           tests/agent_core/tools/test_file_kinds.py tests/agent_core/tools/test_normalize.py
           tests/agent_core/tools/test_args.py

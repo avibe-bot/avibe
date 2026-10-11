@@ -140,13 +140,25 @@ class FileIdentity:
     ctime_ns: int
 
     @classmethod
-    def of(cls, path: str, st: os.stat_result) -> "FileIdentity":
-        return cls(path, st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+    def of(cls, path: str, fd: int) -> "FileIdentity":
+        """The identity of the open file ``fd``, which ``path`` names.
 
+        Windows' ``stat`` does not report a change time on every Python (3.10 and 3.11 give the creation time
+        as ``st_ctime``), so there it is read from the file itself.
+        """
+        st = os.fstat(fd)
+        ctime_ns = windows_files.change_time_ns(fd) if _WINDOWS else st.st_ctime_ns
+        return cls(path, st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, ctime_ns)
 
-def _require(expected: Optional[FileIdentity], path: str, st: os.stat_result) -> None:
-    if expected is not None and FileIdentity.of(path, st) != expected:
-        raise FileChanged()
+    def matches(self, path: str, st: os.stat_result) -> bool:
+        """Whether ``path``, as ``stat`` saw it, is still this file; on Windows it is opened to read its change time."""
+        if not _WINDOWS:
+            return FileIdentity(path, st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns) == self
+        fd = os.open(path, os.O_RDONLY | os.O_BINARY)
+        try:
+            return FileIdentity.of(path, fd) == self
+        finally:
+            os.close(fd)
 
 
 def _check_publishable(path: str, target: str, expected: Optional[FileIdentity]) -> bool:
@@ -165,20 +177,9 @@ def _check_publishable(path: str, target: str, expected: Optional[FileIdentity])
         raise NotRegularFile("directory" if stat.S_ISDIR(st.st_mode) else "other")
     if not may_write(current):
         raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), current)
-    if expected is not None and _WINDOWS:
-        # On Windows, os.stat gives the creation time as st_ctime, where the read's os.fstat gave the
-        # change time that FileIdentity needs: compare a descriptor's view with a descriptor's view.
-        st = _fstat_of(current)
-    _require(expected, current, st)
+    if expected is not None and not expected.matches(current, st):
+        raise FileChanged()
     return True
-
-
-def _fstat_of(path: str) -> os.stat_result:
-    fd = os.open(path, os.O_RDONLY | getattr(os, "O_BINARY", 0))
-    try:
-        return os.fstat(fd)
-    finally:
-        os.close(fd)
 
 
 def write_bytes(path: str, data: bytes, expected: Optional[FileIdentity] = None) -> None:
@@ -188,9 +189,10 @@ def write_bytes(path: str, data: bytes, expected: Optional[FileIdentity] = None)
     file sits beside the real target (through symlinks). Replacing a file, it is private (0600) while
     it receives the new contents and takes the file's mode once they are fsynced; a new file's temp is
     created with the umask default it keeps, so the process umask is never read or changed. Then
-    ``os.replace`` puts it in place. On Windows an existing file is replaced with ``ReplaceFileW``,
-    which keeps what a mode stands for there and more: its DACL, encryption, compression, named
-    streams, and creation time (``windows_files.replace_existing``).
+    ``os.replace`` puts it in place. On Windows the private temp file has an owner-only DACL and then
+    the file's own, and an existing file is replaced with ``ReplaceFileW``, which keeps the rest of
+    what is the file's: its encryption, compression, named streams, and creation time
+    (``windows_files``).
 
     An existing file whose directory does not let a temp file be created is refused
     (``NotReplaceable``) rather than written in place, which a full disk could leave half-written.
@@ -209,8 +211,11 @@ def write_bytes(path: str, data: bytes, expected: Optional[FileIdentity] = None)
     # Short and not derived from the target's name, which may already be at NAME_MAX.
     tmp = os.path.join(os.path.dirname(target), f".avibe-{secrets.token_hex(6)}.tmp")
     try:
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
-        fd = os.open(tmp, flags, 0o600 if mode is not None else 0o666)
+        if _WINDOWS and mode is not None:
+            fd = windows_files.create_private(tmp)
+        else:
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+            fd = os.open(tmp, flags, 0o600 if mode is not None else 0o666)
     except PermissionError:
         if mode is None:
             raise
@@ -223,6 +228,7 @@ def write_bytes(path: str, data: bytes, expected: Optional[FileIdentity] = None)
             if mode is not None and not _WINDOWS:
                 os.fchmod(handle.fileno(), mode)
         if _check_publishable(path, target, expected) and _WINDOWS:
+            windows_files.copy_dacl(target, tmp)  # private until now; the file's own from here
             windows_files.replace_existing(tmp, target)
         else:
             os.replace(tmp, target)

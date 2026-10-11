@@ -475,6 +475,87 @@ async def test_a_replaced_file_keeps_an_acl_of_its_own(tmp_path, make_ctx, tool)
     assert _icacls(target) == before
 
 
+@pytest.mark.skipif(not WINDOWS, reason="a Windows ACL")
+@pytest.mark.parametrize("tool", ["write", "edit"])
+async def test_replacement_contents_stay_the_owners_until_the_replace(tmp_path, make_ctx, monkeypatch, tool):
+    """The temp file is created owner-only, as a 0600 file is on POSIX: not with the directory's wider ACL."""
+    # Python's mkdtemp, which made tmp_path, gives it entries without automatic inheritance, so its files list
+    # theirs as their own; a user's directory inherits automatically, as it does after /reset.
+    _icacls(tmp_path, "/reset")
+    target = tmp_path / "f.txt"
+    target.write_bytes(b"old\n")
+    before = _icacls(target)
+    seen = []
+    real_fsync = write_module.os.fsync
+
+    def watch(fd):
+        [temp] = [path for path in tmp_path.iterdir() if path.name.startswith(".avibe-")]
+        seen.append(_icacls(temp).replace(str(temp), "").split("\n\n")[0].split())
+        real_fsync(fd)
+
+    monkeypatch.setattr(write_module.os, "fsync", watch)
+    result = await _replace_with(tool, make_ctx, "f.txt")
+
+    assert not result.is_error, result_text(result)
+    assert seen == [["OWNER", "RIGHTS:(F)", "NT", "AUTHORITY\\SYSTEM:(F)"]]
+    assert _icacls(target) == before
+
+
+@pytest.mark.skipif(not WINDOWS, reason="Windows file times")
+def test_the_change_time_an_edit_compares_moves_with_every_write(tmp_path):
+    """Python before 3.12 reports a Windows file's creation time as ``st_ctime``, so an edit reads the change time
+    from the file itself: a same-size rewrite whose mtime is put back still moves it."""
+    from core.agent_core.tools import windows_files
+
+    path = tmp_path / "f.txt"
+    path.write_bytes(b"one\n")
+    original = os.stat(path)
+
+    def change_time():
+        with open(path, "rb") as handle:
+            return windows_files.change_time_ns(handle.fileno())
+
+    before = change_time()
+    deadline = time.monotonic() + 5
+    while True:  # until the filesystem's clock has moved past the first write (its timer's resolution)
+        path.write_bytes(b"two\n")
+        os.utime(path, ns=(original.st_atime_ns, original.st_mtime_ns))
+        if change_time() != before or time.monotonic() > deadline:
+            break
+        time.sleep(0.005)
+
+    assert change_time() > before
+    assert os.stat(path).st_mtime_ns == original.st_mtime_ns
+    assert os.stat(path).st_birthtime_ns == original.st_birthtime_ns
+
+
+@pytest.mark.skipif(not WINDOWS, reason="ReplaceFileW")
+async def test_a_backup_that_cannot_be_removed_is_logged_and_the_write_stands(tmp_path, make_ctx, monkeypatch, caplog):
+    """Another program opened the backup between ReplaceFileW and its removal: the old copy stays, and says where."""
+    from core.agent_core.tools import windows_files
+
+    real_unlink = windows_files.os.unlink
+
+    def held(path, *args, **kwargs):
+        if str(path).endswith(".bak"):
+            raise PermissionError(13, "The process cannot access the file", str(path), 32)
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(windows_files.os, "unlink", held)
+    target = tmp_path / "f.txt"
+    target.write_bytes(b"old\n")
+
+    with caplog.at_level("WARNING", logger=windows_files.__name__):
+        result = await WriteTool().execute({"path": "f.txt", "content": "new\n"}, make_ctx())
+    monkeypatch.undo()
+
+    assert not result.is_error, result_text(result)
+    assert target.read_bytes() == b"new\n"
+    [backup] = [path for path in tmp_path.iterdir() if path.name.endswith(".bak")]
+    assert backup.read_bytes() == b"old\n"
+    assert str(backup) in caplog.text
+
+
 @pytest.mark.skipif(not WINDOWS, reason="Windows file metadata")
 @pytest.mark.parametrize("tool", ["write", "edit"])
 async def test_a_replaced_file_keeps_its_named_streams_and_encryption(tmp_path, make_ctx, tool):

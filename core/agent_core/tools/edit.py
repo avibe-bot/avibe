@@ -192,8 +192,8 @@ def _plan_edits(
     real = os.path.realpath(absolute)
     fd = open_regular(real)
     try:
-        st = os.fstat(fd)
-        size = st.st_size
+        identity = FileIdentity.of(real, fd)
+        size = identity.size
         if size > MAX_EDIT_BYTES:
             raise _TooLarge(size)
         raw = read_at_most(fd, MAX_EDIT_BYTES)
@@ -206,7 +206,7 @@ def _plan_edits(
     if lines > MAX_EDIT_LINES:
         raise _TooManyLines(lines)
     new_text, before, after, counts, changed = apply_edits(text, edits, path, max_result_chars=MAX_EDIT_BYTES)
-    return len(raw), encode_file(new_text), before, after, FileIdentity.of(real, st), counts, changed
+    return len(raw), encode_file(new_text), before, after, identity, counts, changed
 
 
 class EditTool:
