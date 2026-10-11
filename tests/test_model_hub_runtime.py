@@ -5773,56 +5773,64 @@ def test_engine_client_marks_loopback_stream_disconnect_as_engine_down(
     asyncio.run(run())
 
 
+def _cpa_unknown_provider(protocol: str, routed_model: str, *, error_type: str = "invalid_request_error") -> dict:
+    """CLIProxyAPI's body for a routed model it has not registered (handlers_routing.go)."""
+
+    message = f"unknown provider for model {routed_model}"
+    if protocol == "anthropic":
+        return {"type": "error", "error": {"type": error_type, "message": message}}
+    return {"error": {"message": message, "type": error_type, "code": "model_not_found", "param": "model"}}
+
+
 @pytest.mark.parametrize(
-    (
-        "status",
-        "reported_model",
-        "expected_kind",
-        "expected_code",
-        "expected_reason",
-    ),
+    ("protocol", "status", "body", "expected_kind", "expected_code", "expected_reason"),
     (
         (
-            502,
-            "source-fixture123/model-a",
+            "anthropic",
+            400,
+            _cpa_unknown_provider("anthropic", "source-fixture123/model-a"),
             RawOutcomeKind.NETWORK_ERROR,
             "engine_down",
             None,
         ),
         (
-            502,
-            "source-fixture123/model-b",
-            RawOutcomeKind.HTTP_ERROR,
+            "openai_chat",
+            400,
+            _cpa_unknown_provider("openai_chat", "source-fixture123/model-a"),
+            RawOutcomeKind.NETWORK_ERROR,
+            "engine_down",
             None,
-            "server_error",
         ),
         (
-            503,
-            "source-fixture123/model-a",
+            "anthropic",
+            400,
+            _cpa_unknown_provider("anthropic", "source-fixture123/model-b"),
+            RawOutcomeKind.HTTP_ERROR,
+            "upstream_request_invalid",
+            None,
+        ),
+        (
+            "anthropic",
+            502,
+            _cpa_unknown_provider("anthropic", "source-fixture123/model-a", error_type="api_error"),
             RawOutcomeKind.HTTP_ERROR,
             None,
             "server_error",
         ),
     ),
+    ids=("anthropic", "openai_chat", "another_model", "older_engine_502"),
 )
 def test_engine_client_distinguishes_local_model_registration_failure(
     monkeypatch: pytest.MonkeyPatch,
+    protocol: str,
     status: int,
-    reported_model: str,
+    body: dict,
     expected_kind: RawOutcomeKind,
     expected_code: str | None,
     expected_reason: str | None,
 ) -> None:
     async def run() -> None:
-        payload = json.dumps(
-            {
-                "type": "error",
-                "error": {
-                    "type": "api_error",
-                    "message": f"unknown provider for model {reported_model}",
-                },
-            }
-        ).encode()
+        payload = json.dumps(body).encode()
 
         class Content:
             reads = 0
@@ -5856,7 +5864,7 @@ def test_engine_client_distinguishes_local_model_registration_failure(
         source = SourceRecord(
             source_id="src_fixture123",
             vendor="custom",
-            protocol="anthropic",
+            protocol=protocol,
             base_url="https://api.example.test/v1",
             credential_ref="cred_fixture123",
             allowed_origins=(),
@@ -5875,7 +5883,6 @@ def test_engine_client_distinguishes_local_model_registration_failure(
         decision = classify_outcome(outcome)
 
         assert outcome.kind is expected_kind
-        assert outcome.error_code == expected_code
         assert decision.error_code == expected_code
         assert decision.reason == expected_reason
 

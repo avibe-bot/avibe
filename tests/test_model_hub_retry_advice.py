@@ -296,22 +296,23 @@ async def test_connection_failure_has_no_response_receipt_or_retry_advice() -> N
 
 @pytest.mark.parametrize("protocol", WIRE)
 async def test_local_registration_failure_keeps_its_identity_with_http_receipt(protocol: str) -> None:
+    message = "unknown provider for model retry-advice/model-a"
+    # CLIProxyAPI's local routing rejection, rebuilt as a Claude error on /v1/messages.
+    body = (
+        {"type": "error", "error": {"type": "invalid_request_error", "message": message}}
+        if protocol == "anthropic"
+        else {"error": {"message": message, "type": "invalid_request_error", "code": "model_not_found", "param": "model"}}
+    )
+
     async def respond(_request: web.Request) -> web.Response:
-        return web.json_response(
-            {
-                "type": "error",
-                "error": {"type": "api_error", "message": "unknown provider for model retry-advice/model-a"},
-            },
-            status=502,
-            headers={"Retry-After": "60"},
-        )
+        return web.json_response(body, status=400, headers={"Retry-After": "60"})
 
     async with _engine(respond) as (client, requests):
         outcome, body = await _invoke(client, protocol, False)
 
     assert outcome.kind is RawOutcomeKind.NETWORK_ERROR
     assert outcome.error_code == "engine_down"
-    assert outcome.http_status == 502
+    assert outcome.http_status == 400
     assert outcome.retry_after == "60"
     assert outcome.response_received_at is not None
     assert outcome.response_received_at.tzinfo is timezone.utc

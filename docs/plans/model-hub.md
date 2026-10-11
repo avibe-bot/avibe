@@ -638,8 +638,11 @@ the separate engine boundary and remaining compatibility limitations are recorde
 Parameter, protocol, and tool-compatibility failures are terminal without fallthrough.
 A local Gateway start, listener, or process loss at **any** request phase is terminal
 `engine_down`: it mutates no Source, does not replay output, and does not walk another
-hop. Credential failures follow the authoritative matrix below. The network-failure
-matrix owns every upstream transport branch. While `stream_started` is false, shaped
+hop. CLIProxyAPI's pre-egress rejection of a routed model it has not registered (yet), a
+400 `unknown provider for model <prefix>/<model>` naming the request's own routed model,
+is this local `engine_down` too: the engine has not registered the routed model, which is
+not an upstream rejection. Credential failures follow the authoritative matrix below. The
+network-failure matrix owns every upstream transport branch. While `stream_started` is false, shaped
 quota/429/authentication/5xx results retain their existing classifier while an
 unclassified connection failure creates only live short backoff. The fact flips only at
 the first user-visible model-output byte, never at HTTP status, headers, or another
