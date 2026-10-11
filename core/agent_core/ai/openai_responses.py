@@ -272,7 +272,8 @@ class OpenAIResponsesAdapter(ProviderAdapter):
         served_hop_resolver: ServedHopResolver | None = None,
         gateway: bool = False,
     ) -> None:
-        self._client = client or httpx.AsyncClient(timeout=None)
+        # The Model Hub gateway is loopback: an environment or system proxy must never carry it.
+        self._client = client or httpx.AsyncClient(timeout=None, trust_env=not gateway)
         self._owns_client = client is None
         self._media_loader = media_loader
         self._served_hop_resolver = served_hop_resolver
