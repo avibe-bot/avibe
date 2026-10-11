@@ -87,6 +87,13 @@ The run makes about ten Turns, plus their checkpoint turns, on the small window.
   row instead of the Session's tool results. A checkpoint that read the fixture could recover a changed value from
   disk instead of from the conversation. The recorded runs' checkpoint turns made no tool round (`rounds` is 0 in
   every `fork_turn` row); check that in the Session before recording a row.
+- The two checkpoints the gate counts may include a `dropped` row, which carries the earlier checkpoint without a model
+  call. The JSON marks each compaction's `model_written`; the recorded run's were all model-written.
+- A reason passes on its keyword, so a reversed one ("the upstream API accepts bursts above 5") would still pass.
+- A changed file is matched by the end of its path, so `tests/rate_limit.py` would count for `src/rate_limit.py`. The
+  recorded answer names the exact paths.
+- The fixture check takes the first `BURST = 5` or `REFILL_RATE = 1` line, not the effective last assignment. The
+  recorded run's edits replaced the old lines.
 - The model is recorded as requested, not as served. If Model Hub fails over to another hop during a run, the row
   would name the requested model. The recorded runs were served by it throughout (every checkpoint's and response's
   origin); check the origins in the Session before recording a row.
