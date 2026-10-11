@@ -55,6 +55,10 @@ BUILTIN_DEFAULT_AGENT_METADATA = {"builtin": True, "builtin_default": True, "loc
 BUILTIN_BACKEND_ENABLED_META_KEY = "backend_enabled"
 # Catalog-owned: only the store writes them, and only on rows it created (``source == "builtin"``).
 BUILTIN_AGENT_MARKER_KEYS = frozenset((*BUILTIN_DEFAULT_AGENT_METADATA, BUILTIN_BACKEND_ENABLED_META_KEY))
+# The description a built-in Agent is created with. The built-in backend's Agent is Vibey, as its system prompt
+# says (``modules/agents/vibey/prompt.py``); the prompt's Agents roster (``core/prompts/harness-agents.md``)
+# lists this description beside that identity.
+_BUILTIN_AGENT_DESCRIPTIONS = {"vibey": "Vibey, the official agent of Avibe."}
 AGENT_ARCHIVE_METADATA_KEY = "_avibe_archive"
 ARCHIVED_AGENT_NAME_PREFIX = "_"
 LEGACY_ARCHIVED_AGENT_NAME_PREFIX = "_archived_"
@@ -1704,7 +1708,9 @@ class VibeAgentStore:
         return self.create(
             name=agent_name,
             backend=backend,
-            description=f"Default Agent for the {display_name_for_backend(backend)} backend.",
+            description=_BUILTIN_AGENT_DESCRIPTIONS.get(
+                backend, f"Default Agent for the {display_name_for_backend(backend)} backend."
+            ),
             source="builtin",
             metadata=metadata,
             enabled=True,

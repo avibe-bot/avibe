@@ -74,6 +74,22 @@ def test_the_startup_sync_leaves_the_built_in_vibey_agent_enabled(tmp_path, sqli
         store.close()
 
 
+def test_the_built_in_vibey_agent_is_described_as_the_agent_its_preamble_names(tmp_path, sqlite_db_factory):
+    """The Agents roster in the system prompt lists this description beside the preamble's identity, so the two
+    must agree; the native backends' built-in Agents keep the generic description."""
+    store = VibeAgentStore(sqlite_db_factory(tmp_path / "agents.sqlite"))
+    try:
+        store.ensure_builtin_default_agents(["claude"])
+
+        # The owner's wording, stated here rather than read from the code it checks.
+        assert store.get_builtin_default_agent_for_backend("vibey").description == "Vibey, the official agent of Avibe."
+        assert store.get_builtin_default_agent_for_backend("claude").description == (
+            "Default Agent for the Claude Code backend."
+        )
+    finally:
+        store.close()
+
+
 def test_vibey_agent_can_be_created_listed_selected_and_routed(tmp_path, sqlite_db_factory):
     """The store and shared run-target resolver must agree on the fourth backend."""
     store = VibeAgentStore(sqlite_db_factory(tmp_path / "agents.sqlite"))
