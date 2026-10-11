@@ -607,13 +607,13 @@ jobs:
       fail-fast: false
       matrix:
         # Both use x64 Python: cryptography publishes no win_arm64 wheel, so
-        # Avibe runs emulated on Windows on Arm until it does. The engine
-        # follows Python's architecture for now.
+        # Avibe runs emulated on Windows on Arm until it does. The engine is a
+        # standalone program and stays native to the machine.
         include:
           - runner: windows-latest
             engine_platform: windows-amd64
           - runner: windows-11-arm
-            engine_platform: windows-amd64
+            engine_platform: windows-arm64
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
 

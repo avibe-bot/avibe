@@ -36,6 +36,7 @@ import pytest
 pytestmark = pytest.mark.e2e_service
 
 _MOCK_UPSTREAM = Path(__file__).resolve().parent / "drivers" / "mock_llm_upstream.py"
+_BACKEND_CATALOG = Path(__file__).resolve().parents[2] / "vibe" / "data" / "backend_models.json"
 _CHAT_KEY = "sk-acceptance-chat-not-real"
 _ANTHROPIC_KEY = "sk-acceptance-anthropic-not-real"
 _CHAT_MODEL = "mock-model"
@@ -117,6 +118,8 @@ class _Service:
         # Every subprocess runs from here, so it must exist before the first one.
         home.mkdir(parents=True, exist_ok=True)
         self.home = home
+        models_dev = home / "models-dev.json"
+        models_dev.write_text("{}", encoding="utf-8")
         # Not home/.avibe: a source checkout refuses to migrate what looks like
         # the user's default state, and this home is only ever the test's.
         self.avibe_home = home / "avibe-state"
@@ -130,8 +133,12 @@ class _Service:
             "NO_PROXY": "127.0.0.1,localhost",
             "no_proxy": "127.0.0.1,localhost",
             # A test service reports nothing and fetches nothing it does not test;
-            # the engine still installs from the packaged manifest.
+            # the engine still installs from the packaged manifest. The catalogs
+            # it reads are this checkout's backend catalog and a models.dev copy
+            # that describes nothing; neither is needed by the turns below.
             "VIBE_SENTRY_DSN": "",
+            "AVIBE_BACKEND_MODEL_CATALOG_URL": _BACKEND_CATALOG.as_uri(),
+            "AVIBE_MODELS_DEV_URL": models_dev.as_uri(),
             "VIBE_INSTALL_SKIP_ASKILL": "1",
             "VIBE_ASKILL_AUTO_UPDATE": "0",
             "VIBE_SHOW_RUNTIME_OFFLINE": "1",
@@ -148,6 +155,9 @@ class _Service:
             urllib.request.ProxyHandler({}), urllib.request.HTTPCookieProcessor(self._cookies),
         )
         self._csrf: str | None = None
+        # Each service and UI this home ran, by pid and start time: a start can
+        # drop the record of one still running, and cleanup must not rely on it.
+        self._started: list[dict[str, Any]] = []
 
     def python(self, *args: str, timeout: float = 300, check: bool = True) -> subprocess.CompletedProcess[str]:
         """Run this interpreter outside the checkout, so it imports the installed package."""
@@ -204,12 +214,14 @@ class _Service:
         """Write the first-run config ``vibe start`` would, on a port of our own.
 
         The default port may belong to a real service on a developer machine.
+        Update checks are off: they would ask PyPI and npm for new releases.
         """
 
         self.python("-c", (
             "from config import paths; from core.services import settings; "
             "config = settings.default_config(); "
             f"config.ui.setup_port = {self.port}; config.ui.open_browser = False; "
+            "config.update.check_interval_minutes = 0; "
             "config.save(paths.get_config_path())"
         ))
         assert (self.avibe_home / "config" / "config.json").is_file()
@@ -223,22 +235,76 @@ class _Service:
             lambda: self.request("GET", "/api/models/sources", timeout=10)[0] == 200,
             what="the Model Hub API", seconds=120,
         )
+        self._remember_recorded()
+
+    def _recorded_pids(self) -> list[int]:
+        """The service and UI pids this home's runtime records right now."""
+
+        runtime = self.avibe_home / "runtime"
+        recorded: list[int] = []
+        with contextlib.suppress(OSError, ValueError, KeyError, TypeError):
+            recorded.append(int(json.loads((runtime / "service.lock").read_text(encoding="utf-8"))["pid"]))
+        for name in ("vibe.pid", "vibe-ui.pid"):
+            with contextlib.suppress(OSError, ValueError):
+                recorded.append(int((runtime / name).read_text(encoding="utf-8").strip()))
+        return recorded
+
+    def _remember_recorded(self) -> None:
+        for pid in self._recorded_pids():
+            if not self._runs_here(pid):
+                continue
+            with contextlib.suppress(psutil.Error):
+                entry = {"pid": pid, "create_time": psutil.Process(pid).create_time()}
+                if entry not in self._started:
+                    self._started.append(entry)
+
+    def _runs_here(self, pid: int) -> bool:
+        """Whether ``pid`` carries this home, which no other process on the machine does."""
+
+        try:
+            return psutil.Process(pid).environ().get("AVIBE_HOME") == str(self.avibe_home)
+        except psutil.Error:
+            return False
+
+    @staticmethod
+    def _kill(pid: int) -> None:
+        # An external command kills it: the service is not a child of this test.
+        command = ["taskkill", "/F", "/PID", str(pid)] if os.name == "nt" else ["kill", "-KILL", str(pid)]
+        result = subprocess.run(command, capture_output=True, text=True, timeout=30)
+        _await(
+            lambda: not psutil.pid_exists(pid),
+            what=f"process {pid} to exit after {command[0]} ({result.returncode}: {result.stderr.strip()})",
+            seconds=30, interval=0.2,
+        )
 
     def kill_service(self) -> None:
         """Kill the service outright, the way a crash or ``taskkill /F`` would.
 
         The pid comes from this home's service lock and must carry this home in
-        its environment, so nothing else on the machine can be the target. An
-        external command kills it: the service is not a child of this test.
+        its environment, so nothing else on the machine can be the target.
         """
 
         lock = json.loads((self.avibe_home / "runtime" / "service.lock").read_text(encoding="utf-8"))
         assert lock.get("phase") == "running", lock
         pid = int(lock["pid"])
-        assert psutil.Process(pid).environ().get("AVIBE_HOME") == str(self.avibe_home), pid
-        command = ["taskkill", "/F", "/PID", str(pid)] if os.name == "nt" else ["kill", "-KILL", str(pid)]
-        subprocess.run(command, check=True, capture_output=True, timeout=30)
-        _await(lambda: not psutil.pid_exists(pid), what="the killed service to exit", seconds=30, interval=0.2)
+        assert self._runs_here(pid), pid
+        self._kill(pid)
+
+    def stop(self) -> None:
+        """Stop the service, then kill each service or UI of this home that ``vibe stop`` left."""
+
+        try:
+            result = self.vibe("stop", timeout=120, check=False)
+        except subprocess.TimeoutExpired:
+            print("vibe stop timed out")
+        else:
+            if result.returncode != 0:
+                print(f"vibe stop exited {result.returncode}: {result.stdout[-2000:]}{result.stderr[-2000:]}")
+        self._remember_recorded()
+        for entry in self._started:
+            if _process_is(entry):
+                print(f"vibe stop left pid {entry['pid']} running; killing it")
+                self._kill(entry["pid"])
 
     def engines(self) -> list[dict[str, Any]]:
         record = self.avibe_home / "runtime" / "model-hub" / "state" / "engine-process.json"
@@ -381,7 +447,7 @@ def test_fresh_install_serves_vibey_and_claude_through_the_hub_and_reaps_an_orph
             print(service.diagnostics())
             raise
         finally:
-            service.vibe("stop", timeout=120, check=False)
+            service.stop()
             service.close()
             for entry in started:
                 if _process_is(entry):
