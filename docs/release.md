@@ -33,7 +33,7 @@ Published managed-runtime manifests are availability contracts. Keep their
 release URLs under the scheduled manifest-verified backup/recovery guard.
 Publish replacement assets before changing a pinned manifest so the guard never
 restores bytes from a different release. A manifest that pins a third-party
-release that Avibe cannot republish (ripgrep) relies on the download mirror as
+release that Avibe cannot republish (ripgrep, cloudflared) relies on the download mirror as
 that guard: the mirror holds the pinned release, verified against the manifest.
 
 ## Download mirror

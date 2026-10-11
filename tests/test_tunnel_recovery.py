@@ -1880,6 +1880,7 @@ def test_ra_tq_034_missing_cloudflared_downloads_outside_the_lifecycle_lock(monk
     config, _ = _setup_exiting_connector(monkeypatch, tmp_path)
     config.remote_access.vibe_cloud.cloudflared_path = ""
     config.save()
+    monkeypatch.setattr(remote_access, "_cloudflared_pin_needed", lambda loaded=None: True)
     monkeypatch.setattr(remote_access, "_resolve_binary", lambda loaded=None: None)
     downloads = []
 
@@ -1996,11 +1997,11 @@ def test_ra_tq_034_concurrent_starts_share_one_cloudflared_download(monkeypatch,
     checks = []
     downloads = []
 
-    def resolve_binary(loaded=None):
+    def pin_needed(loaded=None):
         checks.append(threading.current_thread().name)
         if len(checks) >= 2:
             both_checked.set()
-        return "/fake/cloudflared" if installed.is_set() else None
+        return not installed.is_set()
 
     def install_cloudflared():
         downloads.append(threading.current_thread().name)
@@ -2008,11 +2009,11 @@ def test_ra_tq_034_concurrent_starts_share_one_cloudflared_download(monkeypatch,
         installed.set()
         return {"ok": True, "path": "/fake/cloudflared"}
 
-    monkeypatch.setattr(remote_access, "_resolve_binary", resolve_binary)
+    monkeypatch.setattr(remote_access, "_cloudflared_pin_needed", pin_needed)
     monkeypatch.setattr(remote_access, "install_cloudflared", install_cloudflared)
 
     def download():
-        remote_access._download_missing_cloudflared(config)
+        remote_access._ensure_cloudflared_pin(config)
 
     threads = [threading.Thread(target=download, name=f"start-{i}") for i in range(2)]
     for thread in threads:

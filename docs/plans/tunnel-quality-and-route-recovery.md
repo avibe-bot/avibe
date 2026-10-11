@@ -637,8 +637,8 @@ busy, because a later tick repeats them, and a startup orphan-candidate
 reconciliation that found it busy is retried on later ticks. Record cleanups
 that nothing repeats (a discarded candidate, a drained connector, a cleared
 tail rollback) wait up to 60 seconds, three times the longest hold, and
-otherwise log an error and leave the records for reconciliation. Waits such as candidate warm-up and downloading a
-missing cloudflared run outside it, and the OS releases it when its holder
+otherwise log an error and leave the records for reconciliation. Waits such as candidate warm-up and installing the
+cloudflared pin run outside it, and the OS releases it when its holder
 dies. A request path that is not a regular file is no request.
 
 So only an explicit `stop()` withdraws the request, and no stop or start in

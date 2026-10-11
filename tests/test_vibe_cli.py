@@ -4097,8 +4097,8 @@ def test_runtime_clean_json_keeps_nested_failure_payload_and_exits_nonzero(monke
 @pytest.mark.parametrize(
     ("language", "consumer_scope", "failure_contract"),
     [
-        ("en", "Show, Git, Model Hub, tmux, and ripgrep", "exit nonzero if any cleanup fails"),
-        ("zh", "Show、Git、Model Hub、tmux 和 ripgrep", "任一清理失败时以非零状态退出"),
+        ("en", "Show, Git, Model Hub, tmux, ripgrep, and cloudflared", "exit nonzero if any cleanup fails"),
+        ("zh", "Show、Git、Model Hub、tmux、ripgrep 和 cloudflared", "任一清理失败时以非零状态退出"),
     ],
 )
 def test_runtime_clean_help_names_consumers_and_failure_exit(
@@ -4867,7 +4867,7 @@ def test_runtime_clean_reclaims_each_shared_consumer_in_preview_and_real_run(
 
 
 def test_runtime_clean_registry_invokes_every_current_shared_consumer(monkeypatch):
-    from core import ripgrep_runtime, tmux_runtime
+    from core import cloudflared_runtime, ripgrep_runtime, tmux_runtime
     from vibe.model_hub_runtime import installer as model_hub_installer
 
     calls = []
@@ -4896,6 +4896,7 @@ def test_runtime_clean_registry_invokes_every_current_shared_consumer(monkeypatc
         lambda: FakeManager("tmux"),
     )
     monkeypatch.setattr(ripgrep_runtime, "RipgrepRuntimeManager", lambda: FakeManager("ripgrep"))
+    monkeypatch.setattr(cloudflared_runtime, "CloudflaredRuntimeManager", lambda: FakeManager("cloudflared"))
 
     results = cli._clean_managed_runtime_consumers(keep_previous=2, dry_run=True)
 
@@ -4904,12 +4905,14 @@ def test_runtime_clean_registry_invokes_every_current_shared_consumer(monkeypatc
         "model_hub_engine",
         "tmux",
         "ripgrep",
+        "cloudflared",
     ]
     assert calls == [
         ("git", 2, True),
         ("model_hub_engine", 2, True),
         ("tmux", 2, True),
         ("ripgrep", 2, True),
+        ("cloudflared", 2, True),
     ]
 
 

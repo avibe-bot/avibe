@@ -16231,6 +16231,7 @@ def cmd_runtime(args) -> int:
         tmux = _ensure_tmux_during_prepare(offline=bool(offline), force=force)
         git = _ensure_git_during_prepare(offline=offline, force=force)
         ripgrep = _ensure_ripgrep_during_prepare(offline=offline, force=force)
+        cloudflared = _ensure_cloudflared_during_prepare(offline=offline, force=force)
         avault = _ensure_avault_during_prepare(offline=bool(offline), force=force)
         model_hub_engine = _ensure_model_hub_engine_during_prepare(
             offline=bool(offline),
@@ -16242,6 +16243,7 @@ def cmd_runtime(args) -> int:
         payload["tmux"] = tmux
         payload["git"] = git
         payload["ripgrep"] = ripgrep
+        payload["cloudflared"] = cloudflared
         install = payload.get("install") if isinstance(payload.get("install"), dict) else {}
         policy = payload.get("policy") if isinstance(payload.get("policy"), dict) else {}
         runtime_prepared = bool(payload.get("ok"))
@@ -16350,6 +16352,28 @@ def cmd_runtime(args) -> int:
                         "runtime.prepare.ripgrepNotReady",
                         language,
                         reason=ripgrep.get("message") or ripgrep.get("reason") or "install failed",
+                    ),
+                    file=sys.stderr,
+                )
+            if cloudflared.get("skipped"):
+                pass
+            elif cloudflared.get("ok"):
+                print(
+                    i18n_t(
+                        (
+                            "runtime.prepare.cloudflaredInstalled"
+                            if cloudflared.get("changed")
+                            else "runtime.prepare.cloudflaredReady"
+                        ),
+                        language,
+                    )
+                )
+            else:
+                print(
+                    i18n_t(
+                        "runtime.prepare.cloudflaredNotReady",
+                        language,
+                        reason=cloudflared.get("message") or cloudflared.get("reason") or "install failed",
                     ),
                     file=sys.stderr,
                 )
@@ -16568,6 +16592,21 @@ def _ensure_ripgrep_during_prepare(offline: bool | None = None, force: bool = Fa
         return {"ok": False, "message": str(exc)}
 
 
+def _ensure_cloudflared_during_prepare(offline: bool | None = None, force: bool = False) -> dict:
+    """Prepare the pinned cloudflared while remote access is enabled; never fails prepare."""
+
+    try:
+        config = V2Config.load()
+        cloud = config.remote_access.vibe_cloud
+        if not (config.remote_access.provider == "vibe_cloud" and cloud.enabled and cloud.tunnel_token):
+            return {"ok": True, "skipped": True, "reason": "remote_access_disabled"}
+        from core.cloudflared_runtime import CloudflaredRuntimeManager
+
+        return CloudflaredRuntimeManager(offline=offline).ensure(force=force)
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "message": str(exc)}
+
+
 def _format_byte_size(size: int) -> str:
     if size < 1024:
         return f"{size} B"
@@ -16581,6 +16620,7 @@ def _format_byte_size(size: int) -> str:
 def _managed_runtime_cleaners() -> tuple[tuple[str, Callable[..., dict[str, Any]]], ...]:
     """Return the shared-runtime cleanup passes in stable output order."""
 
+    from core.cloudflared_runtime import CloudflaredRuntimeManager
     from core.ripgrep_runtime import RipgrepRuntimeManager
     from core.tmux_runtime import get_tmux_runtime_manager
     from vibe.model_hub_runtime.installer import EngineRuntimeManager
@@ -16604,11 +16644,18 @@ def _managed_runtime_cleaners() -> tuple[tuple[str, Callable[..., dict[str, Any]
             dry_run=dry_run,
         )
 
+    def clean_cloudflared(*, keep_previous: int, dry_run: bool) -> dict[str, Any]:
+        return CloudflaredRuntimeManager().clean(
+            keep_previous=keep_previous,
+            dry_run=dry_run,
+        )
+
     return (
         ("git", _clean_git_runtime),
         ("model_hub_engine", clean_model_hub),
         ("tmux", clean_tmux),
         ("ripgrep", clean_ripgrep),
+        ("cloudflared", clean_cloudflared),
     )
 
 
@@ -16670,6 +16717,7 @@ def _managed_runtime_label(runtime_id: str) -> str:
         "model_hub_engine": "Model Hub Runtime",
         "tmux": "tmux Runtime",
         "ripgrep": "ripgrep Runtime",
+        "cloudflared": "cloudflared Runtime",
     }
     return labels.get(runtime_id, runtime_id.replace("-", " ").replace("_", " ").title())
 

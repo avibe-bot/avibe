@@ -15,16 +15,12 @@ import json
 import logging
 import ntpath
 import os
-import platform
 import re
 import shlex
 import secrets
-import shutil
 import socket
 import ssl
-import stat
 import subprocess
-import tarfile
 import tempfile
 import threading
 import time
@@ -45,7 +41,6 @@ from vibe import tunnel_quality
 
 logger = logging.getLogger(__name__)
 
-CLOUDFLARED_BASE_URL = "https://github.com/cloudflare/cloudflared/releases/latest/download"
 SESSION_COOKIE_NAME = "__Host-vibe_remote_session"
 PERSONAL_SESSION_TTL_SECONDS = 24 * 60 * 60
 PERSONAL_SESSION_RENEW_AFTER_SECONDS = PERSONAL_SESSION_TTL_SECONDS // 2
@@ -231,13 +226,11 @@ class OAuthCodeExchangeError(Exception):
         self.detail = detail or ""
 
 
-def _bin_dir() -> Path:
-    return paths.get_vibe_remote_dir() / "bin"
+def _legacy_cloudflared_path() -> Path:
+    """The unpinned copy released versions installed before the managed runtime."""
 
-
-def _managed_cloudflared_path() -> Path:
     suffix = ".exe" if os.name == "nt" else ""
-    return _bin_dir() / f"cloudflared{suffix}"
+    return paths.get_vibe_remote_dir() / "bin" / f"cloudflared{suffix}"
 
 
 def _pid_path() -> Path:
@@ -354,21 +347,6 @@ def _clear_cloudflared_logs() -> None:
             pass
 
 
-def _asset_name() -> str:
-    system = platform.system().lower()
-    machine = platform.machine().lower()
-    arch = "amd64" if machine in {"x86_64", "amd64"} else "arm64" if machine in {"aarch64", "arm64"} else ""
-    if not arch:
-        raise ValueError(f"Unsupported architecture for cloudflared: {machine}")
-    if system == "linux":
-        return f"cloudflared-linux-{arch}"
-    if system == "darwin":
-        return f"cloudflared-darwin-{arch}.tgz"
-    if system == "windows" and arch == "amd64":
-        return "cloudflared-windows-amd64.exe"
-    raise ValueError(f"Unsupported OS for cloudflared: {system}")
-
-
 def _version(path: str) -> str | None:
     try:
         result = subprocess.run([path, "--version"], capture_output=True, text=True, timeout=8, check=False)
@@ -378,68 +356,22 @@ def _version(path: str) -> str | None:
     return output[0] if output else None
 
 
-def _make_executable(path: Path) -> None:
-    if os.name == "nt":
-        return
-    mode = path.stat().st_mode
-    path.chmod(mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-
-
-def _copy_stream_atomically(source: Any, target: Path) -> None:
-    target.parent.mkdir(parents=True, exist_ok=True)
-    temp_target = target.with_name(f".{target.name}.tmp")
-    temp_target.unlink(missing_ok=True)
-    try:
-        with temp_target.open("wb") as output:
-            shutil.copyfileobj(source, output)
-        os.replace(temp_target, target)
-    except Exception:
-        temp_target.unlink(missing_ok=True)
-        raise
-
-
-def _safe_extract_cloudflared(archive: tarfile.TarFile, target: Path) -> None:
-    for member in archive.getmembers():
-        member_name = Path(member.name)
-        if member_name.name != "cloudflared":
-            continue
-        if member_name.is_absolute() or ".." in member_name.parts or not member.isfile():
-            raise RuntimeError("Downloaded cloudflared archive contained an unsafe entry")
-        source = archive.extractfile(member)
-        if source is None:
-            raise RuntimeError("Downloaded cloudflared archive did not contain a readable binary")
-        _copy_stream_atomically(source, target)
-        return
-    raise RuntimeError("Downloaded cloudflared archive did not contain cloudflared")
-
-
 def install_cloudflared() -> dict[str, Any]:
-    try:
-        paths.ensure_data_dirs()
-        asset = _asset_name()
-        url = f"{CLOUDFLARED_BASE_URL}/{asset}"
-        target = _managed_cloudflared_path()
-        with tempfile.TemporaryDirectory() as tmp:
-            download_path = Path(tmp) / asset
-            with requests.get(url, stream=True, timeout=60) as response:
-                response.raise_for_status()
-                with download_path.open("wb") as output:
-                    for chunk in response.iter_content(chunk_size=1024 * 1024):
-                        if chunk:
-                            output.write(chunk)
-            if asset.endswith(".tgz"):
-                with tarfile.open(download_path, "r:gz") as archive:
-                    _safe_extract_cloudflared(archive, target)
-            else:
-                with download_path.open("rb") as source:
-                    _copy_stream_atomically(source, target)
-        _make_executable(target)
-        return {"ok": True, "path": str(target), "version": _version(str(target)), "source_url": url}
-    except Exception as exc:
-        return {"ok": False, "error": "cloudflared_install_failed", "detail": str(exc)}
+    """Install the pinned cloudflared release through the managed-runtime core."""
+
+    from core.cloudflared_runtime import CloudflaredRuntimeManager
+
+    result = CloudflaredRuntimeManager().ensure()
+    if result.get("ok") and result.get("path"):
+        return {"ok": True, "path": str(result["path"]), "version": result.get("version")}
+    return {
+        "ok": False,
+        "error": "cloudflared_install_failed",
+        "detail": str(result.get("message") or result.get("reason") or ""),
+    }
 
 
-def _resolve_binary(config: V2Config | None = None) -> str | None:
+def _explicit_cloudflared(config: V2Config | None) -> str | None:
     configured = ""
     if config is not None:
         configured = getattr(config.remote_access.vibe_cloud, "cloudflared_path", "") or ""
@@ -447,10 +379,65 @@ def _resolve_binary(config: V2Config | None = None) -> str | None:
         expanded = Path(configured).expanduser()
         if expanded.exists() and os.access(expanded, os.X_OK):
             return str(expanded)
-    managed = _managed_cloudflared_path()
-    if managed.exists() and os.access(managed, os.X_OK):
+    return None
+
+
+def _resolve_binary(config: V2Config | None = None) -> str | None:
+    """An explicit ``cloudflared_path``, else a verified managed pin, else the tracked connector's binary.
+
+    The managed pin may be an earlier one until the packaged pin installs. The
+    tracked connector's recorded binary keeps a running tunnel manageable after
+    a failed download, until stop() or the exited-record cleanup clears the
+    record. Nothing searches PATH.
+    """
+
+    explicit = _explicit_cloudflared(config)
+    if explicit:
+        return explicit
+    from core.cloudflared_runtime import CloudflaredRuntimeManager
+
+    managed = CloudflaredRuntimeManager().resolve_binary()
+    if managed is not None:
         return str(managed)
-    return shutil.which("cloudflared")
+    recorded = (_read_state() or {}).get("binary_path")
+    if isinstance(recorded, str) and recorded and Path(recorded).is_file() and os.access(recorded, os.X_OK):
+        return recorded
+    return None
+
+
+def _retire_legacy_cloudflared(config: V2Config, binary: str) -> None:
+    """Remove the unpinned copy once the connector runs from another binary."""
+
+    legacy = _legacy_cloudflared_path()
+    configured = config.remote_access.vibe_cloud.cloudflared_path
+    # Compare file identities: ~/.vibe_remote may be a back-symlink to ~/.avibe.
+    if _same_file(Path(binary), legacy) or (configured and _same_file(Path(configured).expanduser(), legacy)):
+        return
+    try:
+        legacy.unlink(missing_ok=True)
+    except OSError:
+        logger.warning("Could not remove the unpinned cloudflared at %s", legacy, exc_info=True)
+
+
+def _cloudflared_pin_needed(config: V2Config | None) -> bool:
+    """Whether the packaged pin is missing and no explicit ``cloudflared_path`` replaces it.
+
+    ``resolve_binary()`` keeps returning an earlier verified pin, so only the
+    status says whether the packaged one is installed.
+    """
+
+    if _explicit_cloudflared(config):
+        return False
+    from core.cloudflared_runtime import CloudflaredRuntimeManager
+
+    return CloudflaredRuntimeManager().status().get("matches_manifest") is not True
+
+
+def _same_file(first: Path, second: Path) -> bool:
+    try:
+        return os.path.samefile(first, second)
+    except OSError:
+        return False
 
 
 def _read_pid_file(path: Path) -> int | None:
@@ -3712,7 +3699,7 @@ def _restart_exited_connector(
         return False
     if now < schedule.due_at:
         return False
-    install_failure = _download_missing_cloudflared(config)
+    install_failure = _ensure_cloudflared_pin(config)
     # Lock order is L, then _RECOVERY_LOCK, then _CONNECTOR_LOCK. The lane check
     # above released both before L. Under L no stop or start in any process
     # interleaves, so the request check, spawn, and publish below are one step.
@@ -4295,7 +4282,7 @@ def start(config: V2Config | None = None) -> dict[str, Any]:
         loaded = config or V2Config.load()
     except Exception:
         loaded = None
-    install_failure = _download_missing_cloudflared(loaded)
+    install_failure = _ensure_cloudflared_pin(loaded)
     try:
         with _connector_lifecycle():
             return _start(loaded or config, record_request=True, install_failure=install_failure)
@@ -4303,19 +4290,20 @@ def start(config: V2Config | None = None) -> dict[str, Any]:
         return {"ok": False, "error": "remote_access_busy", "started": False}
 
 
-def _download_missing_cloudflared(config: V2Config | None) -> dict[str, Any] | None:
-    """Download a missing cloudflared before the lifecycle lock; return the failure, if any.
+def _ensure_cloudflared_pin(config: V2Config | None) -> dict[str, Any] | None:
+    """Install a missing packaged pin before the lifecycle lock; return the failure, if any.
 
     The lock is held only around short check, spawn, and publish sections, so
-    _start() never downloads.
+    _start() never downloads. After a failure _start() still uses whatever
+    _resolve_binary() finds, so a running tunnel keeps its binary.
     """
 
     cloud = config.remote_access.vibe_cloud if config is not None else None
-    if cloud is None or not cloud.enabled or not cloud.tunnel_token or _resolve_binary(config):
+    if cloud is None or not cloud.enabled or not cloud.tunnel_token or not _cloudflared_pin_needed(config):
         return None
     # The installer writes one fixed temporary path, so concurrent starts share one download.
     with _CLOUDFLARED_DOWNLOAD_LOCK:
-        if _resolve_binary(config):
+        if not _cloudflared_pin_needed(config):
             return None
         result = install_cloudflared()
     return None if result.get("ok") else result
@@ -4379,6 +4367,7 @@ def _start(
             running_sig = _running_signature(current.get("pid"))
             desired_sig = _runtime_signature(config, binary)
             if running_sig == desired_sig and _running_connector_has_metrics(current.get("pid")):
+                _retire_legacy_cloudflared(config, binary)
                 _report_runtime_status_async(config, event="start")
                 return {**current, "ok": True, "started": False}
             stop_result = _stop_connector(config)
@@ -4459,6 +4448,7 @@ def _start(
             _report_runtime_status_async(config, event="start_failed", last_error="cloudflared_exited")
             return {**current, "ok": False, "error": "cloudflared_exited"}
         result = {**current, "ok": True, "started": True, "pid": pid}
+        _retire_legacy_cloudflared(config, binary)
         _report_runtime_status_async(config, event="start")
         return result
 
