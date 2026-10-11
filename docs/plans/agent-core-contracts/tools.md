@@ -68,10 +68,14 @@ creates parent directories.`
 Result: `Successfully wrote to {path}`. Writes are serialized per canonical path with `edit`.
 
 A write is all or nothing (Avibe): the content is written beside the target and then replaces it, so a failure leaves
-the file, or its absence, as it was. `edit` publishes the same way. On POSIX the replacement takes the replaced file's
-mode; its owner, ACL, extended attributes, and hard links are not carried over. On Windows an existing file is replaced
-with `ReplaceFileW`, which keeps its DACL, encryption, compression, named streams (the Mark of the Web among them), and
-creation time; a file whose ACL denies writing it is refused, as a read-only one is.
+the file, or its absence, as it was. `edit` publishes the same way. While an existing file's new content is written it
+is the owner's alone: a 0600 temp file on POSIX, an owner-only DACL on Windows. On POSIX the replacement takes the
+replaced file's mode; its owner, ACL, extended attributes, and hard links are not carried over. On Windows an existing
+file is replaced with `ReplaceFileW`, which keeps its DACL, encryption, compression, named streams (the Mark of the Web
+among them), and creation time, through a backup name beside it; a backup that cannot be removed afterwards is left and
+logged with its path. A file whose ACL denies writing it is refused, as a read-only one is. `edit` publishes only over
+the file it read: the same file id, size, mtime, and change time (Windows' NTFS change time, which `stat` does not
+report there on every Python).
 
 ## 4. `edit`
 
