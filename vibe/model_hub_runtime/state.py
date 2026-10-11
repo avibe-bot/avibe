@@ -16,6 +16,7 @@ from typing import Any, Callable, Sequence
 
 from config.atomic_io import write_atomic
 from config.v2_config import normalize_model_hub_base_url, validate_model_hub_protocol_vendor
+from core import private_fs
 from core.handlers.model_hub.events import contains_credential_material
 from core.handlers.model_hub.identifiers import model_id_without_credential_address
 from vibe.model_hub_runtime.api_key_vendors import (
@@ -758,7 +759,7 @@ class EngineStateStore:
                 mode = path.lstat().st_mode
             except FileNotFoundError:
                 return None
-            if not stat.S_ISREG(mode) or stat.S_IMODE(mode) != 0o600:
+            if not stat.S_ISREG(mode) or not private_fs.is_private(path, mode):
                 raise EngineStateError("credential permissions are unsafe")
             payload = self._read_json(path)
             if payload is None:
@@ -791,11 +792,12 @@ class EngineStateStore:
         for path in (self.root, directory):
             try:
                 mode = path.lstat().st_mode
+                private = stat.S_ISDIR(mode) and private_fs.is_private(path, mode)
             except FileNotFoundError:
                 return False
             except OSError as exc:
                 raise EngineStateError("unable to inspect credential directory") from exc
-            if not stat.S_ISDIR(mode) or stat.S_IMODE(mode) != 0o700:
+            if not private:
                 raise EngineStateError("credential directory permissions are unsafe")
         return True
 
@@ -814,7 +816,7 @@ class EngineStateStore:
             return None
         except OSError as exc:
             raise EngineStateError("unable to inspect credential file") from exc
-        if not stat.S_ISREG(mode) or stat.S_IMODE(mode) != 0o600:
+        if not stat.S_ISREG(mode) or not private_fs.is_private(path, mode):
             raise EngineStateError("credential permissions are unsafe")
         try:
             # Do not turn an open/read failure into content corruption. Ref
@@ -824,7 +826,7 @@ class EngineStateStore:
             )
             with os.fdopen(descriptor, "rb") as handle:
                 mode = os.fstat(handle.fileno()).st_mode
-                if not stat.S_ISREG(mode) or stat.S_IMODE(mode) != 0o600:
+                if not stat.S_ISREG(mode) or not private_fs.is_private(path, mode, fd=handle.fileno()):
                     raise EngineStateError("credential permissions are unsafe")
                 raw = handle.read()
         except OSError as exc:
@@ -866,7 +868,7 @@ class EngineStateStore:
             credentials_dir = self.root / "credentials"
             for directory in (self.root, credentials_dir):
                 mode = directory.lstat().st_mode
-                if not stat.S_ISDIR(mode) or stat.S_IMODE(mode) != 0o700:
+                if not stat.S_ISDIR(mode) or not private_fs.is_private(directory, mode):
                     return False
             payload = json.loads(self._read_private_bytes(
                 credentials_dir / f"{credential_ref}.json",
@@ -1104,17 +1106,17 @@ class EngineStateStore:
         auth_mode = self.auth_dir.lstat().st_mode
         if not stat.S_ISDIR(auth_mode):
             raise EngineStateError("engine auth directory is unsafe")
-        if stat.S_IMODE(self.auth_dir.stat().st_mode) != 0o700:
+        if not private_fs.is_private(self.auth_dir, auth_mode):
             raise EngineStateError("engine auth directory permissions are unsafe")
         for entry in self.auth_dir.iterdir():
             mode = entry.lstat().st_mode
             if not stat.S_ISREG(mode):
                 raise EngineStateError("engine auth directory contains an unsafe entry")
-            if stat.S_IMODE(mode) == 0o600:
+            if private_fs.is_private(entry, mode):
                 continue
             if not enforce:
                 raise EngineStateError("engine auth credential permissions are unsafe")
-            entry.chmod(0o600)
+            private_fs.make_private_file(entry)
 
     def _credential_path(self, credential_ref: str) -> Path:
         _credential_ref_auth_scheme(credential_ref)
@@ -1179,7 +1181,7 @@ class EngineStateStore:
         result: list[tuple[str, dict[str, Any]]] = []
         for path in credentials_dir.glob("cred_*.json"):
             mode = path.lstat().st_mode
-            if not stat.S_ISREG(mode) or stat.S_IMODE(mode) != 0o600:
+            if not stat.S_ISREG(mode) or not private_fs.is_private(path, mode):
                 raise EngineStateError("credential permissions are unsafe")
             credential_ref = path.stem
             if path.suffix != ".json" or _CREDENTIAL_REF_RE.fullmatch(credential_ref) is None:
@@ -1324,7 +1326,7 @@ class EngineStateStore:
                 # directory durability boundary before cleanup can converge.
                 cls._fsync_directory(path.parent)
                 return False
-            if not stat.S_ISREG(mode) or stat.S_IMODE(mode) != 0o600:
+            if not stat.S_ISREG(mode) or not private_fs.is_private(path, mode):
                 raise EngineStateError("engine state path is unsafe")
             path.unlink()
             cls._fsync_directory(path.parent)
@@ -1361,7 +1363,7 @@ class EngineStateStore:
             mode = path.lstat().st_mode
         except FileNotFoundError as exc:
             raise EngineStateError("OAuth credential is unavailable") from exc
-        if not stat.S_ISREG(mode) or stat.S_IMODE(mode) != 0o600:
+        if not stat.S_ISREG(mode) or not private_fs.is_private(path, mode):
             raise EngineStateError(message)
         try:
             return path.read_bytes()
@@ -1447,12 +1449,12 @@ class EngineStateStore:
 
     @staticmethod
     def _ensure_private_dir(path: Path) -> None:
-        if path.exists():
-            if not stat.S_ISDIR(path.lstat().st_mode):
-                raise EngineStateError("engine state path is unsafe")
-        else:
-            path.mkdir(parents=True, mode=0o700)
-        path.chmod(0o700)
+        if path.exists() and not stat.S_ISDIR(path.lstat().st_mode):
+            raise EngineStateError("engine state path is unsafe")
+        try:
+            private_fs.ensure_private_directory(path)
+        except private_fs.PrivatePathError as exc:
+            raise EngineStateError("engine state path is unsafe") from exc
 
     @staticmethod
     def _assert_private_file(path: Path, message: str) -> None:
@@ -1460,7 +1462,7 @@ class EngineStateStore:
             mode = path.lstat().st_mode
         except FileNotFoundError:
             return
-        if not stat.S_ISREG(mode) or stat.S_IMODE(mode) != 0o600:
+        if not stat.S_ISREG(mode) or not private_fs.is_private(path, mode):
             raise EngineStateError(message)
 
 
