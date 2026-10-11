@@ -243,7 +243,7 @@ class VibeyAgent(BaseAgent):
         turn_id = str(payload.get("turn_token") or "").strip()
         input_id = str(payload.get("delivery_id") or "").strip()
         if not session_id or not turn_id or not input_id:
-            await self._fail(request, "generic", f"{display_name_for_backend(BACKEND)} turn has no Session, Turn, or input identity.")
+            await self._fail(request, None, f"{display_name_for_backend(BACKEND)} turn has no Session, Turn, or input identity.")
             return
         turn = _Run(request, session_id, turn_id, self._instance)
         async with self._held(session_id, run=turn) as runtime:
@@ -256,7 +256,7 @@ class VibeyAgent(BaseAgent):
                     raise
                 logger.exception("Vibey turn failed for Session %s", session_id)
                 turn.settled = True
-                await self._fail(request, "generic", f"turn failed: {error}", cause=error)
+                await self._fail(request, type(error).__name__, f"turn failed: {error}", cause=error)
             finally:
                 await self._admit_returned_inputs(turn)
                 self.store.bind_agent(session_id, None)
@@ -608,6 +608,9 @@ class VibeyAgent(BaseAgent):
         cause = run.cause
         kind = cause.kind if cause is not None else None
         diagnostic = cause.message if cause is not None else run.errors[0].message if run.errors else reason
+        # What the log names: the cause, else the diagnostic whose text stands in for it (a cleanup that failed after
+        # the reply committed decides the outcome without being its cause).
+        logged = cause or (run.errors[0] if run.errors else None)
         source = cause is not None and cause.origin == "source"
         final = run.responses.get(run.final_row) if run.final_row else None
         if final is not None:
@@ -616,7 +619,7 @@ class VibeyAgent(BaseAgent):
             run_failed_after_commit = reason not in _COMPLETED
             failed = final_outcome(final) == "failed" or run_failed_after_commit
             if failed:
-                self._log_failure(run, reason, kind, diagnostic)
+                self._log_failure(run, reason, logged, diagnostic)
             body = self._display_source(final, final=True)
             if failed and not body.strip():
                 # A silent final whose run failed after the commit: like a final without text
@@ -653,22 +656,21 @@ class VibeyAgent(BaseAgent):
                 context, "result", "", level="silent", output=terminal_output_for(request)
             )
             return
-        self._log_failure(run, reason, kind, diagnostic)
+        self._log_failure(run, reason, logged, diagnostic)
         await self._fail(request, kind, diagnostic, reason=reason, refusal=run.refusal, source=source)
 
     @staticmethod
-    def _log_failure(run: _Run, reason: str, kind: Optional[str], diagnostic: str) -> None:
+    def _log_failure(run: _Run, reason: str, error: Optional[AgentError], diagnostic: str) -> None:
         """One WARNING for a failed run, so a failed Turn can be diagnosed from the log: its kind, who produced it,
         the hop that served the last response, and the diagnostic, which is never display copy (``errors.py``)."""
-        cause = run.cause
         served = next((message.origin for message in reversed(run.responses.values())), None)
         logger.warning(
             "Vibey run failed: session=%s turn=%s reason=%s kind=%s origin=%s served=%s diagnostic=%s",
             run.session_id,
             run.turn_id,
             reason,
-            kind or "-",
-            cause.origin if cause is not None else "-",
+            error.kind if error is not None else "-",
+            error.origin if error is not None else "-",
             f"{served.provider}/{served.api}/{served.model}" if served is not None else "-",
             _loggable_diagnostic(diagnostic or ""),
         )

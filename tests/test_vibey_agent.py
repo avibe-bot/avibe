@@ -1464,7 +1464,7 @@ async def test_a_refused_model_route_fails_before_the_input_is_written(
 # --- settlement and run shape -----------------------------------------------------------
 
 
-async def test_the_footer_reports_the_runs_final_outcome(engine, session, tmp_path, published) -> None:
+async def test_the_footer_reports_the_runs_final_outcome(engine, session, tmp_path, published, caplog) -> None:
     class _LeakyJobs(FakeJobHost):
         async def kill(self, job_id, *, reason="killed") -> None:
             raise RuntimeError("the job's process group cannot be signalled")
@@ -1482,7 +1482,8 @@ async def test_the_footer_reports_the_runs_final_outcome(engine, session, tmp_pa
     harness = _Harness(engine, tmp_path, "avibe", _tool_turn(), suite=suite)
     harness.controller.config.show_duration = True
 
-    await harness.agent.handle_message(harness.request("start it"))
+    with caplog.at_level(logging.WARNING, logger="modules.agents.vibey.agent"):
+        await harness.agent.handle_message(harness.request("start it"))
 
     # The reply committed before cleanup failed, so only settlement knows the run failed: the
     # dispatcher writes the failed outcome into that row, as for any failed terminal result.
@@ -1491,6 +1492,35 @@ async def test_the_footer_reports_the_runs_final_outcome(engine, session, tmp_pa
     assert json.loads(result["content_json"])["result_footer"] == "❌ failed"
     assert (await harness.context_rows())[-1].row_id == result["id"]
     assert harness.controller.terminals[-1]["is_error"] is True
+    # The cleanup failure decided the outcome without being its cause; the log still names it.
+    [line] = [record.getMessage() for record in caplog.records if record.getMessage().startswith("Vibey run failed")]
+    assert " reason=error kind=ForegroundCleanupError origin=local " in line
+
+
+@pytest.mark.parametrize(
+    ("break_turn", "kind", "copy"),
+    [("identity", None, "generic"), ("raise", "RuntimeError", "internal")],
+)
+async def test_a_turn_that_fails_before_settlement_names_its_kind_or_none(
+    engine, session, tmp_path, published, break_turn, kind, copy
+) -> None:
+    harness = _Harness(engine, tmp_path, "telegram", [])
+    request = harness.request("hello")
+    if break_turn == "identity":
+        # No Turn identity: a deliberate generic failure, with no kind to record.
+        request.context.platform_specific.pop("turn_token")
+    else:
+
+        async def broken_turn(*_args, **_kwargs):
+            raise RuntimeError("the turn's runtime broke")
+
+        harness.agent._run_turn = broken_turn
+
+    await harness.agent.handle_message(request)
+
+    assert harness.controller.im_client.sent == [f"❌ {i18n_t(f'vibeyAgent.error.{copy}', 'en', backend='Vibey')}"]
+    [notice] = harness.rows("notify")
+    assert json.loads(notice["metadata_json"]).get("error_kind") == kind
 
 
 @pytest.mark.parametrize("platform", ["avibe", "telegram"])
