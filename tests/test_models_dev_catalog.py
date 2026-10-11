@@ -505,3 +505,55 @@ def test_first_catalog_read_reports_one_fetch_in_flight_until_it_fails(monkeypat
     # That retry runs on its own thread: it must finish while this test's fetch
     # and cache path are still patched, not after teardown restores the real ones.
     join_refreshes()
+
+
+@pytest.mark.real_catalog_refresh
+def test_mh_limits_001_every_saved_copy_signals_its_arrival(monkeypatch, tmp_path):
+    """MH-LIMITS-001: a copy saved by a foreground or a background fetch signals; no other fetch does.
+
+    Rows written while no copy was cached are filled when one arrives, and the
+    copy that most often arrives is the background refresh a picker read starts.
+    """
+
+    import threading
+
+    monkeypatch.setattr(models_dev_catalog, "_cache_path", lambda: tmp_path / "models_dev_catalog.json")
+    monkeypatch.setattr(models_dev_catalog, "_refresh_in_flight", False)
+    monkeypatch.setattr(models_dev_catalog, "_last_refresh_failed", False)
+    monkeypatch.setattr(models_dev_catalog, "_COPY_ARRIVED", None)
+    arrivals: list[str] = []
+    models_dev_catalog.set_models_dev_copy_arrived(lambda: arrivals.append(threading.current_thread().name))
+    outcomes: list[object] = []
+
+    def urlopen(_request, timeout):
+        outcome = outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr(models_dev_catalog.urllib.request, "urlopen", urlopen)
+
+    def refresh_in_background(outcome):
+        models_dev_catalog._write_cache({**models_dev_catalog._read_cache(), "fetched_at": 0})
+        outcomes.append(outcome)
+        assert models_dev_catalog.load_models_dev_catalog_with_date()[0] == _catalog()
+        for thread in threading.enumerate():
+            if thread.name == "models-dev-refresh":
+                thread.join(timeout=5)
+        assert not outcomes
+
+    outcomes.append(urllib.error.URLError("offline"))
+    with pytest.raises(RuntimeError, match="unavailable"):
+        models_dev_catalog.load_models_dev_catalog()
+    assert arrivals == []
+
+    outcomes.append(_Response(_catalog(), headers={"ETag": "v1"}))
+    assert models_dev_catalog.load_models_dev_catalog() == _catalog()
+    assert arrivals == [threading.current_thread().name]
+
+    # Unchanged upstream: the copy stays as it was, and nothing arrived.
+    refresh_in_background(urllib.error.HTTPError(models_dev_catalog._models_dev_url(), 304, "Not Modified", {}, None))
+    assert arrivals == [threading.current_thread().name]
+
+    refresh_in_background(_Response(_catalog(), headers={"ETag": "v2"}))
+    assert arrivals == [threading.current_thread().name, "models-dev-refresh"]

@@ -1,9 +1,9 @@
-// Model Hub identity colors are semantic, not vendor branding: channel/kind
-// owns source color, while backend identity owns Agent color.
+// Model Hub source identity colors are semantic, not vendor branding:
+// channel/kind owns source color. Backend visuals live in lib/agentBackends.
 import type React from 'react';
-import { Bot, KeyRound, Sparkles, Terminal } from 'lucide-react';
+import { KeyRound, Sparkles } from 'lucide-react';
 
-import type { AgentBackend, Source } from './types';
+import type { Source } from './types';
 
 export type Accent = 'mint' | 'gold' | 'cyan' | 'violet' | 'muted';
 
@@ -64,31 +64,6 @@ export function sourceVisual(source: Pick<Source, 'kind' | 'supply_channel'>): S
     Icon: source.kind === 'subscription' ? Sparkles : KeyRound,
     accent: sourceAccent(source),
   };
-}
-
-// ── Agent backends (Agent card rows) ────────────────────────────────────
-export type BackendVisual = { Icon: IconType; accent: Accent };
-
-export const BACKEND_IDENTITY_ACCENT = {
-  claude: 'cyan',
-  codex: 'mint',
-  opencode: 'violet',
-} as const satisfies Record<AgentBackend, Accent>;
-
-const BACKEND_ICON: Record<AgentBackend, IconType> = {
-  claude: Sparkles,
-  codex: Bot,
-  opencode: Terminal,
-};
-
-const BACKEND_VISUAL: Record<AgentBackend, BackendVisual> = {
-  claude: { Icon: BACKEND_ICON.claude, accent: BACKEND_IDENTITY_ACCENT.claude },
-  codex: { Icon: BACKEND_ICON.codex, accent: BACKEND_IDENTITY_ACCENT.codex },
-  opencode: { Icon: BACKEND_ICON.opencode, accent: BACKEND_IDENTITY_ACCENT.opencode },
-};
-
-export function backendVisual(backend: AgentBackend): BackendVisual {
-  return BACKEND_VISUAL[backend] ?? { Icon: Bot, accent: 'muted' };
 }
 
 // Official endpoints classify existing Sources and provide their display identity.

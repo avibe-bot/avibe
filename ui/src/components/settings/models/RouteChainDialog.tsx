@@ -20,6 +20,7 @@ import { Button } from "@/components/ui/button";
 import { ResponsiveMenu } from "@/components/ui/responsive-menu";
 import { SegmentedRadio } from "@/components/ui/segmented";
 import { cn } from "@/lib/utils";
+import { getBackendUiMeta } from "@/lib/agentBackends";
 import { useIsMobile } from "@/lib/useIsMobile";
 import { GuardDialog } from "./GuardDialog";
 import { GuardImpact, type GuardPlan } from "./GuardImpact";
@@ -225,11 +226,7 @@ export const RouteChainDialog: React.FC<{
   const targetSources = agent ? eligibleSources(sources, agent) : [];
   const canEditRoute = draft.length > 0 || addCandidates.length > 0
     || targetSources.some((source) => source.kind === 'api_key');
-  const backend = agent
-    ? (t(`settings.models.backends.${agent.backend}`, {
-        defaultValue: agent.backend,
-      }) as string)
-    : "";
+  const backend = agent ? getBackendUiMeta(agent.backend).label : "";
   const valid = agent
     ? validateRouteDraft(agent, sources, origin, draft)
     : { invalidIndexes: [], valid: false };

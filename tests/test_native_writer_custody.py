@@ -39,8 +39,8 @@ def no_live_operations(monkeypatch):
 def saved_config(*, mode="hub", enabled=True, source=None):
     config = V2Config.default()
     config.model_hub.enabled = enabled
-    for supply in config.model_hub.agents.values():
-        supply.mode = mode
+    for backend in ("claude", "codex", "opencode"):
+        config.model_hub.agents[backend].mode = mode
     if source is not None:
         config.model_hub.sources = [source]
     config.save()

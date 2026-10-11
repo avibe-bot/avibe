@@ -10,6 +10,7 @@ import { SegmentedRadio } from '../../ui/segmented';
 import { Checkbox } from '../../ui/checkbox';
 import { FileDropzone } from './FileDropzone';
 import { errorMessage } from '@/lib/errorMessage';
+import { AGENT_ID_TO_BACKEND } from '@/lib/backendAccent';
 
 export interface AddSkillDialogProps {
   defaultScope: SkillScope;
@@ -114,7 +115,7 @@ export function AddSkillDialog({ defaultScope, projectId, projectName, onClose, 
     return [
       'askill add',
       baseSource,
-      '-a claude-code opencode codex',
+      `-a ${Object.keys(AGENT_ID_TO_BACKEND).join(' ')}`,
       selector,
       scope === 'global' ? '-g' : '',
       '-y',

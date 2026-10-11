@@ -26,7 +26,7 @@ export const ProtocolGlyph: React.FC<{ protocol: SourceProtocol; className?: str
   protocol,
   className,
 }) => (
-  protocol === 'anthropic'
+  protocol === 'google' ? null : protocol === 'anthropic'
     ? <AnthropicGlyph className={className} />
     : <OpenAIGlyph className={className} />
 );

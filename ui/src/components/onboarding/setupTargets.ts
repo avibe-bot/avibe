@@ -1,5 +1,6 @@
 import type { VibeAgentBrief, VibeAgentFull } from '../../context/ApiContext';
-import { ASSISTANT_ORDER, type AssistantId } from './collaborationTimeline';
+import type { AgentBackendId } from '@/lib/agentBackends';
+import { SETUP_LINEUP } from './collaborationTimeline';
 
 /**
  * Which Agent a setup card speaks for.
@@ -33,7 +34,7 @@ const byName = (left: { name: string }, right: { name: string }): number =>
 
 export function setupTargetFor<T extends SetupTargetAgent>(
   agents: readonly T[],
-  backend: AssistantId,
+  backend: AgentBackendId,
 ): T | null {
   const pool = agents.filter((agent) =>
     agent.backend === backend && agent.enabled && !agent.archived && isBuiltinAgent(agent));
@@ -43,9 +44,9 @@ export function setupTargetFor<T extends SetupTargetAgent>(
     ?? null;
 }
 
-/** Every assistant's own Agent, in C6's stable order, skipping the ones that have none. */
+/** Every card's own Agent, in the setup lineup's stable order, skipping the ones that have none. */
 export function setupTargets<T extends SetupTargetAgent>(agents: readonly T[]): T[] {
-  return ASSISTANT_ORDER.flatMap((backend) => {
+  return SETUP_LINEUP.flatMap((backend) => {
     const target = setupTargetFor(agents, backend);
     return target ? [target] : [];
   });
@@ -77,7 +78,7 @@ export async function readSetupTargets(
   const seen = new Set<string>();
   const relevant = briefs.filter((agent) => {
     if (!agent.enabled || agent.archived) return false;
-    if (!ASSISTANT_ORDER.includes(agent.backend as AssistantId)) return false;
+    if (!SETUP_LINEUP.includes(agent.backend as AgentBackendId)) return false;
     if (seen.has(agent.name)) return false;
     seen.add(agent.name);
     return true;

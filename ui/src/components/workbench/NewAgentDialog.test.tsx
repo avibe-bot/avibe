@@ -97,6 +97,35 @@ afterEach(() => {
 });
 
 describe('NewAgentDialog', () => {
+  // The picker used a second label table, so its Claude label disagreed with
+  // Settings and Model Hub. All backend choices share the catalog brands, and
+  // they follow the shared display order, the built-in Vibey first.
+  it('uses the catalog brand names and shared display order for every backend choice', () => {
+    renderDialog();
+    const labels = ['Vibey', 'Claude Code', 'Codex', 'OpenCode'];
+    for (const label of labels) {
+      expect(screen.getByRole('button', { name: new RegExp(label) }).textContent).toContain(label);
+    }
+    const order = screen.getAllByRole('button')
+      .map((button) => labels.find((label) => button.textContent?.includes(label)))
+      .filter(Boolean);
+    expect(order).toEqual(labels);
+    expect(screen.queryByText('Claude', { exact: true })).toBeNull();
+  });
+
+  it('creates a Vibey Agent through the existing backend and model pickers', async () => {
+    modelCatalog = { models: ['vibey-model'], reasoningOptions: { 'vibey-model': [] } };
+    const { createVibeAgent } = renderDialog();
+    fireEvent.click(screen.getByRole('button', { name: /Vibey/ }));
+    fireEvent.change(screen.getByPlaceholderText('agents.create.namePlaceholder'), { target: { value: 'local-helper' } });
+    fireEvent.click(screen.getByRole('combobox'));
+    fireEvent.click(screen.getByRole('option', { name: 'vibey-model' }));
+    submit();
+    await waitFor(() => expect(createVibeAgent).toHaveBeenCalledWith(expect.objectContaining({
+      name: 'local-helper', backend: 'vibey', model: 'vibey-model', reasoning_effort: null,
+    })));
+  });
+
   it("keeps the form while the user adds a model in the Model Hub catalog", async () => {
     // Settings hides the page this dialog sits in; closing it would clear the
     // Agent the user was halfway through defining.

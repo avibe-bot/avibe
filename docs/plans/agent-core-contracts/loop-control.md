@@ -1,0 +1,156 @@
+# C-3 Loop control
+
+The loop in `core/agent_core/agent/`. Semantics are the ones the bare-loop spike and Pi passed in the control matrix
+(evaluation §1).
+
+## 1. Surface
+
+```python
+class Agent:
+    def __init__(self, *, models: ModelRouter, tools: Sequence[Tool], hooks: Sequence[Hooks],
+                 store: TranscriptStore, jobs: JobHost,
+                 context: ContextConfig | None = None) -> None: ...   # C-9; excludes hooks in v1 (§3)
+
+    def run(self, input: Input, *, turn_id: str) -> AsyncIterator[AgentEvent]: ...   # one Avibe Turn
+    def steer(self, input: Input) -> bool: ...       # False: not accepted, the adapter keeps ownership
+    def follow_up(self, input: Input) -> bool: ...
+    def abort(self, reason: str) -> None: ...
+    def set_tools(self, tools: Sequence[Tool]) -> None: ...
+    def snapshot(self) -> Snapshot: ...
+    def side_turn_fits(self, turn: SideTurn, route: ModelSelection) -> bool: ...      # C-10 fork.md §7, §15
+    async def side_turn(self, turn: SideTurn, route: ModelSelection) -> SideTurnResult: ...
+```
+
+`Input` pairs a `UserMessage` with its `messages.id` row. `ModelRouter` returns the `ModelEndpoint` and
+`ModelCapabilities` for the next call (C-2, C-6 via the adapter); `TranscriptStore` is C-5; `JobHost` is C-7. The loop
+wraps the given `JobHost` (`Agent.jobs`) to track foreground jobs for `abort`; tools are constructed with that
+wrapper.
+
+## 2. One run
+
+```text
+commit input → loop:
+    projection → before_model hooks (without a ContextConfig) or budget and the C-9 stage (with one; C-9 §10)
+        → provider stream (events out) → admission of the response
+    if the response has tool calls:
+        commit it as `assistant`
+        for each group of calls, in call order (below):
+            before_tool for each call of the group, in call order
+            start the calls the gates let run, in call order; they run at the same time
+            for each call of the group, in call order: its result → after_tool → commit tool result
+        drain steers (commit each) → continue loop
+    else, holding the queue lock:
+        if a steer or follow-up is pending: commit the response as `assistant`, commit the pending inputs,
+            release the lock → continue loop
+        else: commit the response as final (`result`, or `error` when it failed) and close the queues, release the lock → end
+```
+
+Finality is decided before the response row is inserted, so a final (`result` or `error`) row is always the run's last
+response. A final response with `stop_reason` `refusal` or `safety` and no text is still committed as the final
+response, typed `error` ([`transcript.md`](transcript.md) §1); its commit-time display text is the localized
+explanation. (That it is written in the same transaction so that re-delivery after a crash shows it is moot: Avibe
+delivers committed rows through the shared emit path and nothing re-delivers them, [`recovery.md`](recovery.md)
+§Delivery.) The run also ends with an `error` event of that kind. Refusal text from the provider is kept as the reply. A
+steer that arrives after the queues closed is refused by the running Turn, and Avibe's delivery falls back to the P3
+queue, which starts the next run.
+
+**The calls of one response.** Each tool says whether its calls may run concurrently (`Tool.concurrent`, C-7
+[`tools.md`](tools.md)); a tool that does not is exclusive. The loop walks the calls in call order: a maximal run of
+consecutive concurrent calls is one group, whose calls run at the same time, and every exclusive call is a group of its
+own. Groups run one after another. So an exclusive call starts only after every call before it has finished, and no
+call after it starts until it has finished: a reader-writer lock taken in call order, as Codex's `tools/parallel.rs`
+does. Whenever an `edit` or `write` is involved, the observable result equals running the calls one by one;
+concurrency only ever applies between neighbouring `read` and `bash` calls. A call to a tool that is not available runs
+nothing and never splits a group.
+
+- `tool_started` is emitted when a call starts. Results commit in call order: a call that finishes early waits for the
+  calls before it, and `tool_finished` follows the commits.
+- One call failing, by an exception (which becomes its error result) or by an error result, never cancels another
+  call.
+- No call outlives its batch: every call is awaited or cancelled before the run moves on or ends.
+- There is no cap on how many calls run at once, as in Pi and Codex.
+- Calls that run nothing keep one-at-a-time order: those of a response that stopped at its output limit, and those an
+  `after_model` `skip_tools` or `end` settles.
+- A side turn (C-10 [`fork.md`](fork.md) §7) runs its calls one at a time, in call order, and never through groups:
+  the room each call gets depends on the results before it.
+
+Pi differs (`packages/agent/src/agent-loop.ts` at `7fbbd5f`): it runs every call of a response at the same time unless
+a tool in it declares `executionMode: "sequential"`, and its `edit` and `write` serialize only per file path
+(`withFileMutationQueue`), which `bash` bypasses. Avibe makes mutations exclusive instead, so a command never races an
+edit and never sees a batch of edits half applied. `file_mutation_lock` (`tools/paths.py`) still serializes `edit` and
+`write` across Sessions and forks in the same process.
+
+## 3. Hooks
+
+Hooks run in registration order. The first `deny` or `end` wins; rewrites compose in order.
+
+| Hook | Receives | May return |
+| --- | --- | --- |
+| `before_run` | input message, run context | system prompt and tool set for this run |
+| `before_model` | the `ModelRequest` about to be sent | a replacement request (transient rewrite of messages, system, tools, model, max tokens), or `end` |
+| `after_model` | the committed assistant message | `skip_tools` (commit error results `[skipped by policy]` for its calls), or `end` |
+| `before_tool` | the tool call | `deny(reason)` (error result with the reason), `alter_args(args)`, or `end` |
+| `after_tool` | call and result | `alter_result(result)` before commit, or `end` |
+| `after_run` | outcome | nothing |
+
+A `before_model` rewrite changes only that request and is not persisted by design: a rewritten request is not
+reconstructible from the rows, and A10 is stated for requests without a transient rewrite. Anything that must survive
+a restart, or that context management must see, goes through C-5 rows (`context_edit`, `context_compaction`). `end`
+finishes the run after the current step commits.
+
+The tool hooks follow the groups of §2:
+
+- `before_tool` runs for each call, in call order, before that call starts. A group's gates all run before the group
+  starts, so no gate sees a result from its own group. `deny` and `alter_args` affect only their call. An `end`
+  settles its call and every later call `[skipped by policy]`; the calls before it in its group still run.
+- `after_tool` runs for each call, in call order, when its result is available, before its commit. An `end` settles
+  every call that has not started `[skipped by policy]`. The later calls of its group have already started: they
+  finish, pass `after_tool`, and commit their real results, because their effects happened and the committed result
+  is the truthful record.
+
+In v1 an Agent with a C-9 `ContextConfig` takes no user hooks: passing both is a configuration error, because C-9
+owns the request and the checkpoint turn's tools. Hooks with context management are a post-v1 design item
+(`context.md` §10, plan §10).
+
+## 4. Steer, follow-up, abort
+
+- `steer(m)` queues `m`. It enters the context after the current tool batch and before the next model call, or, when
+  the current response has no tool calls, it starts another model call in the same run. A steer never interrupts a
+  running tool. Avibe P1 deliveries map to `steer`.
+- `follow_up(m)` enters only when the run would otherwise end. It exists for hooks and the future tension system;
+  Avibe's P3 queue starts a new run after the Turn settles instead.
+- `abort(reason)` cancels the provider stream and every running tool call of the batch: each foreground job's process
+  tree is killed (Pi's behavior). Jobs already handed to Watch are not affected. The run ends with
+  `run_ended{reason: "aborted"}`; what was committed stays committed, and T2 ([`recovery.md`](recovery.md)) gives each
+  call left open exactly one result.
+- A tool result with `terminate: true` ends the run after the batch commits.
+
+## 5. Tools per call
+
+`set_tools` and a `before_model` rewrite take effect at the next model call. A call to a tool that is not in the set
+sent with that request gets the error result `Tool <name> is not available.`
+
+## 6. Agent events (C-4)
+
+`run()` yields `agent-event.schema.json` events, keyed by `turn_id`. The adapter maps them onto existing Avibe concepts; no new UI nouns.
+
+| Event | Avibe effect |
+| --- | --- |
+| `run_started` | none; the Turn was opened by its delivery |
+| `text_delta`, `thinking_delta` | dropped: no backend shows live partial text, and none will (owner decision, 2026-10-08), so progress comes from the committed narration and tool lines, as for the other backends |
+| `message_committed` | the committed `messages` row is delivered: `assistant` as activity, `result` as the reply |
+| `tool_started` | `agent_events` `tool_call` trace row; IM progress line |
+| `tool_progress` | dropped: no backend shows live tool output, and none will (owner decision, 2026-10-08), so a running tool shows its `tool_started` line, as for the other backends |
+| `tool_finished` | the committed `tool_result` row; a handed-over job names its Watch |
+| `steer_applied` | the steer delivery is accepted into the running Turn |
+| `compaction_started`, `compaction_finished`, `compaction_failed` | none: compaction is invisible (C-9 `context.md` §10); a finished one lowers the session's token snapshot |
+| `context_exhausted` | the run's stop message, from the error's kind (C-9 `context.md` §8 d): `context_exhausted`, the conversation has grown too long to continue reliably, start a new session with `/new`; `tool_output_too_large`, the latest tool output does not fit even shortened, ask for a smaller part or use a larger model; `input_too_large`, the message does not fit, send a shorter one or use a larger model; `step_too_large`, the latest step (its tool-call arguments or text) is too large, ask for smaller steps or use a larger model. The parts are diagnostic |
+| `run_ended` | `MessageOutput` settles the Turn; `cause` is the error that decided the outcome, from which the adapter takes the failure's kind, text, and Model Hub attribution (a diagnostic is never the cause). A completed run whose foreground job cannot be released ends `error`, and that cleanup error is its cause |
+| `error` | `notify` / `error` row; the text shown is the adapter's localized copy for the event's `kind` (`vibe/i18n`), and `message` is diagnostic detail, never display copy; `origin` (`source` or `local`, set where the loop raises the error) decides whether Model Hub records the failure against the route (C-9 `context.md` §9). A `kind` is one of `NAMED_ERROR_KINDS` (`agent/events.py`: C-2's `ErrorKind`, a failed `StopReason`, and the loop's own `LoopErrorKind`), each with copy of its own, or the class name of an exception the loop did not expect, which reads as an internal error. The adapter logs every failed run once (session, Turn, kind, origin, the hop that served the last response, and the redacted `message`) and records the kind, never the message, on the failure notice row |
+
+## 7. Snapshot and fork
+
+`snapshot()` returns `(session_id, context_seq, state)`, where `state` is the JSON object hooks keep; it is the state
+of the `after_run` outcome, not a fork API. A hook that sets state causes an `agent_state` row at the next commit
+point (C-5), so a fork whose point is at or after that row restores it. Fork is C-10 (`fork.md`): the fork point, the
+side turn (`side_turn`, above), and the fork Session, whose context resolves through C-5.

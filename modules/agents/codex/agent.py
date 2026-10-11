@@ -85,6 +85,7 @@ from vibe.codex_config import (
 )
 from vibe.codex_launch_failure import CodexLaunchError
 from vibe.desktop_backends import desktop_backend_subprocess_environment
+from modules.agents.catalog import display_name_for_backend
 from vibe.i18n import t as i18n_t
 from vibe.message_identity import is_input_turn
 
@@ -700,7 +701,7 @@ class CodexAgent(BaseAgent):
             elif isinstance(e, RuntimeUnitStopping):
                 # Not a source failure: no Hub cooldown.
                 display_text = (
-                    f"❌ {i18n_t('error.agentRuntimeRetired', language, agent=i18n_t('backend.codex', language))}"
+                    f"❌ {i18n_t('error.agentRuntimeRetired', language, agent=display_name_for_backend(self.name))}"
                 )
             elif isinstance(e, CodexLaunchError):
                 # Not a source failure: no Hub cooldown. Every retry fails the
@@ -1755,7 +1756,7 @@ class CodexAgent(BaseAgent):
                 getattr(getattr(self.controller, "config", None), "language", "en")
                 or "en"
             )
-            message = i18n_t("error.agentRuntimeRetired", language, agent=i18n_t("backend.codex", language))
+            message = i18n_t("error.agentRuntimeRetired", language, agent=display_name_for_backend(self.name))
         elif isinstance(error, CodexForkBoundaryUnavailableError):
             language = str(
                 getattr(getattr(self.controller, "config", None), "language", "en")
@@ -3165,7 +3166,7 @@ class CodexAgent(BaseAgent):
         ``process_env`` is the environment of the app-server that runs the
         turn, which its shell inherits; see ``_process_environment``.
         """
-        from core.git_runtime import prepend_vendored_git_to_path
+        from core.agent_path import prepend_managed_tools_to_path
 
         env = self._caller_env_for_request(request)
         runtime_env = process_env
@@ -3178,13 +3179,13 @@ class CodexAgent(BaseAgent):
         if env:
             env_script_path = self._caller_env_script_path(request)
             set_env.update({**env, "BASH_ENV": str(env_script_path)})
-        git_path_changed = prepend_vendored_git_to_path(
+        path_changed = prepend_managed_tools_to_path(
             set_env,
             base_env=runtime_env,
             working_dir=getattr(request, "working_path", None),
         )
         git_path_state = set_env["PATH"] if "PATH" in set_env else runtime_env.get("PATH", "")
-        path_managed = had_path or git_path_changed or force_path
+        path_managed = had_path or path_changed or force_path
         if force_path:
             set_env["PATH"] = git_path_state
         if not env and not path_managed:
@@ -3195,11 +3196,11 @@ class CodexAgent(BaseAgent):
         return git_path_state, path_managed
 
     def _git_path_state_for_request(self, request: AgentRequest, process_env: Mapping[str, str]) -> str:
-        from core.git_runtime import prepend_vendored_git_to_path
+        from core.agent_path import prepend_managed_tools_to_path
 
         runtime_env = process_env
         env: dict[str, str] = {}
-        prepend_vendored_git_to_path(
+        prepend_managed_tools_to_path(
             env,
             base_env=runtime_env,
             working_dir=getattr(request, "working_path", None),

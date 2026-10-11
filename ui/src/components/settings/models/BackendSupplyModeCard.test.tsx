@@ -34,7 +34,7 @@ const CLAUDE_KEY: MigrationItem = {
 };
 
 const RUNTIME: RuntimeDependency = {
-  contract_version: 10,
+  contract_version: 11,
   manifest: { name: 'cliproxyapi', resolution: 'resolved', version: '1', source_sha: 'a'.repeat(40), assets: [] },
   status: { installed_version: '1', verified: true, health: 'ok' },
 };
@@ -62,6 +62,39 @@ const renderCard = () =>
   );
 
 describe('BackendSupplyModeCard', () => {
+  it('offers the Avibe gateway model link without native configuration scanning or direct mode', async () => {
+    vi.mocked(modelsApi.listAgents).mockResolvedValue([{ backend: 'vibey', cli_present: false, mode: 'hub', menu_kind: 'fixed' }]);
+    const setMode = vi.spyOn(modelsApi, 'setAgentMode');
+    render(
+      <MemoryRouter>
+        <I18nextProvider i18n={i18n}><BackendSupplyModeCard backend="vibey" /></I18nextProvider>
+      </MemoryRouter>,
+    );
+    const hub = await screen.findByRole('radio', { name: /Gateway mode/ });
+    expect(hub.getAttribute('aria-checked')).toBe('true');
+    expect(screen.getByRole('link', { name: 'Open Models page' }).getAttribute('href')).toBe('/settings/models');
+    expect(screen.queryByRole('radio', { name: /Direct mode/ })).toBeNull();
+    await userEvent.click(hub);
+    expect(modelsApi.scanMigration).not.toHaveBeenCalled();
+    expect(setMode).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['en', 'On the gateway · no source enabled yet, the next turn will fail. Add or enable a source on the Models page to bring it back.'],
+    ['zh', '已接入模型网关 · 还没有启用任何供应商，下一个回合会失败。去「模型」页添加或启用供应商即可恢复。'],
+  ])('punctuates the warning and its fix as one %s sentence pair', async (language, banner) => {
+    await i18n.changeLanguage(language);
+    vi.mocked(modelsApi.listAgents).mockResolvedValue([
+      { backend: 'vibey', cli_present: false, mode: 'hub', menu_kind: 'fixed', sources: { order: [] } },
+    ]);
+    render(
+      <MemoryRouter>
+        <I18nextProvider i18n={i18n}><BackendSupplyModeCard backend="vibey" /></I18nextProvider>
+      </MemoryRouter>,
+    );
+    expect((await screen.findByText(banner)).textContent).toBe(banner);
+  });
+
   it.each([
     ['switching to the gateway', /Gateway mode/, true],
     ['importing from the Direct strip', null, false],

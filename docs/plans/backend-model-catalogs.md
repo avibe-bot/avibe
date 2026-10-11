@@ -274,6 +274,13 @@ the contract guard as the test. Nothing here introduces a second vocabulary for 
   models.dev suggestion. A proposal contains only values the catalog can store — an effort
   value that violates `backend-model.schema.json` is left out of the proposal, never copied. `PUT` stores the request literally — an empty field in the request
   is an empty field — so a value the user cleared before the first Save stays cleared.
+  One later fill exists, for C-9 budgets: a `provider` row with no `models_dev_id` was
+  written while no models.dev copy was cached (the picker on a cold cache, or Vibey's seed),
+  so it never had a proposal to keep or clear. When a copy arrives, or on the controller's
+  snapshot cadence, such a row whose id names an entry exactly (the C2 match) takes each of
+  `context_window` and `max_output_tokens` it lacks and that entry's `models_dev_id`, through
+  the ordinary committed catalog change (MH-LIMITS-001). A limit already set stands, a row
+  with a `models_dev_id` is never filled, and built-in and manual rows are not filled.
   Server-side seeding at write time exists only for built-ins the reconcile (C6) adds without
   a user draft, from the same snapshot values. `origin` records the creation path only —
   `builtin` (built-in group or reconcile), `provider` (provider group), `models_dev` (custom

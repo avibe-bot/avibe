@@ -65,6 +65,7 @@ from core.services.agent_steering import (
 )
 from storage import messages_service
 from storage import message_deliveries as delivery_store
+from storage.agent_transcript import recovered_watch_ids
 from storage.agent_session_rows import reserve_write_lock
 from storage.db import get_cached_sqlite_engine
 from storage.background import (
@@ -87,6 +88,7 @@ from core.runtime_activation import (
     RuntimeActivationRegistry,
     RuntimeActivationResolution,
 )
+from modules.agents.catalog import display_name_for_backend
 from vibe.i18n import t as i18n_t
 
 if TYPE_CHECKING:
@@ -209,9 +211,20 @@ _EXECUTION_ROUTING_KEYS = _FLUSH_REBUILT_KEYS | frozenset(
 )
 SCHEDULED_TARGET_AGENT_KEY = "scheduled_target_agent_name"
 
-_NON_RESTORABLE_RUNTIME_BACKENDS = frozenset({"claude", "codex"})
+# Runtimes bound to the controller process: an accepted Turn cannot survive a
+# service restart. ``vibey`` runs its loop in this process.
+_NON_RESTORABLE_RUNTIME_BACKENDS = frozenset({"claude", "codex", "vibey"})
 _MAX_AUTOMATIC_UNKNOWN_START_REPLAYS = 1
 _MAX_PREWRITE_START_ATTEMPTS = 3
+# A lost Turn whose running commands recovery handed to Watches (recovery.md T2) gets
+# this copy, for one Watch and for several, instead of asking for a resend that would
+# run them twice; its notice then offers no Retry either (``watch_ids``).
+_HANDED_OVER_NOTICE_KEYS = {
+    "turn.interrupted.serviceRestart": (
+        "turn.interrupted.serviceRestartWatch",
+        "turn.interrupted.serviceRestartWatches",
+    ),
+}
 _UNKNOWN_START_REPLAY_INSTRUCTION = (
     "[Avibe recovery: this request may have been delivered before restart. "
     "Before any irreversible action, check whether the work is already complete.]\n\n"
@@ -2744,7 +2757,7 @@ class SessionTurnManager:
             )
         else:
             receipt = await self._attempt_steer(backend, request)
-        return await self._finish_steer(delivery_id, receipt, context=context)
+        return await self._finish_steer(delivery_id, receipt, context=context, expected_attempt_id=attempt_id)
 
     async def _reconcile_steer_attempt(
         self,
@@ -3284,6 +3297,7 @@ class SessionTurnManager:
         receipt: Any,
         *,
         context: Optional["MessageContext"],
+        expected_attempt_id: Optional[str] = None,
     ) -> DeliveryResult:
         outcome = getattr(receipt, "outcome", SteerOutcome.UNKNOWN)
         outcome_value = str(getattr(outcome, "value", outcome))
@@ -3311,6 +3325,16 @@ class SessionTurnManager:
                 target_turn_id = str(delivery.get("current_target_turn_id") or "")
                 session_id = str(delivery["session_id"])
                 attempt_id = str(delivery.get("current_attempt_id") or "")
+                if expected_attempt_id is not None and attempt_id != expected_attempt_id:
+                    # A receipt for an attempt this Delivery no longer has (settled, or
+                    # superseded by a newer attempt) changes nothing.
+                    return DeliveryResult(
+                        delivery_id,
+                        None,
+                        str(delivery.get("state") or "reconciling_steer"),
+                        target_turn_id or None,
+                        "receipt_cas_lost",
+                    )
                 attempt_rows = (
                     delivery_store.attempt_deliveries(conn, attempt_id)
                     if attempt_id
@@ -3362,6 +3386,20 @@ class SessionTurnManager:
                             target_turn_id or None, "receipt_cas_lost",
                         )
                 elif not materialized:
+                    # A negative receipt is fenced like the ACCEPTED and UNKNOWN branches:
+                    # it settles only a current attempt whose Deliveries are still steering
+                    # or reconciling. A late or duplicate one for an attempt already settled
+                    # would otherwise move a Delivery a newer Turn has since claimed.
+                    if not attempt_id or not attempt_rows or any(
+                        row["state"] not in {"steering", "reconciling_steer"} for row in attempt_rows
+                    ):
+                        return DeliveryResult(
+                            delivery_id,
+                            None,
+                            str(delivery.get("state") or "reconciling_steer"),
+                            target_turn_id or None,
+                            "receipt_cas_lost",
+                        )
                     session_status = conn.execute(
                         select(agent_sessions.c.status).where(
                             agent_sessions.c.id == str(delivery["session_id"])
@@ -6297,6 +6335,7 @@ class SessionTurnManager:
                 str(delivery["id"]),
                 receipt,
                 context=None,
+                expected_attempt_id=attempt_id,
             )
             return result.state != "reconciling_steer"
         return False
@@ -6348,6 +6387,19 @@ class SessionTurnManager:
                 "turn origin lookup failed for turn=%s", turn_id, exc_info=True
             )
             return ""
+
+    def _recovered_watch_ids(self, session_id: str, turn_id: str) -> list[str]:
+        """The Watches startup recovery handed the lost Turn's running commands to (T2 runs before T4)."""
+
+        if not turn_id or not self._durable_schema_available():
+            return []
+        try:
+            with self._sqlite_engine().connect() as conn:
+                return recovered_watch_ids(conn, session_id, turn_id)
+        except Exception:
+            # The notice still goes out, with the copy for a Turn that handed nothing over.
+            logger.warning("hand-over lookup failed for turn=%s", turn_id, exc_info=True)
+            return []
 
     def _controller_language(self) -> str:
         language_getter = getattr(self.controller, "_get_lang", None)
@@ -6558,22 +6610,34 @@ class SessionTurnManager:
         by anything else.
         """
 
+        language = self._controller_language()
+        text = i18n_t(
+            message_key,
+            language,
+            agent=display_name_for_backend(backend) if backend else "",
+        )
+        metadata: dict[str, Any] = {"turn_id": turn_id or None, "replayed": True}
+        watch_ids = self._recovered_watch_ids(session_id, turn_id)
+        handed_over = _HANDED_OVER_NOTICE_KEYS.get(message_key)
+        if watch_ids and handed_over is not None:
+            one, many = handed_over
+            if len(watch_ids) == 1:
+                text = i18n_t(one, language, watch=watch_ids[0])
+            else:
+                text = i18n_t(many, language, watches=", ".join(watch_ids))
+            metadata["watch_ids"] = watch_ids
         try:
             delivered = await self.controller.emit_agent_message(
                 context,
                 "notify",
-                i18n_t(
-                    message_key,
-                    self._controller_language(),
-                    agent=i18n_t(f"backend.{backend}", self._controller_language()) if backend else "",
-                ),
+                text,
                 # Recovery already settled this Turn. Carry its exact identity
                 # through delayed sends without granting another settlement or
                 # guessing the target from the Session's current Turn.
                 output=backend_failure_notification_output(
                     context,
                     backend,
-                    output=MessageOutput(metadata={"turn_id": turn_id or None, "replayed": True}),
+                    output=MessageOutput(metadata=metadata),
                     # A legacy Turn has no durable id; its context token names it.
                     failure_id=f"turn:{turn_id}" if turn_id else None,
                     failure_id_authoritative=bool(turn_id),
@@ -6888,6 +6952,7 @@ class SessionTurnManager:
                 str(attempt["id"]),
                 receipt,
                 context=None,
+                expected_attempt_id=attempt_id,
             )
             if result.state != "reconciling_steer":
                 recovered.append(str(attempt["session_id"]))

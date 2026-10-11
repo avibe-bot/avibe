@@ -53,7 +53,8 @@ describe('unified reasoning-effort vocabulary', () => {
     expect(new Set(Object.keys(TIER_SUGGESTIONS))).toEqual(new Set(SOURCE_PROTOCOLS));
 
     for (const [protocol, tiers] of Object.entries(TIER_SUGGESTIONS)) {
-      expect(tiers.length, protocol).toBeGreaterThan(0);
+      if (protocol === 'google') expect(tiers).toEqual([]);
+      else expect(tiers.length, protocol).toBeGreaterThan(0);
       expect(new Set(tiers).size, protocol).toBe(tiers.length);
       expect(tiers.filter((tier) => vocabulary.includes(tier)), protocol).toEqual([...tiers]);
       expect([...tiers].sort((a, b) => rank(a) - rank(b)), protocol).toEqual([...tiers]);

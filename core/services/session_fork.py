@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Mapping, Optional
 
 from config import paths
+from modules.agents.catalog import AGENT_BACKENDS
 from vibe.authorization import (
     AuthorizationContext,
     require_instance_role,
@@ -186,6 +187,8 @@ def reserve_forked_session(
     db_path: Optional[Path] = None,
     title_lang: str = "en",
     authorization_context: AuthorizationContext | Mapping[str, Any] | None = None,
+    self_fork: bool = False,
+    as_of: Optional[int] = None,
 ) -> SessionForkResult:
     """Copy an existing Agent Session row into a new pending fork target.
 
@@ -194,6 +197,15 @@ def reserve_forked_session(
     ``reasoning_effort`` are simple per-session overrides. The new row's native
     id stays empty until the backend adapter successfully forks the native
     session.
+
+    A Vibey source's fork point (C-10 fork.md section 2) is resolved here. A
+    user's fork cuts before its earliest unfinished Turn, so the child never
+    inherits a partial Turn. ``self_fork`` is the Agent's own fork from inside
+    its live Turn, set only by ``vibe agent run --fork-self``; it cuts at the
+    largest settled point, keeping that Turn's input and finished steps.
+    ``as_of`` is internal, for system mechanisms: a settled Vibey point. No
+    product surface passes it. Native backends fork by their own existing
+    logic and ignore ``self_fork``; they refuse ``as_of``.
     """
 
     context = require_instance_role(authorization_context, "editor")
@@ -252,12 +264,17 @@ def reserve_forked_session(
                 raise SessionForkError(f"agent session is archived: {source_session_id}")
 
             source_backend = str(row["agent_backend"] or "").strip()
-            if source_backend not in {"codex", "claude", "opencode"}:
+            if source_backend not in AGENT_BACKENDS:
                 raise SessionForkError(f"session backend cannot be forked: {source_backend or 'unknown'}")
             source_native = str(row["native_session_id"] or "").strip()
             if not source_native:
                 raise SessionForkError(
                     f"agent session has no native session id to fork: {source_session_id}"
+                )
+            if as_of is not None and source_backend != "vibey":
+                raise SessionForkError(
+                    "an explicit fork point needs a vibey source session",
+                    code="session_fork_point_unsupported",
                 )
             source_anchor = _latest_source_message_anchor(conn, str(row["id"]))
             source_has_active_run = _source_has_active_agent_run(conn, str(row["id"]))
@@ -362,6 +379,8 @@ def reserve_forked_session(
             metadata.pop("fork_opencode_message_id", None)
             metadata.pop("fork_opencode_fork_empty_history", None)
             metadata.pop("fork_opencode_boundary_from_active_run", None)
+            # A source that is itself a fork carries its own point; the child's is resolved below.
+            metadata.pop("fork_source_context_seq", None)
             metadata.update(
                 {
                     "created_via": "session_fork",
@@ -375,6 +394,20 @@ def reserve_forked_session(
                     "fork_created_at": now,
                 }
             )
+            if source_backend == "vibey":
+                # Vibey's context is the source's rows up to the fork point, resolved once
+                # now so later rows never enter the prefix. A user's fork cuts before the
+                # earliest unfinished Turn, so a live Turn's input, calls, and replies never
+                # reach the child (C-10 fork.md section 2).
+                from core.agent_core.harness.fork import ForkPointError
+                from storage.agent_transcript import resolve_fork_point
+
+                try:
+                    metadata["fork_source_context_seq"] = resolve_fork_point(
+                        conn, str(row["id"]), as_of=as_of, self_fork=self_fork
+                    )
+                except ForkPointError as exc:
+                    raise SessionForkError(str(exc), code=f"session_fork_point_{exc.code}") from exc
             if opencode_fork_message_id:
                 metadata["fork_opencode_message_id"] = opencode_fork_message_id
             if opencode_fork_empty_history:

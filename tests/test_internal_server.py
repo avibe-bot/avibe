@@ -3006,6 +3006,7 @@ def test_cancel_waits_for_stale_dispatch_cleanup_before_releasing(tmp_path, monk
 
     async def _go():
         done_event = asyncio.Event()
+        sink_registered = asyncio.Event()
         cleanup_started = asyncio.Event()
         allow_cleanup = asyncio.Event()
 
@@ -3016,8 +3017,9 @@ def test_cancel_waits_for_stale_dispatch_cleanup_before_releasing(tmp_path, monk
                 done_event=done_event,
                 turn_token="old-turn",
             )
+            sink_registered.set()
             try:
-                await asyncio.sleep(60)
+                await asyncio.Event().wait()  # only the cancel ends this dispatch
             finally:
                 cleanup_started.set()
                 await allow_cleanup.wait()
@@ -3030,11 +3032,9 @@ def test_cancel_waits_for_stale_dispatch_cleanup_before_releasing(tmp_path, monk
             platform_specific={"agent_session_id": session_id},
         )
         task = asyncio.create_task(_stale_dispatch())
-        for _ in range(200):
-            if controller.get_turn_sink(resolve_turn_sink_key(controller, context)) is not None:
-                break
-            await asyncio.sleep(0.01)
-        assert controller.get_turn_sink(resolve_turn_sink_key(controller, context)) is not None
+        registered = asyncio.create_task(sink_registered.wait())
+        await asyncio.wait({task, registered}, return_when=asyncio.FIRST_COMPLETED)
+        assert registered.done(), task.result()  # a dispatch that died first surfaces its error
         app.state.in_flight_dispatches[session_id] = session_turns.Turn(
             task=task,
             context=context,
@@ -3048,7 +3048,13 @@ def test_cancel_waits_for_stale_dispatch_cleanup_before_releasing(tmp_path, monk
         controller.command_handler.handle_stop = AsyncMock(side_effect=_not_active)
         async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
             cancel_task = asyncio.create_task(client.post(f"/internal/cancel/{session_id}"))
-            await asyncio.wait_for(cleanup_started.wait(), timeout=1)
+            # Ordering, not latency: the endpoint's database work before it cancels
+            # the dispatch may take any time, but it must not answer first.
+            cleanup_seen = asyncio.create_task(cleanup_started.wait())
+            first, _ = await asyncio.wait({cancel_task, cleanup_seen}, return_when=asyncio.FIRST_COMPLETED)
+            assert cleanup_seen in first and cancel_task not in first, (
+                "the cancel answered before it cancelled the stale dispatch"
+            )
             await asyncio.sleep(0.02)
             assert not cancel_task.done()
             assert session_id in app.state.in_flight_dispatches
@@ -3056,7 +3062,8 @@ def test_cancel_waits_for_stale_dispatch_cleanup_before_releasing(tmp_path, monk
             resp = await cancel_task
         return resp, task
 
-    resp, task = asyncio.run(_go())
+    # A hang guard only: the ordering above is decided by events, never by this bound.
+    resp, task = asyncio.run(asyncio.wait_for(_go(), timeout=30))
     assert resp.status_code == 200
     assert resp.json()["status"] == "stale_released"
     assert task.cancelled()

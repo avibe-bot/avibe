@@ -1,0 +1,527 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "agent-core/transcript-rows.schema.json",
+  "title": "TranscriptRowPayloads",
+  "description": "C-5 payloads of context rows (transcript.md). Written by the adapter's TranscriptStore for the `harness`; read by projection, fork, resume, and the Workbench model view. All shapes are persisted and versioned.",
+  "definitions": {
+    "ModelInput": {
+      "description": "`messages.content_json.model` on user, harness, agent_initiated, and annotation rows, set when the loop consumes the input.",
+      "type": "object",
+      "required": [
+        "version",
+        "message"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "message": {
+          "$ref": "message.schema.json#/definitions/UserMessage",
+          "description": "The input exactly as sent, including the rendered time and identity prefix and attachments."
+        }
+      }
+    },
+    "ModelResponse": {
+      "description": "`messages.content_json.model` on assistant and result rows.",
+      "type": "object",
+      "required": [
+        "version",
+        "message"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "message": {
+          "$ref": "message.schema.json#/definitions/AssistantMessage",
+          "description": "Verbatim, including quick-reply blocks and file:// links that the display copy rewrites."
+        },
+        "request": {
+          "type": "object",
+          "description": "C-9 (context.md section 2): the request this response answered, as sent, for the estimate anchor. Written only when context management is on.",
+          "required": [
+            "tokens"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "tokens": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "UTF-8/4 tokens of the whole request: system prompt, tool definitions, and messages."
+            }
+          }
+        }
+      }
+    },
+    "ToolResult": {
+      "description": "`agent_events.content_json` of a `tool_result` row.",
+      "type": "object",
+      "required": [
+        "version",
+        "message"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "message": {
+          "$ref": "message.schema.json#/definitions/ToolResultMessage"
+        },
+        "details": {
+          "type": "object",
+          "description": "Not sent to the model.",
+          "properties": {
+            "job_id": {
+              "type": "string"
+            },
+            "watch_id": {
+              "type": "string"
+            },
+            "recovered": {
+              "type": "boolean",
+              "description": "Committed by T2 settlement (recovery.md) after the call's run ended, not by the tool."
+            },
+            "exit_code": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "full_output_path": {
+              "type": "string"
+            },
+            "truncated": {
+              "type": "boolean"
+            },
+            "diff": {
+              "type": "string",
+              "description": "edit/write display diff."
+            },
+            "skills": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": [
+                  "name"
+                ],
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  }
+                }
+              },
+              "description": "Set when the result carries skills `vibe skill load` loaded: one entry per top-level `<skill_content name>` block, in load order; the names a checkpoint lists. The result clears like any other."
+            }
+          }
+        }
+      }
+    },
+    "Compaction": {
+      "description": "`agent_events.content_json` of a `context_compaction` row (context.md section 7). Its model-facing content (`summary`, `state`) is fixed when it is written, so projection is a pure function of the rows.",
+      "type": "object",
+      "required": [
+        "version",
+        "mode",
+        "reason",
+        "summary",
+        "checkpoint",
+        "state",
+        "first_kept_seq",
+        "kept_inputs",
+        "summarized_to_seq",
+        "files_read",
+        "files_read_omitted",
+        "files_modified",
+        "files_modified_omitted",
+        "skills",
+        "skills_omitted",
+        "tokens_before",
+        "tokens_after_estimate",
+        "threshold"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "mode": {
+          "enum": [
+            "normal",
+            "rolling",
+            "dropped"
+          ],
+          "description": "`normal`: the fork summarized the whole conversation and the tail stays verbatim; `rolling`: the fork summarized the prefix up to the cut (overflow ladder b); `dropped`: the prefix moved out with no model call (overflow ladder c)."
+        },
+        "reason": {
+          "enum": [
+            "threshold",
+            "overflow"
+          ]
+        },
+        "summary": {
+          "type": "string",
+          "description": "The rendered `<context-checkpoint>` message: framing, checkpoint, `<artifacts>`, `<skills-loaded>`, and `<earlier-record>`. Model-facing. The in-flight Turn's inputs before the cut (`kept_inputs`) stay in the projected context as they were, right before this message (context.md section 5)."
+        },
+        "checkpoint": {
+          "type": "string",
+          "description": "The model-written checkpoint. For `dropped`, the previous checkpoint's text, or empty when there was none or it was too large for the route (context.md section 8 c)."
+        },
+        "state": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "State the adapter rendered from its own stores when the checkpoint was written (the environment's core fields); each is one text block after `summary`. Model-facing."
+        },
+        "first_kept_seq": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "`context_seq` of the first unit kept verbatim."
+        },
+        "kept_inputs": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "description": "`context_seq` of each input of the in-flight Turn (its first and every accepted steer) before `first_kept_seq`, ascending: projection keeps them verbatim, in order, right before this row's message (context.md section 5). Empty when the cut did not fall inside that Turn."
+        },
+        "summarized_to_seq": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "The last `context_seq` moved out of the context; the `<earlier-record>` hint names it."
+        },
+        "previous_compaction_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "files_read": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 50,
+          "description": "Paths given to `read` and never to `write` or `edit`, cumulative, most recently touched first as the calls gave them, at most 50; only the summary's display is cut."
+        },
+        "files_read_omitted": {
+          "type": "boolean",
+          "description": "Whether a read path was ever pushed out of `files_read`; once set, it stays set. A mark, not a count: a path pushed out and touched again is the same path."
+        },
+        "files_modified": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 50,
+          "description": "Paths given to `write` or `edit`, cumulative, most recently touched first as the calls gave them, at most 50; only the summary's display is cut."
+        },
+        "files_modified_omitted": {
+          "type": "boolean",
+          "description": "Whether a modified path was ever pushed out of `files_modified`; once set, it stays set."
+        },
+        "skills": {
+          "type": "array",
+          "description": "Names of the skills the summarized rows loaded, cumulative, minus those whose load result is still in the context: the most recently loaded first, at most 20, as loaded. Listed by name in `summary` (`<skills-loaded>`, each displayed as one line of plain text); never their bodies.",
+          "items": {
+            "type": "object",
+            "required": [
+              "name"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "type": "string"
+              }
+            }
+          },
+          "maxItems": 20
+        },
+        "skills_omitted": {
+          "type": "boolean",
+          "description": "Whether a skill name was ever pushed out of `skills`; once set, it stays set."
+        },
+        "tokens_before": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "tokens_after_estimate": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "threshold": {
+          "type": "integer",
+          "description": "T when the checkpoint was written; ineffective when `tokens_after_estimate >= 0.75 * threshold`."
+        },
+        "summarizer": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "description": "The checkpoint turn; null for `dropped`.",
+          "required": [
+            "origin",
+            "prompt_version",
+            "rounds"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "origin": {
+              "$ref": "message.schema.json#/definitions/Origin"
+            },
+            "prompt_version": {
+              "type": "string"
+            },
+            "rounds": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Responses of the checkpoint turn that called tools: at most 5 rounds whose calls ran, plus one answered with the used-up budget text."
+            }
+          }
+        },
+        "usage": {
+          "$ref": "message.schema.json#/definitions/Usage",
+          "description": "Summed over the checkpoint turn's responses."
+        }
+      }
+    },
+    "ContextEdit": {
+      "description": "`agent_events.content_json` of a `context_edit` row.",
+      "type": "object",
+      "required": [
+        "version",
+        "target_event_id",
+        "replacement",
+        "reason"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "target_event_id": {
+          "type": "string",
+          "description": "The `tool_result` row whose content is replaced in projection."
+        },
+        "replacement": {
+          "type": "object",
+          "required": [
+            "text"
+          ],
+          "properties": {
+            "text": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        "reason": {
+          "enum": [
+            "clear_old_tool_result",
+            "fit_tool_result"
+          ],
+          "description": "`clear_old_tool_result` replaces an old result with the cleared placeholder (context.md section 4); `fit_tool_result` shows the newest batch's result cut to fit, ending with its note (section 3). The row keeps the whole output either way."
+        }
+      }
+    },
+    "AgentState": {
+      "description": "`agent_events.content_json` of an `agent_state` row: hook state at a commit point (loop-control.md section 7). Not projected into messages.",
+      "type": "object",
+      "required": [
+        "version",
+        "state"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "state": {
+          "type": "object"
+        }
+      }
+    },
+    "ForkTurn": {
+      "description": "`agent_events.content_json` of a `fork_turn` audit row (`TranscriptStore.append_audit(kind='fork_turn')`, `visibility = 'audit'`, no `context_seq`): one side turn (C-10 fork.md section 7), such as a C-9 checkpoint turn, and the messages it produced, from the attempt ledger. Written once on every exit but an abort (C-10 F7). Never context.",
+      "type": "object",
+      "required": [
+        "version",
+        "purpose",
+        "policy",
+        "point",
+        "detail",
+        "outcome",
+        "messages"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "purpose": {
+          "enum": [
+            "checkpoint"
+          ],
+          "description": "What the side turn is for; grows with its consumers (C-10 section 13)."
+        },
+        "policy": {
+          "enum": [
+            "dreaming"
+          ],
+          "description": "The side-turn policy its calls ran under (C-10 section 6)."
+        },
+        "point": {
+          "type": "object",
+          "description": "The fork point (C-10 section 2): the caller's latest committed context_seq, and the number of units of that view the prefix kept (null: all of them).",
+          "required": [
+            "as_of",
+            "units"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "as_of": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "units": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0
+            }
+          }
+        },
+        "detail": {
+          "type": "object",
+          "description": "Purpose fields, required. For `checkpoint`, the only purpose in v1: the C-9 reason and mode (context.md section 6). A later purpose adds its own shape with a conditional schema.",
+          "required": [
+            "reason",
+            "mode"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "reason": {
+              "enum": [
+                "threshold",
+                "overflow"
+              ]
+            },
+            "mode": {
+              "enum": [
+                "normal",
+                "rolling"
+              ]
+            }
+          }
+        },
+        "outcome": {
+          "enum": [
+            "completed",
+            "failed"
+          ]
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "folded_event_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The row the caller's fold committed (for a checkpoint, its `context_compaction` row), or null."
+        },
+        "rounds": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "messages": {
+          "type": "array",
+          "description": "Every attempt's response or partial (failed and retried ones included) and the turn's tool results, in order; a refused response that JSON cannot hold is left out (context.md section 10, invariant 6).",
+          "items": {
+            "$ref": "message.schema.json"
+          }
+        },
+        "usage": {
+          "$ref": "message.schema.json#/definitions/Usage"
+        }
+      }
+    },
+    "ModelAttempt": {
+      "description": "`agent_events.content_json` of a `model_attempt` audit row (`TranscriptStore.append_audit(kind='attempt')`, `visibility = 'audit'`, no `context_seq`): a conversation attempt that reported usage and did not become a response row (retried, relieved, a usage-only terminal, refused at admission, or a failed commit), written by the attempt ledger in every mode, with or without context management (context.md section 10, invariant 4). Never context.",
+      "type": "object",
+      "required": [
+        "version",
+        "usage",
+        "error"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "usage": {
+          "$ref": "message.schema.json#/definitions/Usage"
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Why the attempt did not become a response: the provider error that ended it (`<kind>: <message>`), or, without one, why the model call ended (a refusal at admission, a failed commit)."
+        }
+      }
+    }
+  },
+  "examples": [
+    {
+      "version": 1,
+      "mode": "normal",
+      "reason": "threshold",
+      "summary": "<context-checkpoint>\nThis is a record of the earlier part of this conversation, written for you so you can continue. ...\n\n# 1. Self and method\n...\n\n<artifacts>\nRead:\n- tests/test_paths.py\nModified:\n- core/paths.py\n</artifacts>\n<earlier-record>\n...\n</earlier-record>\n</context-checkpoint>",
+      "checkpoint": "# 1. Self and method\n...",
+      "state": [
+        "<loaded-skills>\n...\n</loaded-skills>"
+      ],
+      "first_kept_seq": 412,
+      "kept_inputs": [],
+      "summarized_to_seq": 411,
+      "previous_compaction_id": null,
+      "files_read": [
+        "tests/test_paths.py"
+      ],
+      "files_modified": [
+        "core/paths.py"
+      ],
+      "files_read_omitted": false,
+      "files_modified_omitted": false,
+      "skills": [],
+      "skills_omitted": false,
+      "tokens_before": 158432,
+      "tokens_after_estimate": 31877,
+      "threshold": 155808,
+      "summarizer": {
+        "origin": {
+          "provider": "anthropic",
+          "api": "anthropic",
+          "model": "claude-opus-5-5"
+        },
+        "prompt_version": "checkpoint-v2",
+        "rounds": 0
+      },
+      "usage": {
+        "input_tokens": 1210,
+        "output_tokens": 2304,
+        "cache_read_tokens": 157020,
+        "cache_write_tokens": 0
+      }
+    }
+  ]
+}

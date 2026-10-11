@@ -1,6 +1,7 @@
 import * as React from 'react';
 import { Info } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
+import { getBackendUiMeta } from '@/lib/agentBackends';
 
 import { GuardGapList } from './GuardGapList';
 import type { RouteHopRef, SupplyGap } from './types';
@@ -63,7 +64,7 @@ export const GuardImpact: React.FC<GuardPicture & {
                 >
                   <span className="min-w-0 flex-1">
                     <strong>
-                      {t(`settings.models.backends.${hop.backend}`, { defaultValue: hop.backend })} · {hop.menu_model}
+                      {getBackendUiMeta(hop.backend).label} · {hop.menu_model}
                     </strong>
                     {/* The supplier and the model it serves, in the Agent card's
                         own mapping copy rather than a second string that would

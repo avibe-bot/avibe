@@ -6,6 +6,12 @@
   "type": "object",
   "required": ["vendor", "key"],
   "additionalProperties": false,
+  "allOf": [
+    {
+      "if": { "required": ["protocol"], "properties": { "protocol": { "const": "google" } } },
+      "then": { "properties": { "vendor": { "const": "custom" } } }
+    }
+  ],
   "properties": {
     "save_unverified": {
       "type": "boolean",
@@ -33,7 +39,7 @@
       "description": "Transient plaintext credential. It is never returned or persisted in Source state."
     },
     "protocol": {
-      "enum": ["anthropic", "openai_responses", "openai_chat"],
+      "enum": ["anthropic", "openai_responses", "openai_chat", "google"],
       "description": "Optional user-selected interface. When present, observation probes exactly this protocol. Omission selects the shipped vendor pin when one exists; otherwise custom Auto requires matching response proof. Explicit unverified saving requires a catalog pin or a concrete custom declaration and never guesses a protocol."
     },
     "client_nonce": {

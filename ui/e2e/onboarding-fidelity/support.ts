@@ -4,22 +4,25 @@ export const ORIGIN = 'http://127.0.0.1:5212';
 
 export const isRetiredMemoryPath = (pathname: string) => pathname === '/api/memory' || pathname.startsWith('/api/memory/');
 
-/** Every phase of the authored 8.9s loop, addressed by the elapsed time it freezes at. */
+/** Every phase of the authored 11.15s loop, addressed by the elapsed time it freezes at. */
 export const PHASES = {
-  'pm-working': 600,
-  'handoff-to-codex': 1875,
-  'codex-working': 3000,
-  'handoff-to-opencode': 4125,
-  'tests-running': 5200,
-  'return-to-pm': 6500,
-  'pm-summary': 8000,
+  'coordinator-planning': 600,
+  'handoff-to-claude': 1875,
+  'claude-building': 3000,
+  'handoff-to-codex': 4125,
+  'codex-working': 5200,
+  'handoff-to-opencode': 6375,
+  'tests-running': 7400,
+  'return-to-coordinator': 8750,
+  'coordinator-summary': 10000,
 } as const;
 
 /**
  * The accepted responsive matrix, plus the two widths between its rows that the
  * composition actually changes at. 1920 and 1440 are the wide desktop that takes the
- * 1200 content box; 1366 and 1200 are the standard desktop on 976; 1024 and 768 are
- * where the diagram stops following its proportion; 390, 375 and 320 are the phones.
+ * 1200 content box; 1366 and 1200 are the standard desktop on 1040; 1024 is the last
+ * width the lineup stands in one row, 768 folds it into two; 390, 375 and 320 are the
+ * phones.
  */
 export const VIEWPORTS = [
   { width: 1920, height: 1080 },
@@ -84,7 +87,7 @@ export async function serveProduct(page: Page) {
     const backend = new URL(route.request().url()).pathname.split('/')[4];
     return route.fulfill({ json: { ok: true, agent: { backend, mode: 'direct', sources: { order: [], eligibility: [] }, routes: {}, builtin_models: [], catalog_models: [], named_agents: [], menu: null, model_supply: [], supply_status: 'unavailable' } } });
   });
-  await page.route('**/api/models/runtime/status', (route) => route.fulfill({ json: { ok: true, runtime: { contract_version: 10, enabled: true, host_platform: 'linux', manifest: { name: 'cliproxyapi', resolution: 'resolved', version: 'fixture', source_sha: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', assets: [] }, status: { installed_version: 'fixture', verified: true, health: 'ok' } } } }));
+  await page.route('**/api/models/runtime/status', (route) => route.fulfill({ json: { ok: true, runtime: { contract_version: 11, enabled: true, host_platform: 'linux', manifest: { name: 'cliproxyapi', resolution: 'resolved', version: 'fixture', source_sha: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', assets: [] }, status: { installed_version: 'fixture', verified: true, health: 'ok' } } } }));
   await page.route(`${ORIGIN}/status`, (route) => route.fulfill({ json: { state: 'running' } }));
   await page.route('**/api/backend/*/connection', (route) => route.fulfill({ json: { ok: true, backend: new URL(route.request().url()).pathname.split('/').at(-2), installed: true, enabled: true, auth: 'none', application: 'applied', ready: false, entry_eligible: false } }));
   await page.route('**/api/config', (route) => route.fulfill({ json: CONFIG }));

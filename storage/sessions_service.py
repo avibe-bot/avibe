@@ -13,6 +13,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 
 from config import paths
+from modules.agents.catalog import AGENT_BACKENDS, display_name_for_backend
 from config.v2_config import V2Config
 from config.v2_sessions import ActivePollInfo, SessionState
 from config.v2_settings import _split_scoped_key
@@ -218,7 +219,10 @@ def _set_native_once(conn: Connection, row_id: str, encoded_session_id: str) -> 
     return False
 
 
-_BACKEND_LABELS = {"claude": "Claude", "codex": "Codex", "opencode": "OpenCode"}
+_BACKEND_LABELS = {
+    backend: "Claude" if backend == "claude" else display_name_for_backend(backend)
+    for backend in AGENT_BACKENDS
+}
 
 
 def session_agent_display_label(row: Mapping[str, Any]) -> str | None:
@@ -2437,7 +2441,7 @@ def _infer_scope_type(platform: str, native_id: str) -> str:
     return "channel"
 
 
-_BACKEND_AGENT_NAMES = {"codex", "claude", "opencode"}
+_BACKEND_AGENT_NAMES = frozenset(AGENT_BACKENDS)
 _ROUTING_SENTINEL_VARIANTS = {"", "default", *_BACKEND_AGENT_NAMES}
 
 

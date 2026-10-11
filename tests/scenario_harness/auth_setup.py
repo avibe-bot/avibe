@@ -10,8 +10,8 @@ def save_direct_auth_config(config: V2Config | None = None) -> V2Config:
             config = V2Config.load()
         except FileNotFoundError:
             config = V2Config.default()
-    for agent in config.model_hub.agents.values():
-        agent.mode = "direct"
+    for backend in ("claude", "codex", "opencode"):
+        config.model_hub.agents[backend].mode = "direct"
     config.save()
     return config
 

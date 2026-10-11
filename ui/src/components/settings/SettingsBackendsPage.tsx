@@ -3,19 +3,24 @@ import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { ChevronRight, Settings2 } from 'lucide-react';
 
+import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
 import { SettingsResourceRow, ToggleSwitch } from './SettingsPrimitives';
 import { BackendLifecycleChip } from './BackendLifecycleChip';
 import { SettingsPageShell } from './SettingsPageShell';
+import { hubSupplyBlocks, type HubSupplyBlock } from './models/featureFlags';
+import { modelsApi } from './models/modelsApi';
+import { agentsWithoutModel } from './models/supply';
 import { useApi } from '@/context/ApiContext';
 import { useToast } from '@/context/ToastContext';
-import { AGENT_BACKENDS, DEFAULT_AGENT_STATE } from '@/lib/agentBackends';
+import { AGENT_BACKENDS, DEFAULT_AGENT_STATE, getBackendUiMeta } from '@/lib/agentBackends';
 import { configChanges } from '@/lib/configMutations';
 import { errorMessage } from '@/lib/errorMessage';
 
-// Mirrors design.pen qVHh4 (VR/CM/Backends): three horizontal cards
-// (OpenCode/Claude/Codex). Each card
-// surfaces icon + name/description + status chip + enable toggle + a
+// Mirrors design.pen qVHh4 (VR/CM/Backends): one horizontal card per backend,
+// in shared display order: built-in first, then native setup order. Each card
+// surfaces icon + name/description + status chip + enable toggle (a
+// "Built-in" badge instead for the always-enabled backend) + a
 // "Configure" link that drills into the level-2 provider page. CLI path,
 // detect, install, and permission profile live on the provider page now —
 // keep the level-1 page about backend availability, not Agent defaults.
@@ -24,7 +29,7 @@ type CliStatus = 'unknown' | 'ok' | 'missing';
 
 type AgentState = {
   enabled: boolean;
-  cli_path: string;
+  cli_path?: string;
   status: CliStatus;
 };
 
@@ -54,6 +59,21 @@ export const SettingsBackendsPage: React.FC = () => {
 
   const [loaded, setLoaded] = useState(false);
   const [agents, setAgents] = useState<Record<string, AgentState>>(DEFAULT_AGENTS);
+  const [supplyBlocks, setSupplyBlocks] = useState<ReadonlyMap<string, HubSupplyBlock>>(() => new Map());
+  // Backends with an enabled Agent whose next turn fails for want of a model (the Models page's reading).
+  const [withoutModel, setWithoutModel] = useState<ReadonlySet<string>>(() => new Set());
+
+  const refreshModelAttention = React.useCallback(async () => {
+    try {
+      setWithoutModel(new Set(agentsWithoutModel(await modelsApi.listAgents()).map((named) => named.backend)));
+    } catch {
+      // Without the Model Hub projection there is nothing to flag.
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshModelAttention();
+  }, [refreshModelAttention]);
 
   useEffect(() => {
     let cancelled = false;
@@ -62,6 +82,7 @@ export const SettingsBackendsPage: React.FC = () => {
       .then((config) => {
         if (cancelled) return;
         setAgents(normalizeAgents(config));
+        setSupplyBlocks(hubSupplyBlocks(config));
         setLoaded(true);
       })
       .catch(() => {
@@ -79,7 +100,7 @@ export const SettingsBackendsPage: React.FC = () => {
     let cancelled = false;
     (async () => {
       const results = await Promise.all(
-        Object.entries(agents).map(async ([name, agent]) => {
+        Object.entries(agents).filter(([name]) => getBackendUiMeta(name).capabilities.supports_cli).map(async ([name, agent]) => {
           try {
             const result = await api.detectCli(agent.cli_path || name);
             return [name, result] as const;
@@ -124,9 +145,11 @@ export const SettingsBackendsPage: React.FC = () => {
   const handleToggle = async (name: string, enabled: boolean) => {
     setAgents((prev) => ({ ...prev, [name]: { ...prev[name], enabled } }));
     await persistBackendField(name, { enabled });
+    // Enabling a backend can create its built-in Agent, with no model selected yet.
+    await refreshModelAttention();
   };
 
-  const refreshDetectionFor = async (name: string, cli_path: string) => {
+  const refreshDetectionFor = async (name: string, cli_path?: string) => {
     try {
       const result = await api.detectCli(cli_path || name);
       setAgents((prev) => ({
@@ -164,14 +187,24 @@ export const SettingsBackendsPage: React.FC = () => {
                 tileClassName={meta.tileCls}
                 iconClassName={meta.iconCls}
                 title={meta.label}
-                detail={t(`settings.backends.${meta.id}Description`)}
+                badges={meta.builtin && <Badge variant="secondary">{t('settings.backends.builtinBadge')}</Badge>}
+                detail={t(meta.descriptionKey)}
                 actions={
                   <>
-                    <BackendLifecycleChip
+                    {supplyBlocks.has(meta.id) ? (
+                      <Badge variant="warning">
+                        {supplyBlocks.get(meta.id) === 'hub_disabled'
+                          ? t('settings.backends.hubDisabled')
+                          : t('settings.models.shell.stopped')}
+                      </Badge>
+                    ) : agent.enabled && withoutModel.has(meta.id) && (
+                      <Badge variant="warning">{t('settings.models.gateway.agentIssues.modelMissing')}</Badge>
+                    )}
+                    {meta.capabilities.supports_runtime_refresh && <BackendLifecycleChip
                       name={meta.id}
                       enabled={agent.enabled}
                       cliStatus={agent.status}
-                      cliPath={agent.cli_path}
+                      cliPath={agent.cli_path || ''}
                       onChanged={async (info) => {
                         const installedPath = info?.installedPath || null;
                         if (installedPath) {
@@ -182,11 +215,13 @@ export const SettingsBackendsPage: React.FC = () => {
                         }
                         await refreshDetectionFor(meta.id, installedPath || agent.cli_path);
                       }}
-                    />
-                    <ToggleSwitch
-                      enabled={agent.enabled}
-                      onClick={() => void handleToggle(meta.id, !agent.enabled)}
-                    />
+                    />}
+                    {!meta.builtin && (
+                      <ToggleSwitch
+                        enabled={agent.enabled}
+                        onClick={() => void handleToggle(meta.id, !agent.enabled)}
+                      />
+                    )}
                     {route && (
                       <Button asChild variant="secondary" size="xs">
                         <Link to={route} aria-label={t('settings.backends.configure', { name: meta.label }) as string}>

@@ -1,0 +1,14 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "model-hub/hop-origin.schema.json",
+  "title": "HopOrigin",
+  "description": "Upstream identity captured at admission. Serialized in x-avibe-served-hop and the same provenance attempt's origin.",
+  "type": "object",
+  "required": ["provider", "api", "model"],
+  "additionalProperties": false,
+  "properties": {
+    "provider": { "type": "string", "minLength": 1 },
+    "api": { "$ref": "source.schema.json#/properties/protocol" },
+    "model": { "type": "string", "minLength": 1 }
+  }
+}

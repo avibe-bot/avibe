@@ -42,6 +42,7 @@ import type {
 } from '@/context/ApiContext';
 import { useToast } from '@/context/ToastContext';
 import { errorMessage } from '@/lib/errorMessage';
+import { getBackendUiMeta } from '@/lib/agentBackends';
 import { isNativeAuthHubOwned } from '@/lib/nativeAuthOwnership';
 import { EFFORT_BY_BACKEND, NO_REASONING_EFFORT, sortEffortsByVocabulary } from '@/lib/effortOptions';
 import { HubOwnedAuthNotice } from '../shared/HubOwnedAuthNotice';
@@ -735,7 +736,7 @@ export const OpencodeProviderConfig: React.FC<{
     <div className="flex flex-col gap-4">
       <BackendRuntimeCard
         backend={BACKEND_ID}
-        label="OpenCode"
+        label={getBackendUiMeta('opencode').label}
         description={t('settings.backends.opencodeDescription')}
         Icon={Terminal}
         iconTileClassName="bg-violet-soft"

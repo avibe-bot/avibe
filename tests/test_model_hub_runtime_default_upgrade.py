@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from config import v2_config
-from config.v2_config import MODEL_HUB_BACKENDS, ModelHubConfig, V2Config, update_config_fields
+from config.v2_config import ModelHubConfig, V2Config, update_config_fields
 
 
 def legacy_payload(tmp_path, *, enabled=False):
@@ -22,7 +22,9 @@ def legacy_payload(tmp_path, *, enabled=False):
     payload = read_config(fixture_path)
     payload["model_hub"].pop("runtime_default_applied")
     payload["model_hub"]["enabled"] = enabled
-    for backend in MODEL_HUB_BACKENDS:
+    # A released config predates the Avibe entry (a fresh one leaves it unwritten too).
+    payload["model_hub"]["agents"].pop("vibey", None)
+    for backend in ("claude", "codex", "opencode"):
         payload["model_hub"]["agents"][backend]["mode"] = "direct"
     # Synthetic state proves the upgrade does not clear credentials or change
     # launch auth mode. No native credential stores are ever opened.
@@ -46,6 +48,7 @@ def read_config(path):
 
 def assert_no_native_change(original, upgraded):
     assert upgraded["agents"] == original["agents"]
+    # The Avibe row stays absent until startup seeds it (MH-VIBEY-007).
     assert upgraded["model_hub"]["agents"] == original["model_hub"]["agents"]
     assert upgraded["model_hub"]["sources"] == original["model_hub"]["sources"]
     assert {key: value for key, value in upgraded.items() if key != "model_hub"} == {
@@ -132,8 +135,9 @@ def test_legacy_omissions_never_consent_to_native_takeover(tmp_path, shape):
     assert loaded.load_warnings == ()
     assert loaded.model_hub.enabled is True
     assert loaded.model_hub.runtime_default_applied is True
-    expected = {"claude": "hub", "codex": "direct", "opencode": "direct"} if shape == "missing-backend" else {
-        name: "direct" for name in MODEL_HUB_BACKENDS
+    expected = {
+        "claude": "hub" if shape == "missing-backend" else "direct",
+        "codex": "direct", "opencode": "direct", "vibey": "hub",
     }
     assert {name: agent.mode for name, agent in loaded.model_hub.agents.items()} == expected
     assert read_config(path)["agents"] == original["agents"]
@@ -153,7 +157,8 @@ def test_runtime_stop_after_upgrade_survives_subsequent_loads(tmp_path):
         loaded = V2Config.load(config_path=path)
         assert loaded.model_hub.enabled is False
         assert loaded.model_hub.runtime_default_applied is True
-        assert all(agent.mode == "direct" for agent in loaded.model_hub.agents.values())
+        assert all(loaded.model_hub.agents[backend].mode == "direct" for backend in ("claude", "codex", "opencode"))
+        assert loaded.model_hub.agents["vibey"].mode == "hub"
         assert path.read_bytes() == persisted
     assert len(list(path.parent.glob("config.json.bak-*"))) == 1
 
@@ -227,7 +232,8 @@ def test_invalid_marker_is_strict_and_disk_recovery_does_not_activate(tmp_path, 
     loaded = V2Config.load(config_path=path)
 
     assert loaded.model_hub.enabled is False
-    assert all(agent.mode == "direct" for agent in loaded.model_hub.agents.values())
+    assert all(loaded.model_hub.agents[backend].mode == "direct" for backend in ("claude", "codex", "opencode"))
+    assert loaded.model_hub.agents["vibey"].mode == "hub"
     assert "model_hub" in loaded.recovered_sections
     assert loaded.load_warnings
     assert path.read_bytes() == original
@@ -247,7 +253,8 @@ def test_malformed_optional_section_is_not_upgraded_or_rewritten(tmp_path, bad_h
     path, original = write_config(tmp_path, payload)
     loaded = V2Config.load(config_path=path)
     assert loaded.model_hub.enabled is False
-    assert all(agent.mode == "direct" for agent in loaded.model_hub.agents.values())
+    assert all(loaded.model_hub.agents[backend].mode == "direct" for backend in ("claude", "codex", "opencode"))
+    assert loaded.model_hub.agents["vibey"].mode == "hub"
     assert loaded.load_warnings and not loaded.whole_config_recovery
     assert path.read_bytes() == original
 
@@ -259,7 +266,8 @@ def test_whole_config_recovery_does_not_apply_fresh_install_defaults(tmp_path, r
     loaded = V2Config.load(config_path=path)
     assert loaded.whole_config_recovery
     assert loaded.model_hub.enabled is False
-    assert all(agent.mode == "direct" for agent in loaded.model_hub.agents.values())
+    assert all(loaded.model_hub.agents[backend].mode == "direct" for backend in ("claude", "codex", "opencode"))
+    assert loaded.model_hub.agents["vibey"].mode == "hub"
     assert loaded.load_warnings
     assert path.read_bytes() == raw
 

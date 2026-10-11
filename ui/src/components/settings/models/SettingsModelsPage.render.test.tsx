@@ -35,6 +35,10 @@ const directAgent = (backend: AgentBackend): AgentSupply => ({
   menu_kind: backend === 'opencode' ? 'open' : 'fixed',
 });
 
+const emptyVibeyAgent: AgentSupply = {
+  backend: 'vibey', cli_present: false, mode: 'hub', menu_kind: 'fixed', catalog_models: [],
+};
+
 // Named separately from `runtime` so it keeps the arm of `RuntimeManifest` it
 // was written as. Reached through `runtime.manifest` it is the whole union, and
 // re-resolving a spread of that lands on the `unresolved` arm, which carries no
@@ -44,7 +48,7 @@ const manifest = {
 } satisfies RuntimeManifest;
 
 const runtime: RuntimeDependency = {
-  contract_version: 10,
+  contract_version: 11,
   manifest,
   status: { installed_version: '1', verified: true, health: 'ok' },
 };
@@ -115,7 +119,7 @@ const takeoverAgent: AgentSupply = {
 };
 
 const takeoverChain: AgentChain = { manual_override: {hops:[{source_id:'src_head',model_id:'gpt-5.6-sol'},{source_id:'src_relay',model_id:'gpt-5.6-sol'}]}, route_origin: "manual" as const,
-  contract_version: 10,
+  contract_version: 11,
   backend: 'codex',
   model_id: 'gpt-5.6-sol',
   current: { source_id: 'src_relay', model_id: 'gpt-5.6-sol' },
@@ -218,7 +222,7 @@ const routedHubAgent: AgentSupply = {
 const routedChain: AgentChain = {
   manual_override: { hops: [{ source_id: retainedSource.id, model_id: routedModelId }] },
   route_origin: 'manual' as const,
-  contract_version: 10,
+  contract_version: 11,
   backend: 'claude',
   model_id: routedModelId,
   current: { source_id: retainedSource.id, model_id: routedModelId },
@@ -263,6 +267,7 @@ const renderPage = (
     directAgent('claude'),
     directAgent('codex'),
     directAgent('opencode'),
+    emptyVibeyAgent,
   ]);
   vi.spyOn(modelsApi, 'getRuntimeStatus').mockResolvedValue(runtimeValue);
   vi.spyOn(modelsApi, 'listEvents').mockResolvedValue([]);
@@ -299,6 +304,27 @@ afterEach(() => {
 });
 
 describe('SettingsModelsPage surface branches', () => {
+  // DirectHome is a separate render path from gateway cards; its neutral tile
+  // and API order previously hid backend identity even when the cards were right.
+  it('keeps direct-only backends in Settings order and colors', async () => {
+    renderPage([], [directAgent('opencode'), directAgent('codex'), directAgent('claude')]);
+    await screen.findByText('Claude Code');
+    const rows = [...document.querySelectorAll('.model-hub-direct-row--backend')];
+    expect.soft(rows.map((row) => row.querySelector('.model-hub-direct-backend-name')?.textContent))
+      .toEqual(['Claude Code', 'Codex', 'OpenCode']);
+    for (const [label, tile, ink, glyph] of [
+      ['Claude Code', 'bg-cyan-soft', 'text-cyan-ink', 'lucide-sparkles'],
+      ['Codex', 'bg-gold', 'text-gold-foreground', 'lucide-bot'],
+      ['OpenCode', 'bg-violet-soft', 'text-violet-ink', 'lucide-terminal'],
+    ]) {
+      const row = screen.getByText(label).closest('.model-hub-direct-row--backend')!;
+      const svg = row.querySelector('svg')!;
+      expect.soft(svg.parentElement?.classList.contains(tile)).toBe(true);
+      expect.soft(svg.classList.contains(ink)).toBe(true);
+      expect(svg.classList.contains(glyph)).toBe(true);
+    }
+  });
+
   it.each([
     ['right away', false],
     ['after a refused takeover', true],
@@ -655,7 +681,7 @@ describe('SettingsModelsPage surface branches', () => {
   });
 
   it('renders Frame 09 as the sources tab when every backend is direct and no source exists', async () => {
-    renderPage([]);
+    renderPage([], [directAgent('claude'), directAgent('codex'), directAgent('opencode')]);
 
     expect(await screen.findByText(/^Currently: direct$|^当前:直连$/i)).toBeTruthy();
     expect(screen.getAllByRole('button', { name: /^Switch to Gateway$|^切换到模型网关$/i })).toHaveLength(3);
@@ -909,6 +935,41 @@ describe('SettingsModelsPage surface branches', () => {
     await userEvent.click(toggle);
     expect(stop).not.toHaveBeenCalled();
     expect(await screen.findByText('Retained source')).toBeTruthy();
+  });
+
+  // The in-process catalog is configurable even when empty and without a CLI.
+  // Runtime Stop still depends on whether that catalog actually owns models.
+  it.each([false, true])('MH-VIBEY-003 derives runtime use from Avibe catalog presence: %s', async (configured) => {
+    const catalogModel: BackendModel = {
+      id: 'menu-alias', display_name: null, origin: 'manual', models_dev_id: null,
+      context_window: null, max_output_tokens: null, input_modalities: [], output_modalities: [],
+      supports_tools: null, supports_reasoning: null, reasoning_efforts: [], locked: false, routeable: true,
+    };
+    renderPage([], [
+      directAgent('claude'), directAgent('codex'), directAgent('opencode'),
+      { ...emptyVibeyAgent, catalog_models: configured ? [catalogModel] : [] },
+    ]);
+    const stop = vi.spyOn(modelsApi, 'stopRuntime').mockResolvedValue({ ...runtime, enabled: false });
+    const toggle = await screen.findByRole('switch', {
+      name: configured ? /Vibey's models use|Vibey 的模型通过/i : /Turn model gateway off|关闭模型网关/i,
+    });
+    expect((toggle as HTMLButtonElement).disabled).toBe(configured);
+    const vibeyCard = (await screen.findByText('Vibey')).closest('[data-agent-backend]') as HTMLElement;
+    expect(within(vibeyCard).getAllByRole('button', { name: /^Manage models$|^管理模型$/i }).length).toBeGreaterThan(0);
+    await userEvent.click(within(vibeyCard).getByRole('button', { name: /Runtime mode:|运行模式[:：]/i }));
+    const modeGroup = await screen.findByRole('group', { name: /Runtime mode|运行模式/i });
+    expect(within(modeGroup).queryByRole('button', { name: /Switch to direct|切到直连/i })).toBeNull();
+    await userEvent.click(within(modeGroup).getByRole('button', { pressed: true }));
+    if (configured) {
+      expect(screen.queryByText(/^All 3 backends are direct$|^3 个后端均为直连$/i)).toBeNull();
+      await userEvent.click(toggle);
+      expect(stop).not.toHaveBeenCalled();
+    } else {
+      expect(screen.queryByText(/^All 3 backends are direct$|^3 个后端均为直连$/i)).toBeNull();
+      expect(screen.getAllByRole('button', { name: /^Switch to Gateway$|^切换到模型网关$/i })).toHaveLength(3);
+      await userEvent.click(toggle);
+      await waitFor(() => expect(stop).toHaveBeenCalledOnce());
+    }
   });
 
   it('renders Frame 01 with tabs when retained sources remain under all-direct backends', async () => {

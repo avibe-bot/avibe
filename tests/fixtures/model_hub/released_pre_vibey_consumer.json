@@ -1,0 +1,45 @@
+{
+  "enabled": false,
+  "runtime_default_applied": true,
+  "sources": [
+    {
+      "id": "src_released01",
+      "kind": "api_key",
+      "vendor": "custom",
+      "display_name": "Existing provider",
+      "protocol": "openai_chat",
+      "supply_channel": "hub",
+      "billing": "metered",
+      "state": { "status": "standby" },
+      "models": [{ "id": "模型/β", "origin": "manual", "reasoning_efforts": [] }],
+      "credential_ref": "cred_released01"
+    }
+  ],
+  "agents": {
+    "claude": {
+      "backend": "claude",
+      "mode": "direct",
+      "menu_kind": "fixed",
+      "sources": { "order": [] },
+      "routes": {},
+      "models": [{ "id": "custom-claude", "context_window": 100000 }]
+    },
+    "codex": {
+      "backend": "codex",
+      "mode": "hub",
+      "menu_kind": "fixed",
+      "sources": { "order": ["src_released01"] },
+      "routes": { "custom-codex": { "hops": [{ "source_id": "src_released01", "model_id": "模型/β" }] } },
+      "models": [{ "id": "custom-codex", "max_output_tokens": 4096, "supports_tools": false }]
+    },
+    "opencode": {
+      "backend": "opencode",
+      "mode": "direct",
+      "menu_kind": "open",
+      "sources": { "order": [] },
+      "routes": { "dormant": { "hops": [{ "source_id": "src_released01", "model_id": "模型/β" }] } },
+      "menu": { "view": "featured", "checked": [] },
+      "models": []
+    }
+  }
+}

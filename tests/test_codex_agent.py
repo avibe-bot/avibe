@@ -6547,6 +6547,7 @@ class CodexGenerationAcquisitionTests(unittest.IsolatedAsyncioTestCase):
             "OPENAI_API_KEY": "native-token",
         }
         launch = SimpleNamespace(
+            backend="codex",
             channel="hub",
             gateway_base_url="http://127.0.0.1:18443",
             gateway_token="gateway-token",
@@ -6685,6 +6686,7 @@ class CodexGenerationAcquisitionTests(unittest.IsolatedAsyncioTestCase):
                 await previous.release()
             self.ownership.blocks_transport_replacement = True
             launch = SimpleNamespace(
+                backend="codex",
                 channel="hub",
                 gateway_base_url="http://127.0.0.1:8317",
                 gateway_token="ephemeral-token",

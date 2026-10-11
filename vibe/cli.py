@@ -35,6 +35,7 @@ from sqlalchemy import select
 from config import paths
 from config.atomic_io import write_atomic
 from config.v2_config import V2Config
+from modules.agents.catalog import AGENT_BACKENDS, NATIVE_CLI_BACKENDS, display_name_for_backend
 from core.scheduled_tasks import (
     AGENT_RUN_CLOSE_AFTER_METADATA_KEY,
     AGENT_RUN_DELIVERY_QUEUE,
@@ -56,12 +57,13 @@ from core.caller_context import (
 from core.command_runner import command_line_preview
 from core.cron_weekday import ambiguous_weekday_field, weekday_readings
 from core.install_integrity import verify_python_environment, verify_site_packages
-from core.vibe_agents import AgentArchivedEditError, AgentArchiveError, AgentNameValidationError, AgentReferenceRewriteError, VibeAgent, VibeAgentAccessError, VibeAgentStore, iter_global_agent_files, parse_agent_file, validate_agent_backend
+from core.vibe_agents import AgentAlwaysEnabledError, AgentArchivedEditError, AgentArchiveError, AgentNameValidationError, AgentReferenceRewriteError, VibeAgent, VibeAgentAccessError, VibeAgentStore, iter_global_agent_files, parse_agent_file, validate_agent_backend
 from core.watches import (
     DEFAULT_RETRY_EXIT_CODE,
     NO_EVENT_EXIT_CODE,
     WATCH_RECOVERY_ENTRY_TIMEOUT_SECONDS,
     WATCH_RECONCILE_INTERVAL_SECONDS,
+    JobWatchUpdateRefused,
     ManagedWatchStore,
     WatchRuntimeStateStore,
 )
@@ -114,6 +116,7 @@ from storage.background import (
     DefinitionWriteConflict,
     SQLiteBackgroundTaskStore,
     TASK_RETIREMENT_SCHEDULE_MISSED,
+    JobWatchResumeRefused,
     TaskResumeBlocked,
     TaskScheduleRetired,
     compute_next_run_at,
@@ -3980,6 +3983,9 @@ def _run_payload(run: dict, *, brief: bool = False) -> dict:
             "callback_run_id": normalized.get("callback_run_id"),
         }
     normalized["metadata"] = public_message_metadata(normalized.get("metadata") or {})
+    # `prompt` is the legacy copy of `message`: every writer stores the same text in both, and the
+    # store already falls back to it for `message`, so the record carries that text once.
+    normalized.pop("prompt", None)
     return normalized
 
 
@@ -5883,8 +5889,8 @@ def cmd_agent_update(args):
         agent = _agent_store().update(args.name, **kwargs)
         _print_cli_payload("agent", agent=_agent_payload(agent), **_agent_value_warning_fields(agent))
         return 0
-    except AgentArchivedEditError as exc:
-        _print_task_error(_agent_archived_edit_cli_error(exc))
+    except (AgentArchivedEditError, AgentAlwaysEnabledError) as exc:
+        _print_task_error(_agent_lifecycle_cli_error(exc))
         return 1
     except Exception as exc:
         _print_task_error(exc)
@@ -5896,15 +5902,15 @@ def cmd_agent_set_enabled(args, *, enabled: bool):
         agent = _agent_store().set_enabled(args.name, enabled)
         _print_cli_payload("agent", agent=_agent_payload(agent))
         return 0
-    except AgentArchivedEditError as exc:
-        _print_task_error(_agent_archived_edit_cli_error(exc))
+    except (AgentArchivedEditError, AgentAlwaysEnabledError) as exc:
+        _print_task_error(_agent_lifecycle_cli_error(exc))
         return 1
     except Exception as exc:
         _print_task_error(exc)
         return 1
 
 
-def _agent_archived_edit_cli_error(exc: AgentArchivedEditError) -> TaskCliError:
+def _agent_lifecycle_cli_error(exc: AgentArchivedEditError | AgentAlwaysEnabledError) -> TaskCliError:
     try:
         lang = V2Config.load().language
     except Exception:
@@ -5987,7 +5993,7 @@ def cmd_agent_import(args):
                 raise TaskCliError(
                     "--backend is required when importing an arbitrary file",
                     code="missing_agent_backend",
-                    hint="Pass --backend codex, --backend claude, or --backend opencode.",
+                    hint=f"Pass --backend with one of: {', '.join(AGENT_BACKENDS)}.",
                 )
             candidates.append(parse_agent_file(Path(args.file), backend=args.backend))
         else:
@@ -6666,7 +6672,7 @@ def _resolve_callback_session_id(args, caller_context, *, target_session_id: Opt
     if no_callback:
         message = (
             "Started async Agent Run without a callback. This run will not post its final result back into a "
-            "Session automatically. Track it with `vibe runs show <run-id>` or by polling/listing runs for the "
+            "Session automatically. Track it with `vibe runs show <run-id> --brief` or by polling/listing runs for the "
             "target Session. To receive a follow-up message next time, use `--callback-session-id <session-id>` "
             "or run from a resolved caller context so Avibe can default the callback to the current Session."
         )
@@ -6791,6 +6797,7 @@ def _reserve_forked_cli_session(
     scope_key: Optional[str],
     visibility: str,
     authorization_context=None,
+    self_fork: bool = False,
 ):
     from core.services.session_fork import (
         SESSION_AGENT_UNAVAILABLE_CODE,
@@ -6809,6 +6816,7 @@ def _reserve_forked_cli_session(
             visibility=visibility,
             db_path=paths.get_sqlite_state_path(),
             authorization_context=authorization_context,
+            self_fork=self_fork,
         )
     except SessionForkError as exc:
         if exc.code == SESSION_AGENT_UNAVAILABLE_CODE:
@@ -7066,6 +7074,9 @@ def cmd_agent_run(args):
                 scope_key=scope_key,
                 visibility=visibility,
                 authorization_context=caller_authorization,
+                # Only --fork-self, which resolves the source from AVIBE_SESSION_ID, is the Agent's own fork
+                # from inside its live Turn; --fork-session is a user's fork even when it names that Session.
+                self_fork=bool(getattr(args, "fork_self", False)),
             )
             session_id = fork_result.session_id
             reserved_session_id = session_id
@@ -7271,7 +7282,7 @@ def cmd_runs_show(args):
     if run is None:
         _print_task_error(TaskCliError(f"run '{run_id}' not found", code="run_not_found", details={"run_id": run_id}))
         return 1
-    run_payload = _run_payload(run)
+    run_payload = _run_payload(run, brief=getattr(args, "brief", False))
     session_runtime = _live_session_runtime_for_run(run_payload)
     if session_runtime is not None:
         run_payload["session_runtime"] = session_runtime
@@ -11150,6 +11161,18 @@ def cmd_watch_set_enabled(watch_id: str, enabled: bool):
         return 1
     try:
         updated = store.set_enabled(watch_id, enabled)
+    except JobWatchResumeRefused as exc:
+        lang = _configured_cli_language()
+        _print_task_error(
+            TaskCliError(
+                i18n_t("error.jobWatchResumeRefused.message", lang),
+                code=exc.code,
+                hint=i18n_t("error.jobWatchResumeRefused.hint", lang, id=watch_id),
+                help_command=f"vibe watch remove {watch_id}",
+                details={"watch_id": watch_id},
+            )
+        )
+        return 1
     except DefinitionWriteConflict as exc:
         _print_task_error(
             _definition_conflict_cli_error(
@@ -11535,6 +11558,23 @@ def cmd_watch_update(args):
         watch_payload = _watch_mutation_payload(updated, runtime_entry)
         _print_definition_payload(watch_payload, warnings=warnings)
         return 0
+    except JobWatchUpdateRefused as exc:
+        if reserved_session_id:
+            _release_cli_session_reservation(
+                reserved_session_id,
+                reason="watch update failed before its Session reservation was adopted",
+            )
+        lang = _configured_cli_language()
+        _print_task_error(
+            TaskCliError(
+                i18n_t("error.jobWatchUpdateRefused.message", lang),
+                code=exc.code,
+                hint=i18n_t("error.jobWatchUpdateRefused.hint", lang, id=exc.watch_id),
+                help_command="vibe watch update --help",
+                details={"watch_id": exc.watch_id},
+            )
+        )
+        return 1
     except DefinitionWriteConflict as exc:
         if reserved_session_id:
             _release_cli_session_reservation(
@@ -12521,75 +12561,30 @@ def _doctor(*, deep: bool = False):
     # Agent Backends Group
     agent_items = []
     if config:
-        # OpenCode
-        if config.agents.opencode.enabled:
-            cli_path = config.agents.opencode.cli_path
-            found_path = api.detect_cli(cli_path).get("path") if cli_path else None
-            if found_path:
-                _add_doctor_item(
-                    agent_items,
-                    "pass",
-                    i18n_t("doctor.item.agentCliFound", language, agent="OpenCode", path=found_path),
-                )
-                summary["pass"] += 1
+        for backend in NATIVE_CLI_BACKENDS:
+            backend_config = getattr(config.agents, backend)
+            label = display_name_for_backend(backend)
+            if backend_config.enabled:
+                cli_path = backend_config.cli_path
+                found_path = api.detect_cli(cli_path).get("path") if cli_path else None
+                if found_path:
+                    _add_doctor_item(
+                        agent_items,
+                        "pass",
+                        i18n_t("doctor.item.agentCliFound", language, agent=label, path=found_path),
+                    )
+                    summary["pass"] += 1
+                else:
+                    _add_doctor_item(
+                        agent_items,
+                        "warn",
+                        i18n_t("doctor.item.agentCliMissing", language, agent=label, path=cli_path),
+                        i18n_t("doctor.action.agentCliMissing", language, agent=label),
+                    )
+                    summary["warn"] += 1
             else:
-                _add_doctor_item(
-                    agent_items,
-                    "warn",
-                    i18n_t("doctor.item.agentCliMissing", language, agent="OpenCode", path=cli_path),
-                    i18n_t("doctor.action.agentCliMissing", language, agent="OpenCode"),
-                )
-                summary["warn"] += 1
-        else:
-            _add_doctor_item(agent_items, "pass", i18n_t("doctor.item.agentDisabled", language, agent="OpenCode"))
-            summary["pass"] += 1
-
-        # Claude
-        if config.agents.claude.enabled:
-            cli_path = config.agents.claude.cli_path
-            found_path = api.detect_cli(cli_path).get("path") if cli_path else None
-
-            if found_path:
-                _add_doctor_item(
-                    agent_items,
-                    "pass",
-                    i18n_t("doctor.item.agentCliFound", language, agent="Claude", path=found_path),
-                )
+                _add_doctor_item(agent_items, "pass", i18n_t("doctor.item.agentDisabled", language, agent=label))
                 summary["pass"] += 1
-            else:
-                _add_doctor_item(
-                    agent_items,
-                    "warn",
-                    i18n_t("doctor.item.agentCliMissing", language, agent="Claude", path=cli_path),
-                    i18n_t("doctor.action.agentCliMissing", language, agent="Claude"),
-                )
-                summary["warn"] += 1
-        else:
-            _add_doctor_item(agent_items, "pass", i18n_t("doctor.item.agentDisabled", language, agent="Claude"))
-            summary["pass"] += 1
-
-        # Codex
-        if config.agents.codex.enabled:
-            cli_path = config.agents.codex.cli_path
-            found_path = api.detect_cli(cli_path).get("path") if cli_path else None
-            if found_path:
-                _add_doctor_item(
-                    agent_items,
-                    "pass",
-                    i18n_t("doctor.item.agentCliFound", language, agent="Codex", path=found_path),
-                )
-                summary["pass"] += 1
-            else:
-                _add_doctor_item(
-                    agent_items,
-                    "warn",
-                    i18n_t("doctor.item.agentCliMissing", language, agent="Codex", path=cli_path),
-                    i18n_t("doctor.action.agentCliMissing", language, agent="Codex"),
-                )
-                summary["warn"] += 1
-        else:
-            _add_doctor_item(agent_items, "pass", i18n_t("doctor.item.agentDisabled", language, agent="Codex"))
-            summary["pass"] += 1
 
         # Default Agent check
         default_agent_name = None
@@ -14205,6 +14200,22 @@ def _desktop_provenance_refused(
     return True
 
 
+def _stop_jobs() -> None:
+    """End every command a job runs, Watch-owned or foreground, as a full stop ends other tool commands.
+
+    Restarts and upgrades (and a desktop Runtime's scoped stop, which may be one)
+    never come here, so those commands keep running. A failure is logged and
+    leaves the commands to their own deadlines.
+    """
+
+    try:
+        from core.watches import stop_all_jobs
+
+        stop_all_jobs()
+    except Exception:
+        logger.warning("Could not stop the commands jobs run", exc_info=True)
+
+
 def cmd_stop(*, expect_runtime_id: str | None = None):
     from vibe.desktop_runtime import desktop_caller_provenance
 
@@ -14226,6 +14237,9 @@ def cmd_stop(*, expect_runtime_id: str | None = None):
     except runtime.DesktopRuntimeClaimRefused as refusal:
         _print_provenance_refusal("desktopRuntime.stopRefused", refusal)
         return 3
+    # Holding the free service lock: neither a service that failed to stop nor one
+    # started since owns these commands while they are stopped.
+    runtime.desktop_service_lock_presence(while_absent=_stop_jobs)
     from vibe.desktop_backends import reap_abandoned_desktop_backend_installs
 
     # Each tree's owner decides whether it is abandoned, so the reap runs
@@ -16216,6 +16230,7 @@ def cmd_runtime(args) -> int:
         askill = _ensure_askill_during_prepare(offline=bool(offline), force=force)
         tmux = _ensure_tmux_during_prepare(offline=bool(offline), force=force)
         git = _ensure_git_during_prepare(offline=offline, force=force)
+        ripgrep = _ensure_ripgrep_during_prepare(offline=offline, force=force)
         avault = _ensure_avault_during_prepare(offline=bool(offline), force=force)
         model_hub_engine = _ensure_model_hub_engine_during_prepare(
             offline=bool(offline),
@@ -16226,6 +16241,7 @@ def cmd_runtime(args) -> int:
         payload["model_hub_engine"] = model_hub_engine
         payload["tmux"] = tmux
         payload["git"] = git
+        payload["ripgrep"] = ripgrep
         install = payload.get("install") if isinstance(payload.get("install"), dict) else {}
         policy = payload.get("policy") if isinstance(payload.get("policy"), dict) else {}
         runtime_prepared = bool(payload.get("ok"))
@@ -16319,6 +16335,22 @@ def cmd_runtime(args) -> int:
             else:
                 print(
                     f"git runtime not ready: {git.get('message') or git.get('reason') or 'install failed'}",
+                    file=sys.stderr,
+                )
+            if ripgrep.get("ok"):
+                print(
+                    i18n_t(
+                        "runtime.prepare.ripgrepInstalled" if ripgrep.get("changed") else "runtime.prepare.ripgrepReady",
+                        language,
+                    )
+                )
+            else:
+                print(
+                    i18n_t(
+                        "runtime.prepare.ripgrepNotReady",
+                        language,
+                        reason=ripgrep.get("message") or ripgrep.get("reason") or "install failed",
+                    ),
                     file=sys.stderr,
                 )
         strict_ok = runtime_prepared and _git_prepare_satisfies_strict(git)
@@ -16525,6 +16557,17 @@ def _ensure_git_during_prepare(offline: bool | None = None, force: bool = False)
         return {"ok": False, "message": str(exc)}
 
 
+def _ensure_ripgrep_during_prepare(offline: bool | None = None, force: bool = False) -> dict:
+    """Prepare the managed ripgrep for Agent commands; its absence never fails prepare."""
+
+    try:
+        from core.ripgrep_runtime import RipgrepRuntimeManager
+
+        return RipgrepRuntimeManager(offline=offline).ensure(force=force)
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "message": str(exc)}
+
+
 def _format_byte_size(size: int) -> str:
     if size < 1024:
         return f"{size} B"
@@ -16538,6 +16581,7 @@ def _format_byte_size(size: int) -> str:
 def _managed_runtime_cleaners() -> tuple[tuple[str, Callable[..., dict[str, Any]]], ...]:
     """Return the shared-runtime cleanup passes in stable output order."""
 
+    from core.ripgrep_runtime import RipgrepRuntimeManager
     from core.tmux_runtime import get_tmux_runtime_manager
     from vibe.model_hub_runtime.installer import EngineRuntimeManager
 
@@ -16554,10 +16598,17 @@ def _managed_runtime_cleaners() -> tuple[tuple[str, Callable[..., dict[str, Any]
             dry_run=dry_run,
         )
 
+    def clean_ripgrep(*, keep_previous: int, dry_run: bool) -> dict[str, Any]:
+        return RipgrepRuntimeManager().clean(
+            keep_previous=keep_previous,
+            dry_run=dry_run,
+        )
+
     return (
         ("git", _clean_git_runtime),
         ("model_hub_engine", clean_model_hub),
         ("tmux", clean_tmux),
+        ("ripgrep", clean_ripgrep),
     )
 
 
@@ -16618,6 +16669,7 @@ def _managed_runtime_label(runtime_id: str) -> str:
         "git": "Git Runtime",
         "model_hub_engine": "Model Hub Runtime",
         "tmux": "tmux Runtime",
+        "ripgrep": "ripgrep Runtime",
     }
     return labels.get(runtime_id, runtime_id.replace("-", " ").replace("_", " ").title())
 
@@ -17277,7 +17329,7 @@ def build_parser():
 
     agent_list_parser = agent_subparsers.add_parser("list", help="List Avibe Agents")
     agent_list_parser.add_argument("--brief", action="store_true", help=argparse.SUPPRESS)
-    agent_list_parser.add_argument("--backend", choices=("codex", "claude", "opencode"), help="Filter by backend")
+    agent_list_parser.add_argument("--backend", choices=AGENT_BACKENDS, help="Filter by backend")
     agent_list_parser.add_argument(
         "--include-disabled",
         action="store_true",
@@ -17310,7 +17362,7 @@ def build_parser():
         "name", nargs="?", help="Agent name. Omit and pass --backend to query a backend directly."
     )
     agent_models_parser.add_argument(
-        "--backend", choices=("codex", "claude", "opencode"), help="Query a backend directly instead of an Agent."
+        "--backend", choices=AGENT_BACKENDS, help="Query a backend directly instead of an Agent."
     )
     agent_models_parser.add_argument(
         "--provider", help="Filter to one OpenCode provider id (OpenCode backend only)."
@@ -17321,7 +17373,7 @@ def build_parser():
 
     agent_create_parser = agent_subparsers.add_parser("create", help="Create an Avibe Agent")
     agent_create_parser.add_argument("name", help="Globally unique Agent name")
-    agent_create_parser.add_argument("--backend", required=True, choices=("codex", "claude", "opencode"))
+    agent_create_parser.add_argument("--backend", required=True, choices=AGENT_BACKENDS)
     agent_create_parser.add_argument("--description")
     agent_create_parser.add_argument("--model")
     agent_create_parser.add_argument("--reasoning-effort")
@@ -17367,8 +17419,8 @@ def build_parser():
     agent_import_parser = agent_subparsers.add_parser("import", help="Import global or file-based Agents")
     import_source_group = agent_import_parser.add_mutually_exclusive_group(required=True)
     import_source_group.add_argument("--file", help="Import one markdown Agent file")
-    import_source_group.add_argument("--from", dest="from_source", choices=("claude", "codex", "opencode"))
-    agent_import_parser.add_argument("--backend", choices=("codex", "claude", "opencode"), help="Backend for --file imports")
+    import_source_group.add_argument("--from", dest="from_source", choices=NATIVE_CLI_BACKENDS)
+    agent_import_parser.add_argument("--backend", choices=AGENT_BACKENDS, help="Backend for --file imports")
     agent_import_parser.add_argument("--name", help="Import one named global Agent from --from source")
     agent_import_parser.add_argument("--all", action="store_true", help="Import all global Agents from --from source")
     _add_json_noop(agent_import_parser)
@@ -17465,7 +17517,7 @@ def build_parser():
     runs_list_parser.add_argument("--status", help="Filter by run status")
     runs_list_parser.add_argument("--type", help="Filter by run type")
     runs_list_parser.add_argument("--agent", help="Filter by Avibe Agent name")
-    runs_list_parser.add_argument("--backend", choices=("codex", "claude", "opencode"), help="Filter by backend")
+    runs_list_parser.add_argument("--backend", choices=AGENT_BACKENDS, help="Filter by backend")
     runs_list_parser.add_argument("--session-id", help="Filter by Agent Session ID")
     runs_list_parser.add_argument("--current-session", action="store_true", help="Filter to this current Agent Session")
     runs_list_parser.add_argument("--definition-id", help="Filter by task or watch definition ID")
@@ -17477,6 +17529,11 @@ def build_parser():
     _add_json_noop(runs_list_parser)
     runs_show_parser = runs_subparsers.add_parser("show", help="Show one Agent run")
     runs_show_parser.add_argument("run_id", nargs="?")
+    runs_show_parser.add_argument(
+        "--brief",
+        action="store_true",
+        help=i18n_t("harness.run.cli.help.showBrief", _configured_cli_language()),
+    )
     _add_json_noop(runs_show_parser)
     runs_cancel_parser = runs_subparsers.add_parser(
         "cancel",

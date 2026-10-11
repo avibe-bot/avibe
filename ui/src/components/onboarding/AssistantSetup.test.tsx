@@ -13,11 +13,14 @@ import type { Source } from '../settings/models/types';
 import { RouteSurfaceActiveContext } from '../../lib/routeSurfaceActivity';
 import type { SetupAction, SetupScreenHandle } from './setupFlow';
 import { INITIAL_SETUP_FLOW_STATE } from './setupFlow';
+import { SETUP_LINEUP } from './collaborationTimeline';
 
 const mock = vi.hoisted(() => ({ api: {
   detectCli: vi.fn(), installAgent: vi.fn(), getConfig: vi.fn(), getBackendRuntime: vi.fn(), getBackendConnection: vi.fn(), mutateConfig: vi.fn(), getClaudeAuth: vi.fn(), getCodexAuth: vi.fn(), getOpencodeProviders: vi.fn(), saveClaudeAuth: vi.fn(),
   listVibeAgents: vi.fn(), getVibeAgent: vi.fn(),
-}, showToast: vi.fn(), models: { getAgentChain: vi.fn(), getAgentChains: vi.fn(), previewAgentChain: vi.fn(), putAgentChain: vi.fn(), listSources: vi.fn() } }));
+}, showToast: vi.fn(), permission: { permissionAllowed: true, statusLoaded: true, state: 'idle', message: '', setupPermission: vi.fn() } as {
+  permissionAllowed: boolean; statusLoaded: boolean; state: string; message: string; setupPermission: ReturnType<typeof vi.fn>;
+}, models: { getAgentChain: vi.fn(), getAgentChains: vi.fn(), previewAgentChain: vi.fn(), putAgentChain: vi.fn(), listSources: vi.fn() } }));
 vi.mock('../../context/ApiContext', () => ({ useApi: () => mock.api }));
 vi.mock('../settings/models/modelsApi', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../settings/models/modelsApi')>();
@@ -25,7 +28,7 @@ vi.mock('../settings/models/modelsApi', async (importOriginal) => {
 });
 vi.mock('../../context/ToastContext', () => ({ useToast: () => ({ showToast: mock.showToast }) }));
 vi.mock('../settings/models/useModelHubCapability', () => ({ useModelHubCapability: () => false }));
-vi.mock('../settings/shared/useOpencodePermission', () => ({ useOpencodePermission: () => ({ permissionAllowed: true, statusLoaded: true }) }));
+vi.mock('../settings/shared/useOpencodePermission', () => ({ useOpencodePermission: () => mock.permission }));
 vi.mock('../settings/providers/BackendProviderConfig', () => ({ BackendProviderConfig: ({ backend }: { backend: string }) => <div>Existing provider: {backend}</div> }));
 const i18n = createInstance();
 await i18n.init({ lng: 'en', resources: { en: { translation: en } }, interpolation: { escapeValue: false } });
@@ -47,7 +50,7 @@ const hubAgent = (enabled = true) => ({
   system_prompt: null, created_at: '', metadata: { builtin_default: true },
 });
 const hubChain = (modelId: string) => ({
-  contract_version: 10, backend: 'claude', model_id: 'opus-5',
+  contract_version: 11, backend: 'claude', model_id: 'opus-5',
   manual_override: { hops: [{ source_id: 'src_a', model_id: modelId }] },
   route_origin: 'manual', current: { source_id: 'src_a', model_id: modelId },
   chain: [{ source_id: 'src_a', model_id: modelId, channel: 'hub', health: 'healthy', runnable: true, reason: null, retry_at: null }],
@@ -66,6 +69,7 @@ const setupSource: Source = {
 };
 beforeEach(() => {
   vi.resetAllMocks();
+  mock.permission = { permissionAllowed: true, statusLoaded: true, state: 'idle', message: '', setupPermission: vi.fn(async () => undefined) };
   mock.api.getConfig.mockResolvedValue(data());
   mock.api.mutateConfig.mockResolvedValue({});
   mock.api.getBackendConnection.mockImplementation((backend) => Promise.resolve({ ok: true, backend, installed: true, enabled: true, auth: 'api_key', application: 'applied', ready: true, entry_eligible: true }));
@@ -107,7 +111,7 @@ describe('assistant installation presentation', () => {
     const install = pending<{ ok: boolean; path: string; message: string }>();
     mock.api.installAgent.mockReturnValue(install.promise);
     render(wrap(<AgentDetection data={saved} onNext={vi.fn()} />));
-    await waitFor(() => expect(mock.api.getBackendConnection).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(mock.api.getBackendConnection).toHaveBeenCalledTimes(SETUP_LINEUP.length));
     fireEvent.click(row('Codex').getByRole('button', { name: 'Install' }));
     await act(async () => install.resolve({ ok: true, path: '/isolated/bin/codex', message: '' }));
     expect(row('Codex').getByRole('switch').getAttribute('aria-checked')).toBe('false');
@@ -125,7 +129,7 @@ describe('assistant installation presentation', () => {
     const install = pending<{ ok: boolean; path: string; message: string }>();
     mock.api.installAgent.mockReturnValue(install.promise);
     render(wrap(<AgentDetection data={saved} onNext={vi.fn()} />));
-    await waitFor(() => expect(mock.api.getBackendConnection).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(mock.api.getBackendConnection).toHaveBeenCalledTimes(SETUP_LINEUP.length));
     expect(row('Codex').queryByRole('button', { name: 'Install and enable' })).toBeNull();
     fireEvent.click(row('Codex').getByRole('button', { name: 'Install' }));
     await act(async () => install.resolve({ ok: true, path: '/isolated/bin/codex', message: '' }));
@@ -209,9 +213,12 @@ describe('assistant installation presentation', () => {
       ? new Promise((resolve) => { finishClaude = resolve; })
       : Promise.resolve({ ok: true, path: '/isolated/bin/codex' }));
     render(wrap(<AgentDetection data={data()} onNext={vi.fn()} />));
-    // The three cards are the whole section: the design keeps each assistant's name at
-    // the top of its own card and gives the section no heading of its own.
-    expect(screen.getAllByRole('heading', { level: 3 }).map((node) => node.textContent)).toEqual(['Claude Code', 'Codex', 'OpenCode']);
+    // The cards are the whole section: the design keeps each assistant's name at the top
+    // of its own card and gives the section no heading of its own. The built-in one
+    // stands first, with no switch: it is always on.
+    expect(screen.getAllByRole('heading', { level: 3 }).map((node) => node.textContent)).toEqual(['Vibey', 'Claude Code', 'Codex', 'OpenCode']);
+    expect(within(row('Vibey').getByRole('heading', { name: 'Vibey' }).closest('.onboarding-card-identity') as HTMLElement)
+      .queryByRole('switch')).toBeNull();
     // "Connection state replaces roles with enable switches": the switch belongs to the
     // same identity header as the name, not to a separate strip.
     for (const name of ['Claude Code', 'Codex', 'OpenCode']) {
@@ -260,11 +267,14 @@ describe('assistant installation presentation', () => {
   it('a failed install settlement refreshes connection state without admitting stale readiness', async () => {
     mock.api.getBackendConnection.mockImplementation(async (backend) => ({ ok: true, backend, installed: false, enabled: true, auth: 'none', application: 'applied', ready: false, entry_eligible: false }));
     render(wrap(<AgentDetection data={data()} onNext={vi.fn()} />));
-    await waitFor(() => expect(mock.api.getBackendConnection).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(mock.api.getBackendConnection).toHaveBeenCalledTimes(SETUP_LINEUP.length));
     mock.api.installAgent.mockResolvedValue({ ok: false, path: '/fixture/new-cli', message: 'fixture apply failed' });
     mock.api.getBackendConnection.mockImplementation(async (backend) => ({ ok: true, backend, installed: true, enabled: true, auth: 'api_key', application: 'failed', ready: false, entry_eligible: false }));
     fireEvent.click(row('Claude Code').getByRole('button', { name: 'Install' }));
-    await waitFor(() => expect(mock.api.getBackendConnection).toHaveBeenCalledTimes(4));
+    // The settlement reads the installed backend's connection once more, and the failed
+    // application it reports is what keeps entry closed.
+    await waitFor(() => expect(mock.api.getBackendConnection).toHaveBeenCalledTimes(SETUP_LINEUP.length + 1));
+    expect(mock.api.getBackendConnection).toHaveBeenLastCalledWith('claude');
     expect(screen.getByRole('button', { name: 'Enter workspace' }).hasAttribute('disabled')).toBe(true);
     expect(mock.api.installAgent).toHaveBeenCalledOnce(); expect(mock.api.mutateConfig).not.toHaveBeenCalled();
   });
@@ -292,7 +302,7 @@ describe('assistant installation presentation', () => {
       entry_eligible: false,
     }));
     const view = render(wrap(<AgentDetection data={saved} onNext={vi.fn()} />, false));
-    await waitFor(() => expect(mock.api.getBackendConnection).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(mock.api.getBackendConnection).toHaveBeenCalledTimes(SETUP_LINEUP.length));
     mock.api.getBackendConnection.mockImplementation(async (backend) => ({
       ok: true,
       backend,
@@ -304,7 +314,7 @@ describe('assistant installation presentation', () => {
       entry_eligible: true,
     }));
     view.rerender(wrap(<AgentDetection data={saved} onNext={vi.fn()} />, true));
-    await waitFor(() => expect(mock.api.getBackendConnection).toHaveBeenCalledTimes(6));
+    await waitFor(() => expect(mock.api.getBackendConnection).toHaveBeenCalledTimes(SETUP_LINEUP.length * 2));
     expect(await row('Claude Code').findByRole('button', { name: 'API Key connected' })).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Enter workspace' }).hasAttribute('disabled')).toBe(false);
   });
@@ -330,7 +340,7 @@ describe('assistant installation presentation', () => {
     mock.api.getVibeAgent.mockResolvedValue({ ok: true, agent });
     mock.models.listSources.mockResolvedValue([]);
     const chain = {
-      contract_version: 10, backend: 'claude', model_id: 'opus-5',
+      contract_version: 11, backend: 'claude', model_id: 'opus-5',
       manual_override: { hops: [{ source_id: 'src_a', model_id: 'opus-5' }, { source_id: 'src_b', model_id: 'opus-5' }] },
       route_origin: 'manual', current: { source_id: 'src_a', model_id: 'opus-5' },
       chain: [
@@ -657,6 +667,43 @@ describe('assistant installation presentation', () => {
   });
 });
 
+describe('OpenCode tool-call permission', () => {
+  it('is asked for in OpenCode\'s own card, and granting it re-reads the connection', async () => {
+    mock.permission = { ...mock.permission, permissionAllowed: false };
+    const saved = data(); saved.agents.opencode.status = 'ok';
+    render(wrap(<AgentDetection data={saved} onNext={vi.fn()} />));
+    const card = row('OpenCode');
+    expect(await card.findByText(en.onboarding.setup.notePermission.replace('{{name}}', 'OpenCode'))).toBeTruthy();
+    expect(row('Claude Code').queryByRole('button', { name: en.onboarding.setup.allowToolCalls })).toBeNull();
+    const reads = mock.api.getBackendConnection.mock.calls.length;
+    fireEvent.click(card.getByRole('button', { name: en.onboarding.setup.allowToolCalls }));
+    expect(mock.permission.setupPermission).toHaveBeenCalledOnce();
+    await waitFor(() => expect(mock.api.getBackendConnection.mock.calls.length).toBeGreaterThan(reads));
+    expect(mock.api.getBackendConnection).toHaveBeenLastCalledWith('opencode');
+  });
+
+  it('reports a refused write in the note\'s place, with the server\'s sentence behind it', () => {
+    mock.permission = { ...mock.permission, permissionAllowed: false, state: 'error', message: 'opencode.json is not writable' };
+    const saved = data(); saved.agents.opencode.status = 'ok';
+    render(wrap(<AgentDetection data={saved} onNext={vi.fn()} />));
+    const refusal = row('OpenCode').getByRole('alert');
+    expect(refusal.tagName).toBe('DETAILS');
+    expect(within(refusal).getByText(en.onboarding.setup.permissionFailed)).toBeTruthy();
+    expect(refusal.textContent).toContain('opencode.json is not writable');
+  });
+
+  it('asks nothing of an assistant that is not installed, or once it is allowed', () => {
+    mock.permission = { ...mock.permission, permissionAllowed: false };
+    render(wrap(<AgentDetection data={data()} onNext={vi.fn()} />));
+    expect(row('OpenCode').queryByRole('button', { name: en.onboarding.setup.allowToolCalls })).toBeNull();
+    cleanup();
+    mock.permission = { ...mock.permission, permissionAllowed: true };
+    const saved = data(); saved.agents.opencode.status = 'ok';
+    render(wrap(<AgentDetection data={saved} onNext={vi.fn()} />));
+    expect(row('OpenCode').queryByRole('button', { name: en.onboarding.setup.allowToolCalls })).toBeNull();
+  });
+});
+
 describe('Hub route refresh', () => {
   it.each([false, true])('AUTH-SETUP-126: returns to providers with an empty inventory (direct eligible: %s)', async (directEligible) => {
     const saved = { ...data(), capabilities: { model_hub: { enabled: true } } };
@@ -673,7 +720,7 @@ describe('Hub route refresh', () => {
     const view = render(wrap(<AgentDetection {...props} />));
     await waitFor(() => expect(mock.models.listSources).toHaveBeenCalled());
     expect(screen.queryByRole('button', { name: 'Add model source' })).toBeNull();
-    await waitFor(() => expect(mock.api.getBackendConnection).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(mock.api.getBackendConnection).toHaveBeenCalledTimes(SETUP_LINEUP.length));
     const pendingEntry = screen.getByRole<HTMLButtonElement>('button', { name: 'Enter workspace' });
     expect(pendingEntry.disabled).toBe(true);
     fireEvent.click(pendingEntry);

@@ -17,6 +17,7 @@ from core.managed_skills import ManagedSkill
 from core.prompt_registry import PROMPT_MODULES, prompt_text
 from core.prompt_studio_catalog import export_prompt_studio_catalog, render_prompt_context
 from core.system_prompt_injection import build_system_prompt_injection
+from modules.agents.catalog import AGENT_BACKENDS
 from modules.agents.codex.agent import CodexAgent
 from modules.im import MessageContext
 from vibe import cli
@@ -97,7 +98,7 @@ def _environment(monkeypatch, history="managed", skill_mode="pages"):
 
 
 @pytest.mark.parametrize("backend,history,skill_mode", itertools.product(
-    ("claude", "codex", "opencode"), ("off", "managed", "self-managed"), ("empty", "manual", "single", "pages"),
+    AGENT_BACKENDS, ("off", "managed", "self-managed"), ("empty", "manual", "single", "pages"),
 ))
 def test_export_reconstructs_production_text_with_source_for_every_block(monkeypatch, backend, history, skill_mode):
     _environment(monkeypatch, history, skill_mode)
@@ -151,7 +152,7 @@ def test_export_reconstructs_production_text_with_source_for_every_block(monkeyp
     assert "reuse an earlier successful load that remains in context" not in production
 
 
-@pytest.mark.parametrize("backend", ["claude", "codex", "opencode"])
+@pytest.mark.parametrize("backend", AGENT_BACKENDS)
 @pytest.mark.parametrize("custom", ["", "中文 {verbatim}\n\nKeep my spacing.\n"])
 def test_custom_instructions_only_change_the_final_content_block(monkeypatch, backend, custom):
     _environment(monkeypatch)
@@ -177,7 +178,7 @@ def test_custom_instructions_only_change_the_final_content_block(monkeypatch, ba
     ]
 
 
-@pytest.mark.parametrize("backend", ["claude", "codex", "opencode"])
+@pytest.mark.parametrize("backend", AGENT_BACKENDS)
 def test_evidence_led_principle_is_shared_by_production_export_and_studio(monkeypatch, backend):
     _environment(monkeypatch)
     request = _inputs(backend)
@@ -207,7 +208,7 @@ def test_runtime_snapshot_has_only_tags_and_verbatim_content():
     )
 
 
-@pytest.mark.parametrize("backend", ["claude", "codex", "opencode"])
+@pytest.mark.parametrize("backend", AGENT_BACKENDS)
 @pytest.mark.parametrize("skill_mode", ["empty", "manual", "single", "pages"])
 def test_skill_reuse_clarification_is_codex_only(monkeypatch, backend, skill_mode):
     _environment(monkeypatch, skill_mode=skill_mode)
@@ -220,7 +221,7 @@ def test_skill_reuse_clarification_is_codex_only(monkeypatch, backend, skill_mod
 
 
 @pytest.mark.parametrize("backend,history,skill_mode", itertools.product(
-    ("claude", "codex", "opencode"), ("off", "managed", "self-managed"),
+    AGENT_BACKENDS, ("off", "managed", "self-managed"),
     ("empty", "manual", "single", "pages"),
 ))
 def test_separated_capabilities_keep_independent_markdown_sections(monkeypatch, backend, history, skill_mode):
@@ -256,7 +257,7 @@ def test_separated_capabilities_keep_independent_markdown_sections(monkeypatch, 
     assert ("Codex-generated images" in sections) == (backend == "codex")
 
 
-@pytest.mark.parametrize("backend", ["claude", "codex", "opencode"])
+@pytest.mark.parametrize("backend", AGENT_BACKENDS)
 def test_working_principles_remain_without_session_skills_or_optional_capabilities(backend):
     request = {
         "backend": backend,
@@ -284,7 +285,7 @@ def test_working_principles_remain_without_session_skills_or_optional_capabiliti
 def test_exported_sources_cover_all_rendered_branches(monkeypatch):
     visited = set()
     for backend, history, skill_mode in itertools.product(
-        ("claude", "codex", "opencode"), ("off", "managed", "self-managed"), ("empty", "manual", "pages"),
+        AGENT_BACKENDS, ("off", "managed", "self-managed"), ("empty", "manual", "pages"),
     ):
         _environment(monkeypatch, history, skill_mode)
         result = render_prompt_context(_inputs(backend, history, skill_mode))
@@ -307,7 +308,7 @@ def test_pagination_keeps_its_own_source_provenance(monkeypatch):
     assert "| Agent Name | Backend | Agent Description |" in prompt_text("harness-agents-prompt")
 
 
-@pytest.mark.parametrize("backend", ["claude", "codex", "opencode"])
+@pytest.mark.parametrize("backend", AGENT_BACKENDS)
 def test_history_state_is_not_a_prompt_dependency(monkeypatch, backend):
     _environment(monkeypatch)
     request = _inputs(backend)

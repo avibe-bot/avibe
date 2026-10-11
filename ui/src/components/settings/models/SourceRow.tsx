@@ -3,6 +3,7 @@ import { ChevronRight } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { cn } from '@/lib/utils';
+import { getBackendUiMeta } from '@/lib/agentBackends';
 import { PROTOCOL_COPY_KEYS } from './addApiKeyState';
 import { sourceDetail } from './sourcePresentation';
 import { SourcePrivateValue } from './SourcePrivacy';
@@ -22,7 +23,7 @@ export const SourceRow: React.FC<{
   const detail = sourceDetail(source);
   const interfaceLabel = t(PROTOCOL_COPY_KEYS[source.protocol]);
   const adoptedBy = activeSourceAdoption(source.adopted_by, activeBackends);
-  const adoptedBackends = [...new Set((adoptedBy ?? []).map(({ backend }) => t(`settings.models.backends.${backend}`, { defaultValue: backend }) as string))];
+  const adoptedBackends = [...new Set((adoptedBy ?? []).map(({ backend }) => getBackendUiMeta(backend).label))];
   const state = sourceStatePresentation(source.state, 'card', i18n.language, now, {
     known: adoptedBy !== undefined,
     backends: adoptedBackends,

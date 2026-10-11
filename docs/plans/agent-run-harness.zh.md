@@ -501,7 +501,7 @@ Definition 表的迁移优先级：
 | `legacy_session_key` | 现有，兼容 | 旧导入 runs 的兼容 target。 | 只用于迁移和兼容展示。 |
 | `scope_id` | 目标字段 | Scope placement snapshot。 | 记录 placement，支持按 Scope 查 runs。 |
 | legacy delivery fields | 现有，兼容 | 旧 delivery override snapshot。 | 只保留旧 run history；新的 user-facing contract 应优先使用 Scope placement 和 Session callback 字段。 |
-| `prompt` | 现有，兼容 | 旧消息字段。 | 迁移期兼容旧 run；目标 schema 用 `message`。 |
+| `prompt` | 现有，兼容 | 旧消息字段。 | 迁移期兼容旧 run；目标 schema 用 `message`。`vibe runs show` 输出的 run 记录不含此字段：其文本已在 `message` 中。 |
 | `message` | 新增 | 发送给 Agent 的实际消息。 | 与 `--message` 对齐，并和 Agent system prompt 分离。 |
 | `message_payload_json` | 新增 | 可选结构化 payload。 | 支持 webhook/API 传结构化输入。 |
 | `result_text` | 新增 | 最终用户可见结果。 | 支持 sync `agent run` 回显、run show、Web UI 摘要。 |

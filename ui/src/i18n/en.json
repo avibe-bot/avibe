@@ -621,6 +621,12 @@
       "claudeSubtitle": "Detect or install the Claude Code CLI. Sign in or supply an API key from the CLI itself.",
       "claudeDescription": "Anthropic agent · sign in with Claude or supply an API key",
       "codexDescription": "OpenAI agent · ChatGPT login or OPENAI_API_KEY",
+      "vibeyDescription": "Built-in agent · models and routes managed in Model Hub",
+      "backToBackends": "Back to backends",
+      "gatewayOff": "The model gateway is off, so {{name}} has no model to run on.",
+      "hubDisabled": "Model Hub disabled",
+      "hubDisabledNotice": "Model Hub is disabled on this instance, so {{name}} has no model to run on.",
+      "builtinBadge": "Built-in",
       "openProviderPage": "Configure provider",
       "providerOauth": "OAuth (default)",
       "providerApiKey": "API key",
@@ -918,6 +924,7 @@
           "turnOn": "Turn model gateway on",
           "turnOff": "Turn model gateway off",
           "stopBlocked": "Switch {{names}} to Direct before turning the model gateway off",
+          "stopVibeyBlocked": "{{name}}'s models use the model gateway; remove them before turning it off.",
           "stopUnavailable": "Agent routing status is unavailable; the model gateway cannot be turned off yet"
         },
         "closed": {
@@ -1124,6 +1131,9 @@
         "picker": {
           "title": "Add {{backend}} models",
           "description": "Pick the models to add to this backend's list.",
+          "chooseTitle": "Choose a {{backend}} model",
+          "chooseDescription": "Pick the model to use.",
+          "use": "Use this model",
           "search": "Search models or providers",
           "groupBuiltin": "{{backend}} built-in",
           "groupProviders": "From your providers",
@@ -1919,6 +1929,7 @@
           "anthropicMessages": "Anthropic Messages",
           "openaiResponses": "OpenAI Responses",
           "openaiChatCompletions": "OpenAI Chat Completions",
+          "google": "Google Gemini",
           "idleHint": "Identified automatically once Base URL and API key are filled",
           "detecting": "Identifying the interface…",
           "manual": "Manually specify interface type",
@@ -2061,7 +2072,8 @@
           "detected": "Existing direct config detected: {{detail}} — import it into the gateway in one click",
           "import": "Import to gateway…"
         },
-        "fixHint": "Add or enable a source on the Models page to bring it back."
+        "fixHint": "Add or enable a source on the Models page to bring it back.",
+        "warningWithFix": "{{warning}}. {{fixHint}}"
       },
       "migration": {
         "open": "Migrate configuration",
@@ -2114,11 +2126,6 @@
           "codex": "Codex configuration",
           "opencode": "OpenCode configuration"
         }
-      },
-      "backends": {
-        "claude": "Claude Code",
-        "codex": "Codex",
-        "opencode": "OpenCode"
       },
       "sourceTest": {
         "open": "Test",
@@ -4088,9 +4095,7 @@
     "statusDisabled": "disabled",
     "newAgent": "New agent",
     "import": "Import",
-    "importFromClaude": "Import from Claude",
-    "importFromCodex": "Import from Codex",
-    "importFromOpenCode": "Import from OpenCode",
+    "importFrom": "Import from {{backend}}",
     "importSuccess": "Imported {{imported}}, skipped {{skipped}}.",
     "importFailed": "Import failed: {{error}}",
     "importNoneFound": "No {{backend}} agents found on disk to import.",
@@ -4107,6 +4112,7 @@
     "detail": {
       "enabled": "Enabled",
       "enabledHint": "Disabling keeps the agent in the registry but excludes it from new sessions; running sessions are unaffected.",
+      "alwaysEnabledHint": "{{name}} is built in and always enabled. You can still adjust its model, effort, and system prompt.",
       "defaultTitle": "Default agent",
       "defaultHint": "New chats and IM messages without an explicit agent route to this one.",
       "defaultActive": "Default",
@@ -4118,6 +4124,8 @@
       "descriptionPlaceholder": "What this agent is for…",
       "backend": "Backend",
       "backendLocked": "creation-time only · locked",
+      "nativeBackend": "{{backend}} CLI",
+      "backendName": "{{backend}}",
       "model": "Model",
       "modelPlaceholder": "Pick or type a model",
       "modelEmpty": "No matches — you can type a custom value.",
@@ -5276,33 +5284,38 @@
     "welcome": {
       "getStarted": "Get started",
       "title": "Different capabilities. One team.",
-      "subtitle": "Bring Claude Code, Codex, and OpenCode together",
+      "subtitle": "Vibey coordinates Claude Code, Codex, and OpenCode",
       "detecting": "Checking…",
       "detectionFailed": "Could not check your assistants. Try again."
     },
     "details": "View details",
     "story": {
       "label": "Assistants working together",
-      "description": "Claude Code plans the work, Codex builds it, OpenCode tests it, and Claude Code summarizes the result",
-      "caption": "Plan · Build · Test · Deliver",
-      "returnCaption": "Tests passed · back to the PM",
-      "claude": {
-        "name": "Claude Code",
-        "role": "PM",
-        "working": "Writing the project brief",
-        "complete": "Project brief ready",
-        "summary": "Summarizing the delivery"
+      "description": "Vibey plans the work and hands its parts to other agents through the Harness: Claude Code builds it, Codex reviews it, OpenCode tests it, and Vibey summarizes the result",
+      "caption": "Plan · Build · Review · Test · Deliver",
+      "returnCaption": "Tests passed · back to Vibey",
+      "summary": "Summarizing the delivery",
+      "vibey": {
+        "role": "Coordinator",
+        "working": "Planning the work",
+        "complete": "{{count}} tasks handed off"
       },
-      "codex": {
-        "name": "Codex",
+      "claude": {
         "role": "Developer",
+        "step": "Build",
         "working": "Writing code",
         "complete": "Implementation ready"
       },
+      "codex": {
+        "role": "Reviewer",
+        "step": "Review",
+        "working": "Reviewing the change",
+        "complete": "Review passed"
+      },
       "opencode": {
-        "name": "OpenCode",
         "role": "Tester",
-        "working": "Writing and running tests",
+        "step": "Test",
+        "working": "Running tests",
         "complete": "All tests passed"
       }
     },
@@ -5348,7 +5361,20 @@
       "defaultModelWithBackups_other": "Default model · {{count}} backups",
       "noteNoModels": "No usable model yet",
       "ownershipChanged": "Connection changed. Refresh to continue",
-      "noteModelUnset": "No model set yet; you can set one later in Model Hub"
+      "noteModelUnset": "No model set yet; you can set one later in Model Hub",
+      "notePermission": "{{name}} stops to approve every tool call",
+      "allowToolCalls": "Allow tool calls",
+      "permissionFailed": "Could not allow tool calls",
+      "builtinAlwaysOn": "Built-in · always on",
+      "noteBuiltinUnset": "No model yet. Pick one to start.",
+      "noteGatewayOff": "Model gateway is off. {{name}} needs it to run.",
+      "noteHubDisabled": "Model Hub is disabled on this instance. {{name}} needs it to run.",
+      "pickModelNamed": "Pick a model for {{name}}",
+      "allModels": "All models…",
+      "modelsUnreadable": "Could not read the models.",
+      "noModelsToPick": "No provider supplies a model yet.",
+      "suppliersChanged": "This model's providers changed. Pick it again.",
+      "modelPickFailed": "Could not save the model. Try again."
     },
     "connection": {
       "method": "Connection method",
@@ -5430,7 +5456,9 @@
       "modelUnavailable": "No assistant can reach a model yet. Check your connections and try again.",
       "credentialType": "Credential type",
       "apiKeyLabel": "API Key",
-      "authTokenLabel": "Auth Token"
+      "authTokenLabel": "Auth Token",
+      "builtinModelHint": "Pick a model for {{name}}, or enable an assistant, to enter the workspace",
+      "builtinChoiceHint": "Finish choosing {{name}}'s model to enter the workspace"
     },
     "brand": {
       "name": "Avibe",

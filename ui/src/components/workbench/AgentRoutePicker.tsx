@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
-import { Bot, ChevronDown, Loader2, Plus, Search, Sparkles } from 'lucide-react';
+import { ChevronDown, Loader2, Plus, Search, Sparkles } from 'lucide-react';
 import clsx from 'clsx';
 
 import { useApi } from '../../context/ApiContext';
@@ -12,6 +12,8 @@ import { useRouteSurfaceActive } from '../../lib/routeSurfaceActivity';
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
 import { Button } from '../ui/button';
 import { Input } from '../ui/input';
+import { BackendAvatar } from '../visual';
+import { getBackendUiMeta } from '@/lib/agentBackends';
 
 // The route fields the picker reads. A subset of WorkbenchSession (chat) and of
 // WorkbenchSessionCreate (the create flow), so both can pass their object directly.
@@ -292,8 +294,8 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
                 compactMobile ? 'hidden md:inline-flex' : 'inline-flex',
               )}
             >
-              <Bot className="size-3" />
-              {backend}
+              <BackendAvatar backend={backend} className="size-3" />
+              {getBackendUiMeta(backend).label}
             </span>
           )}
           {compactMobile ? (

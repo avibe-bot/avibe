@@ -298,8 +298,14 @@ def persist_agent_message(
     metadata: Optional[dict[str, Any]] = None,
     native_message_id: Optional[str] = None,
     error_sink: Optional[list] = None,
+    existing_row_id: Optional[str] = None,
 ) -> Optional[dict]:
     """Persist one agent output into the workbench ``messages`` store.
+
+    ``existing_row_id`` names a row the backend already committed as its transcript
+    (the Avibe Agent): its display columns are written instead of inserting a
+    second row, and everything after the write (rank, ``message.new``, inbox) is
+    unchanged (``_write_committed_row``).
 
     Unified across **all** platforms (including avibe, which has no IM mirror)
     and called BEFORE any IM delivery/mute decision, so assistant messages and
@@ -427,23 +433,40 @@ def persist_agent_message(
                 # survives reload because it lives on the row, not in the delivery.
                 if citation_rows:
                     content = {**(content or {}), "citations": citation_rows}
-                appended_row = _append_quietly(
-                    conn,
-                    scope_id=scope_id,
-                    session_id=row_session_id,
-                    platform=context.platform,
-                    author="agent",
-                    source="agent",
-                    author_name=agent_name,
-                    message_type=message_type,
-                    text=text,
-                    metadata=metadata,
-                    native_message_id=native_message_id,
-                    parent_native_message_id=context.thread_id,
-                    content=content,
-                )
+                if existing_row_id:
+                    appended_row = _write_committed_row(
+                        conn,
+                        existing_row_id,
+                        session_id=row_session_id,
+                        platform=context.platform,
+                        scope_id=scope_id,
+                        message_type=message_type,
+                        text=text,
+                        content=content,
+                        metadata=metadata,
+                        native_message_id=native_message_id,
+                        parent_native_message_id=context.thread_id,
+                        suppress_delivery=suppress_delivery,
+                    )
+                else:
+                    appended_row = _append_quietly(
+                        conn,
+                        scope_id=scope_id,
+                        session_id=row_session_id,
+                        platform=context.platform,
+                        author="agent",
+                        source="agent",
+                        author_name=agent_name,
+                        message_type=message_type,
+                        text=text,
+                        metadata=metadata,
+                        native_message_id=native_message_id,
+                        parent_native_message_id=context.thread_id,
+                        content=content,
+                    )
                 if (
-                    appended_row is None
+                    existing_row_id is None
+                    and appended_row is None
                     and native_message_id
                     and not suppress_delivery
                     and spec_for(message_type)["inboxPreview"]
@@ -573,6 +596,95 @@ def persist_agent_message(
         if error_sink is not None:
             error_sink.append(err)
         return None
+
+
+# Display keys ``persist_agent_message`` owns in ``content_json``; ``model`` (the
+# transcript payload of a committed row) is never among them.
+_DISPLAY_CONTENT_KEYS = ("text", "kind", "quick_replies", "result_footer", "citations")
+_FINAL_ROW_TYPES = ("result", "error")
+
+
+def _write_committed_row(
+    conn,
+    row_id: str,
+    *,
+    session_id: Optional[str],
+    platform: str,
+    scope_id: Optional[str],
+    message_type: str,
+    text: str,
+    content: Optional[dict],
+    metadata: Optional[dict],
+    native_message_id: Optional[str],
+    parent_native_message_id: Optional[str],
+    suppress_delivery: bool,
+) -> Optional[dict]:
+    """Write the display columns of an agent row its backend committed; never insert one.
+
+    The same rules as an inserted row, applied to the committed one:
+
+    * the row is attributed to the delivery target (``platform``, ``scope_id``);
+    * a terminal write types the row ``result`` or ``error`` (the dispatcher's
+      failure classification), including a final the backend committed hidden
+      because it had nothing to show; any other write keeps the row's type;
+    * the row takes the output's ``native_message_id``, which is how the
+      dispatcher recognizes a retry of the same output, but never one another row
+      holds, so the unique index cannot break (a concurrent duplicate, which
+      ``_append_quietly`` swallows for an inserted row);
+    * an outward send clears a ``delivery_suppressed`` marker, the promotion
+      ``promote_suppressed_native_message`` performs for an inserted row.
+
+    The transcript payload (``content_json.model``), the row's place in the
+    transcript (``created_at``, ``delivered_at``), and its context identity stay as
+    committed.
+    """
+    import json
+
+    from sqlalchemy import select, update
+
+    from storage.models import messages
+
+    row = conn.execute(
+        select(messages).where(messages.c.id == row_id, messages.c.author == "agent")
+    ).mappings().first()
+    if row is None or (session_id is not None and row["session_id"] != session_id):
+        logger.warning("persist_agent_message: committed row %s is not an agent row of this Session", row_id)
+        return None
+    try:
+        body = json.loads(row["content_json"] or "{}")
+        old_metadata = json.loads(row["metadata_json"] or "{}")
+    except (TypeError, ValueError):
+        body, old_metadata = {}, {}
+    body = {key: value for key, value in body.items() if key not in _DISPLAY_CONTENT_KEYS}
+    body.update({key: value for key, value in (content or {}).items() if key != "model"})
+    body["text"] = text
+    merged_metadata = {key: value for key, value in old_metadata.items() if key != "delivery_suppressed"}
+    merged_metadata.update(metadata or {})
+    if suppress_delivery:
+        merged_metadata["delivery_suppressed"] = True
+    values: dict = {
+        "content_text": text,
+        "content_json": json.dumps(body),
+        "metadata_json": json.dumps(merged_metadata),
+        "updated_at": messages_service.canonical_message_timestamp(_now()),
+    }
+    if scope_id is not None:
+        values.update(platform=platform, scope_id=scope_id)
+    if message_type in _FINAL_ROW_TYPES:
+        values["type"] = message_type
+    if parent_native_message_id and not row["parent_native_message_id"]:
+        values["parent_native_message_id"] = parent_native_message_id
+    if native_message_id and native_message_id != row["native_message_id"]:
+        target_platform, target_scope = values.get("platform", row["platform"]), values.get("scope_id", row["scope_id"])
+        holder = messages_service.get_native_message(
+            conn, platform=target_platform, scope_id=target_scope, native_message_id=native_message_id
+        )
+        if holder is None:
+            values["native_message_id"] = native_message_id
+        else:
+            logger.warning("persist_agent_message: native id %s already belongs to row %s", native_message_id, holder["id"])
+    conn.execute(update(messages).where(messages.c.id == row_id).values(**values))
+    return messages_service.get_message(conn, row_id, include_local_error_detail=True)
 
 
 def persist_silent_terminal(

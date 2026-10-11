@@ -8,6 +8,7 @@ import re
 import shutil
 import subprocess
 from pathlib import Path
+from modules.agents.catalog import NATIVE_CLI_BACKENDS
 
 from vibe.desktop_backends import is_desktop_backend_path, resolve_published_desktop_backend
 
@@ -268,7 +269,7 @@ def resolve_cli_path(
     has_path_separator = os.sep in binary or (os.altsep is not None and os.altsep in binary)
     if expanded.is_absolute() and is_desktop_backend_path(expanded):
         lookup_name = expanded.stem if expanded.suffix.lower() == ".exe" else expanded.name
-        if include_desktop and lookup_name in {"claude", "codex", "opencode"}:
+        if include_desktop and lookup_name in NATIVE_CLI_BACKENDS:
             return resolve_published_desktop_backend(lookup_name)
         return None
     if expanded.is_absolute() or has_path_separator:
@@ -289,7 +290,7 @@ def resolve_cli_path(
                 return fallback
     if include_desktop:
         lookup_name = expanded.name if expanded.is_absolute() or has_path_separator else binary
-        if lookup_name in {"claude", "codex", "opencode"}:
+        if lookup_name in NATIVE_CLI_BACKENDS:
             return resolve_published_desktop_backend(lookup_name)
     return None
 

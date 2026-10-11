@@ -8,6 +8,7 @@ import { ApiError, useApi, type ApiContextType } from '../context/ApiContext';
 import { useInstanceAuthorization } from '../context/InstanceAuthorizationContext';
 import { useRouteSurfaceActive } from './routeSurfaceActivity';
 import { settingsOverlayContinuationState } from './settingsOverlay';
+import { getBackendUiMeta } from './agentBackends';
 
 export interface BackendModels {
   /** Selectable model identifiers for the backend. */
@@ -80,6 +81,7 @@ export async function fetchBackendModels(
 ): Promise<BackendModels> {
   const hub = hubCatalogModels(await api.readModelHubAgentCatalogForModelPicker(backend), backend);
   if (hub) return hub;
+  if (!getBackendUiMeta(backend).capabilities.supports_cli) return { models: [] };
   if (backend === 'claude') {
     const res = await api.claudeModels();
     return {

@@ -1,0 +1,44 @@
+[
+  {
+    "name": "legacy_backend_defaults",
+    "agents": {
+      "default_backend": "codex",
+      "opencode": {"enabled": true, "cli_path": "/opt/opencode", "default_model": "old-model", "default_agent": "build"},
+      "claude": {"enabled": false, "cli_path": "/opt/claude"},
+      "codex": {"enabled": true, "cli_path": "/opt/codex"}
+    },
+    "preserved": {
+      "opencode": {"enabled": true, "cli_path": "/opt/opencode", "default_agent": "build"},
+      "claude": {"enabled": false, "cli_path": "/opt/claude"},
+      "codex": {"enabled": true, "cli_path": "/opt/codex"}
+    }
+  },
+  {
+    "name": "native_auth_and_vault",
+    "agents": {
+      "opencode": {"enabled": false, "default_provider": "custom-provider"},
+      "claude": {"enabled": true, "auth_mode": "api_key", "api_key": "fixture-key", "base_url": "https://fixture.invalid", "auth_mode_set": true},
+      "codex": {"enabled": false, "auth_mode": "oauth", "oauth_relay_marker": {"provider_id": "custom", "base_url": "https://relay.invalid"}},
+      "avault": {"cli_path": "/fixture/avault"}
+    },
+    "preserved": {
+      "opencode": {"enabled": false, "default_provider": "custom-provider"},
+      "claude": {"enabled": true, "auth_mode": "api_key", "api_key": "fixture-key", "base_url": "https://fixture.invalid", "auth_mode_set": true},
+      "codex": {"enabled": false, "auth_mode": "oauth", "oauth_relay_marker": {"provider_id": "custom", "base_url": "https://relay.invalid"}},
+      "avault": {"cli_path": "/fixture/avault"}
+    }
+  },
+  {
+    "name": "runtime_lifecycle_settings",
+    "agents": {
+      "opencode": {"enabled": true, "auto_update": false, "active_turn_timeout_seconds": 7200, "legacy_turn_timeout_neutralized": true},
+      "claude": {"enabled": true, "auto_update": false, "idle_timeout_seconds": 900},
+      "codex": {"enabled": true, "auto_update": true, "idle_timeout_seconds": 1200}
+    },
+    "preserved": {
+      "opencode": {"enabled": true, "auto_update": false, "active_turn_timeout_seconds": 7200},
+      "claude": {"enabled": true, "auto_update": false, "idle_timeout_seconds": 900},
+      "codex": {"enabled": true, "auto_update": true, "idle_timeout_seconds": 1200}
+    }
+  }
+]

@@ -340,6 +340,43 @@ def test_runs_show_defaults_to_caller_run(monkeypatch, tmp_path, capsys) -> None
     }
 
 
+def test_runs_show_prints_the_run_text_once_and_brief_prints_the_list_row(monkeypatch, tmp_path, capsys) -> None:
+    """#2425: a long delegation brief appears once, as `message`; `--brief` is the status row `runs list` prints."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+    delegation_brief = "Review PR #1 and report every finding. " * 100
+    store = SQLiteBackgroundTaskStore()
+    try:
+        store.enqueue_run(
+            {
+                "id": "run-done",
+                "request_type": "agent_run",
+                "status": "succeeded",
+                "agent_name": "helper",
+                "agent_backend": "codex",
+                "session_id": "ses-alpha",
+                "message": delegation_brief,
+                "result_text": "No findings.",
+                "created_at": "2026-05-25T00:00:00+00:00",
+                "updated_at": "2026-05-25T00:00:00+00:00",
+            }
+        )
+    finally:
+        store.close()
+
+    assert cli.cmd_runs_show(cli.build_parser().parse_args(["runs", "show", "run-done"])) == 0
+    run = json.loads(capsys.readouterr().out)["run"]
+    assert "prompt" not in run
+    assert (run["message"], run["result_text"]) == (delegation_brief, "No findings.")
+
+    assert cli.cmd_runs_show(cli.build_parser().parse_args(["runs", "show", "run-done", "--brief"])) == 0
+    brief = json.loads(capsys.readouterr().out)["run"]
+    assert cli.cmd_runs_list(cli.build_parser().parse_args(["runs", "list"])) == 0
+    assert brief == json.loads(capsys.readouterr().out)["runs"][0]
+    assert (brief["status"], "message" in brief) == ("succeeded", False)
+
+
 def test_runs_show_attaches_live_session_owner_for_queued_run(monkeypatch, tmp_path, capsys) -> None:
     """HFR-002: CLI diagnosis names the authoritative live Session owner."""
 

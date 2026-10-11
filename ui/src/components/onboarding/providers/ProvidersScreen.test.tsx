@@ -29,7 +29,7 @@ import {
 import { providerBrandLabel } from '@/components/settings/providers/providerIdentity';
 import { isMigrationDismissed, writeMigrationDismissed } from '@/lib/modelHubMigrationDismiss';
 import type {
-  AgentBackend,
+  NativeCliBackend,
   AgentSupply,
   MigrationItem,
   RuntimeDependency,
@@ -79,7 +79,7 @@ const supply = (over: Partial<AgentSupply> & { backend: AgentSupply['backend'] }
 });
 
 const runtimeOf = (health: RuntimeHealth, over: Partial<RuntimeDependency> = {}): RuntimeDependency => ({
-  contract_version: 10,
+  contract_version: 11,
   manifest: { name: 'cliproxyapi', resolution: 'resolved', version: '1.0.0', source_sha: 'sha', assets: [] },
   status: { verified: true, health },
   ...over,
@@ -1109,8 +1109,8 @@ describe('ProvidersScreen — what an import leaves behind', () => {
   });
 
   it('clears only the identities in a linked group when its card is explicitly selected', async () => {
-    const linkedA = { ...CODEX_KEY, required_backends: ['codex', 'opencode'] as AgentBackend[] };
-    const linkedB = { ...OPENCODE_KEY, required_backends: ['codex', 'opencode'] as AgentBackend[] };
+    const linkedA = { ...CODEX_KEY, required_backends: ['codex', 'opencode'] as NativeCliBackend[] };
+    const linkedB = { ...OPENCODE_KEY, required_backends: ['codex', 'opencode'] as NativeCliBackend[] };
     serve({ scan: [linkedA, linkedB] });
     writeMigrationDismissed([linkedA, linkedB]);
     renderScreen();

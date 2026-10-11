@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react';
-import { Check, ChevronRight, Download, KeyRound, RefreshCw, SlidersHorizontal } from 'lucide-react';
+import { Check, ChevronRight, Download, KeyRound, RefreshCw, Settings, SlidersHorizontal } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { BackendIcon } from '../visual';
 import { Button } from '../ui/button';
@@ -47,6 +47,48 @@ export interface AssistantRowProps {
   enabled?: boolean;
   /** The route read's evidence; pending and failed reads cannot assert absence. */
   route?: AssistantRouteView;
+  /** A tool-call permission this assistant needs before it can work (OpenCode's
+      opencode.json). The card says so and offers the write itself. */
+  permission?: { required: boolean; pending: boolean; error?: string; onAllow: () => void };
+}
+
+/**
+ * The model a card's route resolves to: a label over the model, and — when `live` — the
+ * way into that route, with the chevron that says a dialog is behind it.
+ *
+ * Off, a card still shows the model the assistant would call, so switching it on has no
+ * surprise in it. It is a statement then, not a control: no chevron, nothing to press.
+ */
+export function RouteChoice({ name, route, live, disabled = false, pending = false, onOpen }: {
+  name: string;
+  route?: AssistantRouteView;
+  live: boolean;
+  disabled?: boolean;
+  pending?: boolean;
+  onOpen: () => void;
+}) {
+  const { t } = useTranslation();
+  const model = route?.kind === 'route' ? route.model : null;
+  const unknown = route?.kind === 'pending' || route?.kind === 'failed';
+  const lead = route?.kind === 'route' && route.backups
+    ? t('onboarding.setup.defaultModelWithBackups', { count: route.backups })
+    : t('onboarding.setup.defaultModel');
+  return (
+    <button type="button" className="onboarding-model-choice" onClick={live ? onOpen : undefined}
+      aria-label={t('onboarding.setup.defaultModelNamed', { name })}
+      aria-disabled={live ? undefined : true}
+      disabled={!live || disabled}>
+      <span>
+        <small>{unknown ? t('onboarding.setup.defaultModel') : lead}</small>
+        {unknown
+          ? <strong className="onboarding-model-choice-pending" aria-hidden="true" />
+          : <strong>{model}</strong>}
+      </span>
+      {live && !unknown && (pending
+        ? <RefreshCw size={17} className="motion-safe:animate-spin" />
+        : <ChevronRight size={17} />)}
+    </button>
+  );
 }
 
 /**
@@ -63,7 +105,7 @@ export interface AssistantRowProps {
  */
 export function AssistantRow({ backend, status, installing, detecting, error, lifecycle, upgrade, enabledControl,
   onInstall, onDetect, onConfigure, configuringDisabled = false, connection, onAddKey, onRefreshConnection, onRetryRoute, connectionPending, connectionError, routeError,
-  hubManaged = false, enabled = false, route }: AssistantRowProps) {
+  hubManaged = false, enabled = false, route, permission }: AssistantRowProps) {
   const { t } = useTranslation();
   const label = getBackendUiMeta(backend).label;
   // With Model Hub holding the credentials, a card has three things it can be, and
@@ -78,34 +120,21 @@ export function AssistantRow({ backend, status, installing, detecting, error, li
         : 'checking';
   const routeModel = route?.kind === 'route' ? route.model : null;
   const routeUnknown = route?.kind === 'pending' || route?.kind === 'failed';
-  const routeLead = () => (route?.kind === 'route' && route.backups ? t('onboarding.setup.defaultModelWithBackups', { count: route.backups })
-      : t('onboarding.setup.defaultModel'));
-  // Off, the card still shows the model the assistant would call, so switching it on
-  // has no surprise in it. It is a statement then, not a control: no chevron, nothing
-  // to press, and the switch above is the only thing that changes it.
+  // A permission the installed assistant still needs is the card's most pressing note:
+  // without it the assistant stalls on its first tool call, whatever its route says.
+  const permissionNeeded = status === 'ok' && !!permission?.required;
+  // Switched off, the switch above is the only thing that changes the model shown.
   const routeChoice = (live: boolean) => (
-    <button type="button" className="onboarding-model-choice" onClick={live ? onConfigure : undefined}
-      aria-label={t('onboarding.setup.defaultModelNamed', { name: label })}
-      aria-disabled={live ? undefined : true}
-      disabled={!live || configuringDisabled || installing || detecting || !!connectionPending}>
-      <span>
-        <small>{routeUnknown ? t('onboarding.setup.defaultModel') : routeLead()}</small>
-        {routeUnknown
-          ? <strong className="onboarding-model-choice-pending" aria-hidden="true" />
-          : <strong>{routeModel}</strong>}
-      </span>
-      {live && !routeUnknown && (connectionPending
-        ? <RefreshCw size={17} className="motion-safe:animate-spin" />
-        : <ChevronRight size={17} />)}
-    </button>
+    <RouteChoice name={label} route={route} live={live} onOpen={onConfigure} pending={!!connectionPending}
+      disabled={configuringDisabled || installing || detecting || !!connectionPending} />
   );
   return (
-    <Card className="onboarding-assistant" aria-label={label}>
+    <Card className="onboarding-assistant" data-backend={backend} aria-label={label}>
       <div className="onboarding-card-identity">
         <span className="onboarding-card-logo"><BackendIcon backend={backend} size={28} variant="brand" aria-hidden="true" /></span>
-        {/* A heading here and a `strong` on the welcome: the setup's three cards are
-            a real document structure a person navigates, the welcome's are an
-            illustration the card already labels. Same class, so same geometry. */}
+        {/* A heading here and a `strong` on the welcome: the setup's cards are a real
+            document structure a person navigates, the welcome's are an illustration
+            the card already labels. Same class, so same geometry. */}
         <h3 className="onboarding-card-name">{label}</h3>
         <div className="onboarding-assistant-enable">{enabledControl}</div>
       </div>
@@ -143,8 +172,15 @@ export function AssistantRow({ backend, status, installing, detecting, error, li
             hub-owned credential is managed — rather than a static description of the
             assistant. The frames keep it to one line at every tier, which a
             per-state sentence is short enough to honour in both languages. */}
-        <p className="onboarding-assistant-note">
-          {hubState
+        {/* A refused permission write is the guidance for the state the card is in, so it
+            takes the note's place — the slot the card already reserves — and keeps the
+            server's own sentence one click away. */}
+        {permissionNeeded && permission?.error ? (
+          <details className="onboarding-assistant-note" data-tone="error" role="alert">
+            <summary>{t('onboarding.setup.permissionFailed')}</summary>{permission.error}
+          </details>
+        ) : <p className="onboarding-assistant-note">
+          {permissionNeeded ? t('onboarding.setup.notePermission', { name: label }) : hubState
             ? t(hubState === 'missing' ? 'onboarding.setup.noteNotInstalled'
               : hubState === 'enabled' || hubState === 'idle'
                 ? (route?.kind === 'no-agent-model' ? 'onboarding.setup.noteModelUnset'
@@ -156,10 +192,17 @@ export function AssistantRow({ backend, status, installing, detecting, error, li
               : native
                 ? t(`onboarding.setup.${native}ConnectedHint`)
                 : t(`onboarding.setup.${backend}Guide`)}
-        </p>
+        </p>}
         {/* One full-width row per connection method, subscription above API Key, and
             the connected state wearing the same row with a mint check. */}
         <div className="onboarding-assistant-actions">
+          {permissionNeeded && permission && (
+            <Button type="button" variant="secondary" className="onboarding-method-row onboarding-method-row--attention"
+              onClick={permission.onAllow} disabled={permission.pending || installing || detecting}>
+              {permission.pending ? <RefreshCw size={16} className="motion-safe:animate-spin" /> : <Settings size={16} />}
+              {t('onboarding.setup.allowToolCalls')}
+            </Button>
+          )}
           {hubState === 'checking' ? null : hubState === 'missing' ? (
             <Button type="button" variant="secondary" className="onboarding-method-row" onClick={onInstall} disabled={installing || detecting}>
               {installing ? <RefreshCw size={16} className="motion-safe:animate-spin" /> : <Download size={16} />}

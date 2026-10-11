@@ -1,6 +1,17 @@
 version: 1
 capability: message_delivery
 observations:
+  - id: OBS-MESSAGE-DELIVERY-010
+    source: avibe_agent_phase1_e2e_acceptance
+    related_scenarios:
+      - MESSAGE-DELIVERY-322
+    summary: After a restart, the interruption notice asked the user to resend a command recovery had already handed to a Watch.
+    previous_assumption: An interrupted Turn always lost its work, so a resend or Retry was the safe next step.
+    observed_behavior: The Watch finished and reported back, while the notice and its Retry offered to run the side effects again.
+    required_updates:
+      - run the Avibe Agent's tool-call settlement before Turn recovery at startup (T2 before T4)
+      - branch the shared restart notice on the hand-over record T2 commits, not on text
+      - name the Watch and suppress Retry in both the Web action and the server admission
   - id: OBS-MESSAGE-DELIVERY-009
     source: issue_2049_and_hermetic_native_reproduction
     related_scenarios:

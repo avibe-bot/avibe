@@ -608,7 +608,8 @@ def test_mh_supply_gap_001_manual_target_survives_inventory_loss(
 
     result = asyncio.run(service.refresh_source(supplied.id))
     assert result["removed_hops"] == []
-    model_supply = next(row for row in service.list_agents()[0]["model_supply"] if row["model_id"] == menu_model)
+    claude = next(agent for agent in service.list_agents() if agent["backend"] == "claude")
+    model_supply = next(row for row in claude["model_supply"] if row["model_id"] == menu_model)
     assert model_supply["chain_length"] == 1
     chain = service.agent_chain("claude", menu_model)
     assert chain["route_origin"] == "manual"

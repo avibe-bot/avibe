@@ -200,7 +200,7 @@ def test_live_recovery_snapshots_never_revive_invalid_or_terminal_owners(tmp_pat
 def _record(turn_id, *, backend="claude", model=MODEL, outcome="failed_terminal"):
     identity = {"source_id": "src_deleted01", "configured_model_id": "unknown-model", "channel": "hub"}
     return {
-        "contract_version": 10,
+        "contract_version": 11,
         "turn_id": turn_id,
         "ts": "2026-09-06T00:00:00Z",
         "agent": backend,
@@ -395,6 +395,6 @@ def test_model_history_client_rpc_http_share_nullable_read_only_result(monkeypat
         f"/api/models/agents/claude/provenance?model={MODEL}", headers=csrf_headers(client, origin), base_url=origin
     )
     assert response.status_code == 200
-    assert response.get_json() == {"ok": True, "contract_version": 10, "provenance": record}
+    assert response.get_json() == {"ok": True, "contract_version": 11, "provenance": record}
     assert store.config.to_payload() == before
     assert adapter.synced == []

@@ -1721,6 +1721,55 @@ def test_agent_run_fork_rejects_cross_backend_agent(tmp_path: Path, capsys) -> N
     assert payload["code"] == "session_fork_failed"
 
 
+@pytest.mark.parametrize(
+    ("flags", "self_fork"),
+    [(["--fork-self"], True), (["--fork-session", "SOURCE"], False)],
+    ids=["fork-self", "fork-session-naming-own-session"],
+)
+def test_only_fork_self_is_the_agents_own_fork(tmp_path: Path, capsys, flags, self_fork) -> None:
+    # C-10 section 2: --fork-self, which resolves the source from AVIBE_SESSION_ID, is the only self-fork;
+    # --fork-session stays a user's fork even when it names the caller's own Session from inside its Turn.
+    from core.services import session_fork
+    from storage.importer import ensure_sqlite_state
+
+    state_home = tmp_path / "home"
+    with patch.dict("os.environ", {"AVIBE_HOME": str(state_home)}):
+        ensure_sqlite_state()
+        db_path = state_home / "state" / "vibe.sqlite"
+        source_session_id = _seed_bound_session(db_path, tmp_path)
+        agent_store = cli.VibeAgentStore(db_path)
+        agent_store.create(name="worker", backend="codex")
+        request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
+        args = _parse_agent_run(
+            [
+                *[source_session_id if flag == "SOURCE" else flag for flag in flags],
+                "--agent",
+                "worker",
+                "--async",
+                "--no-callback",
+                "--message",
+                "try the other fix",
+            ]
+        )
+
+        with (
+            patch.dict("os.environ", {"AVIBE_SESSION_ID": source_session_id}),
+            patch("vibe.cli._agent_store", return_value=agent_store),
+            patch("vibe.cli._task_request_store", return_value=request_store),
+            patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
+            patch("vibe.cli._primary_platform", return_value="slack"),
+            patch.object(
+                session_fork, "reserve_forked_session", wraps=session_fork.reserve_forked_session
+            ) as reserve,
+        ):
+            result = cli.cmd_agent_run(args)
+
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["forked_from_session_id"] == source_session_id
+    assert reserve.call_args.kwargs["self_fork"] is self_fork
+
+
 def test_agent_run_fork_localizes_unavailable_source_agent(monkeypatch) -> None:
     from core.services.session_fork import (
         SESSION_AGENT_UNAVAILABLE_CODE,

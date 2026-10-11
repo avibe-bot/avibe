@@ -50,10 +50,11 @@ def test_controller_builds_one_model_hub_aggregate_by_default_or_explicit_enable
     import core.handlers.model_hub.turn_gateway as turn_gateway
     import modules.agents.model_hub as agent_model_hub
     import vibe.model_hub_runtime as model_hub_runtime
-    from vibe import api, backend_model_catalog
+    from vibe import api, backend_model_catalog, models_dev_catalog
 
     service = SimpleNamespace(
         reconcile_builtin_models=AsyncMock(return_value=[]),
+        backfill_models_dev_limits=AsyncMock(return_value=[]),
     )
     calls = []
 
@@ -96,6 +97,12 @@ def test_controller_builds_one_model_hub_aggregate_by_default_or_explicit_enable
         backend_model_catalog,
         "set_remote_catalog_refresh_completed",
         refresh_callbacks.append,
+    )
+    arrival_callbacks = []
+    monkeypatch.setattr(
+        models_dev_catalog,
+        "set_models_dev_copy_arrived",
+        arrival_callbacks.append,
     )
     presence_probes = []
     probe_failure = [False]
@@ -144,6 +151,8 @@ def test_controller_builds_one_model_hub_aggregate_by_default_or_explicit_enable
     assert captured["cli_present_override"]("claude") is False
     service.reconcile_builtin_models.assert_awaited_once_with(notify=False)
     assert refresh_callbacks == [controller._model_hub_snapshot_refresh_completed]
+    # MH-LIMITS-001: a models.dev copy landing takes the same refresh path.
+    assert arrival_callbacks == [controller._model_hub_snapshot_refresh_completed]
     assert presence_probes == [(["claude", "codex", "opencode"], False)]
     probe_failure[0] = True
     captured["cli_presence_refresh"](True, ("opencode",))
@@ -219,6 +228,7 @@ def test_controller_builds_one_model_hub_aggregate_by_default_or_explicit_enable
 
     asyncio.run(drain_refresh())
     assert service.reconcile_builtin_models.await_count == 2
+    service.backfill_models_dev_limits.assert_awaited_once_with()
 
     # A catalog change moves each runtime at its next turn: the agent adopts
     # the committed catalog, and nothing restarts.
@@ -247,6 +257,7 @@ async def test_controller_periodic_tick_reconciles_cross_process_snapshot_change
     controller = Controller.__new__(Controller)
     controller.model_hub_service = SimpleNamespace(
         reconcile_builtin_models=reconcile_builtin_models,
+        backfill_models_dev_limits=AsyncMock(return_value=[]),
     )
     controller._loop = asyncio.get_running_loop()
     controller._shutdown_requested = False
@@ -285,6 +296,7 @@ async def test_controller_shutdown_joins_reconcile_and_rejects_late_completion()
     controller = Controller.__new__(Controller)
     controller.model_hub_service = SimpleNamespace(
         reconcile_builtin_models=reconcile_builtin_models,
+        backfill_models_dev_limits=AsyncMock(return_value=[]),
         stop=stop,
     )
     controller.runtime_work_supervisor = None

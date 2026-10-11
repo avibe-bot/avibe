@@ -368,5 +368,11 @@ scenarios:
     kind: regression
     layer: contract
     test: tests/test_opencode_steer_superseded_reply.py::test_steer_keeps_superseded_completed_reply
+  - id: MESSAGE-DELIVERY-322
+    name: A restart notice names the Watch that continues the interrupted command and offers no Retry
+    status: covered
+    kind: recovery
+    layer: contract
+    test: tests/test_backend_failure_retry.py::test_restart_notice_names_the_watch_running_the_command_and_offers_no_retry
 next_priority:
-  - MESSAGE-DELIVERY-322
+  - MESSAGE-DELIVERY-323

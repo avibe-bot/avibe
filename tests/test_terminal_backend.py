@@ -41,18 +41,25 @@ from vibe.ui_server import app
 
 
 class _FakeWebSocket:
+    """A scripted client. A message naming ``after`` is received only once the server
+    has sent a text frame of that type, so the script follows the server, not a clock."""
+
     def __init__(self, messages: list[dict]) -> None:
         self._messages = list(messages)
         self.sent_bytes: list[bytes] = []
         self.sent_text: list[str] = []
+        self._sent_types: dict[str, asyncio.Event] = {}
+
+    def _sent(self, frame_type: str) -> asyncio.Event:
+        return self._sent_types.setdefault(frame_type, asyncio.Event())
 
     async def receive(self) -> dict:
         if not self._messages:
             await asyncio.sleep(0.05)
             return {"type": "websocket.disconnect", "code": 1000}
         message = self._messages.pop(0)
-        if delay := message.pop("delay", None):
-            await asyncio.sleep(delay)
+        if after := message.pop("after", None):
+            await self._sent(after).wait()
         return message
 
     async def send_bytes(self, payload: bytes) -> None:
@@ -60,6 +67,7 @@ class _FakeWebSocket:
 
     async def send_text(self, payload: str) -> None:
         self.sent_text.append(payload)
+        self._sent(json.loads(payload)["type"]).set()
 
 
 class _RecordingWebSocket:
@@ -108,12 +116,15 @@ async def _terminal_ephemeral_pty_round_trip(monkeypatch, tmp_path):
     service = TerminalService(idle_timeout_seconds=60, max_sessions=2)
     websocket = _FakeWebSocket(
         [
-            {"type": "websocket.receive", "bytes": b"printf READY\\\\n; exit 7\n", "delay": 0.1},
-            {"type": "websocket.disconnect", "code": 1000, "delay": 0.5},
+            {"type": "websocket.receive", "bytes": b"printf READY\\\\n; exit 7\n", "after": "ready"},
+            # A client that hangs up only after it was told the shell exited, however
+            # long the shell took: one that hangs up first is owed no exit frame.
+            {"type": "websocket.disconnect", "code": 1000, "after": "exit"},
         ]
     )
 
-    await service.handle_websocket(websocket, "term_1")
+    # A hang guard only; the script waits on the server's frames, not on time.
+    await asyncio.wait_for(service.handle_websocket(websocket, "term_1"), timeout=30)
     await service.shutdown()
 
     assert json.loads(websocket.sent_text[0]) == {"type": "ready", "persistent": False}

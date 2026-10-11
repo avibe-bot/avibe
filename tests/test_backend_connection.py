@@ -61,8 +61,8 @@ def connection(monkeypatch, tmp_path):
     config.agents.claude.enabled = True
     config.agents.codex.enabled = True
     config.agents.opencode.enabled = True
-    for supply in config.model_hub.agents.values():
-        supply.mode = "direct"
+    for backend in ("claude", "codex", "opencode"):
+        config.model_hub.agents[backend].mode = "direct"
     config.save()
     monkeypatch.setattr(api, "load_config", lambda: config)
     monkeypatch.setattr(api, "resolve_cli_path", lambda _: str(tmp_path / "助手 cli"))
@@ -431,6 +431,40 @@ def _store_hub_credential(source):
     else:
         source.credential_ref = store.bind_oauth_credential(source.id, source.vendor, f"{source.id}.json")
     return store
+
+
+def test_vibey_connection_uses_hub_supply_without_any_native_probe(hub_connection, monkeypatch):
+    """The new backend has no CLI; the existing native cases cannot protect that boundary."""
+    from core import backend_restart
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("Avibe connection inspected a native CLI or takeover journal")
+
+    monkeypatch.setattr(api, "resolve_cli_path", forbidden)
+    monkeypatch.setattr(backend_restart, "pending_native_backends", forbidden)
+    empty = asyncio.run(api.get_backend_connection("vibey"))
+    assert empty["installed"] and empty["enabled"]
+    assert empty["auth"] == "none" and not empty["ready"]
+
+    _place_hub_source(hub_connection, "vibey", _hub_source())
+    response = ui_server.app.test_client().get("/api/backend/vibey/connection")
+    assert response.status_code == 200
+    state = response.get_json()
+    assert state["ready"] and state["entry_eligible"]
+    assert state["supply_mode"] == "hub" and state["auth"] == "api_key"
+    hub_connection.native_read.assert_not_called()
+    # With the Model Hub disabled on the instance, or its gateway turned off, the built-in backend
+    # stays enabled with nothing to run on, whatever source is saved.
+    monkeypatch.setenv("VIBE_MODEL_HUB_ENABLED", "0")
+    disabled = asyncio.run(api.get_backend_connection("vibey"))
+    assert disabled["enabled"] and disabled["auth"] == "none"
+    assert not disabled["ready"] and not disabled["entry_eligible"]
+    monkeypatch.setenv("VIBE_MODEL_HUB_ENABLED", "1")
+    hub_connection.config.model_hub.enabled = False
+    hub_connection.config.save()
+    stopped = asyncio.run(api.get_backend_connection("vibey"))
+    assert stopped["enabled"] and stopped["auth"] == "none"
+    assert not stopped["ready"] and not stopped["entry_eligible"]
 
 
 @pytest.mark.parametrize("backend", ["claude", "codex", "opencode"])

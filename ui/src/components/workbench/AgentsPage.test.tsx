@@ -10,6 +10,8 @@ import type { InstanceCapabilities, InstanceRole } from '../../lib/sessionInfo';
 import { OWNER_INSTANCE_CAPABILITIES } from '../../lib/sessionInfo';
 import { RouteSurfaceActiveContext } from '../../lib/routeSurfaceActivity';
 import { capabilitiesFor } from '../../lib/testing/instanceRoleCapabilities';
+import { modelsApi } from '../settings/models/modelsApi';
+import type { AgentSupply } from '../settings/models/types';
 import { AgentsPage } from './AgentsPage';
 
 type FakeApi = {
@@ -231,6 +233,80 @@ describe('AgentsPage load requests follow the rank that can serve them', () => {
 });
 
 describe('AgentsPage contextual selection', () => {
+  it('marks an enabled Agent the gateway reports without a model, as the Models page does', async () => {
+    // The built-in Vibey Agent exists before Model Hub gives it a model.
+    vi.spyOn(modelsApi, 'listAgents').mockResolvedValue([
+      {
+        backend: 'vibey', cli_present: false, mode: 'hub', menu_kind: 'fixed',
+        named_agents: [{ name: 'vibey', effective_model_id: null, supply_status: null }],
+      },
+      {
+        backend: 'codex', cli_present: true, mode: 'hub', menu_kind: 'fixed',
+        named_agents: [{ name: 'codex', effective_model_id: 'gpt-5', supply_status: 'ok' }],
+      },
+    ] as AgentSupply[]);
+    const api = makeApi(vi.fn().mockResolvedValue(listResult([
+      { ...brief('vibey', 'Default Agent'), backend: 'vibey' },
+      { ...brief('codex', ''), model: 'gpt-5' },
+    ])));
+    renderPage(api);
+    const row = (name: string) => screen.getAllByText(name).find((node) => node.closest('button'))!.closest('button')!;
+
+    await waitFor(() => expect(
+      within(row('vibey')).getByText('settings.models.gateway.agentIssues.modelMissing'),
+    ).toBeTruthy());
+    expect(within(row('codex')).queryByText('settings.models.gateway.agentIssues.modelMissing')).toBeNull();
+  });
+
+  it('lists, selects and edits a Vibey Agent without a native import option or CLI detail', async () => {
+    const agent = { ...brief('local-helper', 'before'), backend: 'vibey' };
+    const changed = { ...agent, description: 'updated in place' };
+    const updateVibeAgent = vi.fn().mockResolvedValue(fullAgent(changed, 'prompt'));
+    const api = makeApi(
+      vi.fn().mockResolvedValue(listResult(agent)),
+      vi.fn().mockResolvedValue(fullAgent(agent, 'prompt')),
+      undefined, undefined, updateVibeAgent,
+    );
+    renderPage(api, { canManageAgents: true, entry: '/agents?agent=local-helper' });
+    expect(await screen.findByText('Vibey')).toBeTruthy();
+    const row = screen.getAllByText('local-helper').find((node) => node.closest('button'))?.closest('button');
+    expect(row).toBeTruthy();
+    fireEvent.click(row!);
+    const description = await screen.findByDisplayValue('before');
+    fireEvent.change(description, { target: { value: 'updated in place' } });
+    fireEvent.blur(description);
+    await waitFor(() => expect(updateVibeAgent).toHaveBeenCalledWith('local-helper', { description: 'updated in place' }));
+    expect(screen.queryByText(/Vibey CLI/)).toBeNull();
+    expect(screen.getByText('agents.detail.backendName:{"backend":"Vibey"}')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'agents.import' }));
+    expect(screen.queryByText('agents.importFrom:{"backend":"Vibey"}')).toBeNull();
+    // Display names are not translation-key suffixes: a catalog brand change
+    // must keep the native import actions translated and correctly scoped.
+    for (const label of ['Claude Code', 'OpenCode', 'Codex']) {
+      expect(screen.getByText(`agents.importFrom:{"backend":"${label}"}`)).toBeTruthy();
+    }
+  });
+
+  // The built-in Vibey is part of the platform: model, effort and prompt
+  // stay editable, but nothing turns it off. Another Agent on its backend is ordinary.
+  it.each([
+    ['vibey', 'builtin', { builtin: true, builtin_default: true, lock_delete: true }, true],
+    ['local-helper', 'custom', {}, false],
+  ])('locks the enable switch of %s only when it is the built-in Vibey', async (name, source, metadata, locked) => {
+    const agent = { ...brief(name, 'vibey agent'), backend: 'vibey', source };
+    const full = fullAgent(agent, 'prompt');
+    const api = makeApi(
+      vi.fn().mockResolvedValue(listResult(agent)),
+      vi.fn().mockResolvedValue({ ...full, agent: { ...full.agent, metadata } }),
+    );
+    renderPage(api, { canManageAgents: true, entry: `/agents?agent=${name}` });
+
+    const toggle = await screen.findByRole('switch', { name: 'agents.detail.enabled' });
+    expect(toggle.hasAttribute('disabled')).toBe(locked);
+    // The hint names the built-in by the catalog's display name.
+    expect(Boolean(screen.queryByText('agents.detail.alwaysEnabledHint:{"name":"Vibey"}'))).toBe(locked);
+  });
+
   it('opens the Agent named by ?agent= instead of the default one', async () => {
     const agentA = brief('agent-a', 'A');
     const agentB = brief('agent-b', 'B');

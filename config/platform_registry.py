@@ -314,8 +314,8 @@ PLATFORM_REGISTRY: dict[str, PlatformDescriptor] = {
             supports_quick_replies=True,
             supports_message_editing=True,
             markdown_upload_returns_message_id=True,
-            supports_typing_indicator=True,
-            supports_reaction_indicator=True,
+            # ``AvibeBot`` shows neither typing nor reactions, so the ack message is the
+            # indicator; declaring them made every turn try both and then downgrade.
         ),
     ),
 }

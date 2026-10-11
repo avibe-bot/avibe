@@ -6,6 +6,8 @@
   },
   "errors": {
     "agentModelRequired": "Select a model for the {backend} Agent or Session in Avibe before running it.",
+    "modelHubDisabled": "Model Hub is disabled on this instance, so {backend} has no model to run on.",
+    "modelGatewayOff": "The model gateway is off, so {backend} has no model to run on. Turn it on in Models, then choose a model.",
     "opencodeModelProviderRequired": "Select an OpenCode model with a provider in Avibe, or configure its Model Hub route."
   },
   "status": {
@@ -117,6 +119,15 @@
       "lifetimeTimeoutPrefix": "Watch stopped after reaching its lifetime timeout.",
       "lifetimeTimeoutBody": "Watch '{name}' reached its lifetime timeout after {seconds} second(s).",
       "lifetimeExpiredWithActiveFollowUp": "Watch lifetime expired while follow-up Run {run_id} was still active; the Watch retired without starting another Run.",
+      "jobExitedWithCode": "The command exited with code {code}.",
+      "jobTimedOut": "The command was stopped at its timeout.",
+      "jobStoppedByVibeStop": "The command was stopped by `vibe stop`.",
+      "jobStoppedAtLifetime": "The command was stopped when the Watch reached its lifetime.",
+      "jobEndedWithoutExitCode": "The command ended without an exit code.",
+      "jobRecordGone": "The command's job record {job_id} is gone, so how it ended is unknown.",
+      "jobStoppedUnreadable": "The command was stopped because its job state could not be read.",
+      "jobStateUnreadable": "The command's job state {job_id} could not be read, so how it ended is unknown.",
+      "jobUnmanageable": "The command's job state cannot be read and the command could not be confirmed stopped; the Watch keeps it and retries.",
       "circuitRepairPrompt": "[Avibe Harness] Watch \"{name}\" was automatically paused because its waiter exited successfully {count} times within {window} seconds. This pattern can create duplicate Agent Runs when a persistent level is reported as a new event on every cycle.\n\nWatch ID: {id}\nSuccessful exit timestamps:\n{timestamps}\nLatest exit code: 0\nLatest stdout:\n{stdout}\nLatest stderr:\n{stderr}\n\nInspect the Watch with `vibe watch show {id}` and inspect the waiter implementation. Fix it so exit 0 means one new reportable event. While the condition is unchanged or not ready, return one of this Watch's allowed retry exit codes: {retry_codes}. For a completed cycle with nothing reportable, return 64 and print `avibe-watch: no-event` to stderr. A recurring waiter must keep a durable cursor, state transition, or domain cooldown so the same level is not emitted repeatedly.\n\nAfter an unambiguous, reversible fix, verify the waiter behavior, update the Watch if needed, and resume it with `vibe watch resume {id}`. If the correct fix is uncertain or cannot be verified safely, leave the Watch paused and report the blocker. Do not process the latest stdout as an ordinary event; it was retained as diagnostic evidence for this repair.",
       "protocolErrors": {
         "specTooLarge": "The watch worker specification is too large.",
@@ -176,7 +187,8 @@
       "bindingUnresolvedPaused": "paused: pinned agent session {session} cannot accept a turn. This definition would fail on every run. Re-point it with: vibe task update {id} --session-id <id>; then resume it with: vibe task resume {id}.",
       "cli": {
         "help": {
-          "cancel": "Request best-effort cancellation for one run; a run already in the live Session turn stops that whole turn, like Session Stop"
+          "cancel": "Request best-effort cancellation for one run; a run already in the live Session turn stops that whole turn, like Session Stop",
+          "showBrief": "Show only status, timing, error, and callback fields, as in vibe runs list"
         },
         "canceledBeforeLiveTurn": "Run was canceled before its input reached the live Session turn."
       }
@@ -331,6 +343,14 @@
       "message": "This one-shot Task's schedule has already ended.",
       "hint": "Set a new future time with `vibe task update {id} --at <time>`, then resume it."
     },
+    "jobWatchResumeRefused": {
+      "message": "A Watch on a running command cannot be resumed once it is paused or finished.",
+      "hint": "Pausing or finishing ended its command. Run the command again to watch a new run, or remove this Watch with `vibe watch remove {id}`."
+    },
+    "jobWatchUpdateRefused": {
+      "message": "This Watch waits on a command that is already running, so only its name, message, and lifetime can be changed.",
+      "hint": "Its Session, Agent, delivery, and command were fixed when the command was handed over. Change the name, message, or lifetime with `vibe watch update {id}`."
+    },
     "cronNumericWeekday": {
       "message": "Cron weekday field uses numbers: {field}",
       "readings": "Avibe (APScheduler) reads it as {avibe}; crontab(5) reads it as {crontab}.",
@@ -373,6 +393,10 @@
       }
     },
     "agentLifecycle": {
+      "agent_always_enabled": {
+        "message": "Agent `{agent}` is built in and always enabled.",
+        "hint": "You can still change its model, effort, and system prompt."
+      },
       "agent_archived_read_only": {
         "message": "Agent `{agent}` is archived and cannot be edited.",
         "hint": "Archived Agents are read-only and remain available only to existing durable references."
@@ -473,6 +497,9 @@
     "routingUpdateNeedsNewSession": "Use /new to create a new session for this setting change to take effect. The new session will replace the current session."
   },
   "settings": {
+    "backends": {
+      "vibeyDescription": "Avibe's built-in agent, powered by models configured in Model Hub."
+    },
     "personalizationTitle": "Personalization Settings",
     "personalizationDesc": "Configure how {agent} messages appear in your Slack workspace.",
     "visibilityTitle": "Settings - Message Visibility",
@@ -640,10 +667,6 @@
       "selectCodexAgent": "Select Codex agent",
       "codexReasoningEffort": "Reasoning Effort",
       "tip": "Select (Default) to use the backend's configured defaults."
-    },
-    "question": {
-      "opencode": "OpenCode",
-      "claudeCode": "Claude Code"
     }
   },
   "command": {
@@ -783,11 +806,6 @@
     "ack": "{agent} received, processing...",
     "quickReplyNote": "Reply: {text}",
     "citationUnresolved": "(source unavailable)"
-  },
-  "backend": {
-    "claude": "ClaudeCode",
-    "codex": "Codex",
-    "opencode": "OpenCode"
   },
   "reasoning": {
     "none": "None",
@@ -1042,11 +1060,6 @@
     "routingCanceled": "Routing update canceled."
   },
   "modelHub": {
-    "backends": {
-      "claude": "Claude Code",
-      "codex": "Codex",
-      "opencode": "OpenCode"
-    },
     "errors": {
       "source_not_found": "Model source not found.",
       "flow_not_found": "Authorization flow not found.",
@@ -1181,7 +1194,9 @@
     "interrupted": {
       "backendRefresh": "⚠️ This turn was interrupted — its Agent runtime had to be replaced while it was still running, for example by a credential migration. Send the request again if the work still needs doing.",
       "backendDisabled": "⏹ This turn was stopped because {agent} was turned off. Turn it on again in Settings, then send the request again if the work still needs doing.",
-      "serviceRestart": "⚠️ This turn was interrupted — the Avibe service restarted while it was still running. Send the request again if the work still needs doing."
+      "serviceRestart": "⚠️ This turn was interrupted — the Avibe service restarted while it was still running. Send the request again if the work still needs doing.",
+      "serviceRestartWatch": "⚠️ This turn was interrupted — the Avibe service restarted while it was still running. Its running command continues as Watch {watch}, and the result will follow here.",
+      "serviceRestartWatches": "⚠️ This turn was interrupted — the Avibe service restarted while it was still running. Its running commands continue as Watches {watches}, and their results will follow here."
     }
   },
   "runtime": {
@@ -1193,10 +1208,13 @@
       "modelHubEngineSkipped": "Model Hub engine: skipped ({reason}).",
       "modelHubEngineInstalled": "Model Hub engine installed.",
       "modelHubEngineReady": "Model Hub engine ready.",
-      "modelHubEngineNotReady": "Model Hub engine not ready: {reason}"
+      "modelHubEngineNotReady": "Model Hub engine not ready: {reason}",
+      "ripgrepInstalled": "ripgrep installed.",
+      "ripgrepReady": "ripgrep ready.",
+      "ripgrepNotReady": "ripgrep not ready: {reason}"
     },
     "clean": {
-      "commandHelp": "Remove stale Show, Git, Model Hub, and tmux runtime installs and archives; exit nonzero if any cleanup fails.",
+      "commandHelp": "Remove stale Show, Git, Model Hub, tmux, and ripgrep runtime installs and archives; exit nonzero if any cleanup fails.",
       "dryRunHelp": "Report stale archives and cache entries without removing anything.",
       "wouldRemoveItems": "Would remove {count} Show Runtime cache item(s).",
       "wouldRemoveArchives": "Would remove {count} downloaded Show Runtime archive(s) ({size}).",
@@ -1658,6 +1676,32 @@
       "notDue": "Retention already ran within the last day; nothing to do.",
       "busy": "Another retention run is active; try again later.",
       "cancelled": "Retention stopped at a batch boundary; no completion was recorded."
+    }
+  },
+  "vibeyAgent": {
+    "error": {
+      "refusal": "The model declined to answer this request.",
+      "safety": "The model stopped this reply for safety reasons.",
+      "emptyResponse": "The model returned an empty reply. Try again or rephrase the request.",
+      "interrupted": "{backend}'s run was interrupted before it finished.",
+      "contextExhausted": "This conversation has grown too long to continue reliably. Start a new session with /new.",
+      "toolOutputTooLarge": "The latest tool output does not fit this model's context, even shortened. Ask for a smaller part (a narrower command, or a file range with offset and limit), or switch to a model with a larger context.",
+      "inputTooLarge": "This message does not fit this model's context. Send a shorter message, or switch to a model with a larger context.",
+      "stepTooLarge": "The latest step is too large for this model's context window. Ask for the work in smaller steps, or switch to a model with a larger context.",
+      "rateLimit": "The model provider is rate-limiting requests. Try again in a moment.",
+      "overloaded": "The model provider is overloaded. Try again in a moment.",
+      "network": "The model provider could not be reached. Check the network and the Model Hub source.",
+      "stalled": "The model provider sent no new data for more than {minutes} minutes, so this turn was stopped. Try again, or choose another model.",
+      "server": "The model provider returned a server error. Try again in a moment.",
+      "auth": "The model provider rejected the credentials of this route. Check the Model Hub source.",
+      "invalidRequest": "The model provider rejected the request.",
+      "modelError": "The model stopped with an error.",
+      "toolsUnsupported": "The selected model does not support tools, which {backend} needs. Choose another model.",
+      "providerProtocol": "The model provider sent a reply {backend} cannot use.",
+      "unclassified": "The request to the model failed with an error {backend} could not classify. Try again, or choose another model.",
+      "outputLimit": "The model kept running out of output space while writing a tool call. Ask for smaller steps, or choose a model with a larger output limit.",
+      "internal": "{backend} stopped because of an internal error. Try again; if it happens again, the service log names the cause.",
+      "generic": "{backend}'s run failed."
     }
   }
 }

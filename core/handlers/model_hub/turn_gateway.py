@@ -20,6 +20,7 @@ from aiohttp import web
 from packaging.version import Version
 
 from config import paths
+from config.v2_config import MODEL_HUB_BACKENDS
 from core.run_settlement import SETTLED_BY_TERMINAL_RESULT
 from vibe.i18n import t as i18n_t
 
@@ -35,6 +36,8 @@ from .provenance import (
     BoundedProvenanceStore,
     ENGINE_DOWN_TURN_OUTCOME,
     GatewayTurnTerminalizer,
+    HopOrigin,
+    PreparedGatewayRouteConflict,
     REQUEST_NONFALLBACK_TURN_OUTCOME,
     TurnOutcomeProjectionInput,
     TurnCorrelationRegistry,
@@ -110,6 +113,16 @@ logger = logging.getLogger(__name__)
 
 def _gateway_utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _response_origin_headers(carrier: ResolvedInvocation | ModelHubError) -> dict[str, str]:
+    """Publish only this response's admitted producer, whichever carrier won.
+
+    Local errors and native callers have no origin. Neither a primary snapshot,
+    mutable config nor a preceding attempt can supply one on their behalf.
+    """
+
+    return carrier.origin.response_headers() if carrier.origin is not None else {}
 
 
 def _rewind_and_measure(payload: BinaryIO) -> int:
@@ -507,9 +520,20 @@ class ModelHubTurnGateway:
         via_mapping: bool = False,
         gateway_request_model_id: Optional[str] = None,
         request_scoped: bool = False,
+        primary_origin: HopOrigin | None = None,
     ) -> tuple[str, str]:
-        if backend not in {"claude", "codex", "opencode"}:
+        if backend not in MODEL_HUB_BACKENDS:
             raise ModelHubError("mapping_target_unavailable", status=409)
+        if backend == "vibey" and turn_id:
+            # The caller may read EOF before the previous handler's owned
+            # teardown exits. Drain already-settled responses, not live model
+            # work; the registry still refuses any remaining overlap.
+            finishing = [
+                owned.done for owned in self._turn_requests.get(turn_id, ())
+                if owned.execution.settlement_recorded or owned.execution.terminal_fact_committed
+            ]
+            if finishing:
+                await asyncio.wait(finishing, timeout=self._transport_timeout)
         scope = str(process_scope or "").strip() or f"{backend}:untracked"
         token = self.correlation.credentials(
             backend, scope, turn_id, request_scoped=request_scoped,
@@ -518,16 +542,20 @@ class ModelHubTurnGateway:
             # Credential-bound clients carry their route in authentication.
             # Multiplexed Codex keeps authentication stable and carries this
             # route's handle on each request instead.
-            route_token = self.correlation.prepare_gateway_turn(
-                backend=backend,
-                token=token,
-                turn_id=turn_id,
-                requested_model_id=requested_model_id,
-                resolved_model_id=resolved_model_id,
-                source_id=source_id,
-                via_mapping=via_mapping,
-                gateway_request_model_id=gateway_request_model_id,
-            )
+            try:
+                route_token = self.correlation.prepare_gateway_turn(
+                    backend=backend,
+                    token=token,
+                    turn_id=turn_id,
+                    requested_model_id=requested_model_id,
+                    resolved_model_id=resolved_model_id,
+                    source_id=source_id,
+                    via_mapping=via_mapping,
+                    gateway_request_model_id=gateway_request_model_id,
+                    primary_origin=primary_origin,
+                )
+            except PreparedGatewayRouteConflict:
+                raise ModelHubError("mapping_target_unavailable", status=409) from None
             if not request_scoped:
                 token = route_token
         await self._ensure_started()
@@ -574,6 +602,7 @@ class ModelHubTurnGateway:
             app = web.Application(client_max_size=client_max_size)
             app.router.add_get("/{backend}/v1/models", self._handle_models)
             app.router.add_post("/{backend}/v1/{endpoint:.*}", self._handle_request)
+            app.router.add_post("/{backend}/v1beta/models/{google_action:.*}", self._handle_google_request)
             runner = web.AppRunner(
                 app,
                 access_log=None,
@@ -601,7 +630,8 @@ class ModelHubTurnGateway:
         authorization = request.headers.get("Authorization", "")
         bearer = authorization[7:] if authorization.lower().startswith("bearer ") else ""
         api_key = request.headers.get("x-api-key", "")
-        for candidate in (bearer, api_key):
+        google_key = request.headers.get("x-goog-api-key", "") if "google_action" in request.match_info else ""
+        for candidate in (bearer, api_key, google_key):
             if candidate and self.correlation.authenticates(backend, candidate):
                 return candidate
         return None
@@ -636,6 +666,28 @@ class ModelHubTurnGateway:
                 "X-Content-Type-Options": "nosniff",
             },
         )
+
+    async def _handle_google_request(self, request: web.Request) -> web.StreamResponse:
+        response = await self._handle_request(request)
+        # Only locally rendered JSON endings need translation. This same
+        # response already owns its status, retry metadata and admitted origin.
+        # Streaming endings use the protocol taxonomy before committing bytes.
+        if isinstance(response, web.Response) and not response.prepared and _LOCAL_ENDING in response:
+            ending = response[_LOCAL_ENDING]
+            response.text = json.dumps({
+                "error": {
+                    "code": response.status,
+                    "status": {
+                        400: "INVALID_ARGUMENT", 401: "UNAUTHENTICATED", 403: "PERMISSION_DENIED",
+                        404: "NOT_FOUND", 409: "ABORTED", 413: "RESOURCE_EXHAUSTED",
+                        422: "FAILED_PRECONDITION", 424: "FAILED_PRECONDITION",
+                        429: "RESOURCE_EXHAUSTED", 503: "UNAVAILABLE", 504: "DEADLINE_EXCEEDED",
+                    }.get(response.status, "INTERNAL"),
+                    "message": ending.message,
+                    "details": [{"reason": ending.key}],
+                },
+            })
+        return response
 
     async def _handle_request(self, request: web.Request) -> web.StreamResponse:
         backend = request.match_info["backend"]
@@ -831,8 +883,15 @@ class ModelHubTurnGateway:
         execution: _TurnExecution,
         resources: AsyncExitStack,
     ) -> web.StreamResponse:
-        endpoint = request.match_info["endpoint"].strip("/")
-        if backend not in {"claude", "codex", "opencode"} or endpoint not in _SUPPORTED_PATHS:
+        endpoint = request.match_info.get("endpoint", "").strip("/")
+        google_action = request.match_info.get("google_action")
+        google_model, _, google_method = (google_action or "").rpartition(":")
+        google_request = google_action is not None
+        supported_path = (
+            bool(google_model) and google_method in {"generateContent", "streamGenerateContent"}
+            if google_request else endpoint in _SUPPORTED_PATHS
+        )
+        if backend not in MODEL_HUB_BACKENDS or not supported_path:
             terminalizer.fail("protocol_error")
             return self._terminal_error_response(
                 execution,
@@ -881,8 +940,20 @@ class ModelHubTurnGateway:
                 code="invalid_request_error",
                 turn_outcome=REQUEST_NONFALLBACK_TURN_OUTCOME,
             )
-        model_id = payload.get("model")
-        stream = payload.get("stream", False)
+        model_id = google_model if google_request else payload.get("model")
+        stream = google_method == "streamGenerateContent" if google_request else payload.get("stream", False)
+        if google_request and (
+            "model" in payload or "stream" in payload
+            or any(
+                value != "sse" or not stream
+                for name in ("alt", "$alt") for value in request.query.getall(name, [])
+            )
+        ):
+            terminalizer.fail("invalid_parameter")
+            return self._terminal_error_response(
+                execution, terminalizer, status=400, code="invalid_request_error",
+                turn_outcome=REQUEST_NONFALLBACK_TURN_OUTCOME,
+            )
         if not isinstance(model_id, str) or not model_id or not isinstance(stream, bool):
             terminalizer.fail("invalid_parameter")
             return self._terminal_error_response(
@@ -912,6 +983,7 @@ class ModelHubTurnGateway:
             decision,
             stripped_reasoning_efforts: tuple[str, ...],
             declared_reasoning_efforts: tuple[str, ...],
+            origin: HopOrigin | None,
         ) -> None:
             if outcome is None or decision is None:
                 terminalizer.begin_attempt(
@@ -921,6 +993,7 @@ class ModelHubTurnGateway:
                     via_mapping=via_mapping,
                     stripped_reasoning_efforts=stripped_reasoning_efforts,
                     declared_reasoning_efforts=declared_reasoning_efforts,
+                    origin=origin,
                 )
                 return
             terminalizer.finish_attempt(
@@ -928,7 +1001,7 @@ class ModelHubTurnGateway:
                 decision=decision,
             )
 
-        protocol = _REQUEST_PROTOCOLS[endpoint]
+        protocol = "google" if google_request else _REQUEST_PROTOCOLS[endpoint]
         try:
             caller_headers = {
                 name.lower(): value for name, value in request.headers.items() if name.lower() in FORWARDED_CALLER_HEADERS
@@ -945,6 +1018,7 @@ class ModelHubTurnGateway:
                         payload,
                         protocol=protocol,
                         headers=caller_headers,
+                        primary_origin=terminalizer.primary_origin,
                     ),
                     stream=stream,
                     supply_channel="hub",
@@ -966,6 +1040,10 @@ class ModelHubTurnGateway:
                 terminalizer.engine_down(local_error_detail=exc.local_error_detail)
             elif turn_outcome is not None and turn_outcome.outcome == "no_candidate" and exc.supply_state is not None:
                 terminalizer.mark_no_candidate(exc.supply_state, exc.blockers)
+            elif turn_outcome is REQUEST_NONFALLBACK_TURN_OUTCOME:
+                # The resolver's local refusal (every Google hop skipped before
+                # admission) is classified like this gateway's own refusals above.
+                terminalizer.fail("protocol_error")
             if exc.code == RECOVERY_EXHAUSTED_CODE:
                 self._commit_and_render_turn_outcome(execution, terminalizer, turn_outcome)
                 # Native compatibility is keyed by the caller backend. Keep its
@@ -983,18 +1061,16 @@ class ModelHubTurnGateway:
                     headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
                 )
                 response[_LOCAL_ENDING] = _RenderedTurnOutcome(RECOVERY_EXHAUSTED_CODE, RECOVERY_EXHAUSTED_MESSAGE)
-                return await self._through_committed_stream(execution, protocol, response)
-            return await self._through_committed_stream(
-                execution,
-                protocol,
-                self._terminal_error_response(
+            else:
+                response = self._terminal_error_response(
                     execution,
                     terminalizer,
                     status=exc.status,
                     code=exc.code,
                     turn_outcome=turn_outcome,
-                ),
-            )
+                )
+            response.headers.update(_response_origin_headers(exc))
+            return await self._through_committed_stream(execution, protocol, response)
 
         if execution.handle is not None:
             # The execution boundary must own cleanup before an awaited health
@@ -1034,7 +1110,7 @@ class ModelHubTurnGateway:
         writes to the response.
         """
 
-        if not stream or protocol != "anthropic":
+        if not stream or protocol != "anthropic" or request.match_info["backend"] == "vibey":
             yield
             return
         resolution_ended = asyncio.get_running_loop().create_future()
@@ -1098,20 +1174,28 @@ class ModelHubTurnGateway:
     ) -> web.StreamResponse:
         if resolved.supply_channel != "hub":
             return self._error_response(status=409, code="mode_switch_blocked")
+        # Resolution has crossed the engine's first-output barrier or already
+        # settled successfully: this request can no longer fail over. The same
+        # admitted origin is held by its provenance attempt.
+        origin_headers = _response_origin_headers(resolved)
         if resolved.outcome is not None:
             # A call that reached the resolver's own hands has already been
             # metered there; its body never becomes this gateway's to forward.
-            return self._outcome_response(resolved.outcome)
+            response = self._outcome_response(resolved.outcome)
+            response.headers.update(origin_headers)
+            return response
         handle = resolved.handle
         if handle is None or handle.stream is None:
             terminalizer.engine_down()
-            return self._terminal_error_response(
+            response = self._terminal_error_response(
                 execution,
                 terminalizer,
                 status=502,
                 code="engine_down",
                 turn_outcome=ENGINE_DOWN_TURN_OUTCOME,
             )
+            response.headers.update(origin_headers)
+            return response
 
         if not stream:
             try:
@@ -1139,7 +1223,10 @@ class ModelHubTurnGateway:
                                 body = await run_owned_in_thread(response_payload.read)
                                 response = web.Response(
                                     status=200, body=body, content_type="application/json",
-                                    headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
+                                    headers={
+                                        "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff",
+                                        **origin_headers,
+                                    },
                                 )
                             else:
                                 response = web.StreamResponse(
@@ -1147,6 +1234,7 @@ class ModelHubTurnGateway:
                                     headers={
                                         "Cache-Control": "no-store", "Content-Length": str(response_size),
                                         "Content-Type": "application/json", "X-Content-Type-Options": "nosniff",
+                                        **origin_headers,
                                     },
                                 )
                                 await self._downstream_io(response.prepare(request))
@@ -1177,23 +1265,26 @@ class ModelHubTurnGateway:
                     # Do not send a second HTTP response after committed headers.
                     execution.buffered_response.force_close()
                     return execution.buffered_response
+                failure.headers.update(origin_headers)
                 return failure
             rendered = self._commit_and_render_handle_settlement(execution, terminalizer, settlement)
             if response is None:
                 assert settlement.decision is not None
-                return self._outcome_response(
+                response = self._outcome_response(
                     outcome,
                     error_code=settlement.decision.error_code,
                     status_override=settlement.decision.downstream_status,
                     rendered=rendered,
                 )
+                response.headers.update(origin_headers)
+                return response
             if response is execution.buffered_response:
                 await self._downstream_io(response.write_eof())
             return response
 
         response = execution.stream_response
         if response is None:
-            response = web.StreamResponse(status=200, headers=_SSE_RESPONSE_HEADERS)
+            response = web.StreamResponse(status=200, headers={**_SSE_RESPONSE_HEADERS, **origin_headers})
             await self._downstream_io(response.prepare(request))
         wire_state = ProtocolSSEState(protocol)
         execution.wire_state = wire_state

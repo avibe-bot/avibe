@@ -2,6 +2,7 @@ import type { BackendConnectionState, VibeAgentBrief, VibeAgentFull } from '../.
 import type { CollectionReadAuthority } from '../settings/models/collectionReadAuthority';
 import { runtimeIsRunning } from '../settings/models/runtimeLifecycle';
 import type { AgentSupply, RuntimeDependency, SupplyStatus } from '../settings/models/types';
+import { BUILTIN_BACKENDS, isBuiltinBackend, type AgentBackendId } from '@/lib/agentBackends';
 import { ASSISTANT_ORDER, type AssistantId } from './collaborationTimeline';
 import { readSetupTargets } from './setupTargets';
 
@@ -23,9 +24,17 @@ import { readSetupTargets } from './setupTargets';
 /** One named Agent that satisfies the gate, with the model the server resolved for it. */
 export type EntryCandidate = {
   agent: VibeAgentBrief;
-  backend: AssistantId;
+  backend: AgentBackendId;
   modelId: string;
 };
+
+/**
+ * The order the gate offers candidates in, which is the order setup picks a default
+ * from: the CLI assistants first and a built-in backend last. That is the server's
+ * `implicit_default_rank` — making the built-in assistant the default is its own
+ * decision, so setup only falls back to it when no CLI assistant can run (D3).
+ */
+const ENTRY_ORDER: readonly AgentBackendId[] = [...ASSISTANT_ORDER, ...BUILTIN_BACKENDS];
 
 export type EntryEvidence = {
   /** False when the Agent listing itself failed. An empty list and an unread list are
@@ -88,20 +97,25 @@ export function configuredCliPath(config: Record<string, unknown> | undefined, b
  * `getBackendConnection.enabled`. A failed detector, a not-found binary, or a stale
  * refresh cannot be replaced by the connection's own installed bit.
  *
+ * A built-in backend has no CLI to be on disk (D3): it is part of the platform, so
+ * its applied connection and the runnable route below are the whole of its gate.
+ *
  * `ready` carries permission and credential ownership; `applied` is the only
  * application state that means the configuration is live. A confirmed `stopped` is
  * something to recover from, never something to enter on.
  */
 const backendUsable = (
+  backend: AgentBackendId,
   connection: BackendConnectionState | undefined,
   supply: AgentSupply | undefined,
-  cliFound: boolean,
+  cliFound: Readonly<Record<AssistantId, boolean>>,
 ): boolean =>
   connection !== undefined && connection.ok
   && connection.enabled
   && connection.ready && connection.application === 'applied'
-  && supply !== undefined && supply.cli_present === true
-  && cliFound;
+  && supply !== undefined
+  && (isBuiltinBackend(backend)
+    || (supply.cli_present === true && cliFound[backend as AssistantId] === true));
 
 /**
  * Whether the server can route THIS named Agent to a model right now.
@@ -111,7 +125,7 @@ const backendUsable = (
  * another's. The runnable-hop owner is the server resolver, and its per-Agent answer
  * is the `named_agents` row — an absent row is a backend that never routed this name.
  */
-const routeRunnable = (supply: AgentSupply | undefined, name: string): string | null => {
+export const routeRunnable = (supply: AgentSupply | undefined, name: string): string | null => {
   if (!supply || supply.mode !== 'hub') return null;
   const row = supply.named_agents?.find((named) => named.name === name);
   if (!row || row.route_reason === 'route_unconfigured') return null;
@@ -119,7 +133,7 @@ const routeRunnable = (supply: AgentSupply | undefined, name: string): string | 
   return row.effective_model_id;
 };
 
-/** Every Agent that passes the whole gate, in C6's backend order and then by name. */
+/** Every Agent that passes the whole gate, in `ENTRY_ORDER` and then by name. */
 export function entryCandidates(evidence: EntryEvidence): EntryCandidate[] {
   // Mode alone is not runtime readiness: a backend can be in hub mode while the Hub
   // that would serve it is down, and then no route on this machine is runnable.
@@ -127,8 +141,8 @@ export function entryCandidates(evidence: EntryEvidence): EntryCandidate[] {
   if (!evidence.runtime || !runtimeIsRunning(evidence.runtime) || !evidence.suppliesRead) return [];
   const connectionOf = new Map(evidence.connections.map((connection) => [connection.backend, connection]));
   const supplyOf = new Map(evidence.supplies.map((supply) => [supply.backend, supply]));
-  return ASSISTANT_ORDER.flatMap((backend) => {
-    if (!backendUsable(connectionOf.get(backend), supplyOf.get(backend), evidence.cliFound[backend] === true)) return [];
+  return ENTRY_ORDER.flatMap((backend) => {
+    if (!backendUsable(backend, connectionOf.get(backend), supplyOf.get(backend), evidence.cliFound)) return [];
     return evidence.agents
       .filter((agent) => agent.backend === backend && usableAgent(agent))
       .flatMap((agent) => {
@@ -172,20 +186,27 @@ export function admitEntry(evidence: EntryEvidence): EntryAdmission {
  * Agent no card represents — setup is finishing a machine, not imposing its own
  * preference on one. Only when the saved name cannot run does setup pick, and then it
  * prefers the assistant's own Agent so the first workspace turn matches the card the
- * person was just looking at.
+ * person was just looking at. That preference applies within the first rank that can run
+ * — the CLI assistants before the built-in backend, as `ENTRY_ORDER` ranks them — so any
+ * runnable CLI assistant's Agent, its own or a custom one, wins over the built-in one.
  */
 export function chooseEntryDefault(
   candidates: readonly EntryCandidate[],
   evidence: EntryEvidence,
 ): EntryCandidate | null {
   if (candidates.some((candidate) => candidate.agent.name === evidence.defaultAgentName)) return null;
+  // The preference for an assistant's own Agent applies within the first rank that can
+  // run: a runnable CLI assistant's custom Agent still wins over the built-in one.
+  const rank = (candidate: EntryCandidate) => (isBuiltinBackend(candidate.backend) ? 1 : 0);
+  const best = Math.min(...candidates.map(rank));
+  const pool = candidates.filter((candidate) => rank(candidate) === best);
   const targets = evidence.targets.map((target) => target.name);
-  return candidates.find((candidate) => targets.includes(candidate.agent.name)) ?? candidates[0] ?? null;
+  return pool.find((candidate) => targets.includes(candidate.agent.name)) ?? pool[0] ?? null;
 }
 
 export type EntryGateDeps = {
   listAgents: () => Promise<{ ok: boolean; agents: VibeAgentBrief[]; default_agent_name: string | null }>;
-  getBackendConnection: (backend: AssistantId) => Promise<BackendConnectionState>;
+  getBackendConnection: (backend: AgentBackendId) => Promise<BackendConnectionState>;
   agentReads: CollectionReadAuthority<AgentSupply[]>;
   getRuntimeStatus: () => Promise<RuntimeDependency>;
   getVibeAgent: (
@@ -232,7 +253,7 @@ export async function readEntryEvidence(
   const [supplyOutcome, runtimeOutcome, connectionResults, agentsOutcome, cliResults] = await Promise.all([
     asSettled(deps.agentReads.refresh()),
     asSettled(deps.getRuntimeStatus()),
-    Promise.allSettled(ASSISTANT_ORDER.map((backend) => deps.getBackendConnection(backend))),
+    Promise.allSettled(ENTRY_ORDER.map((backend) => deps.getBackendConnection(backend))),
     asSettled(deps.listAgents()),
     Promise.allSettled(ASSISTANT_ORDER.map(async (backend) => {
       const path = configuredCliPath(options.config, backend);

@@ -16,7 +16,7 @@ from core.native_dispatch_phase import (
     set_dispatch_phase,
 )
 from core.session_activities import SessionActivityRegistry
-from core.vibe_agents import SUPPORTED_AGENT_BACKENDS
+from modules.agents.catalog import AGENT_BACKENDS
 from modules.agents import service as service_module
 from modules.agents.service import AgentService
 from modules.agents.codex.transport import CodexTransport
@@ -337,7 +337,7 @@ def _request(message: str, runtime_key: str = "session:/repo"):
     )
 
 
-@pytest.mark.parametrize("backend", sorted(SUPPORTED_AGENT_BACKENDS))
+@pytest.mark.parametrize("backend", sorted(AGENT_BACKENDS))
 @pytest.mark.parametrize("model", [None, "", "   ", "default", "fixture-avibe-model", " padded-model "])
 @pytest.mark.parametrize("selection_field", ["vibe_agent_model", "subagent_model"])
 def test_model_selection_is_required_before_any_backend_dispatch(backend, model, selection_field):
@@ -362,6 +362,42 @@ def test_model_selection_is_required_before_any_backend_dispatch(backend, model,
                 await service.handle_message(backend, request)
             assert agent.started == []
             assert not service.runtime_turn_active(request.composite_session_id)
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("backend", "hub_switch", "gateway_enabled", "refusal"),
+    [
+        ("vibey", "1", False, "The model gateway is off, so Vibey has no model to run on"),
+        ("vibey", "1", True, "Select a model"),
+        ("vibey", "0", True, "Model Hub is disabled on this instance, so Vibey has no model to run on"),
+        # A native backend runs direct without the Hub: choosing a model is still the fix.
+        ("codex", "0", True, "Select a model"),
+    ],
+)
+def test_a_missing_model_the_model_hub_explains_names_the_model_hub(
+    monkeypatch, backend, hub_switch, gateway_enabled, refusal
+):
+    """The Avibe Agent's models come only through the Model Hub: while it cannot supply any, choosing a model is not the fix."""
+    monkeypatch.setenv("VIBE_MODEL_HUB_ENABLED", hub_switch)
+
+    async def run():
+        controller = _Controller()
+        hub = SimpleNamespace(enabled=gateway_enabled, agents={backend: SimpleNamespace(mode="hub")})
+        controller.model_hub_service = SimpleNamespace(store=SimpleNamespace(load=lambda: hub))
+        service = AgentService(controller=controller)
+        controller.agent_service = service
+        agent = _RuntimeAgent()
+        agent.name = backend
+        service.register(agent)
+        request = _request("hello")
+        request.vibe_agent_model = None
+        request.failure_handler = AsyncMock(return_value=True)
+
+        with pytest.raises(ValueError, match=refusal):
+            await service.handle_message(backend, request)
+        assert agent.started == []
 
     asyncio.run(run())
 

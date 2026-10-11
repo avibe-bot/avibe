@@ -20,7 +20,7 @@ from core.native_dispatch_phase import (
     set_dispatch_phase,
 )
 from modules.agents.base import AgentRequest
-from modules.agents.catalog import display_name_for_backend, is_agent_backend
+from modules.agents.catalog import AGENT_BACKENDS, NATIVE_CLI_BACKENDS, display_name_for_backend, is_agent_backend
 from modules.im import MessageContext
 from modules.im.base import FileAttachment
 
@@ -37,7 +37,7 @@ def _target_agent_variant(value: Any, backend: Optional[str], agent_name: Option
     variant = str(value).strip()
     if not variant:
         return None
-    sentinel_values = {"default", "claude", "codex", "opencode"}
+    sentinel_values = {"default", *AGENT_BACKENDS}
     if backend:
         sentinel_values.add(str(backend).strip())
     if agent_name:
@@ -399,7 +399,7 @@ class MessageHandler(BaseHandler):
                     routing_agent = getattr(routing, "claude_agent", None)
                 elif agent_name == "codex":
                     routing_agent = getattr(routing, "codex_agent", None)
-            if not routing_agent and agent_name in {"opencode", "claude", "codex"}:
+            if not routing_agent and agent_name in AGENT_BACKENDS:
                 routing_agent = _target_agent_variant(
                     resolved_target.get("agent_variant"),
                     agent_name,
@@ -533,7 +533,7 @@ class MessageHandler(BaseHandler):
                     spec = dict(context.platform_specific or {})
                     spec["routing_subagent"] = subagent_name
                     context.platform_specific = spec
-            elif agent_name in ["opencode", "claude", "codex"]:
+            elif agent_name in NATIVE_CLI_BACKENDS:
                 from modules.agents.subagent_router import (
                     load_codex_subagent,
                     load_claude_subagent,

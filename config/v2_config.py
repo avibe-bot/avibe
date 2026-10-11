@@ -35,7 +35,7 @@ from config.platform_registry import (
     supported_platform_ids,
     supported_platform_set,
 )
-from modules.agents.catalog import DEFAULT_AGENT_BACKEND
+from modules.agents.catalog import AGENT_BACKENDS, NATIVE_CLI_BACKENDS, AgentBackend, DEFAULT_AGENT_BACKEND
 from modules.im.base import BaseIMConfig
 from vibe.i18n import normalize_language
 from vibe.trace_retention_policy import validate_retention_days
@@ -176,7 +176,7 @@ MIN_CHAT_MESSAGE_FONT_SIZE_PX = 12
 MAX_CHAT_MESSAGE_FONT_SIZE_PX = 20
 DEFAULT_AGENT_PROGRESS_STYLE = "off"
 MODEL_HUB_ENABLED_ENV = "VIBE_MODEL_HUB_ENABLED"
-MODEL_HUB_BACKENDS = ("claude", "codex", "opencode")
+MODEL_HUB_BACKENDS = AGENT_BACKENDS
 MODEL_HUB_LEGACY_CREATED_AT = "1970-01-01T00:00:00Z"
 _LEGACY_CLAUDE_FAMILY_ALIASES = {
     "opus": "opus",
@@ -203,6 +203,12 @@ def normalize_model_hub_vendor_id(value: object) -> str:
     ):
         raise ValueError("Config 'model_hub.sources.vendor' is invalid")
     return vendor
+
+
+def validate_model_hub_protocol_vendor(vendor: str, protocol: str) -> None:
+    """Keep Google's v11 explicit custom admission consistent across consumers."""
+    if protocol == "google" and vendor != "custom":
+        raise ValueError("Google Sources require the custom vendor")
 
 
 def model_hub_fixed_menu_ids(backend: str) -> tuple[str, ...]:
@@ -1597,6 +1603,24 @@ def is_model_hub_enabled(environ: Optional[Mapping[str, str]] = None) -> bool:
     return source.get(MODEL_HUB_ENABLED_ENV, "1").strip().lower() in {"1", "true", "yes", "on"}
 
 
+HubSupplyBlock = Literal["hub_disabled", "gateway_off"]
+
+
+def hub_supply_block(backend: str, hub: Optional["ModelHubConfig"]) -> Optional[HubSupplyBlock]:
+    """Why the Model Hub leaves ``backend`` no model to run on now, or ``None``: the one owner of that answer.
+
+    A backend without its own CLI gets every model through the Hub, so the operator's
+    Model Hub switch (``VIBE_MODEL_HUB_ENABLED``) leaves it none. Any backend the Hub
+    supplies has none while the user has turned the gateway off in Models.
+    """
+
+    if not is_model_hub_enabled():
+        return None if backend in NATIVE_CLI_BACKENDS else "hub_disabled"
+    if hub is not None and not hub.enabled and hub.agents[backend].mode == "hub":
+        return "gateway_off"
+    return None
+
+
 def _validate_optional_datetime(value: object, field_path: str) -> Optional[str]:
     if value is None:
         return None
@@ -2295,7 +2319,7 @@ class ModelHubSourceConfig:
     kind: Literal["subscription", "api_key"]
     vendor: str
     display_name: str
-    protocol: Literal["anthropic", "openai_responses", "openai_chat"]
+    protocol: Literal["anthropic", "openai_responses", "openai_chat", "google"]
     supply_channel: Literal["native_cli", "hub"]
     billing: Literal["monthly", "metered"]
     state: ModelHubSourceStateConfig
@@ -2354,8 +2378,10 @@ class ModelHubSourceConfig:
             "anthropic",
             "openai_responses",
             "openai_chat",
+            "google",
         }:
             raise ValueError("Config 'model_hub.sources.protocol' is invalid")
+        validate_model_hub_protocol_vendor(vendor, protocol)
         if not isinstance(supply_channel, str) or supply_channel not in {"native_cli", "hub"}:
             raise ValueError("Config 'model_hub.sources.supply_channel' is invalid")
         if not isinstance(billing, str) or billing not in {"monthly", "metered"}:
@@ -2791,7 +2817,7 @@ class ModelHubAgentSourcesConfig:
 
 @dataclass
 class ModelHubAgentSupplyConfig:
-    backend: Literal["claude", "codex", "opencode"]
+    backend: AgentBackend
     mode: Literal["hub", "direct"]
     menu_kind: Literal["fixed", "open"]
     sources: ModelHubAgentSourcesConfig = field(default_factory=ModelHubAgentSourcesConfig)
@@ -2802,6 +2828,8 @@ class ModelHubAgentSupplyConfig:
 
     @classmethod
     def default(cls, backend: str, *, mode: Literal["hub", "direct"]) -> "ModelHubAgentSupplyConfig":
+        if backend == "vibey":
+            return cls(backend="vibey", mode="hub", menu_kind="fixed")
         if backend == "opencode":
             return cls(
                 backend="opencode",
@@ -2843,12 +2871,14 @@ class ModelHubAgentSupplyConfig:
         backend = expected_backend if raw_backend is None else raw_backend
         mode = payload.get("mode")
         menu_kind = payload.get("menu_kind")
-        if not isinstance(backend, str) or backend not in {"claude", "codex", "opencode"} or (
+        if not isinstance(backend, str) or backend not in MODEL_HUB_BACKENDS or (
             expected_backend is not None and backend != expected_backend
         ):
             raise ValueError("Config 'model_hub.agents.backend' is invalid")
         if not isinstance(mode, str) or mode not in {"hub", "direct"}:
             raise ValueError("Config 'model_hub.agents.mode' is invalid")
+        if backend == "vibey" and mode != "hub":
+            raise ValueError("Config 'model_hub.agents.vibey.mode' must be hub")
         expected_menu_kind = "open" if backend == "opencode" else "fixed"
         if not isinstance(menu_kind, str) or menu_kind != expected_menu_kind:
             raise ValueError("Config 'model_hub.agents.menu_kind' is invalid for backend")
@@ -2982,13 +3012,29 @@ class ModelHubConfig:
     sources: list[ModelHubSourceConfig] = field(default_factory=list)
     agents: dict[str, ModelHubAgentSupplyConfig] = field(
         default_factory=lambda: {
-            backend: ModelHubAgentSupplyConfig.default(backend, mode="hub") for backend in MODEL_HUB_BACKENDS
+            backend: ModelHubAgentSupplyConfig.default(backend, mode="hub")
+            for backend in MODEL_HUB_BACKENDS
+            if backend != "vibey"
         }
     )
     # Fresh configs and explicit Start/Stop consume the default. Disk observers
     # retain a pending false marker until lock-owning startup commits promotion;
     # an unrelated save must not acknowledge an upgrade it did not perform.
     runtime_default_applied: bool = True
+    # Not persisted, like ``V2Config.load_warnings``. True while the Vibey
+    # entry was never supplied: a fresh install, or a file written before
+    # Vibey existed. The empty entry standing in waits for its starting
+    # supply (see ``ModelHubService._seed_vibey``), and until that seed, or any
+    # other edit, touches it, ``to_payload`` keeps it absent, so an unrelated
+    # write cannot record an empty supply as the user's choice.
+    vibey_supply_pending: ClassVar[bool] = False
+
+    def __post_init__(self) -> None:
+        # Existing in-process config producers may still supply the released
+        # three-backend shape, just like older on-disk configurations.
+        if "vibey" not in self.agents:
+            self.agents["vibey"] = ModelHubAgentSupplyConfig.default("vibey", mode="hub")
+            self.vibey_supply_pending = True
 
     @staticmethod
     def source_eligible_for_backend(
@@ -3071,6 +3117,9 @@ class ModelHubConfig:
                 )
         agents = {}
         for backend in MODEL_HUB_BACKENDS:
+            if backend == "vibey" and backend not in agents_payload:
+                # Supplied by ``__post_init__``, which marks it pending.
+                continue
             if backend not in agents_payload:
                 # An omitted legacy backend is not consent to change its
                 # working authentication. Fresh installs use the dataclass
@@ -3093,6 +3142,7 @@ class ModelHubConfig:
             agents=agents,
             runtime_default_applied=runtime_default_applied,
         )
+        agents = config.agents
         for backend in MODEL_HUB_BACKENDS:
             configured_sources = agents[backend].sources
             invalid_id = next(
@@ -3126,11 +3176,18 @@ class ModelHubConfig:
         return config
 
     def to_payload(self) -> dict:
+        unseeded = self.vibey_supply_pending and self.agents["vibey"] == ModelHubAgentSupplyConfig.default(
+            "vibey", mode="hub"
+        )
         return {
             "enabled": self.enabled,
             "runtime_default_applied": self.runtime_default_applied,
             "sources": [source.to_payload() for source in self.sources],
-            "agents": {backend: self.agents[backend].to_payload() for backend in MODEL_HUB_BACKENDS},
+            "agents": {
+                backend: self.agents[backend].to_payload()
+                for backend in MODEL_HUB_BACKENDS
+                if not (backend == "vibey" and unseeded)
+            },
         }
 
 
@@ -3417,25 +3474,35 @@ class V2Config:
         Only the replacement service's lock-owning startup opts into migration
         persistence; incidental reads must not invalidate that older reader.
         Explicit saves remain writes, and recovery keeps its backup evidence.
+
+        A plain load (``persist_migrations=False``) never writes config.json and
+        takes no config lock. Its only disk effects are data-dir bootstrap and
+        uniquely named, append-only evidence backups, both outside the config
+        lock. Every writer publishes the file with an atomic replace, so the read
+        sees one whole snapshot: the old file or the new one. The read takes no
+        lock in either mode: migration persistence re-reads the file under the
+        config lock and replaces it only if it still holds these bytes. A lock
+        here would also invert the canonical order (config lock, then SQLite
+        writer) for every caller that reads config inside an open SQLite write
+        transaction, while a config writer waits for that SQLite writer.
         """
         paths.ensure_data_dirs()
         path = config_path or paths.get_config_path()
-        with CONFIG_LOCK:
-            if not path.exists():
-                raise FileNotFoundError(f"Config not found: {path}")
-            raw_bytes = b""
-            try:
-                raw_bytes = path.read_bytes()
-                raw = raw_bytes.decode("utf-8")
-            except UnicodeDecodeError as exc:
-                backup = _backup_config_file(path, "invalid-encoding", content=raw_bytes)
-                warning = f"Config is not valid UTF-8; using recovery defaults: {exc.reason}"
-                logger.error("%s (backup=%s)", warning, backup)
-                config = cls._recovery_default()
-                config.load_warnings = (warning,)
-                config.recovered_sections = ()
-                config.whole_config_recovery = True
-                return config
+        if not path.exists():
+            raise FileNotFoundError(f"Config not found: {path}")
+        raw_bytes = b""
+        try:
+            raw_bytes = path.read_bytes()
+            raw = raw_bytes.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            backup = _backup_config_file(path, "invalid-encoding", content=raw_bytes)
+            warning = f"Config is not valid UTF-8; using recovery defaults: {exc.reason}"
+            logger.error("%s (backup=%s)", warning, backup)
+            config = cls._recovery_default()
+            config.load_warnings = (warning,)
+            config.recovered_sections = ()
+            config.whole_config_recovery = True
+            return config
 
         try:
             payload = json.loads(raw)

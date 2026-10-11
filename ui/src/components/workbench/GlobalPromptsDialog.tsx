@@ -10,12 +10,13 @@ import { useToast } from '../../context/ToastContext';
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '../ui/dialog';
 import { Button } from '../ui/button';
 import { MarkdownEditor } from '../ui/markdown-editor';
-import { BACKEND_ORDER, BACKEND_LABEL, BACKEND_TEXT, BACKEND_DOT, type Backend } from '../../lib/backendAccent';
+import { NATIVE_BACKEND_ORDER as BACKEND_ORDER, BACKEND_LABEL, BACKEND_TEXT, BACKEND_DOT } from '../../lib/backendAccent';
+import type { NativeCliBackend as Backend } from '@/lib/agentBackends';
 
 type FileMeta = { path: string; filename: string; exists: boolean; readError: boolean };
 
-const emptyStringMap = (): Record<Backend, string> => ({ claude: '', opencode: '', codex: '' });
-const emptyMetaMap = (): Record<Backend, FileMeta | null> => ({ claude: null, opencode: null, codex: null });
+const emptyStringMap = () => Object.fromEntries(BACKEND_ORDER.map((id) => [id, ''])) as Record<Backend, string>;
+const emptyMetaMap = () => Object.fromEntries(BACKEND_ORDER.map((id) => [id, null])) as Record<Backend, FileMeta | null>;
 
 // Index an API response (one entry per backend) into a per-backend map over the
 // canonical BACKEND_ORDER, so missing/extra ids never desync the editor state.

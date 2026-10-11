@@ -1,0 +1,1 @@
+"""Provider adapter contract tests."""

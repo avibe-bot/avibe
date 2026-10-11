@@ -28,11 +28,14 @@ def test_skill_schema_upgrade_downgrade_preserves_existing_events(tmp_path):
                 )
             ],
         )
-        original = conn.execute("SELECT * FROM agent_events ORDER BY id").fetchall()
+        cursor = conn.execute("SELECT * FROM agent_events ORDER BY id")
+        original = cursor.fetchall()
+        # Later revisions may add nullable columns; the released ones must not change.
+        columns = ", ".join(column[0] for column in cursor.description)
     migrations.run_migrations(path)
     with sqlite3.connect(path) as conn:
-        assert conn.execute("SELECT * FROM agent_events ORDER BY id").fetchall() == original
-        assert conn.execute("SELECT version_num FROM alembic_version").fetchone() == ("20260923_0062",)
+        assert conn.execute(f"SELECT {columns} FROM agent_events ORDER BY id").fetchall() == original
+        assert conn.execute("SELECT version_num FROM alembic_version").fetchone() == ("20261002_0063",)
         assert conn.execute("SELECT count(*) FROM skill_usage_daily").fetchone() == (0,)
         assert {row[2] for row in conn.execute("PRAGMA foreign_key_list(skill_usage_daily)")} == {
             "scopes",
@@ -47,7 +50,7 @@ def test_skill_schema_upgrade_downgrade_preserves_existing_events(tmp_path):
         )
     command.downgrade(migrations.alembic_config(path), "20260821_0060")
     with sqlite3.connect(path) as conn:
-        assert conn.execute("SELECT * FROM agent_events ORDER BY id").fetchall() == original
+        assert conn.execute(f"SELECT {columns} FROM agent_events ORDER BY id").fetchall() == original
         assert conn.execute("SELECT name FROM sqlite_master WHERE name='skill_usage_daily'").fetchone() is None
         assert (
             conn.execute("SELECT name FROM sqlite_master WHERE name='ix_agent_events_skill_created_id'").fetchone()
@@ -55,5 +58,5 @@ def test_skill_schema_upgrade_downgrade_preserves_existing_events(tmp_path):
         )
     migrations.run_migrations(path)
     with sqlite3.connect(path) as conn:
-        assert conn.execute("SELECT * FROM agent_events ORDER BY id").fetchall() == original
+        assert conn.execute(f"SELECT {columns} FROM agent_events ORDER BY id").fetchall() == original
         assert conn.execute("PRAGMA integrity_check").fetchone() == ("ok",)

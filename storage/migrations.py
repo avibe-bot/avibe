@@ -145,6 +145,8 @@ HEAD_REQUIRED_COLUMNS = PRE_SHOW_SESSION_EVENTS_REQUIRED_COLUMNS | {
         "delivery_history_json",
         "version",
     },
+    "messages": PRE_SHOW_SESSION_EVENTS_REQUIRED_COLUMNS["messages"] | {"context_seq"},
+    "agent_events": {"context_seq"},
     "session_turns": {
         "initial_delivery_id",
         "state",
@@ -703,6 +705,11 @@ def _repair_head_required_columns(conn: sqlite3.Connection, tables: set[str]) ->
     if "web_push_subscriptions" in tables and "provider_invalidated_at" not in _column_names(conn, "web_push_subscriptions"):
         conn.execute('alter table "web_push_subscriptions" add column "provider_invalidated_at" VARCHAR')
         changed = True
+    # context_seq (20261002_0063): the Avibe Agent's model-context order key.
+    for table in ("messages", "agent_events"):
+        if table in tables and "context_seq" not in _column_names(conn, table):
+            conn.execute(f'alter table "{table}" add column "context_seq" INTEGER')
+            changed = True
 
     _ensure_head_indexes(conn, tables)
     return changed
@@ -957,6 +964,12 @@ def _ensure_agent_events_indexes(conn: sqlite3.Connection, tables: set[str]) -> 
         "create index if not exists ix_agent_events_turn_sequence_id "
         "on agent_events (turn_id, sequence, id)"
     )
+    # The model-context order key of both tables (20261002_0063).
+    for table in ("messages", "agent_events"):
+        conn.execute(
+            f"create unique index if not exists uq_{table}_session_context_seq "
+            f"on {table} (session_id, context_seq) where context_seq is not null"
+        )
 
 
 def _ensure_vault_authz_indexes(conn: sqlite3.Connection, tables: set[str]) -> None:

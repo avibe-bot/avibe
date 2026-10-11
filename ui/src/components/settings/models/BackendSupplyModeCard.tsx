@@ -12,6 +12,7 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { cn } from '@/lib/utils';
+import { getBackendUiMeta } from '@/lib/agentBackends';
 import { createAgentCollectionReadAuthority } from './collectionReadAuthority';
 import { useToast } from '@/context/ToastContext';
 import { modelsApi } from './modelsApi';
@@ -79,6 +80,7 @@ const OptionCard: React.FC<{
 export const BackendSupplyModeCard: React.FC<{ backend: AgentBackend }> = ({ backend }) => {
   const { t } = useTranslation();
   const { showToast } = useToast();
+  const supportsDirect = getBackendUiMeta(backend).capabilities.supports_cli;
 
   const [agent, setAgent] = React.useState<AgentSupply | null>(null);
   const [detected, setDetected] = React.useState<MigrationItem[]>([]);
@@ -105,13 +107,14 @@ export const BackendSupplyModeCard: React.FC<{ backend: AgentBackend }> = ({ bac
   }, [agentReads, backend]);
 
   const scan = React.useCallback(async () => {
+    if (!supportsDirect) return;
     try {
       const s = await modelsApi.scanMigration();
       if (aliveRef.current) setDetected(s.items.filter((i) => i.backend === backend));
     } catch {
       /* detect strip is best-effort */
     }
-  }, [backend]);
+  }, [backend, supportsDirect]);
 
   React.useEffect(() => {
     void load();
@@ -119,7 +122,7 @@ export const BackendSupplyModeCard: React.FC<{ backend: AgentBackend }> = ({ bac
   }, [load, scan]);
 
   const setMode = async (mode: AgentMode, offerMigration = true) => {
-    if (!agent || agent.mode === mode || switching) return;
+    if (!supportsDirect || !agent || agent.mode === mode || switching) return;
     setSwitching(mode);
     try {
       const next = mode === 'hub'
@@ -202,7 +205,7 @@ export const BackendSupplyModeCard: React.FC<{ backend: AgentBackend }> = ({ bac
             </Link>
           }
           description={t('settings.models.supplyMode.hub.description', {
-            backend: t(`settings.models.backends.${backend}`, { defaultValue: backend }),
+            backend: getBackendUiMeta(backend).label,
           }) as string}
         >
           {/* The banner asks the supply question. `fixHint` is appended only
@@ -212,21 +215,24 @@ export const BackendSupplyModeCard: React.FC<{ backend: AgentBackend }> = ({ bac
             <div className="flex items-start gap-2 rounded-lg border border-gold/40 bg-gold/[0.08] px-3.5 py-2.5 text-[12px] leading-relaxed text-foreground">
               <Info className="model-hub-ink-gold mt-0.5 size-3.5 shrink-0" />
               <span>
-                {t(`settings.models.supply.${hubOutcome}`)}
-                {(hubOutcome === 'noSources' || hubOutcome === 'interrupted') &&
-                  ` ${t('settings.models.supplyMode.fixHint')}`}
+                {hubOutcome === 'noSources' || hubOutcome === 'interrupted'
+                  ? t('settings.models.supplyMode.warningWithFix', {
+                    warning: t(`settings.models.supply.${hubOutcome}`),
+                    fixHint: t('settings.models.supplyMode.fixHint'),
+                  })
+                  : t(`settings.models.supply.${hubOutcome}`)}
               </span>
             </div>
           )}
         </OptionCard>
 
-        <OptionCard
+        {supportsDirect && <OptionCard
           selected={mode === 'direct'}
           disabled={switching !== null}
           onSelect={() => void setMode('direct')}
           title={<span className="text-[15px] font-semibold text-foreground">{t('settings.models.supplyMode.direct.title')}</span>}
           description={t('settings.models.supplyMode.direct.description', {
-            backend: t(`settings.models.backends.${backend}`, { defaultValue: backend }),
+            backend: getBackendUiMeta(backend).label,
           }) as string}
         >
           {mode === 'direct' && detectItem && (
@@ -251,11 +257,11 @@ export const BackendSupplyModeCard: React.FC<{ backend: AgentBackend }> = ({ bac
               </Button>
             </div>
           )}
-        </OptionCard>
+        </OptionCard>}
       </CardContent>
 
       {/* Migration is optional: declining it still makes the requested switch. */}
-      <MigrationDialog
+      {supportsDirect && <MigrationDialog
         open={migrateOpen !== null}
         eligible={(item) => item.backend === backend}
         onDecline={migrateOpen === 'switch' ? () => void setMode('hub', false) : undefined}
@@ -265,7 +271,7 @@ export const BackendSupplyModeCard: React.FC<{ backend: AgentBackend }> = ({ bac
           void load();
           void scan();
         }}
-      />
+      />}
     </Card>
   );
 };

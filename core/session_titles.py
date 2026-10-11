@@ -7,6 +7,8 @@ from typing import Any
 
 from core.inbox_events import bus
 from core.services import sessions as workbench_sessions_service
+from modules.agents.catalog import NATIVE_CLI_BACKENDS
+from modules.agents.native_sessions.base import derive_first_prompt_title
 from modules.agents.native_sessions.service import AgentNativeSessionService
 from storage import messages_service
 from storage.db import create_sqlite_engine
@@ -47,6 +49,10 @@ def backfill_agent_session_title(
                 native_session_id=native_session_id,
                 first_user_message=first_user_message or fallback_first_user_message,
             )
+            if candidate is None and backend not in NATIVE_CLI_BACKENDS:
+                # A backend with no native session store (the Avibe Agent) is titled the way
+                # the native providers title a session without metadata: from its first prompt.
+                candidate = derive_first_prompt_title(first_user_message or fallback_first_user_message)
             if candidate is None:
                 return None
             updated = workbench_sessions_service.backfill_session_title(

@@ -8,6 +8,7 @@ import pytest
 
 from core.backend_restart import BackendRestartCoordinator, NativeCredentialLease, NativeMigrationBlockedError
 from core.controller import Controller
+from modules.agents.catalog import NATIVE_CLI_BACKENDS
 from core.run_settlement import SETTLED_BY_BACKEND_DISABLED
 
 
@@ -128,6 +129,26 @@ def test_controller_rejects_unknown_backend_reconcile() -> None:
         asyncio.run(Controller.reconcile_agent_backends(controller, ["unknown"]))
 
     controller.backend_restart_coordinator.request_restart.assert_not_awaited()
+
+
+@pytest.mark.parametrize("backend", [backend for backend in NATIVE_CLI_BACKENDS if backend != "claude"])
+def test_application_projection_accepts_disabled_optional_compat_backends(backend):
+    """No registered runtime is expected only after its compat section is disabled."""
+    from config.v2_compat import to_app_config
+    from config.v2_config import V2Config
+
+    config = V2Config.default()
+    getattr(config.agents, backend).enabled = False
+    controller = SimpleNamespace(
+        config=to_app_config(config, resolve_agent_paths=False),
+        agent_service=SimpleNamespace(agents={}),
+    )
+    coordinator = BackendRestartCoordinator(controller, AsyncMock(), renew=AsyncMock())
+    assert coordinator.snapshot(backend) == {"state": "applied", "disabled": True}
+
+    getattr(config.agents, backend).enabled = True
+    controller.config = to_app_config(config, resolve_agent_paths=False)
+    assert coordinator.snapshot(backend) == {"state": "unavailable"}
 
 
 def test_runtime_gen_008_idle_maintenance_runs_behind_closed_admission_then_renews():

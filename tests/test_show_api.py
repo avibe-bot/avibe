@@ -45,6 +45,36 @@ def ingress(tmp_path):
     return create_ingress(tmp_path)
 
 
+class LoopClock:
+    """The running loop's clock, moved only by the test.
+
+    A deadline then expires where the test puts it, never where scheduling load
+    happens to put it, however long the real work around it takes.
+    """
+
+    def __init__(self, loop):
+        self._loop = loop
+        self._now = loop.time()
+
+    def time(self):
+        return self._now
+
+    async def elapse(self, seconds):
+        """Move the clock ``seconds`` on and return after every timer due by then has run, earliest first."""
+        passed = self._loop.create_future()
+        self._loop.call_later(seconds, lambda: passed.done() or passed.set_result(None))
+        self._now += seconds
+        await passed
+
+
+@pytest.fixture
+async def loop_clock(monkeypatch):
+    loop = asyncio.get_running_loop()
+    clock = LoopClock(loop)
+    monkeypatch.setattr(loop, "time", clock.time)
+    return clock
+
+
 def resolve(ingress, **kwargs):
     return show_api.resolve_server_api(kwargs.get("path", ingress.path).encode(), kwargs.get("method", "POST"), kwargs.get("query", b""))
 
@@ -391,9 +421,8 @@ async def test_admission_datastore_failures_never_escape_public_boundary(ingress
 
 
 @pytest.mark.parametrize("failure_site", ["resolver", "earlier_hook"])
-async def test_total_deadline_interrupts_initial_admission(ingress, monkeypatch, failure_site):
+async def test_total_deadline_interrupts_initial_admission(ingress, monkeypatch, loop_clock, failure_site):
     import threading
-    import time
 
     manager = fake_manager(monkeypatch)
     entered = threading.Event()
@@ -404,7 +433,7 @@ async def test_total_deadline_interrupts_initial_admission(ingress, monkeypatch,
     def stalled(*args, **kwargs):
         entered.set()
         try:
-            assert release.wait(2), "test failed to release storage worker"
+            assert release.wait(30), "test failed to release storage worker"
             return original(*args, **kwargs) if failure_site == "resolver" else None
         finally:
             finished.set()
@@ -413,19 +442,22 @@ async def test_total_deadline_interrupts_initial_admission(ingress, monkeypatch,
         monkeypatch.setattr(show_api, "resolve_server_api", stalled)
     else:
         monkeypatch.setattr(ui_server.app, "_before_request_handlers", [stalled, *ui_server.app._before_request_handlers])
-    monkeypatch.setattr(show_api, "TOTAL_TIMEOUT_SECONDS", 0.05)
-    started = time.monotonic()
+    request = asyncio.ensure_future(post(ingress))
     try:
-        response = await post(ingress)
-        assert entered.is_set()
+        # The deadline passes only once admission is stalled in its storage worker.
+        assert await asyncio.to_thread(entered.wait, 30)
+        await loop_clock.elapse(show_api.TOTAL_TIMEOUT_SECONDS)
+        response = await request
+        # Answered while the worker is still held: the deadline interrupted admission instead of awaiting it.
+        assert not finished.is_set()
         assert response.status_code == 504
         assert response.headers["cache-control"] == "no-store"
         assert "set-cookie" not in response.headers
-        assert time.monotonic() - started < 0.75
         manager.request.assert_not_called()
     finally:
         release.set()
-        assert await asyncio.to_thread(finished.wait, 2)
+        assert await asyncio.to_thread(finished.wait, 30)
+        await asyncio.gather(request, return_exceptions=True)
     await asyncio.sleep(0)
     manager.request.assert_not_called()
 
@@ -441,12 +473,12 @@ async def test_earlier_admission_error_has_generic_receipt(ingress, monkeypatch)
     assert "set-cookie" not in response.headers
 
 
-async def test_unregistered_browser_keeps_its_existing_handler_deadline(ingress, monkeypatch):
+async def test_unregistered_browser_keeps_its_existing_handler_deadline(ingress, monkeypatch, loop_clock):
     (ingress.workspace / show_api.MANIFEST_NAME).unlink()
-    monkeypatch.setattr(show_api, "TOTAL_TIMEOUT_SECONDS", 0.05)
     manager = fake_manager(monkeypatch)
     async def browser_handler(*args, **kwargs):
-        await asyncio.sleep(0.1)
+        # Outlive the ingress deadline once browser admission is established.
+        await loop_clock.elapse(2 * show_api.TOTAL_TIMEOUT_SECONDS)
         return httpx.Response(200, content=b"browser result")
     manager.request.side_effect = browser_handler
     response = await post(ingress, headers={"Origin": "https://alex.avibe.bot"})

@@ -1,0 +1,329 @@
+"""The ``bash`` tool (C-7 section 5).
+
+Ported from Pi ``packages/coding-agent/src/core/tools/bash.ts`` (MIT, Copyright
+(c) 2025 Mario Zechner): the description, parameters, tail truncation, and
+status lines are Pi's. Avibe additions: every command is a job handle from its
+first moment, so a command still running after the foreground window, or
+started with ``watch: true``, is handed to a Watch instead of being killed, and
+it runs exactly once either way.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import os
+import re
+import time
+from typing import Any, Mapping, Optional
+
+from core.agent_core.cancel import CancelToken
+from core.agent_core.tools.args import (
+    ToolInputError,
+    error_result,
+    format_number,
+    optional_bool_arg,
+    optional_number_arg,
+    str_arg,
+    text_result,
+)
+from core.agent_core.tools.base import (
+    MAX_BYTES,
+    MAX_LINES,
+    CallInstance,
+    JobHost,
+    JobStatus,
+    ToolContext,
+    ToolResult,
+    ToolSpec,
+)
+from core.agent_core.tools.jobs import (
+    STOP_ABORTED,
+    STOP_KILLED,
+    STOP_TIMEOUT,
+    STOP_WRAPPER_ERROR,
+    JobHandOverUnavailable,
+    JobStartError,
+    LocalJobHost,
+)
+from core.agent_core.tools.paths import os_reason
+from core.agent_core.tools.output import FINISH_BYTES, JobOutput
+
+logger = logging.getLogger(__name__)
+
+DEFAULT_FOREGROUND_WINDOW_S = 120.0
+_MAX_TIMEOUT_S = 2_147_483.647
+_PROGRESS_INTERVAL_S = 0.1  # Pi's BASH_UPDATE_THROTTLE_MS
+_WATCH_GRACE_S = 0.5
+
+BASH_SCHEMA: Mapping[str, Any] = {
+    "type": "object",
+    "required": ["command"],
+    "properties": {
+        "command": {"type": "string", "description": "Shell command to execute"},
+        "timeout": {"type": "number", "description": "Timeout in seconds (optional, no default timeout)"},
+        "watch": {
+            "type": "boolean",
+            "description": "Start the command as a background Watch and return immediately. Defaults to false.",
+        },
+    },
+}
+
+
+def bash_description(foreground_window_s: float = DEFAULT_FOREGROUND_WINDOW_S) -> str:
+    return (
+        "Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to "
+        f"last {MAX_LINES} lines or {MAX_BYTES // 1024}KB (whichever is hit first). If truncated, the output log is saved "
+        "to a file; very large logs keep their beginning and end. Optionally provide a timeout in seconds. "
+        f"Commands still running after {format_number(foreground_window_s)} seconds, or started with watch=true, "
+        "continue in the background as an Avibe Watch; you get a follow-up message when they finish."
+    )
+
+
+def _append_status(text: str, status: str) -> str:
+    return f"{text}\n\n{status}" if text else status
+
+
+def _timeout_arg(arguments: Mapping[str, Any]) -> Optional[float]:
+    try:
+        timeout = optional_number_arg(arguments, "timeout")
+    except ToolInputError:
+        raise ToolInputError("Invalid timeout: must be a finite number of seconds") from None
+    if timeout is None:
+        return None
+    if timeout <= 0:
+        raise ToolInputError("Invalid timeout: must be a finite number of seconds")
+    if timeout > _MAX_TIMEOUT_S:
+        raise ToolInputError(f"Invalid timeout: maximum is {format_number(_MAX_TIMEOUT_S)} seconds")
+    return timeout
+
+
+async def final_result(output: JobOutput, status: JobStatus, *, note: Optional[str] = None) -> ToolResult:
+    """The result of a job that is no longer running, as Pi formats a finished command."""
+    await output.finish_off_loop()
+    text, truncation = output.render("(no output)")
+    if note:
+        text = f"{text}\n\n{note}"
+    details = {**output.details(truncation), "exit_code": status.exit_code}
+    if status.state == "exited" and status.exit_code == 0:
+        return text_result(text, details=details)
+    if status.state == "exited":
+        return error_result(_append_status(text, f"Command exited with code {status.exit_code}"), details=details)
+    return error_result(_append_status(text, "Command terminated without an exit code"), details=details)
+
+
+async def stopped_result(output: JobOutput, status_line: str) -> ToolResult:
+    """The result of a job that was stopped: the output so far, then why it stopped (``_stopped_line``)."""
+    await output.finish_off_loop()
+    text, truncation = output.render("")
+    return error_result(_append_status(text, status_line), details=output.details(truncation))
+
+
+def _timed_out_line(timeout_s: float) -> str:
+    return f"Command timed out after {format_number(timeout_s)} seconds"
+
+
+#: Avibe change to Pi's ``Command aborted``: an abort is the user's Stop, and the model should know who ended it.
+ABORTED_LINE = "Stopped by the user; the command was terminated."
+
+
+KILLED_LINE = "Command was killed before it finished"
+WRAPPER_ERROR_LINE = "Command ended because the job wrapper running it failed"
+# A reason another owner records (``vibe stop``, a Watch) is named as recorded, if it reads as a name: the
+# job's directory is one its command can write to.
+_RECORDED_REASON = re.compile(r"^[a-z][a-z0-9_]{0,39}$")
+
+
+def _stopped_line(reason: Optional[str], timeout_s: Optional[float]) -> Optional[str]:
+    """The status line for a job someone stopped, from the reason recorded when it was stopped.
+
+    Every recorded reason has one (``recovery.md`` T2); ``None`` means no stop was recorded.
+    """
+    if not reason:
+        return None
+    if reason == STOP_TIMEOUT:
+        return _timed_out_line(timeout_s) if timeout_s is not None else "Command timed out"
+    if reason == STOP_ABORTED:
+        return ABORTED_LINE
+    if reason == STOP_KILLED:
+        return KILLED_LINE
+    if reason == STOP_WRAPPER_ERROR:
+        return WRAPPER_ERROR_LINE
+    if _RECORDED_REASON.match(reason):
+        return f"Command was stopped before it finished ({reason})"
+    return "Command was stopped before it finished"
+
+
+async def handover_result(output: JobOutput, watch_id: str) -> ToolResult:
+    """Avibe: the command keeps running as a Watch; the model sees the output so far and how to manage it."""
+    # A one-shot render reads the whole retained log (head, omitted middle, tail), not one poll's worth.
+    await output.poll_off_loop(FINISH_BYTES)
+    text, truncation = output.render("(no output yet)")
+    text = text.rstrip("\n")
+    lines = [
+        f"Command is still running and is now Watch {watch_id}. You will get a follow-up message when it finishes.",
+        "",
+        text,
+        "",
+    ]
+    if truncation is None:
+        lines.append(output.where())
+    lines += [f"Check: vibe watch show {watch_id}", f"Stop: vibe watch remove {watch_id}"]
+    return text_result("\n".join(lines), details={**output.details(truncation), "watch_id": watch_id})
+
+
+async def recovered_result(
+    jobs: LocalJobHost, job_id: str, status: JobStatus, watch_id: Optional[str]
+) -> Optional[ToolResult]:
+    """The result of a ``bash`` call whose run ended before it committed one (``recovery.md`` T2).
+
+    The one renderer for a crash, a restart, and a Stop: a job handed to ``watch_id``
+    gets the hand-over result, a finished job its final output, and a job stopped
+    with a recorded reason its output so far and why it stopped. ``None`` means the
+    job is gone with no recorded stop, or never ran: the caller commits the
+    synthetic interrupted result.
+    """
+    output = JobOutput(jobs, job_id)
+    if watch_id is not None:
+        return await handover_result(output, watch_id)
+    if status.state == "exited":
+        return await final_result(output, status)
+    if status.state != "gone":
+        return None
+    line = _stopped_line(jobs.stop_reason(job_id), jobs.meta(job_id).get("timeout_s"))
+    return await stopped_result(output, line) if line else None
+
+
+async def settle_bash_call(jobs: LocalJobHost, call: CallInstance) -> Optional[ToolResult]:
+    """The durable result for a ``bash`` call left open by a crash; a running job is handed to Watch first."""
+    job_id = jobs.find_job(call)
+    if job_id is None:
+        return None
+    await jobs.enforce_deadline(job_id)
+    status = jobs.status(job_id)
+    watch_id = await jobs.hand_over(job_id) if status.state == "running" else None
+    return await recovered_result(jobs, job_id, status, watch_id)
+
+
+class BashTool:
+    """``jobs`` is the loop's tracking wrapper around the adapter's host; ``bash`` never makes its own."""
+
+    concurrent = True
+
+    def __init__(self, jobs: JobHost, *, foreground_window_s: float = DEFAULT_FOREGROUND_WINDOW_S) -> None:
+        self._jobs = jobs
+        self._window_s = foreground_window_s
+        self._spec = ToolSpec(name="bash", description=bash_description(foreground_window_s), input_schema=BASH_SCHEMA)
+
+    @property
+    def spec(self) -> ToolSpec:
+        return self._spec
+
+    async def execute(self, arguments: Mapping[str, Any], ctx: ToolContext) -> ToolResult:
+        try:
+            command = str_arg(arguments, "command")
+            if "\x00" in command:
+                raise ToolInputError("Invalid command: contains a NUL byte")
+            timeout = _timeout_arg(arguments)
+            watch = optional_bool_arg(arguments, "watch")
+        except ToolInputError as exc:
+            return error_result(str(exc))
+        if not os.path.isdir(ctx.cwd):
+            return error_result(f"Working directory does not exist: {ctx.cwd}\nCannot execute bash commands.")
+        if not os.access(ctx.cwd, os.X_OK):
+            return error_result(f"Working directory is not accessible: {ctx.cwd}\nCannot execute bash commands.")
+        if ctx.cancel.cancelled:
+            return error_result("Command aborted")
+        if ctx.call is None:
+            # A job is keyed by its call instance; a checkpoint turn's call has none (its policy denies bash first).
+            return error_result("Commands cannot run in this turn.")
+
+        # The job host enforces the timeout (its wrapper decides timeout versus exit); bash only reports
+        # the recorded reason.
+        try:
+            job_id = await self._jobs.start(
+                command,
+                cwd=ctx.cwd,
+                env=ctx.env,
+                timeout_s=timeout,
+                call=ctx.call,
+            )
+        except JobStartError as exc:
+            return error_result(str(exc))
+        except OSError as exc:
+            logger.warning("Could not start a bash job", exc_info=True)
+            return error_result(f"Could not start the command: {os_reason(exc)}.")
+
+        # The handover clock starts once the command may run, so the launch never counts against it.
+        started = time.monotonic()
+        output = JobOutput(self._jobs, job_id)
+        # watch=true still lets a command that ends at once report its own result instead of becoming a Watch.
+        handover_at = min(self._window_s, _WATCH_GRACE_S) if watch else self._window_s
+        handover_error: Optional[Exception] = None
+        last_progress = ""
+        while True:
+            elapsed = time.monotonic() - started
+            hand_over = handover_error is None and elapsed >= handover_at
+            # A handover is decided only after a fresh status: a command that already ended keeps its own result.
+            slice_s = 0.0 if hand_over else _PROGRESS_INTERVAL_S
+            if handover_error is None:
+                slice_s = min(slice_s, max(0.0, handover_at - elapsed))
+            status = await self._wait_or_cancel(job_id, slice_s, ctx.cancel)
+
+            if status is not None and status.state == "gone":
+                # Whoever stopped the job recorded why; the job host or its wrapper may have stopped it first.
+                line = _stopped_line(self._jobs.stop_reason(job_id), timeout)
+                if line:
+                    return await stopped_result(output, line)
+            if status is not None and status.state != "running":
+                note = None
+                if watch and handover_error is not None:
+                    note = f"[Watch unavailable ({handover_error}); the command ran in the foreground.]"
+                return await final_result(output, status, note=note)
+            if ctx.cancel.cancelled:
+                await self._jobs.kill(job_id, reason=STOP_ABORTED)
+                return await stopped_result(output, ABORTED_LINE)
+            if hand_over:
+                watch_id, handover_error = await self._hand_over(job_id)
+                if watch_id is not None:
+                    return await handover_result(output, watch_id)
+                continue
+            # Off the event loop: following a flood of output costs CPU every Session would otherwise wait on.
+            if ctx.on_progress is not None and await output.poll_off_loop():
+                tail = output.snapshot().content
+                if tail != last_progress:
+                    last_progress = tail
+                    ctx.on_progress(tail)
+
+    async def _hand_over(self, job_id: str) -> tuple[Optional[str], Optional[Exception]]:
+        """``(watch_id, None)``, or ``(None, error)`` when no Watch owns the job and it stays in the foreground.
+
+        ``hand_over`` raising means no Watch owns the job, and adopt-or-create is idempotent, so one
+        failed attempt is tried once more; ``JobHandOverUnavailable`` means there is no Watch to try.
+        """
+        error: Optional[Exception] = None
+        for _ in range(2):
+            try:
+                return await self._jobs.hand_over(job_id), None
+            except JobHandOverUnavailable as exc:
+                error = exc
+                break
+            except Exception as exc:
+                error = exc
+        logger.info("Job %s stays in the foreground: %s", job_id, error)
+        return None, error
+
+    async def _wait_or_cancel(self, job_id: str, seconds: float, cancel: CancelToken) -> Optional[JobStatus]:
+        """The job's status after at most ``seconds``, or ``None`` as soon as ``cancel`` fires."""
+        if cancel.cancelled:
+            return None
+        waiting = asyncio.ensure_future(self._jobs.wait(job_id, deadline_s=seconds))
+        cancelled = asyncio.ensure_future(cancel.wait())
+        try:
+            await asyncio.wait({waiting, cancelled}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for task in (waiting, cancelled):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(waiting, cancelled, return_exceptions=True)
+        return waiting.result() if waiting.done() and not waiting.cancelled() else None

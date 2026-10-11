@@ -30,6 +30,7 @@ import { RoutingConfigPanel } from '../shared/RoutingConfigPanel';
 import { CompactSelect, SearchField, ToggleSwitch } from '../settings/SettingsPrimitives';
 import { Button } from '../ui/button';
 import { TelegramTopicList } from './TelegramTopicList';
+import { getBackendUiMeta } from '@/lib/agentBackends';
 
 const PLATFORM_BRAND_COLORS: Record<string, string> = {
   slack: '#4A154B',
@@ -1470,11 +1471,11 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
                   ? channelConfig.routing.claude_model
                   : effectiveBackend === 'codex'
                     ? channelConfig.routing.codex_model
-                    : channelConfig.routing.opencode_model
+                    : effectiveBackend === 'opencode' ? channelConfig.routing.opencode_model : undefined
               );
               const agentSummary = selectedAgent
                 ? `${selectedAgent.display_name || selectedAgent.name}${selectedAgent.model ? ` / ${selectedAgent.model}` : ''}`
-                : `${effectiveBackend === 'claude' ? 'Claude' : effectiveBackend === 'codex' ? 'Codex' : 'OpenCode'}${backendModel ? ` / ${backendModel}` : ''}`;
+                : `${getBackendUiMeta(effectiveBackend).label}${backendModel ? ` / ${backendModel}` : ''}`;
 
               return (
                 <div

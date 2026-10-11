@@ -51,17 +51,23 @@ import { onPageReactivated } from '../../lib/pageActivity';
 import { useRouteSurfaceActive } from '../../lib/routeSurfaceActivity';
 import { estimateTokens } from '../../lib/tokenEstimate';
 import { loadBackendModelsWithRefresh, modelOptionLabel, useAddModelExit } from '../../lib/backendModels';
-import { resolveEffortOptions } from '../../lib/effortOptions';
+import { compatibleEffort, resolveEffortOptions } from '../../lib/effortOptions';
 import { WorkbenchPageHeader } from './WorkbenchPageHeader';
 import { CapabilityTabs } from './CapabilityTabs';
 // Backend order / labels / accent classes live in lib/backendAccent, shared
 // with the Skills surface (BACKEND_TEXT is this page's old BACKEND_ICON_CLASS).
 import {
   BACKEND_ORDER,
+  NATIVE_BACKEND_ORDER,
   BACKEND_LABEL,
   BACKEND_TEXT as BACKEND_ICON_CLASS,
   type Backend,
 } from '../../lib/backendAccent';
+import { getBackendUiMeta, type NativeCliBackend } from '@/lib/agentBackends';
+import { BackendAvatar } from '../visual';
+import { isBuiltinAgent } from '../onboarding/setupTargets';
+import { modelsApi } from '../settings/models/modelsApi';
+import { agentsWithoutModel } from '../settings/models/supply';
 import { errorMessage } from '@/lib/errorMessage';
 // Tab set + its cross-visit memory live together so the remembered value can
 // never name a tab this page no longer renders (see agentsViewMemory).
@@ -301,6 +307,8 @@ export const AgentsPage: React.FC = () => {
   const [runningActiveCount, setRunningActiveCount] = useState<number | null>(null);
   const [eventBridgeConnected, setEventBridgeConnected] = useState(false);
   const [agents, setAgents] = useState<VibeAgentBrief[]>([]);
+  // Agents the gateway cannot run for want of a model, read again whenever the list changes.
+  const [withoutModel, setWithoutModel] = useState<ReadonlySet<string>>(() => new Set());
   const [defaultName, setDefaultName] = useState<string | null>(null);
   const [selected, setSelected] = useState<VibeAgentFull | null>(null);
   const [loading, setLoading] = useState(false);
@@ -319,7 +327,7 @@ export const AgentsPage: React.FC = () => {
   const mutationErrorSequenceRef = useRef(0);
   const [search, setSearch] = useState('');
   const [backendFilter, setBackendFilter] = useState<Backend | 'all'>('all');
-  const [importing, setImporting] = useState<Backend | null>(null);
+  const [importing, setImporting] = useState<NativeCliBackend | null>(null);
   const [onboardingInventory, setOnboardingInventory] = useState<VibeAgentOnboardingResult | null>(null);
   const [onboardingExpanded, setOnboardingExpanded] = useState(false);
   const [onboardingSubmitting, setOnboardingSubmitting] = useState(false);
@@ -1111,6 +1119,21 @@ export const AgentsPage: React.FC = () => {
     void refreshOnboarding();
   }, [refreshOnboarding]);
 
+  // The Models page's per-Agent projection: an Agent shown as enabled whose next turn fails
+  // for want of a model says so here too. A role that cannot read it sees no marker.
+  useEffect(() => {
+    let active = true;
+    modelsApi.listAgents().then(
+      (supplies) => {
+        if (active) setWithoutModel(new Set(agentsWithoutModel(supplies).map((named) => named.name)));
+      },
+      () => {},
+    );
+    return () => {
+      active = false;
+    };
+  }, [agents]);
+
   // Auto-select the default agent on first load so the detail panel has
   // something to show — eliminates the empty "select an agent" state
   // that confused users on first visit.
@@ -1296,7 +1319,7 @@ export const AgentsPage: React.FC = () => {
   }, [agents, search, backendFilter]);
 
   const grouped = useMemo(() => {
-    const groups: Record<Backend, VibeAgentBrief[]> = { claude: [], opencode: [], codex: [] };
+    const groups = Object.fromEntries(BACKEND_ORDER.map((backend) => [backend, [] as VibeAgentBrief[]])) as Record<Backend, VibeAgentBrief[]>;
     for (const agent of filtered) {
       const key = (agent.backend as Backend) in groups ? (agent.backend as Backend) : null;
       if (key) groups[key].push(agent);
@@ -1386,7 +1409,7 @@ export const AgentsPage: React.FC = () => {
     }
   };
 
-  const onImport = async (from: Backend) => {
+  const onImport = async (from: NativeCliBackend) => {
     setImporting(from);
     try {
       const result = await api.importVibeAgents({ from, all: true });
@@ -1586,7 +1609,7 @@ export const AgentsPage: React.FC = () => {
             return (
               <div key={backend} className="flex flex-col gap-2">
                 <div className="flex items-center gap-2 px-1">
-                  <Bot className={clsx('size-3.5', BACKEND_ICON_CLASS[backend])} />
+                  <BackendAvatar backend={backend} className={clsx('size-3.5', BACKEND_ICON_CLASS[backend])} />
                   <span className={clsx('text-[13px] font-bold', BACKEND_ICON_CLASS[backend])}>
                     {BACKEND_LABEL[backend]}
                   </span>
@@ -1601,6 +1624,7 @@ export const AgentsPage: React.FC = () => {
                       agent={agent}
                       isSelected={selected?.name === agent.name}
                       isDefault={defaultName === agent.name}
+                      modelMissing={agent.enabled && withoutModel.has(agent.name)}
                       onSelect={() => selectAgent(agent.name, true)}
                     />
                   ))}
@@ -1761,7 +1785,7 @@ const OrganizationAgentOnboarding: React.FC<OrganizationAgentOnboardingProps> = 
                   <div className="min-w-0">
                     <div className="truncate text-[12px] font-semibold text-foreground">{agent.name}</div>
                     <div className="truncate font-mono text-[10px] text-muted">
-                      {agent.backend} · {system ? t('agents.onboarding.system') : t('agents.onboarding.custom')}
+                      {getBackendUiMeta(agent.backend).label} · {system ? t('agents.onboarding.system') : t('agents.onboarding.custom')}
                     </div>
                   </div>
                   <Badge variant={statusVariant} className="max-w-[45vw]">
@@ -1782,10 +1806,12 @@ interface AgentRowProps {
   agent: VibeAgentBrief;
   isSelected: boolean;
   isDefault: boolean;
+  /** Enabled, but its next turn fails: the gateway has no model selected for it. */
+  modelMissing: boolean;
   onSelect: () => void;
 }
 
-const AgentRow: React.FC<AgentRowProps> = ({ agent, isSelected, isDefault, onSelect }) => {
+const AgentRow: React.FC<AgentRowProps> = ({ agent, isSelected, isDefault, modelMissing, onSelect }) => {
   const { t } = useTranslation();
   const description = [agent.model, agent.reasoning_effort, agent.description].filter(Boolean).join(' · ');
   return (
@@ -1815,6 +1841,11 @@ const AgentRow: React.FC<AgentRowProps> = ({ agent, isSelected, isDefault, onSel
         </div>
         {description && <div className="text-[11px] text-muted">{description}</div>}
       </div>
+      {modelMissing && (
+        <Badge variant="warning" className="shrink-0">
+          {t('settings.models.gateway.agentIssues.modelMissing')}
+        </Badge>
+      )}
       <Badge variant={agent.enabled ? 'success' : 'secondary'} className="font-mono uppercase">
         <span className={clsx('size-1.5 rounded-full', agent.enabled ? 'bg-mint' : 'bg-muted')} />
         {agent.enabled ? t('agents.statusEnabled') : t('agents.statusDisabled')}
@@ -1861,7 +1892,7 @@ const BackendFilter: React.FC<BackendFilterProps> = ({ value, onChange }) => {
               value === key ? 'bg-cyan-soft text-cyan-ink' : 'text-foreground hover:bg-foreground/[0.04]',
             )}
           >
-            {key !== 'all' && <Bot className={clsx('size-3.5', BACKEND_ICON_CLASS[key])} />}
+            {key !== 'all' && <BackendAvatar backend={key} className={clsx('size-3.5', BACKEND_ICON_CLASS[key])} />}
             <span>{key === 'all' ? t('agents.backendAll') : BACKEND_LABEL[key]}</span>
           </button>
         ))}
@@ -1871,8 +1902,8 @@ const BackendFilter: React.FC<BackendFilterProps> = ({ value, onChange }) => {
 };
 
 interface ImportMenuProps {
-  onImport: (from: Backend) => void;
-  importing: Backend | null;
+  onImport: (from: NativeCliBackend) => void;
+  importing: NativeCliBackend | null;
 }
 
 // Outline Button that opens a popover with one entry per backend. The
@@ -1891,7 +1922,7 @@ const ImportMenu: React.FC<ImportMenuProps> = ({ onImport, importing }) => {
         </Button>
       </PopoverTrigger>
       <PopoverContent align="end" className="w-[200px] p-1">
-        {BACKEND_ORDER.map((backend) => (
+        {NATIVE_BACKEND_ORDER.map((backend) => (
           <button
             key={backend}
             type="button"
@@ -1902,8 +1933,8 @@ const ImportMenu: React.FC<ImportMenuProps> = ({ onImport, importing }) => {
             }}
             className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[12px] text-foreground transition hover:bg-foreground/[0.04] disabled:opacity-50"
           >
-            <Bot className={clsx('size-3.5', BACKEND_ICON_CLASS[backend])} />
-            <span>{t(`agents.importFrom${BACKEND_LABEL[backend]}` as const)}</span>
+            <BackendAvatar backend={backend} className={clsx('size-3.5', BACKEND_ICON_CLASS[backend])} />
+            <span>{t('agents.importFrom', { backend: BACKEND_LABEL[backend] })}</span>
           </button>
         ))}
       </PopoverContent>
@@ -1940,6 +1971,8 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, ca
   // System agents are locked everywhere; remote access locks every agent.
   const locked = isSystemAgent(agent) || !canEdit;
   const system = isSystemAgent(agent);
+  // The built-in Agent of the built-in backend is part of the platform: it stays enabled.
+  const alwaysEnabled = agent.source === 'builtin' && isBuiltinAgent(agent) && getBackendUiMeta(agent.backend).builtin;
   const [name, setName] = useState(agent.name);
   const [renaming, setRenaming] = useState(false);
   const [settingDefault, setSettingDefault] = useState(false);
@@ -2239,7 +2272,7 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, ca
         <div className="flex min-w-0 flex-1 flex-col">
           <div className="truncate text-[16px] font-bold text-foreground">{agent.name}</div>
           <div className="truncate text-[10px] text-muted">
-            Vibe Agent · {agent.backend} backend
+            Vibe Agent · {getBackendUiMeta(agent.backend).label} backend
           </div>
         </div>
         <Button
@@ -2263,14 +2296,18 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, ca
       >
         <div className="flex min-w-0 flex-col gap-0.5">
           <span className="text-[13px] font-bold text-foreground">{t('agents.detail.enabled')}</span>
-          <span className="text-[11px] text-muted">{t('agents.detail.enabledHint')}</span>
+          <span className="text-[11px] text-muted">
+            {alwaysEnabled
+              ? t('agents.detail.alwaysEnabledHint', { name: getBackendUiMeta(agent.backend).label })
+              : t('agents.detail.enabledHint')}
+          </span>
         </div>
         <Switch
           checked={agent.enabled}
           onCheckedChange={(next) => {
             consumeBackgroundMutation(onChange({ enabled: next }));
           }}
-          disabled={!canEdit}
+          disabled={!canEdit || alwaysEnabled}
           title={canEdit ? undefined : t('agents.remoteReadOnlyHint')}
           label={t('agents.detail.enabled')}
         />
@@ -2367,12 +2404,15 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, ca
           don't mistake it for a note about the field above (the name). */}
       <Field label={t('agents.detail.backend')}>
         <div className="flex items-center gap-2 rounded-lg border border-border bg-surface-3 px-3 py-2">
-          <Bot className={clsx('size-3 shrink-0', BACKEND_ICON_CLASS[agent.backend as Backend] || 'text-muted')} />
+          <BackendAvatar backend={agent.backend} className={clsx('size-3 shrink-0', BACKEND_ICON_CLASS[agent.backend as Backend] || 'text-muted')} />
           <span className={clsx('font-mono text-[12px] font-bold', BACKEND_ICON_CLASS[agent.backend as Backend] || 'text-foreground')}>
             {agent.backend}
           </span>
           <span className="text-[11px] text-muted">·</span>
-          <span className="text-[11px] text-muted">{BACKEND_LABEL[agent.backend as Backend] || agent.backend} CLI</span>
+          <span className="text-[11px] text-muted">{t(
+            getBackendUiMeta(agent.backend).capabilities.supports_cli ? 'agents.detail.nativeBackend' : 'agents.detail.backendName',
+            { backend: BACKEND_LABEL[agent.backend as Backend] || agent.backend },
+          )}</span>
           <span className="ml-auto font-mono text-[9px] text-muted">{t('agents.detail.backendLocked')}</span>
         </div>
       </Field>
@@ -2404,10 +2444,7 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, ca
               // keeps an effort the model can't run (Codex P2).
               const opts = resolveEffortOptions(agent.backend, value, reasoningOptions);
               if (effort && !opts.includes(effort)) {
-                // No valid option is itself a valid answer: a model whose catalog
-                // row states no efforts must clear the field, not keep the old
-                // value because there was nothing to replace it with.
-                const fallback = opts.includes('medium') ? 'medium' : opts[0] ?? null;
+                const fallback = compatibleEffort(effort, opts);
                 markFieldEdit('effort');
                 markFieldSubmitted('effort');
                 setEffort(fallback);

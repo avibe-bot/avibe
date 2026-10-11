@@ -15,6 +15,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { cn } from '@/lib/utils';
+import { getBackendUiMeta } from '@/lib/agentBackends';
 import { useToast } from '@/context/ToastContext';
 import type { TranslationKey } from '@/i18n/types';
 import { providerLabel, providerVendorId } from '../providers/providerIdentity';
@@ -32,7 +33,7 @@ import { apiFailure, modelsApi } from './modelsApi';
 import { serverText } from './serverCopy';
 import { VendorGlyph } from './vendorGlyph';
 import { ACCENT_ICON, ACCENT_TILE, type Accent } from './vendorMeta';
-import type { AgentBackend, MigrationItem } from './types';
+import type { AgentBackend, MigrationItem, NativeCliBackend } from './types';
 
 // Older payloads cannot identify the exact file or store. Name only the
 // backend's configuration when the server supplies no file locators.
@@ -40,7 +41,7 @@ const SOURCE_KEY = {
   claude: 'settings.models.migration.source.claude',
   codex: 'settings.models.migration.source.codex',
   opencode: 'settings.models.migration.source.opencode',
-} as const satisfies Record<AgentBackend, TranslationKey>;
+} as const satisfies Record<NativeCliBackend, TranslationKey>;
 
 const sourcePaths = (item: MigrationItem): string[] => [...new Set(item.source_paths ?? [])];
 
@@ -462,14 +463,14 @@ export const MigrationDialog: React.FC<{
             {grouped.map((group) => (
               <div key={group.backend} className="flex flex-col gap-2">
                 <span className="px-1 font-mono text-[11px] font-semibold uppercase tracking-normal text-muted">
-                  {t(`settings.models.backends.${group.backend}`, { defaultValue: group.backend })}
+                  {getBackendUiMeta(group.backend).label}
                 </span>
                 {group.required.size > 1 && (
                   <p className="px-1 text-[12px] leading-relaxed text-muted">
                     {t('settings.models.migration.sharedFiles', {
                       backends: BACKEND_ORDER
                         .filter((backend) => group.required.has(backend))
-                        .map((backend) => t(`settings.models.backends.${backend}`))
+                        .map((backend) => getBackendUiMeta(backend).label)
                         .join(', '),
                     })}
                   </p>

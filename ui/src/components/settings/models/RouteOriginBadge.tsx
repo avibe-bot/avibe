@@ -1,6 +1,7 @@
 import * as React from 'react';
 import { useTranslation } from 'react-i18next';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
+import { getBackendUiMeta } from '@/lib/agentBackends';
 import type { AgentBackend, RouteOrigin } from './types';
 
 type RouteOriginBadgeProps = {
@@ -62,7 +63,7 @@ export function RouteOriginBadge({ origin, backend, interactive = true, open = f
         onCloseAutoFocus={(event) => event.preventDefault()}
         onEscapeKeyDown={(event) => { event.stopPropagation(); close(); }}
         onClick={(event) => event.stopPropagation()}
-      >{t(`settings.models.routing.help.${key}`, { backend: t(`settings.models.backends.${backend}`) })}</PopoverContent>
+      >{t(`settings.models.routing.help.${key}`, { backend: getBackendUiMeta(backend).label })}</PopoverContent>
     </Popover>
   );
 }

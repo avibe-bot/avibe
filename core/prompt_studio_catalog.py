@@ -8,6 +8,7 @@ import json
 import re
 from pathlib import Path
 from typing import Any, get_type_hints
+from modules.agents.catalog import AGENT_BACKENDS
 
 from markdown_it import MarkdownIt
 from pydantic import TypeAdapter, ValidationError
@@ -232,7 +233,7 @@ def render_prompt_context(request: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(request, dict) or set(request) - {"backend", "agent_instructions", "options"}:
         raise PromptRenderInputError("invalidContext")
     backend = request.get("backend")
-    if backend not in ("claude", "codex", "opencode"):
+    if backend not in AGENT_BACKENDS:
         raise PromptRenderInputError("invalidBackend")
     agent_instructions = request.get("agent_instructions", "")
     if not isinstance(agent_instructions, str):

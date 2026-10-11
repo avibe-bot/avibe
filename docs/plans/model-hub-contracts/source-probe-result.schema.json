@@ -9,7 +9,7 @@
   "properties": {
     "source_id": {"type": "string", "minLength": 1},
     "model_id": {"type": "string", "minLength": 1},
-    "protocol": {"enum": ["anthropic", "openai_responses", "openai_chat"]},
+    "protocol": {"enum": ["anthropic", "openai_responses", "openai_chat", "google"]},
     "reachable": {"type": "boolean"},
     "latency_ms": {"type": "integer", "minimum": 0},
     "error": {"type": ["string", "null"]}

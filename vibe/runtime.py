@@ -26,15 +26,7 @@ import psutil
 
 from config import paths
 from config.atomic_io import write_atomic
-from config.v2_config import (
-    AgentsConfig,
-    ClaudeConfig,
-    CodexConfig,
-    OpenCodeConfig,
-    RuntimeConfig,
-    SlackConfig,
-    V2Config,
-)
+from config.v2_config import V2Config
 from core.process_isolation import fingerprint_process_marker, isolated_subprocess_kwargs, processes_carrying_marker
 from vibe.log_sink import RUNTIME_LOG_MAX_BYTES, RUNTIME_LOG_RETAIN_BYTES
 
@@ -188,31 +180,13 @@ def ensure_dirs():
     paths.ensure_data_dirs()
 
 
-def default_config():
-    from config.v2_config import ModelHubConfig
-
-    work_dir = Path.home() / "work"
-    work_dir.mkdir(parents=True, exist_ok=True)
-    return V2Config(
-        mode="self_host",
-        version="v2",
-        slack=SlackConfig(bot_token="", app_token=""),
-        runtime=RuntimeConfig(default_cwd=str(work_dir)),
-        agents=AgentsConfig(
-            opencode=OpenCodeConfig(enabled=True, cli_path="opencode"),
-            claude=ClaudeConfig(enabled=True, cli_path="claude"),
-            codex=CodexConfig(enabled=False, cli_path="codex"),
-        ),
-        model_hub=ModelHubConfig(),
-    )
-
-
 def ensure_config():
     from storage.migrations import guard_source_checkout_default_state_bootstrap
 
     guard_source_checkout_default_state_bootstrap()
     config_path = paths.get_config_path()
     from config.v2_config import config_file_lock
+    from core.services import settings as settings_service
 
     # Create-if-absent under the cross-process file lock (#1458 stage
     # ③): the existence check and the seeding save are one atomic step,
@@ -221,8 +195,8 @@ def ensure_config():
     # and the write.
     with config_file_lock(config_path):
         if not config_path.exists():
-            default = default_config()
-            default.save(config_path)
+            # The same first-run shape the CLI seeds, whichever process starts first.
+            settings_service.default_config().save(config_path)
     return V2Config.load(config_path)
 
 

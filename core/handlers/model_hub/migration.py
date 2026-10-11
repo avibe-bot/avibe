@@ -11,9 +11,11 @@ import re
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
+from modules.agents.catalog import NATIVE_CLI_BACKENDS, NativeCliBackend, display_name_for_backend
 from typing import Any, Awaitable, Callable, Collection, Literal, Mapping, Optional, Protocol, cast
 
 from config.v2_config import (
+    MODEL_HUB_BACKENDS,
     ModelHubConfig,
     ModelHubModelConfig,
     ModelHubSourceConfig,
@@ -142,6 +144,10 @@ class MigrationHost(Protocol):
 
     def _save_config(self, config: ModelHubConfig) -> ModelHubConfig: ...
 
+    async def _seed_vibey(self, config: ModelHubConfig) -> bool: ...
+
+    async def _announce_vibey_seed(self) -> None: ...
+
     def _carry_agent_selections(self, config: ModelHubConfig, backend: Any) -> None: ...
 
     def _reconcile_native_auth(self, backends: tuple[str, ...]) -> None: ...
@@ -188,6 +194,7 @@ class MigrationHost(Protocol):
         self,
         config: ModelHubConfig,
         source: ModelHubSourceConfig,
+        backends: Collection[str] = MODEL_HUB_BACKENDS,
     ) -> None: ...
 
     def _added_to(self, source_id: str) -> list[dict]: ...
@@ -203,7 +210,7 @@ class NativeManualModel:
 class NativeMigrationItem:
     id: str
     source_id: str
-    backend: Literal["claude", "codex", "opencode"]
+    backend: NativeCliBackend
     kind: MigrationKind
     masked_detail: str
     proposed_action: MigrationAction
@@ -591,7 +598,7 @@ def _blocked_item(
         selected=False, notes_key=f"settings.models.migration.blocked.{reason}",
         vendor={"claude": "anthropic", "codex": "openai", "opencode": "opencode"}[backend],
         protocol="anthropic" if backend == "claude" else "openai_responses",
-        display_name={"claude": "Claude Code", "codex": "Codex", "opencode": "OpenCode"}[backend],
+        display_name=display_name_for_backend(backend),
         source_paths=source_paths, shell_variables=shell_variables,
         shell_auth_variables=shell_auth_variables, config_blocker=config_blocker,
     )
@@ -1861,6 +1868,14 @@ async def _prepare_takeover(
                 source = ModelHubSourceConfig.from_payload(replacement)
                 updated.sources = [source if value.id == source.id else value for value in updated.sources]
                 _ensure_takeover_placement(updated, source, item.backend)
+                # Now on the Hub, it is new to every backend its native CLI
+                # could not serve, OpenCode and Vibey among them: placed there
+                # like a new Source (a pending Vibey entry is seeded below
+                # instead). Where it already served, the order stays the user's.
+                host._apply_source_placement(updated, source, tuple(
+                    backend for backend in MODEL_HUB_BACKENDS
+                    if not updated.source_eligible_for_backend(existing, backend)
+                ))
             else:
                 updated.sources.append(source)
                 host._apply_source_placement(updated, source)
@@ -1873,6 +1888,9 @@ async def _prepare_takeover(
                         "store_backend": item.backend, "store_routing": item.native_store_routing or "",
                     } if item.native_store_revision else {}),
                 }
+        if updated.vibey_supply_pending:
+            # Once every Source of the batch is in place, reused identities too.
+            await host._seed_vibey(updated)
         backends = sorted({item.backend for item in [*(consented or selected), *retained_keys]})
         native_before = _native_auth_snapshot(host, tuple(backends))
         # Copy-only keeps the Avibe-saved native key; Hub launches shadow it.
@@ -2074,6 +2092,8 @@ async def _resume_takeover(
             # Save the decision without projecting staged grants into CPA.
             # sync_sources is a runtime write, not a config-only operation.
             host._save_config(updated)
+            if previous.vibey_supply_pending and not updated.vibey_supply_pending:
+                await host._announce_vibey_seed()
             host._engine_synced = False
             host._reconcile_native_auth(tuple(record["backends"]))
             # This durable marker precedes any credential exposure to CPA.
@@ -2262,7 +2282,7 @@ async def apply_native_migration(
             scan_native_configs, host.store.load(), mask_credential=mask_credential,
             home=host.migration_home,
             validate_base_url=validate_base_url,
-            legacy_auth=_native_auth_snapshot(host, ("claude", "codex", "opencode")),
+            legacy_auth=_native_auth_snapshot(host, tuple(sorted(NATIVE_CLI_BACKENDS))),
             project_roots=host.migration_project_roots(),
             clean_native_stores=(host.migration_journal.completed() or {}).get("clean_native_stores"),
             retained_native_ids=(host.migration_journal.completed() or {}).get("retained_native_ids"),
@@ -2292,7 +2312,7 @@ async def apply_native_migration(
                 item for item in await asyncio.to_thread(
                     scan_native_configs, host.store.load(), mask_credential=mask_credential,
                     home=host.migration_home, validate_base_url=validate_base_url,
-                    legacy_auth=_native_auth_snapshot(host, ("claude", "codex", "opencode")),
+                    legacy_auth=_native_auth_snapshot(host, tuple(sorted(NATIVE_CLI_BACKENDS))),
                     project_roots=host.migration_project_roots(),
                     clean_native_stores=(host.migration_journal.completed() or {}).get("clean_native_stores"),
                 )

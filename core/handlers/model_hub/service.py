@@ -17,6 +17,7 @@ from typing import Any, Awaitable, Callable, Iterable, Literal, Mapping, Optiona
 from sqlalchemy import func, select
 
 from config import paths
+from modules.agents.catalog import NATIVE_CLI_BACKENDS
 from config.v2_config import (
     CONFIG_LOCK,
     MODEL_HUB_BACKENDS,
@@ -38,6 +39,7 @@ from config.v2_config import (
     normalize_model_hub_base_url,
     normalize_model_hub_vendor_id,
     normalized_model_hub_override,
+    validate_model_hub_protocol_vendor,
     validate_model_hub_source_client_nonce,
 )
 from core.agent_auth_service import BackendLoginInProgressError
@@ -131,16 +133,19 @@ from .oauth import (
 from .pricing import VALUE_WINDOW_DAYS, PriceTable, load_price_table, quota_values
 from .quota import QuotaSourceRef, SubscriptionQuotaCache, SubscriptionQuotaError
 from .provenance import (
+    REQUEST_NONFALLBACK_TURN_OUTCOME,
     BoundedProvenanceStore,
     ENGINE_DOWN_TURN_OUTCOME,
     ExactHopBlocker,
+    HopOrigin,
+    ServedHopHeaderTooLarge,
     TurnOutcomeProjectionInput,
     TurnUpstreamFailure,
     exact_hop_blockers,
     no_candidate_decision,
     produce_turn_outcome,
 )
-from .request import ModelHubRequest
+from .request import ModelHubRequest, without_opaque_history
 from .reasoning_tiers import resolve_reasoning_tiers
 from .stream_wire import ProtocolSSEState
 from .resolver import (
@@ -170,7 +175,7 @@ from .usage import (
     local_usage_day,
 )
 
-CONTRACT_VERSION = 10
+CONTRACT_VERSION = 11
 
 
 def seeded_source_name(vendor: str) -> str:
@@ -272,8 +277,8 @@ _MODELS_DEV_CANDIDATE_FIELDS = (
 )
 
 
-AGENT_CHAIN_CONTRACT_VERSION = 10
-PROBE_RESULT_CONTRACT_VERSION = 10
+AGENT_CHAIN_CONTRACT_VERSION = 11
+PROBE_RESULT_CONTRACT_VERSION = 11
 _SOURCE_DISCOVERY_TIMEOUT_SECONDS = 15
 _SOURCE_PROBE_TIMEOUT_SECONDS = 60
 # Background inventory refresh. The first tick doubles as the startup delay, so
@@ -380,6 +385,7 @@ class ModelHubError(Exception):
         blockers: Iterable[ExactHopBlocker] = (),
         turn_outcome: TurnOutcomeProjectionInput | None = None,
         local_error_detail: str | None = None,
+        origin: HopOrigin | None = None,
     ):
         detail_key = detail or f"modelHub.errors.{code}"
         super().__init__(detail_key)
@@ -391,6 +397,9 @@ class ModelHubError(Exception):
         self.blockers = tuple(blockers)
         self.turn_outcome = turn_outcome
         self.local_error_detail = local_error_detail
+        # Only surfaced upstream responses carry an admitted, immutable origin.
+        # Local refusals/exhaustion must not inherit the last attempted hop.
+        self.origin = origin
 
 
 def turn_refusal(error: BaseException | None) -> TurnOutcomeProjectionInput | None:
@@ -632,6 +641,34 @@ class _InvocationPlanChanged(Exception):
     """No transport was admitted; recompute the remaining effective route."""
 
 
+class _InvocationUnsupported(_InvocationPlanChanged):
+    """A request-specific transport limitation, not a Source health failure."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+def _google_admission_skip_reason(
+    frontend_protocol: str | None,
+    source_protocol: str,
+    model_id: str,
+    stream: bool,
+) -> str | None:
+    """Pinned-engine facts; callers explicitly own where refusal applies."""
+    if frontend_protocol != "google":
+        return None
+    # Pinned CPA splits the decoded action on every colon; escaping cannot
+    # preserve a model colon through that parser.
+    if ":" in model_id:
+        return "google_model_path_unsupported"
+    # CPA c404af96 omits finishReason on its Responses -> Gemini
+    # response.completed conversion. Usage/EOF cannot supply that terminal.
+    if stream and source_protocol == "openai_responses":
+        return "google_stream_responses_unsupported"
+    return None
+
+
 class _RecoveryWindowClosed(Exception):
     """The request may finish its admitted inference, but cannot start another."""
 
@@ -649,6 +686,7 @@ class ResolvedInvocation:
     credential_ref: Optional[str] = None
     settlement_generation: Optional[int] = None
     verification_pending: Optional[str] = None
+    origin: HopOrigin | None = None
 
 
 @dataclass(frozen=True)
@@ -671,6 +709,7 @@ AttemptObserver = Callable[
         Optional[ResolutionDecision],
         tuple[str, ...],
         tuple[str, ...],
+        Optional[HopOrigin],
     ],
     None,
 ]
@@ -964,7 +1003,7 @@ def _runtime_payload(status: EngineStatus, *, enabled: bool) -> dict:
 
     manager = EngineRuntimeManager()
     return {
-        "contract_version": 10,
+        "contract_version": 11,
         "enabled": enabled,
         "host_platform": status.host_platform or manager.host_platform(),
         "manifest": manager.contract_manifest(),
@@ -1059,6 +1098,9 @@ class ModelHubService:
         named_agents_override: Optional[
             Callable[[BackendName], list[tuple[str, Optional[str]]]]
         ] = None,
+        builtin_agent_models_override: Optional[
+            Callable[[], list[tuple[BackendName, str]]]
+        ] = None,
         cli_present_override: Optional[Callable[[BackendName], bool]] = None,
         cli_presence_refresh: Optional[
             Callable[[bool, tuple[BackendName, ...] | None], None]
@@ -1109,6 +1151,9 @@ class ModelHubService:
         self.requested_model_override = requested_model_override
         self.selected_agent_override = selected_agent_override
         self.named_agents_override = named_agents_override
+        # The built-in Agents' models for Vibey's starting supply; the
+        # controller owns those Agent rows.
+        self.builtin_agent_models_override = builtin_agent_models_override
         self.cli_present_override = cli_present_override
         self.cli_presence_refresh = cli_presence_refresh
         self.backend_catalog_changed = backend_catalog_changed
@@ -1760,7 +1805,7 @@ class ModelHubService:
         except (TakeoverStateError, OSError):
             # Unknown recovery state cannot authorize any native credential
             # writer or native launch. Controller recovery preserves this gate.
-            self.migration_blocked_backends.update(MODEL_HUB_BACKENDS)
+            self.migration_blocked_backends.update(NATIVE_CLI_BACKENDS)
             raise ModelHubError("migration_item_conflict", status=409) from None
         task = self._runtime_resume_task
         if task is None or task.done():
@@ -1975,13 +2020,20 @@ class ModelHubService:
             if pinned_protocol is not None:
                 return (pinned_protocol,)
             if vendor == "custom":
-                return SOURCE_PROTOCOLS
+                # Google is explicit API/config admission in v11, not a new
+                # automatic probe or picker option. Its generation path needs
+                # a model, which non-inference observation must not invent.
+                return tuple(protocol for protocol in SOURCE_PROTOCOLS if protocol != "google")
             raise ModelHubError("discovery_failed")
         requested = payload.get("protocol")
         if not isinstance(requested, str) or requested not in SOURCE_PROTOCOLS:
             raise ModelHubError("discovery_failed")
         if pinned_protocol is not None and requested != pinned_protocol:
             raise ModelHubError("discovery_failed")
+        try:
+            validate_model_hub_protocol_vendor(vendor, requested)
+        except ValueError:
+            raise ModelHubError("discovery_failed") from None
         return (requested,)
 
     @staticmethod
@@ -2510,21 +2562,30 @@ class ModelHubService:
                 number += 1
         config.sources.append(source)
         self._apply_source_placement(config, source)
+        seeded = config.vibey_supply_pending and await self._seed_vibey(config)
         await self._commit_synced(previous, config)
+        if seeded:
+            await self._announce_vibey_seed()
 
     def _apply_source_placement(
         self,
         config: ModelHubConfig,
         source: ModelHubSourceConfig,
+        backends: Iterable[str] = MODEL_HUB_BACKENDS,
     ) -> None:
         """Add a new Source to eligible backend defaults without editing overrides.
 
         A subscription serves a fixed catalog, so it joins only the backends whose
-        menu that catalog serves (OpenCode reaches every vendor), ahead of the API
-        keys there. API keys stay open to every eligible backend, appended.
+        menu that catalog serves (OpenCode and Vibey reach every
+        vendor), ahead of the API keys there. API keys stay open to every
+        eligible backend, appended.
         """
 
-        for backend in MODEL_HUB_BACKENDS:
+        for backend in backends:
+            if backend == "vibey" and config.vibey_supply_pending:
+                # Its seed places every Source at once, once the mutation's
+                # Sources are final (see _seed_vibey).
+                continue
             agent = config.agents[backend]
             if not self._eligible_for_agent(source, backend) or source.id in agent.sources.order:
                 continue
@@ -2550,9 +2611,13 @@ class ModelHubService:
         source: ModelHubSourceConfig,
         backend: BackendName,
     ) -> bool:
-        if backend == "opencode" or _NATIVE_VENDOR_BACKENDS.get(source.vendor) == backend:
-            # The vendor's own Agent serves its subscription even when the
-            # catalog is ahead of the backend's menu.
+        if (
+            backend not in _NATIVE_VENDOR_BACKENDS.values()
+            or _NATIVE_VENDOR_BACKENDS.get(source.vendor) == backend
+        ):
+            # A backend that is no one vendor's client (OpenCode, Vibey)
+            # reaches every vendor, and the vendor's own Agent serves its
+            # subscription even when the catalog is ahead of the backend's menu.
             return True
         if not agent.models or not any(not model.retired for model in source.models):
             return False
@@ -3570,7 +3635,7 @@ class ModelHubService:
                     vendor=vendor,
                     display_name=display_name,
                     protocol=cast(
-                        Literal["anthropic", "openai_responses", "openai_chat"],
+                        Literal["anthropic", "openai_responses", "openai_chat", "google"],
                         protocol_order[0],
                     ),
                     base_url=base_url,
@@ -3629,7 +3694,7 @@ class ModelHubService:
                 self._mark_source_unverified(source)
             if observation is not None:
                 source.protocol = cast(
-                    Literal["anthropic", "openai_responses", "openai_chat"],
+                    Literal["anthropic", "openai_responses", "openai_chat", "google"],
                     observation.protocol,
                 )
             if observation is not None and observation.discovery is ObservationDiscovery.SUCCEEDED:
@@ -5128,6 +5193,7 @@ class ModelHubService:
         # Suppliers speak first, models.dev fills what they left unsaid, and
         # an unstated ladder falls back to the tiers the backend's request
         # protocol accepts, unless models.dev says the model cannot reason.
+        # Vibey has no native protocol pin and must not receive guessed tiers.
         enrichment = (
             {field: match[field] for field in _MODELS_DEV_CANDIDATE_FIELDS}
             if match is not None
@@ -5140,7 +5206,7 @@ class ModelHubService:
         display_name = display_name or (match or {}).get("display_name")
         if not reasoning_efforts and match is not None:
             reasoning_efforts = list(match["reasoning_efforts"])
-        if not reasoning_efforts and enrichment.get("supports_reasoning") is not False:
+        if backend != "vibey" and not reasoning_efforts and enrichment.get("supports_reasoning") is not False:
             request_protocol = _FIXED_BACKEND_PROTOCOLS.get(
                 backend
             ) or native_protocol_for_model_id(model_id)
@@ -5309,7 +5375,7 @@ class ModelHubService:
         live_recovery = self.recovery.annotations(config)
         return [
             self._agent_payload(config, config.agents[backend], live_recovery=live_recovery)
-            for backend in ("claude", "codex", "opencode")
+            for backend in MODEL_HUB_BACKENDS
         ]
 
     def refresh_cli_presence(
@@ -5326,6 +5392,8 @@ class ModelHubService:
             logger.warning("Model Hub CLI presence refresh failed", exc_info=True)
 
     def _cli_present(self, backend: BackendName) -> bool:
+        if backend == "vibey":
+            return False
         if self.cli_present_override is None:
             return False
         try:
@@ -5414,8 +5482,187 @@ class ModelHubService:
                 checked=[model.id for model in agent.models],
             )
 
+    async def _seed_vibey(self, config: ModelHubConfig) -> bool:
+        """Give a pending Vibey entry its starting supply, in place; whether it took.
+
+        Its Sources are every existing one this backend may use, placed as a
+        newly created Source would be. Its models are the built-in Agents'
+        selections, in order, that one of those Sources lists, each added as the
+        picker adds a provider model; none qualifying leaves the list empty
+        rather than picking one. The seed counts only once it has placed a
+        Source: until then the entry stays pending, so the first Source the user
+        adds still brings every Source and the starting models with it. Each
+        mutation that adds Sources seeds after its Sources are final, so one
+        that adds several seeds from all of them.
+        """
+
+        agent = config.agents["vibey"]
+        if not any(self._eligible_for_agent(source, "vibey") for source in config.sources):
+            return False
+        # Seeded rows keep the models.dev metadata they are written with, so a
+        # seed with no copy cached fetches one in the foreground, bounded; a
+        # foreground fetch already running (the startup warm-up) is shared.
+        await asyncio.to_thread(self._ensure_models_dev_copy)
+        config.vibey_supply_pending = False
+        for source in config.sources:
+            self._apply_source_placement(config, source, ("vibey",))
+        # A starting model is one a placed Source's own inventory lists; a
+        # route, passthrough included, is no evidence.
+        listed = {
+            model.id
+            for source in config.sources
+            if source.id in agent.sources.order
+            for model in source.models
+            if not model.retired
+        }
+        selections = self.builtin_agent_models_override() if self.builtin_agent_models_override else ()
+        model_ids: list[str] = []
+        for backend, selected in selections:
+            served = next(
+                (
+                    candidate
+                    for candidate in (
+                        opencode_menu_model_candidates(selected)
+                        if backend == "opencode"
+                        else (selected,)
+                    )
+                    if candidate in listed
+                ),
+                None,
+            )
+            if served is not None and served not in model_ids:
+                model_ids.append(served)
+        described = self._models_dev_descriptions(model_ids)
+        rows = []
+        for model_id in model_ids:
+            candidate = self._provider_candidate(config, "vibey", model_id, described.get(model_id))
+            if candidate is not None:
+                rows.append(candidate[0])
+        agent.models = rows
+        return True
+
+    async def _announce_vibey_seed(self) -> None:
+        """Announce a committed seed as the Vibey catalog change it is.
+
+        Like every catalog mutation it ends in ``_refresh_backend_catalog``,
+        whose owner reconciles the built-in Vibey Agent's model. The seed is already
+        committed, so a failed announcement is logged; the next start reconciles.
+        """
+
+        try:
+            await self._refresh_backend_catalog("vibey")
+        except Exception:  # noqa: BLE001 - the committed supply stands
+            logger.warning("Model Hub: Vibey's seeded catalog was not announced", exc_info=True)
+
+    async def seed_vibey_supply(self) -> list[str]:
+        """Seed a pending Vibey entry from the Sources that existed at startup.
+
+        Source creation seeds a pending entry in its own mutation; this covers
+        Sources that predate Vibey. Returns the seeded model ids.
+        """
+
+        if not self.store.load().vibey_supply_pending:
+            return []
+        # Seeded rows are written once and then kept, so a first models.dev copy
+        # is worth one bounded foreground fetch, off the loop and outside the
+        # lock. Taken even with no Source yet, so a fresh install's first
+        # Source usually finds it.
+        await asyncio.to_thread(self._ensure_models_dev_copy)
+        async with self._mutation_lock:
+            previous = self.store.load()
+            if not previous.vibey_supply_pending:
+                return []
+            config = self._clone_config(previous)
+            if not await self._seed_vibey(config):
+                return []
+            try:
+                # An engine that is not up must not undo the seed: the config is
+                # saved first, and the engine takes it on its next demand.
+                await self._commit_synced(previous, config, rollback_on_sync_failure=False)
+            except ModelHubError:
+                if self.store.load().vibey_supply_pending:
+                    raise
+        await self._announce_vibey_seed()
+        return [model.id for model in config.agents["vibey"].models]
+
+    def _ensure_models_dev_copy(self) -> None:
+        """Fetch models.dev in the foreground, bounded, when no copy is cached.
+
+        A foreground fetch already running is shared through the catalog's cache
+        lock; a background refresh is not waited for. A failure leaves no copy.
+        """
+
+        from vibe.models_dev_catalog import load_models_dev_catalog
+
+        try:
+            if not self.models_dev_catalog():
+                load_models_dev_catalog()
+        except Exception as exc:  # noqa: BLE001 - optional metadata never fails a seed
+            logger.info("Vibey seed has no models.dev metadata: %s", type(exc).__name__)
+
+    @staticmethod
+    def _rows_lacking_models_dev_limits(
+        config: ModelHubConfig,
+    ) -> list[tuple[BackendName, ModelHubBackendModelConfig]]:
+        return [
+            (backend, model)
+            for backend in MODEL_HUB_BACKENDS
+            for model in config.agents[backend].models
+            if model.origin == "provider"
+            and model.models_dev_id is None
+            and (model.context_window is None or model.max_output_tokens is None)
+        ]
+
+    async def backfill_models_dev_limits(self) -> list[BackendName]:
+        """Give provider rows written with no models.dev copy cached the limits one states.
+
+        A provider row takes models.dev's description as it is written (see
+        ``_provider_candidate``). Written before any copy was cached, by the
+        picker or a seed, it has none, and an Agent budgets it with default
+        limits. Once a copy names its id exactly, the row gets each limit it
+        lacks and the ``models_dev_id`` they came from. A limit already set
+        stands, and a row models.dev has described is not described again, so
+        a limit its user cleared stays cleared. Built-in rows are their CLI's
+        description and manual rows their user's; neither is filled. Returns
+        the backends whose catalog changed.
+        """
+
+        wanted = {model.id for _backend, model in self._rows_lacking_models_dev_limits(self.store.load())}
+        if not wanted:
+            return []
+        # The copy is parsed off the loop and outside the lock; the rows are
+        # read again under it.
+        described = await asyncio.to_thread(self._models_dev_descriptions, sorted(wanted))
+        if not described:
+            return []
+        async with self._mutation_lock:
+            if not self._reconcile_store_writable():
+                return []
+            previous = self.store.load()
+            config = self._clone_config(previous)
+            changed: list[BackendName] = []
+            for backend, model in self._rows_lacking_models_dev_limits(config):
+                match = described.get(model.id)
+                if match is None:
+                    continue
+                filled = False
+                for field in ("context_window", "max_output_tokens"):
+                    if getattr(model, field) is None and match[field] is not None:
+                        setattr(model, field, match[field])
+                        filled = True
+                if filled:
+                    model.models_dev_id = match["models_dev_id"]
+                    if backend not in changed:
+                        changed.append(backend)
+            if not changed:
+                return []
+            await self._commit_synced(previous, config)
+            for backend in changed:
+                await self._refresh_backend_catalog(backend)
+            return changed
+
     async def set_agent_mode(self, backend: str, mode: object) -> dict:
-        if mode not in {"hub", "direct"}:
+        if mode not in {"hub", "direct"} or (backend == "vibey" and mode != "hub"):
             raise ModelHubError("mode_switch_blocked")
 
         # A mode is a launch input like any other: running work finishes in the
@@ -6521,6 +6768,11 @@ class ModelHubService:
                 "max_output_tokens": output_tokens,
                 "input": "ping",
             }
+        elif request_protocol == "google":
+            payload = {
+                "contents": [{"role": "user", "parts": [{"text": "ping"}]}],
+                "generationConfig": {"maxOutputTokens": output_tokens},
+            }
         else:
             payload = {
                 "model": model_id,
@@ -6549,6 +6801,11 @@ class ModelHubService:
                 or not any(model.id == model_id and not model.retired for model in source.models)
             ):
                 raise ModelHubError("mapping_target_unavailable", status=409)
+            # Saved-Source tests are buffered and speak the Source protocol.
+            # Check both initial selection and the locked post-prepare snapshot.
+            reason = _google_admission_skip_reason(source.protocol, source.protocol, model_id, False)
+            if reason is not None:
+                raise ModelHubError(reason, status=422)
             return source
 
         handle = None
@@ -6769,6 +7026,10 @@ class ModelHubService:
         while True:
             try:
                 return await self._probe_agent_once(backend, model_id)
+            except _InvocationUnsupported as skipped:
+                # Explicit probes select one hop, not a fallback turn. A
+                # permanent local limitation cannot restart as route churn.
+                raise ModelHubError(skipped.reason, status=422) from None
             except _InvocationPlanChanged:
                 continue
 
@@ -6835,6 +7096,10 @@ class ModelHubService:
                 ),
             }
 
+        if backend == "vibey":
+            reason = _google_admission_skip_reason(source.protocol, source.protocol, resolved_model, False)
+            if reason is not None:
+                raise _InvocationUnsupported(reason)
         await self._prepare_engine_for_demand()
         started_at = time.monotonic()
         settlement_generation = None
@@ -7536,6 +7801,7 @@ class ModelHubService:
                     backend
                     for backend, agent in previous.agents.items()
                     if agent.mode == "hub"
+                    and (backend != "vibey" or agent.models)
                 )
                 if hub_backends:
                     raise ModelHubError(
@@ -7577,7 +7843,7 @@ class ModelHubService:
                     clean_native_stores=(self.migration_journal.completed() or {}).get("clean_native_stores"),
                     retained_native_ids=(self.migration_journal.completed() or {}).get("retained_native_ids"),
                     legacy_auth=(
-                        self.store.native_auth_snapshot(MODEL_HUB_BACKENDS)
+                        self.store.native_auth_snapshot(tuple(sorted(NATIVE_CLI_BACKENDS)))
                         if isinstance(self.store, V2ModelHubConfigStore) else None
                     ),
                 )
@@ -7631,7 +7897,7 @@ class ModelHubService:
             try:
                 pending = self.migration_journal.load()
             except (TakeoverStateError, OSError):
-                self.migration_blocked_backends.update(MODEL_HUB_BACKENDS)
+                self.migration_blocked_backends.update(NATIVE_CLI_BACKENDS)
                 raise ModelHubError("migration_configuration_blocked", status=409) from None
             if pending is not None and pending["phase"] == "exposed":
                 raise ModelHubError("migration_recovery_pending", status=409) from None
@@ -8183,6 +8449,7 @@ class ModelHubService:
         stream: bool,
         backend: BackendName,
         excluded_source_ids: set[str],
+        excluded_hops: set[tuple[str, str]] | None = None,
         supply_channel: Literal["hub"] | None = None,
         exact_retry: bool = False,
         on_admitted: Callable[[int], None] | None = None,
@@ -8213,6 +8480,7 @@ class ModelHubService:
                 candidates = [
                     hop for hop in resolution.candidate_hops
                     if hop.source_id not in excluded_source_ids
+                    and (hop.source_id, hop.model_id) not in (excluded_hops or ())
                 ]
                 candidate = next(
                     (
@@ -8227,6 +8495,23 @@ class ModelHubService:
                     or candidate.model_id != model_id
                 ):
                     raise _InvocationPlanChanged
+                attempt_request = request
+                if backend == "vibey":
+                    reason = _google_admission_skip_reason(
+                        getattr(request, "protocol", None), source.protocol, model_id, stream,
+                    )
+                    if reason is not None:
+                        raise _InvocationUnsupported(reason)
+                    # Validate the exact rechecked admission snapshot for every
+                    # hop, including fallback/refresh. Persisted ids stay intact;
+                    # refusal must precede a transport, attempt, or recovery slot.
+                    try:
+                        origin = HopOrigin(source.vendor, source.protocol, model_id)
+                        origin.response_headers()
+                    except ServedHopHeaderTooLarge:
+                        raise ModelHubError("served_hop_too_large", status=422) from None
+                    if getattr(request, "primary_origin", None) != origin:
+                        attempt_request = without_opaque_history(request)
                 if self._engine_synced:
                     if recovery_request is not None and recovery_request.expired:
                         raise _RecoveryWindowClosed
@@ -8236,7 +8521,7 @@ class ModelHubService:
                     # Lock order matches config sync. The adapter hands exclusion
                     # back only after owning the transport that sync must drain.
                     return await self._engine_call(self.adapter.invoke(
-                        source.id, model_id, request, stream, backend, on_admitted=admitted,
+                        source.id, model_id, attempt_request, stream, backend, on_admitted=admitted,
                     ))
             except BaseException:
                 self.recovery.release(source.id, generation)
@@ -8262,6 +8547,7 @@ class ModelHubService:
         backend: str,
         requested_model_id: str,
         excluded_source_ids: set[str],
+        excluded_hops: set[tuple[str, str]] | None = None,
         supply_channel: Literal["hub"] | None = None,
         exact_retry: bool = False,
         on_admitted: Callable[[int], None] | None = None,
@@ -8307,6 +8593,7 @@ class ModelHubService:
                     stream=stream,
                     backend=cast(BackendName, backend),
                     excluded_source_ids=excluded_source_ids,
+                    excluded_hops=excluded_hops,
                     supply_channel=supply_channel,
                     exact_retry=exact_retry,
                     on_admitted=admitted,
@@ -8381,6 +8668,7 @@ class ModelHubService:
                 decision,
                 (),
                 (),
+                HopOrigin(source.vendor, source.protocol, source_model_id) if backend == "vibey" else None,
             )
         if decision.action == "fallback" or (
             decision.action == "surface"
@@ -8511,10 +8799,13 @@ class ModelHubService:
         attempt_observer: Optional[AttemptObserver] = None,
         recovery_request: RecoveryRequest | None = None,
     ) -> ResolvedInvocation:
-        if backend not in {"claude", "codex", "opencode"}:
+        if backend not in MODEL_HUB_BACKENDS:
             raise ModelHubError("mapping_target_unavailable")
         engine_prepared = False
-        if self.revocations.list():
+        # An entirely unsupported Google request must not reconcile the engine
+        # or custody. Supported hops drain the journal in demand preparation.
+        google_preflight = backend == "vibey" and getattr(request, "protocol", None) == "google"
+        if not google_preflight and self.revocations.list():
             try:
                 await self._ensure_engine_synced()
             except ModelHubError:
@@ -8571,6 +8862,8 @@ class ModelHubService:
         non_retryable_failure = False
         attempted = False
         globally_blocked_source_ids: set[str] = set()
+        unsupported_hops: set[tuple[str, str]] = set()
+        unsupported_reason: str | None = None
         while True:
             async with self._mutation_lock:
                 if recovery_request is not None and recovery_request.expired:
@@ -8581,7 +8874,11 @@ class ModelHubService:
                     config, cast(BackendName, backend), model_id, supply_channel,
                 )
                 inspection = next(
-                    (hop for hop in resolution.candidate_hops if hop.source_id not in globally_blocked_source_ids),
+                    (
+                        hop for hop in resolution.candidate_hops
+                        if hop.source_id not in globally_blocked_source_ids
+                        and (hop.source_id, hop.model_id) not in unsupported_hops
+                    ),
                     None,
                 )
             if inspection is None:
@@ -8591,6 +8888,7 @@ class ModelHubService:
             if source is None or target_model is None:
                 raise AssertionError("runnable hop must have an exact identity")
             verification_pending = source.verification_pending
+            origin = HopOrigin(source.vendor, source.protocol, target_model) if backend == "vibey" else None
             if source.supply_channel == "native_cli":
                 self._emit_switch(
                     agent=event_agent,
@@ -8609,8 +8907,6 @@ class ModelHubService:
                     outcome=None,
                     supply_channel="native_cli",
                 )
-            await self._prepare_engine_for_demand(already_synced=engine_prepared)
-            engine_prepared = True
             settlement_generation = None
 
             def admitted(generation: int) -> None:
@@ -8631,9 +8927,18 @@ class ModelHubService:
                         None,
                         (),
                         (),
+                        origin,
                     )
 
             try:
+                if backend == "vibey":
+                    reason = _google_admission_skip_reason(
+                        getattr(request, "protocol", None), source.protocol, target_model, stream,
+                    )
+                    if reason is not None:
+                        raise _InvocationUnsupported(reason)
+                await self._prepare_engine_for_demand(already_synced=engine_prepared)
+                engine_prepared = True
                 handle, outcome, cancelled = await self._invoke(
                     source=source,
                     model_id=target_model,
@@ -8642,10 +8947,19 @@ class ModelHubService:
                     backend=backend,
                     requested_model_id=model_id,
                     excluded_source_ids=globally_blocked_source_ids,
+                    excluded_hops=unsupported_hops,
                     supply_channel=supply_channel,
                     on_admitted=admitted,
                     recovery_request=recovery_request,
                 )
+            except _InvocationUnsupported as skipped:
+                unsupported_reason = skipped.reason
+                unsupported_hops.add((source.id, target_model))
+                logger.info(
+                    "Model Hub skipped unsupported hop: %s", skipped.reason,
+                    extra={"reason": skipped.reason, "source_id": source.id, "model_id": target_model},
+                )
+                continue
             except _InvocationPlanChanged:
                 continue
             except _RecoveryWindowClosed:
@@ -8673,6 +8987,7 @@ class ModelHubService:
                     credential_ref=source.credential_ref,
                     settlement_generation=settlement_generation,
                     verification_pending=verification_pending,
+                    origin=origin,
                 )
             decision = await self._classify_source_outcome(source, outcome)
             if cancelled is not None:
@@ -8700,6 +9015,7 @@ class ModelHubService:
                         backend=backend,
                         requested_model_id=model_id,
                         excluded_source_ids=globally_blocked_source_ids,
+                        excluded_hops=unsupported_hops,
                         supply_channel=supply_channel,
                         exact_retry=True,
                         on_admitted=admitted,
@@ -8707,7 +9023,7 @@ class ModelHubService:
                     )
                 except _InvocationPlanChanged:
                     if attempt_observer is not None:
-                        attempt_observer(source.id, target_model, "hub", False, outcome, decision, (), ())
+                        attempt_observer(source.id, target_model, "hub", False, outcome, decision, (), (), origin)
                     continue
                 except _RecoveryWindowClosed:
                     window_closed = not non_retryable_failure
@@ -8734,6 +9050,7 @@ class ModelHubService:
                         credential_ref=source.credential_ref,
                         settlement_generation=settlement_generation,
                         verification_pending=verification_pending,
+                        origin=origin,
                     )
                 decision = classify_outcome(outcome, refresh_attempted=True)
                 if cancelled is not None:
@@ -8758,6 +9075,7 @@ class ModelHubService:
                     decision,
                     (),
                     (),
+                    origin,
                 )
             if decision.action == "return":
                 if self._verified_recovery_outcome(outcome):
@@ -8786,6 +9104,7 @@ class ModelHubService:
                     credential_ref=source.credential_ref,
                     settlement_generation=settlement_generation,
                     verification_pending=verification_pending,
+                    origin=origin,
                 )
             if decision.action == "surface":
                 self.recovery.release(source.id, settlement_generation)
@@ -8802,6 +9121,11 @@ class ModelHubService:
                     )
                 raise ModelHubError(
                     decision.error_code or outcome.error_code or "engine_down",
+                    origin=(
+                        origin if settlement_generation is not None
+                        and terminal_outcome_category(outcome, decision) != "engine_down"
+                        else None
+                    ),
                     local_error_detail=format_os_errno(outcome.os_errno),
                     status=decision.downstream_status or (
                         outcome.http_status
@@ -8847,6 +9171,12 @@ class ModelHubService:
                 status=502,
                 turn_outcome=ENGINE_DOWN_TURN_OUTCOME,
                 local_error_detail=format_os_errno(outcome.os_errno),
+            )
+        if unsupported_reason is not None and failed_source is None:
+            # No upstream attempt exists. Exhaustion would invent a failed
+            # attempt (and a retryable supply state) for a local limitation.
+            raise ModelHubError(
+                unsupported_reason, status=422, turn_outcome=REQUEST_NONFALLBACK_TURN_OUTCOME,
             )
         final_config, final_resolution = self._inspect_terminal_chain(
             backend=cast(BackendName, backend),
@@ -8973,6 +9303,9 @@ def create_default_service(
     named_agents_override: Optional[
         Callable[[BackendName], list[tuple[str, Optional[str]]]]
     ] = None,
+    builtin_agent_models_override: Optional[
+        Callable[[], list[tuple[BackendName, str]]]
+    ] = None,
     cli_present_override: Optional[Callable[[BackendName], bool]] = None,
     cli_presence_refresh: Optional[
         Callable[[bool, tuple[BackendName, ...] | None], None]
@@ -9033,6 +9366,7 @@ def create_default_service(
         requested_model_override=requested_model_override,
         selected_agent_override=selected_agent_override,
         named_agents_override=named_agents_override,
+        builtin_agent_models_override=builtin_agent_models_override,
         cli_present_override=cli_present_override,
         cli_presence_refresh=cli_presence_refresh,
         backend_catalog_changed=backend_catalog_changed,

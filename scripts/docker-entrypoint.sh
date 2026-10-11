@@ -167,14 +167,11 @@ ensure_service_pid() {
     exit "$service_exit_code"
 }
 
-# Ensure runtime directories exist and seed default config if missing
+# Ensure runtime directories exist and seed the shared first-run config if missing
 python -c "
-from config.paths import ensure_data_dirs, get_config_path
-ensure_data_dirs()
-config_path = get_config_path()
-if not config_path.exists():
-    from vibe.runtime import default_config
-    default_config().save(config_path)
+from vibe import runtime
+runtime.ensure_dirs()
+runtime.ensure_config()
 "
 
 MODE="${1:-ui}"

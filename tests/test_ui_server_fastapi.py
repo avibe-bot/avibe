@@ -2096,6 +2096,55 @@ def test_config_routes_redact_platform_and_gateway_secrets(monkeypatch, tmp_path
         assert "client_secret" not in data["gateway"]
 
 
+@pytest.mark.parametrize(
+    ("hub_switch", "gateway_enabled", "blocks"),
+    [("1", True, {}), ("1", False, {"vibey": "gateway_off"}), ("0", True, {"vibey": "hub_disabled"})],
+)
+def test_config_api_carries_why_the_model_hub_leaves_a_backend_no_model(monkeypatch, tmp_path, hub_switch, gateway_enabled, blocks):
+    """The Backends page shows the server's answer; it keeps no rule of its own."""
+    from modules.agents.catalog import NATIVE_CLI_BACKENDS
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    monkeypatch.setenv("VIBE_MODEL_HUB_ENABLED", hub_switch)
+    from vibe import api
+
+    config = api.save_config(_full_config_payload())
+    # The gateway turns off only while no native backend is in Hub mode (``runtime_in_use``).
+    for backend in NATIVE_CLI_BACKENDS:
+        config.model_hub.agents[backend].mode = "direct"
+    config.model_hub.enabled = gateway_enabled
+    config.save()
+
+    assert app.test_client().get("/api/config").get_json()["agent_supply_blocks"] == blocks
+
+
+def test_a_request_to_turn_off_the_built_in_vibey_agent_fails_with_a_client_error(monkeypatch, tmp_path):
+    """It has no switch: a request to turn it off is refused instead of silently ignored."""
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    from core.vibe_agents import VibeAgentStore
+    from vibe import api
+
+    api.save_config(_full_config_payload())
+    store = VibeAgentStore()
+    try:
+        store.ensure_builtin_default_agents([])
+    finally:
+        store.close()
+    client = app.test_client()
+
+    response = client.patch("/api/agents/vibey", json={"enabled": False}, headers=csrf_headers(client))
+
+    assert response.status_code == 400
+    payload = response.get_json()
+    assert payload["ok"] is False
+    assert payload["code"] == "agent_always_enabled" and payload["message"]
+    store = VibeAgentStore()
+    try:
+        assert store.require("vibey").enabled is True
+    finally:
+        store.close()
+
+
 def test_config_post_hot_reconciles_platform_enablement(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     from vibe import api

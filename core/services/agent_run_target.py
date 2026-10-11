@@ -26,6 +26,7 @@ from core.message_context import (
 )
 from config.v2_settings import make_thread_native_id
 from modules.im import MessageContext
+from modules.agents.catalog import AGENT_BACKENDS
 from storage.agent_session_rows import (
     SESSION_PROJECT_BASE_METADATA_KEY,
     create_agent_session_row,
@@ -546,7 +547,7 @@ def _agent_target_from_vibe_agent(agent: Any, *, scope_row: Optional[dict[str, A
 
 def _supported_backend(value: Any) -> Optional[str]:
     backend = _optional_str(value)
-    if backend in {"opencode", "claude", "codex"}:
+    if backend in AGENT_BACKENDS:
         return backend
     return None
 

@@ -68,6 +68,7 @@ def _stub_runtime_prepare_dependencies(
     monkeypatch.setattr(cli, "_ensure_avault_during_prepare", fake_avault)
     monkeypatch.setattr(cli, "_ensure_tmux_during_prepare", fake_tmux)
     monkeypatch.setattr(cli, "_ensure_git_during_prepare", fake_git)
+    monkeypatch.setattr(cli, "_ensure_ripgrep_during_prepare", lambda **_kwargs: {"ok": True})
     return calls
 
 

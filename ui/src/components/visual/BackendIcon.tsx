@@ -73,3 +73,13 @@ export const BackendIcon: React.FC<BackendIconProps> = ({
     </span>
   );
 };
+
+/** The glyph that stands for one of the backend's Agents, drawn like a lucide icon. */
+export const BackendAvatar: React.FC<{ backend: BackendId; size?: number; className?: string }> = ({
+  backend,
+  size,
+  className,
+}) => {
+  const Avatar = getBackendUiMeta(backend).Avatar;
+  return <Avatar size={size} className={className} />;
+};

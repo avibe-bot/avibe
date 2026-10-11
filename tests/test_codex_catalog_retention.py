@@ -315,7 +315,7 @@ async def test_agent_launch_keeps_pin_across_invalidation_and_reuses_transport(m
     # An extra argument must not override the path whose lifetime we protect.
     value.codex_config.extra_args = ["-c", 'model_catalog_json="/obsolete/catalog.json"']
     launch = SimpleNamespace(
-        channel="hub",
+        backend="codex", channel="hub",
         gateway_base_url="http://127.0.0.1:1", gateway_token="fixture-only",
     )
     starting = asyncio.create_task(value._acquire_generation(str(tmp_path), launch))

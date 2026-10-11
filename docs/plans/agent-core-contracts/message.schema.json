@@ -1,0 +1,430 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "agent-core/message.schema.json",
+  "title": "Message",
+  "description": "C-1 canonical message. Vendor-neutral; provider adapters convert to and from the wire protocol. Produced by `ai` (assistant messages), the adapter (user messages), and `tools` via `agent` (tool results); consumed by `agent`, `harness`, and the adapter.",
+  "oneOf": [
+    {
+      "$ref": "#/definitions/UserMessage"
+    },
+    {
+      "$ref": "#/definitions/AssistantMessage"
+    },
+    {
+      "$ref": "#/definitions/ToolResultMessage"
+    }
+  ],
+  "definitions": {
+    "Protocol": {
+      "enum": [
+        "anthropic",
+        "openai_chat",
+        "openai_responses",
+        "google"
+      ],
+      "description": "Wire protocol, in Model Hub's vocabulary extended by C-6."
+    },
+    "Origin": {
+      "type": "object",
+      "required": [
+        "provider",
+        "api",
+        "model"
+      ],
+      "additionalProperties": false,
+      "description": "Who produced an assistant message, taken from the served-hop report (C-6), not from the request. Two origins are the same only when all three fields are equal.",
+      "properties": {
+        "provider": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Upstream vendor identity of the served hop, for example `anthropic`, `openai`, `google`, `deepseek`."
+        },
+        "api": {
+          "$ref": "#/definitions/Protocol"
+        },
+        "model": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Upstream model id of the served hop."
+        }
+      }
+    },
+    "LargeRef": {
+      "type": "object",
+      "required": [
+        "ref",
+        "bytes"
+      ],
+      "additionalProperties": false,
+      "description": "Reserved reference form for content stored outside the row. v1 writers never produce it; v1 readers must reject it with a clear error rather than misread it.",
+      "properties": {
+        "ref": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "TextBlock": {
+      "type": "object",
+      "required": [
+        "type"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "text"
+        },
+        "text": {
+          "type": "string"
+        },
+        "ref": {
+          "$ref": "#/definitions/LargeRef"
+        }
+      },
+      "oneOf": [
+        {
+          "required": [
+            "text"
+          ]
+        },
+        {
+          "required": [
+            "ref"
+          ]
+        }
+      ]
+    },
+    "ImageBlock": {
+      "type": "object",
+      "required": [
+        "type",
+        "mime_type",
+        "media_token"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "image"
+        },
+        "mime_type": {
+          "enum": [
+            "image/png",
+            "image/jpeg",
+            "image/gif",
+            "image/webp"
+          ]
+        },
+        "media_token": {
+          "type": "string",
+          "description": "`media_objects.token` of an immutable, content-addressed snapshot taken when the block is created; bytes are loaded by the adapter's MediaLoader at request time, never inlined in the transcript. The same block always yields the same bytes, even if the original file changes or is deleted."
+        },
+        "name": {
+          "type": "string"
+        }
+      }
+    },
+    "ThinkingBlock": {
+      "type": "object",
+      "required": [
+        "type",
+        "text"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "thinking"
+        },
+        "text": {
+          "type": "string",
+          "description": "Visible reasoning text or summary; may be empty for redacted reasoning."
+        },
+        "signature": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Opaque provider payload in the adapter's own encoding: the Anthropic signature, OpenAI encrypted reasoning, the Gemini thought signature, or, for a redacted block, the whole redacted payload (Anthropic `redacted_thinking.data`). Replayed only to the same origin; never synthesized."
+        },
+        "redacted": {
+          "type": "boolean",
+          "default": false,
+          "description": "True for reasoning the provider returned only in opaque form; `text` is empty and `signature` holds the payload."
+        }
+      },
+      "if": {
+        "properties": {
+          "redacted": {
+            "const": true
+          }
+        },
+        "required": [
+          "redacted"
+        ]
+      },
+      "then": {
+        "required": [
+          "signature"
+        ],
+        "properties": {
+          "signature": {
+            "type": "string",
+            "minLength": 1
+          },
+          "text": {
+            "const": ""
+          }
+        }
+      }
+    },
+    "ToolCallBlock": {
+      "type": "object",
+      "required": [
+        "type",
+        "id",
+        "name",
+        "arguments"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "tool_call"
+        },
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Canonical id, stable for the life of the session."
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "arguments": {
+          "type": "object",
+          "description": "Parsed arguments. A call whose arguments did not parse is kept with `{}` and answered with an error tool result."
+        },
+        "native_id": {
+          "type": "string",
+          "description": "The id as the provider emitted it, when it differs from `id`."
+        },
+        "signature": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Opaque provider payload attached to the call (Gemini `thoughtSignature` on a function-call part). Same rules as a thinking signature: replayed only to the same origin, never synthesized."
+        }
+      }
+    },
+    "Usage": {
+      "type": "object",
+      "required": [
+        "input_tokens",
+        "output_tokens",
+        "cache_read_tokens",
+        "cache_write_tokens"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "input_tokens": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Uncached input tokens."
+        },
+        "output_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "cache_read_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "cache_write_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "reasoning_tokens": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Subset of output tokens, when the provider reports it."
+        }
+      }
+    },
+    "StopReason": {
+      "enum": [
+        "stop",
+        "length",
+        "tool_use",
+        "refusal",
+        "safety",
+        "aborted",
+        "error"
+      ],
+      "description": "Normalized. `refusal` and `safety` are never folded into `stop`."
+    },
+    "UserMessage": {
+      "type": "object",
+      "required": [
+        "role",
+        "content"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "role": {
+          "const": "user"
+        },
+        "content": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "oneOf": [
+              {
+                "$ref": "#/definitions/TextBlock"
+              },
+              {
+                "$ref": "#/definitions/ImageBlock"
+              }
+            ]
+          }
+        }
+      }
+    },
+    "AssistantMessage": {
+      "type": "object",
+      "required": [
+        "role",
+        "content",
+        "origin",
+        "stop_reason"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "role": {
+          "const": "assistant"
+        },
+        "content": {
+          "type": "array",
+          "description": "Blocks in the order the model produced them.",
+          "items": {
+            "oneOf": [
+              {
+                "$ref": "#/definitions/TextBlock"
+              },
+              {
+                "$ref": "#/definitions/ThinkingBlock"
+              },
+              {
+                "$ref": "#/definitions/ToolCallBlock"
+              }
+            ]
+          }
+        },
+        "origin": {
+          "$ref": "#/definitions/Origin"
+        },
+        "usage": {
+          "$ref": "#/definitions/Usage"
+        },
+        "stop_reason": {
+          "$ref": "#/definitions/StopReason"
+        },
+        "error_message": {
+          "type": "string",
+          "description": "Present when `stop_reason` is `error` or `aborted`."
+        }
+      }
+    },
+    "ToolResultMessage": {
+      "type": "object",
+      "required": [
+        "role",
+        "tool_call_id",
+        "tool_name",
+        "content",
+        "is_error"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "role": {
+          "const": "tool_result"
+        },
+        "tool_call_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tool_name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "content": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              {
+                "$ref": "#/definitions/TextBlock"
+              },
+              {
+                "$ref": "#/definitions/ImageBlock"
+              }
+            ]
+          },
+          "description": "Exactly what the model sees, after output governance (C-7)."
+        },
+        "is_error": {
+          "type": "boolean"
+        }
+      }
+    }
+  },
+  "examples": [
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "thinking",
+          "text": "The failing test imports a renamed helper.",
+          "signature": "EqQBCkYIBxgCKkD…"
+        },
+        {
+          "type": "text",
+          "text": "运行测试看看。"
+        },
+        {
+          "type": "tool_call",
+          "id": "toolu_01AbC",
+          "name": "bash",
+          "arguments": {
+            "command": "pytest tests/test_paths.py -q"
+          }
+        }
+      ],
+      "origin": {
+        "provider": "anthropic",
+        "api": "anthropic",
+        "model": "claude-opus-5-5"
+      },
+      "usage": {
+        "input_tokens": 1834,
+        "output_tokens": 212,
+        "cache_read_tokens": 40210,
+        "cache_write_tokens": 0
+      },
+      "stop_reason": "tool_use"
+    },
+    {
+      "role": "tool_result",
+      "tool_call_id": "toolu_01AbC",
+      "tool_name": "bash",
+      "content": [
+        {
+          "type": "text",
+          "text": "1 failed, 12 passed in 0.84s\n\nCommand exited with code 1"
+        }
+      ],
+      "is_error": true
+    }
+  ]
+}

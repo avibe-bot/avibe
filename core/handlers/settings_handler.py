@@ -5,6 +5,13 @@ import logging
 from typing import Optional
 
 from modules.agents import get_agent_display_name
+from modules.agents.catalog import (
+    AGENT_BACKENDS,
+    NATIVE_CLI_BACKENDS,
+    display_name_for_backend,
+    implicit_default_rank,
+    is_builtin_backend,
+)
 from modules.im import MessageContext, InlineKeyboard, InlineButton
 from core.modals import RoutingModalData, RoutingModalSelection
 from vibe import backend_model_catalog
@@ -432,8 +439,11 @@ class SettingsHandler(BaseHandler):
         enabled_backends = [backend for backend in all_backends if self._is_backend_enabled(backend)]
         if not enabled_backends and current_backend:
             enabled_backends = [current_backend]
-        registered_backends = sorted(enabled_backends, key=lambda x: (x != "opencode", x))
-        active_backend = registered_backends[0] if registered_backends else current_backend
+        # Catalog order, the built-in backend first. As for the default Agent, the fallback
+        # selection is the built-in backend only when no other backend is enabled.
+        catalog_order = {backend: index for index, backend in enumerate(AGENT_BACKENDS)}
+        registered_backends = sorted(enabled_backends, key=lambda x: catalog_order.get(x, len(catalog_order)))
+        active_backend = min(registered_backends, key=implicit_default_rank, default=current_backend)
         if current_backend in registered_backends:
             active_backend = current_backend
         if selected_backend in registered_backends:
@@ -527,16 +537,23 @@ class SettingsHandler(BaseHandler):
         )
 
     def _is_backend_enabled(self, backend: str) -> bool:
+        if is_builtin_backend(backend):
+            return True
         backend_config = getattr(self.config, backend, None)
         if backend_config is None:
             return False
         return bool(getattr(backend_config, "enabled", True))
 
+    def _routing_agent_name(self, backend: str) -> str:
+        """A backend choice routes to that backend's built-in Agent, under whatever name the row holds."""
+        store = getattr(self.controller, "vibe_agent_store", None)
+        return store.routing_name_for_backend(backend) if store is not None else backend
+
     def _resolve_route_backend(self, agent_name: Optional[str]) -> Optional[str]:
         if not agent_name:
             return None
         name = str(agent_name)
-        if name in {"opencode", "claude", "codex"}:
+        if name in NATIVE_CLI_BACKENDS:
             return name
         store = getattr(self.controller, "vibe_agent_store", None)
         if store is None:
@@ -552,7 +569,7 @@ class SettingsHandler(BaseHandler):
     def _routing_target_from_row(row: dict) -> tuple[str, str, str, str, str]:
         backend = str(row.get("agent_backend") or "").strip()
         agent_name = str(row.get("agent_name") or "").strip()
-        if not agent_name and backend in {"opencode", "claude", "codex"}:
+        if not agent_name and backend in NATIVE_CLI_BACKENDS:
             agent_name = backend
         variant = str(row.get("agent_variant") or "").strip()
         if variant == backend and agent_name == backend:
@@ -873,7 +890,7 @@ class SettingsHandler(BaseHandler):
                 resolved_codex_agent = codex_agent
 
             routing = RoutingSettings(
-                agent_name=backend,
+                agent_name=self._routing_agent_name(backend),
                 model=(
                     opencode_model
                     if backend == "opencode"
@@ -906,7 +923,7 @@ class SettingsHandler(BaseHandler):
             settings_manager.set_channel_routing(settings_key, routing)
             needs_new_session_hint = self._routing_update_needs_new_session_hint(context, routing)
 
-            parts = [f"{self._t('routing.label.backend')}: **{backend}**"]
+            parts = [f"{self._t('routing.label.backend')}: **{display_name_for_backend(backend)}**"]
             if backend == "opencode":
                 if opencode_agent:
                     parts.append(f"{self._t('routing.label.agent')}: **{opencode_agent}**")

@@ -10,8 +10,8 @@
 // and the PR records the server implementation and feature-flag activation
 // edge. The client never synthesizes a fallback payload shape.
 
-export const CONTRACT_VERSION = 10 as const;
-export const PERSISTED_TURN_CONTRACT_VERSIONS = [5, 6, 7, 8, 9, 10] as const;
+export const CONTRACT_VERSION = 11 as const;
+export const PERSISTED_TURN_CONTRACT_VERSIONS = [5, 6, 7, 8, 9, 10, 11] as const;
 export const AGENT_CHAIN_CONTRACT_VERSION = CONTRACT_VERSION;
 export const PROBE_RESULT_CONTRACT_VERSION = CONTRACT_VERSION;
 
@@ -21,8 +21,11 @@ export const SOURCE_PROTOCOLS = [
   'anthropic',
   'openai_responses',
   'openai_chat',
+  'google',
 ] as const;
 export type SourceProtocol = (typeof SOURCE_PROTOCOLS)[number];
+// Google is API/config-only until its picker frame is approved.
+export const SELECTABLE_SOURCE_PROTOCOLS = ['anthropic', 'openai_responses', 'openai_chat'] as const;
 export const SOURCE_DISPLAY_NAME_MAX_LENGTH = 64 as const;
 export type SupplyChannel = 'native_cli' | 'hub';
 /** v3 (§4.5): classified by whether the state heals itself. cooldown carries a
@@ -152,7 +155,9 @@ export type Source = {
 // per-backend subset, carried by `AgentSupply.sources` below.
 
 // ── agent-supply.schema.json ────────────────────────────────────────────
-export type AgentBackend = 'claude' | 'codex' | 'opencode';
+import type { AgentBackendId, NativeCliBackend } from '@/lib/agentBackends';
+export type { NativeCliBackend } from '@/lib/agentBackends';
+export type AgentBackend = AgentBackendId;
 export type AgentMode = 'hub' | 'direct';
 export type MenuKind = 'fixed' | 'open';
 
@@ -456,7 +461,7 @@ export type MigrationAction = 'import' | 'controlled_import' | 'keep_native' | '
 
 export type MigrationItem = {
   id: string;
-  backend: AgentBackend;
+  backend: NativeCliBackend;
   kind: MigrationKind;
   /** e.g. "sk-…dd3c + 自定义 Base URL"; never full secrets. */
   masked_detail: string;
@@ -480,7 +485,7 @@ export type MigrationItem = {
   source_paths?: string[];
   /** Server-computed transitive closure of backends sharing persisted shell
    *  assignments. They must migrate together. Missing/empty means this backend. */
-  required_backends?: AgentBackend[];
+  required_backends?: NativeCliBackend[];
   /** The backend's native config cannot be parsed, so Hub mode would fail every
    *  launch: the row blocks its whole consent group. Optional for older servers. */
   config_blocker?: boolean;
@@ -605,6 +610,7 @@ export type RecordedAttempt = {
   channel: SupplyChannel;
   stripped_reasoning_efforts?: string[];
   declared_reasoning_efforts?: string[];
+  origin?: { provider: string; api: SourceProtocol; model: string };
 };
 export type TurnProvenance = {
   contract_version: (typeof PERSISTED_TURN_CONTRACT_VERSIONS)[number];
@@ -626,6 +632,7 @@ export type TurnProvenance = {
     upstream_error_code?: string | null;
     upstream_detail?: string;
     local_error_detail?: string;
+    origin?: { provider: string; api: SourceProtocol; model: string };
     stripped_reasoning_efforts?: string[];
     declared_reasoning_efforts?: string[];
   } | null;

@@ -8,6 +8,7 @@ import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { Input } from '@/components/ui/input';
 import { ResponsiveMenu } from '@/components/ui/responsive-menu';
 import { cn } from '@/lib/utils';
+import { getBackendUiMeta } from '@/lib/agentBackends';
 import { formatRelativeTime } from '@/lib/relativeTime';
 import { AddApiKeyDialog } from './AddApiKeyDialog';
 import { PROTOCOL_COPY_KEYS } from './addApiKeyState';
@@ -633,7 +634,7 @@ export const SourceDetailPanel: React.FC<{
     if (guard.kind === 'removeModel') void remove(guard.model, guard.plan);
   };
   const adoptedBy = activeSourceAdoption(source.adopted_by, activeBackends);
-  const adoptedBackends = [...new Set((adoptedBy ?? []).map(({ backend }) => t(`settings.models.backends.${backend}`, { defaultValue: backend }) as string))];
+  const adoptedBackends = [...new Set((adoptedBy ?? []).map(({ backend }) => getBackendUiMeta(backend).label))];
   const state = sourceStatePresentation(source.state, 'detail', i18n.language, now, {
     known: adoptedBy !== undefined,
     backends: adoptedBackends,

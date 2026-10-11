@@ -221,7 +221,7 @@ def bind_session(
     session record the conversation it came from.
     """
 
-    from core.git_runtime import prepend_vendored_git_to_path
+    from core.agent_path import prepend_managed_tools_to_path
 
     session_id = str(opencode_session_id or "").strip()
     if not session_id:
@@ -234,7 +234,7 @@ def bind_session(
     env = caller.to_env() if caller is not None else {}
     if extra_env:
         env.update((str(key), str(value)) for key, value in extra_env.items() if str(key) and str(value))
-    prepend_vendored_git_to_path(
+    prepend_managed_tools_to_path(
         env,
         base_env=base_env,
         working_dir=working_dir,

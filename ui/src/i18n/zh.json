@@ -621,6 +621,12 @@
       "claudeSubtitle": "检测或安装 Claude Code CLI。登录与 API Key 请直接通过 CLI 完成。",
       "claudeDescription": "Anthropic Agent · 通过 Claude 登录或填入 API Key",
       "codexDescription": "OpenAI Agent · 通过 ChatGPT 登录或 OPENAI_API_KEY",
+      "vibeyDescription": "内置 Agent · 在模型网关管理模型和路由",
+      "backToBackends": "返回后端列表",
+      "gatewayOff": "模型网关已关闭，{{name}} 没有可用的模型。",
+      "hubDisabled": "模型网关已停用",
+      "hubDisabledNotice": "本实例已停用模型网关，{{name}} 没有可用的模型。",
+      "builtinBadge": "内置",
       "openProviderPage": "配置 Provider",
       "providerOauth": "OAuth(默认)",
       "providerApiKey": "API Key",
@@ -918,6 +924,7 @@
           "turnOn": "开启模型网关",
           "turnOff": "关闭模型网关",
           "stopBlocked": "请先将 {{names}} 切换为直连，再关闭模型网关",
+          "stopVibeyBlocked": "{{name}} 的模型通过模型网关运行，请先移除这些模型再关闭网关。",
           "stopUnavailable": "暂时无法读取 Agent 路由状态，当前不能关闭模型网关"
         },
         "closed": {
@@ -1124,6 +1131,9 @@
         "picker": {
           "title": "添加 {{backend}} 模型",
           "description": "挑选要加入这个后端模型列表的模型。",
+          "chooseTitle": "选择 {{backend}} 的模型",
+          "chooseDescription": "选择要使用的模型。",
+          "use": "使用此模型",
           "search": "搜索模型或供应商",
           "groupBuiltin": "{{backend}} 内置",
           "groupProviders": "来自你的供应商",
@@ -1919,6 +1929,7 @@
           "anthropicMessages": "Anthropic Messages",
           "openaiResponses": "OpenAI Responses",
           "openaiChatCompletions": "OpenAI Chat Completions",
+          "google": "Google Gemini",
           "idleHint": "填好 Base URL 和 API Key 后自动识别",
           "detecting": "识别接口中…",
           "manual": "手动指定接口类型",
@@ -2061,7 +2072,8 @@
           "detected": "检测到现有直连配置：{{detail}}，可一键导入模型网关",
           "import": "导入模型网关…"
         },
-        "fixHint": "去「模型」页添加或启用供应商即可恢复。"
+        "fixHint": "去「模型」页添加或启用供应商即可恢复。",
+        "warningWithFix": "{{warning}}。{{fixHint}}"
       },
       "migration": {
         "open": "迁移配置",
@@ -2114,11 +2126,6 @@
           "codex": "Codex 配置",
           "opencode": "OpenCode 配置"
         }
-      },
-      "backends": {
-        "claude": "Claude Code",
-        "codex": "Codex",
-        "opencode": "OpenCode"
       },
       "sourceTest": {
         "open": "测试",
@@ -4088,9 +4095,7 @@
     "statusDisabled": "已停用",
     "newAgent": "新建 Agent",
     "import": "导入",
-    "importFromClaude": "从 Claude 导入",
-    "importFromCodex": "从 Codex 导入",
-    "importFromOpenCode": "从 OpenCode 导入",
+    "importFrom": "从 {{backend}} 导入",
     "importSuccess": "已导入 {{imported}} 个,跳过 {{skipped}} 个。",
     "importFailed": "导入失败:{{error}}",
     "importNoneFound": "磁盘上没有找到可导入的 {{backend}} Agent。",
@@ -4107,6 +4112,7 @@
     "detail": {
       "enabled": "已启用",
       "enabledHint": "关掉后此 Agent 不会被新会话选用,已运行的会话不受影响",
+      "alwaysEnabledHint": "{{name}} 是内置 Agent，始终启用，仍可调整模型、Effort 与系统提示词。",
       "defaultTitle": "默认 Agent",
       "defaultHint": "未指定 Agent 的新会话和 IM 消息都会路由到这个 Agent。",
       "defaultActive": "默认",
@@ -4118,6 +4124,8 @@
       "descriptionPlaceholder": "这个 Agent 用来做什么…",
       "backend": "后端",
       "backendLocked": "创建时确定 · 不可改",
+      "nativeBackend": "{{backend}} CLI",
+      "backendName": "{{backend}}",
       "model": "模型",
       "modelPlaceholder": "选择或输入模型",
       "modelEmpty": "找不到匹配的模型,可以直接输入。",
@@ -5276,33 +5284,38 @@
     "welcome": {
       "getStarted": "立即开始",
       "title": "各有所长，接力完成",
-      "subtitle": "让 Claude Code、Codex、OpenCode 一起工作",
+      "subtitle": "由 Vibey 统筹，Claude Code、Codex、OpenCode 接力完成",
       "detecting": "检测中…",
       "detectionFailed": "未能检测助手，请重试"
     },
     "details": "查看详情",
     "story": {
       "label": "助手接力协作",
-      "description": "Claude Code 规划任务，Codex 编写代码，OpenCode 执行测试，最后由 Claude Code 汇总交付",
-      "caption": "规划 · 开发 · 测试 · 交付",
-      "returnCaption": "测试通过，回传 PM",
-      "claude": {
-        "name": "Claude Code",
-        "role": "PM",
-        "working": "编写需求文档",
-        "complete": "需求文档已就绪",
-        "summary": "汇总结果，完成交付"
+      "description": "Vibey 规划任务，并通过 Harness 把各部分交给其他助手：Claude Code 编写代码，Codex 评审改动，OpenCode 执行测试，最后由 Vibey 汇总交付",
+      "caption": "规划 · 开发 · 评审 · 测试 · 交付",
+      "returnCaption": "测试通过，回传 Vibey",
+      "summary": "汇总结果，完成交付",
+      "vibey": {
+        "role": "统筹",
+        "working": "规划任务",
+        "complete": "已分派 {{count}} 项任务"
       },
-      "codex": {
-        "name": "Codex",
+      "claude": {
         "role": "开发",
+        "step": "开发",
         "working": "编写功能代码",
         "complete": "功能代码已就绪"
       },
+      "codex": {
+        "role": "评审",
+        "step": "评审",
+        "working": "评审代码改动",
+        "complete": "评审通过"
+      },
       "opencode": {
-        "name": "OpenCode",
         "role": "测试",
-        "working": "编写并执行用例",
+        "step": "测试",
+        "working": "执行测试用例",
         "complete": "测试全部通过"
       }
     },
@@ -5348,7 +5361,20 @@
       "defaultModelWithBackups_other": "默认模型 · 另有 {{count}} 个备选",
       "noteNoModels": "还没有可用的模型",
       "ownershipChanged": "连接状态已变化，请刷新后继续",
-      "noteModelUnset": "尚未设置模型，可稍后在模型网关中设置"
+      "noteModelUnset": "尚未设置模型，可稍后在模型网关中设置",
+      "notePermission": "{{name}} 每次调用工具都会停下等待审批",
+      "allowToolCalls": "允许工具调用",
+      "permissionFailed": "未能允许工具调用",
+      "builtinAlwaysOn": "内置 · 始终开启",
+      "noteBuiltinUnset": "还没有模型，选一个即可开始",
+      "noteGatewayOff": "模型网关已关闭，{{name}} 需要它才能运行",
+      "noteHubDisabled": "本实例已停用模型网关，{{name}} 需要它才能运行",
+      "pickModelNamed": "为 {{name}} 选择模型",
+      "allModels": "全部模型…",
+      "modelsUnreadable": "未能读取模型",
+      "noModelsToPick": "还没有供应商提供模型",
+      "suppliersChanged": "该模型的供应商已变化，请重新选择",
+      "modelPickFailed": "未能保存模型，请重试"
     },
     "connection": {
       "method": "连接方式",
@@ -5430,7 +5456,9 @@
       "modelUnavailable": "还没有助手能用上模型，请检查连接后重试",
       "credentialType": "凭据类型",
       "apiKeyLabel": "API Key",
-      "authTokenLabel": "Auth Token"
+      "authTokenLabel": "Auth Token",
+      "builtinModelHint": "为 {{name}} 选择模型或启用一个助手，即可进入工作台",
+      "builtinChoiceHint": "完成 {{name}} 的模型选择后即可进入工作台"
     },
     "brand": {
       "name": "Avibe",
@@ -5529,8 +5557,8 @@
   },
   "pet": {
     "state": {
-      "idle": "云团子空闲中",
-      "sleeping": "云团子睡着了",
+      "idle": "歪比空闲中",
+      "sleeping": "歪比睡着了",
       "listening": "正在听",
       "running": "正在处理…",
       "ready": "有新回复",

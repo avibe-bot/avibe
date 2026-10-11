@@ -476,15 +476,20 @@ class AgentService:
             # never break the turn.
             await self._begin_turn_status(request.context)
             from core.agent_model_selection import require_agent_model
-            from core.vibe_agents import SUPPORTED_AGENT_BACKENDS
+            from modules.agents.catalog import AGENT_BACKENDS
 
-            if agent.name in SUPPORTED_AGENT_BACKENDS:
+            if agent.name in AGENT_BACKENDS:
                 has_subagent_model = request.subagent_model is not None
-                selected_model = require_agent_model(
-                    request.subagent_model if has_subagent_model else request.vibe_agent_model,
-                    agent.name,
-                    getattr(getattr(self.controller, "config", None), "language", "en"),
-                )
+                requested_model = request.subagent_model if has_subagent_model else request.vibe_agent_model
+                language = getattr(getattr(self.controller, "config", None), "language", "en")
+                if not str(requested_model or "").strip():
+                    from modules.agents.model_hub import hub_supply_refusal
+
+                    # When the Model Hub is why there is no model to select, say so, not "select a model".
+                    refusal = await asyncio.to_thread(hub_supply_refusal, self.controller, agent.name, language)
+                    if refusal is not None:
+                        raise ValueError(refusal)
+                selected_model = require_agent_model(requested_model, agent.name, language)
                 if has_subagent_model:
                     request.subagent_model = selected_model
                 else:

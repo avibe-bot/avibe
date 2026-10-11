@@ -15,7 +15,7 @@ import { PERSISTED_TURN_CONTRACT_VERSIONS } from './types';
 import type { RouteHop, TurnProvenance } from './types';
 
 const record: TurnProvenance = {
-  contract_version: 10, turn_id: 'turn-recorded', ts: '2026-09-05T15:00:00Z', agent: 'codex', requested_model_id: 'requested-model',
+  contract_version: 11, turn_id: 'turn-recorded', ts: '2026-09-05T15:00:00Z', agent: 'codex', requested_model_id: 'requested-model',
   outcome: 'failed_terminal', failed_attempts: [], served: null, canceled_attempt: null, model_supply_state: null, blockers: [],
   terminal_error: { source_id: 'src_historical', configured_model_id: 'historical-model', channel: 'hub', reason: 'invalid_parameter', stream_started: false, http_status: 404, upstream_error_code: 'model_not_found' },
 };

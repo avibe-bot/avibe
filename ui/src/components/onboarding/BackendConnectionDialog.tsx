@@ -30,7 +30,7 @@ import { VendorGlyph } from '../settings/models/vendorGlyph';
 import { CUSTOM_VENDOR } from '../settings/models/apiKeyVendors';
 import { providerBrandLabel, providerLabel, providerVendorId, setupPrimaryRank, SETUP_PRIMARY_VENDORS } from '../settings/providers/providerIdentity';
 import { BackendConnectionForm } from '../settings/providers/BackendConnectionForm';
-import type { BackendId } from '../settings/shared/useBackendRuntime';
+import type { NativeCliBackend as BackendId } from '@/lib/agentBackends';
 
 /** One provider choice: its brand mark, the name a person recognises, and the id
  *  OpenCode files it under — shown because that id is what the rest of OpenCode,

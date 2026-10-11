@@ -19,6 +19,7 @@ import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
 import { useApi } from '../../context/ApiContext';
 import { useToast } from '../../context/ToastContext';
+import { getBackendUiMeta } from '../../lib/agentBackends';
 import { getEnabledPlatforms, platformSupportsToolcallDelivery } from '../../lib/platforms';
 import { FolderBrowser } from '../ui/folder-browser';
 import { copyTextToClipboard } from '../../lib/utils';
@@ -621,13 +622,6 @@ export const UserList: React.FC = () => {
 
   const totalCount = aggregated.length;
 
-  // Backend label helper
-  const backendLabel = (backend: string) => {
-    if (backend === 'claude') return 'Claude';
-    if (backend === 'codex') return 'Codex';
-    return 'OpenCode';
-  };
-
   return (
     <>
       <div className="flex h-full flex-col gap-5">
@@ -709,7 +703,7 @@ export const UserList: React.FC = () => {
               const metaPrefix = userConfig.enabled
                 ? selectedAgent
                   ? `${selectedAgent.display_name || selectedAgent.name}${selectedAgent.model ? `/${selectedAgent.model}` : ''}`
-                  : `${backendLabel(effectiveBackend)}${backendModel ? `/${backendModel}` : ''}`
+                  : `${getBackendUiMeta(effectiveBackend).label}${backendModel ? `/${backendModel}` : ''}`
                 : t('userList.disabled');
 
               const updateRow = (patch: Partial<UserConfig>) => updateUser(u.platform, u.userId, patch);

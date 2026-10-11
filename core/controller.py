@@ -20,6 +20,7 @@ from modules.im import BaseIMClient, MessageContext, IMFactory
 from modules.im.multi import MultiIMClient
 from modules.agent_router import AgentRouter
 from modules.agents.service import AgentService
+from modules.agents.catalog import AGENT_BACKENDS, NATIVE_CLI_BACKENDS
 from modules.claude_client import ClaudeClient
 from modules.session_manager import SessionManager
 from modules.settings_manager import SettingsManager, MultiSettingsManager
@@ -171,7 +172,7 @@ def _target_agent_variant(value: Any, backend: Any = None, agent_name: Any = Non
     variant = _optional_target_str(value)
     if variant is None:
         return None
-    sentinel_values = {"default", "claude", "codex", "opencode"}
+    sentinel_values = {"default", *AGENT_BACKENDS}
     backend_text = _optional_target_str(backend)
     if backend_text:
         sentinel_values.add(backend_text)
@@ -323,6 +324,11 @@ class Controller:
 
         # Background task for cleanup
         self.cleanup_task: Optional[asyncio.Task] = None
+        self.vibey_model_supply_task: Optional[asyncio.Task] = None
+        from modules.agents.vibey.recovery import VibeyRecovery
+
+        # The single owner of Vibey's settlement outside a Turn.
+        self.vibey_recovery = VibeyRecovery(self)
         self.trace_retention_task: Optional[asyncio.Task] = None
         self.web_ui_watchdog_task: Optional[asyncio.Task] = None
         self._trace_retention_executor: Optional[Any] = None
@@ -365,11 +371,88 @@ class Controller:
         agent_config = getattr(self.config, "agents", None)
         if agent_config is None:
             return list(getattr(self.agent_service, "agents", {}).keys()) or [DEFAULT_AGENT_BACKEND]
-        for backend in ("opencode", "claude", "codex"):
+        for backend in AGENT_BACKENDS:
             cfg = getattr(agent_config, backend, None)
             if bool(getattr(cfg, "enabled", False)):
                 result.append(backend)
         return result
+
+    def _builtin_agent_models(self) -> list[tuple[str, str]]:
+        """The models the built-in native Agents run, by backend name: claude, codex, opencode."""
+
+        store = self.vibe_agent_store
+        selections = []
+        for backend in sorted(NATIVE_CLI_BACKENDS):
+            agent = store.get_builtin_default_agent_for_backend(backend)
+            model = str(getattr(agent, "model", None) or "").strip()
+            if model:
+                selections.append((backend, model))
+        return selections
+
+    def _reconcile_vibey_agent_model(self) -> None:
+        """Give the built-in Vibey Agent its catalog's first model while it has none.
+
+        A Vibey Agent without a model cannot run a turn, so this only makes an
+        unrunnable Agent runnable. Decided under the store's write lock, it never
+        replaces a model the user chose. It runs whenever the Vibey catalog
+        changes (``backend_catalog_changed``) and at every start, so a hand-off a
+        failed write or an exit lost heals on the next one. No built-in exists
+        when a user Agent already holds the name.
+        """
+
+        from vibe.authorization import instance_owner_context
+
+        models = self.model_hub_service.store.load().agents["vibey"].models
+        if not models:
+            return
+        store = self.vibe_agent_store
+        vibey = store.get_builtin_default_agent_for_backend("vibey", enabled_only=False)
+        if vibey is None or str(vibey.model or "").strip():
+            return
+        store.update(
+            vibey.name,
+            model=models[0].id,
+            only_if_model_unset=True,
+            user_context=instance_owner_context(),
+        )
+
+    async def _model_hub_catalog_changed(self, backend: str) -> None:
+        """Follow a committed Model Hub catalog change for one backend."""
+
+        from config.v2_config import V2Config
+
+        if backend == "vibey":
+            try:
+                self._reconcile_vibey_agent_model()
+            except Exception:
+                # The catalog change stands; the next start reconciles again.
+                logger.warning("Vibey Agent model reconciliation failed", exc_info=True)
+        try:
+            latest = V2Config.load()
+        except FileNotFoundError:
+            return
+        self.config.model_hub = latest.model_hub
+        # Each runtime moves to the committed catalog at its next turn;
+        # nothing restarts or drains. A disabled backend has nothing to adopt.
+        agent = getattr(getattr(self, "agent_service", None), "agents", {}).get(backend)
+        adopt_catalog = getattr(agent, "adopt_model_hub_catalog", None)
+        if callable(adopt_catalog):
+            await adopt_catalog()
+
+    async def _seed_vibey_model_supply(self) -> None:
+        """Seed Vibey's Model Hub entry from existing Sources, then reconcile its built-in Agent's model."""
+
+        model_hub_service = getattr(self, "model_hub_service", None)
+        if model_hub_service is None:
+            return
+        try:
+            await model_hub_service.seed_vibey_supply()
+        except Exception:
+            logger.warning("Vibey starting model supply failed", exc_info=True)
+        try:
+            self._reconcile_vibey_agent_model()
+        except Exception:
+            logger.warning("Vibey Agent model reconciliation failed", exc_info=True)
 
     def get_native_session_service(self):
         if self.native_session_service is None:
@@ -736,6 +819,7 @@ class Controller:
 
     def _init_agents(self):
         from core.session_activities import SessionActivityRegistry
+        from modules.agents.vibey import VibeyAgent
         from modules.agents.claude_agent import ClaudeAgent
         from modules.agents.codex import CodexAgent
         from modules.agents.opencode import OpenCodeAgent
@@ -762,6 +846,8 @@ class Controller:
                 self.agent_service.register(OpenCodeAgent(self, self.config.opencode))
             except Exception as e:
                 logger.error(f"Failed to initialize OpenCode agent: {e}")
+        # Built in: always registered, never unregistered.
+        self.agent_service.register(VibeyAgent(self))
 
     def _setup_callbacks(self):
         """Setup callback connections between modules"""
@@ -1038,6 +1124,13 @@ class Controller:
             platforms.add("")
         await self._restore_active_polls_or_raise(platforms)
 
+    async def _recover_vibey_agent_runtime_state(self) -> None:
+        """Settle what the previous process left of Vibey's work (T2, T3 admission, J5).
+
+        ``vibey_recovery`` is the single owner, retrying until every Session has settled.
+        """
+        await self.vibey_recovery.start()
+
     async def _on_im_ready(self, *, platform: str) -> None:
         """Restore transport-owned state only after that transport can deliver."""
         logger.info("IM transport ready, restoring state for %s", platform)
@@ -1178,6 +1271,14 @@ class Controller:
             )
 
         try:
+            # Off the readiness path: on a first start the seed may wait for a
+            # models.dev copy, and nothing below needs it.
+            if getattr(self, "vibey_model_supply_task", None) is None:
+                self.vibey_model_supply_task = asyncio.create_task(self._seed_vibey_model_supply())
+        except Exception as e:
+            logger.error("Failed to start Vibey's model supply seed: %s", e, exc_info=True)
+
+        try:
             if self.cleanup_task is None or self.cleanup_task.done():
                 self.cleanup_task = asyncio.create_task(self.periodic_cleanup())
         except Exception as e:
@@ -1217,6 +1318,14 @@ class Controller:
                 coordinator = getattr(self, "backend_restart_coordinator", None)
                 if coordinator is not None:
                     coordinator.restore_migration_blocks()
+
+        # recovery.md: T2 before T4. Vibey hands the commands a restart left running
+        # to their Watches first, so the interruption notice of their Turn can say so instead
+        # of asking for a resend. Best effort: its single owner retries what it could not settle.
+        try:
+            await self._recover_vibey_agent_runtime_state()
+        except Exception:
+            logger.exception("Failed to recover Vibey's runtime state")
 
         recover_deliveries = getattr(
             self.session_turns,
@@ -1671,7 +1780,7 @@ class Controller:
             )
             if vibe_agent:
                 return vibe_agent.backend
-        if target_backend and str(target_backend) in {"opencode", "claude", "codex"}:
+        if target_backend and str(target_backend) in AGENT_BACKENDS:
             return str(target_backend)
 
         vibe_agent = self.resolve_vibe_agent_for_context(context, required=False)
@@ -2373,6 +2482,16 @@ class Controller:
                     pass
             self.cleanup_task = None
 
+        async def _cancel_vibey_model_supply_task() -> None:
+            task = getattr(self, "vibey_model_supply_task", None)
+            if task is not None and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+            self.vibey_model_supply_task = None
+
         async def _cancel_web_ui_watchdog_task() -> None:
             task = self.web_ui_watchdog_task
             if task and not task.done():
@@ -2434,6 +2553,7 @@ class Controller:
             logger.debug(f"Internal dispatch server status write skipped: {e}")
 
         _stop_loop_coroutine(_cancel_cleanup_task(), "Idle cleanup task")
+        _stop_loop_coroutine(_cancel_vibey_model_supply_task(), "Vibey model supply seed")
         _stop_loop_coroutine(_cancel_web_ui_watchdog_task(), "Web UI watchdog task")
         # Retention cancellation is cooperative at a delete-batch boundary;
         # wait for that bounded join instead of abandoning the worker after
@@ -2457,6 +2577,11 @@ class Controller:
         show_git_checkpoint_service = getattr(self, "show_git_checkpoint_service", None)
         if show_git_checkpoint_service is not None:
             show_git_checkpoint_service.stop()
+
+        # Vibey's recovery retries end with the service; the next start recovers again.
+        vibey_recovery = getattr(self, "vibey_recovery", None)
+        if vibey_recovery is not None:
+            _stop_loop_coroutine(vibey_recovery.stop(), "Vibey recovery")
 
         try:
             codex_agent = self.agent_service.agents.get("codex")
@@ -2567,12 +2692,20 @@ class Controller:
 
         async def reconcile() -> None:
             try:
-                await service.reconcile_builtin_models()
-            except Exception:
-                logger.warning(
-                    "Model Hub built-in reconciliation failed after snapshot refresh",
-                    exc_info=True,
-                )
+                try:
+                    await service.reconcile_builtin_models()
+                except Exception:
+                    logger.warning(
+                        "Model Hub built-in reconciliation failed after snapshot refresh",
+                        exc_info=True,
+                    )
+                try:
+                    await service.backfill_models_dev_limits()
+                except Exception:
+                    logger.warning(
+                        "Model Hub models.dev limit backfill failed after snapshot refresh",
+                        exc_info=True,
+                    )
             finally:
                 self._model_hub_snapshot_reconcile_task = None
                 if (
@@ -2701,6 +2834,7 @@ class Controller:
         from modules.agents.model_hub import ModelHubRuntimeRouter
         from vibe.api import resolve_cli_paths
         from vibe.backend_model_catalog import set_remote_catalog_refresh_completed
+        from vibe.models_dev_catalog import set_models_dev_copy_arrived
 
         def default_vibe_agent_model(backend: str) -> Optional[str]:
             agent = self.vibe_agent_store.get_default_agent()
@@ -2736,7 +2870,7 @@ class Controller:
             backends: tuple[str, ...] | None = None,
         ) -> None:
             nonlocal cli_presence, next_cli_presence_generation
-            selected_backends = backends or ("claude", "codex", "opencode")
+            selected_backends = backends or tuple(sorted(NATIVE_CLI_BACKENDS))
             with cli_presence_lock:
                 next_cli_presence_generation += 1
                 generation = next_cli_presence_generation
@@ -2782,19 +2916,6 @@ class Controller:
         # post-paint refresh, so controller readiness never waits on npm.
         refresh_cli_presence(False, None)
 
-        async def backend_catalog_changed(backend: str) -> None:
-            try:
-                latest = V2Config.load()
-            except FileNotFoundError:
-                return
-            self.config.model_hub = latest.model_hub
-            # Each runtime moves to the committed catalog at its next turn;
-            # nothing restarts or drains. A disabled backend has nothing to adopt.
-            agent = getattr(getattr(self, "agent_service", None), "agents", {}).get(backend)
-            adopt_catalog = getattr(agent, "adopt_model_hub_catalog", None)
-            if callable(adopt_catalog):
-                await adopt_catalog()
-
         async def repair_model_selections(addresses: frozenset[str]) -> int:
             # A Vibe Agent's model, a channel's routing override, and a
             # session's pin are each a copy of an id the Model Hub menu once
@@ -2813,14 +2934,18 @@ class Controller:
             requested_model_override=default_vibe_agent_model,
             selected_agent_override=default_vibe_agent_name,
             named_agents_override=named_vibe_agents,
+            builtin_agent_models_override=self._builtin_agent_models,
             cli_present_override=cli_present,
             cli_presence_refresh=refresh_cli_presence,
-            backend_catalog_changed=backend_catalog_changed,
+            backend_catalog_changed=self._model_hub_catalog_changed,
             repair_model_selections=repair_model_selections,
         )
         set_remote_catalog_refresh_completed(
             self._model_hub_snapshot_refresh_completed
         )
+        # A models.dev copy is another snapshot input: rows written before one
+        # was cached take their limits from it (backfill_models_dev_limits).
+        set_models_dev_copy_arrived(self._model_hub_snapshot_refresh_completed)
         try:
             asyncio.run(
                 self.model_hub_service.reconcile_builtin_models(notify=False)

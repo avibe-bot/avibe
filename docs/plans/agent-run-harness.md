@@ -525,7 +525,7 @@ Field details:
 | `legacy_session_key` | Existing, compatibility | Legacy target for old imported runs. | Migration/display only. |
 | `scope_id` | Target field | Scope placement snapshot. | Audit placement and query runs by Scope. |
 | legacy delivery fields | Existing, compatibility | Old delivery override snapshots. | Preserve old run history only; new user-facing contracts should prefer Scope placement and Session callback fields. |
-| `prompt` | Existing, compatibility | Legacy message field. | Read compatibility for old runs; target schema uses `message`. |
+| `prompt` | Existing, compatibility | Legacy message field. | Read compatibility for old runs; target schema uses `message`. The run record that `vibe runs show` prints omits it: its text is already in `message`. |
 | `message` | New | Actual message sent to the Agent. | Align with `--message` and separate user message from system prompt. |
 | `message_payload_json` | New | Optional structured payload. | Support webhook/API structured input. |
 | `result_text` | New | Final user-visible result when available. | Support sync run output, run show, and Web UI summaries. |

@@ -1,6 +1,7 @@
 import type { TranslationKey } from '@/i18n/types';
 import * as React from "react";
 import { useTranslation } from "react-i18next";
+import { getBackendUiMeta } from "@/lib/agentBackends";
 
 import type { SupplyGap } from "./types";
 
@@ -27,9 +28,7 @@ export const GuardGapList: React.FC<{ gaps: SupplyGap[]; labelKey?: TranslationK
             <span className="min-w-0 flex-1">
               <strong>
                 {t("settings.models.guard.gap.subject", {
-                  backend: t(`settings.models.backends.${gap.backend}`, {
-                    defaultValue: gap.backend,
-                  }),
+                  backend: getBackendUiMeta(gap.backend).label,
                   menuModel: gap.model_id,
                 })}
               </strong>

@@ -77,13 +77,13 @@
 
 /* ---- Provider sources ---------------------------------------------------- */
 
-/* The same three tracks the story's cards use, so the diagram's columns and the
-   composition's columns are one set: 299-wide cards with 39.5 gaps in a 976 box,
-   written as the fraction rather than the pixels so it holds at every width. */
+/* The reference's three source cards across the composition: 320-wide with 40 between
+   them in the 1040 box, written as the fraction rather than the pixels so it holds at
+   every width. */
 .setup-provider-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 30.6352%));
-  justify-content: space-between;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  column-gap: calc(100% * 40 / 1040);
   height: var(--obp-card-h);
 }
 
@@ -280,9 +280,10 @@
 
 /* ---- Gateway ------------------------------------------------------------- */
 
-/* One track wide and centred, which puts it on the column the middle card sits on. */
+/* The action's width and centred, which puts it on the composition's centre line,
+   right above the action it leads to: 299 of 1040. */
 .setup-gateway {
-  width: 30.6352%;
+  width: calc(100% * 299 / 1040);
   min-width: 0;
   margin: 0 auto;
   height: var(--obp-gateway-h);
@@ -355,13 +356,10 @@
 
 /* ---- Assistant destinations ---------------------------------------------- */
 
-/* The row the introduction's three cards shrink into. Same tracks, same logo and
-   name tokens, so the handoff has nothing to interpolate but position and size of
-   the frame itself. */
+/* The row the introduction's cards shrink into. The story's own tracks (see
+   onboarding.css), the same logo and name tokens, so the handoff has nothing to
+   interpolate but position and size of the frame itself. */
 .setup-destinations {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 30.6352%));
-  justify-content: space-between;
   height: var(--obp-destination-h);
 }
 .setup-destination {
@@ -381,6 +379,18 @@
   color: var(--foreground);
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* A built-in assistant is part of the platform; the tag says so where the others say
+   nothing, because there is nothing to install or enable for it. */
+.setup-destination-tag {
+  flex-shrink: 0;
+  padding: 2px calc(8 * var(--ob-u));
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  font-size: var(--obp-card-key);
+  line-height: 1.45;
+  color: var(--muted);
   white-space: nowrap;
 }
 
@@ -626,23 +636,20 @@
 /* ---- Bands --------------------------------------------------------------- */
 
 /* Only the two stacked bands `onboarding.css` already declares, restated for this
-   root. Nothing new is introduced: below 1024 the composition loses its third
-   column, and below 760 the diagram is a single column with the wires removed,
-   because a vertical wire between two stacked boxes describes nothing. */
+   root. Nothing new is introduced: below 1024 the columns close up, and below 760
+   the diagram is a single column with the wires removed, because a vertical wire
+   between two stacked boxes describes nothing. */
 @media (max-width: 1023px) {
   .setup-provider-grid,
-  .setup-destinations {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: calc(12 * var(--ob-u));
-    justify-content: stretch;
-  }
+  .setup-destinations { column-gap: calc(12 * var(--ob-u)); }
   .setup-gateway { width: 100%; }
 }
 @media (max-width: 759px) {
   .setup-provider-stage { gap: 10px; }
+  .setup-provider-grid { grid-template-columns: minmax(0, 1fr); }
+  .setup-destinations { grid-auto-flow: row; }
   .setup-provider-grid,
   .setup-destinations {
-    grid-template-columns: minmax(0, 1fr);
     height: auto;
     gap: 10px;
   }

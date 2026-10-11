@@ -1,4 +1,5 @@
 import asyncio
+from modules.agents.catalog import AGENT_BACKENDS, NATIVE_CLI_BACKENDS, display_name_for_backend
 import io
 import json
 import logging
@@ -1423,11 +1424,11 @@ class DiscordBot(BaseIMClient):
     ):
         interaction = trigger_id if isinstance(trigger_id, discord.Interaction) else None
         t = lambda key, **kw: self._t(key, channel_id, **kw)
-        common_agents = ["claude", "codex", "opencode"]
+        common_agents = NATIVE_CLI_BACKENDS
         registered_backends = None
         if getattr(self, "_controller", None) and getattr(self._controller, "agent_service", None):
             registered_backends = list(self._controller.agent_service.agents.keys())
-        allowed_agents = set(registered_backends or common_agents)
+        allowed_agents = set(registered_backends or common_agents) & set(NATIVE_CLI_BACKENDS)
         sessions = [item for item in sessions if item.agent in allowed_agents]
 
         options = []
@@ -1585,9 +1586,7 @@ class DiscordBot(BaseIMClient):
         interaction = trigger_id if isinstance(trigger_id, discord.Interaction) else None
 
         backend_display_names = {
-            "claude": "ClaudeCode",
-            "codex": "Codex",
-            "opencode": "OpenCode",
+            backend: display_name_for_backend(backend) for backend in AGENT_BACKENDS
         }
 
         def _prefixed_label(prefix_key: str, label: str, limit: int = 100) -> str:

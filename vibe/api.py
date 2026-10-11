@@ -34,6 +34,7 @@ from config.v2_config import (
     config_file_lock,
     AGENT_CREDENTIAL_SECTIONS,
     config_recovery_refusal,
+    hub_supply_block,
 )
 from config.v2_settings import (
     SettingsStore,
@@ -106,16 +107,22 @@ from vibe.restart_supervisor import schedule_restart
 from vibe import backend_model_catalog
 from vibe.i18n import t as backend_t
 from modules.agents.catalog import (
+    AGENT_BACKENDS,
+    NATIVE_CLI_BACKENDS,
     agent_backend_catalog_payload,
     agent_backend_descriptors,
     display_name_for_backend,
     is_agent_backend,
+    is_builtin_backend,
+    is_native_cli_backend,
     latest_probe_for_backend,
     supports_runtime_refresh,
+    supports_install,
     supports_web_oauth,
 )
 from modules.agents.subagent_router import list_codex_subagents
 from core.vibe_agents import (
+    AgentAlwaysEnabledError,
     AgentArchivedEditError,
     AgentArchiveError,
     AgentNameValidationError,
@@ -174,7 +181,7 @@ def _native_auth_write(
     def decorate(function):
         def acquire(args, kwargs):
             target = str(backend or kwargs.get("backend") or (args[0] if args else "")).strip().lower()
-            if target not in {"claude", "codex", "opencode"}:
+            if target not in NATIVE_CLI_BACKENDS:
                 raise NativeMigrationBlockedError("unsupported_backend", ())
             lease = NativeCredentialLease((target,)).acquire()
             try:
@@ -257,7 +264,7 @@ def _enabled_agent_backends_from_config(config: Optional[V2Config] = None) -> li
     result: list[str] = []
     agents = getattr(cfg, "agents", None)
     if agents is not None:
-        for backend in ("opencode", "claude", "codex"):
+        for backend in AGENT_BACKENDS:
             backend_cfg = getattr(agents, backend, None)
             if backend_cfg is not None and bool(getattr(backend_cfg, "enabled", True)):
                 result.append(backend)
@@ -342,7 +349,7 @@ def resolve_cli_paths(
     for binary, path in resolved.items():
         if path is None:
             name = Path(os.path.expanduser(binary)).name
-            if name in {"claude", "codex", "opencode"}:
+            if name in NATIVE_CLI_BACKENDS:
                 resolved[binary] = resolve_published_desktop_backend(name)
     return resolved
 
@@ -2179,8 +2186,8 @@ def update_vibe_agent(name: str, payload: dict, *, user_context: Any = None) -> 
             )
         except AgentNameValidationError as exc:
             return _agent_name_validation_error(exc)
-        except AgentArchivedEditError as exc:
-            return _agent_archived_edit_error(exc)
+        except (AgentArchivedEditError, AgentAlwaysEnabledError) as exc:
+            return _agent_lifecycle_error(exc)
         except AgentReferenceRewriteError as exc:
             return _agent_reference_rewrite_error(exc)
         return {"ok": True, "agent": _vibe_agent_payload(agent)}
@@ -2202,7 +2209,7 @@ def _agent_name_validation_error(exc: AgentNameValidationError) -> dict:
     }
 
 
-def _agent_archived_edit_error(exc: AgentArchivedEditError) -> dict:
+def _agent_lifecycle_error(exc: AgentArchivedEditError | AgentAlwaysEnabledError) -> dict:
     try:
         lang = V2Config.load().language
     except Exception:
@@ -4968,7 +4975,7 @@ def import_vibe_agents(payload: dict, *, user_context: Any = None) -> dict:
         path = _validate_direct_agent_import_path(Path(file_path).expanduser())
         candidates.append(_parse_agent_import_file(path, backend=backend))
     else:
-        if source not in {"claude", "codex", "opencode"}:
+        if source not in NATIVE_CLI_BACKENDS:
             raise ValueError("from must be one of: claude, codex, opencode")
         if name and import_all:
             raise ValueError("Use either name or all, not both")
@@ -6961,7 +6968,7 @@ def agent_model_options(
     """
 
     normalized_backend = (backend or "").strip().lower()
-    if normalized_backend not in ("claude", "codex", "opencode"):
+    if normalized_backend not in AGENT_BACKENDS:
         return {"ok": False, "error": f"unknown backend '{backend}'", "backend": normalized_backend}
 
     try:
@@ -6969,6 +6976,26 @@ def agent_model_options(
     except Exception:
         config = None
 
+    if not is_native_cli_backend(normalized_backend):
+        if config is None:
+            return {"ok": False, "backend": normalized_backend, "error": "config_unavailable"}
+        supply = config.model_hub.agents[normalized_backend]
+        return {
+            "ok": True,
+            "backend": normalized_backend,
+            "models": [
+                {
+                    "value": model.id,
+                    "label": model.display_name or model.id,
+                    "reasoning_efforts": (
+                        [] if model.supports_reasoning is False else list(model.reasoning_efforts)
+                    ),
+                }
+                for model in supply.models
+            ],
+            "source": "model_hub",
+            "live": False,
+        }
     if normalized_backend == "claude":
         data = claude_models()
         if not data.get("ok"):
@@ -7071,7 +7098,7 @@ def start_agent_install_job(name: str) -> dict:
     install/upgrade implementation as the CLI card used before; only the
     execution boundary changes.
     """
-    if not is_agent_backend(name):
+    if not supports_install(name):
         return {"ok": False, "message": f"Unknown agent: {name}"}
 
     job_id = uuid.uuid4().hex
@@ -7222,9 +7249,7 @@ def _persist_agent_cli_path(name: str, installed_path: str, *, required: bool = 
 
 
 _DESKTOP_BACKEND_LABELS = {
-    "claude": "Claude Code",
-    "codex": "Codex",
-    "opencode": "OpenCode",
+    backend: display_name_for_backend(backend) for backend in NATIVE_CLI_BACKENDS
 }
 _DESKTOP_BACKEND_ERROR_I18N_KEYS = {
     "unknown_backend": "desktopBackendInstall.unknownBackend",
@@ -7292,6 +7317,8 @@ def install_agent(name: str) -> dict:
     Settings runs this in the UI process and backend auto-update in the
     controller, so only a file lock keeps two installers off one CLI.
     """
+    if not supports_install(name):
+        return {"ok": False, "message": f"Unknown agent: {name}"}
     lock = MigrationFileLock(paths.get_state_dir() / "agent_install" / f"{name}.lock", timeout_seconds=0)
     try:
         lock.acquire()
@@ -9552,6 +9579,7 @@ def reconcile_startup_dependencies() -> dict:
         "model_hub_engine": {"ok": False, "status": "unknown"},
         "show_runtime": {"ok": False, "status": "unknown"},
         "tmux": {"ok": False, "status": "unknown"},
+        "ripgrep": {"ok": False, "status": "unknown"},
     }
     try:
         _set_startup_dependency_reconciling("askill", True)
@@ -9648,6 +9676,18 @@ def reconcile_startup_dependencies() -> dict:
                 result["tmux"] = {"ok": False, "status": "failed", "reason": str(exc)}
             finally:
                 _set_startup_dependency_reconciling("tmux", False)
+
+        # Agent commands search with the managed ripgrep. `vibe runtime prepare`
+        # installs it, but a Runtime that never runs prepare (the desktop app)
+        # gets it only here. Its absence only changes Vibey's prompt line, so it
+        # never fails startup.
+        try:
+            from core.ripgrep_runtime import RipgrepRuntimeManager
+
+            result["ripgrep"] = RipgrepRuntimeManager().ensure(force=False)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Startup dependency reconcile failed to ensure ripgrep: %s", exc, exc_info=True)
+            result["ripgrep"] = {"ok": False, "status": "failed", "reason": str(exc)}
 
         result["duration_ms"] = int((time.monotonic() - started_at) * 1000)
         result["ok"] = (
@@ -10083,8 +10123,6 @@ def _hub_backend_connection_auth(config: V2Config, backend: str) -> str:
     from vibe.model_hub_runtime.state import EngineStateStore
 
     hub = config.model_hub
-    if not hub.enabled:
-        return "none"
     source_ids = list(dict.fromkeys([
         *hub.effective_source_order(backend),
         *(hop.source_id for route in hub.agents[backend].routes.values() for hop in route.hops),
@@ -10137,10 +10175,15 @@ async def get_backend_connection(name: str) -> dict:
     if not is_agent_backend(name):
         return {"ok": False, "error": "unsupported_backend"}
     config = await asyncio.to_thread(load_config)
-    backend_config = getattr(config.agents, name)
-    enabled = bool(backend_config.enabled)
+    builtin = is_builtin_backend(name)
+    backend_config = None if builtin else getattr(config.agents, name)
+    enabled = builtin or bool(backend_config.enabled)
     supply_mode = config.model_hub.agents[name].mode
-    installed = await asyncio.to_thread(resolve_cli_path, backend_config.cli_path or name) is not None
+    native = is_native_cli_backend(name)
+    installed = (
+        await asyncio.to_thread(resolve_cli_path, backend_config.cli_path or name) is not None
+        if native else True
+    )
     result = {
         "ok": True, "backend": name, "installed": installed, "enabled": enabled,
         "supply_mode": supply_mode,
@@ -10175,11 +10218,15 @@ async def get_backend_connection(name: str) -> dict:
         result["message"] = receipt.get("message") or receipt.get("error")
     if not installed or config.load_warnings:
         return result
-    if name in await asyncio.to_thread(pending_native_backends, paths.get_state_dir() / "native-takeover"):
+    if native and name in await asyncio.to_thread(pending_native_backends, paths.get_state_dir() / "native-takeover"):
         return result
     try:
         if supply_mode == "hub":
-            result["auth"] = await asyncio.to_thread(_hub_backend_connection_auth, config, name)
+            # A backend the Hub cannot supply now has no credential to run on, whatever is saved.
+            result["auth"] = (
+                "none" if hub_supply_block(name, config.model_hub) is not None
+                else await asyncio.to_thread(_hub_backend_connection_auth, config, name)
+            )
         elif name == "opencode":
             if not enabled:
                 return result
@@ -10213,7 +10260,7 @@ async def get_backend_connection(name: str) -> dict:
         return result
     # An ownership transition may have started while the observation awaited
     # IPC or native read-only checks. Do not admit against a pending journal.
-    if name in await asyncio.to_thread(pending_native_backends, paths.get_state_dir() / "native-takeover"):
+    if native and name in await asyncio.to_thread(pending_native_backends, paths.get_state_dir() / "native-takeover"):
         return result
     credential_ready = enabled and result["auth"] in {"subscription", "api_key"} and not result.get("permission_required")
     result["ready"] = credential_ready and result["application"] == "applied"
@@ -10227,7 +10274,7 @@ def get_backend_runtime(name: str) -> dict:
     Versions are cached for short windows so popovers and re-renders do not
     fan out into many CLI invocations or registry HTTP calls.
     """
-    if not is_agent_backend(name):
+    if not is_native_cli_backend(name):
         return {"ok": False, "error": f"Unknown backend: {name}"}
 
     try:

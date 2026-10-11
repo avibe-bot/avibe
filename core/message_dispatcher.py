@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional, Sequence
 from urllib.parse import urljoin
+from modules.agents.catalog import AGENT_BACKENDS
 
 from config.platform_registry import get_platform_descriptor
 from config.v2_config import DEFAULT_AGENT_PROGRESS_STYLE
@@ -1816,7 +1817,7 @@ class ConsolidatedMessageDispatcher:
         if (
             not session_id
             or not base_session_id
-            or backend not in {"claude", "codex", "opencode"}
+            or backend not in AGENT_BACKENDS
         ):
             if lease is not None:
                 release_lease = getattr(
@@ -2860,6 +2861,9 @@ class ConsolidatedMessageDispatcher:
                 "delivery_suppressed": True,
             }
         native_output_id = output_semantics.native_message_id(target_context) if output is not None else None
+        # A backend that commits its own transcript row passes it here: every persist
+        # site below then writes that row's display columns instead of a second row.
+        existing_row_id = output_semantics.persisted_row_id
 
         # For a result, persist the SAME cleaned text the user receives:
         # process_reply() strips file:// markdown links + the trailing
@@ -3039,6 +3043,7 @@ class ConsolidatedMessageDispatcher:
                             metadata=output_metadata,
                             native_message_id=native_output_id,
                             citations=citations,
+                            existing_row_id=existing_row_id,
                         )
                     else:
                         persisted_output = persist_agent_message(
@@ -3049,6 +3054,7 @@ class ConsolidatedMessageDispatcher:
                             metadata=output_metadata,
                             native_message_id=native_output_id,
                             citations=citations,
+                            existing_row_id=existing_row_id,
                         )
                 else:
                     persisted_output = persist_agent_message(
@@ -3058,6 +3064,7 @@ class ConsolidatedMessageDispatcher:
                         metadata=output_metadata,
                         native_message_id=native_output_id,
                         citations=citations,
+                        existing_row_id=existing_row_id,
                     )
                 local_message_id = (persisted_output or {}).get("id") or (
                     f"suppressed:{(context.platform_specific or {}).get('task_execution_id') or canonical_type}"
@@ -3485,6 +3492,7 @@ class ConsolidatedMessageDispatcher:
                             metadata=output_metadata,
                             native_message_id=native_output_id,
                             citations=citations,
+                            existing_row_id=existing_row_id,
                         )
                     else:
                         persisted_output = persist_agent_message(
@@ -3495,6 +3503,7 @@ class ConsolidatedMessageDispatcher:
                             metadata=output_metadata,
                             native_message_id=native_output_id,
                             citations=citations,
+                            existing_row_id=existing_row_id,
                         )
 
                 if settlement_waits_for_persistence:
@@ -3668,6 +3677,7 @@ class ConsolidatedMessageDispatcher:
             persist_text,
             citations=citations,
             metadata={TRANSCRIPT_COPY_KEY: "interim"} if interim_row else None,
+            existing_row_id=existing_row_id,
         )
 
         # The row above is the only copy of an intermediate message that carries a

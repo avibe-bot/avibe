@@ -11,7 +11,7 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 from config import paths
 from config.atomic_io import write_atomic
@@ -31,6 +31,7 @@ MODELS_DEV_CACHE_TTL_SECONDS = 24 * 60 * 60
 MODELS_DEV_MAX_BYTES = 16 * 1024 * 1024
 MODELS_DEV_MAX_MATCHES = 8
 _CACHE_LOCK = threading.Lock()
+_COPY_ARRIVED: Callable[[], None] | None = None
 
 
 def _vendor_map_path() -> Path:
@@ -166,6 +167,12 @@ def _fetch_catalog(previous: dict[str, Any]) -> dict[str, Any]:
                 if isinstance(value, str) and value:
                     payload[key] = value
             _write_cache(payload)
+            arrived = _COPY_ARRIVED
+            if arrived is not None:
+                try:
+                    arrived()
+                except Exception:  # noqa: BLE001 - the copy is saved and every reader sees it
+                    logger.warning("models.dev copy arrival signal failed", exc_info=True)
             return catalog
     except urllib.error.HTTPError as exc:
         if exc.code == 304:
@@ -175,6 +182,19 @@ def _fetch_catalog(previous: dict[str, Any]) -> dict[str, Any]:
                 _write_cache(previous)
                 return catalog
         raise
+
+
+def set_models_dev_copy_arrived(callback: Callable[[], None] | None) -> None:
+    """Set the controller-owned signal that a new copy landed in this process.
+
+    A row written while no copy was cached lacks the metadata one gives it, and
+    its owner fills it once a copy arrives. Every fetch that saves a copy, in
+    the foreground or the background, calls the signal on its own thread, the
+    foreground one still holding ``_CACHE_LOCK``, so the signal only hands off.
+    """
+
+    global _COPY_ARRIVED
+    _COPY_ARRIVED = callback
 
 
 def load_models_dev_catalog() -> dict[str, Any]:

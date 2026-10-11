@@ -104,7 +104,7 @@ async def test_runtime_gen_006_a_turn_reaching_a_disabled_claude_starts_nothing(
 
     assert controller.session_handler.get_or_create_claude_session.await_count == (1 if disabled_while_connecting else 0)
     assert len(failures) == 1 and failures[0][0] == "claude"
-    assert "ClaudeCode was turned off" in failures[0][1]
+    assert "Claude Code was turned off" in failures[0][1]
 
 
 class _StubSessions:

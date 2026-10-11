@@ -98,6 +98,7 @@ import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
 import { Switch } from '../ui/switch';
 import { errorMessage } from '@/lib/errorMessage';
+import { getBackendUiMeta } from '@/lib/agentBackends';
 
 // Detail-panel schedule, in words. The literal it was derived from is printed
 // beside it by the caller — humanizing must never be the only copy of a value
@@ -1864,7 +1865,7 @@ export const RunDetail: React.FC<RunDetailProps> = ({ run, agent }) => {
       </DetailField>
       <DetailField label={t('harness.detail.agent')}>
         <span className="text-[12px] text-foreground">{agentDisplayName(run.agent_name, agent)}</span>
-        {run.agent_backend && <span className="ml-2 font-mono text-[10px] text-muted">{run.agent_backend}</span>}
+        {run.agent_backend && <span className="ml-2 font-mono text-[10px] text-muted">{getBackendUiMeta(run.agent_backend).label}</span>}
         {run.model && <span className="ml-2 font-mono text-[10px] text-muted">{run.model}</span>}
       </DetailField>
       {(run.definition_name || run.definition_id) && (

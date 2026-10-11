@@ -12,8 +12,9 @@ import { surfaceBackendNotices } from './shared/surfaceBackendNotices';
 import { HubOwnedAuthNotice } from './shared/HubOwnedAuthNotice';
 import { errorMessage } from '@/lib/errorMessage';
 import { isNativeAuthHubOwned } from '@/lib/nativeAuthOwnership';
+import type { WebOAuthBackend } from '@/lib/agentBackends';
 
-type Backend = 'claude' | 'codex' | 'opencode';
+type Backend = WebOAuthBackend;
 
 export type BackendOAuthPanelProps = {
   backend: Backend;

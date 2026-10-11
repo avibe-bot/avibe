@@ -368,3 +368,127 @@ def test_transaction_reentrant_with_save(isolated_config_home: Path) -> None:
         "provider_id": "OpenAI",
         "base_url": "https://r/v1",
     }
+
+
+def test_plain_load_completes_while_another_thread_holds_the_config_lock(
+    isolated_config_home: Path,
+) -> None:
+    """A plain read takes no config lock: a held writer section cannot stall it."""
+    from config import v2_config as module
+
+    held = threading.Event()
+    release = threading.Event()
+    loaded: list[V2Config] = []
+
+    def writer_section() -> None:
+        with module.CONFIG_LOCK:
+            held.set()
+            release.wait()
+
+    def read() -> None:
+        loaded.append(V2Config.load())
+
+    holder = threading.Thread(target=writer_section)
+    holder.start()
+    reader = threading.Thread(target=read)
+    try:
+        assert held.wait(30)
+        reader.start()
+        # A hang guard only: the read waits on nothing while the lock stays held.
+        reader.join(30)
+        assert not reader.is_alive(), "a plain load waited for the config lock"
+        assert loaded[0].language == "en"
+    finally:
+        release.set()
+        holder.join()
+        if reader.is_alive():
+            reader.join()
+
+
+def test_a_load_racing_a_save_sees_the_old_file_or_the_new_one(isolated_config_home: Path) -> None:
+    """Writers publish config.json atomically, so a lock-free read never sees a partial file."""
+
+    # Large enough that an in-place rewrite would span many writes and reads.
+    padding = "x" * 500_000
+    versions = {"en": f"/old/{padding}", "zh": f"/new/{padding}"}
+
+    def write(language: str) -> None:
+        def mutate(cfg: V2Config) -> None:
+            cfg.language = language
+            cfg.runtime.default_cwd = versions[language]
+
+        update_config_fields(mutate)
+
+    write("en")
+    stop = threading.Event()
+    errors: list[BaseException] = []
+
+    def writer() -> None:
+        try:
+            for index in range(60):
+                write(("zh", "en")[index % 2])
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            stop.set()
+
+    thread = threading.Thread(target=writer)
+    thread.start()
+    observed = 0
+    try:
+        while not stop.is_set() or observed == 0:
+            config = V2Config.load()
+            assert config.load_warnings == ()
+            assert config.runtime.default_cwd == versions[config.language]
+            observed += 1
+    finally:
+        stop.set()
+        thread.join()
+    assert not errors
+    assert not list(isolated_config_home.parent.glob(f"{isolated_config_home.name}.bak-*"))
+
+
+def test_pair_preclaim_migration_reads_config_under_the_sqlite_writer_without_the_config_lock(
+    isolated_config_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """pair()'s pre-claim migration holds the SQLite writer when it reads the config.
+
+    A reconcile in another thread holds config_file_lock and waits for that writer.
+    When the read also took CONFIG_LOCK, the two waited on each other until SQLite's
+    busy_timeout failed the reconcile with "database is locked".
+    """
+    from config.v2_config import config_file_lock
+    from storage import remote_access_authorization_service as authorization
+    from storage import resource_access_service
+    from vibe import remote_access
+
+    # Initialize state first so neither thread migrates the schema below.
+    remote_access._run_pending_deferred_context_migration()
+    holds_sqlite_writer = threading.Event()
+    original = resource_access_service._configured_resource_state
+
+    def configured_resource_state():
+        # Called after reserve_write_lock(): this thread owns the SQLite writer now.
+        holds_sqlite_writer.set()
+        return original()
+
+    monkeypatch.setattr(resource_access_service, "_configured_resource_state", configured_resource_state)
+    outcome: dict[str, object] = {}
+
+    def preclaim() -> None:
+        try:
+            outcome["preclaim"] = remote_access._run_pending_deferred_context_migration()
+        except BaseException as exc:
+            outcome["preclaim"] = exc
+
+    worker = threading.Thread(target=preclaim)
+    try:
+        with config_file_lock():
+            worker.start()
+            assert holds_sqlite_writer.wait(30)
+            result = authorization.reconcile_instance_binding(instance_id="inst_A", instance_kind="personal")
+    finally:
+        # After the config lock is released, so a pre-claim still waiting for it can finish.
+        worker.join()
+    assert result["ok"]
+    assert isinstance(outcome["preclaim"], dict)

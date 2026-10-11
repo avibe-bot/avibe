@@ -72,7 +72,9 @@ export function isBackendFailureNotice(
 }
 
 // This is action eligibility, not transcript visibility. The server additionally
-// rechecks the durable failed-Turn boundary and current Session authority.
+// rechecks the durable failed-Turn boundary and current Session authority. A
+// Turn whose running commands continue as Watches (``watch_ids``) is not retried:
+// that would run them twice.
 export function isRetryableFailureNotice(
   message: TerminalAgentMessageCandidate & { source?: string | null },
 ): boolean {
@@ -80,7 +82,8 @@ export function isRetryableFailureNotice(
   return isBackendFailureNotice(message)
     && typeof metadata?.turn_id === 'string'
     && !!metadata.turn_id
-    && !metadata.detached;
+    && !metadata.detached
+    && !(Array.isArray(metadata.watch_ids) && metadata.watch_ids.length > 0);
 }
 
 // A terminal reply the TRANSCRIPT shows: the catalog's terminal activity role

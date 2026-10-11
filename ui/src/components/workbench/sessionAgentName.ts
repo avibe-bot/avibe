@@ -16,3 +16,21 @@ export function sessionAgentDisplayName(
     agents.find((candidate) => candidate.name === agentName);
   return agent?.display_name?.trim() || agentName;
 }
+
+// Which backend a chat session's replies come from, for their avatar: the session's
+// own backend, else its Agent's, else (while it inherits the global default) the
+// default Agent's. A caller passes no default for a row that never inherits one.
+export function sessionAgentBackend(
+  session: Pick<WorkbenchSession, 'agent_id' | 'agent_name' | 'agent_backend'>,
+  agents: VibeAgentBrief[],
+  defaultAgentName: string | null,
+): string | null {
+  const backend = session.agent_backend?.trim();
+  if (backend) return backend;
+  const agentName = session.agent_name?.trim() || null;
+  const agent = agentName
+    ? (session.agent_id ? agents.find((candidate) => candidate.id === session.agent_id) : undefined)
+      ?? agents.find((candidate) => candidate.name === agentName)
+    : defaultAgentName ? agents.find((candidate) => candidate.name === defaultAgentName) : undefined;
+  return agent?.backend ?? null;
+}

@@ -27,7 +27,7 @@ from collections.abc import Iterable
 from pathlib import Path
 
 from config.atomic_io import write_atomic
-from modules.agents.catalog import AGENT_BACKENDS, is_agent_backend
+from modules.agents.catalog import NATIVE_CLI_BACKENDS, is_agent_backend
 from vibe.claude_config import get_claude_home
 from vibe.codex_config import get_codex_home
 from vibe.opencode_config import get_opencode_config_paths
@@ -96,7 +96,7 @@ def read_global_agents_md(backend: str, home: Path | None = None) -> dict:
 
 def read_all_global_agents_md(home: Path | None = None) -> list[dict]:
     """Return the editor seed for every known backend, in catalog order."""
-    return [read_global_agents_md(backend, home) for backend in AGENT_BACKENDS]
+    return [read_global_agents_md(backend, home) for backend in NATIVE_CLI_BACKENDS]
 
 
 def write_global_agents_md(backend: str, content: str, home: Path | None = None) -> dict:

@@ -12,6 +12,7 @@ from typing import AsyncIterator, Callable
 
 import aiohttp
 import pytest
+from modules.agents.catalog import display_name_for_backend
 
 from config.v2_config import (
     ModelHubAgentSourcesConfig,
@@ -231,7 +232,8 @@ def _config(*sources: ModelHubSourceConfig) -> ModelHubConfig:
             for backend in ("claude", "codex", "opencode")
         },
     )
-    for backend, agent in config.agents.items():
+    for backend in ("claude", "codex", "opencode"):
+        agent = config.agents[backend]
         eligible_sources = tuple(
             source
             for source in sources
@@ -1422,7 +1424,7 @@ def test_mh_unlisted_001_removed_model_fails_its_next_turn_with_one_clear_reason
             "modelHub.launch.model_unlisted",
             language,
             model=model_id,
-            backend=i18n_t(f"modelHub.backends.{backend}", language),
+            backend=display_name_for_backend(backend),
         )
         assert str(refused.value) == expected
         assert model_id in expected
@@ -1521,7 +1523,7 @@ def test_opencode_refuses_an_unlisted_model_its_retained_route_cannot_address(
             "modelHub.launch.model_unlisted",
             "en",
             model=model_id,
-            backend=i18n_t("modelHub.backends.opencode", "en"),
+            backend=display_name_for_backend("opencode"),
         )
         assert prewrite_failure_evidence(context) == {
             "reason": "model_hub_model_unlisted", "requires_explicit_retry": True,
