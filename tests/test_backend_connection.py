@@ -435,7 +435,7 @@ def _store_hub_credential(source):
 
 def test_vibey_connection_uses_hub_supply_without_any_native_probe(hub_connection, monkeypatch):
     """The new backend has no CLI; the existing native cases cannot protect that boundary."""
-    from core import backend_restart
+    from core import backend_restart, managed_runtime
 
     def forbidden(*_args, **_kwargs):
         pytest.fail("Avibe connection inspected a native CLI or takeover journal")
@@ -465,6 +465,13 @@ def test_vibey_connection_uses_hub_supply_without_any_native_probe(hub_connectio
     stopped = asyncio.run(api.get_backend_connection("vibey"))
     assert stopped["enabled"] and stopped["auth"] == "none"
     assert not stopped["ready"] and not stopped["entry_eligible"]
+    # A host the pinned engine manifest has no asset for leaves it nothing either, gateway on or off.
+    hub_connection.config.model_hub.enabled = True
+    hub_connection.config.save()
+    monkeypatch.setattr(managed_runtime, "runtime_platform_tag", lambda: "win32-x64")
+    unsupported = asyncio.run(api.get_backend_connection("vibey"))
+    assert unsupported["enabled"] and unsupported["auth"] == "none"
+    assert not unsupported["ready"] and not unsupported["entry_eligible"]
 
 
 @pytest.mark.parametrize("backend", ["claude", "codex", "opencode"])

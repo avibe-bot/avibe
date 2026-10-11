@@ -13,7 +13,8 @@ export const modelHubEnabledFromConfig = (config: unknown): boolean => {
   );
 };
 
-export type HubSupplyBlock = 'hub_disabled' | 'gateway_off';
+const HUB_SUPPLY_BLOCKS = ['hub_disabled', 'engine_unsupported', 'gateway_off'] as const;
+export type HubSupplyBlock = typeof HUB_SUPPLY_BLOCKS[number];
 
 // Backends left with no model to run on by the Model Hub's state, and why. The
 // server decides (``hub_supply_block``) and GET /api/config carries the answer.
@@ -22,6 +23,6 @@ export const hubSupplyBlocks = (config: unknown): ReadonlyMap<string, HubSupplyB
   if (!blocks || typeof blocks !== 'object') return new Map();
   return new Map(
     Object.entries(blocks).filter((entry): entry is [string, HubSupplyBlock] =>
-      entry[1] === 'hub_disabled' || entry[1] === 'gateway_off'),
+      (HUB_SUPPLY_BLOCKS as readonly unknown[]).includes(entry[1])),
   );
 };

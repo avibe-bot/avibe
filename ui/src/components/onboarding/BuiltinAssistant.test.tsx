@@ -271,4 +271,16 @@ describe('the built-in assistant card', () => {
     await act(async () => undefined);
     expect(enter().disabled).toBe(true);
   });
+
+  // A host the pinned gateway engine has no build for: Vibey stays listed and always on,
+  // but the card says why it cannot run and is never offered as the way in.
+  it('says this platform has no gateway component and never offers it as the entry', async () => {
+    render(wrap(<AgentDetection data={data({ agent_supply_blocks: { vibey: 'engine_unsupported' } })}
+      onNext={vi.fn()} onNavigate={vi.fn()} agentReads={reads} />));
+    expect(await card().findByText(en.onboarding.setup.noteGatewayUnsupported.replace('{{name}}', 'Vibey'))).toBeTruthy();
+    expect(card().getByText(en.onboarding.setup.builtinAlwaysOn)).toBeTruthy();
+    expect(card().queryByRole('group')).toBeNull();
+    await act(async () => undefined);
+    expect(enter().disabled).toBe(true);
+  });
 });

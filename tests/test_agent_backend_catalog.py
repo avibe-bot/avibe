@@ -77,7 +77,7 @@ def test_copy_about_the_built_in_names_it_from_the_catalog(lang) -> None:
     for kind in ("aborted", "UnsupportedModelRoute", "ProviderProtocolViolation", None):
         text = error_text(kind, lang)
         assert name in text and "{backend}" not in text
-    for key in ("errors.modelHubDisabled", "errors.modelGatewayOff"):
+    for key in ("errors.modelHubDisabled", "errors.modelGatewayUnsupported", "errors.modelGatewayOff"):
         text = t(key, lang, backend=name)
         assert name in text and "{backend}" not in text
     always_on = t("error.agentLifecycle.agent_always_enabled.message", lang, agent="vibey")

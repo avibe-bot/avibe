@@ -364,7 +364,11 @@ def launch_refusal_copy(controller: Any, error: BaseException) -> str | None:
     return render_turn_outcome_copy(outcome, _language(controller))
 
 
-_HUB_SUPPLY_REFUSALS = {"hub_disabled": "errors.modelHubDisabled", "gateway_off": "errors.modelGatewayOff"}
+_HUB_SUPPLY_REFUSALS = {
+    "hub_disabled": "errors.modelHubDisabled",
+    "engine_unsupported": "errors.modelGatewayUnsupported",
+    "gateway_off": "errors.modelGatewayOff",
+}
 
 
 def hub_supply_refusal(controller: Any, backend: str, language: str) -> str | None:

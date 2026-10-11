@@ -57,6 +57,7 @@ export function BuiltinAssistantRow({ backend, route, block, offer, picking = nu
   const routeUnknown = route?.kind === 'pending' || route?.kind === 'failed';
   const note = block === 'gateway_off' ? t('onboarding.setup.noteGatewayOff', { name: label })
     : block === 'hub_disabled' ? t('onboarding.setup.noteHubDisabled', { name: label })
+      : block === 'engine_unsupported' ? t('onboarding.setup.noteGatewayUnsupported', { name: label })
       : unset ? t('onboarding.setup.noteBuiltinUnset')
         : route?.kind === 'route' && !routeModel ? t('onboarding.setup.noteNoModels')
           : t('onboarding.setup.noteEnabled');

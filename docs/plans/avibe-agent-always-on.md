@@ -45,12 +45,18 @@ backend list, it is always enabled, and it cannot be turned off.
 - **Model Hub cannot supply.** `hub_supply_block(backend, hub_config)` (`config/v2_config.py`) is the one owner of why
   the Model Hub leaves a backend no model to run on now. The shared model gate and the adapter's preflight render its
   copy (`hub_supply_refusal`), `get_backend_connection` reports such a backend unready, and `GET /api/config` carries
-  it as `agent_supply_blocks`, which the Backends pages show. The backend stays listed and enabled in both cases.
+  it as `agent_supply_blocks`, which the Backends pages show. The backend stays listed and enabled in every case.
   - Gateway off (Models → Start/Stop): its row says "Gateway off", its page links to Models, and a Turn refuses with
     `errors.modelGatewayOff`.
   - Model Hub disabled on the instance (`VIBE_MODEL_HUB_ENABLED=0`): a backend without its own CLI gets every model
     through the Hub, so its row says "Model Hub disabled", its page says so without a Models link, and a Turn refuses
     with `errors.modelHubDisabled`.
+  - No engine for this host (`engine_unsupported`): the pinned engine manifest has no asset for the host's platform
+    (`EngineRuntimeManager.supports_host_platform()`; native Windows today), so a backend without its own CLI has no
+    gateway to run through. Its row and wizard card say "No gateway component for this platform yet", the wizard does
+    not offer it as the entry, and a Turn refuses with `errors.modelGatewayUnsupported`. The manifest is the only
+    input: a platform gains the backend when its engine asset ships. Native backends keep their own Direct path and
+    are unchanged.
 
 ## Known by design
 

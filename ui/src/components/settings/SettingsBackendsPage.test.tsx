@@ -160,4 +160,24 @@ describe('backend attention', () => {
     expect(await screen.findByText('Model Hub is disabled on this instance, so Vibey has no model to run on.')).toBeTruthy();
     expect(screen.queryByRole('link', { name: 'Open Models page' })).toBeNull();
   });
+
+  // No gateway engine is built for this platform: the backend stays listed and enabled,
+  // its status names that, and there is nothing on the Models page to turn on.
+  it('says this platform has no gateway component, on the row and on the backend page', async () => {
+    vi.spyOn(modelsApi, 'listAgents').mockResolvedValue(withoutModel);
+    mocks.api.getConfig.mockResolvedValue({
+      agents: {}, capabilities: { model_hub: { enabled: true } }, agent_supply_blocks: { vibey: 'engine_unsupported' },
+    });
+    renderBackends();
+
+    const vibey = await rowOf('Vibey');
+    expect(await within(vibey).findByText('No gateway component for this platform yet')).toBeTruthy();
+    expect(within(vibey).queryByText('Gateway off')).toBeNull();
+    expect(within(vibey).queryByText('No model selected')).toBeNull();
+    expect(within(await rowOf('Claude Code')).queryByText('No gateway component for this platform yet')).toBeNull();
+
+    fireEvent.click(within(vibey).getByRole('link', { name: 'Configure' }));
+    expect(await screen.findByText('No gateway component for this platform yet, so Vibey has no model to run on.')).toBeTruthy();
+    expect(screen.queryByRole('link', { name: 'Open Models page' })).toBeNull();
+  });
 });
