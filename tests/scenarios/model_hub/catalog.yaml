@@ -188,6 +188,14 @@ scenarios:
     test: tests/test_model_hub_vibey_consumer.py::test_sequential_vibey_retry_replaces_route_and_retains_served_provenance
     related_tests:
       - tests/test_model_hub_vibey_consumer.py::test_vibey_route_replacement_refuses_overlap_without_poisoning_current_request
+  - id: MH-VIBEY-008
+    name: Every Vibey resolution names its Turn, so each Turn on its Session's service-lifetime scope keeps exact provenance
+    status: covered
+    kind: lifecycle
+    layer: contract
+    test: tests/test_model_hub_vibey_consumer.py::test_a_vibey_sessions_turns_share_its_scope_and_each_keeps_its_provenance
+    related_tests:
+      - tests/test_vibey_agent.py::test_every_model_hub_resolution_names_its_turn
   - id: MH-CODEX-ROUTING-001
     name: Shared Codex authentication stays stable while concurrent aliases route and settle independently
     status: covered

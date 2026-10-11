@@ -282,13 +282,17 @@ async def resolve_model_hub_launch(
     process_scope: Optional[str] = None,
     context: Any = None,
     config: Any = None,
+    turn_id: Optional[str] = None,
 ) -> ModelHubLaunch:
     router = getattr(controller, "model_hub_runtime", None)
     resolver = getattr(router, "resolve", None)
     if callable(resolver):
-        manager = getattr(controller, "session_turns", None)
-        turn_lookup = getattr(manager, "model_hub_turn_id_for_task", None)
-        turn_id = turn_lookup() if callable(turn_lookup) else None
+        if turn_id is None:
+            # Only the Turn's own dispatch task is found this way; a caller resolving
+            # from another task (Vibey's later model calls) names its Turn itself.
+            manager = getattr(controller, "session_turns", None)
+            turn_lookup = getattr(manager, "model_hub_turn_id_for_task", None)
+            turn_id = turn_lookup() if callable(turn_lookup) else None
         snapshot = {"config": config} if config is not None else {}
         try:
             return await resolver(

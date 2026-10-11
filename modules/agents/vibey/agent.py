@@ -515,8 +515,10 @@ class VibeyAgent(BaseAgent):
 
         async def resolve() -> ModelSelection:
             try:
+                # Every resolution names the Turn: the loop's later model calls run in their own tasks.
                 launch = await resolve_model_hub_launch(
-                    self.controller, BACKEND, model, process_scope=f"{BACKEND}:{session_id}", context=context
+                    self.controller, BACKEND, model, process_scope=f"{BACKEND}:{session_id}", context=context,
+                    turn_id=turn.turn_id,
                 )
             except Exception as error:
                 turn.refusal = launch_refusal_copy(self.controller, error)
