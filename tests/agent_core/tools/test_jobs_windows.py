@@ -30,6 +30,7 @@ from core.agent_core.cancel import CancelToken
 from core.agent_core.tools.base import ToolContext
 from core.agent_core.tools.bash import BashTool, settle_bash_call
 from core.agent_core.tools.jobs import JobStartError, LocalJobHost
+from core.agent_core.tools.shell import Shell
 from tests.agent_core.tools.conftest import instance, result_text
 
 pytestmark = pytest.mark.skipif(os.name != "nt", reason="the Windows job host")
@@ -73,7 +74,7 @@ def make_ctx(tmp_path):
 
 
 def _host(tmp_path, **kwargs):
-    return LocalJobHost(str(tmp_path / "jobs"), shell=sys.executable, **kwargs)
+    return LocalJobHost(str(tmp_path / "jobs"), shell=Shell(sys.executable), **kwargs)
 
 
 async def _start(host, tmp_path, script, *, tool_call_id="toolu_1", response_seq=1, timeout_s=None):
@@ -315,8 +316,9 @@ async def test_a_job_outlives_the_host_process_that_started_it(tmp_path):
         "import asyncio, os, sys\n"
         "from core.agent_core.tools.base import CallInstance\n"
         "from core.agent_core.tools.jobs import LocalJobHost\n"
+        "from core.agent_core.tools.shell import Shell\n"
         "async def main():\n"
-        f"    host = LocalJobHost(r'{tmp_path / 'jobs'}', shell=sys.executable)\n"
+        f"    host = LocalJobHost(r'{tmp_path / 'jobs'}', shell=Shell(sys.executable))\n"
         f"    job_id = await host.start({_tree(tmp_path)!r}, cwd=r'{tmp_path}', env=dict(os.environ),"
         " timeout_s=None, call=CallInstance('ses_test', 'msg_1', 1, 'toolu_1'))\n"
         "    print(job_id, flush=True)\n"
@@ -463,7 +465,7 @@ async def test_a_program_holding_tail_log_when_the_command_exits_leaves_its_exit
 async def test_jobs_run_with_their_files_on_a_volume_without_hard_links(tmp_path):
     """FAT has no hard links: a decision and a stop reason are each created once by a rename instead."""
     jobs_dir = Path(os.environ["AVIBE_TEST_FAT_DIR"]) / f"jobs-{secrets.token_hex(4)}"
-    host = LocalJobHost(str(jobs_dir), shell=sys.executable)
+    host = LocalJobHost(str(jobs_dir), shell=Shell(sys.executable))
     try:
         done = await _start(host, tmp_path, "import sys; sys.stdout.buffer.write(b'ran\\n')")
         assert await host.wait(done, deadline_s=15) == jobs_module.JobStatus("exited", 0)

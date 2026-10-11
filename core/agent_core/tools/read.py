@@ -15,7 +15,6 @@ import asyncio
 import codecs
 import inspect
 import os
-import shlex
 import struct
 from dataclasses import dataclass
 from typing import Any, Awaitable, BinaryIO, Callable, Mapping, Optional, Union
@@ -37,6 +36,7 @@ from core.agent_core.tools.paths import (
     resolve_read_path,
     target_kind,
 )
+from core.agent_core.tools.shell import read_line_advice
 from core.agent_core.tools.text import decode_file, shown
 from core.agent_core.tools.truncate import format_size, truncate_head, utf8_len
 
@@ -226,7 +226,7 @@ def _read_text(
     if truncation.first_line_exceeds_limit:
         text = (
             f"[Line {start_display} is {format_size(first_line_bytes)}, exceeds {format_size(MAX_BYTES)} limit. "
-            f"Use bash: sed -n '{start_display}p' {shlex.quote(absolute)} | head -c {MAX_BYTES}]"
+            f"{read_line_advice(absolute, start_display, MAX_BYTES)}]"
         )
         details["truncation"] = truncation.to_details()
     elif truncation.truncated:

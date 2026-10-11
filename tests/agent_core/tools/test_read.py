@@ -84,7 +84,7 @@ async def test_an_over_long_first_line_is_measured_as_it_would_be_shown(tmp_path
 @pytest.mark.parametrize(
     "spelling", ["big file.txt", "~/big file.txt", "file://{home}/big%20file.txt", "@big file.txt"]
 )
-async def test_an_over_long_first_line_points_at_bash_with_the_file_read_opened(tmp_path, make_ctx, spelling):
+async def test_an_over_long_first_line_points_at_the_shell_with_the_file_read_opened(tmp_path, make_ctx, spelling):
     """The suggested command names the resolved file, so it runs whatever spelling the model used."""
     home = os.path.expanduser("~")
     os.makedirs(home, exist_ok=True)
@@ -95,9 +95,13 @@ async def test_an_over_long_first_line_points_at_bash_with_the_file_read_opened(
     result = await ReadTool().execute({"path": spelling.format(home=home), "offset": 2}, make_ctx(cwd=home))
     text = result_text(result)
 
-    assert text == (
-        f"[Line 2 is 60.0KB, exceeds 50.0KB limit. Use bash: sed -n '2p' {shlex.quote(target)} | head -c 51200]"
+    advice = (
+        f"Use powershell: (Get-Content -LiteralPath '{target}' -TotalCount 2)[-1] | "
+        "ForEach-Object { $_.Substring(0, [Math]::Min($_.Length, 51200)) }"
+        if os.name == "nt"
+        else f"Use bash: sed -n '2p' {shlex.quote(target)} | head -c 51200"
     )
+    assert text == f"[Line 2 is 60.0KB, exceeds 50.0KB limit. {advice}]"
 
 
 class _CancelledAfter(CancelToken):

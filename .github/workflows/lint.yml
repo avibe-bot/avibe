@@ -822,6 +822,11 @@ jobs:
       - name: Verify the job host
         run: python -m pytest -q -ra tests/agent_core/tools/test_jobs_windows.py
 
+      # The command tool on Windows, under PowerShell 7 and under Windows
+      # PowerShell 5.1, which every Windows has.
+      - name: Verify the powershell tool
+        run: python -m pytest -q -ra tests/agent_core/tools/test_powershell.py
+
       # Its job object is the one the watch worker uses; no other job runs
       # this file on Windows.
       - name: Verify the watch worker's job object

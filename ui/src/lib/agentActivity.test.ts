@@ -54,6 +54,9 @@ describe('toolSummary', () => {
 describe('toolIconKind', () => {
   it('maps tool-name families to a stable icon key', () => {
     expect(toolIconKind('Bash')).toBe('terminal');
+    // Vibey's command tool on Windows, and Claude Code's PowerShell tool.
+    expect(toolIconKind('powershell')).toBe('terminal');
+    expect(toolIconKind('PowerShell')).toBe('terminal');
     expect(toolIconKind('Read')).toBe('file');
     expect(toolIconKind('Edit')).toBe('edit');
     expect(toolIconKind('Write')).toBe('edit');
@@ -97,6 +100,7 @@ describe('parseToolCall (tier gating: extract name + JSON args, or null)', () =>
 describe('toolRecipe (tier 1: known-tool recipes, backend-agnostic)', () => {
   it('bash/shell family → command (Claude/Codex/OpenCode)', () => {
     expect(toolRecipe('Bash', { command: 'pwd' })).toEqual({ kind: 'command', command: 'pwd' });
+    expect(toolRecipe('powershell', { command: 'Get-Location' })).toEqual({ kind: 'command', command: 'Get-Location' });
     expect(toolRecipe('bash', { command: 'ls', status: 'completed', exit_code: 0 })).toEqual({
       kind: 'command',
       command: 'ls',

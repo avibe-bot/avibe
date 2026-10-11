@@ -1093,7 +1093,10 @@ class VibeyAgent(BaseAgent):
         runtime = self._runtimes.get(session_id)
         cwd = ((runtime.run.cwd if runtime.run is not None else "") or runtime.cwd) if runtime is not None else ""
         return current_environment(
-            cwd, self._watch_lines(session_id), include_time=getattr(self.config, "include_time_info", True)
+            cwd,
+            self._watch_lines(session_id),
+            shell=self._tools().shell,
+            include_time=getattr(self.config, "include_time_info", True),
         )
 
     def _watch_lines(self, session_id: str) -> list[str]:

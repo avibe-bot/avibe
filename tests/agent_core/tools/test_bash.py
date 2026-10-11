@@ -19,6 +19,7 @@ import core.agent_core.tools.bash as bash_module
 from core.agent_core.tools.bash import BashTool, settle_bash_call
 import core.agent_core.tools.jobs as jobs_module
 from core.agent_core.tools.jobs import LocalJobHost
+from core.agent_core.tools.shell import Shell
 from tests import hang_guard
 from tests.agent_core.tools.conftest import instance, result_text
 
@@ -192,7 +193,7 @@ async def test_a_command_that_cannot_start_has_a_defined_result(tmp_path, make_c
     elif failure == "jobs_dir_not_writable":
         jobs_dir.mkdir(mode=0o555)
     else:
-        shell = str(tmp_path / "no-such-shell")
+        shell = Shell(str(tmp_path / "no-such-shell"))
     locked = {"cwd_not_accessible": cwd, "jobs_dir_not_writable": jobs_dir}.get(failure)
     try:
         host = LocalJobHost(str(jobs_dir), shell=shell)

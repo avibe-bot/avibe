@@ -48,6 +48,7 @@ from core.agent_core.tools.jobs import (
 )
 from core.agent_core.tools.paths import os_reason
 from core.agent_core.tools.output import FINISH_BYTES, JobOutput
+from core.agent_core.tools.shell import Shell, default_shell
 
 logger = logging.getLogger(__name__)
 
@@ -70,14 +71,27 @@ BASH_SCHEMA: Mapping[str, Any] = {
 }
 
 
-def bash_description(foreground_window_s: float = DEFAULT_FOREGROUND_WINDOW_S) -> str:
-    return (
-        "Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to "
+def bash_description(foreground_window_s: float = DEFAULT_FOREGROUND_WINDOW_S, shell: Optional[Shell] = None) -> str:
+    """Pi's description; for PowerShell, its first sentence names PowerShell (C-7 tools.md section 5)."""
+    shell = shell or default_shell()
+    opening = (
+        "Execute a PowerShell command in the current working directory. Returns its output and errors."
+        if shell.powershell
+        else "Execute a bash command in the current working directory. Returns stdout and stderr."
+    )
+    description = (
+        f"{opening} Output is truncated to "
         f"last {MAX_LINES} lines or {MAX_BYTES // 1024}KB (whichever is hit first). If truncated, the output log is saved "
         "to a file; very large logs keep their beginning and end. Optionally provide a timeout in seconds. "
         f"Commands still running after {format_number(foreground_window_s)} seconds, or started with watch=true, "
         "continue in the background as an Avibe Watch; you get a follow-up message when they finish."
     )
+    if shell.windows_powershell:
+        description += (
+            " This is Windows PowerShell 5.1: it has no && or ||, so separate commands with ; and test $? or "
+            "$LASTEXITCODE."
+        )
+    return description
 
 
 def _append_status(text: str, status: str) -> str:
@@ -210,10 +224,22 @@ class BashTool:
 
     concurrent = True
 
-    def __init__(self, jobs: JobHost, *, foreground_window_s: float = DEFAULT_FOREGROUND_WINDOW_S) -> None:
+    def __init__(
+        self,
+        jobs: JobHost,
+        *,
+        foreground_window_s: float = DEFAULT_FOREGROUND_WINDOW_S,
+        shell: Optional[Shell] = None,
+    ) -> None:
+        """``shell`` is what ``jobs`` runs commands in (``LocalJobHost.shell``); it names the tool."""
+        shell = shell or default_shell()
         self._jobs = jobs
         self._window_s = foreground_window_s
-        self._spec = ToolSpec(name="bash", description=bash_description(foreground_window_s), input_schema=BASH_SCHEMA)
+        self._spec = ToolSpec(
+            name="powershell" if shell.powershell else "bash",
+            description=bash_description(foreground_window_s, shell),
+            input_schema=BASH_SCHEMA,
+        )
 
     @property
     def spec(self) -> ToolSpec:
@@ -229,9 +255,11 @@ class BashTool:
         except ToolInputError as exc:
             return error_result(str(exc))
         if not os.path.isdir(ctx.cwd):
-            return error_result(f"Working directory does not exist: {ctx.cwd}\nCannot execute bash commands.")
+            return error_result(f"Working directory does not exist: {ctx.cwd}\nCannot execute {self._spec.name} commands.")
         if not os.access(ctx.cwd, os.X_OK):
-            return error_result(f"Working directory is not accessible: {ctx.cwd}\nCannot execute bash commands.")
+            return error_result(
+                f"Working directory is not accessible: {ctx.cwd}\nCannot execute {self._spec.name} commands."
+            )
         if ctx.cancel.cancelled:
             return error_result("Command aborted")
         if ctx.call is None:

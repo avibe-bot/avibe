@@ -24,7 +24,7 @@ from typing import Any, Callable, Mapping, Optional, Sequence
 
 from sqlalchemy.engine import Engine
 
-from core.agent_core.harness.context import StateRequest, display
+from core.agent_core.harness.context import COMMAND_TOOLS, StateRequest, display
 from core.agent_core.tools.base import Tool, ToolContext, ToolResult, ToolSpec
 from core.managed_skills import is_skill_name
 from modules.agents.vibey.prompt import EnvironmentValue, render_environment
@@ -148,5 +148,6 @@ class _SkillLoadMarking:
 
 
 def mark_skill_loads(tools: Sequence[Tool]) -> tuple[Tool, ...]:
-    """The tools with ``bash`` recording the skills it loads, which a checkpoint lists by name (section 7)."""
-    return tuple(_SkillLoadMarking(tool) if tool.spec.name == "bash" else tool for tool in tools)
+    """The tools with the command tool (``bash``, ``powershell`` on Windows) recording the skills it loads, which a
+    checkpoint lists by name (section 7)."""
+    return tuple(_SkillLoadMarking(tool) if tool.spec.name in COMMAND_TOOLS else tool for tool in tools)

@@ -10,6 +10,8 @@ parts are checked against real rows and the real read-only query guard.
 
 from __future__ import annotations
 
+import dataclasses
+
 import json
 import re
 from pathlib import Path
@@ -418,7 +420,7 @@ async def test_a_3000_byte_cwd_is_kept_whole_on_every_input_and_in_the_state(eng
 
     # The cwd is never cut, only escaped: the model builds absolute paths from it, so a cut one would be false.
     cwd = "/工作区/" + "/".join(["目录" * 40] * 12) + "/a<b"
-    fields = current_environment(cwd, [])
+    fields = current_environment(cwd, [], shell="/bin/bash")
     assert fields["cwd"] == cwd and len(cwd.encode()) > 2_900
     shown = cwd.replace("<", "\\u003c")
     assert f"\ncwd: {shown}\n" in render_environment(fields)  # every input
@@ -427,14 +429,16 @@ async def test_a_3000_byte_cwd_is_kept_whole_on_every_input_and_in_the_state(eng
     assert f"\ncwd: {shown}\n" in environment and "…" not in environment
 
 
-async def test_two_values_that_look_alike_once_cut_are_still_two_environments(engine, session, tmp_path, monkeypatch):
+async def test_two_values_that_look_alike_once_cut_are_still_two_environments(engine, session, tmp_path):
     # Identity is the raw value, and only the block the model reads is cut (display): a cut display never proves a
     # field unchanged, so two shells alike in their head and tail still tell the model the shell changed. A value
     # displayed whole is proved unchanged by its display, so the cwd is not sent again.
     scripts = [[Done(assistant("one"))], [Done(assistant("two"))]]
     harness = _Harness(engine, tmp_path, "avibe", scripts)
     for middle in ("one", "two"):
-        monkeypatch.setenv("SHELL", f"/opt/{'head' * 40}{middle}{'tail' * 40}")
+        # The shell is the job host's; a restart can change it (PowerShell 7 installed meanwhile, say).
+        harness.suite = dataclasses.replace(harness.suite, shell=f"/opt/{'head' * 40}{middle}{'tail' * 40}")
+        harness.new_agent()
         await _turn(harness, f"with {middle}")
     first, second = [row.message.content[0].text for row in await harness.context_rows() if row.kind == "input"]
     shell = [line for line in first.split("\n") if line.startswith("shell: ")]

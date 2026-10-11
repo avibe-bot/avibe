@@ -43,6 +43,8 @@ AGENT_PREAMBLE = "You are an agent running inside Avibe, a local-first Agent OS 
 TOOL_SNIPPETS: dict[str, str] = {
     "read": "Read file contents",
     "bash": "Execute bash commands (ls, grep, find, etc.)",
+    # Avibe: the command tool on Windows (C-7 tools.md section 5).
+    "powershell": "Execute PowerShell commands (Get-ChildItem, Select-String, etc.)",
     "edit": "Make precise file edits with exact text replacement, including multiple disjoint edits in one call",
     "write": "Create or overwrite files",
 }
@@ -59,7 +61,7 @@ TOOL_GUIDELINES: dict[str, tuple[str, ...]] = {
     ),
     "write": ("Use write only for new files or complete rewrites.",),
 }
-TOOL_ORDER = ("read", "bash", "edit", "write")
+TOOL_ORDER = ("read", "bash", "powershell", "edit", "write")
 FINAL_REPLY_RULE = "Only your final reply is reliably shown to the user; put anything the user must see in it"
 #: Avibe's: the loop runs a response's neighbouring read and bash calls at the same time (C-3 loop-control.md section 2).
 CONCURRENT_CALLS_RULE = (
@@ -92,6 +94,8 @@ def coding_prompt(tool_names: Iterable[str], *, builtin_agent: bool, rg: bool) -
     rules: list[str] = []
     if "bash" in names:
         rules.append(f"Use bash for file operations like ls, {'rg' if rg else 'grep'}, find")
+    if "powershell" in names:
+        rules.append(f"Use powershell for file operations like Get-ChildItem, {'rg' if rg else 'Select-String'}")
     for name in names:
         rules.extend(TOOL_GUIDELINES.get(name, ()))
     if names:
@@ -147,7 +151,7 @@ EnvironmentValue = Union[str, tuple[str, ...]]
 
 
 def current_environment(
-    cwd: str, watches: Sequence[str], *, include_time: bool = True, now: Optional[datetime] = None
+    cwd: str, watches: Sequence[str], *, shell: str, include_time: bool = True, now: Optional[datetime] = None
 ) -> dict[str, EnvironmentValue]:
     """The environment fields, raw; the clock ones follow ``include_time_info``, as every input prefix does.
 
@@ -157,7 +161,8 @@ def current_environment(
     fields: dict[str, EnvironmentValue] = {
         "cwd": str(Path(cwd).resolve()) if cwd else "",
         "os": operating_system(),
-        "shell": os.environ.get("SHELL") or "/bin/sh",
+        # The shell the commands run in (``Shell.describe``), not the user's login shell.
+        "shell": shell,
     }
     if include_time:
         fields.update(date=(now or datetime.now()).date().isoformat(), timezone=local_timezone())

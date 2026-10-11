@@ -1,4 +1,5 @@
-"""The coding tool set: Pi's ``read``, ``write``, ``edit``, and ``bash`` with the Avibe additions (C-7)."""
+"""The coding tool set: Pi's ``read``, ``write``, ``edit``, and ``bash`` (``powershell`` on Windows) with the Avibe
+additions (C-7)."""
 
 from __future__ import annotations
 
@@ -8,6 +9,7 @@ from core.agent_core.tools.base import JobHost, Tool
 from core.agent_core.tools.bash import DEFAULT_FOREGROUND_WINDOW_S, BashTool
 from core.agent_core.tools.edit import EditTool
 from core.agent_core.tools.read import ImageSink, ReadTool
+from core.agent_core.tools.shell import Shell
 from core.agent_core.tools.write import WriteTool
 
 
@@ -16,15 +18,17 @@ def create_coding_tools(
     *,
     image_sink: Optional[ImageSink] = None,
     foreground_window_s: float = DEFAULT_FOREGROUND_WINDOW_S,
+    shell: Optional[Shell] = None,
 ) -> tuple[Tool, ...]:
     """One tool set for every model; each tool's ``spec`` is what the model sees.
 
     ``jobs`` is the loop's ``Agent.jobs`` wrapper, so an abort can kill a
-    foreground command; ``image_sink`` stores images ``read`` attaches.
+    foreground command; ``image_sink`` stores images ``read`` attaches;
+    ``shell`` is what the host runs commands in, which names the command tool.
     """
     return (
         ReadTool(image_sink=image_sink),
         WriteTool(),
         EditTool(),
-        BashTool(jobs, foreground_window_s=foreground_window_s),
+        BashTool(jobs, foreground_window_s=foreground_window_s, shell=shell),
     )

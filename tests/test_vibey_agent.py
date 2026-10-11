@@ -473,6 +473,8 @@ async def test_a_turn_commits_its_context_once_and_shows_the_reply_once(
     assert [entry.kind for entry in rows] == ["input", "response", "tool_result", "response"]
     environment, typed = rows[0].message.content
     assert environment.text.startswith("<environment>\ncwd: ") and typed == TextBlock(text="看一下目录")
+    # The shell is the one the commands run in, the job host's, not the user's login shell.
+    assert f"\nshell: {harness.suite.shell}\n" in environment.text
     # The clock fields follow include_time_info (off here), as every input prefix does.
     assert "date:" not in environment.text and "timezone:" not in environment.text
     # The steer identity existed when the Turn owner bound the native start.
@@ -1640,6 +1642,16 @@ async def test_a_relative_tool_path_is_shown_under_the_runs_cwd(engine, session,
         # Another drive has no relative path at all.
         other_drive = "Z:\\x.py" if not str(project).upper().startswith("Z:") else "Y:\\x.py"
         assert shown(other_drive) == other_drive
+
+
+def test_on_windows_the_command_tool_is_powershell_with_its_own_rule() -> None:
+    from modules.agents.vibey.prompt import coding_prompt
+
+    text = coding_prompt(["read", "powershell", "edit", "write"], builtin_agent=True, rg=True)
+
+    assert "- powershell: Execute PowerShell commands (Get-ChildItem, Select-String, etc.)" in text
+    assert "Use powershell for file operations like Get-ChildItem, rg" in text
+    assert "bash" not in text
 
 
 async def test_the_system_prompt_lists_every_tool_the_run_offers(engine, session, tmp_path, published) -> None:

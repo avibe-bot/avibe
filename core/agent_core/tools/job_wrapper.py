@@ -1,9 +1,10 @@
 """The process that runs one job's command (``LocalJobHost``'s ``pipe`` backend).
 
-Run as ``python -I -S -B job_wrapper.py avibe-job <job_dir> <shell> <command>
-<decision_timeout_s> <head_cap> <tail_cap> <deadline_epoch_s or ->`` in a new
-session, so its pid is the job's process group. Standard library only: ``-S``
-skips site-packages.
+Run as ``python -I -S -B job_wrapper.py avibe-job <job_dir> <decision_timeout_s>
+<head_cap> <tail_cap> <deadline_epoch_s or -> <argv...>`` in a new session, so
+its pid is the job's process group, where ``argv`` runs the command (``shell.py``:
+``<shell> -c <command>``, or PowerShell reading ``command.ps1``). Standard
+library only: ``-S`` skips site-packages.
 
 On Windows the tree is held by a job object instead of a process group: the
 wrapper creates ``Local\\avibe-job-<job_id>`` with ``KILL_ON_JOB_CLOSE`` and
@@ -16,8 +17,8 @@ makes its replacement fail.
 2. Wait for ``decision``, at most ``decision_timeout_s``; on timeout, decide
    ``abandon`` itself through the same exclusive ``link(2)`` the host uses (on
    Windows a rename, which never replaces there).
-3. Only on ``go``: run ``<shell> -c <command>`` with stdin closed and stdout and
-   stderr into one pipe.
+3. Only on ``go``: run ``argv`` with stdin closed and stdout and stderr into one
+   pipe.
 4. Keep the output bounded on disk: the first ``head_cap`` bytes are appended
    to ``output.log`` as they arrive; after that, the last ``tail_cap`` bytes are
    kept in ``tail.log`` (a ``[output from byte <offset>]\\n`` header, readable by
@@ -295,11 +296,11 @@ def _stay_while_the_job_runs() -> None:
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) != 9 or argv[1] != "avibe-job":
+    if len(argv) < 8 or argv[1] != "avibe-job":
         return 64
-    job_dir, shell, command = argv[2], argv[3], argv[4]
-    decision_timeout_s, head_cap, tail_cap = float(argv[5]), int(argv[6]), int(argv[7])
-    deadline = None if argv[8] == "-" else float(argv[8])
+    job_dir, command = argv[2], argv[7:]
+    decision_timeout_s, head_cap, tail_cap = float(argv[3]), int(argv[4]), int(argv[5])
+    deadline = None if argv[6] == "-" else float(argv[6])
     proc: Optional[subprocess.Popen] = None
 
     def stop_on_signal(signum: int, frame: object) -> None:
@@ -320,9 +321,7 @@ def main(argv: list[str]) -> int:
             # The deadline passed during the launch: the command must not start at all.
             _stop_group(job_dir, "timeout", None)
         log = _BoundedLog(job_dir, head_cap, tail_cap)
-        proc = subprocess.Popen(
-            [shell, "-c", command], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT
-        )
+        proc = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         _run(job_dir, proc, log, deadline)
         if _WINDOWS:
             _stay_while_the_job_runs()
