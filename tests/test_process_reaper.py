@@ -10,6 +10,7 @@ import os
 import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import psutil
@@ -328,6 +329,67 @@ def test_a_spawn_that_cannot_be_recorded_is_ended_before_the_failure_propagates(
     )
 
     assert result.stdout.splitlines() == ["raised 28", "left 0"], result.stdout + result.stderr
+
+
+# A recorded helper that waits on a control pipe and, when told, spawns a
+# detached child its record never names (`posix_spawn` bypasses the `Popen`
+# wrapper), as a helper killed before its append would leave one.
+CONTROLLED_HELPER = """
+import os, sys
+from pathlib import Path
+
+import psutil
+
+from tests import process_reaper
+
+process_reaper.record_spawns(Path(sys.argv[1]))
+written = Path(sys.argv[2])
+for line in sys.stdin:
+    pid = os.posix_spawn(sys.executable, [sys.executable, "-c", "import time; time.sleep(600)"], os.environ, setsid=True)
+    written.write_text(f"{pid} {psutil.Process(pid).create_time()!r}\\n")
+"""
+
+
+@pytest.mark.allow_foreign_signals(reason="ends the child an unfrozen reap would leave, by the pid the helper wrote")
+def test_a_helper_is_frozen_before_the_last_snapshot_so_it_spawns_nothing_before_its_kill(tmp_path, monkeypatch):
+    record = process_reaper.helper_spawn_record(tmp_path)
+    written = tmp_path / "late-child"
+    helper = subprocess.Popen(
+        [sys.executable, "-c", CONTROLLED_HELPER, str(record), str(written)],
+        cwd=REPO_ROOT,
+        stdin=subprocess.PIPE,
+        text=True,
+    )
+    kill_and_wait = process_reaper._kill_and_wait
+
+    def ask_the_helper_to_spawn_then_kill(targets, groups):
+        # Between the last snapshot and the kill: a running helper spawns at once.
+        helper.stdin.write("spawn\n")
+        helper.stdin.flush()
+        give_up = time.monotonic() + 1.0
+        while not written.exists() and time.monotonic() < give_up:
+            time.sleep(0.01)
+        kill_and_wait(targets, groups)
+
+    try:
+        give_up = time.monotonic() + hang_guard.HANG_GUARD_SECONDS
+        while not record.exists() and time.monotonic() < give_up:
+            time.sleep(0.01)
+        monkeypatch.setattr(process_reaper, "_SPAWN_EXIT_SECONDS", 0.2)
+        monkeypatch.setattr(process_reaper, "_kill_and_wait", ask_the_helper_to_spawn_then_kill)
+
+        reaped, orphans = process_reaper.end_helper_spawns(record, tmp_path)
+
+        # Stopped, the helper never read the request: no child exists to outlive it.
+        assert not written.exists()
+        assert len(reaped) == 1 and reaped[0].startswith(f"{helper.pid} (") and orphans == []
+    finally:
+        if written.exists():
+            for pid in _running(written):
+                os.killpg(pid, signal.SIGKILL)
+        if helper.poll() is None:
+            helper.kill()
+        helper.wait()
 
 
 @pytest.fixture

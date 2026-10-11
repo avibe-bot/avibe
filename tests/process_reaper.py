@@ -174,6 +174,32 @@ def _kill_and_wait(targets: dict[int, float], groups: set[int]) -> None:
 # A log sink ends once the connector whose output it drains has: what the
 # test's own cleanup stopped gets this long to go before it counts as left behind.
 _SPAWN_EXIT_SECONDS = 5.0
+# SIGSTOP lands asynchronously; a process that has not stopped by then is killed anyway.
+_STOP_SECONDS = 2.0
+
+
+def _stop_all(targets: dict[int, float]) -> dict[int, float]:
+    """SIGSTOP each target that is still the same process, then wait until each has stopped; return those signalled."""
+    stopped: dict[int, float] = {}
+    for pid, created in targets.items():
+        if _same(pid, created) is not None:
+            try:
+                _KILL(pid, signal.SIGSTOP)
+                stopped[pid] = created
+            except OSError:
+                pass
+
+    def settled(pid: int, created: float) -> bool:
+        try:
+            process = psutil.Process(pid)
+            return process.create_time() != created or process.status() in {psutil.STATUS_STOPPED, psutil.STATUS_ZOMBIE}
+        except psutil.Error:
+            return True
+
+    give_up = time.monotonic() + _STOP_SECONDS
+    while not all(settled(pid, created) for pid, created in stopped.items()) and time.monotonic() < give_up:
+        time.sleep(0.005)
+    return stopped
 
 
 def names_path(path: Path) -> Callable[[str], re.Match | None]:
@@ -313,11 +339,31 @@ def end_helper_spawns(
     while (leftovers()[0] or orphans_naming(test_temp)) and time.monotonic() < give_up:
         time.sleep(0.05)
     reaped: list[str] = []
-    # Killing a helper ends its appends, so the read after it is final.
-    while (found := leftovers())[0]:
-        targets, groups = found
-        reaped.extend(_describe(pid) for pid, created in targets.items() if _same(pid, created) is not None)
-        _kill_and_wait(targets, groups)
+    while (alive := leftovers()[0]):
+        # Freeze, then reap: a stopped process forks nothing and appends nothing, and
+        # a fork already in flight has completed, so its child is in the next snapshot.
+        # Stopping repeats until the snapshot holds nothing that is not stopped.
+        stopped: dict[int, float] = {}
+        signalled: set[int] = set()
+        try:
+            for _ in range(20):
+                fresh = {pid: created for pid, created in alive.items() if pid not in signalled}
+                if not fresh:
+                    break
+                signalled.update(fresh)
+                stopped.update(_stop_all(fresh))
+                alive = leftovers()[0]
+            targets, groups = leftovers()
+            reaped.extend(_describe(pid) for pid, created in targets.items() if _same(pid, created) is not None)
+            _kill_and_wait(targets, groups)
+        finally:
+            # Whatever this pass stopped it also kills, however the pass ended.
+            for pid, created in stopped.items():
+                if _same(pid, created) is not None:
+                    try:
+                        _KILL(pid, signal.SIGKILL)
+                    except OSError:
+                        pass
     return reaped, orphans_naming(test_temp)
 
 
