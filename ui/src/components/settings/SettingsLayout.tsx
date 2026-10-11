@@ -41,14 +41,13 @@ import {
 import { useStandaloneSettingsMenu } from '@/lib/settingsMenuPlacement';
 import { AccountMenu } from '../AccountMenu';
 import { VersionBadge } from '../VersionBadge';
-import { modelHubEnabledFromConfig } from './models/featureFlags';
 
 type SettingsItem = {
   path: string;
   labelKey: TranslationKey;
   icon: React.ComponentType<{ className?: string }>;
   ownerOnly?: boolean;
-  feature?: 'models' | 'channels';
+  feature?: 'channels';
   children?: SettingsItem[];
   defaultOpen?: boolean;
   exact?: boolean;
@@ -70,7 +69,7 @@ const SETTINGS_GROUPS: SettingsGroup[] = [
     labelKey: 'settings.groups.agents',
     items: [
       { path: '/settings/backends', labelKey: 'settings.sections.backends', icon: Server, ownerOnly: true },
-      { path: '/settings/models', labelKey: 'settings.sections.models', icon: Cpu, ownerOnly: true, feature: 'models' },
+      { path: '/settings/models', labelKey: 'settings.sections.models', icon: Cpu, ownerOnly: true },
       { path: '/settings/replies', labelKey: 'settings.sections.replies', icon: MessageSquare },
     ],
   },
@@ -246,7 +245,6 @@ export const SettingsLayout: React.FC = () => {
   const setupOriginPath = useSettingsOverlayContext()?.location.pathname;
   const setupOrigin = setupOriginPath !== undefined && isChromelessShellPath(setupOriginPath);
   const standaloneMenu = useStandaloneSettingsMenu();
-  const [modelHubVisible, setModelHubVisible] = useState(false);
   const [channelSettingsVisible, setChannelSettingsVisible] = useState(false);
   const atRoot = location.pathname === '/settings' || location.pathname === '/settings/';
   const isModelHub = pathMatches(location.pathname, '/settings/models');
@@ -260,7 +258,6 @@ export const SettingsLayout: React.FC = () => {
     let cancelled = false;
     let configVersion = 0;
     const applyConfigVisibility = (config: unknown) => {
-      setModelHubVisible(modelHubEnabledFromConfig(config));
       setChannelSettingsVisible(
         getEnabledPlatforms(config).some((platform) => platformSupportsChannels(config, platform)),
       );
@@ -277,7 +274,6 @@ export const SettingsLayout: React.FC = () => {
       })
       .catch(() => {
         if (!cancelled && requestedConfigVersion === configVersion) {
-          setModelHubVisible(false);
           setChannelSettingsVisible(false);
         }
       });
@@ -295,7 +291,6 @@ export const SettingsLayout: React.FC = () => {
         // row would leave the setup and lose the step it is on.
         if (setupOrigin && !SETUP_VISIT_SETTINGS_PATHS.has(item.path)) return [];
         if (item.ownerOnly && !capabilities.can_manage_instance) return [];
-        if (item.feature === 'models' && !modelHubVisible) return [];
         return [{
           ...item,
           children: item.children?.filter((child) =>
@@ -303,7 +298,7 @@ export const SettingsLayout: React.FC = () => {
         }];
       }),
     })).filter((group) => group.items.length > 0),
-    [capabilities.can_manage_instance, channelSettingsVisible, modelHubVisible, setupOrigin],
+    [capabilities.can_manage_instance, channelSettingsVisible, setupOrigin],
   );
 
   const activeTrail = (() => {
@@ -347,10 +342,9 @@ export const SettingsLayout: React.FC = () => {
   // it, which is the row the rail can show as current.
   //
   // Where the person actually is, is the whole input. A feature-gated row
-  // (Models, Channels) can leave the rail while its page stays routed.
-  // Nothing here consults the feature projections the rail draws
-  // rows from, so a pending or failed read can neither erase a preference nor
-  // record the wrong one.
+  // (Channels) can leave the rail while its page stays routed. Nothing here
+  // consults the feature projections the rail draws rows from, so a pending or
+  // failed read can neither erase a preference nor record the wrong one.
   useEffect(() => {
     const section = activeTrail.at(-1);
     if (section) writeLastSettingsSection(section.path);

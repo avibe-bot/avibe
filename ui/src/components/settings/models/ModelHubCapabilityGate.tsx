@@ -1,8 +1,9 @@
 import * as React from 'react';
-import { Navigate } from 'react-router-dom';
+import { Navigate, useLocation } from 'react-router-dom';
 
+import { isChromelessShellPath, settingsOverlayOriginFromState } from '@/lib/settingsOverlay';
 import { useModelHubCapability } from './useModelHubCapability';
-import { MODEL_HUB_DISABLED_REDIRECT } from './modelHubRoutes';
+import { modelHubDisabledRedirect } from './modelHubRoutes';
 
 export const ModelHubRenderBoundary: React.FC<{
   enabled: boolean | null;
@@ -15,10 +16,14 @@ export const ModelHubRenderBoundary: React.FC<{
 
 export const ModelHubCapabilityGate: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const enabled = useModelHubCapability();
+  const location = useLocation();
+  const overSetup = isChromelessShellPath(
+    settingsOverlayOriginFromState(location.state)?.location.pathname ?? '',
+  );
   return (
     <ModelHubRenderBoundary
       enabled={enabled}
-      disabled={<Navigate to={MODEL_HUB_DISABLED_REDIRECT} replace />}
+      disabled={<Navigate to={modelHubDisabledRedirect(overSetup)} replace state={location.state} />}
     >
       {children}
     </ModelHubRenderBoundary>
