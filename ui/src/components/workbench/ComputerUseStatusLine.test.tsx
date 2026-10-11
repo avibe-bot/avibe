@@ -84,6 +84,7 @@ describe('computerUseStatusCopy', () => {
     ['snapshot_invalid', 'snapshotInvalidDetail'],
     ['shell_not_running', 'shellNotRunningDetail'],
     ['daemon_unreachable', 'daemonUnreachableDetail'],
+    ['controller_unavailable', 'controllerUnavailableDetail'],
   ])('maps unavailable reason %s to dedicated localized remediation', (reason, key) => {
     const detail = computerUseStatusCopy(
       { status: 'unavailable', reason },
@@ -102,6 +103,11 @@ describe('computerUseStatusCopy', () => {
       { status: 'unavailable', reason: 'future_unavailable' },
       (key) => key,
     ).detail).toBe('workbench.home.computerUse.unavailableDetail');
+  });
+
+  it('keeps Controller-unavailable remediation aligned in both locales', () => {
+    expect(en.workbench.home.computerUse.controllerUnavailableDetail).toContain('Controller');
+    expect(zh.workbench.home.computerUse.controllerUnavailableDetail).toContain('Controller');
   });
 });
 
@@ -141,5 +147,27 @@ describe('ComputerUseStatusLine', () => {
       expect(apiFetch).toHaveBeenCalled();
     });
     expect(screen.queryByTestId('computer-use-status')).toBeNull();
+  });
+
+  it('renders Controller IPC failure as unavailable instead of ready', async () => {
+    apiFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        supported: true,
+        status: 'unavailable',
+        reason: 'controller_unavailable',
+      }),
+    });
+
+    render(<ComputerUseStatusLine />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('computer-use-status')).toBeTruthy();
+    });
+    expect(screen.getByTestId('computer-use-status').getAttribute('data-computer-use-status')).toBe(
+      'unavailable',
+    );
+    expect(screen.getByText('workbench.home.computerUse.controllerUnavailableDetail')).toBeTruthy();
+    expect(screen.queryByText('workbench.home.computerUse.readyDetail')).toBeNull();
   });
 });

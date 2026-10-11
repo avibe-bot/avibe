@@ -181,6 +181,43 @@ _COMPUTER_ERROR_I18N_KEYS = {
     "window_target_required": "computer.cli.error.windowTargetRequired",
 }
 
+_COMPUTER_STATUS_I18N_KEYS = {
+    "off": "computer.cli.status.off",
+    "needs_permission": "computer.cli.status.needsPermission",
+    "needs_runtime": "computer.cli.status.needsRuntime",
+    "starting": "computer.cli.status.starting",
+    "error": "computer.cli.status.error",
+    "stopped": "computer.cli.status.stopped",
+    "unavailable": "computer.cli.status.unavailable",
+}
+
+_COMPUTER_REASON_I18N_KEYS = {
+    "never_enabled": "computer.cli.reason.neverEnabled",
+    "toggle_off": "computer.cli.reason.toggleOff",
+    "accessibility": "computer.cli.reason.accessibility",
+    "screen_recording": "computer.cli.reason.screenRecording",
+    "runtime_unavailable": "computer.cli.reason.runtimeUnavailable",
+    "runtime_too_old": "computer.cli.reason.runtimeTooOld",
+    "state_unwritable": "computer.cli.reason.stateUnwritable",
+    "assets_invalid": "computer.cli.reason.assetsInvalid",
+    "spawn_failed": "computer.cli.reason.spawnFailed",
+    "daemon_exited": "computer.cli.reason.daemonExited",
+    "health_timeout": "computer.cli.reason.healthTimeout",
+    "bundle_identity": "computer.cli.reason.bundleIdentity",
+    "ax_capability": "computer.cli.reason.axCapability",
+    "capture_failed": "computer.cli.reason.captureFailed",
+    "driver_health_failed": "computer.cli.reason.driverHealthFailed",
+    "endpoint_busy": "computer.cli.reason.endpointBusy",
+    "endpoint_unremovable": "computer.cli.reason.endpointUnremovable",
+    "socket_unreachable": "computer.cli.reason.socketUnreachable",
+    "socket_path_too_long": "computer.cli.reason.socketPathTooLong",
+    "invalid_state_file": "computer.cli.reason.invalidStateFile",
+    "snapshot_invalid": "computer.cli.reason.snapshotInvalid",
+    "shell_not_running": "computer.cli.reason.shellNotRunning",
+    "daemon_unreachable": "computer.cli.reason.daemonUnreachable",
+    "daemon_generation_changed": "computer.cli.reason.daemonGenerationChanged",
+}
+
 
 def translate_computer_error(
     error: Mapping[str, Any],
@@ -197,6 +234,33 @@ def translate_computer_error(
     params = error.get("params")
     if code == "unknown_tool" and isinstance(params, Mapping):
         return translate(key, tool=str(params.get("tool") or ""))
+    if code == "computer_use_unavailable" and isinstance(params, Mapping):
+        status_code = str(params.get("status") or "unknown")
+        reason_value = params.get("reason")
+        reason_code = (
+            str(reason_value)
+            if isinstance(reason_value, str) and reason_value
+            else "none"
+        )
+        status_key = _COMPUTER_STATUS_I18N_KEYS.get(
+            status_code,
+            "computer.cli.status.unknown",
+        )
+        reason_key = _COMPUTER_REASON_I18N_KEYS.get(
+            reason_code,
+            (
+                "computer.cli.reason.none"
+                if reason_code == "none"
+                else "computer.cli.reason.unknown"
+            ),
+        )
+        return translate(
+            key,
+            statusCode=status_code,
+            status=translate(status_key, code=status_code),
+            reasonCode=reason_code,
+            reason=translate(reason_key, code=reason_code),
+        )
     return translate(key)
 
 

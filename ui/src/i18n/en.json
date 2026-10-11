@@ -2966,6 +2966,7 @@
         "snapshotInvalidDetail": "The verified Computer Use tool snapshot is missing or changed. Update or reinstall the Avibe desktop app.",
         "shellNotRunningDetail": "Open or reopen the Avibe desktop app to make Computer Use available.",
         "daemonUnreachableDetail": "The desktop driver is not reachable. Turn Computer Use off and on; reopen Avibe if it repeats.",
+        "controllerUnavailableDetail": "The Avibe Controller is not reachable. Wait for the service to recover before using the Computer Use CLI.",
         "socketPathTooLongDetail": "macOS could not create the managed driver socket. Update or reinstall the Avibe desktop app."
       },
       "continueOnPhone": "Continue on your phone",
