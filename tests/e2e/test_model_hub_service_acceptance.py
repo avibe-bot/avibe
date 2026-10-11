@@ -31,7 +31,7 @@ from typing import Any, Iterator
 import psutil
 import pytest
 
-pytestmark = pytest.mark.e2e_model_hub
+pytestmark = pytest.mark.e2e_service
 
 _MOCK_UPSTREAM = Path(__file__).resolve().parent / "drivers" / "mock_llm_upstream.py"
 _CHAT_KEY = "sk-acceptance-chat-not-real"

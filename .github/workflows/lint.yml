@@ -632,7 +632,16 @@ jobs:
           python -m pip install $wheel pytest
 
       - name: Verify Model Hub through the installed service
-        run: python -m pytest -m e2e_model_hub tests/e2e/test_model_hub_service_acceptance.py -v -ra
+        shell: pwsh
+        run: |
+          python -m pytest -m e2e_service tests/e2e/test_model_hub_service_acceptance.py -v -ra *>&1 |
+            Tee-Object -FilePath acceptance.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # A skip would pass silently; this job exists to run the case.
+          if (-not (Select-String -Path acceptance.log -Pattern '1 passed' -SimpleMatch -Quiet) -or
+              (Select-String -Path acceptance.log -Pattern 'SKIPPED' -SimpleMatch -Quiet)) {
+            throw "The service acceptance did not run"
+          }
 
   windows-control-ipc:
     runs-on: windows-latest
