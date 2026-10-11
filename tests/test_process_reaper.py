@@ -277,9 +277,10 @@ def test_a_process_with_a_live_parent_naming_tmp_path_is_neither_killed_nor_repo
         watcher.wait()
 
 
-# A helper whose record write fails after `Popen` has started the child, and
-# after that child, a shell, has put a command in the background: the disk
-# filling up between the spawn and its fsync.
+# A helper whose record write fails after `Popen` has started the child: the
+# disk filling up between the spawn and its fsync. The child, a shell leading a
+# session of its own, has put a command in the background by then and, with
+# `exit`, already exited.
 FAILING_RECORD = """
 import os, signal, subprocess, sys, time
 from pathlib import Path
@@ -292,24 +293,38 @@ process_reaper.record_spawns(Path(sys.argv[1]))
 spawned = []
 
 
+def in_group(pgid):
+    found = []
+    for process in psutil.process_iter():
+        try:
+            if os.getpgid(process.pid) == pgid and process.status() != psutil.STATUS_ZOMBIE:
+                found.append(process)
+        except (OSError, psutil.Error):
+            pass
+    return found
+
+
 def fail(fd):
+    shell = psutil.Process().children()[0].pid
+    spawned.append(shell)
     deadline = time.monotonic() + 10
-    while not any(child.children() for child in psutil.Process().children()) and time.monotonic() < deadline:
+    while time.monotonic() < deadline:
+        try:
+            exited = psutil.Process(shell).status() == psutil.STATUS_ZOMBIE
+        except psutil.NoSuchProcess:
+            exited = True
+        if exited and in_group(shell):
+            break
         time.sleep(0.01)
-    spawned.extend(child.pid for child in psutil.Process().children())
     raise OSError(28, "No space left on device")
 
 
 os.fsync = fail
 try:
-    subprocess.Popen(["/bin/sh", "-c", "sleep 600 & sleep 600"], start_new_session=True)
+    subprocess.Popen(["/bin/sh", "-c", "sleep 600 & exit 0"], start_new_session=True)
 except OSError as exc:
     print("raised", exc.errno)
-left = [
-    process
-    for process in psutil.process_iter()
-    if process.pid != os.getpid() and process.status() != psutil.STATUS_ZOMBIE and os.getpgid(process.pid) in spawned
-]
+left = [process for pgid in spawned for process in in_group(pgid)]
 print("left", len(left))
 for pgid in spawned:
     try:
