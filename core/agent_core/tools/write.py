@@ -75,8 +75,6 @@ class WriteTool:
                 return error_result(
                     f"Cannot write {path}: its directory is not writable, so the file cannot be replaced safely."
                 )
-            except KeepsPrivilege:
-                return error_result(f"Cannot write {path}: {KeepsPrivilege.MESSAGE}.")
             except FileChanged:
                 return error_result(f"Cannot write {path}: it changed while it was being written; write it again.")
             except NotRegularFile as exc:
@@ -129,13 +127,6 @@ class NotReplaceable(Exception):
     """
 
 
-class KeepsPrivilege(Exception):
-    """A setuid or setgid file another user owns: rewriting it would make the kernel clear those bits, so
-    nothing was written."""
-
-    MESSAGE = "it is a setuid or setgid file another user owns, and rewriting it would clear those bits"
-
-
 @dataclass(frozen=True)
 class FileIdentity:
     """The file a read-modify-write read, so its result is published only over that same file."""
@@ -160,10 +151,11 @@ class FileIdentity:
         return cls(path, st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, ctime_ns)
 
     def matches(self, path: str, st: os.stat_result) -> bool:
-        """Whether ``path``, as ``stat`` saw it, is still this file; on Windows it is opened to read its change time."""
+        """Whether ``path``, as ``stat`` saw it, is still this file; on Windows it is opened (for its attributes
+        alone) to read its change time."""
         if not _WINDOWS:
             return FileIdentity(path, st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns) == self
-        fd = os.open(path, os.O_RDONLY | os.O_BINARY)
+        fd = windows_files.open_attributes(path)
         try:
             return FileIdentity.of(path, fd) == self
         finally:
@@ -192,31 +184,28 @@ def _check_publishable(path: str, target: str, expected: Optional[FileIdentity])
 
 
 def write_bytes(path: str, data: bytes, expected: Optional[FileIdentity] = None) -> None:
-    """Create or rewrite ``path`` only once ``data`` is completely on disk (C-7 tools.md section 3).
+    """Create or replace ``path`` only once ``data`` is completely on disk (C-7 tools.md section 3).
 
-    The content is first written to a temp file beside the real target (through symlinks), private while
-    it is there: 0600 when a file exists, else created with the umask default it keeps, so the process
-    umask is never read or changed; an owner-only DACL on Windows. A full disk or a quota therefore fails
-    before the file is touched.
+    The temp file sits beside the real target (through symlinks). Replacing a file, it is private while it
+    receives the new contents (0600, or an owner-only DACL on Windows); a new file's temp is created with the
+    umask default it keeps, so the process umask is never read or changed.
 
-    - A new file is the temp file, renamed into place.
-    - On POSIX a file this user owns is replaced by the temp file, which takes its mode, so a failed
-      write leaves it as it was. A file another account owns is rewritten in place, so it keeps its owner
-      and everything else (a replacement would be this user's), unless it is setuid or setgid, which is
-      refused (``KeepsPrivilege``). Which applies is decided from the file the path names right before
-      publication.
-    - On Windows an existing file is always rewritten in place, so it stays the same file object, with its
-      owner, security, streams, and links. A crash in the middle of the rewrite can leave it partly
+    - A new file is the temp file, renamed into place: a failed write (a full disk, a quota) leaves its
+      absence as it was.
+    - On POSIX an existing file is replaced the same way: the temp file takes its mode once the contents are
+      fsynced, and ``os.replace`` puts it in place, so a failed write leaves the original as it was.
+    - On Windows an existing file is rewritten in place (``_rewrite``), so it stays the same file object; the
+      temp file only shows the volume has room. A crash in the middle of the rewrite can leave it partly
       written.
 
     An existing file whose directory does not let a temp file be created is refused
-    (``NotReplaceable``) rather than written without that proof.
+    (``NotReplaceable``) rather than written without the temp file.
 
     Right before publication, the path must still name the same target, which must be absent or a
     writable regular file, as ``write`` first classified it; with ``expected``, it must also be the very
     file that was read. So a file swapped for a FIFO, a directory, or a read-only file, or a path
     retargeted to another file, is never written behind the result's back. POSIX has no
-    compare-and-rename, so a change between that check and the publication is not seen.
+    compare-and-rename, so a change between that check and the rename is not seen.
     """
     target = os.path.realpath(path)
     try:
@@ -243,17 +232,13 @@ def write_bytes(path: str, data: bytes, expected: Optional[FileIdentity] = None)
             if mode is not None and not _WINDOWS:
                 os.fchmod(handle.fileno(), mode)
         current = _check_publishable(path, target, expected)
-        if current is None:
-            if _WINDOWS and mode is not None:
-                # Gone since it was read: renaming the private temp file into place would publish a file only
-                # this user can read.
-                raise FileChanged()
-            os.replace(tmp, target)
-        elif _WINDOWS or current.st_uid != os.geteuid():
-            if not _WINDOWS and current.st_mode & (stat.S_ISUID | stat.S_ISGID) and os.geteuid() != 0:
-                raise KeepsPrivilege()
-            os.unlink(tmp)  # it proved the space
-            _rewrite(target, data)
+        if _WINDOWS and current is not None:
+            os.unlink(tmp)  # it showed the volume has room
+            _rewrite(path, target, expected, data)
+        elif _WINDOWS and mode is not None:
+            # Gone since it was read: renaming the private temp file into place would publish a file only
+            # this user can read.
+            raise FileChanged()
         else:
             os.replace(tmp, target)
     except BaseException:
@@ -262,17 +247,20 @@ def write_bytes(path: str, data: bytes, expected: Optional[FileIdentity] = None)
         raise
 
 
-def _rewrite(target: str, data: bytes) -> None:
-    """Rewrite the existing file ``target`` through its own file object: from the start, then cut to length.
+def _rewrite(path: str, target: str, expected: Optional[FileIdentity], data: bytes) -> None:
+    """Rewrite the existing Windows file ``target`` through its own file object: from the start, then cut to length.
 
-    On Windows the open asks for writing the data alone (``GENERIC_WRITE`` includes reading the file's
-    security) and lets no other writer in while it lasts.
+    The open does not follow a link, and no other program can write, rename, or delete the file while it is
+    held. With it held, the publication checks are made again against it, so the write lands only in the file
+    that passed them, whatever the path named between the first check and the open.
     """
-    if _WINDOWS:
-        fd = windows_files.open_for_rewriting(target)
-    else:
-        fd = os.open(target, os.O_WRONLY | getattr(os, "O_CLOEXEC", 0))
+    fd = windows_files.open_for_rewriting(target)
+    if fd is None:  # the name is a link now
+        raise FileChanged()
     try:
+        held = FileIdentity.of(target, fd)
+        if (expected is not None and held != expected) or _check_publishable(path, target, held) is None:
+            raise FileChanged()
         view = memoryview(data)
         while view:
             view = view[os.write(fd, view) :]

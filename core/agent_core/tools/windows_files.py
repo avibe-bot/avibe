@@ -15,9 +15,10 @@ from __future__ import annotations
 
 import ctypes
 import os
-from typing import Any
+from typing import Any, Optional
 
 _FILE_WRITE_DATA = 0x0002
+_FILE_READ_ATTRIBUTES = 0x0080
 _GENERIC_WRITE = 0x40000000
 _FILE_SHARE_READ = 0x1
 _FILE_SHARE_READ_WRITE = 0x1 | 0x2
@@ -25,7 +26,12 @@ _FILE_SHARE_READ_WRITE_DELETE = 0x1 | 0x2 | 0x4
 _CREATE_NEW = 1
 _OPEN_EXISTING = 3
 _FILE_ATTRIBUTE_NORMAL = 0x80
+_FILE_ATTRIBUTE_REPARSE_POINT = 0x400
+_FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
 _FILE_BASIC_INFO = 0
+_FILE_ATTRIBUTE_TAG_INFO = 9
+# IsReparseTagNameSurrogate: the reparse point names another file (a symbolic link, a junction).
+_REPARSE_TAG_NAME_SURROGATE = 0x20000000
 _ERROR_SHARING_VIOLATION = 32
 _SDDL_REVISION_1 = 1
 # Protected, so nothing is inherited: the owner and SYSTEM alone, as a POSIX 0600 file is the owner's.
@@ -104,9 +110,13 @@ def may_write(path: str) -> bool:
     return True
 
 
-def open_for_rewriting(path: str) -> int:
-    """A binary, write-only descriptor of the existing file ``path`` that asks for writing the data alone, and
-    lets no other writer in while it is open.
+def open_for_rewriting(path: str) -> Optional[int]:
+    """A binary, write-only descriptor of the existing file ``path`` that asks for writing the data (and reading
+    the attributes) alone, and lets no other program write, rename, or delete the file while it is open;
+    ``None`` when ``path`` names a link (a symbolic link or a junction) rather than a file.
+
+    The open does not follow a link. Any other reparse point (a OneDrive placeholder, a compressed file) belongs
+    to the file itself, which is then opened normally, so the filter behind it does its work.
 
     ``os.open`` asks for ``GENERIC_WRITE``, which includes reading the file's security, so it fails on a file
     whose ACL grants writing but not ``READ_CONTROL``. Without write sharing, a program that has the file open
@@ -115,14 +125,49 @@ def open_for_rewriting(path: str) -> int:
     import msvcrt
 
     kernel32 = _kernel32()
-    handle = kernel32.CreateFileW(path, _FILE_WRITE_DATA, _FILE_SHARE_READ, None, _OPEN_EXISTING, 0, None)
-    if _invalid(handle):
-        raise _error(path)
+
+    def open_file(flags: int) -> Any:
+        handle = kernel32.CreateFileW(
+            path, _FILE_WRITE_DATA | _FILE_READ_ATTRIBUTES, _FILE_SHARE_READ, None, _OPEN_EXISTING, flags, None
+        )
+        if _invalid(handle):
+            raise _error(path)
+        return handle
+
+    handle = open_file(_FILE_FLAG_OPEN_REPARSE_POINT)
     try:
+        tag = _reparse_tag(handle, path)
+        if tag is not None:
+            kernel32.CloseHandle(handle)
+            handle = None
+            if tag & _REPARSE_TAG_NAME_SURROGATE:
+                return None
+            handle = open_file(0)
         return msvcrt.open_osfhandle(handle, os.O_WRONLY | os.O_BINARY)
     except BaseException:
-        kernel32.CloseHandle(handle)
+        if handle is not None:
+            kernel32.CloseHandle(handle)
         raise
+
+
+def _reparse_tag(handle: Any, path: str) -> Optional[int]:
+    """The reparse tag of the open file ``handle``, or ``None`` when it is not a reparse point.
+
+    The attributes come first: a volume without reparse points (FAT) does not answer for their tags.
+    """
+    from ctypes import wintypes
+
+    class AttributeTagInformation(ctypes.Structure):
+        _fields_ = [("FileAttributes", wintypes.DWORD), ("ReparseTag", wintypes.DWORD)]
+
+    if not _basic_information(handle, path).FileAttributes & _FILE_ATTRIBUTE_REPARSE_POINT:
+        return None
+    information = AttributeTagInformation()
+    if not _kernel32().GetFileInformationByHandleEx(
+        handle, _FILE_ATTRIBUTE_TAG_INFO, ctypes.byref(information), ctypes.sizeof(information)
+    ):
+        raise _error(path)
+    return int(information.ReparseTag)
 
 
 def create_private(path: str) -> int:
@@ -169,9 +214,25 @@ def create_private(path: str) -> int:
         raise
 
 
-def change_time_ns(fd: int) -> int:
-    """The change time of the open file ``fd``: any write or metadata change sets it, and nothing sets it back."""
+def open_attributes(path: str) -> int:
+    """A descriptor of the file ``path`` that can read its attributes and nothing else, so ``os.fstat`` and
+    ``change_time_ns`` work on a file whose ACL denies reading its data or its security."""
     import msvcrt
+
+    kernel32 = _kernel32()
+    handle = kernel32.CreateFileW(
+        path, _FILE_READ_ATTRIBUTES, _FILE_SHARE_READ_WRITE_DELETE, None, _OPEN_EXISTING, 0, None
+    )
+    if _invalid(handle):
+        raise _error(path)
+    try:
+        return msvcrt.open_osfhandle(handle, os.O_RDONLY | os.O_BINARY)
+    except BaseException:
+        kernel32.CloseHandle(handle)
+        raise
+
+
+def _basic_information(handle: Any, path: str) -> Any:
     from ctypes import wintypes
 
     class BasicInformation(ctypes.Structure):
@@ -184,9 +245,16 @@ def change_time_ns(fd: int) -> int:
         ]
 
     information = BasicInformation()
-    handle = msvcrt.get_osfhandle(fd)
     if not _kernel32().GetFileInformationByHandleEx(
         handle, _FILE_BASIC_INFO, ctypes.byref(information), ctypes.sizeof(information)
     ):
-        raise _error(f"<descriptor {fd}>")
+        raise _error(path)
+    return information
+
+
+def change_time_ns(fd: int) -> int:
+    """The change time of the open file ``fd``: any write or metadata change sets it, and nothing sets it back."""
+    import msvcrt
+
+    information = _basic_information(msvcrt.get_osfhandle(fd), f"<descriptor {fd}>")
     return (information.ChangeTime - _UNIX_EPOCH_FILETIME) * 100

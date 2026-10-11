@@ -500,29 +500,6 @@ async def test_new_contents_stay_the_owners_until_they_are_written(tmp_path, mak
     assert _icacls(target) == before
 
 
-@pytest.mark.skipif(WINDOWS, reason="POSIX ownership")
-@pytest.mark.parametrize("tool", ["write", "edit"])
-async def test_a_file_another_user_owns_is_rewritten_in_place(tmp_path, make_ctx, monkeypatch, tool):
-    """Replacing it would hand it to this user (who could then chmod it); rewriting keeps the file, owner, and links."""
-    target = tmp_path / "f.txt"
-    target.write_bytes(b"old\n")
-    os.link(target, tmp_path / "link.txt")
-    before = os.stat(target)
-    monkeypatch.setattr(write_module.os, "geteuid", lambda: before.st_uid + 1)  # as another user sees this file
-
-    result = await _replace_with(tool, make_ctx, "f.txt")
-
-    assert not result.is_error, result_text(result)
-    after = os.stat(target)
-    assert (after.st_ino, after.st_uid, stat.S_IMODE(after.st_mode)) == (
-        before.st_ino,
-        before.st_uid,
-        stat.S_IMODE(before.st_mode),
-    )
-    assert (tmp_path / "link.txt").read_bytes() == b"new\n"
-    assert sorted(path.name for path in tmp_path.iterdir()) == ["f.txt", "link.txt"]
-
-
 def _owner(path):
     """The file's owner, by name, read with the Win32 API directly rather than through the code under test."""
     import ctypes
@@ -568,48 +545,6 @@ async def test_on_windows_an_existing_file_is_rewritten_in_place_whoever_owns_it
     with open(f"{target}:Zone.Identifier", encoding="ascii", newline="") as stream:
         assert stream.read() == zone
     assert sorted(path.name for path in tmp_path.iterdir()) == ["f.txt", "link.txt"]
-
-
-@pytest.mark.skipif(WINDOWS, reason="POSIX ownership")
-async def test_whether_to_replace_is_decided_right_before_publication(tmp_path, make_ctx, monkeypatch):
-    """The file was this user's when the write began and another account's by the time it is published: it is
-    rewritten in place, never replaced by a file of this user's."""
-    target = tmp_path / "f.txt"
-    target.write_bytes(b"old\n")
-    inode, uid = os.stat(target).st_ino, os.stat(target).st_uid
-    real_fsync = write_module.os.fsync
-
-    def ownership_changes_meanwhile(fd):
-        real_fsync(fd)
-        monkeypatch.setattr(write_module.os, "geteuid", lambda: uid + 1)  # as another user sees the file now
-
-    monkeypatch.setattr(write_module.os, "fsync", ownership_changes_meanwhile)
-    result = await WriteTool().execute({"path": "f.txt", "content": "new\n"}, make_ctx())
-
-    assert not result.is_error, result_text(result)
-    assert (target.read_bytes(), os.stat(target).st_ino) == (b"new\n", inode)
-
-
-@pytest.mark.skipif(WINDOWS or (hasattr(os, "geteuid") and os.geteuid() == 0), reason="POSIX setuid, as a non-root user")
-@pytest.mark.parametrize("bit", [stat.S_ISUID, stat.S_ISGID])
-@pytest.mark.parametrize("tool", ["write", "edit"])
-async def test_a_setuid_or_setgid_file_another_user_owns_is_not_rewritten(tmp_path, make_ctx, monkeypatch, tool, bit):
-    """The kernel clears those bits when someone other than the owner writes the file, so it is refused."""
-    target = tmp_path / "f.txt"
-    target.write_bytes(b"old\n")
-    target.chmod(0o755 | bit)
-    before = os.stat(target)
-    if not before.st_mode & bit:
-        pytest.skip("this environment drops setuid and setgid bits (a macOS sandbox does)")
-    monkeypatch.setattr(write_module.os, "geteuid", lambda: before.st_uid + 1)  # as another user sees this file
-
-    result = await _replace_with(tool, make_ctx, "f.txt")
-
-    reason = "it is a setuid or setgid file another user owns, and rewriting it would clear those bits"
-    expected = {"write": f"Cannot write f.txt: {reason}.", "edit": f"Could not edit file: f.txt. {reason.capitalize()}."}
-    assert (result.is_error, result_text(result)) == (True, expected[tool])
-    assert (target.read_bytes(), os.stat(target).st_mode) == (b"old\n", before.st_mode)
-    assert [path.name for path in tmp_path.iterdir()] == ["f.txt"]
 
 
 @pytest.mark.skipif(not WINDOWS, reason="a Windows ACL")
@@ -753,6 +688,64 @@ async def test_an_in_place_rewrite_lets_no_other_writer_in(tmp_path, make_ctx):
     assert result_text(result).startswith("Cannot write f.txt: ")
     assert target.read_bytes() == b"old\n"
     assert [path.name for path in tmp_path.iterdir()] == ["f.txt"]
+
+
+@pytest.mark.skipif(not WINDOWS, reason="Windows rewrites in place")
+@pytest.mark.parametrize("swap", ["the file for a symbolic link", "its directory for a junction"])
+@pytest.mark.parametrize("tool", ["write", "edit"])
+async def test_a_file_swapped_after_the_last_check_is_not_written_through(tmp_path, make_ctx, monkeypatch, tool, swap):
+    """Another process swaps the file, or a directory on its path, for a link to another file between the last
+    check by path and the open: the rewrite checks what it opened, so the other file is never written."""
+    import _winapi
+
+    project, elsewhere = tmp_path / "project", tmp_path / "elsewhere"
+    project.mkdir()
+    elsewhere.mkdir()
+    (project / "f.txt").write_bytes(b"old\n")
+    (elsewhere / "f.txt").write_bytes(b"old\n")
+    real_open = write_module.windows_files.open_for_rewriting
+
+    def swap_then_open(target):
+        if swap == "the file for a symbolic link":
+            os.replace(project / "f.txt", tmp_path / "moved.txt")
+            os.symlink(elsewhere / "f.txt", project / "f.txt")
+        else:
+            os.rename(project, tmp_path / "moved")
+            _winapi.CreateJunction(str(elsewhere), str(project))
+        return real_open(target)
+
+    monkeypatch.setattr(write_module.windows_files, "open_for_rewriting", swap_then_open)
+    result = await _replace_with(tool, functools.partial(make_ctx, cwd=str(project)), "f.txt")
+
+    expected = {
+        "write": "Cannot write f.txt: it changed while it was being written; write it again.",
+        "edit": "Could not edit file: f.txt. It changed while the edit was being applied; read it again.",
+    }[tool]
+    assert (result.is_error, result_text(result)) == (True, expected)
+    assert (elsewhere / "f.txt").read_bytes() == b"old\n"
+    moved = tmp_path / ("moved.txt" if swap == "the file for a symbolic link" else "moved/f.txt")
+    assert moved.read_bytes() == b"old\n"
+
+
+@pytest.mark.skipif(not WINDOWS, reason="a Windows reparse point")
+async def test_a_file_with_a_reparse_point_of_its_own_is_written(tmp_path, make_ctx, monkeypatch):
+    """A reparse point that is not a link (a OneDrive placeholder's, here as its tag alone, since a runner has no
+    sync provider) belongs to the file itself: the file is opened again through the filter behind it, and written."""
+    target = tmp_path / "f.txt"
+    target.write_bytes(b"old\n")
+    asked = []
+
+    def as_a_cloud_file(handle, path):
+        asked.append(path)
+        return 0x9000601A  # IO_REPARSE_TAG_CLOUD_6
+
+    monkeypatch.setattr(write_module.windows_files, "_reparse_tag", as_a_cloud_file)
+    result = await WriteTool().execute({"path": "f.txt", "content": "new\n"}, make_ctx())
+
+    assert not result.is_error, result_text(result)
+    assert len(asked) == 1  # of the open that did not follow it; the file's own open is not asked again
+    assert target.read_bytes() == b"new\n"
+    assert [p.name for p in tmp_path.iterdir()] == ["f.txt"]
 
 
 @pytest.mark.skipif(not WINDOWS, reason="a Windows ACL")
