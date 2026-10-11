@@ -53,6 +53,7 @@ from core.agent_core.harness.context import (
 from core.agent_core.harness.projection import context_view, project
 from core.agent_core.messages import (
     AssistantMessage,
+    Origin,
     TextBlock,
     ThinkingBlock,
     ToolCallBlock,
@@ -1266,19 +1267,29 @@ async def test_one_compaction_is_in_flight_per_session():
     assert len(model.checkpoint_requests) == 1
 
 
-async def test_clearing_runs_when_the_cache_is_cold_and_spares_recent_turns():
+#: An official OpenAI GPT model (a 30-minute prompt cache, section 3) and Anthropic, whose message breakpoints Vibey
+#: caches for 5 minutes; ``ENDPOINT``'s test provider is a route of unknown lifetime, an hour.
+GPT = ModelEndpoint("openai_responses", "http://model.invalid", "gpt-6-astra", "", provider="openai")
+CLAUDE = ModelEndpoint("anthropic", "http://model.invalid", "claude-opus-5-5", "", provider="anthropic")
+
+
+@pytest.mark.parametrize("endpoint,lifetime", [(CLAUDE, 300), (GPT, 1_800), (ENDPOINT, 3_600)])
+async def test_clearing_runs_once_the_route_cache_has_gone_cold_and_spares_recent_turns(endpoint, lifetime):
     now = [1_000.0]
     store = InMemoryTranscriptStore(clock=lambda: now[0])
     context = ContextConfig(clock=lambda: now[0])
-    script = [*_long_context(9), [Done(assistant("one"))], [Done(assistant("two"))], [Done(assistant("three"))]]
+    script = [*_long_context(9), *([Done(assistant(word))] for word in ("one", "two", "three", "four"))]
     model = Model(script)
-    agent = make_agent(model, store=store, tools=[reader(tokens(6_000))], selection=LARGE, context=context)
+    route = ModelSelection(endpoint, LARGE.capabilities)
+    agent = make_agent(model, store=store, tools=[reader(tokens(6_000))], selection=route, context=context)
     await run(agent, row="turn-1")
     await run(agent, row="turn-2")
+    now[0] += lifetime  # idle exactly as long as the route's cache lives: still warm
+    await run(agent, row="turn-3")
     assert not [row for row in await store.load("session") if row.kind == "context_edit"]  # warm, below 0.8 T
     results = deepcopy([row for row in await store.load("session") if row.kind == "tool_result"])
-    now[0] += 301  # idle past the cache TTL
-    await run(agent, row="turn-3")
+    now[0] += lifetime + 1  # idle past it
+    await run(agent, row="turn-4")
     rows = await store.load("session")
     edits = [row for row in rows if row.kind == "context_edit"]
     by_id = {row.row_id: row.message.tool_call_id for row in results}
@@ -1289,6 +1300,119 @@ async def test_clearing_runs_when_the_cache_is_cold_and_spares_recent_turns():
     assert [m.content[0].text.startswith("[Old tool result cleared") for m in sent] == [True] * 4 + [False] * 5
     assert model.requests[-1].messages == project(rows[:-1]).messages
     assert store.transactions == [["context_edit"] * 4]  # one transition, one transaction
+
+
+#: A Model Hub Google hop as the adapter calls it: over Chat at the gateway, while the served-hop report names the
+#: Google protocol the gateway converted to (C-6). Its cache lifetime is unknown: an hour.
+GEMINI = ModelEndpoint("openai_chat", "http://model.invalid", "gemini-3-pro", "", provider="google")
+GEMINI_SERVED = Origin("google", "google", "gemini-3-pro")
+
+
+async def routed_turn(store, now, endpoint, scripts, row, served=None):
+    """One Turn in a new Agent over ``store`` on ``endpoint``, its replies served as ``served`` (the endpoint's own
+    origin by default); the ``context_edit`` rows after it."""
+    origin = served or endpoint_origin(endpoint)
+    model = Model([[replace(event, message=replace(event.message, origin=origin)) for event in s] for s in scripts])
+    route = ModelSelection(endpoint, LARGE.capabilities)
+    context = ContextConfig(clock=lambda: now[0])
+    agent = make_agent(model, store=store, tools=[reader(tokens(6_000))], selection=route, context=context)
+    assert (await run(agent, row=row))[-1].reason == "completed"
+    return [row for row in await store.load("session") if row.kind == "context_edit"]
+
+
+async def test_a_route_cache_counts_only_its_own_use():
+    # Ten minutes after Claude's last reply, GPT answers for the first time: a route with no use yet takes the latest
+    # use of any route, well inside GPT's 30 minutes, so nothing clears. A minute later the Session is back on Claude,
+    # whose own cache went unused for eleven minutes: cold, although another route answered a minute ago.
+    now = [1_000.0]
+    store = InMemoryTranscriptStore(clock=lambda: now[0])
+    await routed_turn(store, now, CLAUDE, [*_long_context(9), [Done(assistant("one"))]], "turn-1")
+    await routed_turn(store, now, CLAUDE, [[Done(assistant("two"))]], "turn-2")
+    now[0] += 600
+    assert not await routed_turn(store, now, GPT, [[Done(assistant("three"))]], "turn-3")
+    now[0] += 60
+    assert len(await routed_turn(store, now, CLAUDE, [[Done(assistant("four"))]], "turn-4")) == 4
+
+
+async def test_a_converted_route_cache_is_its_upstream_provider_and_model():
+    # A Google hop's replies are served as the Google protocol though the request went over Chat: its cache is still
+    # its own. Fifty minutes after its last reply it is warm (an hour, unknown lifetime); after another route answers,
+    # it goes cold once its own reply is over an hour old, although that route answered under twelve minutes ago.
+    now = [1_000.0]
+    store = InMemoryTranscriptStore(clock=lambda: now[0])
+    await routed_turn(store, now, GEMINI, [*_long_context(9), [Done(assistant("one"))]], "turn-1", GEMINI_SERVED)
+    await routed_turn(store, now, GEMINI, [[Done(assistant("two"))]], "turn-2", GEMINI_SERVED)
+    now[0] += 3_000
+    assert not await routed_turn(store, now, GEMINI, [[Done(assistant("three"))]], "turn-3", GEMINI_SERVED)
+    now[0] += 3_000
+    assert not await routed_turn(store, now, ENDPOINT, [[Done(assistant("four"))]], "turn-4")
+    now[0] += 700
+    assert len(await routed_turn(store, now, GEMINI, [[Done(assistant("five"))]], "turn-5", GEMINI_SERVED)) == 4
+
+
+async def test_pressure_clearing_runs_on_a_warm_cache():
+    # From 0.8 T old results clear whatever the cache's lifetime (section 3): on this window T = 59,904, and nine
+    # results of 6,000 tokens hold 0.9 T. The third Turn is the first whose old results are not protected.
+    route = ModelSelection(ENDPOINT, replace(SELECTION.capabilities, context_window=72_000, input_limit=None))
+    script = [*_long_context(9), *([Done(assistant(word))] for word in ("one", "two", "three"))]
+    model = Model(script, [[Done(assistant(CHECKPOINT))]])
+    agent = make_agent(model, tools=[reader(tokens(6_000))], selection=route)
+    for turn in ("turn-1", "turn-2", "turn-3"):
+        assert (await run(agent, row=turn))[-1].reason == "completed"
+    edits = [row for row in await agent.store.load("session") if row.kind == "context_edit"]
+    assert [row.payload["reason"] for row in edits] == ["clear_old_tool_result"] * 4
+    assert not model.checkpoint_requests
+
+
+def responses_reply(*calls: ToolCallBlock, reasoning: int, value: str = ""):
+    """A script answering on ``GPT`` with a Responses reasoning item of 17 bytes of ciphertext per reasoning token, billed
+    as the OpenAI route was measured to bill: the request's bytes / 4 without the ciphertext, plus the reported
+    reasoning of every item it replays."""
+
+    def script(request):
+        visible, replayed = 0, 0
+        for message in request.messages:
+            for block in message.content:
+                if isinstance(block, (TextBlock, ThinkingBlock)):
+                    visible += len(block.text.encode())
+                elif isinstance(block, ToolCallBlock):
+                    visible += len(block.name.encode()) + len(json.dumps(block.arguments, separators=(",", ":")))
+            if isinstance(message, AssistantMessage) and any(
+                isinstance(block, ThinkingBlock) and block.signature for block in message.content
+            ):
+                replayed += message.usage.reasoning_tokens
+        billed = request_tokens(request.system, request.tools, ()) + -(-visible // 4) + replayed
+        item = {"type": "reasoning", "id": "rs_0", "encrypted_content": "A" * (17 * reasoning), "summary": []}
+        content = (ThinkingBlock("", signature=json.dumps(item)), *((text(value),) if value else ()), *calls)
+        usage = Usage(input_tokens=billed, output_tokens=reasoning + 20, reasoning_tokens=reasoning)
+        return [Done(AssistantMessage(content, endpoint_origin(GPT), "tool_use" if calls else "stop", usage=usage))]
+
+    return script
+
+
+@pytest.mark.parametrize("idle_s,cleared", [(1_302, 0), (1_860, 4)])
+async def test_a_return_to_a_long_reasoning_session_never_checkpoints_at_57_percent(idle_s, cleared):
+    # The incident: a gpt-6-astra Session about 57% of T into its window (here 102,000 of T = 180,000), its 36,400
+    # reasoning tokens replayed as 155,000 tokens of ciphertext by UTF-8 / 4. After 21.7 minutes away its 30-minute
+    # cache is still warm and nothing clears; after 31 minutes four old results clear, the anchor still holds, and
+    # the estimate falls by what they held. Neither checkpoints.
+    now = [1_000.0]
+    store = InMemoryTranscriptStore(clock=lambda: now[0])
+    reads = [responses_reply(ToolCallBlock(f"r{index}", "read", {"path": "f"}), reasoning=4_000) for index in range(9)]
+    script = [*reads, *(responses_reply(value=word, reasoning=200) for word in ("noted", "two", "three"))]
+    model = Model(script, [[Done(assistant(CHECKPOINT))]])
+    route = ModelSelection(GPT, LARGE.capabilities)
+    context = ContextConfig(clock=lambda: now[0])
+    agent = make_agent(model, store=store, tools=[reader(tokens(7_300))], selection=route, context=context)
+    await run(agent, row="turn-1")
+    await run(agent, row="turn-2")
+    billed = [row.message.usage.input_tokens for row in await store.load("session") if row.kind == "response"]
+    assert 0.55 * 180_000 < billed[-1] < 0.6 * 180_000
+    now[0] += idle_s
+    events = await run(agent, row="turn-3")
+    assert events[-1].reason == "completed" and not model.checkpoint_requests
+    edits = [row for row in await store.load("session") if row.kind == "context_edit"]
+    assert len(edits) == cleared and len(model.conversation_requests) == 12
 
 
 async def test_chinese_output_reaches_the_threshold_by_its_utf8_size():

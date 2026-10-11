@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Collection, Mapping, Optional, Protocol, Sequence
 
 from core.agent_core.ai._common import endpoint_origin
-from core.agent_core.ai.provider import ModelCapabilities, ModelRequest
+from core.agent_core.ai.provider import ModelCapabilities, ModelEndpoint, ModelRequest
 from core.agent_core.harness.projection import ContextView, Unit, context_view
 from core.agent_core.harness.store import ContextEntry
 from core.agent_core.messages import (
@@ -55,6 +55,10 @@ THRESHOLD_RATIO = 0.9
 KEEP_MAX = 20_000
 KEEP_RATIO = 0.25
 IMAGE_TOKENS = 1_600
+#: A replayed response that reports no usage counts its opaque reasoning payloads at their UTF-8 bytes / this (section
+#: 2): the fewest bytes per reasoning token measured, Anthropic signatures 6.3-7.2 and OpenAI Responses items about 17,
+#: so it errs high, up to about 2.9 times on the latter.
+PAYLOAD_BYTES_PER_TOKEN = 6
 #: Each artifact list a checkpoint row keeps this many paths, most recently touched first, and marks whether earlier
 #: ones were pushed out; what the model reads shows a 4,000th of the route's window of them, between
 #: ``ARTIFACTS_SHOWN_MIN`` and this (section 7).
@@ -73,7 +77,15 @@ CLEAR_MIN_TOKENS = 20_000
 CLEAR_KEEP_RESULTS = 5
 CLEAR_PROTECTED_TURNS = 2
 CLEARABLE_TOOLS = frozenset({"read", "bash"})
-CACHE_TTL_S = 300.0
+#: How long a route's provider prompt cache stays warm after its last use, in seconds, by cache family (section 3):
+#: the documented lifetime of the cache mode Vibey requests for the conversation, where clearable results live.
+#: ``anthropic``: the message breakpoints' ``cache_control`` is ephemeral with no ``ttl``, 5 minutes, refreshed on use.
+#: ``openai-gpt-5.6``: OpenAI models from GPT-5.6 keep a prefix 30 minutes after its last write or reuse, the default
+#: and only ``prompt_cache_options.ttl``; Vibey sends none.
+CACHE_TTLS: Mapping[str, float] = {"anthropic": 300.0, "openai-gpt-5.6": 1_800.0}
+#: Any other route, or one not identified unambiguously: clearing a warm cache costs a full-price re-read of the
+#: context, while leaving a cold one only keeps some old output, so an unknown lifetime counts as an hour.
+CACHE_TTL_UNKNOWN_S = 3_600.0
 CLEARED_PLACEHOLDER = (
     "[Old tool result cleared to save context. Re-run the tool or re-read the file if you need it again.]"
 )
@@ -204,7 +216,6 @@ class ContextConfig:
     #: This Session's scratch directory; checkpoint turns may write only there.
     scratch_dir: Optional[str] = None
     clear_tool_results: bool = True
-    cache_ttl_s: float = CACHE_TTL_S
     clock: Callable[[], float] = field(default=time.time, repr=False)
 
 
@@ -220,20 +231,43 @@ def _utf8(value: str) -> int:
 
 
 def message_tokens(message: Message) -> int:
-    """UTF-8 bytes / 4 of everything replayed, with a fixed cost per image."""
+    """``tokens()`` of a message as replayed (section 2): UTF-8 bytes / 4 of its text, its thinking text, and each tool
+    call's name and JSON arguments, 1,600 per image, and, when it carries an opaque reasoning payload, its reasoning
+    in place of the payload's size."""
     size = 0
     images = 0
+    signed = 0  # thinking text that rides with a payload: the reported reasoning covers it
+    payload: Optional[int] = None  # UTF-8 bytes of its opaque payloads, None without any
     for block in message.content:
         if isinstance(block, TextBlock):
             size += _utf8(block.text) if block.text is not None else block.ref.bytes
         elif isinstance(block, ImageBlock):
             images += 1
         elif isinstance(block, ThinkingBlock):
-            size += _utf8(block.text) + _utf8(block.signature or "")
+            if block.signature is None:
+                size += _utf8(block.text)
+            else:
+                signed += _utf8(block.text)
+                payload = (payload or 0) + _utf8(block.signature)
         elif isinstance(block, ToolCallBlock):
             arguments = json.dumps(block.arguments, ensure_ascii=False, separators=(",", ":"))
-            size += _utf8(block.name) + _utf8(arguments) + _utf8(block.signature or "")
-    return math.ceil(size / 4) + images * IMAGE_TOKENS
+            size += _utf8(block.name) + _utf8(arguments)
+            if block.signature is not None:
+                payload = (payload or 0) + _utf8(block.signature)
+    reasoning = 0 if payload is None else max(math.ceil(signed / 4), _reasoning(message, payload))
+    return math.ceil(size / 4) + images * IMAGE_TOKENS + reasoning
+
+
+def _reasoning(message: Message, payload: int) -> int:
+    """What a message's opaque reasoning payloads of ``payload`` bytes cost when replayed (section 2): the reasoning
+    tokens its usage reports, else its output tokens, which include them; without usage, the bytes over
+    ``PAYLOAD_BYTES_PER_TOKEN``. A failed or aborted partial's payloads cost nothing: it is never replayed."""
+    if not isinstance(message, AssistantMessage) or message.stop_reason in ("error", "aborted"):
+        return 0
+    usage = message.usage
+    if usage is None:
+        return math.ceil(payload / PAYLOAD_BYTES_PER_TOKEN)
+    return usage.output_tokens if usage.reasoning_tokens is None else usage.reasoning_tokens
 
 
 def messages_tokens(messages: Sequence[Message]) -> int:
@@ -286,7 +320,7 @@ class Anchor:
     #: What its request carried from the transcript, before the response.
     transcript: tuple[Message, ...]
     response: AssistantMessage
-    #: UTF-8/4 of the whole request it answered, as sent (``ModelResponse.request.tokens``).
+    #: ``tokens()`` of the whole request it answered, as sent (``ModelResponse.request.tokens``).
     request_tokens: int
 
 
@@ -300,7 +334,7 @@ def _valid_usage(message: Optional[Message]) -> bool:
 
 
 def sent_tokens(request: ModelRequest) -> int:
-    """UTF-8/4 of a whole request: system prompt, tool definitions, and messages."""
+    """``tokens()`` of a whole request (section 2): system prompt, tool definitions, and messages."""
     return request_tokens(request.system, request.tools, request.messages)
 
 
@@ -335,23 +369,41 @@ def checkpoint_max_tokens(capabilities: ModelCapabilities, configured: int) -> i
 
 
 def _estimate(request: ModelRequest, transcript: Sequence[Message], anchor: Optional[Anchor]) -> int:
-    """The anchored usage while it holds, adjusted by the UTF-8/4 delta of everything else; else UTF-8/4.
+    """The anchored usage while it holds, grown by the ``tokens()`` of what changed since; else ``tokens()`` of the
+    request (section 2).
 
-    The anchor holds while the request goes to the route that answered it and the transcript up to its response
-    is unchanged. A changed system prompt, tool set, or rehydrated state does not invalidate it: the request's
-    own UTF-8/4 size carries the delta.
+    The anchor holds while the request goes to the route that answered it and the transcript up to its response is
+    the one its request carried, but for the content of tool results, all that clearing and a cut to fit change. The
+    growth is the larger of the whole request's and the transcript's own: a stored request size adds a changed system
+    prompt, tool set, or rehydrated state, and never takes away more than the transcript accounts for. While a tool
+    result before the response differs, the estimate is at least ``tokens()`` of the request, since what the change
+    removed is a local estimate taken from a provider count.
     """
     whole = sent_tokens(request)
-    if anchor is not None and anchor.response.origin == endpoint_origin(request.endpoint):
-        sent = len(anchor.transcript)
-        if (
-            len(transcript) > sent
-            and transcript[sent] == anchor.response
-            and tuple(transcript[:sent]) == anchor.transcript
-        ):
-            usage = usage_total(anchor.response.usage)
-            return max(0, usage + whole - anchor.request_tokens - message_tokens(anchor.response))
-    return whole
+    if anchor is None or anchor.response.origin != endpoint_origin(request.endpoint):
+        return whole
+    sent = len(anchor.transcript)
+    if len(transcript) <= sent or transcript[sent] != anchor.response:
+        return whole
+    edited = False
+    for now, then in zip(transcript, anchor.transcript):
+        if now == then:
+            continue
+        if not _same_result(now, then):
+            return whole
+        edited = True
+    growth = max(whole - anchor.request_tokens, messages_tokens(transcript) - messages_tokens(anchor.transcript))
+    est = usage_total(anchor.response.usage) - message_tokens(anchor.response) + growth
+    return max(est, whole) if edited else est
+
+
+def _same_result(now: Message, then: Message) -> bool:
+    """The same tool result but for its content: call id, tool name, and error flag unchanged (section 2)."""
+    return (
+        isinstance(now, ToolResultMessage)
+        and isinstance(then, ToolResultMessage)
+        and (now.tool_call_id, now.tool_name, now.is_error) == (then.tool_call_id, then.tool_name, then.is_error)
+    )
 
 
 def fit_result(
@@ -424,7 +476,27 @@ def budget(
     return Budget(window, limit, output, margin, threshold, keep, _estimate(request, transcript, anchor))
 
 
-# --- clearing (context.md section 4) ------------------------------------------------
+# --- clearing (context.md sections 3 and 4) -------------------------------------------
+
+#: An official OpenAI GPT model id, parsed whole: ``gpt-<major>[.<minor>]``, then an optional ``-<suffix>``.
+_GPT_MODEL = re.compile(r"gpt-(\d+)(?:\.(\d+))?(?:-[a-z0-9]+(?:[.-][a-z0-9]+)*)?", re.ASCII)
+
+
+def cache_ttl_s(endpoint: ModelEndpoint) -> float:
+    """How long the provider cache of a request's route stays warm (section 3): its family's documented lifetime in
+    ``CACHE_TTLS``, else ``CACHE_TTL_UNKNOWN_S``."""
+    family = _cache_family(endpoint)
+    return CACHE_TTL_UNKNOWN_S if family is None else CACHE_TTLS[family]
+
+
+def _cache_family(endpoint: ModelEndpoint) -> Optional[str]:
+    """The route's cache family from its provider, protocol, and whole model id; None unless unambiguous."""
+    if endpoint.provider == "anthropic" and endpoint.protocol == "anthropic":
+        return "anthropic"
+    gpt = _GPT_MODEL.fullmatch(endpoint.model_id) if endpoint.provider == "openai" else None
+    if gpt is not None and (int(gpt[1]), int(gpt[2] or 0)) >= (5, 6):
+        return "openai-gpt-5.6"
+    return None
 
 
 def clearable_results(view: ContextView) -> tuple[ContextEntry, ...]:

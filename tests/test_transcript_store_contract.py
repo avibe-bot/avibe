@@ -351,7 +351,7 @@ async def test_a_new_agent_clears_old_results_once_the_cache_has_gone_cold(c9):
     await run(agent, row=c9.stored_input(SESSION))
     await run(agent, row=c9.stored_input(SESSION))
     assert not [row for row in await c9.store.load(SESSION) if row.kind == "context_edit"]  # warm, below 0.8 T
-    idle[0] = 301  # past the cache TTL; the restarted Agent knows only the stored commit times
+    idle[0] = 3_601  # past the hour a route of unknown cache lifetime gets; the restarted Agent knows only commit times
     model = Model([[Done(assistant("three"))]])
     restarted = make_agent(model, store=c9.store, tools=[reader(tokens(6_000))], selection=LARGE, context=context)
     await run(restarted, row=c9.stored_input(SESSION))

@@ -188,10 +188,11 @@ and `bash` results with `context_edit` rows, on by default; and a checkpoint wri
   function derives the rest and `est` from the final request, immediately before it is sent.
   `M = min(max(8,000, 3% W), W / 8)`, `T = min(L_in - O - M, 0.9 W)`.
 - **Trigger** before every model request, including inside the tool loop, on the final request (in v1 no user hook
-  runs with context management): `est` is the usage of the latest response stored with its request facts, adjusted by the UTF-8 bytes / 4
-  difference between this request and that one (1,600 per image), while that request went to the same route and the
-  transcript up to the response is unchanged; otherwise UTF-8 bytes / 4 of the whole request. Compact when
-  `est >= T`.
+  runs with context management): `est` is the usage of the latest response stored with its request facts, adjusted by the
+  estimate's difference between this request and that one, while that request went to the same route and the
+  transcript up to the response is unchanged but for tool-result content (then never below the request's own
+  estimate); otherwise the estimate of the whole request: UTF-8 bytes / 4, 1,600 per image, and an opaque reasoning
+  payload at its response's reported reasoning, never as text. Compact when `est >= T`.
 - **Cut** before a user message or before an assistant message whose tool batch follows it, keeping
   `min(20K, 0.25 T)` verbatim; a cut inside the in-flight Turn keeps its inputs (the first and each steer) as they
   were, images included. A tool batch that cannot fit even with the conversation moved out is cut to fit, each
