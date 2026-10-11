@@ -80,5 +80,9 @@ Error classification is part of the contract because the loop branches on it:
 | `aborted` | cancelled by the caller | end the run as aborted |
 | `unknown` | anything else | end the run with the error |
 
+A `ProviderError` whose `partial` is committed (a response that failed after output) carries the error's text as that
+partial's `error_message`, redacted like the error itself and bounded to 1,000 characters, so the transcript row says
+why the response ended. A Stop's partial carries none.
+
 The `ai` lane adds a conversion table per protocol (request fields, stream events, stop reasons, usage fields) to this
 directory with its first PR; its tests enumerate the tables.

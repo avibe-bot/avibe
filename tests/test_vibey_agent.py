@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import struct
 import time
@@ -32,6 +33,7 @@ from typing import Any, Optional
 import pytest
 from sqlalchemy import select, update
 
+from core.agent_core.agent.events import NAMED_ERROR_KINDS
 from core.agent_core.agent.recovery import UNRECORDED_EFFECT
 from core.agent_core.ai.provider import Done
 from core.agent_core.harness.projection import project
@@ -39,6 +41,7 @@ from core.agent_core.messages import (
     AssistantMessage,
     ImageBlock,
     TextBlock,
+    ThinkingBlock,
     ToolCallBlock,
     ToolResultMessage,
     UserMessage,
@@ -1129,11 +1132,23 @@ async def test_a_google_hop_is_called_over_chat_at_the_gateway_prefix(engine, se
     assert harness.controller.terminals[-1]["is_error"] is False
 
 
-@pytest.mark.parametrize("kind", sorted({*_KIND_KEYS, "unknown", "context_exhausted"}))
-def test_every_error_kind_has_english_and_chinese_copy(kind: str) -> None:
+@pytest.mark.parametrize("kind", sorted(NAMED_ERROR_KINDS | set(_KIND_KEYS)))
+def test_every_kind_the_engine_names_has_copy_of_its_own(kind: str) -> None:
+    """Closure: every C-2 ``ErrorKind``, failed ``StopReason`` and loop kind (``NAMED_ERROR_KINDS``) has its own copy,
+    so no failure reads as the bare "run failed" line."""
+    assert kind in _KIND_KEYS
     key = error_key(kind)
     english, chinese = i18n_t(key, "en"), i18n_t(key, "zh")
+    assert key != "vibeyAgent.error.generic"
     assert english != key and chinese != key and english != chinese
+
+
+def test_an_unclassified_provider_failure_and_an_unexpected_exception_each_say_what_they_are() -> None:
+    # C-2's ``unknown``: an unrecognized code, or an error frame no rule names (Model Hub's own included).
+    assert error_key("unknown") == "vibeyAgent.error.unclassified"
+    # Any kind outside the named set is the class of an exception the loop did not expect.
+    assert error_key("HookStateError") == "vibeyAgent.error.internal"
+    assert error_key(None, reason="error") == "vibeyAgent.error.generic"
 
 
 @pytest.mark.parametrize("language", ["en", "zh"])
@@ -1184,6 +1199,35 @@ async def test_a_provider_stall_is_not_shown_as_a_connection_failure(
     assert "10" in stalled_copy and "{minutes}" not in stalled_copy
     assert harness.controller.im_client.sent == [f"❌ {stalled_copy}"]
     assert stalled_copy != i18n_t("vibeyAgent.error.network", language)
+
+
+async def test_a_failed_run_logs_its_kind_and_redacted_diagnostic_and_its_notice_keeps_the_kind(
+    engine, session, tmp_path, published, caplog
+) -> None:
+    """The diagnostic is never display copy, but it is recorded: one WARNING (redacted, one bounded line, no payload),
+    and the failure notice row names the kind, never the text."""
+    from core.agent_core.ai.provider import ProviderError
+
+    secret = "sk-proj-incident0secret0value"
+    partial = AssistantMessage((ThinkingBlock("**Checking catalog model metadata**"),), ORIGIN, "error")
+    failure = ProviderError(
+        "unknown", f"upstream refused\nAuthorization: Bearer {secret}", False, partial=partial
+    )
+    harness = _Harness(engine, tmp_path, "telegram", [[failure]], language="zh")
+    request = harness.request("dispatch it")
+
+    with caplog.at_level(logging.WARNING, logger="modules.agents.vibey.agent"):
+        await harness.agent.handle_message(request)
+
+    [line] = [record.getMessage() for record in caplog.records if record.getMessage().startswith("Vibey run failed")]
+    assert f"session={harness.session_id} turn={_turn(request.context)} " in line
+    assert " reason=error kind=unknown origin=source served=test-provider/anthropic/test-model " in line
+    assert line.endswith("diagnostic=upstream refused Authorization: Bearer [redacted]")
+    assert secret not in caplog.text
+    [notice] = harness.rows("notify")
+    assert json.loads(notice["metadata_json"])["error_kind"] == "unknown"
+    assert secret not in notice["metadata_json"] and "upstream refused" not in notice["metadata_json"]
+    assert harness.controller.im_client.sent == [f"❌ {i18n_t('vibeyAgent.error.unclassified', 'zh', backend='Vibey')}"]
 
 
 async def test_a_run_failure_is_reported_to_model_hub_like_the_other_backends(engine, session, tmp_path, published) -> None:

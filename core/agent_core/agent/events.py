@@ -9,7 +9,10 @@ The adapter maps events onto existing Avibe outputs (``loop-control.md`` section
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal, Optional, Union
+from typing import Literal, Optional, Union, get_args
+
+from core.agent_core.ai.provider import ErrorKind
+from core.agent_core.messages import StopReason
 
 RunEndReason = Literal["completed", "aborted", "error", "ended_by_hook", "context_exhausted"]
 CompactionReason = Literal["threshold", "overflow"]
@@ -18,6 +21,25 @@ CompactionMode = Literal["normal", "rolling", "dropped"]
 #: rejected, a response the transcript cannot hold); ``local`` is everything else (a Stop, an overflow or context
 #: exhaustion, a hook, tool, or store error).
 ErrorOrigin = Literal["source", "local"]
+#: The kinds the loop names itself (C-3 section 6), beside a provider error's C-2 ``ErrorKind`` and a failed
+#: response's ``StopReason``: an empty reply, what does not fit the context (C-9 section 8 d), a cancelled dependency,
+#: a failed stream cleanup, and the two exceptions that have copy of their own.
+LoopErrorKind = Literal[
+    "empty_response",
+    "context_exhausted",
+    "tool_output_too_large",
+    "input_too_large",
+    "step_too_large",
+    "dependency_cancelled",
+    "stream_cleanup",
+    "UnsupportedModelRoute",
+    "ProviderProtocolViolation",
+]
+#: Every kind an ``AgentError`` can name (``tool_use`` never ends a run). Any other kind is the class name of an
+#: exception the loop did not expect, and that error is local.
+NAMED_ERROR_KINDS: frozenset[str] = frozenset(
+    (*get_args(ErrorKind), *get_args(StopReason), *get_args(LoopErrorKind))
+) - {"tool_use"}
 
 
 @dataclass(frozen=True)

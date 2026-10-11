@@ -1571,6 +1571,9 @@
       "modelError": "模型因错误而停止。",
       "toolsUnsupported": "所选模型不支持工具，而 {backend} 需要工具。请换一个模型。",
       "providerProtocol": "模型服务商返回的回复 {backend} 无法使用。",
+      "unclassified": "请求模型时出现了 {backend} 无法归类的错误。可以重试，或换一个模型。",
+      "outputLimit": "模型在写工具调用时多次超出输出上限。请让它分成更小的步骤，或换用输出上限更大的模型。",
+      "internal": "{backend} 因内部错误而停止。可以重试；如果再次出现，服务日志里记录了原因。",
       "generic": "{backend} 运行失败。"
     }
   }

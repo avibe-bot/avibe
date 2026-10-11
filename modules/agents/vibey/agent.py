@@ -128,6 +128,15 @@ def _relative_to(cwd: str) -> Callable[[str], str]:
 
 #: ``Agent.max_tokens`` for every Turn: the resolved hop's budgeted maximum decides the output (``budgeted``).
 _NO_OUTPUT_CAP = 1 << 30
+#: A failure's diagnostic in the service log: one redacted line, bounded, never a payload.
+_LOGGED_DIAGNOSTIC_CHARS = 500
+
+
+def _loggable_diagnostic(text: str) -> str:
+    from core.agent_core.ai.errors import redact_provider_text
+
+    line = " ".join(redact_provider_text(text).split())
+    return line if len(line) <= _LOGGED_DIAGNOSTIC_CHARS else line[: _LOGGED_DIAGNOSTIC_CHARS - 1] + "…"
 
 
 @dataclass
@@ -606,6 +615,8 @@ class VibeyAgent(BaseAgent):
                 reason = "completed"
             run_failed_after_commit = reason not in _COMPLETED
             failed = final_outcome(final) == "failed" or run_failed_after_commit
+            if failed:
+                self._log_failure(run, reason, kind, diagnostic)
             body = self._display_source(final, final=True)
             if failed and not body.strip():
                 # A silent final whose run failed after the commit: like a final without text
@@ -642,7 +653,25 @@ class VibeyAgent(BaseAgent):
                 context, "result", "", level="silent", output=terminal_output_for(request)
             )
             return
+        self._log_failure(run, reason, kind, diagnostic)
         await self._fail(request, kind, diagnostic, reason=reason, refusal=run.refusal, source=source)
+
+    @staticmethod
+    def _log_failure(run: _Run, reason: str, kind: Optional[str], diagnostic: str) -> None:
+        """One WARNING for a failed run, so a failed Turn can be diagnosed from the log: its kind, who produced it,
+        the hop that served the last response, and the diagnostic, which is never display copy (``errors.py``)."""
+        cause = run.cause
+        served = next((message.origin for message in reversed(run.responses.values())), None)
+        logger.warning(
+            "Vibey run failed: session=%s turn=%s reason=%s kind=%s origin=%s served=%s diagnostic=%s",
+            run.session_id,
+            run.turn_id,
+            reason,
+            kind or "-",
+            cause.origin if cause is not None else "-",
+            f"{served.provider}/{served.api}/{served.model}" if served is not None else "-",
+            _loggable_diagnostic(diagnostic or ""),
+        )
 
     async def _continuing_input(self, run: _Run) -> Optional[AgentInput]:
         """The input that continues a Turn whose run ended by design with inputs it accepted.
@@ -1153,6 +1182,10 @@ class VibeyAgent(BaseAgent):
         """
         if source:
             await self.record_model_hub_native_failure(request.context, diagnostic or (kind or "error"))
+        output = terminal_output_for(request)
+        if kind:
+            # The kind, never the diagnostic, so a failed Turn can be diagnosed from its notice row.
+            output = replace(output, metadata={**output.metadata, "error_kind": kind})
         await emit_backend_failure(
             self.controller,
             request.context,
@@ -1160,6 +1193,7 @@ class VibeyAgent(BaseAgent):
             diagnostic or (kind or "error"),
             display_text=f"❌ {refusal or error_text(kind, self._language(), reason=reason)}",
             request=request,
+            output=output,
             cause=cause,
         )
 
@@ -1172,7 +1206,7 @@ class VibeyAgent(BaseAgent):
         refusal = (
             await asyncio.to_thread(hub_supply_refusal, self.controller, BACKEND, language)
             or launch_refusal_copy(self.controller, error)
-            or error_text("generic", language)
+            or error_text(None, language)
         )
         # Recorded on every start failure, as the other backends do: a no-op unless a launch is bound.
         await self.record_model_hub_native_failure(request.context, str(error))
