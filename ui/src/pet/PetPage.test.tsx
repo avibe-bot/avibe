@@ -403,6 +403,20 @@ describe('PetPage other conversations', () => {
     expect(api.getRunningAgents.mock.calls.length).toBe(settled);
   }, 15000);
 
+  it('keeps re-reading a started turn after a failed read', async () => {
+    canUseAgents = true;
+    devBind('S');
+    render(<PetPage />);
+    await waitFor(() => expect(api.getRunningAgents).toHaveBeenCalled());
+    const before = api.getRunningAgents.mock.calls.length;
+    // The read turn.start asks for fails, as during a short controller outage.
+    api.getRunningAgents.mockRejectedValueOnce(new Error('controller restarting'));
+    await emit((h) => h.onTurnStart?.({ session_id: 'T' }));
+    await waitFor(() => expect(api.getRunningAgents.mock.calls.length).toBe(before + 1));
+    runningAgents = workingIn('T');
+    await waitFor(() => expect(pose()).toBe('running'), { timeout: 5000 });
+  }, 15000);
+
   it('re-reads on every event that can change who is working, and catches up on visibility', async () => {
     const { REFRESH_TRIGGERS } = await import('./useConversationAgentWorking');
     canUseAgents = true;
