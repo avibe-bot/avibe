@@ -10,6 +10,78 @@
 - Companion docs: `desktop-tray-lifecycle.md` (native toggle pattern),
   `desktop-auto-update.md` (signing), `desktop-product-gaps.md`
 
+## Route A: raw single-click selector (2026-10-10)
+
+Status: implementation lane, based on remote master
+`0438a99916e82c9fe0387321dd65fd87b4412587`, branch
+`fix/desktop-cua-raw-single-click-20261010`.
+
+The bounded research probe showed that the existing routed window-pointer
+CGEvent path can deliver a hit-tested click to a test-owned AppKit target in
+the background without changing the frontmost PID or hardware cursor
+coordinates.
+The failure in self-drawn apps was the click tool's AX-first optimization:
+`AXPress` returned success while the target did not receive `mouseDown`.
+
+Upstream investigation found no stable, maintainer-accepted selector contract
+that bypasses this hollow AX success while preserving the current default
+behavior. The pinned source is `cua-driver-rs-v0.31.0` at commit
+`5272e492d61b96caf08e3bf434d91126c1f3dccc`, with source archive SHA-256
+`8134337f2beb1854918d8bbc5aea22d7ae00de9838ce6426f275d7ba6734d191`.
+Relevant upstream work and the upgrade plan are recorded in
+[`desktop/cua-driver/PATCHES.md`](../../desktop/cua-driver/PATCHES.md) and
+`desktop/cua-driver/sources.json`.
+
+The smallest accepted contract is `click_mode`:
+
+- missing or `"auto"` keeps today's AX-first `count=1` click behavior;
+- `"raw"` is opt-in and requires an exact `pid` + `window_id`, pixel `x/y`,
+  background left-click delivery, `action` `press` or `click`, `count=1`, and
+  no modifiers, element token, or portable target;
+- raw delivery defaults to background when `delivery_mode` is omitted; when
+  supplied, the field must be exactly `"background"` rather than null,
+  foreground, or an unknown future value;
+- raw mode bypasses only the macOS click tool's AX hit-test/`AXPress` shortcut
+  and uses the existing routed CGEvent path;
+- unknown values and invalid combinations are structured
+  `invalid_arguments`.
+
+Avibe admits and forwards `click_mode` only for the `click` tool, after the
+existing observe-first and exact-window admission. A request observed before
+the target window is admitted is never forwarded. The tool snapshot hash is
+updated in the core and Runtime host, and the package workflow now builds the
+patched source and emits schema-2 provenance containing source, patch, snapshot,
+prepared-binary, packaged-binary, and cdhash evidence.
+
+The package verifier keeps two generated schema surfaces distinct. The
+driver's `dump-docs --type mcp` output uses `input_schema`, while the managed
+MCP snapshot uses `inputSchema`. Packaging validates the former against the
+built binary; `core/computer_server.py` consumes the latter. Owning tests reject
+the snapshot shape at the `dump-docs` boundary so a guessed key cannot silently
+replace the producer's actual contract again.
+
+Driver provenance also keeps the unsigned and signed binary surfaces distinct.
+Immediately before Tauri packaging, the workflow hashes the prepared sidecar
+at `desktop/src-tauri/binaries/cua-driver-<target>` and requires it to match
+`prepared_binary_sha256`. Release recording separately hashes the signed helper
+inside the app as `packaged_sha256`; signing may make the two hashes differ.
+Owning mutation tests reject both an arbitrary valid-looking digest and the
+signed helper's digest when either is substituted for the prepared sidecar
+digest.
+
+The test-owned AppKit fixture makes `AXPress` a hollow success and counts
+native `mouseDown`/`mouseUp`. Its ignored live harness is compiled in this
+lane but is not run here because live GUI/TCC actions are outside the current
+authorization. The owning contract tests cover snapshot/manifest locking,
+source-subtree extraction, rejection of non-regular archive members, Avibe
+admission/forwarding, and release provenance verification.
+
+Route B, a bounded foreground mode for applications that reject both
+accessibility actions and background synthetic events, is explicitly deferred.
+It must be designed and accepted from new real evidence; it cannot become a
+silent fallback for Route A. QQ/WeChat verification likewise requires a later
+owner handoff after the patched artifact exists.
+
 ## Background
 
 Avibe agents can run shell commands and take a desktop screenshot
@@ -104,15 +176,16 @@ running. The tray keeps the shell alive after the window closes.
   standard nested-code location. Launch it directly with `Command`, never
   through LaunchServices.
   Pin the version and SHA-256 in a sources manifest beside
-  `runtime-sources.json`. Fetch only the plain driver binary, never the
-  `cua-perception` extension, which is AGPL. Add the upstream MIT notice.
-  Desktop packages are per architecture (`aarch64-apple-darwin`,
-  `x86_64-apple-darwin`, `x86_64-pc-windows-msvc`), so ship one thin slice per
-  package: `lipo -thin` of the universal binary keeps Cua's valid per-slice
-  signature. Record the release archive, extracted universal, and thinned
-  upstream digests before packaging, separately from the packaged digest and
-  cdhash after signing. Newly produced desktop source metadata uses schema 2:
-  every macOS record must include this complete driver provenance block.
+  `runtime-sources.json`. Fetch only the plain driver source, never the
+  `cua-perception` extension, which is AGPL. Apply only the explicitly
+  recorded patch variant, add the upstream MIT notice, and record the source
+  archive and patch hashes. Desktop packages are per architecture
+  (`aarch64-apple-darwin`, `x86_64-apple-darwin`,
+  `x86_64-pc-windows-msvc`), so build one target-specific macOS helper per
+  package. Record the prepared binary digest before packaging, separately from
+  the packaged digest and cdhash after signing. Newly produced desktop source
+  metadata uses schema 2: every macOS record must include this complete driver
+  provenance block.
   Schema-1 metadata remains accepted only as a legacy published input. Sign
   nested code explicitly before the outer app; `--deep` is verification-only.
   Windows ships `cua-driver.exe`; whether the default-off
