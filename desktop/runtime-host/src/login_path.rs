@@ -79,6 +79,12 @@ impl LoginPath {
 /// environment, and an interactive shell attached to the same terminal would
 /// compete with it for the foreground.
 pub fn login_shell_path() -> LoginPath {
+    // This crate's unit tests never run the developer's own login shell and
+    // its startup files; the lookup itself is covered through `resolve_with`
+    // with test-owned fake shells.
+    if cfg!(test) {
+        return LoginPath::Inherited("test");
+    }
     #[cfg(target_os = "macos")]
     {
         use std::io::IsTerminal;
