@@ -328,20 +328,18 @@ async def test_a_cancelled_write_lands_before_the_next_writer_takes_the_lock(
         real_fsync(fd)
 
     def counted(publish):
-        def publish_and_count(source, target):
-            publish(source, target)
-            renames.append(target)
+        def publish_and_count(*args):
+            publish(*args)
+            renames.append(args)
             if len(renames) == expected_renames:
                 renamed.set()
 
         return publish_and_count
 
     monkeypatch.setattr(write_module.os, "fsync", first_fsync_blocks)
-    # A new file is renamed into place; on Windows an existing one is replaced with ReplaceFileW.
+    # An existing file is replaced by a rename, or on Windows rewritten in place.
     monkeypatch.setattr(write_module.os, "replace", counted(real_replace))
-    monkeypatch.setattr(
-        write_module.windows_files, "replace_existing", counted(write_module.windows_files.replace_existing)
-    )
+    monkeypatch.setattr(write_module, "_rewrite", counted(write_module._rewrite))
     tool = WriteTool() if "content" in first else EditTool()
     cancelled = asyncio.ensure_future(tool.execute(first, make_ctx()))
     await asyncio.to_thread(entered.wait, 10)
@@ -461,7 +459,7 @@ async def _replace_with(tool, make_ctx, path):
 
 @pytest.mark.skipif(not WINDOWS, reason="a Windows ACL")
 @pytest.mark.parametrize("tool", ["write", "edit"])
-async def test_a_replaced_file_keeps_an_acl_of_its_own(tmp_path, make_ctx, tool):
+async def test_a_written_file_keeps_an_acl_of_its_own(tmp_path, make_ctx, tool):
     """The replacement starts with what its directory passes on; a file kept private by its own ACL stays so."""
     target = tmp_path / "secret.txt"
     target.write_bytes(b"old\n")
@@ -477,7 +475,7 @@ async def test_a_replaced_file_keeps_an_acl_of_its_own(tmp_path, make_ctx, tool)
 
 @pytest.mark.skipif(not WINDOWS, reason="a Windows ACL")
 @pytest.mark.parametrize("tool", ["write", "edit"])
-async def test_replacement_contents_stay_the_owners_until_the_replace(tmp_path, make_ctx, monkeypatch, tool):
+async def test_new_contents_stay_the_owners_until_they_are_written(tmp_path, make_ctx, monkeypatch, tool):
     """The temp file is created owner-only, as a 0600 file is on POSIX: not with the directory's wider ACL."""
     # Python's mkdtemp, which made tmp_path, gives it entries without automatic inheritance, so its files list
     # theirs as their own; a user's directory inherits automatically, as it does after /reset.
@@ -489,8 +487,9 @@ async def test_replacement_contents_stay_the_owners_until_the_replace(tmp_path, 
     real_fsync = write_module.os.fsync
 
     def watch(fd):
-        [temp] = [path for path in tmp_path.iterdir() if path.name.startswith(".avibe-")]
-        seen.append(_icacls(temp).replace(str(temp), "").split("\n\n")[0].split())
+        # The temp copy's fsync; the rewrite of the file itself syncs too, once the copy is gone.
+        for temp in (path for path in tmp_path.iterdir() if path.name.startswith(".avibe-")):
+            seen.append(_icacls(temp).replace(str(temp), "").split("\n\n")[0].split())
         real_fsync(fd)
 
     monkeypatch.setattr(write_module.os, "fsync", watch)
@@ -546,26 +545,70 @@ def _owner(path):
     return f"{domain.value}\\{name.value}"
 
 
-@pytest.mark.skipif(not WINDOWS, reason="a Windows owner")
+@pytest.mark.skipif(not WINDOWS, reason="Windows rewrites in place")
+@pytest.mark.parametrize("owner", ["this user", "another account"])
 @pytest.mark.parametrize("tool", ["write", "edit"])
-async def test_a_file_another_account_owns_is_rewritten_in_place_on_windows(tmp_path, make_ctx, tool):
-    """A replacement would be this user's, with an owner's right to change its ACL: the file is rewritten instead."""
+async def test_on_windows_an_existing_file_is_rewritten_in_place_whoever_owns_it(tmp_path, make_ctx, tool, owner):
+    """It stays the same file object: id, owner, ACL, streams, and its hard links all see the new content."""
     target = tmp_path / "f.txt"
     target.write_bytes(b"old\n")
     zone = "[ZoneTransfer]\r\nZoneId=3\r\n"
     with open(f"{target}:Zone.Identifier", "w", encoding="ascii", newline="") as stream:
         stream.write(zone)
-    _icacls(target, "/setowner", "NT AUTHORITY\\SYSTEM")
+    os.link(target, tmp_path / "link.txt")
+    if owner == "another account":
+        _icacls(target, "/setowner", "NT AUTHORITY\\SYSTEM")
     before = (_owner(target), _icacls(target), os.stat(target).st_ino)
 
     result = await _replace_with(tool, make_ctx, "f.txt")
 
     assert not result.is_error, result_text(result)
-    assert target.read_bytes() == b"new\n"
+    assert target.read_bytes() == (tmp_path / "link.txt").read_bytes() == b"new\n"
     assert (_owner(target), _icacls(target), os.stat(target).st_ino) == before
-    assert before[0] == "NT AUTHORITY\\SYSTEM"
     with open(f"{target}:Zone.Identifier", encoding="ascii", newline="") as stream:
         assert stream.read() == zone
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["f.txt", "link.txt"]
+
+
+@pytest.mark.skipif(WINDOWS, reason="POSIX ownership")
+async def test_whether_to_replace_is_decided_right_before_publication(tmp_path, make_ctx, monkeypatch):
+    """The file was this user's when the write began and another account's by the time it is published: it is
+    rewritten in place, never replaced by a file of this user's."""
+    target = tmp_path / "f.txt"
+    target.write_bytes(b"old\n")
+    inode, uid = os.stat(target).st_ino, os.stat(target).st_uid
+    real_fsync = write_module.os.fsync
+
+    def ownership_changes_meanwhile(fd):
+        real_fsync(fd)
+        monkeypatch.setattr(write_module.os, "geteuid", lambda: uid + 1)  # as another user sees the file now
+
+    monkeypatch.setattr(write_module.os, "fsync", ownership_changes_meanwhile)
+    result = await WriteTool().execute({"path": "f.txt", "content": "new\n"}, make_ctx())
+
+    assert not result.is_error, result_text(result)
+    assert (target.read_bytes(), os.stat(target).st_ino) == (b"new\n", inode)
+
+
+@pytest.mark.skipif(WINDOWS or (hasattr(os, "geteuid") and os.geteuid() == 0), reason="POSIX setuid, as a non-root user")
+@pytest.mark.parametrize("bit", [stat.S_ISUID, stat.S_ISGID])
+@pytest.mark.parametrize("tool", ["write", "edit"])
+async def test_a_setuid_or_setgid_file_another_user_owns_is_not_rewritten(tmp_path, make_ctx, monkeypatch, tool, bit):
+    """The kernel clears those bits when someone other than the owner writes the file, so it is refused."""
+    target = tmp_path / "f.txt"
+    target.write_bytes(b"old\n")
+    target.chmod(0o755 | bit)
+    before = os.stat(target)
+    if not before.st_mode & bit:
+        pytest.skip("this environment drops setuid and setgid bits (a macOS sandbox does)")
+    monkeypatch.setattr(write_module.os, "geteuid", lambda: before.st_uid + 1)  # as another user sees this file
+
+    result = await _replace_with(tool, make_ctx, "f.txt")
+
+    reason = "it is a setuid or setgid file another user owns, and rewriting it would clear those bits"
+    expected = {"write": f"Cannot write f.txt: {reason}.", "edit": f"Could not edit file: f.txt. {reason.capitalize()}."}
+    assert (result.is_error, result_text(result)) == (True, expected[tool])
+    assert (target.read_bytes(), os.stat(target).st_mode) == (b"old\n", before.st_mode)
     assert [path.name for path in tmp_path.iterdir()] == ["f.txt"]
 
 
@@ -603,7 +646,7 @@ def _read_data_only(path):
 
 
 @pytest.mark.skipif(not WINDOWS, reason="a Windows integrity label")
-async def test_a_replaced_file_keeps_its_integrity_label(tmp_path, make_ctx):
+async def test_a_written_file_keeps_its_integrity_label(tmp_path, make_ctx):
     target = tmp_path / "f.txt"
     target.write_bytes(b"old\n")
     _icacls(target, "/setintegritylevel", "low")
@@ -615,42 +658,6 @@ async def test_a_replaced_file_keeps_its_integrity_label(tmp_path, make_ctx):
     assert not result.is_error, result_text(result)
     assert target.read_bytes() == b"new\n"
     assert _icacls(target) == before
-
-
-@pytest.mark.skipif(not WINDOWS, reason="ReplaceFileW")
-async def test_a_backup_is_never_put_back_over_a_file_created_meanwhile(tmp_path, make_ctx, monkeypatch):
-    """``ERROR_UNABLE_TO_MOVE_REPLACEMENT_2`` leaves the name free, and another program writes a file there before
-    the backup can be put back: that file stays, and the error says where the earlier content is."""
-    import ctypes
-
-    from core.agent_core.tools import windows_files
-
-    real = windows_files._kernel32()
-
-    class FailsAndAnotherWriterComes:
-        def __getattr__(self, name):
-            return getattr(real, name)
-
-        def ReplaceFileW(self, replaced, replacement, backup, flags, exclude, reserved):
-            os.replace(replaced, backup)
-            with open(replaced, "wb") as theirs:
-                theirs.write(b"theirs\n")
-            ctypes.set_last_error(1177)
-            return False
-
-    monkeypatch.setattr(windows_files, "_kernel32", FailsAndAnotherWriterComes)
-    target = tmp_path / "f.txt"
-    target.write_bytes(b"old\n")
-
-    result = await WriteTool().execute({"path": "f.txt", "content": "new\n"}, make_ctx())
-
-    [backup] = [path for path in tmp_path.iterdir() if path.name.endswith(".bak")]
-    assert (result.is_error, result_text(result)) == (
-        True,
-        f"Cannot write f.txt: it was created again while it was being replaced; its earlier content is in {backup}.",
-    )
-    assert (target.read_bytes(), backup.read_bytes()) == (b"theirs\n", b"old\n")
-    assert sorted(path.name for path in tmp_path.iterdir()) == sorted(["f.txt", backup.name])
 
 
 @pytest.mark.skipif(not WINDOWS, reason="Windows file times")
@@ -681,36 +688,9 @@ def test_the_change_time_an_edit_compares_moves_with_every_write(tmp_path):
     assert os.stat(path).st_birthtime_ns == original.st_birthtime_ns
 
 
-@pytest.mark.skipif(not WINDOWS, reason="ReplaceFileW")
-async def test_a_backup_that_cannot_be_removed_is_logged_and_the_write_stands(tmp_path, make_ctx, monkeypatch, caplog):
-    """Another program opened the backup between ReplaceFileW and its removal: the old copy stays, and says where."""
-    from core.agent_core.tools import windows_files
-
-    real_unlink = windows_files.os.unlink
-
-    def held(path, *args, **kwargs):
-        if str(path).endswith(".bak"):
-            raise PermissionError(13, "The process cannot access the file", str(path), 32)
-        return real_unlink(path, *args, **kwargs)
-
-    monkeypatch.setattr(windows_files.os, "unlink", held)
-    target = tmp_path / "f.txt"
-    target.write_bytes(b"old\n")
-
-    with caplog.at_level("WARNING", logger=windows_files.__name__):
-        result = await WriteTool().execute({"path": "f.txt", "content": "new\n"}, make_ctx())
-    monkeypatch.undo()
-
-    assert not result.is_error, result_text(result)
-    assert target.read_bytes() == b"new\n"
-    [backup] = [path for path in tmp_path.iterdir() if path.name.endswith(".bak")]
-    assert backup.read_bytes() == b"old\n"
-    assert str(backup) in caplog.text
-
-
 @pytest.mark.skipif(not WINDOWS, reason="Windows file metadata")
 @pytest.mark.parametrize("tool", ["write", "edit"])
-async def test_a_replaced_file_keeps_its_named_streams_and_encryption(tmp_path, make_ctx, tool):
+async def test_a_written_file_keeps_its_named_streams_and_encryption(tmp_path, make_ctx, tool):
     """A downloaded file keeps its Mark of the Web, and a file encrypted on its own stays encrypted."""
     target = tmp_path / "f.txt"
     target.write_bytes(b"old\n")
@@ -731,61 +711,22 @@ async def test_a_replaced_file_keeps_its_named_streams_and_encryption(tmp_path, 
 
 
 @pytest.mark.skipif(not WINDOWS, reason="Windows file sharing")
-async def test_a_replace_windows_refuses_leaves_the_file_as_it_was(tmp_path, make_ctx):
-    """Another program holds the file open without sharing delete: nothing is replaced, and nothing is left over."""
+async def test_a_reader_holding_the_file_does_not_stop_a_write(tmp_path, make_ctx):
+    """A rename onto a file another program has open fails on Windows; a rewrite in place shares it with readers."""
     target = tmp_path / "f.txt"
     target.write_bytes(b"old\n")
     with open(target, "rb"):
         result = await WriteTool().execute({"path": "f.txt", "content": "new\n"}, make_ctx())
 
-    assert result.is_error
-    assert result_text(result).startswith("Cannot write f.txt: ")
-    assert target.read_bytes() == b"old\n"
-    assert [p.name for p in tmp_path.iterdir()] == ["f.txt"]
-
-
-@pytest.mark.skipif(not WINDOWS, reason="ReplaceFileW")
-async def test_a_replaced_file_left_under_the_backup_name_is_put_back(tmp_path, make_ctx, monkeypatch):
-    """``ERROR_UNABLE_TO_MOVE_REPLACEMENT_2``: Windows moved the replaced file to the backup name and then could not
-    move the replacement into place. Simulated, since no test can make Windows fail at exactly that step."""
-    import ctypes
-
-    from core.agent_core.tools import windows_files
-
-    real = windows_files._kernel32()
-
-    class FailsAfterTheBackup:
-        def __getattr__(self, name):
-            return getattr(real, name)
-
-        def ReplaceFileW(self, replaced, replacement, backup, flags, exclude, reserved):
-            os.replace(replaced, backup)
-            ctypes.set_last_error(1177)
-            return False
-
-    monkeypatch.setattr(windows_files, "_kernel32", FailsAfterTheBackup)
-    target = tmp_path / "f.txt"
-    target.write_bytes(b"old\n")
-
-    result = await WriteTool().execute({"path": "f.txt", "content": "new\n"}, make_ctx())
-
-    assert result.is_error
-    assert target.read_bytes() == b"old\n"
-    assert [p.name for p in tmp_path.iterdir()] == ["f.txt"]
+    assert not result.is_error, result_text(result)
+    assert target.read_bytes() == b"new\n"
+    assert [path.name for path in tmp_path.iterdir()] == ["f.txt"]
 
 
 @pytest.mark.skipif(not os.environ.get("AVIBE_TEST_FAT_DIR"), reason="needs a FAT volume (AVIBE_TEST_FAT_DIR)")
 @pytest.mark.parametrize("tool", ["write", "edit"])
-async def test_a_file_on_a_volume_without_acls_is_replaced(make_ctx, monkeypatch, tool):
-    """FAT keeps no owners, ACLs, or streams: nothing a replacement could lose, so the write stays all or nothing."""
-    replaced = []
-    real_replace = write_module.windows_files.replace_existing
-
-    def replace_existing(replacement, target):
-        replaced.append(target)
-        real_replace(replacement, target)
-
-    monkeypatch.setattr(write_module.windows_files, "replace_existing", replace_existing)
+async def test_a_file_on_a_volume_without_acls_is_written(make_ctx, tool):
+    """FAT keeps no owners or ACLs: the owner-only temp file and the rewrite in place work there too."""
     directory = Path(os.environ["AVIBE_TEST_FAT_DIR"]) / f"replace-{tool}-{secrets.token_hex(4)}"
     directory.mkdir()
     try:
@@ -794,7 +735,6 @@ async def test_a_file_on_a_volume_without_acls_is_replaced(make_ctx, monkeypatch
 
         assert not result.is_error, result_text(result)
         assert (directory / "f.txt").read_bytes() == b"new\n"
-        assert replaced == [os.path.realpath(directory / "f.txt")]  # replaced, not rewritten in place
         assert [p.name for p in directory.iterdir()] == ["f.txt"]
     finally:
         shutil.rmtree(directory, ignore_errors=True)
@@ -805,7 +745,6 @@ async def test_an_in_place_rewrite_lets_no_other_writer_in(tmp_path, make_ctx):
     """Another program has the file open for writing: the rewrite fails before a byte changes, and leaves nothing."""
     target = tmp_path / "f.txt"
     target.write_bytes(b"old\n")
-    _icacls(target, "/setowner", "NT AUTHORITY\\SYSTEM")  # so it is rewritten in place
 
     with open(target, "r+b"):
         result = await WriteTool().execute({"path": "f.txt", "content": "new\n"}, make_ctx())

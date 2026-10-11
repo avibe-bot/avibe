@@ -38,7 +38,14 @@ from core.agent_core.tools.paths import (
 )
 from core.agent_core.tools.text import decode_file, encode_file, model_text
 from core.agent_core.tools.truncate import format_size
-from core.agent_core.tools.write import FileChanged, FileIdentity, NotReplaceable, may_write, write_bytes
+from core.agent_core.tools.write import (
+    FileChanged,
+    FileIdentity,
+    KeepsPrivilege,
+    NotReplaceable,
+    may_write,
+    write_bytes,
+)
 
 #: Avibe: larger files are refused rather than loaded whole; the display diff stops at a smaller size.
 MAX_EDIT_BYTES = 10 * 1024 * 1024
@@ -269,6 +276,8 @@ class EditTool:
                 return error_result(
                     f"Could not edit file: {path}. Its directory is not writable, so the file cannot be replaced safely."
                 )
+            except KeepsPrivilege:
+                return error_result(f"Could not edit file: {path}. {KeepsPrivilege.MESSAGE.capitalize()}.")
             except EditError as exc:
                 return error_result(str(exc))
             except FileChanged:

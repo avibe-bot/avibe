@@ -75,6 +75,8 @@ class WriteTool:
                 return error_result(
                     f"Cannot write {path}: its directory is not writable, so the file cannot be replaced safely."
                 )
+            except KeepsPrivilege:
+                return error_result(f"Cannot write {path}: {KeepsPrivilege.MESSAGE}.")
             except FileChanged:
                 return error_result(f"Cannot write {path}: it changed while it was being written; write it again.")
             except NotRegularFile as exc:
@@ -127,6 +129,13 @@ class NotReplaceable(Exception):
     """
 
 
+class KeepsPrivilege(Exception):
+    """A setuid or setgid file another user owns: rewriting it would make the kernel clear those bits, so
+    nothing was written."""
+
+    MESSAGE = "it is a setuid or setgid file another user owns, and rewriting it would clear those bits"
+
+
 @dataclass(frozen=True)
 class FileIdentity:
     """The file a read-modify-write read, so its result is published only over that same file."""
@@ -161,9 +170,9 @@ class FileIdentity:
             os.close(fd)
 
 
-def _check_publishable(path: str, target: str, expected: Optional[FileIdentity]) -> bool:
-    """Right before the rename: ``path`` still names ``target``, which is absent or a writable regular file
-    (for a read-modify-write, the one that was read). Returns whether it exists."""
+def _check_publishable(path: str, target: str, expected: Optional[FileIdentity]) -> Optional[os.stat_result]:
+    """Right before publication: ``path`` still names ``target``, which is absent or a writable regular file
+    (for a read-modify-write, the one that was read). Returns its ``stat``, ``None`` when it is absent."""
     current = os.path.realpath(path)
     if current != target:
         raise FileChanged()
@@ -172,48 +181,48 @@ def _check_publishable(path: str, target: str, expected: Optional[FileIdentity])
     except FileNotFoundError:
         if expected is not None:
             raise FileChanged() from None
-        return False
+        return None
     if not stat.S_ISREG(st.st_mode):
         raise NotRegularFile("directory" if stat.S_ISDIR(st.st_mode) else "other")
     if not may_write(current):
         raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), current)
     if expected is not None and not expected.matches(current, st):
         raise FileChanged()
-    return True
+    return st
 
 
 def write_bytes(path: str, data: bytes, expected: Optional[FileIdentity] = None) -> None:
     """Create or rewrite ``path`` only once ``data`` is completely on disk (C-7 tools.md section 3).
 
-    The content is first written to a temp file beside the real target (through symlinks), private
-    while it is written: 0600 when it replaces a file, else created with the umask default it keeps,
-    so the process umask is never read or changed; an owner-only DACL on Windows.
+    The content is first written to a temp file beside the real target (through symlinks), private while
+    it is there: 0600 when a file exists, else created with the umask default it keeps, so the process
+    umask is never read or changed; an owner-only DACL on Windows. A full disk or a quota therefore fails
+    before the file is touched.
 
-    - A new file, or one this user owns, is replaced by the temp file, so a failed write (a full disk,
-      a quota) leaves it, or its absence, as it was. The replacement takes the file's mode; on Windows
-      its DACL and explicit label, and ``ReplaceFileW`` keeps its encryption, compression, named
-      streams, and creation time (``windows_files``).
-    - A file another account owns is rewritten in place, so it stays the same file object, with its
-      owner and everything else: a replacement would be this user's. The temp file proved the space and
-      is removed first; a full disk or a crash during the rewrite itself can leave the file partly
+    - A new file is the temp file, renamed into place.
+    - On POSIX a file this user owns is replaced by the temp file, which takes its mode, so a failed
+      write leaves it as it was. A file another account owns is rewritten in place, so it keeps its owner
+      and everything else (a replacement would be this user's), unless it is setuid or setgid, which is
+      refused (``KeepsPrivilege``). Which applies is decided from the file the path names right before
+      publication.
+    - On Windows an existing file is always rewritten in place, so it stays the same file object, with its
+      owner, security, streams, and links. A crash in the middle of the rewrite can leave it partly
       written.
 
     An existing file whose directory does not let a temp file be created is refused
-    (``NotReplaceable``) rather than written in place without that proof.
+    (``NotReplaceable``) rather than written without that proof.
 
-    Right before the file is replaced or rewritten, the path must still name the same target, which
-    must be absent or a writable regular file, as ``write`` first classified it; with ``expected``, it
-    must also be the very file that was read. So a file swapped for a FIFO, a directory, or a read-only
-    file, or a path retargeted to another file, is never written behind the result's back. POSIX has no
-    compare-and-rename, so a change between that check and the write is not seen.
+    Right before publication, the path must still name the same target, which must be absent or a
+    writable regular file, as ``write`` first classified it; with ``expected``, it must also be the very
+    file that was read. So a file swapped for a FIFO, a directory, or a read-only file, or a path
+    retargeted to another file, is never written behind the result's back. POSIX has no
+    compare-and-rename, so a change between that check and the publication is not seen.
     """
     target = os.path.realpath(path)
     try:
-        st: Optional[os.stat_result] = os.stat(target)
+        mode: Optional[int] = stat.S_IMODE(os.stat(target).st_mode)
     except FileNotFoundError:
-        st = None
-    mode = stat.S_IMODE(st.st_mode) if st is not None else None
-    in_place = st is not None and not _owned(target, st)
+        mode = None
     # Short and not derived from the target's name, which may already be at NAME_MAX.
     tmp = os.path.join(os.path.dirname(target), f".avibe-{secrets.token_hex(6)}.tmp")
     try:
@@ -231,15 +240,20 @@ def write_bytes(path: str, data: bytes, expected: Optional[FileIdentity] = None)
             handle.write(data)
             handle.flush()
             os.fsync(handle.fileno())
-            if mode is not None and not _WINDOWS and not in_place:
+            if mode is not None and not _WINDOWS:
                 os.fchmod(handle.fileno(), mode)
-        exists = _check_publishable(path, target, expected)
-        if exists and in_place:
-            os.unlink(tmp)
+        current = _check_publishable(path, target, expected)
+        if current is None:
+            if _WINDOWS and mode is not None:
+                # Gone since it was read: renaming the private temp file into place would publish a file only
+                # this user can read.
+                raise FileChanged()
+            os.replace(tmp, target)
+        elif _WINDOWS or current.st_uid != os.geteuid():
+            if not _WINDOWS and current.st_mode & (stat.S_ISUID | stat.S_ISGID) and os.geteuid() != 0:
+                raise KeepsPrivilege()
+            os.unlink(tmp)  # it proved the space
             _rewrite(target, data)
-        elif exists and _WINDOWS:
-            windows_files.copy_security(target, tmp)  # private until now; the file's own from here
-            windows_files.replace_existing(tmp, target)
         else:
             os.replace(tmp, target)
     except BaseException:
@@ -248,14 +262,12 @@ def write_bytes(path: str, data: bytes, expected: Optional[FileIdentity] = None)
         raise
 
 
-def _owned(target: str, st: os.stat_result) -> bool:
-    """Whether a replacement, which gets the owner of the files this process creates, can stand in for ``target``:
-    it has that owner already (POSIX: the effective uid; Windows: the token's default owner)."""
-    return windows_files.owned_as_new_files_are(target) if _WINDOWS else st.st_uid == os.geteuid()
-
-
 def _rewrite(target: str, data: bytes) -> None:
-    """Rewrite the existing file ``target`` through its own file object: from the start, then cut to length."""
+    """Rewrite the existing file ``target`` through its own file object: from the start, then cut to length.
+
+    On Windows the open asks for writing the data alone (``GENERIC_WRITE`` includes reading the file's
+    security) and lets no other writer in while it lasts.
+    """
     if _WINDOWS:
         fd = windows_files.open_for_rewriting(target)
     else:
