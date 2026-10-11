@@ -56,14 +56,16 @@ fit: at `est = T` it uses a few hundred tokens of `M` for the checkpoint request
 A message counts its text, its thinking text, each tool call's name and JSON arguments, and 1,600 tokens per image.
 
 An opaque reasoning payload (a thinking or tool-call `signature`, redacted thinking: Anthropic's signed thinking, an
-OpenAI Responses reasoning item's `encrypted_content`, and the like) is never counted by its size. It is
+OpenAI Responses reasoning item's `encrypted_content`, and the like) is never counted like text. It is
 ciphertext, about 17 UTF-8 bytes per reasoning token on OpenAI Responses, so bytes / 4 overstated a replayed item
 about 4.3 times. A message carrying one counts, once, the larger of its signed thinking text and its reasoning: the
-`reasoning_tokens` its usage reports, else its `output_tokens`, which include them, else 0 (a response that reports
-no usage: in practice a failed partial, which is never replayed). Measured on recorded Sessions: OpenAI Responses
-bills a replayed reasoning item at about its `reasoning_tokens`; Anthropic bills replayed thinking at about its
-`reasoning_tokens` until a tool result before it is edited, and not after that, which the next response's usage
-shows. A payload sent to another origin is dropped (C-1); it still counts, until that route's first answer anchors.
+`reasoning_tokens` its usage reports, else its `output_tokens`, which include them; a response that reports no usage
+counts its payloads' UTF-8 bytes / 6, the fewest bytes per reasoning token measured (Anthropic signatures 6.3-7.2,
+OpenAI Responses items about 17), so it errs high. A failed or aborted partial's payloads count nothing: it is never
+replayed (C-1). Measured on recorded Sessions: OpenAI Responses bills a replayed reasoning item at about its
+`reasoning_tokens`; Anthropic bills replayed thinking at about its `reasoning_tokens` until a tool result before it
+is edited, and not after that, which the next response's usage shows. A payload sent to another origin is dropped
+(C-1); it still counts, until that route's first answer anchors.
 
 The **anchor** is the latest response in the context that neither failed nor was aborted, reports non-zero usage,
 and records the request it answered on its row (`ModelResponse.request.tokens`: `tokens()` of that whole request as
@@ -87,10 +89,11 @@ growth takes away what they removed by its `tokens()`; what they removed is a lo
 count, so while such a change stands the estimate is never below `tokens(this request)`. A checkpoint breaks (b), and
 so does any other change before `R`. A changed system prompt, tool set, or rehydrated state does not invalidate the
 anchor: the difference between this request's `tokens()` and `R.request.tokens` carries it, but only to add, since
-the growth is never less than the transcript's own. So a recorded size above this request's system prompt, tools,
-and rehydrated state plus `R`'s transcript (a row recorded while the estimate counted payload ciphertext) cannot take
-the estimate below `usage(R)` and what follows `R`. Anything after `R`, an edit there included, counts by its
-`tokens()`.
+the growth is never less than the transcript's own. So a recorded size larger than what the transcript's growth
+explains (a row recorded under another estimate rule, such as one that counted payload ciphertext) cannot take the
+estimate below `usage(R)` and what follows `R`. No rule version is recorded, so such a size hides growth of the
+system prompt, tools, or rehydrated state up to its excess, until the next response anchors. Anything after `R`, an
+edit there included, counts by its `tokens()`.
 
 ## 3. Before every model request
 

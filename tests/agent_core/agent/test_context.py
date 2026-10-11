@@ -147,9 +147,8 @@ def _reply(*content, reasoning=None, output=0, usage=True) -> AssistantMessage:
         (_reply(replace(READ, signature="thought-signature" * 100), reasoning=200, output=230), 4 + 200),  # Gemini
         # A Chat marker signature: the text is the reasoning, replayed in its own field; never counted twice.
         (_reply(ThinkingBlock("t" * 2_000, signature="reasoning_content"), READ, reasoning=480), 4 + 500),
-        # Without a reported reasoning count, the response's output, which includes it; without usage, nothing.
+        # Without a reported reasoning count, the response's output, which includes it.
         (_reply(ANTHROPIC_THINKING, READ, output=700), 4 + 700),
-        (_reply(ANTHROPIC_THINKING, READ, usage=False), 4),
         # Thinking with no payload replays as plain text.
         (_reply(ThinkingBlock("t" * 400), READ, reasoning=900), 4 + 100),
     ],
@@ -164,6 +163,21 @@ def test_an_opaque_reasoning_payload_counts_its_reported_reasoning_never_its_cip
         for block in reply.content
     )
     assert message_tokens(replace(reply, content=bigger)) == tokens
+
+
+def test_without_usage_a_payload_counts_its_bytes_over_six_and_a_failed_partial_none():
+    # A replayed response that reports no usage: its payloads at UTF-8 bytes / 6, the fewest bytes per reasoning token
+    # measured, so the estimate errs high (an OpenAI Responses item of 4,000 reasoning tokens counts about 11,300).
+    item = responses_item(4_000)
+    for thinking in (item, ANTHROPIC_THINKING):
+        assert message_tokens(_reply(thinking, READ, usage=False)) == 4 + math.ceil(len(thinking.signature) / 6)
+    signed_call = replace(READ, signature="thought-signature" * 100)
+    assert message_tokens(_reply(item, signed_call, usage=False)) == 4 + math.ceil((len(item.signature) + 1_700) / 6)
+    # A failed or aborted partial is never replayed: its payloads cost nothing, whether it reports usage or not.
+    for stop in ("error", "aborted"):
+        for usage in (True, False):
+            partial = replace(_reply(item, READ, reasoning=4_000, output=4_100, usage=usage), stop_reason=stop)
+            assert message_tokens(partial) == 4
 
 
 def make_request(messages=(), *, system="system", tools=(), endpoint=ENDPOINT, max_tokens=4_096) -> ModelRequest:
@@ -288,13 +302,16 @@ def test_the_anchor_survives_clearing_a_result_before_it_but_never_drops_below_t
     assert 600 + after - freed < _est(rows) == _whole(rows)
 
 
-def test_a_stored_request_size_above_what_the_request_carried_never_lowers_the_estimate():
-    # Rows written by the earlier estimate record a request with each reasoning item at its ciphertext's UTF-8 / 4,
-    # about four times its reasoning. Taken as is, the anchored usage would lose more than R and everything after it
-    # are worth; the anchor never takes away more than the transcript accounts for, so it reads like a current row.
-    item = responses_item(4_000)
+def test_a_stored_request_size_the_transcript_cannot_explain_hides_at_most_its_excess():
+    # A row recorded under another estimate rule (here the earlier one, each reasoning item at its ciphertext's UTF-8
+    # / 4, about four times its reasoning) stores a request size larger than this rule gives what that request
+    # carried, here by about 26,000. Taken as is, the anchored usage would lose more than R and everything after it
+    # are worth; the anchor never takes away more than the transcript accounts for, so the estimate stays at usage(R)
+    # and what follows R. No rule version is recorded: growth outside the transcript hides behind that excess, at
+    # most all of it, until the next response anchors (known by design, section 2).
+    item = responses_item(8_000)
     call = ToolCallBlock("s", "read", {"path": "a"})
-    reported = Usage(input_tokens=1_000, output_tokens=4_010, reasoning_tokens=4_000)
+    reported = Usage(input_tokens=1_000, output_tokens=8_010, reasoning_tokens=8_000)
     earlier_reply = AssistantMessage((item, call), ORIGIN, "tool_use", usage=reported)
 
     def rows_storing(stored):
@@ -305,18 +322,27 @@ def test_a_stored_request_size_above_what_the_request_carried_never_lowers_the_e
         read = ToolCallBlock("r", "read", {"path": "f"})
         current = request_facts(make_request(context_view(rows.rows).messages))["tokens"]
         tokens = stored(current)
-        anchored = AssistantMessage((read,), ORIGIN, "tool_use", usage=_usage(9_000))
+        anchored = AssistantMessage((read,), ORIGIN, "tool_use", usage=_usage(12_000))
         rows.add("response", anchored, payload={"request": {"tokens": tokens}})
         result = rows.result(read, "y" * 4_000)
         rows.response(value="z" * 40)
         return rows, current, tokens, message_tokens(result.message) + 10
 
+    def grown(rows, tokens):
+        """This request with a system prompt ``tokens`` larger."""
+        return make_request(context_view(rows.rows).messages, system="system" + "s" * (4 * tokens))
+
+    # A row this rule recorded: the stored size carries the system prompt's growth.
     rows, current, _, after = rows_storing(lambda current: current)
-    assert _est(rows) == 9_000 + after
+    assert _est(rows) == 12_000 + after
+    assert _est(rows, grown(rows, 20_000)) == 12_000 + after + 20_000
     ciphertext = math.ceil((len(item.signature.encode()) + len('read{"path":"a"}')) / 4)
-    rows, current, earlier, after = rows_storing(lambda current: current - (4 + 4_000) + ciphertext)
-    assert earlier - current > 9_000 + after  # usage + tokens(this) - R.request.tokens - tokens(R) would be negative
-    assert _est(rows) == 9_000 + after
+    rows, current, earlier, after = rows_storing(lambda current: current - (4 + 8_000) + ciphertext)
+    excess = earlier - current
+    assert excess > 12_000 + after  # usage + tokens(this) - R.request.tokens - tokens(R) would be negative
+    assert _est(rows) == 12_000 + after > _whole(rows)
+    assert _est(rows, grown(rows, 20_000)) == 12_000 + after  # under the excess: hidden
+    assert _est(rows, grown(rows, 40_000)) == 12_000 + after + 40_000 - excess  # over it: all but the excess
 
 
 def test_a_checkpoint_or_another_route_invalidates_the_anchor():

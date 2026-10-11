@@ -55,6 +55,10 @@ THRESHOLD_RATIO = 0.9
 KEEP_MAX = 20_000
 KEEP_RATIO = 0.25
 IMAGE_TOKENS = 1_600
+#: A replayed response that reports no usage counts its opaque reasoning payloads at their UTF-8 bytes / this (section
+#: 2): the fewest bytes per reasoning token measured, Anthropic signatures 6.3-7.2 and OpenAI Responses items about 17,
+#: so it errs high, up to about 2.9 times on the latter.
+PAYLOAD_BYTES_PER_TOKEN = 6
 #: Each artifact list a checkpoint row keeps this many paths, most recently touched first, and marks whether earlier
 #: ones were pushed out; what the model reads shows a 4,000th of the route's window of them, between
 #: ``ARTIFACTS_SHOWN_MIN`` and this (section 7).
@@ -233,7 +237,7 @@ def message_tokens(message: Message) -> int:
     size = 0
     images = 0
     signed = 0  # thinking text that rides with a payload: the reported reasoning covers it
-    opaque = False
+    payload: Optional[int] = None  # UTF-8 bytes of its opaque payloads, None without any
     for block in message.content:
         if isinstance(block, TextBlock):
             size += _utf8(block.text) if block.text is not None else block.ref.bytes
@@ -244,22 +248,25 @@ def message_tokens(message: Message) -> int:
                 size += _utf8(block.text)
             else:
                 signed += _utf8(block.text)
-                opaque = True
+                payload = (payload or 0) + _utf8(block.signature)
         elif isinstance(block, ToolCallBlock):
             arguments = json.dumps(block.arguments, ensure_ascii=False, separators=(",", ":"))
             size += _utf8(block.name) + _utf8(arguments)
-            opaque = opaque or block.signature is not None
-    reasoning = max(math.ceil(signed / 4), _reasoning(message)) if opaque else 0
+            if block.signature is not None:
+                payload = (payload or 0) + _utf8(block.signature)
+    reasoning = 0 if payload is None else max(math.ceil(signed / 4), _reasoning(message, payload))
     return math.ceil(size / 4) + images * IMAGE_TOKENS + reasoning
 
 
-def _reasoning(message: Message) -> int:
-    """What a message's opaque reasoning payloads cost when replayed, never their size (section 2): the reasoning
-    tokens its usage reports, else its output tokens, which include them, else 0 when it reports no usage (in
-    practice a failed partial, which is never replayed)."""
-    usage = message.usage if isinstance(message, AssistantMessage) else None
-    if usage is None:
+def _reasoning(message: Message, payload: int) -> int:
+    """What a message's opaque reasoning payloads of ``payload`` bytes cost when replayed (section 2): the reasoning
+    tokens its usage reports, else its output tokens, which include them; without usage, the bytes over
+    ``PAYLOAD_BYTES_PER_TOKEN``. A failed or aborted partial's payloads cost nothing: it is never replayed."""
+    if not isinstance(message, AssistantMessage) or message.stop_reason in ("error", "aborted"):
         return 0
+    usage = message.usage
+    if usage is None:
+        return math.ceil(payload / PAYLOAD_BYTES_PER_TOKEN)
     return usage.output_tokens if usage.reasoning_tokens is None else usage.reasoning_tokens
 
 

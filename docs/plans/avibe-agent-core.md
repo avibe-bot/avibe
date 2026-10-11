@@ -192,7 +192,7 @@ and `bash` results with `context_edit` rows, on by default; and a checkpoint wri
   estimate's difference between this request and that one, while that request went to the same route and the
   transcript up to the response is unchanged but for tool-result content (then never below the request's own
   estimate); otherwise the estimate of the whole request: UTF-8 bytes / 4, 1,600 per image, and an opaque reasoning
-  payload at its response's reported reasoning, never its size. Compact when `est >= T`.
+  payload at its response's reported reasoning, never as text. Compact when `est >= T`.
 - **Cut** before a user message or before an assistant message whose tool batch follows it, keeping
   `min(20K, 0.25 T)` verbatim; a cut inside the in-flight Turn keeps its inputs (the first and each steer) as they
   were, images included. A tool batch that cannot fit even with the conversation moved out is cut to fit, each
