@@ -1500,6 +1500,19 @@ def test_engine_installer_selects_verified_packaged_asset(
     assert archive.bin_path == bin_path
 
 
+def test_x64_python_on_windows_on_arm_still_installs_the_native_arm64_engine() -> None:
+    """Avibe runs on x64 Python there until its wheels exist; the engine needs no Python."""
+    on_arm = runtime_installer_module._engine_platform_map(True)
+    elsewhere = runtime_installer_module._engine_platform_map(False)
+
+    assert on_arm["win32-x64"] == "windows-arm64"
+    assert elsewhere["win32-x64"] == "windows-amd64"
+    assert on_arm["win32-arm64"] == elsewhere["win32-arm64"] == "windows-arm64"
+    assert {tag: asset for tag, asset in on_arm.items() if tag != "win32-x64"} == {
+        tag: asset for tag, asset in elsewhere.items() if tag != "win32-x64"
+    }
+
+
 def test_engine_platform_identity_is_normalized_locally() -> None:
     assert dict(runtime_installer_module._ENGINE_SPEC.platform_aliases) == runtime_installer_module._ENGINE_PLATFORM_MAP
     assert EngineRuntimeManager._normalize_engine_platform("linux-x64") == "linux-amd64"

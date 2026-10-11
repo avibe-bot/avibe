@@ -23,20 +23,34 @@ from core.managed_runtime import (
     env_flag_enabled,
 )
 from core.process_isolation import isolated_subprocess_kwargs
+from core.windows_arch import windows_native_arm64
 from storage.lock import MigrationFileLock
 from vibe.model_hub_runtime.environment import engine_subprocess_environment
 
 
 _ENGINE_VERSION_RE = re.compile(r"CLIProxyAPI Version:\s*([\w.-]+)")
+
+
+def _engine_platform_map(windows_on_arm: bool) -> dict[str, str]:
+    """Python's platform tag -> the engine asset this host runs.
+
+    x64 Python runs emulated on Windows on Arm (core/windows_arch.py), but the
+    engine is a native program, so there it is still the arm64 build. The base
+    manager reads this as its platform aliases, so every install, status and
+    pointer check agrees on that choice.
+    """
+    return {
+        "darwin-arm64": "darwin-arm64",
+        "darwin-x64": "darwin-x64",
+        "linux-x64": "linux-amd64",
+        "linux-arm64": "linux-arm64",
+        "win32-x64": "windows-arm64" if windows_on_arm else "windows-amd64",
+        "win32-arm64": "windows-arm64",
+    }
+
+
 # A manifest override must not silently expand the engine's supported host set.
-_ENGINE_PLATFORM_MAP = {
-    "darwin-arm64": "darwin-arm64",
-    "darwin-x64": "darwin-x64",
-    "linux-x64": "linux-amd64",
-    "linux-arm64": "linux-arm64",
-    "win32-x64": "windows-amd64",
-    "win32-arm64": "windows-arm64",
-}
+_ENGINE_PLATFORM_MAP = _engine_platform_map(windows_native_arm64())
 _ENGINE_ASSET_PLATFORMS = frozenset(_ENGINE_PLATFORM_MAP.values())
 _INSTALL_STATE_SCHEMA_VERSION = 3
 _INSTALL_STATE_RELEASED_SCHEMA_VERSIONS = frozenset({1, 2})
