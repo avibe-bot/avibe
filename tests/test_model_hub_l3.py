@@ -6,6 +6,7 @@ import copy
 import inspect
 import json
 import re
+import socket
 import tempfile
 import threading
 from collections import deque
@@ -2318,6 +2319,32 @@ def test_gateway_models_endpoint_serves_authenticated_backend_catalog(
                 assert payload["has_more"] is False
                 assert payload["first_id"] == expected[0]
                 assert payload["last_id"] == expected[-1]
+        finally:
+            await gateway.close()
+
+    asyncio.run(exercise())
+
+
+def test_gateway_port_cannot_be_bound_by_another_socket(tmp_path: Path) -> None:
+    """Windows SO_REUSEADDR would let any local socket share the gateway's port and its traffic."""
+
+    async def exercise() -> None:
+        service = _service(tmp_path, sources=[_source("src_primary01", "Primary")])
+        gateway = ModelHubTurnGateway(service)
+        base_url, _token = await gateway.endpoint(
+            "codex",
+            process_scope="/repo",
+            turn_id="turn_exclusive_port",
+            requested_model_id="shared-model",
+            resolved_model_id="shared-model",
+            source_id="src_primary01",
+        )
+        port = int(base_url.rsplit(":", 1)[1].split("/", 1)[0])
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as intruder:
+                intruder.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                with pytest.raises(OSError):
+                    intruder.bind(("127.0.0.1", port))
         finally:
             await gateway.close()
 

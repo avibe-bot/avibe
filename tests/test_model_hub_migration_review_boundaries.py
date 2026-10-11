@@ -276,6 +276,20 @@ def test_mode_replay_rejects_replaced_content_without_chmod(home, monkeypatch, r
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
 
+def test_native_file_bytes_survive_takeover_byte_for_byte(tmp_path):
+    """CRLF and 0x1A are native bytes too: a Windows text-mode read dropped one and stopped at the other."""
+    path = tmp_path / "settings.json"
+    before = b'{"model": "native"}\r\n\x1a{"keep": true}\r\n'
+    path.write_bytes(before)
+    edit = NativeFileEdit.plan(path, b'{"model": "hub"}\r\n')
+    edit.check()
+    edit.apply()
+    edit.check(applied=True)
+    assert path.read_bytes() == b'{"model": "hub"}\r\n'
+    edit.apply(reverse=True)
+    assert path.read_bytes() == before
+
+
 @pytest.mark.parametrize("operation", ["check", "apply"])
 def test_selected_shell_mode_change_invalidates_planned_edit(home, operation):
     path = home / ".bashrc"

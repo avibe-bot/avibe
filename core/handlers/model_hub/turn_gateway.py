@@ -610,7 +610,14 @@ class ModelHubTurnGateway:
             )
             await runner.setup()
             listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            # On Windows SO_REUSEADDR lets another socket, even another user's,
+            # bind this port and take the gateway's traffic; claim it exclusively
+            # there, as control IPC does.
+            exclusive = getattr(socket, "SO_EXCLUSIVEADDRUSE", None)
+            if exclusive is not None:
+                listener.setsockopt(socket.SOL_SOCKET, exclusive, 1)
+            else:
+                listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             listener.bind(("127.0.0.1", 0))
             listener.listen(128)
             listener.setblocking(False)
