@@ -613,8 +613,10 @@ connector request (`remote-access-connector-requested` in the runtime
 directory) and `stop()` withdraws it before stopping the process. The monitor
 restarts a requested connector that is no longer running:
 
-- only while remote access is enabled with a tunnel token, and never while a
-  candidate, draining connector, or tail rollback owns the connector lane;
+- only while remote access is enabled with a tunnel token, and never while
+  recovery owns the connector lane: the restart checks
+  `_connector_lane_reserved_locked()` under the recovery lock before it takes
+  the connector lock, the same order settings and recovery use;
 - one backoff delay after the exit is first seen, starting at one sample
   interval and doubling after each attempt up to two minutes; and
 - the delay resets once a connector reports a ready connection.

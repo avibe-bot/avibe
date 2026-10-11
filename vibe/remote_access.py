@@ -3573,7 +3573,8 @@ def _exited_connector_requested(config: V2Config | None) -> bool:
 
     ``stop()`` withdraws the request, so a connector the user stopped stays
     down. A candidate, draining connector, or tail rollback means route
-    recovery owns the connector lane.
+    recovery owns the connector lane. Reads only connector state, so callers
+    may hold ``_CONNECTOR_LOCK``.
     """
 
     if config is None or config.remote_access.provider != "vibe_cloud":
@@ -3587,7 +3588,6 @@ def _exited_connector_requested(config: V2Config | None) -> bool:
         and _state_connector("draining") is None
         and _pending_tail_rollback() is None
         and _read_pid_file(_candidate_pid_path()) is None
-        and _recovery_payload().get("state") not in {"evaluating", "draining"}
     )
 
 
@@ -3607,6 +3607,11 @@ def _restart_exited_connector(
     if not _exited_connector_requested(config):
         schedule.due_at = None
         return
+    with _RECOVERY_LOCK:
+        recovery_owns_lane = _connector_lane_reserved_locked()
+    if recovery_owns_lane:
+        schedule.due_at = None
+        return
     if schedule.due_at is None:
         schedule.due_at = now + schedule.delay_seconds
         return
@@ -3614,6 +3619,8 @@ def _restart_exited_connector(
         return
     schedule.due_at = None
     schedule.delay_seconds = min(2 * schedule.delay_seconds, CONNECTOR_RESTART_MAX_DELAY_SECONDS)
+    # Recovery takes ``_RECOVERY_LOCK`` before ``_CONNECTOR_LOCK``; the restart
+    # never takes them in the other order.
     with _CONNECTOR_LOCK:
         if not _exited_connector_requested(config):
             return
@@ -3668,7 +3675,7 @@ def _quality_monitor_loop(interval_seconds: float, quality_path: Path) -> None:
                 loaded = V2Config.load()
             except Exception:
                 loaded = None
-            if sample is not None and sample.ha_connections > 0:
+            if sample is not None and sample.ready:
                 restart_schedule = _ConnectorRestartSchedule()
             _restart_exited_connector(loaded, restart_schedule, started_at)
             configured_protocol = _configured_protocol(loaded) if loaded is not None else "auto"

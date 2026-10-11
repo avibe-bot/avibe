@@ -1617,3 +1617,44 @@ def test_ra_tq_034_withdrawn_connector_request_is_not_restarted(monkeypatch, tmp
         assert not remote_access._is_cloudflared_pid(remote_access._read_pid())
     finally:
         remote_access.stop()
+
+
+def test_ra_tq_034_restart_takes_recovery_lock_before_connector_lock(monkeypatch, tmp_path) -> None:
+    config, network_up = _setup_exiting_connector(monkeypatch, tmp_path)
+    schedule = remote_access._ConnectorRestartSchedule()
+    recovery_holds_its_lock = threading.Event()
+    connector_lock_acquired = []
+
+    def reserve_recovery() -> None:
+        # The order route recovery and settings use: _RECOVERY_LOCK, then _CONNECTOR_LOCK.
+        with remote_access._RECOVERY_LOCK:
+            recovery_holds_its_lock.set()
+            acquired = remote_access._CONNECTOR_LOCK.acquire(timeout=5)
+            connector_lock_acquired.append(acquired)
+            if acquired:
+                remote_access._CONNECTOR_LOCK.release()
+
+    recovery = threading.Thread(target=reserve_recovery)
+    real_read_pid = remote_access._read_pid
+
+    def read_pid_while_recovery_reserves():
+        # Recovery reserves the lane right after the restart takes the connector lock.
+        if remote_access._CONNECTOR_LOCK._is_owned() and not recovery_holds_its_lock.is_set():
+            recovery.start()
+            recovery_holds_its_lock.wait(5)
+        return real_read_pid()
+
+    try:
+        remote_access.start()
+        _wait_connector_exit()
+        network_up.touch()
+        remote_access._restart_exited_connector(config, schedule, 1000.0)
+        monkeypatch.setattr(remote_access, "_read_pid", read_pid_while_recovery_reserves)
+
+        remote_access._restart_exited_connector(config, schedule, 1000.0 + schedule.delay_seconds)
+        recovery.join(10)
+
+        assert connector_lock_acquired == [True]
+    finally:
+        monkeypatch.setattr(remote_access, "_read_pid", real_read_pid)
+        remote_access.stop()
