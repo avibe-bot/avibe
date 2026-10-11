@@ -60,10 +60,14 @@ function renderDoc(content = DOC, references?: MentionReference[]) {
   return container;
 }
 
-const PARAGRAPH = 'Intro with **bold text** and a [link](https://example.com/a) here.';
-const LIST = '- first item\n- second `code` item';
+const BOLD = 'Before **bold words** after';
+const CJK = '前面 **加粗文字** 后面';
 const CODE = '```ts\nconst a = 1;\nconst b = 2;\n```';
-const TABLE = '| key | val |\n|---|---|\n| x | yes |';
+const LIST = '- first item\n- second `code` item';
+const QUOTE = '> q1\n> q2\n>\n> p2\n\nafter';
+const TABLE = '| key | val |\n|---|---|\n| x | yes |\n| z | **w** |';
+const REFERENCE = '见[文档][docs]和[接口][api]。\n\n[docs]: https://example.com/docs\n[api]: https://example.com/api';
+const NOTE = 'A claim[^1] here.\n\n[^1]: First part.\n\n    Second part.\n\nNext.';
 
 describe('selectedMarkdown', () => {
   it.each([
@@ -79,69 +83,100 @@ describe('selectedMarkdown', () => {
     expect(selectedMarkdown(range, container)).toBe(content);
   });
 
-  it('copies the whole bubble once a selection touches every block of it', () => {
+  it('copies a whole bubble byte for byte once a selection reaches all it shows', () => {
     const content = 'Only **one** paragraph.\n';
     const container = renderDoc(content);
-    expect(selectedMarkdown(rangeOver(container, ['one', 'before'], ['one', 'after']), container)).toBe(content);
+    expect(selectedMarkdown(rangeOver(container, ['Only', 'before'], ['paragraph.', 'after']), container))
+      .toBe(content);
   });
 
-  // Each block a selection touches is copied whole, however little of it is selected.
-  it.each<[string, Edge, Edge, string]>([
-    ['a few words of a paragraph', ['bold', 'before'], ['and', 'after'], PARAGRAPH],
-    ['two characters of a link', ['in', 'before'], ['in', 'after'], PARAGRAPH],
-    ['a heading', ['Plan', 'before'], ['Plan', 'after'], '## Plan **now**'],
-    ['one list item', ['second', 'before'], ['second', 'after'], LIST],
-    ['a line of a code block', ['const b', 'before'], ['const b', 'after'], CODE],
-    ['one table cell', ['yes', 'before'], ['yes', 'after'], TABLE],
-    ['a paragraph and the list after it', ['here', 'before'], ['first', 'after'], `${PARAGRAPH}\n\n${LIST}`],
-    ['a code block and the table after it', ['const a', 'before'], ['key', 'after'], `${CODE}\n\n${TABLE}`],
-  ])('copies the blocks under %s', (_case, start, end, expected) => {
-    const container = renderDoc();
+  // A construct the selection covers keeps its Markdown; one it cuts through
+  // drops its own syntax and copies what is selected inside it. Nothing that
+  // was not selected is copied.
+  it.each<[string, string, Edge, Edge, string]>([
+    ['a whole emphasis', BOLD, ['bold words', 'before'], ['bold words', 'after'], '**bold words**'],
+    ['the inside of an emphasis', BOLD, ['old wor', 'before'], ['old wor', 'after'], 'old wor'],
+    ['text starting inside an emphasis', BOLD, ['words', 'before'], ['after', 'after'], 'words after'],
+    ['text ending after a whole emphasis', BOLD, ['Before', 'before'], ['words', 'after'], 'Before **bold words**'],
+    ['a whole CJK emphasis', CJK, ['加粗文字', 'before'], ['加粗文字', 'after'], '**加粗文字**'],
+    ['the inside of a CJK emphasis', CJK, ['粗文', 'before'], ['粗文', 'after'], '粗文'],
+    ['CJK text starting inside an emphasis', CJK, ['文字', 'before'], ['后面', 'after'], '文字 后面'],
+    ['an emphasis whole inside a cut one', '**bold *it* text** end', ['it', 'before'], ['text', 'after'], '*it* text'],
+    ['a cut emphasis around a whole one', '**bold *it* text** end', ['old', 'before'], ['it', 'after'], 'old *it*'],
+    ['a whole inline link', 'See [link](https://example.com/a) here.', ['See', 'before'], ['link', 'after'], 'See [link](https://example.com/a)'],
+    ['part of a link label', 'See [link](https://example.com/a) here.', ['in', 'before'], ['in', 'after'], 'in'],
+    ['a whole code span', 'Run `npm test` now.', ['npm test', 'before'], ['npm test', 'after'], '`npm test`'],
+    ['part of a code span', 'Run `npm test` now.', ['test', 'before'], ['now', 'after'], 'test now'],
+    // Text in a cut construct copies as it reads; a covered one keeps what was written.
+    ['escapes and entities in cut text', 'Keep \\*this\\* &amp; **that** too.', ['*this', 'before'], ['that', 'after'], '*this* & **that**'],
+    ['escapes and entities in a whole paragraph', 'Keep \\*this\\* &amp; that.\n\nNext.', ['Keep', 'before'], ['that.', 'after'], 'Keep \\*this\\* &amp; that.'],
+    // Every selected character copies, whitespace included; code whitespace is content.
+    ['the spaces selected around an emphasis', BOLD, [' ', 'before'], [' ', 'after', 2], ' **bold words** '],
+    ['a code line without its indentation', 'Intro\n\n```\n  a\n```\n\nNext', ['a', 'before'], ['a', 'after'], 'a'],
+    ['the only code block without its indentation', '```\n  a\n```', ['a', 'before'], ['a', 'after'], 'a'],
+    ['the only code block with its indentation', '```\n  a\n```', ['  a', 'before'], ['  a', 'after'], '```\n  a\n```'],
+    ['an indented code block line', '    x = 1\n      y', ['  y', 'before'], ['  y', 'after'], '  y'],
+    // A hard break the selection holds keeps the source that makes it one.
+    ['a hard break', 'Prefix one  \ntwo end', ['one', 'before'], ['two', 'after'], 'one  \ntwo'],
+    ['a backslash hard break', 'Prefix one\\\ntwo end', ['one', 'before'], ['two', 'after'], 'one\\\ntwo'],
+    ['a hard break between emphases', 'Prefix **one**  \n*two* end', ['one', 'before'], ['two', 'after'], '**one**  \n*two*'],
+    ['the line before a hard break', 'Prefix one  \ntwo end', ['one', 'before'], ['one', 'after'], 'one'],
+    ['the line after a hard break', 'Prefix one  \ntwo end', ['two', 'before'], ['end', 'after'], 'two end'],
+    ['emoji and the whitespace between them', 'Grow 🌱  **green** 🌳 tall', ['🌱', 'before'], ['🌳', 'after'], '🌱  **green** 🌳'],
+    ['a soft line break', 'line one\nline **two** here', ['one', 'before'], ['two', 'after'], 'one\nline **two**'],
+    ['part of a heading', '## Plan **now**\n\nBody.', ['Plan', 'before'], ['Plan', 'after'], 'Plan'],
+    ['a whole heading and part of the paragraph after it', '## Plan **now**\n\nBody.', ['Plan', 'before'], ['Bo', 'after'], '## Plan **now**\n\nBo'],
+    ['a line of a code block', CODE, ['const b', 'before'], ['const b', 'after'], 'const b'],
+    ['the end of a code block and the paragraph after it', `${CODE}\n\nafter`, ['const b', 'before'], ['after', 'after'], 'const b = 2;\n\nafter'],
+    ['a whole code block and the paragraph after it', `${CODE}\n\nafter`, ['const a', 'before'], ['after', 'after'], `${CODE}\n\nafter`],
+    ['the end of one list item and the start of the next', LIST, ['item', 'before'], ['second', 'after'], 'item\nsecond'],
+    ['a whole list item and part of the next', LIST, ['first', 'before'], ['second', 'after'], '- first item\nsecond'],
+    ['the items of a nested list', '- top\n  - inner one\n  - inner two\n- next', ['inner one', 'before'], ['inner two', 'after'], '- inner one\n- inner two'],
+    ['a code block in a list item', '- step:\n  ```sh\n  npm i\n  ```\n- next', ['npm', 'before'], ['next', 'after'], 'npm i\n- next'],
+    // A source over several lines of a quote carries the quote's `>` on each.
+    ['a multi-line paragraph of a quote', QUOTE, ['q1', 'before'], ['q2', 'after'], 'q1\nq2'],
+    ['two paragraphs of a quote', QUOTE, ['q2', 'before'], ['p2', 'after'], 'q2\n\np2'],
+    ['a whole quote', QUOTE, ['q1', 'before'], ['p2', 'after'], '> q1\n> q2\n>\n> p2'],
+    ['cells across table rows', TABLE, ['val', 'before'], ['w', 'after'], 'val\nx\tyes\nz\t**w**'],
+    ['a whole table and the paragraph after it', `Intro.\n\n${TABLE}\n\nend`, ['key', 'before'], ['end', 'after'], `${TABLE}\n\nend`],
+    // A covered reference link brings its definition, which renders nowhere.
+    ['a whole reference link', REFERENCE, ['文档', 'before'], ['文档', 'after'], '[文档][docs]\n\n[docs]: https://example.com/docs'],
+    ['two reference links', REFERENCE, ['文档', 'before'], ['接口', 'after'], '[文档][docs]和[接口][api]\n\n[docs]: https://example.com/docs\n[api]: https://example.com/api'],
+    ['part of a reference link label', REFERENCE, ['文', 'before'], ['文', 'after'], '文'],
+    // A footnote body is visible text of its own, so a reference never brings it.
+    ['a footnote reference', NOTE, ['claim', 'before'], ['here', 'after'], 'claim[^1] here'],
+    ['part of a footnote body', NOTE, ['First', 'before'], ['part', 'after'], 'First part'],
+    ['a paragraph and the footnotes rendered after it', NOTE, ['Next', 'before'], ['First', 'after'], 'Next.\n\nFirst'],
+  ])('copies only %s', (_case, content, start, end, expected) => {
+    const container = renderDoc(content);
     expect(selectedMarkdown(rangeOver(container, start, end), container)).toBe(expected);
   });
 
-  it('brings along the definition of a reference in the copy', () => {
-    const container = renderDoc();
-    expect(selectedMarkdown(rangeOver(container, ['重点', 'before'], ['内容', 'after']), container))
-      .toBe('这是**重点**内容。见[文档][docs]。\n\n[docs]: https://example.com/docs');
+  it('copies a line break of a bubble that renders every newline as one', () => {
+    const { container } = render(<Markdown content={'one\ntwo **three**\nfour'} softBreaks />);
+    expect(selectedMarkdown(rangeOver(container, ['two', 'before'], ['four', 'after']), container))
+      .toBe('two **three**\nfour');
   });
 
-  it('brings along definitions an appended definition needs', () => {
-    const container = renderDoc('A claim[^1] here.\n\nNext.\n\n[^1]: See [docs][ref].\n\n[ref]: https://example.com/docs');
-    expect(selectedMarkdown(rangeOver(container, ['claim', 'before'], ['here', 'after']), container))
-      .toBe('A claim[^1] here.\n\n[^1]: See [docs][ref].\n\n[ref]: https://example.com/docs');
-  });
-
-  it('copies a footnote definition selected in the rendered footnotes once', () => {
-    // A two-paragraph footnote is one block, wherever it is written.
-    const content = 'A claim[^1] here.\n\n[^1]: First part.\n\n    Second part.\n\nNext.';
-    const container = renderDoc(content);
-    expect(selectedMarkdown(rangeOver(container, ['Next', 'before'], ['First', 'after']), container))
-      .toBe('[^1]: First part.\n\n    Second part.\n\nNext.');
-  });
-
-  it('leaves out a block written between two copied ones but not selected', () => {
-    // The footnote is written mid-document but rendered after "Third".
-    const container = renderDoc('First.\n\n[^1]: Note.\n\nSecond[^1].\n\nThird.');
-    expect(selectedMarkdown(rangeOver(container, ['Third', 'before'], ['Note', 'after']), container))
-      .toBe('[^1]: Note.\n\nThird.');
-  });
-
-  it('copies a mention chip as the marker that was typed', () => {
+  // A whole chip copies as the marker that was typed; part of one is part of its label.
+  it.each<[string, Edge, Edge, string]>([
+    ['a whole chip', ['#Release plan', 'before'], ['#Release plan', 'after'], '#<ses_1a2b>'],
+    ['text and a whole chip', ['or', 'before'], ['plan', 'after'], 'or see #<ses_1a2b>'],
+    ['part of a chip', ['lease', 'before'], ['pla', 'after'], 'lease pla'],
+  ])('copies %s', (_case, start, end, expected) => {
     const content = 'ask @<claude> or see #<ses_1a2b>\n\nNext.';
     const container = renderDoc(content, [
       { kind: 'agent', name: 'claude' },
       { kind: 'session', session_id: 'ses_1a2b', title: 'Release plan' },
     ]);
-    expect(selectedMarkdown(rangeOver(container, ['lease', 'before'], ['pla', 'after']), container))
-      .toBe('ask @<claude> or see #<ses_1a2b>');
+    expect(selectedMarkdown(rangeOver(container, start, end), container)).toBe(expected);
   });
 
   // An endpoint resting on an element's edge or in whitespace touches nothing there.
   it.each<[string, string, Edge, (container: Element) => [Node, number], string]>([
-    ['the next paragraph', 'Intro with **bold** here.\n\nNext para.', ['here', 'before'], (c) => [c.querySelectorAll('p')[1], 0], 'Intro with **bold** here.'],
-    ['the next list item', '- alpha\n- beta\n\nAfter.', ['alpha', 'before'], (c) => [c.querySelectorAll('li')[1], 0], '- alpha\n- beta'],
-    ['the paragraph after a code block', '```\nabc\n```\n\nafter\n\nend', ['bc', 'before'], (c) => [c.querySelectorAll('p')[0], 0], '```\nabc\n```'],
+    ['the next paragraph', 'Intro with **bold** here.\n\nNext para.', ['here', 'before'], (c) => [c.querySelectorAll('p')[1], 0], 'here.'],
+    ['the next list item', '- alpha\n- beta\n\nAfter.', ['alpha', 'before'], (c) => [c.querySelectorAll('li')[1], 0], '- alpha'],
+    ['the paragraph after a code block', '```\nabc\n```\n\nafter\n\nend', ['bc', 'before'], (c) => [c.querySelectorAll('p')[0], 0], 'bc'],
   ])('ends a selection before %s', (_case, content, start, end, expected) => {
     const container = renderDoc(content);
     const range = document.createRange();
@@ -151,7 +186,16 @@ describe('selectedMarkdown', () => {
     expect(selectedMarkdown(range, container)).toBe(expected);
   });
 
-  // An image or a rule shows content without text, and selecting it touches its block.
+  it('starts a selection after the end of the paragraph before it', () => {
+    const container = renderDoc('First **one**.\n\nSecond para.');
+    const range = document.createRange();
+    range.setStart(...pointAt(container, ['.', 'after']));
+    range.setEnd(...pointAt(container, ['Second', 'after']));
+
+    expect(selectedMarkdown(range, container)).toBe('Second');
+  });
+
+  // An image or a rule shows content without text, and selecting it selects all of it.
   it.each<[string, string, Edge, (container: Element) => [Node, number], string]>([
     ['an image block', 'Here:\n\n![chart](/api/media/abc123)\n\nNext para.', ['Here', 'before'], (c) => [c.querySelectorAll('p')[2], 0], 'Here:\n\n![chart](/api/media/abc123)'],
     ['a rule', 'Above\n\n---\n\nBelow', ['Above', 'before'], (c) => [c.querySelectorAll('p')[1], 0], 'Above\n\n---'],
@@ -164,7 +208,10 @@ describe('selectedMarkdown', () => {
     expect(selectedMarkdown(range, container)).toBe(expected);
   });
 
-  it('copies each bubble a selection crosses, separated by a blank line', () => {
+  it.each<[string, Edge, string]>([
+    ['part of each bubble', ['bubble', 'before'], '**bubble** text\n\n- second'],
+    ['one bubble byte for byte and part of the next', ['Intro', 'before'], 'Intro.\n\nfirst **bubble** text\n\n- second'],
+  ])('copies %s a selection crosses, separated by a blank line', (_case, start, expected) => {
     const { container } = render(
       <>
         <Markdown content={'Intro.\n\nfirst **bubble** text'} />
@@ -172,9 +219,9 @@ describe('selectedMarkdown', () => {
         <Markdown content={'- second\n- bubble\n\nOutro.'} />
       </>,
     );
-    const range = rangeOver(container, ['bubble', 'before'], ['second', 'after']);
+    const range = rangeOver(container, start, ['second', 'after']);
 
-    expect(selectedMarkdown(range, container)).toBe('first **bubble** text\n\n- second\n- bubble');
+    expect(selectedMarkdown(range, container)).toBe(expected);
   });
 
   it('reports no Markdown for a selection outside every bubble', () => {

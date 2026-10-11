@@ -1,31 +1,39 @@
 import type { TextEdit } from '@/lib/citations';
 
-// Selection → the Markdown that was written.
+// Selection → the Markdown that was written, bounded by the selection.
 //
 // The transcript shows rendered Markdown, but a reader copying from it wants
-// the source the bubble was rendered from: `**b**`, not `b`. Copying works in
-// whole blocks, because a whole block is self-contained Markdown and a cut
-// through one is not (half a list item, half a table, half a link):
+// the source the bubble was rendered from: `**b**`, not `b`. A copy never
+// reaches past what was selected; where the two conflict, the selection wins
+// and formatting is what gets dropped. For `Before **bold words** after`:
 //
-// - A selection that touches every block of a bubble copies the bubble's
-//   source byte for byte. Select all does exactly that.
-// - Otherwise it copies the source of each top-level block it touches — a
-//   paragraph, heading, list, quote, code block, table, rule or footnote — whole.
-//   A selection inside one paragraph copies that paragraph.
-// - A reference-style link or footnote in the copy brings its definition along
-//   when the definition is not in the copy itself.
+// - `bold words` covers the emphasis and copies `**bold words**`.
+// - `old wor` cuts through it and copies `old wor`; `words after` copies
+//   `words after`. A cut construct drops its own syntax and copies what is
+//   selected inside it, where whatever it holds whole keeps its own Markdown.
+// - A selection of everything in a bubble copies the bubble's source byte for
+//   byte. Select all does exactly that.
+//
+// Text in a cut construct copies as it reads, whitespace included, so an
+// escape or an entity there copies as the character it shows. Whitespace is
+// content (code indentation especially): a construct is covered only when the
+// selection holds all of it. A hard break the selection holds keeps its source.
+// A construct whose source would carry its container's syntax onto later lines
+// (a quote's `>`, an item's indent) copies as a cut one unless that container
+// is selected whole too. A complete reference link brings along its
+// definition, which renders nowhere; a footnote's body is visible text and is
+// never brought along.
 //
 // The renderer marks every element with the source range it came from
 // (`data-md-start` / `data-md-end`, UTF-16 offsets into the text ReactMarkdown
-// parsed), marks each reference with its definition's range, and binds each
-// rendered root to that text.
+// parsed), marks each reference link with its definition's range, and binds
+// each rendered root to that text.
 
 const START = 'data-md-start';
 const END = 'data-md-end';
 const DEF_START = 'data-md-def-start';
 const DEF_END = 'data-md-def-end';
 const ROOT = 'data-md-root';
-const MARKED = `[${START}]`;
 
 // What shows content without text.
 const TEXTLESS = new Set(['IMG', 'HR']);
@@ -79,29 +87,21 @@ function eachNode<T extends { children?: T[] }>(node: T, visit: (node: T) => voi
   node.children?.forEach((child) => eachNode(child, visit));
 }
 
-/** Point each reference at the definition it needs, which renders nowhere near it. */
+/** Point each reference link at its definition, which renders nowhere. */
 export function remarkDefinitionSpans() {
   return (tree: unknown) => {
-    const kind = (type?: string) => {
-      if (type === 'definition' || type === 'linkReference' || type === 'imageReference') return 'link';
-      if (type === 'footnoteDefinition' || type === 'footnoteReference') return 'note';
-      return null;
-    };
     const definitions = new Map<string, [number, number]>();
     eachNode(tree as MdastNode, (node) => {
       const start = node.position?.start?.offset;
       const end = node.position?.end?.offset;
-      if (node.type !== 'definition' && node.type !== 'footnoteDefinition') return;
+      if (node.type !== 'definition') return;
       if (typeof node.identifier !== 'string' || typeof start !== 'number' || typeof end !== 'number') return;
       // The first definition of an identifier is the one a reference resolves to.
-      const key = `${kind(node.type)}:${node.identifier}`;
-      if (!definitions.has(key)) definitions.set(key, [start, end]);
+      if (!definitions.has(node.identifier)) definitions.set(node.identifier, [start, end]);
     });
     eachNode(tree as MdastNode, (node) => {
-      if (node.type === 'definition' || node.type === 'footnoteDefinition') return;
-      const type = kind(node.type);
-      if (!type || typeof node.identifier !== 'string') return;
-      const span = definitions.get(`${type}:${node.identifier}`);
+      if (node.type !== 'linkReference' && node.type !== 'imageReference') return;
+      const span = typeof node.identifier === 'string' ? definitions.get(node.identifier) : undefined;
       if (!span) return;
       const properties = ((node.data ??= {}).hProperties ??= {});
       properties.dataMdDefStart = span[0];
@@ -138,6 +138,68 @@ export function sourceSpanProps(node: unknown): Record<string, number> {
 const spanStart = (el: Element) => Number(el.getAttribute(START));
 const spanEnd = (el: Element) => Number(el.getAttribute(END));
 
+// Elements laid out as blocks. A copy separates the parts of two blocks itself;
+// the blank text the renderer puts between them is only its line layout.
+const BLOCKS = new Set([
+  'P', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'UL', 'OL', 'LI', 'BLOCKQUOTE', 'PRE', 'DIV', 'HR',
+  'TABLE', 'THEAD', 'TBODY', 'TR', 'TH', 'TD', 'SECTION',
+]);
+// A table's parts are not Markdown without the table: a cell's range starts at its pipe.
+const TABLE_PARTS = new Set(['THEAD', 'TBODY', 'TR', 'TH', 'TD']);
+const CELLS = new Set(['TH', 'TD']);
+// Containers that repeat their syntax on every line they hold: a quote's `>`, an item's indent.
+const LINE_PREFIXED = new Set(['BLOCKQUOTE', 'LI']);
+
+const isBlock = (node: Node | null) => node?.nodeType === Node.ELEMENT_NODE && BLOCKS.has((node as Element).tagName);
+const isMarkedBreak = (node: Node | null) => node?.nodeType === Node.ELEMENT_NODE
+  && (node as Element).tagName === 'BR' && (node as Element).hasAttribute(START);
+
+// How much of a text node is content. Every character is, whitespace included,
+// except what the renderer adds for layout: blank text between blocks, the
+// newline after a hard break (whose own source holds it), and the newline that
+// ends a code block.
+function contentLength(text: Text): number {
+  if (text.data.trim() === '' && isBlock(text.parentNode)
+    && (!text.previousSibling || isBlock(text.previousSibling))
+    && (!text.nextSibling || isBlock(text.nextSibling))) return 0;
+  if (text.data === '\n' && isMarkedBreak(text.previousSibling)) return 0;
+  const code = text.parentElement;
+  const endsBlockCode = code?.tagName === 'CODE' && code.parentElement?.tagName === 'PRE'
+    && !text.nextSibling && text.data.endsWith('\n');
+  return text.data.length - (endsBlockCode ? 1 : 0);
+}
+
+type Point = [Node, number];
+const before = (node: Node): Point => [node.parentNode!, Array.prototype.indexOf.call(node.parentNode!.childNodes, node)];
+const after = (node: Node): Point => [node.parentNode!, before(node)[1] + 1];
+
+// Where what `el` shows begins and ends: its first and last character of
+// content, image or rule. A hard break shows a line break, and is all of itself.
+function contentBounds(el: Element): [Point, Point] | null {
+  if (isTextless(el) || isMarkedBreak(el)) return [before(el), after(el)];
+  let first: Point | null = null;
+  let last: Point | null = null;
+  const walker = el.ownerDocument.createTreeWalker(el, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT);
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    if (node.nodeType === Node.TEXT_NODE) {
+      const length = contentLength(node as Text);
+      if (!length) continue;
+      first ??= [node, 0];
+      last = [node, length];
+    } else if (isTextless(node)) {
+      first ??= before(node);
+      last = after(node);
+    }
+  }
+  return first && last ? [first, last] : null;
+}
+
+// Whether `range` selects everything `el` shows.
+function covers(range: Range, el: Element): boolean {
+  const bounds = contentBounds(el);
+  return !!bounds && bounds.every(([node, offset]) => range.comparePoint(node, offset) === 0);
+}
+
 // The selection narrowed to what it selects: characters, images and rules. An
 // endpoint resting on an element's edge, between blocks, or in whitespace at
 // either end touches nothing there — a triple-click ends at the start of the
@@ -168,23 +230,15 @@ function selectedContent(range: Range): Range | null {
     const head = selected(first as Text);
     narrowed.setStart(first, head.from + head.text.search(/\S/));
   } else {
-    narrowed.setStart(first, 0);
+    narrowed.setStartBefore(first);
   }
   if (last.nodeType === Node.TEXT_NODE) {
     const tail = selected(last as Text);
     narrowed.setEnd(last, tail.from + tail.text.search(/\s*$/));
   } else {
-    narrowed.setEnd(last, 0);
+    narrowed.setEndAfter(last);
   }
   return narrowed;
-}
-
-// A root's top-level blocks: its outermost marked elements. Footnote
-// definitions render inside an unmarked section, and are blocks of their own.
-function blocksOf(root: Element): Element[] {
-  return Array.from(root.querySelectorAll(MARKED)).filter(
-    (el) => el.parentElement?.closest(MARKED) === root,
-  );
 }
 
 // An offset in the parsed text, carried back through the rewrite passes into
@@ -212,45 +266,75 @@ function toContent(source: MarkdownSource, offset: number, side: 'start' | 'end'
 
 function copyFromRoot(range: Range, root: Element): string {
   const source = sources.get(root)!;
-  const blocks = blocksOf(root);
-  const touched = new Set(blocks.filter((block) => range.intersectsNode(block)));
-  if (!touched.size) return '';
-  if (touched.size === blocks.length) return source.content;
+  if (covers(range, root)) return source.content;
+  const slice = (start: number, end: number) =>
+    source.content.slice(toContent(source, start, 'start'), toContent(source, end, 'end'));
 
-  // Touched blocks next to each other in the source are copied as one stretch,
-  // with what was written between them; a block left out splits the stretch.
-  const ordered = [...blocks].sort((left, right) => spanStart(left) - spanStart(right));
-  const stretches: Array<[number, number]> = [];
-  let open = false;
-  for (const block of ordered) {
-    if (!touched.has(block)) {
-      open = false;
-    } else if (open) {
-      stretches[stretches.length - 1][1] = spanEnd(block);
-    } else {
-      stretches.push([spanStart(block), spanEnd(block)]);
-      open = true;
+  // What goes between the parts of two blocks: a tab between cells of a row, a
+  // line break between rows, otherwise the line break or blank line written
+  // between the blocks.
+  const separator = (from: Element, to: Element) => {
+    if (CELLS.has(from.tagName) && CELLS.has(to.tagName)) return from.parentElement === to.parentElement ? '\t' : '\n';
+    if (from.contains(to) || to.contains(from)) return '\n';
+    const between = spanEnd(from) <= spanStart(to) ? source.text.slice(spanEnd(from), spanStart(to)) : '';
+    return between.split('\n').length === 2 ? '\n' : '\n\n';
+  };
+
+  let copied = '';
+  let block: Element | null = null;
+  const kept: Element[] = [];
+  const write = (text: string, within: Element) => {
+    if (!text) return;
+    if (block && block !== within) copied = copied.replace(/\n+$/, '') + separator(block, within);
+    copied += text;
+    block = within;
+  };
+  // A construct the selection covers copies its source; one it cuts through
+  // copies what it selects inside. `within` is the block around `node`, and
+  // `prefixed` says a container around it repeats its syntax on every line, so
+  // a source that runs over several lines would carry that syntax along.
+  const visit = (node: Node, within: Element, prefixed: boolean) => {
+    if (!range.intersectsNode(node)) return;
+    if (node.nodeType === Node.TEXT_NODE) {
+      const text = node as Text;
+      // Text no construct holds is the renderer's own, like a footnote section's label.
+      if (within === root) return;
+      const from = text === range.startContainer ? range.startOffset : 0;
+      const to = text === range.endContainer ? range.endOffset : text.data.length;
+      write(text.data.slice(from, Math.min(to, contentLength(text))), within);
+      return;
+    }
+    if (node.nodeType !== Node.ELEMENT_NODE) return;
+    const el = node as Element;
+    const marked = el.hasAttribute(START);
+    const own = marked && BLOCKS.has(el.tagName) ? el : within;
+    if (marked && !TABLE_PARTS.has(el.tagName) && covers(range, el)) {
+      const markdown = slice(spanStart(el), spanEnd(el));
+      if (!prefixed || !markdown.includes('\n')) {
+        write(markdown, own);
+        kept.push(el);
+        return;
+      }
+    }
+    const inner = prefixed || (marked && LINE_PREFIXED.has(el.tagName));
+    el.childNodes.forEach((child) => visit(child, own, inner));
+  };
+  root.childNodes.forEach((child) => visit(child, root, false));
+
+  // A kept reference link brings along its definition, unless that was kept too.
+  const holds = (start: number, end: number) => kept.some((el) => start >= spanStart(el) && end <= spanEnd(el));
+  const definitions = new Map<number, number>();
+  for (const el of kept) {
+    for (const reference of [el, ...Array.from(el.querySelectorAll(`[${DEF_START}]`))]) {
+      if (!reference.hasAttribute(DEF_START)) continue;
+      const start = Number(reference.getAttribute(DEF_START));
+      const end = Number(reference.getAttribute(DEF_END));
+      if (!holds(start, end)) definitions.set(start, end);
     }
   }
-
-  // A definition brought along can itself hold references (a footnote citing a
-  // reference link), so collect until nothing copied needs anything more.
-  const copied = [...stretches];
-  const holds = (start: number, end: number) => copied.some(([left, right]) => start >= left && end <= right);
-  const references = Array.from(root.querySelectorAll(`[${DEF_START}]`)).filter((el) => el.hasAttribute(START));
-  for (let grew = true; grew;) {
-    grew = false;
-    for (const el of references) {
-      const definition: [number, number] = [Number(el.getAttribute(DEF_START)), Number(el.getAttribute(DEF_END))];
-      if (!holds(spanStart(el), spanEnd(el)) || holds(...definition)) continue;
-      copied.push(definition);
-      grew = true;
-    }
-  }
-  const definitions = copied.slice(stretches.length).sort(([left], [right]) => left - right);
-  return [...stretches, ...definitions]
-    .map(([start, end]) => source.content.slice(toContent(source, start, 'start'), toContent(source, end, 'end')))
-    .join('\n\n');
+  if (!definitions.size) return copied;
+  const appended = [...definitions].sort(([left], [right]) => left - right).map(([start, end]) => slice(start, end));
+  return `${copied}\n\n${appended.join('\n')}`;
 }
 
 // The rendered Markdown roots `range` reaches inside `container`, in document order.
@@ -267,9 +351,11 @@ function markdownRoots(range: Range, container: Element): Element[] {
  * timestamps) is not Markdown and is left out.
  */
 export function selectedMarkdown(range: Range, container: Element): string | null {
+  // The narrowed selection decides which bubbles are reached at all; within
+  // them, every character the selection holds is copied, whitespace included.
   const selected = selectedContent(range);
   if (!selected) return null;
-  const parts = markdownRoots(selected, container).map((root) => copyFromRoot(selected, root));
+  const parts = markdownRoots(selected, container).map((root) => copyFromRoot(range, root));
   return parts.filter((part) => part.trim() !== '').join('\n\n') || null;
 }
 
