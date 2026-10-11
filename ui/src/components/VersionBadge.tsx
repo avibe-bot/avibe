@@ -132,7 +132,7 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
         }
       }
     } catch (e) {
-      setUpgradeResult({ ok: false, message: String(e), output: null, restarting: false });
+      setUpgradeResult({ ok: false, message: String(e), output: null, activation_notice: null, restarting: false });
     } finally {
       setUpgrading(false);
     }
@@ -299,16 +299,21 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
               {upgradeResult && (
                 <div
                   className={clsx(
-                    'flex items-center gap-2 rounded-md border px-3 py-2 text-sm',
+                    'flex items-start gap-2 rounded-md border px-3 py-2 text-sm',
                     upgradeResult.ok
                       ? 'border-mint/25 bg-mint/10 text-mint-ink'
                       : 'border-destructive/30 bg-destructive/10 text-destructive-ink'
                   )}
                 >
                   {upgradeResult.ok ? <Check size={16} className="shrink-0" /> : <AlertCircle size={16} className="shrink-0" />}
-                  <span>
+                  <div className="min-w-0 space-y-1">
                     {upgradeResult.ok ? t('dashboard.upgradeSuccess') : t('dashboard.upgradeFailed')}
-                  </span>
+                    {upgradeResult.ok && upgradeResult.activation_notice && (
+                      <div className="whitespace-pre-wrap break-words text-xs">
+                        {upgradeResult.activation_notice}
+                      </div>
+                    )}
+                  </div>
                 </div>
               )}
 

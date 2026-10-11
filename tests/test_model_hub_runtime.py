@@ -73,6 +73,9 @@ from vibe.model_hub_runtime.supervisor import (
     EngineUnavailableError,
 )
 
+# Starts real mock engines: none may outlive its test (tests/process_reaper.py).
+pytestmark = pytest.mark.reap_processes
+
 
 MODEL_HUB_FIXTURES = Path(__file__).parent / "fixtures" / "model_hub"
 STREAM_TRANSPORT_BOUNDARIES = json.loads(

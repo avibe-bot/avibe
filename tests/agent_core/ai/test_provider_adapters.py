@@ -5211,3 +5211,65 @@ async def test_responses_summary_done_replaces_streaming_separator_after_late_de
             '{"type":"reasoning","id":"rs_1","encrypted_content":"enc","summary":[{"type":"summary_text","text":"p1"},{"type":"summary_text","text":"p2"}]}',
         ),
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("protocol", "path", "body"),
+    [
+        (
+            "anthropic",
+            "/v1/messages",
+            'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}\n\n'
+            'data: {"type":"message_stop"}\n\n',
+        ),
+        (
+            "openai_chat",
+            "/v1/chat/completions",
+            'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
+        ),
+        (
+            "openai_responses",
+            "/v1/responses",
+            'data: {"type":"response.completed","response":{"status":"completed"}}\n\n',
+        ),
+    ],
+)
+async def test_gateway_adapters_reach_loopback_past_configured_proxies(
+    monkeypatch: pytest.MonkeyPatch, protocol: str, path: str, body: str,
+) -> None:
+    """The gateway is loopback: a proxy from the environment never carries its requests."""
+    import socket
+
+    from aiohttp import web
+
+    with socket.socket() as unused:
+        unused.bind(("127.0.0.1", 0))
+        dead_proxy = f"http://127.0.0.1:{unused.getsockname()[1]}"
+    for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+        monkeypatch.setenv(name, dead_proxy)
+    for name in ("NO_PROXY", "no_proxy"):
+        monkeypatch.delenv(name, raising=False)
+
+    seen: list[str] = []
+
+    async def gateway(request: web.Request) -> web.Response:
+        seen.append(request.path)
+        return web.Response(text=body, headers={"Content-Type": "text/event-stream"})
+
+    app = web.Application()
+    app.router.add_post(path, gateway)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    port = site._server.sockets[0].getsockname()[1]
+    adapter = adapter_class(protocol)(gateway=True)
+    try:
+        events = await _events(adapter, _request(protocol, base_url=f"http://127.0.0.1:{port}/v1"))
+    finally:
+        await adapter.aclose()
+        await runner.cleanup()
+
+    assert seen == [path]
+    assert isinstance(events[-1], Done)

@@ -23,6 +23,9 @@ import core.agent_core.tools.jobs as jobs_module
 from core.agent_core.tools.jobs import JobStartError, LocalJobHost
 from tests.agent_core.tools.conftest import instance
 
+# Starts real job wrappers: none may outlive its test (tests/process_reaper.py).
+pytestmark = pytest.mark.reap_processes
+
 
 class Crash(Exception):
     pass

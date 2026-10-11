@@ -472,3 +472,48 @@ def test_before_send_rate_state_is_thread_safe(monkeypatch):
 
     assert all(results)
     assert len(sentry_integration._EVENT_RATE_STATE) <= 8
+
+
+def test_sentry_events_carry_no_frame_locals(monkeypatch, tmp_path):
+    """An error event keeps its traceback but never the values its frames held.
+
+    Frame locals carry what ``scrub_data`` cannot see into, such as a Vibey tool
+    context's whole environment rendered as one repr string.
+    """
+    import json
+    import logging
+    import uuid
+
+    import sentry_sdk
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    monkeypatch.setenv("VIBE_SENTRY_DSN", "http://public@127.0.0.1:9/1")
+    events = []
+
+    def capture(event, hint):
+        events.append(event)
+        return None  # dropped before any transport
+
+    monkeypatch.setattr(sentry_integration, "before_send", capture)
+    # Built at runtime: the event's source-context lines must not be what carries it.
+    secret = f"sk-{uuid.uuid4().hex}"
+
+    def tool_execute(arguments, env):
+        raise RuntimeError("database is locked")
+
+    try:
+        assert sentry_integration.init_sentry(_config(), component="service") is True
+        try:
+            tool_execute({"path": "/etc/hosts"}, {"OPENAI_API_KEY": secret})
+        except RuntimeError:
+            logging.getLogger("tests.sentry_frame_locals").exception("Tool execution failed")
+        sentry_sdk.flush(timeout=2)
+    finally:
+        sentry_sdk.get_client().close(timeout=0)
+        sentry_sdk.get_global_scope().set_client(None)
+
+    (event,) = events
+    frames = event["exception"]["values"][0]["stacktrace"]["frames"]
+    assert [frame["function"] for frame in frames][-1] == "tool_execute"
+    assert all("vars" not in frame for frame in frames)
+    assert secret not in json.dumps(event, default=str)

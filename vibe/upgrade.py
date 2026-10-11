@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import errno
 import json
 import logging
 import os
@@ -14,7 +15,7 @@ import time
 import urllib.parse
 import urllib.request
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import cast
@@ -188,13 +189,36 @@ def _pip_dry_run_is_unsupported(result: subprocess.CompletedProcess[str]) -> boo
     )
 
 
-@dataclass(frozen=True)
+@dataclass
 class AtomicActivation:
-    """A validated candidate and the stable launcher it will replace."""
+    """A validated candidate and the stable launcher it will replace.
+
+    ``committed`` becomes true immediately after the stable launcher is
+    replaced. Callers use it to distinguish post-commit cleanup or reporting
+    failures from pre-commit activation failures.
+    """
 
     launcher: Path
     candidate_launcher: Path
     source_generation: Path | None = None
+    committed: bool = field(default=False, init=False, repr=False, compare=False)
+
+
+@dataclass(frozen=True)
+class LauncherActivationFailure:
+    """A managed peer launcher that remained on its previous generation."""
+
+    launcher: Path
+    reason: str
+    reason_code: str = "move_failed"
+
+
+@dataclass(frozen=True)
+class ActivationOutcome:
+    """The committed activation and any managed peers left behind."""
+
+    activated_launcher: Path
+    peer_failures: tuple[LauncherActivationFailure, ...] = ()
 
 
 def atomic_uv_install_root() -> Path:
@@ -390,7 +414,16 @@ def defer_upgrade_activation(
         with contextlib.suppress(OSError):
             process.terminate()
         raise
+    activation.committed = True
+    setattr(process, "activation_log_path", log_path)
     return process
+
+
+def get_deferred_activation_log_path(process: object) -> Path | None:
+    """Return the existing log path used by a detached activation helper."""
+
+    path = getattr(process, "activation_log_path", None)
+    return path if isinstance(path, Path) else None
 
 
 def get_cli_launcher_path(launcher: runtime_mod.ServiceLauncher) -> Path | None:
@@ -852,16 +885,27 @@ def _prepare_launcher_replacement(replacement: Path, target: Path) -> None:
         shutil.copy2(target, replacement)
 
 
-def activate_upgrade_candidate(activation: AtomicActivation) -> None:
+def _activation_failure_reason_code(exc: BaseException) -> str:
+    """Classify a peer move failure without discarding its concrete cause."""
+
+    if isinstance(exc, PermissionError) or getattr(exc, "errno", None) in {
+        errno.EACCES,
+        errno.EPERM,
+    } or getattr(exc, "winerror", None) == 5:
+        return "permission_denied"
+    return "move_failed"
+
+
+def activate_upgrade_candidate(activation: AtomicActivation) -> ActivationOutcome:
     """Atomically switch the stable launcher to a validated candidate."""
 
     # Runtime callers already own this lock; the lock is re-entrant so direct
     # activation and installer callers share the same collection boundary too.
     with atomic_upgrade_lock():
-        _activate_upgrade_candidate_locked(activation)
+        return _activate_upgrade_candidate_locked(activation)
 
 
-def _activate_upgrade_candidate_locked(activation: AtomicActivation) -> None:
+def _activate_upgrade_candidate_locked(activation: AtomicActivation) -> ActivationOutcome:
     from vibe.install_generations import (
         collect_install_generations,
         finish_install_generation,
@@ -883,6 +927,7 @@ def _activate_upgrade_candidate_locked(activation: AtomicActivation) -> None:
     try:
         _prepare_launcher_replacement(replacement, activation.candidate_launcher)
         os.replace(replacement, launcher)
+        activation.committed = True
     except Exception:
         with contextlib.suppress(OSError):
             replacement.unlink()
@@ -892,17 +937,31 @@ def _activate_upgrade_candidate_locked(activation: AtomicActivation) -> None:
     # `vibe doctor`; it must not undo the committed activation. A peer that
     # now follows the primary, such as an alias of it, keeps its shape.
     activated = _generation_for_path(activation.candidate_launcher, root)
+    peer_failures: list[LauncherActivationFailure] = []
     for peer, selected in peers:
+        if selected == activated:
+            continue
         try:
-            if selected != activated:
-                move_managed_launcher_locked(peer, selected, activation.candidate_launcher)
-        except Exception:
+            if not move_managed_launcher_locked(peer, selected, activation.candidate_launcher):
+                if _launcher_generation(peer, root) == activated:
+                    continue
+                reason = "the launcher changed after discovery"
+                peer_failures.append(
+                    LauncherActivationFailure(peer, reason, "launcher_changed_after_discovery")
+                )
+                logger.warning("Could not move stable launcher %s: %s", peer, reason)
+        except Exception as exc:
+            reason = str(exc).strip() or type(exc).__name__
+            peer_failures.append(
+                LauncherActivationFailure(peer, reason, _activation_failure_reason_code(exc))
+            )
             logger.warning("Could not move stable launcher %s to the activated generation", peer, exc_info=True)
     finish_install_generation(activation.candidate_launcher)
     collect_install_generations(launcher)
+    return ActivationOutcome(launcher.absolute(), tuple(peer_failures))
 
 
-def activate_installer_candidate(activation: AtomicActivation) -> None:
+def activate_installer_candidate(activation: AtomicActivation) -> ActivationOutcome:
     """Activate an installer candidate through the shared lifecycle owner."""
 
     with atomic_upgrade_lock():
@@ -911,7 +970,63 @@ def activate_installer_candidate(activation: AtomicActivation) -> None:
             raise RuntimeError("an Avibe restart is still in progress")
         if reason == "superseded":
             raise RuntimeError("the active Avibe generation changed while the installer was staging")
-        activate_upgrade_candidate(activation)
+        return activate_upgrade_candidate(activation)
+
+
+def activation_repair_command(launcher: str | os.PathLike[str]) -> str:
+    """Return a shell-safe repair command rooted at the activated launcher."""
+
+    full_path = os.path.abspath(os.path.expanduser(str(launcher)))
+    command = [full_path, "doctor", "repair", "stable-launchers"]
+    if os.name == "nt":
+        powershell_path = full_path.replace("'", "''")
+        return f"& '{powershell_path}' doctor repair stable-launchers"
+    return shlex.join(command)
+
+
+def format_activation_failures(outcome: ActivationOutcome, language: str = "en") -> str | None:
+    """Render managed peer failures for a user-facing upgrade result."""
+
+    if not outcome.peer_failures:
+        return None
+    from vibe.i18n import t
+
+    repair_command = activation_repair_command(outcome.activated_launcher)
+    repair_instruction_key = (
+        "update.stableLauncherRepairPowerShellInstruction"
+        if os.name == "nt"
+        else "update.stableLauncherRepairInstruction"
+    )
+    repair_instruction = t(repair_instruction_key, language, repairCommand=repair_command)
+    messages = []
+    for failure in outcome.peer_failures:
+        if failure.reason_code == "permission_denied":
+            key = "update.stableLauncherActivationPermissionDenied"
+        elif failure.reason_code == "launcher_changed_after_discovery":
+            key = "update.stableLauncherActivationChanged"
+        else:
+            key = "update.stableLauncherActivationFailed"
+        messages.append(
+            t(
+                key,
+                language,
+                launcher=str(failure.launcher),
+                reason=failure.reason,
+                repairCommand=repair_command,
+                repairInstruction=repair_instruction,
+            )
+        )
+    return "\n\n".join(messages)
+
+
+def format_deferred_activation_log(log_path: Path | None, language: str = "en") -> str | None:
+    """Explain where a deferred activation helper records its result."""
+
+    if log_path is None:
+        return None
+    from vibe.i18n import t
+
+    return t("update.deferredActivationLog", language, logPath=str(log_path))
 
 
 def activate_launcher_target(launcher: str | os.PathLike[str], target: str | os.PathLike[str]) -> None:
