@@ -13,6 +13,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import secrets
+import shutil
 import subprocess
 import sys
 import time
@@ -403,6 +405,82 @@ async def test_a_program_holding_tail_log_open_only_delays_its_refresh(tmp_path,
     assert host.stop_reason(job_id) is None
     data, _ = host.output(job_id, os.path.getsize(host.output_path(job_id)))
     assert data.endswith(b"2999\n3000\n")
+
+
+def _hold(path, sharing):
+    """``path`` open for reading in another program's way: sharing reading and writing (Python's ``open``,
+    ``Get-Content -Wait``) or reading alone, and never delete."""
+    if sharing == "reading and writing":
+        return open(path, "rb")
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p] + [
+        wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE
+    ]
+    kernel32.CreateFileW.restype = wintypes.HANDLE
+    handle = kernel32.CreateFileW(path, 0x80000000, 0x1, None, 3, 0, None)  # GENERIC_READ, FILE_SHARE_READ
+    assert handle not in (None, ctypes.c_void_p(-1).value), ctypes.get_last_error()
+    return os.fdopen(msvcrt.open_osfhandle(handle, os.O_RDONLY), "rb")
+
+
+@pytest.mark.parametrize("sharing", ["reading and writing", "reading alone"])
+async def test_a_program_holding_tail_log_when_the_command_exits_leaves_its_exit_as_it_is(
+    tmp_path, monkeypatch, sharing
+):
+    """The last tail cannot be renamed into place then: it is written into the file itself, which such a program
+    shares for writing, and one that shares neither keeps the tail before it while it holds the file. The exit is
+    the command's either way."""
+    monkeypatch.setattr(jobs_module, "OUTPUT_HEAD_BYTES", 10)
+    host = _host(tmp_path)
+    release = tmp_path / "release"
+    job_id = await _start(
+        host,
+        tmp_path,
+        "import os, sys, time\n"
+        "sys.stdout.buffer.write(b'x' * 100 + b'\\nfirst\\n'); sys.stdout.flush()\n"
+        f"while not os.path.exists(r'{release}'): time.sleep(0.01)\n"
+        "sys.stdout.buffer.write(b'last\\n'); sys.stdout.flush()\n"
+        "sys.exit(3)\n",
+    )
+    assert _wait_until(lambda: host.output(job_id, 10)[0].endswith(b"first\n"))
+    held = _hold(os.path.join(host.job_dir(job_id), "tail.log"), sharing)
+    try:
+        release.write_text("")
+        status = await host.wait(job_id, deadline_s=15)
+        data, _ = host.output(job_id, 10)
+    finally:
+        held.close()
+
+    assert status == jobs_module.JobStatus("exited", 3)
+    assert host.stop_reason(job_id) is None
+    assert data.endswith(b"first\nlast\n" if sharing == "reading and writing" else b"first\n")
+
+
+@pytest.mark.skipif(not os.environ.get("AVIBE_TEST_FAT_DIR"), reason="needs a FAT volume (AVIBE_TEST_FAT_DIR)")
+async def test_jobs_run_with_their_files_on_a_volume_without_hard_links(tmp_path):
+    """FAT has no hard links: a decision and a stop reason are each created once by a rename instead."""
+    jobs_dir = Path(os.environ["AVIBE_TEST_FAT_DIR"]) / f"jobs-{secrets.token_hex(4)}"
+    host = LocalJobHost(str(jobs_dir), shell=sys.executable)
+    try:
+        done = await _start(host, tmp_path, "import sys; sys.stdout.buffer.write(b'ran\\n')")
+        assert await host.wait(done, deadline_s=15) == jobs_module.JobStatus("exited", 0)
+        assert host.output(done)[0] == b"ran\n"
+        running = await _start(host, tmp_path, "import time; time.sleep(60)", tool_call_id="toolu_2")
+        await host.kill(running)
+        assert host.stop_reason(running) == "killed"
+        assert (await host.wait(running, deadline_s=15)).state == "gone"
+    finally:
+        for entry in jobs_dir.iterdir():
+            job = windows_job.open_job(f"avibe-job-{entry.name}")
+            if job is not None:
+                try:
+                    windows_job.terminate_job(job)
+                finally:
+                    windows_job.close_handle(job)
+        shutil.rmtree(jobs_dir, ignore_errors=True)
 
 
 async def test_a_process_the_command_leaves_running_keeps_the_job_until_it_ends_or_is_killed(tmp_path):

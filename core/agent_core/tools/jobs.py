@@ -14,7 +14,8 @@ wrapper writes ``pid`` and waits for ``decision``; the host records the process
 identity in ``meta.json`` (J2), then decides ``go``; the wrapper runs the
 command only on ``go``, and decides ``abandon`` itself if no decision comes in
 time. A decision is created exclusively, through ``link(2)`` of a written
-temporary file, so exactly one side decides and nobody reads it half-written.
+temporary file (on Windows a rename, which never replaces there), so exactly
+one side decides and nobody reads it half-written.
 Recovery decides ``abandon`` for a job that has none; a missing or late
 ``pid`` proves nothing.
 
@@ -278,14 +279,15 @@ class LocalJobHost:
     def _create_once(self, job_id: str, name: str, value: str) -> str:
         """Create ``name`` holding ``value`` unless it exists; return what it holds, ours or the earlier writer's.
 
-        ``link(2)`` of a written temporary file: exclusive, and never visible half-written.
+        ``link(2)`` of a written temporary file: exclusive, and never visible half-written. On Windows a rename,
+        which never replaces there, and works on volumes without hard links (FAT).
         """
         target = self._path(job_id, name)
         tmp = f"{target}.{value}.{secrets.token_hex(4)}.tmp"
         with open(tmp, "w", encoding="utf-8") as handle:
             handle.write(f"{value}\n")
         try:
-            os.link(tmp, target)
+            (os.rename if os.name == "nt" else os.link)(tmp, target)
         except FileExistsError:
             return _read_text(target) or value
         finally:

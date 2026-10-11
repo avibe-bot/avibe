@@ -14,7 +14,8 @@ makes its replacement fail.
 
 1. Write ``pid`` (temporary file, rename).
 2. Wait for ``decision``, at most ``decision_timeout_s``; on timeout, decide
-   ``abandon`` itself through the same exclusive ``link(2)`` the host uses.
+   ``abandon`` itself through the same exclusive ``link(2)`` the host uses (on
+   Windows a rename, which never replaces there).
 3. Only on ``go``: run ``<shell> -c <command>`` with stdin closed and stdout and
    stderr into one pipe.
 4. Keep the output bounded on disk: the first ``head_cap`` bytes are appended
@@ -95,16 +96,20 @@ def _write_atomic(path: str, data: bytes) -> None:
 
 
 def _create_once(path: str, value: str) -> None:
-    """Create ``path`` holding ``value`` unless it exists: ``link(2)`` of a written temp file, as the host does."""
+    """Create ``path`` holding ``value`` unless it exists: ``link(2)`` of a written temp file, as the host does.
+
+    On Windows a rename, which never replaces there, and works on volumes without hard links (FAT).
+    """
     tmp = f"{path}.{value}.{os.getpid()}.tmp"
     with open(tmp, "w") as handle:
         handle.write(f"{value}\n")
     try:
-        os.link(tmp, path)
+        (os.rename if _WINDOWS else os.link)(tmp, path)
     except FileExistsError:
         pass
     finally:
-        os.unlink(tmp)
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(tmp)
 
 
 def _wait_for_decision(job_dir: str, timeout_s: float) -> str:
@@ -117,8 +122,11 @@ def _wait_for_decision(job_dir: str, timeout_s: float) -> str:
             break
         time.sleep(delay)
         delay = min(delay * 2, 0.05)
-    with open(decision) as handle:
-        return handle.read(64).strip()
+    # With delete sharing, as Avibe reads every job file: on Windows the host creates ``decision`` by a rename,
+    # whose handle asks for delete until it closes, and a plain ``open`` meanwhile is a sharing violation.
+    fd = _files.open_for_reading(decision) if _WINDOWS else os.open(decision, os.O_RDONLY)
+    with os.fdopen(fd, "rb") as handle:
+        return handle.read(64).decode("ascii", "replace").strip()
 
 
 class _BoundedLog:
@@ -153,17 +161,41 @@ class _BoundedLog:
         if not self._dirty or (not force and now - self._last_snapshot < _SNAPSHOT_INTERVAL_S):
             return
         kept = bytes(self._tail[-self._tail_cap :])
+        data = b"[output from byte %d]\n" % (self._total - len(kept)) + kept
         try:
-            _write_atomic(self._tail_path, b"[output from byte %d]\n" % (self._total - len(kept)) + kept)
+            _write_atomic(self._tail_path, data)
         except PermissionError:
-            # Windows: another program holds tail.log open without sharing delete (an editor, a scanner). The
-            # tail is still here, so a periodic snapshot leaves it to the next one; the last one must land.
-            if force or not _WINDOWS:
+            # Windows: another program holds tail.log open without sharing delete (an editor, ``Get-Content
+            # -Wait``). The tail is still here, so a periodic snapshot leaves it to the next one. The last one
+            # cannot wait: it goes into the file itself, which such a program shares for writing; one that shares
+            # neither keeps the previous tail while it holds the file, and the command's exit still stands.
+            if not _WINDOWS:
                 raise
-            self._last_snapshot = now
-            return
+            if not (force and _rewrite_in_place(self._tail_path, data)):
+                self._last_snapshot = now
+                return
         self._dirty = False
         self._last_snapshot = now
+
+
+def _rewrite_in_place(path: str, data: bytes) -> bool:
+    """Windows: write ``data`` over the existing file ``path`` itself; whether its readers' sharing allowed it.
+
+    Not atomic: a reader in the middle of it may see part of each, so it stands in only for the last
+    snapshot, which cannot wait for the next.
+    """
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_BINARY)
+    except PermissionError:
+        return False
+    try:
+        view = memoryview(data)
+        while view:
+            view = view[os.write(fd, view) :]
+        os.ftruncate(fd, len(data))
+    finally:
+        os.close(fd)
+    return True
 
 
 def _stop_group(job_dir: str, reason: str, proc: Optional[subprocess.Popen]) -> None:
