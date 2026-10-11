@@ -260,9 +260,14 @@ job and ended when the wrapper's handle to it closes. Every process the command 
 `kill` terminates the job object; a kill of the wrapper alone (`TerminateProcess`, which nothing can catch) also ends
 the tree but records no reason, so T2 settles that call as interrupted rather than `killed`. A process the command
 leaves running keeps the wrapper, and so the job, alive until it ends or is killed; on POSIX it runs on in the process
-group. Job files are replaced with POSIX rename semantics and Avibe reads them with delete sharing, so no reader of
+group. On both, the deadline is the command's (J3): once the shell has exited, it reaches no such process. Job files are replaced with POSIX rename semantics and Avibe reads them with delete sharing, so no reader of
 Avibe's makes the wrapper's replacement of `tail.log` fail; while another program holds it open without that sharing,
-the wrapper keeps the tail and writes it at a later snapshot.
+the wrapper keeps the tail and writes it at a later snapshot. The last snapshot, taken when the command exits, cannot
+wait: it is written into `tail.log` itself, which such a program shares for writing (Python's `open`,
+`Get-Content -Wait`); one that shares neither leaves the previous tail there while it holds the file. The command's
+exit stands either way.
+A decision or a stop reason is created once by a rename, which never replaces on Windows, rather than by a hard link,
+so job files work on a volume without hard links (FAT, exFAT).
 
 ## 8. Environment section
 
