@@ -353,7 +353,9 @@ jobs:
               git tag -l '*v*' --sort=v:refname | tail -n 50 >&2
               exit 1
             fi
-            PREV=$(git describe --tags --abbrev=0 "${TAG}^" 2>/dev/null || true)
+            # Only release tags can bound the notes. Runtime asset tags such as
+            # model-hub-engine-v* and git-runtime-v* sit on master history too.
+            PREV=$(git describe --tags --abbrev=0 --match 'gh-v*' --match 'v[0-9]*' "${TAG}^" 2>/dev/null || true)
             echo "prev=$PREV" >> "$GITHUB_OUTPUT"
             exit 0
           fi
