@@ -20,11 +20,12 @@ Plan: `docs/plans/avibe-agent-core.md` §6, A12. Script: `a12_compaction_quality
 - Only then do log reads, sized from the model's window and one per Turn, push the context over the threshold. They
   continue, up to seven, until two checkpoints have summarized the context past the last planted fact.
 - A probe Turn then asks, from memory, for the ground rules, the files changed and why, the last error verbatim, and
-  the next step, as one JSON object. Each of the nine planted facts is judged on its own field:
+  the next step, as one JSON object. Each of the ten planted facts is judged on its own field:
   - a rule only with its polarity and its action: each rule is `{"action", "kind": "must" | "must_not"}`, and the
     action must name the constrained act (modify, rename public functions, record);
   - a changed value only inside its file's entry and as the new value ("to 5", "= 5"), and a reason only in that
-    entry's `why`;
+    entry's `why` (the REFILL_RATE reason only about refilling);
+  - the changelog edits as an entry for `CHANGES.md` among the changed files;
   - the last error as the whole line;
   - the next step with its action and boundary (add a test in `tests/test_burst.py` for a burst of exactly 5), not
     only the file.

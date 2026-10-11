@@ -113,6 +113,12 @@ def _set_to(text: str, value: int) -> bool:
     return re.search(rf"(?:\bto|=|→|->)\s*{value}(?!\.?\d)", text) is not None
 
 
+def _refill_reason(answer: dict) -> bool:
+    """Whether config.py's reason is about refilling and says why: a zero rate never refills, or 1 enables refilling."""
+    why = _text(_change(answer, "config.py").get("why"))
+    return "refill" in why and re.search(r"never|zero|enabl|(?<![\d.])0(?!\.?\d)", why) is not None
+
+
 def _next_step(answer: dict) -> bool:
     """Whether the next step is still to add a test in tests/test_burst.py for a burst of exactly 5: the action and the
     boundary as well as the file, so a remembered filename with a lost or reversed plan fails."""
@@ -156,13 +162,8 @@ FACTS = (
         lambda a: "refill" in _text(_change(a, "config.py").get("change"))
         and _set_to(_text(_change(a, "config.py").get("change")), 1),
     ),
-    Fact(
-        "why: a zero refill rate never refills",
-        lambda a: any(
-            phrase in _text(_change(a, "config.py").get("why"))
-            for phrase in ("never refill", "0 means", "zero", "of 0", "enable")
-        ),
-    ),
+    Fact("why: a zero refill rate never refills", _refill_reason),
+    Fact("changed: CHANGES.md", lambda a: bool(_change(a, "changes.md"))),
     Fact("last error, verbatim", lambda a: _text(a.get("last_error")).strip(" `'\"") == LAST_ERROR.lower()),
     Fact("next step: add a test in tests/test_burst.py for a burst of exactly 5", _next_step),
 )
