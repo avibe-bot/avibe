@@ -301,9 +301,41 @@ def _take_lock_file(lock_file) -> bool:
     return True
 
 
+# How long a service lock that no live service holds may take to come free.
+#
+# Holding the lock is how a service says it is running, but it is not the only
+# way the lock gets held. It cannot be tested without being taken -- a Windows
+# byte-range lock has no other test -- so every check holds it for an instant,
+# and `vibe start` checks it every 100 ms while it waits for the service it
+# launched. A service whose single attempt landed in one of those instants
+# took the check for another service and exited. A holder that is gone can
+# also keep it a while: Windows releases a terminated process's locks only as
+# its resources allow. Neither names a live process in the record, which a
+# service writes the moment it takes the lock, so only that state is waited
+# out, and only this long; a live holder is answered at once.
+_SERVICE_LOCK_SETTLE_SECONDS = 2.0
+_SERVICE_LOCK_SETTLE_INTERVAL_SECONDS = 0.02
+
+
+def _take_service_lock(lock_file) -> bool:
+    """Take the service lock unless a service holds it; raises ``OSError`` when an attempt itself failed.
+
+    False when the record names a live holder, or when the lock stays held for
+    ``_SERVICE_LOCK_SETTLE_SECONDS`` with none named.
+    """
+
+    deadline = time.monotonic() + _SERVICE_LOCK_SETTLE_SECONDS
+    while not _take_lock_file(lock_file):
+        holder_pid = _lock_file_pid(lock_file)
+        if (holder_pid and pid_alive(holder_pid)) or time.monotonic() >= deadline:
+            return False
+        time.sleep(_SERVICE_LOCK_SETTLE_INTERVAL_SECONDS)
+    return True
+
+
 def _try_lock_file(lock_file) -> bool:
     try:
-        return _take_lock_file(lock_file)
+        return _take_service_lock(lock_file)
     except OSError:
         return False
 
@@ -2998,7 +3030,7 @@ def desktop_service_lock_presence(while_absent: Callable[[], None] | None = None
     with lock_file:
         # Only another holder is a mismatch; a lock call that failed says nothing.
         try:
-            taken = _take_lock_file(lock_file)
+            taken = _take_service_lock(lock_file)
         except OSError:
             logger.warning("Could not probe the service instance lock", exc_info=True)
             return DesktopRuntimePresence.UNKNOWN

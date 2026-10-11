@@ -22,7 +22,10 @@ change.
 
 import json
 import os
+import subprocess
 import sys
+import threading
+import time
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -195,6 +198,116 @@ class PosixServiceLockUnchangedTests(unittest.TestCase):
 
         self.assertEqual(observed[0], (0, fcntl.LOCK_EX | fcntl.LOCK_NB))
         self.assertEqual(observed[-1][1], fcntl.LOCK_UN)
+
+
+# Holds the service lock the way a running service does, through the entry
+# point `main.py` uses, until it is killed.
+_HOLDER = """
+import sys, time
+from pathlib import Path
+from unittest.mock import patch
+sys.path.insert(0, sys.argv[1])
+from vibe import runtime
+lock_path = Path(sys.argv[2])
+with patch("vibe.runtime.ensure_dirs", return_value=None), patch(
+    "vibe.runtime.paths.get_runtime_service_lock_path", return_value=lock_path
+), patch("vibe.runtime.paths.get_runtime_pid_path", return_value=lock_path.with_name("vibe.pid")):
+    runtime.acquire_service_instance_lock()
+    print("held", flush=True)
+    time.sleep(600)
+"""
+
+
+class ServiceLockContentionTests(unittest.TestCase):
+    """Who holds the lock, as a starting service and a launcher must read it.
+
+    The lock is held by a running service, and also, for an instant, by every
+    check of it: a lock cannot be tested without being taken. ``vibe start``
+    checks every 100 ms while it waits for the service it launched, and a
+    service whose single attempt landed in one of those instants took the check
+    for another service and exited ("Vibe service process pid=... did not
+    acquire the service lock" on a fresh Windows home). A holder that was just
+    killed can also keep the lock a while on Windows. Neither names a live
+    process in the record; a running service does, and must still be refused
+    at once.
+    """
+
+    def setUp(self) -> None:
+        tmp = TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        runtime_dir = Path(tmp.name) / "runtime"
+        runtime_dir.mkdir(parents=True)
+        self.lock_path = runtime_dir / "service.lock"
+        for started in (
+            patch("vibe.runtime.ensure_dirs", return_value=None),
+            patch("vibe.runtime.paths.get_runtime_service_lock_path", return_value=self.lock_path),
+            patch("vibe.runtime.paths.get_runtime_pid_path", return_value=runtime_dir / "vibe.pid"),
+        ):
+            started.start()
+            self.addCleanup(started.stop)
+
+    def _hold_like_a_check(self, *, record: str = "") -> None:
+        """Hold the lock through another handle, naming whatever ``record`` says, for 200 ms."""
+
+        check = self.lock_path.open("a+", encoding="utf-8")
+        self.addCleanup(check.close)
+        self.assertTrue(runtime._take_lock_file(check))
+        check.seek(0)
+        check.truncate()
+        check.write(record)
+        check.flush()
+        release = threading.Timer(0.2, runtime._unlock_file, args=(check,))
+        release.start()
+        self.addCleanup(release.join)
+
+    def _acquire(self) -> None:
+        runtime.acquire_service_instance_lock()
+        self.addCleanup(runtime.release_service_instance_lock)
+        self.assertEqual(json.loads(self.lock_path.read_text(encoding="utf-8"))["pid"], os.getpid())
+
+    def _holder(self) -> subprocess.Popen:
+        holder = subprocess.Popen(
+            [sys.executable, "-c", _HOLDER, str(Path(__file__).resolve().parents[1]), str(self.lock_path)],
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+        self.addCleanup(holder.wait, 10)
+        self.addCleanup(holder.kill)
+        self.addCleanup(holder.stdout.close)
+        self.assertEqual(holder.stdout.readline().strip(), "held")
+        return holder
+
+    def test_a_service_starting_during_a_check_takes_the_lock_once_the_check_ends(self):
+        self._hold_like_a_check()
+        self._acquire()
+
+    def test_a_service_starting_while_a_dead_holder_s_lock_is_released_takes_it(self):
+        gone = subprocess.Popen([sys.executable, "-c", "pass"])
+        gone.wait(timeout=10)
+        self._hold_like_a_check(record=json.dumps({"pid": gone.pid}))
+        self._acquire()
+
+    def test_a_service_started_right_after_the_last_was_killed_takes_the_lock(self):
+        """The acceptance test's own order: kill the service outright, start the next."""
+
+        holder = self._holder()
+        holder.kill()
+        holder.wait(timeout=10)
+        self._acquire()
+
+    def test_a_running_service_is_still_refused_at_once(self):
+        holder = self._holder()
+        began = time.monotonic()
+        with self.assertRaises(runtime.ServiceAlreadyRunningError) as refused:
+            runtime.acquire_service_instance_lock()
+        self.assertLess(time.monotonic() - began, runtime._SERVICE_LOCK_SETTLE_SECONDS)
+        self.assertEqual(refused.exception.holder_pid, holder.pid)
+
+    def test_a_check_still_reads_a_running_service_at_once(self):
+        holder = self._holder()
+        began = time.monotonic()
+        self.assertEqual(runtime.service_instance_lock_available(), (False, holder.pid))
+        self.assertLess(time.monotonic() - began, runtime._SERVICE_LOCK_SETTLE_SECONDS)
 
 
 @unittest.skipUnless(os.name == "nt", "Windows byte-range lock semantics")
