@@ -17,12 +17,24 @@ Plan: `docs/plans/avibe-agent-core.md` §6, A12. Script: `a12_compaction_quality
   - has it run a check that fails twice;
   - agrees on a next step.
 - Log reads sized from the model's window push the context over the threshold. The script adds up to three more
-  reads until the Session holds at least two checkpoints. If it still holds fewer, the script stops without probing.
-- Every Agent run must succeed within its wait. A failed, canceled, or detached run stops the script, so no Turn ever
-  reads an earlier Turn's reply.
-- A probe Turn then asks, from memory, for the ground rules, the files changed and why, the last error verbatim,
-  and the next step. The answer is scored against the nine planted facts; the last error must appear in full.
-  Compactions are read again after the probe, so the JSON includes any checkpoint the probe Turn itself made.
+  reads until the Session holds at least two checkpoints.
+- A probe Turn then asks, from memory, for the ground rules, the files changed and why, the last error verbatim, and
+  the next step, as one JSON object. Each of the nine planted facts is judged on its own field: a changed value only
+  inside its file's entry, a reason only in that entry's `why`, and the last error as the whole line.
+
+**Valid runs only.** A run is scored only if ground truth (the database rows and the fixture on disk) shows that it
+happened as scripted:
+- every Agent run succeeded within its wait;
+- the fixture ends with BURST = 5, REFILL_RATE = 1, two CHANGES.md lines, `allow()` still defined, and
+  `vendor/legacy_api.py` untouched;
+- both check outputs are in the Session's tool results, in order;
+- the Session compacted at least twice before the probe, and the probe called no tool;
+- every model-written checkpoint used the checkout's prompt version.
+
+Otherwise the JSON says `"valid": false` with the reasons, no score is given, and the script exits with status 3. A
+failed or detached Agent run stops it at once. A non-empty `--project-dir` is refused. Everything reported comes from
+the rows: a checkpoint is model-written only when its row names a summarizer, and the prompt version is the
+summarizers'.
 
 **Where it runs.** It writes real Sessions and spends real tokens, so it runs only inside a regression instance
 (`VIBE_DEPLOYMENT_ENV=regression`); elsewhere it exits with status 2.
@@ -37,6 +49,7 @@ Plan: `docs/plans/avibe-agent-core.md` §6, A12. Script: `a12_compaction_quality
    ```
 
 3. Read the JSON it prints:
+   - whether the run is valid, and why not;
    - the prompt version and model;
    - each compaction (mode, sizes, and whether the model wrote it);
    - each checkpoint turn's outcome and repair;

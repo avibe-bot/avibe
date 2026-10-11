@@ -5,7 +5,12 @@ instance's Model Hub and every checkpoint through the shipped C-9 code. A script
 ground rules, has the agent change two files for stated reasons, run a check that fails twice, and agree on a next
 step, while large log reads push the context over the threshold. Once the Session holds at least two checkpoints, a
 probe Turn asks, from memory, for the ground rules, the files changed and why, the last error verbatim, and the next
-step. The answer is scored against the facts the script planted.
+step, as one JSON object. Each field is scored against the facts the script planted.
+
+A run counts only if ground truth says it happened as scripted: every Agent run succeeded, the fixture on disk ends in
+the scripted state, both check outputs are in the Session's tool results in order, the Session compacted at least twice
+before the probe, the probe called no tool, and every model-written checkpoint used the checkout's prompt version. An
+invalid run is reported with its reasons, not scored, and exits with status 3.
 
 Not a test and not collected by pytest (no ``test_`` prefix); never run in CI. It makes real model calls and writes
 real Sessions, so it runs only inside a regression instance (``VIBE_DEPLOYMENT_ENV=regression``), for example through
@@ -28,10 +33,11 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Sequence
+from typing import Callable, Optional, Sequence
 
 # Run as a file from the source checkout: the product's modules are imported from it.
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -64,42 +70,84 @@ TURNS = (
 )
 EXTRA_TURN = "Read logs/day{index}.log completely and summarize it in one line."
 PROBE = (
-    "Without reading any file or running any command, answer from memory in four short sections: (1) every ground "
-    "rule I set for this session; (2) each file you changed, and why; (3) the last error check.py printed, "
-    "verbatim; (4) the next step."
+    "Answer from memory only: do not read any file or run any command. Reply with one JSON object and nothing else, "
+    'in this shape: {"rules": ["..."], "changes": [{"file": "...", "change": "...", "why": "..."}], "last_error": '
+    '"...", "next_step": "..."}. rules: every ground rule I set for this session. changes: each file you changed, '
+    "what you changed in it, and why. last_error: the last error check.py printed, verbatim. next_step: the next step."
 )
+FIRST_ERROR = "ValueError: refill_rate must be > 0 (got 0)"
 LAST_ERROR = "AssertionError: burst window overlaps (bucket=5, window=0.5s)"
+VENDOR = "# Vendored client for the legacy upstream API. Do not edit.\n\ndef call(path):\n    return path\n"
+
+
+def _text(value: object) -> str:
+    return value.lower() if isinstance(value, str) else ""
+
+
+def _change(answer: dict, file: str) -> dict:
+    """The answer's entry for ``file`` (its path ends with it), or an empty one."""
+    changes = answer.get("changes")
+    entries = [item for item in changes if isinstance(item, dict)] if isinstance(changes, list) else []
+    return next((item for item in entries if _text(item.get("file")).endswith(file)), {})
+
+
+def _rules(answer: dict) -> str:
+    rules = answer.get("rules")
+    return " ".join(_text(rule) for rule in rules) if isinstance(rules, list) else ""
+
+
+def _number(text: str, value: int) -> bool:
+    return re.search(rf"(?<![\d.]){value}(?![\d.])", text) is not None
 
 
 @dataclass(frozen=True)
 class Fact:
-    """One planted fact: every group must match, each by any of its phrases (case-insensitive)."""
+    """One planted fact, judged on its own field of the probe's JSON answer."""
 
     name: str
-    groups: tuple[tuple[str, ...], ...]
-
-    def found(self, answer: str) -> bool:
-        lowered = answer.lower()
-        return all(any(phrase.lower() in lowered for phrase in group) for group in self.groups)
+    found: Callable[[dict], bool]
 
 
 #: What A12 asks the agent to still state: the user's constraints, the files changed and why, the last error, and
-#: the next step.
+#: the next step. A value counts only inside its own file's entry, a reason only in that entry's ``why``.
 FACTS = (
-    Fact("rule: vendor/legacy_api.py untouched", (("vendor/legacy_api.py",),)),
-    Fact("rule: no public function renamed", (("rename",), ("public",))),
-    Fact("rule: every change noted in CHANGES.md", (("changes.md",),)),
-    Fact("changed: src/rate_limit.py, BURST to 5", (("rate_limit.py",), ("burst",), ("5",))),
-    Fact("why: upstream rejects bursts above 5", (("upstream",),)),
-    Fact("changed: src/config.py, REFILL_RATE to 1", (("config.py",), ("refill",))),
-    # With "refill" required by the fact above, a reason states that 0 stopped refills or that 1 enables them.
+    Fact("rule: vendor/legacy_api.py untouched", lambda a: "vendor/legacy_api.py" in _rules(a)),
+    Fact("rule: no public function renamed", lambda a: "rename" in _rules(a) and "public" in _rules(a)),
+    Fact("rule: every change noted in CHANGES.md", lambda a: "changes.md" in _rules(a)),
+    Fact(
+        "changed: src/rate_limit.py, BURST to 5",
+        lambda a: "burst" in _text(_change(a, "rate_limit.py").get("change"))
+        and _number(_text(_change(a, "rate_limit.py").get("change")), 5),
+    ),
+    Fact("why: upstream rejects bursts above 5", lambda a: "upstream" in _text(_change(a, "rate_limit.py").get("why"))),
+    Fact(
+        "changed: src/config.py, REFILL_RATE to 1",
+        lambda a: "refill" in _text(_change(a, "config.py").get("change"))
+        and _number(_text(_change(a, "config.py").get("change")), 1),
+    ),
     Fact(
         "why: a zero refill rate never refills",
-        (("never refill", "never refills", "0 means", "zero means", "of 0", "enable"),),
+        lambda a: any(
+            phrase in _text(_change(a, "config.py").get("why"))
+            for phrase in ("never refill", "0 means", "zero", "of 0", "enable")
+        ),
     ),
-    Fact("last error, verbatim", ((LAST_ERROR,),)),
-    Fact("next step: tests/test_burst.py", (("tests/test_burst.py", "test_burst.py"),)),
+    Fact("last error, verbatim", lambda a: _text(a.get("last_error")).strip(" `'\"") == LAST_ERROR.lower()),
+    Fact("next step: tests/test_burst.py", lambda a: "test_burst.py" in _text(a.get("next_step"))),
 )
+
+
+def parse_answer(text: str) -> Optional[dict]:
+    """The probe's JSON object: the outermost braces of the reply, fences and narration around them ignored."""
+    start, end = text.find("{"), text.rfind("}")
+    if start < 0 or end < start:
+        return None
+    try:
+        value = json.loads(text[start : end + 1])
+    except json.JSONDecodeError:
+        return None
+    return value if isinstance(value, dict) else None
+
 
 CHECK_PY = f'''import re
 import sys
@@ -158,7 +206,7 @@ def write_fixture(root: Path, window: int) -> None:
             '    bucket["tokens"] -= 1\n    return True\n'
         ),
         "src/config.py": "REFILL_RATE = 0\n",
-        "vendor/legacy_api.py": "# Vendored client for the legacy upstream API. Do not edit.\n\ndef call(path):\n    return path\n",
+        "vendor/legacy_api.py": VENDOR,
         "CHANGES.md": "# Changes\n",
         "check.py": CHECK_PY,
     }
@@ -196,7 +244,7 @@ def model_window(model: str) -> tuple[int, Optional[int]]:
 
 
 class Rows:
-    """Read-only views of the instance's state database."""
+    """Read-only views of the instance's state database: the ground truth a run is judged on."""
 
     def __init__(self) -> None:
         from config import paths
@@ -211,20 +259,35 @@ class Rows:
         finally:
             connection.close()
 
-    def compactions(self, session_id: str) -> list[dict]:
+    def _events(self, session_id: str, kind: str, after: int = 0) -> list[dict]:
         rows = self._query(
-            "select content_json from agent_events where session_id = ? and event_type = 'context_compaction' "
-            "order by created_at",
+            "select content_json from agent_events where session_id = ? and event_type = ? and rowid > ? order by rowid",
             session_id,
+            kind,
+            after,
         )
         return [json.loads(row["content_json"]) for row in rows]
 
+    def mark(self) -> int:
+        """The newest event's position: what a later Turn writes comes after it."""
+        return self._query("select coalesce(max(rowid), 0) as mark from agent_events")[0]["mark"]
+
+    def compactions(self, session_id: str) -> list[dict]:
+        return self._events(session_id, "context_compaction")
+
     def checkpoint_turns(self, session_id: str) -> list[dict]:
-        rows = self._query(
-            "select content_json from agent_events where session_id = ? and event_type = 'fork_turn' order by created_at",
-            session_id,
-        )
-        return [json.loads(row["content_json"]) for row in rows]
+        return self._events(session_id, "fork_turn")
+
+    def tool_calls(self, session_id: str, after: int) -> int:
+        return len(self._events(session_id, "tool_call", after))
+
+    def tool_outputs(self, session_id: str) -> list[str]:
+        """Every tool result's text, in order."""
+        outputs = []
+        for payload in self._events(session_id, "tool_result"):
+            blocks = (payload.get("message") or {}).get("content") or []
+            outputs.append("\n".join(block.get("text") or "" for block in blocks if isinstance(block, dict)))
+        return outputs
 
     def last_result(self, session_id: str) -> str:
         rows = self._query(
@@ -235,21 +298,50 @@ class Rows:
         return rows[0]["content_text"] if rows else ""
 
 
-def run(args: argparse.Namespace) -> dict:
+def fixture_problems(root: Path) -> list[str]:
+    """How the fixture on disk differs from the end state the scripted Turns ask for."""
+    problems = []
+    limiter = (root / "src/rate_limit.py").read_text(encoding="utf-8")
+    if not re.search(r"^BURST\s*=\s*5\s*$", limiter, re.M):
+        problems.append("src/rate_limit.py does not set BURST = 5")
+    if not re.search(r"^def allow\(", limiter, re.M):
+        problems.append("src/rate_limit.py no longer defines allow()")
+    if not re.search(r"^REFILL_RATE\s*=\s*1\s*$", (root / "src/config.py").read_text(encoding="utf-8"), re.M):
+        problems.append("src/config.py does not set REFILL_RATE = 1")
+    notes = [line for line in (root / "CHANGES.md").read_text(encoding="utf-8").splitlines()[1:] if line.strip()]
+    if len(notes) < 2:
+        problems.append(f"CHANGES.md has {len(notes)} change line(s), not 2")
+    if (root / "vendor/legacy_api.py").read_text(encoding="utf-8") != VENDOR:
+        problems.append("vendor/legacy_api.py was modified")
+    return problems
+
+
+def check_outputs_in_order(outputs: Sequence[str]) -> bool:
+    """Whether the first check's error and then the last one appear in the Session's tool results, in that order."""
+    first = next((index for index, text in enumerate(outputs) if FIRST_ERROR in text), None)
+    return first is not None and any(LAST_ERROR in text for text in outputs[first + 1 :])
+
+
+def run(args: argparse.Namespace) -> tuple[dict, bool]:
     window, max_output = model_window(args.model)
     if window > MAX_WINDOW:
         raise SystemExit(f"{args.model} has a {window}-token window; A12 needs one of at most {MAX_WINDOW}")
-    command = tuple(args.vibe.split())
     stamp = time.strftime("%Y%m%d%H%M%S")
-    agent = f"a12-eval-{stamp}"
-    root = Path(args.project_dir or tempfile.mkdtemp(prefix=f"a12-{stamp}-"))
+    if args.project_dir:
+        root = Path(args.project_dir)
+        if root.exists() and any(root.iterdir()):
+            raise SystemExit(f"{root} is not empty; A12 writes its fixture only into a new or empty directory")
+        root.mkdir(parents=True, exist_ok=True)
+    else:
+        root = Path(tempfile.mkdtemp(prefix=f"a12-{stamp}-"))
     write_fixture(root, window)
+    command = tuple(args.vibe.split())
+    agent = f"a12-eval-{stamp}"
     vibe(command, "agent", "create", agent, "--backend", "vibey", "--model", args.model,
          "--description", "A12 compaction-quality evaluation (temporary)")
     rows, session_id, transcript = Rows(), None, []
     try:
-        turns = list(TURNS)
-        extra = 0
+        turns, extra = list(TURNS), 0
         while turns:
             message = turns.pop(0)
             target = ("--session-id", session_id) if session_id else ("--agent", agent, "--create-session", "--cwd", str(root))
@@ -260,23 +352,36 @@ def run(args: argparse.Namespace) -> dict:
             if not turns and len(rows.compactions(session_id)) < 2 and extra < EXTRA_READS:
                 extra += 1
                 turns.append(EXTRA_TURN.format(index=4 + extra))
-        before = len(rows.compactions(session_id))
-        if before < 2:
-            # A12 scores a Session compacted at least twice; a probe of fewer would read the context it kept.
-            raise SystemExit(f"Session {session_id} compacted {before} time(s) before the probe; A12 needs at least 2")
-        vibe(command, "agent", "run", "--session-id", session_id, "--sync", "--no-callback",
-             "--wait-timeout", str(TURN_TIMEOUT_S), "--message", PROBE)
-        answer = rows.last_result(session_id)
-        compactions = rows.compactions(session_id)  # including any the probe Turn itself made
+        before_probe = len(rows.compactions(session_id))
+        problems = fixture_problems(root)
+        if not check_outputs_in_order(rows.tool_outputs(session_id)):
+            problems.append("the Session's tool results lack the two check outputs in order")
+        if before_probe < 2:
+            problems.append(f"the Session compacted {before_probe} time(s) before the probe, not at least 2")
+        answer, probe_calls = "", None
+        if not problems:  # an invalid run is not probed
+            mark = rows.mark()
+            vibe(command, "agent", "run", "--session-id", session_id, "--sync", "--no-callback",
+                 "--wait-timeout", str(TURN_TIMEOUT_S), "--message", PROBE)
+            answer, probe_calls = rows.last_result(session_id), rows.tool_calls(session_id, mark)
+            if probe_calls:
+                problems.append(f"the probe called {probe_calls} tool(s) instead of answering from memory")
     finally:
         if not args.keep:
             vibe(command, "agent", "remove", agent)
-    scores = {fact.name: fact.found(answer) for fact in FACTS}
+
     from core.agent_core.harness.context import PROMPT_VERSION
 
-    turns_audit = rows.checkpoint_turns(session_id)
-    return {
-        "prompt_version": PROMPT_VERSION,
+    compactions = rows.compactions(session_id)  # after the probe: any checkpoint it made is reported too
+    versions = sorted({item["summarizer"].get("prompt_version") for item in compactions if item.get("summarizer")})
+    if versions != [PROMPT_VERSION]:
+        problems.append(f"the runtime's checkpoints used prompt version(s) {versions}, the checkout has {PROMPT_VERSION}")
+    parsed = parse_answer(answer) if not problems else None
+    scores = {fact.name: parsed is not None and fact.found(parsed) for fact in FACTS} if not problems else None
+    result = {
+        "valid": not problems,
+        "invalid_reasons": problems,
+        "prompt_version": versions[0] if len(versions) == 1 else versions,
         "model": args.model,
         "window": window,
         "max_output_tokens": max_output,
@@ -288,35 +393,39 @@ def run(args: argparse.Namespace) -> dict:
                 "reason": item.get("reason"),
                 "tokens_before": item.get("tokens_before"),
                 "tokens_after_estimate": item.get("tokens_after_estimate"),
-                "model_written": bool(item.get("checkpoint")),
+                # A dropped row carries an earlier checkpoint without a model call: no summarizer.
+                "model_written": item.get("summarizer") is not None,
             }
             for item in compactions
         ],
         "checkpoint_turns": [
             {"outcome": item.get("outcome"), "repair": item.get("repair"), "error": item.get("error")}
-            for item in turns_audit
+            for item in rows.checkpoint_turns(session_id)
         ],
-        "score": f"{sum(scores.values())}/{len(scores)}",
+        "probe_tool_calls": probe_calls,
+        "answer_parsed": parsed is not None if not problems else None,
+        "score": f"{sum(scores.values())}/{len(scores)}" if scores is not None else None,
         "facts": scores,
         "answer": answer,
         "turns": transcript,
     }
+    return result, not problems
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n", 1)[0])
     parser.add_argument("--model", required=True, help="a Vibey model with a Model Hub window of at most 64,000 tokens")
-    parser.add_argument("--project-dir", help="where to write the fixture (default: a new temporary directory)")
+    parser.add_argument("--project-dir", help="a new or empty directory for the fixture (default: a new temporary one)")
     parser.add_argument("--vibe", default="vibe", help="the vibe command of the instance under evaluation")
     parser.add_argument("--keep", action="store_true", help="keep the temporary Agent")
     args = parser.parse_args(argv)
     if os.environ.get("VIBE_DEPLOYMENT_ENV") != "regression":
         print("A12 makes real model calls and writes Sessions: run it inside a regression instance.", file=sys.stderr)
         return 2
-    result = run(args)
+    result, valid = run(args)
     json.dump(result, sys.stdout, ensure_ascii=False, indent=2)
     sys.stdout.write("\n")
-    return 0
+    return 0 if valid else 3
 
 
 if __name__ == "__main__":
