@@ -60,9 +60,7 @@ export function SettingsBackendPage({ backend }: { backend: AgentBackendId }) {
                 <p className="text-[12px] text-gold-ink">
                   {supplyBlock === 'hub_disabled'
                     ? t('settings.backends.hubDisabledNotice', { name: meta.label })
-                    : supplyBlock === 'engine_unsupported'
-                      ? t('settings.backends.gatewayUnsupported', { name: meta.label })
-                      : t('settings.backends.gatewayOff', { name: meta.label })}
+                    : t('settings.backends.gatewayOff', { name: meta.label })}
                 </p>
                 {supplyBlock === 'gateway_off' && <Link
                   to="/settings/models"
@@ -74,8 +72,7 @@ export function SettingsBackendPage({ backend }: { backend: AgentBackendId }) {
               </div>
             )}
           />
-          {/* Where no gateway engine is built, no supply mode can make this backend run. */}
-          {modelHubEnabled === true && supplyBlock !== 'engine_unsupported' && <BackendSupplyModeCard backend={backend} />}
+          {modelHubEnabled === true && <BackendSupplyModeCard backend={backend} />}
         </div>
       )}
     </SettingsPageShell>

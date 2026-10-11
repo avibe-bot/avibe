@@ -1603,25 +1603,19 @@ def is_model_hub_enabled(environ: Optional[Mapping[str, str]] = None) -> bool:
     return source.get(MODEL_HUB_ENABLED_ENV, "1").strip().lower() in {"1", "true", "yes", "on"}
 
 
-HubSupplyBlock = Literal["hub_disabled", "engine_unsupported", "gateway_off"]
+HubSupplyBlock = Literal["hub_disabled", "gateway_off"]
 
 
 def hub_supply_block(backend: str, hub: Optional["ModelHubConfig"]) -> Optional[HubSupplyBlock]:
     """Why the Model Hub leaves ``backend`` no model to run on now, or ``None``: the one owner of that answer.
 
     A backend without its own CLI gets every model through the Hub, so the operator's
-    Model Hub switch (``VIBE_MODEL_HUB_ENABLED``) leaves it none, and so does a host the
-    pinned engine manifest has no asset for. Any backend the Hub supplies has none while
-    the user has turned the gateway off in Models.
+    Model Hub switch (``VIBE_MODEL_HUB_ENABLED``) leaves it none. Any backend the Hub
+    supplies has none while the user has turned the gateway off in Models.
     """
 
     if not is_model_hub_enabled():
         return None if backend in NATIVE_CLI_BACKENDS else "hub_disabled"
-    if backend not in NATIVE_CLI_BACKENDS:
-        from vibe.model_hub_runtime.installer import EngineRuntimeManager
-
-        if not EngineRuntimeManager(offline=True).supports_host_platform():
-            return "engine_unsupported"
     if hub is not None and not hub.enabled and hub.agents[backend].mode == "hub":
         return "gateway_off"
     return None
