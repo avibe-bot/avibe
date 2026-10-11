@@ -1372,7 +1372,7 @@ def start_runtime(monkeypatch):
     monkeypatch.setattr(runtime, "pid_alive", lambda pid: pid in process_times)
     monkeypatch.setattr(runtime.psutil, "Process", fake_process)
     monkeypatch.setattr(runtime, "_pid_mismatches_service", lambda pid: False)
-    monkeypatch.setattr(runtime, "_ui_server_identity", lambda pid: True)
+    monkeypatch.setattr(runtime, "_pid_matches_ui_server", lambda pid: True)
     monkeypatch.setattr(runtime, "ui_server_compatible", lambda host, port: True)
     monkeypatch.setattr(runtime, "service_pid_recorded", lambda pid: True)
     monkeypatch.setattr(runtime, "wait_for_service_ready", lambda pid, timeout: pid)
@@ -1620,7 +1620,7 @@ def test_cmd_start_reuses_independent_ui_or_recovers_only_unhealthy_ui(monkeypat
     monkeypatch.setattr(runtime, "wait_for_service_ready", lambda pid, timeout: pid)
     monkeypatch.setattr(runtime, "effective_ui_bind_host", lambda cfg: "127.0.0.1")
     monkeypatch.setattr(runtime, "pid_alive", lambda pid: pid in {111, 222})
-    monkeypatch.setattr(runtime, "_ui_server_identity", lambda pid: pid == 111)
+    monkeypatch.setattr(runtime, "_pid_matches_ui_server", lambda pid: pid == 111)
     monkeypatch.setattr(runtime, "ui_server_healthy", lambda *args: ui_state == "healthy")
     # This tree adopts a UI through its identity-checked readiness probe; stub it
     # like the health probe so no real loopback listener is consulted.
@@ -4602,9 +4602,9 @@ def test_start_ui_reuses_existing_live_pid(tmp_path, monkeypatch):
     assert runtime.start_ui("127.0.0.1", 5123) == 12345
 
 
-# A UI server as far as `ui_server_compatible` can tell: every path answers the
-# readiness the real one gives.
-_STUB_UI_SERVER = """
+# A UI server as far as `ui_server_compatible` can tell -- every path answers
+# the readiness the real one gives -- whose command line names the real one.
+_STUB_UI_SERVER = """# stands in for vibe.ui_server's run_ui_server
 import http.server, json
 class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
@@ -4622,14 +4622,16 @@ server.serve_forever()
 """
 
 
-def test_a_start_keeps_a_serving_ui_it_cannot_identify_so_a_stop_ends_it(tmp_path, monkeypatch):
+def test_a_start_identifies_a_serving_ui_without_an_external_lookup_so_a_stop_ends_it(tmp_path, monkeypatch):
     """The UI a hard-killed service left serving is still stopped by the next stop.
 
     After the service is killed outright the next start finds the recorded UI
-    serving. When its command line could not be read -- a setuid ``ps`` barred
-    by a macOS sandbox -- the start took it for another program, dropped its
-    record and started a replacement, which died on the port. The old UI kept
-    serving with nothing pointing at it, and ``vibe stop`` left it running.
+    serving. Its command line came from ``ps`` or PowerShell, and where that
+    could not run -- a setuid ``ps`` barred by a macOS sandbox, a PowerShell
+    lookup that failed or timed out -- the start took the UI for another
+    program, dropped its record and started a replacement, which died on the
+    port. The old UI kept serving with nothing pointing at it, and ``vibe
+    stop`` left it running.
     """
 
     monkeypatch.setattr(paths, "get_vibe_remote_dir", lambda: tmp_path / ".vibe_remote")
@@ -4638,8 +4640,11 @@ def test_a_start_keeps_a_serving_ui_it_cannot_identify_so_a_stop_ends_it(tmp_pat
     try:
         port = int(ui.stdout.readline())
         paths.get_runtime_ui_pid_path().write_text(str(ui.pid), encoding="utf-8")
-        real_command = runtime.get_process_command
-        monkeypatch.setattr(runtime, "get_process_command", lambda pid: None if pid == ui.pid else real_command(pid))
+
+        def no_external_lookup(command, **kwargs):
+            raise OSError(f"no external process can run here: {command[0]}")
+
+        monkeypatch.setattr(runtime.subprocess, "run", no_external_lookup)
         replacements = []
 
         def die_on_the_port(args, pid_path, *_args, **_kwargs):
@@ -4656,7 +4661,7 @@ def test_a_start_keeps_a_serving_ui_it_cannot_identify_so_a_stop_ends_it(tmp_pat
         try:
             ui.wait(timeout=15)
         except subprocess.TimeoutExpired:
-            pytest.fail("the stop left running the UI the start could not identify")
+            pytest.fail("the stop left the recorded UI serving")
         assert replacements == []
         assert started == ui.pid
         assert (info.pid, info.reused) == (ui.pid, True)
@@ -4667,13 +4672,21 @@ def test_a_start_keeps_a_serving_ui_it_cannot_identify_so_a_stop_ends_it(tmp_pat
         ui.stdout.close()
 
 
-def test_start_ui_replaces_an_unidentified_pid_when_no_ui_answers(tmp_path, monkeypatch):
+@pytest.mark.parametrize("ui_answers", [False, True])
+def test_start_ui_never_adopts_a_recorded_pid_it_cannot_identify(tmp_path, monkeypatch, ui_answers):
+    """A UI answering on the port is not shown to be the recorded pid.
+
+    A pid whose command line cannot be read -- one psutil may not read, so not
+    a process this user started -- is replaced whether or not some UI answers:
+    adopting it would hand the next stop a process that may not be the UI.
+    """
+
     monkeypatch.setattr(paths, "get_vibe_remote_dir", lambda: tmp_path / ".vibe_remote")
     runtime.ensure_dirs()
     paths.get_runtime_ui_pid_path().write_text("12345", encoding="utf-8")
 
     monkeypatch.setattr(runtime, "pid_alive", lambda pid: pid == 12345)
-    monkeypatch.setattr(runtime, "ui_server_compatible", lambda host, port: False)
+    monkeypatch.setattr(runtime, "ui_server_compatible", lambda host, port: ui_answers)
     monkeypatch.setattr(runtime, "get_process_command", lambda pid: None)
     monkeypatch.setattr(runtime, "wait_for_ui_server", lambda host, port: True)
 

@@ -2300,15 +2300,11 @@ def _is_ui_server_command(command: str) -> bool:
     return "vibe.ui_server" in command and "run_ui_server" in command
 
 
-def _ui_server_identity(pid: int) -> bool | None:
-    """Whether ``pid`` runs the UI server; None when its command line cannot be read."""
-
-    command = get_process_command(pid)
-    return _is_ui_server_command(command) if command else None
-
-
 def _pid_matches_ui_server(pid: int) -> bool:
-    return _ui_server_identity(pid) is True
+    command = get_process_command(pid)
+    if not command:
+        return False
+    return _is_ui_server_command(command)
 
 
 def ui_pid_file_points_to_running_ui(pid_path: Path | None = None) -> bool:
@@ -2327,7 +2323,8 @@ def recorded_ui_is_gone(pid_path: Path | None = None) -> bool:
     pid = _read_pid_file(pid_path or paths.get_runtime_ui_pid_path())
     if not pid or not pid_alive(pid):
         return True
-    return _ui_server_identity(pid) is False
+    command = get_process_command(pid)
+    return command is not None and not _is_ui_server_command(command)
 
 
 def resolve_localhost_family() -> str:
@@ -2416,17 +2413,7 @@ def start_ui(
             existing_pid = 0
         if existing_pid and pid_alive(existing_pid):
             is_ui_server = _claim_recorded_ui(existing_pid)
-            # One that cannot be identified is not gone either (see
-            # `recorded_ui_is_gone`): with a UI answering, it may be that UI,
-            # and a replacement would only die on the port, leaving the UI
-            # serving with no record for a stop to find.
-            if is_ui_server is not False and ui_server_compatible(host, port):
-                if is_ui_server is None:
-                    logger.warning(
-                        "Reusing UI pid=%s, whose command line cannot be read, because a UI answers on %s",
-                        existing_pid,
-                        ", ".join(_ui_health_urls(host, port)),
-                    )
+            if is_ui_server and ui_server_compatible(host, port):
                 if start_info is not None:
                     start_info.capture(existing_pid, reused=True)
                 return existing_pid
@@ -2447,12 +2434,6 @@ def start_ui(
                         existing_pid,
                     )
                     return None
-            elif is_ui_server is None:
-                logger.warning(
-                    "Replacing UI pid=%s, whose command line cannot be read, because no UI answers on %s",
-                    existing_pid,
-                    ", ".join(_ui_health_urls(host, port)),
-                )
             else:
                 logger.warning(
                     "Ignoring stale UI pid file pid=%s because it does not match the Vibe UI server",
@@ -2857,19 +2838,18 @@ def claim_ready_service(ready_pid: int, *, started_pid: int) -> None:
         claim_desktop_runtime_process(ready_pid, "service")
 
 
-def _claim_recorded_ui(pid: int) -> bool | None:
+def _claim_recorded_ui(pid: int) -> bool:
     """Whether the live ``pid`` the UI record names is a UI server a start may reuse or replace.
 
-    A record naming another program is stale, and one whose command line
-    cannot be read is None. Under a desktop Runtime id a UI server must be
-    that Runtime's, and a pid whose command line cannot be read is refused:
-    nothing can tell whose it is.
+    A record naming another program is stale. Under a desktop Runtime id a UI
+    server must be that Runtime's, and a pid whose command line cannot be read
+    is refused: nothing can tell whose it is.
     """
 
     from vibe.desktop_runtime import desktop_runtime_id
 
-    is_ui_server = _ui_server_identity(pid)
-    if is_ui_server is None and desktop_runtime_id() is not None:
+    is_ui_server = _pid_matches_ui_server(pid)
+    if not is_ui_server and desktop_runtime_id() is not None and not get_process_command(pid):
         raise DesktopRuntimeClaimRefused("ui", "identity_unavailable")
     if is_ui_server:
         claim_desktop_runtime_process(pid, "ui")
