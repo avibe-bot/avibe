@@ -204,10 +204,12 @@ below, and the budget's 5 rounds, 4,000-token floor, and 1,000-token slack; C-10
   with calls continues the turn. That text is a checkpoint only if one validator, the same for every checkpoint
   turn (normal and rolling), accepts it, judged on what the user would see of it: the product's one silent-block
   grammar (`core/reply_enhancer.strip_silent_blocks`, which delivery uses) removes its `<silent>` notes first. Then
-  the template's three top-level section markers (`# 1.`, `# 2.`, `# 3.` at the start of a line, whatever language
-  the headings are in) appear exactly once each, in order, each section with content under its heading (a line that
-  is not itself a heading). A reply wrapped in, or made only of, a `<silent>` note, or with a section missing,
-  repeated, out of order, or empty, is no checkpoint. Anything else (a response refused at admission, a length stop, a `tool_use` stop without calls, calls
+  the template's three section markers (`# 1.`, `# 2.`, `# 3.` at the start of a line, whatever language the
+  headings are in, each written at heading level 1 to 3: `# 1.`, `## 1.`, or `### 1.`) appear exactly once each, in
+  order, each section with content under its heading (a line that is not itself a heading). The markers at the
+  template's own level (`#`) are judged first, so a numbered sub-heading under them stays content; only when they do
+  not form a checkpoint are the markers at all three levels judged. A reply wrapped in, or made only of, a `<silent>`
+  note, or with a section missing, repeated, out of order, or empty, is no checkpoint. Anything else (a response refused at admission, a length stop, a `tool_use` stop without calls, calls
   under any other stop, an error, no text, or a reply the validator rejects) is a failure: it counts as unproductive
   (§10), nothing enters the context, the old context is kept, and the ladder continues; the reply's text is only in
   the audit row. So is a checkpoint whose row the host cannot complete (§10, invariant 4).

@@ -801,6 +801,17 @@ def test_a_displayed_path_or_skill_name_is_one_line_of_plain_text():
 
 
 _VALID = "# 1. Self and method\n- terse\n# 2. Goals and requirements\n- fix it\n# 3. Now and next\n- read f05 next"
+# A real claude-haiku-4-5 checkpoint reply (A6 acceptance, 2026-10-11), trimmed: complete in substance, with
+# section 2's marker written one level deeper than the template's.
+_HAIKU_REPLY = (
+    "# 1. Self and method\n\n## How I work here\n- User expects me to complete a review task: read 6 files in big/\n"
+    "- Working agreement: read every file completely, then list each file with line count. Do not write anything yet."
+    "\n\n## 2. Goals and requirements\n\n## Goals\n- Review six files in big/ for error-handling weaknesses\n\n"
+    "## User requirements\n- Do not write anything yet\n\n## Key decisions\n(none)\n\n## Pitfalls\n(none)\n\n"
+    "# 3. Now and next\n\n## Progress\n### Done\n- Listed files in big/ and obtained line counts via wc\n\n"
+    "### In progress\n- Reading all 6 files completely\n\n## Next steps\n1. Read anthropic.py.txt (1018 lines)\n\n"
+    "## Exact references\n- Output: `/home/avibe/a6-acceptance/out/v7-review.md`"
+)
 
 
 @pytest.mark.parametrize(
@@ -818,6 +829,17 @@ _VALID = "# 1. Self and method\n- terse\n# 2. Goals and requirements\n- fix it\n
         ("# 1. Self and method\n# 2. Goals\n- g\n# 3. Now\n- n", "section 1 is empty"),
         ("# 1. Self\n## How I work here\n# 2. Goals\n- g\n# 3. Now\n- n", "section 1 is empty"),
         ("# 1. Self\n- s\n# 2. Goals\n- g\n# 3. Now and next", "section 3 is empty"),
+        # A marker may be written one or two levels deeper than the template's, alone or mixed; it stays positional.
+        (_HAIKU_REPLY, None),
+        ("## 1. Self\n- s\n## 2. Goals\n- g\n## 3. Now\n- n", None),
+        ("### 1. Self\n- s\n### 2. Goals\n- g\n### 3. Now\n- n", None),
+        ("## 1. Self\n- s\n### 2. Goals\n- g\n# 3. Now\n- n", None),
+        ("#### 1. Self\n- s\n#### 2. Goals\n- g\n#### 3. Now\n- n", "section 1 is missing"),
+        ("## 1. Self\n- s\n## 3. Now\n- n", "section 2 is missing"),
+        ("## 2. Goals\n- g\n# 1. Self\n- s\n# 3. Now\n- n", "a section marker is repeated or out of order"),
+        ("## 1. Self\n## 2. Goals\n- g\n## 3. Now\n- n", "section 1 is empty"),
+        # Under the template's own markers a numbered sub-heading is content, not another section.
+        ("# 1. Self\n- s\n# 2. Goals\n### 1. First goal\n- g\n# 3. Now\n- n", None),
         (f"<silent>\n{_VALID}\n</silent>", "section 1 is missing"),
         # The product's own silent grammar decides what is hidden, exactly as delivery would: any case, attributes,
         # a spaced closing tag; and a tag shown in a code span hides nothing.
