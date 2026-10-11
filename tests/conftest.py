@@ -72,6 +72,7 @@ import psutil
 import pytest
 from sqlalchemy.exc import SAWarning
 
+from tests import process_reaper
 from tests.fake_pid_helpers import PID_LIMIT
 
 REAL_USER_HOME = Path.home()
@@ -175,6 +176,47 @@ def pytest_configure(config):
         raise pytest.UsageError(
             f"{sys.executable} is a desktop Runtime's private interpreter; run the tests with another Python"
         )
+    global _process_warden
+    if _SIGNAL_GUARD_SUPPORTED:
+        _process_warden = process_reaper.Warden()
+
+
+# Every process a test starts ends with it (tests/process_reaper.py): the
+# running test's record, the run's warden, and what the reaper had to kill.
+_active_test_processes: process_reaper.TestProcesses | None = None
+_process_warden: process_reaper.Warden | None = None
+_reaped_processes: list[str] = []
+_TEST_PROCESSES = pytest.StashKey[process_reaper.TestProcesses]()
+
+
+@pytest.fixture(autouse=True)
+def _record_test_processes(request):
+    """Record every process this test starts; ``pytest_runtest_teardown`` kills what is still running.
+
+    A fixture, so the record begins after every module- and session-scoped
+    fixture is set up: what those start belongs to them, not to this test.
+    """
+
+    global _active_test_processes
+    if _SIGNAL_GUARD_SUPPORTED:
+        _active_test_processes = request.node.stash[_TEST_PROCESSES] = process_reaper.TestProcesses(
+            _process_warden
+        )
+    yield
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_teardown(item):
+    """Reap after every finalizer of the test has run, so a process a fixture stops is gone first."""
+
+    global _active_test_processes
+    try:
+        return (yield)
+    finally:
+        _active_test_processes = None
+        processes = item.stash.get(_TEST_PROCESSES, None)
+        if processes is not None:
+            _reaped_processes.extend(f"{item.nodeid}: {each}" for each in processes.reap())
 
 
 def _module_uses_default_sqlite_state(request: pytest.FixtureRequest) -> bool:
@@ -721,6 +763,9 @@ def _recording_popen_init(popen, *args, **kwargs):
     guard = _active_signal_guard
     if guard is not None:
         guard.owned.add(popen.pid)
+    processes = _active_test_processes
+    if processes is not None:
+        processes.record(popen.pid)
 
 
 @wraps(_REAL_PSUTIL_PROCESS_INIT)
@@ -995,6 +1040,10 @@ def pytest_sessionstart(session: pytest.Session) -> None:
 
 
 def pytest_terminal_summary(terminalreporter) -> None:
+    if _reaped_processes:
+        terminalreporter.section("processes still running when their test ended were killed", yellow=True)
+        for line in _reaped_processes:
+            terminalreporter.line(line, yellow=True)
     written = list(_real_home_writes)
     terminalreporter.config.stash[_REPORTED_WRITES] = len(written)
     if written:
@@ -1009,6 +1058,8 @@ def pytest_unconfigure(config: pytest.Config) -> None:
     # daemon threads can outlive this hook, and restoring the real values here
     # would hand them the real home again. Only a write during interpreter
     # shutdown, after pytest has returned its status, is refused without failing.
+    if _process_warden is not None:
+        _process_warden.close()
     shutil.rmtree(_SESSION_HOME, ignore_errors=True)
     for message in _real_home_writes[config.stash.get(_REPORTED_WRITES, 0) :]:
         sys.stderr.write(f"refused a write under the real Avibe home: {message}\n")
