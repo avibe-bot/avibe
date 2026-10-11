@@ -6,6 +6,8 @@ states the user's ground rules, has the agent change two files for stated reason
 agree on a next step. Large log reads then push the context over the threshold until at least two checkpoints have
 summarized every planted fact. A probe Turn asks, from memory, for the ground rules, the files changed and why, the
 last error verbatim, and the next step, as one JSON object. Each field is scored against the facts the script planted.
+One more fact reads the checkpoints written before the probe, and the probe answer, for the checkpoint request recorded
+as the user's: the request comes from the harness (``context.md`` section 11).
 
 A run counts only if ground truth says it happened as scripted: every Agent run succeeded, the fixture on disk ends in
 the scripted state, both check outputs are in the Session's tool results in order, at least two checkpoints before the
@@ -126,7 +128,7 @@ def _next_step(answer: dict) -> bool:
     step = _text(answer.get("next_step"))
     return (
         "test_burst.py" in step
-        and any(verb in step for verb in ("add", "write", "creat", "implement"))
+        and any(verb in step for verb in ("add", "writ", "creat", "implement"))
         and re.search(r"(?<![\d.])5(?!\.?\d)", step) is not None
     )
 
@@ -168,6 +170,53 @@ FACTS = (
     Fact("last error, verbatim", lambda a: _text(a.get("last_error")).strip(" `'\"") == LAST_ERROR.lower()),
     Fact("next step: add a test in tests/test_burst.py for a burst of exactly 5", _next_step),
 )
+
+
+#: The checkpoint request's marks (``context.md`` section 11). It comes from the harness, so neither it nor its no-tools
+#: instruction belongs in the record as the user's. The fixture's user mentions neither checkpoints nor tools before the
+#: probe, so a line that carries either is the request's.
+LEAK = "no leak: the checkpoint request is not recorded as the user's"
+_CHECKPOINT = re.compile(r"checkpoint|检查点", re.I)
+_EARLIER = re.compile(
+    r"\b(?:earlier|previous|prior|last|older)\s+(?:context\s+)?checkpoints?\b|(?:上一个|上次|之前的|先前的)\s*(?:checkpoint|检查点)",
+    re.I,
+)
+_CREDITED = re.compile(r"\buser\b|\brequest|\bask|用户|请求|要求", re.I)
+_NO_TOOLS = re.compile(
+    r"\b(?:do not|don't|never|no|not|without)\b[^\n.;]{0,25}\btools?\b|(?:不|禁止|勿|无需)要?(?:执行|调用|使用|运行|用)(?:任何)?工具",
+    re.I,
+)
+_HEADING = re.compile(r"^\s*(?:#+|\*\*)\s*(.*?)[\s*]*$")
+#: The headings under which a line is recorded as the user's or as what to do next.
+_USERS = ("goal", "requirement", "next step")
+
+
+def _names_checkpoint(text: str) -> bool:
+    """Whether ``text`` names a checkpoint other than an earlier one, which a checkpoint may carry forward."""
+    return _CHECKPOINT.search(_EARLIER.sub("", text)) is not None
+
+
+def checkpoint_leaks(checkpoint: str) -> list[str]:
+    """A checkpoint's lines that carry the request: a no-tools instruction anywhere, or the checkpoint itself credited to
+    the user or listed under the goals, the user requirements, or the next steps."""
+    leaks, scoped = [], False
+    for line in checkpoint.splitlines():
+        heading = _HEADING.match(line)
+        if heading:
+            scoped = any(name in heading.group(1).lower() for name in _USERS)
+        elif _NO_TOOLS.search(line) or (_names_checkpoint(line) and (scoped or _CREDITED.search(line))):
+            leaks.append(line.strip())
+    return leaks
+
+
+def answer_leaks(answer: dict) -> list[str]:
+    """The probe answer's rules and next step that carry the request. A rule is judged only on naming the checkpoint:
+    a rule against tools could be the probe's own "answer from memory"."""
+    rules = answer.get("rules")
+    actions = [_text(item.get("action")) for item in rules if isinstance(item, dict)] if isinstance(rules, list) else []
+    step = _text(answer.get("next_step"))
+    leaks = [action for action in actions if _names_checkpoint(action)]
+    return leaks + [step] if _names_checkpoint(step) or _NO_TOOLS.search(step) else leaks
 
 
 def parse_answer(text: str) -> Optional[dict]:
@@ -363,7 +412,12 @@ def fixture_problems(root: Path) -> list[str]:
         problems.append("src/rate_limit.py no longer defines allow()")
     if not re.search(r"^REFILL_RATE\s*=\s*1\s*$", (root / "src/config.py").read_text(encoding="utf-8"), re.M):
         problems.append("src/config.py does not set REFILL_RATE = 1")
-    notes = [line.lower() for line in (root / "CHANGES.md").read_text(encoding="utf-8").splitlines()[1:] if line.strip()]
+    # Its entries are every non-blank line but a heading: an agent may rewrite the file without the "# Changes" one.
+    notes = [
+        line.lower()
+        for line in (root / "CHANGES.md").read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
     if len(notes) != 2 or not any("burst" in note for note in notes) or not any("refill" in note for note in notes):
         problems.append(f"CHANGES.md does not hold exactly the BURST and REFILL_RATE lines: {notes}")
     if (root / "vendor/legacy_api.py").read_text(encoding="utf-8") != VENDOR:
@@ -417,6 +471,7 @@ def run(args: argparse.Namespace) -> tuple[dict, bool]:
                 break
             turn(READ_TURN.format(index=index))
         before_probe = carried()
+        written = [item.get("checkpoint") or "" for item in rows.compactions(session_id)]  # what the leak fact reads
         problems = fixture_problems(root)
         if not check_outputs_in_order(rows.tool_outputs(session_id)):
             problems.append("the Session's tool results lack the two check outputs in order")
@@ -444,7 +499,14 @@ def run(args: argparse.Namespace) -> tuple[dict, bool]:
     if versions != [PROMPT_VERSION]:
         problems.append(f"the runtime's checkpoints used prompt version(s) {versions}, the checkout has {PROMPT_VERSION}")
     parsed = parse_answer(answer) if not problems else None
+    leaks = [
+        {"source": f"checkpoint {index}", "line": line}
+        for index, checkpoint in enumerate(written, 1)
+        for line in checkpoint_leaks(checkpoint)
+    ] + [{"source": "probe answer", "line": line} for line in (answer_leaks(parsed) if parsed is not None else ())]
     scores = {fact.name: parsed is not None and fact.found(parsed) for fact in FACTS} if not problems else None
+    if scores is not None:
+        scores[LEAK] = parsed is not None and not leaks
     result = {
         "valid": not problems,
         "invalid_reasons": problems,
@@ -475,6 +537,7 @@ def run(args: argparse.Namespace) -> tuple[dict, bool]:
         "answer_parsed": parsed is not None if not problems else None,
         "score": f"{sum(scores.values())}/{len(scores)}" if scores is not None else None,
         "facts": scores,
+        "leaks": leaks,
         "answer": answer,
         "turns": transcript,
     }

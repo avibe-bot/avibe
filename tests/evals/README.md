@@ -29,6 +29,15 @@ Plan: `docs/plans/avibe-agent-core.md` §6, A12. Script: `a12_compaction_quality
   - the last error as the whole line;
   - the next step with its action and boundary (add a test in `tests/test_burst.py` for a burst of exactly 5), not
     only the file.
+- An eleventh fact checks that the checkpoint request stays out of the user's record. The request comes from the
+  harness, not the user (`context.md` §11, `checkpoint-v4`). The fact reads the text of every checkpoint written
+  before the probe, as stored in its row, and the probe's rules and next step. It fails on any of these:
+  - a no-tools instruction anywhere;
+  - the checkpoint itself (not an earlier one) credited to the user;
+  - the checkpoint listed under the goals, the user requirements, or the next steps.
+
+  The JSON lists every such line under `leaks`. A checkpoint the probe triggers is not read: it may rightly record
+  the probe's own "do not read any file or run any command".
 
 **Valid runs only.** A run is scored only if ground truth (the database rows and the fixture on disk) shows that it
 happened as scripted:
@@ -99,6 +108,11 @@ The run makes about ten Turns, plus their checkpoint turns, on the small window.
 - The last error is compared ignoring case and wrapping quotes or backticks. The recorded answer is exact.
 - `--vibe` is split on whitespace, so a path with spaces needs a link without them. The documented run uses the
   default.
+- The leak fact finds the request's marks by keyword. Before the probe, the fixture's user mentions neither
+  checkpoints nor tools, so here such a line is the request's. A checkpoint that writes "this checkpoint" under its
+  next steps fails it.
+- Heading lines only set the section and are not read for leaks, so "## Next steps: write the checkpoint" would pass.
+  The recorded runs' headings contain neither word.
 - The model is recorded as requested, not as served. If Model Hub fails over to another hop during a run, the row
   would name the requested model. The recorded runs were served by it throughout (every checkpoint's and response's
   origin); check the origins in the Session before recording a row.

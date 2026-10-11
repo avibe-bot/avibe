@@ -103,13 +103,15 @@ async def test_a_threshold_checkpoint_carries_the_lookup_and_the_state_and_shows
 
 async def test_an_8k_route_compacts_instead_of_exhausting(engine, session, tmp_path):
     # T stays positive on every window (the margin is at most W / 8): on an 8,000-token route with no output maximum,
-    # O = 2,000 and M = 1,000, so T = 5,000. Three small Turns cross it once, and a normal checkpoint makes room.
+    # O = 2,000 and M = 1,000, so T = 5,000. Three small Turns cross it once, and a normal checkpoint makes room. The
+    # whole context plus the checkpoint request (about 825 tokens) plus O must fit the window, so the Turns are sized
+    # for the third to cross T by less than the room the request leaves.
     replies = ("one", "two", CHECKPOINT, "three")  # the third Turn's request is the checkpoint request first
     scripts = [[Done(assistant(reply))] for reply in replies]
     harness = _Harness(engine, tmp_path, "avibe", scripts)
     harness.controller.hub_limits = {"context_window": 8_000, "max_output_tokens": None}
     for _ in range(3):
-        await _turn(harness, tokens(1_000))
+        await _turn(harness, tokens(950))
     compactions = [row for row in await harness.context_rows() if row.kind == "compaction"]
     assert [row.payload["mode"] for row in compactions] == ["normal"]
     assert _texts(harness, "result") == ["one", "two", "three"] and not harness.rows("notify")
