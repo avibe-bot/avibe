@@ -1185,23 +1185,27 @@ class SessionHandler(BaseHandler):
             return None
         matcher = "|".join(session_only_background_tool_names())
 
-        async def guard(
-            input_data: Dict[str, Any],
-            tool_use_id: Optional[str],
-            context: Any,
-        ) -> Dict[str, Any]:
-            return await self._guard_session_only_background_tools(
-                input_data,
-                tool_use_id,
-                context,
-                caller_session_id=caller_session_id,
-            )
+        hook = self._guard_session_only_background_tools
+        if caller_session_id:
+            async def guard(
+                input_data: Dict[str, Any],
+                tool_use_id: Optional[str],
+                context: Any,
+            ) -> Dict[str, Any]:
+                return await self._guard_session_only_background_tools(
+                    input_data,
+                    tool_use_id,
+                    context,
+                    caller_session_id=caller_session_id,
+                )
+
+            hook = guard
 
         return {
             "PreToolUse": [
                 HookMatcher(
                     matcher=matcher,
-                    hooks=[guard],
+                    hooks=[hook],
                 )
             ]
         }
