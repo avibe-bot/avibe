@@ -189,8 +189,12 @@ async def test_a_command_keeps_powershell_script_semantics(run, command, output)
         ("begin { cmd /c exit 6 }", 6),
         # A function that writes an error and returns has succeeded, as $? says (C-7 tools.md section 5).
         ("function Get-Twice { cmd /c exit 23; Get-Item C:\\does-not-exist }\nGet-Twice", 0),
+        # A compound statement is one statement, and it set $LASTEXITCODE.
+        ("if ($true) { cmd /c exit 23; Get-Item C:\\does-not-exist }", 23),
+        # Blocks may be written in any order; they run begin, process, end.
+        ("end { cmd /c exit 4 }\nbegin { Write-Output begin }", 4),
     ],
-    ids=["end", "process-only", "begin-only", "a-function-returns"],
+    ids=["end", "process-only", "begin-only", "a-function-returns", "a-compound-statement", "blocks-out-of-order"],
 )
 async def test_the_exit_code_follows_the_statement_that_runs_last(run, command, code):
     error, text = await run(command)
@@ -230,6 +234,14 @@ async def test_a_command_may_turn_strict_mode_on(run, command, is_error, ending)
     error, text = await run(command)
 
     assert (error, text.rstrip().splitlines()[-1]) == (is_error, ending)
+
+
+@ON_WINDOWS
+async def test_the_command_sees_lastexitcode_as_powershell_sets_it(run):
+    """Watching which statement set ``$LASTEXITCODE`` leaves its value, and its type, as they are."""
+    error, text = await run("cmd /c exit 7\n$LASTEXITCODE.GetType().Name; $LASTEXITCODE")
+
+    assert (error, text.split()) == (False, ["Int32", "7"])
 
 
 @ON_WINDOWS

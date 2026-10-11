@@ -25,11 +25,13 @@ COMMAND_FILE = "command.ps1"
 # which the command line would have to escape. The command runs whole, as one script block, so PowerShell's own
 # semantics hold. Only the statement that runs last (the last of the clean block, which PowerShell 7.3 and
 # later run after the others, else of the end, process, or begin block) is wrapped, by its place in the text and on the lines it already has, so the lines PowerShell reports
-# are the command's own: its status is taken right after it, and, right after the statement that runs before
-# it, ``$LASTEXITCODE`` is kept as a long of the same value. A native program sets it as an int, so the exit
-# code is one the last statement set, never a code an earlier one left there. ``$LASTEXITCODE`` does not exist
-# until something sets it, so the wrapping reads it through ``Get-Variable``, which strict mode allows. The loop
-# around the script block is where a ``break`` or ``continue`` outside any loop ends it.
+# are the command's own: its status is taken right after it, and the value ``$LASTEXITCODE`` holds is noted
+# right after the statement that runs before it. A native program stores a new value even when the code is the
+# same, so the exit code is one the last statement set, never a code an earlier one left there, and the
+# command sees ``$LASTEXITCODE`` exactly as PowerShell sets it. It does not exist until something sets it, so
+# the wrapping reads it through ``Get-Variable``, which strict mode allows. The edits go in from the end of the
+# text, since blocks may be written in any order. The loop around the script block is where a ``break`` or
+# ``continue`` outside any loop ends it.
 _BOOTSTRAP = """\
 $ProgressPreference = 'SilentlyContinue'
 if ($PSStyle) { $PSStyle.OutputRendering = 'PlainText' }
@@ -48,17 +50,25 @@ $__avibe_error.Extent.StartColumnNumber) + [Environment]::NewLine + $__avibe_err
     exit 1
 }
 $__avibe_status = $true
+$__avibe_set = $false
+$__avibe_code = $null
+$__avibe_before = $null
 $__avibe_run = @(foreach ($__avibe_block in $__avibe_ast.BeginBlock, $__avibe_ast.ProcessBlock, \
 $__avibe_ast.EndBlock, $__avibe_ast.CleanBlock) { if ($__avibe_block) { $__avibe_block.Statements } })
+$__avibe_edits = @()
 if ($__avibe_run.Count) {
-    $__avibe_script = $__avibe_script.Insert($__avibe_run[-1].Extent.EndOffset, \
-'; $__avibe_status = $?; $__avibe_code = Get-Variable LASTEXITCODE -Scope Global -ValueOnly -ErrorAction Ignore; \
-$__avibe_set = $__avibe_code -is [int]')
+    $__avibe_edits += , @($__avibe_run[-1].Extent.EndOffset, '; $__avibe_status = $?; \
+$__avibe_var = Get-Variable LASTEXITCODE -Scope Global -ErrorAction Ignore; if ($__avibe_var) { \
+$__avibe_code = $__avibe_var.Value; \
+$__avibe_set = $__avibe_code -is [int] -and -not [object]::ReferenceEquals($__avibe_code, $__avibe_before) }')
 }
 if ($__avibe_run.Count -gt 1) {
-    $__avibe_script = $__avibe_script.Insert($__avibe_run[-2].Extent.EndOffset, \
-'; if ((Get-Variable LASTEXITCODE -Scope Global -ValueOnly -ErrorAction Ignore) -is [int]) { \
-$global:LASTEXITCODE = [long]$global:LASTEXITCODE }')
+    $__avibe_edits += , @($__avibe_run[-2].Extent.EndOffset, '; \
+$__avibe_var = Get-Variable LASTEXITCODE -Scope Global -ErrorAction Ignore; \
+if ($__avibe_var) { $__avibe_before = $__avibe_var.Value }')
+}
+foreach ($__avibe_edit in $__avibe_edits | Sort-Object { $_[0] } -Descending) {
+    $__avibe_script = $__avibe_script.Insert($__avibe_edit[0], $__avibe_edit[1])
 }
 try {
     foreach ($__avibe_once in 1) { . ([ScriptBlock]::Create($__avibe_script)) | Out-Default }
@@ -125,9 +135,10 @@ def read_line_advice(path: str, line: int, max_bytes: int) -> str:
     """How to read one line too long for ``read``, as a command that is safe to run whatever the path holds."""
     if WINDOWS:
         quoted = "'" + path.replace("'", "''") + "'"
-        # What sed and head -c print: the line as UTF-8, at most max_bytes of it, cut at a character boundary.
+        # What sed and head -c print: the line as UTF-8, at most max_bytes of it, cut at a character boundary,
+        # streaming the lines before it.
         return (
-            f"Use powershell: @(Get-Content -LiteralPath {quoted} -TotalCount {line} -Encoding UTF8)[-1] | "
+            f"Use powershell: Get-Content -LiteralPath {quoted} -TotalCount {line} -Encoding UTF8 | Select-Object -Last 1 | "
             f"ForEach-Object {{ $b = [Text.Encoding]::UTF8.GetBytes($_); $n = [Math]::Min($b.Length, {max_bytes}); "
             "while ($n -lt $b.Length -and ($b[$n] -band 0xC0) -eq 0x80) { $n-- }; "
             "[Console]::Out.Write([Text.Encoding]::UTF8.GetString($b, 0, $n)) }"

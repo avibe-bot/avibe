@@ -96,7 +96,7 @@ async def test_an_over_long_first_line_points_at_the_shell_with_the_file_read_op
     text = result_text(result)
 
     advice = (
-        f"Use powershell: @(Get-Content -LiteralPath '{target}' -TotalCount 2 -Encoding UTF8)[-1] | "
+        f"Use powershell: Get-Content -LiteralPath '{target}' -TotalCount 2 -Encoding UTF8 | Select-Object -Last 1 | "
         "ForEach-Object { $b = [Text.Encoding]::UTF8.GetBytes($_); $n = [Math]::Min($b.Length, 51200); "
         "while ($n -lt $b.Length -and ($b[$n] -band 0xC0) -eq 0x80) { $n-- }; "
         "[Console]::Out.Write([Text.Encoding]::UTF8.GetString($b, 0, $n)) }"
