@@ -1739,6 +1739,7 @@ def test_dependencies_status_node_unsupported_not_ready(monkeypatch):
 
 
 def test_reconcile_startup_dependencies_reports_runtime_install_failure_without_node(monkeypatch):
+    monkeypatch.setenv("VIBE_RIPGREP_OFFLINE", "1")
     monkeypatch.setattr(api, "ensure_askill_installed", lambda force=False: {"ok": True, "installed": True})
     monkeypatch.setattr(api, "ensure_avault_installed", lambda force=False: {"ok": True, "installed": True})
     monkeypatch.setattr(
@@ -2300,6 +2301,7 @@ def test_dependencies_status_keeps_node_ready_for_explicit_runtime_config_failur
 def test_reconcile_startup_dependencies_uses_automatic_runtime_admission(monkeypatch):
     """MH-RUNTIME-008: startup converges CPA without changing run intent."""
 
+    monkeypatch.setenv("VIBE_RIPGREP_OFFLINE", "1")
     askill_calls = []
     avault_calls = []
     model_hub_calls = []

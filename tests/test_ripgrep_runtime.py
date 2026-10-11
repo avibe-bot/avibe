@@ -17,8 +17,8 @@ from core.ripgrep_runtime import RipgrepRuntimeManager, prepend_managed_ripgrep_
 UPSTREAM = "https://github.com/BurntSushi/ripgrep/releases/download"
 
 
-def install_test_ripgrep(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, tamper: str | None = None) -> dict:
-    """Install a stand-in ``rg`` through a test manifest the default manager also reads."""
+def pin_test_ripgrep(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, tamper: str | None = None) -> None:
+    """Pin a stand-in ``rg`` archive in a test manifest the default manager also reads."""
 
     stem = "ripgrep-15.2.0-test"
     binary = tmp_path / "archive-root" / stem / "rg"
@@ -53,6 +53,12 @@ def install_test_ripgrep(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, tam
     )
     # The runtime installs under the test's own AVIBE_HOME (conftest).
     monkeypatch.setenv("VIBE_RIPGREP_MANIFEST_PATH", str(manifest))
+
+
+def install_test_ripgrep(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, tamper: str | None = None) -> dict:
+    """Install a stand-in ``rg`` through a test manifest the default manager also reads."""
+
+    pin_test_ripgrep(tmp_path, monkeypatch, tamper=tamper)
     return RipgrepRuntimeManager().ensure()
 
 
@@ -140,3 +146,41 @@ def test_agent_path_is_unchanged_without_a_verified_managed_rg(
 
     assert prepend_managed_ripgrep_to_path(env, base_env={}) is False
     assert env == {"PATH": str(without_rg)}
+
+
+@pytest.mark.parametrize("tamper", (None, "sha256"))
+def test_startup_reconcile_installs_ripgrep_without_failing_startup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tamper: str | None
+) -> None:
+    """The desktop Runtime never runs `vibe runtime prepare`; service startup must install rg instead."""
+
+    import core.show_runtime as show_runtime
+    from vibe import api
+
+    for ensure in ("ensure_askill_installed", "ensure_avault_installed", "ensure_model_hub_engine_installed"):
+        monkeypatch.setattr(api, ensure, lambda force=False: {"ok": True, "installed": True})
+
+    class _ReadyShowRuntime:
+        def status(self, *, offline=False):
+            return {"node_available": True, "node_supported": True, "node_version": "22.12.0"}
+
+        def prepare(self, *, force=False, automatic=False):
+            return {"policy": {"state": "allowed"}, "install": {"state": "installed"}}
+
+    monkeypatch.setattr(show_runtime, "get_show_runtime_manager", lambda: _ReadyShowRuntime())
+    monkeypatch.setenv("VIBE_INSTALL_SKIP_TMUX", "1")
+    pin_test_ripgrep(tmp_path, monkeypatch, tamper=tamper)
+    assert RipgrepRuntimeManager().resolve_binary() is None
+
+    out = api.reconcile_startup_dependencies()
+
+    resolved = RipgrepRuntimeManager().resolve_binary()
+    if tamper is None:
+        assert out["ripgrep"]["ok"] is True
+        assert resolved is not None and resolved == Path(out["ripgrep"]["path"])
+    else:
+        assert out["ripgrep"]["ok"] is False
+        assert out["ripgrep"]["reason"] == "ripgrep_archive_checksum_mismatch"
+        assert resolved is None
+    # A missing ripgrep only changes Vibey's prompt line, so it never fails startup.
+    assert out["ok"] is True
