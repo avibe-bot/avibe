@@ -51,7 +51,10 @@ Raw text, no line numbers, head kept. Model-facing suffixes:
   with no newline added, streaming the lines before it. The path is in single quotes with each `'` doubled:
   `Get-Content -LiteralPath {quoted_path} -TotalCount {n} -Encoding UTF8 | Select-Object -Last 1 | ForEach-Object {
   $b = [Text.Encoding]::UTF8.GetBytes($_); $n = [Math]::Min($b.Length, 51200); while ($n -lt $b.Length -and ($b[$n]
-  -band 0xC0) -eq 0x80) { $n-- }; [Console]::Out.Write([Text.Encoding]::UTF8.GetString($b, 0, $n)) }`
+  -band 0xC0) -eq 0x80) { $n-- }; [Console]::Out.Write([Text.Encoding]::UTF8.GetString($b, 0, $n)) }`.
+  Known limit: `Get-Content` ends a line at a bare `\r` as well, where `read` ends one only at `\n`, so in a file
+  with bare carriage returns the command can count lines differently and show part of the line. PowerShell 7
+  ignores `-Delimiter "`n"` for that, and a byte-scanning reader would not be a one-line command.
 - Error: `Offset {offset} is beyond end of file ({total} lines total)`
 
 Images are attached as `ImageBlock`s (C-1); for a model without image input the result says so and omits the image.
@@ -243,14 +246,15 @@ names `powershell` there, and "for example sed or a short script" becomes "for e
   32,767 characters), and a fixed bootstrap runs it through `-NoProfile -NonInteractive -Command`
   (`-EncodedCommand` makes Windows PowerShell write errors as CLIXML). It turns off progress records and color, and
   makes the output UTF-8: PowerShell's own, and the console code page that native programs inherit;
-  `PYTHONUTF8=1` is set unless the environment sets it.
+  `PYTHONIOENCODING=utf-8` is set unless the environment sets it, so Python's standard streams are UTF-8 while
+  the files it opens keep the system's encoding.
 - A command that does not parse fails with exit code 1 and the parser's messages before anything runs. Otherwise
   it runs whole, as one script block, so PowerShell's own semantics hold (`return`, classes, named blocks, traps,
   `using`). Only the statement that runs last is wrapped, to record how it ended; a `return`, `break`, or
   `continue` at the top level ends the command.
 - The exit code follows PowerShell's `$?` for the last statement of the last block that runs (`clean`, which
   PowerShell 7.3 and later run after the others, and not at all in a script with no other block; else `end`, else
-  `process`, else `begin`): the command's own `exit N`; else 0 when that statement succeeded, or the command ended
+  `process`, else `begin`, else `dynamicparam`): the command's own `exit N`; else 0 when that statement succeeded, or the command ended
   before it; else the `$LASTEXITCODE` that statement set, when it is not 0, so a failed native program reports its
   code; else 1. A code an earlier statement left in `$LASTEXITCODE` is not the last statement's, and a function
   that writes an error and returns has succeeded, as `$?` says.
@@ -258,7 +262,7 @@ names `powershell` there, and "for example sed or a short script" becomes "for e
   A compound last statement (an `if`, a loop, a `try`) is one statement: when a native program in it fails and a
   cmdlet after it fails too, the code is the native program's, which that statement set.
 - Errors are reported at the command's own lines: the wrapping adds no line. Only an error in a last statement that
-  shares its line with the statement before it is reported at a later column. The wrapping reads nothing that
+  shares its line with the statement before it, or with its block's opening brace, is reported at a later column. The wrapping reads nothing that
   `Set-StrictMode` forbids, so a command may turn strict mode on.
 - Known limit, as with `powershell -Command`: an `exit` ends the process before PowerShell formats objects that are
   still waiting to be laid out as a table, so `Get-ChildItem | Select-Object Name; exit 2` can print nothing.
