@@ -373,7 +373,16 @@ class ManagedRuntimeManager:
                         manifest=manifest,
                         archive=archive,
                     )
-                if not self._binary_matches_manifest(staged_binary, manifest):
+                replace_target = install_dir.exists() and (
+                    (force and self.spec.replace_target_on_force)
+                    or (canonical_target_was_rejected and self.spec.replace_invalid_target_on_repair)
+                )
+                # Run the binary where it stays: Windows may hold a file it just
+                # executed (Defender, the Arm64 x64-emulation cache) for a moment,
+                # and a directory holding one cannot be renamed. A target replaced
+                # in place is removed first, so that binary is checked here, while
+                # the install it replaces is still there to keep.
+                if replace_target and not self._binary_matches_manifest(staged_binary, manifest):
                     return self._failure(
                         self._reason("binary_not_runnable"),
                         manifest=manifest,
@@ -382,12 +391,6 @@ class ManagedRuntimeManager:
 
                 install_dir.parent.mkdir(parents=True, exist_ok=True)
                 if install_dir.exists():
-                    replace_target = (
-                        force and self.spec.replace_target_on_force
-                    ) or (
-                        canonical_target_was_rejected
-                        and self.spec.replace_invalid_target_on_repair
-                    )
                     if replace_target:
                         if not self._remove_install_target_for_replacement(install_dir):
                             return self._failure(
@@ -404,6 +407,12 @@ class ManagedRuntimeManager:
                 shutil.move(str(staging_dir), str(install_dir))
                 candidate_install_dir = install_dir
                 installed_binary = (install_dir / archive.bin_path).resolve(strict=True)
+                if not replace_target and not self._binary_matches_manifest(installed_binary, manifest):
+                    return self._failure(
+                        self._reason("binary_not_runnable"),
+                        manifest=manifest,
+                        archive=archive,
+                    )
                 self._write_manifest_install_metadata(
                     install_dir,
                     manifest,

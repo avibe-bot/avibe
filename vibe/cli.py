@@ -14138,6 +14138,7 @@ def _stop_expected_desktop_runtime(runtime_id: str) -> int:
     if result.outcome is runtime.DesktopRuntimeStopOutcome.NOT_OURS:
         _print_stop_json({"reason": result.refusal})
         return 3
+    runtime.desktop_service_lock_presence(while_absent=_stop_model_hub_engine)
     if result.opencode_stopped:
         _report_opencode_stopped()
     # Unlike a full stop, an OpenCode server of this Runtime that survives
@@ -14216,6 +14217,30 @@ def _stop_jobs() -> None:
         logger.warning("Could not stop the commands jobs run", exc_info=True)
 
 
+def _stop_model_hub_engine() -> None:
+    """End a Model Hub engine its service left running.
+
+    A service stops its own engine, but a stop that ends the service outright --
+    always on Windows, where it is TerminateProcess -- leaves the engine running
+    and holding its port until the next start reaps it. The supervisor's stop
+    reaps by the record and identity marker that service left, so it ends
+    exactly that engine. Called only while holding the free service lock; a
+    failure is logged and left to the next start.
+    """
+
+    try:
+        from vibe.model_hub_runtime.supervisor import get_engine_supervisor
+
+        get_engine_supervisor().stop()
+    except Exception:
+        logger.warning("Could not stop a Model Hub engine its service left running", exc_info=True)
+
+
+def _stop_what_the_service_left() -> None:
+    _stop_jobs()
+    _stop_model_hub_engine()
+
+
 def cmd_stop(*, expect_runtime_id: str | None = None):
     from vibe.desktop_runtime import desktop_caller_provenance
 
@@ -14239,7 +14264,7 @@ def cmd_stop(*, expect_runtime_id: str | None = None):
         return 3
     # Holding the free service lock: neither a service that failed to stop nor one
     # started since owns these commands while they are stopped.
-    runtime.desktop_service_lock_presence(while_absent=_stop_jobs)
+    runtime.desktop_service_lock_presence(while_absent=_stop_what_the_service_left)
     from vibe.desktop_backends import reap_abandoned_desktop_backend_installs
 
     # Each tree's owner decides whether it is abandoned, so the reap runs
