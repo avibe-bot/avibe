@@ -222,7 +222,7 @@ def pytest_runtest_teardown(item):
 
 
 @pytest.fixture
-def reap_helper_spawns(tmp_path, tmp_path_factory):
+def reap_helper_spawns(request, tmp_path, tmp_path_factory):
     """Reap what the test's helper interpreters spawned, by identity, and fail the test for each one left.
 
     A helper started with ``process_reaper.record_spawns`` appends each spawn to
@@ -245,7 +245,9 @@ def reap_helper_spawns(tmp_path, tmp_path_factory):
     yield
     __tracebackhide__ = True
     try:
-        reaped, orphans = process_reaper.end_helper_spawns(record, tmp_path)
+        reaped, orphans = process_reaper.end_helper_spawns(
+            record, tmp_path, request.node.stash.get(_TEST_PROCESSES, None)
+        )
     finally:
         _process_warden.forget_spawns()
     problems = []

@@ -86,8 +86,10 @@ def test_an_unmarked_run_starts_no_warden():
 
 
 # A helper interpreter, as a cross-process child is: it spawns a detached
-# connector and exits, so the connector reparents to init. With `record` it
-# records the spawn first, as the remote-access helpers do.
+# connector and exits, so the connector reparents to init. Unless the mode is
+# `skip` it records itself and the spawn first, as the remote-access helpers do;
+# `late` spawns a second after the test has returned, and `group` spawns a shell
+# that leaves a background member in its group when it exits.
 DETACHING = '''
 import os
 import signal
@@ -95,49 +97,60 @@ import subprocess
 import sys
 from pathlib import Path
 
-import psutil
 import pytest
 
 from tests import process_reaper
 
-RECORD = Path(os.environ["REAPER_PROBE_RECORD"])
-pytestmark = pytest.mark.usefixtures("reap_helper_spawns")
+pytestmark = [pytest.mark.reap_processes, pytest.mark.usefixtures("reap_helper_spawns")]
 
 HELPER = (
-    "import subprocess, sys\\n"
+    "import os, subprocess, sys, time\\n"
     "from pathlib import Path\\n"
-    "if sys.argv[2] == 'record':\\n"
+    "import psutil\\n"
+    "mode, connector, record = sys.argv[1:4]\\n"
+    "if mode != 'skip':\\n"
     "    from tests import process_reaper\\n"
-    "    process_reaper.record_spawns(Path(sys.argv[3]))\\n"
-    "print(subprocess.Popen([sys.argv[1]], start_new_session=True, stdin=subprocess.DEVNULL,"
-    " stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).pid)\\n"
+    "    process_reaper.record_spawns(Path(record))\\n"
+    "if mode == 'late':\\n"
+    "    time.sleep(1)\\n"
+    "args = ['/bin/sh', '-c', 'sleep 600 & sleep 0.5'] if mode == 'group' else [connector]\\n"
+    "spawn = subprocess.Popen(args, start_new_session=True, stdin=subprocess.DEVNULL,"
+    " stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\\n"
+    "created = psutil.Process(spawn.pid).create_time()\\n"
+    "Path(os.environ['REAPER_PROBE_RECORD']).write_text(f'{spawn.pid} {created!r}\\\\n')\\n"
 )
 
 
-def _detach_a_connector(tmp_path, mode):
+def _run_helper(tmp_path, mode):
     connector = tmp_path / "bin" / "cloudflared"
     connector.parent.mkdir()
     connector.write_text("#!/bin/sh\\nwhile :; do sleep 0.2; done\\n")
     connector.chmod(0o755)
     record = process_reaper.helper_spawn_record(tmp_path)
-    helper = subprocess.run(
-        [sys.executable, "-c", HELPER, str(connector), mode, str(record)], capture_output=True, text=True, check=True
-    )
-    pid = int(helper.stdout)
-    RECORD.write_text(f"{pid} {psutil.Process(pid).create_time()!r}\\n")
+    helper = subprocess.Popen([sys.executable, "-c", HELPER, mode, str(connector), str(record)])
+    if mode != "late":
+        assert helper.wait() == 0
 
 
 def test_a_recorded_spawn(tmp_path):
-    _detach_a_connector(tmp_path, "record")
+    _run_helper(tmp_path, "record")
 
 
 def test_an_unrecorded_orphan(tmp_path):
-    _detach_a_connector(tmp_path, "skip")
+    _run_helper(tmp_path, "skip")
+
+
+def test_a_spawn_recorded_after_the_test_returned(tmp_path):
+    _run_helper(tmp_path, "late")
+
+
+def test_a_group_member_left_by_a_recorded_leader(tmp_path):
+    _run_helper(tmp_path, "group")
 
 
 @pytest.mark.allow_foreign_signals(reason="the run kills itself, as the CI watchdog does")
 def test_a_killed_run_after_a_recorded_spawn(tmp_path):
-    _detach_a_connector(tmp_path, "record")
+    _run_helper(tmp_path, "record")
     os.kill(os.getpid(), signal.SIGKILL)
 '''
 
@@ -193,6 +206,13 @@ def test_a_run_without_a_marked_test_has_no_warden(tmp_path):
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+def _group_of(pid: int) -> int | None:
+    try:
+        return os.getpgid(pid)
+    except OSError:
+        return None
+
+
 def _reported(output: str, after: str) -> str:
     return output.split(after)[1].splitlines()[0]
 
@@ -217,6 +237,26 @@ async def test_a_recorded_spawn_ends_with_a_killed_run(tmp_path):
     assert result.returncode == -9, result.stdout + result.stderr
     # The warden acts once it sees the run gone, after this pytest saw it exit.
     await hang_guard.until(lambda: _running(record) == [], "the warden to reap the recorded spawn")
+
+
+def test_a_spawn_a_helper_records_during_teardown_is_reaped(tmp_path):
+    result, record = _run_inner(tmp_path, "recorded_after_the_test_returned", DETACHING)
+
+    output = result.stdout + result.stderr
+    assert result.returncode == 1, output
+    pid = record.read_text().split()[0]
+    assert f"were still running and were killed: {pid} (" in output, output
+    assert _running(record) == []
+
+
+def test_a_group_member_a_recorded_leader_left_is_killed_and_fails_its_test(tmp_path):
+    result, record = _run_inner(tmp_path, "group_member_left", DETACHING)
+
+    output = result.stdout + result.stderr
+    assert result.returncode == 1, output
+    assert "(sleep)" in _reported(output, "were still running and were killed: "), output
+    leader = int(record.read_text().split()[0])
+    assert [process.pid for process in psutil.process_iter() if _group_of(process.pid) == leader] == []
 
 
 @pytest.mark.allow_foreign_signals(reason="ends the orphan the inner run deliberately left unrecorded")
