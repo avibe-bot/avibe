@@ -67,6 +67,12 @@ creates parent directories.`
 
 Result: `Successfully wrote to {path}`. Writes are serialized per canonical path with `edit`.
 
+A write is all or nothing (Avibe): the content is written beside the target and then replaces it, so a failure leaves
+the file, or its absence, as it was. `edit` publishes the same way. On POSIX the replacement takes the replaced file's
+mode; its owner, ACL, extended attributes, and hard links are not carried over. On Windows an existing file is replaced
+with `ReplaceFileW`, which keeps its DACL, encryption, compression, named streams (the Mark of the Web among them), and
+creation time; a file whose ACL denies writing it is refused, as a read-only one is.
+
 ## 4. `edit`
 
 Description: `Edit a single file using exact text replacement. Every edits[].oldText must match a unique,
