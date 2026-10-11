@@ -16,6 +16,7 @@ from typing import Any, Mapping, Optional
 
 from core.agent_core.tools.args import ToolInputError, error_result, str_arg, text_result
 from core.agent_core.tools.base import ToolContext, ToolResult, ToolSpec
+from core.agent_core.tools import windows_files
 from core.agent_core.tools.paths import (
     KIND_REASON,
     NotRegularFile,
@@ -25,6 +26,8 @@ from core.agent_core.tools.paths import (
     target_kind,
     to_thread_joined,
 )
+
+_WINDOWS = os.name == "nt"
 
 WRITE_DESCRIPTION = (
     "Write content to a file. Creates the file if it doesn't exist, overwrites if it does. Automatically creates "
@@ -97,9 +100,15 @@ def _prepare_target(absolute: str) -> Optional[str]:
     if kind != "regular":
         return KIND_REASON[kind]
     # A rename checks the directory, not the file, so a read-only file must be refused here.
-    if not os.access(target, os.W_OK):
+    if not may_write(target):
         return "permission denied"
     return None
+
+
+def may_write(path: str) -> bool:
+    """Whether this user may write the existing file ``path``: by its mode on POSIX, and on Windows by its
+    ACL, which ``os.access`` does not consult there (it sees only the read-only bit)."""
+    return windows_files.may_write(path) if _WINDOWS else os.access(path, os.W_OK)
 
 
 def write_text(path: str, content: str) -> None:
@@ -131,18 +140,31 @@ class FileIdentity:
     ctime_ns: int
 
     @classmethod
-    def of(cls, path: str, st: os.stat_result) -> "FileIdentity":
-        return cls(path, st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+    def of(cls, path: str, fd: int) -> "FileIdentity":
+        """The identity of the open file ``fd``, which ``path`` names.
+
+        Windows' ``stat`` does not report a change time on every Python (3.10 and 3.11 give the creation time
+        as ``st_ctime``), so there it is read from the file itself.
+        """
+        st = os.fstat(fd)
+        ctime_ns = windows_files.change_time_ns(fd) if _WINDOWS else st.st_ctime_ns
+        return cls(path, st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, ctime_ns)
+
+    def matches(self, path: str, st: os.stat_result) -> bool:
+        """Whether ``path``, as ``stat`` saw it, is still this file; on Windows it is opened (for its attributes
+        alone) to read its change time."""
+        if not _WINDOWS:
+            return FileIdentity(path, st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns) == self
+        fd = windows_files.open_attributes(path)
+        try:
+            return FileIdentity.of(path, fd) == self
+        finally:
+            os.close(fd)
 
 
-def _require(expected: Optional[FileIdentity], path: str, st: os.stat_result) -> None:
-    if expected is not None and FileIdentity.of(path, st) != expected:
-        raise FileChanged()
-
-
-def _check_publishable(path: str, target: str, expected: Optional[FileIdentity]) -> None:
-    """Right before the rename: ``path`` still names ``target``, which is absent or a writable regular file
-    (for a read-modify-write, the one that was read)."""
+def _check_publishable(path: str, target: str, expected: Optional[FileIdentity]) -> Optional[os.stat_result]:
+    """Right before publication: ``path`` still names ``target``, which is absent or a writable regular file
+    (for a read-modify-write, the one that was read). Returns its ``stat``, ``None`` when it is absent."""
     current = os.path.realpath(path)
     if current != target:
         raise FileChanged()
@@ -151,27 +173,35 @@ def _check_publishable(path: str, target: str, expected: Optional[FileIdentity])
     except FileNotFoundError:
         if expected is not None:
             raise FileChanged() from None
-        return
+        return None
     if not stat.S_ISREG(st.st_mode):
         raise NotRegularFile("directory" if stat.S_ISDIR(st.st_mode) else "other")
-    if not os.access(current, os.W_OK):
+    if not may_write(current):
         raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), current)
-    _require(expected, current, st)
+    if expected is not None and not expected.matches(current, st):
+        raise FileChanged()
+    return st
 
 
 def write_bytes(path: str, data: bytes, expected: Optional[FileIdentity] = None) -> None:
-    """Create or replace ``path`` only once ``data`` is completely on disk.
+    """Create or replace ``path`` only once ``data`` is completely on disk (C-7 tools.md section 3).
 
-    A failed write (a full disk, a quota) leaves the original, or its absence, as it was. The temp
-    file sits beside the real target (through symlinks). Replacing a file, it is private (0600) while
-    it receives the new contents and takes the file's mode once they are fsynced; a new file's temp is
-    created with the umask default it keeps, so the process umask is never read or changed. Then
-    ``os.replace`` puts it in place.
+    The temp file sits beside the real target (through symlinks). Replacing a file, it is private while it
+    receives the new contents (0600, or an owner-only DACL on Windows); a new file's temp is created with the
+    umask default it keeps, so the process umask is never read or changed.
+
+    - A new file is the temp file, renamed into place: a failed write (a full disk, a quota) leaves its
+      absence as it was.
+    - On POSIX an existing file is replaced the same way: the temp file takes its mode once the contents are
+      fsynced, and ``os.replace`` puts it in place, so a failed write leaves the original as it was.
+    - On Windows an existing file is rewritten in place (``_rewrite``), so it stays the same file object; the
+      temp file only shows the volume has room. A crash in the middle of the rewrite can leave it partly
+      written.
 
     An existing file whose directory does not let a temp file be created is refused
-    (``NotReplaceable``) rather than written in place, which a full disk could leave half-written.
+    (``NotReplaceable``) rather than written without the temp file.
 
-    Right before the rename, the path must still name the same target, which must be absent or a
+    Right before publication, the path must still name the same target, which must be absent or a
     writable regular file, as ``write`` first classified it; with ``expected``, it must also be the very
     file that was read. So a file swapped for a FIFO, a directory, or a read-only file, or a path
     retargeted to another file, is never written behind the result's back. POSIX has no
@@ -185,7 +215,11 @@ def write_bytes(path: str, data: bytes, expected: Optional[FileIdentity] = None)
     # Short and not derived from the target's name, which may already be at NAME_MAX.
     tmp = os.path.join(os.path.dirname(target), f".avibe-{secrets.token_hex(6)}.tmp")
     try:
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600 if mode is not None else 0o666)
+        if _WINDOWS and mode is not None:
+            fd = windows_files.create_private(tmp)
+        else:
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+            fd = os.open(tmp, flags, 0o600 if mode is not None else 0o666)
     except PermissionError:
         if mode is None:
             raise
@@ -195,11 +229,42 @@ def write_bytes(path: str, data: bytes, expected: Optional[FileIdentity] = None)
             handle.write(data)
             handle.flush()
             os.fsync(handle.fileno())
-            if mode is not None:
+            if mode is not None and not _WINDOWS:
                 os.fchmod(handle.fileno(), mode)
-        _check_publishable(path, target, expected)
-        os.replace(tmp, target)
+        current = _check_publishable(path, target, expected)
+        if _WINDOWS and current is not None:
+            os.unlink(tmp)  # it showed the volume has room
+            _rewrite(path, target, expected, data)
+        elif _WINDOWS and mode is not None:
+            # Gone since it was read: renaming the private temp file into place would publish a file only
+            # this user can read.
+            raise FileChanged()
+        else:
+            os.replace(tmp, target)
     except BaseException:
         with contextlib.suppress(FileNotFoundError):
             os.unlink(tmp)
         raise
+
+
+def _rewrite(path: str, target: str, expected: Optional[FileIdentity], data: bytes) -> None:
+    """Rewrite the existing Windows file ``target`` through its own file object: from the start, then cut to length.
+
+    The open does not follow a link, and no other program can write, rename, or delete the file while it is
+    held. With it held, the publication checks are made again against it, so the write lands only in the file
+    that passed them, whatever the path named between the first check and the open.
+    """
+    fd = windows_files.open_for_rewriting(target)
+    if fd is None:  # the name is a link now
+        raise FileChanged()
+    try:
+        held = FileIdentity.of(target, fd)
+        if (expected is not None and held != expected) or _check_publishable(path, target, held) is None:
+            raise FileChanged()
+        view = memoryview(data)
+        while view:
+            view = view[os.write(fd, view) :]
+        os.ftruncate(fd, len(data))
+        os.fsync(fd)
+    finally:
+        os.close(fd)

@@ -121,8 +121,11 @@ def _relative_to(cwd: str) -> Callable[[str], str]:
         absolute = os.path.abspath(os.path.join(cwd, os.path.expanduser(path)) if cwd else os.path.expanduser(path))
         if not cwd:
             return absolute
-        shown = os.path.relpath(absolute, cwd)
-        return absolute if shown.startswith("../..") else shown
+        try:
+            shown = os.path.relpath(absolute, cwd)
+        except ValueError:  # Windows: another drive has no relative path
+            return absolute
+        return absolute if shown.startswith(os.path.join(os.pardir, os.pardir)) else shown
 
     return relative
 

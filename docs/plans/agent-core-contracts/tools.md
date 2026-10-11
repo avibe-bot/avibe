@@ -67,6 +67,37 @@ creates parent directories.`
 
 Result: `Successfully wrote to {path}`. Writes are serialized per canonical path with `edit`.
 
+How a write lands (Avibe); `edit` publishes the same way. The new content is always written to a temp file beside the
+file first, the owner's alone while it is there (0600 on POSIX, an owner-only DACL on Windows).
+
+- A new file is that temp file, renamed into place, so a failure leaves its absence as it was.
+- On POSIX an existing file is replaced by the temp file, which takes its mode, so a failure (a full disk, a quota)
+  leaves it as it was.
+- On Windows an existing file is rewritten in place, so it stays the same file object: its owner, DACL, audit
+  entries, integrity label, encryption, compression, named streams (the Mark of the Web among them), hard links, and
+  creation time stay as they were. The temp file only shows the volume has room, and is removed. The file is opened
+  without following a link, and no other program can write, rename, or delete it while it is open; one that already
+  has it open that way makes the write fail before a byte changes. With the file held, the checks made before
+  publication (a writable regular file, which the path still names; for `edit`, the file it read) are made again
+  against it, so the write lands only in the file that passed them.
+- A file whose ACL denies writing it is refused, as a read-only one is.
+- `edit` writes only over the file it read: the same file id, size, mtime, and change time (Windows' NTFS change
+  time, which `stat` does not report there on every Python).
+
+Known limits, kept as they are:
+
+- A POSIX replacement is a new file of this user's, as with an editor that saves by renaming. Replacing a
+  group-writable file another account owns makes this user its owner. The mode is carried over, but not ACLs,
+  extended attributes (file capabilities among them), or hard links. POSIX has no compare-and-rename, so a change
+  between the last check and the rename is not seen; a rename replaces a name and never writes through a link.
+- A Windows write to an existing file is an ordinary in-place write, as an editor's save is. It is not all or nothing:
+  a crash, a quota, or a failure of the disk itself in the middle of the rewrite can leave the file partly written.
+  Its growth is charged to the file owner's quota, and the temp file, which shows the volume has room, reserves
+  nothing.
+- A new file is published by renaming its temp file, on both platforms, as before. A directory that lets this user
+  create files but neither rename nor delete them (a Windows drop folder) refuses the rename and the removal alike,
+  so the temp file stays there, with the ACL the new file would have had.
+
 ## 4. `edit`
 
 Description: `Edit a single file using exact text replacement. Every edits[].oldText must match a unique,

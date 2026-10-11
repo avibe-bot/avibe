@@ -74,7 +74,7 @@ def test_ci_uv_installation_is_exact_and_cache_ownership_is_preserved():
     }
     assert set(owners) == {
         "unit-test-shards", "migration-release-guard", "install-upgrade-shards",
-        "show-router-integration", "memory-insight-contract",
+        "show-router-integration", "memory-insight-contract", "windows-agent",
     }
     cache_keys = {}
     for name, job in owners.items():
@@ -102,6 +102,11 @@ def test_ci_uv_installation_is_exact_and_cache_ownership_is_preserved():
         cache_keys[name] = key
         first_consumer = next(step for step in steps if step.get("run", "").startswith("uv "))
         assert steps.index(install) < steps.index(cache) < steps.index(first_consumer)
+        if "windows" in f"{job['runs-on']} {job.get('strategy', {})}":
+            # uv's Windows default is %LOCALAPPDATA%\uv\cache, not the path the cache step keeps.
+            redirect, = [step for step in steps if "UV_CACHE_DIR" in step.get("run", "")]
+            assert "UV_CACHE_DIR=$HOME\\.cache\\uv" in redirect["run"]
+            assert steps.index(redirect) < steps.index(first_consumer)
     assert len({cache_keys[name] for name in owners}) == 1
 
 

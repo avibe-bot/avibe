@@ -225,9 +225,10 @@ def open_regular(path: str, flags: int = os.O_RDONLY) -> int:
 
     ``O_NONBLOCK`` keeps a FIFO swapped in after an earlier check from blocking the open, and the
     kind is taken from the descriptor (``fstat``), so sizes and contents come from the same file.
-    Raises ``NotRegularFile`` or the ``OSError`` of the open.
+    Windows has no FIFO to block on, and needs ``O_BINARY``: a text-mode descriptor would drop CRs
+    and stop reading at the first 0x1A byte. Raises ``NotRegularFile`` or the ``OSError`` of the open.
     """
-    fd = os.open(path, flags | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0))
+    fd = os.open(path, flags | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0) | getattr(os, "O_CLOEXEC", 0))
     try:
         mode = os.fstat(fd).st_mode
         if not stat.S_ISREG(mode):
@@ -276,9 +277,10 @@ async def file_mutation_lock(path: str) -> AsyncIterator[None]:
     """Serialize ``write`` and ``edit`` on one file, keyed by its canonical path.
 
     Different files proceed in parallel. The key follows symlinks, so two names
-    for one file share a lock.
+    for one file share a lock, and so do two spellings of one name on Windows, where names are
+    case-insensitive and a file that does not exist yet keeps the spelling it was named with.
     """
-    key = os.path.realpath(path)
+    key = os.path.normcase(os.path.realpath(path))
     entry = _locks.get(key)
     if entry is None:
         entry = _locks[key] = _PathLock()

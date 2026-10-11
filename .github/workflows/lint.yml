@@ -686,3 +686,77 @@ jobs:
           $env:AVIBE_TEST_RIPGREP_ZIPS = Join-Path $env:RUNNER_TEMP "ripgrep-zips"
           python -c "import json, os, pathlib, urllib.request; target = pathlib.Path(os.environ['AVIBE_TEST_RIPGREP_ZIPS']); target.mkdir(exist_ok=True); archives = json.load(open('vibe/ripgrep_runtime_manifest.json'))['archives']; [urllib.request.urlretrieve(entry['url'], target / entry['name']) for tag, entry in archives.items() if tag.startswith('win32-')]"
           python -m pytest -q -ra tests/test_ripgrep_runtime.py -k "pinned_windows_zip or six_platform or zip_entry"
+
+  # Vibey's tools on real Windows: what the Linux shards cannot show is how
+  # the same Python behaves there (no O_NONBLOCK, no fchmod before 3.13,
+  # text-mode descriptors without O_BINARY, st_ctime that means creation time).
+  # Both runners use x64 Python: no win_arm64 wheel of cryptography exists, so
+  # Avibe runs on Windows on Arm through x64 Python.
+  windows-agent:
+    name: windows-agent (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, windows-11-arm]
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+
+      - name: Prepare minimal UI asset placeholder
+        run: |
+          New-Item -ItemType Directory -Force ui/dist | Out-Null
+          Set-Content -Path ui/dist/index.html -Value '<!doctype html><html><body></body></html>'
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
+        with:
+          python-version: "3.12"
+          architecture: x64
+
+      - name: Install pinned uv
+        run: |
+          python -m pip install --disable-pip-version-check --only-binary=:all: --no-deps uv==0.12.10
+
+      # uv keeps its cache in %LOCALAPPDATA% on Windows; it uses the path this
+      # job saves and restores instead, under its own runner's key.
+      - name: Point uv at the saved cache
+        run: '"UV_CACHE_DIR=$HOME\.cache\uv" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8'
+
+      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25  # v5
+        with:
+          path: ~/.cache/uv
+          key: ${{ runner.os }}-${{ runner.arch }}-ci-uv-0.12.10-py3.12-${{ hashFiles('pyproject.toml', 'uv.lock') }}
+
+      - name: Install package and test deps
+        run: uv pip install --system -e . --group dev
+
+      # A volume without ACLs or named streams, where a replace keeps what it
+      # can: FAT32 on a small virtual disk.
+      - name: Prepare a FAT volume
+        run: |
+          $vhd = Join-Path $env:RUNNER_TEMP "fat.vhdx"
+          $script = Join-Path $env:RUNNER_TEMP "fat.diskpart"
+          @(
+            "create vdisk file=`"$vhd`" maximum=64 type=expandable",
+            "attach vdisk",
+            "create partition primary",
+            "format fs=fat32 quick label=AVIBEFAT",
+            "assign letter=T"
+          ) | Set-Content -Encoding ascii $script
+          diskpart /s $script
+          if ($LASTEXITCODE -ne 0) { throw "diskpart failed: $LASTEXITCODE" }
+          (Get-Volume -DriveLetter T).FileSystem
+          "AVIBE_TEST_FAT_DIR=T:\" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      # The four CPU-time bounds are set for the Linux shards, which run them;
+      # Windows' interpreter is slower, and on Arm it is emulated.
+      - name: Verify the file tools
+        run: >-
+          python -m pytest -q -ra
+          -k "not without_walking_it and not bounded_by_lines and not stays_linear and not nfkc_expansion"
+          tests/agent_core/tools/test_read.py tests/agent_core/tools/test_write_edit.py
+          tests/agent_core/tools/test_file_kinds.py tests/agent_core/tools/test_normalize.py
+          tests/agent_core/tools/test_args.py
+
+      - name: Verify Vibey's tool lines
+        run: python -m pytest -q -ra tests/test_vibey_agent.py -k relative_tool_path
