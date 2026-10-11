@@ -630,10 +630,13 @@ stop's withdrawal, kill, and record removal; the restart's request check,
 spawn, and publish; status()'s removal of an exited connector's records; and
 recovery's candidate spawn, promote, and drain record transitions. The lock
 order is the lifecycle lock, then the recovery lock, then the connector lock.
-User starts and stops wait up to 15 seconds and then report
-`remote_access_busy`; the monitor, the restart, reconciliation, and status()
-only try the lock and skip when it is busy. Waits such as candidate warm-up
-run outside it, and the OS releases it when its holder dies.
+User starts and stops wait up to 20 seconds, longer than a start's own
+worst-case hold, and then report `remote_access_busy`; the monitor, the
+restart, reconciliation, and status() only try the lock and skip when it is
+busy, and a startup orphan-candidate reconciliation that found it busy is
+retried on later ticks. Waits such as candidate warm-up and downloading a
+missing cloudflared run outside it, and the OS releases it when its holder
+dies. A request path that is not a regular file is no request.
 
 So only an explicit `stop()` withdraws the request, and no stop or start in
 any process interleaves with a restart. A tick that attempted a restart skips

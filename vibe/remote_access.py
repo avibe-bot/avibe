@@ -123,8 +123,8 @@ STATUS_REPORT_DRAIN_SECONDS = 1.0
 RECOVERY_READY_TIMEOUT_SECONDS = 30.0
 START_PREFERRED_READY_TIMEOUT_SECONDS = 8.0
 CONNECTOR_RESTART_MAX_DELAY_SECONDS = 120.0
-# Longer than stop_pid's 8 s, so a user stop or start outlasts one in-flight change.
-CONNECTOR_LIFECYCLE_WAIT_SECONDS = 15.0
+# Outlasts a start's worst-case hold: 8 s readiness + 8 s stop_pid + the respawn.
+CONNECTOR_LIFECYCLE_WAIT_SECONDS = 20.0
 RECOVERY_EVALUATION_SECONDS = 45.0
 RECOVERY_DRAIN_SECONDS = 35.0
 QUALITY_COMPARISON_MAX_AGE_SECONDS = 2 * QUALITY_SAMPLE_SECONDS
@@ -3644,7 +3644,8 @@ def _exited_connector_requested(config: V2Config | None) -> bool:
     if config is None or config.remote_access.provider != "vibe_cloud":
         return False
     cloud = config.remote_access.vibe_cloud
-    if not cloud.enabled or not cloud.tunnel_token or not _connector_requested_path().exists():
+    # A path that is not a regular file (one a stop could not remove) is no request.
+    if not cloud.enabled or not cloud.tunnel_token or not _connector_requested_path().is_file():
         return False
     return (
         _cloudflared_pid_state(_read_pid()) in {"dead", "other"}
@@ -3682,6 +3683,7 @@ def _restart_exited_connector(
         return False
     if now < schedule.due_at:
         return False
+    install_failure = _download_missing_cloudflared(config)
     # Lock order is L, then _RECOVERY_LOCK, then _CONNECTOR_LOCK. The lane check
     # above released both before L. Under L no stop or start in any process
     # interleaves, so the request check, spawn, and publish below are one step.
@@ -3693,7 +3695,7 @@ def _restart_exited_connector(
             schedule.delay_seconds = min(2 * schedule.delay_seconds, CONNECTOR_RESTART_MAX_DELAY_SECONDS)
             logger.warning("Tunnel connector exited; restarting it")
             # Only explicit starts record the request and only stop() withdraws it.
-            result = _start(None, record_request=False)
+            result = _start(None, record_request=False, install_failure=install_failure)
     except _ConnectorLifecycleBusy:
         return False  # another lifecycle change is in progress; retry next tick
     if not result.get("ok"):
@@ -3701,7 +3703,12 @@ def _restart_exited_connector(
     return True
 
 
-def _quality_monitor_loop(interval_seconds: float, quality_path: Path) -> None:
+def _quality_monitor_loop(
+    interval_seconds: float,
+    quality_path: Path,
+    *,
+    orphan_candidate_pending: bool = False,
+) -> None:
     global _QUALITY_MONITOR_STARTED, _RECOVERY_MANUAL_BYPASS_USED, _RECOVERY_EMERGENCY_BYPASS_USED
     last_report_at = 0.0
     last_active_pid: int | None = None
@@ -3711,6 +3718,9 @@ def _quality_monitor_loop(interval_seconds: float, quality_path: Path) -> None:
     try:
         while quality_path == _quality_state_path() and quality_path.parent.exists():
             started_at = time.monotonic()
+            if orphan_candidate_pending:
+                # Startup found the lifecycle lock busy; retry until it runs.
+                orphan_candidate_pending = not _reconcile_orphan_candidate_when_free()
             _reconcile_connector_lifecycle()
             active_pid = _read_pid()
             running = _is_cloudflared_pid(active_pid)
@@ -4071,6 +4081,26 @@ def _reconcile_orphan_candidate() -> None:
         _finish_reconciled_recovery("failed")
 
 
+def _reconcile_orphan_candidate_when_free() -> bool:
+    """Run the startup orphan-candidate reconciliation; False to retry on a later tick.
+
+    A candidate is spawned only under the lifecycle lock after recovery reserves
+    the lane, so while this holds the lock with no recovery reserved, any
+    recorded candidate is an orphan.
+    """
+
+    try:
+        with _connector_lifecycle(wait=False):
+            with _RECOVERY_LOCK:
+                recovery_running = _RECOVERY_THREAD is not None
+            if recovery_running:
+                return False
+            _reconcile_orphan_candidate()
+    except _ConnectorLifecycleBusy:
+        return False
+    return True
+
+
 def _normalize_orphaned_recovery_state() -> None:
     recovery = _recovery_payload()
     if recovery.get("state") not in {"evaluating", "draining"}:
@@ -4115,10 +4145,7 @@ def start_tunnel_quality_monitor(interval_seconds: float = QUALITY_SAMPLE_SECOND
                 _RECOVERY_EMERGENCY_BYPASS_USED = bool(persisted.get("emergency_bypass_used"))
             preferred_protocol = persisted.get("preferred_protocol")
             _PREFERRED_PROTOCOL = str(preferred_protocol) if preferred_protocol in {"quic", "http2"} else None
-        try:
-            _reconcile_orphan_candidate()
-        except _ConnectorLifecycleBusy:
-            logger.info("Tunnel connector lifecycle is busy; leaving any orphan candidate for the next start")
+        orphan_candidate_pending = not _reconcile_orphan_candidate_when_free()
         _reconcile_connector_lifecycle()
         _normalize_orphaned_recovery_state()
         quality_path = _quality_state_path()
@@ -4126,6 +4153,7 @@ def start_tunnel_quality_monitor(interval_seconds: float = QUALITY_SAMPLE_SECOND
             thread = threading.Thread(
                 target=_quality_monitor_loop,
                 args=(interval_seconds, quality_path),
+                kwargs={"orphan_candidate_pending": orphan_candidate_pending},
                 name="vibe-tunnel-quality-monitor",
                 daemon=True,
             )
@@ -4234,23 +4262,38 @@ def rotate_session_secret(config: V2Config) -> None:
 def start(config: V2Config | None = None) -> dict[str, Any]:
     """Start the connector and record the request that keeps one running."""
 
-    # Download a missing cloudflared before taking the lifecycle lock, which is
-    # held only around the short check, spawn, and publish in _start().
     try:
         loaded = config or V2Config.load()
     except Exception:
         loaded = None
-    cloud = loaded.remote_access.vibe_cloud if loaded is not None else None
-    if cloud is not None and cloud.enabled and cloud.tunnel_token and not _resolve_binary(loaded):
-        install_cloudflared()
+    install_failure = _download_missing_cloudflared(loaded)
     try:
         with _connector_lifecycle():
-            return _start(loaded or config, record_request=True)
+            return _start(loaded or config, record_request=True, install_failure=install_failure)
     except _ConnectorLifecycleBusy:
         return {"ok": False, "error": "remote_access_busy", "started": False}
 
 
-def _start(config: V2Config | None, *, record_request: bool) -> dict[str, Any]:
+def _download_missing_cloudflared(config: V2Config | None) -> dict[str, Any] | None:
+    """Download a missing cloudflared before the lifecycle lock; return the failure, if any.
+
+    The lock is held only around short check, spawn, and publish sections, so
+    _start() never downloads.
+    """
+
+    cloud = config.remote_access.vibe_cloud if config is not None else None
+    if cloud is None or not cloud.enabled or not cloud.tunnel_token or _resolve_binary(config):
+        return None
+    result = install_cloudflared()
+    return None if result.get("ok") else result
+
+
+def _start(
+    config: V2Config | None,
+    *,
+    record_request: bool,
+    install_failure: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Start the connector; callers hold the connector lifecycle lock."""
 
     fallback_config = config
@@ -4281,11 +4324,15 @@ def _start(config: V2Config | None, *, record_request: bool) -> dict[str, Any]:
             _connector_requested_path().touch()
         binary = _resolve_binary(config)
         if not binary:
-            install_result = install_cloudflared()
-            if install_result.get("ok") is False:
-                _report_runtime_status_async(config, event="start_failed", last_error=str(install_result.get("error") or "cloudflared_install_failed"))
-                return {**status(config), **install_result}
-            binary = str(install_result["path"])
+            # Callers download before taking the lifecycle lock; a request recorded
+            # above lets the monitor retry the download later.
+            failure = install_failure or {
+                "ok": False,
+                "error": "cloudflared_install_failed",
+                "detail": "cloudflared is not installed",
+            }
+            _report_runtime_status_async(config, event="start_failed", last_error=str(failure.get("error")))
+            return {**status(config), **failure}
         current = status(config)
         if current.get("pid_state") == "unknown":
             _report_runtime_status_async(config, event="start_failed", last_error="cloudflared_process_unknown")

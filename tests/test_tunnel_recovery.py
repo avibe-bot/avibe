@@ -1579,9 +1579,9 @@ def test_ra_tq_034_withdrawn_connector_request_is_not_restarted(monkeypatch, tmp
             config.remote_access.vibe_cloud.enabled = False
             config.save()
 
-        def record_start(loaded, *, record_request):
+        def record_start(loaded, *, record_request, install_failure=None):
             started.append(record_request)
-            return real_start(loaded, record_request=record_request)
+            return real_start(loaded, record_request=record_request, install_failure=install_failure)
 
         monkeypatch.setattr(remote_access, "_start", record_start)
         for now in (1000.0, 2000.0, 3000.0):
@@ -1713,7 +1713,7 @@ def test_ra_tq_034_failed_config_read_during_restart_keeps_the_request(monkeypat
 
 
 def test_ra_tq_034_stop_still_stops_when_the_request_cannot_be_withdrawn(monkeypatch, tmp_path) -> None:
-    _, network_up = _setup_exiting_connector(monkeypatch, tmp_path)
+    config, network_up = _setup_exiting_connector(monkeypatch, tmp_path)
     network_up.touch()
     request = remote_access._connector_requested_path()
     try:
@@ -1728,6 +1728,10 @@ def test_ra_tq_034_stop_still_stops_when_the_request_cannot_be_withdrawn(monkeyp
         assert result["ok"] is False
         assert result["error"] == "remote_access_request_withdraw_failed"
         assert not remote_access._is_cloudflared_pid(pid)
+        # What stop could not remove is no request, so the monitor keeps it down.
+        schedule = remote_access._ConnectorRestartSchedule()
+        for now in (1000.0, 2000.0, 3000.0):
+            assert remote_access._restart_exited_connector(config, schedule, now) is False
     finally:
         if request.is_dir():
             request.rmdir()
@@ -1799,7 +1803,7 @@ def test_ra_tq_034_cross_process_stop_and_start_serialize_with_the_restart(monke
     real_start = remote_access._start
     launched = []
 
-    def start_while_other_processes_wait(loaded, *, record_request):
+    def start_while_other_processes_wait(loaded, *, record_request, install_failure=None):
         # The restart holds the lifecycle lock here, after its request check and
         # before its spawn: the round-8 ordering would have the stop read the
         # exited pid now. Each child finds the lock busy and must wait for it.
@@ -1807,7 +1811,7 @@ def test_ra_tq_034_cross_process_stop_and_start_serialize_with_the_restart(monke
             launched.append(_lifecycle_child(tmp_path, name, name))
         for _process, report in launched:
             assert _wait_for_file(report.with_suffix(".probe")) == "busy"
-        return real_start(loaded, record_request=record_request)
+        return real_start(loaded, record_request=record_request, install_failure=install_failure)
 
     try:
         remote_access.start()
@@ -1866,6 +1870,68 @@ def test_ra_tq_034_lifecycle_lock_frees_when_its_holder_dies_and_status_never_wa
             pass
         remote_access.status()
         assert remote_access._read_pid() is None
+    finally:
+        if holder.poll() is None:
+            holder.kill()
+            holder.wait()
+
+
+def test_ra_tq_034_missing_cloudflared_downloads_outside_the_lifecycle_lock(monkeypatch, tmp_path) -> None:
+    config, _ = _setup_exiting_connector(monkeypatch, tmp_path)
+    config.remote_access.vibe_cloud.cloudflared_path = ""
+    config.save()
+    monkeypatch.setattr(remote_access, "_resolve_binary", lambda loaded=None: None)
+    downloads = []
+
+    def install_cloudflared():
+        # Another thread can take the lock only if this download does not hold it.
+        free = []
+
+        def probe():
+            try:
+                with remote_access._connector_lifecycle(wait=False):
+                    free.append(True)
+            except remote_access._ConnectorLifecycleBusy:
+                free.append(False)
+
+        prober = threading.Thread(target=probe)
+        prober.start()
+        prober.join()
+        downloads.append(free[0])
+        return {"ok": False, "error": "cloudflared_install_failed", "detail": "offline"}
+
+    monkeypatch.setattr(remote_access, "install_cloudflared", install_cloudflared)
+
+    result = remote_access.start()
+    remote_access._restart_exited_connector(config, remote_access._ConnectorRestartSchedule(due_at=0.0), 1.0)
+
+    assert result["ok"] is False and result["detail"] == "offline"
+    # One download per start or restart, each outside the lock; none under it.
+    assert downloads == [True, True]
+    assert remote_access._connector_requested_path().is_file()
+
+
+def test_ra_tq_034_orphan_candidate_reconcile_waits_for_the_lock_and_for_recovery(monkeypatch, tmp_path) -> None:
+    _setup_exiting_connector(monkeypatch, tmp_path)
+    dead = subprocess.Popen([sys.executable, "-c", "pass"])
+    dead.wait()
+    remote_access._state_path().parent.mkdir(parents=True, exist_ok=True)
+    runtime.write_json(remote_access._state_path(), {"schema_version": 2, "candidate": {"pid": dead.pid}})
+    monkeypatch.setattr(remote_access, "_set_recovery_state", lambda **changes: changes)
+    holder, report = _lifecycle_child(tmp_path, "hold", "holder")
+    try:
+        assert _wait_for_file(report) == "held"
+        assert remote_access._reconcile_orphan_candidate_when_free() is False
+        holder.kill()
+        holder.wait()
+
+        monkeypatch.setattr(remote_access, "_RECOVERY_THREAD", threading.current_thread())
+        assert remote_access._reconcile_orphan_candidate_when_free() is False
+        assert remote_access._state_connector("candidate") == {"pid": dead.pid}
+
+        monkeypatch.setattr(remote_access, "_RECOVERY_THREAD", None)
+        assert remote_access._reconcile_orphan_candidate_when_free() is True
+        assert remote_access._state_connector("candidate") is None
     finally:
         if holder.poll() is None:
             holder.kill()
