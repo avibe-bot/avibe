@@ -50,6 +50,13 @@ outside the container loses the automatic callback, since the forwarder no
 longer listens on the container's external interface. The pasted callback URL
 completes the login there.
 
+Go's wildcard listen is dual-stack, so the stock forwarder also accepted
+`[::1]`; the patched one accepts 127.0.0.1 only. The vendors' redirect URIs
+name `localhost`, and a browser that tries `::1` first is refused at once and
+falls back to 127.0.0.1, as mainstream browsers do. Where one does not, the
+pasted callback URL still completes the login. Revisit this if anyone reports
+a refused connection to `localhost` at the OAuth callback.
+
 ## `antigravity-static-catalog-until-probe.patch`
 
 Avibe ships Gemini subscriptions through Antigravity OAuth grants and routes
