@@ -213,7 +213,13 @@ def record_spawns(record: Path) -> None:
 
     def recording_init(self, *args, **kwargs):
         initialize(self, *args, **kwargs)
-        _append_spawn(record, self.pid)
+        try:
+            _append_spawn(record, self.pid)
+        except BaseException:
+            # The caller never gets this child, and no record names it: end it here.
+            self.kill()
+            self.wait()
+            raise
 
     subprocess.Popen.__init__ = recording_init
 

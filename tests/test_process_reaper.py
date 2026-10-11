@@ -276,6 +276,47 @@ def test_a_process_with_a_live_parent_naming_tmp_path_is_neither_killed_nor_repo
         watcher.wait()
 
 
+# A helper whose record write fails after `Popen` has started the child: the
+# disk filling up between the spawn and its fsync.
+FAILING_RECORD = """
+import os, subprocess, sys
+from pathlib import Path
+
+import psutil
+
+from tests import process_reaper
+
+process_reaper.record_spawns(Path(sys.argv[1]))
+
+
+def fail(fd):
+    raise OSError(28, "No space left on device")
+
+
+os.fsync = fail
+try:
+    subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"])
+except OSError as exc:
+    print("raised", exc.errno)
+left = [child for child in psutil.Process().children() if child.status() != psutil.STATUS_ZOMBIE]
+print("left", len(left))
+for child in left:
+    child.kill()
+"""
+
+
+def test_a_spawn_that_cannot_be_recorded_is_ended_before_the_failure_propagates(tmp_path):
+    result = subprocess.run(
+        [sys.executable, "-c", FAILING_RECORD, str(process_reaper.helper_spawn_record(tmp_path))],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=hang_guard.HANG_GUARD_SECONDS,
+    )
+
+    assert result.stdout.splitlines() == ["raised 28", "left 0"], result.stdout + result.stderr
+
+
 @pytest.fixture
 def group_leader():
     """A live process leading its own group, as a stranger that reused a recorded pid would."""
