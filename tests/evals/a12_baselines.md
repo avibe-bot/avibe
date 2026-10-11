@@ -24,6 +24,9 @@ All 3 checkpoints were model-written under `checkpoint-v3`, each accepted on its
 no failed checkpoint turn. The script was launched without `vibe` on the PATH and drove the instance's CLI next to its
 Python.
 
+**Origins and re-scoring.** Every checkpoint and response in the Session was served by claude-haiku-4-5. Values
+are now judged as the new value ("to 5"); the recorded answer re-scores unchanged at 9/9.
+
 **Observation, not scored.** The first, normal checkpoint made little room (26,009 → 25,272 estimated tokens). The cut
 kept the latest log read verbatim, so the next request overflowed and the ladder rolled. Every run so far shows this.
 

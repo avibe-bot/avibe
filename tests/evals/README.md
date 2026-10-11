@@ -21,7 +21,8 @@ Plan: `docs/plans/avibe-agent-core.md` §6, A12. Script: `a12_compaction_quality
 - A probe Turn then asks, from memory, for the ground rules, the files changed and why, the last error verbatim, and
   the next step, as one JSON object. Each of the nine planted facts is judged on its own field:
   - a rule only with its polarity: each rule is `{"action", "kind": "must" | "must_not"}`;
-  - a changed value only inside its file's entry, and a reason only in that entry's `why`;
+  - a changed value only inside its file's entry and as the new value ("to 5", "= 5"), and a reason only in that
+    entry's `why`;
   - the last error as the whole line.
 
 **Valid runs only.** A run is scored only if ground truth (the database rows and the fixture on disk) shows that it
@@ -73,3 +74,6 @@ The run makes about a dozen Turns, plus their checkpoint turns, on the small win
 - The two check outputs are looked for in every tool result. A read of `check.py`, whose source contains the last
   error's text, could therefore stand in for the second check run. The recorded runs ran both checks with `bash`;
   confirm that in the Session when a run looks suspicious.
+- The model is recorded as requested, not as served. If Model Hub fails over to another hop during a run, the row
+  would name the requested model. The recorded runs were served by it throughout (every checkpoint's and response's
+  origin); check the origins in the Session before recording a row.

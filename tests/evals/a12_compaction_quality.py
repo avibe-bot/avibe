@@ -103,8 +103,9 @@ def _rule(answer: dict, kind: str, *subjects: str) -> bool:
     )
 
 
-def _number(text: str, value: int) -> bool:
-    return re.search(rf"(?<![\d.]){value}(?![\d.])", text) is not None
+def _set_to(text: str, value: int) -> bool:
+    """Whether ``text`` gives ``value`` as the setting's new value ("to 5", "= 5", "→ 5"), not merely mentions it."""
+    return re.search(rf"(?:\bto|=|→|->)\s*{value}(?![\d.])", text) is not None
 
 
 @dataclass(frozen=True)
@@ -125,13 +126,13 @@ FACTS = (
     Fact(
         "changed: src/rate_limit.py, BURST to 5",
         lambda a: "burst" in _text(_change(a, "rate_limit.py").get("change"))
-        and _number(_text(_change(a, "rate_limit.py").get("change")), 5),
+        and _set_to(_text(_change(a, "rate_limit.py").get("change")), 5),
     ),
     Fact("why: upstream rejects bursts above 5", lambda a: "upstream" in _text(_change(a, "rate_limit.py").get("why"))),
     Fact(
         "changed: src/config.py, REFILL_RATE to 1",
         lambda a: "refill" in _text(_change(a, "config.py").get("change"))
-        and _number(_text(_change(a, "config.py").get("change")), 1),
+        and _set_to(_text(_change(a, "config.py").get("change")), 1),
     ),
     Fact(
         "why: a zero refill rate never refills",
