@@ -244,12 +244,9 @@ def reap_helper_spawns(request, tmp_path, tmp_path_factory):
     _process_warden.watch_spawns(record, tmp_path_factory.getbasetemp())
     yield
     __tracebackhide__ = True
-    try:
-        reaped, orphans = process_reaper.end_helper_spawns(
-            record, tmp_path, request.node.stash.get(_TEST_PROCESSES, None)
-        )
-    finally:
-        _process_warden.forget_spawns()
+    reaped, orphans = process_reaper.end_helper_spawns(record, tmp_path, request.node.stash.get(_TEST_PROCESSES, None))
+    # Only a finished teardown disarms the warden: an interrupted one leaves it the record.
+    _process_warden.forget_spawns(record)
     problems = []
     if reaped:
         problems.append("spawns of this test's helper processes were still running and were killed: " + ", ".join(reaped))

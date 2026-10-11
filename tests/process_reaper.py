@@ -367,16 +367,16 @@ class TestProcesses:
 # Runs as ``python -I -c _WARDEN <pytest pid>`` with the record pipe on stdin. A
 # line is "<pid> <creation time> <1 if it founded its group>", "settled" once
 # the running test's reap has confirmed every record gone, "spawns <path>" for
-# the running ``reap_helper_spawns`` test's spawn record, or "unspawns" once its
-# teardown has reaped that record. EOF, or a parent that is no longer pytest,
-# means the run is over.
+# a ``reap_helper_spawns`` test's spawn record, or "unspawns <path>" once that
+# test's teardown has reaped it; a teardown that did not finish leaves its
+# record armed. EOF, or a parent that is no longer pytest, means the run is over.
 _WARDEN = r"""
-import os, select, signal, sys
+import os, select, signal, sys, time
 import psutil
 
 pytest_pid = int(sys.argv[1])
 records = {}
-spawn_record = None
+spawn_records = set()
 pending = b""
 while True:
     ready, _, _ = select.select([0], [], [], 1.0)
@@ -393,50 +393,69 @@ while True:
             records.clear()
             continue
         if line.startswith(b"spawns "):
-            spawn_record = line[7:].decode()
+            spawn_records.add(line[7:].decode())
             continue
-        if line == b"unspawns":
-            spawn_record = None
+        if line.startswith(b"unspawns "):
+            spawn_records.discard(line[9:].decode())
             continue
         pid, created, founded_group = line.split()
         records[int(pid)] = (float(created), founded_group == b"1")
-# What the running test's helper interpreters recorded, in the same format.
-if spawn_record is not None:
-    try:
-        with open(spawn_record, encoding="utf-8") as file:
-            for line in file:
-                try:
-                    pid, created, founded_group = line.split()
-                    records[int(pid)] = (float(created), founded_group == "1")
-                except ValueError:
-                    pass
-    except OSError:
-        pass
-for pid, (created, founded_group) in records.items():
-    try:
-        process = psutil.Process(pid)
-        same = process.create_time() == created
-    except psutil.NoSuchProcess:
-        process, same = None, False
-    except psutil.Error:
-        continue
-    if same:
+
+
+def recorded():
+    # The helper records, in the same format, read afresh: a helper still running may append.
+    found = dict(records)
+    for path in spawn_records:
         try:
-            tree = [*process.children(recursive=True), process]
-        except psutil.Error:
-            # It ended after the identity check; its group is still handled below.
-            tree = []
-        for each in tree:
-            try:
-                each.send_signal(signal.SIGKILL)
-            except psutil.Error:
-                pass
-    # The group is the leader's while it runs, or while no process holds its pid.
-    if founded_group and (same or process is None):
-        try:
-            os.killpg(pid, signal.SIGKILL)
+            with open(path, encoding="utf-8") as file:
+                for line in file:
+                    try:
+                        pid, created, founded_group = line.split()
+                        found[int(pid)] = (float(created), founded_group == "1")
+                    except ValueError:
+                        pass
         except OSError:
             pass
+    return found
+
+
+def reap_pass():
+    acted = False
+    for pid, (created, founded_group) in recorded().items():
+        try:
+            process = psutil.Process(pid)
+            same = process.create_time() == created and process.status() != psutil.STATUS_ZOMBIE
+        except psutil.NoSuchProcess:
+            process, same = None, False
+        except psutil.Error:
+            continue
+        if same:
+            acted = True
+            try:
+                tree = [*process.children(recursive=True), process]
+            except psutil.Error:
+                # It ended after the identity check; its group is still handled below.
+                tree = []
+            for each in tree:
+                try:
+                    each.send_signal(signal.SIGKILL)
+                except psutil.Error:
+                    pass
+        # The group is the leader's while it runs, or while no process holds its pid.
+        if founded_group and (same or process is None):
+            try:
+                os.killpg(pid, signal.SIGKILL)
+                acted = True
+            except OSError:
+                pass
+    return acted
+
+
+# Killing a helper ends its appends, so passes repeat until one finds nothing running.
+for _ in range(40):
+    if not reap_pass():
+        break
+    time.sleep(0.05)
 """
 
 
@@ -474,8 +493,8 @@ class Warden:
         require_inside_basetemp(record, basetemp)
         self._send(f"spawns {record}")
 
-    def forget_spawns(self) -> None:
-        self._send("unspawns")
+    def forget_spawns(self, record: Path) -> None:
+        self._send(f"unspawns {record}")
 
     def settle(self) -> None:
         """Every record so far is confirmed gone: forget them, so none can go stale."""

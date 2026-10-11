@@ -261,17 +261,21 @@ def test_a_group_member_a_recorded_leader_left_is_killed_and_fails_its_test(tmp_
 
 @pytest.mark.allow_foreign_signals(reason="ends the orphan the inner run deliberately left unrecorded")
 def test_an_unrecorded_orphan_is_reported_and_never_signalled(tmp_path):
-    result, record = _run_inner(tmp_path, "unrecorded_orphan", DETACHING)
-    pid = int(record.read_text().split()[0])
     try:
+        result, record = _run_inner(tmp_path, "unrecorded_orphan", DETACHING)
+        pid = int(record.read_text().split()[0])
         output = result.stdout + result.stderr
         assert result.returncode == 1, output
         reported = _reported(output, "are in no spawn record and were left running: ")
         assert reported.startswith(f"{pid} (") and "/" not in reported
         assert _running(record) == [pid]
     finally:
-        # The orphan leads its own group: its shell's sleeps end with it.
-        os.killpg(pid, signal.SIGKILL)
+        # No reaper knows this orphan, so the test ends it by the identity the
+        # helper wrote, however the inner run ended. It leads its own group:
+        # its shell's sleeps end with it.
+        written = tmp_path / "spawned"
+        for running in _running(written) if written.exists() else []:
+            os.killpg(running, signal.SIGKILL)
 
 
 def test_a_process_with_a_live_parent_naming_tmp_path_is_neither_killed_nor_reported(tmp_path):
@@ -316,6 +320,34 @@ def test_a_reap_never_signals_a_group_whose_pid_now_names_another_process(group_
     assert processes.reap() == []
 
     assert process_reaper._same(pid, created) is not None
+
+
+@pytest.mark.parametrize("forgotten", [False, True], ids=["armed", "forgotten"])
+def test_the_warden_reaps_a_helper_record_until_that_record_is_forgotten(tmp_path_factory, tmp_path, forgotten):
+    sleeper = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"], start_new_session=True)
+    created = psutil.Process(sleeper.pid).create_time()
+    record = process_reaper.helper_spawn_record(tmp_path)
+    process_reaper._append_spawn(record, sleeper.pid)
+    later = tmp_path / "later" / "helper-spawns"
+    basetemp = tmp_path_factory.getbasetemp()
+    warden = process_reaper.Warden()
+    try:
+        warden.watch_spawns(record, basetemp)
+        # Another test's record, armed and forgotten, leaves this one armed.
+        warden.watch_spawns(later, basetemp)
+        warden.forget_spawns(later)
+        if forgotten:
+            warden.forget_spawns(record)
+        warden.close()
+        warden = None
+
+        sleeper_running = process_reaper._same(sleeper.pid, created) is not None
+        assert sleeper_running is forgotten
+    finally:
+        if warden is not None:
+            warden.close()
+        sleeper.kill()
+        sleeper.wait()
 
 
 @pytest.mark.parametrize("settled", [False, True], ids=["stale", "settled"])
