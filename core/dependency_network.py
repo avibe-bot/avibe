@@ -40,6 +40,7 @@ RELEASE_MIRRORS = {
     "https://github.com/avibe-bot/avault/releases/download/": "https://dl.avibe.bot/avault/releases/",
     "https://github.com/tmux/tmux-builds/releases/download/": "https://dl.avibe.bot/tmux/releases/",
     "https://github.com/BurntSushi/ripgrep/releases/download/": "https://dl.avibe.bot/ripgrep/releases/",
+    "https://github.com/cloudflare/cloudflared/releases/download/": "https://dl.avibe.bot/cloudflared/releases/",
 }
 # Index into download_sources() of the source that last completed a download.
 _preferred_source = 0

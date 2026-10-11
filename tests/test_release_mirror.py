@@ -334,3 +334,19 @@ def test_every_publishing_workflow_named_by_the_mirror_trigger_exists():
     triggers = workflow("release-mirror.yml")[True]["workflow_run"]["workflows"]
 
     assert triggers and set(triggers) <= names
+
+
+@pytest.mark.parametrize("repository", sorted(mirror.PINNED_BY_MANIFEST))
+def test_pinned_manifest_archives_download_from_the_mirrored_release(repository):
+    from core import dependency_network
+
+    manifest = json.loads(mirror.PINNED_BY_MANIFEST[repository].read_text(encoding="utf-8"))
+    tag = manifest["release_tag"]
+    for archive in manifest["archives"].values():
+        url = f"https://github.com/{repository}/releases/download/{tag}/{archive['name']}"
+        # The mirror holds only the pinned release, so every archive must come from it.
+        assert archive["url"] == url
+        assert dependency_network.download_sources(url) == [
+            f"https://dl.avibe.bot/{mirror.REPOSITORIES[repository]}releases/{tag}/{archive['name']}",
+            url,
+        ]

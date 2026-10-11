@@ -13,7 +13,7 @@ on:
     types: [completed]
   # Safety net for missed triggers and renamed workflows, and the trigger for
   # the other mirrored repositories' releases (askill, avault, tmux-builds,
-  # ripgrep).
+  # ripgrep, cloudflared).
   schedule:
     - cron: "41 * * * *"
   workflow_dispatch:

@@ -34,13 +34,17 @@ REPOSITORIES = {
     "avibe-bot/avault": "avault/",
     "tmux/tmux-builds": "tmux/",
     "BurntSushi/ripgrep": "ripgrep/",
+    "cloudflare/cloudflared": "cloudflared/",
 }
 # Repositories mirrored only for the releases packaged managed-runtime
 # manifests pin. The mirror is those releases' backup: a pinned archive GitHub
 # no longer publishes with the manifest's bytes fails the run, and a release an
 # earlier manifest pinned stays, since released Avibe versions still name it.
 # ripgrep's older releases also carry no GitHub digest.
-PINNED_BY_MANIFEST = {"BurntSushi/ripgrep": REPO_ROOT / "vibe" / "ripgrep_runtime_manifest.json"}
+PINNED_BY_MANIFEST = {
+    "BurntSushi/ripgrep": REPO_ROOT / "vibe" / "ripgrep_runtime_manifest.json",
+    "cloudflare/cloudflared": REPO_ROOT / "vibe" / "cloudflared_runtime_manifest.json",
+}
 # Repositories mirrored without prereleases. tmux-builds rebuilds its
 # ``preview`` prerelease in place, changing bytes under unchanged asset names,
 # which the mirror must treat as published bytes changing.
