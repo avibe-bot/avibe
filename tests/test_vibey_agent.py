@@ -1524,8 +1524,10 @@ async def test_a_turn_that_fails_before_settlement_names_its_kind_or_none(
     [notice] = harness.rows("notify")
     assert json.loads(notice["metadata_json"]).get("error_kind") == kind
     if break_turn == "raise":
-        # A failure before settlement takes the same structured, redacted line as any failed run.
-        [line] = [record.getMessage() for record in caplog.records if record.getMessage().startswith("Vibey run failed")]
+        # A failure before settlement takes the same structured, redacted line as any failed run, and only that one.
+        warnings = [record for record in caplog.records if record.levelno >= logging.WARNING]
+        [line] = [record.getMessage() for record in warnings if record.name == "modules.agents.vibey.agent"]
+        assert line.startswith("Vibey run failed")
         assert f"turn={_turn(request.context)} reason=error kind=RuntimeError origin=local served=- " in line
         assert line.endswith("diagnostic=turn failed: the turn's runtime broke: Bearer [redacted]")
         assert secret not in caplog.text

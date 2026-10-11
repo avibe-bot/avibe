@@ -260,8 +260,8 @@ class VibeyAgent(BaseAgent):
                     raise
                 turn.settled = True
                 self._log_failure(turn, "error", type(error).__name__, "local", f"turn failed: {error}")
-                # Where it was raised, without the message the line above already carries, redacted.
-                logger.warning(
+                # Where it was raised, for debugging only: the WARNING above is the failure's one line.
+                logger.debug(
                     "Vibey turn %s raised in:\n%s", turn_id, "".join(traceback.format_tb(error.__traceback__))
                 )
                 await self._fail(request, type(error).__name__, f"turn failed: {error}", cause=error)
