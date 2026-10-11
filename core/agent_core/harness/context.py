@@ -570,19 +570,26 @@ def checkpoint_text(message: AssistantMessage) -> str:
     )
 
 
-#: The approved template's top-level section markers (section 11), whatever language the headings are in.
-_SECTION = re.compile(r"^#[ \t]*([123])\.", re.M)
+#: The approved template's top-level section markers (section 11), whatever language the headings are in: written
+#: ``# 1.`` there, or one or two levels deeper in a reply.
+_SECTION = re.compile(r"^(#{1,3})[ \t]*([123])\.", re.M)
 
 
 def checkpoint_problem(reply: str) -> Optional[str]:
     """Why a checkpoint turn's reply is not a checkpoint, or None when it is (section 6), judged on what the user
     would see of it: the product's one silent-block grammar (``strip_silent_blocks``, which delivery uses) removes its
-    ``<silent>`` notes first. Then the template's three top-level markers (``# 1.``, ``# 2.``, ``# 3.``) appear
-    exactly once each, in order, each section with content under its heading (a line that is not itself a heading).
-    The one check every checkpoint path applies."""
+    ``<silent>`` notes first. Then the template's three section markers (``# 1.``, ``# 2.``, ``# 3.``, each written at
+    heading level 1 to 3) appear exactly once each, in order, each section with content under its heading (a line
+    that is not itself a heading). The markers at the template's own level are judged first, so a numbered
+    sub-heading under them stays content. The one check every checkpoint path applies."""
     visible = strip_silent_blocks(reply)
     markers = list(_SECTION.finditer(visible))
-    numbers = [marker.group(1) for marker in markers]
+    problem = _sections_problem(visible, [marker for marker in markers if len(marker.group(1)) == 1])
+    return None if problem is None else _sections_problem(visible, markers)
+
+
+def _sections_problem(visible: str, markers: Sequence[re.Match[str]]) -> Optional[str]:
+    numbers = [marker.group(2) for marker in markers]
     for number in "123":
         if number not in numbers:
             return f"section {number} is missing"
