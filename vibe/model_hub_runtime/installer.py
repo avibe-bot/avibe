@@ -8,7 +8,7 @@ import subprocess
 import threading
 import uuid
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path
 from typing import Any, Callable
@@ -50,8 +50,10 @@ def _engine_platform_map(windows_on_arm: bool) -> dict[str, str]:
 
 
 # A manifest override must not silently expand the engine's supported host set.
-_ENGINE_PLATFORM_MAP = _engine_platform_map(windows_native_arm64())
-_ENGINE_ASSET_PLATFORMS = frozenset(_ENGINE_PLATFORM_MAP.values())
+# Every asset any host runs, whichever host this is.
+_ENGINE_ASSET_PLATFORMS = frozenset(
+    {*_engine_platform_map(False).values(), *_engine_platform_map(True).values()}
+)
 _INSTALL_STATE_SCHEMA_VERSION = 3
 _INSTALL_STATE_RELEASED_SCHEMA_VERSIONS = frozenset({1, 2})
 _INSTALL_STATE_SUPPORTED_SCHEMA_VERSIONS = frozenset(
@@ -92,7 +94,8 @@ _ENGINE_SPEC = ManagedRuntimeSpec(
     default_bin_path="cli-proxy-api",
     archives_field="assets",
     archive_size_field="size_bytes",
-    platform_aliases=tuple(_ENGINE_PLATFORM_MAP.items()),
+    # Set per manager from the host it runs on; see _engine_platform_map.
+    platform_aliases=(),
 )
 
 
@@ -131,8 +134,9 @@ class EngineRuntimeManager(ManagedRuntimeManager):
         manifest_url: str | None = None,
         offline: bool | None = None,
     ) -> None:
+        self._platform_map = _engine_platform_map(windows_native_arm64())
         super().__init__(
-            spec=_ENGINE_SPEC,
+            spec=replace(_ENGINE_SPEC, platform_aliases=tuple(self._platform_map.items())),
             runtime_dir=runtime_dir or paths.get_runtime_dir() / "model-hub" / "engine",
             manifest_path=manifest_path or os.environ.get("VIBE_MODEL_HUB_ENGINE_MANIFEST_PATH"),
             manifest_url=(
@@ -251,9 +255,8 @@ class EngineRuntimeManager(ManagedRuntimeManager):
         resolution, _archive = self._resolve_manifest_state(manifest)
         return resolution is not ManifestResolution.UNSUPPORTED
 
-    @staticmethod
-    def _normalize_engine_platform(platform_tag: str) -> str:
-        return _ENGINE_PLATFORM_MAP.get(platform_tag, platform_tag)
+    def _normalize_engine_platform(self, platform_tag: str) -> str:
+        return self._platform_map.get(platform_tag, platform_tag)
 
     def install_failure_reasons(self) -> frozenset[str]:
         """Return every admission failure emitted by the shared installer."""
@@ -617,7 +620,7 @@ class EngineRuntimeManager(ManagedRuntimeManager):
             and re.fullmatch(r"[0-9a-f]{40}", str(payload.get("source_sha") or ""))
         ):
             return ManifestResolution.UNRESOLVED, None
-        asset_platform = _ENGINE_PLATFORM_MAP.get(managed_runtime.runtime_platform_tag())
+        asset_platform = self._platform_map.get(managed_runtime.runtime_platform_tag())
         archive = manifest.archives.get(asset_platform) if asset_platform is not None else None
         if archive is None:
             return ManifestResolution.UNSUPPORTED, None

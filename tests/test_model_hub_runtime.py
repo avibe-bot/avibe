@@ -879,10 +879,14 @@ def test_orphaned_oauth_cleanup_never_existed_ref_is_converged(
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("windows_on_arm", [False, True])
 def test_packaged_manifest_matches_frozen_runtime_dependency_values(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    windows_on_arm: bool,
 ) -> None:
+    # The contract lists every asset, whichever host reads it.
+    monkeypatch.setattr(runtime_installer_module, "windows_native_arm64", lambda: windows_on_arm)
     manager = EngineRuntimeManager(runtime_dir=tmp_path / "runtime", offline=True)
 
     manifest = manager.contract_manifest()
@@ -932,7 +936,8 @@ def test_packaged_manifest_matches_frozen_runtime_dependency_values(
         ],
     }
 
-    for host_platform, asset_platform in (("win32-x64", "windows-amd64"), ("win32-arm64", "windows-arm64")):
+    x64_python_asset = "windows-arm64" if windows_on_arm else "windows-amd64"
+    for host_platform, asset_platform in (("win32-x64", x64_python_asset), ("win32-arm64", "windows-arm64")):
         monkeypatch.setattr(managed_runtime, "runtime_platform_tag", lambda tag=host_platform: tag)
         assert manager.host_platform() == asset_platform
         assert manager.supports_host_platform() is True
@@ -1423,10 +1428,11 @@ def test_installing_projection_matches_live_owner_or_resumable_claim(
 
 
 @pytest.mark.parametrize(
-    ("host_platform", "asset_platform", "size_bytes", "archive_sha256", "binary_sha256", "bin_path"),
+    ("host_platform", "windows_on_arm", "asset_platform", "size_bytes", "archive_sha256", "binary_sha256", "bin_path"),
     [
             (
                 "darwin-arm64",
+                False,
                 "darwin-arm64",
                 40511180,
                 "bd863d04d950390b745dd4414ea8c8be715cb5c21b492d3c0d71504f64fca978",
@@ -1435,6 +1441,7 @@ def test_installing_projection_matches_live_owner_or_resumable_claim(
             ),
             (
                 "darwin-x64",
+                False,
                 "darwin-x64",
                 42973748,
                 "eda0092a9d1afecf8471fc95e4c077825a3db8059df7caa6a06816a2a8a438eb",
@@ -1443,6 +1450,7 @@ def test_installing_projection_matches_live_owner_or_resumable_claim(
             ),
             (
                 "linux-x64",
+                False,
                 "linux-amd64",
                 40932246,
                 "e72351f5280f943233c9ddc8ab9f51556f57e9f95d68bf13a15b141a95e48b65",
@@ -1451,6 +1459,7 @@ def test_installing_projection_matches_live_owner_or_resumable_claim(
             ),
             (
                 "linux-arm64",
+                False,
                 "linux-arm64",
                 37548183,
                 "ca06e508c654d6c8cfc5af44341eeac339e0a033d217a480c44043b8e8c81ebc",
@@ -1459,14 +1468,26 @@ def test_installing_projection_matches_live_owner_or_resumable_claim(
             ),
             (
                 "win32-x64",
+                False,
                 "windows-amd64",
                 41444644,
                 "7d138744b44a7ee103f15d065712f97798db0259cdafce2a93819b4135b69006",
                 "c265136d64bc6fdb7a4737e28333ff58ed995407d50b0581857e6693a2952a32",
                 "cli-proxy-api.exe",
             ),
+            # x64 Python on Windows on Arm still gets the native engine.
+            (
+                "win32-x64",
+                True,
+                "windows-arm64",
+                37803078,
+                "969997f1dbe169c83e227def75ca51e105aafb9f3d30bb3bb615685fc289b525",
+                "0ba1b87a3c562f5121f2902507e6608713237a3daafa229bca5b4829b29c29ec",
+                "cli-proxy-api.exe",
+            ),
             (
                 "win32-arm64",
+                True,
                 "windows-arm64",
                 37803078,
                 "969997f1dbe169c83e227def75ca51e105aafb9f3d30bb3bb615685fc289b525",
@@ -1479,6 +1500,7 @@ def test_engine_installer_selects_verified_packaged_asset(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     host_platform: str,
+    windows_on_arm: bool,
     asset_platform: str,
     size_bytes: int,
     archive_sha256: str,
@@ -1486,6 +1508,7 @@ def test_engine_installer_selects_verified_packaged_asset(
     bin_path: str,
 ) -> None:
     monkeypatch.setattr(managed_runtime, "runtime_platform_tag", lambda: host_platform)
+    monkeypatch.setattr(runtime_installer_module, "windows_native_arm64", lambda: windows_on_arm)
     manager = EngineRuntimeManager(runtime_dir=tmp_path / host_platform, offline=True)
 
     manifest = manager._load_manifest(allow_network=False)
@@ -1500,23 +1523,11 @@ def test_engine_installer_selects_verified_packaged_asset(
     assert archive.bin_path == bin_path
 
 
-def test_x64_python_on_windows_on_arm_still_installs_the_native_arm64_engine() -> None:
-    """Avibe runs on x64 Python there until its wheels exist; the engine needs no Python."""
-    on_arm = runtime_installer_module._engine_platform_map(True)
-    elsewhere = runtime_installer_module._engine_platform_map(False)
-
-    assert on_arm["win32-x64"] == "windows-arm64"
-    assert elsewhere["win32-x64"] == "windows-amd64"
-    assert on_arm["win32-arm64"] == elsewhere["win32-arm64"] == "windows-arm64"
-    assert {tag: asset for tag, asset in on_arm.items() if tag != "win32-x64"} == {
-        tag: asset for tag, asset in elsewhere.items() if tag != "win32-x64"
-    }
-
-
-def test_engine_platform_identity_is_normalized_locally() -> None:
-    assert dict(runtime_installer_module._ENGINE_SPEC.platform_aliases) == runtime_installer_module._ENGINE_PLATFORM_MAP
-    assert EngineRuntimeManager._normalize_engine_platform("linux-x64") == "linux-amd64"
-    assert EngineRuntimeManager._normalize_engine_platform("linux-amd64") == "linux-amd64"
+def test_engine_platform_identity_is_normalized_locally(tmp_path: Path) -> None:
+    manager = EngineRuntimeManager(runtime_dir=tmp_path / "runtime", offline=True)
+    assert dict(manager.spec.platform_aliases) == manager._platform_map
+    assert manager._normalize_engine_platform("linux-x64") == "linux-amd64"
+    assert manager._normalize_engine_platform("linux-amd64") == "linux-amd64"
 
 
 def test_engine_installer_is_idempotent_and_rejects_tampered_archive(tmp_path: Path) -> None:
