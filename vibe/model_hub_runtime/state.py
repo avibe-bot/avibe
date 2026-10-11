@@ -32,6 +32,10 @@ _CREDENTIAL_REF_RE = re.compile(r"^cred_[A-Za-z0-9_-]{6,128}$")
 _BEARER_CREDENTIAL_REF_RE = re.compile(r"^cred_auth_bearer_[0-9a-f]{32}$")
 _SOURCE_ID_RE = re.compile(r"^src_[a-z0-9]{8,}$")
 _PROTOCOLS = {"anthropic", "openai_responses", "openai_chat", "google"}
+# The engine writes its file log to ``logs`` under its working directory, the instance directory, only
+# when that directory already exists; otherwise it falls back to ``<auth-dir>/logs``, among the
+# credentials (CLIProxyAPI internal/logging/global_logger.go ResolveLogDirectory).
+ENGINE_LOG_DIR = "logs"
 
 
 class EngineStateError(RuntimeError):
@@ -206,6 +210,7 @@ class EngineStateStore:
             self.audit_auth_permissions()
             instance_dir = self.root / "instances" / _safe_identifier(install_id)
             self._ensure_private_dir(instance_dir)
+            self._ensure_private_dir(instance_dir / ENGINE_LOG_DIR)
             self._remove_obsolete_instances(instance_dir)
             secrets_path = instance_dir / "runtime-secrets.json"
             if not rotate:

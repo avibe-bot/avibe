@@ -46,7 +46,7 @@ def test_windows_engine_start_and_api_key_source_keep_secrets_private(root):
     # any access rule; they must pass the audit every engine start runs.
     (store.auth_dir / "codex-synthetic.json").write_text("{}", encoding="utf-8")
     store.audit_auth_permissions()
-    for path in (store.root, instance_dir, instance_dir / "runtime-secrets.json", store.auth_dir):
+    for path in (store.root, instance_dir, instance_dir / "runtime-secrets.json", instance_dir / "logs", store.auth_dir):
         assert _private(path), path
 
 

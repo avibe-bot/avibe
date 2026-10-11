@@ -1703,6 +1703,10 @@ def test_config_generation_is_private_and_never_logs_secrets(
     ]
     assert stat.S_IMODE(config_path.stat().st_mode) == 0o600
     assert stat.S_IMODE(store.auth_dir.stat().st_mode) == 0o700
+    # The engine's own log stays beside its config, owner-private and bounded, and carries no bodies.
+    assert payload["logging-to-file"] is True and payload["logs-max-total-size-mb"] > 0
+    assert payload["commercial-mode"] is True and payload["request-log"] is False
+    assert stat.S_IMODE((instance_dir / "logs").stat().st_mode) == 0o700
     credential_path = next((store.root / "credentials").iterdir())
     assert stat.S_IMODE(credential_path.stat().st_mode) == 0o600
     for secret in (
