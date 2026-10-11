@@ -19,6 +19,7 @@
     "test:crypto": "vitest run src/lib/vaultCrypto.test.ts",
     "e2e": "playwright test",
     "e2e:headed": "playwright test --headed",
+    "test:chat-interactions": "tsc -p e2e/chat-interactions/tsconfig.json --noEmit && playwright test --config playwright.chat-interactions.config.ts",
     "test:chat-paging": "tsc -p e2e/chat-paging/tsconfig.json --noEmit && playwright test --config playwright.chat-paging.config.ts",
     "test:citations": "tsc -p e2e/citations/tsconfig.json --noEmit && playwright test --config playwright.citations.config.ts",
     "test:inbox-return": "tsc -p e2e/inbox-return/tsconfig.json --noEmit && playwright test --config playwright.inbox-return.config.ts",

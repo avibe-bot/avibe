@@ -254,6 +254,43 @@ describe('chat selection action gesture lifetime', () => {
     expect(writeText).toHaveBeenCalledExactlyOnceWith(content);
   });
 
+  it('consumes the touchend default after Select all without relying on pointerdown cancellation', () => {
+    const container = mountBubble();
+    const range = document.createRange();
+    range.selectNodeContents(container.querySelector('strong')!);
+    window.getSelection()!.addRange(range);
+    settle();
+
+    const button = screen.getByRole('button', { name: 'chat.selection.selectAll' });
+    fireEvent.pointerDown(button, press);
+    fireEvent.touchStart(button);
+    fireEvent.pointerUp(button, press);
+    // iOS processes the native tap after pointerup. Pointerdown.preventDefault
+    // suppresses compatibility mouse events, not this touchend default action.
+    const end = new Event('touchend', { bubbles: true, cancelable: true });
+    fireEvent(button, end);
+    expect(end.defaultPrevented).toBe(true);
+    settle();
+    expect(window.getSelection()!.toString()).toBe('Use bold now');
+    expect(screen.queryByRole('toolbar')).not.toBeNull();
+
+    // No sticky selection lock: a later user gesture may clear it normally.
+    fireEvent.pointerDown(container, press);
+    clearSelection();
+    expect(screen.queryByRole('toolbar')).toBeNull();
+  });
+
+  it('does not consume touchend for an unactivated toolbar gesture', () => {
+    mountToolbar();
+    const button = screen.getByRole('button', { name: 'chat.selection.quote' });
+    fireEvent.pointerDown(button, press);
+    fireEvent.pointerUp(button, { ...press, clientX: 500 });
+    const end = new Event('touchend', { bubbles: true, cancelable: true });
+    fireEvent(button, end);
+    expect(end.defaultPrevented).toBe(false);
+    expect(quote).not.toHaveBeenCalled();
+  });
+
   it('leaves a selection made after Copy in place', async () => {
     const container = mountToolbar();
     await act(async () => {
