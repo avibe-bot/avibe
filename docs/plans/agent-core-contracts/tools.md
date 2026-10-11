@@ -46,8 +46,9 @@ Raw text, no line numbers, head kept. Model-facing suffixes:
 - `[{remaining} more lines in file. Use offset={next} to continue.]` (an explicit `limit` stopped before the end)
 - `[Line {n} is {size}, exceeds 50KB limit. Use bash: sed -n '{n}p' {quoted_path} | head -c 51200]`, where
   `{quoted_path}` is the path shell-quoted (Avibe change to Pi's text, so the suggested command is always safe to run).
-  On Windows: `[Line {n} is {size}, exceeds 50KB limit. Use powershell: (Get-Content -LiteralPath {quoted_path}
-  -TotalCount {n})[-1].Substring(0, 51200)]`, the path in single quotes with each `'` doubled.
+  On Windows: `[Line {n} is {size}, exceeds 50KB limit. Use powershell: @(Get-Content -LiteralPath {quoted_path}
+  -TotalCount {n})[-1] | ForEach-Object { $_.Substring(0, [Math]::Min($_.Length, 51200)) }]`, the path in single
+  quotes with each `'` doubled; `@()` keeps line 1 a line rather than a string to index.
 - Error: `Offset {offset} is beyond end of file ({total} lines total)`
 
 Images are attached as `ImageBlock`s (C-1); for a model without image input the result says so and omits the image.
@@ -242,9 +243,12 @@ names `powershell` there, and "for example sed or a short script" becomes "for e
   `PYTHONUTF8=1` is set unless the environment sets it.
 - A command that does not parse fails with exit code 1 and the parser's messages before anything runs. Otherwise
   each top-level statement runs in turn and its output is formatted before the next one runs, so no output is lost
-  to an `exit` that follows it (PowerShell's own `-Command` loses it).
-- The exit code follows bash: the command's own `exit N`; else 0 when the last statement succeeded; else
-  `$LASTEXITCODE` when it is not 0, so a failed native program reports its code; else 1.
+  to an `exit` that follows it (PowerShell's own `-Command` loses it). A script that works only as a whole runs
+  whole: one with a `param` or named block, `using` statements, a top-level `trap`, or a `return`, `break`, or
+  `continue` outside any function or script block, whose control flow would otherwise stop at its own statement.
+- The exit code follows bash: the command's own `exit N`; else 0 when the last statement succeeded; else the
+  `$LASTEXITCODE` that statement set, when it is not 0, so a failed native program reports its code; else 1. A
+  code an earlier statement left in `$LASTEXITCODE` is not the last statement's.
 
 ## 6. Output normalizer
 
