@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Literal, Mapping, Optional
 
 from config.v2_config import MODEL_HUB_BACKENDS, ModelHubConfig
-from modules.agents.catalog import display_name_for_backend
+from modules.agents.catalog import NATIVE_CLI_BACKENDS, display_name_for_backend
 from core.os_errors import format_os_errno
 
 from core.run_settlement import (
@@ -2388,6 +2388,13 @@ class TurnCorrelationRegistry:
                 scope.ambiguous_turns.discard(normalized_turn_id)
                 scope.prepared_routes.pop(normalized_turn_id, None)
                 scope.routing_conflicts.discard(normalized_turn_id)
+                if key[0] not in NATIVE_CLI_BACKENDS and not scope.active_turns and not scope.untracked_use:
+                    # No process outlives an in-process consumer's Turn (Vibey): its
+                    # credentials serve its Turns only, so the last one settled retires them.
+                    del self._scopes[key]
+                    self._credentials.pop(scope.token, None)
+                    for route_token in scope.route_tokens.values():
+                        self._credentials.pop(route_token, None)
             if trace is None or trace.ambiguous or poisoned:
                 return
 

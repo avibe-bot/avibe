@@ -1286,6 +1286,23 @@ async def test_a_route_model_hub_refuses_mid_run_shows_the_hubs_copy(engine, ses
     assert copy and harness.controller.im_client.sent[-1] == f"❌ {copy}"
 
 
+
+async def test_every_model_hub_resolution_names_its_turn(engine, session, tmp_path, published) -> None:
+    """The loop's later model calls run in their own tasks, where a Turn cannot be found by task."""
+    harness = _Harness(engine, tmp_path, "telegram", _tool_turn())
+    resolve, turns = harness.controller._resolve, []
+
+    async def route(*args, turn_id=None, **kwargs):
+        turns.append(turn_id)
+        return await resolve(*args, turn_id=turn_id, **kwargs)
+
+    harness.controller.model_hub_runtime = SimpleNamespace(resolve=route)
+    request = harness.request("look")
+
+    await harness.agent.handle_message(request)
+
+    assert turns == [_turn(request.context)] * 2
+
 async def test_an_im_stop_finds_the_turn_by_its_runtime_key(engine, session, tmp_path, published) -> None:
     started = asyncio.Event()
 

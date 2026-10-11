@@ -480,6 +480,43 @@ async def test_sequential_vibey_retry_replaces_route_and_retains_served_provenan
         await gateway.close()
 
 
+
+@pytest.mark.asyncio
+async def test_vibey_credentials_retire_with_their_last_settled_turn(tmp_path):
+    """Vibey has no process that outlives a Turn: its scope's credentials serve its Turns only."""
+    primary = _source("src_primary01", "Primary", vendor="anthropic", protocol="anthropic")
+    service = _vibey_service(tmp_path, [primary], handles=[
+        LiveInvokeHandle(_outcome(RawOutcomeKind.SUCCESS, source_id=primary.id), (b"{}",)),
+        LiveInvokeHandle(_outcome(RawOutcomeKind.SUCCESS, source_id=primary.id), (b"{}",)),
+    ])
+    gateway = ModelHubTurnGateway(service)
+    router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
+    try:
+        async with aiohttp.ClientSession() as client:
+
+            async def call(hop):
+                async with client.post(
+                    f'{hop["base_url"]}/messages',
+                    headers={"Authorization": f'Bearer {hop["token"]}'},
+                    json={"model": hop["runtime_model"], "messages": []},
+                ) as response:
+                    await response.read()
+                    return response.status
+
+            first = await router.resolve_hop("menu-alias", process_scope="vibey:session", turn_id="turn-first")
+            assert await call(first) == 200
+            completion = router.settle_turn("turn-first", settled_by=SETTLED_BY_TERMINAL_RESULT, ts=NOW.isoformat())
+            if completion:
+                await completion
+            assert service.provenance.get("turn-first")["outcome"] == "served"
+            assert await call(first) == 401
+
+            second = await router.resolve_hop("menu-alias", process_scope="vibey:session", turn_id="turn-second")
+            assert second["token"] != first["token"]
+            assert await call(second) == 200
+    finally:
+        await gateway.close()
+
 @pytest.mark.asyncio
 async def test_vibey_route_replacement_refuses_overlap_without_poisoning_current_request(tmp_path):
     """MH-VIBEY-006: a new launch cannot take an in-flight request's turn identity."""

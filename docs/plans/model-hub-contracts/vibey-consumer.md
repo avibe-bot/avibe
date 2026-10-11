@@ -51,8 +51,12 @@ retains the caller's catalog alias through remapping and failover. The token is
 in-memory only and excluded from the launch repr. `request_headers` is a required
 map (empty when unused) carrying any gateway correlation metadata; it is never
 omitted. The caller supplies a Session-specific process scope
-and the current Vibey turn id for durable turn provenance, then retires the scope
-through the existing router lifecycle when the consumer shuts down.
+and the current Vibey turn id on every resolution for durable turn provenance. It names
+the turn itself, because the loop's later model calls run in their own tasks, where the
+turn cannot be found by task. A resolution without a turn id would mark the scope's turns
+ambiguous. Vibey has no process that outlives a turn, so the existing turn settlement
+retires the scope's credentials once its last active turn settles, and the next turn
+receives fresh ones. A scope with untracked use is left to the native lifecycle rules.
 
 Planning capabilities retain the requested catalog row's authority, including for
 aliases. Unknown `context_window`, `max_output_tokens`, `supports_tools`, and
