@@ -15,6 +15,7 @@ import { ShellSidebarContext } from '@/context/ShellSidebarContext';
 import { SETTINGS_MENU_PLACEMENT_STORAGE_KEY } from '@/lib/settingsMenuPlacement';
 import { SETTINGS_LAST_SECTION_STORAGE_KEY } from '@/lib/settingsSectionMemory';
 import { ModelHubCapabilityGate } from './models/ModelHubCapabilityGate';
+import { SettingsOverlayNavigationBoundary } from './SettingsOverlayNavigationBoundary';
 import { SettingsLayout } from './SettingsLayout';
 
 const api = vi.hoisted(() => {
@@ -104,6 +105,7 @@ const renderLayout = (
 ) => render(
   <MemoryRouter initialEntries={[entry]}>
     <ShellSidebarContext.Provider value={shellHasSidebar}>
+    <SettingsOverlayNavigationBoundary desktop={shellHasSidebar}>
     <Routes>
       <Route path="/settings" element={<SettingsLayoutHarness />}>
         <Route path="general" element={<div>general-body</div>} />
@@ -121,6 +123,7 @@ const renderLayout = (
       </Route>
       <Route path="/chat/:sessionId" element={<div>chat-body</div>} />
     </Routes>
+    </SettingsOverlayNavigationBoundary>
     </ShellSidebarContext.Provider>
   </MemoryRouter>,
 );
@@ -336,6 +339,25 @@ describe('SettingsLayout', () => {
     expect(screen.getByRole('link', { name: 'settings.sections.models' })).toBeTruthy();
     const rail = screen.getByRole('navigation', { name: 'settings.navigationLabel' });
     expect(rail.querySelectorAll('a[href^="/settings/"]')).toHaveLength(2);
+    expect(screen.queryByRole('link', { name: 'settings.sections.replies' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'nav.messagingPlatforms' })).toBeNull();
+  });
+
+  it('keeps a disabled Model Hub inside the setup overlay instead of leaving for Backends', async () => {
+    const setup: Location = { pathname: '/setup', search: '', hash: '', state: null, key: 'setup' };
+    api.getConfig.mockResolvedValue({ capabilities: { model_hub: { enabled: false } } });
+    renderLayout(
+      { pathname: '/settings/models', state: settingsOverlayOpenState(setup, null) },
+      { shellHasSidebar: false, gateModelHub: true },
+    );
+
+    expect(await screen.findByText('general-body')).toBeTruthy();
+    expect(screen.queryByText('backends-body')).toBeNull();
+    expect(screen.queryByText('models-body')).toBeNull();
+    const rail = screen.getByRole('navigation', { name: 'settings.navigationLabel' });
+    expect(rail.querySelectorAll('a[href^="/settings/"]')).toHaveLength(2);
+    expect(screen.getByRole('link', { name: 'settings.sections.models' })).toBeTruthy();
+    expect(screen.getByRole('link', { name: 'settings.sections.general' })).toBeTruthy();
     expect(screen.queryByRole('link', { name: 'settings.sections.replies' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'nav.messagingPlatforms' })).toBeNull();
   });
