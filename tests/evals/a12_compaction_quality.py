@@ -128,7 +128,7 @@ def _next_step(answer: dict) -> bool:
     step = _text(answer.get("next_step"))
     return (
         "test_burst.py" in step
-        and any(verb in step for verb in ("add", "write", "creat", "implement"))
+        and any(verb in step for verb in ("add", "writ", "creat", "implement"))
         and re.search(r"(?<![\d.])5(?!\.?\d)", step) is not None
     )
 
@@ -412,7 +412,12 @@ def fixture_problems(root: Path) -> list[str]:
         problems.append("src/rate_limit.py no longer defines allow()")
     if not re.search(r"^REFILL_RATE\s*=\s*1\s*$", (root / "src/config.py").read_text(encoding="utf-8"), re.M):
         problems.append("src/config.py does not set REFILL_RATE = 1")
-    notes = [line.lower() for line in (root / "CHANGES.md").read_text(encoding="utf-8").splitlines()[1:] if line.strip()]
+    # Its entries are every non-blank line but a heading: an agent may rewrite the file without the "# Changes" one.
+    notes = [
+        line.lower()
+        for line in (root / "CHANGES.md").read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
     if len(notes) != 2 or not any("burst" in note for note in notes) or not any("refill" in note for note in notes):
         problems.append(f"CHANGES.md does not hold exactly the BURST and REFILL_RATE lines: {notes}")
     if (root / "vendor/legacy_api.py").read_text(encoding="utf-8") != VENDOR:
