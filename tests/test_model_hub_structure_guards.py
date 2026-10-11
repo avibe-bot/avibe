@@ -301,7 +301,6 @@ MACHINE_ERROR_FAMILY_FIXTURES = {
         "api_error",
         "service_unavailable_error",
         "upstream_error",
-        "timeout_error",
     ),
     "transient": (
         "rate_limit_error",
@@ -1322,7 +1321,10 @@ def test_settlement_abandonment_cannot_overwrite_a_committed_terminal_fact() -> 
 
 
 def test_machine_error_family_product_is_complete_across_transports() -> None:
-    expected_codes = {code for codes in MACHINE_ERROR_FAMILY_FIXTURES.values() for code in codes}
+    fixture_codes = [code for codes in MACHINE_ERROR_FAMILY_FIXTURES.values() for code in codes]
+    expected_codes = set(fixture_codes)
+    # Each code is listed once; the set comparison below would collapse a duplicate.
+    assert len(fixture_codes) == len(expected_codes)
     assert expected_codes == set(UPSTREAM_MACHINE_ERROR_CODES)
     assert set(MACHINE_ERROR_CODES) - expected_codes == {"engine_down"}
     observed: set[tuple[str, str, str]] = set()

@@ -155,7 +155,7 @@ line-length = 120
 src = ["."]
 
 [tool.ruff.lint]
-select = ["E9", "F63", "F7", "F82"]
+select = ["E9", "F63", "F7", "F82", "F601"]
 extend-ignore = ["E501"]
 
 [tool.pytest.ini_options]
