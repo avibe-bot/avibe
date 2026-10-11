@@ -5,6 +5,9 @@ The coding tools in `core/agent_core/tools/`. Names, parameters, logic, and mode
 are Pi's unless marked as an Avibe addition. tau 0.4.7 (MIT, Copyright (c) 2026 Alejandro AO) is the Python
 reference. One tool set serves every model.
 
+On Windows the command tool is `powershell` instead of `bash` (§5); what this contract and the others (C-3, C-9, C-10)
+say of `bash` holds for it.
+
 `Tool.concurrent` (Avibe) says whether a tool's calls may run at the same time as the neighbouring concurrent calls of
 the same response (C-3 [`loop-control.md`](loop-control.md) §2). When it is absent or `False`, every call of the tool
 is exclusive. `read` and `bash` are concurrent; `write` and `edit` are exclusive. Pi instead runs a response's calls at
@@ -42,7 +45,9 @@ Raw text, no line numbers, head kept. Model-facing suffixes:
 - `[Showing lines {start}-{end} of {total} (50KB limit). Use offset={next} to continue.]`
 - `[{remaining} more lines in file. Use offset={next} to continue.]` (an explicit `limit` stopped before the end)
 - `[Line {n} is {size}, exceeds 50KB limit. Use bash: sed -n '{n}p' {quoted_path} | head -c 51200]`, where
-  `{quoted_path}` is the path shell-quoted (Avibe change to Pi's text, so the suggested command is always safe to run)
+  `{quoted_path}` is the path shell-quoted (Avibe change to Pi's text, so the suggested command is always safe to run).
+  On Windows: `[Line {n} is {size}, exceeds 50KB limit. Use powershell: (Get-Content -LiteralPath {quoted_path}
+  -TotalCount {n})[-1].Substring(0, 51200)]`, the path in single quotes with each `'` doubled.
 - Error: `Offset {offset} is beyond end of file ({total} lines total)`
 
 Images are attached as `ImageBlock`s (C-1); for a model without image input the result says so and omits the image.
@@ -220,6 +225,27 @@ continue in the background as an Avibe Watch; you get a follow-up message when t
 - The Watch follow-up states the command, exit code, elapsed time, the tail under the same rules, and the output log
   under the same label.
 
+### On Windows: `powershell` (Avibe)
+
+The tool is named `powershell`, so the model writes PowerShell, with the same parameters, behavior, and results. Its
+description is the one above with `Execute a PowerShell command in the current working directory. Returns its output
+and errors.` as the first sentence; under Windows PowerShell 5.1 it adds `This is Windows PowerShell 5.1: it has no &&
+or ||, so separate commands with ; and test $? or $LASTEXITCODE.` The advice in other tools' results that names `bash`
+names `powershell` there, and "for example sed or a short script" becomes "for example a short script".
+
+- Shell: PowerShell 7 (`pwsh`) when it is on the `PATH` the commands run with, else Windows PowerShell 5.1, which
+  every Windows 10 and 11 has.
+- The command is written to `command.ps1` in the job directory, so no length limit applies (a command line holds
+  32,767 characters), and a fixed bootstrap runs it through `-NoProfile -NonInteractive -Command`
+  (`-EncodedCommand` makes Windows PowerShell write errors as CLIXML). It turns off progress records and color, and
+  makes the output UTF-8: PowerShell's own, and the console code page that native programs inherit;
+  `PYTHONUTF8=1` is set unless the environment sets it.
+- A command that does not parse fails with exit code 1 and the parser's messages before anything runs. Otherwise
+  each top-level statement runs in turn and its output is formatted before the next one runs, so no output is lost
+  to an `exit` that follows it (PowerShell's own `-Command` loses it).
+- The exit code follows bash: the command's own `exit N`; else 0 when the last statement succeeded; else
+  `$LASTEXITCODE` when it is not 0, so a failed native program reports its code; else 1.
+
 ## 6. Output normalizer
 
 Every model-facing command output (`bash` results, job logs, Watch follow-ups) passes through one normalizer: decode
@@ -280,13 +306,15 @@ the projected context no longer shows, because the inputs that carried the earli
 <environment>
 cwd: /absolute/path
 os: macOS 26.0 (arm64)
-shell: /bin/zsh
+shell: /bin/bash
 date: 2026-10-02
 timezone: Asia/Shanghai
 watches: wch_8f2k "nightly sync" command running; wch_3c1d job running
 </environment>
 ```
 
+`shell` is the shell the commands run in: the job host's on POSIX (`/bin/bash`, else `bash` on `PATH`, else `sh`), and
+on Windows `PowerShell 7 ({path})` or `Windows PowerShell 5.1 ({path})`.
 `watches` names the Session's enabled Watches by id, name, and kind, never a command: at most 20, then `and N more`.
 A field's identity is its raw value; only the block displays it, through the one display helper (`display`, C-9
 `context.md` §7): one line of plain text, escaped injectively (a backslash doubled, control characters and `<`, `>`
