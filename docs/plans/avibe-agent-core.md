@@ -46,15 +46,18 @@ sits below the product boundary Avibe must own: loop semantics, persistence, and
 - Becoming the default agent for new installs. v1 is the built-in backend, always enabled and listed first
   ([`avibe-agent-always-on.md`](avibe-agent-always-on.md)), but not the default for new chats; that default is decided
   after the P4 regression with real usage evidence.
-- Hosting MCP servers (Avibe is an MCP client only). Sandboxing beyond Avibe's existing cwd policy.
+- An MCP client in the engine or the adapter. Avibe is CLI-first: MCP servers are reached through the Avibe MCP
+  Hub's `vibe` commands, the same way for every backend (§10).
+- Per-action permission prompts. No backend prompts per action today (§10). Sandboxing beyond Avibe's existing cwd
+  policy.
 - Failover and credentials inside the agent; they stay in Model Hub.
 - Interactive terminal programs (planned, §5.4).
 
 ## 3. Hard constraints
 
 1. Python `>=3.10` (Avibe's floor), asyncio host, no threads for the loop, no subprocess boundary for the loop.
-2. No third-party agent framework at runtime. New dependencies only by recorded decision: the official `mcp` Python
-   SDK enters in P3, recorded in `pyproject.toml` in the same PR. Internal types are dataclasses.
+2. No third-party agent framework at runtime. New dependencies only by recorded decision, recorded in
+   `pyproject.toml` in the same PR. Internal types are dataclasses.
 3. Native protocols: Anthropic Messages, OpenAI Chat Completions, OpenAI Responses, Google Gemini. The agent speaks
    the protocol of the route's primary hop and never flattens everything to one wire protocol.
 4. **One persistence model, one copy.** The model-facing transcript is Avibe's own `messages` and `agent_events` rows
@@ -73,11 +76,11 @@ sits below the product boundary Avibe must own: loop semantics, persistence, and
 ```
 modules/agents/vibey/             backend adapter: BaseAgent implementation, event → MessageOutput,
                                   transcript store over messages/agent_events, Watch-backed job host,
-                                  question/permission bridge, Model Hub hop resolution
+                                  question bridge, Model Hub hop resolution
 core/agent_core/
   ai/                             canonical message model, provider adapters (4 protocols), stream parsing, retry
   agent/                          loop, hooks, steer/follow-up queues, dynamic tools, side turn (C-10), typed events
-  harness/                        transcript store interface, projection, context management, skills, MCP client
+  harness/                        transcript store interface, projection, context management, skills
   tools/                          read / write / edit / bash with output governance; JobHost interface
 tests/agent_core/                 control-point matrix (acceptance harness), conformance fixtures, stub server
 tests/scenarios/agent_core/       scenario catalog (IDs cited in PRs)
@@ -229,8 +232,8 @@ The tool surface follows Pi: names, parameters, logic, and model-facing text. ta
 
 One tool set serves every model. stdin is closed, so interactive programs fail fast instead of hanging; where tmux
 is installed the agent can still drive one through `bash`, as Pi's own repository does. Search, delegation,
-credentials, waiting, files for the user, and questions stay on existing Avibe surfaces (`rg`/`find` through `bash`,
-`vibe agent run`, Vault, `vibe watch`, `file://` links, the question UI).
+credentials, waiting, files for the user, questions, and MCP stay on existing Avibe surfaces (`rg`/`find` through
+`bash`, `vibe agent run`, Vault, `vibe watch`, `file://` links, the question UI, and the MCP Hub's `vibe` commands).
 
 Owner additions over Pi: `edit` `replaceAll` (from Claude Code and OpenCode) and Watch-backed `bash` (below). Rejected
 for v1: stale-write guard, line numbers in `read`, a `workdir` parameter, head+tail failure output, `write_stdin`,
@@ -316,8 +319,8 @@ Properties; the test suites enumerate cases.
   With a provider that always overflows, one request makes at most two checkpoint model calls and then ends in a
   user-visible stop (C-9 `context.md` §8).
 - **A5 Egress.** With Model Hub configured, every model call goes to the resolved `base_url`: the engine itself sends
-  no telemetry and never contacts a vendor directly. Network use by tools (`bash`, later MCP) is the tools' own and is
-  governed by tool and workspace policy, not by this criterion.
+  no telemetry and never contacts a vendor directly. Network use by tools (`bash` and the commands it runs, MCP Hub
+  calls through `vibe` included) is the tools' own and is governed by tool and workspace policy, not by this criterion.
 - **A6 Surfaces.** The same turn produces equivalent user-visible outcomes on Workbench and on every IM platform in
   the Incus regression environment: progress, tool activity, final message, stop, questions, Watch follow-ups.
 - **A7 Registration.** Every declaration that stands for a whole backend universe equals the catalog's set or the
@@ -345,7 +348,7 @@ Properties; the test suites enumerate cases.
 | P0 | docs | this plan, the evaluation, and the contract drafts | owner approval; `pr-delivery-loop` gates |
 | P1 | Model Hub extension: `core/handlers/model_hub/`, Model Hub contracts, UI types · `ai`: `core/agent_core/ai/` · `agent`: `core/agent_core/agent/` · `tools`: `core/agent_core/tools/` | C-1, C-2, C-3, C-6, C-7 frozen on `master` first | each lane in its own worktree and PR; the control points it owns pass |
 | P2 | adapter: `modules/agents/vibey/`, catalog, config, and UI registration (i18n strings; any new UI element needs an approved `design.pen` frame first) · transcript and Watch `job` target: `core/agent_core/harness/`, `storage/`, `core/watches.py` | C-4, C-5, C-8 frozen | A1, A3, A7, A10, A11; Incus smoke on one platform |
-| P3 | context management as the main v1 investment; loaded skills listed by name across checkpoints; MCP client; permissions through the question UI (pending questions live in the controller process while Workbench answers arrive through `vibe/ui_server.py`, so this needs the controller IPC path, not the in-memory `QuestionUIHandler` alone) | C-9 frozen | A4; A12 baseline recorded |
+| P3 | context management as the main v1 investment; loaded skills listed by name across checkpoints | C-9 frozen | A4; A12 baseline recorded |
 | P4 | regression and acceptance | Incus four-platform regression; owner checklist | A6; default-agent decision |
 
 Before P1, a few live calls through one Model Hub Source the owner names confirm the stub's fidelity. Circuit
@@ -390,6 +393,8 @@ contracts and checked against the implementing lane's code before they are close
 | Steer receipt fencing in the shared Turn owner | `core/session_turns.py` (`_finish_steer`) | **Done in PR #2345** (orchestrator-authorized cross-lane fix): a negative receipt settles only a current attempt whose Deliveries are still steering or reconciling, and a caller that knows the attempt passes `expected_attempt_id`, so a late or duplicate receipt can no longer pull a Delivery out of a Turn that claimed it. Regression: `test_a_late_negative_steer_receipt_never_moves_a_delivery_its_attempt_no_longer_owns`. |
 | Fork as the runtime's base primitive | `core/agent_core/harness`, `core/agent_core/agent`, `storage/agent_transcript.py`, `core/services/session_fork.py` | Contract [`agent-core-contracts/fork.md`](agent-core-contracts/fork.md) (C-10, frozen 2026-10-10 by owner decision): one fork point with two carriers, the side turn and the fork Session. Phase 1a wires Vibey's existing session fork to the fork point (a user's fork cuts at the end of the previous ended Turn; arbitrary settled points are internal only, with no product surface); Phase 1b rebuilds C-9's checkpoint turn on the side turn. Native backends keep their existing fork logic (owner decision, 2026-10-10). Teams are a later design; native point-in-time fork and a self-fork bound are not planned. |
 | Hooks with context management | `core/agent_core/agent/` (C-3, C-9) | In v1, an Agent with a `ContextConfig` takes no user hooks: `before_model` rewrites and `before_tool`/`after_tool` decisions each changed what C-9 owns (the route, the projected prefix, artifacts, the checkpoint budget). A post-v1 design defines which hook outputs C-9 accepts and how it accounts for them before the two are combined (owner decision, PR #2360 round 5). |
+| MCP via the MCP Hub (CLI-first): no per-backend MCP client | Avibe MCP Hub (master) | Owner decision, 2026-10-11: Avibe is CLI-first. Installed MCP servers sit behind an Avibe MCP Hub; Agents get a Hub skill and use MCP through `vibe` commands, so Vibey gets no MCP client, the engine takes no `mcp` dependency, and every backend reaches the same servers the same way. Computer Use becomes a standalone `vibe` subcommand, owned on master. |
+| Permissions through the question UI | deferred, not v1 | No backend prompts per action today: Claude Code runs with `bypassPermissions`, Codex with approvals and sandbox bypassed, and Vibey with no approval hooks. A cross-backend design comes later, if ever. It would need the controller IPC path: pending questions live in the controller process while Workbench answers arrive through `vibe/ui_server.py`, so the in-memory `QuestionUIHandler` alone is not enough. C-10 `fork.md` §6 already fixes how approvals order against policy and forks. |
 | Call-instance identity for job files | `core/agent_core/tools/` (`ToolContext`, job `meta.json`), the adapter | **Done.** A tool call's identity is its instance: the owning response plus the call id, because providers reuse ids. The loop gives every executed call its instance (`ToolContext.call`: the response's row id and `context_seq`), and the job's `meta.json` records it. T2's job lookup (`find_job`), J5's settled check, and the hand-over's owning Turn match on the whole instance in context order; the clock fallback, which assumed a non-decreasing wall clock between a response's commit and its job's start, is gone. |
 
 Dropped by owner decision (2026-10-08), not to be built: live partial text and progress (streamed output), and slash
