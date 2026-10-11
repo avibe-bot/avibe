@@ -171,6 +171,17 @@ continue in the background as an Avibe Watch; you get a follow-up message when t
 - `timeout` kills the process tree: `Command timed out after {n} seconds`. Abort kills it: `Stopped by the user; the
   command was terminated.` (Avibe change to Pi's `Command aborted`: an abort is the user's Stop, and the model should
   know who ended the command). The adapter commits that result when the run ends (recovery's renderer, T2).
+- Every stop reason a job records ends its result the same way, as an error result: the output so far under the tail
+  rules above, then one line naming the reason. In the foreground and in recovery (T2) alike:
+  - `timeout`: `Command timed out after {n} seconds`;
+  - `aborted`: `Stopped by the user; the command was terminated.`;
+  - `killed` (anyone else's stop, a run ending with its command still running, or a signal that reached the
+    wrapper): `Command was killed before it finished`;
+  - `wrapper_error`: `Command ended because the job wrapper running it failed`;
+  - a reason another owner recorded through the job host, such as `vibe_stop`:
+    `Command was stopped before it finished ({reason})`, naming the reason only when it reads as a name.
+
+  A job that never ran, or ended with neither an exit nor a recorded stop, settles as interrupted (T2).
 - Handover (Avibe), when `watch: true` or the foreground window passes: the result is not an error and reads
   `Command is still running and is now Watch {watch_id}. You will get a follow-up message when it finishes.` followed
   by the output so far (tail rules above), `{label}: {path}`, and `Check: vibe watch show {watch_id}`,

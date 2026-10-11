@@ -465,6 +465,9 @@ def init_sentry(config: V2Config, component: str, enable_fastapi: bool = False) 
             before_send=before_send,
             before_breadcrumb=before_breadcrumb,
             attach_stacktrace=True,
+            # Frame locals hold user data the scrubber cannot see into: an Agent's tool
+            # environment and file contents, raw config bytes. Tracebacks stay; values do not.
+            include_local_variables=False,
             ignore_errors=[KeyboardInterrupt, SystemExit],
             max_breadcrumbs=50,
             sample_rate=1.0,

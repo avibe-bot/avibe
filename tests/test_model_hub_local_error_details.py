@@ -27,6 +27,9 @@ from vibe.model_hub_runtime.installer import EngineRuntimeManager
 from vibe.model_hub_runtime.state import EngineStateStore
 from vibe.model_hub_runtime.supervisor import EngineSupervisor, EngineUnavailableError
 
+# Starts real mock engines: none may outlive its test (tests/process_reaper.py).
+pytestmark = pytest.mark.reap_processes
+
 
 @pytest.mark.parametrize("code", [errno.ENOSPC, errno.EACCES, errno.EROFS, errno.EMFILE])
 @pytest.mark.parametrize("stage", ["install_lock", "invoke_spawn", "record_read", "record_write"])

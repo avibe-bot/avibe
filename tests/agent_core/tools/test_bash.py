@@ -22,6 +22,9 @@ from core.agent_core.tools.jobs import LocalJobHost
 from tests import hang_guard
 from tests.agent_core.tools.conftest import instance, result_text
 
+# Starts real job wrappers: none may outlive its test (tests/process_reaper.py).
+pytestmark = pytest.mark.reap_processes
+
 LABEL = "Output log (first 1.0MB, then the last 2.0MB in tail.log beside it)"
 
 
@@ -173,7 +176,7 @@ async def test_only_the_recorded_reason_makes_a_gone_job_a_timeout(tmp_path, mak
 
     assert host.stop_reason(job_id) == "wrapper_error"
     assert result.is_error
-    assert result_text(result).endswith("Command terminated without an exit code")
+    assert result_text(result).endswith("Command ended because the job wrapper running it failed")
 
 
 @pytest.mark.parametrize("failure", ["cwd_missing", "cwd_not_accessible", "jobs_dir_not_writable", "shell_missing"])
@@ -202,8 +205,8 @@ async def test_a_command_that_cannot_start_has_a_defined_result(tmp_path, make_c
         "cwd_missing": f"Working directory does not exist: {cwd}\nCannot execute bash commands.",
         "cwd_not_accessible": f"Working directory is not accessible: {cwd}\nCannot execute bash commands.",
         "jobs_dir_not_writable": "Could not start the command: permission denied.",
-        # The wrapper cannot spawn the shell: it records wrapper_error and the job ends without an exit code.
-        "shell_missing": "(no output)\n\nCommand terminated without an exit code",
+        # The wrapper cannot spawn the shell: it records wrapper_error, and the result says so.
+        "shell_missing": "Command ended because the job wrapper running it failed",
     }[failure]
     assert (result.is_error, result_text(result)) == (True, expected)
     assert not (tmp_path / "ran").exists()
@@ -545,7 +548,57 @@ async def test_settlement_reports_each_job_state(tmp_path, make_ctx):
     assert again.details["watch_id"] == running.details["watch_id"] == "wch_1"
     assert await settle_bash_call(recovery, instance("unknown")) is None
     await recovery.kill(running.details["job_id"])
-    assert await settle_bash_call(recovery, instance("running")) is None
+    killed = await settle_bash_call(recovery, instance("running"))
+    assert result_text(killed).endswith("Command was killed before it finished")
+
+
+@pytest.mark.parametrize(
+    ("reason", "line"),
+    [
+        (jobs_module.STOP_TIMEOUT, "Command timed out after 60 seconds"),
+        (jobs_module.STOP_ABORTED, "Stopped by the user; the command was terminated."),
+        ("killed", "Command was killed before it finished"),
+        ("wrapper_error", "Command ended because the job wrapper running it failed"),
+        # Recorded by another owner through the job host (``vibe stop`` ends every job).
+        ("vibe_stop", "Command was stopped before it finished (vibe_stop)"),
+    ],
+)
+async def test_recovery_settles_a_stopped_job_with_its_output_and_its_recorded_reason(tmp_path, reason, line):
+    """T2: a job stopped with a recorded reason settles as its output so far and why it stopped, not as interrupted."""
+    host = _host(tmp_path)
+    job_id = await host.start(
+        "echo so far; sleep 30", cwd=str(tmp_path), env={"PATH": os.environ["PATH"]}, timeout_s=60, call=instance()
+    )
+    output = host.output_path(job_id)
+    await hang_guard.until(
+        lambda: os.path.exists(output) and open(output).read() == "so far\n", "the command's first output"
+    )
+    await host.kill(job_id, reason=reason)
+
+    settled = await settle_bash_call(LocalJobHost(str(tmp_path / "jobs")), instance())
+
+    assert settled is not None
+    assert (result_text(settled), settled.is_error) == (f"so far\n\n\n{line}", True)
+
+
+async def test_a_recovered_stop_keeps_the_output_governance_of_any_result(tmp_path):
+    """The tail, its truncation notice and the output log, exactly as a foreground result shows them."""
+    host = _host(tmp_path)
+    job_id = await host.start(
+        "seq 1 3000; sleep 30", cwd=str(tmp_path), env={"PATH": os.environ["PATH"]}, timeout_s=None, call=instance()
+    )
+    output = host.output_path(job_id)
+    await hang_guard.until(
+        lambda: os.path.exists(output) and open(output).read().endswith("\n3000\n"), "the command's output"
+    )
+    await host.kill(job_id)
+
+    settled = await settle_bash_call(LocalJobHost(str(tmp_path / "jobs")), instance())
+
+    assert settled.details["output_path"] == output
+    assert result_text(settled).endswith(
+        f"2999\n3000\n\n[Showing lines 1001-3000 of 3000. {LABEL}: {output}]\n\nCommand was killed before it finished"
+    )
 
 
 async def test_a_timeout_holds_across_handover_and_a_restart(tmp_path, make_ctx):

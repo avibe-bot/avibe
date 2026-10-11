@@ -757,9 +757,35 @@ def test_root_launchers_move_together_through_either_activation(installation, mo
     assert os.readlink(foreign) == str(foreign_target)
 
 
+def test_alias_peer_that_reaches_primary_generation_is_not_reported_as_failed(
+    installation, monkeypatch, tmp_path,
+):
+    root, launcher = installation
+    peer = tmp_path / "alias-home" / ".local" / "bin" / "vibe"
+    peer.parent.mkdir(parents=True)
+    monkeypatch.setattr(upgrade, "INSTALLER_LAUNCHER_DIRS", (str(peer.parent),))
+    old = activate(root, launcher, "old")
+    peer.symlink_to(old)
+    current = candidate(root, "current")
+
+    def race_to_alias(_peer_launcher, _selected, _target):
+        peer.unlink()
+        peer.symlink_to(current)
+        return False
+
+    monkeypatch.setattr(upgrade, "move_managed_launcher_locked", race_to_alias)
+    outcome = upgrade.activate_installer_candidate(upgrade.AtomicActivation(
+        launcher, current, upgrade._launcher_generation(launcher, root),
+    ))
+
+    assert launcher.resolve() == current.resolve()
+    assert peer.resolve() == current.resolve()
+    assert outcome.peer_failures == ()
+
+
 def test_a_launcher_that_cannot_move_keeps_its_generation(installation, monkeypatch, tmp_path):
     root, launcher = installation
-    peer = tmp_path / "root-home" / ".local" / "bin" / "vibe"
+    peer = tmp_path / "root home 空格" / ".local" / "bin" / "vibe"
     peer.parent.mkdir(parents=True)
     monkeypatch.setattr(upgrade, "INSTALLER_LAUNCHER_DIRS", (str(peer.parent),))
     old = activate(root, launcher, "old")
@@ -769,12 +795,36 @@ def test_a_launcher_that_cannot_move_keeps_its_generation(installation, monkeypa
         raise PermissionError(f"{path} is read-only")
 
     monkeypatch.setattr(upgrade, "_activate_launcher_target_locked", read_only)
-    current = activate(root, launcher, "current")
+    current = candidate(root, "current")
+    outcome = upgrade.activate_installer_candidate(upgrade.AtomicActivation(
+        launcher, current, upgrade._launcher_generation(launcher, root),
+    ))
 
     assert launcher.resolve() == current.resolve()
     assert peer.resolve() == old.resolve()
     assert {path.name for path in root.iterdir()} == {"old", "current"}
     assert subprocess.run([str(peer)], check=False).returncode == 0
+    assert outcome.activated_launcher == launcher.absolute()
+    assert [(failure.launcher, failure.reason) for failure in outcome.peer_failures] == [
+        (peer.absolute(), f"{peer} is read-only"),
+    ]
+    assert [failure.reason_code for failure in outcome.peer_failures] == ["permission_denied"]
+    for language, expected in (
+        ("en", "Upgrade activated the new version"),
+        ("zh", "升级已激活新版本"),
+    ):
+        notice = upgrade.format_activation_failures(outcome, language)
+        assert notice is not None
+        assert expected in notice
+        assert str(peer) in notice
+        assert "is read-only" in notice
+        assert "doctor repair stable-launchers" in notice
+        if language == "en":
+            assert "Correct its permissions or ownership first" in notice
+            assert "then run `" in notice
+            assert "then Run `" not in notice
+        else:
+            assert "先修正其权限或所有者" in notice
 
 
 def test_a_peer_replaced_after_discovery_is_left_alone(installation, monkeypatch, tmp_path):
@@ -800,10 +850,31 @@ def test_a_peer_replaced_after_discovery_is_left_alone(installation, monkeypatch
         return found
 
     monkeypatch.setattr(upgrade, "managed_stable_launchers", replaced_after_discovery)
-    current = activate(root, launcher, "current")
+    current = candidate(root, "current")
+    outcome = upgrade.activate_installer_candidate(upgrade.AtomicActivation(
+        launcher, current, upgrade._launcher_generation(launcher, root),
+    ))
 
     assert launcher.resolve() == current.resolve()
     assert os.readlink(peer) == str(foreign_target)
+    assert [(failure.launcher, failure.reason) for failure in outcome.peer_failures] == [
+        (peer.absolute(), "the launcher changed after discovery"),
+    ]
+    assert [failure.reason_code for failure in outcome.peer_failures] == ["launcher_changed_after_discovery"]
+    notice_en = upgrade.format_activation_failures(outcome, "en")
+    notice_zh = upgrade.format_activation_failures(outcome, "zh")
+    assert notice_en is not None
+    assert notice_zh is not None
+    assert "the launcher changed after discovery" not in notice_zh
+    assert "so it was left untouched" in notice_en
+    assert "Inspect that launcher and confirm its intended target or installation" in notice_en
+    assert "other remaining managed stable launchers" in notice_en
+    assert "发现后发生了变化" in notice_zh
+    assert "因此该启动器保持原样" in notice_zh
+    assert "请检查该启动器并确认其目标或安装状态" in notice_zh
+    assert "其他仍受管理的稳定启动器" in notice_zh
+    assert "doctor repair stable-launchers" in notice_en
+    assert "doctor repair stable-launchers" in notice_zh
 
 
 def test_partial_removal_retains_uv_evidence_and_next_pass_finishes(installation, monkeypatch):
@@ -902,6 +973,288 @@ def test_installer_diagnostics_restore_logging_without_a_traceback(
     assert any(record.exc_info for record in caplog.records)
     assert retention.logger.handlers == handlers
     assert retention.logger.level == level
+
+
+def test_installer_postcommit_notice_failure_keeps_committed_generation(
+    installation, monkeypatch,
+):
+    from vibe import cli
+
+    root, launcher = installation
+    exported = candidate(root, "selected")
+    monkeypatch.setattr(
+        cli,
+        "format_activation_failures",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(BrokenPipeError("closed pipe")),
+    )
+
+    result = cli._dispatch_installer_activation([
+        "--launcher", str(launcher), "--candidate", str(exported),
+    ])
+
+    assert result == 0
+    assert launcher.resolve() == exported.resolve()
+    assert exported.exists()
+    assert (root / "selected").exists()
+
+
+def test_installer_postcommit_owner_failure_keeps_committed_generation(
+    installation, monkeypatch,
+):
+    from vibe import cli
+
+    root, launcher = installation
+    exported = candidate(root, "selected")
+    activate = cli.activate_installer_candidate
+
+    def activate_then_fail(activation):
+        activate(activation)
+        raise RuntimeError("retention reporting failed")
+
+    monkeypatch.setattr(cli, "activate_installer_candidate", activate_then_fail)
+
+    result = cli._dispatch_installer_activation([
+        "--launcher", str(launcher), "--candidate", str(exported),
+    ])
+
+    assert result == 0
+    assert launcher.resolve() == exported.resolve()
+    assert exported.exists()
+    assert (root / "selected").exists()
+
+
+def test_cli_postcommit_notice_failure_keeps_committed_generation(
+    installation, monkeypatch, capsys,
+):
+    from vibe import cli
+
+    root, launcher = installation
+    exported = candidate(root, "selected")
+    plan = upgrade.UpgradePlan(
+        command=["uv-fixture"],
+        env=None,
+        method="uv",
+        activation=upgrade.AtomicActivation(launcher, exported),
+    )
+    monkeypatch.setattr(
+        cli,
+        "get_latest_version",
+        lambda: {"error": None, "has_update": True, "latest": "99"},
+    )
+    monkeypatch.setattr(cli, "cache_running_vibe_path", lambda: str(launcher))
+    monkeypatch.setattr(cli, "build_upgrade_plan", lambda **_kwargs: plan)
+    monkeypatch.setattr(cli, "_runtime_process_was_running", lambda: False)
+    monkeypatch.setattr(
+        cli,
+        "execute_upgrade_plan",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(plan.command, 0, "", ""),
+    )
+    monkeypatch.setattr(cli, "_prepare_show_runtime_after_install", lambda *_args: None)
+    monkeypatch.setattr(
+        cli,
+        "format_activation_failures",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("notice failed")),
+    )
+
+    result = cli.cmd_upgrade()
+
+    assert result == 0
+    assert "Stable launcher activation notice unavailable: notice failed" in capsys.readouterr().out
+    assert launcher.resolve() == exported.resolve()
+    assert exported.exists()
+    assert (root / "selected").exists()
+
+
+def test_cli_postcommit_owner_failure_keeps_committed_generation(
+    installation, monkeypatch, capsys,
+):
+    from vibe import cli
+
+    root, launcher = installation
+    exported = candidate(root, "selected")
+    plan = upgrade.UpgradePlan(
+        command=["uv-fixture"],
+        env=None,
+        method="uv",
+        activation=upgrade.AtomicActivation(launcher, exported),
+    )
+    monkeypatch.setattr(
+        cli,
+        "get_latest_version",
+        lambda: {"error": None, "has_update": True, "latest": "99"},
+    )
+    monkeypatch.setattr(cli, "cache_running_vibe_path", lambda: str(launcher))
+    monkeypatch.setattr(cli, "build_upgrade_plan", lambda **_kwargs: plan)
+    monkeypatch.setattr(cli, "_runtime_process_was_running", lambda: False)
+    monkeypatch.setattr(
+        cli,
+        "execute_upgrade_plan",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(plan.command, 0, "", ""),
+    )
+    monkeypatch.setattr(cli, "_prepare_show_runtime_after_install", lambda *_args: None)
+    activate = cli.activate_upgrade_candidate
+
+    def activate_then_fail(activation):
+        activate(activation)
+        raise RuntimeError("retention reporting failed")
+
+    monkeypatch.setattr(cli, "activate_upgrade_candidate", activate_then_fail)
+
+    result = cli.cmd_upgrade()
+
+    assert result == 0
+    assert "post-activation cleanup reported" in capsys.readouterr().out
+    assert launcher.resolve() == exported.resolve()
+    assert exported.exists()
+    assert (root / "selected").exists()
+
+
+def test_api_postcommit_notice_failure_keeps_committed_generation(
+    installation, monkeypatch,
+):
+    from vibe import api
+
+    root, launcher = installation
+    exported = candidate(root, "selected")
+    plan = upgrade.UpgradePlan(
+        command=["uv-fixture"],
+        env=None,
+        method="uv",
+        activation=upgrade.AtomicActivation(launcher, exported),
+    )
+    monkeypatch.setattr(api, "get_version_info", lambda: {"latest": "99"})
+    monkeypatch.setattr(api, "get_running_vibe_path", lambda: str(launcher))
+    monkeypatch.setattr(api, "build_upgrade_plan", lambda **_kwargs: plan)
+    monkeypatch.setattr(api, "_runtime_process_was_running", lambda: True)
+    restart_calls = []
+    monkeypatch.setattr(api, "schedule_restart", lambda **kwargs: restart_calls.append(kwargs) or {"job_id": "restart"})
+    monkeypatch.setattr(
+        api,
+        "execute_upgrade_plan",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(plan.command, 0, "", ""),
+    )
+    monkeypatch.setattr(api, "_prepare_show_runtime_after_upgrade", lambda *_args: None)
+    monkeypatch.setattr(
+        api,
+        "format_activation_failures",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("notice failed")),
+    )
+
+    result = api.do_upgrade(auto_restart=True)
+
+    assert result["ok"] is True
+    assert result["message"] == "Upgrade successful. Restarting..."
+    assert result["activation_notice"] is None
+    assert result["output"] == "Stable launcher activation notice unavailable: notice failed"
+    assert result["restarting"] is True
+    assert restart_calls
+    assert launcher.resolve() == exported.resolve()
+    assert exported.exists()
+    assert (root / "selected").exists()
+
+
+def test_api_postcommit_owner_failure_keeps_committed_generation(
+    installation, monkeypatch,
+):
+    from vibe import api
+
+    root, launcher = installation
+    exported = candidate(root, "selected")
+    plan = upgrade.UpgradePlan(
+        command=["uv-fixture"],
+        env=None,
+        method="uv",
+        activation=upgrade.AtomicActivation(launcher, exported),
+    )
+    monkeypatch.setattr(api, "get_version_info", lambda: {"latest": "99"})
+    monkeypatch.setattr(api, "get_running_vibe_path", lambda: str(launcher))
+    monkeypatch.setattr(api, "build_upgrade_plan", lambda **_kwargs: plan)
+    monkeypatch.setattr(api, "_runtime_process_was_running", lambda: False)
+    monkeypatch.setattr(
+        api,
+        "execute_upgrade_plan",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(plan.command, 0, "", ""),
+    )
+    monkeypatch.setattr(api, "_prepare_show_runtime_after_upgrade", lambda *_args: None)
+    activate = api.activate_upgrade_candidate
+
+    def activate_then_fail(activation):
+        activate(activation)
+        raise RuntimeError("retention reporting failed")
+
+    monkeypatch.setattr(api, "activate_upgrade_candidate", activate_then_fail)
+
+    result = api.do_upgrade(auto_restart=False)
+
+    assert result["ok"] is True
+    assert result["message"] == "Upgrade successful. Please restart vibe."
+    assert result["output"] == "Upgrade activation cleanup reported: retention reporting failed"
+    assert result["restarting"] is False
+    assert launcher.resolve() == exported.resolve()
+    assert exported.exists()
+    assert (root / "selected").exists()
+
+
+@pytest.mark.parametrize("failure", ["metadata", "format"])
+def test_deferred_parent_posthandoff_diagnostic_failure_keeps_generation(
+    installation, monkeypatch, failure,
+):
+    from vibe import api
+
+    root, launcher = installation
+    exported = candidate(root, "deferred")
+    plan = upgrade.UpgradePlan(
+        command=["uv-fixture"],
+        env=None,
+        method="uv",
+        activation=upgrade.AtomicActivation(launcher, exported),
+    )
+
+    class WindowsOsProxy:
+        name = "nt"
+
+        def __getattr__(self, name):
+            return getattr(os, name)
+
+    monkeypatch.setattr(api, "os", WindowsOsProxy())
+    monkeypatch.setattr(api, "build_upgrade_plan", lambda **_kwargs: plan)
+    monkeypatch.setattr(api, "get_version_info", lambda: {"latest": "99"})
+    monkeypatch.setattr(api, "get_running_vibe_path", lambda: str(launcher))
+    monkeypatch.setattr(api, "_runtime_process_was_running", lambda: False)
+    monkeypatch.setattr(api, "activation_block_reason", lambda _activation: None)
+    monkeypatch.setattr(api, "launcher_is_current_process", lambda _launcher: True)
+    monkeypatch.setattr(api, "verify_upgrade_candidate", lambda _activation: upgrade.IntegrityResult(True))
+    monkeypatch.setattr(
+        api,
+        "defer_upgrade_activation",
+        lambda *_args, **_kwargs: SimpleNamespace(activation_log_path=root / "upgrade.log"),
+    )
+    if failure == "metadata":
+        monkeypatch.setattr(
+            api,
+            "get_deferred_activation_log_path",
+            lambda _process: (_ for _ in ()).throw(RuntimeError("log metadata failed")),
+        )
+    else:
+        monkeypatch.setattr(
+            api,
+            "format_deferred_activation_log",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("log formatting failed")),
+        )
+    monkeypatch.setattr(
+        api,
+        "execute_upgrade_plan",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(plan.command, 0, "done", ""),
+    )
+
+    result = api.do_upgrade(auto_restart=False)
+
+    assert result["ok"] is True
+    assert result["message"] == "Upgrade successful. Activation will complete after this process exits."
+    assert "log metadata failed" in result["output"] or "log formatting failed" in result["output"]
+    assert result["activation_notice"] is None
+    assert exported.exists()
+    assert (root / "deferred").exists()
 
 
 @pytest.mark.parametrize("state,owner,old_status,marker_job,deferred", [

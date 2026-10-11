@@ -40,6 +40,17 @@ pointer ownership that is released only by those terminal events, so a withheld
   not intersect either expanded endpoint handle region, or the candidate with
   the smallest overlap when no fully safe slot exists.
 
+## Select-all touch completion
+
+Select all widens the DOM range during `pointerup`. The native `touchend` tap
+processing follows it; cancelling only `pointerdown` does not cancel that touch
+default. Consume `touchend` for a successfully activated toolbar button without
+holding or restoring the selection. Keep the receipt separate from the bounded
+press state, and clear it on touch completion or the next pointer gesture.
+Incomplete gestures retain their native defaults. The browser regression and
+physical-device limits are documented in
+[`ui/e2e/chat-interactions/README.md`](../../ui/e2e/chat-interactions/README.md).
+
 ## Validation
 
 - Component tests simulate pointerdown without any terminal pointer event,

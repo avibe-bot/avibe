@@ -1,0 +1,406 @@
+diff --git a/libs/cua-driver/rust/crates/cua-driver-e2e/tests/harness_appkit_test.rs b/libs/cua-driver/rust/crates/cua-driver-e2e/tests/harness_appkit_test.rs
+index 4fa4e14ab..ec42f9f9b 100644
+--- a/libs/cua-driver/rust/crates/cua-driver-e2e/tests/harness_appkit_test.rs
++++ b/libs/cua-driver/rust/crates/cua-driver-e2e/tests/harness_appkit_test.rs
+@@ -81,7 +81,13 @@ impl Harness {
+         pointer_oracle: Option<&Path>,
+         keep_ordered_front: bool,
+     ) -> Self {
+-        let harness = Self::spawn(command_oracle, pointer_oracle, keep_ordered_front, None);
++        let harness = Self::spawn(
++            command_oracle,
++            pointer_oracle,
++            keep_ordered_front,
++            None,
++            false,
++        );
+         // Settle for window creation + activation.
+         std::thread::sleep(Duration::from_millis(800));
+         harness.await_presented();
+@@ -91,5 +97,12 @@ impl Harness {
+     /// Launch a harness that holds off entering its run loop for `delay`
+     /// after registering its window, without waiting for its launch posture.
+     fn launch_slowly(delay: Duration) -> Self {
+-        Self::spawn(None, None, false, Some(delay))
++        Self::spawn(None, None, false, Some(delay), false)
++    }
++
++    fn launch_with_raw_click_target() -> Self {
++        let harness = Self::spawn(None, None, false, None, true);
++        std::thread::sleep(Duration::from_millis(800));
++        harness.await_presented();
++        harness
+     }
+@@ -99,6 +112,7 @@ impl Harness {
+         pointer_oracle: Option<&Path>,
+         keep_ordered_front: bool,
+         launch_delay: Option<Duration>,
++        raw_click_target: bool,
+     ) -> Self {
+         let exe = harness_exe();
+         assert!(
+@@ -122,6 +136,9 @@ impl Harness {
+         if let Some(delay) = launch_delay {
+             command.env("CUA_APPKIT_LAUNCH_DELAY_MS", delay.as_millis().to_string());
+         }
++        if raw_click_target {
++            command.env("CUA_APPKIT_RAW_CLICK_TARGET", "1");
++        }
+         let app = command
+             .spawn()
+             .unwrap_or_else(|error| panic!("launch AppKit harness {exe:?}: {error}"));
+@@ -1649,3 +1666,85 @@ fn harness_appkit_counter_px_background() {
++#[test]
++#[ignore]
++fn harness_appkit_raw_single_click_bypasses_hollow_ax_press() {
++    let case = native_background_case(
++        "appkit",
++        "raw_single_click",
++        Targeting::Px,
++        DriverRoute::MacosCgEventPid,
++    );
++    execute_case(case, |evidence| {
++        let mut driver = McpDriver::spawn_macos_daemon_proxy_named("appkit-raw-single-click")
++            .expect("start macOS daemon proxy");
++        *evidence = recording_evidence(driver.recording_dir());
++        let harness = Harness::launch_with_raw_click_target();
++        let (wid, _) = driver
++            .find_window(harness.pid as i64, "CuaTestHarness AppKit")
++            .expect("find raw click receiver window");
++        let (_, passed) = run_with_background_oracles(
++            &mut driver,
++            TargetWindow {
++                pid: harness.pid,
++                native_id: wid,
++            },
++            |driver| {
++                let pre = snapshot_elements(driver, harness.pid, wid);
++                assert!(pre.tree_text().contains("raw_ax_presses=0"));
++                assert!(pre.tree_text().contains("raw_mouse_downs=0"));
++                assert!(pre.tree_text().contains("raw_mouse_ups=0"));
++                let (x, y, width, height) = element_pixel_frame(&pre, "btn-raw-hit-test");
++
++                let auto = driver.call(
++                    "click",
++                    serde_json::json!({
++                        "pid": harness.pid,
++                        "window_id": wid,
++                        "x": x + width / 2.0,
++                        "y": y + height / 2.0,
++                        "count": 1,
++                        "delivery_mode": "background"
++                    }),
++                );
++                assert!(!auto.is_error(), "default click failed: {}", auto.text());
++                std::thread::sleep(Duration::from_millis(250));
++                let after_auto = snapshot_elements(driver, harness.pid, wid);
++                assert!(
++                    after_auto.tree_text().contains("raw_ax_presses=1")
++                        && after_auto.tree_text().contains("raw_mouse_downs=0")
++                        && after_auto.tree_text().contains("raw_mouse_ups=0"),
++                    "default count=1 click must preserve AX-first behavior:\n{}",
++                    after_auto.tree_text()
++                );
++
++                let raw = driver.call(
++                    "click",
++                    serde_json::json!({
++                        "pid": harness.pid,
++                        "window_id": wid,
++                        "x": x + width / 2.0,
++                        "y": y + height / 2.0,
++                        "button": "left",
++                        "count": 1,
++                        "delivery_mode": "background",
++                        "click_mode": "raw"
++                    }),
++                );
++                assert!(!raw.is_error(), "raw click failed: {}", raw.text());
++                std::thread::sleep(Duration::from_millis(250));
++                let after_raw = snapshot_elements(driver, harness.pid, wid);
++                assert!(
++                    after_raw.tree_text().contains("raw_ax_presses=1")
++                        && after_raw.tree_text().contains("raw_mouse_downs=1")
++                        && after_raw.tree_text().contains("raw_mouse_ups=1"),
++                    "raw count=1 click must deliver exactly one native pair without AX:\n{}",
++                    after_raw.tree_text()
++                );
++            },
++        )
++        .unwrap_or_else(|error| panic!("background desktop contract failed: {error}"));
++        Observation::delivered_with_fixture_state(passed)
++    });
++}
++
+ #[test]
+ #[ignore]
+ fn harness_appkit_right_click_px_foreground() {
+diff --git a/libs/cua-driver/rust/crates/platform-macos/src/tools/click.rs b/libs/cua-driver/rust/crates/platform-macos/src/tools/click.rs
+index 7996734a9..69992dc6e 100644
+--- a/libs/cua-driver/rust/crates/platform-macos/src/tools/click.rs
++++ b/libs/cua-driver/rust/crates/platform-macos/src/tools/click.rs
+@@ -63,3 +63,23 @@ enum PixelActivationPolicy {
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++enum ClickMode {
++    Auto,
++    Raw,
++}
++
++impl ClickMode {
++    fn parse(value: &str) -> Option<Self> {
++        match value.trim().to_ascii_lowercase().as_str() {
++            "" | "auto" => Some(Self::Auto),
++            "raw" => Some(Self::Raw),
++            _ => None,
++        }
++    }
++
++    fn is_raw(self) -> bool {
++        self == Self::Raw
++    }
++}
++
+ #[derive(Clone, Copy, Debug)]
+ struct SelectionPixelTarget {
+     screen_x: f64,
+@@ -196,7 +216,10 @@ fn def() -> &'static ToolDef {
+              Pixel path: routes through the CGEvent left/right/middle mouse-button primitives. \
+              AX path: \"right\" maps to AXShowMenu (same surface as the dedicated `right_click` \
+              tool); \"middle\" has no AX equivalent and falls back to a pixel middle-click at the \
+-             element's center.\n\
++             element's center. For a window-addressed background pixel left-click, \
++             click_mode:\"raw\" bypasses the AX hit-test optimization and posts exactly one \
++             routed mouse down/up pair. Keep the default click_mode:\"auto\" unless AXPress \
++             was observed to return a hollow success.\n\
+              action: press (default), show_menu, pick, confirm, cancel, open.\n\
+              from_zoom: set true after a zoom call to auto-translate zoom-image pixel \
+              coordinates to full-window space."
+@@ -224,6 +247,11 @@ fn def() -> &'static ToolDef {
+                     "description": "Mouse button. Default: \"left\" — omit for legacy left-click behaviour. Pixel path uses the matching CGEvent primitive; AX path maps \"right\" to AXShowMenu and falls back to a pixel middle-click at the element's center for \"middle\"."
+                 },
+                 "count":         { "type": "integer", "description": "Click count (pixel path only). Default 1." },
++                "click_mode": {
++                    "type": "string",
++                    "enum": ["auto", "raw"],
++                    "description": "Pixel single-click delivery selector. Default \"auto\" preserves the AX-first background optimization. \"raw\" is opt-in and valid only for an exact pid + window_id background left-click with x/y, press action, count=1, and no modifiers; it bypasses AX hit-testing and uses the existing routed CGEvent path."
++                },
+                 "modifier": {
+                     "type": "array",
+                     "items": { "type": "string" },
+@@ -277,6 +305,24 @@ impl Tool for ClickTool {
+         let has_window_id = args.get("window_id").map(|v| !v.is_null()).unwrap_or(false);
+         let has_xy = args.get("x").map(|v| v.is_number()).unwrap_or(false)
+             && args.get("y").map(|v| v.is_number()).unwrap_or(false);
++        let click_mode_value = args.str_or("click_mode", "auto");
++        let click_mode = match ClickMode::parse(&click_mode_value) {
++            Some(mode) => mode,
++            None => {
++                return ToolResult::error(format!(
++                    "click: unknown click_mode \"{}\" — expected auto or raw.",
++                    click_mode_value.trim().to_ascii_lowercase()
++                ))
++                .with_structured(serde_json::json!({ "code": "invalid_arguments" }));
++            }
++        };
++        if click_mode.is_raw() && (!has_pid || !has_window_id || !has_xy) {
++            return ToolResult::error(
++                "click(click_mode=\"raw\") requires pixel coordinates x/y and an exact \
++                 pid + window_id target.",
++            )
++            .with_structured(serde_json::json!({ "code": "invalid_arguments" }));
++        }
+         let capture_id = args.opt_str("capture_id");
+         if capture_id.is_some() && !has_xy {
+             return ToolResult::error("click.capture_id requires pixel coordinates x and y.")
+@@ -463,3 +509,22 @@ impl Tool for ClickTool {
++        if click_mode.is_raw()
++            && (element_guard.is_some()
++                || args.get("target").is_some()
++                || x.is_none()
++                || y.is_none()
++                || window_id.is_none()
++                || !matches!(action.as_str(), "press" | "click")
++                || button_str != "left"
++                || count != 1
++                || !modifiers.is_empty()
++                || delivery_mode.is_foreground())
++        {
++            return ToolResult::error(
++                "click(click_mode=\"raw\") requires a background pixel left-click with \
++                 exact pid + window_id, x/y, press action, count=1, and no modifiers.",
++            )
++            .with_structured(serde_json::json!({ "code": "invalid_arguments" }));
++        }
++
+         // PID-routed key transitions can look correct for one AX poll and then
+         // collapse to a plain click once AppKit resolves the gesture. Refuse
+         // that false-success path. The explicit foreground rung uses physical
+@@ -987,7 +1052,8 @@ impl Tool for ClickTool {
+             // backend after resolving the requested screen point. This keeps
+             // targeting (PX) orthogonal to delivery (AX) and avoids making a
+             // Chromium/AppKit window key merely to satisfy first-mouse rules.
+-            if !delivery_mode.is_foreground()
++            if click_mode == ClickMode::Auto
++                && !delivery_mode.is_foreground()
+                 && window_id.is_some()
+                 && button_str == "left"
+                 && count == 1
+@@ -1641,4 +1707,24 @@ mod tests {
+             desc.contains("middle"),
+             "description should mention middle button"
+         );
++        assert!(
++            desc.contains("click_mode"),
++            "description should mention the raw single-click selector"
++        );
++    }
++
++    #[test]
++    fn schema_advertises_opt_in_raw_click_mode() {
++        let d = def();
++        let click_mode = &d.input_schema["properties"]["click_mode"];
++        assert_eq!(click_mode["type"], "string");
++        assert_eq!(click_mode["enum"], serde_json::json!(["auto", "raw"]));
++    }
++
++    #[test]
++    fn click_mode_preserves_auto_default_and_rejects_unknown_values() {
++        assert_eq!(ClickMode::parse(""), Some(ClickMode::Auto));
++        assert_eq!(ClickMode::parse("auto"), Some(ClickMode::Auto));
++        assert_eq!(ClickMode::parse("RAW"), Some(ClickMode::Raw));
++        assert_eq!(ClickMode::parse("semantic"), None);
+     }
+diff --git a/libs/cua-driver/tests/fixtures/apps/macos/appkit/main.swift b/libs/cua-driver/tests/fixtures/apps/macos/appkit/main.swift
+index 4621a4627..f8f0125ce 100644
+--- a/libs/cua-driver/tests/fixtures/apps/macos/appkit/main.swift
++++ b/libs/cua-driver/tests/fixtures/apps/macos/appkit/main.swift
+@@ -55,6 +55,11 @@ let kMenuActionAID = "lbl-menu-action"
+ let kScrollerAID = "scroll-tall"
+ let kScrollOffsetAID = "lbl-scroll-offset"
+ let kAccelCountAID = "lbl-accel-count"
++let kRawClickTargetAID = "btn-raw-hit-test"
++let kRawAxPressCountAID = "lbl-raw-ax-press-count"
++let kRawMouseDownCountAID = "lbl-raw-mouse-down-count"
++let kRawMouseUpCountAID = "lbl-raw-mouse-up-count"
++let kRawClickTargetEnv = "CUA_APPKIT_RAW_CLICK_TARGET"
+ let kScrollTopMarker = "SCROLL_TOP_MARKER_v1"
+ let kScrollBottomMarker = "SCROLL_BOTTOM_MARKER_v1"
+ let kExitButtonAID = "btn-exit"
+@@ -130,6 +135,12 @@ final class HarnessWindowController: NSObject, NSTextFieldDelegate, NSTableViewD
+     let scrollOffsetLabel = NSTextField(labelWithString: "scroll_offset=0")
+     let accelCountLabel = NSTextField(labelWithString: "accel_fired=0")
+     var accelCount = 0
++    let rawAxPressCountLabel = NSTextField(labelWithString: "raw_ax_presses=0")
++    let rawMouseDownCountLabel = NSTextField(labelWithString: "raw_mouse_downs=0")
++    let rawMouseUpCountLabel = NSTextField(labelWithString: "raw_mouse_ups=0")
++    var rawAxPressCount = 0
++    var rawMouseDownCount = 0
++    var rawMouseUpCount = 0
+     var keyMonitor: Any?
+     // Opt-in jev-use task controls and their app-owned state file.
+     let taskStatePath = ProcessInfo.processInfo.environment[kTaskStateEnv]
+@@ -267,3 +278,28 @@ final class HarnessWindowController: NSObject, NSTextFieldDelegate, NSTableViewD
++        if ProcessInfo.processInfo.environment[kRawClickTargetEnv] == "1" {
++            content.addArrangedSubview(sectionLabel("raw_click_target"))
++            let rawTarget = HitTestOnlyView(harness: self)
++            rawTarget.setAccessibilityIdentifier(kRawClickTargetAID)
++            rawTarget.translatesAutoresizingMaskIntoConstraints = false
++            rawAxPressCountLabel.setAccessibilityIdentifier(kRawAxPressCountAID)
++            rawMouseDownCountLabel.setAccessibilityIdentifier(kRawMouseDownCountAID)
++            rawMouseUpCountLabel.setAccessibilityIdentifier(kRawMouseUpCountAID)
++            for label in [rawAxPressCountLabel, rawMouseDownCountLabel, rawMouseUpCountLabel] {
++                label.font = NSFont.monospacedSystemFont(ofSize: 14, weight: .regular)
++            }
++            let rawRow = NSStackView()
++            rawRow.orientation = .horizontal
++            rawRow.spacing = 12
++            rawRow.addArrangedSubview(rawTarget)
++            rawRow.addArrangedSubview(rawAxPressCountLabel)
++            rawRow.addArrangedSubview(rawMouseDownCountLabel)
++            rawRow.addArrangedSubview(rawMouseUpCountLabel)
++            NSLayoutConstraint.activate([
++                rawTarget.widthAnchor.constraint(equalToConstant: 180),
++                rawTarget.heightAnchor.constraint(equalToConstant: 48),
++            ])
++            content.addArrangedSubview(rawRow)
++        }
++
+         // slider — NSSlider drives the `drag` / `set_value` tools (AXValue).
+         content.addArrangedSubview(sectionLabel("slider"))
+         let slider = NSSlider(value: 0, minValue: 0, maxValue: 100,
+@@ -700,6 +736,18 @@ final class HarnessWindowController: NSObject, NSTextFieldDelegate, NSTableViewD
+     @objc func onClickTarget() { recordClick("click") }
+     func clickTargetSawDouble() { recordClick("double_click") }
+     func clickTargetSawRight() { recordClick("right_click") }
++    func rawTargetSawAxPress() {
++        rawAxPressCount += 1
++        rawAxPressCountLabel.stringValue = "raw_ax_presses=\(rawAxPressCount)"
++    }
++    func rawTargetSawMouseDown() {
++        rawMouseDownCount += 1
++        rawMouseDownCountLabel.stringValue = "raw_mouse_downs=\(rawMouseDownCount)"
++    }
++    func rawTargetSawMouseUp() {
++        rawMouseUpCount += 1
++        rawMouseUpCountLabel.stringValue = "raw_mouse_ups=\(rawMouseUpCount)"
++    }
+     private func recordClick(_ action: String) {
+         clicks += 1
+         lastActionLabel.stringValue = "last_action=\(action)"
+@@ -732,3 +780,56 @@ final class ClickTargetButton: NSButton {
++final class HitTestOnlyView: NSView {
++    weak var harness: HarnessWindowController?
++
++    init(harness: HarnessWindowController) {
++        self.harness = harness
++        super.init(frame: .zero)
++        setAccessibilityElement(true)
++        setAccessibilityRole(.button)
++        setAccessibilityLabel("Raw hit-test button")
++    }
++
++    required init?(coder: NSCoder) {
++        fatalError("HitTestOnlyView does not support NSCoder")
++    }
++
++    override func draw(_ dirtyRect: NSRect) {
++        NSColor.systemBlue.setFill()
++        NSBezierPath(roundedRect: bounds, xRadius: 6, yRadius: 6).fill()
++        let text = "RAW HIT-TEST"
++        let attributes: [NSAttributedString.Key: Any] = [
++            .font: NSFont.boldSystemFont(ofSize: 14),
++            .foregroundColor: NSColor.white,
++        ]
++        let size = text.size(withAttributes: attributes)
++        text.draw(
++            at: NSPoint(
++                x: bounds.midX - size.width / 2,
++                y: bounds.midY - size.height / 2
++            ),
++            withAttributes: attributes
++        )
++    }
++
++    override func hitTest(_ point: NSPoint) -> NSView? {
++        bounds.contains(point) ? self : nil
++    }
++
++    override func mouseDown(with event: NSEvent) {
++        harness?.rawTargetSawMouseDown()
++    }
++
++    override func mouseUp(with event: NSEvent) {
++        harness?.rawTargetSawMouseUp()
++    }
++
++    override func accessibilityPerformPress() -> Bool {
++        harness?.rawTargetSawAxPress()
++        return true
++    }
++
++    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
++}
++
+ // Opt-in windows for the persistent exact-window activation certification.
+ // Ordinary harness launches remain byte-for-byte and behaviorally unchanged.
+ final class BringToFrontMatrixWindows {
