@@ -144,7 +144,9 @@ STREAM_ENVELOPE_FIXTURES = (
         "event_name": "error",
         "selector_path": ("type",),
         "selector_value": "error",
-        "error_paths": ((),),
+        # The reference carries the class at the root; Model Hub's engine nests it under `error`:
+        # https://github.com/router-for-me/CLIProxyAPI/blob/v7.3.16/sdk/api/handlers/openai_responses_stream_error.go
+        "error_paths": ((), ("error",)),
         "payload": b'{"type":"error","code":"permission_error"}',
         "source": "https://platform.openai.com/docs/api-reference/responses-streaming/error",
     },
@@ -1703,7 +1705,7 @@ def test_cancelled_sse_observation_drains_its_worker_before_settlement() -> None
 @pytest.mark.parametrize(
     ("event_name", "payload", "expected_outcome"),
     (
-        ("error", b'{"type":"error","error":{"code":"permission_error"}}', "failed_terminal"),
+        ("error", b'{"type":"error","response":{"error":{"code":"permission_error"}}}', "failed_terminal"),
         ("response.failed", b'{"type":"response.failed","code":"permission_error","response":{}}', "failed_terminal"),
         ("response.incomplete", b'{"type":"response.incomplete","response":{"error":null}}', "served"),
         ("response.incomplete", b'{"type":"response.incomplete","response":{"error":{}}}', "served"),
@@ -1717,7 +1719,7 @@ def test_responses_terminal_trust_roots_ignore_unofficial_error_locations(
     state = ProtocolSSEState("openai_responses")
     state.observe(b"event: " + event_name.encode() + b"\ndata: " + payload + b"\n\n")
     assert state.terminal_outcome == expected_outcome
-    assert state.error_envelope_paths in {((),), (), (("response", "error"),)}
+    assert state.error_envelope_paths in {((), ("error",)), (), (("response", "error"),)}
 
     from vibe.model_hub_runtime.client import _raw_error_fields
 
