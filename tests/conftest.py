@@ -222,32 +222,39 @@ def pytest_runtest_teardown(item):
 
 
 @pytest.fixture
-def reap_tmp_path_processes(tmp_path):
-    """Fail a test that leaves running a process naming its ``tmp_path``, once that process is killed.
+def reap_helper_spawns(tmp_path, tmp_path_factory):
+    """Reap what the test's helper interpreters spawned, by identity, and fail the test for each one left.
 
-    ``reap_processes`` reaps what this pytest process started. A connector that a
-    test's child Python started reparents to init once the child exits, where no
-    record reaches it, but it names the test's ``tmp_path`` (tests/process_reaper.py).
+    A helper started with ``process_reaper.record_spawns`` appends each spawn to
+    ``helper_spawn_record(tmp_path)``; once the helper exits those spawns
+    reparent to init, where no record of this pytest process reaches them.
     Torn down after the test's own fixtures, so their cleanup runs first; the
-    warden covers a run killed before teardown. POSIX only, like the reaper.
+    warden reaps the record if the run is killed before then. An orphan that
+    names ``tmp_path`` but is in no record also fails the test, and is never
+    signalled. POSIX only, like the reaper.
     """
 
     global _process_warden
     if not _SIGNAL_GUARD_SUPPORTED:
         yield
         return
+    record = process_reaper.helper_spawn_record(tmp_path)
     if _process_warden is None:
         _process_warden = process_reaper.Warden()
-    # A pytest killed outright runs no teardown: the warden then kills what names tmp_path.
-    _process_warden.watch_root(tmp_path)
+    _process_warden.watch_spawns(record, tmp_path_factory.getbasetemp())
     yield
     __tracebackhide__ = True
     try:
-        reaped = process_reaper.reap_naming(tmp_path)
+        reaped, orphans = process_reaper.end_helper_spawns(record, tmp_path)
     finally:
-        _process_warden.forget_root()
+        _process_warden.forget_spawns()
+    problems = []
     if reaped:
-        pytest.fail("processes naming this test's tmp_path were still running and were killed: " + ", ".join(reaped))
+        problems.append("spawns of this test's helper processes were still running and were killed: " + ", ".join(reaped))
+    if orphans:
+        problems.append("orphans naming this test's tmp_path are in no spawn record and were left running: " + ", ".join(orphans))
+    if problems:
+        pytest.fail("\n".join(problems))
 
 
 def _module_uses_default_sqlite_state(request: pytest.FixtureRequest) -> bool:

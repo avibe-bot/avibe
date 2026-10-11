@@ -38,15 +38,13 @@ its body. Every signal is proven to reach what the test started:
   it. A pid reused by any live process makes the record stale. The warden
   forgets each test's records once its reap has confirmed them gone.
 
-A process that a test's own child Python started is in no record: a connector
-a cross-process child brings up reparents to init once the child exits.
-``reap_naming`` covers it for the tests that opt into the
-``reap_tmp_path_processes`` fixture: everything such a test starts names its own
-``tmp_path`` (a fake cloudflared, the log sinks writing under the test's home),
-so a process whose executable or argv names it and is still running after the
-test's own cleanup is killed with its group, and the test fails. The warden
-holds the running test's ``tmp_path`` too, so when pytest is killed outright it
-kills what names that path as well.
+A helper interpreter a test starts (a cross-process child) spawns processes
+this pytest process never sees: once the helper exits they reparent to init.
+The helper calls ``record_spawns`` first, so each of its spawns is appended to
+the test's spawn record, and the ``reap_helper_spawns`` fixture reaps them by
+identity after the test's own cleanup; the warden reads the same record when
+the run is killed. Nothing is ever killed by name: an orphan that is in no
+record but names the test's ``tmp_path`` is only reported, and fails the test.
 
 Reports name a process by pid and executable name only: an argv can carry a
 credential.
@@ -140,69 +138,22 @@ def _describe(pid: int) -> str:
         return str(pid)
 
 
-# A log sink ends once the connector whose output it drains has: what the
-# test's own cleanup stopped gets this long to go before it counts as left behind.
-_NAMED_EXIT_SECONDS = 5.0
+def _add_tree(targets: dict[int, float], process: psutil.Process) -> None:
+    try:
+        for each in (process, *process.children(recursive=True)):
+            targets.setdefault(each.pid, each.create_time())
+    except psutil.Error:
+        pass
 
 
-def names_path(path: Path) -> Callable[[str], re.Match | None]:
-    """Search for ``path`` itself or a path inside it: the whole final component, so ``test_x1`` never names ``test_x10``."""
-    return re.compile(re.escape(str(path)) + r"(?![\w.-])").search
-
-
-def _naming(path: Path) -> dict[int, float]:
-    names = names_path(path)
-    found: dict[int, float] = {}
-    for process in psutil.process_iter():
-        if process.pid == os.getpid():
-            continue
-        try:
-            if process.status() == psutil.STATUS_ZOMBIE:
-                continue
-            words = [process.exe(), *process.cmdline()]
-            created = process.create_time()
-        except psutil.Error:
-            continue
-        if any(word and names(word) for word in words):
-            found[process.pid] = created
-    return found
-
-
-def reap_naming(path: Path) -> list[str]:
-    """Kill every process naming ``path`` that outlives a short grace, with its group and descendants; describe each.
-
-    Called once the test's own cleanup has run, for the processes no record
-    reaches.
-    """
+def _kill_and_wait(targets: dict[int, float], groups: set[int]) -> None:
+    """SIGKILL every group, then every target still the same process, and wait until all are gone."""
     __tracebackhide__ = True
-    give_up = time.monotonic() + _NAMED_EXIT_SECONDS
-    while (named := _naming(path)) and time.monotonic() < give_up:
-        time.sleep(0.05)
-    targets: dict[int, float] = {}
-    groups: set[int] = set()
-    for pid, created in named.items():
-        if (process := _same(pid, created)) is None:
-            continue
-        try:
-            for each in (process, *process.children(recursive=True)):
-                targets.setdefault(each.pid, each.create_time())
-            if _GETPGID(pid) == pid != _GETPGRP():
-                groups.add(pid)
-        except (OSError, psutil.Error):
-            pass
-    for member in _group_members(groups) if groups else ():
-        try:
-            targets.setdefault(member.pid, member.create_time())
-        except psutil.Error:
-            pass
-    targets.pop(os.getpid(), None)
-    reaped = [_describe(pid) for pid, created in named.items() if _same(pid, created) is not None]
     for pgid in groups:
-        if _group_is_ours(pgid, named[pgid]):
-            try:
-                _KILLPG(pgid, signal.SIGKILL)
-            except OSError:
-                pass
+        try:
+            _KILLPG(pgid, signal.SIGKILL)
+        except OSError:
+            pass
     for pid, created in targets.items():
         if _same(pid, created) is not None:
             try:
@@ -217,7 +168,127 @@ def reap_naming(path: Path) -> list[str]:
                 + ", ".join(map(_describe, running))
             )
         time.sleep(0.01)
-    return reaped
+
+
+# A log sink ends once the connector whose output it drains has: what the
+# test's own cleanup stopped gets this long to go before it counts as left behind.
+_SPAWN_EXIT_SECONDS = 5.0
+
+
+def names_path(path: Path) -> Callable[[str], re.Match | None]:
+    """Search for ``path`` itself or a path inside it: the whole final component, so ``test_x1`` never names ``test_x10``."""
+    return re.compile(re.escape(str(path)) + r"(?![\w.-])").search
+
+
+def helper_spawn_record(test_temp: Path) -> Path:
+    """Where a test's helper interpreters record their spawns."""
+    return test_temp / "helper-spawns"
+
+
+def record_spawns(record: Path) -> None:
+    """Called first in a helper interpreter a test starts: append each process it spawns to ``record``.
+
+    One line per spawn, ``<pid> <creation time> <1 if it founded its group>``,
+    flushed and synced before ``Popen`` returns, so a helper killed right after
+    a spawn has still recorded it.
+    """
+    initialize = subprocess.Popen.__init__
+
+    def recording_init(self, *args, **kwargs):
+        initialize(self, *args, **kwargs)
+        created = _created(self.pid)
+        if created is None:
+            return
+        try:
+            founded_group = _GETPGID(self.pid) == self.pid != _GETPGRP()
+        except (OSError, TypeError):
+            founded_group = False
+        with open(record, "a", encoding="utf-8") as file:
+            file.write(f"{self.pid} {created!r} {int(founded_group)}\n")
+            file.flush()
+            os.fsync(file.fileno())
+
+    subprocess.Popen.__init__ = recording_init
+
+
+def _recorded_spawns(record: Path) -> dict[int, _Spawn]:
+    spawns: dict[int, _Spawn] = {}
+    try:
+        lines = record.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return spawns
+    for line in lines:
+        try:
+            pid, created, founded_group = line.split()
+            spawns[int(pid)] = _Spawn(float(created), founded_group == "1")
+        except ValueError:
+            # A line cut short by a helper killed mid-write.
+            continue
+    return spawns
+
+
+def require_inside_basetemp(path: Path, basetemp: Path) -> None:
+    """Fail unless ``path`` is strictly inside the run's ``basetemp``."""
+    __tracebackhide__ = True
+    resolved, root = path.resolve(), basetemp.resolve()
+    if root not in resolved.parents:
+        pytest.fail(f"refusing {resolved}: it is not strictly inside this run's basetemp {root}")
+
+
+def _lineage() -> set[int]:
+    me = psutil.Process()
+    return {me.pid, *(ancestor.pid for ancestor in me.parents())}
+
+
+def orphans_naming(test_temp: Path) -> list[str]:
+    """Describe each orphan (ppid 1) whose executable or argv names ``test_temp``. Never signals one.
+
+    A process with a live parent, such as a developer's ``tail -f``, is not an orphan.
+    """
+    names = names_path(test_temp)
+    lineage = _lineage()
+    found = []
+    for process in psutil.process_iter():
+        if process.pid in lineage:
+            continue
+        try:
+            if process.ppid() != 1 or process.status() == psutil.STATUS_ZOMBIE:
+                continue
+            words = [process.exe(), *process.cmdline()]
+        except psutil.Error:
+            continue
+        if any(word and names(word) for word in words):
+            found.append(_describe(process.pid))
+    return found
+
+
+def end_helper_spawns(record: Path, test_temp: Path) -> tuple[list[str], list[str]]:
+    """After the test's own cleanup, reap what ``record`` names by identity; then list unrecorded orphans.
+
+    Returns the recorded spawns that were still running and were killed, and
+    the orphans still naming ``test_temp``, which get no signal.
+    """
+    __tracebackhide__ = True
+    spawns = _recorded_spawns(record)
+
+    def running() -> list[int]:
+        return [pid for pid, spawn in spawns.items() if _same(pid, spawn.created) is not None]
+
+    give_up = time.monotonic() + _SPAWN_EXIT_SECONDS
+    while (running() or orphans_naming(test_temp)) and time.monotonic() < give_up:
+        time.sleep(0.05)
+    targets: dict[int, float] = {}
+    for pid in running():
+        if (process := _same(pid, spawns[pid].created)) is not None:
+            _add_tree(targets, process)
+    groups = {pid for pid, spawn in spawns.items() if spawn.founded_group and _group_is_ours(pid, spawn.created)}
+    for member in _group_members(groups) if groups else ():
+        _add_tree(targets, member)
+    for pid in _lineage():
+        targets.pop(pid, None)
+    reaped = list(map(_describe, running()))
+    _kill_and_wait(targets, groups)
+    return reaped, orphans_naming(test_temp)
 
 
 class TestProcesses:
@@ -247,47 +318,21 @@ class TestProcesses:
         """Kill what the test left running and wait until it is gone; describe each process killed."""
         __tracebackhide__ = True
         targets: dict[int, float] = {}
-
-        def add(process: psutil.Process) -> None:
-            try:
-                for each in (process, *process.children(recursive=True)):
-                    targets.setdefault(each.pid, each.create_time())
-            except psutil.Error:
-                pass
-
         for pid, created in _descendants().items():
             if self._before.get(pid) != created and (process := _same(pid, created)) is not None:
-                add(process)
+                _add_tree(targets, process)
         for pid, spawn in self._spawned.items():
             if (process := _same(pid, spawn.created)) is not None:
-                add(process)
+                _add_tree(targets, process)
         # A group outlives its leader: what a spawned shell put in the background stays in it.
         groups = {
             pid for pid, spawn in self._spawned.items() if spawn.founded_group and _group_is_ours(pid, spawn.created)
         }
         for member in _group_members(groups) if groups else ():
-            add(member)
+            _add_tree(targets, member)
         targets.pop(os.getpid(), None)
         reaped = [_describe(pid) for pid, created in targets.items() if _same(pid, created) is not None]
-        for pgid in groups:
-            try:
-                _KILLPG(pgid, signal.SIGKILL)
-            except OSError:
-                pass
-        for pid, created in targets.items():
-            if _same(pid, created) is not None:
-                try:
-                    _KILL(pid, signal.SIGKILL)
-                except OSError:
-                    pass
-        give_up = time.monotonic() + hang_guard.HANG_GUARD_SECONDS
-        while running := [pid for pid, created in targets.items() if _same(pid, created) is not None]:
-            if time.monotonic() >= give_up:
-                pytest.fail(
-                    f"hung for {hang_guard.HANG_GUARD_SECONDS:.0f}s waiting for SIGKILLed processes to end: "
-                    + ", ".join(map(_describe, running))
-                )
-            time.sleep(0.01)
+        _kill_and_wait(targets, groups)
         if self._warden is not None:
             self._warden.settle()
         return reaped
@@ -295,17 +340,17 @@ class TestProcesses:
 
 # Runs as ``python -I -c _WARDEN <pytest pid>`` with the record pipe on stdin. A
 # line is "<pid> <creation time> <1 if it founded its group>", "settled" once
-# the running test's reap has confirmed every record gone, "root <path>" for a
-# ``reap_tmp_path_processes`` test's ``tmp_path``, or "unroot" once its
-# teardown has cleared that path. EOF, or a parent that is no longer pytest,
+# the running test's reap has confirmed every record gone, "spawns <path>" for
+# the running ``reap_helper_spawns`` test's spawn record, or "unspawns" once its
+# teardown has reaped that record. EOF, or a parent that is no longer pytest,
 # means the run is over.
 _WARDEN = r"""
-import os, re, select, signal, sys
+import os, select, signal, sys
 import psutil
 
 pytest_pid = int(sys.argv[1])
 records = {}
-roots = set()
+spawn_record = None
 pending = b""
 while True:
     ready, _, _ = select.select([0], [], [], 1.0)
@@ -321,14 +366,26 @@ while True:
         if line == b"settled":
             records.clear()
             continue
-        if line.startswith(b"root "):
-            roots.add(line[5:].decode())
+        if line.startswith(b"spawns "):
+            spawn_record = line[7:].decode()
             continue
-        if line == b"unroot":
-            roots.clear()
+        if line == b"unspawns":
+            spawn_record = None
             continue
         pid, created, founded_group = line.split()
         records[int(pid)] = (float(created), founded_group == b"1")
+# What the running test's helper interpreters recorded, in the same format.
+if spawn_record is not None:
+    try:
+        with open(spawn_record, encoding="utf-8") as file:
+            for line in file:
+                try:
+                    pid, created, founded_group = line.split()
+                    records[int(pid)] = (float(created), founded_group == "1")
+                except ValueError:
+                    pass
+    except OSError:
+        pass
 for pid, (created, founded_group) in records.items():
     try:
         process = psutil.Process(pid)
@@ -353,19 +410,6 @@ for pid, (created, founded_group) in records.items():
         try:
             os.killpg(pid, signal.SIGKILL)
         except OSError:
-            pass
-# What names the running test's tmp_path is that test's, wherever it was reparented.
-for root in roots:
-    names = re.compile(re.escape(root) + r"(?![\w.-])").search
-    for process in psutil.process_iter():
-        try:
-            if not any(word and names(word) for word in [process.exe(), *process.cmdline()]):
-                continue
-            if os.getpgid(process.pid) == process.pid:
-                os.killpg(process.pid, signal.SIGKILL)
-            for each in [*process.children(recursive=True), process]:
-                each.send_signal(signal.SIGKILL)
-        except (OSError, psutil.Error):
             pass
 """
 
@@ -395,12 +439,17 @@ class Warden:
     def record(self, pid: int, created: float, founded_group: bool) -> None:
         self._send(f"{pid} {created!r} {int(founded_group)}")
 
-    def watch_root(self, path: Path) -> None:
-        """Kill what names ``path`` if the run ends before ``forget_root``."""
-        self._send(f"root {path}")
+    def watch_spawns(self, record: Path, basetemp: Path) -> None:
+        """Reap what ``record`` names if the run ends before ``forget_spawns``.
 
-    def forget_root(self) -> None:
-        self._send("unroot")
+        Checked here: the warden of a dead run has nothing to check it against.
+        """
+        __tracebackhide__ = True
+        require_inside_basetemp(record, basetemp)
+        self._send(f"spawns {record}")
+
+    def forget_spawns(self) -> None:
+        self._send("unspawns")
 
     def settle(self) -> None:
         """Every record so far is confirmed gone: forget them, so none can go stale."""

@@ -7,8 +7,10 @@ reaper and the warden act exactly as they do for every marked test file.
 from __future__ import annotations
 
 import os
+import signal
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import psutil
@@ -83,9 +85,10 @@ def test_an_unmarked_run_starts_no_warden():
 '''
 
 
-# What a cross-process child does: it starts a detached connector and exits, so
-# the connector reparents to init and no record of this pytest process reaches it.
-ORPHANING = '''
+# A helper interpreter, as a cross-process child is: it spawns a detached
+# connector and exits, so the connector reparents to init. With `record` it
+# records the spawn first, as the remote-access helpers do.
+DETACHING = '''
 import os
 import signal
 import subprocess
@@ -95,33 +98,46 @@ from pathlib import Path
 import psutil
 import pytest
 
-RECORD = Path(os.environ["REAPER_PROBE_RECORD"])
-pytestmark = pytest.mark.usefixtures("reap_tmp_path_processes")
+from tests import process_reaper
 
-CHILD = (
-    "import subprocess, sys; "
-    "print(subprocess.Popen([sys.argv[1]], start_new_session=True, stdin=subprocess.DEVNULL, "
-    "stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).pid)"
+RECORD = Path(os.environ["REAPER_PROBE_RECORD"])
+pytestmark = pytest.mark.usefixtures("reap_helper_spawns")
+
+HELPER = (
+    "import subprocess, sys\\n"
+    "from pathlib import Path\\n"
+    "if sys.argv[2] == 'record':\\n"
+    "    from tests import process_reaper\\n"
+    "    process_reaper.record_spawns(Path(sys.argv[3]))\\n"
+    "print(subprocess.Popen([sys.argv[1]], start_new_session=True, stdin=subprocess.DEVNULL,"
+    " stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).pid)\\n"
 )
 
 
-def _orphan_a_connector(tmp_path):
+def _detach_a_connector(tmp_path, mode):
     connector = tmp_path / "bin" / "cloudflared"
     connector.parent.mkdir()
     connector.write_text("#!/bin/sh\\nwhile :; do sleep 0.2; done\\n")
     connector.chmod(0o755)
-    child = subprocess.run([sys.executable, "-c", CHILD, str(connector)], capture_output=True, text=True, check=True)
-    pid = int(child.stdout)
+    record = process_reaper.helper_spawn_record(tmp_path)
+    helper = subprocess.run(
+        [sys.executable, "-c", HELPER, str(connector), mode, str(record)], capture_output=True, text=True, check=True
+    )
+    pid = int(helper.stdout)
     RECORD.write_text(f"{pid} {psutil.Process(pid).create_time()!r}\\n")
 
 
-def test_a_detached_connector_a_child_started(tmp_path):
-    _orphan_a_connector(tmp_path)
+def test_a_recorded_spawn(tmp_path):
+    _detach_a_connector(tmp_path, "record")
+
+
+def test_an_unrecorded_orphan(tmp_path):
+    _detach_a_connector(tmp_path, "skip")
 
 
 @pytest.mark.allow_foreign_signals(reason="the run kills itself, as the CI watchdog does")
-def test_a_killed_run_after_a_child_detached_a_connector(tmp_path):
-    _orphan_a_connector(tmp_path)
+def test_a_killed_run_after_a_recorded_spawn(tmp_path):
+    _detach_a_connector(tmp_path, "record")
     os.kill(os.getpid(), signal.SIGKILL)
 '''
 
@@ -177,27 +193,68 @@ def test_a_run_without_a_marked_test_has_no_warden(tmp_path):
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-def test_a_connector_a_child_started_is_killed_and_fails_its_test(tmp_path):
-    result, record = _run_inner(tmp_path, "detached_connector", ORPHANING)
+def _reported(output: str, after: str) -> str:
+    return output.split(after)[1].splitlines()[0]
+
+
+def test_a_recorded_spawn_is_killed_by_identity_and_fails_its_test(tmp_path):
+    result, record = _run_inner(tmp_path, "test_a_recorded_spawn", DETACHING)
 
     output = result.stdout + result.stderr
     assert result.returncode == 1, output
-    # The body passed; the teardown found the connector and failed the test.
+    # The body passed; the teardown reaped the spawn and failed the test.
     assert "1 passed" in output and "1 error" in output, output
     pid = record.read_text().split()[0]
-    reported = output.split("were still running and were killed: ")[1].splitlines()[0]
-    assert reported.startswith(f"{pid} (")
+    reported = _reported(output, "were still running and were killed: ")
     # A report names the process, never its arguments, which can carry a credential.
-    assert "/" not in reported
+    assert reported.startswith(f"{pid} (") and "/" not in reported
     assert _running(record) == []
 
 
-async def test_a_connector_a_child_started_ends_with_a_killed_run(tmp_path):
-    result, record = _run_inner(tmp_path, "killed_run_after", ORPHANING)
+async def test_a_recorded_spawn_ends_with_a_killed_run(tmp_path):
+    result, record = _run_inner(tmp_path, "killed_run_after_a_recorded_spawn", DETACHING)
 
     assert result.returncode == -9, result.stdout + result.stderr
     # The warden acts once it sees the run gone, after this pytest saw it exit.
-    await hang_guard.until(lambda: _running(record) == [], "the warden to kill the connector the child detached")
+    await hang_guard.until(lambda: _running(record) == [], "the warden to reap the recorded spawn")
+
+
+@pytest.mark.allow_foreign_signals(reason="ends the orphan the inner run deliberately left unrecorded")
+def test_an_unrecorded_orphan_is_reported_and_never_signalled(tmp_path):
+    result, record = _run_inner(tmp_path, "unrecorded_orphan", DETACHING)
+    pid = int(record.read_text().split()[0])
+    try:
+        output = result.stdout + result.stderr
+        assert result.returncode == 1, output
+        reported = _reported(output, "are in no spawn record and were left running: ")
+        assert reported.startswith(f"{pid} (") and "/" not in reported
+        assert _running(record) == [pid]
+    finally:
+        # The orphan leads its own group: its shell's sleeps end with it.
+        os.killpg(pid, signal.SIGKILL)
+
+
+def test_a_process_with_a_live_parent_naming_tmp_path_is_neither_killed_nor_reported(tmp_path):
+    # A developer's `tail -f` on a test log: it names tmp_path, but its parent lives.
+    watcher = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)", str(tmp_path / "connector.log")])
+    try:
+        assert process_reaper.end_helper_spawns(process_reaper.helper_spawn_record(tmp_path), tmp_path) == ([], [])
+        assert watcher.poll() is None
+    finally:
+        watcher.kill()
+        watcher.wait()
+
+
+@pytest.mark.parametrize("where", ["outside", "basetemp"])
+def test_a_spawn_record_not_inside_the_basetemp_is_refused(tmp_path_factory, where):
+    basetemp = tmp_path_factory.getbasetemp()
+    record = Path(tempfile.gettempdir()) / "helper-spawns" if where == "outside" else basetemp
+    warden = process_reaper.Warden()
+    try:
+        with pytest.raises(pytest.fail.Exception, match="not strictly inside"):
+            warden.watch_spawns(record, basetemp)
+    finally:
+        warden.close()
 
 
 @pytest.fixture

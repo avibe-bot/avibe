@@ -14,7 +14,7 @@ from tests.test_remote_access_vibe_cloud import _config
 from vibe import remote_access, runtime
 
 # Real fake-cloudflared connectors and their log sinks.
-pytestmark = [pytest.mark.reap_processes, pytest.mark.usefixtures("reap_tmp_path_processes")]
+pytestmark = [pytest.mark.reap_processes, pytest.mark.usefixtures("reap_helper_spawns")]
 
 UPSTREAM = "https://github.com/cloudflare/cloudflared/releases/download/2026.10.0"
 
