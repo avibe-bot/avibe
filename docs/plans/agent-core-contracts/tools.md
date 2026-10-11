@@ -94,6 +94,9 @@ Known limits, kept as they are:
   a crash, a quota, or a failure of the disk itself in the middle of the rewrite can leave the file partly written.
   Its growth is charged to the file owner's quota, and the temp file, which shows the volume has room, reserves
   nothing.
+- A new file is published by renaming its temp file, on both platforms, as before. A directory that lets this user
+  create files but neither rename nor delete them (a Windows drop folder) refuses the rename and the removal alike,
+  so the temp file stays there, with the ACL the new file would have had.
 
 ## 4. `edit`
 
