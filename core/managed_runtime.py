@@ -17,6 +17,7 @@ import threading
 import time
 import urllib.parse
 import urllib.request
+import zipfile
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -125,6 +126,9 @@ class ManagedRuntimeArchive:
     binary_sha256: str | None
     size: int | None
     bin_path: str
+    # One of ARCHIVE_FORMATS; ``binary`` means the asset is the executable itself, ``zip`` is what
+    # upstream projects publish for Windows.
+    format: str = "tar.gz"
 
 
 @dataclass(frozen=True)
@@ -344,8 +348,7 @@ class ManagedRuntimeManager:
             staging_dir = Path(tempfile.mkdtemp(prefix="install-", dir=self.runtime_dir))
             candidate_install_dir: Path | None = None
             try:
-                with tarfile.open(archive_path, "r:gz") as archive_file:
-                    safe_extract_tar(archive_file, staging_dir)
+                stage_archive(archive_path, archive.format, staging_dir, bin_path=archive.bin_path)
                 staged_binary = staging_dir / archive.bin_path
                 if not _is_regular_file(staged_binary):
                     return self._failure(
@@ -373,7 +376,16 @@ class ManagedRuntimeManager:
                         manifest=manifest,
                         archive=archive,
                     )
-                if not self._binary_matches_manifest(staged_binary, manifest):
+                replace_target = install_dir.exists() and (
+                    (force and self.spec.replace_target_on_force)
+                    or (canonical_target_was_rejected and self.spec.replace_invalid_target_on_repair)
+                )
+                # Run the binary where it stays: Windows may hold a file it just
+                # executed (Defender, the Arm64 x64-emulation cache) for a moment,
+                # and a directory holding one cannot be renamed. A target replaced
+                # in place is removed first, so that binary is checked here, while
+                # the install it replaces is still there to keep.
+                if replace_target and not self._binary_matches_manifest(staged_binary, manifest):
                     return self._failure(
                         self._reason("binary_not_runnable"),
                         manifest=manifest,
@@ -382,12 +394,6 @@ class ManagedRuntimeManager:
 
                 install_dir.parent.mkdir(parents=True, exist_ok=True)
                 if install_dir.exists():
-                    replace_target = (
-                        force and self.spec.replace_target_on_force
-                    ) or (
-                        canonical_target_was_rejected
-                        and self.spec.replace_invalid_target_on_repair
-                    )
                     if replace_target:
                         if not self._remove_install_target_for_replacement(install_dir):
                             return self._failure(
@@ -404,6 +410,12 @@ class ManagedRuntimeManager:
                 shutil.move(str(staging_dir), str(install_dir))
                 candidate_install_dir = install_dir
                 installed_binary = (install_dir / archive.bin_path).resolve(strict=True)
+                if not replace_target and not self._binary_matches_manifest(installed_binary, manifest):
+                    return self._failure(
+                        self._reason("binary_not_runnable"),
+                        manifest=manifest,
+                        archive=archive,
+                    )
                 self._write_manifest_install_metadata(
                     install_dir,
                     manifest,
@@ -1762,6 +1774,7 @@ class ManagedRuntimeManager:
                     else None
                 )
                 bin_path = str(item.get("bin_path") or self.spec.default_bin_path)
+                archive_format = str(item.get("format") or "tar.gz")
                 raw_size = item.get(self.spec.archive_size_field)
                 size = int(raw_size) if raw_size is not None else None
                 if not self._archive_name_is_owned(name):
@@ -1785,6 +1798,9 @@ class ManagedRuntimeManager:
                     raise ValueError("invalid archive size")
                 if archive_path_is_unsafe(bin_path):
                     raise ValueError("unsafe binary path")
+                if archive_format not in ARCHIVE_FORMATS:
+                    # An older client given a newer format refuses the manifest.
+                    raise ValueError("unsupported archive format")
                 archives[platform_tag] = ManagedRuntimeArchive(
                     platform=platform_tag,
                     name=name,
@@ -1793,6 +1809,7 @@ class ManagedRuntimeManager:
                     binary_sha256=binary_sha256,
                     size=size,
                     bin_path=bin_path,
+                    format=archive_format,
                 )
             runtime_version = str(data.get(self.spec.version_field) or "")
             if not _safe_metadata_value(runtime_version):
@@ -2268,6 +2285,62 @@ def runtime_platform_tag() -> str:
 def install_lock_for(runtime_id: str) -> threading.Lock:
     with _INSTALL_LOCKS_GUARD:
         return _INSTALL_LOCKS.setdefault(runtime_id, threading.Lock())
+
+
+ARCHIVE_FORMATS = frozenset({"tar.gz", "zip", "binary"})
+
+
+def stage_archive(archive_path: Path, archive_format: str, staging_dir: Path, *, bin_path: str) -> None:
+    """Unpack a verified download into ``staging_dir``, one branch per archive format.
+
+    ``bin_path`` is relative to ``staging_dir`` and was checked at manifest parse to
+    stay inside it. A ``binary`` asset is the executable itself and lands at
+    ``bin_path``; archives place it there through their own layout.
+    """
+
+    if archive_format == "tar.gz":
+        with tarfile.open(archive_path, "r:gz") as archive_file:
+            safe_extract_tar(archive_file, staging_dir)
+    elif archive_format == "zip":
+        with zipfile.ZipFile(archive_path) as archive_file:
+            safe_extract_zip(archive_file, staging_dir)
+    elif archive_format == "binary":
+        target = staging_dir / bin_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(archive_path, target)
+    else:
+        raise ValueError(f"unsupported archive format: {archive_format}")
+
+
+def safe_extract_zip(archive: zipfile.ZipFile, destination: Path) -> None:
+    """Extract a zip of regular files and directories into ``destination``, refusing what ``safe_extract_tar``
+    refuses: a path that leaves ``destination`` and a link (a zip records a symlink as a Unix file mode).
+
+    Each member is written to the path checked here, never one ``zipfile`` derives itself: on Windows it
+    strips trailing spaces and periods from a name's parts, as Windows itself does, so ``.. /x`` would
+    become ``../x``. A part ending in either is refused for that reason.
+    """
+    destination_resolved = destination.resolve()
+    planned: list[tuple[zipfile.ZipInfo, Path]] = []
+    for member in archive.infolist():
+        name = member.filename.replace("\\", "/")
+        parts = PurePosixPath(name).parts
+        if archive_path_is_unsafe(member.filename) or any(part != part.rstrip(" .") for part in parts):
+            raise ValueError(f"Unsafe managed runtime archive path: {member.filename}")
+        target = destination.joinpath(*parts).resolve()
+        if target != destination_resolved and destination_resolved not in target.parents:
+            raise ValueError(f"Unsafe managed runtime archive path: {member.filename}")
+        # A zip need not record a file type; only a type that is neither a file nor a directory is refused.
+        if stat.S_IFMT(member.external_attr >> 16) not in (0, stat.S_IFREG, stat.S_IFDIR):
+            raise ValueError(f"Unsupported managed runtime archive member: {member.filename}")
+        planned.append((member, target))
+    for member, target in planned:
+        if member.is_dir():
+            target.mkdir(parents=True, exist_ok=True)
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with archive.open(member) as source, open(target, "wb") as sink:
+            shutil.copyfileobj(source, sink)
 
 
 def safe_extract_tar(archive: tarfile.TarFile, destination: Path) -> None:

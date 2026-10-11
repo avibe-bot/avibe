@@ -580,6 +580,13 @@ jobs:
       - name: Verify Windows Controller control IPC
         run: python -m pytest tests/test_control_ipc.py -q
 
+      # Windows reports 0o777/0o666 whatever the access rules are, so the Model
+      # Hub's engine state and takeover journal are owner-private only through
+      # the DACL helper control IPC shares. Engine start, an API-key Source and
+      # the files the engine writes itself all depend on it.
+      - name: Verify owner-private Model Hub state
+        run: python -m pytest tests/test_private_fs.py tests/test_model_hub_state_private.py -q -ra
+
       # Windows byte-range locks are mandatory and per-handle, so a lock taken
       # over the bytes of a record makes that record unreadable to every other
       # handle -- including this process's own. Nothing on Linux can observe
@@ -624,6 +631,16 @@ jobs:
           python -m pytest -q -ra
           tests/test_process_isolation.py tests/test_model_hub_l3.py tests/test_model_hub_migration_review_boundaries.py
           -k "console_window or cannot_be_bound or byte_for_byte"
+
+      # ripgrep's Windows release is a zip, which only this managed runtime
+      # extracts: install the bytes the manifest pins for this machine from a
+      # copy of upstream's archive, and run them.
+      - name: Verify the managed ripgrep installs from its Windows zip
+        shell: pwsh
+        run: |
+          $env:AVIBE_TEST_RIPGREP_ZIPS = Join-Path $env:RUNNER_TEMP "ripgrep-zips"
+          python -c "import json, os, pathlib, urllib.request; target = pathlib.Path(os.environ['AVIBE_TEST_RIPGREP_ZIPS']); target.mkdir(exist_ok=True); archives = json.load(open('vibe/ripgrep_runtime_manifest.json'))['archives']; [urllib.request.urlretrieve(entry['url'], target / entry['name']) for tag, entry in archives.items() if tag.startswith('win32-')]"
+          python -m pytest -q -ra tests/test_ripgrep_runtime.py -k "pinned_windows_zip or six_platform or zip_entry"
 
   # Vibey's tools on real Windows: what the Linux shards cannot show is how
   # the same Python behaves there (no O_NONBLOCK, no fchmod before 3.13,

@@ -14,11 +14,11 @@ from scripts import build_model_hub_engine
 from scripts import model_hub_engine_release_guard as guard
 
 
-def _archive(binary: bytes) -> bytes:
+def _archive(binary: bytes, bin_path: str) -> bytes:
     output = io.BytesIO()
     with gzip.GzipFile(fileobj=output, mode="wb", filename="", mtime=0) as compressed:
         with tarfile.open(fileobj=compressed, mode="w") as bundle:
-            member = tarfile.TarInfo("cli-proxy-api")
+            member = tarfile.TarInfo(bin_path)
             member.mode = 0o755
             member.size = len(binary)
             bundle.addfile(member, io.BytesIO(binary))
@@ -29,15 +29,15 @@ def _manifest(tmp_path: Path) -> tuple[Path, dict[str, bytes], dict[str, bytes]]
     version = "v7.2.149"
     asset_release_tag = "model-hub-engine-v7.2.149-1"
     owned_root = f"{guard.OWNED_RELEASE_ROOT}/{asset_release_tag}"
-    upstream_root = f"{guard.UPSTREAM_RELEASE_ROOT}/{version}"
     source_sha = "2a6b87aca083a5bf498ac1f68a1b636c500d7aaa"
     owned: dict[str, bytes] = {}
-    upstream: dict[str, bytes] = {}
+    built: dict[str, bytes] = {}
     assets = []
     for platform in sorted(guard.EXPECTED_PLATFORMS):
         upstream_platform = guard.UPSTREAM_PLATFORM_NAMES[platform]
         name = f"CLIProxyAPI_7.2.149_{upstream_platform}.tar.gz"
-        archive = _archive(f"{platform}-binary".encode())
+        bin_path = "cli-proxy-api.exe" if platform.startswith("windows-") else "cli-proxy-api"
+        archive = _archive(f"{platform}-binary".encode(), bin_path)
         archive_sha = hashlib.sha256(archive).hexdigest()
         binary_sha = hashlib.sha256(f"{platform}-binary".encode()).hexdigest()
         url = f"{owned_root}/{name}"
@@ -48,12 +48,12 @@ def _manifest(tmp_path: Path) -> tuple[Path, dict[str, bytes], dict[str, bytes]]
                 "size_bytes": len(archive),
                 "sha256": archive_sha,
                 "binary_sha256": binary_sha,
-                "bin_path": "cli-proxy-api",
+                "bin_path": bin_path,
             }
         )
         owned[url] = archive
         owned[f"{url}.sha256"] = f"{archive_sha}  {name}\n".encode()
-        upstream[f"{upstream_root}/{name}"] = archive
+        built[name] = archive
 
     payload = {
         "schema_version": 1,
@@ -70,7 +70,7 @@ def _manifest(tmp_path: Path) -> tuple[Path, dict[str, bytes], dict[str, bytes]]
     manifest_path = tmp_path / "cliproxyapi_manifest.json"
     manifest_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     owned[f"{owned_root}/model-hub-engine-manifest.json"] = manifest_path.read_bytes()
-    return manifest_path, owned, upstream
+    return manifest_path, owned, built
 
 
 def _fake_download(remote: dict[str, bytes]):
@@ -88,7 +88,7 @@ def test_fetch_owned_release_materializes_exact_verified_assets(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    manifest_path, owned, _upstream = _manifest(tmp_path)
+    manifest_path, owned, _built = _manifest(tmp_path)
     monkeypatch.setattr(guard, "_download", _fake_download(owned))
 
     spec = guard.fetch_release_assets(manifest_path, tmp_path / "backup")
@@ -104,7 +104,7 @@ def test_fetch_source_verifies_upstream_bytes_and_builds_publishable_release(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    manifest_path, _owned, upstream = _manifest(tmp_path)
+    manifest_path, _owned, built = _manifest(tmp_path)
     def build_source(manifest: Path, output: Path) -> Path:
         output.mkdir()
         output_manifest = output / "model-hub-engine-manifest.json"
@@ -112,9 +112,7 @@ def test_fetch_source_verifies_upstream_bytes_and_builds_publishable_release(
         payload = json.loads(manifest.read_text(encoding="utf-8"))
         for raw in payload["assets"]:
             name = Path(raw["url"]).name
-            archive = upstream[
-                f"{guard.UPSTREAM_RELEASE_ROOT}/{payload['release_tag']}/{name}"
-            ]
+            archive = built[name]
             (output / name).write_bytes(archive)
             (output / f"{name}.sha256").write_text(
                 f"{hashlib.sha256(archive).hexdigest()}  {name}\n",
@@ -143,7 +141,7 @@ def test_verify_rejects_changed_release_bytes(
     mutate,
     match,
 ) -> None:
-    manifest_path, owned, _upstream = _manifest(tmp_path)
+    manifest_path, owned, _built = _manifest(tmp_path)
     monkeypatch.setattr(guard, "_download", _fake_download(owned))
     backup = tmp_path / "backup"
     guard.fetch_release_assets(manifest_path, backup)
@@ -160,7 +158,7 @@ def test_verify_rejects_non_release_entries(
     monkeypatch: pytest.MonkeyPatch,
     entry_kind: str,
 ) -> None:
-    manifest_path, owned, _upstream = _manifest(tmp_path)
+    manifest_path, owned, _built = _manifest(tmp_path)
     monkeypatch.setattr(guard, "_download", _fake_download(owned))
     backup = tmp_path / "backup"
     guard.fetch_release_assets(manifest_path, backup)
@@ -179,7 +177,7 @@ def test_failed_fetch_preserves_last_verified_backup(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    manifest_path, owned, _upstream = _manifest(tmp_path)
+    manifest_path, owned, _built = _manifest(tmp_path)
     del owned[next(url for url in owned if url.endswith(".tar.gz"))]
     monkeypatch.setattr(guard, "_download", _fake_download(owned))
     backup = tmp_path / "backup"
@@ -194,7 +192,7 @@ def test_failed_fetch_preserves_last_verified_backup(
 
 
 def test_manifest_rejects_non_owned_release_url(tmp_path: Path) -> None:
-    manifest_path, _owned, _upstream = _manifest(tmp_path)
+    manifest_path, _owned, _built = _manifest(tmp_path)
     payload = json.loads(manifest_path.read_text(encoding="utf-8"))
     payload["assets"][0]["url"] = (
         "https://github.com/router-for-me/CLIProxyAPI/releases/download/"
@@ -203,6 +201,24 @@ def test_manifest_rejects_non_owned_release_url(tmp_path: Path) -> None:
     manifest_path.write_text(json.dumps(payload), encoding="utf-8")
 
     with pytest.raises(guard.ReleaseGuardError, match="outside the Avibe-owned release"):
+        guard.load_release_spec(manifest_path)
+
+
+@pytest.mark.parametrize(
+    ("platform", "bin_path"),
+    [("windows-amd64", "cli-proxy-api"), ("linux-amd64", "cli-proxy-api.exe"), ("darwin-arm64", "bin/cli-proxy-api")],
+)
+def test_manifest_pins_the_engine_binary_name_per_platform(
+    tmp_path: Path, platform: str, bin_path: str,
+) -> None:
+    # Windows resolves an extensionless path by appending .exe, so a Windows
+    # asset must name the .exe member and no other asset may.
+    manifest_path, _owned, _built = _manifest(tmp_path)
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    next(asset for asset in payload["assets"] if asset["platform"] == platform)["bin_path"] = bin_path
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(guard.ReleaseGuardError, match="bin_path is invalid"):
         guard.load_release_spec(manifest_path)
 
 
@@ -216,7 +232,7 @@ def test_draft_publication_repairs_exact_asset_set_before_becoming_public(
     # Contract: either publish the exact pinned bytes, or preserve the draft.
     # The old workflow deleted only expected names, so an extra asset survived
     # every recovery. Source-text assertions never exercised this transition.
-    manifest, owned, _upstream = _manifest(tmp_path)
+    manifest, owned, _built = _manifest(tmp_path)
     monkeypatch.setattr(guard, "_download", _fake_download(owned))
     verified = tmp_path / "verified"
     guard.fetch_release_assets(manifest, verified)

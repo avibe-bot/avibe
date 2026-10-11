@@ -190,6 +190,37 @@ def _fixture_runtime_manager(
     )
 
 
+@pytest.mark.parametrize("runs", [True, False])
+def test_install_runs_the_binary_only_from_its_install_directory(tmp_path: Path, runs: bool) -> None:
+    """Windows may hold a file it just ran, and a directory holding one cannot be renamed.
+
+    So the version check runs where the binary stays, never in staging; a
+    binary that fails it leaves neither a published install nor its directory.
+    """
+    manifest_path = tmp_path / "manifest.json"
+    _write_fixture_runtime_release(tmp_path, manifest_path, label="ran-in-place", version="1.0.0")
+    manager = _fixture_runtime_manager(tmp_path / "runtime", manifest_path=manifest_path)
+    probed: list[Path] = []
+
+    def binary_version(binary: Path | None) -> str | None:
+        probed.append(Path(binary))
+        return "1.0.0" if runs else None
+
+    manager._binary_version = binary_version
+
+    result = manager.ensure()
+
+    assert len(probed) == 1
+    assert not any(part.startswith("install-") for part in probed[0].relative_to(tmp_path / "runtime").parts)
+    if runs:
+        assert result["ok"] is True
+        assert probed[0] == Path(result["path"])
+    else:
+        assert result["ok"] is False
+        assert result["reason"].endswith("binary_not_runnable")
+        assert not probed[0].exists()
+
+
 def test_force_install_uses_sibling_target_by_default(
     tmp_path: Path,
 ) -> None:

@@ -1,5 +1,5 @@
 diff --git a/internal/runtime/executor/helps/openai_compat_max_tokens.go b/internal/runtime/executor/helps/openai_compat_max_tokens.go
-index bceddd20..5ba754b0 100644
+index 71915c5b..9819da97 100644
 --- a/internal/runtime/executor/helps/openai_compat_max_tokens.go
 +++ b/internal/runtime/executor/helps/openai_compat_max_tokens.go
 @@ -55,6 +55,13 @@ func NormalizeOpenAIMaxTokens(payload []byte, useMaxCompletionTokens bool) []byte

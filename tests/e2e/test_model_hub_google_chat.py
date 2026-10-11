@@ -84,7 +84,7 @@ def _gemini_reply(parts, finish="STOP", *, usage=True):
 
 
 @asynccontextmanager
-async def _chat_gateway(tmp_path, monkeypatch, upstream, *, model="gemini-3-pro-preview"):
+async def _chat_gateway(tmp_path, monkeypatch, upstream, *, model="gemini-3-pro-preview", complete=True):
     with _isolated_engine_adapter(tmp_path, monkeypatch) as adapter:
         async with _server(upstream) as root:
             source = _source("src_google001", "Gemini fixture", vendor="custom", protocol="google", model_id=model)
@@ -122,7 +122,10 @@ async def _chat_gateway(tmp_path, monkeypatch, upstream, *, model="gemini-3-pro-
                         if not stream:
                             return [json.loads(raw)]
                         data = [line[5:].strip() for line in raw.splitlines() if line.startswith(b"data:")]
-                        assert data[-1] == b"[DONE]", raw
+                        # A Chat stream is complete only when a chunk carried
+                        # finish_reason: CPA ends it with [DONE], otherwise
+                        # with an error frame.
+                        assert (data[-1] == b"[DONE]") is complete, raw
                         return [json.loads(frame) for frame in data if frame != b"[DONE]"]
 
                     yield post
@@ -132,6 +135,9 @@ async def _chat_gateway(tmp_path, monkeypatch, upstream, *, model="gemini-3-pro-
                 if completion:
                     await completion
                 record = service.provenance.get("chat-gemini")
+                if not complete:
+                    assert record["outcome"] != "served", record
+                    return
                 assert record["outcome"] == "served", record
                 assert record["served"]["origin"] == origin
                 assert record["failed_attempts"] == []
@@ -279,7 +285,7 @@ async def test_chat_google_tool_round_trip_loses_signature_but_explicit_carrier_
     "missing_finish", "missing_finish_and_usage",
 ])
 async def test_chat_google_stream_terminal_boundaries(tmp_path, monkeypatch, ending):
-    """Without traceId, split finish/usage is lost; CPA's [DONE] is not semantic proof."""
+    """Without traceId, split finish/usage is lost, and CPA ends that stream with an error."""
     requests = []
     content = _gemini_reply([{"text": "streamed answer"}], usage=False)
     content["candidates"][0].pop("finishReason")
@@ -298,7 +304,8 @@ async def test_chat_google_stream_terminal_boundaries(tmp_path, monkeypatch, end
         frames = [content] + tails[ending]
         return web.Response(body=b"".join(_sse(frame) for frame in frames), content_type="text/event-stream")
 
-    async with _chat_gateway(tmp_path, monkeypatch, upstream) as post:
+    complete = ending == "same_frame"
+    async with _chat_gateway(tmp_path, monkeypatch, upstream, complete=complete) as post:
         frames = await post(
             [{"role": "user", "content": "Finish boundary fixture"}],
             stream=True, stream_options={"include_usage": True},
@@ -307,7 +314,7 @@ async def test_chat_google_stream_terminal_boundaries(tmp_path, monkeypatch, end
         assert requests[0][0].endswith(":streamGenerateContent")
         reasons = [
             (choice.get("finish_reason"), choice.get("native_finish_reason"))
-            for frame in frames for choice in frame["choices"]
+            for frame in frames for choice in frame.get("choices", [])
             if choice.get("finish_reason") is not None
         ]
         # CPA filters usage on frames without their own finishReason, then the
@@ -316,3 +323,8 @@ async def test_chat_google_stream_terminal_boundaries(tmp_path, monkeypatch, end
         assert reasons == expected, frames
         usages = [frame["usage"] for frame in frames if "usage" in frame]
         assert usages == ([CHAT_USAGE] if ending == "same_frame" else []), frames
+        if not complete:
+            assert frames[-1] == {"error": {
+                "message": "upstream stream closed before any chunk carried finish_reason",
+                "type": "server_error", "code": "internal_server_error",
+            }}, frames

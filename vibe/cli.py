@@ -14138,6 +14138,7 @@ def _stop_expected_desktop_runtime(runtime_id: str) -> int:
     if result.outcome is runtime.DesktopRuntimeStopOutcome.NOT_OURS:
         _print_stop_json({"reason": result.refusal})
         return 3
+    runtime.desktop_service_lock_presence(while_absent=_stop_model_hub_engine)
     if result.opencode_stopped:
         _report_opencode_stopped()
     # Unlike a full stop, an OpenCode server of this Runtime that survives
@@ -14216,6 +14217,30 @@ def _stop_jobs() -> None:
         logger.warning("Could not stop the commands jobs run", exc_info=True)
 
 
+def _stop_model_hub_engine() -> None:
+    """End a Model Hub engine its service left running.
+
+    A service stops its own engine, but a stop that ends the service outright --
+    always on Windows, where it is TerminateProcess -- leaves the engine running
+    and holding its port until the next start reaps it. The supervisor's stop
+    reaps by the record and identity marker that service left, so it ends
+    exactly that engine. Called only while holding the free service lock; a
+    failure is logged and left to the next start.
+    """
+
+    try:
+        from vibe.model_hub_runtime.supervisor import get_engine_supervisor
+
+        get_engine_supervisor().stop()
+    except Exception:
+        logger.warning("Could not stop a Model Hub engine its service left running", exc_info=True)
+
+
+def _stop_what_the_service_left() -> None:
+    _stop_jobs()
+    _stop_model_hub_engine()
+
+
 def cmd_stop(*, expect_runtime_id: str | None = None):
     from vibe.desktop_runtime import desktop_caller_provenance
 
@@ -14239,7 +14264,7 @@ def cmd_stop(*, expect_runtime_id: str | None = None):
         return 3
     # Holding the free service lock: neither a service that failed to stop nor one
     # started since owns these commands while they are stopped.
-    runtime.desktop_service_lock_presence(while_absent=_stop_jobs)
+    runtime.desktop_service_lock_presence(while_absent=_stop_what_the_service_left)
     from vibe.desktop_backends import reap_abandoned_desktop_backend_installs
 
     # Each tree's owner decides whether it is abandoned, so the reap runs
@@ -16231,6 +16256,7 @@ def cmd_runtime(args) -> int:
         tmux = _ensure_tmux_during_prepare(offline=bool(offline), force=force)
         git = _ensure_git_during_prepare(offline=offline, force=force)
         ripgrep = _ensure_ripgrep_during_prepare(offline=offline, force=force)
+        cloudflared = _ensure_cloudflared_during_prepare(offline=offline, force=force)
         avault = _ensure_avault_during_prepare(offline=bool(offline), force=force)
         model_hub_engine = _ensure_model_hub_engine_during_prepare(
             offline=bool(offline),
@@ -16242,6 +16268,7 @@ def cmd_runtime(args) -> int:
         payload["tmux"] = tmux
         payload["git"] = git
         payload["ripgrep"] = ripgrep
+        payload["cloudflared"] = cloudflared
         install = payload.get("install") if isinstance(payload.get("install"), dict) else {}
         policy = payload.get("policy") if isinstance(payload.get("policy"), dict) else {}
         runtime_prepared = bool(payload.get("ok"))
@@ -16350,6 +16377,28 @@ def cmd_runtime(args) -> int:
                         "runtime.prepare.ripgrepNotReady",
                         language,
                         reason=ripgrep.get("message") or ripgrep.get("reason") or "install failed",
+                    ),
+                    file=sys.stderr,
+                )
+            if cloudflared.get("skipped"):
+                pass
+            elif cloudflared.get("ok"):
+                print(
+                    i18n_t(
+                        (
+                            "runtime.prepare.cloudflaredInstalled"
+                            if cloudflared.get("changed")
+                            else "runtime.prepare.cloudflaredReady"
+                        ),
+                        language,
+                    )
+                )
+            else:
+                print(
+                    i18n_t(
+                        "runtime.prepare.cloudflaredNotReady",
+                        language,
+                        reason=cloudflared.get("message") or cloudflared.get("reason") or "install failed",
                     ),
                     file=sys.stderr,
                 )
@@ -16568,6 +16617,26 @@ def _ensure_ripgrep_during_prepare(offline: bool | None = None, force: bool = Fa
         return {"ok": False, "message": str(exc)}
 
 
+def _ensure_cloudflared_during_prepare(offline: bool | None = None, force: bool = False) -> dict:
+    """Prepare the pinned cloudflared while remote access is enabled; never fails prepare."""
+
+    try:
+        config = V2Config.load()
+        cloud = config.remote_access.vibe_cloud
+        if not (config.remote_access.provider == "vibe_cloud" and cloud.enabled and cloud.tunnel_token):
+            return {"ok": True, "skipped": True, "reason": "remote_access_disabled"}
+        from vibe import remote_access
+
+        if remote_access._explicit_cloudflared(config):
+            # The connector runs the configured binary, so the pin would go unused.
+            return {"ok": True, "skipped": True, "reason": "explicit_cloudflared_path"}
+        from core.cloudflared_runtime import CloudflaredRuntimeManager
+
+        return CloudflaredRuntimeManager(offline=offline).ensure(force=force)
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "message": str(exc)}
+
+
 def _format_byte_size(size: int) -> str:
     if size < 1024:
         return f"{size} B"
@@ -16581,6 +16650,7 @@ def _format_byte_size(size: int) -> str:
 def _managed_runtime_cleaners() -> tuple[tuple[str, Callable[..., dict[str, Any]]], ...]:
     """Return the shared-runtime cleanup passes in stable output order."""
 
+    from core.cloudflared_runtime import CloudflaredRuntimeManager
     from core.ripgrep_runtime import RipgrepRuntimeManager
     from core.tmux_runtime import get_tmux_runtime_manager
     from vibe.model_hub_runtime.installer import EngineRuntimeManager
@@ -16604,11 +16674,18 @@ def _managed_runtime_cleaners() -> tuple[tuple[str, Callable[..., dict[str, Any]
             dry_run=dry_run,
         )
 
+    def clean_cloudflared(*, keep_previous: int, dry_run: bool) -> dict[str, Any]:
+        return CloudflaredRuntimeManager().clean(
+            keep_previous=keep_previous,
+            dry_run=dry_run,
+        )
+
     return (
         ("git", _clean_git_runtime),
         ("model_hub_engine", clean_model_hub),
         ("tmux", clean_tmux),
         ("ripgrep", clean_ripgrep),
+        ("cloudflared", clean_cloudflared),
     )
 
 
@@ -16670,6 +16747,7 @@ def _managed_runtime_label(runtime_id: str) -> str:
         "model_hub_engine": "Model Hub Runtime",
         "tmux": "tmux Runtime",
         "ripgrep": "ripgrep Runtime",
+        "cloudflared": "cloudflared Runtime",
     }
     return labels.get(runtime_id, runtime_id.replace("-", " ").replace("_", " ").title())
 
