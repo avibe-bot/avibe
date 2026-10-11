@@ -71,6 +71,7 @@ _INSTANCE_ACCESS_SOURCES = frozenset(
 _ORGANIZATION_ROLES = frozenset({"owner", "admin", "member"})
 _INSTANCE_KINDS = frozenset({"personal", "organization"})
 _CONNECTOR_LOCK = threading.RLock()
+_CLOUDFLARED_DOWNLOAD_LOCK = threading.Lock()
 _STATUS_HEARTBEAT_LOCK = threading.Lock()
 _STATUS_HEARTBEAT_STARTED = False
 _STATUS_REPORT_LOCK = threading.Lock()
@@ -125,6 +126,9 @@ START_PREFERRED_READY_TIMEOUT_SECONDS = 8.0
 CONNECTOR_RESTART_MAX_DELAY_SECONDS = 120.0
 # Outlasts a start's worst-case hold: 8 s readiness + 8 s stop_pid + the respawn.
 CONNECTOR_LIFECYCLE_WAIT_SECONDS = 20.0
+# Record cleanups that nothing repeats wait at least 3x the longest bounded hold
+# (about 17 s) before giving up, so only a holder stuck for a minute leaves them.
+CLEANUP_LOCK_WAIT_SECONDS = 60.0
 RECOVERY_EVALUATION_SECONDS = 45.0
 RECOVERY_DRAIN_SECONDS = 35.0
 QUALITY_COMPARISON_MAX_AGE_SECONDS = 2 * QUALITY_SAMPLE_SECONDS
@@ -257,8 +261,11 @@ class _ConnectorLifecycleBusy(Exception):
     """Another thread or process holds the connector lifecycle lock."""
 
 
+_USER_WAIT = object()
+
+
 @contextmanager
-def _connector_lifecycle(*, wait: bool = True):
+def _connector_lifecycle(*, timeout: Any = _USER_WAIT):
     """Hold the cross-process connector lifecycle lock (L).
 
     The UI server, its monitor and recovery threads, and the ``vibe remote`` CLI
@@ -266,8 +273,11 @@ def _connector_lifecycle(*, wait: bool = True):
     read-validate-mutate section runs under one lock shared by every process.
     Lock order is L, then ``_RECOVERY_LOCK``, then ``_CONNECTOR_LOCK``: never
     acquire L fresh while holding either of them. L is re-entrant per thread,
-    and the OS releases it when its holder dies. ``wait=False`` is a try-lock.
-    A lock file that cannot be opened leaves only the per-process locks.
+    and the OS releases it when its holder dies. By default it waits as long as
+    a user start or stop does; ``timeout=0`` is a try-lock for steps a later
+    tick repeats, and record cleanups that nothing repeats wait
+    ``CLEANUP_LOCK_WAIT_SECONDS``. A lock file that cannot be opened leaves
+    only the per-process locks.
     """
 
     # Import lazily because storage's package initializer imports V2Config.
@@ -275,7 +285,7 @@ def _connector_lifecycle(*, wait: bool = True):
 
     lock = MigrationFileLock(
         _connector_lifecycle_lock_path(),
-        timeout_seconds=CONNECTOR_LIFECYCLE_WAIT_SECONDS if wait else 0,
+        timeout_seconds=CONNECTOR_LIFECYCLE_WAIT_SECONDS if timeout is _USER_WAIT else timeout,
     )
     try:
         lock.acquire()
@@ -1081,21 +1091,31 @@ def _connector_lane_reserved_locked() -> bool:
 
 
 def _clear_pending_tail_rollback(*, force: bool = False) -> None:
-    with _connector_lifecycle(), _CONNECTOR_LOCK:
-        state = _read_state() or {}
-        pending = state.get("pending_tail_rollback")
-        active = state.get("active")
-        if not isinstance(pending, dict):
-            return
-        if (
-            not force
-            and isinstance(active, dict)
-            and isinstance(pending.get("active_pid"), int)
-            and active.get("pid") != pending.get("active_pid")
-        ):
-            return
-        state["pending_tail_rollback"] = None
-        runtime.write_json(_state_path(), state)
+    try:
+        with _connector_lifecycle(timeout=CLEANUP_LOCK_WAIT_SECONDS), _CONNECTOR_LOCK:
+            state = _read_state() or {}
+            pending = state.get("pending_tail_rollback")
+            active = state.get("active")
+            if not isinstance(pending, dict):
+                return
+            if (
+                not force
+                and isinstance(active, dict)
+                and isinstance(pending.get("active_pid"), int)
+                and active.get("pid") != pending.get("active_pid")
+            ):
+                return
+            state["pending_tail_rollback"] = None
+            runtime.write_json(_state_path(), state)
+    except _ConnectorLifecycleBusy:
+        _log_stranded_records("pending tail rollback", None)
+
+
+def _log_stranded_records(kind: str, pid: int | None) -> None:
+    # Needs a lifecycle holder stuck for CLEANUP_LOCK_WAIT_SECONDS. Monitor
+    # reconciliation clears what remains: draining and rollback records on a later
+    # tick, a candidate at the next monitor start.
+    logger.error("Tunnel %s records stay after the lifecycle lock stayed busy pid=%s", kind, pid)
 
 
 def _replace_state_connector(name: str, record: dict[str, Any] | None) -> None:
@@ -1248,7 +1268,7 @@ def _discard_exited_connector_records(pid: int) -> None:
     """
 
     try:
-        with _connector_lifecycle(wait=False):
+        with _connector_lifecycle(timeout=0):
             if _read_pid() != pid or _cloudflared_pid_state(pid) not in {"dead", "other"}:
                 return
             _pid_path().unlink(missing_ok=True)
@@ -3147,11 +3167,14 @@ def _discard_candidate_connector(pid: int) -> None:
     if state not in {"dead", "other"}:
         logger.warning("Preserving Tunnel candidate with unverified process identity pid=%s", pid)
         return
-    with _connector_lifecycle(), _CONNECTOR_LOCK:
-        _candidate_pid_path().unlink(missing_ok=True)
-        candidate = _state_connector("candidate") or {}
-        if candidate.get("pid") == pid:
-            _replace_state_connector("candidate", None)
+    try:
+        with _connector_lifecycle(timeout=CLEANUP_LOCK_WAIT_SECONDS), _CONNECTOR_LOCK:
+            _candidate_pid_path().unlink(missing_ok=True)
+            candidate = _state_connector("candidate") or {}
+            if candidate.get("pid") == pid:
+                _replace_state_connector("candidate", None)
+    except _ConnectorLifecycleBusy:
+        _log_stranded_records("candidate", pid)
 
 
 def _promote_candidate_connector(
@@ -3195,12 +3218,15 @@ def _drain_tracked_connector(connector: dict[str, Any]) -> bool:
     if not drained:
         logger.warning("Old Tunnel connector remains tracked after drain failed pid=%s", pid)
         return False
-    with _connector_lifecycle(), _CONNECTOR_LOCK:
-        current = _read_state() or {}
-        draining = current.get("draining")
-        if isinstance(draining, dict) and draining.get("pid") == pid:
-            current["draining"] = None
-            runtime.write_json(_state_path(), current)
+    try:
+        with _connector_lifecycle(timeout=CLEANUP_LOCK_WAIT_SECONDS), _CONNECTOR_LOCK:
+            current = _read_state() or {}
+            draining = current.get("draining")
+            if isinstance(draining, dict) and draining.get("pid") == pid:
+                current["draining"] = None
+                runtime.write_json(_state_path(), current)
+    except _ConnectorLifecycleBusy:
+        _log_stranded_records("draining", pid)
     return True
 
 
@@ -3571,12 +3597,15 @@ def _run_route_optimization(
             else:
                 drained = old_pid_state in {"dead", "other"}
             if drained:
-                with _connector_lifecycle(), _CONNECTOR_LOCK:
-                    state = _read_state() or {}
-                    draining = state.get("draining")
-                    if isinstance(draining, dict) and draining.get("pid") == old_pid:
-                        state["draining"] = None
-                        runtime.write_json(_state_path(), state)
+                try:
+                    with _connector_lifecycle(timeout=CLEANUP_LOCK_WAIT_SECONDS), _CONNECTOR_LOCK:
+                        state = _read_state() or {}
+                        draining = state.get("draining")
+                        if isinstance(draining, dict) and draining.get("pid") == old_pid:
+                            state["draining"] = None
+                            runtime.write_json(_state_path(), state)
+                except _ConnectorLifecycleBusy:
+                    _log_stranded_records("draining", old_pid)
             else:
                 logger.warning("Old Tunnel connector remains tracked after drain failed pid=%s", old_pid)
         _finish_recovery(
@@ -3611,12 +3640,12 @@ def _run_route_optimization(
             candidate_cleaned = candidate_state in {"dead", "other"}
         if not promoted and candidate_cleaned:
             try:
-                with _connector_lifecycle(), _CONNECTOR_LOCK:
+                with _connector_lifecycle(timeout=CLEANUP_LOCK_WAIT_SECONDS), _CONNECTOR_LOCK:
                     _candidate_pid_path().unlink(missing_ok=True)
                     if _state_path().exists():
                         _replace_state_connector("candidate", None)
             except _ConnectorLifecycleBusy:
-                logger.warning("Tunnel candidate records stay until the lifecycle lock frees pid=%s", candidate_pid)
+                _log_stranded_records("candidate", candidate_pid)
         elif not promoted:
             logger.warning("Preserving Tunnel candidate with unverified process identity pid=%s", candidate_pid)
         with _RECOVERY_LOCK:
@@ -3688,7 +3717,7 @@ def _restart_exited_connector(
     # above released both before L. Under L no stop or start in any process
     # interleaves, so the request check, spawn, and publish below are one step.
     try:
-        with _connector_lifecycle(wait=False), _CONNECTOR_LOCK:
+        with _connector_lifecycle(timeout=0), _CONNECTOR_LOCK:
             if not _exited_connector_requested(config):
                 return False
             schedule.due_at = None
@@ -3840,7 +3869,7 @@ def _quality_monitor_loop(
 def _reconcile_draining_connector() -> None:
     if not _state_connector("draining"):
         return
-    with _connector_lifecycle(wait=False):
+    with _connector_lifecycle(timeout=0):
         draining = _state_connector("draining")
         if not draining or not isinstance(draining.get("pid"), int):
             return
@@ -3871,7 +3900,7 @@ def _restore_tracked_rollback_connector(
         return False
     if not _connector_ready_now(rollback_pid, metrics_url):
         return False
-    with _connector_lifecycle(wait=False), _CONNECTOR_LOCK:
+    with _connector_lifecycle(timeout=0), _CONNECTOR_LOCK:
         state = _read_state() or {}
         current_pending = state.get("pending_tail_rollback")
         active = state.get("active")
@@ -3909,7 +3938,7 @@ def _start_rollback_replacement(pending: dict[str, Any]) -> bool:
             or not binary
         ):
             return False
-        with _connector_lifecycle(wait=False), _CONNECTOR_LOCK:
+        with _connector_lifecycle(timeout=0), _CONNECTOR_LOCK:
             active = _state_connector("active") or {}
             if (
                 active.get("pid") != pending.get("active_pid")
@@ -3943,7 +3972,7 @@ def _reconcile_pending_tail_rollback() -> None:
     pending = _pending_tail_rollback()
     if pending is None:
         if raw_pending is not None:
-            with _connector_lifecycle(wait=False), _CONNECTOR_LOCK:
+            with _connector_lifecycle(timeout=0), _CONNECTOR_LOCK:
                 current = _read_state() or {}
                 if current.get("pending_tail_rollback") == raw_pending:
                     current["pending_tail_rollback"] = None
@@ -4013,7 +4042,7 @@ def _finish_reconciled_recovery(
 def _reconcile_orphan_candidate() -> None:
     """Resolve a candidate left by a previous service process without risking the active route."""
 
-    with _connector_lifecycle(wait=False):
+    with _connector_lifecycle(timeout=0):
         candidate = _state_connector("candidate")
         if not candidate or not isinstance(candidate.get("pid"), int):
             candidate_pid = _read_pid_file(_candidate_pid_path())
@@ -4090,7 +4119,7 @@ def _reconcile_orphan_candidate_when_free() -> bool:
     """
 
     try:
-        with _connector_lifecycle(wait=False):
+        with _connector_lifecycle(timeout=0):
             with _RECOVERY_LOCK:
                 recovery_running = _RECOVERY_THREAD is not None
             if recovery_running:
@@ -4284,7 +4313,11 @@ def _download_missing_cloudflared(config: V2Config | None) -> dict[str, Any] | N
     cloud = config.remote_access.vibe_cloud if config is not None else None
     if cloud is None or not cloud.enabled or not cloud.tunnel_token or _resolve_binary(config):
         return None
-    result = install_cloudflared()
+    # The installer writes one fixed temporary path, so concurrent starts share one download.
+    with _CLOUDFLARED_DOWNLOAD_LOCK:
+        if _resolve_binary(config):
+            return None
+        result = install_cloudflared()
     return None if result.get("ok") else result
 
 
@@ -4320,8 +4353,13 @@ def _start(
             stop_result = halt(config)
             return {**stop_result, "ok": False, "error": "missing_tunnel_token"}
         if record_request:
-            _connector_requested_path().parent.mkdir(parents=True, exist_ok=True)
-            _connector_requested_path().touch()
+            try:
+                _connector_requested_path().parent.mkdir(parents=True, exist_ok=True)
+                _connector_requested_path().touch()
+            except OSError:
+                # The connector still starts; without the request the monitor
+                # just does not restart it if it exits.
+                logger.warning("Could not record the tunnel connector request", exc_info=True)
         binary = _resolve_binary(config)
         if not binary:
             # Callers download before taking the lifecycle lock; a request recorded

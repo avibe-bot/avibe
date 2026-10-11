@@ -1757,7 +1757,7 @@ if action == "hold":
         sys.stdin.read()  # held until the test kills this process
     sys.exit(0)
 try:
-    with remote_access._connector_lifecycle(wait=False):
+    with remote_access._connector_lifecycle(timeout=0):
         probe = "free"
 except remote_access._ConnectorLifecycleBusy:
     probe = "busy"
@@ -1854,7 +1854,7 @@ def test_ra_tq_034_lifecycle_lock_frees_when_its_holder_dies_and_status_never_wa
         remote_access._pid_path().parent.mkdir(parents=True, exist_ok=True)
         remote_access._pid_path().write_text(str(dead.pid), encoding="utf-8")
         with pytest.raises(remote_access._ConnectorLifecycleBusy):
-            with remote_access._connector_lifecycle(wait=False):
+            with remote_access._connector_lifecycle(timeout=0):
                 pass
 
         started_at = time.monotonic()
@@ -1866,7 +1866,7 @@ def test_ra_tq_034_lifecycle_lock_frees_when_its_holder_dies_and_status_never_wa
 
         holder.kill()
         holder.wait()
-        with remote_access._connector_lifecycle(wait=False):
+        with remote_access._connector_lifecycle(timeout=0):
             pass
         remote_access.status()
         assert remote_access._read_pid() is None
@@ -1889,7 +1889,7 @@ def test_ra_tq_034_missing_cloudflared_downloads_outside_the_lifecycle_lock(monk
 
         def probe():
             try:
-                with remote_access._connector_lifecycle(wait=False):
+                with remote_access._connector_lifecycle(timeout=0):
                     free.append(True)
             except remote_access._ConnectorLifecycleBusy:
                 free.append(False)
@@ -1936,3 +1936,108 @@ def test_ra_tq_034_orphan_candidate_reconcile_waits_for_the_lock_and_for_recover
         if holder.poll() is None:
             holder.kill()
             holder.wait()
+
+
+def test_ra_tq_034_candidate_cleanup_waits_out_lifecycle_contention(monkeypatch, tmp_path) -> None:
+    _setup_exiting_connector(monkeypatch, tmp_path)
+    # A short user bound shows the cleanup does not give up when a user step would.
+    monkeypatch.setattr(remote_access, "CONNECTOR_LIFECYCLE_WAIT_SECONDS", 0.2)
+    dead = subprocess.Popen([sys.executable, "-c", "pass"])
+    dead.wait()
+    remote_access._state_path().parent.mkdir(parents=True, exist_ok=True)
+    runtime.write_json(remote_access._state_path(), {"schema_version": 2, "candidate": {"pid": dead.pid}})
+    holder, report = _lifecycle_child(tmp_path, "hold", "holder")
+    errors = []
+
+    def discard():
+        try:
+            remote_access._discard_candidate_connector(dead.pid)
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    cleaner = threading.Thread(target=discard)
+    try:
+        assert _wait_for_file(report) == "held"
+        cleaner.start()
+        cleaner.join(timeout=1.0)
+        assert cleaner.is_alive() and errors == []  # still waiting, not failed
+        holder.kill()
+        holder.wait()
+        cleaner.join(timeout=10)
+        assert not cleaner.is_alive() and errors == []
+        assert remote_access._state_connector("candidate") is None
+    finally:
+        if holder.poll() is None:
+            holder.kill()
+            holder.wait()
+        cleaner.join(timeout=10)
+
+
+def test_ra_tq_034_start_survives_an_unwritable_request(monkeypatch, tmp_path) -> None:
+    _, network_up = _setup_exiting_connector(monkeypatch, tmp_path)
+    network_up.touch()
+    blocker = tmp_path / "not-a-directory"
+    blocker.write_text("", encoding="utf-8")
+    # The request's parent is a file, so recording the request raises OSError.
+    monkeypatch.setattr(remote_access, "_connector_requested_path", lambda: blocker / "request")
+    try:
+        result = remote_access.start()
+
+        assert result["ok"] is True and result["started"] is True
+        assert remote_access._is_cloudflared_pid(result["pid"])
+    finally:
+        remote_access.stop()
+
+
+def test_ra_tq_034_concurrent_starts_share_one_cloudflared_download(monkeypatch, tmp_path) -> None:
+    config, _ = _setup_exiting_connector(monkeypatch, tmp_path)
+    installed = threading.Event()
+    both_checked = threading.Event()
+    checks = []
+    downloads = []
+
+    def resolve_binary(loaded=None):
+        checks.append(threading.current_thread().name)
+        if len(checks) >= 2:
+            both_checked.set()
+        return "/fake/cloudflared" if installed.is_set() else None
+
+    def install_cloudflared():
+        downloads.append(threading.current_thread().name)
+        both_checked.wait(5)  # the other start has found cloudflared missing too
+        installed.set()
+        return {"ok": True, "path": "/fake/cloudflared"}
+
+    monkeypatch.setattr(remote_access, "_resolve_binary", resolve_binary)
+    monkeypatch.setattr(remote_access, "install_cloudflared", install_cloudflared)
+
+    def download():
+        remote_access._download_missing_cloudflared(config)
+
+    threads = [threading.Thread(target=download, name=f"start-{i}") for i in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    assert len(downloads) == 1
+
+
+def test_ra_tq_034_candidate_cleanup_gives_up_only_after_its_long_bound(monkeypatch, tmp_path, caplog) -> None:
+    _setup_exiting_connector(monkeypatch, tmp_path)
+    monkeypatch.setattr(remote_access, "CLEANUP_LOCK_WAIT_SECONDS", 0.3)
+    dead = subprocess.Popen([sys.executable, "-c", "pass"])
+    dead.wait()
+    remote_access._state_path().parent.mkdir(parents=True, exist_ok=True)
+    runtime.write_json(remote_access._state_path(), {"schema_version": 2, "candidate": {"pid": dead.pid}})
+    holder, report = _lifecycle_child(tmp_path, "hold", "holder")
+    try:
+        assert _wait_for_file(report) == "held"
+
+        remote_access._discard_candidate_connector(dead.pid)  # returns instead of hanging or raising
+
+        assert remote_access._state_connector("candidate") == {"pid": dead.pid}
+        assert "records stay after the lifecycle lock stayed busy" in caplog.text
+    finally:
+        holder.kill()
+        holder.wait()
