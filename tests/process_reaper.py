@@ -7,23 +7,39 @@ Hub engines, outlived their deleted worktrees by days. Two owners close that.
 
 - ``TestProcesses.reap`` runs once every fixture of a test is torn down
   (``tests/conftest.py``). It kills each process the test started that is still
-  running: every ``subprocess.Popen`` child the test recorded, with the process
-  group the child founded, and every other new descendant of this pytest
-  process, each with its own descendants.
+  running: every child the test recorded, with the process group the child
+  founded, and every other new descendant of this pytest process, each with its
+  own descendants.
 - A pytest that is killed outright (SIGKILL, the CI watchdog's ``_exit``) runs
-  no teardown. The warden, a process started with the run, reads every recorded
-  spawn from a pipe. When pytest is gone, however it ended, the warden kills
-  each recorded process still running and the group it founded.
+  no teardown. The warden, a process started with the run, reads the running
+  test's recorded children from a pipe. When pytest is gone, however it ended,
+  the warden kills each one still running and the group it founded.
+
+``tests/conftest.py`` records a child at every primitive that starts one:
+``subprocess.Popen`` (and so asyncio subprocesses), ``multiprocessing``'s
+``Process.start``, ``os.fork``, ``os.forkpty`` (``pty.fork``) and
+``os.posix_spawn``/``posix_spawnp``.
 
 Invariant: once a test has ended, no process it started is still running, and
-once the run has ended, none any test started is. A process is killed, not
-waited for, so a test that needs one to finish waits for it in its body. A
-process is matched by pid and creation time, so a reused pid is never
-signalled. A founded group is matched by its leader's pid alone, because its
-orphans outlive the leader; a pid reused as a new group's leader within one
-test's lifetime is not a credible case.
+when a run is killed, none its running test started is. A process is killed,
+not waited for, so a test that needs one to finish waits for it in its body.
+Every signal is proven to reach what the test started:
 
-POSIX only, like the foreign-signal guard that records the spawns.
+- a process is matched by pid and creation time, so a reused pid is never
+  signalled;
+- a group is signalled only while its recorded leader still runs, or while
+  that pid names no process at all, which leaves only the leader's orphans in
+  it. A pid reused by any live process makes the record stale. The warden
+  forgets each test's records once its reap has confirmed them gone.
+
+``multiprocessing``'s resource tracker and forkserver are started lazily by
+whichever test first needs them and then serve the whole run. They end with
+pytest, so they are never reaped.
+
+Reports name a process by pid and executable name only: an argv can carry a
+credential.
+
+POSIX only, like the foreign-signal guard whose ``Popen`` hook records spawns.
 """
 
 from __future__ import annotations
@@ -46,10 +62,16 @@ _KILLPG = getattr(os, "killpg", None)
 _GETPGID = getattr(os, "getpgid", None)
 _GETPGRP = getattr(os, "getpgrp", None)
 
+# The ``-c`` programs multiprocessing starts its process-wide helpers with.
+_PROCESS_WIDE_HELPERS = (
+    "from multiprocessing.resource_tracker import main",
+    "from multiprocessing.forkserver import main",
+)
+
 
 class _Spawn(NamedTuple):
     created: float
-    # The spawn leads a process group of its own (``start_new_session`` or ``setpgid``).
+    # The spawn leads a process group of its own (``start_new_session``, ``setsid``, ``forkpty``).
     founded_group: bool
 
 
@@ -68,6 +90,25 @@ def _same(pid: int, created: float) -> psutil.Process | None:
     except psutil.Error:
         pass
     return None
+
+
+def _group_is_ours(leader: int, created: float) -> bool:
+    """Whether group ``leader`` still holds only what the recorded leader started."""
+    try:
+        return psutil.Process(leader).create_time() == created
+    except psutil.NoSuchProcess:
+        # No process holds the pid, so no other process can lead a group by it.
+        return True
+    except psutil.Error:
+        return False
+
+
+def _is_process_wide_helper(process: psutil.Process) -> bool:
+    try:
+        command = " ".join(process.cmdline())
+    except psutil.Error:
+        return False
+    return any(program in command for program in _PROCESS_WIDE_HELPERS)
 
 
 def _descendants() -> dict[int, float]:
@@ -93,8 +134,7 @@ def _group_members(groups: set[int]) -> list[psutil.Process]:
 
 def _describe(pid: int) -> str:
     try:
-        process = psutil.Process(pid)
-        return f"{pid} ({' '.join(process.cmdline())[:120] or process.name()})"
+        return f"{pid} ({psutil.Process(pid).name()})"
     except psutil.Error:
         return str(pid)
 
@@ -110,7 +150,7 @@ class TestProcesses:
         self._spawned: dict[int, _Spawn] = {}
 
     def record(self, pid: int) -> None:
-        """Called for every ``subprocess.Popen`` the test starts, once its child exists."""
+        """Called for every child the test starts, once the child exists."""
         created = _created(pid)
         if created is None:
             return
@@ -130,7 +170,8 @@ class TestProcesses:
         def add(process: psutil.Process) -> None:
             try:
                 for each in (process, *process.children(recursive=True)):
-                    targets.setdefault(each.pid, each.create_time())
+                    if not _is_process_wide_helper(each):
+                        targets.setdefault(each.pid, each.create_time())
             except psutil.Error:
                 pass
 
@@ -141,7 +182,9 @@ class TestProcesses:
             if (process := _same(pid, spawn.created)) is not None:
                 add(process)
         # A group outlives its leader: what a spawned shell put in the background stays in it.
-        groups = {pid for pid, spawn in self._spawned.items() if spawn.founded_group}
+        groups = {
+            pid for pid, spawn in self._spawned.items() if spawn.founded_group and _group_is_ours(pid, spawn.created)
+        }
         for member in _group_members(groups) if groups else ():
             add(member)
         targets.pop(os.getpid(), None)
@@ -165,12 +208,15 @@ class TestProcesses:
                     + ", ".join(map(_describe, running))
                 )
             time.sleep(0.01)
+        if self._warden is not None:
+            self._warden.settle()
         return reaped
 
 
 # Runs as ``python -I -c _WARDEN <pytest pid>`` with the record pipe on stdin. A
-# record line is "<pid> <creation time> <1 if it founded its group>". EOF, or a
-# parent that is no longer pytest, means the run is over.
+# line is "<pid> <creation time> <1 if it founded its group>", or "settled" once
+# the running test's reap has confirmed every record gone. EOF, or a parent
+# that is no longer pytest, means the run is over.
 _WARDEN = r"""
 import os, select, signal, sys
 import psutil
@@ -189,20 +235,27 @@ while True:
         break
     *lines, pending = (pending + chunk).split(b"\n")
     for line in lines:
+        if line == b"settled":
+            records.clear()
+            continue
         pid, created, founded_group = line.split()
         records[int(pid)] = (float(created), founded_group == b"1")
 for pid, (created, founded_group) in records.items():
     try:
         process = psutil.Process(pid)
-        if process.create_time() == created:
-            for each in [*process.children(recursive=True), process]:
-                try:
-                    each.send_signal(signal.SIGKILL)
-                except psutil.Error:
-                    pass
+        same = process.create_time() == created
+    except psutil.NoSuchProcess:
+        process, same = None, False
     except psutil.Error:
-        pass
-    if founded_group:
+        continue
+    if same:
+        for each in [*process.children(recursive=True), process]:
+            try:
+                each.send_signal(signal.SIGKILL)
+            except psutil.Error:
+                pass
+    # The group is the leader's while it runs, or while no process holds its pid.
+    if founded_group and (same or process is None):
         try:
             os.killpg(pid, signal.SIGKILL)
         except OSError:
@@ -225,12 +278,19 @@ class Warden:
         finally:
             os.close(read_end)
 
-    def record(self, pid: int, created: float, founded_group: bool) -> None:
+    def _send(self, line: str) -> None:
         try:
-            os.write(self._write_end, f"{pid} {created!r} {int(founded_group)}\n".encode())
+            os.write(self._write_end, f"{line}\n".encode())
         except BrokenPipeError:
-            # The warden is gone; the per-test reaper still owns this spawn.
+            # The warden is gone; the per-test reaper still owns every spawn.
             pass
+
+    def record(self, pid: int, created: float, founded_group: bool) -> None:
+        self._send(f"{pid} {created!r} {int(founded_group)}")
+
+    def settle(self) -> None:
+        """Every record so far is confirmed gone: forget them, so none can go stale."""
+        self._send("settled")
 
     def close(self) -> None:
         """End the run: the warden kills whatever recorded process is still running, then exits."""

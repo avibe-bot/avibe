@@ -50,6 +50,7 @@ import ast
 import errno
 import importlib
 import inspect
+import multiprocessing.process
 import os
 import re
 import shutil
@@ -545,6 +546,12 @@ _REAL_PSUTIL_PROCESS = psutil.Process
 _REAL_PSUTIL_PROCESS_INIT = psutil.Process.__init__
 _REAL_PSUTIL_PIDS = psutil.pids
 _REAL_POPEN_INIT = subprocess.Popen.__init__
+# Every other primitive that starts a child, for the reaper's record (tests/process_reaper.py).
+_REAL_OS_FORK = getattr(os, "fork", None)
+_REAL_OS_FORKPTY = getattr(os, "forkpty", None)
+_REAL_OS_POSIX_SPAWN = getattr(os, "posix_spawn", None)
+_REAL_OS_POSIX_SPAWNP = getattr(os, "posix_spawnp", None)
+_REAL_PROCESS_START = multiprocessing.process.BaseProcess.start
 
 # The packages the wheel ships: a process lookup made from one of them is the
 # product's, and that is where a test's fake pid must not reach the real table.
@@ -757,15 +764,47 @@ def _guarded_killpg(pgid, sig):
     return _REAL_OS_KILLPG(pgid, sig)
 
 
+def _record_child(pid) -> None:
+    processes = _active_test_processes
+    if processes is not None and isinstance(pid, int) and pid > 0:
+        processes.record(pid)
+
+
 @wraps(_REAL_POPEN_INIT)
 def _recording_popen_init(popen, *args, **kwargs):
     _REAL_POPEN_INIT(popen, *args, **kwargs)
     guard = _active_signal_guard
     if guard is not None:
         guard.owned.add(popen.pid)
-    processes = _active_test_processes
-    if processes is not None:
-        processes.record(popen.pid)
+    _record_child(popen.pid)
+
+
+def _recording_fork():
+    pid = _REAL_OS_FORK()
+    _record_child(pid)
+    return pid
+
+
+def _recording_forkpty():
+    pid, fd = _REAL_OS_FORKPTY()
+    _record_child(pid)
+    return pid, fd
+
+
+def _recording_spawn(spawn):
+    @wraps(spawn)
+    def recording(*args, **kwargs):
+        pid = spawn(*args, **kwargs)
+        _record_child(pid)
+        return pid
+
+    return recording
+
+
+@wraps(_REAL_PROCESS_START)
+def _recording_process_start(process):
+    _REAL_PROCESS_START(process)
+    _record_child(process.pid)
 
 
 @wraps(_REAL_PSUTIL_PROCESS_INIT)
@@ -801,7 +840,8 @@ def _listing_pids():
 # TerminateProcess through ctypes, so wrapping `os.kill` there would guard
 # nothing the product reaches. Every psutil lookup constructs a `Process`, and
 # `process_iter` lists through the module's `pids`; a test that replaces
-# `psutil.Process` with its own fake bypasses both, as it means to.
+# `psutil.Process` with its own fake bypasses both, as it means to. The spawn
+# primitives record each child for the reaper, whichever way a test starts it.
 _SIGNAL_GUARD_SUPPORTED = os.name != "nt" and _REAL_OS_KILLPG is not None
 if _SIGNAL_GUARD_SUPPORTED:
     os.kill = _guarded_kill
@@ -809,6 +849,14 @@ if _SIGNAL_GUARD_SUPPORTED:
     subprocess.Popen.__init__ = _recording_popen_init
     psutil.Process.__init__ = _guarded_process_init
     psutil.pids = _listing_pids
+    os.fork = wraps(_REAL_OS_FORK)(_recording_fork)
+    if _REAL_OS_FORKPTY is not None:
+        os.forkpty = wraps(_REAL_OS_FORKPTY)(_recording_forkpty)
+    if _REAL_OS_POSIX_SPAWN is not None:
+        os.posix_spawn = _recording_spawn(_REAL_OS_POSIX_SPAWN)
+    if _REAL_OS_POSIX_SPAWNP is not None:
+        os.posix_spawnp = _recording_spawn(_REAL_OS_POSIX_SPAWNP)
+    multiprocessing.process.BaseProcess.start = _recording_process_start
 
 
 @pytest.fixture(autouse=True)

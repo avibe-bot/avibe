@@ -1,7 +1,7 @@
 """No process a test starts outlives it, however the test ends (tests/process_reaper.py).
 
-Each case runs a pytest of its own with this suite's conftest, so the reaper and
-the warden act exactly as they do for every test file.
+The run-level cases run a pytest of their own with this suite's conftest, so the
+reaper and the warden act exactly as they do for every test file.
 """
 
 from __future__ import annotations
@@ -14,20 +14,27 @@ from pathlib import Path
 import psutil
 import pytest
 
-from tests import hang_guard
+from tests import hang_guard, process_reaper
 
 pytestmark = pytest.mark.skipif(os.name == "nt", reason="the reaper records spawns on POSIX only")
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+SUMMARY = "processes still running when their test ended were killed"
 
-# What leaked before: a child stopped with SIGSTOP in a session of its own (the
-# job wrapper the deadline test stops), and a grandchild a spawned shell put in
-# the background, orphaned once the shell exits and found only through its group.
+# What leaked before, and every other way a test starts a child: a child stopped
+# with SIGSTOP in a session of its own (the job wrapper the deadline test stops),
+# a grandchild a spawned shell put in the background, orphaned once the shell
+# exits and found only through its group, a multiprocessing worker, and a pty
+# child. The spawn context also starts multiprocessing's resource tracker, which
+# serves the whole run and must survive the reap.
 INNER = '''
+import multiprocessing
 import os
+import pty
 import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import psutil
@@ -44,13 +51,27 @@ def _spawn_tree():
     )
     orphan = int(shell.stdout.readline())
     shell.wait()
+    worker = multiprocessing.get_context("spawn").Process(target=time.sleep, args=(600,))
+    worker.start()
+    pid, _ = pty.fork()
+    if pid == 0:
+        os.execv("/bin/sleep", ["sleep", "600"])
     RECORD.write_text(
-        "".join(f"{pid} {psutil.Process(pid).create_time()!r}\\n" for pid in (stopped.pid, orphan))
+        "".join(
+            f"{each} {psutil.Process(each).create_time()!r}\\n" for each in (stopped.pid, orphan, worker.pid, pid)
+        )
     )
+
+
+def _tracker():
+    from multiprocessing import resource_tracker
+
+    return resource_tracker._resource_tracker._pid
 
 
 def test_a_failing_body():
     _spawn_tree()
+    assert _tracker() is not None
     raise AssertionError("fails on purpose")
 
 
@@ -62,6 +83,7 @@ def test_then_nothing_it_started_is_running():
             assert process.create_time() != float(created) or process.status() == psutil.STATUS_ZOMBIE
         except psutil.NoSuchProcess:
             pass
+    assert psutil.Process(_tracker()).status() != psutil.STATUS_ZOMBIE
 
 
 @pytest.mark.allow_foreign_signals(reason="the run kills itself, as the CI watchdog does")
@@ -90,12 +112,8 @@ def _running(record: Path) -> list[int]:
     running = []
     for line in record.read_text().splitlines():
         pid, created = line.split()
-        try:
-            process = psutil.Process(int(pid))
-            if process.create_time() == float(created) and process.status() != psutil.STATUS_ZOMBIE:
-                running.append(process.pid)
-        except psutil.NoSuchProcess:
-            pass
+        if process_reaper._same(int(pid), float(created)) is not None:
+            running.append(int(pid))
     return running
 
 
@@ -105,7 +123,10 @@ def test_a_failed_test_leaves_nothing_it_started_running(tmp_path):
     output = result.stdout + result.stderr
     assert result.returncode == 1, output
     assert "1 failed, 1 passed" in output, output
-    assert "test_a_failing_body" in output.split("processes still running when their test ended were killed")[1]
+    reported = output.split(SUMMARY)[1]
+    assert "test_a_failing_body" in reported
+    # A report names the process, never its arguments, which can carry a credential.
+    assert "time.sleep" not in reported and "sleep 600" not in reported
     assert _running(record) == []
 
 
@@ -115,3 +136,40 @@ async def test_a_killed_run_leaves_nothing_it_started_running(tmp_path):
     assert result.returncode == -9, result.stdout + result.stderr
     # The warden acts once it sees the run gone, after this pytest saw it exit.
     await hang_guard.until(lambda: _running(record) == [], "the warden to kill what the killed run started")
+
+
+@pytest.fixture
+def group_leader():
+    """A live process leading its own group, as a stranger that reused a recorded pid would."""
+    process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"], start_new_session=True)
+    try:
+        yield process.pid, psutil.Process(process.pid).create_time()
+    finally:
+        process.kill()
+        process.wait()
+
+
+def test_a_reap_never_signals_a_group_whose_pid_now_names_another_process(group_leader):
+    pid, created = group_leader
+    processes = process_reaper.TestProcesses(None)
+    processes._spawned[pid] = process_reaper._Spawn(created - 1.0, founded_group=True)
+
+    assert processes.reap() == []
+
+    assert process_reaper._same(pid, created) is not None
+
+
+@pytest.mark.parametrize("settled", [False, True], ids=["stale", "settled"])
+def test_the_warden_never_signals_a_record_it_cannot_prove_is_still_the_runs(group_leader, settled):
+    pid, created = group_leader
+    warden = process_reaper.Warden()
+    if settled:
+        # Forgotten once a reap confirmed the test's records gone, even an exact match.
+        warden.record(pid, created, founded_group=True)
+        warden.settle()
+    else:
+        warden.record(pid, created - 1.0, founded_group=True)
+
+    warden.close()
+
+    assert process_reaper._same(pid, created) is not None
