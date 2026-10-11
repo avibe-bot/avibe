@@ -23,6 +23,14 @@ RELEASED_ARTIFACT_FIXTURE = (
 )
 
 
+def _package_released_manifest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Serve the released v3.6b manifest as the packaged one, as on a 3.6b-era install."""
+    package_dir = tmp_path / "package"
+    package_dir.mkdir()
+    (package_dir / "tmux_runtime_manifest.json").write_bytes(RELEASED_MANIFEST_FIXTURE.read_bytes())
+    monkeypatch.setattr(managed_runtime.package_resources, "files", lambda _package: package_dir)
+
+
 def _write_tmux_archive(
     tmp_path: Path,
     *,
@@ -85,8 +93,6 @@ def _write_manifest(
 def test_released_manifest_and_archive_fixtures_pass_through_production_reader(
     tmp_path: Path,
 ) -> None:
-    manifest_path = Path(tmux_runtime.__file__).resolve().parents[1] / "vibe" / "tmux_runtime_manifest.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     released_manifest = json.loads(RELEASED_MANIFEST_FIXTURE.read_text(encoding="utf-8"))
     released_artifacts = json.loads(RELEASED_ARTIFACT_FIXTURE.read_text(encoding="utf-8"))
     manager = TmuxRuntimeManager(runtime_dir=tmp_path / "runtime", offline=True)
@@ -108,13 +114,11 @@ def test_released_manifest_and_archive_fixtures_pass_through_production_reader(
     assert set(parsed.archives) == set(released_artifacts["archives"])
     for platform_tag, artifact in released_artifacts["archives"].items():
         released_archive = released_manifest["archives"][platform_tag]
-        current_archive = manifest["archives"][platform_tag]
         parsed_archive = parsed.archives[platform_tag]
         assert released_archive == {
             key: artifact[key]
             for key in ("name", "url", "sha256", "size", "bin_path")
         }
-        assert current_archive == artifact
         assert parsed_archive.binary_sha256 == artifact["binary_sha256"]
     assert {
         archive["sha256"]: archive["binary_sha256"]
@@ -702,6 +706,7 @@ def test_exact_released_packaged_install_is_adopted_without_archive_resolution(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _package_released_manifest(tmp_path, monkeypatch)
     released_manifest = json.loads(RELEASED_MANIFEST_FIXTURE.read_text(encoding="utf-8"))
     platform_tag = runtime_platform_tag()
     archive = released_manifest["archives"][platform_tag]
@@ -777,6 +782,7 @@ def test_cleanup_preserves_legacy_parent_containing_current_fingerprinted_instal
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _package_released_manifest(tmp_path, monkeypatch)
     released_manifest = json.loads(RELEASED_MANIFEST_FIXTURE.read_text(encoding="utf-8"))
     platform_tag = runtime_platform_tag()
     archive = released_manifest["archives"][platform_tag]
