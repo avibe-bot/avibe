@@ -44,7 +44,8 @@ class ModelRequest:
     tools: Sequence[ToolSpec]            # C-7; may differ on every call
     max_tokens: int
     reasoning_effort: str | None         # one of the hop's declared efforts, or None
-    cache: Literal["default", "none"]    # "none" for the compaction summarizer
+    cache: Literal["default", "none"]    # "default": the protocol's cache breakpoints and their lifetimes
+                                         # (conversion-tables.md); "none" for the compaction summarizer
     supports_images: bool                # resolved by the loop; unknown capability counts as False
 ```
 

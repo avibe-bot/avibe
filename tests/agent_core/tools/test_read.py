@@ -279,6 +279,24 @@ async def test_a_fifo_swapped_in_after_the_check_does_not_block_read(tmp_path, m
     assert (result.is_error, result_text(result)) == (True, "Cannot read p: it is not a regular file.")
 
 
+@pytest.mark.skipif(os.name != "nt", reason="POSIX never stops a rename onto an open file")
+def test_a_file_being_read_can_still_be_replaced(tmp_path):
+    """Windows refuses a replace onto a name held open without ``FILE_SHARE_DELETE``: a job's wrapper replaces
+    the ``tail.log`` the model reads, and a failed replace stops the job's command."""
+    from core.agent_core.tools import windows_files
+    from core.agent_core.tools.paths import open_regular
+
+    (tmp_path / "tail.log").write_bytes(b"old")
+    (tmp_path / "next").write_bytes(b"new")
+    fd = open_regular(str(tmp_path / "tail.log"))
+    try:
+        windows_files.replace(str(tmp_path / "next"), str(tmp_path / "tail.log"))
+        assert os.read(fd, 10) == b"old"
+    finally:
+        os.close(fd)
+    assert (tmp_path / "tail.log").read_bytes() == b"new"
+
+
 async def test_a_huge_png_shaped_file_is_classified_without_walking_it(tmp_path, make_ctx):
     """A sparse file of empty PNG chunks: image work is bounded by the cap, not by the file."""
     path = tmp_path / "huge.png"
