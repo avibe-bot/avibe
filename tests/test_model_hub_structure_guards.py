@@ -296,6 +296,7 @@ MACHINE_ERROR_FAMILY_FIXTURES = {
     ),
     "server": (
         "server_error",
+        "timeout_error",
         "internal_error",
         "api_error",
         "service_unavailable_error",

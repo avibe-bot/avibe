@@ -273,7 +273,10 @@ def test_new_terminal_records_retain_only_safe_recognized_error_metadata(
         model_id="unknown-model",
         source_id="src_deleted01",
     )
-    registry.finish_attempt(turn_id, outcome=outcome, decision=classify_outcome(outcome))
+    # The record keeps only safe, recognized metadata whatever the outcome carried; which class the classifier
+    # assigns is not under test here (classification reads machine codes, never this text).
+    decision = ResolutionDecision("surface", error_code="upstream_request_invalid", downstream_status=400)
+    registry.finish_attempt(turn_id, outcome=outcome, decision=decision)
     registry.settle("turn-error", settled_by=SETTLED_BY_TERMINAL_RESULT)
     record = store.latest_for_model("claude", MODEL)
     assert record["terminal_error"] == {

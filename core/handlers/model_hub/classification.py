@@ -129,6 +129,8 @@ _MACHINE_ERROR_TAXONOMY: Final[Mapping[str, _MachineErrorRule]] = {
     "overloaded": _MachineErrorRule("transient", True, 80, "fallback", "server_error", None, 30, None),
     "overloaded_error": _MachineErrorRule("transient", True, 80, "fallback", "server_error", None, 30, None),
     "server_error": _MachineErrorRule("server", True, 70, "fallback", "server_error", None, 30, None),
+    # CLIProxyAPI's Claude type for an upstream 504, and since v8 for a 408.
+    "timeout_error": _MachineErrorRule("server", True, 70, "fallback", "server_error", None, 30, None),
     "internal_error": _MachineErrorRule("server", True, 70, "fallback", "server_error", None, 30, None),
     "api_error": _MachineErrorRule("server", True, 10, "fallback", "server_error", None, 30, None),
     "service_unavailable_error": _MachineErrorRule(
@@ -189,7 +191,11 @@ def terminal_outcome_category(
 
 
 def _error_text(outcome: RawCallOutcome) -> str:
-    return " ".join((*machine_error_codes(outcome), outcome.redacted_message or ""))
+    # Machine codes only. ``redacted_message`` is the engine client's own account
+    # of how the call ended, not upstream text, so its wording must not decide a
+    # class: "upstream returned a protocol error event" once read as a rejected
+    # request.
+    return " ".join(machine_error_codes(outcome))
 
 
 def machine_error_codes(outcome: RawCallOutcome) -> tuple[str, ...]:

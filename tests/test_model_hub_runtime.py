@@ -6820,6 +6820,111 @@ def test_engine_client_reads_the_class_of_a_responses_stream_failure_wherever_it
     asyncio.run(run())
 
 
+_STREAM_OUTPUT = {
+    "anthropic": b'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,'
+    b'"delta":{"type":"text_delta","text":"Hi"}}\n\n',
+    "openai_chat": b'data: {"object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"Hi"}}]}\n\n',
+}
+# Error frames whose class no taxonomy row names. Their text says "protocol error",
+# which classification must not read: only machine codes decide a class.
+_UNNAMED_STREAM_ERRORS = {
+    "anthropic": b'event: error\ndata: {"type":"error","error":{"type":"relay_specific_error",'
+    b'"message":"upstream protocol error"}}\n\n',
+    "openai_chat": b'data: {"error":{"type":"relay_specific_error","message":"upstream protocol error"}}\n\n',
+}
+
+
+async def _stream_outcome(monkeypatch: pytest.MonkeyPatch, protocol: str, body: list[bytes]):
+    chunks = list(body)
+
+    class Content:
+        async def read(self, _size: int) -> bytes:
+            return chunks.pop(0) if chunks else b""
+
+        async def iter_chunked(self, _size: int):
+            while chunks:
+                yield chunks.pop(0)
+
+    class Response:
+        status = 200
+        content = Content()
+        headers = {"Content-Type": "text/event-stream"}
+
+        def close(self) -> None:
+            return None
+
+    class Session:
+        async def post(self, *_args, **_kwargs):
+            return Response()
+
+        async def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(client_module.aiohttp, "ClientSession", lambda **_kwargs: Session())
+    source = SourceRecord(
+        source_id="src_fixture123",
+        vendor="custom",
+        protocol=protocol,
+        base_url="https://api.example.test/v1",
+        credential_ref="cred_fixture123",
+        allowed_origins=(),
+        model_ids=("model-a",),
+        prefix="source-fixture123",
+    )
+    handle = await EngineClient(
+        EngineConnection(
+            base_url="http://127.0.0.1:15220",
+            management_key="management-key",
+            gateway_token="gateway-token",
+        )
+    ).invoke(source, "model-a", {}, stream=True, request_protocol=protocol)
+    if handle.stream is not None:
+        assert b"".join([chunk async for chunk in handle.stream]) == b"".join(body)
+    return await handle.outcome()
+
+
+@pytest.mark.parametrize("protocol", sorted(_UNNAMED_STREAM_ERRORS))
+@pytest.mark.parametrize("after_output", [False, True], ids=["before-output", "after-output"])
+def test_a_stream_error_no_rule_names_is_unclassified_whatever_its_text(
+    monkeypatch: pytest.MonkeyPatch,
+    protocol: str,
+    after_output: bool,
+) -> None:
+    """The gateway's placeholder, "upstream returned a protocol error event", once made this a rejected request."""
+
+    async def run() -> None:
+        body = [*([_STREAM_OUTPUT[protocol]] if after_output else []), _UNNAMED_STREAM_ERRORS[protocol]]
+        outcome = await _stream_outcome(monkeypatch, protocol, body)
+
+        assert outcome.kind is RawOutcomeKind.HTTP_ERROR
+        assert outcome.stream_started is after_output
+        assert outcome.upstream_detail == "upstream protocol error"
+        decision = classify_outcome(outcome)
+        assert decision.reason == "unclassified_error"
+        if after_output:
+            assert (decision.action, decision.error_code) == ("surface", "stream_interrupted")
+        else:
+            assert decision.action == "fallback"
+
+    asyncio.run(run())
+
+
+def test_cliproxyapis_claude_timeout_frame_is_a_server_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """CLIProxyAPI types an upstream 504, and since v8 a 408, as timeout_error in a Claude stream."""
+
+    async def run() -> None:
+        outcome = await _stream_outcome(
+            monkeypatch,
+            "anthropic",
+            [b'event: error\ndata: {"type":"error","error":{"type":"timeout_error","message":"upstream timeout"}}\n\n'],
+        )
+
+        decision = classify_outcome(outcome)
+        assert (decision.action, decision.reason, decision.cooldown_seconds) == ("fallback", "server_error", 30)
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("invalid_type", [None, [], {}])
 def test_engine_client_ignores_non_string_stream_event_types(
     monkeypatch: pytest.MonkeyPatch,
