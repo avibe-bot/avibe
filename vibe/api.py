@@ -9472,6 +9472,7 @@ def reconcile_startup_dependencies() -> dict:
         "model_hub_engine": {"ok": False, "status": "unknown"},
         "show_runtime": {"ok": False, "status": "unknown"},
         "tmux": {"ok": False, "status": "unknown"},
+        "ripgrep": {"ok": False, "status": "unknown"},
     }
     try:
         _set_startup_dependency_reconciling("askill", True)
@@ -9568,6 +9569,18 @@ def reconcile_startup_dependencies() -> dict:
                 result["tmux"] = {"ok": False, "status": "failed", "reason": str(exc)}
             finally:
                 _set_startup_dependency_reconciling("tmux", False)
+
+        # Agent commands search with the managed ripgrep. `vibe runtime prepare`
+        # installs it, but a Runtime that never runs prepare (the desktop app)
+        # gets it only here. Its absence only changes Vibey's prompt line, so it
+        # never fails startup.
+        try:
+            from core.ripgrep_runtime import RipgrepRuntimeManager
+
+            result["ripgrep"] = RipgrepRuntimeManager().ensure(force=False)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Startup dependency reconcile failed to ensure ripgrep: %s", exc, exc_info=True)
+            result["ripgrep"] = {"ok": False, "status": "failed", "reason": str(exc)}
 
         result["duration_ms"] = int((time.monotonic() - started_at) * 1000)
         result["ok"] = (
