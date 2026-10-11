@@ -6,7 +6,9 @@ import asyncio
 import json
 import os
 import shutil
+import socketserver
 import subprocess
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,10 +18,15 @@ import pytest
 
 from config.v2_config import ModelHubBackendModelConfig, ModelHubMenuConfig
 from core.handlers.model_hub.identifiers import OPENCODE_PROVIDER_BY_NATIVE_PROTOCOL
-from modules.agents.model_hub import ModelHubRuntimeRouter
+from modules.agents.codex.transport import CodexTransport
+from modules.agents.model_hub import ModelHubLaunch, ModelHubRuntimeRouter, build_codex_hub_launch
 from modules.agents.opencode.caller_context import PLUGIN_FILENAME, PLUGIN_SOURCE
 from tests.e2e.drivers.model_hub_app import ModelHubTestApp
 from tests.e2e.drivers.mock_llm_upstream import MockLLMUpstream
+from tests.e2e.test_model_hub_catalog_consumer import (
+    codex_catalog_runtime,  # noqa: F401 -- fixture dependency
+    rejected_external_proxy,  # noqa: F401 -- fixture dependency
+)
 from tests.e2e.test_model_hub_routing import _request_credential
 from tests.e2e.test_model_hub_runtime import _install_engine, _local_engine_manifest
 from tests.e2e.test_model_hub_sources import SYNTHETIC_API_KEY, _configure_protocol, _create_source
@@ -31,6 +38,7 @@ from tests.scenario_harness.model_hub import (
     service_for,
     source,
 )
+from vibe.backend_model_catalog import _codex_hub_catalog_bytes
 from vibe.opencode_config import managed_opencode_runtime_config_content
 
 
@@ -196,3 +204,104 @@ def test_opencode_native_settings_cannot_change_hub_transport(tmp_path, options_
         assert all(_request_credential(item) == token for item in captured), [item["headers"] for item in captured]
         assert all(item["body"]["model"] == model for item in captured)
         assert native_settings.read_text() == native_payload
+
+
+_PROXY_NAMES = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy")
+
+
+class _ProxyTrap(socketserver.ThreadingTCPServer):
+    """A loopback proxy that records each request line and answers 502."""
+
+    allow_reuse_address = True
+    daemon_threads = True
+
+    def __init__(self):
+        self.lines: list[str] = []
+        super().__init__(("127.0.0.1", 0), _ProxyTrapHandler)
+
+    @property
+    def url(self) -> str:
+        return f"http://127.0.0.1:{self.server_address[1]}"
+
+    def __enter__(self):
+        threading.Thread(target=self.serve_forever, daemon=True).start()
+        return self
+
+    def __exit__(self, *exc_info):
+        self.shutdown()
+        self.server_close()
+
+
+class _ProxyTrapHandler(socketserver.StreamRequestHandler):
+    def handle(self):
+        self.server.lines.append(self.rfile.readline(4096).decode("latin-1").strip())
+        while self.rfile.readline(65536) not in (b"\r\n", b"\n", b""):
+            pass
+        self.wfile.write(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+
+
+async def _hub_turn(binary, runtime, env, catalog_path, gateway, *, exempt):
+    """One Hub turn on the real app-server; returns its terminal status."""
+    launch = ModelHubLaunch(
+        backend="codex", channel="hub", requested_model="proxy-probe", target_model="upstream-alias",
+        runtime_model="proxy-probe", gateway_base_url=gateway.url, gateway_token="isolated-proxy-fixture",
+    )
+    args, launch_env = build_codex_hub_launch([], env, launch, model_catalog_path=catalog_path)
+    if not exempt:
+        # The launch as it was before the gateway joined the exemptions.
+        launch_env = {key: value for key, value in launch_env.items() if key.upper() != "NO_PROXY"}
+    transport = CodexTransport(binary=binary, cwd=str(runtime.home), runtime_args=args, runtime_env=launch_env)
+    completed: asyncio.Queue = asyncio.Queue()
+
+    async def notify(method, params):
+        if method == "turn/completed":
+            await completed.put(params["turn"]["status"])
+
+    transport.on_notification(notify)
+    try:
+        await transport.start()
+        thread = await transport.send_request(
+            "thread/start", {"model": "proxy-probe", "cwd": str(runtime.home), "approvalPolicy": "never", "ephemeral": True},
+        )
+        await transport.send_request(
+            "turn/start", {"threadId": thread["thread"]["id"], "input": [{"type": "text", "text": "Reply with ready."}]},
+        )
+        return await asyncio.wait_for(completed.get(), timeout=60)
+    finally:
+        await transport.stop()
+
+
+def test_mh_codex_launch_002_configured_proxies_cannot_divert_the_loopback_gateway(codex_catalog_runtime):
+    """MH-CODEX-LAUNCH-002: a Hub turn reaches the gateway on this machine despite configured proxies.
+
+    Codex sends loopback requests through any proxy it is given and does not
+    read the macOS proxy exception list. Every proxy variable points at a
+    recording trap and nothing is exempt beforehand, so only the launch's own
+    exemption keeps the gateway request off the trap. The same launch without
+    it is caught by the trap, so the trap is proved to intercept.
+    """
+    binary, runtime, raw_catalog = codex_catalog_runtime
+    Path(runtime.env["CODEX_HOME"], "config.toml").write_text('cli_auth_credentials_store = "file"\n')
+    catalog_path = runtime.home / "proxy-models.json"
+    catalog_path.write_bytes(_codex_hub_catalog_bytes(
+        raw_catalog, [ModelHubBackendModelConfig(id="proxy-probe", context_window=128_000).to_payload()],
+    ))
+    with _ProxyTrap() as trap, MockLLMUpstream() as gateway:
+        gateway.configure(protocol="openai_responses")
+        env = {key: value for key, value in runtime.env.items() if key.upper() != "NO_PROXY"}
+        env.update(dict.fromkeys(_PROXY_NAMES, trap.url))
+
+        status = asyncio.run(_hub_turn(binary, runtime, env, catalog_path, gateway, exempt=True))
+
+        assert status == "completed"
+        assert "/v1/responses" in [item["path"] for item in gateway.requests()]
+        assert trap.lines == []
+
+        gateway.reset_requests()
+        status = asyncio.run(_hub_turn(binary, runtime, env, catalog_path, gateway, exempt=False))
+
+        assert status == "failed"
+        assert gateway.requests() == []
+        assert trap.lines and all(
+            line == f"POST {gateway.url}/v1/responses HTTP/1.1" for line in trap.lines
+        ), trap.lines

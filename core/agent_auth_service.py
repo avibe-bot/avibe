@@ -48,6 +48,7 @@ from modules.agents.opencode.utils import (
     resolve_opencode_reasoning_effort,
 )
 from modules.im import InlineButton, InlineKeyboard, MessageContext
+from vibe.codex_launch_failure import CLI_NOT_FOUND, CodexLaunchError
 from vibe.i18n import t as i18n_t
 from vibe.opencode_config import remove_opencode_provider_api_key
 
@@ -3064,6 +3065,16 @@ class AgentAuthService:
             return result
         except FileNotFoundError:
             return {"ok": False, "error": "cli_not_found", "detail": binary}
+        except CodexLaunchError as err:
+            # The CLI never started; its recognized cause explains the failure.
+            if err.cause == CLI_NOT_FOUND:
+                return {"ok": False, "error": "cli_not_found", "detail": binary}
+            return {
+                "ok": False,
+                "error": "spawn_failed",
+                "detail": str(err),
+                "duration_ms": int((time.monotonic() - started) * 1000),
+            }
         except Exception as err:  # noqa: BLE001
             detail = str(err).strip()
             if "no such file or directory" in detail.lower() or "claude code not found" in detail.lower():

@@ -356,7 +356,54 @@ def test_codex_hub_launch_uses_responses_wire_api_and_ephemeral_token(tmp_path):
     assert "model_providers.avibe_model_hub.request_max_retries=0" in args
     assert "features.unbounded_connection_retries=false" in args
     assert not any("stream_max_retries" in arg for arg in args)
-    assert env == {"AVIBE_MODEL_HUB_TOKEN": "local-test-token"}
+    assert env == {"AVIBE_MODEL_HUB_TOKEN": "local-test-token", "NO_PROXY": "127.0.0.1"}
+
+
+PROXY = {"HTTPS_PROXY": "http://proxy.example:8080", "http_proxy": "http://proxy.example:8080"}
+
+
+@pytest.mark.parametrize(
+    ("gateway", "inherited", "expected"),
+    [
+        # Neither spelling present: one new list naming only the gateway host.
+        ("http://127.0.0.1:15220", {}, {"NO_PROXY": "127.0.0.1"}),
+        ("http://[::1]:15220", {}, {"NO_PROXY": "::1"}),
+        ("http://localhost:15220", {}, {"NO_PROXY": "localhost"}),
+        # Each spelling present is extended on its own; none is added or dropped.
+        (
+            "http://127.0.0.1:15220",
+            {"no_proxy": "corp.example, .internal"},
+            {"no_proxy": "corp.example,.internal,127.0.0.1"},
+        ),
+        (
+            "http://127.0.0.1:15220",
+            {"NO_PROXY": "corp.example", "no_proxy": "10.0.0.0/8"},
+            {"NO_PROXY": "corp.example,127.0.0.1", "no_proxy": "10.0.0.0/8,127.0.0.1"},
+        ),
+        # Present but empty still wins for Codex over the other spelling.
+        (
+            "http://127.0.0.1:15220",
+            {"NO_PROXY": "", "no_proxy": "corp.example"},
+            {"NO_PROXY": "127.0.0.1", "no_proxy": "corp.example,127.0.0.1"},
+        ),
+        # Already exempt, or everything is: left exactly as it was.
+        ("http://127.0.0.1:15220", {"NO_PROXY": "*"}, {"NO_PROXY": "*"}),
+        ("http://LOCALHOST:15220", {"no_proxy": "LocalHost"}, {"no_proxy": "LocalHost"}),
+        # A gateway elsewhere keeps the proxy that reaches it.
+        ("http://10.0.0.5:15220", {}, {}),
+        ("https://gateway.example", {"NO_PROXY": "corp.example"}, {"NO_PROXY": "corp.example"}),
+    ],
+)
+def test_codex_hub_launch_bypasses_proxies_only_for_its_loopback_gateway(tmp_path, gateway, inherited, expected):
+    """MH-CODEX-LAUNCH-002: only the loopback gateway joins the child's proxy exemptions."""
+
+    launch = hub_launch(backend="codex", gateway_base_url=gateway)
+    base_env = {**PROXY, **inherited, "PATH": "/bin"}
+
+    _args, env = build_codex_hub_launch([], base_env, launch, model_catalog_path=tmp_path / "models.json")
+
+    assert env == {**PROXY, **expected, "PATH": "/bin", "AVIBE_MODEL_HUB_TOKEN": "local-test-token"}
+    assert base_env == {**PROXY, **inherited, "PATH": "/bin"}
 
 
 def test_codex_hub_launch_requires_provider_safe_catalog():

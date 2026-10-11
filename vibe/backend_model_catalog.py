@@ -27,6 +27,7 @@ from vibe.claude_model_catalog import (
     load_catalog_models,
 )
 from vibe.codex_config import get_codex_home
+from vibe.codex_launch_failure import CodexLaunchError, launch_failure_from_stderr
 
 if TYPE_CHECKING:
     from storage.lock import MigrationFileLock
@@ -507,7 +508,6 @@ def _export_codex_bundled_catalog(
             max_output_bytes=CODEX_HUB_CATALOG_MAX_BYTES,
             extra_env=env,
             remove_env=removed_env,
-            discard_stderr=True,
         )
     )
     if result.timed_out:
@@ -515,6 +515,11 @@ def _export_codex_bundled_catalog(
     if result.stdout_truncated:
         raise RuntimeError("Codex bundled model catalog exceeded the safety limit")
     if result.exit_code != 0:
+        # Stderr is read only to recognize a CLI that cannot start; it never
+        # reaches an error message, a log, or the user.
+        cause = launch_failure_from_stderr(result.stderr)
+        if cause is not None:
+            raise CodexLaunchError(cause)
         raise RuntimeError("Codex could not export its bundled model catalog")
     return result.stdout.encode()
 

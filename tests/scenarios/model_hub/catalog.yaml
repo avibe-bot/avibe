@@ -10,6 +10,7 @@ capability:
     - tests/test_model_hub_resolution.py
     - tests/test_model_hub_background_discovery.py
     - tests/test_model_hub_injection.py
+    - tests/test_codex_launch_failure.py
     - tests/test_codex_request_routing.py
     - tests/test_model_hub_runtime.py
     - tests/test_model_hub_inference_wait.py
@@ -514,6 +515,25 @@ scenarios:
     kind: injection
     layer: e2e
     test: tests/e2e/test_model_hub_backend_settings.py::test_codex_native_provider_settings_cannot_change_hub_egress
+  - id: MH-CODEX-LAUNCH-002
+    name: A Codex Hub turn reaches the gateway on this machine when proxies are configured, and every other proxy setting is kept
+    status: covered
+    kind: injection
+    layer: e2e
+    test: tests/e2e/test_model_hub_backend_settings.py::test_mh_codex_launch_002_configured_proxies_cannot_divert_the_loopback_gateway
+    related_tests:
+      - tests/test_model_hub_injection.py::test_codex_hub_launch_bypasses_proxies_only_for_its_loopback_gateway
+  - id: MH-CODEX-LAUNCH-003
+    name: A Codex CLI that cannot start ends the turn with repair guidance and holds its input for an explicit retry; once repaired, the same Session continues
+    status: covered
+    kind: recovery
+    layer: unit
+    test: tests/test_codex_launch_failure.py::test_a_codex_cli_that_cannot_start_holds_the_input_for_a_repair
+    related_tests:
+      - tests/test_codex_launch_failure.py::test_recognizes_only_launch_failures_it_has_evidence_for
+      - tests/test_codex_runtime_generations.py::test_a_session_whose_cli_could_not_start_resumes_its_thread_once_repaired
+      - tests/test_session_delivery_fsm.py::test_send_now_no_write_preserves_existing_retry_hold
+      - tests/e2e/test_codex_launch_failures.py::test_incomplete_install_stops_the_catalog_export_with_its_cause
   - id: MH-OPENCODE-LAUNCH-001
     name: Native OpenCode settings preserve the exact Hub provider transport and authentication
     status: covered

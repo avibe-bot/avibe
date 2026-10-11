@@ -14,7 +14,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 import modules.agents.codex.agent as codex_agent_module
-from core.native_dispatch_phase import DISPATCH_PHASE_PREWRITE, set_dispatch_phase
+from core.native_dispatch_phase import DISPATCH_PHASE_PREWRITE, prewrite_failure_evidence, set_dispatch_phase
 from core.handlers.model_hub.provenance import BoundedProvenanceStore, TurnCorrelationRegistry
 from core.runtime_activation import RuntimeActivationRegistry
 from core.session_activities import SessionActivityRegistry
@@ -27,6 +27,7 @@ from modules.agents.model_hub import ModelHubLaunch
 from modules.agents.runtime_generations import RuntimeUnitStopping
 from modules.agents.service import AgentService
 from tests.codex_generation_support import init_generation_state
+from vibe.codex_launch_failure import INSTALL_INCOMPLETE, CodexLaunchError
 from vibe.i18n import t as i18n_t
 
 
@@ -1095,6 +1096,52 @@ async def test_runtime_gen_016_hub_scope_is_revoked_only_with_the_last_hub_gener
         assert router.retired == []
         await agent.shutdown_runtime()
     assert router.retired == [router.scopes[0]]
+
+
+@pytest.mark.asyncio
+async def test_a_session_whose_cli_could_not_start_resumes_its_thread_once_repaired(tmp_path):
+    """MH-CODEX-LAUNCH-003: a repaired CLI continues the same Session and Codex thread.
+
+    The process that ran the Session's thread has exited, and the next start
+    finds the CLI broken. That input waits for an explicit retry and the Session
+    keeps its thread binding; after the repair, the retried input resumes the
+    same thread on a new process instead of opening a new conversation.
+    """
+    agent, cwd = _agent(tmp_path)
+    agent.controller.emit_agent_message = AsyncMock(return_value="notice-1")
+    await agent.handle_message(_request(cwd, "s1"))
+    first = _server_for(agent, "s1")
+    thread_id = agent._session_mgr.get_thread_id("s1")
+    await first.complete(thread_id)
+    first.close_reader()
+    first.exit()
+
+    async def broken_cli(server):
+        server._process.exit(1)
+        raise CodexLaunchError(INSTALL_INCOMPLETE)
+
+    FakeAppServer.on_start = broken_cli
+    held = _request(cwd, "s1")
+    set_dispatch_phase(held.context, DISPATCH_PHASE_PREWRITE)
+    await asyncio.wait_for(agent.handle_message(held), 1)
+
+    assert prewrite_failure_evidence(held.context) == {
+        "reason": "codex_cli_install_incomplete",
+        "requires_explicit_retry": True,
+    }
+    assert agent._turn_registry.get_active_turn("s1") is None
+    agent.sessions.clear_agent_session_mapping.assert_not_called()
+
+    FakeAppServer.on_start = None
+    retried = _request(cwd, "s1")
+    await asyncio.wait_for(agent.handle_message(retried), 1)
+
+    repaired = _server_for(agent, "s1")
+    assert repaired not in FakeAppServer.started[:2] and repaired.alive
+    opened = [(method, params.get("threadId")) for method, params in repaired.requests if method.startswith("thread/")]
+    assert opened == [("thread/resume", thread_id)]
+    assert agent._session_mgr.get_thread_id("s1") == thread_id
+    assert agent._turn_registry.get_active_turn("s1")
 
 
 @pytest.mark.asyncio

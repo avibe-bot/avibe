@@ -594,7 +594,6 @@ def test_codex_hub_catalog_export_uses_stable_supervisor(monkeypatch):
     )
     assert captured["timeout_seconds"] == backend_model_catalog.CODEX_HUB_CATALOG_TIMEOUT_SECONDS
     assert captured["max_output_bytes"] == backend_model_catalog.CODEX_HUB_CATALOG_MAX_BYTES
-    assert captured["discard_stderr"] is True
 
 
 def test_codex_hub_catalog_export_survives_deleted_service_cwd(monkeypatch, tmp_path):
@@ -639,6 +638,7 @@ def test_codex_hub_catalog_export_survives_deleted_service_cwd(monkeypatch, tmp_
 )
 def test_codex_hub_catalog_export_rejects_supervised_failures(monkeypatch, result, message):
     result.stdout = ""
+    result.stderr = ""
 
     async def run(**_kwargs):
         return result
