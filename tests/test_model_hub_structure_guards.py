@@ -300,6 +300,7 @@ MACHINE_ERROR_FAMILY_FIXTURES = {
         "api_error",
         "service_unavailable_error",
         "upstream_error",
+        "timeout_error",
     ),
     "transient": (
         "rate_limit_error",

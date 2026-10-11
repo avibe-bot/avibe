@@ -135,6 +135,9 @@ _MACHINE_ERROR_TAXONOMY: Final[Mapping[str, _MachineErrorRule]] = {
         "server", True, 70, "fallback", "server_error", None, 30, None
     ),
     "upstream_error": _MachineErrorRule("server", True, 70, "fallback", "server_error", None, 30, None),
+    # CLIProxyAPI's Claude-shaped error type for an upstream 408 or 504; its OpenAI
+    # shape is type server_error with code request_timeout.
+    "timeout_error": _MachineErrorRule("server", True, 70, "fallback", "server_error", None, 30, None),
 }
 MACHINE_ERROR_CODES: Final = frozenset(_MACHINE_ERROR_TAXONOMY)
 UPSTREAM_MACHINE_ERROR_CODES: Final = frozenset(
