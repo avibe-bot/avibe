@@ -580,6 +580,13 @@ jobs:
       - name: Verify Windows Controller control IPC
         run: python -m pytest tests/test_control_ipc.py -q
 
+      # Windows reports 0o777/0o666 whatever the access rules are, so the Model
+      # Hub's engine state and takeover journal are owner-private only through
+      # the DACL helper control IPC shares. Engine start, an API-key Source and
+      # the files the engine writes itself all depend on it.
+      - name: Verify owner-private Model Hub state
+        run: python -m pytest tests/test_private_fs.py tests/test_model_hub_state_private.py -q -ra
+
       # Windows byte-range locks are mandatory and per-handle, so a lock taken
       # over the bytes of a record makes that record unreadable to every other
       # handle -- including this process's own. Nothing on Linux can observe
