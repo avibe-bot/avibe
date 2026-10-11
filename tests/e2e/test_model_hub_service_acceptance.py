@@ -18,9 +18,11 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -112,8 +114,12 @@ class _Service:
     """The installed ``vibe`` against one isolated home, and its Web UI API."""
 
     def __init__(self, home: Path, port: int) -> None:
+        # Every subprocess runs from here, so it must exist before the first one.
+        home.mkdir(parents=True, exist_ok=True)
         self.home = home
-        self.avibe_home = home / ".avibe"
+        # Not home/.avibe: a source checkout refuses to migrate what looks like
+        # the user's default state, and this home is only ever the test's.
+        self.avibe_home = home / "avibe-state"
         self.port = port
         self.origin = f"http://127.0.0.1:{port}"
         self.env = {
@@ -123,7 +129,20 @@ class _Service:
             "USERPROFILE": str(home),
             "NO_PROXY": "127.0.0.1,localhost",
             "no_proxy": "127.0.0.1,localhost",
+            # A test service reports nothing and fetches nothing it does not test;
+            # the engine still installs from the packaged manifest.
+            "VIBE_SENTRY_DSN": "",
+            "VIBE_INSTALL_SKIP_ASKILL": "1",
+            "VIBE_ASKILL_AUTO_UPDATE": "0",
+            "VIBE_SHOW_RUNTIME_OFFLINE": "1",
+            "VIBE_TMUX_OFFLINE": "1",
+            "VIBE_GIT_OFFLINE": "1",
         }
+        self._socket_dir: str | None = None
+        if os.name != "nt":
+            # A Unix socket path is capped near 104 bytes; a test home is deeper.
+            self._socket_dir = tempfile.mkdtemp(prefix="avibe-acc-", dir="/tmp")
+            self.env["VIBE_INTERNAL_DISPATCH_SOCKET"] = os.path.join(self._socket_dir, "dispatch.sock")
         self._cookies = CookieJar()
         self._opener = urllib.request.build_opener(
             urllib.request.ProxyHandler({}), urllib.request.HTTPCookieProcessor(self._cookies),
@@ -236,6 +255,10 @@ class _Service:
             return engines[0] if status.get("health") == "ok" and len(engines) == 1 else None
 
         return _await(ready, what="a healthy engine", seconds=_ENGINE_START_SECONDS, interval=2)
+
+    def close(self) -> None:
+        if self._socket_dir is not None:
+            shutil.rmtree(self._socket_dir, ignore_errors=True)
 
     def diagnostics(self) -> str:
         parts = []
@@ -359,6 +382,7 @@ def test_fresh_install_serves_vibey_and_claude_through_the_hub_and_reaps_an_orph
             raise
         finally:
             service.vibe("stop", timeout=120, check=False)
+            service.close()
             for entry in started:
                 if _process_is(entry):
                     psutil.Process(entry["pid"]).kill()
