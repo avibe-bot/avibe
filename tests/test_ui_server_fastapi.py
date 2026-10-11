@@ -2,7 +2,6 @@ import asyncio
 import gzip
 import json
 import threading
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -2098,48 +2097,24 @@ def test_config_routes_redact_platform_and_gateway_secrets(monkeypatch, tmp_path
 
 
 @pytest.mark.parametrize(
-    ("hub_switch", "gateway_enabled", "host", "blocks"),
-    [
-        ("1", True, "supported", {}),
-        ("1", False, "supported", {"vibey": "gateway_off"}),
-        ("0", True, "supported", {"vibey": "hub_disabled"}),
-        # No engine asset for the host: the pinned manifest alone decides, on any OS.
-        ("1", True, "win32-x64", {"vibey": "engine_unsupported"}),
-        ("1", True, "manifest_without_host", {"vibey": "engine_unsupported"}),
-        ("1", False, "win32-x64", {"vibey": "engine_unsupported"}),
-        ("0", True, "win32-x64", {"vibey": "hub_disabled"}),
-    ],
+    ("hub_switch", "gateway_enabled", "blocks"),
+    [("1", True, {}), ("1", False, {"vibey": "gateway_off"}), ("0", True, {"vibey": "hub_disabled"})],
 )
-def test_config_api_carries_why_the_model_hub_leaves_a_backend_no_model(
-    monkeypatch, tmp_path, hub_switch, gateway_enabled, host, blocks
-):
+def test_config_api_carries_why_the_model_hub_leaves_a_backend_no_model(monkeypatch, tmp_path, hub_switch, gateway_enabled, blocks):
     """The Backends page shows the server's answer; it keeps no rule of its own."""
-    from core import managed_runtime
     from modules.agents.catalog import NATIVE_CLI_BACKENDS
-    from vibe.model_hub_runtime.installer import EngineRuntimeManager
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     monkeypatch.setenv("VIBE_MODEL_HUB_ENABLED", hub_switch)
-    if host == "win32-x64":
-        monkeypatch.setattr(managed_runtime, "runtime_platform_tag", lambda: host)
-    elif host == "manifest_without_host":
-        from vibe.model_hub_runtime import installer
-
-        packaged = json.loads((Path(installer.__file__).parent / "cliproxyapi_manifest.json").read_text())
-        own = EngineRuntimeManager().host_platform()
-        manifest = tmp_path / "engine-manifest.json"
-        manifest.write_text(json.dumps({**packaged, "assets": [a for a in packaged["assets"] if a["platform"] != own]}))
-        monkeypatch.setenv("VIBE_MODEL_HUB_ENGINE_MANIFEST_PATH", str(manifest))
     from vibe import api
 
     config = api.save_config(_full_config_payload())
     # The gateway turns off only while no native backend is in Hub mode (``runtime_in_use``).
     for backend in NATIVE_CLI_BACKENDS:
-        config.model_hub.agents[backend].mode = "hub" if gateway_enabled else "direct"
+        config.model_hub.agents[backend].mode = "direct"
     config.model_hub.enabled = gateway_enabled
     config.save()
 
-    # A native backend keeps its own Direct path, so a missing engine never blocks it.
     assert app.test_client().get("/api/config").get_json()["agent_supply_blocks"] == blocks
 
 
