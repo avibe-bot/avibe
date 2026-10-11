@@ -594,6 +594,46 @@ jobs:
           fi
           echo "The installer passed on every Windows runner."
 
+  # The only job that starts the real service on Windows. A fresh install
+  # installs the Model Hub engine from the packaged manifest, saves API-key
+  # Sources, answers a Vibey turn and a Claude Code hub-mode turn through the
+  # gateway, and reaps the engine a hard-killed service left behind.
+  windows-model-hub:
+    name: windows-model-hub (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
+    needs: build-linux-artifacts
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # Both use x64 Python: cryptography publishes no win_arm64 wheel, so
+        # Avibe runs emulated on Windows on Arm until it does.
+        runner: [windows-latest, windows-11-arm]
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8
+        with:
+          name: vibe-wheel-linux
+          path: dist
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
+        with:
+          python-version: "3.12"
+          architecture: x64
+
+      - name: Install package and test dependency
+        shell: pwsh
+        run: |
+          $wheel = (Get-ChildItem dist\*.whl | Select-Object -First 1).FullName
+          if (-not $wheel) {
+            throw "Missing wheel artifact"
+          }
+          python -m pip install $wheel pytest
+
+      - name: Verify Model Hub through the installed service
+        run: python -m pytest -m e2e_model_hub tests/e2e/test_model_hub_service_acceptance.py -v -ra
+
   windows-control-ipc:
     runs-on: windows-latest
     needs: build-linux-artifacts

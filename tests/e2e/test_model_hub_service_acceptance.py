@@ -1,0 +1,353 @@
+"""Model Hub end to end through the installed service, from a fresh home.
+
+This is the acceptance case for Model Hub on Windows: CI runs it on the x64
+and Arm64 Windows runners, where nothing else starts the real service. It runs
+the same way on Linux and macOS. It drives ``vibe`` exactly as a user's install
+does -- the CLI starts the background service, the Web UI API configures it --
+against two loopback upstreams, and proves:
+
+- the engine installs from the packaged manifest and becomes healthy;
+- an API-key Source saves through the real credential check;
+- a Vibey turn and a Claude Code hub-mode turn each get the upstream's reply;
+- after the service is killed outright, the next start reaps the engine it
+  left behind and runs a new one.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import json
+import os
+import socket
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+from http.cookiejar import CookieJar
+from pathlib import Path
+from typing import Any, Iterator
+
+import psutil
+import pytest
+
+pytestmark = pytest.mark.e2e_model_hub
+
+_MOCK_UPSTREAM = Path(__file__).resolve().parent / "drivers" / "mock_llm_upstream.py"
+_CHAT_KEY = "sk-acceptance-chat-not-real"
+_ANTHROPIC_KEY = "sk-acceptance-anthropic-not-real"
+_CHAT_MODEL = "mock-model"
+_CLAUDE_MODEL = "claude-sonnet-4-6"
+_VIBEY_MODEL = "acceptance-chat"
+_REPLY = "mock response"
+_ENGINE_START_SECONDS = 600
+_TURN_SECONDS = 300
+
+
+def _free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        return int(probe.getsockname()[1])
+
+
+def _await(condition, *, what: str, seconds: float, interval: float = 1.0):
+    deadline = time.monotonic() + seconds
+    last: Any = None
+    while time.monotonic() < deadline:
+        try:
+            last = condition()
+        except (OSError, ValueError) as exc:
+            last = exc
+        else:
+            if last:
+                return last
+        time.sleep(interval)
+    raise AssertionError(f"timed out waiting for {what}; last observation: {last!r}")
+
+
+class _Upstream:
+    """One loopback LLM upstream; the shared mock serves one protocol per process."""
+
+    def __init__(self, process: subprocess.Popen[str], url: str) -> None:
+        self.process = process
+        self.url = url
+        self._opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+    def control(self, method: str, path: str, payload: object | None = None) -> Any:
+        data = None if payload is None else json.dumps(payload).encode("utf-8")
+        request = urllib.request.Request(
+            f"{self.url}{path}", data=data, method=method, headers={"Content-Type": "application/json"},
+        )
+        with self._opener.open(request, timeout=10) as response:
+            return json.loads(response.read() or b"null")
+
+    def configure(self, **update: Any) -> None:
+        self.control("POST", "/__control/config", update)
+
+    def requests(self) -> list[dict[str, Any]]:
+        return self.control("GET", "/__control/requests")["requests"]
+
+
+@contextlib.contextmanager
+def _upstream(**config: Any) -> Iterator[_Upstream]:
+    process = subprocess.Popen(
+        [sys.executable, str(_MOCK_UPSTREAM), "--port", "0"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    try:
+        line = process.stdout.readline() if process.stdout else ""
+        prefix = "Mock LLM upstream listening at "
+        assert line.startswith(prefix), line
+        upstream = _Upstream(process, line[len(prefix):].strip())
+        upstream.configure(**config)
+        yield upstream
+    finally:
+        process.kill()
+        process.wait(timeout=10)
+
+
+class _Service:
+    """The installed ``vibe`` against one isolated home, and its Web UI API."""
+
+    def __init__(self, home: Path, port: int) -> None:
+        self.avibe_home = home / ".avibe"
+        self.port = port
+        self.origin = f"http://127.0.0.1:{port}"
+        self.env = {
+            **os.environ,
+            "AVIBE_HOME": str(self.avibe_home),
+            # Windows resolves the home directory from USERPROFILE, not HOME.
+            "USERPROFILE": str(home),
+            "NO_PROXY": "127.0.0.1,localhost",
+            "no_proxy": "127.0.0.1,localhost",
+        }
+        self._cookies = CookieJar()
+        self._opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler({}), urllib.request.HTTPCookieProcessor(self._cookies),
+        )
+        self._csrf: str | None = None
+
+    def vibe(self, *args: str, timeout: float = 300, check: bool = True) -> subprocess.CompletedProcess[str]:
+        result = subprocess.run(
+            [sys.executable, "-m", "vibe", *args],
+            env=self.env,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+        )
+        if check:
+            assert result.returncode == 0, (args, result.returncode, result.stdout[-4000:], result.stderr[-4000:])
+        return result
+
+    def request(self, method: str, path: str, payload: object | None = None, *, timeout: float = 60) -> tuple[int, Any]:
+        headers = {"Accept": "application/json"}
+        data = None
+        if method != "GET":
+            if self._csrf is None:
+                _status, body = self.request("GET", "/api/csrf-token")
+                self._csrf = body["csrf_token"]
+            headers.update({
+                "Content-Type": "application/json",
+                "Origin": self.origin,
+                "X-Vibe-CSRF-Token": self._csrf,
+            })
+            data = json.dumps({} if payload is None else payload).encode("utf-8")
+        request = urllib.request.Request(f"{self.origin}{path}", data=data, method=method, headers=headers)
+        try:
+            with self._opener.open(request, timeout=timeout) as response:
+                return response.status, json.loads(response.read() or b"null")
+        except urllib.error.HTTPError as exc:
+            raw = exc.read()
+            try:
+                return exc.code, json.loads(raw or b"null")
+            except ValueError:
+                return exc.code, raw.decode("utf-8", "replace")
+
+    def ok(self, method: str, path: str, payload: object | None = None, *, timeout: float = 60) -> Any:
+        status, body = self.request(method, path, payload, timeout=timeout)
+        assert 200 <= status < 300 and isinstance(body, dict) and body.get("ok") is not False, (
+            method, path, status, body,
+        )
+        return body
+
+    def seed_config(self) -> None:
+        """Write the first-run config ``vibe start`` would, on a port of our own.
+
+        The default port may belong to a real service on a developer machine.
+        """
+
+        from config import paths
+        from core.services import settings
+
+        config = settings.default_config()
+        config.ui.setup_port = self.port
+        config.ui.open_browser = False
+        path = paths.get_config_path()
+        assert path == self.avibe_home / "config" / "config.json", path
+        config.save(path)
+
+    def wait_ready(self) -> None:
+        _await(
+            lambda: self.request("GET", "/health", timeout=5)[1] == {"status": "ok"},
+            what="the Web UI health check", seconds=120,
+        )
+        _await(
+            lambda: self.request("GET", "/api/models/sources", timeout=10)[0] == 200,
+            what="the Model Hub API", seconds=120,
+        )
+
+    def kill_service(self) -> None:
+        """Kill the service outright, the way a crash or ``taskkill /F`` would.
+
+        The pid comes from this home's service lock and must carry this home in
+        its environment, so nothing else on the machine can be the target. An
+        external command kills it: the service is not a child of this test.
+        """
+
+        lock = json.loads((self.avibe_home / "runtime" / "service.lock").read_text(encoding="utf-8"))
+        assert lock.get("phase") == "running", lock
+        pid = int(lock["pid"])
+        assert psutil.Process(pid).environ().get("AVIBE_HOME") == str(self.avibe_home), pid
+        command = ["taskkill", "/F", "/PID", str(pid)] if os.name == "nt" else ["kill", "-KILL", str(pid)]
+        subprocess.run(command, check=True, capture_output=True, timeout=30)
+        _await(lambda: not psutil.pid_exists(pid), what="the killed service to exit", seconds=30, interval=0.2)
+
+    def engines(self) -> list[dict[str, Any]]:
+        record = self.avibe_home / "runtime" / "model-hub" / "state" / "engine-process.json"
+        try:
+            payload = json.loads(record.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return []
+        return [entry for entry in payload.get("engines", []) if isinstance(entry.get("pid"), int)]
+
+    def healthy_engine(self) -> dict[str, Any]:
+        def ready():
+            status = self.ok("GET", "/api/models/runtime/status")["runtime"]["status"]
+            engines = self.engines()
+            return engines[0] if status.get("health") == "ok" and len(engines) == 1 else None
+
+        return _await(ready, what="a healthy engine", seconds=_ENGINE_START_SECONDS, interval=2)
+
+    def diagnostics(self) -> str:
+        parts = []
+        for name in ("logs/vibe_remote.log", "runtime/service_stderr.log", "runtime/ui_stderr.log"):
+            path = self.avibe_home / name
+            if path.exists():
+                parts.append(f"--- {name} (tail) ---\n" + path.read_text(encoding="utf-8", errors="replace")[-6000:])
+        return "\n".join(parts)
+
+
+def _process_is(entry: dict[str, Any]) -> bool:
+    """Whether the recorded process is still the one the record names."""
+
+    try:
+        return abs(psutil.Process(entry["pid"]).create_time() - float(entry["create_time"])) < 0.01
+    except (psutil.NoSuchProcess, psutil.AccessDenied, KeyError, TypeError, ValueError):
+        return False
+
+
+def _add_model(service: _Service, backend: str, model_id: str) -> None:
+    baseline = service.ok("GET", f"/api/models/agents/{backend}/models")["agent"].get("catalog_models") or []
+    if any(model.get("id") == model_id for model in baseline):
+        return
+    service.ok("PUT", f"/api/models/agents/{backend}/models", {
+        "baseline": baseline,
+        "models": [*baseline, {"id": model_id, "origin": "manual"}],
+    })
+
+
+def _route(service: _Service, backend: str, model_id: str, source_id: str, upstream_model: str) -> None:
+    _add_model(service, backend, model_id)
+    service.ok(
+        "PUT", f"/api/models/agents/{backend}/chain?model={model_id}",
+        {"hops": [{"source_id": source_id, "model_id": upstream_model}]},
+    )
+    service.vibe("agent", "update", backend, "--model", model_id)
+
+
+def _turn(service: _Service, agent: str) -> dict[str, Any]:
+    result = service.vibe(
+        "agent", "run", "--agent", agent, "--sync", "--wait-timeout", str(_TURN_SECONDS),
+        "--message", "Reply with the upstream's answer.", timeout=_TURN_SECONDS + 60,
+    )
+    return json.loads(result.stdout)["run"]
+
+
+def test_fresh_install_serves_vibey_and_claude_through_the_hub_and_reaps_an_orphaned_engine(tmp_path) -> None:
+    home = Path(os.environ["HOME"])
+    service = _Service(home, _free_port())
+    service.seed_config()
+    started: list[dict[str, Any]] = []
+    with _upstream(protocol="openai_chat", models=[_CHAT_MODEL], required_api_key=_CHAT_KEY) as chat, _upstream(
+        protocol="anthropic", models=[_CLAUDE_MODEL], required_api_key=_ANTHROPIC_KEY,
+        required_auth_scheme="protocol",
+    ) as anthropic:
+        try:
+            service.vibe("start", "--no-open-browser", timeout=300)
+            service.wait_ready()
+
+            # The engine installs from the packaged manifest and becomes healthy.
+            service.ok("POST", "/api/models/runtime/start", timeout=_ENGINE_START_SECONDS)
+            first = service.healthy_engine()
+            started.append(first)
+
+            # API-key Sources save through the real credential check, which
+            # requires the listing to refuse a request without the key.
+            chat_source = service.ok("POST", "/api/models/sources", {
+                "kind": "api_key", "vendor": "custom", "display_name": "Acceptance Chat",
+                "base_url": f"{chat.url}/v1", "key": _CHAT_KEY, "protocol": "openai_chat",
+            }, timeout=120)["source"]
+            anthropic_source = service.ok("POST", "/api/models/sources", {
+                "kind": "api_key", "vendor": "custom", "display_name": "Acceptance Anthropic",
+                "base_url": anthropic.url, "key": _ANTHROPIC_KEY, "protocol": "anthropic",
+            }, timeout=120)["source"]
+            # Avibe checks an Anthropic key with x-api-key; the engine sends a
+            # custom relay's key as a bearer token. Serve both from here on.
+            anthropic.configure(required_api_key=None)
+
+            # A Vibey turn gets the upstream's reply through the hub.
+            _route(service, "vibey", _VIBEY_MODEL, chat_source["id"], _CHAT_MODEL)
+            vibey = _turn(service, "vibey")
+            assert vibey["status"] == "succeeded", vibey
+            assert _REPLY in (vibey.get("result_text") or ""), vibey
+            assert any(item["path"] == "/v1/chat/completions" for item in chat.requests())
+
+            # So does a Claude Code turn in hub mode.
+            service.ok("PATCH", "/api/models/agents/claude/mode", {"mode": "hub"})
+            _route(service, "claude", _CLAUDE_MODEL, anthropic_source["id"], _CLAUDE_MODEL)
+            claude = _turn(service, "claude")
+            assert claude["status"] == "succeeded", claude
+            assert _REPLY in (claude.get("result_text") or ""), claude
+            assert any(item["path"] == "/v1/messages" for item in anthropic.requests())
+
+            # Kill the service outright: its engine is left running.
+            first = service.engines()[0]
+            service.kill_service()
+            assert _process_is(first), "the engine should outlive a killed service"
+
+            # The next start reaps that engine before it runs a new one.
+            service.vibe("start", "--no-open-browser", timeout=300)
+            service.wait_ready()
+            service.ok("POST", "/api/models/runtime/start", timeout=_ENGINE_START_SECONDS)
+            second = service.healthy_engine()
+            started.append(second)
+            assert second["pid"] != first["pid"] or second["create_time"] != first["create_time"]
+            assert not _process_is(first), "the orphaned engine is still running"
+            log = (service.avibe_home / "logs" / "vibe_remote.log").read_text(encoding="utf-8", errors="replace")
+            assert "Reaped a Model Hub engine left running by an earlier service" in log
+
+            service.vibe("stop", timeout=120)
+            assert service.engines() == []
+            assert not _process_is(second)
+        except BaseException:
+            print(service.diagnostics())
+            raise
+        finally:
+            service.vibe("stop", timeout=120, check=False)
+            for entry in started:
+                if _process_is(entry):
+                    psutil.Process(entry["pid"]).kill()
