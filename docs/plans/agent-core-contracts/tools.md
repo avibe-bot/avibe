@@ -68,24 +68,32 @@ creates parent directories.`
 Result: `Successfully wrote to {path}`. Writes are serialized per canonical path with `edit`.
 
 How a write lands (Avibe); `edit` publishes the same way. The new content is always written to a temp file beside the
-file first, the owner's alone while it is there (0600 on POSIX, an owner-only DACL on Windows), so a full disk or a
-quota fails before the file is touched.
+file first, the owner's alone while it is there (0600 on POSIX, an owner-only DACL on Windows).
 
 - A new file is that temp file, renamed into place, so a failure leaves its absence as it was.
-- On POSIX, a file this user owns (its uid is the effective uid) is replaced by the temp file, which takes its mode,
-  so a failure leaves it as it was; its ACL, extended attributes, and hard links are not carried over. A file another
-  account owns is rewritten in place instead, so its owner, mode, ACL, attributes, and links stay as they were: a
-  replacement would be this user's. Which of the two applies is decided right before publication, from the file the
-  path names then. A setuid or setgid file another account owns is refused: rewriting it would make the kernel clear
-  those bits.
-- On Windows an existing file is always rewritten in place, so it stays the same file object: its owner, DACL, audit
+- On POSIX an existing file is replaced by the temp file, which takes its mode, so a failure (a full disk, a quota)
+  leaves it as it was.
+- On Windows an existing file is rewritten in place, so it stays the same file object: its owner, DACL, audit
   entries, integrity label, encryption, compression, named streams (the Mark of the Web among them), hard links, and
-  creation time stay as they were. Such a write is not all or nothing: a crash, or a failure of the disk itself, in
-  the middle of the rewrite can leave the file partly written. No other program can open the file for writing while
-  it is rewritten, and one that has it open for writing makes the write fail before a byte changes.
+  creation time stay as they were. The temp file only shows the volume has room, and is removed. The file is opened
+  without following a link, and no other program can write, rename, or delete it while it is open; one that already
+  has it open that way makes the write fail before a byte changes. With the file held, the checks made before
+  publication (a writable regular file, which the path still names; for `edit`, the file it read) are made again
+  against it, so the write lands only in the file that passed them.
 - A file whose ACL denies writing it is refused, as a read-only one is.
 - `edit` writes only over the file it read: the same file id, size, mtime, and change time (Windows' NTFS change
   time, which `stat` does not report there on every Python).
+
+Known limits, kept as they are:
+
+- A POSIX replacement is a new file of this user's, as with an editor that saves by renaming. Replacing a
+  group-writable file another account owns makes this user its owner. The mode is carried over, but not ACLs,
+  extended attributes (file capabilities among them), or hard links. POSIX has no compare-and-rename, so a change
+  between the last check and the rename is not seen; a rename replaces a name and never writes through a link.
+- A Windows write to an existing file is an ordinary in-place write, as an editor's save is. It is not all or nothing:
+  a crash, a quota, or a failure of the disk itself in the middle of the rewrite can leave the file partly written.
+  Its growth is charged to the file owner's quota, and the temp file, which shows the volume has room, reserves
+  nothing.
 
 ## 4. `edit`
 
