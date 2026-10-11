@@ -670,8 +670,52 @@ def _focus_shortcut(arguments: Mapping[str, Any], tool_name: str) -> bool:
 
 
 def _validate_input(tool_name: str, arguments: Mapping[str, Any]) -> None:
+    if "click_mode" in arguments and tool_name != "click":
+        raise ComputerServerError(
+            "invalid_arguments",
+            "click_mode is valid only for the click tool.",
+        )
     if tool_name not in _INPUT_TOOLS:
         return
+    if "click_mode" in arguments:
+        click_mode = arguments.get("click_mode")
+        if not isinstance(click_mode, str) or click_mode not in {"auto", "raw"}:
+            raise ComputerServerError(
+                "invalid_arguments",
+                'click_mode must be "auto" or "raw".',
+            )
+        if click_mode == "raw":
+            pid = arguments.get("pid")
+            window_id = arguments.get("window_id")
+            x = arguments.get("x")
+            y = arguments.get("y")
+            count = arguments.get("count", 1)
+            modifiers = arguments.get("modifier", [])
+            if (
+                isinstance(pid, bool)
+                or not isinstance(pid, int)
+                or isinstance(window_id, bool)
+                or not isinstance(window_id, int)
+                or isinstance(x, bool)
+                or not isinstance(x, (int, float))
+                or isinstance(y, bool)
+                or not isinstance(y, (int, float))
+                or arguments.get("element_token") is not None
+                or arguments.get("target") is not None
+                or arguments.get("action", "press") not in {"press", "click"}
+                or arguments.get("button", "left") != "left"
+                or arguments.get("delivery_mode", "background") != "background"
+                or isinstance(count, bool)
+                or not isinstance(count, int)
+                or count != 1
+                or not isinstance(modifiers, list)
+                or modifiers
+            ):
+                raise ComputerServerError(
+                    "invalid_arguments",
+                    'click_mode="raw" requires an exact pid + window_id '
+                    "background left-click with x/y, count=1, and no modifiers.",
+                )
     if arguments.get("delivery_mode") == "foreground":
         raise ComputerServerError(
             "foreground_forbidden",

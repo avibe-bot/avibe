@@ -209,6 +209,14 @@ jobs:
             echo "apple_signing=absent" >> "$GITHUB_ENV"
           fi
 
+      - name: Verify prepared Cua Driver provenance
+        if: runner.os == 'macOS'
+        run: >
+          python scripts/desktop_release.py verify-driver-prepared
+          --target "${{ matrix.target }}"
+          --driver "desktop/src-tauri/binaries/cua-driver-${{ matrix.target }}"
+          --provenance-path "desktop/src-tauri/binaries/cua-driver-${{ matrix.target }}.provenance.json"
+
       - name: Build self-contained installer
         working-directory: desktop
         run: >
@@ -321,6 +329,7 @@ jobs:
           if [ "$RUNNER_OS" = "macOS" ]; then
             signing="${signature_state}"$'\ndmg-unsigned-unnotarized'
             driver_args=(
+              --prepared-driver "desktop/src-tauri/binaries/cua-driver-${{ matrix.target }}"
               --driver "$driver_packaged_path"
               --driver-provenance-path "$driver_provenance_path"
               --driver-cdhash "$driver_packaged_cdhash"

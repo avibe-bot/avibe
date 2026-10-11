@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify and prepare the pinned macOS Cua Driver nested helper."""
+"""Build the pinned and explicitly patched macOS Cua Driver helper."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+from pathlib import PurePosixPath
 import re
 import shutil
 import subprocess
@@ -47,6 +48,7 @@ def load_manifest(path: Path = SOURCES) -> dict:
         or driver.get("version") != "0.31.0"
         or driver.get("tag") != "cua-driver-rs-v0.31.0"
         or driver.get("source_commit") != "5272e492d61b96caf08e3bf434d91126c1f3dccc"
+        or SHA256.fullmatch(str(driver.get("tool_snapshot_sha256"))) is None
         or driver.get("license") != "MIT"
         or not isinstance(driver.get("release_base_url"), str)
         or driver.get("release_checksums_asset") != "checksums.txt"
@@ -54,10 +56,42 @@ def load_manifest(path: Path = SOURCES) -> dict:
         or not isinstance(macos, dict)
         or macos.get("asset") != "cua-driver-rs-0.31.0-darwin-universal-binary.tar.gz"
         or SHA256.fullmatch(str(macos.get("sha256"))) is None
+        or not isinstance(driver.get("source"), dict)
+        or driver["source"].get("archive")
+        != "cua-5272e492d61b96caf08e3bf434d91126c1f3dccc.tar.gz"
+        or driver["source"].get("url")
+        != "https://codeload.github.com/trycua/cua/tar.gz/5272e492d61b96caf08e3bf434d91126c1f3dccc"
+        or SHA256.fullmatch(str(driver["source"].get("sha256"))) is None
+        or driver["source"].get("root")
+        != "cua-5272e492d61b96caf08e3bf434d91126c1f3dccc"
+        or not isinstance(driver.get("patch"), dict)
+        or driver["patch"].get("variant") != "avibe-raw-single-click-v1"
+        or driver["patch"].get("file")
+        != "patches/0001-macos-raw-single-click.patch"
+        or SHA256.fullmatch(str(driver["patch"].get("sha256"))) is None
+        or driver["patch"].get("contract") != "click.click_mode=raw"
+        or not isinstance(driver["patch"].get("upstream_refs"), list)
+        or not driver["patch"]["upstream_refs"]
+        or not isinstance(driver["patch"].get("upgrade_plan"), str)
+        or not driver["patch"]["upgrade_plan"].strip()
         or payload.get("managed_policy") != "policy.yaml"
         or payload.get("tool_snapshot") != "tools-v0.31.0.json"
     ):
         raise ValueError("invalid pinned Cua Driver source manifest")
+    patch = path.parent / driver["patch"]["file"]
+    if not patch.is_file() or digest(patch) != driver["patch"]["sha256"]:
+        raise ValueError("pinned Cua Driver patch hash mismatch")
+    try:
+        snapshot = json.loads(TOOL_SNAPSHOT.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError("pinned Cua Driver tool snapshot is unreadable") from exc
+    if (
+        not isinstance(snapshot, dict)
+        or snapshot.get("patch_sha256") != driver["patch"]["sha256"]
+    ):
+        raise ValueError("pinned Cua Driver tool snapshot patch hash mismatch")
+    if digest(TOOL_SNAPSHOT) != driver["tool_snapshot_sha256"]:
+        raise ValueError("pinned Cua Driver tool snapshot hash mismatch")
     if "perception" in json.dumps(payload).lower():
         raise ValueError("Cua perception assets must not enter the Phase 1 package")
     verify_managed_policy_surface()
@@ -107,115 +141,156 @@ def download(url: str, target: Path) -> None:
             shutil.copyfileobj(response, output)
 
 
-def checksums(text: str) -> dict[str, str]:
-    parsed: dict[str, str] = {}
-    for line in text.splitlines():
-        match = re.fullmatch(r"([0-9a-f]{64})  ([A-Za-z0-9._+-]+)", line)
-        if match:
-            parsed[match.group(2)] = match.group(1)
-    return parsed
+def extract_driver_source(manifest: dict, archive_path: Path, destination: Path) -> Path:
+    """Extract only the pinned driver subtree from the verified source archive."""
+
+    source = manifest["driver"]["source"]
+    if digest(archive_path) != source["sha256"]:
+        raise ValueError("Cua Driver source archive hash mismatch")
+    archive_root = PurePosixPath(source["root"])
+    driver_root = archive_root / "libs" / "cua-driver"
+    extracted_files = 0
+    with tarfile.open(archive_path, "r:gz") as archive:
+        for member in archive.getmembers():
+            path = PurePosixPath(member.name)
+            if path.is_absolute() or ".." in path.parts:
+                raise ValueError("unsafe Cua Driver source archive path")
+            if path.parts[: len(driver_root.parts)] != driver_root.parts:
+                continue
+            relative = PurePosixPath(*path.parts[1:])
+            target = destination.joinpath(*relative.parts)
+            if member.isdir():
+                target.mkdir(parents=True, exist_ok=True)
+                continue
+            if not member.isfile():
+                raise ValueError("Cua Driver source subtree contains a non-regular file")
+            extracted = archive.extractfile(member)
+            if extracted is None:
+                raise ValueError("Cua Driver source archive member could not be read")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with target.open("wb") as output:
+                shutil.copyfileobj(extracted, output)
+            target.chmod(member.mode & 0o777)
+            extracted_files += 1
+    source_root = destination
+    cargo_manifest = source_root / "libs" / "cua-driver" / "rust" / "Cargo.toml"
+    if extracted_files == 0 or not cargo_manifest.is_file():
+        raise ValueError("Cua Driver source archive is missing the pinned Rust workspace")
+    return source_root
 
 
-def verify_release_inputs(manifest: dict, archive: Path, checksum_file: Path) -> None:
-    driver = manifest["driver"]
-    asset = driver["macos"]["asset"]
-    if digest(checksum_file) != driver["release_checksums_sha256"]:
-        raise ValueError("Cua Driver checksums.txt hash mismatch")
-    release_hashes = checksums(checksum_file.read_text(encoding="utf-8"))
-    expected = driver["macos"]["sha256"]
-    if release_hashes.get(asset) != expected:
-        raise ValueError("Cua Driver release checksums do not contain the pinned asset hash")
-    if digest(archive) != expected:
-        raise ValueError("Cua Driver archive hash mismatch")
+def run(command: list[str], *, merge_stderr: bool = True) -> str:
+    return subprocess.check_output(
+        command,
+        text=True,
+        stderr=subprocess.STDOUT if merge_stderr else None,
+    )
 
 
-def safe_member(archive: tarfile.TarFile, name: str) -> tarfile.TarInfo:
-    matches = [
-        member
-        for member in archive.getmembers()
-        if member.isfile() and Path(member.name).name == name
-    ]
-    if len(matches) != 1:
-        raise ValueError(f"Cua Driver archive must contain exactly one {name}")
-    member = matches[0]
-    if member.name.startswith("/") or ".." in Path(member.name).parts:
-        raise ValueError("unsafe Cua Driver archive path")
-    return member
+def apply_driver_patch(manifest: dict, source_root: Path) -> Path:
+    patch = ROOT / "cua-driver" / manifest["driver"]["patch"]["file"]
+    subprocess.run(
+        ["git", "-C", str(source_root), "apply", "--check", str(patch)],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(source_root), "apply", str(patch)],
+        check=True,
+    )
+    return patch
 
 
-def run(command: list[str]) -> str:
-    return subprocess.check_output(command, text=True, stderr=subprocess.STDOUT)
+def build_driver(manifest: dict, source_root: Path, target: str) -> Path:
+    workspace = source_root / "libs" / "cua-driver" / "rust"
+    target_dir = ROOT / "target" / "cua-driver-patched"
+    environment = {
+        **os.environ,
+        "CARGO_INCREMENTAL": "0",
+        "CARGO_TARGET_DIR": str(target_dir),
+    }
+    subprocess.run(
+        [
+            "cargo",
+            "build",
+            "--locked",
+            "--release",
+            "-p",
+            "cua-driver",
+            "--bin",
+            "cua-driver",
+            "--target",
+            target,
+        ],
+        cwd=workspace,
+        env=environment,
+        check=True,
+    )
+    built = target_dir / target / "release" / "cua-driver"
+    if not built.is_file():
+        raise ValueError("patched Cua Driver build did not produce the expected binary")
+    info = run(["lipo", "-info", str(built)])
+    arch = TARGET_ARCH[target]
+    if arch not in info or "Non-fat file" not in info:
+        raise ValueError(f"patched Cua Driver has the wrong architecture: {info}")
+    return built
+
+
+def verify_built_contract(binary: Path) -> None:
+    if run([str(binary), "--version"]).strip() != "cua-driver 0.31.0":
+        raise ValueError("patched Cua Driver reports an unexpected version")
+    try:
+        docs = json.loads(
+            run([str(binary), "dump-docs", "--type", "mcp"], merge_stderr=False)
+        )
+        click = next(tool for tool in docs["tools"] if tool.get("name") == "click")
+        click_mode = click["input_schema"]["properties"]["click_mode"]
+    except (json.JSONDecodeError, KeyError, StopIteration, TypeError) as exc:
+        raise ValueError("patched Cua Driver does not expose click.click_mode") from exc
+    if click_mode.get("enum") != ["auto", "raw"]:
+        raise ValueError("patched Cua Driver click.click_mode contract is unexpected")
 
 
 def prepare(
     target: str,
     *,
-    archive: Path | None = None,
-    checksum_file: Path | None = None,
+    source_archive: Path | None = None,
     output_dir: Path | None = None,
 ) -> Path:
     manifest = load_manifest()
     arch = TARGET_ARCH[target]
     driver = manifest["driver"]
-    base_url = driver["release_base_url"].rstrip("/")
     destination = (output_dir or ROOT / "src-tauri" / "binaries").resolve()
     destination.mkdir(parents=True, exist_ok=True)
     output = destination / f"cua-driver-{target}"
 
     with tempfile.TemporaryDirectory(prefix="avibe-cua-driver-") as temporary:
         work = Path(temporary)
-        resolved_checksums = checksum_file or work / "checksums.txt"
-        resolved_archive = archive or work / driver["macos"]["asset"]
-        if checksum_file is None:
-            download(
-                f"{base_url}/{driver['release_checksums_asset']}",
-                resolved_checksums,
-            )
-        if archive is None:
-            download(f"{base_url}/{driver['macos']['asset']}", resolved_archive)
-        verify_release_inputs(manifest, resolved_archive, resolved_checksums)
-
-        universal = work / "cua-driver"
-        with tarfile.open(resolved_archive, "r:gz") as source:
-            member = safe_member(source, "cua-driver")
-            extracted = source.extractfile(member)
-            if extracted is None:
-                raise ValueError("Cua Driver archive member could not be read")
-            with universal.open("wb") as stream:
-                shutil.copyfileobj(extracted, stream)
-        universal.chmod(0o755)
-        universal_sha256 = digest(universal)
-
-        prepared = work / f"cua-driver-{arch}"
-        subprocess.run(
-            ["lipo", str(universal), "-thin", arch, "-output", str(prepared)],
-            check=True,
-        )
-        info = run(["lipo", "-info", str(prepared)])
-        if arch not in info or "Non-fat file" not in info:
-            raise ValueError(f"prepared Cua Driver has the wrong architecture: {info}")
-        subprocess.run(
-            ["codesign", "--verify", "--strict", "--verbose=2", str(prepared)],
-            check=True,
-        )
-        prepared.chmod(0o755)
+        resolved_archive = source_archive or work / driver["source"]["archive"]
+        if source_archive is None:
+            download(driver["source"]["url"], resolved_archive)
+        source_root = extract_driver_source(manifest, resolved_archive, work / "source")
+        patch = apply_driver_patch(manifest, source_root)
+        prepared = build_driver(manifest, source_root, target)
+        verify_built_contract(prepared)
         temporary_output = destination / f".{output.name}.{os.getpid()}.tmp"
         shutil.copyfile(prepared, temporary_output)
         temporary_output.chmod(0o755)
         os.replace(temporary_output, output)
         provenance = {
-            "schema_version": 1,
+            "schema_version": 2,
             "version": driver["version"],
             "tag": driver["tag"],
             "source_commit": driver["source_commit"],
             "target": target,
             "arch": arch,
-            "release_checksums_sha256": driver["release_checksums_sha256"],
-            "archive": driver["macos"]["asset"],
-            "archive_sha256": driver["macos"]["sha256"],
-            "extracted_universal_sha256": universal_sha256,
-            "thinned_upstream_sha256": digest(output),
-            "thinned_signature": "upstream_preserved",
+            "source_archive": driver["source"]["archive"],
+            "source_archive_sha256": driver["source"]["sha256"],
+            "patch_variant": driver["patch"]["variant"],
+            "patch_file": driver["patch"]["file"],
+            "patch_sha256": digest(patch),
+            "tool_snapshot_sha256": digest(TOOL_SNAPSHOT),
+            "prepared_binary_sha256": digest(output),
+            "build_origin": "repository_patch_built",
         }
         provenance_output = output.with_name(f"{output.name}.provenance.json")
         temporary_provenance = destination / f".{provenance_output.name}.{os.getpid()}.tmp"
@@ -231,8 +306,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check-manifest", action="store_true")
     parser.add_argument("--target", choices=TARGET_ARCH)
-    parser.add_argument("--archive", type=Path)
-    parser.add_argument("--checksums", type=Path)
+    parser.add_argument("--source-archive", type=Path)
     parser.add_argument("--output-dir", type=Path)
     args = parser.parse_args()
     if args.check_manifest:
@@ -243,8 +317,7 @@ def main() -> None:
         parser.error("--target is required unless only --check-manifest is used")
     output = prepare(
         args.target,
-        archive=args.archive,
-        checksum_file=args.checksums,
+        source_archive=args.source_archive,
         output_dir=args.output_dir,
     )
     print(output)
