@@ -619,8 +619,9 @@ restarts a requested connector that is no longer running:
   interval and doubling after each attempt up to two minutes; and
 - the delay resets once a connector reports a ready connection.
 
-A stop from another process that withdraws the request while a restart runs
-also stops the connector that restart spawned.
+The connector lock is per process, so a stop from another process can land
+while a restart runs. The restart therefore never records the request itself;
+when the request is gone after it spawns, it stops the connector it spawned.
 
 ## Doctor Integration
 

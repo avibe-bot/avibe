@@ -3618,10 +3618,11 @@ def _restart_exited_connector(
         if not _exited_connector_requested(config):
             return
         logger.warning("Tunnel connector exited; restarting it")
-        result = start()
+        # The restart never records the request itself, so a stop in another
+        # process that withdraws it during this restart stays visible below.
+        result = _start(None, record_request=False)
         if result.get("started") and not _connector_requested_path().exists():
-            # A stop in another process withdrew the request while this restart
-            # ran. It may have read the exited pid, so stop the new connector here.
+            # That stop may have read the exited pid, so stop the new connector here.
             stop()
             if _is_cloudflared_pid(result.get("pid")):
                 runtime.stop_pid(result["pid"], timeout=8)
@@ -4139,6 +4140,12 @@ def rotate_session_secret(config: V2Config) -> None:
 
 
 def start(config: V2Config | None = None) -> dict[str, Any]:
+    """Start the connector and record the request that keeps one running."""
+
+    return _start(config, record_request=True)
+
+
+def _start(config: V2Config | None, *, record_request: bool) -> dict[str, Any]:
     fallback_config = config
     if fallback_config is None:
         try:
@@ -4158,8 +4165,9 @@ def start(config: V2Config | None = None) -> dict[str, Any]:
         if not cloud.tunnel_token:
             stop_result = stop(config)
             return {**stop_result, "ok": False, "error": "missing_tunnel_token"}
-        _connector_requested_path().parent.mkdir(parents=True, exist_ok=True)
-        _connector_requested_path().touch()
+        if record_request:
+            _connector_requested_path().parent.mkdir(parents=True, exist_ok=True)
+            _connector_requested_path().touch()
         binary = _resolve_binary(config)
         if not binary:
             install_result = install_cloudflared()

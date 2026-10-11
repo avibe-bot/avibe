@@ -1560,14 +1560,18 @@ def test_ra_tq_034_connector_exited_before_network_is_restarted_with_backoff(mon
         remote_access.stop()
 
 
-@pytest.mark.parametrize("withdrawal", ["user_stop", "remote_access_disabled", "stop_during_restart"])
+@pytest.mark.parametrize(
+    "withdrawal",
+    ["user_stop", "remote_access_disabled", "stop_before_restart_spawns", "stop_after_restart_spawns"],
+)
 def test_ra_tq_034_withdrawn_connector_request_is_not_restarted(monkeypatch, tmp_path, withdrawal) -> None:
     config, network_up = _setup_exiting_connector(monkeypatch, tmp_path)
     schedule = remote_access._ConnectorRestartSchedule()
-    real_start = remote_access.start
+    real_check = remote_access._exited_connector_requested
+    real_start = remote_access._start
     started = []
     try:
-        real_start()
+        remote_access.start()
         _wait_connector_exit()
         network_up.touch()
         if withdrawal == "user_stop":
@@ -1576,24 +1580,38 @@ def test_ra_tq_034_withdrawn_connector_request_is_not_restarted(monkeypatch, tmp
             config.remote_access.vibe_cloud.enabled = False
             config.save()
 
-        def start_racing_a_stop():
-            result = real_start()
+        # The connector lock is per process, so a stop from another process can
+        # land at any point of the restart; these hooks run one at each point.
+        def check_then_stop(loaded):
+            requested = real_check(loaded)
+            if (
+                withdrawal == "stop_before_restart_spawns"
+                and requested
+                and remote_access._CONNECTOR_LOCK._is_owned()
+            ):
+                remote_access.stop()  # lands right after the restart's last request check
+            return requested
+
+        def start_then_stale_stop(loaded, *, record_request):
+            result = real_start(loaded, record_request=record_request)
             started.append(result.get("pid"))
-            if withdrawal == "stop_during_restart":
-                # Another process's stop() withdrew the request and, having read
-                # the exited pid, removed the records this restart just wrote.
+            if withdrawal == "stop_after_restart_spawns":
+                # A stop that read the exited pid withdraws the request and
+                # removes the records this restart just wrote.
                 remote_access._connector_requested_path().unlink()
                 remote_access._pid_path().unlink()
                 remote_access._state_path().unlink()
             return result
 
-        monkeypatch.setattr(remote_access, "start", start_racing_a_stop)
+        monkeypatch.setattr(remote_access, "_exited_connector_requested", check_then_stop)
+        monkeypatch.setattr(remote_access, "_start", start_then_stale_stop)
         for now in (1000.0, 2000.0, 3000.0):
             remote_access._restart_exited_connector(config, schedule, now)
 
-        if withdrawal == "stop_during_restart":
+        if withdrawal.startswith("stop_"):
             assert len(started) == 1
             assert not remote_access._is_cloudflared_pid(started[0])
+            assert not remote_access._connector_requested_path().exists()
         else:
             assert started == []
         assert not remote_access._is_cloudflared_pid(remote_access._read_pid())
