@@ -69,8 +69,7 @@ Result: `Successfully wrote to {path}`. Writes are serialized per canonical path
 
 How a write lands (Avibe); `edit` publishes the same way:
 
-- A new file, or one this user owns (POSIX: the file's uid is the effective uid; Windows: its owner is the token's
-  user), is replaced atomically, so a failure leaves it, or its absence, as it was. The new content is written beside
+- A new file, or one this user owns, is replaced atomically, so a failure leaves it, or its absence, as it was. The new content is written beside
   it, the owner's alone meanwhile (a 0600 temp file on POSIX, an owner-only DACL on Windows), and then stands in for
   it. On POSIX the replacement takes the file's mode; its ACL, extended attributes, and hard links are not carried
   over. On Windows it takes the file's DACL and explicit integrity label and is put in place with `ReplaceFileW`,
@@ -78,7 +77,8 @@ How a write lands (Avibe); `edit` publishes the same way:
   audit entries (the rest of the SACL) are not carried, as POSIX has none. The replaced file passes through a backup
   name: if `ReplaceFileW` leaves it there, it is put back without overwriting a file created meanwhile (if one was,
   the backup is kept and the error names it), and a backup that cannot be removed after success is left and logged
-  with its path.
+  with its path. "Owns" means the file already has the owner the replacement would get: on POSIX the effective uid;
+  on Windows the token's default owner, which is the user, or the Administrators group in an elevated session.
 - A file another account owns is rewritten in place, so the file object, and with it its owner, ACL or mode, audit
   policy, label, links, and streams, stays exactly as it was: replacing it would hand it to this user. The new content
   is first written to a temp file beside it, which proves the space and is then removed. A full disk or a crash in

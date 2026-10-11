@@ -183,31 +183,37 @@ def _check_publishable(path: str, target: str, expected: Optional[FileIdentity])
 
 
 def write_bytes(path: str, data: bytes, expected: Optional[FileIdentity] = None) -> None:
-    """Create or replace ``path`` only once ``data`` is completely on disk.
+    """Create or rewrite ``path`` only once ``data`` is completely on disk (C-7 tools.md section 3).
 
-    A failed write (a full disk, a quota) leaves the original, or its absence, as it was. The temp
-    file sits beside the real target (through symlinks). Replacing a file, it is private (0600) while
-    it receives the new contents and takes the file's mode once they are fsynced; a new file's temp is
-    created with the umask default it keeps, so the process umask is never read or changed. Then
-    ``os.replace`` puts it in place. On Windows the private temp file has an owner-only DACL and then
-    the file's own, and an existing file is replaced with ``ReplaceFileW``, which keeps the rest of
-    what is the file's: its encryption, compression, named streams, and creation time
-    (``windows_files``).
+    The content is first written to a temp file beside the real target (through symlinks), private
+    while it is written: 0600 when it replaces a file, else created with the umask default it keeps,
+    so the process umask is never read or changed; an owner-only DACL on Windows.
+
+    - A new file, or one this user owns, is replaced by the temp file, so a failed write (a full disk,
+      a quota) leaves it, or its absence, as it was. The replacement takes the file's mode; on Windows
+      its DACL and explicit label, and ``ReplaceFileW`` keeps its encryption, compression, named
+      streams, and creation time (``windows_files``).
+    - A file another account owns is rewritten in place, so it stays the same file object, with its
+      owner and everything else: a replacement would be this user's. The temp file proved the space and
+      is removed first; a full disk or a crash during the rewrite itself can leave the file partly
+      written.
 
     An existing file whose directory does not let a temp file be created is refused
-    (``NotReplaceable``) rather than written in place, which a full disk could leave half-written.
+    (``NotReplaceable``) rather than written in place without that proof.
 
-    Right before the rename, the path must still name the same target, which must be absent or a
-    writable regular file, as ``write`` first classified it; with ``expected``, it must also be the very
-    file that was read. So a file swapped for a FIFO, a directory, or a read-only file, or a path
-    retargeted to another file, is never written behind the result's back. POSIX has no
-    compare-and-rename, so a change between that check and the rename is not seen.
+    Right before the file is replaced or rewritten, the path must still name the same target, which
+    must be absent or a writable regular file, as ``write`` first classified it; with ``expected``, it
+    must also be the very file that was read. So a file swapped for a FIFO, a directory, or a read-only
+    file, or a path retargeted to another file, is never written behind the result's back. POSIX has no
+    compare-and-rename, so a change between that check and the write is not seen.
     """
     target = os.path.realpath(path)
     try:
-        mode: Optional[int] = stat.S_IMODE(os.stat(target).st_mode)
+        st: Optional[os.stat_result] = os.stat(target)
     except FileNotFoundError:
-        mode = None
+        st = None
+    mode = stat.S_IMODE(st.st_mode) if st is not None else None
+    in_place = st is not None and not _owned(target, st)
     # Short and not derived from the target's name, which may already be at NAME_MAX.
     tmp = os.path.join(os.path.dirname(target), f".avibe-{secrets.token_hex(6)}.tmp")
     try:
@@ -225,10 +231,14 @@ def write_bytes(path: str, data: bytes, expected: Optional[FileIdentity] = None)
             handle.write(data)
             handle.flush()
             os.fsync(handle.fileno())
-            if mode is not None and not _WINDOWS:
+            if mode is not None and not _WINDOWS and not in_place:
                 os.fchmod(handle.fileno(), mode)
-        if _check_publishable(path, target, expected) and _WINDOWS:
-            windows_files.copy_dacl(target, tmp)  # private until now; the file's own from here
+        exists = _check_publishable(path, target, expected)
+        if exists and in_place:
+            os.unlink(tmp)
+            _rewrite(target, data)
+        elif exists and _WINDOWS:
+            windows_files.copy_security(target, tmp)  # private until now; the file's own from here
             windows_files.replace_existing(tmp, target)
         else:
             os.replace(tmp, target)
@@ -236,3 +246,25 @@ def write_bytes(path: str, data: bytes, expected: Optional[FileIdentity] = None)
         with contextlib.suppress(FileNotFoundError):
             os.unlink(tmp)
         raise
+
+
+def _owned(target: str, st: os.stat_result) -> bool:
+    """Whether a replacement, which gets the owner of the files this process creates, can stand in for ``target``:
+    it has that owner already (POSIX: the effective uid; Windows: the token's default owner)."""
+    return windows_files.owned_as_new_files_are(target) if _WINDOWS else st.st_uid == os.geteuid()
+
+
+def _rewrite(target: str, data: bytes) -> None:
+    """Rewrite the existing file ``target`` through its own file object: from the start, then cut to length."""
+    if _WINDOWS:
+        fd = windows_files.open_for_rewriting(target)
+    else:
+        fd = os.open(target, os.O_WRONLY | getattr(os, "O_CLOEXEC", 0))
+    try:
+        view = memoryview(data)
+        while view:
+            view = view[os.write(fd, view) :]
+        os.ftruncate(fd, len(data))
+        os.fsync(fd)
+    finally:
+        os.close(fd)

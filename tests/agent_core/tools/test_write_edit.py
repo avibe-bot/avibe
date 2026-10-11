@@ -501,6 +501,158 @@ async def test_replacement_contents_stay_the_owners_until_the_replace(tmp_path, 
     assert _icacls(target) == before
 
 
+@pytest.mark.skipif(WINDOWS, reason="POSIX ownership")
+@pytest.mark.parametrize("tool", ["write", "edit"])
+async def test_a_file_another_user_owns_is_rewritten_in_place(tmp_path, make_ctx, monkeypatch, tool):
+    """Replacing it would hand it to this user (who could then chmod it); rewriting keeps the file, owner, and links."""
+    target = tmp_path / "f.txt"
+    target.write_bytes(b"old\n")
+    os.link(target, tmp_path / "link.txt")
+    before = os.stat(target)
+    monkeypatch.setattr(write_module.os, "geteuid", lambda: before.st_uid + 1)  # as another user sees this file
+
+    result = await _replace_with(tool, make_ctx, "f.txt")
+
+    assert not result.is_error, result_text(result)
+    after = os.stat(target)
+    assert (after.st_ino, after.st_uid, stat.S_IMODE(after.st_mode)) == (
+        before.st_ino,
+        before.st_uid,
+        stat.S_IMODE(before.st_mode),
+    )
+    assert (tmp_path / "link.txt").read_bytes() == b"new\n"
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["f.txt", "link.txt"]
+
+
+def _owner(path):
+    """The file's owner, by name, read with the Win32 API directly rather than through the code under test."""
+    import ctypes
+    from ctypes import wintypes
+
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    advapi32.GetNamedSecurityInfoW.argtypes = [wintypes.LPCWSTR, ctypes.c_int, wintypes.DWORD] + [
+        ctypes.POINTER(ctypes.c_void_p) if index in (0, 4) else ctypes.c_void_p for index in range(5)
+    ]
+    advapi32.LookupAccountSidW.argtypes = [
+        wintypes.LPCWSTR, ctypes.c_void_p, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD), wintypes.LPWSTR,
+        ctypes.POINTER(wintypes.DWORD), ctypes.POINTER(wintypes.DWORD),
+    ]
+    owner, descriptor = ctypes.c_void_p(), ctypes.c_void_p()
+    assert advapi32.GetNamedSecurityInfoW(str(path), 1, 1, ctypes.byref(owner), None, None, None, ctypes.byref(descriptor)) == 0
+    name, domain = ctypes.create_unicode_buffer(256), ctypes.create_unicode_buffer(256)
+    name_size, domain_size, use = wintypes.DWORD(256), wintypes.DWORD(256), wintypes.DWORD()
+    assert advapi32.LookupAccountSidW(None, owner, name, name_size, domain, domain_size, use)
+    ctypes.windll.kernel32.LocalFree(descriptor)
+    return f"{domain.value}\\{name.value}"
+
+
+@pytest.mark.skipif(not WINDOWS, reason="a Windows owner")
+@pytest.mark.parametrize("tool", ["write", "edit"])
+async def test_a_file_another_account_owns_is_rewritten_in_place_on_windows(tmp_path, make_ctx, tool):
+    """A replacement would be this user's, with an owner's right to change its ACL: the file is rewritten instead."""
+    target = tmp_path / "f.txt"
+    target.write_bytes(b"old\n")
+    zone = "[ZoneTransfer]\r\nZoneId=3\r\n"
+    with open(f"{target}:Zone.Identifier", "w", encoding="ascii", newline="") as stream:
+        stream.write(zone)
+    _icacls(target, "/setowner", "NT AUTHORITY\\SYSTEM")
+    before = (_owner(target), _icacls(target), os.stat(target).st_ino)
+
+    result = await _replace_with(tool, make_ctx, "f.txt")
+
+    assert not result.is_error, result_text(result)
+    assert target.read_bytes() == b"new\n"
+    assert (_owner(target), _icacls(target), os.stat(target).st_ino) == before
+    assert before[0] == "NT AUTHORITY\\SYSTEM"
+    with open(f"{target}:Zone.Identifier", encoding="ascii", newline="") as stream:
+        assert stream.read() == zone
+    assert [path.name for path in tmp_path.iterdir()] == ["f.txt"]
+
+
+@pytest.mark.skipif(not WINDOWS, reason="a Windows ACL")
+async def test_a_file_this_user_may_write_but_not_inspect_is_written(tmp_path, make_ctx):
+    """Writing the data is allowed and reading the file's security is not: neither the replacement's ACL copy nor
+    ``os.open`` (which asks for it) may stand in the way."""
+    target = tmp_path / "f.txt"
+    target.write_bytes(b"old\n")
+    _icacls(target, "/setowner", "NT AUTHORITY\\SYSTEM")
+    # Nothing undoes this: removing the file needs only the directory's permission.
+    _icacls(target, "/deny", f"{getpass.getuser()}:(RC)")
+
+    result = await WriteTool().execute({"path": "f.txt", "content": "new\n"}, make_ctx())
+
+    assert not result.is_error, result_text(result)
+    assert _read_data_only(target) == b"new\n"  # open() asks for the denied right too
+    assert [path.name for path in tmp_path.iterdir()] == ["f.txt"]
+
+
+def _read_data_only(path):
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p] + [
+        wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE
+    ]
+    kernel32.CreateFileW.restype = wintypes.HANDLE
+    handle = kernel32.CreateFileW(str(path), 0x0001, 0x7, None, 3, 0, None)  # FILE_READ_DATA, OPEN_EXISTING
+    assert handle and handle != ctypes.c_void_p(-1).value, ctypes.get_last_error()
+    with os.fdopen(msvcrt.open_osfhandle(handle, os.O_RDONLY | os.O_BINARY), "rb") as handle:
+        return handle.read()
+
+
+@pytest.mark.skipif(not WINDOWS, reason="a Windows integrity label")
+async def test_a_replaced_file_keeps_its_integrity_label(tmp_path, make_ctx):
+    target = tmp_path / "f.txt"
+    target.write_bytes(b"old\n")
+    _icacls(target, "/setintegritylevel", "low")
+    before = _icacls(target)
+    assert "Low Mandatory Level" in before
+
+    result = await WriteTool().execute({"path": "f.txt", "content": "new\n"}, make_ctx())
+
+    assert not result.is_error, result_text(result)
+    assert target.read_bytes() == b"new\n"
+    assert _icacls(target) == before
+
+
+@pytest.mark.skipif(not WINDOWS, reason="ReplaceFileW")
+async def test_a_backup_is_never_put_back_over_a_file_created_meanwhile(tmp_path, make_ctx, monkeypatch):
+    """``ERROR_UNABLE_TO_MOVE_REPLACEMENT_2`` leaves the name free, and another program writes a file there before
+    the backup can be put back: that file stays, and the error says where the earlier content is."""
+    import ctypes
+
+    from core.agent_core.tools import windows_files
+
+    real = windows_files._kernel32()
+
+    class FailsAndAnotherWriterComes:
+        def __getattr__(self, name):
+            return getattr(real, name)
+
+        def ReplaceFileW(self, replaced, replacement, backup, flags, exclude, reserved):
+            os.replace(replaced, backup)
+            with open(replaced, "wb") as theirs:
+                theirs.write(b"theirs\n")
+            ctypes.set_last_error(1177)
+            return False
+
+    monkeypatch.setattr(windows_files, "_kernel32", FailsAndAnotherWriterComes)
+    target = tmp_path / "f.txt"
+    target.write_bytes(b"old\n")
+
+    result = await WriteTool().execute({"path": "f.txt", "content": "new\n"}, make_ctx())
+
+    [backup] = [path for path in tmp_path.iterdir() if path.name.endswith(".bak")]
+    assert (result.is_error, result_text(result)) == (
+        True,
+        f"Cannot write f.txt: it was created again while it was being replaced; its earlier content is in {backup}.",
+    )
+    assert (target.read_bytes(), backup.read_bytes()) == (b"theirs\n", b"old\n")
+    assert sorted(path.name for path in tmp_path.iterdir()) == sorted(["f.txt", backup.name])
+
+
 @pytest.mark.skipif(not WINDOWS, reason="Windows file times")
 def test_the_change_time_an_edit_compares_moves_with_every_write(tmp_path):
     """Python before 3.12 reports a Windows file's creation time as ``st_ctime``, so an edit reads the change time

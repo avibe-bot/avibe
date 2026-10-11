@@ -13,6 +13,7 @@ everywhere; calling it works only on Windows.
 from __future__ import annotations
 
 import ctypes
+import errno
 import logging
 import os
 import secrets
@@ -32,7 +33,12 @@ _ERROR_SHARING_VIOLATION = 32
 _ERROR_UNABLE_TO_MOVE_REPLACEMENT_2 = 1177
 _SDDL_REVISION_1 = 1
 _SE_FILE_OBJECT = 1
+_OWNER_SECURITY_INFORMATION = 0x1
 _DACL_SECURITY_INFORMATION = 0x4
+_LABEL_SECURITY_INFORMATION = 0x10
+_INHERITED_ACE = 0x10
+_TOKEN_QUERY = 0x0008
+_TOKEN_OWNER = 4
 _PROTECTED_DACL_SECURITY_INFORMATION = 0x80000000
 _UNPROTECTED_DACL_SECURITY_INFORMATION = 0x20000000
 _SE_DACL_PROTECTED = 0x1000
@@ -119,6 +125,22 @@ def _kernel32() -> Any:
         ctypes.POINTER(wintypes.DWORD),
     ]
     advapi32.GetSecurityDescriptorControl.restype = wintypes.BOOL
+    advapi32.OpenProcessToken.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)]
+    advapi32.OpenProcessToken.restype = wintypes.BOOL
+    advapi32.GetTokenInformation.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    advapi32.GetTokenInformation.restype = wintypes.BOOL
+    advapi32.EqualSid.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    advapi32.EqualSid.restype = wintypes.BOOL
+    advapi32.GetAce.argtypes = [ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p)]
+    advapi32.GetAce.restype = wintypes.BOOL
+    kernel32.GetCurrentProcess.argtypes = []
+    kernel32.GetCurrentProcess.restype = wintypes.HANDLE
     kernel32.GetVolumePathNameW.argtypes = [wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD]
     kernel32.GetVolumePathNameW.restype = wintypes.BOOL
     kernel32.GetVolumeInformationW.argtypes = [
@@ -161,6 +183,25 @@ def may_write(path: str) -> bool:
         return ctypes.get_last_error() == _ERROR_SHARING_VIOLATION
     kernel32.CloseHandle(handle)
     return True
+
+
+def open_for_rewriting(path: str) -> int:
+    """A binary, write-only descriptor of the existing file ``path`` that asks for writing the data alone.
+
+    ``os.open`` asks for ``GENERIC_WRITE``, which includes reading the file's security, so it fails on a file
+    whose ACL grants writing but not ``READ_CONTROL``.
+    """
+    import msvcrt
+
+    kernel32 = _kernel32()
+    handle = kernel32.CreateFileW(path, _FILE_WRITE_DATA, _FILE_SHARE_READ_WRITE, None, _OPEN_EXISTING, 0, None)
+    if _invalid(handle):
+        raise _error(path)
+    try:
+        return msvcrt.open_osfhandle(handle, os.O_WRONLY | os.O_BINARY)
+    except BaseException:
+        kernel32.CloseHandle(handle)
+        raise
 
 
 def create_private(path: str) -> int:
@@ -207,13 +248,45 @@ def create_private(path: str) -> int:
         raise
 
 
-def copy_dacl(source: str, destination: str) -> None:
-    """Give ``destination`` exactly the DACL of ``source``: its own entries, and whether it inherits from its
-    directory, whose inheritable entries are then recomputed as for any file. Nothing on a volume that keeps no
-    ACLs (FAT).
+def owned_as_new_files_are(path: str) -> bool:
+    """Whether the file ``path`` has the owner this process gives the files it creates (its token's default owner:
+    the user, or the Administrators group in an elevated session); ``False`` when its owner cannot be read."""
+    from ctypes import wintypes
+
+    kernel32 = _kernel32()
+    advapi32 = kernel32.advapi32
+    token = wintypes.HANDLE()
+    if not advapi32.OpenProcessToken(kernel32.GetCurrentProcess(), _TOKEN_QUERY, ctypes.byref(token)):
+        raise _error(path)
+    try:
+        needed = wintypes.DWORD()
+        advapi32.GetTokenInformation(token, _TOKEN_OWNER, None, 0, ctypes.byref(needed))
+        default = ctypes.create_string_buffer(needed.value)
+        if not advapi32.GetTokenInformation(token, _TOKEN_OWNER, default, needed, ctypes.byref(needed)):
+            raise _error(path)
+    finally:
+        kernel32.CloseHandle(token)
+    default_owner = ctypes.c_void_p.from_buffer(default).value  # TOKEN_OWNER is the owner SID's pointer
+    descriptor, owner = ctypes.c_void_p(), ctypes.c_void_p()
+    if advapi32.GetNamedSecurityInfoW(
+        path, _SE_FILE_OBJECT, _OWNER_SECURITY_INFORMATION, ctypes.byref(owner), None, None, None,
+        ctypes.byref(descriptor),
+    ):
+        return False  # READ_CONTROL denied, or a volume without owners
+    try:
+        return bool(owner.value) and bool(advapi32.EqualSid(owner, default_owner))
+    finally:
+        kernel32.LocalFree(descriptor)
+
+
+def copy_security(source: str, destination: str) -> None:
+    """Give ``destination`` exactly the DACL of ``source`` (its own entries, and whether it inherits from its
+    directory, whose inheritable entries are then recomputed as for any file) and its explicit integrity label.
+    Nothing on a volume that keeps no ACLs (FAT).
 
     ``ReplaceFileW`` merges the replaced file's DACL into the replacement's rather than putting it in its place,
-    so a replacement created owner-only is given the file's own DACL first.
+    so a replacement created owner-only is given the file's own security first. ``source`` is a file this user
+    owns, so its owner may read both.
     """
     from ctypes import wintypes
 
@@ -227,15 +300,15 @@ def copy_dacl(source: str, destination: str) -> None:
     if not flags.value & _FILE_PERSISTENT_ACLS:
         return
     advapi32 = kernel32.advapi32
-    descriptor, dacl = ctypes.c_void_p(), ctypes.c_void_p()
+    descriptor, dacl, sacl = ctypes.c_void_p(), ctypes.c_void_p(), ctypes.c_void_p()
     error = advapi32.GetNamedSecurityInfoW(
         source,
         _SE_FILE_OBJECT,
-        _DACL_SECURITY_INFORMATION,
+        _DACL_SECURITY_INFORMATION | _LABEL_SECURITY_INFORMATION,
         None,
         None,
         ctypes.byref(dacl),
-        None,
+        ctypes.byref(sacl),
         ctypes.byref(descriptor),
     )
     if error:
@@ -249,9 +322,13 @@ def copy_dacl(source: str, destination: str) -> None:
             if control.value & _SE_DACL_PROTECTED
             else _UNPROTECTED_DACL_SECURITY_INFORMATION
         )
-        error = advapi32.SetNamedSecurityInfoW(
-            destination, _SE_FILE_OBJECT, _DACL_SECURITY_INFORMATION | inheritance, None, None, dacl, None
-        )
+        information = _DACL_SECURITY_INFORMATION | inheritance
+        # The label is the SACL's one entry readable without privilege; an inherited one the replacement inherits.
+        ace = ctypes.c_void_p()
+        if sacl.value and advapi32.GetAce(sacl, 0, ctypes.byref(ace)):
+            if not ctypes.c_ubyte.from_address(ace.value + 1).value & _INHERITED_ACE:  # ACE_HEADER.AceFlags
+                information |= _LABEL_SECURITY_INFORMATION
+        error = advapi32.SetNamedSecurityInfoW(destination, _SE_FILE_OBJECT, information, None, None, dacl, sacl)
         if error:
             raise OSError(None, ctypes.FormatError(error), destination, error)
     finally:
@@ -285,10 +362,11 @@ def replace_existing(replacement: str, target: str) -> None:
     """Replace the existing file ``target`` with ``replacement`` through ``ReplaceFileW``, Windows' safe save.
 
     The result keeps ``target``'s encryption, compression, named streams (the Mark of the Web among them),
-    and creation time, which a rename would drop, and merges its DACL into the replacement's (``copy_dacl``
-    makes them the same first). The replaced file passes through a backup name
-    beside it, so no failure loses it: where ``ReplaceFileW`` leaves it under that name, it is put back.
-    The backup is removed once the replacement is in place. Raises ``OSError`` with ``target`` as it was.
+    and creation time, which a rename would drop, and merges its DACL into the replacement's (``copy_security``
+    makes them the same first). The replaced file passes through a backup name beside it, so no failure loses
+    it: where ``ReplaceFileW`` leaves it under that name, it is put back, unless a file was created at
+    ``target`` meanwhile, which is never overwritten; then the error names the backup. The backup is removed
+    once the replacement is in place. Raises ``OSError``.
     """
     kernel32 = _kernel32()
     backup = os.path.join(os.path.dirname(target), f".avibe-{secrets.token_hex(6)}.bak")
@@ -302,6 +380,12 @@ def replace_existing(replacement: str, target: str) -> None:
         return
     error = ctypes.get_last_error()
     if error == _ERROR_UNABLE_TO_MOVE_REPLACEMENT_2:
-        # The replaced file is at the backup name and the replacement could not take its place.
-        os.replace(backup, target)
+        # The replaced file is at the backup name and the replacement could not take its place. Put it back with
+        # a rename that fails rather than overwrite a file another program created there in the gap.
+        try:
+            os.rename(backup, target)
+        except FileExistsError:
+            raise FileExistsError(
+                errno.EEXIST, f"it was created again while it was being replaced; its earlier content is in {backup}"
+            ) from None
     raise OSError(None, ctypes.FormatError(error), target, error)
