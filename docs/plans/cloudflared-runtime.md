@@ -30,7 +30,8 @@ warnings, and installs from that window stayed on them.
   reports the start error.
 - The runtime never resolves `releases/latest`; the pin moves with Avibe
   releases.
-- `vibe runtime prepare` installs it while remote access is enabled, and
+- `vibe runtime prepare` installs it while remote access is enabled and no
+  explicit `cloudflared_path` resolves, and
   `vibe runtime clean` reclaims superseded versions.
 
 ## Binary precedence

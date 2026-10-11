@@ -16600,6 +16600,11 @@ def _ensure_cloudflared_during_prepare(offline: bool | None = None, force: bool 
         cloud = config.remote_access.vibe_cloud
         if not (config.remote_access.provider == "vibe_cloud" and cloud.enabled and cloud.tunnel_token):
             return {"ok": True, "skipped": True, "reason": "remote_access_disabled"}
+        from vibe import remote_access
+
+        if remote_access._explicit_cloudflared(config):
+            # The connector runs the configured binary, so the pin would go unused.
+            return {"ok": True, "skipped": True, "reason": "explicit_cloudflared_path"}
         from core.cloudflared_runtime import CloudflaredRuntimeManager
 
         return CloudflaredRuntimeManager(offline=offline).ensure(force=force)

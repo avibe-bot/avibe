@@ -270,6 +270,45 @@ def test_prepare_installs_the_pin_only_while_remote_access_is_enabled(
     assert CloudflaredRuntimeManager().resolve_binary() is not None
 
 
+def test_prepare_skips_the_pin_when_an_explicit_cloudflared_path_resolves(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vibe import cli
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _pin_test_cloudflared(tmp_path, monkeypatch)
+    config = _config()
+    config.remote_access.vibe_cloud.tunnel_token = "tunnel-token"
+    config.remote_access.vibe_cloud.cloudflared_path = str(
+        _fake_cloudflared(tmp_path / "explicit" / "cloudflared", "2026.9.0")
+    )
+    config.save()
+
+    assert cli._ensure_cloudflared_during_prepare() == {
+        "ok": True,
+        "skipped": True,
+        "reason": "explicit_cloudflared_path",
+    }
+    assert CloudflaredRuntimeManager().resolve_binary() is None
+
+
+def test_version_probe_runs_without_a_console(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from core import cloudflared_runtime
+
+    consoles = []
+
+    def isolated_subprocess_kwargs(*, console: bool = True) -> dict:
+        consoles.append(console)
+        return {}
+
+    monkeypatch.setattr(cloudflared_runtime, "isolated_subprocess_kwargs", isolated_subprocess_kwargs)
+
+    version = cloudflared_runtime._probe_cloudflared_version(_fake_cloudflared(tmp_path / "cloudflared", "2026.10.0"))
+
+    assert version == "2026.10.0"
+    assert consoles == [False]
+
+
 def test_a_new_pin_replaces_an_earlier_verified_install(remote_home, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _pin_test_cloudflared(tmp_path, monkeypatch, version="2026.9.0")
     first = remote_access.start()

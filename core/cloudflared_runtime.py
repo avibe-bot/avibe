@@ -54,7 +54,8 @@ def _probe_cloudflared_version(binary: Path | None) -> str | None:
             text=True,
             timeout=10,
             check=False,
-            **isolated_subprocess_kwargs(),
+            # Status polls run this probe, so it must not flash a console on Windows.
+            **isolated_subprocess_kwargs(console=False),
         )
     except Exception:  # noqa: BLE001
         return None
