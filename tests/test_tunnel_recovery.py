@@ -1757,3 +1757,37 @@ def test_ra_tq_034_restart_tick_does_not_evaluate_the_exited_connector(monkeypat
         assert optimized_while_running == [False]
     finally:
         remote_access.stop()
+
+
+def test_ra_tq_034_failed_config_read_during_restart_keeps_the_request(monkeypatch, tmp_path) -> None:
+    config, network_up = _setup_exiting_connector(monkeypatch, tmp_path)
+    schedule = remote_access._ConnectorRestartSchedule()
+    real_load = remote_access.V2Config.load
+    reads_under_lock = []
+
+    def load_failing_once_under_connector_lock(*args, **kwargs):
+        if remote_access._CONNECTOR_LOCK._is_owned():
+            reads_under_lock.append(True)
+            # The restart's _start() reads the config twice under the lock;
+            # the second read, after its fallback read, fails once.
+            if len(reads_under_lock) == 2:
+                raise OSError("transient config read failure")
+        return real_load(*args, **kwargs)
+
+    try:
+        remote_access.start()
+        _wait_connector_exit()
+        network_up.touch()
+        monkeypatch.setattr(remote_access.V2Config, "load", load_failing_once_under_connector_lock)
+        remote_access._restart_exited_connector(config, schedule, 1000.0)
+        remote_access._restart_exited_connector(config, schedule, 1000.0 + schedule.delay_seconds)
+        assert len(reads_under_lock) == 2
+        assert remote_access._connector_requested_path().exists()
+
+        now = 2000.0
+        remote_access._restart_exited_connector(config, schedule, now)
+        remote_access._restart_exited_connector(config, schedule, now + schedule.delay_seconds)
+        assert remote_access._is_cloudflared_pid(remote_access._read_pid())
+    finally:
+        monkeypatch.setattr(remote_access.V2Config, "load", real_load)
+        remote_access.stop()

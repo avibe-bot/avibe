@@ -4169,18 +4169,22 @@ def _start(config: V2Config | None, *, record_request: bool) -> dict[str, Any]:
             fallback_config = V2Config.load()
         except Exception as exc:
             return {"ok": False, "error": "remote_access_config_load_failed", "detail": str(exc), "started": False}
+    # Only an explicit stop() withdraws the request, so the automatic restart
+    # (record_request=False) cleans up without it and the monitor keeps retrying.
+    halt = stop if record_request else _stop_connector
     with _CONNECTOR_LOCK:
         try:
             config = V2Config.load()
         except Exception as exc:
-            stop_result = stop(fallback_config)
+            stop_result = halt(fallback_config)
             return {**stop_result, "ok": False, "error": "remote_access_config_load_failed", "detail": str(exc)}
         cloud = config.remote_access.vibe_cloud
         if not cloud.enabled:
-            stop_result = stop(config)
+            stop_result = halt(config)
             return {**stop_result, "ok": False, "error": "remote_access_disabled"}
         if not cloud.tunnel_token:
-            stop_result = stop(config)
+            # Unreachable from the restart, whose request check requires a token.
+            stop_result = halt(config)
             return {**stop_result, "ok": False, "error": "missing_tunnel_token"}
         if record_request:
             _connector_requested_path().parent.mkdir(parents=True, exist_ok=True)
