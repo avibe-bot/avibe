@@ -1,0 +1,328 @@
+"""CLI contract and rendering helpers for Controller-owned Computer Use."""
+
+from __future__ import annotations
+
+import base64
+import binascii
+import json
+from pathlib import Path
+from typing import Any, Callable, Mapping
+
+
+COMPUTER_CLI_TOOLS: dict[tuple[str, ...], str] = {
+    ("observe", "apps"): "list_apps",
+    ("observe", "windows"): "list_windows",
+    ("observe", "window"): "get_window_state",
+    ("zoom",): "zoom",
+    ("click",): "click",
+    ("type",): "type_text",
+    ("key",): "press_key",
+    ("hotkey",): "hotkey",
+    ("scroll",): "scroll",
+    ("drag",): "drag",
+    ("set-value",): "set_value",
+    ("clipboard", "read"): "clipboard_read",
+    ("clipboard", "write"): "clipboard_write",
+    ("launch",): "launch_app",
+    ("quit",): "kill_app",
+}
+
+OBSERVATION_TOOLS = frozenset(
+    {
+        "list_apps",
+        "list_windows",
+        "get_window_state",
+        "zoom",
+    }
+)
+SCREENSHOT_TOOLS = frozenset({"get_window_state", "zoom"})
+
+
+class ComputerCliError(ValueError):
+    """The CLI request cannot be translated into a driver call."""
+
+    def __init__(self, key: str, **params: Any) -> None:
+        self.key = key
+        self.params = params
+        super().__init__(key)
+
+
+def parse_arguments_json(raw: str | None) -> dict[str, Any]:
+    if not raw:
+        return {}
+    source = raw
+    if raw.startswith("@"):
+        try:
+            source = Path(raw[1:]).read_text(encoding="utf-8")
+        except OSError as exc:
+            raise ComputerCliError(
+                "computer.cli.error.cannotReadArgsJson",
+                error=str(exc),
+            ) from exc
+    try:
+        payload = json.loads(source)
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ComputerCliError("computer.cli.error.argsJsonObject") from exc
+    if not isinstance(payload, dict):
+        raise ComputerCliError("computer.cli.error.argsJsonObject")
+    return dict(payload)
+
+
+def parse_argument_overrides(values: list[str] | None) -> dict[str, Any]:
+    overrides: dict[str, Any] = {}
+    for raw in values or []:
+        name, separator, value = raw.partition("=")
+        if not separator or not name.strip():
+            raise ComputerCliError("computer.cli.error.argNameValue")
+        name = name.strip()
+        try:
+            parsed: Any = json.loads(value)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            parsed = value
+        overrides[name] = parsed
+    return overrides
+
+
+def build_driver_arguments(
+    args_json: str | None,
+    overrides: list[str] | None,
+) -> dict[str, Any]:
+    arguments = parse_arguments_json(args_json)
+    for key, value in parse_argument_overrides(overrides).items():
+        arguments[key] = value
+    if "session" in arguments:
+        raise ComputerCliError("computer.cli.error.sessionArgumentForbidden")
+    return arguments
+
+
+def prepare_arguments_for_output(
+    tool: str,
+    arguments: dict[str, Any],
+    output_path: str | None,
+) -> dict[str, Any]:
+    if not output_path:
+        return arguments
+    if tool not in SCREENSHOT_TOOLS:
+        return arguments
+    if tool == "zoom":
+        return arguments
+    if "screenshot_out_file" in arguments:
+        raise ComputerCliError("computer.cli.error.outputArgumentConflict")
+    prepared = dict(arguments)
+    prepared["screenshot_out_file"] = str(Path(output_path).expanduser().resolve())
+    return prepared
+
+
+def tool_for_command(path: tuple[str, ...]) -> str:
+    try:
+        return COMPUTER_CLI_TOOLS[path]
+    except KeyError as exc:
+        raise ComputerCliError(
+            "computer.cli.error.unsupportedCommand",
+            command=" ".join(path),
+        ) from exc
+
+
+def _structured_payloads(result: Mapping[str, Any]) -> list[dict[str, Any]]:
+    payloads: list[dict[str, Any]] = []
+    content = result.get("content")
+    if not isinstance(content, list):
+        return payloads
+    for item in content:
+        if not isinstance(item, dict) or item.get("type") != "text":
+            continue
+        text = item.get("text")
+        if not isinstance(text, str):
+            continue
+        if text.startswith("Structured content:\n"):
+            text = text.split("\n", 1)[1]
+        try:
+            payload = json.loads(text)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if isinstance(payload, dict):
+            payloads.append(payload)
+    return payloads
+
+
+def _error_payload(result: Mapping[str, Any]) -> dict[str, Any]:
+    for payload in _structured_payloads(result):
+        if "code" in payload:
+            return payload
+    content = result.get("content")
+    if isinstance(content, list):
+        for item in content:
+            if isinstance(item, dict) and isinstance(item.get("text"), str):
+                return {"code": "computer_use_error", "params": {}}
+    return {"code": "computer_use_error", "params": {}}
+
+
+_COMPUTER_ERROR_I18N_KEYS = {
+    "active_turn_required": "computer.cli.error.activeTurnRequired",
+    "computer_use_unavailable": "computer.cli.error.computerUseUnavailable",
+    "computer_use_error": "computer.cli.error.genericDriverError",
+    "desktop_busy": "computer.cli.error.desktopBusy",
+    "desktop_lease_lost": "computer.cli.error.desktopLeaseLost",
+    "focus_shortcut_forbidden": "computer.cli.error.focusShortcutForbidden",
+    "foreground_forbidden": "computer.cli.error.foregroundForbidden",
+    "invalid_arguments": "computer.cli.error.invalidDriverArguments",
+    "invalid_computer_use_request": "computer.cli.error.requestRejected",
+    "observe_first": "computer.cli.error.observeFirst",
+    "platform_unsupported": "computer.cli.error.platformUnsupported",
+    "session_archived": "computer.cli.error.sessionArchived",
+    "session_argument_forbidden": "computer.cli.error.sessionArgumentForbidden",
+    "session_required": "computer.cli.error.missingCallerSession",
+    "session_unavailable": "computer.cli.error.sessionUnavailable",
+    "unknown_tool": "computer.cli.error.unknownTool",
+    "upstream_error": "computer.cli.error.upstreamError",
+    "upstream_protocol_error": "computer.cli.error.upstreamProtocolError",
+    "upstream_tool_error": "computer.cli.error.upstreamToolError",
+    "upstream_unavailable": "computer.cli.error.upstreamUnavailable",
+    "window_target_required": "computer.cli.error.windowTargetRequired",
+}
+
+
+def translate_computer_error(
+    error: Mapping[str, Any],
+    *,
+    translate: Callable[..., str],
+) -> str:
+    """Render a Controller or driver error without trusting prose from it."""
+
+    code = str(error.get("code") or "computer_use_error")
+    key = _COMPUTER_ERROR_I18N_KEYS.get(
+        code,
+        "computer.cli.error.genericDriverError",
+    )
+    params = error.get("params")
+    if code == "unknown_tool" and isinstance(params, Mapping):
+        return translate(key, tool=str(params.get("tool") or ""))
+    return translate(key)
+
+
+def _decode_image_content(result: Mapping[str, Any]) -> bytes | None:
+    content = result.get("content")
+    if not isinstance(content, list):
+        return None
+    for item in content:
+        if not isinstance(item, dict) or item.get("type") != "image":
+            continue
+        data = item.get("data")
+        if not isinstance(data, str):
+            continue
+        try:
+            return base64.b64decode(data, validate=True)
+        except (binascii.Error, ValueError):
+            return None
+    return None
+
+
+def write_screenshot(
+    tool: str,
+    result: Mapping[str, Any],
+    output_path: str | None,
+) -> str | None:
+    if not output_path:
+        return None
+    target = Path(output_path).expanduser()
+    if tool == "get_window_state":
+        payloads = _structured_payloads(result)
+        for payload in payloads:
+            path = payload.get("screenshot_file_path")
+            if isinstance(path, str) and path:
+                return str(Path(path).expanduser().resolve())
+    image = _decode_image_content(result)
+    if image is None:
+        raise ComputerCliError("computer.cli.error.screenshotMissing", tool=tool)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(image)
+    return str(target.resolve())
+
+
+def _render_accessibility(
+    payload: Mapping[str, Any],
+    translate: Callable[..., str],
+) -> list[str]:
+    lines: list[str] = []
+    if "elements" not in payload and "tree_markdown" not in payload:
+        return lines
+    degraded = payload.get("degraded_reason")
+    complete = payload.get("elements_complete")
+    state_key = "available"
+    if degraded:
+        state_key = "degraded"
+    elif complete is False or payload.get("truncated") is True:
+        state_key = "partial"
+    lines.append(
+        translate(
+            "computer.cli.result.accessibility",
+            state=translate(
+                f"computer.cli.result.accessibilityState.{state_key}",
+                reason=degraded,
+            ),
+        )
+    )
+    elements = payload.get("elements")
+    if isinstance(elements, list):
+        lines.append(translate("computer.cli.result.elementTokens"))
+        for element in elements:
+            if not isinstance(element, dict):
+                continue
+            token = str(element.get("element_token") or "").strip()
+            if not token:
+                continue
+            role = str(element.get("role") or "element")
+            label = str(element.get("label") or element.get("value") or "").strip()
+            suffix = f" {label}" if label else ""
+            lines.append(f"  {token} [{role}]{suffix}")
+    tree = payload.get("tree_markdown")
+    if isinstance(tree, str) and tree.strip():
+        lines.append(tree.rstrip())
+    return lines
+
+
+def format_human_result(
+    tool: str,
+    result: Mapping[str, Any],
+    *,
+    output_path: str | None = None,
+    translate: Callable[..., str],
+) -> str:
+    if result.get("isError") is True:
+        error = _error_payload(result)
+        code = str(error.get("code") or "computer_use_error")
+        message = translate_computer_error(error, translate=translate)
+        return translate(
+            "computer.cli.result.error",
+            code=code,
+            message=message,
+        )
+
+    lines = [translate("computer.cli.result.succeeded", tool=tool)]
+    rendered = False
+    for payload in _structured_payloads(result):
+        accessibility = _render_accessibility(payload, translate)
+        if accessibility:
+            lines.extend(accessibility)
+            rendered = True
+            continue
+        for key in ("apps", "windows"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                lines.append(translate(f"computer.cli.result.{key}"))
+                lines.extend(f"  {json.dumps(item, ensure_ascii=False, sort_keys=True)}" for item in value)
+                rendered = True
+        if not rendered:
+            lines.append(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+            rendered = True
+    if output_path:
+        lines.append(translate("computer.cli.result.screenshot", path=output_path))
+    if not rendered:
+        content = result.get("content")
+        if isinstance(content, list):
+            for item in content:
+                if isinstance(item, dict) and item.get("type") == "text":
+                    text = item.get("text")
+                    if isinstance(text, str) and not text.startswith("Structured content:"):
+                        lines.append(text)
+    return "\n".join(lines)

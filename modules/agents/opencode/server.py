@@ -1521,7 +1521,6 @@ class OpenCodeLaunchSpec:
     # The Hub overlay as Model Hub wrote it, and as OpenCode receives it inline.
     overlay_file_content: Optional[bytes] = field(default=None, repr=False)
     overlay_inline_content: Optional[str] = field(default=None, repr=False)
-    computer_use_spec: Any = field(default=None, repr=False)
 
 
 class OpenCodeGeneration(OpenCodeServerClient):
@@ -1762,7 +1761,6 @@ def _launch_environment(spec: OpenCodeLaunchSpec, overlay_path: Optional[Path]) 
     # removes OpenCode's independently assembled native Catalog.
     env["OPENCODE_CONFIG_CONTENT"] = _managed_runtime_config_content(
         env.get("OPENCODE_CONFIG_CONTENT"),
-        computer_use_spec=spec.computer_use_spec,
     )
     return env
 

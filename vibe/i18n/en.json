@@ -846,6 +846,92 @@
       }
     }
   },
+  "computer": {
+    "cli": {
+      "help": {
+        "command": "Use the local desktop through the active Avibe Agent Turn",
+        "description": "Run an allowlisted Computer Use operation through the Avibe service. The caller Session is taken from the Agent environment and the service checks that it has an active Turn.",
+        "argsJson": "JSON object of driver arguments, or @path to a JSON file.",
+        "arg": "Override one driver argument; JSON values are parsed when valid.",
+        "output": "Caller-selected screenshot path for 'observe window'.",
+        "json": "Print the structured service response.",
+        "observe": "Observe apps, windows, or one exact window",
+        "observeApps": "List visible applications",
+        "observeWindows": "List windows",
+        "observeWindow": "Observe one exact window and optionally save a screenshot",
+        "zoom": "Inspect one exact window at a readable scale",
+        "click": "Click an observed element or exact window coordinate",
+        "type": "Type text into an observed target",
+        "key": "Press one key",
+        "hotkey": "Press a key combination",
+        "scroll": "Scroll an observed target",
+        "drag": "Drag an observed target",
+        "setValue": "Set an observed control value",
+        "launch": "Launch an application or URL",
+        "quit": "Quit an application",
+        "clipboard": "Read or write the system clipboard",
+        "clipboardRead": "Read the system clipboard",
+        "clipboardWrite": "Write the system clipboard"
+      },
+      "error": {
+        "invalidArguments": "Invalid Computer Use arguments: {detail}",
+        "cannotReadArgsJson": "Cannot read the --args-json file: {error}",
+        "argsJsonObject": "--args-json must contain a JSON object",
+        "argNameValue": "--arg values must use name=value",
+        "sessionArgumentForbidden": "The Computer Use session is bound to the caller's Avibe Session and cannot be supplied through --args-json or --arg.",
+        "outputArgumentConflict": "Use --output or screenshot_out_file in --args-json, not both.",
+        "unsupportedCommand": "Unsupported Computer Use command: {command}",
+        "screenshotMissing": "{tool} did not return an image that could be written to --output.",
+        "outputUnsupported": "--output is supported only by observe window or zoom.",
+        "missingCallerSession": "Computer Use requires an Avibe Agent caller Session.",
+        "missingCallerTurn": "Computer Use requires the caller's Avibe Session to have an active Turn.",
+        "serviceUnavailable": "Avibe service is unavailable: {error}",
+        "requestTimedOut": "Computer Use request timed out before the service replied: {error}",
+        "invalidResponse": "Computer Use service returned an invalid response.",
+        "requestRejected": "Computer Use request was rejected.",
+        "activeTurnRequired": "Computer Use requires the caller's active Avibe Turn.",
+        "computerUseUnavailable": "Computer Use is currently unavailable.",
+        "desktopBusy": "The desktop is busy with another Avibe Session.",
+        "desktopLeaseLost": "The desktop lease was lost before Computer Use completed.",
+        "focusShortcutForbidden": "This focus shortcut is not allowed. Use launch with a URL instead.",
+        "foregroundForbidden": "Foreground input is not allowed.",
+        "genericDriverError": "The Computer Use driver returned an error.",
+        "invalidDriverArguments": "The Computer Use arguments are invalid.",
+        "observeFirst": "Observe the exact window again before sending input.",
+        "platformUnsupported": "Computer Use is unavailable on this platform.",
+        "sessionArchived": "Computer Use is unavailable because this Avibe Session is archived or being archived.",
+        "sessionUnavailable": "The Computer Use driver could not prepare the Session.",
+        "unknownTool": "Unknown Computer Use tool: {tool}.",
+        "upstreamError": "The Computer Use driver rejected the request.",
+        "upstreamProtocolError": "The Computer Use driver returned an invalid response.",
+        "upstreamToolError": "The Computer Use driver returned an error.",
+        "upstreamUnavailable": "The Computer Use driver is unavailable. Observe again before retrying.",
+        "windowTargetRequired": "Input must target an exact observed window or element."
+      },
+      "hint": {
+        "invalidArguments": "Check the command syntax and run `vibe computer --help` for the Computer Use contract.",
+        "missingCallerSession": "Run this command from an Avibe Agent Turn. The command binds to its Session automatically and has no --session-id option.",
+        "missingCallerTurn": "Run this command from an active Avibe Agent Turn. The Controller checks the active Turn; do not provide a Turn ID.",
+        "serviceUnavailable": "Start the Avibe service before using Computer Use.",
+        "requestTimedOut": "Observe again before retrying because the action may have completed."
+      },
+      "result": {
+        "succeeded": "Computer Use: {tool} succeeded.",
+        "error": "Computer Use error [{code}]: {message}",
+        "unknownError": "The Computer Use driver returned an error without details.",
+        "accessibility": "Accessibility: {state}",
+        "accessibilityState": {
+          "available": "available",
+          "degraded": "degraded ({reason})",
+          "partial": "partial"
+        },
+        "elementTokens": "Element tokens:",
+        "apps": "Apps:",
+        "windows": "Windows:",
+        "screenshot": "Screenshot: {path}"
+      }
+    }
+  },
   "debug": {
     "cli": {
       "help": {

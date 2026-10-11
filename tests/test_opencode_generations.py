@@ -2270,7 +2270,7 @@ def test_a_turn_keeps_the_opencode_settings_it_was_admitted_with(monkeypatch):
     serve_opencode_agent(agent, _Server())
 
     async def admitted_launch(_context):
-        return None, None, SimpleNamespace(computer_use_spec=object()), admitted
+        return None, None, SimpleNamespace(), admitted
 
     agent._prepare_launch = admitted_launch
     agent._delete_ack = _async_noop
@@ -2298,4 +2298,4 @@ def test_a_turn_keeps_the_opencode_settings_it_was_admitted_with(monkeypatch):
     assert prompts and prompts[0]["model"] == {"providerID": "openai", "modelID": "gpt-5.4"}
     assert prompts[0]["reasoning_effort"] == "high"
     assert polled == [admitted]
-    assert prompt_options["include_computer_use"] is True
+    assert "include_computer_use" not in prompt_options

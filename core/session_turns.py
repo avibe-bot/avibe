@@ -105,6 +105,7 @@ class _SessionLifecycleState:
     operation_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     admission_waiters: int = 0
     epoch: int = 0
+    computer_use_admission_closed: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -543,6 +544,14 @@ class Turn:
     logical_turn_id: Optional[str] = None
     delivery_id: Optional[str] = None
     terminal_is_error: bool = False
+    computer_use_admission_closed: bool = False
+
+
+@dataclass(frozen=True)
+class ComputerUseAdmission:
+    """One Computer Use request admitted for one live Avibe Session."""
+
+    session_id: str
 
 
 @dataclass(frozen=True)
@@ -737,6 +746,15 @@ class SessionTurnManager:
             and snapshot._state.epoch == snapshot.epoch
         )
 
+    def mark_session_non_admitting(self, raw_session_id: str) -> None:
+        """Fence new Computer Use requests for an archived Session."""
+
+        state = self._session_lifecycle_state(raw_session_id)
+        state.computer_use_admission_closed = True
+        turn = self.in_flight.get(raw_session_id)
+        if turn is not None:
+            turn.computer_use_admission_closed = True
+
     async def acquire_lifecycle_admission(
         self,
         raw_session_id: str,
@@ -782,6 +800,14 @@ class SessionTurnManager:
         state = self._session_lifecycle_state(raw_session_id)
         await state.operation_lock.acquire()
         admission = None
+        was_computer_use_admission_closed = state.computer_use_admission_closed
+        turn = self.in_flight.get(raw_session_id)
+        was_turn_computer_use_admission_closed = (
+            turn.computer_use_admission_closed if turn is not None else False
+        )
+        state.computer_use_admission_closed = True
+        if turn is not None:
+            turn.computer_use_admission_closed = True
         try:
             pre_epoch = state.epoch
             # Lifecycle operations are intentionally non-blocking with respect
@@ -804,6 +830,13 @@ class SessionTurnManager:
                     state,
                 )
             return result
+        except BaseException:
+            state.computer_use_admission_closed = was_computer_use_admission_closed
+            if turn is not None:
+                turn.computer_use_admission_closed = (
+                    was_turn_computer_use_admission_closed
+                )
+            raise
         finally:
             if admission is not None:
                 admission.release()
@@ -4454,6 +4487,36 @@ class SessionTurnManager:
                         receipt={"reason": "dispatch_may_have_written"},
                     )
             return False
+
+    def begin_computer_use_request(
+        self,
+        session_id: str,
+    ) -> tuple[ComputerUseAdmission | None, str]:
+        """Admit one CLI request for a Session with a live active Turn.
+
+        The active Turn is resolved entirely from the Controller-owned
+        ``in_flight`` registry. The caller never presents a Turn identifier.
+        """
+
+        normalized_session_id = str(session_id or "").strip()
+        state = self._session_lifecycle_states.get(normalized_session_id)
+        if state is not None and state.computer_use_admission_closed:
+            return None, "session_archived"
+        turn = self.in_flight.get(normalized_session_id)
+        if turn is None or turn.task.done():
+            return None, "active_turn_required"
+        if turn.computer_use_admission_closed:
+            return None, "session_archived"
+        context = getattr(turn, "context", None)
+        bound_session_id = self.controller._session_id_from_context(context)
+        if bound_session_id != normalized_session_id:
+            return None, "active_turn_required"
+        return (
+            ComputerUseAdmission(
+                session_id=normalized_session_id,
+            ),
+            "",
+        )
 
     def _delivery_runtime_owner_factory(
         self,

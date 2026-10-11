@@ -290,6 +290,7 @@ class VibeArgumentParser(argparse.ArgumentParser):
     def __init__(self, *args, **kwargs):
         self.error_help_command = kwargs.pop("error_help_command", None)
         self.error_hint = kwargs.pop("error_hint", None)
+        self.error_i18n_key = kwargs.pop("error_i18n_key", None)
         super().__init__(*args, **kwargs)
 
     def parse_args(self, args=None, namespace=None):
@@ -317,6 +318,12 @@ class VibeArgumentParser(argparse.ArgumentParser):
         return parsed
 
     def error(self, message):
+        if self.error_i18n_key:
+            message = i18n_t(
+                self.error_i18n_key,
+                _configured_cli_language(),
+                detail=message,
+            )
         payload = {
             "schema_version": 1,
             "ok": False,
@@ -715,6 +722,125 @@ def cmd_skill(args) -> int:
             finish_cli_load(args.name, skill, started_at, observation_error)
 
     return 1
+
+
+def cmd_computer(args) -> int:
+    """Run one Controller-owned Computer Use operation for the active Turn."""
+
+    from core.computer_cli import (
+        ComputerCliError,
+        build_driver_arguments,
+        format_human_result,
+        prepare_arguments_for_output,
+        translate_computer_error,
+        tool_for_command,
+        write_screenshot,
+    )
+    from vibe.internal_client import (
+        InternalServerTimeout,
+        InternalServerUnavailable,
+        computer_use_sync,
+    )
+
+    language = _configured_cli_language()
+
+    def translate(key: str, **kwargs: Any) -> str:
+        return i18n_t(key, language, **kwargs)
+
+    caller_context = caller_context_from_env()
+    caller_session_id = _default_session_id_from_caller(caller_context)
+    if not caller_session_id:
+        raise TaskCliError(
+            translate("computer.cli.error.missingCallerSession"),
+            code="missing_caller_session",
+            hint=translate("computer.cli.hint.missingCallerSession"),
+            help_command="vibe computer --help",
+        )
+    if args.computer_command == "observe":
+        command_path = ("observe", args.computer_observe_command)
+    elif args.computer_command == "clipboard":
+        command_path = ("clipboard", args.computer_clipboard_command)
+    else:
+        command_path = (args.computer_command,)
+
+    try:
+        tool = tool_for_command(command_path)
+        if args.output and tool not in {"get_window_state", "zoom"}:
+            raise ComputerCliError("computer.cli.error.outputUnsupported")
+        arguments = build_driver_arguments(args.args_json, args.arg)
+        arguments = prepare_arguments_for_output(tool, arguments, args.output)
+        response = computer_use_sync(
+            caller_session_id=caller_session_id,
+            tool=tool,
+            arguments=arguments,
+        )
+    except ComputerCliError as exc:
+        raise TaskCliError(
+            i18n_t(exc.key, language, **exc.params),
+            code="invalid_computer_use_arguments",
+            hint=translate("computer.cli.hint.invalidArguments"),
+            help_command="vibe computer --help",
+        ) from exc
+    except InternalServerUnavailable as exc:
+        raise TaskCliError(
+            translate("computer.cli.error.serviceUnavailable", error=str(exc)),
+            code="controller_unavailable",
+            hint=translate("computer.cli.hint.serviceUnavailable"),
+        ) from exc
+    except InternalServerTimeout as exc:
+        raise TaskCliError(
+            translate("computer.cli.error.requestTimedOut", error=str(exc)),
+            code="computer_use_timeout",
+            hint=translate("computer.cli.hint.requestTimedOut"),
+        ) from exc
+
+    body = response.get("body")
+    if not isinstance(body, dict):
+        raise TaskCliError(
+            translate("computer.cli.error.invalidResponse"),
+            code="invalid_computer_use_response",
+        )
+    result = body.get("result")
+    if not isinstance(result, dict):
+        code = str(body.get("error") or "computer_use_error")
+        error = {
+            "code": code,
+            "params": body.get("params")
+            if isinstance(body.get("params"), dict)
+            else {},
+        }
+        message = translate_computer_error(
+            error,
+            translate=translate,
+        )
+        if args.json:
+            print(json.dumps(body, ensure_ascii=False, sort_keys=True))
+        else:
+            print(translate("computer.cli.result.error", code=code, message=message))
+        return 1
+
+    if result.get("isError") is True:
+        if args.json:
+            print(json.dumps(body, ensure_ascii=False, sort_keys=True))
+        else:
+            print(format_human_result(tool, result, translate=translate))
+        return 1
+
+    screenshot_path = write_screenshot(tool, result, args.output)
+    if screenshot_path:
+        body["screenshot_path"] = screenshot_path
+    if args.json:
+        print(json.dumps(body, ensure_ascii=False, sort_keys=True))
+    else:
+        print(
+            format_human_result(
+                tool,
+                result,
+                output_path=screenshot_path,
+                translate=translate,
+            )
+        )
+    return 1 if result.get("isError") is True else 0
 
 
 def cmd_debug_prompt(args) -> int:
@@ -16880,6 +17006,145 @@ def build_parser():
         "name",
         help=i18n_t("skill.cli.help.name", skill_help_language),
     )
+    computer_help_language = _configured_cli_language()
+    computer_parser = subparsers.add_parser(
+        "computer",
+        help=i18n_t("computer.cli.help.command", computer_help_language),
+        description=i18n_t("computer.cli.help.description", computer_help_language),
+        error_help_command="vibe computer --help",
+        error_hint=i18n_t(
+            "computer.cli.hint.invalidArguments",
+            computer_help_language,
+        ),
+        error_i18n_key="computer.cli.error.invalidArguments",
+    )
+    computer_subparsers = computer_parser.add_subparsers(
+        dest="computer_command",
+        metavar="{observe,zoom,click,type,key,hotkey,scroll,drag,set-value,clipboard,launch,quit}",
+    )
+    computer_subparsers.required = True
+
+    def _add_computer_options(command_parser) -> None:
+        command_parser.add_argument(
+            "--args-json",
+            help=i18n_t(
+                "computer.cli.help.argsJson",
+                computer_help_language,
+            ),
+        )
+        command_parser.add_argument(
+            "--arg",
+            action="append",
+            default=[],
+            metavar="NAME=VALUE",
+            help=i18n_t(
+                "computer.cli.help.arg",
+                computer_help_language,
+            ),
+        )
+        command_parser.add_argument(
+            "--output",
+            help=i18n_t(
+                "computer.cli.help.output",
+                computer_help_language,
+            ),
+        )
+        command_parser.add_argument(
+            "--json",
+            action="store_true",
+            help=i18n_t(
+                "computer.cli.help.json",
+                computer_help_language,
+            ),
+        )
+
+    computer_observe_parser = computer_subparsers.add_parser(
+        "observe",
+        help=i18n_t("computer.cli.help.observe", computer_help_language),
+        error_help_command="vibe computer observe --help",
+        error_hint=i18n_t("computer.cli.hint.invalidArguments", computer_help_language),
+        error_i18n_key="computer.cli.error.invalidArguments",
+    )
+    computer_observe_subparsers = computer_observe_parser.add_subparsers(
+        dest="computer_observe_command",
+        metavar="{apps,windows,window}",
+    )
+    computer_observe_subparsers.required = True
+    for name, help_text in (
+        (
+            "apps",
+            i18n_t("computer.cli.help.observeApps", computer_help_language),
+        ),
+        (
+            "windows",
+            i18n_t("computer.cli.help.observeWindows", computer_help_language),
+        ),
+        (
+            "window",
+            i18n_t("computer.cli.help.observeWindow", computer_help_language),
+        ),
+    ):
+        leaf = computer_observe_subparsers.add_parser(
+            name,
+            help=help_text,
+            error_help_command=f"vibe computer observe {name} --help",
+            error_hint=i18n_t("computer.cli.hint.invalidArguments", computer_help_language),
+            error_i18n_key="computer.cli.error.invalidArguments",
+        )
+        _add_computer_options(leaf)
+
+    for name, help_text in (
+        ("zoom", "zoom"),
+        ("click", "click"),
+        ("type", "type"),
+        ("key", "key"),
+        ("hotkey", "hotkey"),
+        ("scroll", "scroll"),
+        ("drag", "drag"),
+        ("set-value", "setValue"),
+        ("launch", "launch"),
+        ("quit", "quit"),
+    ):
+        leaf = computer_subparsers.add_parser(
+            name,
+            help=i18n_t(f"computer.cli.help.{help_text}", computer_help_language),
+            error_help_command=f"vibe computer {name} --help",
+            error_hint=i18n_t("computer.cli.hint.invalidArguments", computer_help_language),
+            error_i18n_key="computer.cli.error.invalidArguments",
+        )
+        _add_computer_options(leaf)
+
+    computer_clipboard_parser = computer_subparsers.add_parser(
+        "clipboard",
+        help=i18n_t("computer.cli.help.clipboard", computer_help_language),
+        error_help_command="vibe computer clipboard --help",
+        error_hint=i18n_t("computer.cli.hint.invalidArguments", computer_help_language),
+        error_i18n_key="computer.cli.error.invalidArguments",
+    )
+    computer_clipboard_subparsers = computer_clipboard_parser.add_subparsers(
+        dest="computer_clipboard_command",
+        metavar="{read,write}",
+    )
+    computer_clipboard_subparsers.required = True
+    for name, help_text in (
+        (
+            "read",
+            i18n_t("computer.cli.help.clipboardRead", computer_help_language),
+        ),
+        (
+            "write",
+            i18n_t("computer.cli.help.clipboardWrite", computer_help_language),
+        ),
+    ):
+        leaf = computer_clipboard_subparsers.add_parser(
+            name,
+            help=help_text,
+            error_help_command=f"vibe computer clipboard {name} --help",
+            error_hint=i18n_t("computer.cli.hint.invalidArguments", computer_help_language),
+            error_i18n_key="computer.cli.error.invalidArguments",
+        )
+        _add_computer_options(leaf)
+
     debug_help_language = _configured_cli_language()
     debug_parser = subparsers.add_parser(
         "debug",
@@ -18733,6 +18998,23 @@ _CLI_COMMAND_FLOORS: dict[tuple[str, ...], Optional[str]] = {
     ("status",): None,
     ("desktop", "endpoint"): "member",
     ("desktop", "remove-backends"): "member",
+    # Computer Use is admitted as a local member operation, then narrowed by
+    # the Controller to the caller's active Session and Turn.
+    ("computer", "observe", "apps"): "member",
+    ("computer", "observe", "windows"): "member",
+    ("computer", "observe", "window"): "member",
+    ("computer", "zoom"): "member",
+    ("computer", "click"): "member",
+    ("computer", "type"): "member",
+    ("computer", "key"): "member",
+    ("computer", "hotkey"): "member",
+    ("computer", "scroll"): "member",
+    ("computer", "drag"): "member",
+    ("computer", "set-value"): "member",
+    ("computer", "clipboard", "read"): "member",
+    ("computer", "clipboard", "write"): "member",
+    ("computer", "launch"): "member",
+    ("computer", "quit"): "member",
     # Host scope, not instance scope: these act on this machine's screen and on
     # authored files, and have no role contract to repair here.
     ("screenshot",): None,
@@ -18988,6 +19270,12 @@ def _dispatch_parsed_command(parser: argparse.ArgumentParser, args) -> None:
         sys.exit(cmd_status())
     if args.command == "skill":
         sys.exit(cmd_skill(args))
+    if args.command == "computer":
+        try:
+            sys.exit(cmd_computer(args))
+        except Exception as exc:
+            _print_task_error(exc, help_command="vibe computer --help")
+            sys.exit(1)
     if args.command == "debug":
         sys.exit(cmd_debug_prompt(args))
     if args.command == "doctor":
