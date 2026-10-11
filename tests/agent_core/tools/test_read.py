@@ -96,8 +96,10 @@ async def test_an_over_long_first_line_points_at_the_shell_with_the_file_read_op
     text = result_text(result)
 
     advice = (
-        f"Use powershell: @(Get-Content -LiteralPath '{target}' -TotalCount 2)[-1] | "
-        "ForEach-Object { $_.Substring(0, [Math]::Min($_.Length, 51200)) }"
+        f"Use powershell: @(Get-Content -LiteralPath '{target}' -TotalCount 2 -Encoding UTF8)[-1] | "
+        "ForEach-Object { $b = [Text.Encoding]::UTF8.GetBytes($_); $n = [Math]::Min($b.Length, 51200); "
+        "while ($n -lt $b.Length -and ($b[$n] -band 0xC0) -eq 0x80) { $n-- }; "
+        "[Console]::Out.Write([Text.Encoding]::UTF8.GetString($b, 0, $n)) }"
         if os.name == "nt"
         else f"Use bash: sed -n '2p' {shlex.quote(target)} | head -c 51200"
     )

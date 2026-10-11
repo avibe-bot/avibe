@@ -139,7 +139,7 @@ async def test_a_command_that_does_not_parse_runs_nothing_and_says_why(run, tmp_
 @ON_WINDOWS
 @pytest.mark.parametrize("flow", ["return", "break", "continue"])
 async def test_a_top_level_return_ends_the_whole_script(run, tmp_path, flow):
-    """Run statement by statement, ``return`` would end only its own statement and the next would still run."""
+    """The command is one script: a ``return`` at its top level ends it, and nothing after it runs."""
     marker = tmp_path / "after"
     error, text = await run(
         f"if ($true) {{ Write-Output before; {flow} }}\n"
@@ -152,10 +152,39 @@ async def test_a_top_level_return_ends_the_whole_script(run, tmp_path, flow):
 
 
 @ON_WINDOWS
-async def test_output_comes_before_an_exit_that_follows_it(run):
-    error, text = await run("Get-ChildItem $env:SystemRoot -Filter win.ini | Select-Object Name; exit 2")
+async def test_text_comes_before_an_exit_that_follows_it(run):
+    """Strings and native programs' output are written as they come; only objects still waiting to be laid out
+    as a table can be lost to an ``exit`` (C-7 tools.md section 5, as with ``powershell -Command``)."""
+    error, text = await run("Write-Output before; cmd /c echo native; exit 2")
 
-    assert error and "win.ini" in text and text.rstrip().endswith("Command exited with code 2")
+    assert error and text.split()[:2] == ["before", "native"]
+    assert text.rstrip().endswith("Command exited with code 2")
+
+
+@ON_WINDOWS
+@pytest.mark.parametrize(
+    ("command", "output"),
+    [
+        ("class Item { [string] $Name = 'item' }\nenum Color { Red }\n[Item]::new().Name; [Color]::Red", "item Red"),
+        ("param($Name = 'default')\nWrite-Output $Name", "default"),
+        ("using namespace System.Text\n[StringBuilder]::new().Append('built').ToString()", "built"),
+        ("begin { Write-Output first }\nprocess { Write-Output each }\nend { Write-Output last }", "first each last"),
+        ("process { Write-Output only }", "only"),
+    ],
+    ids=["types", "param", "using", "named-blocks", "process-only"],
+)
+async def test_a_command_keeps_powershell_script_semantics(run, command, output):
+    """Types are visible across its statements, and a param block, using, or named blocks work as in a script."""
+    error, text = await run(command)
+
+    assert (error, " ".join(text.split())) == (False, output)
+
+
+@ON_WINDOWS
+async def test_the_exit_code_is_the_last_statement_s_inside_an_end_block(run):
+    error, text = await run("begin { Write-Output first }\nend { Write-Output last; cmd /c exit 4 }")
+
+    assert error and text.rstrip().endswith("Command exited with code 4")
 
 
 @ON_WINDOWS
@@ -230,26 +259,29 @@ async def test_a_process_started_with_start_process_stays_in_the_job_until_it_is
 
 @ON_WINDOWS
 @pytest.mark.parametrize(
-    ("content", "line"),
-    [(b"short\n" + b"x" * 61_440 + b"\nafter\n", 2), (b"x" * 61_440, 1)],
-    ids=["a later line", "the only line"],
+    ("content", "line", "expected"),
+    [
+        (b"short\n" + b"x" * 61_440 + b"\nafter\n", 2, "x" * 51_200),
+        (b"x" * 61_440, 1, "x" * 51_200),
+        # UTF-8 without a BOM, which Windows PowerShell would read as ANSI; 51,200 bytes end on a character.
+        (b"ab" + "\u4e2d".encode() * 30_000 + b"\n", 1, "ab" + "\u4e2d" * 17_066),
+        # ...and inside one, which is left out whole.
+        (b"a" + "\u4e2d".encode() * 30_000, 1, "a" + "\u4e2d" * 17_066),
+    ],
+    ids=["a later line", "the only line", "cjk", "cjk-cut-inside-a-character"],
 )
-def test_the_advice_read_gives_for_a_long_line_runs_as_given(tmp_path, shell, content, line):
-    """``read`` points at a command for a line too long to show; it must work whatever the path holds, and for
-    line 1, which ``Get-Content`` alone gives as a string rather than a list of lines."""
+async def test_the_advice_read_gives_for_a_long_line_runs_as_given(tmp_path, run, content, line, expected):
+    """``read`` points at a command for a line too long to show. Run through the tool, it prints what ``sed`` and
+    ``head -c`` would: that line as UTF-8, at most 51,200 bytes of it, whatever the path holds; line 1 too, which
+    ``Get-Content`` alone gives as a string rather than a list of lines."""
     target = tmp_path / "it's big.txt"
     target.write_bytes(content)
     advice = read_line_advice(str(target), line, 51_200).removeprefix("Use powershell: ")
 
-    completed = subprocess.run(
-        [shell.path, "-NoProfile", "-NonInteractive", "-Command", advice],
-        capture_output=True,
-        creationflags=subprocess.CREATE_NO_WINDOW,
-        timeout=60,
-    )
+    error, text = await run(advice)
 
-    assert completed.returncode == 0, completed.stderr
-    assert completed.stdout.decode().strip() == "x" * 51_200
+    assert not error, text[-300:]
+    assert text.encode() == expected.encode()
 
 
 @ON_WINDOWS

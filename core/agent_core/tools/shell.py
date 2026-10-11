@@ -22,12 +22,11 @@ COMMAND_FILE = "command.ps1"
 
 # Runs ``command.ps1`` (C-7 tools.md section 5). It is passed with ``-Command``, where Windows PowerShell
 # writes errors as text (with ``-EncodedCommand`` it writes them as CLIXML), so it holds no double quote,
-# which the command line would have to escape. Each top-level statement runs on its own and its output is
-# formatted before the next one runs, so an ``exit`` loses none of it; a script with parts that only work
-# whole (a param or named block, a top-level trap, using statements, or a return, break, or continue outside
-# any function or script block, which would otherwise end only its own statement) runs whole. A native program
-# sets ``$LASTEXITCODE`` as an int; between statements the bootstrap keeps it as a long of the same value, so
-# the exit code is one the last statement set, never a code an earlier one left there.
+# which the command line would have to escape. The command runs whole, as one script block, so PowerShell's own
+# semantics hold. Only the last statement of its end block is wrapped, found by its place in the text: a native
+# program sets ``$LASTEXITCODE`` as an int, so it is kept as a long of the same value just before that statement,
+# and the exit code is one the last statement set, never a code an earlier one left there. The loop around the
+# script block is where a ``break`` or ``continue`` outside any loop ends it.
 _BOOTSTRAP = """\
 $ProgressPreference = 'SilentlyContinue'
 if ($PSStyle) { $PSStyle.OutputRendering = 'PlainText' }
@@ -35,8 +34,9 @@ $__avibe_utf8 = New-Object System.Text.UTF8Encoding $false
 [Console]::OutputEncoding = $__avibe_utf8
 $OutputEncoding = $__avibe_utf8
 $__avibe_errors = $null
+$__avibe_script = [System.IO.File]::ReadAllText('{path}', $__avibe_utf8)
 $__avibe_ast = [System.Management.Automation.Language.Parser]::ParseInput(\
-[System.IO.File]::ReadAllText('{path}', $__avibe_utf8), [ref]$null, [ref]$__avibe_errors)
+$__avibe_script, [ref]$null, [ref]$__avibe_errors)
 if ($__avibe_errors) {
     foreach ($__avibe_error in $__avibe_errors) {
         [Console]::Error.WriteLine(('At line:{0} char:{1}' -f $__avibe_error.Extent.StartLineNumber, \
@@ -44,27 +44,16 @@ $__avibe_error.Extent.StartColumnNumber) + [Environment]::NewLine + $__avibe_err
     }
     exit 1
 }
-$__avibe_flow = $__avibe_ast.Find({
-    param($__avibe_node)
-    if (-not ($__avibe_node -is [System.Management.Automation.Language.ReturnStatementAst] -or \
-$__avibe_node -is [System.Management.Automation.Language.BreakStatementAst] -or \
-$__avibe_node -is [System.Management.Automation.Language.ContinueStatementAst])) { return $false }
-    $__avibe_owner = $__avibe_node.Parent
-    while (-not ($__avibe_owner -is [System.Management.Automation.Language.ScriptBlockAst])) { \
-$__avibe_owner = $__avibe_owner.Parent }
-    [object]::ReferenceEquals($__avibe_owner, $__avibe_ast)
-}, $true)
-$__avibe_whole = $__avibe_ast.ParamBlock -or $__avibe_ast.BeginBlock -or $__avibe_ast.ProcessBlock -or \
-$__avibe_ast.DynamicParamBlock -or $__avibe_ast.UsingStatements.Count -or $__avibe_ast.EndBlock.Traps -or $__avibe_flow
-if ($__avibe_whole) { $__avibe_parts = @($__avibe_ast.Extent.Text) } else { \
-$__avibe_parts = @($__avibe_ast.EndBlock.Statements | ForEach-Object { $_.Extent.Text }) }
 $__avibe_status = $true
+if ($__avibe_ast.EndBlock -and $__avibe_ast.EndBlock.Statements.Count) {
+    $__avibe_last = $__avibe_ast.EndBlock.Statements[$__avibe_ast.EndBlock.Statements.Count - 1].Extent
+    $__avibe_script = $__avibe_script.Insert($__avibe_last.EndOffset, [Environment]::NewLine + \
+'$__avibe_status = $?; $__avibe_code = $global:LASTEXITCODE; $__avibe_set = $__avibe_code -is [int]').Insert(\
+$__avibe_last.StartOffset, 'if ($global:LASTEXITCODE -is [int]) { $global:LASTEXITCODE = [long]$global:LASTEXITCODE }' + \
+[Environment]::NewLine)
+}
 try {
-    foreach ($__avibe_part in $__avibe_parts) {
-        if ($global:LASTEXITCODE -is [int]) { $global:LASTEXITCODE = [long]$global:LASTEXITCODE }
-        . ([ScriptBlock]::Create($__avibe_part + [Environment]::NewLine + [Environment]::NewLine + \
-'$__avibe_status = $?; $__avibe_code = $global:LASTEXITCODE; $__avibe_set = $__avibe_code -is [int]')) | Out-Default
-    }
+    foreach ($__avibe_once in 1) { . ([ScriptBlock]::Create($__avibe_script)) | Out-Default }
 } catch {
     [Console]::Error.Write(($_ | Out-String))
     exit 1
@@ -128,8 +117,11 @@ def read_line_advice(path: str, line: int, max_bytes: int) -> str:
     """How to read one line too long for ``read``, as a command that is safe to run whatever the path holds."""
     if WINDOWS:
         quoted = "'" + path.replace("'", "''") + "'"
+        # What sed and head -c print: the line as UTF-8, at most max_bytes of it, cut at a character boundary.
         return (
-            f"Use powershell: @(Get-Content -LiteralPath {quoted} -TotalCount {line})[-1] | "
-            f"ForEach-Object {{ $_.Substring(0, [Math]::Min($_.Length, {max_bytes})) }}"
+            f"Use powershell: @(Get-Content -LiteralPath {quoted} -TotalCount {line} -Encoding UTF8)[-1] | "
+            f"ForEach-Object {{ $b = [Text.Encoding]::UTF8.GetBytes($_); $n = [Math]::Min($b.Length, {max_bytes}); "
+            "while ($n -lt $b.Length -and ($b[$n] -band 0xC0) -eq 0x80) { $n-- }; "
+            "[Console]::Out.Write([Text.Encoding]::UTF8.GetString($b, 0, $n)) }"
         )
     return f"Use bash: sed -n '{line}p' {shlex.quote(path)} | head -c {max_bytes}"
