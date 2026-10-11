@@ -261,9 +261,13 @@ names `powershell` there, and "for example sed or a short script" becomes "for e
 - The command sees `$LASTEXITCODE` exactly as PowerShell sets it, and its named blocks may be written in any order.
   A compound last statement (an `if`, a loop, a `try`) is one statement: when a native program in it fails and a
   cmdlet after it fails too, the code is the native program's, which that statement set.
-- Errors are reported at the command's own lines: the wrapping adds no line. Only an error in a last statement that
-  shares its line with the statement before it, or with its block's opening brace, is reported at a later column. The wrapping reads nothing that
+- Errors are reported at the command's own lines: the wrapping adds no line before the last statement, and one after
+  it only when it uses `--%`, whose arguments run to the end of its line. Only an error in a last statement that
+  shares its line with the statement before it or with its block's opening brace, or that follows a `--%` statement,
+  is reported at a later column. Parameter binding, a `param` default included, runs before the last statement. The wrapping reads nothing that
   `Set-StrictMode` forbids, so a command may turn strict mode on.
+- Known limit: PowerShell in ConstrainedLanguage mode (an AppLocker or WDAC policy) is not supported. The bootstrap
+  needs .NET calls that mode blocks, so the tool says so and runs nothing.
 - Known limit, as with `powershell -Command`: an `exit` ends the process before PowerShell formats objects that are
   still waiting to be laid out as a table, so `Get-ChildItem | Select-Object Name; exit 2` can print nothing.
   Strings and the output of native programs are written as they come.
