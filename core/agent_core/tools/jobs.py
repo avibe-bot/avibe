@@ -387,8 +387,9 @@ class LocalJobHost:
         child_env = dict(env)
         child_env[PROCESS_IDENTITY_ENV] = marker
         if self._shell.powershell:
-            # Python writes a pipe in the ANSI code page otherwise; the bootstrap makes everything else UTF-8.
-            child_env.setdefault("PYTHONUTF8", "1")
+            # Python writes a pipe in the ANSI code page otherwise; the bootstrap makes everything else UTF-8. Only
+            # its standard streams: UTF-8 mode would also change the encoding of every file it opens.
+            child_env.setdefault("PYTHONIOENCODING", "utf-8")
         argv = [
             sys.executable,
             "-I",

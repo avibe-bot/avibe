@@ -193,8 +193,18 @@ async def test_a_command_keeps_powershell_script_semantics(run, command, output)
         ("if ($true) { cmd /c exit 23; Get-Item C:\\does-not-exist }", 23),
         # Blocks may be written in any order; they run begin, process, end.
         ("end { cmd /c exit 4 }\nbegin { Write-Output begin }", 4),
+        # The code an earlier block left is not the last statement's, whatever path led to it.
+        ("begin { cmd /c exit 23 }\nend { Get-Item C:\\does-not-exist }", 1),
     ],
-    ids=["end", "process-only", "begin-only", "a-function-returns", "a-compound-statement", "blocks-out-of-order"],
+    ids=[
+        "end",
+        "process-only",
+        "begin-only",
+        "a-function-returns",
+        "a-compound-statement",
+        "blocks-out-of-order",
+        "a-code-from-an-earlier-block",
+    ],
 )
 async def test_the_exit_code_follows_the_statement_that_runs_last(run, command, code):
     error, text = await run(command)
@@ -218,6 +228,30 @@ async def test_a_clean_block_runs_last(run, shell, tmp_path):
     assert after_process[0] and after_process[1].rstrip().endswith("Command exited with code 5")
     assert alone[0] is False
     assert not marker.exists()
+
+
+@ON_WINDOWS
+async def test_a_clean_block_after_an_early_return_reports_its_own_failure(run, shell):
+    """``clean`` runs even after ``return``; the native code ``begin`` left is not its last statement's."""
+    if shell.windows_powershell:
+        pytest.skip("Windows PowerShell 5.1 has no clean block")
+    error, text = await run("begin { cmd /c exit 23; return }\nclean { Get-Item C:\\does-not-exist }")
+
+    assert error and text.rstrip().endswith("Command exited with code 1"), text
+
+
+@ON_WINDOWS
+async def test_a_dynamicparam_block_counts_when_it_runs(run, tmp_path):
+    """It runs first, during parameter binding; if it is the only block, its last statement is the one that counts."""
+    marker = tmp_path / "dynamicparam-ran"
+    error, text = await run(
+        f"dynamicparam {{ New-Item -ItemType File -Path '{marker}' | Out-Null; cmd /c exit 7 }}"
+    )
+
+    if marker.exists():
+        assert error and text.rstrip().endswith("Command exited with code 7"), text
+    else:
+        assert not error, text
 
 
 @ON_WINDOWS
@@ -258,11 +292,13 @@ async def test_output_is_utf8_from_powershell_and_from_native_programs(run):
     error, text = await run(
         "Write-Output '中文 ps'\n"
         "cmd /c echo 中文 cmd\n"
-        f"& '{sys.executable}' -c \"print('中文 py')\""
+        f"& '{sys.executable}' -c \"import sys; print('中文 py', sys.flags.utf8_mode)\""
     )
 
+    # Only Python's standard streams are made UTF-8: the files it opens keep the system's encoding.
+    utf8_mode = 1 if os.environ.get("PYTHONUTF8") == "1" else 0
     assert not error, text
-    assert text.splitlines() == ["中文 ps", "中文 cmd", "中文 py"]
+    assert text.splitlines() == ["中文 ps", "中文 cmd", f"中文 py {utf8_mode}"]
 
 
 # Runs in a console of its own (CREATE_NO_WINDOW), sets it to code page 936 as Chinese Windows starts one,

@@ -26,7 +26,8 @@ COMMAND_FILE = "command.ps1"
 # semantics hold. Only the statement that runs last (the last of the clean block, which PowerShell 7.3 and
 # later run after the others, else of the end, process, or begin block) is wrapped, by its place in the text and on the lines it already has, so the lines PowerShell reports
 # are the command's own: its status is taken right after it, and the value ``$LASTEXITCODE`` holds is noted
-# right after the statement that runs before it. A native program stores a new value even when the code is the
+# where every path into it passes: after the statement before it in its block, else as its block begins (a
+# ``clean`` block runs even after a ``return``). A native program stores a new value even when the code is the
 # same, so the exit code is one the last statement set, never a code an earlier one left there, and the
 # command sees ``$LASTEXITCODE`` exactly as PowerShell sets it. It does not exist until something sets it, so
 # the wrapping reads it through ``Get-Variable``, which strict mode allows. The edits go in from the end of the
@@ -53,8 +54,8 @@ $__avibe_status = $true
 $__avibe_set = $false
 $__avibe_code = $null
 $__avibe_before = $null
-$__avibe_run = @(foreach ($__avibe_block in $__avibe_ast.BeginBlock, $__avibe_ast.ProcessBlock, \
-$__avibe_ast.EndBlock, $__avibe_ast.CleanBlock) { if ($__avibe_block) { $__avibe_block.Statements } })
+$__avibe_run = @(foreach ($__avibe_block in $__avibe_ast.DynamicParamBlock, $__avibe_ast.BeginBlock, \
+$__avibe_ast.ProcessBlock, $__avibe_ast.EndBlock, $__avibe_ast.CleanBlock) { if ($__avibe_block) { $__avibe_block.Statements } })
 $__avibe_edits = @()
 if ($__avibe_run.Count) {
     $__avibe_edits += , @($__avibe_run[-1].Extent.EndOffset, '; $__avibe_status = $?; \
@@ -62,10 +63,17 @@ $__avibe_var = Get-Variable LASTEXITCODE -Scope Global -ErrorAction Ignore; if (
 $__avibe_code = $__avibe_var.Value; \
 $__avibe_set = $__avibe_code -is [int] -and -not [object]::ReferenceEquals($__avibe_code, $__avibe_before) }')
 }
-if ($__avibe_run.Count -gt 1) {
-    $__avibe_edits += , @($__avibe_run[-2].Extent.EndOffset, '; \
-$__avibe_var = Get-Variable LASTEXITCODE -Scope Global -ErrorAction Ignore; \
-if ($__avibe_var) { $__avibe_before = $__avibe_var.Value }')
+$__avibe_note = '$__avibe_var = Get-Variable LASTEXITCODE -Scope Global -ErrorAction Ignore; \
+if ($__avibe_var) { $__avibe_before = $__avibe_var.Value }'
+if ($__avibe_run.Count) {
+    $__avibe_home = $__avibe_run[-1].Parent
+    if ($__avibe_home.Statements.Count -gt 1) {
+        $__avibe_edits += , @($__avibe_home.Statements[$__avibe_home.Statements.Count - 2].Extent.EndOffset, \
+('; ' + $__avibe_note))
+    } elseif (-not $__avibe_home.Unnamed) {
+        $__avibe_edits += , @(($__avibe_home.Extent.StartOffset + $__avibe_home.Extent.Text.IndexOf('{') + 1), \
+($__avibe_note + '; '))
+    }
 }
 foreach ($__avibe_edit in $__avibe_edits | Sort-Object { $_[0] } -Descending) {
     $__avibe_script = $__avibe_script.Insert($__avibe_edit[0], $__avibe_edit[1])
@@ -136,7 +144,7 @@ def read_line_advice(path: str, line: int, max_bytes: int) -> str:
     if WINDOWS:
         quoted = "'" + path.replace("'", "''") + "'"
         # What sed and head -c print: the line as UTF-8, at most max_bytes of it, cut at a character boundary,
-        # streaming the lines before it.
+        # streaming the lines before it. Get-Content also ends a line at a bare \r (C-7 tools.md section 2).
         return (
             f"Use powershell: Get-Content -LiteralPath {quoted} -TotalCount {line} -Encoding UTF8 | Select-Object -Last 1 | "
             f"ForEach-Object {{ $b = [Text.Encoding]::UTF8.GetBytes($_); $n = [Math]::Min($b.Length, {max_bytes}); "
