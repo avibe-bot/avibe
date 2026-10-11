@@ -349,6 +349,11 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                         if terminal is not None:
                             yield terminal
                         return
+                    if event.event == "response.failed" and "type" not in chunk and _has_response_error(chunk):
+                        # Some OpenAI-compatible relays keep the event name but omit the
+                        # duplicated `type`; the name and the response's error object still
+                        # identify the failure, as Model Hub's stream observer accepts it.
+                        chunk = {**chunk, "type": "response.failed"}
                     try:
                         event_type = dispatch_wire_event(
                             chunk,
@@ -1563,6 +1568,11 @@ def _responses_error_shape_error(value: Any, label: str) -> str | None:
         elif raw is not None and not isinstance(raw, str):
             return f"{label} {field} must be a string"
     return None
+
+
+def _has_response_error(chunk: Mapping[str, Any]) -> bool:
+    response = chunk.get("response")
+    return isinstance(response, Mapping) and isinstance(response.get("error"), Mapping)
 
 
 def _responses_error_body(error: Mapping[str, Any]) -> str:

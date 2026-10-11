@@ -4391,6 +4391,94 @@ async def test_provider_error_envelope_is_classified_identically_from_every_sour
     assert events[0].retryable == (kind == "server")
 
 
+# Failure frames a Model Hub relay writes into an HTTP 200 stream that has
+# already started, so only the frame says what failed. sub2api writes the first
+# three (`handler/gateway_handler.go` and `handler/openai_gateway_handler.go`
+# `handleStreamingAwareErrorWithCode`, `handler/stream_error_event.go`
+# `writeResponsesFailedSSE`, `mapUpstreamError` for the messages); the
+# Anthropic frame is the one Claude Code reported through a relay. Some relays
+# keep the `response.failed` event name but omit the duplicated JSON `type`
+# (Model Hub's `stream_wire.py` accepts that envelope). OpenAI's own capacity
+# shed sends `service_unavailable_error` in an error frame, which relays pass on.
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("adapter_type", "protocol", "body", "message", "kind"),
+    [
+        (
+            AnthropicAdapter,
+            "anthropic",
+            'data: {"type":"error","error":{"type":"upstream_error","message":"Upstream request failed"}}\n\n',
+            "Upstream request failed",
+            "server",
+        ),
+        (
+            OpenAIChatAdapter,
+            "openai_chat",
+            'event: error\ndata: {"error":{"type":"upstream_error",'
+            '"message":"Upstream authentication failed, please contact administrator"}}\n\n',
+            "Upstream authentication failed, please contact administrator",
+            "server",
+        ),
+        (
+            OpenAIChatAdapter,
+            "openai_chat",
+            'event: error\ndata: {"error":{"type":"upstream_error",'
+            '"message":"Upstream service overloaded, please retry later"}}\n\n',
+            "Upstream service overloaded, please retry later",
+            "overloaded",
+        ),
+        (
+            OpenAIResponsesAdapter,
+            "openai_responses",
+            'event: response.failed\ndata: {"type":"response.failed","sequence_number":0,'
+            '"response":{"id":"resp_0f3c","object":"response","created_at":1760140800,"model":"gpt-5",'
+            '"status":"failed","output":[],'
+            '"error":{"code":"upstream_error","message":"Upstream service temporarily unavailable"}}}\n\n',
+            "Upstream service temporarily unavailable",
+            "server",
+        ),
+        (
+            OpenAIResponsesAdapter,
+            "openai_responses",
+            'event: response.failed\ndata: {"response":{"error":{"code":"upstream_error",'
+            '"message":"response protection is unavailable"}}}\n\n',
+            "response protection is unavailable",
+            "server",
+        ),
+        (
+            OpenAIResponsesAdapter,
+            "openai_responses",
+            'event: response.failed\ndata: {"type":"response.failed","response":{"status":"failed",'
+            '"error":{"code":"service_unavailable_error","message":"Service temporarily unavailable"}}}\n\n',
+            "Service temporarily unavailable",
+            "server",
+        ),
+        (
+            OpenAIResponsesAdapter,
+            "openai_responses",
+            'event: error\ndata: {"type":"error","error":{"type":"service_unavailable_error",'
+            '"message":"Our servers are currently overloaded. Please try again later."}}\n\n',
+            "Our servers are currently overloaded. Please try again later.",
+            "overloaded",
+        ),
+    ],
+)
+async def test_a_relay_failure_frame_before_output_is_a_retryable_server_failure(
+    adapter_type: Any, protocol: str, body: str, message: str, kind: str,
+) -> None:
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        events = await _events(adapter_type(client), _request(protocol))
+
+    assert len(events) == 1
+    error = events[0]
+    assert isinstance(error, ProviderError)
+    assert (error.kind, error.retryable) == (kind, True)
+    assert error.message == message
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("adapter_type", "protocol", "body", "outcome", "stop_reason", "error_kind", "partial"),

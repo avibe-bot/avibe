@@ -262,13 +262,18 @@ def _classify_kind(
         "internal_server_error",
         "bad_gateway",
         "service_unavailable",
+        "service_unavailable_error",
+        # A Model Hub relay's own failure, its upstream's status folded away.
+        "upstream_error",
         "internal",
         "api_error",
         "unavailable",
         "deadline_exceeded",
         "aborted",
     }:
-        return "server"
+        # The same rule as a 5xx status: OpenAI's capacity shed is a
+        # service_unavailable_error that says it is overloaded.
+        return "overloaded" if "overloaded" in message.lower() else "server"
     if normalized_code in {"context_length_exceeded", "request_too_large"}:
         return "overflow"
     if is_overflow_message(message, status=status):
