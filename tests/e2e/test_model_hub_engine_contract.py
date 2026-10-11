@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import hashlib
 import json
 import os
@@ -23,6 +24,7 @@ import urllib.request
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+import psutil
 import pytest
 import yaml
 
@@ -351,33 +353,39 @@ def test_engine_management_surface_avibe_reads(tmp_path, monkeypatch) -> None:
     _write_evidence(tmp_path, evidence)
 
 
-def _external_address() -> str | None:
-    """Return this host's non-loopback address, without sending a packet."""
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+def _engine_listeners(adapter, port: int) -> set[str]:
+    """The addresses the test-owned engine itself listens on at ``port``.
+
+    The vendors' callback ports are fixed, so another process on this host may
+    hold one; reading the engine's own sockets never touches that process.
+    """
+    record = json.loads((adapter.state_store.root / "engine-process.json").read_text(encoding="utf-8"))
+    [engine] = record["engines"]
+    return {
+        connection.laddr.ip
+        for connection in psutil.Process(engine["pid"]).net_connections(kind="tcp")
+        if connection.status == psutil.CONN_LISTEN and connection.laddr.port == port
+    }
+
+
+def _port_free(port: int) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
         try:
-            probe.connect(("192.0.2.1", 9))
+            probe.bind(("127.0.0.1", port))
         except OSError:
-            return None
-        address = probe.getsockname()[0]
-    return None if address.startswith("127.") or address == "0.0.0.0" else address
-
-
-def _accepts(host: str, port: int) -> bool:
-    try:
-        with socket.create_connection((host, port), timeout=1.0):
-            return True
-    except OSError:
-        return False
+            return False
+    return True
 
 
 def test_oauth_callback_forwarder_is_loopback_only_and_optional(tmp_path, monkeypatch) -> None:
     """A redirect login relays its callback on loopback only, and starts without the relay.
 
-    Codex's forwarder port must accept on 127.0.0.1 and refuse on the host's
-    network address. With Claude's fixed port already taken, the login still
-    starts and waits for a pasted callback.
+    Codex's forwarder must listen on 127.0.0.1 and nowhere else. With Claude's
+    fixed port already taken, the login still starts and waits for a pasted
+    callback, and the engine holds no listener there.
     """
-    external = _external_address()
+    if not _port_free(1455):
+        pytest.skip("Codex's fixed OAuth callback port 1455 is in use on this host")
     evidence: dict = {}
     with _isolated_engine_adapter(tmp_path, monkeypatch) as adapter:
         client = EngineClient(adapter.supervisor.ensure_running())
@@ -385,21 +393,21 @@ def test_oauth_callback_forwarder_is_loopback_only_and_optional(tmp_path, monkey
         started = _call(client, "GET", "/codex-auth-url", query={"is_webui": "true"})
         assert started["ok"], started
         state = started["body"]["state"]
-        _await(lambda: _accepts("127.0.0.1", 1455), what="codex forwarder on loopback")
-        evidence["codex_forwarder"] = {
-            "loopback": True,
-            "external": _accepts(external, 1455) if external else None,
-        }
-        assert evidence["codex_forwarder"]["external"] in (False, None), evidence
+        # The forwarder listens before the engine answers the start.
+        evidence["codex_forwarder_listens_on"] = sorted(_engine_listeners(adapter, 1455))
+        assert evidence["codex_forwarder_listens_on"] == ["127.0.0.1"], evidence
         assert _call(client, "DELETE", "/oauth-session", query={"state": state})["ok"]
 
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as holder:
-            holder.bind(("127.0.0.1", 54545))
-            holder.listen()
+        with contextlib.ExitStack() as stack:
+            if _port_free(54545):
+                holder = stack.enter_context(socket.socket(socket.AF_INET, socket.SOCK_STREAM))
+                holder.bind(("127.0.0.1", 54545))
+                holder.listen()
             started = _call(client, "GET", "/anthropic-auth-url", query={"is_webui": "true"})
             evidence["anthropic_port_taken"] = {"ok": started["ok"], "status": started.get("status")}
             assert started["ok"], started
             assert started["body"].get("url")
+            assert _engine_listeners(adapter, 54545) == set()
             state = started["body"]["state"]
             waiting = _call(client, "GET", "/get-auth-status", query={"state": state})
             assert waiting["ok"] and waiting["body"].get("status") == "wait", waiting
