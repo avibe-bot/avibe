@@ -1018,6 +1018,8 @@ def test_runtime_status_reports_packaged_engine_manifest(tmp_path):
         "darwin-x64",
         "linux-amd64",
         "linux-arm64",
+        "windows-amd64",
+        "windows-arm64",
     ]
 
 
@@ -1774,7 +1776,7 @@ def test_runtime_install_rejects_unsupported_server_host_without_mutation(
 
     monkeypatch.setattr(
         "core.managed_runtime.runtime_platform_tag",
-        lambda: "win32-x64",
+        lambda: "linux-riscv64",
     )
     service = ModelHubService(
         store=MemoryStore(),
