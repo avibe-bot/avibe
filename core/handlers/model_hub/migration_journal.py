@@ -18,6 +18,7 @@ from typing import Any
 
 from config.atomic_io import write_atomic
 from config.v2_config import ModelHubConfig
+from core import private_fs
 
 
 class TakeoverStateError(RuntimeError):
@@ -32,6 +33,18 @@ def _read_regular(path: Path) -> bytes | None:
     if not stat.S_ISREG(mode):
         raise TakeoverStateError("native configuration is not a regular file")
     return path.read_bytes()
+
+
+def _same_mode(actual: int, recorded: int) -> bool:
+    """Whether a file's permission bits are the ones a takeover recorded for it.
+
+    Windows keeps only the read-only attribute, which ``stat`` reports as the
+    write bits of 0o666 or 0o444 and ``chmod`` sets from the owner write bit, so
+    a recorded mode holds there exactly as far as that bit goes.
+    """
+    if os.name == "nt":
+        return bool(actual & stat.S_IWRITE) == bool(recorded & stat.S_IWRITE)
+    return actual == recorded
 
 
 def _encoded(content: bytes | None) -> str | None:
@@ -160,7 +173,7 @@ class NativeFileEdit:
             if (
                 content != expected
                 or (current.st_dev, current.st_ino) != (entry.st_dev, entry.st_ino)
-                or (mode is not None and stat.S_IMODE(current.st_mode) != mode)
+                or (mode is not None and not _same_mode(stat.S_IMODE(current.st_mode), mode))
             ):
                 raise TakeoverStateError("native configuration changed")
             if sync:
@@ -217,17 +230,17 @@ class NativeTakeoverJournal:
         return frozenset(backends)
 
     def _prepare(self) -> None:
-        self.path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
-        mode = self.path.parent.lstat().st_mode
-        if not stat.S_ISDIR(mode) or stat.S_IMODE(mode) != 0o700:
-            raise TakeoverStateError("unsafe takeover directory")
+        try:
+            private_fs.ensure_private_directory(self.path.parent)
+        except private_fs.PrivatePathError as exc:
+            raise TakeoverStateError("unsafe takeover directory") from exc
 
     def load(self) -> dict[str, Any] | None:
         try:
             mode = self.path.lstat().st_mode
         except FileNotFoundError:
             return None
-        if not stat.S_ISREG(mode) or stat.S_IMODE(mode) != 0o600:
+        if not stat.S_ISREG(mode) or not private_fs.is_private(self.path, mode):
             raise TakeoverStateError("unsafe takeover journal")
         try:
             payload = json.loads(self.path.read_bytes())
