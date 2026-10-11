@@ -7,7 +7,7 @@ import json
 import logging
 import secrets
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Literal, Mapping, Optional
@@ -92,6 +92,9 @@ class AttemptIdentity:
     stripped_reasoning_efforts: tuple[str, ...] = ()
     declared_reasoning_efforts: tuple[str, ...] = ()
     origin: HopOrigin | None = None
+    # Whether this request forwarded model output. Not part of the attempt's identity or payload: it only
+    # lets a turn that ends while the attempt is pending say whether its stream had started.
+    streamed: bool = field(default=False, compare=False)
 
     def payload(self) -> dict:
         payload = {
@@ -891,6 +894,8 @@ class GatewayTurnTerminalizer:
 
     def mark_stream_started(self) -> None:
         self._stream_started = True
+        if self.turn_id is not None:
+            self._registry.mark_stream_started(self.turn_id, request_id=self._request_id)
 
     def update_recovery(self, snapshot: dict | None) -> None:
         if self._recovery_closed:
@@ -2252,8 +2257,21 @@ class TurnCorrelationRegistry:
 
         return any(key != request_id for key in trace.pending_attempts)
 
+    def mark_stream_started(self, turn_id: str, *, request_id: str = TURN_REQUEST) -> None:
+        """Record that this request's pending attempt forwarded model output."""
+
+        with self._lock:
+            trace = self._traces.get(turn_id)
+            identity = trace.pending_attempts.get(request_id) if trace is not None else None
+            if identity is not None and not identity.streamed:
+                trace.pending_attempts[request_id] = replace(identity, streamed=True)
+
     def fail_hub_attempt(self, turn_id: Optional[str]) -> None:
-        """Replace a gateway success rejected by the backend terminal result."""
+        """Replace a gateway success rejected by the backend terminal result.
+
+        A pending attempt that never forwarded model output was not rejected: the backend ended the turn
+        before the hub produced anything, so it is recorded as such, with the stream it actually had.
+        """
 
         normalized = str(turn_id or "").strip()
         if not normalized:
@@ -2268,11 +2286,10 @@ class TurnCorrelationRegistry:
                 return
             trace.outcome_frozen = True
             identity = trace.pending_attempt
-            payload = (
-                identity.payload()
-                if identity is not None and identity.channel == "hub"
-                else trace.served
-            )
+            if identity is not None and identity.channel == "hub":
+                payload, streamed = identity.payload(), identity.streamed
+            else:
+                payload, streamed = trace.served, True
             if payload is None or payload.get("channel") != "hub":
                 return
             # The backend rejected the turn's result, not one request's.
@@ -2280,8 +2297,8 @@ class TurnCorrelationRegistry:
             trace.served = None
             trace.terminal_error = {
                 **payload,
-                "reason": "protocol_error",
-                "stream_started": True,
+                "reason": "protocol_error" if streamed else "no_model_output",
+                "stream_started": streamed,
             }
 
     def finish_attempt(
@@ -2445,6 +2462,7 @@ class TurnCorrelationRegistry:
                     if trace.pending_attempt is not None
                     else served
                 )
+                interrupted_streamed = trace.pending_attempt.streamed if trace.pending_attempt is not None else True
                 if terminal_error is None and interrupted_attempt is None:
                     if not trace.failed_attempts:
                         return
@@ -2454,8 +2472,8 @@ class TurnCorrelationRegistry:
                     served = None
                     terminal_error = terminal_error or {
                         **interrupted_attempt,
-                        "reason": "stream_interrupted",
-                        "stream_started": True,
+                        "reason": "stream_interrupted" if interrupted_streamed else "no_model_output",
+                        "stream_started": interrupted_streamed,
                     }
             elif (
                 settled_by == SETTLED_BY_TERMINAL_RESULT

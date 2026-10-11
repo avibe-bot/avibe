@@ -1322,7 +1322,8 @@
           "protocol_error": "协议错误",
           "tool_incompatible": "工具不兼容",
           "stream_interrupted": "响应中断",
-          "engine_down": "模型网关不可用"
+          "engine_down": "模型网关不可用",
+          "no_model_output": "模型没有任何输出"
         },
         "origin": {
           "automatic": "自动",

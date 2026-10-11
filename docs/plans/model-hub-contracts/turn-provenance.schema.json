@@ -172,7 +172,8 @@
             "protocol_error",
             "tool_incompatible",
             "stream_interrupted",
-            "engine_down"
+            "engine_down",
+            "no_model_output"
           ]
         },
         "stream_started": { "type": "boolean" },

@@ -626,7 +626,7 @@ export type TurnProvenance = {
     source_id: string | null;
     configured_model_id: string | null;
     channel: SupplyChannel | null;
-    reason: 'invalid_parameter' | 'protocol_error' | 'tool_incompatible' | 'stream_interrupted' | 'engine_down';
+    reason: 'invalid_parameter' | 'protocol_error' | 'tool_incompatible' | 'stream_interrupted' | 'engine_down' | 'no_model_output';
     stream_started: boolean;
     http_status?: number | null;
     upstream_error_code?: string | null;

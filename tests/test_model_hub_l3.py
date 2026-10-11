@@ -5487,6 +5487,50 @@ def test_backend_terminal_failure_overrides_gateway_success(
     _assert_valid("turn-provenance.schema.json", record)
 
 
+@pytest.mark.parametrize("settled_by", [SETTLED_BY_TERMINAL_RESULT, SETTLED_BY_NO_TERMINAL_RESULT])
+@pytest.mark.parametrize("streamed", [False, True])
+def test_a_turn_that_ends_while_its_hub_attempt_is_pending_records_the_stream_it_had(
+    tmp_path: Path,
+    streamed: bool,
+    settled_by: str,
+) -> None:
+    """A backend gave up waiting (Vibey's silence bound) or ended without a result while its request was pending.
+
+    The record keeps whether that request had forwarded model output: an attempt that produced nothing is
+    ``no_model_output`` with no stream, never a protocol error or interruption of a stream that never began.
+    """
+
+    store = BoundedProvenanceStore(tmp_path / "pending-ended.json")
+    registry = TurnCorrelationRegistry(store)
+    token = registry.credentials("claude", "session:/repo", "turn_pending01")
+    live_token = _prepare_route(
+        registry,
+        token,
+        turn_id="turn_pending01",
+        requested="caller-live",
+        resolved="hub-live",
+    )
+    with registry.gateway_terminalizer(backend="claude", token=live_token) as request:
+        assert request.resolution_model("hub-live") == "caller-live"
+        request.begin_attempt(source_id="src_primary01", resolved_model_id="hub-live", channel="hub", via_mapping=True)
+        if streamed:
+            request.mark_stream_started()
+        if settled_by == SETTLED_BY_TERMINAL_RESULT:
+            # The backend's own failure arrives while the gateway still holds the request.
+            registry.fail_hub_attempt("turn_pending01")
+        registry.settle("turn_pending01", settled_by=settled_by, ts=NOW.isoformat())
+
+    record = store.get("turn_pending01")
+    assert record is not None
+    assert record["outcome"] == "failed_terminal"
+    ended = {SETTLED_BY_TERMINAL_RESULT: "protocol_error", SETTLED_BY_NO_TERMINAL_RESULT: "stream_interrupted"}
+    assert (record["terminal_error"]["reason"], record["terminal_error"]["stream_started"]) == (
+        ended[settled_by] if streamed else "no_model_output",
+        streamed,
+    )
+    _assert_valid("turn-provenance.schema.json", record)
+
+
 def test_lost_terminal_retains_completed_fallback_attempts(
     tmp_path: Path,
 ) -> None:

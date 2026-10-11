@@ -1322,7 +1322,8 @@
           "protocol_error": "Protocol error",
           "tool_incompatible": "Tool incompatible",
           "stream_interrupted": "Stream interrupted",
-          "engine_down": "Gateway unavailable"
+          "engine_down": "Gateway unavailable",
+          "no_model_output": "No model output"
         },
         "origin": {
           "automatic": "Automatic",
