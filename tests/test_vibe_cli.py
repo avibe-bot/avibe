@@ -986,6 +986,8 @@ def test_stop_process_preserves_pidfile_when_stop_fails(tmp_path, monkeypatch):
 
 
 def test_stop_pid_reports_failure_when_sigkill_does_not_terminate(monkeypatch):
+    # stop_pid logs its target's command line, which a literal pid reads off a real process.
+    pid = fake_pid()
     monkeypatch.setattr(runtime.os, "name", "posix", raising=False)
     monkeypatch.setattr(runtime, "pid_alive", lambda pid: True)
     monkeypatch.setattr(runtime, "write_shutdown_intent", lambda *args, **kwargs: None)
@@ -997,8 +999,8 @@ def test_stop_pid_reports_failure_when_sigkill_does_not_terminate(monkeypatch):
 
     monkeypatch.setattr(runtime.os, "kill", _kill)
 
-    assert runtime.stop_pid(12345, timeout=0) is False
-    assert calls == [(12345, signal.SIGTERM), (12345, signal.SIGKILL)]
+    assert runtime.stop_pid(pid, timeout=0) is False
+    assert calls == [(pid, signal.SIGTERM), (pid, signal.SIGKILL)]
 
 
 def test_cli_stop_process_reuses_runtime_impl(tmp_path, monkeypatch):
@@ -1097,13 +1099,6 @@ def test_cli_stop_fallback_stops_tool_commands_with_the_opencode_server(tmp_path
             server.kill()
         server.wait(timeout=5)
         server.stdout.close()
-
-
-def test_proc_cmdline_decode_preserves_argv_boundaries():
-    command = runtime._decode_proc_cmdline(b"/tmp/Vibe Tools/cloudflared\x00tunnel\x00run\x00")
-
-    assert command is not None
-    assert shlex.split(command)[0] == "/tmp/Vibe Tools/cloudflared"
 
 
 def test_cmd_restart_schedules_delayed_restart(monkeypatch, capsys):
@@ -1377,7 +1372,7 @@ def start_runtime(monkeypatch):
     monkeypatch.setattr(runtime, "pid_alive", lambda pid: pid in process_times)
     monkeypatch.setattr(runtime.psutil, "Process", fake_process)
     monkeypatch.setattr(runtime, "_pid_mismatches_service", lambda pid: False)
-    monkeypatch.setattr(runtime, "_pid_matches_ui_server", lambda pid: True)
+    monkeypatch.setattr(runtime, "_ui_server_identity", lambda pid: True)
     monkeypatch.setattr(runtime, "ui_server_compatible", lambda host, port: True)
     monkeypatch.setattr(runtime, "service_pid_recorded", lambda pid: True)
     monkeypatch.setattr(runtime, "wait_for_service_ready", lambda pid, timeout: pid)
@@ -1625,7 +1620,7 @@ def test_cmd_start_reuses_independent_ui_or_recovers_only_unhealthy_ui(monkeypat
     monkeypatch.setattr(runtime, "wait_for_service_ready", lambda pid, timeout: pid)
     monkeypatch.setattr(runtime, "effective_ui_bind_host", lambda cfg: "127.0.0.1")
     monkeypatch.setattr(runtime, "pid_alive", lambda pid: pid in {111, 222})
-    monkeypatch.setattr(runtime, "_pid_matches_ui_server", lambda pid: pid == 111)
+    monkeypatch.setattr(runtime, "_ui_server_identity", lambda pid: pid == 111)
     monkeypatch.setattr(runtime, "ui_server_healthy", lambda *args: ui_state == "healthy")
     # This tree adopts a UI through its identity-checked readiness probe; stub it
     # like the health probe so no real loopback listener is consulted.
@@ -4526,6 +4521,8 @@ def test_restart_parser_rejects_non_finite_delay_seconds(raw_value):
 
 
 def test_stop_pid_handles_process_lookup_race(monkeypatch):
+    # stop_pid logs its target's command line, which a literal pid reads off a real process.
+    pid = fake_pid()
     monkeypatch.setattr(runtime.os, "name", "posix", raising=False)
     monkeypatch.setattr(runtime, "pid_alive", lambda pid: True)
     monkeypatch.setattr(runtime, "write_shutdown_intent", lambda *args, **kwargs: None)
@@ -4535,10 +4532,12 @@ def test_stop_pid_handles_process_lookup_race(monkeypatch):
 
     monkeypatch.setattr(runtime.os, "kill", _kill)
 
-    assert runtime.stop_pid(12345) is False
+    assert runtime.stop_pid(pid) is False
 
 
 def test_stop_pid_handles_permission_error(monkeypatch):
+    # stop_pid logs its target's command line, which a literal pid reads off a real process.
+    pid = fake_pid()
     monkeypatch.setattr(runtime.os, "name", "posix", raising=False)
     monkeypatch.setattr(runtime, "pid_alive", lambda pid: True)
     monkeypatch.setattr(runtime, "write_shutdown_intent", lambda *args, **kwargs: None)
@@ -4548,10 +4547,12 @@ def test_stop_pid_handles_permission_error(monkeypatch):
 
     monkeypatch.setattr(runtime.os, "kill", _kill)
 
-    assert runtime.stop_pid(12345) is False
+    assert runtime.stop_pid(pid) is False
 
 
 def test_stop_pid_writes_shutdown_intent_before_sigterm(monkeypatch):
+    # stop_pid logs its target's command line, which a literal pid reads off a real process.
+    pid = fake_pid()
     monkeypatch.setattr(runtime.os, "name", "posix", raising=False)
     alive_results = iter([True, False])
     monkeypatch.setattr(runtime, "pid_alive", lambda pid: next(alive_results))
@@ -4564,11 +4565,11 @@ def test_stop_pid_writes_shutdown_intent_before_sigterm(monkeypatch):
     monkeypatch.setattr(runtime.time, "sleep", lambda _seconds: None)
     monkeypatch.setattr(runtime, "write_shutdown_intent", lambda *args, **kwargs: calls.append(("intent", args, kwargs)))
 
-    assert runtime.stop_pid(12345) is True
+    assert runtime.stop_pid(pid) is True
     assert calls[0][0] == "intent"
-    assert calls[0][1] == (12345,)
+    assert calls[0][1] == (pid,)
     assert calls[0][2]["signum"] == signal.SIGTERM
-    assert calls[1] == (12345, signal.SIGTERM)
+    assert calls[1] == (pid, signal.SIGTERM)
 
 
 def test_start_ui_reuses_existing_live_pid(tmp_path, monkeypatch):
@@ -4599,6 +4600,95 @@ def test_start_ui_reuses_existing_live_pid(tmp_path, monkeypatch):
     monkeypatch.setattr(runtime, "spawn_background", fail_spawn)
 
     assert runtime.start_ui("127.0.0.1", 5123) == 12345
+
+
+# A UI server as far as `ui_server_compatible` can tell: every path answers the
+# readiness the real one gives.
+_STUB_UI_SERVER = """
+import http.server, json
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        body = json.dumps({"schema_version": 1, "product": "avibe", "ready": True}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def log_message(self, *args):
+        pass
+server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+print(server.server_address[1], flush=True)
+server.serve_forever()
+"""
+
+
+def test_a_start_keeps_a_serving_ui_it_cannot_identify_so_a_stop_ends_it(tmp_path, monkeypatch):
+    """The UI a hard-killed service left serving is still stopped by the next stop.
+
+    After the service is killed outright the next start finds the recorded UI
+    serving. When its command line could not be read -- a setuid ``ps`` barred
+    by a macOS sandbox -- the start took it for another program, dropped its
+    record and started a replacement, which died on the port. The old UI kept
+    serving with nothing pointing at it, and ``vibe stop`` left it running.
+    """
+
+    monkeypatch.setattr(paths, "get_vibe_remote_dir", lambda: tmp_path / ".vibe_remote")
+    runtime.ensure_dirs()
+    ui = subprocess.Popen([sys.executable, "-c", _STUB_UI_SERVER], stdout=subprocess.PIPE, text=True)
+    try:
+        port = int(ui.stdout.readline())
+        paths.get_runtime_ui_pid_path().write_text(str(ui.pid), encoding="utf-8")
+        real_command = runtime.get_process_command
+        monkeypatch.setattr(runtime, "get_process_command", lambda pid: None if pid == ui.pid else real_command(pid))
+        replacements = []
+
+        def die_on_the_port(args, pid_path, *_args, **_kwargs):
+            replacements.append(args)
+            pid_path.write_text(str(fake_pid()), encoding="utf-8")
+            return fake_pid()
+
+        monkeypatch.setattr(runtime, "spawn_background", die_on_the_port)
+        info = runtime.ProcessStartInfo()
+
+        started = runtime.start_ui("127.0.0.1", port, wait_for_ready=False, start_info=info)
+        runtime.stop_ui(stop_remote_access=False)
+
+        try:
+            ui.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            pytest.fail("the stop left running the UI the start could not identify")
+        assert replacements == []
+        assert started == ui.pid
+        assert (info.pid, info.reused) == (ui.pid, True)
+    finally:
+        if ui.poll() is None:
+            ui.kill()
+        ui.wait(timeout=10)
+        ui.stdout.close()
+
+
+def test_start_ui_replaces_an_unidentified_pid_when_no_ui_answers(tmp_path, monkeypatch):
+    monkeypatch.setattr(paths, "get_vibe_remote_dir", lambda: tmp_path / ".vibe_remote")
+    runtime.ensure_dirs()
+    paths.get_runtime_ui_pid_path().write_text("12345", encoding="utf-8")
+
+    monkeypatch.setattr(runtime, "pid_alive", lambda pid: pid == 12345)
+    monkeypatch.setattr(runtime, "ui_server_compatible", lambda host, port: False)
+    monkeypatch.setattr(runtime, "get_process_command", lambda pid: None)
+    monkeypatch.setattr(runtime, "wait_for_ui_server", lambda host, port: True)
+
+    def fail_stop(pid, timeout=5):
+        raise AssertionError(f"a pid that cannot be identified should not be stopped: {pid}")
+
+    def fake_spawn(args, pid_path, stdout_name, stderr_name, env=None):
+        pid_path.write_text("67890", encoding="utf-8")
+        return 67890
+
+    monkeypatch.setattr(runtime, "stop_pid", fail_stop)
+    monkeypatch.setattr(runtime, "spawn_background", fake_spawn)
+
+    assert runtime.start_ui("127.0.0.1", 5123) == 67890
+    assert paths.get_runtime_ui_pid_path().read_text(encoding="utf-8") == "67890"
 
 
 def test_start_ui_does_not_reuse_unrelated_pid_with_healthy_endpoint(tmp_path, monkeypatch):

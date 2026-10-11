@@ -664,53 +664,31 @@ def _terminate_process_windows(pid: int, timeout: float = 5) -> bool:
         return False
 
 
-# One shell that never answers must not be able to hold a `vibe stop` open.
-# This lookup names a single process for a log line or an identity check, so a
-# bound that costs it an unanswered question is cheaper than an unbounded wait
-# on a lifecycle path. The existing `except Exception: continue` already moves
-# on to the next shell, and TimeoutExpired arrives there.
-_WINDOWS_COMMAND_LOOKUP_TIMEOUT_SECONDS = 5.0
-
-
-def _get_process_command_windows(pid: int) -> str | None:
-    script = f'$p = Get-CimInstance Win32_Process -Filter "ProcessId = {pid}"; if ($p) {{ $p.CommandLine }}'
-    for shell in ("powershell", "pwsh"):
-        try:
-            result = subprocess.run(
-                [shell, "-NoProfile", "-Command", script],
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=_WINDOWS_COMMAND_LOOKUP_TIMEOUT_SECONDS,
-            )
-        except Exception:
-            continue
-        command = (result.stdout or "").strip()
-        if command:
-            return command
-    return None
-
-
-def _decode_proc_cmdline(raw: bytes) -> str | None:
-    argv = [part.decode("utf-8", "replace") for part in raw.split(b"\x00") if part]
-    return shlex.join(argv) if argv else None
-
-
 def get_process_command(pid: int) -> str | None:
+    """The command line ``pid`` runs, or None when it cannot be read.
+
+    psutil reads it in this process. A ``ps`` or PowerShell child per lookup
+    took seconds on Windows, and failed outright where a setuid ``ps`` cannot
+    run, as under a macOS sandbox: there a start could not tell the recorded
+    UI from another program and replaced it, orphaning the UI still serving.
+    Only another user's process, which psutil may not read on macOS, still
+    asks ``ps``; on Windows such a process reads as None.
+    """
+
     if not isinstance(pid, int) or pid <= 0:
         return None
-
-    if os.name == "nt":
-        return _get_process_command_windows(pid)
-
-    proc_cmdline = Path(f"/proc/{pid}/cmdline")
     try:
-        command = _decode_proc_cmdline(proc_cmdline.read_bytes())
-    except Exception:
-        command = None
-    if command:
-        return command
+        argv = psutil.Process(pid).cmdline()
+    except psutil.AccessDenied:
+        return None if os.name == "nt" else _get_process_command_from_ps(pid)
+    except psutil.Error:
+        return None
+    if not argv:
+        return None
+    return subprocess.list2cmdline(argv) if os.name == "nt" else shlex.join(argv)
 
+
+def _get_process_command_from_ps(pid: int) -> str | None:
     try:
         result = subprocess.run(
             ["ps", "-p", str(pid), "-o", "command="],
@@ -862,7 +840,7 @@ def _process_command_from_info(proc) -> str | None:
     """Name a scanned process from what psutil already collected, or not at all.
 
     This is asked for every process on the machine, so it has to be cheap. It
-    used to fall back to `get_process_command`, which on Windows launches
+    used to fall back to `get_process_command`, which on Windows then launched
     `powershell -Command Get-CimInstance ...` -- and a second `pwsh` when the
     first says nothing -- once per process. A per-process external shell inside
     a whole-machine walk is invisible on Linux, where that fallback is a /proc
@@ -2322,11 +2300,15 @@ def _is_ui_server_command(command: str) -> bool:
     return "vibe.ui_server" in command and "run_ui_server" in command
 
 
-def _pid_matches_ui_server(pid: int) -> bool:
+def _ui_server_identity(pid: int) -> bool | None:
+    """Whether ``pid`` runs the UI server; None when its command line cannot be read."""
+
     command = get_process_command(pid)
-    if not command:
-        return False
-    return _is_ui_server_command(command)
+    return _is_ui_server_command(command) if command else None
+
+
+def _pid_matches_ui_server(pid: int) -> bool:
+    return _ui_server_identity(pid) is True
 
 
 def ui_pid_file_points_to_running_ui(pid_path: Path | None = None) -> bool:
@@ -2345,8 +2327,7 @@ def recorded_ui_is_gone(pid_path: Path | None = None) -> bool:
     pid = _read_pid_file(pid_path or paths.get_runtime_ui_pid_path())
     if not pid or not pid_alive(pid):
         return True
-    command = get_process_command(pid)
-    return command is not None and not _is_ui_server_command(command)
+    return _ui_server_identity(pid) is False
 
 
 def resolve_localhost_family() -> str:
@@ -2435,7 +2416,17 @@ def start_ui(
             existing_pid = 0
         if existing_pid and pid_alive(existing_pid):
             is_ui_server = _claim_recorded_ui(existing_pid)
-            if is_ui_server and ui_server_compatible(host, port):
+            # One that cannot be identified is not gone either (see
+            # `recorded_ui_is_gone`): with a UI answering, it may be that UI,
+            # and a replacement would only die on the port, leaving the UI
+            # serving with no record for a stop to find.
+            if is_ui_server is not False and ui_server_compatible(host, port):
+                if is_ui_server is None:
+                    logger.warning(
+                        "Reusing UI pid=%s, whose command line cannot be read, because a UI answers on %s",
+                        existing_pid,
+                        ", ".join(_ui_health_urls(host, port)),
+                    )
                 if start_info is not None:
                     start_info.capture(existing_pid, reused=True)
                 return existing_pid
@@ -2456,6 +2447,12 @@ def start_ui(
                         existing_pid,
                     )
                     return None
+            elif is_ui_server is None:
+                logger.warning(
+                    "Replacing UI pid=%s, whose command line cannot be read, because no UI answers on %s",
+                    existing_pid,
+                    ", ".join(_ui_health_urls(host, port)),
+                )
             else:
                 logger.warning(
                     "Ignoring stale UI pid file pid=%s because it does not match the Vibe UI server",
@@ -2860,18 +2857,19 @@ def claim_ready_service(ready_pid: int, *, started_pid: int) -> None:
         claim_desktop_runtime_process(ready_pid, "service")
 
 
-def _claim_recorded_ui(pid: int) -> bool:
+def _claim_recorded_ui(pid: int) -> bool | None:
     """Whether the live ``pid`` the UI record names is a UI server a start may reuse or replace.
 
-    A record naming another program is stale. Under a desktop Runtime id a UI
-    server must be that Runtime's, and a pid whose command line cannot be read
-    is refused: nothing can tell whose it is.
+    A record naming another program is stale, and one whose command line
+    cannot be read is None. Under a desktop Runtime id a UI server must be
+    that Runtime's, and a pid whose command line cannot be read is refused:
+    nothing can tell whose it is.
     """
 
     from vibe.desktop_runtime import desktop_runtime_id
 
-    is_ui_server = _pid_matches_ui_server(pid)
-    if not is_ui_server and desktop_runtime_id() is not None and not get_process_command(pid):
+    is_ui_server = _ui_server_identity(pid)
+    if is_ui_server is None and desktop_runtime_id() is not None:
         raise DesktopRuntimeClaimRefused("ui", "identity_unavailable")
     if is_ui_server:
         claim_desktop_runtime_process(pid, "ui")

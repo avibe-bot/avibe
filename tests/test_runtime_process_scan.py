@@ -14,6 +14,7 @@ invisible. On Windows it was a ``powershell`` launch, and that is why
 
 import os
 import secrets
+import shlex
 import subprocess
 import sys
 import threading
@@ -84,29 +85,64 @@ def test_the_service_scan_starts_no_external_process_per_scanned_process(monkeyp
     )
 
 
-def test_the_windows_command_lookup_cannot_hang_its_caller(monkeypatch):
-    """The single-pid diagnostic lookup keeps its shell, but on a leash.
+def test_the_command_lookup_reads_a_live_process_without_starting_one(monkeypatch):
+    """The single-pid lookup reads the command line in this process.
 
-    Dropping it from the scan leaves it right for what it is actually for:
-    naming one specific process. It still runs on lifecycle paths such as
-    ``vibe stop``, though, so it must not be able to wait forever on a shell
-    that never answers.
+    It names one process for an identity check or a log line, on lifecycle
+    paths such as ``vibe start`` and ``vibe stop``. A ``powershell`` or ``ps``
+    child per lookup took seconds on Windows, and could not run at all where a
+    setuid ``ps`` is barred, as under a macOS sandbox. A path with a space must
+    stay one argument.
     """
 
-    calls = []
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", "/tmp/Vibe Tools/cloudflared"])
+    launched = []
+    try:
+        monkeypatch.setattr(runtime.subprocess, "run", lambda command, **kwargs: launched.append(command))
+        command = runtime.get_process_command(child.pid)
+    finally:
+        child.kill()
+        child.wait(timeout=10)
 
-    def record(command, **kwargs):
-        calls.append(kwargs)
-        return SimpleNamespace(stdout="", stderr="")
+    assert launched == []
+    assert command is not None
+    if os.name == "nt":
+        assert command.endswith(' "/tmp/Vibe Tools/cloudflared"'), command
+    else:
+        assert shlex.split(command)[-1] == "/tmp/Vibe Tools/cloudflared", command
 
-    monkeypatch.setattr(runtime.subprocess, "run", record)
 
-    runtime._get_process_command_windows(4321)
+def _deny_every_process(monkeypatch):
+    def denied(pid):
+        raise runtime.psutil.AccessDenied(pid)
 
-    assert calls, "the lookup never ran its shell, so this asserts nothing"
-    assert all(isinstance(call.get("timeout"), (int, float)) and call["timeout"] > 0 for call in calls), (
-        f"an unbounded external shell on a lifecycle path: {calls}"
+    monkeypatch.setattr(runtime.psutil, "Process", denied)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="only POSIX has a ps that reads what psutil may not")
+def test_another_users_process_is_still_read_through_ps(monkeypatch):
+    """On macOS psutil may not read another user's process; the setuid ``ps`` can."""
+
+    _deny_every_process(monkeypatch)
+    asked = []
+    monkeypatch.setattr(
+        runtime.subprocess,
+        "run",
+        lambda command, **kwargs: asked.append(command) or SimpleNamespace(stdout="/usr/sbin/someone-else --flag\n"),
     )
+
+    assert runtime.get_process_command(4321) == "/usr/sbin/someone-else --flag"
+    assert asked == [["ps", "-p", "4321", "-o", "command="]]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows has no other reader to ask")
+def test_on_windows_a_process_psutil_may_not_read_is_unread_without_a_shell(monkeypatch):
+    _deny_every_process(monkeypatch)
+    asked = []
+    monkeypatch.setattr(runtime.subprocess, "run", lambda command, **kwargs: asked.append(command))
+
+    assert runtime.get_process_command(4321) is None
+    assert asked == []
 
 
 @pytest.mark.skipif(os.name != "nt", reason="only a real Windows process table holds enough unreadable processes")
