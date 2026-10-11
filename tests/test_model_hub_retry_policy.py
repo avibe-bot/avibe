@@ -480,6 +480,8 @@ def test_real_gateway_has_one_half_open_owner_and_interruptible_waiters(tmp_path
                             "type": RECOVERY_EXHAUSTED_CODE,
                             "code": RECOVERY_EXHAUSTED_CODE,
                             "message": RECOVERY_EXHAUSTED_MESSAGE,
+                            # The failure this request waited out names the ending, not the request.
+                            "cause": "network",
                         },
                     }
                     assert len(calls) == 1 and not owner.done()

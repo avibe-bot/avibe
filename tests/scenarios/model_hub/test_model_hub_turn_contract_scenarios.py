@@ -390,6 +390,7 @@ def test_mh_turn_takeover_is_silent_and_provenance_names_the_serving_hop(tmp_pat
             "type": "model_hub_recovery_exhausted",
             "code": "model_hub_recovery_exhausted",
             "message": "Automatic recovery has ended. Try again or choose another model.",
+            "cause": "quota_exhausted",
         },
     }
     assert exhausted_result["provenance"]["outcome"] == "exhausted"

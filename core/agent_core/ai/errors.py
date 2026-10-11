@@ -142,6 +142,17 @@ def classify_error(
     effective_code = code
     if not effective_code or _is_generic_code(effective_code):
         effective_code = extracted_code or effective_code
+    if effective_code == _MODEL_HUB_RECOVERY_EXHAUSTED:
+        # Model Hub already retried within its recovery window and gave up: never retry again, and name the failure
+        # it waited out rather than the request (the generic 4xx rule below would say the request was rejected).
+        return ProviderError(
+            kind=_RECOVERY_CAUSE_KINDS.get(_recovery_cause(body) or "", "server"),
+            message=message,
+            retryable=False,
+            retry_after_s=retry_after,
+            status=status,
+            partial=partial,
+        )
     kind = _classify_kind(
         status=status,
         message=f"{body}\n{message}",
@@ -207,6 +218,27 @@ def is_overflow_message(message: str, *, status: int | None = None) -> bool:
     if any(pattern.search(message) for pattern in _NON_OVERFLOW_RE):
         return False
     return any(pattern.search(message) for pattern in _OVERFLOW_RE)
+
+
+# Model Hub's ending after its recovery window (``core/handlers/model_hub/retry.py``) and the source settlement reasons
+# its envelope's ``cause`` carries (``core/handlers/model_hub/classification.py``), as kinds.
+_MODEL_HUB_RECOVERY_EXHAUSTED = "model_hub_recovery_exhausted"
+_RECOVERY_CAUSE_KINDS = {
+    "server_error": "server",
+    "network": "network",
+    "rate_limited": "rate_limit",
+    "quota_exhausted": "rate_limit",
+}
+
+
+def _recovery_cause(body: str) -> str | None:
+    try:
+        value = json.loads(body)
+    except (TypeError, ValueError):
+        return None
+    error = value.get("error") if isinstance(value, Mapping) else None
+    cause = error.get("cause") if isinstance(error, Mapping) else None
+    return cause if isinstance(cause, str) else None
 
 
 def _classify_kind(
