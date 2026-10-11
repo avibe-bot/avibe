@@ -8855,12 +8855,12 @@ class ModelHubService:
             facts = turn_outcome.supply_facts
             if facts is None:
                 raise AssertionError("no-candidate outcome must carry supply facts")
+            expired = recovery_request is not None and recovery_request.expired
             raise ModelHubError(
-                RECOVERY_EXHAUSTED_CODE
-                if recovery_request is not None and recovery_request.expired
-                else "mapping_target_unavailable",
+                RECOVERY_EXHAUSTED_CODE if expired else "mapping_target_unavailable",
                 status=409,
                 supply_state=facts.supply_state,
+                data=_recovery_cause(recovery_request.reason) if expired else None,
                 blockers=exact_hop_blockers(projection_resolution),
                 turn_outcome=turn_outcome,
             )
@@ -9215,6 +9215,11 @@ class ModelHubService:
             RECOVERY_EXHAUSTED_CODE if window_closed else "mapping_target_unavailable",
             status=503,
             supply_state=final_facts.supply_state,
+            data=(
+                _recovery_cause(failed_reason or (recovery_request.reason if recovery_request is not None else None))
+                if window_closed
+                else None
+            ),
             blockers=exact_hop_blockers(final_resolution),
             turn_outcome=turn_outcome,
         )
@@ -9254,7 +9259,7 @@ class ModelHubService:
                         raise
                     pending.start()
                     if pending.expired:
-                        raise self._recovery_exhausted(exc) from exc
+                        raise self._recovery_exhausted(exc, pending.reason) from exc
                     config = self.store.load()
                     resolution = self._invocation_resolution(
                         config, kwargs["backend"], kwargs["model_id"], supply_channel,
@@ -9278,32 +9283,40 @@ class ModelHubService:
                     ]
                     selected = min(waits, key=lambda item: item[0]) if waits else None
                     delay = selected[0] if selected is not None else pending.remaining
-                    if delay >= pending.remaining:
-                        # Another admitted owner can still wake this request early.
-                        if not any(hop.recovery == "in_flight" for hop in waitable):
-                            raise self._recovery_exhausted(exc) from exc
-                        delay = pending.remaining
                     hop = selected[1] if selected is not None else waitable[0]
                     pending.source_id = hop.source_id
                     annotation = annotations.get(hop.source_id)
                     pending.reason = annotation.reason if annotation else pending.reason
+                    if delay >= pending.remaining:
+                        # Another admitted owner can still wake this request early.
+                        if not any(hop.recovery == "in_flight" for hop in waitable):
+                            raise self._recovery_exhausted(exc, pending.reason) from exc
+                        delay = pending.remaining
                     changed = self.recovery.changed
                     pending.publish("waiting", next_eligible_at=hop.retry_at)
                     await self.recovery.wait(delay, changed)
                     if pending.expired:
                         # Preserve this request's admission-expiry cause even
                         # if an owner succeeded or configuration changed on wake.
-                        raise self._recovery_exhausted(exc) from exc
+                        raise self._recovery_exhausted(exc, pending.reason) from exc
         finally:
             pending.clear()
 
     @staticmethod
-    def _recovery_exhausted(error: ModelHubError) -> ModelHubError:
+    def _recovery_exhausted(error: ModelHubError, reason: str | None) -> ModelHubError:
+        # The walk's own failure is the most recent one; otherwise the reason the request was waiting out.
         return ModelHubError(
             RECOVERY_EXHAUSTED_CODE, status=error.status,
             supply_state=error.supply_state, blockers=error.blockers,
+            data=error.data if error.code == RECOVERY_EXHAUSTED_CODE and error.data else _recovery_cause(reason),
             turn_outcome=error.turn_outcome,
         )
+
+
+def _recovery_cause(reason: str | None) -> dict[str, str] | None:
+    """The failure an exhausted recovery waited out, for the caller to classify (``classification.py`` reasons)."""
+
+    return {"cause": reason} if reason else None
 
 
 def create_default_service(
