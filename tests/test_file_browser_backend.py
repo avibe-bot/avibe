@@ -2506,6 +2506,7 @@ def test_startup_reconcile_skips_tmux_when_env_set(monkeypatch):
     monkeypatch.setattr(api, "ensure_askill_installed", lambda force=False: {"ok": True, "installed": True})
     monkeypatch.setattr(api, "ensure_avault_installed", lambda force=False: {"ok": True, "installed": True})
     monkeypatch.setenv("VIBE_UI_ENABLE_TERMINAL", "1")
+    monkeypatch.setenv("VIBE_RIPGREP_OFFLINE", "1")
 
     import core.show_runtime as srt_mod
     import core.tmux_runtime as tmux_mod
