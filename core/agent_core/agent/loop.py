@@ -696,6 +696,9 @@ class Agent:
             retries = 0
             started = time.monotonic()
             retry_error: Optional[ProviderError] = None
+            # A response that dropped after thinking alone is retried once per request (C-2 ``provider.md``): some
+            # prompts drop at the same point every time.
+            thinking_retried = False
             while True:
                 self._scope.check()
                 if retry_error is not None and time.monotonic() - started >= self.retry.max_elapsed_s:
@@ -760,6 +763,10 @@ class Agent:
                         if isinstance(terminal, ProviderError) and not relieve
                         else None
                     )
+                    if delay is not None and terminal.after_thinking:
+                        if thinking_retried:
+                            delay = None
+                        thinking_retried = True
                     if delay is None and not relieve:
                         # Admitted here; the caller commits it inside the scope,
                         # BEFORE aclose. Never retry an accepted terminal.

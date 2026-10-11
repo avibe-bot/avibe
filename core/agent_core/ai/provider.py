@@ -21,12 +21,21 @@ ErrorKind = Literal[
     "network",
     "stalled",
     "server",
+    # The provider's stream ended after output without a terminal (Model Hub's ``modelHub.errors.stream_interrupted``).
+    "interrupted",
     "auth",
     "invalid_request",
     "aborted",
     "unknown",
 ]
-RETRYABLE_ERROR_KINDS: frozenset[str] = frozenset({"rate_limit", "overloaded", "network", "stalled", "server"})
+RETRYABLE_ERROR_KINDS: frozenset[str] = frozenset(
+    {"rate_limit", "overloaded", "network", "stalled", "server", "interrupted"}
+)
+#: A response that dropped after streaming thinking alone is retried once for these (owner decision, 2026-10-11):
+#: a transient failure, or one nothing classified. Never for a rate limit, an overflow, auth, or a rejected request.
+THINKING_DROP_RETRY_KINDS: frozenset[str] = frozenset(
+    {"overloaded", "network", "stalled", "server", "interrupted", "unknown"}
+)
 
 
 @dataclass(frozen=True)
@@ -116,6 +125,9 @@ class ProviderError:
     retry_after_s: Optional[float] = None
     status: Optional[int] = None
     partial: Optional[AssistantMessage] = None
+    #: The response streamed thinking and nothing else before this error (``THINKING_DROP_RETRY_KINDS``): it is
+    #: ``retryable``, and the loop retries it at most once per request (``provider.md``).
+    after_thinking: bool = False
 
 
 ProviderEvent = Union[TextDelta, ThinkingDelta, ToolCallStart, ToolCallDelta, BlockEnd, Done, ProviderError]

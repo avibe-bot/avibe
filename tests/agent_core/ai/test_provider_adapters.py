@@ -4461,6 +4461,24 @@ async def test_provider_error_envelope_is_classified_identically_from_every_sour
             "Our servers are currently overloaded. Please try again later.",
             "overloaded",
         ),
+        # CLIProxyAPI, Model Hub's engine, byte for byte: its Claude type for an upstream 408 or 504, and its
+        # Responses class for an upstream stream that closed before its terminal.
+        (
+            AnthropicAdapter,
+            "anthropic",
+            'event: error\ndata: {"type":"error","error":{"type":"timeout_error","message":"upstream timeout"}}\n\n',
+            "upstream timeout",
+            "server",
+        ),
+        (
+            OpenAIResponsesAdapter,
+            "openai_responses",
+            '\nevent: error\ndata: {"type":"error","error":{"code":"request_timeout","message":"stream error: stream '
+            'disconnected before completion: stream closed before response.completed","param":null,'
+            '"type":"server_error"},"sequence_number":1}\n\n',
+            "stream error: stream disconnected before completion: stream closed before response.completed",
+            "server",
+        ),
     ],
 )
 async def test_a_relay_failure_frame_before_output_is_a_retryable_server_failure(
@@ -4514,9 +4532,94 @@ async def test_a_failed_response_keeps_its_error_on_the_partial_it_commits(messa
         events = await _events(OpenAIResponsesAdapter(client), _request("openai_responses"))
 
     error = events[-1]
-    assert isinstance(error, ProviderError) and error.kind == "unknown"
+    assert isinstance(error, ProviderError) and error.kind == "interrupted"
     assert error.partial is not None and error.partial.stop_reason == "error"
     assert error.partial.error_message == kept
+
+
+# Model Hub's frame for an upstream stream that ended after output without a terminal: its code is the gateway's
+# copy key, its message localized copy (``stream_wire.py`` renders the Responses and Chat frames).
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("adapter_type", "protocol", "frame"),
+    [
+        (
+            OpenAIResponsesAdapter,
+            "openai_responses",
+            {"type": "error", "code": "modelHub.errors.stream_interrupted", "message": "供应商响应已中断。", "param": None},
+        ),
+        (
+            OpenAIChatAdapter,
+            "openai_chat",
+            {
+                "object": "chat.completion.chunk",
+                "type": "error",
+                "error": {"type": "server_error", "code": "modelHub.errors.stream_interrupted", "message": "中断"},
+                "choices": [],
+            },
+        ),
+    ],
+)
+async def test_model_hubs_stream_interrupted_frame_is_the_interrupted_kind(adapter_type, protocol, frame) -> None:
+    body = f"event: error\ndata: {json.dumps(frame, ensure_ascii=False)}\n\n"
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        events = await _events(adapter_type(client), _request(protocol))
+
+    error = events[-1]
+    assert isinstance(error, ProviderError)
+    assert (error.kind, error.retryable) == ("interrupted", True)
+
+
+# CLIProxyAPI nests the class under `error`; OpenAI's reference carries it at the root.
+_SERVER_ERROR_FRAMES = {
+    "cpa-nested": 'data: {"type":"error","error":{"code":"request_timeout","message":"stream error: stream '
+    'disconnected before completion: stream closed before response.completed","param":null,"type":"server_error"},'
+    '"sequence_number":3}\n\n',
+    "root": 'data: {"type":"error","code":"server_error","message":"failed"}\n\n',
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("frame", sorted(_SERVER_ERROR_FRAMES))
+@pytest.mark.parametrize(
+    ("streamed", "flagged"),
+    [
+        ("", False),
+        ('data: {"type":"response.reasoning_summary_text.delta","output_index":0,"delta":"plan"}\n\n', True),
+        (
+            'data: {"type":"response.reasoning_summary_text.delta","output_index":0,"delta":"plan"}\n\n'
+            'data: {"type":"response.output_item.added","output_index":1,"item":{"type":"message","id":"msg_1"}}\n\n'
+            'data: {"type":"response.output_text.delta","output_index":1,"delta":"Hi"}\n\n',
+            False,
+        ),
+    ],
+    ids=["nothing", "thinking-alone", "thinking-then-text"],
+)
+async def test_only_a_drop_after_thinking_alone_is_marked_after_thinking(
+    streamed: str, flagged: bool, frame: str
+) -> None:
+    """C-2: ``after_thinking`` marks a transient drop after thinking alone, which is then ``retryable`` once."""
+    body = (
+        'data: {"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":"rs_1"}}\n\n'
+        + streamed
+        + _SERVER_ERROR_FRAMES[frame]
+    )
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        events = await _events(OpenAIResponsesAdapter(client), _request("openai_responses"))
+
+    error = events[-1]
+    assert isinstance(error, ProviderError) and error.kind == "server"
+    assert error.after_thinking is flagged
+    # Before any output a server error was always retryable; after text it never is.
+    assert error.retryable is (flagged or not streamed)
 
 
 @pytest.mark.asyncio

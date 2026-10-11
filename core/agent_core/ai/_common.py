@@ -37,6 +37,7 @@ from core.agent_core.messages import (
 )
 from core.agent_core.ai.provider import (
     RETRYABLE_ERROR_KINDS,
+    THINKING_DROP_RETRY_KINDS,
     BlockEnd,
     Done,
     MediaLoader,
@@ -165,6 +166,8 @@ class StreamAssembler:
         self.usage: Any = None
         self._terminal_seen = False
         self._emitted_output = False
+        # Text or a tool call: output past which a dropped response is never retried.
+        self._emitted_visible = False
         self._closed_indices: set[int] = set()
         self._slots: dict[tuple[str, Hashable], int] = {}
         self._block_kinds: dict[Hashable, str] = {}
@@ -322,6 +325,7 @@ class StreamAssembler:
         buffer.write(value)
         self._visible_blocks.add(index)
         self._emitted_output = True
+        self._emitted_visible = True
         return TextDelta(index=index, delta=value)
 
     def ensure_text_slot(self, key: Hashable) -> int:
@@ -341,6 +345,7 @@ class StreamAssembler:
         self._text_buffers[index] = _string_buffer(value)
         self._visible_blocks.add(index)
         self._emitted_output = True
+        self._emitted_visible = True
         suffix = value[len(previous) :] if value.startswith(previous) else ""
         return TextDelta(index=index, delta=suffix) if suffix else None
 
@@ -610,6 +615,7 @@ class StreamAssembler:
             )
             self._visible_blocks.add(state["content_index"])
             self._emitted_output = True
+            self._emitted_visible = True
             self._account_output(BLOCK_SLOT_OVERHEAD_BYTES)
             self._account_tool_identity_block(state)
             if native:
@@ -730,6 +736,7 @@ class StreamAssembler:
         if not value or state is None or "content_index" not in state:
             return None
         self._emitted_output = True
+        self._emitted_visible = True
         return ToolCallDelta(index=state["content_index"], arguments_delta=value)
 
     def tool_arguments_snapshot(self, key: Hashable, value: str) -> ToolCallDelta | None:
@@ -756,6 +763,7 @@ class StreamAssembler:
         if not suffix:
             return None
         self._emitted_output = True
+        self._emitted_visible = True
         return ToolCallDelta(index=state["content_index"], arguments_delta=suffix)
 
     def pending_tool_arguments(self, key: Hashable) -> ToolCallDelta | None:
@@ -1035,9 +1043,15 @@ class StreamAssembler:
         if self._terminal_seen:
             return None
         if isinstance(event, ProviderError):
-            event = _bounded_partial_error(self._sanitize_error(_partial_with_error(event)))
+            event = _bounded_partial_error(self._sanitize_error(_partial_with_error(self._after_thinking(event))))
         self._terminal_seen = True
         return event
+
+    def _after_thinking(self, error: ProviderError) -> ProviderError:
+        """A response that dropped after streaming thinking alone may be retried once (``provider.md``)."""
+        if self._emitted_output and not self._emitted_visible and error.kind in THINKING_DROP_RETRY_KINDS:
+            return replace(error, retryable=True, after_thinking=True)
+        return error
 
     def _sanitize_error(self, error: ProviderError) -> ProviderError:
         return redact_provider_error(

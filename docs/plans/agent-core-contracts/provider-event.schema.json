@@ -40,9 +40,10 @@
       "additionalProperties": false,
       "properties": {
         "type": { "const": "error" },
-        "kind": { "enum": ["overflow", "rate_limit", "overloaded", "network", "stalled", "server", "auth", "invalid_request", "aborted", "unknown"] },
+        "kind": { "enum": ["overflow", "rate_limit", "overloaded", "network", "stalled", "server", "interrupted", "auth", "invalid_request", "aborted", "unknown"] },
         "retryable": { "type": "boolean" },
         "retry_after_s": { "type": "number", "minimum": 0 },
+        "after_thinking": { "type": "boolean", "description": "The response streamed thinking and nothing else before this transient or unknown error; the loop retries it at most once per request (provider.md)." },
         "status": { "type": "integer", "description": "HTTP status, when there was one." },
         "message": { "type": "string", "description": "Provider message with credentials removed." },
         "partial": { "$ref": "message.schema.json#/definitions/AssistantMessage", "description": "What streamed before the error, with stop_reason `error` or `aborted`; never replayed as a valid response." }
