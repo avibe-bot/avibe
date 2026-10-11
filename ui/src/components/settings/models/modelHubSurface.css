@@ -1806,7 +1806,6 @@
   background: var(--model-hub-wash-0a);
   color: var(--muted);
 }
-.model-hub-direct-tile { background: var(--model-hub-wash-0a); color: var(--muted); }
 .model-hub-direct-switch { border-color: var(--model-hub-wash-24); background: var(--model-hub-wash-0a); }
 
 .model-hub-direct-empty {

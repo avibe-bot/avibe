@@ -2,7 +2,6 @@
 import { cleanup, render } from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
 import { getBackendUiMeta } from '@/lib/agentBackends';
-import { backendVisual } from '../settings/models/vendorMeta';
 import { BACKEND_BRAND_MARKS } from './backendBrandMarks';
 import { BackendAvatar, BackendIcon } from './BackendIcon';
 
@@ -20,8 +19,6 @@ describe('Vibey mark', () => {
     expect(markPath(render(<Avatar size={16} />).container)).toBe(vibey);
     expect(markPath(render(<BackendAvatar backend="vibey" />).container)).toBe(vibey);
     expect(markPath(render(<BackendIcon backend="vibey" variant="brand" size={28} />).container)).toBe(vibey);
-    // The Models route card reads the same table.
-    expect(backendVisual('vibey').Icon).toBe(Icon);
   });
 
   it('follows the text color so it reads on dark and light themes', () => {

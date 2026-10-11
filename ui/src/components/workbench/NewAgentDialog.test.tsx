@@ -99,10 +99,10 @@ afterEach(() => {
 describe('NewAgentDialog', () => {
   // The picker used a second label table, so its Claude label disagreed with
   // Settings and Model Hub. All backend choices share the catalog brands, and
-  // they follow catalog order, the built-in Vibey first.
-  it('uses the catalog brand names and order for every backend choice', () => {
+  // they follow the shared display order, the built-in Vibey first.
+  it('uses the catalog brand names and shared display order for every backend choice', () => {
     renderDialog();
-    const labels = ['Vibey', 'OpenCode', 'Claude Code', 'Codex'];
+    const labels = ['Vibey', 'Claude Code', 'Codex', 'OpenCode'];
     for (const label of labels) {
       expect(screen.getByRole('button', { name: new RegExp(label) }).textContent).toContain(label);
     }

@@ -304,6 +304,27 @@ afterEach(() => {
 });
 
 describe('SettingsModelsPage surface branches', () => {
+  // DirectHome is a separate render path from gateway cards; its neutral tile
+  // and API order previously hid backend identity even when the cards were right.
+  it('keeps direct-only backends in Settings order and colors', async () => {
+    renderPage([], [directAgent('opencode'), directAgent('codex'), directAgent('claude')]);
+    await screen.findByText('Claude Code');
+    const rows = [...document.querySelectorAll('.model-hub-direct-row--backend')];
+    expect.soft(rows.map((row) => row.querySelector('.model-hub-direct-backend-name')?.textContent))
+      .toEqual(['Claude Code', 'Codex', 'OpenCode']);
+    for (const [label, tile, ink, glyph] of [
+      ['Claude Code', 'bg-cyan-soft', 'text-cyan-ink', 'lucide-sparkles'],
+      ['Codex', 'bg-gold', 'text-gold-foreground', 'lucide-bot'],
+      ['OpenCode', 'bg-violet-soft', 'text-violet-ink', 'lucide-terminal'],
+    ]) {
+      const row = screen.getByText(label).closest('.model-hub-direct-row--backend')!;
+      const svg = row.querySelector('svg')!;
+      expect.soft(svg.parentElement?.classList.contains(tile)).toBe(true);
+      expect.soft(svg.classList.contains(ink)).toBe(true);
+      expect(svg.classList.contains(glyph)).toBe(true);
+    }
+  });
+
   it.each([
     ['right away', false],
     ['after a refused takeover', true],

@@ -101,7 +101,13 @@ export const AGENT_BACKENDS = BACKEND_CATALOG.map((backend) => ({
   settingsRoute: backend.settings_route,
   descriptionKey: backend.description_key,
   capabilities: backend.capabilities,
-}));
+})).sort((left, right) => Number(right.builtin) - Number(left.builtin) || left.nativeOrder - right.nativeOrder);
+
+/** Display only: built-in first, then the native setup order, with unknowns last. */
+export function backendDisplayOrder(id: BackendId): number {
+  const index = AGENT_BACKENDS.findIndex((backend) => backend.id === id);
+  return index < 0 ? AGENT_BACKENDS.length : index;
+}
 
 export const NATIVE_CLI_BACKENDS = BACKEND_CATALOG
   .filter((backend): backend is Extract<BackendDescriptor, { capabilities: { supports_cli: true } }> =>

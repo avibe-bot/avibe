@@ -72,9 +72,8 @@ import { resumeGatewayAdoption } from './gatewayAdoption';
 import { groupMigrationCandidates } from './migrationGrouping';
 import { SUBSCRIPTION_MENU_ROWS } from './subscriptionOptions';
 import { VendorGlyph } from './vendorGlyph';
-import { backendVisual } from './vendorMeta';
 import { USAGE_DEFAULT_WINDOW, type AgentBackend, type AgentMode, type AgentSupply, type ResolutionEvent, type QuotaSummary, type RuntimeDependency, type Source, type UsageReport, type UsageWindowKey } from './types';
-import { getBackendUiMeta, isNativeCliBackend, type NativeCliBackend } from '@/lib/agentBackends';
+import { backendDisplayOrder, getBackendUiMeta, isNativeCliBackend, type NativeCliBackend } from '@/lib/agentBackends';
 
 const CHAIN_READ_CONCURRENCY = 6;
 const EVENT_PAGE = 20;
@@ -364,15 +363,15 @@ const DirectHome: React.FC<{
             <div><h2 className="text-[16px] font-bold text-foreground">{t('settings.models.direct.card.current')}</h2><p className="mt-1 text-[11.5px] text-muted">{t('settings.models.direct.card.current.sub')}</p></div>
           </div>
           <div className="model-hub-direct-content flex flex-col">
-            {agents.map((agent) => {
-              const { Icon } = backendVisual(agent.backend);
+            {[...agents].sort((left, right) => backendDisplayOrder(left.backend) - backendDisplayOrder(right.backend)).map((agent) => {
+              const { Icon, tileCls, iconCls, label } = getBackendUiMeta(agent.backend);
               const switchFailed = switchFailures.has(agent.backend);
               return (
                 <div key={agent.backend} className="model-hub-direct-row model-hub-direct-row--backend flex flex-wrap items-center gap-2.5 bg-background px-3 sm:flex-nowrap">
-                  <span className="model-hub-direct-tile flex size-[34px] shrink-0 items-center justify-center rounded-[9px]"><Icon className="size-[17px]" /></span>
+                  <span className={cn('flex size-[34px] shrink-0 items-center justify-center rounded-[9px]', tileCls)}><Icon className={cn('size-[17px]', iconCls)} /></span>
                   <span className="model-hub-direct-backend-copy">
                     <span className="flex min-w-0 items-center gap-1.5">
-                      <span className="model-hub-direct-backend-name truncate text-foreground">{getBackendUiMeta(agent.backend).label}</span>
+                      <span className="model-hub-direct-backend-name truncate text-foreground">{label}</span>
                       <span className="model-hub-pill model-hub-direct-kind-pill border">{t('settings.models.direct.pill.direct')}</span>
                     </span>
                     {switchFailed

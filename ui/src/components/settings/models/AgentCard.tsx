@@ -14,8 +14,7 @@ import { foldRegionRead, regionFailed } from './regionRead';
 import { gatewayRouteStatus } from './supply';
 import { agentHasLiveChainProjection, type FreshRuntimeProjection } from './runtimeLifecycle';
 import { currentChainLink, isTakeoverChain } from './takeover';
-import { ACCENT_ICON, ACCENT_TILE, backendVisual } from './vendorMeta';
-import { getBackendUiMeta } from '@/lib/agentBackends';
+import { backendDisplayOrder, getBackendUiMeta } from '@/lib/agentBackends';
 import type { AgentSupply, Source } from './types';
 
 const sourceName = (sources: Source[], id: string): string => sources.find((source) => source.id === id)?.display_name ?? id;
@@ -200,7 +199,7 @@ const AgentModelCard: React.FC<{
   onOpenAgent?: (name: string) => void;
 }> = ({ agent, runtime, sources, chains, pending, connecting, switchFailed, activeOriginHelp, onOriginHelpChange, onConnectHub, onSwitchDirect, onOpenModels, onOpenOrder, onOpenRoute, onProbeSettled, onOpenAgent }) => {
   const { t } = useTranslation();
-  const { Icon, accent } = backendVisual(agent.backend);
+  const { Icon, tileCls, iconCls, label } = getBackendUiMeta(agent.backend);
   const [expanded, setExpanded] = React.useState(false);
   const [modeMenuOpen, setModeMenuOpen] = React.useState(false);
   const allModels = React.useMemo(() => catalogModelIds(agent), [agent]);
@@ -261,8 +260,8 @@ const AgentModelCard: React.FC<{
       >
         <div className="model-hub-agent-head-summary flex min-w-0 items-center justify-between gap-2">
           <div className="flex min-w-0 items-center gap-[9px]">
-            <span className={cn('flex size-[30px] shrink-0 items-center justify-center rounded-[9px]', ACCENT_TILE[accent])}><Icon className={cn('size-[15px]', ACCENT_ICON[accent])} /></span>
-            <h2 className="truncate text-[14px] font-bold leading-[17px] text-foreground">{getBackendUiMeta(agent.backend).label}</h2>
+            <span className={cn('flex size-[30px] shrink-0 items-center justify-center rounded-[9px]', tileCls)}><Icon className={cn('size-[15px]', iconCls)} /></span>
+            <h2 className="truncate text-[14px] font-bold leading-[17px] text-foreground">{label}</h2>
           </div>
           {agent.mode === 'hub' && (
             <ResponsiveMenu
@@ -360,5 +359,6 @@ export const AgentCard: React.FC<{
     // Late blur, leave timers and row cleanup can dismiss only their own help.
     setActiveOriginHelp((current) => open ? key : current === key ? null : current);
   }, []);
-  return <div className="flex flex-col gap-2.5">{agents.map((agent) => <AgentModelCard key={agent.backend} agent={agent} {...props} activeOriginHelp={activeOriginHelp} onOriginHelpChange={onOriginHelpChange} pending={pendingBackends.has(agent.backend)} switchFailed={switchFailures.has(agent.backend)} connecting={connectingBackend === agent.backend} />)}</div>;
+  const orderedAgents = [...agents].sort((left, right) => backendDisplayOrder(left.backend) - backendDisplayOrder(right.backend));
+  return <div className="flex flex-col gap-2.5">{orderedAgents.map((agent) => <AgentModelCard key={agent.backend} agent={agent} {...props} activeOriginHelp={activeOriginHelp} onOriginHelpChange={onOriginHelpChange} pending={pendingBackends.has(agent.backend)} switchFailed={switchFailures.has(agent.backend)} connecting={connectingBackend === agent.backend} />)}</div>;
 };
