@@ -312,6 +312,8 @@ def test_terminal_diagnostic_schema_uses_the_production_machine_code_authority()
         (Path(__file__).parents[1] / "docs/plans/model-hub-contracts/turn-provenance.schema.json").read_text()
     )
     enum = schema["properties"]["terminal_error"]["properties"]["upstream_error_code"]["enum"]
+    # Each code is listed once; the set comparison below would collapse a duplicate.
+    assert len(enum) == len(set(enum))
     assert set(enum) - {None} == UPSTREAM_MACHINE_ERROR_CODES
     assert "engine_down" not in enum
 
