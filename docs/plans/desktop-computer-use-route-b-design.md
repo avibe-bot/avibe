@@ -123,6 +123,11 @@ caller to distinguish an unattempted call, an attempted call with an
 unverifiable effect, and a call whose effect occurred but whose restoration
 failed.
 
+Native Computer Use stop expires consent and cancels the current foreground
+call. Restoration and reporting remain the terminal obligation before normal
+daemon teardown; if the call cannot restore and verify, it stops and reports.
+Stop cannot claim to undo an input that was already posted.
+
 Owner-input quarantine, suppression, capture, and replay during the
 focus-changing interval are explicitly out of scope for this record. The
 implementation must not claim those stronger guarantees without a later owner
