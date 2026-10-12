@@ -47,6 +47,23 @@ and consumers remain independent. No remaining browser suite was demoted or
 deleted by this scheduling change. Npm setup is repeated once (~seconds), in
 exchange for removing the ~7-8 minute serial dependency on UI validation.
 
+## Measured shard decision
+
+After test/tooling subtraction, retain the isolated-file runner but increase
+Python lanes from six to eight. With the refreshed complete launcher timings,
+six lanes have a replay lower bound of 12m43s each, before setup; eight replay at
+~9m33s before fixture/tooling reductions. Keeping six would require deleting
+roughly a quarter of all remaining runtime, which the audit does not justify.
+Two extra lightweight Python setups trade modest concurrency for shorter
+latency; total PR runner jobs remain below the pre-#2518 Windows-heavy workflow.
+Do not confuse that concurrency trade-off with deleting wasted computation.
+
+Train-on-PR / holdout-master replay (independent of the median snapshot): six
+lanes reach a 14m43s tail; eight reach 11m20s. Runner variability means these
+estimates are not a guarantee of a nine-minute CI. Measure the integrated run
+before another concurrency change. Per-file watchdogs, process isolation,
+integration exclusions and exactly-once discovery remain intact.
+
 ## Initial local validation
 
 - Existing Python 3.12 development environment created with `uv sync --frozen`;
@@ -56,6 +73,15 @@ exchange for removing the ~7-8 minute serial dependency on UI validation.
   excluded from this older actionlint release's label catalog).
 - Focused `test_ci_pipeline.py` + `test_ci_unit_test_shards.py`: 62 passed in
   32.82s. This is local correctness evidence, not the full CI performance claim.
+
+- Integrated UI commits `9eacb1c7d` and `a6a6e3e1d` after independently inspecting
+  their diffs; focused five-file Vitest run: 408 passed in 2.85s. The consolidated
+  `typecheck:tests` and production UI build also pass in the integration worktree.
+- The Model Catalog discovery test continues to verify live-fixture isolation
+  and discovery of every spec on desktop/mobile. The historical exact count of
+  36 and a title prefix are not product contracts: no catalog scenario or label
+  was deleted, and the README was aligned. The separate read-only audit's
+  conservative concern was evaluated at this consuming boundary, not ignored.
 
 Performance acceptance and lane-specific deletion inventories are recorded
 separately after integration and exact-head CI.

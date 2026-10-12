@@ -218,8 +218,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3, 4, 5]
-        shard-total: [6]
+        # Complete recent timings put six balanced lanes above 12 minutes.
+        # Eight retain per-file isolation while using fewer total runners than
+        # the former PR Windows matrix plus serial UI pipeline.
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+        shard-total: [8]
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
 
