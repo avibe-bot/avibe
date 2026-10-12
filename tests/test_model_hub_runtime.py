@@ -529,6 +529,9 @@ def test_supervisor_records_health_transitions_without_repeating_or_leaking_erro
         for _ in range(2):
             assert supervisor.status()["status"]["health"] == "ok"
         failure[0] = EngineClientError("private-body", error_type="TimeoutError")
+        # A passed check vouches for the engine until it expires.
+        assert supervisor.status()["status"]["health"] == "ok"
+        supervisor._verified_at -= supervisor_module.MODEL_HUB_HEALTH_TTL_SECONDS
         assert supervisor.status()["status"]["health"] == "degraded"
 
     messages = [record.getMessage() for record in caplog.records]
@@ -4025,6 +4028,63 @@ def test_supervisor_starts_checks_health_and_stops_mock_engine(
     assert second.gateway_token == first.gateway_token
     assert second.management_key == first.management_key
     supervisor.stop()
+
+
+def test_a_verified_engine_serves_calls_with_a_liveness_check_until_its_health_check_expires(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    supervisor, _store = _fixture_supervisor(tmp_path)
+    checks: list[str] = []
+    real_health = EngineClient.health
+
+    def counted_health(client: EngineClient) -> bool:
+        checks.append(client.connection.base_url)
+        return real_health(client)
+
+    monkeypatch.setattr(EngineClient, "health", counted_health)
+    try:
+        first = supervisor.ensure_running()
+        at_ready = len(checks)
+        for _ in range(20):
+            assert supervisor.ensure_running() is first
+            assert supervisor.status()["status"]["health"] == "ok"
+        assert len(checks) == at_ready
+
+        supervisor._verified_at -= supervisor_module.MODEL_HUB_HEALTH_TTL_SECONDS
+        assert supervisor.ensure_running() is first
+        assert supervisor.ensure_running() is first
+        assert len(checks) == at_ready + 1
+
+        # An engine that exits is found by the next call's liveness check, which starts another.
+        supervisor._process.kill()
+        supervisor._process.wait(timeout=5)
+        assert supervisor.ensure_running() is not first
+    finally:
+        supervisor.stop()
+
+
+def test_a_failed_health_check_is_not_remembered(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    installer = SimpleNamespace(
+        status=lambda: {"installed": True, "version": "fixture"},
+        contract_manifest=lambda: {"name": "cliproxyapi", "version": "fixture", "assets": []},
+    )
+    supervisor = EngineSupervisor(installer=installer, state_store=EngineStateStore(tmp_path / "state"))
+    supervisor._process = SimpleNamespace(poll=lambda: None)
+    supervisor._connection = EngineConnection("http://127.0.0.1:15220", "management", "gateway")
+    answers = [False, False, True]
+    checks: list[bool] = []
+
+    def health(_client: EngineClient) -> bool:
+        checks.append(answers[min(len(checks), len(answers) - 1)])
+        return checks[-1]
+
+    monkeypatch.setattr(EngineClient, "health", health)
+
+    healths = [supervisor.status()["status"]["health"] for _ in range(5)]
+
+    assert healths == ["degraded", "degraded", "ok", "ok", "ok"]
+    assert checks == [False, False, True]
+    supervisor._process = None
 
 
 def test_supervisor_disable_restores_explicit_off_state(tmp_path: Path) -> None:
