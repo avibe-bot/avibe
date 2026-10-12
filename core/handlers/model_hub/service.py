@@ -5488,8 +5488,10 @@ class ModelHubService:
         Its Sources are every existing one this backend may use, placed as a
         newly created Source would be. Its models are the built-in Agents'
         selections, in order, that one of those Sources lists, each added as the
-        picker adds a provider model; none qualifying leaves the list empty
-        rather than picking one. The seed counts only once it has placed a
+        picker adds a provider model. With none qualifying, Vibey starts on one
+        model the Sources list (``_vibey_starting_model``), so a new install's
+        default Agent can run once setup places a Source; a model nothing can
+        describe leaves the list empty. The seed counts only once it has placed a
         Source: until then the entry stays pending, so the first Source the user
         adds still brings every Source and the starting models with it. Each
         mutation that adds Sources seeds after its Sources are final, so one
@@ -5538,8 +5540,41 @@ class ModelHubService:
             candidate = self._provider_candidate(config, "vibey", model_id, described.get(model_id))
             if candidate is not None:
                 rows.append(candidate[0])
+        if not rows:
+            starting = self._vibey_starting_model(config)
+            rows = [starting] if starting is not None else []
         agent.models = rows
         return True
+
+    def _vibey_starting_model(self, config: ModelHubConfig) -> ModelHubBackendModelConfig | None:
+        """The one model a seed with no qualifying selection starts Vibey on, or ``None``.
+
+        The first model, in Vibey's Source order and then each Source's own
+        inventory order, that models.dev describes (by the exact match the
+        picker's candidates use) as taking tool calls and producing text: the
+        least an Agent's turn needs. A model models.dev does not know is never
+        guessed at, so an inventory it cannot describe starts Vibey with none.
+        """
+
+        source_by_id = {source.id: source for source in config.sources}
+        listed = list(
+            dict.fromkeys(
+                model.id
+                for source_id in config.agents["vibey"].sources.order
+                if (source := source_by_id.get(source_id)) is not None
+                for model in source.models
+                if not model.retired
+            )
+        )
+        described = self._models_dev_descriptions(listed)
+        for model_id in listed:
+            match = described.get(model_id)
+            if match is None or match.get("supports_tools") is not True or "text" not in match.get("output_modalities", ()):
+                continue
+            candidate = self._provider_candidate(config, "vibey", model_id, match)
+            if candidate is not None:
+                return candidate[0]
+        return None
 
     async def _announce_vibey_seed(self) -> None:
         """Announce a committed seed as the Vibey catalog change it is.

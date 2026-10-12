@@ -294,8 +294,8 @@ async def test_a_starting_model_needs_a_source_that_lists_it(tmp_path, sqlite_db
     """MH-VIBEY-007: a Source's inventory, not a route, decides a starting model.
 
     An Anthropic key could pass any model id through, but it lists only Claude
-    models: the Codex Agent's ``gpt-6-astra`` is no starting model for Avibe,
-    and the Avibe Agent stays without a model rather than routing it there.
+    models: the Codex Agent's ``gpt-6-astra`` is no starting model for Avibe.
+    The Avibe Agent starts on a model the Source lists instead of routing it there.
     """
     from config.v2_config import ModelHubConfig
     from tests.test_model_hub_l3 import _service, _source
@@ -319,8 +319,8 @@ async def test_a_starting_model_needs_a_source_that_lists_it(tmp_path, sqlite_db
             await service._commit_new_source_locked(anthropic)
 
         vibey = service.store.load().agents["vibey"]
-        assert (vibey.sources.order, vibey.models) == ([anthropic.id], [])
-        assert store.get("vibey").model is None
+        assert (vibey.sources.order, [model.id for model in vibey.models]) == ([anthropic.id], ["claude-opus-5-5"])
+        assert store.get("vibey").model == "claude-opus-5-5"
     finally:
         store.close()
 
