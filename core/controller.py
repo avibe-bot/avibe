@@ -51,6 +51,7 @@ from core.web_ui_watchdog import watch_web_ui
 from core.vibe_agents import VibeAgent, VibeAgentStore
 from core.blocking import run_blocking
 from vibe.i18n import get_supported_languages, t as i18n_t
+from core.loop_watchdog import EventLoopWatchdog
 from vibe.runtime import current_process_owns_service_instance, mark_service_instance_started
 
 if TYPE_CHECKING:
@@ -2148,6 +2149,9 @@ class Controller:
         try:
             self._loop = asyncio.new_event_loop()
             asyncio.set_event_loop(self._loop)
+            # Names whatever blocks this loop while it blocks; see core/loop_watchdog.py.
+            self._loop_watchdog = EventLoopWatchdog(self._loop)
+            self._loop_watchdog.start()
             self._schedule_model_hub_snapshot_reconcile()
             self.show_git_checkpoint_service.start()
             # Internal control-IPC ASGI server for the Web UI / future
@@ -2199,6 +2203,10 @@ class Controller:
             except Exception as exc:
                 logger.debug("Internal control IPC cleanup skipped: %s", exc)
             self._internal_server_task = None
+            loop_watchdog = getattr(self, "_loop_watchdog", None)
+            if loop_watchdog is not None:
+                loop_watchdog.stop()
+                self._loop_watchdog = None
             if self._loop is not None:
                 try:
                     self._loop.stop()
