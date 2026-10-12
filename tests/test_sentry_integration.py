@@ -376,6 +376,7 @@ def test_scrub_data_redacts_sensitive_values():
         ("GET https://cdn.weixin.qq.com/download?encrypted_query_param=wx-s3cret", "wx-s3cret", "https://cdn.weixin.qq.com/"),
         ("proxy error http://alice:px-s3cret@proxy.local:8080 timed out", "px-s3cret", "@proxy.local:8080 timed out"),
         ("bad proxy http://bob:p/w-s3cret@proxy.local/x", "w-s3cret", "bad proxy http://"),
+        ("POST hooks.slack.com/actions/T01/123/ns-s3cret failed", "ns-s3cret", "POST hooks.slack.com/"),
     ],
 )
 def test_scrub_data_redacts_secrets_inside_free_text(text, secret, kept):
@@ -395,19 +396,21 @@ def test_scrub_data_redacts_secrets_inside_free_text(text, secret, kept):
 def test_before_send_redacts_stored_credentials_in_any_text(monkeypatch, tmp_path):
     """A credential Avibe stores leaves no trace however the text around it is shaped.
 
-    Prose such as ``auth failed for <secret>`` has no key for a pattern to find.
-    Rotating a credential must protect the new value without a restart.
+    Prose such as ``auth failed for <secret>`` has no key for a pattern to find, a
+    secret can be escaped by JSON or repr or name a dict entry, and an unreadable
+    store must not keep a rotated credential from being covered.
     """
     import json
 
     from config import paths
-    from config.v2_config import LarkConfig
+    from config.v2_config import LarkConfig, TelegramConfig
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     sentry_integration._NOISY_EVENT_LAST_SEEN.clear()
     sentry_integration._EVENT_RATE_STATE.clear()
     config = _config()
-    config.lark = LarkConfig(app_id="cli_x", app_secret="lark-first-s3cret")
+    config.lark = LarkConfig(app_id="cli_x", app_secret='lark"first\\s3cret')
+    config.telegram = TelegramConfig(bot_token="s3cr7")
     config.save()
     state = paths.get_runtime_dir() / "model-hub" / "state"
     (state / "credentials").mkdir(parents=True)
@@ -419,15 +422,24 @@ def test_before_send_redacts_stored_credentials_in_any_text(monkeypatch, tmp_pat
         json.dumps({"management_key": "mh-management-s3cret", "gateway_token": "mh-gateway-s3cret"})
     )
 
-    def send(message):
+    def send(message, extra=None):
         event = {"logentry": {"message": message}, "breadcrumbs": {"values": [{"message": message}]}}
+        if extra is not None:
+            event["extra"] = extra
         return json.dumps(sentry_integration.before_send(event, {}))
 
-    first = send("rejected lark-first-s3cret, mh-stored-s3cret and mh-management-s3cret (openai)")
-    for secret in ("lark-first-s3cret", "mh-stored-s3cret", "mh-management-s3cret"):
+    first = send(
+        "rejected mh-stored-s3cret and mh-management-s3cret (openai); short s3cr7! "
+        + json.dumps({"note": 'lark"first\\s3cret'})
+        + " "
+        + repr('lark"first\\s3cret'),
+        extra={"sessions": {"mh-gateway-s3cret": "active"}},
+    )
+    for secret in ("mh-stored-s3cret", "mh-management-s3cret", "mh-gateway-s3cret", "s3cr7", "first"):
         assert secret not in first
-    assert "rejected [Filtered], [Filtered] and [Filtered] (openai)" in first
+    assert "rejected [Filtered] and [Filtered] (openai); short [Filtered]!" in first
 
+    (state / "credentials" / "cred_broken.json").write_text("{not json")
     config.lark.app_secret = "lark-rotated-s3cret"
     config.save()
     rotated = send("lark auth failed for lark-rotated-s3cret (cli_x)")
@@ -485,6 +497,52 @@ def test_before_send_keeps_request_records_to_their_origin(monkeypatch, tmp_path
     assert http_crumb["data"]["http.response.status_code"] == 404
     assert subprocess_crumb["message"] == "git"
     assert subprocess_crumb["data"] == {}
+
+
+def test_performance_transactions_are_scrubbed_like_events(monkeypatch, tmp_path):
+    """Transactions skip ``before_send``; their spans must not carry what events may not."""
+    import sentry_sdk
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    monkeypatch.setenv("VIBE_SENTRY_DSN", "http://public@127.0.0.1:9/1")
+    monkeypatch.setenv("VIBE_SENTRY_TRACES_SAMPLE_RATE", "1.0")
+    sent = []
+
+    class Capture(sentry_sdk.transport.Transport):
+        def capture_envelope(self, envelope):
+            sent.extend(item.get_bytes().decode("utf-8") for item in envelope.items)
+
+    real_init = sentry_sdk.init
+    monkeypatch.setattr(sentry_sdk, "init", lambda **options: real_init(transport=Capture(), **options))
+    try:
+        assert sentry_integration.init_sentry(_config(), component="service") is True
+        with sentry_sdk.start_transaction(op="task", name="refresh"):
+            with sentry_sdk.start_span(op="http.client", name="POST https://discord.com/api/webhooks/1/tx-s3cret") as span:
+                span.set_data("url", "https://discord.com/api/webhooks/1/tx-s3cret")
+                span.set_data("http.query", "wait=tq-s3cret")
+            with sentry_sdk.start_span(op="subprocess", name="git push https://x:sp-s3cret@github.com/o/r"):
+                pass
+            with sentry_sdk.start_span(op="task", name="refresh lark app_secret=ts-s3cret"):
+                pass
+        sentry_sdk.flush(timeout=2)
+    finally:
+        sentry_sdk.get_client().close(timeout=0)
+        sentry_sdk.get_global_scope().set_client(None)
+
+    (payload,) = [item for item in sent if '"type":"transaction"' in item]
+    assert "s3cret" not in payload
+    assert "https://discord.com/[Filtered]" in payload
+
+
+@pytest.mark.parametrize("unit", ["\\", "a.", "x-api-"])
+def test_scrub_data_stays_linear_on_pathological_text(unit):
+    """Scrubbing runs synchronously on every log call, so it must never backtrack."""
+    import time
+
+    text = unit * (40_000 // len(unit))
+    started = time.perf_counter()
+    sentry_integration.scrub_data(text)
+    assert time.perf_counter() - started < 1.0
 
 
 @pytest.mark.parametrize(
