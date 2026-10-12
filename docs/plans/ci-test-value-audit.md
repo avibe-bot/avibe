@@ -61,6 +61,21 @@ No API, wire format, persistent schema, allocated IDs, credential or deployment
 changes. No remote environments or local Avibe restart. Keep the primary
 checkout and unrelated active worktrees untouched.
 
+## Active execution
+
+- Integration branch: `vibe/20261013-ci-test-value`, orchestrator worktree
+  `.worktrees/avibe/ci-test-value-audit`.
+- Python implementation: session `sesm4rsqtgcq5`, branch
+  `vibe/20261013-ci-value-python`.
+- UI implementation: session `sesswafk5qzrr`, branch
+  `vibe/20261013-ci-value-ui`.
+- Independent read-only audit: session `sesvtw3epcdgv`, worktree
+  `.worktrees/avibe/ci-test-value-independent`.
+- Shared contract commit before dispatch: `e089ae4429aae72d49b448ca4cc59d806cc2f82e`.
+- Orchestrator has removed shell/toolchain self-tests, split required UI lanes,
+  and rebuilt a complete timing snapshot. See `ci-test-value-evidence.md`.
+  Integration waits for lane commits; no partial PR has been pushed yet.
+
 ## Work sequence
 
 1. Collect complete per-file timings from successful PR/master runs; preserve

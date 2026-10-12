@@ -78,6 +78,22 @@ jobs:
           npm run typecheck:tests
           npm test
 
+  ui-browser-checks:
+    # Browser interactions do not depend on lint, Vitest, or the production
+    # bundle. Run alongside UI validation; the required unit-tests gate waits
+    # for both lanes, including failure/cancellation of either one.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
+        with:
+          node-version: "22.14.0"
+          cache: "npm"
+          cache-dependency-path: ui/package-lock.json
+      - name: Install UI dependencies
+        working-directory: ui
+        run: npm ci
+
       - name: Test browser interactions
         # Model Hub catalog/provider regression runs on the scheduled/manual
         # model-hub-ui-regression workflow instead of blocking every PR.
@@ -241,15 +257,16 @@ jobs:
     runs-on: ubuntu-latest
     # Keep UI validation in the existing required gate while allowing artifact
     # consumers to start as soon as their production bundle is built.
-    needs: [unit-test-shards, ui-checks]
+    needs: [unit-test-shards, ui-checks, ui-browser-checks]
     if: always()
     steps:
       - name: Verify unit test shards and UI checks
         env:
           UNIT_RESULT: ${{ needs['unit-test-shards'].result }}
           UI_RESULT: ${{ needs['ui-checks'].result }}
+          BROWSER_RESULT: ${{ needs['ui-browser-checks'].result }}
         run: |
-          for result in "$UNIT_RESULT" "$UI_RESULT"; do
+          for result in "$UNIT_RESULT" "$UI_RESULT" "$BROWSER_RESULT"; do
             if [ "$result" != "success" ]; then
               echo "Unit/UI checks finished with result: $result"
               exit 1
