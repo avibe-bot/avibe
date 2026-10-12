@@ -111,10 +111,11 @@ proof of identity after reuse.
 After the explicit input call, the implementation restores the recorded
 frontmost application, exact window, and pointer. Any injected button state
 must be cleaned up before pointer restoration. It then takes a fresh
-observation and verifies all three restored values plus that the active Space
-for the affected display did not change. A transport acknowledgement is not
-effect confirmation; the result must preserve the existing click effect
-vocabulary, including `confirmed` and `unverifiable`.
+observation and verifies all three restored values. Restoration also repeats
+`list_windows` for the previously frontmost pid and window; it must be present
+with `on_current_space=true`. A transport acknowledgement is not effect
+confirmation; the result must preserve the existing click effect vocabulary,
+including `confirmed` and `unverifiable`.
 
 If restoration cannot be completed or cannot be verified, the operation stops
 and reports a concrete restoration failure. It does not retry, choose another
@@ -159,11 +160,11 @@ delivery mode remains background. An accepted background dispatch with an
 unverifiable result never escalates by itself; a later foreground call must be
 an explicit caller decision with its own admission.
 
-Route B v1 admits a target only when a fresh observation verifies that its
-exact window is on the current active Space of its display. An off-Space or
-unresolved target is refused with stable reason `target_off_active_space`,
-using the driver's `on_current_space` / `off_space_or_ax_unresolved` signal.
-Route B never switches Spaces; cross-Space targets are future work.
+Route B v1 admits a target only when a fresh `list_windows` call in the same
+call's admission finds the exact pid and window with `on_current_space=true`.
+`false`, `null`, or a missing window fails closed with stable reason
+`target_off_active_space`. Route B never switches Spaces; cross-Space targets
+are future work.
 
 The CLI should reuse the existing leaf command and argument shape rather than
 add a new top-level foreground command or hidden retry flag. The planned
