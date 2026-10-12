@@ -372,8 +372,11 @@ _HUB_SUPPLY_REFUSALS = {
     "gateway_off": "errors.modelGatewayOff",
     "no_source": "errors.modelSourceRequired",
 }
-# The turn-outcome copy that already sends its reader to Models.
-_MODELS_ROUTE_REFUSALS = frozenset({"modelHub.launch.interrupted", "modelHub.launch.route_unconfigured"})
+# The turn-outcome copy whose fix is in Models: it sends its reader there, or names a backend's
+# model list, which Models keeps (a model the person removed from the list, even its last one).
+_MODELS_ROUTE_REFUSALS = frozenset(
+    {"modelHub.launch.interrupted", "modelHub.launch.route_unconfigured", "modelHub.launch.model_unlisted"}
+)
 MODELS_PAGE_PATH = "/settings/models"
 
 

@@ -462,9 +462,11 @@ async def test_a_failure_models_cannot_fix_gets_no_next_step(context, cause):
 @pytest.mark.parametrize(
     ("discriminator", "supply_state", "pointed"),
     [
-        # Copy that already sends its reader to Models carries the way there...
+        # Copy whose fix is in Models carries the way there: it sends the reader there, or names a model
+        # list Models keeps, as when a person removed the Agent's model, even the list's last one...
         ("route_unconfigured", "interrupted", True),
         ("blocked_supply_state", "interrupted", True),
+        ("model_unlisted", "interrupted", True),
         # ...and copy that does not, such as a source still cooling down, does not.
         ("blocked_supply_state", "waiting", False),
     ],

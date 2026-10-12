@@ -83,7 +83,10 @@ On master before this change:
   `modules/agents/model_hub.py`. This covers:
   - the supply blocks other than `hub_disabled`;
   - the built-in backend's missing model;
-  - route refusals whose copy already sends the reader to Models.
+  - route refusals whose copy already sends the reader to Models;
+  - an Agent model that is not in its backend's model list (`model_unlisted`), including one a person emptied the list
+    of. The list and the Agent row stay as the person left them; the step points to where the list is kept. Like the
+    supply refusals, this refusal already holds its input for an explicit retry.
 - **On the Workbench,** notices are drawn as plain text, never Markdown: a notice can carry provider or upstream text,
   and that must not become clickable. So the step travels as data, not text. The notice's metadata says
   `failure_next_step: "models"`, and the Workbench draws the step from its own copy, for the viewer:
