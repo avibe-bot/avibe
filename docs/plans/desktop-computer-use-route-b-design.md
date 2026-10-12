@@ -92,6 +92,14 @@ allowed operation, and call id. The daemon/driver validates that capability at
 the actual foreground admission boundary; a same-user direct socket or proxy
 caller without it is refused. A Controller-only grant is not sufficient.
 
+Capability minting is mutual-authenticated. The Controller's request must be
+bound to the current Controller instance/generation, admitted desktop lease,
+active Turn, call id, target, operation, and a one-time nonce; the shell accepts
+requests only from that authenticated Controller peer. The shell's signed
+response is accepted only by that Controller instance, and an agent-originated
+request receives no capability. If the OS cannot enforce both peer identities,
+foreground remains refused.
+
 The agent cannot mint, extend, or reuse a challenge or capability. Missing
 acknowledgement, stale shell generation, IPC loss, native stop, session
 end/archive, or shell-lock loss revokes the grant and fails closed. The exact
@@ -143,6 +151,12 @@ must match the recorded process identity and native window ID; another window
 in the same app is not success. Pointer restoration must match display and
 coordinates within readback precision before returning `restored`.
 
+Button release is safety cleanup and is not skipped by the activity fence. If
+owner activity occurs while the injected button is down, the driver must not
+move the pointer or restore the app/window; it must release at the current
+pointer location, verify the button state, and then enter the attention or
+quarantine state. Failure to verify the release is itself a quarantine trigger.
+
 The target process-start identity must match the admitted PID/window through
 activation, the final window readback, and dispatch. PID/window numbers alone
 are insufficient because a target can exit and those identifiers can be reused.
@@ -158,6 +172,15 @@ frontmost app or pointer, the driver cancels before dispatch when possible.
 After dispatch it stops restoration rather than overwriting newer human state,
 reports interruption by owner activity, and leaves the attention indicator
 visible.
+
+The activity fence alone cannot protect owner keystrokes during the
+focus-stealing interval: a key can reach the target before a later check sees
+it. Before activation, the shell must establish a bounded OS-level owner-input
+guard that suppresses owner keyboard events while the target is frontmost and
+replays them to the recorded prior target in order after restoration, or provide
+an equivalent OS guarantee. The guard must be acknowledged before activation;
+if capture, replay, or acknowledgement is unavailable, Route B remains
+refused. This guard covers owner input only and never authorizes agent typing.
 
 If the prior app/window exited, moved to an unaddressable workspace, or cannot
 be verified, the driver must not guess. It should make an independent bounded
@@ -207,9 +230,9 @@ default:
   exact-window contract;
 - `delivery_mode:"foreground"` is accepted only for the first-release click
   allowlist, explicit session consent, a shell-rendered pre-activation
-  acknowledgement, a daemon-valid shell capability, a fresh exact target, its
-  matching `capture_id`, a supported platform, and existing lease/caller
-  checks;
+  acknowledgement, an acknowledged owner-input guard, a daemon-valid shell
+  capability, a fresh exact target, its matching `capture_id`, a supported
+  platform, and existing lease/caller checks;
 - unknown modes, desktop-wide targets, stale captures, locked sessions,
   missing consent, and unsupported operations remain structured refusals; and
 - an unchanged or unverifiable background result never escalates by itself. A
