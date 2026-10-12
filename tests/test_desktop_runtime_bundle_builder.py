@@ -140,7 +140,7 @@ def test_runtime_sources_schema_two_contains_only_node_and_npm_tools():
     sources = json.loads((SCRIPT.parents[1] / "runtime-sources.json").read_text(encoding="utf-8"))
 
     assert sources["schema_version"] == 2
-    assert sources["npm_version"] == "10.9.8"
+    assert sources["npm_version"] == "10.9.9"
     assert set(sources["sdist_build_allowlist"]) == {"claude-agent-sdk", "http-ece"}
     assert "codex_version" not in sources
     assert "codex_license" not in sources
