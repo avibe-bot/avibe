@@ -22,7 +22,7 @@ from collections.abc import Callable
 
 logger = logging.getLogger(__name__)
 
-STALL_SECONDS = 5.0
+STALL_SECONDS = 2.0
 POLL_SECONDS = 1.0
 # At most one stack report per this long; a loop that keeps stalling still gets
 # its recovery lines, which carry each stall's length.
