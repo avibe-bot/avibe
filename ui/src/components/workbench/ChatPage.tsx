@@ -4928,7 +4928,7 @@ export const MessageRow = memo(function MessageRow({
             </span>
           </div>
           <div className="flex flex-wrap items-center gap-1.5 empty:hidden">
-            <FailureNextStep message={message} readOnly={readOnly} />
+            <FailureNextStep message={message} />
             {onFailureRetry && (
               <FailureRetry
                 message={message}

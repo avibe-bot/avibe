@@ -92,6 +92,8 @@ On master before this change:
   `failure_next_step: "models"`, and the Workbench draws the step from its own copy, for the viewer:
   - a viewer with `can_manage_instance` (the gate on `/settings/models`) gets an **Open Models** button;
   - anyone else gets "Ask an Avibe admin to fix this in Models.", never a link they would be bounced from.
+- **The form follows where the notice goes:** a scheduled or Harness Turn whose notices go to an IM channel gets the
+  IM line. A restart's copy replaces the refusal, and its step with it.
 - **In IM,** no identity maps an IM user to a Workbench principal. So the step is the same for everyone and makes no
   claim about the requester's access:
   - With Avibe Cloud paired, `errors.modelsNextStepImUrl` offers `workbench_url('/settings/models')` as information.
@@ -110,8 +112,10 @@ On master before this change:
   - the backend page notice and its Models link
 - **One refusal, held.** A supply refusal fails the same way until someone changes Models, so its input is held for
   an explicit retry (prewrite failure evidence `model_supply_refusal`) instead of spending the automatic startup
-  retries. The notice is plain text: a supply refusal is shown as its own copy (`❌ …`), with no "Error:" wrapper and
-  no formatter markup.
+  retries. IM has no Retry control, so there the held input waits in the Session's queue, where the Workbench
+  retries or removes it; the person's next message still runs. The notice is plain text: a supply refusal is shown as
+  its own copy (`❌ …`), with no "Error:" wrapper and no formatter markup. Another dispatch error is escaped for the
+  IM it goes to, never for the Workbench.
 - **No fallback.** A turn sent to an Agent that cannot run is refused. It is never re-routed: the first turn pins its
   Agent to the Session, so a fallback would silently become permanent.
 

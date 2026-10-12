@@ -22,7 +22,7 @@ const refusal = {
   metadata: { event: 'backend_failure', failure_id: 'failed', turn_id: 'turn-1', failure_next_step: 'models' },
 } as WorkbenchMessage;
 
-function mount(message: WorkbenchMessage, canManage: boolean, readOnly = false) {
+function mount(message: WorkbenchMessage, canManage: boolean) {
   const authorization = {
     remote: true, instanceKind: null, instanceRole: null,
     capabilities: { ...DENIED_INSTANCE_CAPABILITIES, can_chat: true, can_manage_instance: canManage },
@@ -32,7 +32,7 @@ function mount(message: WorkbenchMessage, canManage: boolean, readOnly = false) 
       <InstanceAuthorizationContext.Provider value={authorization as never}>
         <MemoryRouter initialEntries={['/chat/session']}>
           <Routes>
-            <Route path="/chat/session" element={<FailureNextStep message={message} readOnly={readOnly} />} />
+            <Route path="/chat/session" element={<FailureNextStep message={message} />} />
             <Route path="/settings/models" element={<p>Models page</p>} />
           </Routes>
         </MemoryRouter>
@@ -56,10 +56,8 @@ describe('FailureNextStep', () => {
     expect(screen.queryByRole('button')).toBeNull();
   });
 
-  it('draws nothing for a notice without the step, or a read-only transcript', () => {
+  it('draws nothing for a notice without the step', () => {
     const { container } = mount({ ...refusal, metadata: { ...refusal.metadata, failure_next_step: undefined } }, true);
     expect(container.textContent).toBe('');
-    cleanup();
-    expect(mount(refusal, true, true).container.textContent).toBe('');
   });
 });

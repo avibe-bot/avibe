@@ -11,13 +11,14 @@ import { Button } from '../ui/button';
 
 /** The step a failure notice names as data (`failure_next_step`), drawn from the Workbench's
  *  own copy: a notice is plain text, so any link in it comes from here, never from its body.
- *  Models is for those who manage the instance; anyone else is told who can fix it. */
-export function FailureNextStep({ message, readOnly }: { message: WorkbenchMessage; readOnly?: boolean }) {
+ *  Models is for those who manage the instance; anyone else is told who can fix it. Opening Models
+ *  writes nothing to the Session, so a read-only transcript shows the step too. */
+export function FailureNextStep({ message }: { message: WorkbenchMessage }) {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const location = useLocation();
   const { capabilities } = useInstanceAuthorization();
-  if (readOnly || !isBackendFailureNotice(message) || message.metadata?.failure_next_step !== 'models') return null;
+  if (!isBackendFailureNotice(message) || message.metadata?.failure_next_step !== 'models') return null;
   if (!capabilities.can_manage_instance) {
     return <span className="px-0.5 text-[11px] text-muted-foreground">{t('chat.failureNextStep.askAdmin')}</span>;
   }

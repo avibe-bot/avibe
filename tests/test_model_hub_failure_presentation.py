@@ -398,6 +398,11 @@ def _next_step_controller(language: str, *, public_url: str | None):
 
 _WORKBENCH = MessageContext(user_id="local", channel_id="proj-1", platform="avibe", platform_specific={})
 _IM = MessageContext(user_id="U1", channel_id="C1", platform="slack", platform_specific={})
+# A scheduled or Harness Turn in a Workbench Session whose notices go to an IM channel.
+_ROUTED_TO_IM = MessageContext(
+    user_id="local", channel_id="proj-1", platform="avibe",
+    platform_specific={"delivery_override": {"platform": "slack", "channel_id": "C1"}},
+)
 
 
 def _notice(controller):
@@ -415,6 +420,8 @@ def _notice(controller):
         # No IM identity maps to a Workbench principal: IM says who can fix it, with the public URL when there is one.
         (_IM, "https://team.avibe.bot", "errors.modelsNextStepImUrl", "https://team.avibe.bot/settings/models"),
         (_IM, None, "errors.modelsNextStepIm", None),
+        # The form follows where the notice goes, not the Session it came from.
+        (_ROUTED_TO_IM, "https://team.avibe.bot", "errors.modelsNextStepImUrl", "https://team.avibe.bot/settings/models"),
     ],
 )
 async def test_a_refusal_fixed_in_models_ends_with_where_to_fix_it(language, context, public_url, line_key, url):
@@ -457,6 +464,20 @@ async def test_a_failure_models_cannot_fix_gets_no_next_step(context, cause):
 
     text, metadata = _notice(controller)
     assert (text, metadata.get("failure_next_step")) == (f"❌ {error}", None)
+
+
+@pytest.mark.parametrize("context", [_WORKBENCH, _IM])
+async def test_a_restart_replaces_the_refusal_and_its_next_step(context):
+    from modules.agents.model_hub import ModelSupplyRefusal
+
+    controller = _next_step_controller("en", public_url="https://team.avibe.bot")
+    controller.shutdown_requested = True
+    refusal = ModelSupplyRefusal("Vibey has no model source yet.", fixed_in_models=True)
+
+    await emit_backend_failure(controller, context, "vibey", str(refusal), display_text=f"❌ {refusal}", cause=refusal)
+
+    text, metadata = _notice(controller)
+    assert (text, metadata.get("failure_next_step")) == (t("turn.interrupted.serviceRestart", "en"), None)
 
 
 @pytest.mark.parametrize(

@@ -345,7 +345,7 @@ async def test_codex_turn_on_an_unlisted_model_fails_once_with_the_shared_copy(t
     controller.agent_auth_service = SimpleNamespace(
         maybe_emit_auth_recovery_message=AsyncMock(return_value=True),
     )
-    context = SimpleNamespace(platform_specific={})
+    context = SimpleNamespace(platform="avibe", platform_specific={})
     set_dispatch_phase(context, DISPATCH_PHASE_PREWRITE)
     request = SimpleNamespace(
         base_session_id="session-1", working_path=str(tmp_path),
@@ -370,6 +370,8 @@ async def test_codex_turn_on_an_unlisted_model_fails_once_with_the_shared_copy(t
     controller.agent_auth_service.maybe_emit_auth_recovery_message.assert_not_awaited()
     notify = controller.emit_agent_message.await_args_list[0]
     assert notify.args[1:3] == ("notify", f"❌ {unlisted_model_copy('codex', language)}")
+    # The list is kept in Models: the Workbench draws the way there from the notice's data.
+    assert notify.kwargs["output"].metadata["failure_next_step"] == "models"
     assert prewrite_failure_evidence(context) == {
         "reason": "model_hub_model_unlisted", "requires_explicit_retry": True,
     }

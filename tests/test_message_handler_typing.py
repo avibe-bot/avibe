@@ -114,7 +114,11 @@ class _StubIMClient:
         self.reactions = []
         self.sent_messages = []
         self.removed_keyboards = []
-        self.formatter = type("Formatter", (), {"format_error": staticmethod(lambda text: text)})()
+        self.formatter = type(
+            "Formatter",
+            (),
+            {"format_error": staticmethod(lambda text: text), "escape_special_chars": staticmethod(lambda text: text)},
+        )()
 
     def should_use_thread_for_reply(self):
         return False
@@ -1982,31 +1986,44 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
 
 
     async def test_a_dispatch_failure_notice_is_plain_and_a_supply_refusal_is_its_own_copy(self):
-        """The Workbench draws notices without Markdown, so no formatter markup reaches one.
+        """The Workbench draws notices as plain text, so no formatter markup or escape reaches one.
 
         The primary IM platform's formatter is not the Workbench's: its ``*Error*`` showed
-        literally there. A supply refusal is already the user's copy, so it is not wrapped
-        in a second "Error:".
+        literally there. An IM sends the notice as its own markup, so the raw error is escaped
+        there, or a ``<@U1>`` in it would mention someone. A supply refusal is already the
+        user's copy, so it is not wrapped in a second "Error:".
         """
         from modules.agents.model_hub import ModelSupplyRefusal
 
         controller = _StubController(platform="slack", ack_mode="reaction", typing_result=True)
         controller.im_client.formatter = type(
-            "SlackFormatter", (), {"format_error": staticmethod(lambda text: f"❌ *Error*: {text}")}
+            "SlackFormatter",
+            (),
+            {
+                "format_error": staticmethod(lambda text: f"❌ *Error*: {text}"),
+                "escape_special_chars": staticmethod(lambda text: text.replace("<", "&lt;").replace(">", "&gt;")),
+            },
         )()
         handler = MessageHandler(controller)
-        context = MessageContext(user_id="u1", channel_id="ses-1", platform="avibe")
+        workbench = MessageContext(user_id="u1", channel_id="ses-1", platform="avibe")
+        slack = MessageContext(user_id="u1", channel_id="C1", platform="slack")
         refusal = ModelSupplyRefusal("Vibey has no model source yet.", fixed_in_models=True)
 
         emitted = AsyncMock()
         # This suite loads the handler module on its own, so patch the globals it actually reads.
         with patch.dict(MessageHandler._emit_agent_dispatch_failure.__globals__, emit_backend_failure=emitted):
-            await handler._emit_agent_dispatch_failure(context, None, refusal)
-            await handler._emit_agent_dispatch_failure(context, None, RuntimeError("socket closed"))
+            await handler._emit_agent_dispatch_failure(workbench, None, refusal)
+            await handler._emit_agent_dispatch_failure(workbench, None, RuntimeError("<@U1> socket closed"))
+            await handler._emit_agent_dispatch_failure(slack, None, RuntimeError("<@U1> socket closed"))
 
         texts = [call.kwargs["display_text"] for call in emitted.await_args_list]
-        assert texts == ["❌ Vibey has no model source yet.", f"❌ {handler._t('error.processMessageFailed', error='socket closed')}"]
+        assert texts == [
+            "❌ Vibey has no model source yet.",
+            f"❌ {handler._t('error.processMessageFailed', error='<@U1> socket closed')}",
+            f"❌ {handler._t('error.processMessageFailed', error='&lt;@U1&gt; socket closed')}",
+        ]
         assert [call.kwargs["cause"] for call in emitted.await_args_list][0] is refusal
+
 
 if __name__ == "__main__":
     unittest.main()
