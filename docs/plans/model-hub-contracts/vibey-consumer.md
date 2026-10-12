@@ -34,11 +34,13 @@ first one, in Vibey's Source order and then each Source's own non-retired
 inventory order, that models.dev describes, by the picker's exact match, as
 taking text and tool calls and producing text. A model models.dev does not know is never
 guessed at: with none described that way, the catalog stays empty and the setup
-card offers the pick. A seed that ran before any models.dev copy could describe
-a listed model is healed when a copy arrives (the snapshot reconcile that also
-backfills MH-LIMITS-001): while Vibey's catalog is empty, records no removal,
-and its built-in Agent has no model, it starts on the same rule's model. An Agent
-that has a model, or a list a person emptied, is that person's choice and is never
+card offers the pick. A Vibey left with nothing to run on is healed by the
+snapshot reconcile that also backfills MH-LIMITS-001, which runs when a copy
+arrives and on the controller's cadence. While Vibey's catalog is empty, records
+no removal, and its built-in Agent has no model, it starts on the same rule's
+model, whether a new copy or a later Source made one describable. Nothing was
+ever chosen for that Vibey, so this is its start, not a re-seed. An Agent that
+has a model, or a list a person emptied, is that person's choice and is never
 overridden. A Vibey Agent without a model cannot run a turn, so the
 built-in one takes its catalog's first model while it has none: one controller
 rule, decided under the Agent store's write lock so a chosen model stands, run

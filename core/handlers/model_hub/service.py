@@ -5649,10 +5649,12 @@ class ModelHubService:
     async def start_vibey_without_models(self) -> list[str]:
         """Start a seeded Vibey whose catalog is still empty on its starting model; the ids it took.
 
-        The seed starts Vibey once, and a seed that ran with no models.dev copy to
-        describe a listed model leaves the catalog empty. The controller calls this
-        once a copy arrives, and only while Vibey's built-in Agent has no model. A
-        catalog a person emptied records its removals, so it is theirs and stays empty.
+        A seed that found nothing describable leaves the catalog empty. The snapshot
+        reconcile calls this, when a models.dev copy arrives and on its cadence, and
+        only while Vibey's built-in Agent has no model, so whatever later makes a
+        listed model describable (the copy, or a Source added since) starts a Vibey
+        nothing was ever chosen for. A catalog a person emptied records its removals,
+        so it is theirs and stays empty.
         """
 
         async with self._mutation_lock:
