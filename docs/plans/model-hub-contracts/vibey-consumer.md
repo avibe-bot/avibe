@@ -25,8 +25,24 @@ subscription joins it whether or not a starting model matches, ahead of the API
 keys), and its catalog becomes the models the built-in
 Claude, Codex, and OpenCode Agents run, in that order, that one of those Sources
 lists, deduplicated and added as the picker adds a provider model (models.dev
-metadata included). None qualifying leaves the catalog empty; no model is picked
-on the user's behalf. A Vibey Agent without a model cannot run a turn, so the
+metadata included). A selection that models.dev explicitly describes as taking
+no tool calls, or as taking or producing no text, does not qualify; one it does not know still
+does, being a person's own choice for a native Agent. With none qualifying, the
+seed starts Vibey on one model, so a new install's default Agent can run once
+setup places a Source. That model is the
+first one, in Vibey's Source order and then each Source's own non-retired
+inventory order, that models.dev describes, by the picker's exact match, as
+taking text and tool calls and producing text. A model models.dev does not know is never
+guessed at: with none described that way, the catalog stays empty and the setup
+card offers the pick. A Vibey left with nothing to run on is healed by the
+snapshot reconcile that also backfills MH-LIMITS-001, which runs when a copy
+arrives and on the controller's cadence, and at every start, so a Vibey an earlier
+build seeded empty starts on the first upgraded start. While Vibey's catalog is empty, records
+no removal, and its built-in Agent has no model, it starts on the same rule's
+model, whether a new copy or a later Source made one describable. Nothing was
+ever chosen for that Vibey, so this is its start, not a re-seed. An Agent that
+has a model, or a list a person emptied, is that person's choice and is never
+overridden. A Vibey Agent without a model cannot run a turn, so the
 built-in one takes its catalog's first model while it has none: one controller
 rule, decided under the Agent store's write lock so a chosen model stands, run
 on every Vibey catalog change (`_refresh_backend_catalog`, which each seed also
@@ -198,6 +214,10 @@ The header needs no upstream credentials and is never forwarded upstream.
 - Starting supply (MH-VIBEY-007): an unrelated write keeps the unseeded row absent;
   the seed places existing Sources for Vibey alone and keeps only routable Agent
   models; a second start leaves the persisted row, including removed Sources, alone.
+  With no qualifying selection, the seed starts Vibey on the first listed model
+  models.dev describes as tool-capable with text output; a selection models.dev
+  rules out does not start it; nothing describable leaves the catalog empty, and
+  a copy that arrives later starts it unless its built-in Agent already has a model.
 - Real loopback gateway requests through the existing service, with hermetic engine
   fixtures: primary protocol resolution, cross-protocol failover, non-ASCII origin,
   slow Anthropic resolution, buffered/streamed bodies, and concurrent requests.

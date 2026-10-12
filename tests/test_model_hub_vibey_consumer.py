@@ -775,6 +775,55 @@ async def test_fresh_install_seeds_vibey_with_its_first_source(tmp_path, first, 
     assert announced == ["vibey"]
 
 
+TOOL_CATALOG = {"relay": {"name": "Relay", "models": {
+    "embed-1": {"name": "Embed 1", "tool_call": False, "modalities": {"input": ["text"], "output": ["text"]}},
+    "draw-1": {"name": "Draw 1", "tool_call": True, "modalities": {"input": ["text"], "output": ["image"]}},
+    "chat-1": {"name": "Chat 1", "tool_call": True, "modalities": {"input": ["text"], "output": ["text"]},
+               "limit": {"context": 200_000, "output": 32_000}},
+    "chat-2": {"name": "Chat 2", "tool_call": True, "modalities": {"input": ["text"], "output": ["text"]}},
+    "see-1": {"name": "See 1", "tool_call": True, "modalities": {"input": ["image"], "output": ["text"]}},
+}}}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("selections", "sources", "seeded"), [
+    # The first listed model that takes text and tool calls and answers in text, past the ones that do not.
+    ([("codex", "gpt-6-astra")], [("src_seedrelay001", ("embed-1", "draw-1", "see-1", "unknown-1", "chat-1", "chat-2"))], ["chat-1"]),
+    # Sources the user already had are read in Vibey's Source order, each in its own inventory order.
+    ([("codex", "gpt-6-astra")], [("src_seedrelay001", ("unknown-1", "embed-1")), ("src_seedrelay002", ("chat-2", "chat-1"))], ["chat-2"]),
+    # A model models.dev cannot describe is never guessed at.
+    ([("codex", "gpt-6-astra")], [("src_seedrelay001", ("unknown-1", "unknown-2"))], []),
+    # A native Agent's selection that models.dev rules out for an Agent's turn does not start Vibey;
+    # one it does not know still does, being that person's own choice.
+    ([("codex", "embed-1"), ("opencode", "custom/draw-1"), ("claude", "see-1")],
+     [("src_seedrelay001", ("embed-1", "draw-1", "see-1", "chat-2"))], ["chat-2"]),
+    ([("codex", "unknown-1")], [("src_seedrelay001", ("unknown-1", "chat-2"))], ["unknown-1"]),
+])
+async def test_a_seed_with_no_qualifying_selection_starts_vibey_on_a_tool_capable_model(
+    tmp_path, selections, sources, seeded,
+):
+    """MH-VIBEY-007: a new install's default Agent can run once setup places a Source.
+
+    No built-in Agent's model is listed by these Sources, so the seed starts
+    Vibey on one model they do list, by a rule a person can predict.
+    """
+    payload = ModelHubConfig().to_payload()
+    payload["sources"] = [
+        _seed_source(source_id, day, *model_ids, vendor="custom", protocol="openai_chat").to_payload()
+        for day, (source_id, model_ids) in enumerate(sources, start=1)
+    ]
+    service, store, _announced = _seed_service(tmp_path, payload, selections)
+    service.models_dev_catalog = lambda: TOOL_CATALOG
+
+    assert await service.seed_vibey_supply() == seeded
+
+    vibey = store.payload["agents"]["vibey"]
+    assert [model["id"] for model in vibey["models"]] == seeded
+    if seeded == ["chat-1"]:
+        [row] = vibey["models"]
+        assert (row["origin"], row["display_name"], row["context_window"]) == ("provider", "Chat 1", 200_000)
+
+
 @pytest.mark.asyncio
 async def test_the_first_source_seed_fetches_a_models_dev_copy_when_none_is_cached(tmp_path, monkeypatch):
     """MH-VIBEY-007: seeded rows keep the metadata they are written with.

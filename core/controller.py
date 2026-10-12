@@ -417,6 +417,19 @@ class Controller:
             user_context=instance_owner_context(),
         )
 
+    async def _start_vibey_without_a_model(self) -> None:
+        """Start a Vibey with nothing to run on, once a models.dev copy can describe a starting model.
+
+        Only while the built-in Agent has no model: a person who emptied Vibey's list keeps
+        the Agent's model, so this never replaces a choice; it only makes an unrunnable
+        Agent runnable, as ``_reconcile_vibey_agent_model`` does.
+        """
+
+        vibey = self.vibe_agent_store.get_builtin_default_agent_for_backend("vibey", enabled_only=False)
+        if vibey is None or str(vibey.model or "").strip():
+            return
+        await self.model_hub_service.start_vibey_without_models()
+
     async def _model_hub_catalog_changed(self, backend: str) -> None:
         """Follow a committed Model Hub catalog change for one backend."""
 
@@ -441,7 +454,12 @@ class Controller:
             await adopt_catalog()
 
     async def _seed_vibey_model_supply(self) -> None:
-        """Seed Vibey's Model Hub entry from existing Sources, then reconcile its built-in Agent's model."""
+        """Seed Vibey's Model Hub entry from existing Sources, then reconcile its built-in Agent's model.
+
+        A Vibey an earlier seed left with nothing to run on (an earlier build's empty seed,
+        or one that ran without a models.dev copy) starts here too, not only on the next
+        snapshot reconcile.
+        """
 
         model_hub_service = getattr(self, "model_hub_service", None)
         if model_hub_service is None:
@@ -450,6 +468,10 @@ class Controller:
             await model_hub_service.seed_vibey_supply()
         except Exception:
             logger.warning("Vibey starting model supply failed", exc_info=True)
+        try:
+            await self._start_vibey_without_a_model()
+        except Exception:
+            logger.warning("Vibey's starting model failed at startup", exc_info=True)
         try:
             self._reconcile_vibey_agent_model()
         except Exception:
@@ -2712,6 +2734,13 @@ class Controller:
                 except Exception:
                     logger.warning(
                         "Model Hub models.dev limit backfill failed after snapshot refresh",
+                        exc_info=True,
+                    )
+                try:
+                    await self._start_vibey_without_a_model()
+                except Exception:
+                    logger.warning(
+                        "Vibey's starting model failed after snapshot refresh",
                         exc_info=True,
                     )
             finally:

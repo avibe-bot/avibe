@@ -277,6 +277,27 @@ _MODELS_DEV_CANDIDATE_FIELDS = (
 )
 
 
+def _described_as_fit_for_agent_turns(match: Mapping[str, Any]) -> bool:
+    """models.dev says the model takes text and tool calls and answers in text: the least an Agent's turn needs."""
+
+    return (
+        match.get("supports_tools") is True
+        and "text" in (match.get("input_modalities") or ())
+        and "text" in (match.get("output_modalities") or ())
+    )
+
+
+def _described_as_unfit_for_agent_turns(match: Mapping[str, Any]) -> bool:
+    """models.dev says the model takes no tool calls, or takes or answers in something other than text."""
+
+    if match.get("supports_tools") is False:
+        return True
+    return any(
+        bool(modalities) and "text" not in modalities
+        for modalities in (match.get("input_modalities") or (), match.get("output_modalities") or ())
+    )
+
+
 AGENT_CHAIN_CONTRACT_VERSION = 11
 PROBE_RESULT_CONTRACT_VERSION = 11
 _SOURCE_DISCOVERY_TIMEOUT_SECONDS = 15
@@ -5488,8 +5509,10 @@ class ModelHubService:
         Its Sources are every existing one this backend may use, placed as a
         newly created Source would be. Its models are the built-in Agents'
         selections, in order, that one of those Sources lists, each added as the
-        picker adds a provider model; none qualifying leaves the list empty
-        rather than picking one. The seed counts only once it has placed a
+        picker adds a provider model. With none qualifying, Vibey starts on one
+        model the Sources list (``_vibey_starting_model``), so a new install's
+        default Agent can run once setup places a Source; a model nothing can
+        describe leaves the list empty. The seed counts only once it has placed a
         Source: until then the entry stays pending, so the first Source the user
         adds still brings every Source and the starting models with it. Each
         mutation that adds Sources seeds after its Sources are final, so one
@@ -5535,11 +5558,49 @@ class ModelHubService:
         described = self._models_dev_descriptions(model_ids)
         rows = []
         for model_id in model_ids:
-            candidate = self._provider_candidate(config, "vibey", model_id, described.get(model_id))
+            match = described.get(model_id)
+            # A selection is a person's choice for a native Agent: only a description
+            # that rules out an Agent's turn keeps it from starting Vibey.
+            if match is not None and _described_as_unfit_for_agent_turns(match):
+                continue
+            candidate = self._provider_candidate(config, "vibey", model_id, match)
             if candidate is not None:
                 rows.append(candidate[0])
+        if not rows:
+            starting = self._vibey_starting_model(config)
+            rows = [starting] if starting is not None else []
         agent.models = rows
         return True
+
+    def _vibey_starting_model(self, config: ModelHubConfig) -> ModelHubBackendModelConfig | None:
+        """The one model a seed with no qualifying selection starts Vibey on, or ``None``.
+
+        The first model, in Vibey's Source order and then each Source's own
+        inventory order, that models.dev describes (by the exact match the
+        picker's candidates use) as taking tool calls and producing text: the
+        least an Agent's turn needs. A model models.dev does not know is never
+        guessed at, so an inventory it cannot describe starts Vibey with none.
+        """
+
+        source_by_id = {source.id: source for source in config.sources}
+        listed = list(
+            dict.fromkeys(
+                model.id
+                for source_id in config.agents["vibey"].sources.order
+                if (source := source_by_id.get(source_id)) is not None
+                for model in source.models
+                if not model.retired
+            )
+        )
+        described = self._models_dev_descriptions(listed)
+        for model_id in listed:
+            match = described.get(model_id)
+            if match is None or not _described_as_fit_for_agent_turns(match):
+                continue
+            candidate = self._provider_candidate(config, "vibey", model_id, match)
+            if candidate is not None:
+                return candidate[0]
+        return None
 
     async def _announce_vibey_seed(self) -> None:
         """Announce a committed seed as the Vibey catalog change it is.
@@ -5584,6 +5645,37 @@ class ModelHubService:
                     raise
         await self._announce_vibey_seed()
         return [model.id for model in config.agents["vibey"].models]
+
+    async def start_vibey_without_models(self) -> list[str]:
+        """Start a seeded Vibey whose catalog is still empty on its starting model; the ids it took.
+
+        A seed that found nothing describable leaves the catalog empty. The snapshot
+        reconcile calls this, when a models.dev copy arrives and on its cadence, and
+        only while Vibey's built-in Agent has no model, so whatever later makes a
+        listed model describable (the copy, or a Source added since) starts a Vibey
+        nothing was ever chosen for. A catalog a person emptied records its removals,
+        so it is theirs and stays empty.
+        """
+
+        async with self._mutation_lock:
+            previous = self.store.load()
+            vibey = previous.agents["vibey"]
+            if previous.vibey_supply_pending or vibey.models or vibey.removed_model_ids:
+                return []
+            starting = self._vibey_starting_model(previous)
+            if starting is None:
+                return []
+            config = self._clone_config(previous)
+            config.agents["vibey"].models = [starting]
+            try:
+                # As for the seed, an engine that is not up must not undo the start: the
+                # config is saved first, and the Agent still has to hear about it.
+                await self._commit_synced(previous, config, rollback_on_sync_failure=False)
+            except ModelHubError:
+                if not self.store.load().agents["vibey"].models:
+                    raise
+        await self._announce_vibey_seed()
+        return [starting.id]
 
     def _ensure_models_dev_copy(self) -> None:
         """Fetch models.dev in the foreground, bounded, when no copy is cached.

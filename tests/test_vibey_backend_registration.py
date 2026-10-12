@@ -6,7 +6,7 @@ import asyncio
 import json
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from sqlalchemy.exc import OperationalError
@@ -294,8 +294,8 @@ async def test_a_starting_model_needs_a_source_that_lists_it(tmp_path, sqlite_db
     """MH-VIBEY-007: a Source's inventory, not a route, decides a starting model.
 
     An Anthropic key could pass any model id through, but it lists only Claude
-    models: the Codex Agent's ``gpt-6-astra`` is no starting model for Avibe,
-    and the Avibe Agent stays without a model rather than routing it there.
+    models: the Codex Agent's ``gpt-6-astra`` is no starting model for Avibe.
+    The Avibe Agent starts on a model the Source lists instead of routing it there.
     """
     from config.v2_config import ModelHubConfig
     from tests.test_model_hub_l3 import _service, _source
@@ -306,6 +306,11 @@ async def test_a_starting_model_needs_a_source_that_lists_it(tmp_path, sqlite_db
         store.update("codex", model="gpt-6-astra")
         service = _service(tmp_path, sources=[])
         service.store.config = ModelHubConfig()
+        # A fixed models.dev copy: the seed must never reach the network.
+        service.models_dev_catalog = lambda: {"anthropic": {"name": "Anthropic", "models": {
+            "claude-opus-5-5": {"name": "Claude Opus 5.5", "tool_call": True,
+                                "modalities": {"input": ["text"], "output": ["text"]}},
+        }}}
         controller = Controller.__new__(Controller)
         controller.vibe_agent_store = store
         controller.model_hub_service = service
@@ -319,8 +324,110 @@ async def test_a_starting_model_needs_a_source_that_lists_it(tmp_path, sqlite_db
             await service._commit_new_source_locked(anthropic)
 
         vibey = service.store.load().agents["vibey"]
-        assert (vibey.sources.order, vibey.models) == ([anthropic.id], [])
+        assert (vibey.sources.order, [model.id for model in vibey.models]) == ([anthropic.id], ["claude-opus-5-5"])
+        assert store.get("vibey").model == "claude-opus-5-5"
+    finally:
+        store.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("person_chose", "person_emptied", "engine_up"),
+    [(False, False, True), (True, False, True), (False, True, True), (False, False, False)],
+)
+async def test_vibey_starts_once_a_models_dev_copy_describes_a_listed_model(
+    tmp_path, sqlite_db_factory, person_chose, person_emptied, engine_up,
+):
+    """MH-VIBEY-007: a seed that ran with no models.dev copy heals when a copy arrives.
+
+    With no copy to describe the Source's models, the seed leaves Vibey's catalog empty.
+    Once a copy arrives, Vibey starts on its starting model, but only while its built-in
+    Agent has no model and nobody emptied its list: a person's choice always stands.
+    """
+    from config.v2_config import ModelHubConfig
+    from tests.test_model_hub_l3 import _service, _source
+
+    store = VibeAgentStore(sqlite_db_factory(tmp_path / "agents.sqlite"))
+    try:
+        store.ensure_builtin_default_agents(["codex", "vibey"])
+        store.update("codex", model="gpt-6-astra")
+        service = _service(tmp_path, sources=[])
+        service.store.config = ModelHubConfig()
+        copy_on_disk: dict = {}
+        service.models_dev_catalog = lambda: copy_on_disk
+        controller = Controller.__new__(Controller)
+        controller.vibe_agent_store = store
+        controller.model_hub_service = service
+        service.builtin_agent_models_override = controller._builtin_agent_models
+        service.backend_catalog_changed = controller._model_hub_catalog_changed
+        # A model only Vibey would run, so starting on it adds the Source's route target and syncs the engine.
+        relay = _source("src_relay0001", "Relay", vendor="custom", protocol="openai_chat", model_id="relay-tools-1")
+
+        with patch("vibe.models_dev_catalog.load_models_dev_catalog", side_effect=OSError("offline")):
+            async with service._mutation_lock:
+                await service._commit_new_source_locked(relay)
+        assert service.store.load().agents["vibey"].models == []
         assert store.get("vibey").model is None
+        if person_chose:
+            store.update("vibey", model="relay-tools-1")
+        if person_emptied:
+            # The person added the model and removed it again: the empty list is theirs.
+            service.store.config.agents["vibey"].removed_model_ids = ["relay-tools-1"]
+
+        copy_on_disk.update({"relay": {"name": "Relay", "models": {
+            "relay-tools-1": {"name": "Relay Tools 1", "tool_call": True,
+                              "modalities": {"input": ["text"], "output": ["text"]}},
+        }}})
+        if not engine_up:
+            from core.handlers.model_hub.service import ModelHubError
+
+            # The start is saved before the engine syncs, so the Agent hears of it even when the sync fails.
+            service.adapter.sync_sources = AsyncMock(side_effect=ModelHubError("engine_down", status=503))
+        await controller._start_vibey_without_a_model()
+
+        started = [model.id for model in service.store.load().agents["vibey"].models]
+        assert started == ([] if person_chose or person_emptied else ["relay-tools-1"])
+        assert store.get("vibey").model == (None if person_emptied else "relay-tools-1")
+    finally:
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_an_rc1_vibey_left_empty_starts_at_the_first_upgraded_start(tmp_path, sqlite_db_factory):
+    """MH-VIBEY-007: a Vibey an earlier build seeded empty starts at the next start.
+
+    gh-v3.2.0rc1 seeded Vibey from a Source listing no built-in Agent's model and left its
+    catalog empty. The seed is spent, so the upgraded start does not run it again; it starts
+    that Vibey from the cached models.dev copy instead of waiting for a later refresh.
+    """
+    from config.v2_config import ModelHubConfig
+    from tests.test_model_hub_l3 import _service, _source
+
+    store = VibeAgentStore(sqlite_db_factory(tmp_path / "agents.sqlite"))
+    try:
+        store.ensure_builtin_default_agents(["vibey"])
+        relay = _source("src_relay0001", "Relay", vendor="custom", protocol="openai_chat", model_id="relay-tools-1")
+        # The persisted shape rc1 left: Vibey seeded (no longer pending), its Source placed, its catalog empty.
+        config = ModelHubConfig(sources=[relay])
+        config.agents["vibey"].sources.order = [relay.id]
+        config = ModelHubConfig.from_payload(config.to_payload())
+        assert not config.vibey_supply_pending and config.agents["vibey"].models == []
+        service = _service(tmp_path, sources=[])
+        service.store.config = config
+        service.models_dev_catalog = lambda: {"relay": {"name": "Relay", "models": {
+            "relay-tools-1": {"name": "Relay Tools 1", "tool_call": True,
+                              "modalities": {"input": ["text"], "output": ["text"]}},
+        }}}
+        controller = Controller.__new__(Controller)
+        controller.vibe_agent_store = store
+        controller.model_hub_service = service
+        service.builtin_agent_models_override = controller._builtin_agent_models
+        service.backend_catalog_changed = controller._model_hub_catalog_changed
+
+        await controller._seed_vibey_model_supply()
+
+        assert [model.id for model in service.store.load().agents["vibey"].models] == ["relay-tools-1"]
+        assert store.get("vibey").model == "relay-tools-1"
     finally:
         store.close()
 
