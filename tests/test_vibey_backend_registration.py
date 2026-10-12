@@ -306,6 +306,11 @@ async def test_a_starting_model_needs_a_source_that_lists_it(tmp_path, sqlite_db
         store.update("codex", model="gpt-6-astra")
         service = _service(tmp_path, sources=[])
         service.store.config = ModelHubConfig()
+        # A fixed models.dev copy: the seed must never reach the network.
+        service.models_dev_catalog = lambda: {"anthropic": {"name": "Anthropic", "models": {
+            "claude-opus-5-5": {"name": "Claude Opus 5.5", "tool_call": True,
+                                "modalities": {"input": ["text"], "output": ["text"]}},
+        }}}
         controller = Controller.__new__(Controller)
         controller.vibe_agent_store = store
         controller.model_hub_service = service

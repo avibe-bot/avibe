@@ -123,7 +123,7 @@ the wizard confirms application and an available Agent before completing setup.
 Pending application, uncertain keychain auth, or a failed start stays recoverable
 on this screen. For OpenCode, if the Agent's provider is unconnected or its exact
 model is absent from that provider's merged native/custom catalog, choose a
-compatible model in the inline recovery and apply it explicitly. The wizard never chooses a model or changes an existing usable default silently.
+compatible model in the inline recovery and apply it explicitly. The wizard never changes an existing usable default silently, and it picks no model for an assistant except Vibey's starting model: the first tool-capable model the first source lists, which the user can change.
 
 IM is optional for a fresh installation. Configure Slack, Discord, Telegram,
 WeChat, or Lark / Feishu later in Settings. Existing enabled but incomplete IM

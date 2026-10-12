@@ -548,4 +548,19 @@ scenarios:
       test: tests/e2e/test_model_hub_engine_contract.py::test_oauth_callback_forwarder_is_loopback_only_and_optional
     supporting_tests:
       - tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_hub_oauth_mispaste_stays_recoverable_and_schemeless_address_signs_in
+  - id: AUTH-SETUP-131
+    name: A source that lists no built-in Agent's model still leaves Vibey runnable, and setup completes on it without a pick
+    status: covered
+    kind: happy_path
+    layer: scenario
+    backend: vibey
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_vibey_starts_on_a_sources_tool_capable_model_and_setup_completes_without_a_pick
+    # The scenario owns the server boundary setup's providers screen calls: the add-source
+    # route, the seed it runs, the Vibey catalog change it announces, the controller's
+    # reconciliation of the built-in Agent's model, the runnable named route the entry
+    # gate admits, and completion. The browser side, which keeps a recorded default that
+    # can run, is the supporting tests below.
+    supporting_tests:
+      - ui/src/components/onboarding/entryGate.test.ts
+      - tests/test_model_hub_vibey_consumer.py
 next_priority: []

@@ -785,15 +785,21 @@ TOOL_CATALOG = {"relay": {"name": "Relay", "models": {
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("sources", "seeded"), [
+@pytest.mark.parametrize(("selections", "sources", "seeded"), [
     # The first listed model that takes tool calls and answers in text, past the ones that do not.
-    ([("src_seedrelay001", ("embed-1", "draw-1", "unknown-1", "chat-1", "chat-2"))], ["chat-1"]),
+    ([("codex", "gpt-6-astra")], [("src_seedrelay001", ("embed-1", "draw-1", "unknown-1", "chat-1", "chat-2"))], ["chat-1"]),
     # Sources the user already had are read in Vibey's Source order, each in its own inventory order.
-    ([("src_seedrelay001", ("unknown-1", "embed-1")), ("src_seedrelay002", ("chat-2", "chat-1"))], ["chat-2"]),
+    ([("codex", "gpt-6-astra")], [("src_seedrelay001", ("unknown-1", "embed-1")), ("src_seedrelay002", ("chat-2", "chat-1"))], ["chat-2"]),
     # A model models.dev cannot describe is never guessed at.
-    ([("src_seedrelay001", ("unknown-1", "unknown-2"))], []),
+    ([("codex", "gpt-6-astra")], [("src_seedrelay001", ("unknown-1", "unknown-2"))], []),
+    # A native Agent's selection that models.dev rules out for an Agent's turn does not start Vibey;
+    # one it does not know still does, being that person's own choice.
+    ([("codex", "embed-1"), ("opencode", "custom/draw-1")], [("src_seedrelay001", ("embed-1", "draw-1", "chat-2"))], ["chat-2"]),
+    ([("codex", "unknown-1")], [("src_seedrelay001", ("unknown-1", "chat-2"))], ["unknown-1"]),
 ])
-async def test_a_seed_with_no_qualifying_selection_starts_vibey_on_a_tool_capable_model(tmp_path, sources, seeded):
+async def test_a_seed_with_no_qualifying_selection_starts_vibey_on_a_tool_capable_model(
+    tmp_path, selections, sources, seeded,
+):
     """MH-VIBEY-007: a new install's default Agent can run once setup places a Source.
 
     No built-in Agent's model is listed by these Sources, so the seed starts
@@ -804,7 +810,7 @@ async def test_a_seed_with_no_qualifying_selection_starts_vibey_on_a_tool_capabl
         _seed_source(source_id, day, *model_ids, vendor="custom", protocol="openai_chat").to_payload()
         for day, (source_id, model_ids) in enumerate(sources, start=1)
     ]
-    service, store, _announced = _seed_service(tmp_path, payload, [("codex", "gpt-6-astra")])
+    service, store, _announced = _seed_service(tmp_path, payload, selections)
     service.models_dev_catalog = lambda: TOOL_CATALOG
 
     assert await service.seed_vibey_supply() == seeded

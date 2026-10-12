@@ -277,6 +277,19 @@ _MODELS_DEV_CANDIDATE_FIELDS = (
 )
 
 
+def _described_as_fit_for_agent_turns(match: Mapping[str, Any]) -> bool:
+    """models.dev says the model takes tool calls and answers in text: the least an Agent's turn needs."""
+
+    return match.get("supports_tools") is True and "text" in (match.get("output_modalities") or ())
+
+
+def _described_as_unfit_for_agent_turns(match: Mapping[str, Any]) -> bool:
+    """models.dev says the model takes no tool calls, or answers in something other than text."""
+
+    outputs = match.get("output_modalities") or ()
+    return match.get("supports_tools") is False or (bool(outputs) and "text" not in outputs)
+
+
 AGENT_CHAIN_CONTRACT_VERSION = 11
 PROBE_RESULT_CONTRACT_VERSION = 11
 _SOURCE_DISCOVERY_TIMEOUT_SECONDS = 15
@@ -5537,7 +5550,12 @@ class ModelHubService:
         described = self._models_dev_descriptions(model_ids)
         rows = []
         for model_id in model_ids:
-            candidate = self._provider_candidate(config, "vibey", model_id, described.get(model_id))
+            match = described.get(model_id)
+            # A selection is a person's choice for a native Agent: only a description
+            # that rules out an Agent's turn keeps it from starting Vibey.
+            if match is not None and _described_as_unfit_for_agent_turns(match):
+                continue
+            candidate = self._provider_candidate(config, "vibey", model_id, match)
             if candidate is not None:
                 rows.append(candidate[0])
         if not rows:
@@ -5569,7 +5587,7 @@ class ModelHubService:
         described = self._models_dev_descriptions(listed)
         for model_id in listed:
             match = described.get(model_id)
-            if match is None or match.get("supports_tools") is not True or "text" not in match.get("output_modalities", ()):
+            if match is None or not _described_as_fit_for_agent_turns(match):
                 continue
             candidate = self._provider_candidate(config, "vibey", model_id, match)
             if candidate is not None:

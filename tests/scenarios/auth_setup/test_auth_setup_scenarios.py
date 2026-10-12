@@ -4681,6 +4681,75 @@ def test_builtin_vibey_model_pick_completes_setup_without_a_cli(monkeypatch, tmp
         agents.close()
 
 
+def test_vibey_starts_on_a_sources_tool_capable_model_and_setup_completes_without_a_pick(monkeypatch, tmp_path):
+    """AUTH-SETUP-131: add source -> seed -> catalog change -> Agent model -> runnable route -> completion.
+
+    The setup's first source lists no model a built-in Agent runs, yet the built-in Vibey
+    Agent can run as soon as it is placed: the seed starts Vibey on the first listed model
+    models.dev describes as taking tool calls and answering in text, announces the catalog
+    change, and the controller gives the Agent that model. Setup then completes on the
+    Vibey default with no pick. Every step is the HTTP route setup calls, and the Hub
+    service is wired to the real Agent store and catalog-change handler as the controller
+    wires them.
+    """
+    from core.controller import Controller
+    from core.vibe_agents import VibeAgentStore
+    from tests.test_model_hub_api import _service
+
+    monkeypatch.setenv("VIBE_MODEL_HUB_ENABLED", "1")
+    V2Config.default().save()
+    service, store, _adapter = _service(tmp_path / "hub")
+    # The fake upstream lists claude-opus-4-6 then claude-sonnet-4-6; models.dev knows only the second.
+    service.models_dev_catalog = lambda: {"anthropic": {"name": "Anthropic", "models": {
+        "claude-sonnet-4-6": {"name": "Claude Sonnet 4.6", "tool_call": True,
+                              "modalities": {"input": ["text"], "output": ["text"]}},
+    }}}
+    agents = VibeAgentStore()
+    controller = Controller.__new__(Controller)
+    controller.config = V2Config.load()
+    controller.vibe_agent_store = agents
+    controller.model_hub_service = service
+    service.builtin_agent_models_override = controller._builtin_agent_models
+    service.backend_catalog_changed = controller._model_hub_catalog_changed
+    service.named_agents_override = lambda backend: [
+        (agent.name, agent.model)
+        for agent in agents.list_agents(include_disabled=False)
+        if agent.backend == backend
+    ]
+    monkeypatch.setattr(ui_server, "_model_hub_service", lambda: service)
+    client = app.test_client()
+    headers = csrf_headers(client)
+    try:
+        vibey = next(row for row in client.get("/api/agents").get_json()["agents"] if row["backend"] == "vibey")
+        assert vibey["model"] is None
+        # A new install records the built-in Agent as its default (docs/plans/vibey-default-agent.md §1).
+        recorded = client.post("/api/agents/default", json={"name": vibey["name"]}, headers=headers)
+        assert recorded.status_code == 200, recorded.get_json()
+
+        created = client.post(
+            "/api/models/sources",
+            json={"kind": "api_key", "vendor": "anthropic", "key": "sk-test-auth-setup-anthropic"},
+            headers=headers,
+        )
+        assert created.status_code == 201, created.get_json()
+
+        # No pick: the seed chose the first describable tool-capable model and the Agent took it.
+        assert agents.require(vibey["name"]).model == "claude-sonnet-4-6"
+        supply = next(row for row in client.get("/api/models/agents").get_json()["agents"] if row["backend"] == "vibey")
+        assert [row["id"] for row in supply["catalog_models"]] == ["claude-sonnet-4-6"]
+        route = next(row for row in supply["named_agents"] if row["name"] == vibey["name"])
+        assert route["effective_model_id"] == "claude-sonnet-4-6"
+        assert route["supply_status"] in {"ok", "degraded"}
+        assert route["route_reason"] != "route_unconfigured"
+
+        completed = client.post("/api/config", json={"setup_completed": True}, headers=headers)
+        assert completed.status_code == 200, completed.get_json()
+        assert V2Config.load().setup_completed
+        assert agents.get_default_agent().name == vibey["name"]
+    finally:
+        agents.close()
+
+
 @pytest.mark.parametrize("setup_host", ["192.0.2.5", "fd00::1", "2001:db8::5", "[2001:db8::5]"])
 async def test_cloud_pairing_origin_reaches_effective_ui_listener(monkeypatch, setup_host):
     """Scenario: AUTH-SETUP-907 — every origin consumer reaches the widened UI bind."""

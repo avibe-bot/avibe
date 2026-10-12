@@ -146,6 +146,7 @@ scenarios:
     test: tests/test_model_hub_vibey_consumer.py::test_vibey_agent_predating_its_supply_starts_with_the_users_providers_and_models
     related_tests:
       - tests/test_model_hub_vibey_consumer.py::test_fresh_install_seeds_vibey_with_its_first_source
+      - tests/test_model_hub_vibey_consumer.py::test_a_seed_with_no_qualifying_selection_starts_vibey_on_a_tool_capable_model
       - tests/test_model_hub_native_takeover.py::test_takeover_seeds_a_pending_vibey_entry_from_its_whole_batch
       - tests/test_vibey_backend_registration.py::test_vibey_agent_runs_its_catalogs_first_model_until_it_has_one
       - tests/test_vibey_backend_registration.py::test_a_lost_vibey_model_hand_off_heals_on_the_next_start
