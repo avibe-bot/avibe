@@ -3,6 +3,8 @@ from __future__ import annotations
 import ipaddress
 from http.cookies import SimpleCookie
 
+import pytest
+
 from config.v2_config import AgentsConfig, PlatformsConfig, RemoteAccessConfig, RuntimeConfig, SlackConfig, V2Config
 from vibe import ui_server
 from vibe.ui_compat import TEST_REMOTE_ADDR_HEADER
@@ -95,6 +97,45 @@ def test_config_post_rejects_host_mismatch_before_parsing_malformed_json(monkeyp
 
     assert response.status_code == 503
     assert response.get_json()["error"] == "remote_access_host_mismatch"
+
+
+@pytest.mark.parametrize("host", ["lan.example/assets/x?", "lan.example/assets/x#"])
+def test_malformed_host_is_refused_before_request_hooks(monkeypatch, tmp_path, host):
+    """A Host carrying path delimiters must not reshape the path the auth hooks see.
+
+    Starlette < 1.0.1 rebuilds ``request.url`` from the raw Host, so such a value
+    made a write to ``/api/config`` look like a public ``/assets/`` request to a
+    peer reaching a wildcard-bound UI directly.
+    """
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = V2Config(
+        mode="self_host",
+        version="v2",
+        slack=SlackConfig(bot_token=""),
+        runtime=RuntimeConfig(default_cwd="."),
+        agents=AgentsConfig(),
+    )
+    config.ui.setup_host = "0.0.0.0"
+    config.save()
+    config_path = tmp_path / "config" / "config.json"
+    before = config_path.read_bytes()
+    client = app.test_client()
+
+    response = client.post(
+        "/api/config",
+        json={"agents": {"claude": {"enabled": True, "cli_path": "/tmp/unexpected-cli"}}},
+        headers={
+            "Host": host,
+            "Origin": "http://lan.example",
+            "Cookie": "vibe_csrf_token=t",
+            "X-Vibe-CSRF-Token": "t",
+        },
+        environ_base={"REMOTE_ADDR": "203.0.113.10"},
+    )
+
+    assert response.status_code == 400
+    assert response.get_json() == {"ok": False, "error": "invalid_host_header"}
+    assert config_path.read_bytes() == before
 
 
 def test_config_post_accepts_vendor_json_content_type(monkeypatch, tmp_path):

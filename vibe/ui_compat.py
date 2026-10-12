@@ -54,7 +54,9 @@ class CompatRequest:
 
     @property
     def path(self) -> str:
-        return self._request.url.path
+        # The routed path. ``request.url`` is rebuilt from the Host header, so
+        # its path can differ from the one the router dispatched on.
+        return self._request.scope["path"]
 
     @property
     def args(self) -> QueryParams:

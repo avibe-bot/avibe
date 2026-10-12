@@ -3106,7 +3106,56 @@ def _apply_vault_sandbox_security_headers(response: FastAPIResponse, path: str) 
 @app.middleware("http")
 async def add_vault_sandbox_security_headers(starlette_request: FastAPIRequest, call_next):
     response = await call_next(starlette_request)
-    return _apply_vault_sandbox_security_headers(response, starlette_request.url.path)
+    return _apply_vault_sandbox_security_headers(response, starlette_request.scope["path"])
+
+
+# RFC 9112 §3.2 Host: ``uri-host [":" port]`` (same grammar Starlette >= 1.0.1
+# enforces). Anything else, e.g. ``/``, ``?`` or ``#``, would let the Host move
+# the path boundary of the URL rebuilt from it.
+_VALID_HOST_HEADER_RE = re.compile(
+    r"(?:[a-z0-9._~%!$&'()*+,;=-]+|\[[a-f0-9]*:[a-f0-9.:]+\]|\[(?-i:v)[a-f0-9]+\.[a-z0-9._~!$&'()*+,;=:-]+\])"
+    r"(?::(?P<port>[0-9]+))?",
+    re.IGNORECASE,
+)
+
+
+def _is_valid_host_header(value: str) -> bool:
+    match = _VALID_HOST_HEADER_RE.fullmatch(value)
+    if match is None:
+        return False
+    port = (match["port"] or "").lstrip("0")
+    return len(port) <= 5 and int(port or "0") <= 65535
+
+
+class _RejectInvalidHostMiddleware:
+    """Refuse HTTP and WebSocket requests whose Host is not a valid authority.
+
+    Request hooks and handlers read origin and host values derived from Host;
+    this keeps every one of them on a well-formed value. Registered after the
+    other middleware so it wraps all of them.
+    """
+
+    def __init__(self, asgi_app: Any) -> None:
+        self.app = asgi_app
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if scope["type"] in {"http", "websocket"}:
+            hosts = [value for key, value in scope.get("headers") or () if key == b"host"]
+            if len(hosts) > 1 or (hosts and not _is_valid_host_header(hosts[0].decode("latin-1"))):
+                if scope["type"] == "websocket":
+                    await send({"type": "websocket.close", "code": 1008})
+                    return
+                response = FastAPIResponse(
+                    content='{"ok":false,"error":"invalid_host_header"}',
+                    status_code=400,
+                    media_type="application/json",
+                )
+                await response(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
+
+
+app.add_middleware(_RejectInvalidHostMiddleware)
 
 
 @app.after_request
