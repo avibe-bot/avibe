@@ -200,6 +200,9 @@ async def test_a_command_keeps_powershell_script_semantics(run, command, output)
         # --% makes the rest of its line arguments: nothing may be added there.
         ("cmd.exe --% /c exit 7", 7),
         ("cmd.exe --% /c exit 23\nGet-Item C:\\does-not-exist", 1),
+        # The last statement sees $? as the one before left it.
+        ("cmd /c exit 7; if (-not $?) { exit $LASTEXITCODE }", 7),
+        ("cmd /c exit 0; if ($?) { cmd /c exit 5 }", 5),
     ],
     ids=[
         "end",
@@ -212,6 +215,8 @@ async def test_a_command_keeps_powershell_script_semantics(run, command, output)
         "a-code-from-a-param-default",
         "stop-parsing-last",
         "stop-parsing-before-the-last",
+        "the-last-tests-the-one-before",
+        "the-last-tests-a-success",
     ],
 )
 async def test_the_exit_code_follows_the_statement_that_runs_last(run, command, code):

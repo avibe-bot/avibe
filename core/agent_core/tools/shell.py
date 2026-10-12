@@ -28,7 +28,8 @@ COMMAND_FILE = "command.ps1"
 # later run after the others, else of the end, process, or begin block) is wrapped, by its place in the text and on the lines it already has, so the lines PowerShell reports
 # are the command's own: its status is taken right after it, and the value ``$LASTEXITCODE`` holds is noted
 # where every path into it passes: after the statement before it in its block, else as its block begins (a
-# ``clean`` block runs even after a ``return``), else after parameter binding. ``--%`` makes the rest of its line
+# ``clean`` block runs even after a ``return``), else after parameter binding. The note leaves ``$?`` as it found
+# it, ending in a silently ignored error when it was false, since the last statement may test it. ``--%`` makes the rest of its line
 # arguments, so nothing is added on such a line. A native program stores a new value even when the code is the
 # same, so the exit code is one the last statement set, never a code an earlier one left there, and the
 # command sees ``$LASTEXITCODE`` exactly as PowerShell sets it. It does not exist until something sets it, so
@@ -65,8 +66,9 @@ $__avibe_before = $null
 $__avibe_run = @(foreach ($__avibe_block in $__avibe_ast.DynamicParamBlock, $__avibe_ast.BeginBlock, \
 $__avibe_ast.ProcessBlock, $__avibe_ast.EndBlock, $__avibe_ast.CleanBlock) { if ($__avibe_block) { $__avibe_block.Statements } })
 $__avibe_edits = @()
-$__avibe_note = '$__avibe_var = Get-Variable LASTEXITCODE -Scope Global -ErrorAction Ignore; \
-if ($__avibe_var) { $__avibe_before = $__avibe_var.Value }'
+$__avibe_note = '$__avibe_q = $?; $__avibe_var = Get-Variable LASTEXITCODE -Scope Global -ErrorAction Ignore; \
+if ($__avibe_var) { $__avibe_before = $__avibe_var.Value }; \
+if (-not $__avibe_q) { Write-Error -Message avibe -ErrorAction Ignore }'
 if ($__avibe_run.Count) {
     $__avibe_last = $__avibe_run[-1]
     $__avibe_after = '; '
