@@ -119,7 +119,7 @@ One rule decides identity, in this order:
    A boolean check cannot express the third answer, so each consumer still
    using rule 4 needs one. A command line is independent proof only when it
    names this particular process. Every watch supervisor runs the same
-   `python core/watch_worker.py` argv, with its watch id only in the
+   `python …/watch_worker.py` argv, with its watch id only in the
    environment, so for those the per-watch environment is the proof, and
    without it the answer is *unknown*.
 
