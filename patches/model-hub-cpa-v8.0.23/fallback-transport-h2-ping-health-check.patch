@@ -1,0 +1,365 @@
+diff --git a/internal/runtime/executor/helps/proxy_helpers.go b/internal/runtime/executor/helps/proxy_helpers.go
+index 0c5f6c95..4c15b243 100644
+--- a/internal/runtime/executor/helps/proxy_helpers.go
++++ b/internal/runtime/executor/helps/proxy_helpers.go
+@@ -153,5 +153,8 @@ func buildProxyTransport(proxyURL string) *http.Transport {
+ 		log.Errorf("%v", errBuild)
+ 		return nil
+ 	}
+-	return transport
++	if transport == nil {
++		return nil
++	}
++	return withUpstreamHTTP2HealthCheck(transport, upstreamHTTP2SendPingTimeout, upstreamHTTP2PingTimeout)
+ }
+diff --git a/internal/runtime/executor/helps/upstream_transport.go b/internal/runtime/executor/helps/upstream_transport.go
+new file mode 100644
+index 00000000..3e2bae5b
+--- /dev/null
++++ b/internal/runtime/executor/helps/upstream_transport.go
+@@ -0,0 +1,57 @@
++package helps
++
++import (
++	"net/http"
++	"sync"
++	"time"
++)
++
++// upstreamHTTP2SendPingTimeout and upstreamHTTP2PingTimeout turn on the HTTP/2 health check for
++// upstream requests that do not use a dedicated uTLS connection: API-key relays, OpenAI-compatible
++// providers and other executor traffic on the standard transport. After SendPingTimeout without a
++// frame the connection sends a PING, and it is closed if no ACK arrives within PingTimeout. Without
++// it, a stream whose path stopped delivering packets without a FIN or RST, which a NAT or a
++// TCP-terminating proxy can leave behind and TCP keepalive cannot see past, blocks its body read
++// until the caller gives up. A silent but live upstream acknowledges the PING, so long reasoning
++// pauses are not cut. PING exists only in HTTP/2; an HTTP/1.1 upstream is not covered.
++const (
++	upstreamHTTP2SendPingTimeout = 30 * time.Second
++	upstreamHTTP2PingTimeout     = 15 * time.Second
++)
++
++// upstreamFallbackTransport is the standard transport upstream executors use when neither a proxy
++// nor an injected RoundTripper applies. It is one clone of http.DefaultTransport, created on first
++// use and shared, so connection pooling and HTTP/2 multiplexing work as they do on the default
++// transport. The process-wide http.DefaultTransport is not modified.
++var upstreamFallbackTransport = sync.OnceValue(func() http.RoundTripper {
++	base, ok := http.DefaultTransport.(*http.Transport)
++	if !ok || base == nil {
++		return http.DefaultTransport
++	}
++	return withUpstreamHTTP2HealthCheck(base.Clone(), upstreamHTTP2SendPingTimeout, upstreamHTTP2PingTimeout)
++})
++
++// WithUpstreamFallbackTransport gives client the shared upstream transport when it has no transport
++// of its own, as NewProxyAwareHTTPClient leaves it when neither a proxy nor an injected RoundTripper
++// applies. NewProxyAwareHTTPClient itself keeps returning a nil Transport there, because some
++// callers read that as "direct" and install a transport of their own.
++func WithUpstreamFallbackTransport(client *http.Client) *http.Client {
++	if client != nil && client.Transport == nil {
++		client.Transport = upstreamFallbackTransport()
++	}
++	return client
++}
++
++// withUpstreamHTTP2HealthCheck sets the HTTP/2 health check on transport and returns it, keeping any
++// other HTTP/2 settings the transport already has.
++func withUpstreamHTTP2HealthCheck(transport *http.Transport, sendPingTimeout, pingTimeout time.Duration) *http.Transport {
++	config := &http.HTTP2Config{}
++	if transport.HTTP2 != nil {
++		copied := *transport.HTTP2
++		config = &copied
++	}
++	config.SendPingTimeout = sendPingTimeout
++	config.PingTimeout = pingTimeout
++	transport.HTTP2 = config
++	return transport
++}
+diff --git a/internal/runtime/executor/helps/upstream_transport_test.go b/internal/runtime/executor/helps/upstream_transport_test.go
+new file mode 100644
+index 00000000..be953d58
+--- /dev/null
++++ b/internal/runtime/executor/helps/upstream_transport_test.go
+@@ -0,0 +1,220 @@
++package helps
++
++import (
++	"bufio"
++	"context"
++	"crypto/tls"
++	"crypto/x509"
++	"errors"
++	"fmt"
++	"net"
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/proxyutil"
++)
++
++// newHealthCheckedTLSStream starts an HTTP/2 TLS server running handler and returns a client on a
++// fresh standard transport with the health check at the given timings, whose TCP connections are
++// passed through wrap before the TLS handshake.
++func newHealthCheckedTLSStream(t *testing.T, sendPingTimeout, pingTimeout time.Duration, handler http.Handler, wrap func(net.Conn) net.Conn) (*http.Client, string) {
++	t.Helper()
++	server := httptest.NewUnstartedServer(handler)
++	server.EnableHTTP2 = true
++	server.StartTLS()
++	t.Cleanup(server.Close)
++	base, ok := http.DefaultTransport.(*http.Transport)
++	if !ok {
++		t.Fatalf("http.DefaultTransport is %T", http.DefaultTransport)
++	}
++	transport := withUpstreamHTTP2HealthCheck(base.Clone(), sendPingTimeout, pingTimeout)
++	rootCAs := x509.NewCertPool()
++	rootCAs.AddCert(server.Certificate())
++	transport.TLSClientConfig.RootCAs = rootCAs
++	transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
++		conn, errDial := (&net.Dialer{}).DialContext(ctx, network, address)
++		if errDial != nil {
++			return nil, errDial
++		}
++		return wrap(conn), nil
++	}
++	t.Cleanup(transport.CloseIdleConnections)
++	return &http.Client{Transport: transport}, server.URL
++}
++
++func openHealthCheckedStream(t *testing.T, client *http.Client, serverURL string) (*http.Response, *bufio.Reader) {
++	t.Helper()
++	req, errRequest := http.NewRequestWithContext(t.Context(), http.MethodPost, serverURL, strings.NewReader("{}"))
++	if errRequest != nil {
++		t.Fatal(errRequest)
++	}
++	resp, errDo := client.Do(req)
++	if errDo != nil {
++		t.Fatal(errDo)
++	}
++	t.Cleanup(func() { _ = resp.Body.Close() })
++	if resp.ProtoMajor != 2 {
++		t.Fatalf("protocol = %s, want HTTP/2", resp.Proto)
++	}
++	reader := bufio.NewReader(resp.Body)
++	if line, errRead := reader.ReadString('\n'); errRead != nil || !strings.Contains(line, "response.created") {
++		t.Fatalf("first line = %q, error = %v", line, errRead)
++	}
++	return resp, reader
++}
++
++func TestUpstreamTransportStreamFailsWhenThePathGoesDead(t *testing.T) {
++	release := make(chan struct{})
++	t.Cleanup(func() { close(release) })
++	var path *deadPathConn
++	client, serverURL := newHealthCheckedTLSStream(t, 100*time.Millisecond, time.Second, sseUntilReleased(t, release), func(conn net.Conn) net.Conn {
++		path = newDeadPathConn(conn)
++		return path
++	})
++	_, reader := openHealthCheckedStream(t, client, serverURL)
++	path.stall()
++	started := time.Now()
++	done := make(chan error, 1)
++	go func() {
++		_, errRead := reader.ReadString('\n')
++		for errRead == nil {
++			_, errRead = reader.ReadString('\n')
++		}
++		done <- errRead
++	}()
++	select {
++	case errRead := <-done:
++		if errRead == nil || errors.Is(errRead, http.ErrBodyReadAfterClose) {
++			t.Fatalf("read error = %v, want a lost-connection error", errRead)
++		}
++		t.Logf("dead path detected after %v: %v", time.Since(started), errRead)
++	case <-time.After(10 * time.Second):
++		t.Fatal("stream read still blocked on a dead path; the HTTP/2 health check did not close the connection")
++	}
++}
++
++func TestUpstreamTransportHealthCheckKeepsASilentHealthyStream(t *testing.T) {
++	const sendPingTimeout = 100 * time.Millisecond
++	release := make(chan struct{})
++	client, serverURL := newHealthCheckedTLSStream(t, sendPingTimeout, time.Second, sseUntilReleased(t, release), func(conn net.Conn) net.Conn { return conn })
++	_, reader := openHealthCheckedStream(t, client, serverURL)
++	// Ten health-check periods of silence: the server answers each PING, so the stream survives.
++	time.AfterFunc(10*sendPingTimeout, func() { close(release) })
++	for {
++		line, errRead := reader.ReadString('\n')
++		if errRead != nil {
++			t.Fatalf("silent healthy stream failed: %v", errRead)
++		}
++		if strings.Contains(line, "response.completed") {
++			return
++		}
++	}
++}
++
++func TestUpstreamClientsUseTheHealthCheckedStandardTransport(t *testing.T) {
++	shared, ok := upstreamFallbackTransport().(*http.Transport)
++	if !ok {
++		t.Fatalf("upstream fallback transport is %T, want a dedicated *http.Transport", upstreamFallbackTransport())
++	}
++	if shared == http.DefaultTransport {
++		t.Fatal("upstream fallback transport is http.DefaultTransport itself")
++	}
++	if defaultTransport, okDefault := http.DefaultTransport.(*http.Transport); okDefault && defaultTransport.HTTP2 != nil {
++		t.Fatalf("http.DefaultTransport was modified: HTTP2 = %+v", *defaultTransport.HTTP2)
++	}
++	// 30 s without a frame, then 15 s for the PING ACK: a dead path fails at about 45 s.
++	if shared.HTTP2 == nil || shared.HTTP2.SendPingTimeout != 30*time.Second || shared.HTTP2.PingTimeout != 15*time.Second {
++		t.Fatalf("shared transport HTTP/2 health check = %+v, want 30s/15s", shared.HTTP2)
++	}
++
++	direct := &config.Config{}
++	fallback, okFallback := NewUtlsHTTPClient(context.Background(), direct, nil, 0).Transport.(*fallbackRoundTripper)
++	if !okFallback || fallback.fallback != http.RoundTripper(shared) {
++		t.Fatalf("NewUtlsHTTPClient fallback = %#v, want the shared upstream transport", fallback)
++	}
++	// NewProxyAwareHTTPClient keeps its nil-transport contract; the OpenAI-compatible executor adds the
++	// shared transport on top of it.
++	if got := NewProxyAwareHTTPClient(context.Background(), direct, nil, 0).Transport; got != nil {
++		t.Fatalf("NewProxyAwareHTTPClient transport = %T, want nil as before", got)
++	}
++	if got := WithUpstreamFallbackTransport(NewProxyAwareHTTPClient(context.Background(), direct, nil, 0)).Transport; got != http.RoundTripper(shared) {
++		t.Fatalf("WithUpstreamFallbackTransport transport = %T, want the shared upstream transport", got)
++	}
++
++	proxied := &config.Config{}
++	proxied.ProxyURL = "http://127.0.0.1:9"
++	for name, client := range map[string]*http.Client{
++		"NewProxyAwareHTTPClient": NewProxyAwareHTTPClient(context.Background(), proxied, nil, 0),
++		"NewUtlsHTTPClient":       NewUtlsHTTPClient(context.Background(), proxied, nil, 0),
++	} {
++		transport := client.Transport
++		if wrapped, okWrapped := transport.(*fallbackRoundTripper); okWrapped {
++			transport = wrapped.fallback
++		}
++		proxyTransport, okProxy := transport.(*http.Transport)
++		if !okProxy || proxyTransport.HTTP2 == nil || proxyTransport.HTTP2.SendPingTimeout != 30*time.Second || proxyTransport.HTTP2.PingTimeout != 15*time.Second {
++			t.Fatalf("%s proxy transport = %T, want the HTTP/2 health check", name, transport)
++		}
++	}
++
++	injected := roundTripperFunc(func(*http.Request) (*http.Response, error) { return nil, errors.New("unused") })
++	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", http.RoundTripper(injected))
++	if got := WithUpstreamFallbackTransport(NewProxyAwareHTTPClient(ctx, direct, nil, 0)).Transport; got == http.RoundTripper(shared) || got == nil {
++		t.Fatalf("the injected RoundTripper was replaced with %T", got)
++	}
++}
++
++func TestUpstreamHTTP2HealthCheckLeavesProtocolSelectionAlone(t *testing.T) {
++	describe := func(transport *http.Transport) string {
++		var nextProtos []string
++		if transport.TLSClientConfig != nil {
++			nextProtos = transport.TLSClientConfig.NextProtos
++		}
++		protocols := "<nil>"
++		if transport.Protocols != nil {
++			protocols = transport.Protocols.String()
++		}
++		return fmt.Sprintf("force=%t protocols=%s tlsNextProto(nil=%t,len=%d) alpn=%q", transport.ForceAttemptHTTP2, protocols, transport.TLSNextProto == nil, len(transport.TLSNextProto), nextProtos)
++	}
++	for _, proxyURL := range []string{"http://127.0.0.1:9", "https://127.0.0.1:9", "socks5://127.0.0.1:9"} {
++		stock, _, errStock := proxyutil.BuildHTTPTransport(proxyURL)
++		if errStock != nil || stock == nil {
++			t.Fatalf("%s: stock transport: %v", proxyURL, errStock)
++		}
++		patched := buildProxyTransport(proxyURL)
++		if got, want := describe(patched), describe(stock); got != want {
++			t.Fatalf("%s: protocol selection changed:\n got  %s\n want %s", proxyURL, got, want)
++		}
++		if patched.HTTP2 == nil || patched.HTTP2.SendPingTimeout != 30*time.Second || patched.HTTP2.PingTimeout != 15*time.Second {
++			t.Fatalf("%s: HTTP/2 health check = %+v", proxyURL, patched.HTTP2)
++		}
++	}
++
++	// The health check does not opt a transport into HTTP/2: one that has not opted in still speaks
++	// HTTP/1.1 to an HTTP/2-capable server.
++	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {}))
++	server.EnableHTTP2 = true
++	server.StartTLS()
++	t.Cleanup(server.Close)
++	rootCAs := x509.NewCertPool()
++	rootCAs.AddCert(server.Certificate())
++	for _, withHealthCheck := range []bool{false, true} {
++		transport := &http.Transport{TLSClientConfig: &tls.Config{RootCAs: rootCAs}, DialContext: (&net.Dialer{}).DialContext}
++		if withHealthCheck {
++			withUpstreamHTTP2HealthCheck(transport, upstreamHTTP2SendPingTimeout, upstreamHTTP2PingTimeout)
++		}
++		resp, errGet := (&http.Client{Transport: transport}).Get(server.URL)
++		if errGet != nil {
++			t.Fatal(errGet)
++		}
++		_ = resp.Body.Close()
++		transport.CloseIdleConnections()
++		if resp.ProtoMajor != 1 {
++			t.Fatalf("health check=%t: negotiated %s, want HTTP/1.1 for a transport that did not opt into HTTP/2", withHealthCheck, resp.Proto)
++		}
++	}
++}
+diff --git a/internal/runtime/executor/helps/utls_client.go b/internal/runtime/executor/helps/utls_client.go
+index f832748b..c3417e78 100644
+--- a/internal/runtime/executor/helps/utls_client.go
++++ b/internal/runtime/executor/helps/utls_client.go
+@@ -405,7 +405,7 @@ func NewUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyau
+ 
+ 	var chromeRT http.RoundTripper = newUtlsRoundTripper(proxyURL)
+ 	var anthropicRT http.RoundTripper = cachedClaudeCodeRoundTripper(proxyURL)
+-	var standardTransport http.RoundTripper = http.DefaultTransport
++	var standardTransport http.RoundTripper = upstreamFallbackTransport()
+ 	if proxyURL != "" {
+ 		if transport := buildProxyTransport(proxyURL); transport != nil {
+ 			standardTransport = transport
+diff --git a/internal/runtime/executor/openai_compat_executor.go b/internal/runtime/executor/openai_compat_executor.go
+index b63f1258..47aaa55e 100644
+--- a/internal/runtime/executor/openai_compat_executor.go
++++ b/internal/runtime/executor/openai_compat_executor.go
+@@ -81,7 +81,7 @@ func (e *OpenAICompatExecutor) HttpRequest(ctx context.Context, auth *cliproxyau
+ 	if err := e.PrepareRequest(httpReq, auth); err != nil {
+ 		return nil, err
+ 	}
+-	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
++	httpClient := helps.WithUpstreamFallbackTransport(helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0))
+ 	return httpClient.Do(httpReq)
+ }
+ 
+@@ -181,7 +181,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
+ 		AuthValue: authValue,
+ 	})
+ 
+-	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
++	httpClient := helps.WithUpstreamFallbackTransport(helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0))
+ 	httpClient = reporter.TrackHTTPClient(httpClient)
+ 	httpResp, err := httpClient.Do(httpReq)
+ 	if err != nil {
+@@ -282,7 +282,7 @@ func (e *OpenAICompatExecutor) executeImages(ctx context.Context, auth *cliproxy
+ 		AuthValue: authValue,
+ 	})
+ 
+-	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
++	httpClient := helps.WithUpstreamFallbackTransport(helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0))
+ 	httpClient = reporter.TrackHTTPClient(httpClient)
+ 	httpResp, err := httpClient.Do(httpReq)
+ 	if err != nil {
+@@ -408,7 +408,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
+ 		AuthValue: authValue,
+ 	})
+ 
+-	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
++	httpClient := helps.WithUpstreamFallbackTransport(helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0))
+ 	// Early role/empty frames are only first-packet fallbacks, not effective tokens.
+ 	httpClient = reporter.TrackHTTPClientRoundTripOnly(httpClient)
+ 	httpResp, err := httpClient.Do(httpReq)
+@@ -678,7 +678,7 @@ func (e *OpenAICompatExecutor) executeImagesStream(ctx context.Context, auth *cl
+ 		AuthValue: authValue,
+ 	})
+ 
+-	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
++	httpClient := helps.WithUpstreamFallbackTransport(helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0))
+ 	httpClient = reporter.TrackHTTPClient(httpClient)
+ 	httpResp, err := httpClient.Do(httpReq)
+ 	if err != nil {
