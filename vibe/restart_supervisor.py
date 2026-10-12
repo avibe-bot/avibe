@@ -429,7 +429,7 @@ def _run_restart_job(
             # process that later reused the pid. Matches the key schedule_restart
             # seeds with the spawned subprocess pid (this process is that pid).
             "supervisor_pid": os.getpid(),
-            "supervisor_started_at": runtime.process_create_time(os.getpid()),
+            "supervisor_start_token": runtime.process_start_token(os.getpid()),
             "state": RestartState.SCHEDULED.value if delay_seconds > 0 else RestartState.RUNNING.value,
             "trigger": trigger,
             "delay_seconds": delay_seconds,

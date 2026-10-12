@@ -826,23 +826,44 @@ def process_create_time(pid: int) -> float | None:
 
 
 @lru_cache(maxsize=1)
-def _linux_boot_id() -> str:
+def _linux_boot_id() -> str | None:
     try:
-        return Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8").strip()
+        boot_id = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8").strip()
     except OSError:
-        return ""
+        return None
+    return boot_id or None
 
 
 def process_start_token(pid: int) -> str | None:
-    """When a process started, as a value no clock step changes; None if it cannot be read.
+    """When a process started, as a value no clock adjustment changes; None if it cannot be read.
 
-    Linux counts a process's start in clock ticks since boot (field 22 of
-    ``/proc/<pid>/stat``). psutil turns that into wall-clock time through the
-    boot time, which moves whenever the clock is stepped -- by a VM's time
-    sync, a WSL2 resume, NTP catching up after boot -- so the same process
-    reads as started at another time afterwards. The ticks, with the boot they
-    count from, do not move. Elsewhere the start time is stored when the
-    process is created, and reads back unchanged.
+    This is the one identity of a running process: a recorded ``(pid, token)``
+    still names the same execution after the wall clock or the boot time moves,
+    or the machine reboots, and never names a process that later reused the
+    pid. A token is returned only when every part of it was read; otherwise
+    None, which every caller treats as unverifiable.
+
+    - Linux counts a process's start in clock ticks since boot (field 22 of
+      ``/proc/<pid>/stat``). psutil turns that into wall-clock time through the
+      boot time, which moves whenever the clock is stepped -- by a VM's time
+      sync, a WSL2 resume, NTP catching up after boot. The ticks, with the boot
+      they count from, do not move. Ticks restart at every boot, so without
+      the boot id there is no token.
+    - macOS (and NetBSD) store the wall-clock time a process started, but
+      psutil's ``create_time()`` adds the change in whole seconds of
+      ``kern.boottime`` since psutil was imported, and the system time daemon
+      moves ``kern.boottime`` in routine adjustments. The same process then
+      reads a second later or earlier, and differently in two processes that
+      imported psutil at different times. The stored value is what psutil
+      itself uses for process identity (``Process._get_ident``), through
+      ``create_time(monotonic=True)``. That accessor is private, so a psutil
+      without it reads as None.
+    - Windows stores the creation time with the process, and psutil reads it
+      back unchanged.
+    - Elsewhere (FreeBSD, OpenBSD, ...) the start psutil reads moves with
+      system clock updates, as psutil itself warns, and no stable one is
+      available: no process there has a token, so a record of one is
+      unverifiable.
     """
 
     if sys.platform.startswith("linux"):
@@ -850,9 +871,19 @@ def process_start_token(pid: int) -> str | None:
             ticks = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8").rsplit(")", 1)[1].split()[19]
         except (OSError, IndexError, ValueError):
             return None
-        return f"{_linux_boot_id()}:{ticks}"
-    create_time = process_create_time(pid)
-    return None if create_time is None else repr(create_time)
+        boot_id = _linux_boot_id()
+        if boot_id is None or not ticks.isdigit():
+            return None
+        return f"{boot_id}:{ticks}"
+    monotonic = sys.platform == "darwin" or sys.platform.startswith("netbsd")
+    if not monotonic and sys.platform != "win32":
+        return None
+    try:
+        process = psutil.Process(pid)
+        start = process._proc.create_time(monotonic=True) if monotonic else process.create_time()
+        return repr(float(start))
+    except (psutil.Error, AttributeError, TypeError, ValueError, OSError):
+        return None
 
 
 def _safe_resolve_path(value: str | Path) -> Path | None:

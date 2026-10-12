@@ -253,7 +253,14 @@ def restart_record_is_pending(
     *,
     grace_seconds: float = RESTART_PENDING_GRACE_SECONDS,
 ) -> bool:
-    """Apply the restart ownership policy to one persisted status record."""
+    """Apply the restart ownership policy to one persisted status record.
+
+    The one policy every reader of the restart status applies. A live
+    supervisor pid is the job while its recorded identity matches: its start
+    token, or the create time a job a released build ran recorded. A record
+    that cannot be verified -- no pid yet, no identity recorded, or none
+    readable now -- owns the restart only until it is ``grace_seconds`` old.
+    """
 
     try:
         state = RestartState(payload.get("state"))
@@ -263,14 +270,21 @@ def restart_record_is_pending(
         return False
     supervisor_pid = payload.get("supervisor_pid")
     if isinstance(supervisor_pid, int) and supervisor_pid > 0 and runtime_mod.pid_alive(supervisor_pid):
+        start_token = payload.get("supervisor_start_token")
         started_at = payload.get("supervisor_started_at")
-        if started_at is not None:
+        if start_token is not None:
+            current_start_token = runtime_mod.process_start_token(supervisor_pid)
+            if current_start_token is not None:
+                return current_start_token == start_token
+        elif started_at is not None:
+            # A job a released build ran recorded its create time instead.
             current_started_at = runtime_mod.process_create_time(supervisor_pid)
             if current_started_at is not None:
                 return current_started_at == started_at
-        # Legacy records do not carry a process identity, and process metadata
-        # can be unavailable. In both cases a reused PID must not block upgrades
-        # for the lifetime of an unrelated process, so fall through to age.
+        # A record with no identity (from before identities, or written where
+        # none could be read) and one whose identity cannot be read now cannot
+        # tell the job from a reused PID, which must not block upgrades for the
+        # lifetime of an unrelated process, so fall through to age.
     try:
         age = time.time() - path.stat().st_mtime
     except OSError:

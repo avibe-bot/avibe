@@ -108,7 +108,7 @@ def _restart_job(state: str) -> None:
             "ok": None,
             "state": state,
             "supervisor_pid": os.getpid(),
-            "supervisor_started_at": runtime.process_create_time(os.getpid()),
+            "supervisor_start_token": runtime.process_start_token(os.getpid()),
         },
     )
 

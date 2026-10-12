@@ -364,7 +364,7 @@ def test_restart_job_stops_and_starts_service(monkeypatch, tmp_path, scope, read
     # The job records its own pid + start time so a watcher can validate the
     # restart is live and not a reused pid.
     assert status["supervisor_pid"] == os.getpid()
-    assert isinstance(status["supervisor_started_at"], (int, float))
+    assert status["supervisor_start_token"] == runtime.process_start_token(os.getpid())
     assert status["stage_durations"]["stop_remote_access_seconds"] == 0.01
     assert status["stage_durations"]["stop_remote_access_skipped"] is True
     assert "stop_ui_total_seconds" in status["stage_durations"]

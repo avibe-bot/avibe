@@ -2739,7 +2739,7 @@ def _restart_status_payload(**overrides) -> dict:
         "ok": False,
         "job_id": "0d1f2e3a4b5c",
         "supervisor_pid": 4242,
-        "supervisor_started_at": 1.0,
+        "supervisor_start_token": "1.0",
         "state": "failed",
         "trigger": "auto-update",
         "delay_seconds": 0.0,

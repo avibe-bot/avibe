@@ -1301,12 +1301,12 @@ def test_pending_followup_respects_restart_ownership(
             "supervisor_pid": None if owner == "seed" else 123,
         }
         if owner not in {"legacy", "seed"}:
-            payload["supervisor_started_at"] = 100.0
+            payload["supervisor_start_token"] = "100.0"
         runtime.write_json(status, payload)
         if old_status:
             os.utime(status, (1, 1))
     monkeypatch.setattr(runtime, "pid_alive", lambda pid: owner not in {"dead", "seed"})
-    monkeypatch.setattr(runtime, "process_create_time", lambda pid: 200.0 if owner == "reused" else 100.0)
+    monkeypatch.setattr(runtime, "process_start_token", lambda pid: "200.0" if owner == "reused" else "100.0")
     if state == "unreadable":
         original_read = Path.read_text
 

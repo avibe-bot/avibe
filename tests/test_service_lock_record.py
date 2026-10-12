@@ -325,6 +325,18 @@ class ServiceLockContentionTests(unittest.TestCase):
             runtime.acquire_service_instance_lock()
         self.assertEqual(refused.exception.holder_pid, holder.pid)
 
+    def test_a_holder_whose_start_cannot_be_read_now_is_refused_once_the_wait_runs_out(self):
+        """Unverifiable, it names no one: the wait is bounded, and the lock it holds is never taken."""
+
+        holder = self._holder()
+        began = time.monotonic()
+        with patch.object(runtime, "process_start_token", return_value=None), self.assertRaises(
+            runtime.ServiceAlreadyRunningError
+        ) as refused:
+            runtime.acquire_service_instance_lock()
+        self.assertEqual(refused.exception.holder_pid, holder.pid)
+        self.assertLess(time.monotonic() - began, runtime._SERVICE_LOCK_SETTLE_SECONDS + 3)
+
     def test_a_service_started_right_after_the_last_was_killed_takes_the_lock(self):
         """The acceptance test's own order: kill the service outright, start the next."""
 
@@ -357,6 +369,29 @@ class ServiceLockContentionTests(unittest.TestCase):
         with patch.object(
             runtime.psutil.Process, "create_time", lambda process: real_create_time(process) - 21.0
         ), patch.object(runtime.time, "sleep", side_effect=AssertionError("waited for a running service")):
+            self.assertEqual(runtime.service_instance_lock_available(settle=True), (False, holder.pid))
+            with self.assertRaises(runtime.ServiceAlreadyRunningError) as refused:
+                runtime.acquire_service_instance_lock()
+        self.assertEqual(refused.exception.holder_pid, holder.pid)
+
+    @unittest.skipUnless(sys.platform == "darwin", "macOS moves kern.boottime in routine clock adjustments")
+    def test_a_running_service_is_still_recognised_after_kern_boottime_ticks(self):
+        """psutil's macOS start time moves with kern.boottime; the holder's identity must not.
+
+        psutil adds the change in whole seconds of kern.boottime since it was
+        imported, and the system time daemon moves kern.boottime across a whole
+        second in routine adjustments. The holder then reads exactly one second
+        away from its record, in this process and in no fresh one.
+        """
+
+        from psutil import _psosx
+
+        holder = self._holder()
+        before = runtime.process_create_time(holder.pid)
+        with patch.object(_psosx, "boot_time", lambda: _psosx.INIT_BOOT_TIME - 1), patch.object(
+            runtime.time, "sleep", side_effect=AssertionError("waited for a running service")
+        ):
+            self.assertEqual(runtime.process_create_time(holder.pid), before + 1.0)
             self.assertEqual(runtime.service_instance_lock_available(settle=True), (False, holder.pid))
             with self.assertRaises(runtime.ServiceAlreadyRunningError) as refused:
                 runtime.acquire_service_instance_lock()
