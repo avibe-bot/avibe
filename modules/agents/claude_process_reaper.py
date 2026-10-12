@@ -33,6 +33,8 @@ class ClaudeOwnedProcess:
     owner: str = AVIBE_CLAUDE_SESSION_OWNER
     # vibe.runtime.process_start_token at registration: the process's identity, which no clock adjustment moves.
     start_token: str | None = None
+    # A record a released build wrote has no token: it carries the start `ps -o lstart` showed instead.
+    started_at: float | None = None
 
 
 def get_claude_client_process(client: object | None) -> object | None:
@@ -104,25 +106,28 @@ def _process_start_token(pid: int) -> str | None:
     return process_start_token(pid)
 
 
-def _process_start_tokens(pids: set[int]) -> dict[int, str]:
-    tokens: dict[int, str] = {}
-    for pid in pids:
-        token = _process_start_token(pid)
-        if token is not None:
-            tokens[pid] = token
-    return tokens
+def _process_start_time(pid: int) -> float | None:
+    from vibe.runtime import process_start_time
+
+    return process_start_time(pid)
 
 
-def _process_identity_matches(
-    record: ClaudeOwnedProcess,
-    row: ClaudeProcessRow,
-    current_start_token: str | None,
-) -> bool:
-    if record.pid != row.pid:
-        return False
-    if record.start_token is None:
-        return True
-    return current_start_token is not None and current_start_token == record.start_token
+def _recorded_start_matches(pid: int, start_token: str | None, started_at: float | None) -> bool:
+    """Whether ``pid`` is still the process a registry record names.
+
+    A record names its process by start token. A record a released build wrote
+    has ``started_at`` instead, the start ``ps -o lstart`` showed to the
+    second; it is judged as that build judged it, within a second of the
+    process's start as its kernel reports it, read without ``ps``. A record
+    with neither proves nothing.
+    """
+
+    if start_token is not None:
+        return _process_start_token(pid) == start_token
+    if started_at is not None:
+        started = _process_start_time(pid)
+        return started is not None and abs(started - started_at) < 1.0
+    return False
 
 
 def _registry_path(runtime_dir: Path | None = None) -> Path:
@@ -151,15 +156,15 @@ def _load_owned_process_registry(runtime_dir: Path | None = None) -> list[Claude
             continue
         native_session_id = item.get("native_session_id")
         owner = item.get("owner") or AVIBE_CLAUDE_SESSION_OWNER
-        # A record from before start tokens carries a wall-clock `started_at`, which a clock adjustment
-        # moves; it names no verifiable process, so it is never reaped or reported.
         start_token = item.get("start_token")
+        started_at = item.get("started_at")
         records.append(
             ClaudeOwnedProcess(
                 pid=pid,
                 native_session_id=str(native_session_id) if native_session_id else None,
                 owner=str(owner),
                 start_token=start_token if isinstance(start_token, str) and start_token else None,
+                started_at=float(started_at) if isinstance(started_at, (int, float)) else None,
             )
         )
     return records
@@ -192,6 +197,7 @@ def register_claude_owned_process(
                 "native_session_id": record.native_session_id,
                 "owner": record.owner,
                 "start_token": record.start_token,
+                "started_at": record.started_at,
             }
             for record in records
         ]
@@ -605,21 +611,19 @@ async def reap_orphaned_claude_processes(
     ]
     row_by_pid = {row.pid: row for row in claude_rows}
     registry = owned_processes if owned_processes is not None else _load_owned_process_registry()
-    registry_pids = {
-        record.pid
-        for record in registry
-        if record.start_token is not None and record.pid in row_by_pid
-    }
-    current_start_tokens = await loop.run_in_executor(None, _process_start_tokens, registry_pids)
+
+    def live_records() -> list[ClaudeOwnedProcess]:
+        return [
+            record
+            for record in registry
+            if record.pid in row_by_pid
+            and _recorded_start_matches(record.pid, record.start_token, record.started_at)
+        ]
 
     candidates: set[int] = set()
 
-    for record in registry:
-        row = row_by_pid.get(record.pid)
-        if row is None or not _process_identity_matches(record, row, current_start_tokens.get(record.pid)):
-            continue
-        if record.start_token is None:
-            continue
+    for record in await loop.run_in_executor(None, live_records):
+        row = row_by_pid[record.pid]
         in_service_tree = row.pid in service_tree
         if record.owner != AVIBE_CLAUDE_SESSION_OWNER:
             continue

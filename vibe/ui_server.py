@@ -6834,11 +6834,17 @@ def _restart_in_flight() -> bool:
         # unrelated process (notably across a reboot), which would otherwise keep
         # blocking restarts until that process exits. The job records its
         # ``supervisor_start_token`` (its start identity), so only treat the pid
-        # as the live supervisor when the create time still matches.
+        # as the live supervisor when the token still matches. A job a released
+        # build ran recorded ``supervisor_started_at``, its create time, instead.
         start_token = status.get("supervisor_start_token")
+        started_at = status.get("supervisor_started_at")
         if start_token is not None:
             current = runtime.process_start_token(sup_pid)
             if current is not None and current != start_token:
+                return False
+        elif started_at is not None:
+            current = runtime.process_create_time(sup_pid)
+            if current is not None and current != started_at:
                 return False
         return True
     # No supervisor pid recorded yet: in flight only while the seed is fresh

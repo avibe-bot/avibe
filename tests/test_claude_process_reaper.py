@@ -341,7 +341,7 @@ def test_reap_orphaned_reaps_in_tree_no_owner_and_descendants(monkeypatch):
         ]
     )
     signals = _patch_orphan_env(monkeypatch, table, {101: 999.0, 102: 999.0}, {100, 101, 102})
-    monkeypatch.setattr(claude_process_reaper, "_process_start_tokens", lambda pids: {pid: "123.0" for pid in pids})
+    monkeypatch.setattr(claude_process_reaper, "_process_start_token", lambda pid: "123.0")
 
     reaped = asyncio.run(
         claude_process_reaper.reap_orphaned_claude_processes(
@@ -444,7 +444,7 @@ def test_reap_orphaned_respects_min_age_grace_window(monkeypatch):
         ]
     )
     signals = _patch_orphan_env(monkeypatch, table, {101: 5.0}, {101})
-    monkeypatch.setattr(claude_process_reaper, "_process_start_tokens", lambda pids: {pid: "123.0" for pid in pids})
+    monkeypatch.setattr(claude_process_reaper, "_process_start_token", lambda pid: "123.0")
 
     reaped = asyncio.run(
         claude_process_reaper.reap_orphaned_claude_processes(
@@ -468,7 +468,7 @@ def test_reap_orphaned_skips_when_age_unknown(monkeypatch):
         ]
     )
     signals = _patch_orphan_env(monkeypatch, table, {}, {101})
-    monkeypatch.setattr(claude_process_reaper, "_process_start_tokens", lambda pids: {pid: "123.0" for pid in pids})
+    monkeypatch.setattr(claude_process_reaper, "_process_start_token", lambda pid: "123.0")
 
     reaped = asyncio.run(
         claude_process_reaper.reap_orphaned_claude_processes(
@@ -541,7 +541,7 @@ def test_reap_orphaned_skips_in_tree_sweep_when_disabled(monkeypatch):
         ]
     )
     signals = _patch_orphan_env(monkeypatch, table, {101: 999.0}, {101})
-    monkeypatch.setattr(claude_process_reaper, "_process_start_tokens", lambda pids: {pid: "123.0" for pid in pids})
+    monkeypatch.setattr(claude_process_reaper, "_process_start_token", lambda pid: "123.0")
 
     reaped = asyncio.run(
         claude_process_reaper.reap_orphaned_claude_processes(
@@ -642,7 +642,7 @@ def test_reap_orphaned_reaps_registry_owned_out_of_tree_resume_match(monkeypatch
         ]
     )
     signals = _patch_orphan_env(monkeypatch, table, {300: 999.0}, {100, 300})
-    monkeypatch.setattr(claude_process_reaper, "_process_start_tokens", lambda pids: {pid: "123.0" for pid in pids})
+    monkeypatch.setattr(claude_process_reaper, "_process_start_token", lambda pid: "123.0")
 
     reaped = asyncio.run(
         claude_process_reaper.reap_orphaned_claude_processes(

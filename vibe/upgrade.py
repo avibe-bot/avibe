@@ -264,11 +264,17 @@ def restart_record_is_pending(
     supervisor_pid = payload.get("supervisor_pid")
     if isinstance(supervisor_pid, int) and supervisor_pid > 0 and runtime_mod.pid_alive(supervisor_pid):
         start_token = payload.get("supervisor_start_token")
+        started_at = payload.get("supervisor_started_at")
         if start_token is not None:
             current_start_token = runtime_mod.process_start_token(supervisor_pid)
             if current_start_token is not None:
                 return current_start_token == start_token
-        # Legacy records do not carry a process identity, and process metadata
+        elif started_at is not None:
+            # A job a released build ran recorded its create time instead.
+            current_started_at = runtime_mod.process_create_time(supervisor_pid)
+            if current_started_at is not None:
+                return current_started_at == started_at
+        # Older records do not carry a process identity, and process metadata
         # can be unavailable. In both cases a reused PID must not block upgrades
         # for the lifetime of an unrelated process, so fall through to age.
     try:

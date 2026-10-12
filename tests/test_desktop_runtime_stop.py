@@ -108,7 +108,7 @@ def _child_env(runtime_id: str | None, role: str | None = None, owner_pid: int |
         env[desktop_backends.PROCESS_IDENTITY_ENV] = desktop_backends.new_process_identity_marker()
         # Whoever started the tree owns it: this test, unless another process is named.
         pid = os.getpid() if owner_pid is None else owner_pid
-        env[desktop_runtime.DESKTOP_INSTALLER_OWNER_ENV] = f"{pid}:{runtime.process_create_time(pid)!r}"
+        env[desktop_runtime.DESKTOP_INSTALLER_OWNER_ENV] = f"{pid}:{runtime.process_start_token(pid)}"
     return env
 
 

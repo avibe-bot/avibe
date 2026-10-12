@@ -654,8 +654,9 @@ def test_a_live_owner_whose_create_time_shifted_keeps_its_tree(monkeypatch, inst
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX process groups")
 @pytest.mark.parametrize("holder", ["not-a-ui", "ui-of-another-runtime", "ui-without-a-runtime-id"])
+@pytest.mark.parametrize("owner_shape", ["start-token", "released-create-time"])
 def test_a_tree_whose_owner_pid_now_names_another_process_is_reaped(
-    tmp_path, installer_tree, quiet_stop, children, holder
+    tmp_path, installer_tree, quiet_stop, children, holder, owner_shape
 ):
     from vibe import runtime
 
@@ -670,13 +671,37 @@ def test_a_tree_whose_owner_pid_now_names_another_process_is_reaped(
         if holder == "ui-of-another-runtime":
             ui_env[desktop_backends.DESKTOP_RUNTIME_ID_ENV] = secrets.token_hex(32)
         pid = _start_ui_stand_in(children, tmp_path, ui_env)
-    reused = f"{pid}:an-earlier-process"
+    if owner_shape == "start-token":
+        reused = f"{pid}:an-earlier-process"
+    else:
+        # A released build named the owner by its wall-clock create time.
+        reused = f"{pid}:{runtime.process_create_time(pid) - 1.0!r}"
     pids = _start_tree_naming(children, env, wait_for_tree, reused)
 
     assert cli.cmd_stop() == 0
 
     assert _running(pids) == []
     assert statuses == [("stopped",)]
+
+
+@pytest.mark.parametrize("holder", ["ui-of-its-runtime", "not-a-ui", "exited"])
+def test_an_owner_value_a_released_build_wrote_is_judged_by_the_process_at_its_pid(tmp_path, children, holder):
+    from vibe import runtime
+
+    runtime_id = secrets.token_hex(32)
+    if holder == "ui-of-its-runtime":
+        pid = _start_ui_stand_in(children, tmp_path, {**os.environ, desktop_backends.DESKTOP_RUNTIME_ID_ENV: runtime_id})
+    else:
+        children.append(subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"]))
+        pid = children[-1].pid
+    # A released build wrote `pid:create_time`. Shifted by a second, it names no live start token on any
+    # platform, as after a tick on macOS: only the process now at the pid can tell.
+    released = f"{pid}:{runtime.process_create_time(pid) - 1.0!r}"
+    if holder == "exited":
+        children[-1].kill()
+        children[-1].wait(10)
+
+    assert desktop_backends._installer_owner_gone(released, runtime_id) is (holder != "ui-of-its-runtime")
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX process groups")

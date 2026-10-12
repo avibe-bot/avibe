@@ -322,7 +322,7 @@ def _collect_orphans(seen_native: dict[str, Optional[int]], seen_pids: set[int])
             AVIBE_CLAUDE_SESSION_OWNER,
             _load_owned_process_registry,
             _process_ages,
-            _process_start_token,
+            _recorded_start_matches,
         )
     except Exception:  # noqa: BLE001
         return rows
@@ -335,9 +335,9 @@ def _collect_orphans(seen_native: dict[str, Optional[int]], seen_pids: set[int])
     # Filter to session-owned registry rows not already backed by a live client.
     # The registry accumulates stale rows (the reaper prunes lazily), so an entry
     # alone proves nothing — we must verify the process is genuinely alive. A
-    # missing ``start_token`` means we cannot prove identity, so we skip it
-    # rather than risk a false orphan from pid reuse.
-    candidates: list[tuple[Any, int, Optional[str], str]] = []
+    # record with no recorded start means we cannot prove identity, so we skip
+    # it rather than risk a false orphan from pid reuse.
+    candidates: list[tuple[Any, int, Optional[str], Optional[str], Optional[float]]] = []
     for record in registry:
         if getattr(record, "owner", None) != AVIBE_CLAUDE_SESSION_OWNER:
             continue
@@ -354,10 +354,11 @@ def _collect_orphans(seen_native: dict[str, Optional[int]], seen_pids: set[int])
                 continue
         if not isinstance(record_pid, int) or record_pid in seen_pids:
             continue
-        recorded = getattr(record, "start_token", None)
-        if not isinstance(recorded, str) or not recorded:
+        start_token = getattr(record, "start_token", None)
+        started_at = getattr(record, "started_at", None)
+        if start_token is None and started_at is None:
             continue  # identity unprovable — don't risk a false orphan
-        candidates.append((record, record_pid, native, recorded))
+        candidates.append((record, record_pid, native, start_token, started_at))
 
     if not candidates:
         return rows
@@ -366,11 +367,11 @@ def _collect_orphans(seen_native: dict[str, Optional[int]], seen_pids: set[int])
     # dead entries collapse to zero here with a single subprocess call). Only the
     # few survivors get the precise per-pid start-time identity check below, so
     # we never fan out N blocking ``ps`` calls on the controller loop.
-    ages = _process_ages({pid for _, pid, _, _ in candidates})
-    for record, record_pid, native, recorded in candidates:
+    ages = _process_ages({pid for _, pid, _, _, _ in candidates})
+    for record, record_pid, native, start_token, started_at in candidates:
         if record_pid not in ages:
             continue  # not alive — stale registry entry, not a leak
-        if _process_start_token(record_pid) != recorded:
+        if not _recorded_start_matches(record_pid, start_token, started_at):
             continue  # gone, or the pid was reused by a different process
         rows.append(
             _make_row(
@@ -517,6 +518,7 @@ async def _end_orphan_pid(pid: int) -> dict[str, Any]:
             _parse_ps_rows,
             _process_start_token,
             _reap_pid_set,
+            _recorded_start_matches,
             _run_ps,
         )
     except Exception:  # noqa: BLE001
@@ -529,17 +531,17 @@ async def _end_orphan_pid(pid: int) -> dict[str, Any]:
             break
     if record is None:
         return {"ok": False, "error": "not_an_owned_process", "pid": pid}
-    current = _process_start_token(pid)
-    if current is None:
+    if _process_start_token(pid) is None:
         return {"ok": False, "error": "process_not_alive", "pid": pid}
-    recorded = getattr(record, "start_token", None)
-    # FAIL CLOSED: refuse to kill unless identity is provable. A record without a
-    # ``start_token`` (registered before tokens, or whose start could not be read)
-    # cannot be distinguished from a reused pid, so we never SIGKILL it — matching
-    # the read path's conservatism (``_collect_orphans`` skips such records too).
-    if not isinstance(recorded, str) or not recorded:
+    start_token = getattr(record, "start_token", None)
+    started_at = getattr(record, "started_at", None)
+    # FAIL CLOSED: refuse to kill unless identity is provable. A record with no
+    # recorded start (its start could not be read at registration) cannot be
+    # distinguished from a reused pid, so we never SIGKILL it — matching the read
+    # path's conservatism (``_collect_orphans`` skips such records too).
+    if start_token is None and started_at is None:
         return {"ok": False, "error": "identity_unprovable", "pid": pid}
-    if current != recorded:
+    if not _recorded_start_matches(pid, start_token, started_at):
         return {"ok": False, "error": "pid_reused", "pid": pid}
     # NOTE: a microscopic TOCTOU remains between this check and the signal (the pid
     # could exit + be reused in the gap); it's inherent to pid-based signaling and
