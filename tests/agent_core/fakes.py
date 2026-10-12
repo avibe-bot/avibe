@@ -29,6 +29,26 @@ SELECTION = ModelSelection(
 )
 Script = Sequence[ProviderEvent] | Callable[[ModelRequest, CancelToken], AsyncIterator[ProviderEvent]]
 
+#: How an Anthropic model before Claude 4.5 refuses a request whose input plus ``max_tokens`` exceeds its window.
+WINDOW_REFUSAL = (
+    "input length and `max_tokens` exceed context limit: 188240 + 21333 > 200000, "
+    "decrease input length or `max_tokens` and try again"
+)
+
+
+def anthropic_error(message: str) -> dict:
+    """An Anthropic endpoint's 400 body for a request it refuses."""
+    return {"type": "error", "error": {"type": "invalid_request_error", "message": message}}
+
+
+def model_hub_error(message: str) -> dict:
+    """Model Hub's gateway body for a request its upstream refused (Vibey's route): the gateway's own code, and the
+    upstream's message inside the copy the gateway's renderer writes."""
+    from core.handlers.model_hub.provenance import produce_turn_outcome, render_turn_outcome_copy
+
+    copy = render_turn_outcome_copy(produce_turn_outcome("turn.request_nonfallback", upstream_detail=message), "en")
+    return {"error": {"type": "upstream_request_invalid", "code": "upstream_request_invalid", "message": copy}}
+
 
 def user(value: str) -> UserMessage:
     return UserMessage((text(value),))

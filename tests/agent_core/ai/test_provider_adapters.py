@@ -44,6 +44,7 @@ from core.agent_core.messages import (
     Usage,
 )
 from core.agent_core.tools.base import ToolSpec
+from tests.agent_core.fakes import WINDOW_REFUSAL, anthropic_error, model_hub_error
 
 
 def _request(
@@ -645,6 +646,19 @@ async def test_adapters_join_protocol_path_before_existing_query(
                 'data: {"type":"content_block_delta","index":0,'
                 '"delta":{"type":"input_json_delta","partial_json":"{\\"path\\":\\"x"}}\n\n'
                 'data: {"type":"message_delta","delta":{"stop_reason":"max_tokens"}}\n\n'
+                'data: {"type":"message_stop"}\n\n'
+            ),
+        ),
+        (
+            # Generation reached the context window first: Anthropic says to treat the response as truncated.
+            AnthropicAdapter,
+            "anthropic",
+            (
+                'data: {"type":"content_block_start","index":0,'
+                '"content_block":{"type":"tool_use","id":"toolu_1","name":"read"}}\n\n'
+                'data: {"type":"content_block_delta","index":0,'
+                '"delta":{"type":"input_json_delta","partial_json":"{\\"path\\":\\"x"}}\n\n'
+                'data: {"type":"message_delta","delta":{"stop_reason":"model_context_window_exceeded"}}\n\n'
                 'data: {"type":"message_stop"}\n\n'
             ),
         ),
@@ -3085,6 +3099,36 @@ async def test_http_413_is_classified_as_overflow() -> None:
     assert error.kind == "overflow"
     assert error.status == 413
     assert error.retryable is False
+
+
+#: Anthropic's 400 for a ``max_tokens`` above the model's output limit: it names ``max_tokens`` too, but no smaller
+#: context can fix it.
+OUTPUT_LIMIT_REFUSAL = (
+    "max_tokens: 200000 > 128000, which is the maximum allowed number of output tokens for claude-opus-4-1-20250805"
+)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("envelope", [anthropic_error, model_hub_error], ids=["endpoint", "model-hub"])
+@pytest.mark.parametrize(
+    ("message", "kind"),
+    [(WINDOW_REFUSAL, "overflow"), (OUTPUT_LIMIT_REFUSAL, "invalid_request")],
+    ids=["window", "output-limit"],
+)
+async def test_anthropic_window_refusal_is_overflow_and_output_limit_refusal_is_not(
+    envelope: Any, message: str, kind: str,
+) -> None:
+    # Models before Claude 4.5 refuse a request whose input plus max_tokens exceeds the window; later ones stop at the
+    # window instead. Through Model Hub the upstream's message reaches the adapter inside the gateway's copy and code.
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, json=envelope(message))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        events = await _events(AnthropicAdapter(client), _request("anthropic"))
+
+    (error,) = events
+    assert isinstance(error, ProviderError)
+    assert (error.kind, error.status, error.retryable, error.partial) == (kind, 400, False, None)
 
 
 @pytest.mark.asyncio

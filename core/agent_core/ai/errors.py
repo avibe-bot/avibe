@@ -1,8 +1,9 @@
 """Provider error classification.
 
 Overflow expressions are ported from Pi's ``packages/ai/src/utils/overflow.ts``
-(MIT, revision 7fbbd5f). The adapter layer adds HTTP and transport semantics
-from C-2.
+(MIT, revision 7fbbd5f), plus one Pi lacks: Anthropic's refusal of input plus
+``max_tokens`` over the window. The adapter layer adds HTTP and transport
+semantics from C-2.
 """
 
 from __future__ import annotations
@@ -55,6 +56,10 @@ _OVERFLOW_PATTERNS = (
     r"too many tokens",
     r"token limit exceeded",
     r"4(?:00|13)\s*(?:status code)?\s*\(no body\)",
+    # Not in Pi. Anthropic models before Claude 4.5 refuse a request whose input plus max_tokens exceeds the window
+    # with a 400 invalid_request_error: "input length and `max_tokens` exceed context limit: 188240 + 21333 > 200000,
+    # decrease input length or `max_tokens` and try again". Later models accept it (conversion-tables.md).
+    r"input length and `?max_tokens`? exceed context limit",
 )
 _OVERFLOW_RE = tuple(re.compile(pattern, re.IGNORECASE) for pattern in _OVERFLOW_PATTERNS)
 _NON_OVERFLOW_RE = (

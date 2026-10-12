@@ -134,10 +134,10 @@ or extracted message/code pair that its wire format makes available.
 
 | Protocol | Auth | Rate limit | Overload/server | Overflow/context |
 | --- | --- | --- | --- | --- |
-| Anthropic | `authentication_error`, `invalid_api_key`, `permission_error`, `permission` | `rate_limit_error` | `overloaded_error` → `overloaded`; `api_error` → `server` | `invalid_request_error` with context text; `context_length_exceeded` → `overflow` |
+| Anthropic | `authentication_error`, `invalid_api_key`, `permission_error`, `permission` | `rate_limit_error` | `overloaded_error` → `overloaded`; `api_error` → `server` | `invalid_request_error` with context text (`ai/errors.is_overflow_message`), which includes the refusal of input plus `max_tokens` over the window by models before Claude 4.5 (``input length and `max_tokens` exceed context limit``); `context_length_exceeded` → `overflow` |
 | OpenAI Chat | `authentication_error`, `invalid_api_key`, `permission` | `rate_limit_error`, `too_many_requests` | `server_error`, `api_error` | `context_length_exceeded`, `request_too_large` |
 | OpenAI Responses | `unauthenticated`, `permission_denied`, `invalid_api_key` | `rate_limit`, `rate_limit_error` | `overloaded`, `server_error`, `service_unavailable` | `context_length_exceeded`, `request_too_large` |
-| Model Hub relays, any protocol | | | `upstream_error`, `service_unavailable_error`; `request_timeout` and `timeout_error` (CLIProxyAPI, Model Hub's engine: `request_timeout` for an upstream `408` or an upstream stream that closed before its terminal, nested under `error` with type `server_error`; `timeout_error`, its Claude type for an upstream `408` or `504`) → `server` | |
+| Model Hub relays, any protocol | | | `upstream_error`, `service_unavailable_error`; `request_timeout` and `timeout_error` (CLIProxyAPI, Model Hub's engine: `request_timeout` for an upstream `408` or an upstream stream that closed before its terminal, nested under `error` with type `server_error`; `timeout_error`, its Claude type for an upstream `408` or `504`) → `server` | `upstream_request_invalid` (the gateway's code for a request its upstream refused; its copy quotes the upstream's message) → `overflow` when the quoted message is context text |
 | Model Hub's own frame, OpenAI Responses and Chat | | | `modelHub.errors.stream_interrupted` (the gateway's code for an upstream stream that ended after output without a terminal) → `interrupted` | |
 HTTP `401/403` always map to `auth`, `413` to `overflow`, `429` to
 `rate_limit` with `Retry-After`, and `5xx` to `server` or `overloaded`. A server code follows the same rule as a
@@ -539,10 +539,17 @@ Anthropic stop reasons:
 | Wire value | Canonical |
 | --- | --- |
 | `end_turn`, `stop_sequence`, `pause_turn` | `stop` |
-| `max_tokens` | `length` |
+| `max_tokens`, `model_context_window_exceeded` | `length` |
 | `tool_use` | `tool_use` |
 | `refusal` | `refusal` |
 | `safety` | `safety` |
+| any other value | `error` |
+
+`model_context_window_exceeded` ends a response whose request asked for more output than the window had room for:
+Claude 4.5 and newer models accept such a request and stop when generation reaches the window, and Anthropic says to
+treat the response as truncated. Earlier models refuse the request instead, unless it carries the
+`model-context-window-exceeded-2025-08-26` beta header, which this adapter does not send; the refusal is an
+`overflow` (Provider error classification).
 
 ## OpenAI Chat Completions
 
