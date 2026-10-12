@@ -47,12 +47,14 @@ backend list, it is always enabled, and it cannot be turned off.
 - **Model Hub cannot supply.** `hub_supply_block(backend, hub_config)` (`config/v2_config.py`) is the one owner of why
   the Model Hub leaves a backend no model to run on now. The shared model gate and the adapter's preflight render its
   copy (`hub_supply_refusal`), `get_backend_connection` reports such a backend unready, and `GET /api/config` carries
-  it as `agent_supply_blocks`, which the Backends pages show. The backend stays listed and enabled in both cases.
+  it as `agent_supply_blocks`, which the Backends pages show. The backend stays listed and enabled in every case.
   - Gateway off (Models → Start/Stop): its row says "Gateway off", its page links to Models, and a Turn refuses with
     `errors.modelGatewayOff`.
   - Model Hub disabled on the instance (`VIBE_MODEL_HUB_ENABLED=0`): a backend without its own CLI gets every model
     through the Hub, so its row says "Model Hub disabled", its page says so without a Models link, and a Turn refuses
     with `errors.modelHubDisabled`.
+  - No source may supply a backend without its own CLI (`no_source`): owned by
+    [`vibey-default-agent.md`](vibey-default-agent.md) §2.
 
 ## Known by design
 

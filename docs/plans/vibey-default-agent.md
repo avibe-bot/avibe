@@ -111,17 +111,18 @@ On master before this change:
   exists: on a new install, the source setup places; on an upgrade, the existing sources at the first start.
 - **Today,** the starting models are the native built-ins' model selections that a placed source lists. When none
   qualifies, the list stays empty, and Vibey has no model until someone picks one on its setup card.
-- **A native selection** still qualifies first, unless models.dev explicitly describes it as taking no tool calls or
-  producing no text. A selection models.dev does not know still qualifies, because it is a person's own choice for a
+- **A native selection** still qualifies first, unless models.dev explicitly describes it as taking no tool calls, or as
+  taking or producing no text. A selection models.dev does not know still qualifies, because it is a person's own choice for a
   native Agent.
 - **New: when no selection qualifies, the seed starts Vibey on one model the placed sources list.** The rule is
   deterministic:
   1. Take the first model, in source placement order and then each source's own inventory order, that is not
-     retired and that models.dev describes as accepting tool calls and producing text. The description uses the
+     retired and that models.dev describes as taking text and tool calls and producing text. The description uses the
      exact match the picker's candidates already use.
   2. If models.dev describes no listed model that way, choose none. The setup card's pick and §2's refusal remain.
      A seed that ran before any models.dev copy could describe a listed model is healed when a copy arrives: while
-     Vibey's catalog is empty and its built-in Agent has no model, it starts on this rule's model.
+     Vibey's catalog is empty, records no removal, and its built-in Agent has no model, it starts on this rule's
+     model. A list a person emptied records its removals, so it stays empty.
 - **How the model is added.** It joins Vibey's list as the picker adds a provider model.
   `_reconcile_vibey_agent_model` then gives the built-in Agent that model, as it already does for the first model in
   the list.
@@ -195,8 +196,11 @@ and a closed-loop case in `tests/scenarios/auth_setup/test_auth_setup_scenarios.
 
 - An upgraded install is never moved to Vibey, even when Vibey is runnable there. Inviting upgraders to switch would
   be a separate product decision.
-- The starting model comes only from what models.dev can describe. An endpoint whose models it does not know still
-  needs one click on Vibey's setup card.
+- Without a qualifying native selection, the starting model comes only from what models.dev can describe. An endpoint
+  whose models it does not know, and that lists no native selection, still needs one click on Vibey's setup card.
+- Route refusals and the gateway-off copy keep their own "in Models" clause. The appended §2 step adds the link, or
+  tells a requester who cannot open Models to ask an admin. The two lines can overlap; only the step varies by
+  requester.
 - Setup completion keeps its existing fallback, the second writer named in §1's invariants. If Vibey cannot run at
   completion, which takes a source models.dev cannot describe and no pick, the existing rule records the first
   runnable CLI assistant. Otherwise setup would finish on a default that cannot run.
