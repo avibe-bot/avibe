@@ -75,16 +75,19 @@ On master before this change:
 - **Refusal copy.**
   - `no_source` renders `errors.modelSourceRequired`.
   - `errors.agentModelRequired` renders the backend's display name.
-- **The next step.** Every Model Hub refusal of a turn appends one next step to Models, built by one helper in
-  `modules/agents/model_hub.py`. This covers supply blocks, a missing model and route refusals.
-  - **Who gets the link.** Only a requester who can open Models gets it:
-    - on the Workbench, a caller with `can_manage_instance`, the gate on `/settings/models`;
-    - in IM, an admin, the gate `/setup` already uses (`core/auth.py`).
-    Anyone else gets `errors.askAdminForModels` instead of a link they would be bounced from.
-  - **Web Workbench:** a link to `/settings/models`.
-  - **IM:** `workbench_url('/settings/models')` when Avibe Cloud is paired; otherwise no URL, because the copy
-    already names Models.
-  - **Exception:** `hub_disabled` gets no link, because the Models page is unavailable there.
+- **The next step.** Every Model Hub refusal whose fix is in Models ends with one next step, built by one helper in
+  `modules/agents/model_hub.py`. This covers:
+  - the supply blocks other than `hub_disabled`;
+  - the built-in backend's missing model;
+  - route refusals whose copy already sends the reader to Models.
+- **On the Workbench,** the requester is known, so the step depends on them:
+  - a caller with `can_manage_instance` (the gate on `/settings/models`) gets a link to `/settings/models`;
+  - anyone else gets `errors.askAdminForModels`, never a link they would be bounced from.
+- **In IM,** no identity maps an IM user to a Workbench principal. So the step is the same for everyone and makes no
+  claim about the requester's access:
+  - With Avibe Cloud paired, `errors.modelsNextStepImUrl` offers `workbench_url('/settings/models')` as information.
+  - Without it, `errors.modelsNextStepIm` names where the fix is.
+- **Exception:** `hub_disabled` gets no step, because the Models page is unavailable there.
 - **IM `/setup`.** Both forms answer with Model Hub guidance and the same next step, instead of "does not support
   setup":
   - an explicit `/setup vibey`, which today is refused by the backend-hint gate in `handle_setup_command`;
@@ -110,21 +113,27 @@ PR-3 waits for the owner's approval of the rendered frame.
 
 - **Options.** Screen 3 marks exactly one ready assistant as the one new chats start with. The ready assistants are
   listed with Vibey first. A saved custom default that can run is listed too.
-- **Which one is marked.** The mark is derived, in order, until the person changes it:
-  1. the person's pick
+- **Which one is marked.** The mark is derived, in order:
+  1. the person's pick, while it is ready
   2. the saved default, if it is ready
   3. Vibey, if it is ready
   4. the first ready CLI assistant
-- **On completion.** The default is written only when the mark differs from the saved default, through the existing
-  completion write and its uncached confirmation.
+- **A pick that stops being ready** (its source removed, the gateway stopped) is not kept. The mark re-derives from
+  the list above, and the picked card says why it can no longer start new chats.
+- **On completion.** The completion gate re-reads readiness, as it does today, and judges the mark against that
+  completion-time evidence. A mark that is no longer ready holds completion until it re-derives; setup never writes a
+  default that cannot run. The default is written only when the mark differs from the saved default, through the
+  existing completion write and its uncached confirmation.
 
 ### Copy
 
 | Key | en | zh |
 |---|---|---|
 | `errors.modelSourceRequired` (server, new) | {backend} has no model source yet. Add an API key or a subscription in Models. | {backend} 还没有模型来源。请在「模型」页添加 API Key 或订阅。 |
-| `errors.openModels` (server, new) | Open Models: {url} | 打开「模型」页：{url} |
-| `errors.askAdminForModels` (server, new) | Ask an Avibe admin to fix this in Models. | 请联系 Avibe 管理员在「模型」页处理。 |
+| `errors.openModelsLink` (server, new; Workbench) | [Open Models]({url}) | [打开「模型」页]({url}) |
+| `errors.askAdminForModels` (server, new; Workbench) | Ask an Avibe admin to fix this in Models. | 请联系 Avibe 管理员在「模型」页处理。 |
+| `errors.modelsNextStepImUrl` (server, new; IM) | Someone who manages this Avibe can fix it in Models: {url} | 管理这个 Avibe 的人可以在「模型」页处理：{url} |
+| `errors.modelsNextStepIm` (server, new; IM) | Someone who manages this Avibe can fix it in Models, in the Avibe Workbench. | 管理这个 Avibe 的人可以在 Avibe 工作台的「模型」页处理。 |
 | `command.setup.builtinBackend` (server, new) | {backend} gets its models from Model Hub and needs no sign-in. Add or manage model sources in Models. | {backend} 通过模型网关获取模型，无需单独登录。请在「模型」页添加或管理模型来源。 |
 | `onboarding.setup.noteNoSource` (new) | No model source supplies {{name}} yet. | 还没有模型来源供给 {{name}}。 |
 | `settings.backends.noModelSource` (new) | No model source | 无模型来源 |
@@ -145,9 +154,17 @@ choice's labels.
     - with none enabled, records the built-in Agent, the only enabled candidate.
 - **PR-2:**
   - a table test of `hub_supply_block`
-  - one dispatch-level refusal test with its next step, on Web and IM, for a requester who can open Models and one
-    who cannot
+  - one dispatch-level refusal test with its next step
+  - a table test of the next step:
+    - Workbench: a caller who can open Models, and one who cannot
+    - IM: with Avibe Cloud paired, and without
   - IM `/setup vibey`, and a bare `/setup` on a Vibey default
+- **PR-3**, per the repository's rule for multi-step setup flows:
+  - update `tests/scenarios/auth_setup/catalog.yaml`, and add a closed-loop case to
+    `tests/scenarios/auth_setup/test_auth_setup_scenarios.py` that proves the default shown at completion is the
+    default the server confirms. It covers: Vibey marked and written; the person's CLI pick written; and a pick that
+    stops being ready before completion, which is never written
+  - the mark's order and its re-derivation in focused `entryGate` and `AgentDetection` tests
 - **Hermetic upgrade runs**, as in the 3.2.0 merge readiness check:
   - fresh install → `vibey`
   - v3.1.3 (custom default) → unchanged
