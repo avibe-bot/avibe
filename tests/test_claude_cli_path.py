@@ -41,15 +41,11 @@ from core.handlers.model_hub.service import ModelHubError
 from modules.claude_sdk_compat import CLAUDE_SDK_MAX_BUFFER_SIZE
 from modules.im import MessageContext
 from tests import hang_guard
-from tests.fake_pid_helpers import fake_pid
 from tests.scenario_harness.model_hub import (
     UNLISTED_MODEL,
     unlisted_model_copy,
     unlisted_model_runtime,
 )
-
-# The Claude CLI a stub client holds: registering it reads its start token, so it is a pid no process holds.
-_CLAUDE_CLI_PID = fake_pid()
 
 
 @dataclass
@@ -1098,7 +1094,7 @@ def test_session_handler_moves_claude_process_into_agent_cgroup(monkeypatch, tmp
 
     class _StubClaudeSDKClient:
         def __init__(self, options):
-            self._transport = type("Transport", (), {"_process": type("Process", (), {"pid": _CLAUDE_CLI_PID})()})()
+            self._transport = type("Transport", (), {"_process": type("Process", (), {"pid": 9753})()})()
 
         async def connect(self) -> None:
             return None
@@ -1121,7 +1117,7 @@ def test_session_handler_moves_claude_process_into_agent_cgroup(monkeypatch, tmp
 
     _run_session(handler, MessageContext(user_id="U123", channel_id="C123"))
 
-    assert calls == [(_CLAUDE_CLI_PID, "claude")]
+    assert calls == [(9753, "claude")]
 
 
 def test_session_handler_keeps_sdk_default_for_default_claude_binary(monkeypatch, tmp_path: Path) -> None:
@@ -1666,7 +1662,7 @@ def test_session_handler_marks_claude_sdk_session_process_owner(monkeypatch, tmp
     class _StubClaudeSDKClient:
         def __init__(self, options):
             captured["options"] = options
-            self._transport = type("T", (), {"_process": type("P", (), {"pid": _CLAUDE_CLI_PID})()})()
+            self._transport = type("T", (), {"_process": type("P", (), {"pid": 4321})()})()
 
         async def connect(self) -> None:
             captured["connected"] = True
@@ -3321,7 +3317,7 @@ def test_reap_orphaned_sessions_disables_in_tree_sweep_when_create_in_flight(mon
         return 0
 
     monkeypatch.setattr(session_handler_module, "reap_orphaned_claude_processes", _fake_reap)
-    monkeypatch.setattr(session_handler_module, "get_claude_client_pid", lambda client: _CLAUDE_CLI_PID)
+    monkeypatch.setattr(session_handler_module, "get_claude_client_pid", lambda client: 4321)
 
     controller = _Controller(tmp_path)
     handler = SessionHandler(controller)
@@ -3340,7 +3336,7 @@ def test_reap_orphaned_sessions_enables_in_tree_sweep_when_owner_set_complete(mo
         return 0
 
     monkeypatch.setattr(session_handler_module, "reap_orphaned_claude_processes", _fake_reap)
-    monkeypatch.setattr(session_handler_module, "get_claude_client_pid", lambda client: _CLAUDE_CLI_PID)
+    monkeypatch.setattr(session_handler_module, "get_claude_client_pid", lambda client: 4321)
 
     controller = _Controller(tmp_path)
     handler = SessionHandler(controller)
@@ -3364,7 +3360,7 @@ def test_reap_orphaned_sessions_excludes_active_watch_process_roots(monkeypatch,
             return {500}
 
     monkeypatch.setattr(session_handler_module, "reap_orphaned_claude_processes", _fake_reap)
-    monkeypatch.setattr(session_handler_module, "get_claude_client_pid", lambda client: _CLAUDE_CLI_PID)
+    monkeypatch.setattr(session_handler_module, "get_claude_client_pid", lambda client: 4321)
 
     controller = _Controller(tmp_path)
     controller.watch_service = _WatchService()
@@ -3389,7 +3385,7 @@ def test_reap_orphaned_sessions_excludes_active_claude_auth_clients(monkeypatch,
             return {600}
 
     monkeypatch.setattr(session_handler_module, "reap_orphaned_claude_processes", _fake_reap)
-    monkeypatch.setattr(session_handler_module, "get_claude_client_pid", lambda client: _CLAUDE_CLI_PID)
+    monkeypatch.setattr(session_handler_module, "get_claude_client_pid", lambda client: 4321)
 
     controller = _Controller(tmp_path)
     controller.agent_auth_service = _AuthService()
@@ -3421,7 +3417,7 @@ def test_reap_orphaned_sessions_disables_in_tree_when_auth_client_pid_unknown(
             return True
 
     monkeypatch.setattr(session_handler_module, "reap_orphaned_claude_processes", _fake_reap)
-    monkeypatch.setattr(session_handler_module, "get_claude_client_pid", lambda client: _CLAUDE_CLI_PID)
+    monkeypatch.setattr(session_handler_module, "get_claude_client_pid", lambda client: 4321)
 
     controller = _Controller(tmp_path)
     controller.agent_auth_service = _AuthService()
@@ -3886,7 +3882,7 @@ def test_evict_idle_sessions_reaps_native_resume_processes(monkeypatch, tmp_path
             self._transport = type(
                 "Transport",
                 (),
-                {"_process": type("Process", (), {"pid": _CLAUDE_CLI_PID})()},
+                {"_process": type("Process", (), {"pid": 4321})()},
             )()
             captured["client"] = self
 
@@ -3951,7 +3947,7 @@ def test_cleanup_defers_duplicate_reap_while_a_client_create_is_in_flight(
             self._transport = type(
                 "Transport",
                 (),
-                {"_process": type("Process", (), {"pid": _CLAUDE_CLI_PID})()},
+                {"_process": type("Process", (), {"pid": 4321})()},
             )()
 
         async def connect(self) -> None:
@@ -3999,7 +3995,7 @@ def test_evict_idle_sessions_protects_pids_of_other_live_sessions(monkeypatch, t
             self._transport = type(
                 "Transport",
                 (),
-                {"_process": type("Process", (), {"pid": _CLAUDE_CLI_PID})()},
+                {"_process": type("Process", (), {"pid": 4321})()},
             )()
 
         async def connect(self) -> None:
@@ -4063,7 +4059,7 @@ def test_cleanup_defers_duplicate_reap_when_a_live_client_pid_is_unresolved(
             self._transport = type(
                 "Transport",
                 (),
-                {"_process": type("Process", (), {"pid": _CLAUDE_CLI_PID})()},
+                {"_process": type("Process", (), {"pid": 4321})()},
             )()
 
         async def connect(self) -> None:
@@ -4118,7 +4114,7 @@ def test_cleanup_skips_a_generation_a_replacement_already_took_over(
             self._transport = type(
                 "Transport",
                 (),
-                {"_process": type("Process", (), {"pid": _CLAUDE_CLI_PID})()},
+                {"_process": type("Process", (), {"pid": 4321})()},
             )()
 
         async def connect(self) -> None:

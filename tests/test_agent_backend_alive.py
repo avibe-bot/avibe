@@ -214,7 +214,7 @@ def _opencode_generation(generation_id: str, pid: int) -> OpenCodeGeneration:
         pid=pid,
         port=50000 + pid,
         spec_digest="spec",
-        process_start_token="1000.0",
+        process_created_at=1000.0,
     )
 
 
@@ -232,9 +232,9 @@ class OpenCodeResourceExitTests(unittest.TestCase):
         pressure = AgentResourceFailure(kind="pids", message="shared cgroup limit event")
 
         with patch(
-            "modules.agents.opencode.server.runtime.process_start_token",
+            "modules.agents.opencode.server.runtime.process_create_time",
             # Alive, then the pid belongs to a later process.
-            side_effect=["1000.0", "2000.0"],
+            side_effect=[1000.0, 2000.0],
         ), patch(
             "modules.agents.opencode.agent.observe_agent_resource_pressure",
             return_value=pressure,
@@ -251,7 +251,7 @@ class OpenCodeResourceExitTests(unittest.TestCase):
         pressure = AgentResourceFailure(kind="pids", message="first exit")
 
         with patch(
-            "modules.agents.opencode.server.runtime.process_start_token",
+            "modules.agents.opencode.server.runtime.process_create_time",
             return_value=None,
         ), patch(
             "modules.agents.opencode.server.runtime.pid_alive",

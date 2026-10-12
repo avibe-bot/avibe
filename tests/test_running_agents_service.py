@@ -104,15 +104,15 @@ def _no_db_no_registry(monkeypatch):
         lambda client: getattr(client, "_fake_pid", None),
     )
     # Orphan liveness: by default every probed pid is "alive" (batched ages) with
-    # a start token that matches the record (so identity passes). Tests exercising
+    # a start time that matches the record (so identity passes). Tests exercising
     # the dead/reused-pid filter override these per-pid.
     monkeypatch.setattr(
         "modules.agents.claude_process_reaper._process_ages",
         lambda pids: {p: 1.0 for p in pids},
     )
     monkeypatch.setattr(
-        "modules.agents.claude_process_reaper._process_start_token",
-        lambda pid: "1000.0",
+        "modules.agents.claude_process_reaper._process_start_time",
+        lambda pid: 1000.0,
     )
 
 
@@ -420,9 +420,9 @@ def test_orphan_only_when_native_not_owned(monkeypatch):
     from modules.agents.claude_process_reaper import AVIBE_CLAUDE_SESSION_OWNER
 
     live = _FakeClaudeClient("slack_live", "nat-live", None)
-    owned = types.SimpleNamespace(pid=100, native_session_id="nat-live", owner=AVIBE_CLAUDE_SESSION_OWNER, start_token="1000.0")
-    leaked = types.SimpleNamespace(pid=200, native_session_id="nat-gone", owner=AVIBE_CLAUDE_SESSION_OWNER, start_token="1000.0")
-    auth_proc = types.SimpleNamespace(pid=300, native_session_id="nat-auth", owner="auth", start_token="1000.0")
+    owned = types.SimpleNamespace(pid=100, native_session_id="nat-live", owner=AVIBE_CLAUDE_SESSION_OWNER, started_at=1000.0)
+    leaked = types.SimpleNamespace(pid=200, native_session_id="nat-gone", owner=AVIBE_CLAUDE_SESSION_OWNER, started_at=1000.0)
+    auth_proc = types.SimpleNamespace(pid=300, native_session_id="nat-auth", owner="auth", started_at=1000.0)
     monkeypatch.setattr(
         "modules.agents.claude_process_reaper._load_owned_process_registry",
         lambda *a, **k: [owned, leaked, auth_proc],
@@ -448,8 +448,8 @@ def test_orphan_dedup_by_pid_when_live_client_lacks_native(monkeypatch):
     # exposes the pid but Avibe hasn't captured the native session id yet).
     live = _FakeClaudeClient("slack_live", None, None)
     live._fake_pid = 555
-    same_pid = types.SimpleNamespace(pid=555, native_session_id="nat-x", owner=AVIBE_CLAUDE_SESSION_OWNER, start_token="1000.0")
-    leaked = types.SimpleNamespace(pid=999, native_session_id="nat-y", owner=AVIBE_CLAUDE_SESSION_OWNER, start_token="1000.0")
+    same_pid = types.SimpleNamespace(pid=555, native_session_id="nat-x", owner=AVIBE_CLAUDE_SESSION_OWNER, started_at=1000.0)
+    leaked = types.SimpleNamespace(pid=999, native_session_id="nat-y", owner=AVIBE_CLAUDE_SESSION_OWNER, started_at=1000.0)
     monkeypatch.setattr(
         "modules.agents.claude_process_reaper._load_owned_process_registry",
         lambda *a, **k: [same_pid, leaked],
@@ -526,7 +526,7 @@ def test_orphan_surfaces_duplicate_native_with_different_pid(monkeypatch):
     live = _FakeClaudeClient("slack_dup", "nat-dup", None)
     live._fake_pid = 100
     leaked_old = types.SimpleNamespace(
-        pid=200, native_session_id="nat-dup", owner=AVIBE_CLAUDE_SESSION_OWNER, start_token="1000.0"
+        pid=200, native_session_id="nat-dup", owner=AVIBE_CLAUDE_SESSION_OWNER, started_at=1000.0
     )
     monkeypatch.setattr(
         "modules.agents.claude_process_reaper._load_owned_process_registry",
@@ -546,26 +546,26 @@ def test_orphan_surfaces_duplicate_native_with_different_pid(monkeypatch):
 def test_orphan_skips_dead_and_reused_pids(monkeypatch):
     from modules.agents.claude_process_reaper import AVIBE_CLAUDE_SESSION_OWNER
 
-    alive = types.SimpleNamespace(pid=10, native_session_id="nat-alive", owner=AVIBE_CLAUDE_SESSION_OWNER, start_token="5000.0")
-    dead = types.SimpleNamespace(pid=20, native_session_id="nat-dead", owner=AVIBE_CLAUDE_SESSION_OWNER, start_token="5000.0")
-    reused = types.SimpleNamespace(pid=30, native_session_id="nat-reused", owner=AVIBE_CLAUDE_SESSION_OWNER, start_token="5000.0")
+    alive = types.SimpleNamespace(pid=10, native_session_id="nat-alive", owner=AVIBE_CLAUDE_SESSION_OWNER, started_at=5000.0)
+    dead = types.SimpleNamespace(pid=20, native_session_id="nat-dead", owner=AVIBE_CLAUDE_SESSION_OWNER, started_at=5000.0)
+    reused = types.SimpleNamespace(pid=30, native_session_id="nat-reused", owner=AVIBE_CLAUDE_SESSION_OWNER, started_at=5000.0)
     monkeypatch.setattr(
         "modules.agents.claude_process_reaper._load_owned_process_registry",
         lambda *a, **k: [alive, dead, reused],
     )
 
     # pid 20 is not alive (absent from batched ages → stale); pid 30 is alive but
-    # has another start token (reused by an unrelated process); pid 10 is a real
-    # leak (alive + its token matches the record).
+    # started far from the recorded time (reused by an unrelated process); pid 10
+    # is a real leak (alive + start matches the record within 1s).
     monkeypatch.setattr(
         "modules.agents.claude_process_reaper._process_ages",
         lambda pids: {p: 1.0 for p in pids if p in {10, 30}},
     )
 
     def _start(pid):
-        return {10: "5000.0", 30: "9999.0"}.get(pid)
+        return {10: 5000.4, 30: 9999.0}.get(pid)
 
-    monkeypatch.setattr("modules.agents.claude_process_reaper._process_start_token", _start)
+    monkeypatch.setattr("modules.agents.claude_process_reaper._process_start_time", _start)
 
     snap = running_agents.snapshot_running_agents(_make_controller())
     orphans = [r for r in snap["agents"] if r["state"] == "orphan"]
@@ -583,9 +583,9 @@ def test_orphan_skips_dead_and_reused_pids(monkeypatch):
 def test_end_orphan_kills_verified_owned_pid(monkeypatch):
     from modules.agents import claude_process_reaper as reaper
 
-    rec = types.SimpleNamespace(pid=10, owner=reaper.AVIBE_CLAUDE_SESSION_OWNER, start_token="1000.0")
+    rec = types.SimpleNamespace(pid=10, owner=reaper.AVIBE_CLAUDE_SESSION_OWNER, started_at=1000.0)
     monkeypatch.setattr(reaper, "_load_owned_process_registry", lambda *a, **k: [rec])
-    monkeypatch.setattr(reaper, "_process_start_token", lambda pid: "1000.0")
+    monkeypatch.setattr(reaper, "_process_start_time", lambda pid: 1000.0)
     reap = _AsyncFlag(ret=1)
     monkeypatch.setattr(reaper, "_reap_pid_set", reap)
 
@@ -601,9 +601,9 @@ def test_end_orphan_reaps_root_plus_descendants(monkeypatch):
     # leak with no registry root a later kill could target.
     from modules.agents import claude_process_reaper as reaper
 
-    rec = types.SimpleNamespace(pid=100, owner=reaper.AVIBE_CLAUDE_SESSION_OWNER, start_token="1000.0")
+    rec = types.SimpleNamespace(pid=100, owner=reaper.AVIBE_CLAUDE_SESSION_OWNER, started_at=1000.0)
     monkeypatch.setattr(reaper, "_load_owned_process_registry", lambda *a, **k: [rec])
-    monkeypatch.setattr(reaper, "_process_start_token", lambda pid: "1000.0")
+    monkeypatch.setattr(reaper, "_process_start_time", lambda pid: 1000.0)
     # Tree: 100(root) -> 200(child) -> 300(grandchild); 999 is unrelated.
     ps_rows = [
         reaper.ClaudeProcessRow(pid=100, ppid=1, command="claude"),
@@ -631,9 +631,9 @@ def test_end_orphan_falls_back_to_root_when_ps_unreadable(monkeypatch):
     # root pid (better than reaping nothing).
     from modules.agents import claude_process_reaper as reaper
 
-    rec = types.SimpleNamespace(pid=55, owner=reaper.AVIBE_CLAUDE_SESSION_OWNER, start_token="1000.0")
+    rec = types.SimpleNamespace(pid=55, owner=reaper.AVIBE_CLAUDE_SESSION_OWNER, started_at=1000.0)
     monkeypatch.setattr(reaper, "_load_owned_process_registry", lambda *a, **k: [rec])
-    monkeypatch.setattr(reaper, "_process_start_token", lambda pid: "1000.0")
+    monkeypatch.setattr(reaper, "_process_start_time", lambda pid: 1000.0)
 
     def _boom():
         raise RuntimeError("ps unavailable")
@@ -658,10 +658,10 @@ def test_end_orphan_excludes_other_registered_session_pids(monkeypatch):
     # owned-pid subtraction so we don't kill another live session's process.
     from modules.agents import claude_process_reaper as reaper
 
-    root = types.SimpleNamespace(pid=100, owner=reaper.AVIBE_CLAUDE_SESSION_OWNER, start_token="1000.0")
-    other = types.SimpleNamespace(pid=200, owner=reaper.AVIBE_CLAUDE_SESSION_OWNER, start_token="1000.0")
+    root = types.SimpleNamespace(pid=100, owner=reaper.AVIBE_CLAUDE_SESSION_OWNER, started_at=1000.0)
+    other = types.SimpleNamespace(pid=200, owner=reaper.AVIBE_CLAUDE_SESSION_OWNER, started_at=1000.0)
     monkeypatch.setattr(reaper, "_load_owned_process_registry", lambda *a, **k: [root, other])
-    monkeypatch.setattr(reaper, "_process_start_token", lambda pid: "1000.0")
+    monkeypatch.setattr(reaper, "_process_start_time", lambda pid: 1000.0)
     # 100(root) -> 200(other owned) -> 300(other's child)
     ps_rows = [
         reaper.ClaudeProcessRow(pid=100, ppid=1, command="claude"),
@@ -689,9 +689,9 @@ def test_end_orphan_never_reaps_the_service_tree(monkeypatch):
     # orphan root, it must never be signalled.
     from modules.agents import claude_process_reaper as reaper
 
-    root = types.SimpleNamespace(pid=100, owner=reaper.AVIBE_CLAUDE_SESSION_OWNER, start_token="1000.0")
+    root = types.SimpleNamespace(pid=100, owner=reaper.AVIBE_CLAUDE_SESSION_OWNER, started_at=1000.0)
     monkeypatch.setattr(reaper, "_load_owned_process_registry", lambda *a, **k: [root])
-    monkeypatch.setattr(reaper, "_process_start_token", lambda pid: "1000.0")
+    monkeypatch.setattr(reaper, "_process_start_time", lambda pid: 1000.0)
     # 100(root) -> 200(== service pid) -> 300(service child)
     ps_rows = [
         reaper.ClaudeProcessRow(pid=100, ppid=1, command="claude"),
@@ -732,9 +732,9 @@ def test_end_orphan_refuses_when_identity_unprovable(monkeypatch):
     # from a reused pid → fail closed (never kill), matching the read path.
     from modules.agents import claude_process_reaper as reaper
 
-    rec = types.SimpleNamespace(pid=10, owner=reaper.AVIBE_CLAUDE_SESSION_OWNER, start_token=None)
+    rec = types.SimpleNamespace(pid=10, owner=reaper.AVIBE_CLAUDE_SESSION_OWNER, started_at=None)
     monkeypatch.setattr(reaper, "_load_owned_process_registry", lambda *a, **k: [rec])
-    monkeypatch.setattr(reaper, "_process_start_token", lambda pid: "1000.0")
+    monkeypatch.setattr(reaper, "_process_start_time", lambda pid: 1000.0)
     reap = _AsyncFlag(ret=1)
     monkeypatch.setattr(reaper, "_reap_pid_set", reap)
 

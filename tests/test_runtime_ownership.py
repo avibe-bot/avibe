@@ -340,7 +340,7 @@ def test_hfr_145_every_backend_invalidation_path_consumes_exact_ownership() -> N
             pid=fake_pid(index),
             port=50000 + index,
             spec_digest=generation_id,
-            process_start_token="1.0",
+            process_created_at=1.0,
         )
 
     retiring, current = generation("ocg_old", 1), generation("ocg_new", 2)

@@ -1548,7 +1548,6 @@ def test_restore_leaves_every_poll_whose_run_another_desktop_runtimes_live_serve
     monkeypatch.setattr(opencode_server, "desktop_caller_provenance", lambda: frozenset({this_runtime}))
     monkeypatch.setattr(opencode_server.runtime, "pid_alive", lambda pid: pid == live_pid)
     monkeypatch.setattr(opencode_server.runtime, "process_create_time", lambda pid: 100.0 + pid)
-    monkeypatch.setattr(opencode_server.runtime, "process_start_token", lambda pid: repr(100.0 + pid))
     monkeypatch.setattr(
         opencode_server.runtime, "get_process_command", lambda pid: "/bin/opencode serve --port=50201"
     )

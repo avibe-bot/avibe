@@ -164,7 +164,6 @@ def isolated_launch(tmp_path, monkeypatch):
     monkeypatch.setattr(opencode_server, "_ADOPTION_PROBE_INTERVAL_SECONDS", 0)
     monkeypatch.setattr(opencode_server, "ensure_plugin_installed", lambda: None)
     monkeypatch.setattr(opencode_server.runtime, "process_create_time", lambda pid: 100.0 + pid)
-    monkeypatch.setattr(opencode_server.runtime, "process_start_token", lambda pid: repr(100.0 + pid))
     monkeypatch.setattr(opencode_server.OpenCodeGeneration, "is_healthy", AsyncMock(return_value=True))
     monkeypatch.setattr(opencode_server, "_pid_listens_on", lambda pid, port: True)
     launches: list[dict] = []
@@ -196,7 +195,7 @@ def test_a_start_chooses_its_port_and_retries_one_another_process_took(isolated_
     assert generation.port == ports[1] and generation.pid == fake_pid(2)
     assert [path.name for path in isolated_launch.records.glob("*.json")] == [f"{generation.generation_id}.json"]
     record = json.loads(generation.record_path.read_text())
-    assert record["spec_digest"] == "spec" and record["process_start_token"] == repr(100.0 + fake_pid(2))
+    assert record["spec_digest"] == "spec" and record["process_created_at"] == 100.0 + fake_pid(2)
     assert isolated_launch.launches[1]["env"]["AVIBE_OPENCODE_MODEL_HUB"] == "0"
 
 
@@ -256,7 +255,7 @@ def _record(records: Path, generation_id: str, pid: int, port: int, **fields) ->
             "generation_id": generation_id,
             "pid": pid,
             "port": port,
-            "process_start_token": repr(100.0 + pid),
+            "process_created_at": 100.0 + pid,
             "spec_digest": f"spec-{generation_id}",
             **fields,
         }),
@@ -305,11 +304,6 @@ def test_adoption_keeps_every_proven_serving_process_and_drops_the_rest(isolated
     )
     monkeypatch.setattr(
         opencode_server.runtime,
-        "process_start_token",
-        lambda pid: repr(999.0 if pid == fake_pid(12) else 100.0 + pid),
-    )
-    monkeypatch.setattr(
-        opencode_server.runtime,
         "get_process_command",
         lambda pid: f"/bin/opencode serve --hostname=127.0.0.1 --port={ports[pid]}",
     )
@@ -347,7 +341,7 @@ def _generation(generation_id: str, index: int, digest: str) -> OpenCodeGenerati
         pid=fake_pid(index),
         port=50100 + index,
         spec_digest=digest,
-        process_start_token="1.0",
+        process_created_at=1.0,
     )
 
 
@@ -478,11 +472,11 @@ def test_runtime_gen_026_a_generation_this_controller_started_is_alive_while_its
         pid=fake_pid(7),
         port=50107,
         spec_digest="v1",
-        process_start_token="1000.0",
+        process_created_at=1_000.0,
         process=process,
     )
-    # The start token read now differs from the one recorded at spawn.
-    monkeypatch.setattr(opencode_server.runtime, "process_start_token", lambda _pid: "998.0")
+    # The start time read now differs from the one recorded at spawn.
+    monkeypatch.setattr(opencode_server.runtime, "process_create_time", lambda _pid: 998.0)
 
     assert generation.process_alive()
     process.returncode = 0
@@ -1420,7 +1414,6 @@ def _leftover_record(records: Path, monkeypatch, generation_id: str, index: int)
     monkeypatch.setattr(opencode_server, "legacy_pid_file", lambda: records / "absent.json")
     monkeypatch.setattr(opencode_server.runtime, "pid_alive", lambda candidate: candidate == pid)
     monkeypatch.setattr(opencode_server.runtime, "process_create_time", lambda candidate: 100.0 + candidate)
-    monkeypatch.setattr(opencode_server.runtime, "process_start_token", lambda candidate: repr(100.0 + candidate))
     monkeypatch.setattr(
         opencode_server.runtime,
         "get_process_command",
@@ -1656,7 +1649,7 @@ def test_the_cap_stops_the_oldest_adopted_generation_whatever_its_record_order(f
             pid=fake_pid(80 + index),
             port=50180 + index,
             spec_digest=f"old-{index}",
-            process_start_token=repr(started_at),
+            process_created_at=started_at,
             started_at=started_at,
             # Each still runs a restored turn, so none stops on its own.
             active_run_sessions=(f"ses-{index}",),
@@ -2099,11 +2092,7 @@ def test_service_shutdown_stops_a_started_process_whose_record_was_never_written
     proven, shifted, exited = fake_pid(67), fake_pid(68), fake_pid(69)
     isolated_launch.processes.extend(_Process(pid) for pid in (proven, shifted, exited))
     create_times = {proven: 1.0, shifted: 2.0, exited: 3.0}
-    monkeypatch.setattr(
-        opencode_server.runtime,
-        "process_start_token",
-        lambda pid: None if pid not in create_times else repr(create_times[pid]),
-    )
+    monkeypatch.setattr(opencode_server.runtime, "process_create_time", create_times.get)
     monkeypatch.setattr(opencode_server.runtime, "pid_alive", lambda pid: pid in create_times)
     monkeypatch.setattr(opencode_server, "legacy_pid_file", lambda: isolated_launch.records / "absent.json")
 
@@ -2156,7 +2145,7 @@ def test_runtime_gen_026_service_shutdown_stops_its_own_recorded_server_after_a_
         opencode_server.start_generation(OpenCodeLaunchSpec(digest="spec", binary="/bin/opencode"))
     )
     assert generation.record_path.exists()
-    monkeypatch.setattr(opencode_server.runtime, "process_start_token", lambda _pid: "7.0")
+    monkeypatch.setattr(opencode_server.runtime, "process_create_time", lambda _pid: 7.0)
 
     opencode_server.stop_owned_generations_sync()
 

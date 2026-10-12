@@ -849,8 +849,17 @@ def process_start_token(pid: int) -> str | None:
       sync, a WSL2 resume, NTP catching up after boot. The ticks, with the boot
       they count from, do not move. Ticks restart at every boot, so without
       the boot id there is no token.
-    - macOS, NetBSD and Windows store the wall-clock time a process started,
-      which ``process_start_time`` reads unchanged.
+    - macOS (and NetBSD) store the wall-clock time a process started, but
+      psutil's ``create_time()`` adds the change in whole seconds of
+      ``kern.boottime`` since psutil was imported, and the system time daemon
+      moves ``kern.boottime`` in routine adjustments. The same process then
+      reads a second later or earlier, and differently in two processes that
+      imported psutil at different times. The stored value is what psutil
+      itself uses for process identity (``Process._get_ident``), through
+      ``create_time(monotonic=True)``. That accessor is private, so a psutil
+      without it reads as None.
+    - Windows stores the creation time with the process, and psutil reads it
+      back unchanged.
     - Elsewhere (FreeBSD, OpenBSD, ...) the start psutil reads moves with
       system clock updates, as psutil itself warns, and no stable one is
       available: no process there has a token, so a record of one is
@@ -866,37 +875,13 @@ def process_start_token(pid: int) -> str | None:
         if boot_id is None or not ticks.isdigit():
             return None
         return f"{boot_id}:{ticks}"
-    if sys.platform not in {"darwin", "win32"} and not sys.platform.startswith("netbsd"):
+    monotonic = sys.platform == "darwin" or sys.platform.startswith("netbsd")
+    if not monotonic and sys.platform != "win32":
         return None
-    start = process_start_time(pid)
-    return repr(start) if start is not None else None
-
-
-def process_start_time(pid: int) -> float | None:
-    """The wall-clock time a process started, as its kernel reports it; None if it cannot be read.
-
-    On macOS and Linux it is the start ``ps -o lstart`` shows, to the second.
-    It is an identity only where the kernel stores it (macOS, NetBSD,
-    Windows); elsewhere it moves with the clock, so ``process_start_token``
-    is the identity.
-
-    On macOS psutil's ``create_time()`` adds the change in whole seconds of
-    ``kern.boottime`` since psutil was imported, and the system time daemon
-    moves ``kern.boottime`` in routine adjustments. The same process then reads
-    a second later or earlier, and differently in two processes that imported
-    psutil at different times. The stored value is what psutil itself uses for
-    process identity (``Process._get_ident``), through
-    ``create_time(monotonic=True)``. That accessor is private, so a psutil
-    without it reads as None, which every caller treats as unverifiable.
-    """
-
     try:
         process = psutil.Process(pid)
-        if sys.platform == "darwin" or sys.platform.startswith("netbsd"):
-            start = process._proc.create_time(monotonic=True)
-        else:
-            start = process.create_time()
-        return float(start)
+        start = process._proc.create_time(monotonic=True) if monotonic else process.create_time()
+        return repr(float(start))
     except (psutil.Error, AttributeError, TypeError, ValueError, OSError):
         return None
 
