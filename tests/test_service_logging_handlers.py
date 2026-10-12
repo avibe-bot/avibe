@@ -58,7 +58,7 @@ def test_start_service_disables_stdout_logging_for_background_process(monkeypatc
     monkeypatch.setattr(runtime.paths, "get_runtime_pid_path", lambda: pid_path)
     monkeypatch.setattr(runtime, "pid_alive", lambda pid: False)
     monkeypatch.setattr(runtime, "get_service_main_path", lambda: Path("/tmp/main.py"))
-    monkeypatch.setattr(runtime, "service_instance_lock_available", lambda: (True, 0))
+    monkeypatch.setattr(runtime, "service_instance_lock_available", lambda **kwargs: (True, 0))
     # Exercise the generic (non-scoped) spawn path deterministically: on a Linux
     # dev host maybe_systemd_scope_prefix() is truthy and would route through the
     # scoped poll-and-adopt path instead of wait_for_service_pid.

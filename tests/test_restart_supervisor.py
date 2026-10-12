@@ -768,7 +768,7 @@ def test_restart_job_waits_for_service_lock_release_before_start(monkeypatch, tm
 
     lock_checks = iter([(False, 111), (True, None)])
 
-    def service_instance_lock_available():
+    def service_instance_lock_available(**kwargs):
         calls.append("lock_available")
         return next(lock_checks)
 
