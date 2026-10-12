@@ -1,7 +1,9 @@
 # Model Catalog Interaction Regression
 
 Run `npm run test:model-catalog` from `ui/` after installing the pinned Chromium
-binary with `npx playwright install chromium`. CI runs this in `ui-checks`.
+binary with `npx playwright install chromium`. PR `lint` intentionally does not run
+this suite. GitHub runs it in the daily/manual
+`.github/workflows/model-hub-ui-regression.yml` workflow instead.
 The suite follows the existing
 isolated UI fixture pattern and never starts or contacts Avibe or a backend CLI.
 Only `modelsApi` is replaced with in-memory reads/writes. The catalog, picker,

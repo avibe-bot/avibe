@@ -47,7 +47,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
         with:
-          name: model-hub-ui-regression-${{ github.run_id }}
+          name: model-hub-ui-regression-${{ github.run_id }}-${{ github.run_attempt }}
           path: ui/e2e/.artifacts
           if-no-files-found: ignore
           retention-days: 14
