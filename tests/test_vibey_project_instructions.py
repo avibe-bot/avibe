@@ -16,8 +16,9 @@ from modules.agents.vibey.instructions import InstructionFile, load_instruction_
 
 # The model-facing text, stated here rather than read from the constants it checks (C-7 tools.md section 9).
 SUBTREE = (
-    "A directory below the working directory may hold its own instruction file (AGENTS.override.md, AGENTS.md, or "
-    "CLAUDE.md) with more specific rules for that subtree: read it before changing files there."
+    "A directory below the working directory may hold its own instruction file (AGENTS.override.md, AGENTS.md, "
+    "AGENTS.MD, CLAUDE.md, or CLAUDE.MD) with more specific rules for that subtree: read it before changing files "
+    "there."
 )
 HEADER = (
     "Project-specific instructions and guidelines:\n"

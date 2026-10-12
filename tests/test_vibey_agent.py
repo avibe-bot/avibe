@@ -1790,7 +1790,8 @@ async def test_the_instruction_files_enter_between_the_head_and_avibes_sections_
     # The section's text, stated here rather than built by the code under test.
     subtree = (
         "A directory below the working directory may hold its own instruction file (AGENTS.override.md, AGENTS.md, "
-        "or CLAUDE.md) with more specific rules for that subtree: read it before changing files there."
+        "AGENTS.MD, CLAUDE.md, or CLAUDE.MD) with more specific rules for that subtree: read it before changing files "
+        "there."
     )
     section = (
         "<project_context>\nProject-specific instructions and guidelines:\n"

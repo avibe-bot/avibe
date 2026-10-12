@@ -30,8 +30,9 @@ PRECEDENCE = "More general files come first; where two conflict, the later, more
 #: Files below the cwd are never loaded; as Codex does, the section tells the Agent to look for them. Constant, and
 #: present even when no file loaded, since a subtree may still hold one.
 SUBTREE = (
-    "A directory below the working directory may hold its own instruction file (AGENTS.override.md, AGENTS.md, or "
-    "CLAUDE.md) with more specific rules for that subtree: read it before changing files there."
+    "A directory below the working directory may hold its own instruction file (AGENTS.override.md, AGENTS.md, "
+    "AGENTS.MD, CLAUDE.md, or CLAUDE.MD) with more specific rules for that subtree: read it before changing files "
+    "there."
 )
 TRUNCATED = (
     "[Truncated: the first {shown} of {size} bytes. The instruction files share a 65,536-byte limit; read the file "
