@@ -46,6 +46,8 @@ class InstructionFile:
 
 
 _BOM = b"\xef\xbb\xbf"
+#: Git writes one path line into ``.git`` and ``commondir``: no more is read of either.
+_GIT_LINE = 8192
 
 
 def _read(path: str) -> Optional[tuple[str, int]]:
@@ -64,7 +66,9 @@ def _read(path: str) -> Optional[tuple[str, int]]:
         return None
     if data.startswith(_BOM):
         data, size = data[len(_BOM) :], size - len(_BOM)
-    return data[: LIMIT + 4].decode("utf-8", "replace"), size
+    text = data[: LIMIT + 4].decode("utf-8", "replace")
+    # Read whole, its size is the text's: each undecodable byte became a three-byte replacement character.
+    return text, (len(text.encode("utf-8")) if len(data) >= size else size)
 
 
 def _from_dir(directory: str) -> Optional[InstructionFile]:
@@ -84,7 +88,7 @@ def _git_paths(cwd: str) -> Optional[tuple[str, str]]:
         try:
             if os.path.isfile(marker):
                 with open(marker, encoding="utf-8", errors="replace") as handle:
-                    content = handle.read().strip()
+                    content = handle.read(_GIT_LINE).strip()
                 if content.startswith("gitdir: "):
                     git_dir = os.path.normpath(os.path.join(directory, content[len("gitdir: ") :].strip()))
                     if not os.path.exists(os.path.join(git_dir, "HEAD")):
@@ -92,7 +96,7 @@ def _git_paths(cwd: str) -> Optional[tuple[str, str]]:
                     common = os.path.join(git_dir, "commondir")
                     if os.path.exists(common):
                         with open(common, encoding="utf-8", errors="replace") as handle:
-                            return directory, os.path.normpath(os.path.join(git_dir, handle.read().strip()))
+                            return directory, os.path.normpath(os.path.join(git_dir, handle.read(_GIT_LINE).strip()))
                     return directory, git_dir
             elif os.path.isdir(marker):
                 return (directory, marker) if os.path.exists(os.path.join(marker, "HEAD")) else None
@@ -182,7 +186,7 @@ def project_context(files: Sequence[InstructionFile]) -> str:
             omitted.append(f"{path} ({size} bytes)")
             continue
         content = file.content
-        if room < size:
+        if room < size or len(content.encode("utf-8")) > room:
             shown = _cut(content, room)
             content = f"{shown}\n{TRUNCATED.format(shown=len(shown.encode('utf-8')), size=size)}"
         blocks.append(f'<project_instructions path="{path}">\n{content}\n</project_instructions>')

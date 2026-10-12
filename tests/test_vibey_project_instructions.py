@@ -199,3 +199,16 @@ def test_a_huge_file_is_read_only_as_far_as_the_section_can_hold(tmp_path) -> No
                Path(found.path).is_relative_to(tmp_path)]
     assert len(file.content.encode("utf-8")) <= 65_536 + 4
     assert truncated(65_536, 16 * 65_536) in project_context([file])
+
+
+def test_undecodable_bytes_count_toward_the_limit_as_read(tmp_path) -> None:
+    # Each invalid byte reads as a three-byte replacement character: the limit holds for what the prompt carries.
+    (tmp_path / "repo").mkdir()
+    (tmp_path / "repo/AGENTS.md").write_bytes(b"\xff" * 65_536)
+
+    (file,) = [found for found in load_instruction_files(str(tmp_path / "repo"), tmp_path / "none") if
+               Path(found.path).is_relative_to(tmp_path)]
+    section = project_context([file])
+    shown = section.split(">\n", 2)[2].split("\n[Truncated", 1)[0]
+    assert len(shown.encode("utf-8")) <= 65_536
+    assert truncated(65_535, 3 * 65_536) in section
