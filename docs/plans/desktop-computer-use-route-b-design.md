@@ -93,29 +93,27 @@ decision before implementation.
 
 ### Record, restore, and verify
 
-Before the foreground call, the implementation must record the exact prior
-desktop state needed for restoration:
+Route B v1 has a finite restoration contract. Before the foreground call, the
+implementation records exactly:
 
-- the frontmost application, including an identity that distinguishes the
-  current process instance;
-- the frontmost native window, including its owning application and native
-  window identity; and
-- the pointer position, display context, and relevant button state.
+1. the prior frontmost application and its frontmost native window, including
+   identities that distinguish the current process and native window;
+2. the hardware pointer position; and
+3. the active Space of the affected display.
 
-The target must be one freshly observed application window in the same Session.
-The implementation must retain the target identity and coordinate context
-needed to confirm that it is still the requested window before posting the
-foreground input. Numeric PID or window identifiers must not be treated as
-proof of identity after reuse.
+The target must be one freshly observed application window in the same Session
+and must satisfy the admission preconditions below. The implementation must
+retain the target identity and coordinate context needed to confirm that it is
+still the requested window before posting the foreground input. Numeric PID or
+window identifiers must not be treated as proof of identity after reuse.
 
-After the explicit input call, the implementation restores the recorded
-frontmost application, exact window, and pointer. Any injected button state
-must be cleaned up before pointer restoration. It then takes a fresh
-observation and verifies all three restored values. Restoration also repeats
-`list_windows` for the previously frontmost pid and window; it must be present
-with `on_current_space=true`. A transport acknowledgement is not effect
-confirmation; the result must preserve the existing click effect vocabulary,
-including `confirmed` and `unverifiable`.
+After the explicit input call, the implementation restores those three recorded
+values and verifies them against a fresh observation: the prior frontmost
+application and exact window, the hardware pointer position, and the affected
+display's active Space. The previously frontmost window must still be present
+on the current Space in that observation. A transport acknowledgement is not
+effect confirmation; the result must preserve the existing click effect
+vocabulary, including `confirmed` and `unverifiable`.
 
 If restoration cannot be completed or cannot be verified, the operation stops
 and reports a concrete restoration failure. It does not retry, choose another
@@ -129,6 +127,12 @@ Native Computer Use stop expires consent and cancels the current foreground
 call. Restoration and reporting remain the terminal obligation before normal
 daemon teardown; if the call cannot restore and verify, it stops and reports.
 Stop cannot claim to undo an input that was already posted.
+
+Any other window-system state is not restored in v1 and may differ after the
+call. This includes the target's `z_index` and z-order relative to
+non-frontmost windows, focus or selection inside windows, IME state, and
+fullscreen or tiling arrangements. Because of the admission preconditions, the
+target was already visible beforehand.
 
 Owner-input quarantine, suppression, capture, and replay during the
 focus-changing interval are explicitly out of scope for this record. The
@@ -161,10 +165,14 @@ unverifiable result never escalates by itself; a later foreground call must be
 an explicit caller decision with its own admission.
 
 Route B v1 admits a target only when a fresh `list_windows` call in the same
-call's admission finds the exact pid and window with `on_current_space=true`.
-`false`, `null`, or a missing window fails closed with stable reason
-`target_off_active_space`. Route B never switches Spaces; cross-Space targets
-are future work.
+call's admission finds the exact pid and window with all of these conditions:
+`is_on_screen=true`, `minimized=false`, and `on_current_space=true`. For v1,
+the on-screen condition is also the no-hidden condition: Route B does not
+un-hide, reveal, or un-minimize a target. Any false, null, missing, or
+otherwise non-admissible value fails closed with a stable reason:
+`target_off_active_space` for a missing or off-current-Space target, and
+`target_not_admissible` for visibility, hidden, or minimized targets. Route B
+never switches Spaces; cross-Space targets are future work.
 
 The CLI should reuse the existing leaf command and argument shape rather than
 add a new top-level foreground command or hidden retry flag. The planned
