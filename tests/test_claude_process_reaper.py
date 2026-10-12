@@ -2,6 +2,10 @@ import asyncio
 import logging
 import os
 import signal
+import subprocess
+import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
 from modules.agents import claude_process_reaper
@@ -714,3 +718,81 @@ def test_reap_orphaned_ignores_other_backend_stream_json_descendant_without_regi
 
     assert reaped == 0
     assert signals == []
+
+
+def _client(pid: int) -> SimpleNamespace:
+    return SimpleNamespace(_transport=SimpleNamespace(_process=SimpleNamespace(pid=pid)))
+
+
+def _sleeper() -> subprocess.Popen:
+    return subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+
+
+def test_registering_a_process_reads_and_writes_on_the_registry_thread(tmp_path, monkeypatch):
+    # The service registers on its event loop; the `ps` read and the file rewrite must not run there.
+    threads: list[str] = []
+
+    def start_time(pid):
+        threads.append(threading.current_thread().name)
+        return 1000.0
+
+    monkeypatch.setattr(claude_process_reaper, "_process_start_time", start_time)
+    child = _sleeper()
+    try:
+        pending = claude_process_reaper.register_claude_owned_process(
+            _client(child.pid), native_session_id="sess-1", runtime_dir=tmp_path
+        )
+        pending.result(timeout=10)
+    finally:
+        child.kill()
+        child.wait(10)
+
+    assert threads and all(name.startswith("claude-process-registry") for name in threads)
+    assert claude_process_reaper._load_owned_process_registry(tmp_path) == [
+        claude_process_reaper.ClaudeOwnedProcess(pid=child.pid, native_session_id="sess-1", started_at=1000.0)
+    ]
+
+
+def test_a_registration_drops_the_records_of_processes_that_have_exited(tmp_path, monkeypatch):
+    monkeypatch.setattr(claude_process_reaper, "_process_start_time", lambda pid: 1000.0)
+    exited = subprocess.Popen([sys.executable, "-c", "pass"])
+    exited.wait(10)
+    running, registering = _sleeper(), _sleeper()
+    try:
+        for child in (exited, running):
+            claude_process_reaper.register_claude_owned_process(_client(child.pid), runtime_dir=tmp_path).result(timeout=10)
+
+        claude_process_reaper.register_claude_owned_process(_client(registering.pid), runtime_dir=tmp_path).result(timeout=10)
+
+        recorded = {record.pid for record in claude_process_reaper._load_owned_process_registry(tmp_path)}
+    finally:
+        for child in (running, registering):
+            child.kill()
+            child.wait(10)
+
+    assert recorded == {running.pid, registering.pid}
+
+
+def test_concurrent_registrations_keep_every_record(tmp_path, monkeypatch):
+    monkeypatch.setattr(claude_process_reaper, "_process_start_time", lambda pid: 1000.0)
+    children = [_sleeper() for _ in range(4)]
+    try:
+        with ThreadPoolExecutor(max_workers=4) as callers:
+            pending = list(
+                callers.map(
+                    lambda child: claude_process_reaper.register_claude_owned_process(
+                        _client(child.pid), runtime_dir=tmp_path
+                    ),
+                    children,
+                )
+            )
+        for write in pending:
+            write.result(timeout=10)
+
+        recorded = {record.pid for record in claude_process_reaper._load_owned_process_registry(tmp_path)}
+    finally:
+        for child in children:
+            child.kill()
+            child.wait(10)
+
+    assert recorded == {child.pid for child in children}
