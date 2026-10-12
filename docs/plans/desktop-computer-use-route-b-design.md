@@ -5,15 +5,21 @@ implementation.
 
 Route A remains the shipped contract in
 [Desktop computer use via embedded Cua Driver](desktop-computer-use.md#route-a-raw-single-click-selector-2026-10-10).
-Route B is a separate, explicit foreground delivery mode for applications that
-reject both accessibility actions and background synthetic input. It must never
-become a silent fallback from Route A.
+Route B is a separate, explicit foreground mode for applications that reject
+both accessibility actions and background synthetic input. It must never become
+a silent fallback from Route A.
 
 ## Evidence and conclusion
 
-The macOS background-input research note
-(`docs/research/desktop-computer-use-background-input/findings.md`) establishes
-two separate facts:
+The load-bearing observations are recorded here so a fresh checkout can review
+the decision without the unmerged research worktree or temporary acceptance
+directory. Their provenance is the macOS background-input research note
+(`docs/research/desktop-computer-use-background-input/findings.md`) and the
+Slice 2 final report and QQ artifacts under
+`/tmp/avibe-cua-slice2-20261011-1540/evidence/final/`; those paths are
+provenance, not dependencies of this contract.
+
+The research probe established that:
 
 - A raw, exact-window `synthetic_events` click can reach a test-owned AppKit
   surface through `mouseDown` without changing the frontmost application or
@@ -22,19 +28,12 @@ two separate facts:
   real mouse event, and the pinned driver has no general-purpose foreground
   selector that makes this safe by default.
 
-The Slice 2 final report
-(`/tmp/avibe-cua-slice2-20261011-1540/evidence/final/slice2-final-report.md`)
-shows the remaining gap in a real application. The fresh same-connection
-observation identified QQ window `6285` under PID
-`97470`; the single click used `x=41`, `y=146`, `count=1`, `button=left`,
-`click_mode:"raw"`, and `delivery_mode:"background"`. The driver response in
-`qq-direct-corrected-click-response-20261012.json` reported
-`route:"synthetic_events"` and accepted the dispatch, while the before/after
-observations and
-`qq-direct-corrected-before-20261012.png` /
-`qq-direct-corrected-after-20261012.png` show no QQ view change. The correct
-conclusion is that the background event reached the driver boundary but had no
-observable effect in QQ. It does not justify changing Route A's meaning.
+Slice 2 showed the gap in a real application: QQ window `6285` under PID
+`97470` received `x=41`, `y=146`, `count=1`, `button=left`,
+`click_mode:"raw"`, and `delivery_mode:"background"`. The driver reported
+`route:"synthetic_events"` and accepted dispatch, but the before/after
+observations and screenshots showed no QQ view change. The event reached the
+driver boundary without an observable QQ effect; this does not change Route A.
 
 The design recommendation is therefore a narrow foreground exception:
 explicit per-call opt-in, guarded by a session-scoped owner toggle, exact
@@ -61,22 +60,19 @@ another explicit foreground call, but consent must not turn all subsequent
 input into foreground input. Desktop targets, ambiguous windows, stale
 observations, and activation-only operations remain refused.
 
-Per-app foreground mode is an explicit alternative, but is too broad: an app
-can contain multiple windows with different user impact, and an allowlist can
-outlive the task that justified it. Per-session foreground mode is simpler but
-would make an accidental or stale agent request affect every later input in the
-session. Per-call delivery is the smallest boundary that matches the actual
-risk.
+Per-app mode is too broad because an app can contain multiple windows and an
+allowlist can outlive the task that justified it. Per-session mode is simpler
+but lets an accidental or stale request affect every later input. Per-call
+delivery is the smallest boundary that matches the risk.
 
 ### Owner consent
 
 The recommended consent model is a local, owner-controlled session toggle:
-"Allow foreground control for this Agent Session." The toggle is available
-only from the native desktop surface or tray, never from the agent CLI, an IM
-message, or an agent-provided argument. It is ephemeral: session end, session
-archive, native Computer Use stop, or the owner disabling the toggle revokes
-it. The implementation should keep this consent in runtime state owned by the
-existing session/lease path rather than create a durable allowlist file.
+"Allow foreground control for this Agent Session." It is available only from
+the native desktop surface or tray, never from the agent CLI, an IM message, or
+an agent argument. Session end/archive, native Computer Use stop, or disabling
+the toggle revokes it. Consent belongs in the existing ephemeral session/lease
+path, not a durable allowlist file.
 
 Every-call consent is the strongest prompt model, but it is incompatible with
 unattended IM and scheduled work: the required human may not be at the
@@ -85,62 +81,89 @@ allowlist avoids repeated prompts but creates persistent authority that is
 harder to audit and revoke. The session toggle keeps the owner decision
 explicit while preserving a short lifetime and exact per-call target checks.
 
+The native-to-Controller handoff must be explicit. The Controller issues an
+opaque, short-lived challenge for the selected active session. After the owner
+toggles foreground control, the native shell sends the session identity, shell
+instance/generation, challenge, and owner action over authenticated local IPC.
+The Controller stores the grant in its ephemeral session/lease registry and
+acknowledges it. The agent cannot mint, extend, or reuse the challenge. Missing
+acknowledgement, stale shell generation, IPC loss, native stop, session
+end/archive, or shell-lock loss revokes the grant and fails closed. The exact
+IPC message and shell-origin proof require owner and source review; this must
+not become agent-writable state.
+
 ### Recording and restoration
 
-Before foreground admission, the driver must capture a complete restoration
-snapshot in the same serialized desktop lease:
+Before admission, the driver must capture a complete restoration snapshot in
+the same serialized desktop lease:
 
-- **Frontmost application:** bundle or executable identity, PID, and a
-  process-start identity that prevents PID reuse from being mistaken for the
-  same process.
+- **Frontmost application:** bundle/executable identity, PID, and process-start
+  identity so PID reuse cannot match.
 - **Frontmost window:** owning process identity, native window ID, title or
   role where available, frame, display, and workspace/Space identity where the
   platform exposes it.
-- **Pointer:** global screen coordinates, display identity and scale, plus
-  enough button-state information to prove that the pointer is not already in
-  an ambiguous drag.
-- **Target:** the freshly observed target PID/window ID, frame, and the
-  coordinate transform used to calculate the requested screen point.
+- **Pointer:** global coordinates, display/scale, and button state sufficient
+  to reject an existing ambiguous drag.
+- **Target:** freshly observed PID/window ID, frame, coordinate transform, and
+  the observation `capture_id` used for the coordinates.
 
 If any required snapshot is unavailable, stale, or internally inconsistent, the
-call is refused before activation. The driver then activates only the exact
-target launch instance, moves the hardware pointer to the requested point,
-posts the requested HID action, and waits for the bounded action completion
-window.
+call is refused before activation. A foreground pixel click must include the
+same `capture_id`; stale, mismatched, or out-of-bounds captures are rejected
+before activation. The driver activates only the exact target launch instance,
+reads back the exact native target window, recomputes its transform, and
+refuses the call unless the admitted `pid`/`window_id` is frontmost immediately
+before the HID event.
 
-Restoration is an ordered, verified operation: restore the recorded frontmost
-application, restore its recorded window, restore the pointer to its recorded
-global position, then read the state again. App and window restoration must
-match the recorded process identity and native window ID; bringing a different
-window from the same app to the front is not success. Pointer restoration must
-match the recorded display and coordinates within the platform's readback
-precision.
+The first implementation should allow only the evidenced click shape: the
+`click` tool, an exact pixel target, `action:"click"`, left button, count one,
+no modifiers, no element token, no portable or desktop target, and no
+`click_mode:"raw"`. Right or middle buttons, multiple clicks, press-only
+actions, modifiers, element actions, and every other tool operation require a
+separate contract and validation.
 
-If the prior application or window has exited, moved to an unaddressable
-workspace, or cannot be verified, the driver must not guess a replacement.
-It should still make the bounded pointer-restoration attempt when that can be
-done independently, return a structured `foreground_restoration_failed`
-result, and block further foreground input for the session until the owner
-re-arms the toggle. It must not retry the action, silently continue with
-another target, or claim that the input was undone. The local indication must
-remain in an attention state so the owner knows that the desktop was not
-restored exactly.
+Restoration is ordered and verified: restore the recorded app, its recorded
+window, and the recorded pointer position, then read state again. App/window
+restoration must match process identity and native window ID; another window in
+the same app is not success. Pointer restoration must match display and
+coordinates within readback precision. If Route B emitted button-down, cleanup
+must emit a bounded matching release when needed and verify that no button
+remains pressed before returning `restored`.
+
+The sequence carries a user-activity fence. The snapshot records an OS-level
+activation/pointer input generation; the driver checks it before activation,
+before posting HID, and before each restoration step. If the owner changes the
+frontmost app or pointer, the driver cancels before dispatch when possible.
+After dispatch it stops restoration rather than overwriting newer human state,
+reports interruption by owner activity, and leaves the attention indicator
+visible.
+
+If the prior app/window exited, moved to an unaddressable workspace, or cannot
+be verified, the driver must not guess. It should make an independent bounded
+pointer-restoration attempt when possible, return
+`foreground_restoration_failed`, and quarantine foreground delivery for the
+whole desktop until the owner resolves the attention state. This covers every
+session and foreground call; Route A remains governed by its existing rules.
+The driver must not retry, choose another target, or claim the input was undone.
+The same desktop quarantine applies to a post-forward transport failure with an
+unknown outcome or restoration state.
 
 ## User-visible indication
 
 Foreground mode must be visible before activation and remain visible until
-restoration has been verified. The existing agent-cursor overlay remains
-enabled. In addition, the native tray/app-menu status should identify
-"Foreground control active" and name the target application/window. A
-non-interactive native banner or equivalent shell-owned indicator should expose
-the same state with an immediate Stop action. The Workbench status line may
-mirror the state, but it is not sufficient on its own because the Workbench may
-be hidden while an IM-triggered turn is running.
+restoration is verified. Keep the existing agent-cursor overlay enabled. The
+native tray/app-menu status must say "Foreground control active" and name the
+target app/window. A shell-owned banner or equivalent must expose the same
+state with an immediate Stop action. The Workbench may mirror it, but cannot be
+the only indication because IM-triggered work can run while it is hidden.
 
-Stopping from the native surface revokes the session consent and prevents the
-next input call. It cannot claim to undo an event already posted. A failed
-restoration keeps the indicator visible as an error until the owner resolves
-the state.
+Stopping from the native surface revokes the session consent and marks the
+in-flight operation cancelled. The operation checks that cancellation before
+activation and again immediately before posting the HID event; if it has not
+posted, it aborts and restores any state it changed. After dispatch, Stop
+cannot claim to undo the event, but the operation still completes its bounded
+restoration or enters the attention/quarantine state. A failed restoration
+keeps the indicator visible as an error until the owner resolves the state.
 
 ## Admission and API shape
 
@@ -151,65 +174,63 @@ default:
 - omitted `delivery_mode` remains background;
 - Route A `click_mode:"raw"` remains background-only and keeps its existing
   exact-window contract;
-- `delivery_mode:"foreground"` is accepted only with explicit session consent,
-  a fresh exact target, a supported operation/platform, and the existing
-  lease and caller checks;
+- `delivery_mode:"foreground"` is accepted only for the first-release click
+  allowlist, explicit session consent, a fresh exact target, its matching
+  `capture_id`, a supported platform, and existing lease/caller checks;
 - unknown modes, desktop-wide targets, stale captures, locked sessions,
   missing consent, and unsupported operations remain structured refusals; and
-- a background result that is unchanged or unverifiable never escalates by
-  itself. The agent must observe again and issue a separate explicit
-  foreground request.
+- an unchanged or unverifiable background result never escalates by itself. A
+  separate foreground request requires action-specific negative evidence that
+  the background action did not occur; an ambiguous postcondition is reported
+  as unknown rather than repeated.
 
 The CLI should reuse the existing leaf command and argument surface rather than
 add a top-level foreground command or a hidden retry flag:
 
 ```text
 vibe computer click --arg pid=97470 --arg window_id=6285 \
-  --arg x=41 --arg y=146 --arg delivery_mode=foreground
+  --arg x=41 --arg y=146 --arg capture_id=capture_... \
+  --arg action=click --arg button=left --arg count=1 \
+  --arg modifier=[] --arg delivery_mode=foreground
 ```
 
-The built-in `computer-use` Skill should teach the same sequence: background
-first, observe the exact target in the same session, do not retry blindly,
-request foreground only when the owner session toggle is active, and verify
-both the target effect and restoration afterward. It must state that agents
-cannot grant foreground consent and that foreground is never an implicit
-fallback. Structured results should distinguish dispatch mode, target effect
-(`verified` or `unverifiable`), and restoration (`restored` or a concrete
-failure); a transport acknowledgment alone is not success.
+The built-in `computer-use` Skill should teach: background first; observe the
+exact target in the same session; carry `capture_id`; do not retry blindly;
+request foreground only when the owner toggle is active; and verify effect and
+restoration afterward. It must say that agents cannot grant consent and
+foreground is never an implicit fallback. Results should distinguish dispatch
+mode, target effect (`verified` or `unverifiable`), and restoration (`restored`
+or a concrete failure); transport acknowledgement alone is not success.
 
 ## Windows and Q6
 
-Route B cannot claim Windows parity yet. The existing Q6 record says that the
-Windows assets are signed and available, but embedded daemon spawn, proxy
-reachability, and the need for the UIA worker remain unverified. It also records
-that Windows runs in the interactive logon session, refuses Session 0, may
-require a high-integrity daemon for elevated targets, needs foreground delivery
-for Chromium page content, terminals, and GTK or custom-drawn surfaces, and
-does not provide the macOS-style window-change wait.
-
-Q6 therefore changes the admission matrix, not just packaging. A Windows
-implementation needs its own exact process/window identity and restoration
-contract using the native foreground window and cursor APIs. It must define
-how effect and restoration are verified without the window-change wait, and
-must refuse targets whose integrity level or UIA route is unsupported. Until
-Q6 is completed on a Windows machine, foreground delivery stays refused on
-Windows even if the CLI accepts the documented field on other platforms.
+Route B cannot claim Windows parity yet. Q6 still leaves embedded daemon spawn,
+proxy reachability, UIA worker behavior, and the interactive-session boundary
+unverified. It also records elevated-integrity targets, foreground-only
+Chromium/terminal/GTK/custom surfaces, and no macOS-style window-change wait.
+Q6 therefore changes admission, not just packaging. Windows needs its own exact
+process/window identity, cursor restoration, and effect/restoration verification
+using native APIs, with refusals for unsupported integrity or UIA routes.
+Until the Q6 machine run is complete, foreground remains refused on Windows.
 
 ## Explicitly out of scope
 
 - Silent escalation from Route A background delivery.
-- A persistent per-app allowlist, global foreground permission, or agent-granted
+- Persistent per-app allowlists, global foreground permission, or agent-granted
   consent.
 - Desktop-wide HID injection, an activation-only tool, login-screen or
   lock-screen control, and replacement of the native Computer Use stop.
 - General foreground support for typing, hotkeys, scrolling, or dragging before
   each operation has its own restoration and effect contract; the first
   implementation target should be the evidenced click path.
+- Foreground click variants outside the first-release allowlist, including
+  right or middle buttons, multiple clicks, modifiers, element actions, and
+  press-only actions.
 - QQ or WeChat product acceptance, app-specific adapters, OCR, perception, or
   model changes.
 - Windows implementation before the Q6 machine run.
-- TCC changes, credentials, Runtime restart, packaging changes, new product
-  flags, or new persistent state files in this design-only lane.
+- TCC changes, credentials, Runtime restart, packaging changes, product flags,
+  or persistent state files in this design-only lane.
 
 This document defines the bounded contract for review. It does not authorize
 implementation. Owner and source review must approve the policy, restoration
