@@ -356,16 +356,63 @@ def test_scrub_data_redacts_sensitive_values():
             "AAHs3cretS3cretS3cretS3cretS3cret",
             "/getUpdates",
         ),
+        # Credential names the code uses, in the spellings it uses them.
+        ({"provider": {"apiKey": "oc-s3cret"}, "model": "m1"}, "oc-s3cret", '"model": "m1"'),
+        ("request headers x-api-key: an-s3cret accept: json", "an-s3cret", "accept: json"),
+        ("engine health X-Management-Key: mk-s3cret status=503", "mk-s3cret", "status=503"),
+        ("media decrypt failed aes_key=aes-s3cret file=a.jpg", "aes-s3cret", "file=a.jpg"),
+        ('{"passphrase": "pp-s3cret", "vault": "v1"}', "pp-s3cret", '"vault": "v1"'),
+        ("Binding(private_key='pk-s3cret', agent='a1')", "pk-s3cret", "agent='a1'"),
+        # Userinfo in any platform's proxy URL.
+        ("proxy error http://alice:px-s3cret@proxy.local:8080 timed out", "px-s3cret", "proxy.local:8080"),
+        # An escaped quote inside the value, and JSON nested in a JSON string.
+        ('api_key="ab\\"esc-s3cret" retry=2', "esc-s3cret", "retry=2"),
+        ('{"body": "{\\"api_key\\": \\"nest-s3cret\\", \\"n\\": 1}"}', "nest-s3cret", '\\"n\\": 1'),
     ],
 )
 def test_scrub_data_redacts_secrets_inside_free_text(text, secret, kept):
     """Log and exception messages carry secrets as text, not under a dict key."""
+    import json
+
     scrubbed = sentry_integration.scrub_data({"logentry": {"params": [text]}})
 
     (value,) = scrubbed["logentry"]["params"]
-    assert secret not in value
-    assert "[Filtered]" in value
-    assert kept in value
+    rendered = json.dumps(value) if isinstance(value, dict) else value
+    assert secret not in rendered
+    assert "[Filtered]" in rendered
+    assert kept in rendered
+
+
+def test_before_send_redacts_configured_secrets_in_any_text(monkeypatch, tmp_path):
+    """A configured credential leaves no trace however the text around it is shaped.
+
+    Prose such as ``auth failed for <secret>`` has no key for a pattern to find.
+    Rotating the credential must protect the new value without a restart.
+    """
+    import json
+
+    from config.v2_config import LarkConfig
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    sentry_integration._NOISY_EVENT_LAST_SEEN.clear()
+    sentry_integration._EVENT_RATE_STATE.clear()
+    config = _config()
+    config.lark = LarkConfig(app_id="cli_x", app_secret="lark-first-s3cret")
+    config.save()
+
+    def send(message):
+        event = {"logentry": {"message": message}, "breadcrumbs": {"values": [{"message": message}]}}
+        return json.dumps(sentry_integration.before_send(event, {}))
+
+    first = send("lark auth failed for lark-first-s3cret")
+    assert "lark-first-s3cret" not in first
+    assert "lark auth failed for [Filtered]" in first
+
+    config.lark.app_secret = "lark-rotated-s3cret"
+    config.save()
+    rotated = send("lark auth failed for lark-rotated-s3cret (cli_x)")
+    assert "lark-rotated-s3cret" not in rotated
+    assert "(cli_x)" in rotated
 
 
 def test_before_send_throttles_repeated_noisy_slack_socket_events(monkeypatch):

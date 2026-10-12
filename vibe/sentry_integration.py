@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import os
 import platform
@@ -10,6 +11,7 @@ import threading
 import time
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import quote
 
 from config.v2_config import V2Config
 from config import paths
@@ -24,14 +26,19 @@ DEPLOYMENT_ENV_VAR = "VIBE_DEPLOYMENT_ENV"
 
 _SENSITIVE_KEY_PARTS = (
     "access_key",
+    "aes_key",
     "api_key",
     "app_token",
     "authorization",
     "bot_token",
     "client_secret",
     "cookie",
+    "credential",
     "dsn",
+    "management_key",
+    "passphrase",
     "password",
+    "private_key",
     "secret",
     "signing_secret",
     "token",
@@ -39,26 +46,56 @@ _SENSITIVE_KEY_PARTS = (
     "workspace_token",
 )
 _REDACTED = "[Filtered]"
-_SENSITIVE_KEY_PATTERN = "|".join(re.escape(part) for part in _SENSITIVE_KEY_PARTS)
+
+
+def _normalized_key(key: str) -> str:
+    # ``api_key``, ``apiKey``, ``x-api-key`` and ``API-KEY`` name the same credential.
+    return re.sub(r"[^a-z0-9]", "", key.lower())
+
+
+_SENSITIVE_KEY_TOKENS = tuple(_normalized_key(part) for part in _SENSITIVE_KEY_PARTS)
+# The same key match inside free text: any token, in any case, with an optional
+# ``_``, ``-`` or ``.`` between its characters.
+_SENSITIVE_KEY_TEXT_PATTERN = "|".join(
+    "[_.-]?".join(re.escape(char) for char in token) for token in _SENSITIVE_KEY_TOKENS
+)
+# A sensitive key rendered into free text: a dataclass repr, a header line,
+# ``key=value``, or JSON, including JSON nested inside a JSON string. The key
+# starts at a word boundary and is length-bounded so long word runs stay linear;
+# a quoted value runs to its first unescaped closing delimiter.
+_SENSITIVE_KEY_VALUE_RE = re.compile(
+    r"(?i)(?<![\w.-])(?P<kq>\\*[\"']?)[\w.-]{0,40}(?:" + _SENSITIVE_KEY_TEXT_PATTERN + r")[\w.-]{0,40}(?P=kq)"
+    r"\s*[:=]\s*"
+    r"(?:(?P<vq>\\*[\"'])(?P<quoted>.{0,8192}?)(?<!\\)(?P=vq)|(?P<bare>[^\s\"',;&(){}\[\]\\]+))",
+    re.DOTALL,
+)
+
+
+def _redact_key_value(match: re.Match[str]) -> str:
+    group = "quoted" if match.group("quoted") is not None else "bare"
+    start, end = match.span(group)
+    offset = match.start()
+    text = match.group(0)
+    return text[: start - offset] + _REDACTED + text[end - offset :]
+
+
 _STRING_REPLACEMENTS = (
     (re.compile(r"(?i)(authorization[:=]\s*)(bearer\s+)?\S+"), r"\1" + _REDACTED),
     (re.compile(r"(?i)(token=)[^&\s]+"), r"\1" + _REDACTED),
     (re.compile(r"(?i)(cookie[:=]\s*)\S+"), r"\1" + _REDACTED),
     (re.compile(r"\bxox[baprs]-[A-Za-z0-9-]+\b"), _REDACTED),
     (re.compile(r"\bxapp-[A-Za-z0-9-]+\b"), _REDACTED),
-    # A sensitive key rendered into free text, as a dataclass repr, JSON, or
-    # ``key=value`` puts it inside log and exception messages. The key starts at
-    # a word boundary and its length is bounded, so long word runs stay linear.
-    (
-        re.compile(
-            r"(?i)((?<![\w.-])[\"']?[\w.-]{0,40}(?:" + _SENSITIVE_KEY_PATTERN + r")[\w.-]{0,40}[\"']?\s*[:=]\s*)"
-            r"(\"[^\"]*\"|'[^']*'|[^\s\"',;&(){}\[\]]+)"
-        ),
-        r"\1" + _REDACTED,
-    ),
+    # URL userinfo, such as a platform ``proxy_url`` of ``http://user:pass@host``.
+    (re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)[^\s/?#@]+@"), r"\1" + _REDACTED + "@"),
+    (_SENSITIVE_KEY_VALUE_RE, _redact_key_value),
     # Telegram Bot API tokens travel in request URLs (``/bot<id>:<secret>/``).
     (re.compile(r"\b(bot)?\d{5,}:[A-Za-z0-9_-]{30,}"), r"\1" + _REDACTED),
 )
+# Credential values read from ``config.json``. Shorter values are too likely to
+# collide with ordinary text to redact by value.
+_CONFIGURED_SECRET_MIN_LENGTH = 8
+_CONFIGURED_SECRETS_LOCK = threading.Lock()
+_configured_secrets: tuple[tuple[int, int, int] | None, re.Pattern[str] | None] = (None, None)
 _ONE_DAY_SECONDS = 60 * 60 * 24
 _NOISY_EVENT_TTL_SECONDS = _ONE_DAY_SECONDS
 _NOISY_EVENT_CACHE_LIMIT = 128
@@ -87,8 +124,8 @@ def _redact_string(value: str) -> str:
 
 
 def _is_sensitive_key(key: str) -> bool:
-    lowered = key.lower()
-    return any(part in lowered for part in _SENSITIVE_KEY_PARTS)
+    normalized = _normalized_key(key)
+    return any(token in normalized for token in _SENSITIVE_KEY_TOKENS)
 
 
 def scrub_data(value: Any) -> Any:
@@ -106,6 +143,64 @@ def scrub_data(value: Any) -> Any:
         return tuple(scrub_data(item) for item in value)
     if isinstance(value, str):
         return _redact_string(value)
+    return value
+
+
+def _collect_secret_values(node: Any, found: set[str], *, sensitive: bool = False) -> None:
+    if isinstance(node, dict):
+        for key, item in node.items():
+            item_sensitive = sensitive or (isinstance(key, str) and _is_sensitive_key(key))
+            _collect_secret_values(item, found, sensitive=item_sensitive)
+    elif isinstance(node, list):
+        for item in node:
+            _collect_secret_values(item, found, sensitive=sensitive)
+    elif sensitive and isinstance(node, str) and len(node) >= _CONFIGURED_SECRET_MIN_LENGTH:
+        found.add(node)
+
+
+def _configured_secret_pattern() -> re.Pattern[str] | None:
+    """Match each credential stored in ``config.json``, whatever text surrounds it.
+
+    Patterns cannot see a secret in prose, an unfamiliar URL, or an extra layer of
+    escaping; the exact value can. Read as plain JSON (no config migration or
+    logging inside a Sentry hook) and re-read only when the file changes.
+    """
+
+    global _configured_secrets
+    try:
+        stat = paths.get_config_path().stat()
+    except OSError:
+        return None
+    signature = (stat.st_ino, stat.st_mtime_ns, stat.st_size)
+    with _CONFIGURED_SECRETS_LOCK:
+        cached_signature, cached_pattern = _configured_secrets
+        if cached_signature == signature:
+            return cached_pattern
+        try:
+            data = json.loads(paths.get_config_path().read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return cached_pattern
+        values: set[str] = set()
+        _collect_secret_values(data, values)
+        variants = values | {quote(value, safe="") for value in values}
+        pattern = (
+            re.compile("|".join(re.escape(value) for value in sorted(variants, key=len, reverse=True)))
+            if variants
+            else None
+        )
+        _configured_secrets = (signature, pattern)
+        return pattern
+
+
+def _redact_matches(value: Any, pattern: re.Pattern[str]) -> Any:
+    if isinstance(value, dict):
+        return {key: _redact_matches(item, pattern) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_redact_matches(item, pattern) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_redact_matches(item, pattern) for item in value)
+    if isinstance(value, str):
+        return pattern.sub(_REDACTED, value)
     return value
 
 
@@ -427,6 +522,9 @@ def _should_drop_repeated_event(event: dict[str, Any]) -> bool:
 def before_send(event: dict[str, Any], hint: dict[str, Any]) -> Optional[dict[str, Any]]:
     del hint
     scrubbed = scrub_data(event)
+    configured_secrets = _configured_secret_pattern()
+    if configured_secrets is not None:
+        scrubbed = _redact_matches(scrubbed, configured_secrets)
     if _should_drop_noisy_event(scrubbed):
         return None
     if _should_drop_repeated_event(scrubbed):
