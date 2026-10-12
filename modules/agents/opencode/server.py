@@ -1709,10 +1709,11 @@ class OpenCodeGeneration(OpenCodeServerClient):
             # This controller's own child: its handle is the authority, and
             # its pid cannot be reused before the handle reaps it.
             return process.returncode is None
-        start_token = runtime.process_start_token(self.pid)
         if self.process_start_token is None:
-            return start_token is not None or _pid_exists(self.pid)
-        return start_token == self.process_start_token
+            # No identity could be read when it was recorded: the pid is this
+            # server only while it proves itself as a record without one does.
+            return _record_proves_process({"pid": self.pid, "port": self.port})
+        return runtime.process_start_token(self.pid) == self.process_start_token
 
     def observed_exit_pid(self) -> int | None:
         """This process's pid once it has exited, never a pid reused since."""

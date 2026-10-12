@@ -6812,9 +6812,10 @@ def version():
 # could both pass the check before either seeds restart_status.json, scheduling
 # two supervisors that race on the same pid files + lock.
 _RESTART_CONTROL_LOCK = threading.Lock()
-# How long a just-seeded, pid-less "scheduled" status is treated as in flight
-# (its supervisor is still starting up). Past this, a pid-less status is stale
-# (the supervisor died before recording its pid) and must NOT block restarts.
+# How long a restart status whose job cannot be verified is treated as in
+# flight: a just-seeded, pid-less status (its supervisor is still starting up),
+# or a live pid whose identity cannot be read. Past this such a status is stale
+# and must NOT block restarts.
 _RESTART_SEED_GRACE_SECONDS = 60.0
 
 
@@ -6822,38 +6823,18 @@ def _restart_in_flight() -> bool:
     """True only when a restart is genuinely still running, so a stale status
     can never permanently block Web restarts."""
     from vibe import runtime
+    from vibe.upgrade import restart_record_is_pending
 
-    status = runtime.read_json(runtime.get_restart_status_path()) or {}
-    if status.get("state") not in ("scheduled", "running"):
-        return False
+    path = runtime.get_restart_status_path()
+    status = runtime.read_json(path) or {}
     sup_pid = status.get("supervisor_pid")
-    if isinstance(sup_pid, int):
-        if not runtime.pid_alive(sup_pid):
-            return False
-        # Guard against PID reuse: a dead supervisor's pid can be reclaimed by an
-        # unrelated process (notably across a reboot), which would otherwise keep
-        # blocking restarts until that process exits. The job records its
-        # ``supervisor_start_token`` (its start identity), so only treat the pid
-        # as the live supervisor when the token still matches. A job a released
-        # build ran recorded ``supervisor_started_at``, its create time, instead.
-        start_token = status.get("supervisor_start_token")
-        started_at = status.get("supervisor_started_at")
-        if start_token is not None:
-            current = runtime.process_start_token(sup_pid)
-            if current is not None and current != start_token:
-                return False
-        elif started_at is not None:
-            current = runtime.process_create_time(sup_pid)
-            if current is not None and current != started_at:
-                return False
-        return True
-    # No supervisor pid recorded yet: in flight only while the seed is fresh
-    # (the child is still starting). An older pid-less status is stale.
-    try:
-        age = time.time() - runtime.get_restart_status_path().stat().st_mtime
-    except OSError:
+    if isinstance(sup_pid, int) and not runtime.pid_alive(sup_pid):
+        # A job that has exited runs no restart, whatever its status says.
         return False
-    return age < _RESTART_SEED_GRACE_SECONDS
+    # A live pid is the job only while its recorded identity matches: a pid
+    # reclaimed by an unrelated process (notably across a reboot) would
+    # otherwise keep blocking restarts until that process exits.
+    return restart_record_is_pending(status, path, grace_seconds=_RESTART_SEED_GRACE_SECONDS)
 
 
 def _runtime_refusal_payload(action: str, refusal: "DesktopRuntimeClaimRefused") -> dict[str, Any]:

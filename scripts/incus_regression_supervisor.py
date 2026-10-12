@@ -13,6 +13,7 @@ from config import paths
 from config.v2_config import V2Config
 from scripts.incus_regression import SERVICE_HOME, regression_show_runtime_env
 from vibe import runtime
+from vibe.upgrade import restart_record_is_pending
 
 
 def _read_pid_file(pid_path: Path) -> int | None:
@@ -60,7 +61,8 @@ def _adoptable_service_pid(pid: int | None) -> bool:
 
 
 def _restart_in_progress() -> bool:
-    status = runtime.read_json(runtime.get_restart_status_path()) or {}
+    path = runtime.get_restart_status_path()
+    status = runtime.read_json(path) or {}
     # Only the active stop/start phase ("running") should suppress the supervisor's
     # own recovery. A "scheduled" (delayed) restart is just sleeping and hasn't
     # touched the service yet, so a crash during the delay must still be recovered
@@ -74,22 +76,9 @@ def _restart_in_progress() -> bool:
     restart_pid = status.get("supervisor_pid")
     if not (isinstance(restart_pid, int) and restart_pid > 0 and runtime.pid_alive(restart_pid)):
         return False
-    # Defend against pid reuse (notably across a reboot): confirm the live pid is
-    # still the same process the restart job recorded, by its start token, or
-    # by the create time a job a released build ran recorded instead. Only
-    # treat a mismatch as stale; if either side is unavailable, fall back to the
-    # liveness check above.
-    recorded_start_token = status.get("supervisor_start_token")
-    recorded_started_at = status.get("supervisor_started_at")
-    if isinstance(recorded_start_token, str):
-        current_start_token = runtime.process_start_token(restart_pid)
-        if current_start_token is not None:
-            return current_start_token == recorded_start_token
-    elif isinstance(recorded_started_at, (int, float)):
-        current_started_at = runtime.process_create_time(restart_pid)
-        if current_started_at is not None:
-            return abs(current_started_at - recorded_started_at) < 1.0
-    return True
+    # A live pid is the job only while its recorded identity matches (pid reuse,
+    # notably across a reboot), and one that cannot be verified only for a bounded time.
+    return restart_record_is_pending(status, path)
 
 
 def _config() -> V2Config:

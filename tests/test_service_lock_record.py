@@ -325,6 +325,18 @@ class ServiceLockContentionTests(unittest.TestCase):
             runtime.acquire_service_instance_lock()
         self.assertEqual(refused.exception.holder_pid, holder.pid)
 
+    def test_a_holder_whose_start_cannot_be_read_now_is_refused_once_the_wait_runs_out(self):
+        """Unverifiable, it names no one: the wait is bounded, and the lock it holds is never taken."""
+
+        holder = self._holder()
+        began = time.monotonic()
+        with patch.object(runtime, "process_start_token", return_value=None), self.assertRaises(
+            runtime.ServiceAlreadyRunningError
+        ) as refused:
+            runtime.acquire_service_instance_lock()
+        self.assertEqual(refused.exception.holder_pid, holder.pid)
+        self.assertLess(time.monotonic() - began, runtime._SERVICE_LOCK_SETTLE_SECONDS + 3)
+
     def test_a_service_started_right_after_the_last_was_killed_takes_the_lock(self):
         """The acceptance test's own order: kill the service outright, start the next."""
 

@@ -684,8 +684,23 @@ def test_a_tree_whose_owner_pid_now_names_another_process_is_reaped(
     assert statuses == [("stopped",)]
 
 
+def test_an_install_whose_owner_has_no_readable_token_never_starts(monkeypatch):
+    """No owner value can be written, so no tree is started that nothing could later tell apart."""
+
+    from vibe import runtime
+
+    monkeypatch.setattr(runtime, "process_start_token", lambda _pid: None)
+
+    with pytest.raises(desktop_backends.DesktopBackendError) as refused:
+        desktop_backends._installer_owner()
+    assert refused.value.code == "desktop_install_failed"
+
+
 @pytest.mark.parametrize("holder", ["ui-of-its-runtime", "not-a-ui", "exited"])
-def test_an_owner_value_a_released_build_wrote_is_judged_by_the_process_at_its_pid(tmp_path, children, holder):
+@pytest.mark.parametrize("owner_value", ["released-create-time", "token-unreadable-now"])
+def test_an_owner_value_no_token_verifies_is_judged_by_the_process_at_its_pid(
+    monkeypatch, tmp_path, children, holder, owner_value
+):
     from vibe import runtime
 
     runtime_id = secrets.token_hex(32)
@@ -694,14 +709,18 @@ def test_an_owner_value_a_released_build_wrote_is_judged_by_the_process_at_its_p
     else:
         children.append(subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"]))
         pid = children[-1].pid
-    # A released build wrote `pid:create_time`. Shifted by a second, it names no live start token on any
-    # platform, as after a tick on macOS: only the process now at the pid can tell.
-    released = f"{pid}:{runtime.process_create_time(pid) - 1.0!r}"
+    if owner_value == "released-create-time":
+        # A released build wrote `pid:create_time`. Shifted by a second, it names no live start token on
+        # any platform, as after a tick on macOS: only the process now at the pid can tell.
+        owner = f"{pid}:{runtime.process_create_time(pid) - 1.0!r}"
+    else:
+        owner = f"{pid}:{runtime.process_start_token(pid)}"
+        monkeypatch.setattr(runtime, "process_start_token", lambda _pid: None)
     if holder == "exited":
         children[-1].kill()
         children[-1].wait(10)
 
-    assert desktop_backends._installer_owner_gone(released, runtime_id) is (holder != "ui-of-its-runtime")
+    assert desktop_backends._installer_owner_gone(owner, runtime_id) is (holder != "ui-of-its-runtime")
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX process groups")

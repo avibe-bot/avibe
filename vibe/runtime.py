@@ -826,11 +826,12 @@ def process_create_time(pid: int) -> float | None:
 
 
 @lru_cache(maxsize=1)
-def _linux_boot_id() -> str:
+def _linux_boot_id() -> str | None:
     try:
-        return Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8").strip()
+        boot_id = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8").strip()
     except OSError:
-        return ""
+        return None
+    return boot_id or None
 
 
 def process_start_token(pid: int) -> str | None:
@@ -838,13 +839,16 @@ def process_start_token(pid: int) -> str | None:
 
     This is the one identity of a running process: a recorded ``(pid, token)``
     still names the same execution after the wall clock or the boot time moves,
-    and never names a process that later reused the pid.
+    or the machine reboots, and never names a process that later reused the
+    pid. A token is returned only when every part of it was read; otherwise
+    None, which every caller treats as unverifiable.
 
     - Linux counts a process's start in clock ticks since boot (field 22 of
       ``/proc/<pid>/stat``). psutil turns that into wall-clock time through the
       boot time, which moves whenever the clock is stepped -- by a VM's time
       sync, a WSL2 resume, NTP catching up after boot. The ticks, with the boot
-      they count from, do not move.
+      they count from, do not move. Ticks restart at every boot, so without
+      the boot id there is no token.
     - macOS, NetBSD and Windows store the wall-clock time a process started,
       which ``process_start_time`` reads unchanged.
     - Elsewhere (FreeBSD, OpenBSD, ...) the start psutil reads moves with
@@ -858,7 +862,10 @@ def process_start_token(pid: int) -> str | None:
             ticks = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8").rsplit(")", 1)[1].split()[19]
         except (OSError, IndexError, ValueError):
             return None
-        return f"{_linux_boot_id()}:{ticks}"
+        boot_id = _linux_boot_id()
+        if boot_id is None or not ticks.isdigit():
+            return None
+        return f"{boot_id}:{ticks}"
     if sys.platform not in {"darwin", "win32"} and not sys.platform.startswith("netbsd"):
         return None
     start = process_start_time(pid)
