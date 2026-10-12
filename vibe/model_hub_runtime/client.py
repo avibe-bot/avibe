@@ -1931,13 +1931,15 @@ def _upstream_reset_advice(
 ) -> str | None:
     """Project a usage cap's own reset as Retry-After advice, in that header's syntax.
 
-    A ChatGPT subscription past its cap answers 429 with ``resets_at`` (Unix
-    seconds) and ``resets_in_seconds`` in the error envelope and no header. The
-    first becomes an HTTP-date and the second delay-seconds; L2 validates either
-    exactly like the header.
+    A ChatGPT subscription past its cap answers 429 ``usage_limit_reached`` with
+    ``resets_at`` (Unix seconds) and ``resets_in_seconds`` in the error envelope
+    and no header. The first becomes an HTTP-date and the second delay-seconds;
+    L2 validates either exactly like the header. Only that envelope's reset is
+    advice: the same field names in any other error say nothing about when the
+    Source can serve again.
     """
 
-    fields = ("resets_at", "resets_in_seconds")
+    fields = ("type", "resets_at", "resets_in_seconds")
     reset_paths = tuple((*path, field) for path in envelope_paths for field in fields)
     values: dict[JSONPath, object] = {}
 
@@ -1955,6 +1957,8 @@ def _upstream_reset_advice(
     if not payload or not project_json_reader(io.BytesIO(payload), reset_paths, visit):
         return None
     for path in envelope_paths:
+        if values.get((*path, "type")) != "usage_limit_reached":
+            continue
         resets_at = values.get((*path, "resets_at"))
         if type(resets_at) is int and resets_at > 0:
             try:

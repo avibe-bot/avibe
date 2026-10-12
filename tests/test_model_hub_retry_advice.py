@@ -167,6 +167,21 @@ async def test_failed_http_response_carries_only_bounded_ascii_advice(
     assert requests == [(WIRE[protocol][0], {"model": "retry-advice/model-a", "stream": stream})]
 
 
+@pytest.mark.parametrize(("status", "error_type"), [(429, "rate_limit_error"), (503, "server_error")])
+async def test_only_a_usage_cap_turns_its_body_reset_into_advice(status: int, error_type: str) -> None:
+    """Reset fields in any other error body are not retry advice and cannot set a cooldown."""
+    body = {"error": {"type": error_type, "resets_at": 4102444800, "resets_in_seconds": 600}}
+
+    async def respond(_request: web.Request) -> web.Response:
+        return web.json_response(body, status=status)
+
+    async with _engine(respond) as (client, _requests):
+        outcome, _body = await _invoke(client, "openai_responses", False)
+
+    assert (outcome.http_status, outcome.error_type) == (status, error_type)
+    assert outcome.retry_after is None
+
+
 @pytest.mark.parametrize("protocol", WIRE)
 @pytest.mark.parametrize("stream", [False, True], ids=["buffered", "streaming"])
 @pytest.mark.parametrize("body_mode", ["slow", "timeout", "disconnect", "malformed"])
