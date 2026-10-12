@@ -47,7 +47,6 @@
 
 .pet-mini-layer {
   position:absolute;
-  height:52px;
   border:1px solid color-mix(in srgb,var(--pet-ink) 8%,transparent);
   border-radius:24px;
   background:var(--pet-layer)}
@@ -131,7 +130,6 @@
   width:100%;
   padding:6px;
   border-radius:34px;
-  background:var(--background);
   pointer-events:auto}
 
 @keyframes pet-mini-content-in {
@@ -268,6 +266,7 @@ to {
 
 .pet-mini-detail {
   display:grid;
+  grid-template-columns:minmax(0,1fr);
   grid-template-rows:0fr;
   opacity:0;
   transition:grid-template-rows 280ms var(--settle),opacity 200ms ease}

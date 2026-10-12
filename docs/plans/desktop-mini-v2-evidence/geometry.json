@@ -17,7 +17,80 @@
     "size": [
       460,
       600
-    ]
+    ],
+    "stack": {
+      "x": 13.75,
+      "y": 320.125,
+      "width": 432.390625,
+      "height": 135,
+      "top": 320.125,
+      "right": 446.140625,
+      "bottom": 455.125,
+      "left": 13.75
+    },
+    "front": {
+      "x": 31.75,
+      "y": 320.125,
+      "width": 396.390625,
+      "height": 90,
+      "top": 320.125,
+      "right": 428.140625,
+      "bottom": 410.125,
+      "left": 31.75
+    },
+    "layers": [
+      {
+        "x": 37.75,
+        "y": 329.125,
+        "width": 384.390625,
+        "height": 90,
+        "top": 329.125,
+        "right": 422.140625,
+        "bottom": 419.125,
+        "left": 37.75
+      },
+      {
+        "x": 40.75,
+        "y": 338.125,
+        "width": 378.390625,
+        "height": 90,
+        "top": 338.125,
+        "right": 419.140625,
+        "bottom": 428.125,
+        "left": 40.75
+      },
+      {
+        "x": 43.75,
+        "y": 347.125,
+        "width": 372.390625,
+        "height": 90,
+        "top": 347.125,
+        "right": 416.140625,
+        "bottom": 437.125,
+        "left": 43.75
+      },
+      {
+        "x": 46.75,
+        "y": 356.125,
+        "width": 366.390625,
+        "height": 90,
+        "top": 356.125,
+        "right": 413.140625,
+        "bottom": 446.125,
+        "left": 46.75
+      },
+      {
+        "x": 49.75,
+        "y": 365.125,
+        "width": 360.390625,
+        "height": 90,
+        "top": 365.125,
+        "right": 410.140625,
+        "bottom": 455.125,
+        "left": 49.75
+      }
+    ],
+    "panelBackground": null
   },
   "desktop-expanded": {
     "pose": "running",
@@ -38,7 +111,9 @@
       460,
       600
     ],
-    "scroll": 0
+    "scroll": 0,
+    "layers": [],
+    "panelBackground": "rgba(0, 0, 0, 0)"
   },
   "desktop-scrolled": {
     "pose": "running",
@@ -59,7 +134,9 @@
       460,
       600
     ],
-    "scroll": 120
+    "scroll": 120,
+    "layers": [],
+    "panelBackground": "rgba(0, 0, 0, 0)"
   },
   "desktop-main-detail": {
     "pose": "running",
@@ -80,7 +157,9 @@
       460,
       600
     ],
-    "scroll": 0
+    "scroll": 0,
+    "layers": [],
+    "panelBackground": "rgba(0, 0, 0, 0)"
   },
   "desktop-bubble-open": {
     "pose": "running",
@@ -101,7 +180,9 @@
       460,
       600
     ],
-    "scroll": 0
+    "scroll": 0,
+    "layers": [],
+    "panelBackground": "rgba(0, 0, 0, 0)"
   },
   "desktop-stop-confirm": {
     "pose": "running",
@@ -122,7 +203,32 @@
       460,
       600
     ],
-    "scroll": 75
+    "scroll": 75,
+    "layers": [],
+    "panelBackground": "rgba(0, 0, 0, 0)"
+  },
+  "desktop-mid-dismiss": {
+    "pose": "running",
+    "expanded": true,
+    "detail": false,
+    "slot": false,
+    "avatar": {
+      "x": 172.5,
+      "y": 449,
+      "width": 115,
+      "height": 115,
+      "top": 449,
+      "right": 287.5,
+      "bottom": 564,
+      "left": 172.5
+    },
+    "size": [
+      460,
+      600
+    ],
+    "scroll": 75,
+    "layers": [],
+    "panelBackground": "rgba(0, 0, 0, 0)"
   },
   "desktop-dictating": {
     "pose": "listening",
@@ -143,6 +249,8 @@
       460,
       600
     ],
-    "scroll": 148
+    "scroll": 75,
+    "layers": [],
+    "panelBackground": "rgba(0, 0, 0, 0)"
   }
 }

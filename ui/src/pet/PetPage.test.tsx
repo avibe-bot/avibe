@@ -1385,7 +1385,9 @@ describe('PetPage review fixes, round 14', () => {
 
 
 describe('desktop mini v2 interaction contract', () => {
-  const activity = (id: string, item_kind: 'watch' | 'task' | 'agent_run', status = 'running') => ({
+  // Match derive_session_harness_activities(): definitions carry durable
+  // enabled/scheduled states, while delegated executions carry running.
+  const activity = (id: string, item_kind: 'watch' | 'task' | 'agent_run', status = { watch: 'enabled', task: 'scheduled', agent_run: 'running' }[item_kind]) => ({
     id, item_kind, status, label: id, description: id, backend: 'codex',
     runtime_key: id, session_id: 'S', kind: item_kind, started_at: '', updated_at: '',
   });
@@ -1399,6 +1401,57 @@ describe('desktop mini v2 interaction contract', () => {
   afterEach(() => {
     vi.useRealTimers();
     api.getTurnState.mockResolvedValue(idleTurn);
+  });
+
+  it('keeps waiting definitions pausable without marking them as executing', async () => {
+    turn([activity('watch:w1', 'watch'), activity('task:t1', 'task')]);
+    devBind('S'); render(<PetPage />); await showDetail();
+    expect(screen.getAllByLabelText('pet.stop.confirmPause')).toHaveLength(2);
+    expect(screen.getByText('pet.activityKind.watch · pet.activityStatus.waiting')).toBeTruthy();
+    expect(screen.getByText('pet.activityKind.task · pet.activityStatus.waiting')).toBeTruthy();
+    expect(document.querySelector('.pet-mini-running-dot')).toBeNull();
+    expect(pose()).toBe('idle');
+    expect(document.querySelector('[data-busy]')?.getAttribute('data-busy')).toBe('false');
+    turn([activity('watch:w1', 'watch'), activity('task:t1', 'task'), activity('agent_run:r1', 'agent_run')]);
+    await emit((h) => h.onRunsUpdated?.({}));
+    await waitFor(() => expect(pose()).toBe('running'));
+    expect(document.querySelectorAll('.pet-mini-running-dot')).toHaveLength(1);
+    expect(screen.getAllByLabelText('pet.stop.confirmPause')).toHaveLength(2);
+    expect(screen.queryByLabelText('pet.stop.confirmStop')).toBeNull();
+  });
+
+  it.each([false, true])('keeps switching reachable without a main exchange (background work: %s)', async (hasBackgroundWork) => {
+    tails.S = [];
+    turn(hasBackgroundWork ? [activity('watch:w1', 'watch')] : []);
+    switcherSessions = [session('B', { title: 'Another session' })];
+    devBind('S'); render(<PetPage />);
+    await waitFor(() => expect(api.listSessionMessages).toHaveBeenCalledWith('S', expect.anything()));
+    summon('show');
+    if (hasBackgroundWork) {
+      expect(await screen.findByText('watch:w1')).toBeTruthy();
+      fireEvent.click(await screen.findByText('pet.switchSession'));
+    }
+    fireEvent.click(await screen.findByText('Another session'));
+    await waitFor(() => expect(devBinding().binding).toBe('B'));
+    expect(await screen.findAllByText('Session B')).toHaveLength(2);
+  });
+
+  it('keeps the unread count visible until the inbox confirms the result was read', async () => {
+    tails.S = [message('u', 'S', { author: 'user', type: 'user' }), message('r', 'S', { read_at: null })];
+    unreadBySession = { S: 1 };
+    devBind('S'); render(<PetPage />);
+    expect((await screen.findByLabelText('pet.unreadBadge')).textContent).toBe('1');
+    summon('show');
+    expect(screen.getByLabelText('pet.unreadBadge').textContent).toBe('1');
+    expect(markRead).not.toHaveBeenCalled();
+    await showDetail();
+    await waitFor(() => expect(markRead).toHaveBeenCalledWith('S', 'r'));
+    act(() => {
+      unreadBySession = {};
+      inboxVersion += 1;
+      inboxListeners.forEach((listener) => listener());
+    });
+    await waitFor(() => expect(screen.queryByLabelText('pet.unreadBadge')).toBeNull());
   });
 
   it('does not mark the collapsed card read; detail is explicitly opened and closes on collapse', async () => {

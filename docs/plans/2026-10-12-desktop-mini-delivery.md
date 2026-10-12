@@ -14,10 +14,14 @@ quick-reply, and pet lifecycle paths. Backend APIs are outside this change.
 - Main detail retains Markdown, quick replies, vault actions, queue and uncertain
   send notices. Mark-read additionally waits for the result to intersect the
   fixed scroll viewport. One document-level send owner survives component changes.
+  The unread badge remains until the inbox confirms the read. Without a main
+  exchange, the picker remains reachable, including when sub-task cards exist.
 - Background activities supply sub-task cards. Running items lead when collapsed;
   expanded order is stable and new items enter below main. Watch/task pause calls
   use their native IDs, require a second press within 3s, and wait for the response.
   Success lingers for 2.5s before the two-beat exit. Agent runs have no stop control.
+  Durable `enabled` watches and `scheduled` tasks can be paused while waiting;
+  only `running`/`processing` executions affect the running dot, order and busy pose.
 - Dismissal writes the optional `dismissed_ids` field in `pet.json`. Old files load;
   a binding change clears the IDs. Only an authoritative turn read removes stale IDs.
 - The page reports clipped logical hit rectangles. The native poller runs at 16ms
@@ -95,9 +99,22 @@ wait for the requested DOM state and its transition before native window capture
 [Measured geometry](desktop-mini-v2-evidence/geometry.json) records unchanged
 Vibey bounds and window dimensions across the seven steady states.
 
+The owner corrected spec §3.3 during review: collapsed layers now match the
+front card's measured height instead of a fixed 52px. The refreshed native
+collapsed capture measures a 90px front card, five 90px layers, a 135px stack,
+and 45px between the front and final layer's bottom edges. The reference was
+recopied from the corrected prototype source. The owner's subsequent §3.2 decision
+removes the desktop backing fill, retaining all padding and geometry. The gaps
+show the desktop and are absent from the native hit-region reports. The prototype
+keeps its page-coloured plate solely to cover the surrounding web-page text.
+
 ## Validation
 
-- Focused pet, voice ownership, dictation-wrapper and bridge suites: 135 tests.
+- Focused pet, voice ownership, dictation-wrapper and bridge suites: 139 tests.
+- `npm run test:pet-mini`: 12 real-browser layout checks across Chromium and
+  WebKit. They cover both front-card heights and 1/3/5 layers, exact stack/peek
+  geometry, long-title containment, unchanged avatar bounds on expansion, and
+  transparent gaps excluded from the actual hit-region reporter's output.
 - UI production build.
 - Desktop workspace Rust tests: 366 passed, including shell capability boundaries,
   fixed-window anchoring, optional persistence and cold-start shortcut release.
@@ -107,3 +124,17 @@ Vibey bounds and window dimensions across the seven steady states.
 The PR's exact-head Codex review, unresolved-thread inventory and CI are separate
 delivery gates. Windows/Linux native visual and voice handoff evidence is not
 claimed by these macOS captures. Production voice stays off pending its gate.
+
+## Review inventory
+
+The first findings-bearing head, `6b969e9d2`, received three Codex findings:
+
+| Root-cause class | Resolution and consuming evidence |
+| --- | --- |
+| Durable activity status mapping | Separate pause eligibility from execution; watch/task interaction fixtures use the producer's `enabled`/`scheduled` statuses. |
+| Unread affordance preservation | Restore the existing ready-state badge and test that the inbox owns its removal. |
+| Binding control reachability | Keep the picker accessible before the first exchange, with and without sub-task cards; test selecting another session in both states. |
+
+There is one findings-bearing head so far; no root-cause class has repeated
+across reviewed heads. The owner's corrected layer geometry is included in the
+same repair, with the browser and native evidence above.

@@ -44,6 +44,7 @@ type PetCard = {
   kind: CardKind;
   status: string;
   running: boolean;
+  canPause: boolean;
   main?: boolean;
 };
 
@@ -60,7 +61,8 @@ const activityStatusKey = (status: string): string => ({
   queued: 'pet.activityStatus.queued',
   pending: 'pet.activityStatus.waiting',
   waiting: 'pet.activityStatus.waiting',
-  enabled: 'pet.activityStatus.running',
+  enabled: 'pet.activityStatus.waiting',
+  scheduled: 'pet.activityStatus.waiting',
   disabled: 'pet.activityStatus.stopped',
   completed: 'pet.activityStatus.completed',
   succeeded: 'pet.activityStatus.completed',
@@ -76,6 +78,10 @@ function activityCard(activity: SessionActivityState, fallback: string, t: (key:
     kind: activity.item_kind ?? 'backend_activity',
     status: `${t(kindKey)} · ${t(activityStatusKey(activity.status))}`,
     running: isRunning(activity),
+    // Durable definitions are pausable while waiting for their next execution.
+    // They do not make Vibey busy or receive the actively-running indicator.
+    canPause: (activity.item_kind === 'watch' && (activity.status === 'enabled' || isRunning(activity)))
+      || (activity.item_kind === 'task' && (activity.status === 'scheduled' || isRunning(activity))),
   };
 }
 
@@ -208,7 +214,7 @@ const PetSurface: React.FC = () => {
       : latest?.text?.trim()
         ? `${t('pet.repliedPrefix')} ${latest.text.trim()}`
         : t('pet.waiting');
-    return { id: 'main-agent', title, kind: 'backend_activity', status: subtitle, running: data.running, main: true };
+    return { id: 'main-agent', title, kind: 'backend_activity', status: subtitle, running: data.running, canPause: false, main: true };
   }, [data.running, exchange.results, exchange.user, optimisticTitle, uncertain, draft, t]);
   useEffect(() => {
     if (exchange.user?.text?.trim() === optimisticTitle) setOptimisticTitle('');
@@ -310,7 +316,7 @@ const PetSurface: React.FC = () => {
   }, [binding, reducedMotion, visibleCards]);
 
   const setStop = useCallback((card: PetCard) => {
-    if (!card.running || card.main || !isPausable(card)) return;
+    if (!card.canPause || card.main) return;
     const updatePhase = (phase?: StopPhase) => {
       if (petShell.currentBinding() !== binding) return;
       if (phase) stopPhases.current[card.id] = phase;
@@ -471,7 +477,7 @@ const PetSurface: React.FC = () => {
         }}
         onContextMenu={(event) => event.preventDefault()}
       >
-        <PetAvatar pose={voice.listening ? 'listening' : pose} activities={activeSubtasks.length} />
+        <PetAvatar pose={voice.listening ? 'listening' : pose} badge={state === 'ready' ? unreadCount : 0} activities={activeSubtasks.length} />
       </button>
       <MiniDock
         enabled={canChat && Boolean(binding)}
@@ -494,7 +500,7 @@ const PetSurface: React.FC = () => {
       <div className={clsx('pet-mini-column', voice.listening && 'is-voice-active')}>
         <div className={clsx('pet-mini-cards', voice.listening && 'is-hidden')} inert={voice.listening || undefined} aria-label={expanded ? t('pet.panel') : undefined} style={{ height: expanded ? STACK_HEIGHT : collapsedHeight }}>
           <div ref={collapsedRef} key={expanded ? 'expanded' : 'collapsed'} className="pet-mini-swap is-switching" onAnimationEnd={(event) => { if (event.target === event.currentTarget) event.currentTarget.classList.remove('is-switching'); }}>
-          {expanded && (!binding || switcherOpen) ? (
+          {expanded && (!binding || switcherOpen || visibleCards.length === 0) ? (
             <SessionPicker onPick={(sessionId) => { petShell.pick(sessionId); setSwitcherOpen(false); }} />
           ) : visibleCards.length > 0 && (
             expanded ? (
@@ -503,6 +509,7 @@ const PetSurface: React.FC = () => {
                 leaving={leaving}
                 detailOpen={detailOpen}
                 onMain={() => setDetailOpen((open) => !open)}
+                onSwitch={mainCard ? undefined : () => setSwitcherOpen(true)}
                 onDismiss={dismiss}
                 stops={stops}
                 onStop={setStop}
@@ -731,14 +738,14 @@ const CollapsedCards: React.FC<{ cards: PetCard[]; onOpen: () => void; t: (key: 
     <button type="button" className="pet-mini-collapsed" style={{ paddingBottom: layers.length * 9 }} onClick={onOpen} aria-label={t('pet.stack.expand')}>
       {layers.map((card, index) => {
         const inset = 18 + 6 + index * 3;
-        return <span key={card.id} data-pet-hit className="pet-mini-layer" style={{ top: (index + 1) * 9, left: inset, right: inset, zIndex: layers.length - index }} aria-hidden />;
+        return <span key={card.id} data-pet-hit className="pet-mini-layer" style={{ top: (index + 1) * 9, bottom: (layers.length - index - 1) * 9, left: inset, right: inset, zIndex: layers.length - index }} aria-hidden />;
       })}
       <div className="pet-mini-front" style={{ zIndex: layers.length + 1 }}><CardBody card={front} expanded={false} t={t} /></div>
     </button>
   );
 };
 
-const ExpandedCards: React.FC<{ cards: PetCard[]; leaving: string[]; detailOpen: boolean; onMain: () => void; onDismiss: (id: string) => void; stops: Record<string, StopPhase>; onStop: (card: PetCard) => void; t: (key: string, options?: Record<string, unknown>) => string; detail: ReactNode }> = ({ cards, leaving, detailOpen, onMain, onDismiss, stops, onStop, t, detail }) => {
+const ExpandedCards: React.FC<{ cards: PetCard[]; leaving: string[]; detailOpen: boolean; onMain: () => void; onSwitch?: () => void; onDismiss: (id: string) => void; stops: Record<string, StopPhase>; onStop: (card: PetCard) => void; t: (key: string, options?: Record<string, unknown>) => string; detail: ReactNode }> = ({ cards, leaving, detailOpen, onMain, onSwitch, onDismiss, stops, onStop, t, detail }) => {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [edges, setEdges] = useState({ top: 0, bottom: 0 });
   const measure = useCallback(() => {
@@ -753,13 +760,15 @@ const ExpandedCards: React.FC<{ cards: PetCard[]; leaving: string[]; detailOpen:
     if (typeof ResizeObserver === 'undefined') return undefined;
     const observer = new ResizeObserver(measure);
     observer.observe(node);
-    if (node.firstElementChild) observer.observe(node.firstElementChild);
+    const list = node.querySelector('.pet-mini-list');
+    if (list) observer.observe(list);
     return () => observer.disconnect();
   }, [measure, cards.length, detailOpen]);
   const mask = `linear-gradient(to bottom, transparent 0, #000 ${edges.top}px, #000 calc(100% - ${edges.bottom}px), transparent 100%)`;
   return (
     <div className="pet-mini-panel">
       <div ref={scrollRef} onScroll={measure} className="pet-mini-scroll" style={{ maskImage: mask, WebkitMaskImage: mask }}>
+        {onSwitch && <Button variant="link" size="sm" data-pet-hit onClick={onSwitch}>{t('pet.switchSession')}</Button>}
         <ul className="pet-mini-list">
           {cards.map((card) => {
             const phase = stops[card.id];
@@ -796,7 +805,7 @@ const CardBody: React.FC<{ card: PetCard; expanded: boolean; t: (key: string, op
           <span>{subtitle}</span>
         </div>
       </div>
-      {expanded && card.running && !card.main && isPausable(card) && phase !== 'stopped' && (
+      {expanded && card.canPause && !card.main && phase !== 'stopped' && (
         <button type="button" className={clsx('pet-mini-stop', phase === 'confirm' && 'is-confirm')} onClick={(event) => { event.stopPropagation(); onStop?.(); }} disabled={phase === 'stopping'} aria-label={stopText}>
           {phase === 'confirm' ? stopText : phase === 'stopping' ? <span className="pet-mini-spinner" aria-hidden /> : <StopIcon />}
         </button>

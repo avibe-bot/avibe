@@ -74,10 +74,12 @@ the main agent; there is no Follow up on cards.
 
 ### 3.2 Expanded box
 
-- **Backing panel:** full column width, radius 34px, padding 6px.
-  - Background equals the theme background (prototype `#121218`).
-  - No border, no shadow, no blur.
-  - It only hides what is behind the gaps between cards.
+- **No backing panel on the desktop (owner decision, 2026-10-12).** The
+  expanded list sits in a transparent wrapper with 6px padding (kept so the
+  widths in §3.1 hold). Cards float directly over the desktop, separated by
+  their own border and shadow. The gaps between cards show the wallpaper and
+  pass clicks through (§9.2). The prototype keeps a page-coloured plate only
+  to hide the web page's own text behind it (§12).
 - **Scroll box:** **fixed height** of about 3.5 cards (prototype **292px**),
   horizontal padding 12px. The half card at the bottom signals "more".
   - Hidden scrollbar: `scrollbar-width: none`, plus `::-webkit-scrollbar
@@ -98,9 +100,13 @@ the main agent; there is no Follow up on cards.
   showing its title and subtitle only: no ×, no stop button.
 - **Layers:** **one per remaining card**, behind the front card (6 cards →
   front card + 5 layers). For layer `i` (0-based, nearest first):
-  - top offset `(i + 1) × 9px` from the front card's top;
+  - **the same height as the front card**, offset `(i + 1) × 9px` below it,
+    so its bottom edge peeks out `(i + 1) × 9px` under the front card's
+    bottom whatever the front card's height. Do not use a fixed layer height:
+    a fixed 52px is hidden entirely behind a taller front card (the main card
+    with its eyebrow);
   - horizontal inset `18 + 6 + 3i` px from each column edge;
-  - height 52px, radius 24px, background `#1a1a1e`, border `white / 8%`;
+  - radius 24px, background `#1a1a1e`, border `white / 8%`;
   - **the same opacity as the front card** (no per-depth fade);
   - nearer layers stack above farther ones.
 - The stack's height is the front card plus `layers × 9px`.
@@ -483,6 +489,8 @@ sessions.
   (en + zh).
 - The page header, the "还差什么" section, and the extra chevron under Vibey
   in earlier versions.
+- The page-coloured plate behind the expanded list (it only hides the web
+  page's text; the desktop has none, §3.2).
 
 ## 13. Acceptance checklist
 
@@ -494,6 +502,8 @@ sessions.
       content fade); clicking Vibey again collapses.
 - [ ] Expanded: fixed 3.5-card box; cards bottom-aligned; overflow scrolls;
       scrollbar hidden; 10px top padding.
+- [ ] No backing plate behind the expanded list; gaps show the desktop and
+      pass clicks through.
 - [ ] Edge fades: none at the top until the user scrolls, up to 32px, none at
       the end; recomputed on resize.
 - [ ] Cards, marquee and bubble share one width. A long title truncates and
