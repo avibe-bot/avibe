@@ -277,7 +277,7 @@ Full references: [Commands](docs/COMMANDS.md) · [CLI](docs/CLI.md)
 1. `~/.avibe/AGENTS.md`, for every project;
 2. then, in each directory from the filesystem root down to the working directory, its `AGENTS.md` (or `CLAUDE.md`).
 
-`AGENTS.override.md` takes the place of a directory's `AGENTS.md`. When two files conflict, the more specific one wins. Files in directories below the working directory are not loaded up front: Vibey is told to read a subtree's file before it changes files there. An edit takes effect on the next Turn. The instructions are capped at 64 KiB in all; past that, Vibey is told which file was cut or left out.
+`AGENTS.override.md` takes the place of a directory's `AGENTS.md`. When two files conflict, the more specific one wins. Files in directories below the working directory are not loaded up front: Vibey is told to read a subtree's file before it works with files there. An edit takes effect on the next Turn. The instructions are capped at 64 KiB in all; past that, Vibey is told which file was cut or left out.
 
 The setup wizard detects Claude Code, Codex, and OpenCode on your machine and installs any you choose that are missing. To install one yourself:
 

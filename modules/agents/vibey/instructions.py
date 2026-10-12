@@ -31,8 +31,8 @@ PRECEDENCE = "More general files come first; where two conflict, the later, more
 #: present even when no file loaded, since a subtree may still hold one.
 SUBTREE = (
     "A directory below the working directory may hold its own instruction file with more specific rules for that "
-    "subtree: the first that exists of AGENTS.override.md, AGENTS.md, AGENTS.MD, CLAUDE.md, CLAUDE.MD, the others in "
-    "that directory ignored. Read it before changing files there."
+    "subtree: the first readable one of AGENTS.override.md, AGENTS.md, AGENTS.MD, CLAUDE.md, CLAUDE.MD in that "
+    "directory, and only that one. Read it before working with files there."
 )
 TRUNCATED = (
     "[Truncated: the first {shown} of {size} bytes. The instruction files share a 65,536-byte limit; read the file "
