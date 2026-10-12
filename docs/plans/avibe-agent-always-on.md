@@ -15,12 +15,15 @@ backend list, it is always enabled, and it cannot be turned off.
   processing meaning), the Agent create picker, the Agents page groups and filter, the Global prompts tabs (the UI's
   `BACKEND_ORDER`, derived from the catalog; the separate `agentOrder` is gone), and IM routing pickers. Native
   backends therefore read OpenCode, Claude Code, Codex everywhere a backend list is shown.
-- **Not the default.** `DEFAULT_AGENT_BACKEND` stays `opencode`. `implicit_default_rank` (`modules/agents/catalog.py`) is the
-  one rule for a backend or Agent nobody chose: the built-in backend comes last, so it is chosen only when nothing else
-  is enabled. Every implicit pick goes through it: the built-in sync's default, the effective-default fallbacks
-  (`resolve_effective_default_agent`, `_effective_default_agent`), the per-principal fallback
+- **The first default, not a replacement.** A new install records the built-in Agent as its first default
+  (owner decision 2026-10-12, [`vibey-default-agent.md`](vibey-default-agent.md)). `implicit_default_rank`
+  (`modules/agents/catalog.py`) remains the rule for a *replacement*: a backend or Agent picked because the recorded
+  one cannot be used. There the built-in backend comes last, so it is chosen only when nothing else is enabled. Every
+  replacement goes through it: the built-in sync's replacement of a missing or disabled default, the effective-default
+  fallbacks (`resolve_effective_default_agent`, `_effective_default_agent`), the per-principal fallback
   (`resolve_usable_default_agent`), the archived default's replacement after its same-backend preference, and the
-  IM routing modal's fallback selection.
+  IM routing modal's fallback selection. `DEFAULT_AGENT_BACKEND` stays `opencode`; it is reached only when no Agent
+  row resolves at all.
 - **Always on, by construction.** The built-in backend has no `agents.<id>` section; like any unknown `agents.*` key,
   one in a config file or a `POST /api/config` body is ignored and never saved. The controller registers the adapter at
   startup and never unregisters it; runtime renewal is a no-op for it.
@@ -56,11 +59,12 @@ backend list, it is always enabled, and it cannot be turned off.
 
 - The setup wizard draws Vibey first, as the coordinator, ahead of the native setup sequence (Claude Code, Codex,
   OpenCode: `nativeOrder`), and Vibey alone can complete setup. That is the owner's follow-up decision, delivered by
-  `feat/vibey-setup-wizard`; see `setup-three-screen/contracts.md` §C4 (D3). The default Agent after setup still
-  follows `implicit_default_rank`, so Vibey becomes it only when no native assistant can run.
+  `feat/vibey-setup-wizard`; see `setup-three-screen/contracts.md` §C4 (D3). Setup completion keeps the recorded
+  default when it can run, which on a new install is Vibey ([`vibey-default-agent.md`](vibey-default-agent.md)).
 - Setup onboarding is therefore not CLI-only (owner override, 2026-10-07, of the registration contract's "native setup
   onboarding remains CLI-only"): the built-in backend is a setup card with no CLI to detect, install or enable. Native
   import and the global native prompt files remain CLI-only.
 - The Agents page detail panel mirrors `is_builtin_default_agent` from the Agent's `source` and markers;
   `setupTargets.isBuiltinAgent` reads the markers, which callers can no longer write.
-- Making Vibey the default for new chats is a separate owner decision.
+- Making Vibey the default for new chats was a separate owner decision: it is, for new installs only
+  ([`vibey-default-agent.md`](vibey-default-agent.md)).
