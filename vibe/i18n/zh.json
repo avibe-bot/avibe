@@ -1010,6 +1010,11 @@
     "stopRefused": "未停止任何进程：此命令来自桌面托管的 Avibe Runtime，而正在运行的 {part} 不属于该 Runtime（{reason}）。请从启动它的 Avibe 停止它。",
     "restartRefused": "未重启任何进程：此命令来自桌面托管的 Avibe Runtime，而正在运行的 {part} 不属于该 Runtime（{reason}）。请从启动它的 Avibe 重启它。"
   },
+  "cliHealth": {
+    "installReadbackFailed": "安装程序已结束，但所选 CLI 仍然缺失或无法运行，尚未验证安装成功。请修复后重试。",
+    "repairUnavailable": "Avibe 无法安全确定 {backend} 的原安装来源或修复方式。请使用原安装工具重新安装，或选择正确的 CLI 路径；本次未修改任何安装。",
+    "repairPathConflict": "修复环境中仍能找到另一个 OpenCode 命令，本次未开始修复。请移除冲突的 PATH 项，或使用原安装工具重新安装 OpenCode。"
+  },
   "agentInstall": {
     "installFailed": "无法安装 {backend}。",
     "upgradeFailed": "无法升级 {backend}。",
@@ -1428,6 +1433,7 @@
       "slackConfigMissing": "无法检查 Slack：配置尚未加载",
       "agentCliFound": "找到 {agent} CLI：{path}",
       "agentCliMissing": "找不到 {agent} CLI：{path}",
+      "agentCliUnhealthy": "{agent} CLI 文件存在，但未能验证其可运行：{path}",
       "agentDisabled": "{agent}：已禁用",
       "defaultAgent": "默认 Agent：{agent}",
       "agentConfigMissing": "无法检查 Agent：配置尚未加载",

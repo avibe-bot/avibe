@@ -14,6 +14,7 @@ from typing import Any, BinaryIO
 import psutil
 
 PROCESS_IDENTITY_ENV = "AVIBE_PROCESS_IDENTITY"
+HIDE_CONSOLE_ENV = "AVIBE_SUPERVISOR_HIDE_CONSOLE"
 WATCH_WORKER_PROTOCOL_VERSION = 1
 WATCH_WORKER_ERROR_PREFIX = "AVIBE_WATCH_WORKER_ERROR:"
 _MAX_SPEC_BYTES = 16 * 1024 * 1024
@@ -269,6 +270,8 @@ def _run_watch_worker() -> int:
     command, shell_command = _read_watch_worker_spec()
     child_env = dict(os.environ)
     child_env.pop(PROCESS_IDENTITY_ENV, None)
+    hide_console = child_env.pop(HIDE_CONSOLE_ENV, None) == "1"
+    creation_options = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" and hide_console else {}
     identity_anchor = _start_posix_identity_anchor()
 
     try:
@@ -281,6 +284,7 @@ def _run_watch_worker() -> int:
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
+                **creation_options,
             )
         except OSError as exc:
             raise _CommandSpawnError(exc) from exc

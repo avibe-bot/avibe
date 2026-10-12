@@ -37,7 +37,7 @@ beforeEach(async () => {
   vi.clearAllMocks();
   await i18n.changeLanguage('en');
   mocks.api.getConfig.mockResolvedValue({ agents: {} });
-  mocks.api.detectCli.mockImplementation(async (binary: string) => ({ found: true, path: binary }));
+  mocks.api.detectCli.mockImplementation(async (binary: string) => ({ found: true, status: 'ok' as const, path: binary }));
 });
 
 afterEach(() => {

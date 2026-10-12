@@ -37,8 +37,8 @@ export function Welcome({ data, onNext, active, ref, onActionChange }: WelcomePr
     try {
       const results = await Promise.all(ASSISTANT_ORDER.map(async (name) => {
         const agent = { ...DEFAULT_NATIVE_AGENT_STATE[name], ...data?.agents?.[name] };
-        const result = await api.detectCli(agent.cli_path || name);
-        return [name, { ...agent, cli_path: result.path || agent.cli_path, status: result.found ? 'ok' : 'missing' }];
+        const result = await api.detectCli(agent.cli_path || name, name);
+        return [name, { ...agent, cli_path: result.path || agent.cli_path, status: result.status, detectedRuntime: result.runtime }];
       }));
       await onNext({ agents: Object.fromEntries(results), __onboardingDetected: true });
     } catch (cause) {

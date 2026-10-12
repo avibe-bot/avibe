@@ -160,7 +160,7 @@ def test_dependency_install_route_allows_model_hub_engine(monkeypatch, tmp_path)
 def test_install_job_fails_when_runtime_refresh_fails(monkeypatch, backend):
     monkeypatch.setattr(api, "is_agent_backend", lambda name: name == backend)
     monkeypatch.setattr(api, "supports_runtime_refresh", lambda name: name == backend)
-    monkeypatch.setattr(api, "_agent_runtime_fingerprint", lambda name: None)
+    monkeypatch.setattr(api, "_agent_runtime_fingerprint", lambda name, detection=None: None)
     monkeypatch.setattr(
         api,
         "install_agent",
@@ -169,6 +169,7 @@ def test_install_job_fails_when_runtime_refresh_fails(monkeypatch, backend):
             "message": "Installed",
             "output": "done",
             "path": f"/usr/local/bin/{backend}",
+            "detection": api.CliHealth(True, f"/usr/local/bin/{backend}", "ok", "1.0.0").payload(),
         },
     )
     monkeypatch.setattr(api, "restart_backend", lambda name, **kwargs: {"ok": False, "message": "refresh timeout"})
@@ -248,11 +249,15 @@ def test_install_job_measures_configured_runtime(monkeypatch, tmp_path, backend,
             return None
         return str(standard) if binary == backend else binary
 
-    def probe(binary):
-        probed.append(binary)
+    def observe(binary, _backend):
+        path = resolve(binary)
+        if path is None:
+            return api.CliHealth(False, None, "missing").payload()
+        probed.append(path)
         if change == ("unknown-after" if installed else "unknown-before"):
-            return None
-        return "1.0.1" if installed and change == "version" else "1.0.0"
+            return api.CliHealth(True, path, "broken", reason="invalid_version").payload()
+        version = "1.0.1" if installed and change == "version" else "1.0.0"
+        return api.CliHealth(True, path, "ok", version).payload()
 
     class InstallProcess:
         returncode = 0
@@ -269,8 +274,7 @@ def test_install_job_measures_configured_runtime(monkeypatch, tmp_path, backend,
             return "fixture installed", ""
 
     monkeypatch.setattr(api, "resolve_cli_path", resolve)
-    monkeypatch.setattr(api, "_probe_cli_version", probe)
-    monkeypatch.setattr(api, "_cached_version", Mock(side_effect=AssertionError("must measure, not use cached versions")))
+    monkeypatch.setattr(api, "detect_cli", observe)
     monkeypatch.setattr(api.subprocess, "Popen", InstallProcess)
     monkeypatch.setattr(
         api, "install_agent",
@@ -283,10 +287,15 @@ def test_install_job_measures_configured_runtime(monkeypatch, tmp_path, backend,
 
     started = api.start_agent_install_job(backend)
     result = _wait_for_install_job(started["job_id"])
+    if change == "unknown-after":
+        assert result["status"] == "failed" and result["code"] == "cli_readback_failed"
+        refresh.assert_not_called()
+        return
     assert result["status"] == "succeeded"
     assert result["ok"] is True
     assert getattr(V2Config.load().agents, backend).cli_path == str(standard)
-    assert resolved == [str(configured), backend, str(standard)]
+    assert resolved[0] == str(configured) and resolved[-1] == str(standard)
+    assert backend in resolved and set(resolved) <= {str(configured), backend, str(standard)}
     assert probed == ([str(standard)] if change == "fresh-install" else [str(configured), str(standard)])
     if change == "unchanged":
         refresh.assert_not_called()

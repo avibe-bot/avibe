@@ -12566,8 +12566,9 @@ def _doctor(*, deep: bool = False):
             label = display_name_for_backend(backend)
             if backend_config.enabled:
                 cli_path = backend_config.cli_path
-                found_path = api.detect_cli(cli_path).get("path") if cli_path else None
-                if found_path:
+                detection = api.detect_cli(cli_path or backend, backend)
+                found_path = detection.get("path")
+                if detection.get("status") == "ok":
                     _add_doctor_item(
                         agent_items,
                         "pass",
@@ -12578,7 +12579,7 @@ def _doctor(*, deep: bool = False):
                     _add_doctor_item(
                         agent_items,
                         "warn",
-                        i18n_t("doctor.item.agentCliMissing", language, agent=label, path=cli_path),
+                        i18n_t("doctor.item.agentCliUnhealthy" if detection.get("found") else "doctor.item.agentCliMissing", language, agent=label, path=cli_path),
                         i18n_t("doctor.action.agentCliMissing", language, agent=label),
                     )
                     summary["warn"] += 1

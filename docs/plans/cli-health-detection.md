@@ -4,7 +4,7 @@
 
 A native CLI detection observes the selected executable, not merely its directory entry. The observation contains `found`, `path`, `status` (`ok`, `broken`, `missing`, `unknown`), `version`, and a closed safe `reason` code. `found` retains its presence meaning; only `status == ok` certifies runnability. The version belongs to that same successful, bounded `--version` observation. Non-native command discovery (npm, shells, etc.) retains presence semantics and does not impersonate native backend health.
 
-The native backend identity is explicit on the detection request, so custom/draft paths are classified using the right CLI's version contract. Explicit existing paths are tested even when they lack execute permission. A draft is never judged using the saved path. Missing-path fallback, where the existing resolver supports it, must be returned as the observed path and used consistently by consumers.
+The native backend identity is explicit on the detection request, so custom/draft paths are classified using the right CLI's version contract. Explicit existing paths are tested even when they lack execute permission. A draft is never judged using the saved path. An explicit native path that is missing stays missing: another healthy PATH installation cannot certify it. Bare command discovery still uses the existing resolver. Generic non-backend tool discovery is unchanged.
 
 One detection owner runs probes using the existing supervised command runner, with output limits, timeout and owned-tree teardown. HTTP consumers await it natively; synchronous CLI/installer workers use its synchronous adapter, not a new per-request event-loop bridge. Initial detections/read-backs are uncached: replacing an npm platform package can change health without changing the launcher's stat or version-cache key.
 
@@ -14,12 +14,22 @@ Backend-specific version parsing accepts actual CLI formats, not an arbitrary se
 
 - `/api/cli/detect`: native identity + selected path -> authoritative observation.
 - `/api/backend/<name>/runtime`: optional selected path -> the same observation, plus existing lifecycle/update information. No separate `runnable` verdict.
-- Welcome, AgentDetection, SettingsBackendsPage, useBackendRuntime and BackendLifecycleChip: consume `status`, not `found`/`installed` as readiness. Lifecycle version queries name the same path. Existing connection/source/application gates remain required.
+- Welcome, AgentDetection, SettingsBackendsPage, useBackendRuntime, BackendLifecycleChip, final onboarding entryGate and CLI doctor consume `status`, not `found`/`installed` as readiness. Native UI detection obtains the runtime projection once and shares that observation with its lifecycle chip; subsequent explicit refreshes carry the selected path and discard stale completions. Human unsaved path edits cannot mutate a different saved installation. Existing connection/source/application gates remain required.
 - Install/upgrade: exit zero is only a candidate success. Freshly detect the resulting executable before persisting its path or announcing success. A missing/broken result fails. Existing app-private candidate verification/ownership and install locks remain in force.
 
 ## Repair
 
 A healthy CLI keeps its ordinary native update route. A broken Claude/OpenCode CLI cannot be its own repair tool. Determine supported existing installation provenance without executing that CLI; use its package manager or native bootstrap independently, preserving source and resulting path. Unsupported/ambiguous sources return a safe actionable failure rather than silently migrating the install. App-private desktop installs retain their installer and activation boundary.
+
+### Native OpenCode support/refusal ledger
+
+Only the positively identified canonical `~/.opencode/bin/opencode` installation uses its vendor bootstrap. Its installer environment is a copy with that directory (including equivalent directory entries) removed from PATH. `BASH_ENV`, `ENV`, `SHELLOPTS`, `BASHOPTS` and exported Bash functions are removed from that child environment only. A non-executing `command -v opencode` guard refuses any residual executable alias, wrapper, function or second installation **before network activity**; the same guard prefixes the bootstrap stream in the non-login/non-rc consumer shell. The official installer receives `--no-modify-path`. No shell configuration changes, renamed/deleted old executable, source migration, wrapper inspection, or new native artifact downloader is involved.
+
+A residual resolution conflict is an actionable refusal, not an attempted repair. Even after exit zero, the exact selected destination must pass fresh detection under the **normal launch environment**, not the masked installer environment. Missing target, wrong output and timeout remain failure even if another healthy installation exists. Install-job success carries that validated observation; the restart fingerprint reuses its path/version rather than inventing an independent after-version verdict. Already activated app-private generations are not removed if final read-back fails.
+
+### Supervised probe launch contract
+
+`core.command_runner.run_supervised_command(hide_console=True)` is opt-in. It hides the Windows supervisor and supplies private `AVIBE_SUPERVISOR_HIDE_CONSOLE=1` to `core.watch_worker`, which consumes the instruction, hides the actual Windows command and does not forward the flag to that command. Default callers retain existing console behavior. Shared supervision owns output limits, timeout/cancellation and descendant cleanup. Mocked Win32 flag assertions are not a claim of native Windows acceptance.
 
 Not included: npm residue cleanup, general install-source migration, generic health service, auth/routing rewrites, deployment, unrelated runtime/VM changes. Preserve #2452 startup diagnosis and input retry behavior.
 

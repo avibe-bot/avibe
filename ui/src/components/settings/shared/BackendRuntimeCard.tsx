@@ -108,6 +108,8 @@ export const BackendRuntimeCard: React.FC<BackendRuntimeCardProps> = ({
               enabled={runtime.enabled}
               cliStatus={runtime.cliStatus}
               cliPath={runtime.cliPath}
+              detectedRuntime={runtime.detectedRuntime}
+              selectionUnsaved={runtime.runtimeDirty}
               onChanged={runtime.handleLifecycleChanged}
               onOperationChange={(busy) => { if (!busy) void runtime.handleLifecycleChanged(null); }}
             />}
@@ -152,14 +154,14 @@ export const BackendRuntimeCard: React.FC<BackendRuntimeCardProps> = ({
           <p className="text-[12px] text-muted">{t('settings.backends.cliPathHint')}</p>
         </div>}
 
-        {capabilities.supports_install && runtime.cliStatus === 'missing' && (
+        {capabilities.supports_install && (runtime.cliStatus === 'missing' || runtime.cliStatus === 'broken') && (
           <div className="space-y-2 rounded-lg border border-cyan/30 bg-cyan/[0.06] px-3 py-2.5">
-            <p className="text-[12px] text-cyan-ink">{t('agentDetection.installHint')}</p>
+            <p className="text-[12px] text-cyan-ink">{t(runtime.cliStatus === 'broken' ? 'backendLifecycle.brokenHint' : 'agentDetection.installHint', { name: label })}</p>
             <Button
               variant="brand-cyan"
               size="xs"
               onClick={() => void runtime.install()}
-              disabled={runtime.installing}
+              disabled={runtime.installing || runtime.runtimeDirty}
             >
               {runtime.installing ? (
                 <RefreshCw className="size-3.5 animate-spin" />
@@ -168,8 +170,9 @@ export const BackendRuntimeCard: React.FC<BackendRuntimeCardProps> = ({
               )}
               {runtime.installing
                 ? t('agentDetection.installing')
-                : t('agentDetection.installAgent')}
+                : t(runtime.cliStatus === 'broken' ? 'backendLifecycle.reinstall' : 'agentDetection.installAgent')}
             </Button>
+            {runtime.runtimeDirty && <p className="text-xs text-muted">{t('backendLifecycle.savePathFirst')}</p>}
             {runtime.installResult && (
               <InstallOutcome result={runtime.installResult} className="text-[12px]" />
             )}

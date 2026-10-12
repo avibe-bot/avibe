@@ -84,8 +84,8 @@ beforeEach(() => {
   model = null;
   effort = null;
   mock.api.getConfig.mockResolvedValue(data());
-  mock.api.detectCli.mockResolvedValue({ found: false });
-  mock.api.getBackendRuntime.mockResolvedValue({ installed: false, has_update: false });
+  mock.api.detectCli.mockResolvedValue({ found: false, status: 'missing' as const });
+  mock.api.getBackendRuntime.mockImplementation(async (_backend, path) => ({ installed: false, status: 'missing', cli_path: path, resolved_path: null, has_update: false }));
   mock.api.getBackendConnection.mockImplementation(async (backend: string) => backend === 'vibey'
     ? { ok: true, backend, installed: true, enabled: true, auth: 'api_key', application: 'applied', ready: true, entry_eligible: true, supply_mode: 'hub' }
     : { ok: true, backend, installed: false, enabled: true, auth: 'none', application: 'applied', ready: false, entry_eligible: false, supply_mode: 'hub' });
@@ -158,7 +158,8 @@ describe('the built-in assistant card', () => {
   });
 
   it('holds the whole entry on a choice that did not stand, even with a CLI assistant ready', async () => {
-    mock.api.detectCli.mockResolvedValue({ found: true, path: '/isolated/bin/claude' });
+    mock.api.detectCli.mockResolvedValue({ found: true, status: 'ok' as const, path: '/isolated/bin/claude' });
+    mock.api.getBackendRuntime.mockImplementation(async (_backend, path) => ({ installed: true, status: 'ok', cli_path: path, resolved_path: path, has_update: false }));
     mock.api.getBackendConnection.mockImplementation(async (backend: string) => ({
       ok: true, backend, installed: true, enabled: true, auth: 'api_key', application: 'applied', ready: true, entry_eligible: true, supply_mode: 'hub',
     }));

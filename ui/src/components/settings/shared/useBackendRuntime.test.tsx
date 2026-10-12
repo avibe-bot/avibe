@@ -30,7 +30,7 @@ beforeEach(() => {
     agents: { claude: { enabled: true, cli_path: 'claude' } },
   });
   mocks.api.detectCli.mockImplementation(async (binary: string) => ({
-    found: true,
+    found: true, status: 'ok' as const,
     path: binary,
   }));
   mocks.api.installAgent.mockResolvedValue({
@@ -51,6 +51,28 @@ const mountRuntime = async () => {
 };
 
 describe('persisted backend install paths', () => {
+  it('reports a present but broken CLI without converting presence to health', async () => {
+    mocks.api.detectCli.mockResolvedValue({ found: true, path: '/broken/claude', status: 'broken' });
+    const hook = await mountRuntime();
+    expect(hook.result.current.cliStatus).toBe('broken');
+    expect(mocks.api.detectCli).toHaveBeenCalledWith('claude', 'claude');
+  });
+
+  it('does not install the saved CLI while the person is inspecting another unsaved path', async () => {
+    const hook = await mountRuntime();
+    act(() => hook.result.current.setCliPath('/draft/claude'));
+    await act(async () => hook.result.current.install());
+    expect(mocks.api.installAgent).not.toHaveBeenCalled();
+    expect(hook.result.current.runtimeDirty).toBe(true);
+  });
+
+  it('does not mistake automatic discovery of the saved command for a human draft', async () => {
+    mocks.api.detectCli.mockResolvedValue({ found: true, path: '/resolved/claude', status: 'ok' });
+    const hook = await mountRuntime();
+    expect(hook.result.current.cliPath).toBe('/resolved/claude');
+    expect(hook.result.current.runtimeDirty).toBe(false);
+  });
+
   it('reads the built-in backend as enabled without a config section and rejects CLI work at the hook boundary', async () => {
     const hook = renderHook(() => useBackendRuntime({ backend: 'vibey' }));
     await waitFor(() => expect(hook.result.current.loaded).toBe(true));

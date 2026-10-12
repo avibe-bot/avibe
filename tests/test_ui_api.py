@@ -32,6 +32,19 @@ from vibe import api, backend_model_catalog, cli_paths
 from vibe.opencode_config import parse_jsonc_object
 
 
+@pytest.fixture
+def healthy_cli_observation(monkeypatch):
+    """Command-selection tests assume a usable fake CLI, not a real supervisor.
+
+    Filesystem/probe/read-back failure contracts are exercised with real owned
+    children in test_cli_health, test_cli_repair and test_cli_detection_api.
+    """
+    def observe(binary, backend=None):
+        path = binary if api.os.path.isabs(binary) else api.resolve_cli_path(binary)
+        return api.CliHealth(bool(path), path, "ok" if path else "missing", "1.0.0" if path else None).payload()
+    monkeypatch.setattr(api, "detect_cli", observe)
+
+
 class _PopenFromRun:
     def __init__(self, cmd, *args, **kwargs):
         result = api.subprocess.run(cmd, **kwargs)
@@ -1931,6 +1944,7 @@ def test_detect_cli_finds_codex_in_npm_global_prefix(monkeypatch, tmp_path, only
     assert result["path"] == str(codex_path)
 
 
+@pytest.mark.usefixtures("healthy_cli_observation")
 def test_install_agent_blocks_private_desktop_codex_self_update(monkeypatch, tmp_path):
     runtime_root = tmp_path / "runtime" / "3.1.0" / ("a" * 16)
     codex_path = runtime_root / "tools" / "bin" / "codex"
@@ -1967,7 +1981,7 @@ def test_backend_runtime_skips_latest_probe_for_private_desktop_codex(monkeypatc
     monkeypatch.setenv("AVIBE_DESKTOP_RUNTIME_ROOT", str(runtime_root))
     monkeypatch.setattr(api.V2Config, "load", staticmethod(lambda: config))
     monkeypatch.setattr(api, "resolve_cli_path", lambda _binary: str(codex_path))
-    monkeypatch.setattr(api, "_cached_version", lambda _name, _path: "1.2.3")
+    monkeypatch.setattr(api, "detect_cli_async", AsyncMock(return_value=api.CliHealth(True, str(codex_path), "ok", "1.2.3").payload()))
     monkeypatch.setattr(
         api,
         "_cached_latest",
@@ -1983,6 +1997,7 @@ def test_backend_runtime_skips_latest_probe_for_private_desktop_codex(monkeypatc
     assert result["managed_by"] == "desktop"
 
 
+@pytest.mark.usefixtures("healthy_cli_observation")
 def test_install_agent_upgrades_exact_configured_external_path(monkeypatch, tmp_path):
     external = tmp_path / "custom" / "claude"
     external.parent.mkdir()
@@ -2023,6 +2038,7 @@ def test_install_agent_upgrades_exact_configured_external_path(monkeypatch, tmp_
     assert resolved == [str(external), str(external)]
 
 
+@pytest.mark.usefixtures("healthy_cli_observation")
 def test_install_agent_uses_private_desktop_installer_when_external_is_missing(monkeypatch, tmp_path):
     installed = tmp_path / "backends" / "codex" / "releases" / "new" / "codex"
     monkeypatch.setenv("AVIBE_DESKTOP_MANAGED_RUNTIME", "1")
@@ -2030,7 +2046,7 @@ def test_install_agent_uses_private_desktop_installer_when_external_is_missing(m
     config = api.V2Config.default()
     config.agents.codex.cli_path = "codex"
     config.save()
-    invalidated: list[str] = []
+    read_back: list[tuple[str, str]] = []
 
     def fake_install(name, *, activate):
         assert name == "codex"
@@ -2040,7 +2056,10 @@ def test_install_agent_uses_private_desktop_installer_when_external_is_missing(m
     monkeypatch.setattr(api, "resolve_cli_path", lambda value: None)
     monkeypatch.setattr(api, "desktop_backend_toolchain", lambda: object())
     monkeypatch.setattr(api, "install_desktop_backend", fake_install)
-    monkeypatch.setattr(api, "_invalidate_version_cache", invalidated.append)
+    def verified(binary, backend):
+        read_back.append((binary, backend))
+        return api.CliHealth(True, binary, "ok", "1.2.3").payload()
+    monkeypatch.setattr(api, "detect_cli", verified)
     monkeypatch.setattr(
         api.subprocess,
         "Popen",
@@ -2054,7 +2073,7 @@ def test_install_agent_uses_private_desktop_installer_when_external_is_missing(m
     assert result["path"] == str(installed)
     assert result["message"] == "Codex installed successfully."
     assert api.V2Config.load().agents.codex.cli_path == str(installed)
-    assert invalidated == ["codex"]
+    assert read_back == [(str(installed), "codex")]
 
 
 def test_desktop_backend_install_localizes_structured_failure(monkeypatch):
@@ -2108,6 +2127,7 @@ def test_desktop_runtime_does_not_fall_back_to_global_installer(monkeypatch, bac
 
 
 @pytest.mark.parametrize("backend", ["claude", "codex", "opencode"])
+@pytest.mark.usefixtures("healthy_cli_observation")
 def test_install_agent_updates_existing_private_backend(monkeypatch, tmp_path, backend):
     existing = tmp_path / "backends" / backend / "releases" / "old" / backend
     config = SimpleNamespace(
@@ -2131,6 +2151,7 @@ def test_install_agent_updates_existing_private_backend(monkeypatch, tmp_path, b
 
 
 @pytest.mark.parametrize("backend", ["claude", "codex", "opencode"])
+@pytest.mark.usefixtures("healthy_cli_observation")
 def test_install_agent_never_upgrades_an_external_cli_for_a_missing_private_backend(
     monkeypatch, tmp_path, backend
 ):
@@ -2176,6 +2197,7 @@ def test_install_agent_never_upgrades_an_external_cli_for_a_missing_private_back
     assert managed == [backend], "the missing private backend was not reinstalled privately"
 
 
+@pytest.mark.usefixtures("healthy_cli_observation")
 def test_install_agent_blocks_a_missing_private_runtime_codex_without_reaching_the_external_one(
     monkeypatch, tmp_path
 ):
@@ -2220,7 +2242,7 @@ def test_backend_runtime_checks_updates_for_private_backend(monkeypatch, tmp_pat
     monkeypatch.setattr(api, "resolve_cli_path", lambda _value: str(managed))
     monkeypatch.setattr(api, "is_desktop_backend_path", lambda path: path == str(managed))
     monkeypatch.setattr(api, "is_private_desktop_runtime_path", lambda _path: False)
-    monkeypatch.setattr(api, "_cached_version", lambda _name, _path: "1.0.0")
+    monkeypatch.setattr(api, "detect_cli_async", AsyncMock(return_value=api.CliHealth(True, str(managed), "ok", "1.0.0").payload()))
     monkeypatch.setattr(api, "_cached_latest", lambda _name: "1.1.0")
     monkeypatch.setattr(api, "_opencode_process_status", lambda: "stopped")
     monkeypatch.setattr(api, "_codex_process_status", lambda _path: "stopped")
@@ -2355,6 +2377,7 @@ def test_resolve_cli_paths_preserves_completed_paths_when_other_probes_fail(
     }
 
 
+@pytest.mark.usefixtures("healthy_cli_observation")
 def test_install_agent_returns_resolved_path(monkeypatch):
     class CompletedProcess:
         returncode = 0
@@ -2376,6 +2399,7 @@ def test_install_agent_returns_resolved_path(monkeypatch):
     assert result["path"] == "/Users/test/.opencode/bin/opencode"
 
 
+@pytest.mark.usefixtures("healthy_cli_observation")
 def test_install_agent_refuses_a_second_concurrent_install_of_one_backend(monkeypatch):
     # Settings installs in the UI process and auto-update in the controller;
     # both reach the CLI only through ``install_agent``.
@@ -2414,6 +2438,7 @@ def test_install_agent_refuses_a_second_concurrent_install_of_one_backend(monkey
     assert api.install_agent("opencode")["ok"] is True
 
 
+@pytest.mark.usefixtures("healthy_cli_observation")
 def test_install_codex_fresh_install_uses_resolved_npm(monkeypatch, tmp_path):
     # Fresh-install path: codex is not yet on disk, but npm is resolvable.
     # install_agent must shell out to `npm install -g @openai/codex` and
@@ -2431,7 +2456,7 @@ def test_install_codex_fresh_install_uses_resolved_npm(monkeypatch, tmp_path):
         return CompletedProcess()
 
     # Codex is missing before install, present after.
-    codex_resolve = iter([None, "/Users/test/.nvm/versions/node/v22.18.0/bin/codex"])
+    codex_resolve = iter([None, None, "/Users/test/.nvm/versions/node/v22.18.0/bin/codex"])
 
     def fake_resolve(binary):
         if binary == "npm":
@@ -2455,6 +2480,7 @@ def test_install_codex_fresh_install_uses_resolved_npm(monkeypatch, tmp_path):
     assert result["path"] == "/Users/test/.nvm/versions/node/v22.18.0/bin/codex"
 
 
+@pytest.mark.usefixtures("healthy_cli_observation")
 def test_install_codex_npm_install_runs_npm_upgrade(monkeypatch, tmp_path):
     # Npm-owned Codex installs should upgrade through npm, not through a
     # different installer and not by blindly invoking the CLI self-updater. The
@@ -2506,6 +2532,7 @@ def test_install_codex_npm_install_runs_npm_upgrade(monkeypatch, tmp_path):
     assert result["path"] == str(codex_path)
 
 
+@pytest.mark.usefixtures("healthy_cli_observation")
 def test_install_codex_homebrew_install_runs_brew_upgrade(monkeypatch, tmp_path):
     brew_path = tmp_path / "homebrew" / "bin" / "brew"
     brew_path.parent.mkdir(parents=True)
@@ -2554,6 +2581,7 @@ def test_install_codex_homebrew_install_runs_brew_upgrade(monkeypatch, tmp_path)
     assert [str(brew_path), "upgrade", "--cask", "codex"] in [call[0] for call in calls]
 
 
+@pytest.mark.usefixtures("healthy_cli_observation")
 def test_install_codex_prefers_homebrew_when_npm_shares_prefix(monkeypatch, tmp_path):
     prefix = tmp_path / "homebrew"
     brew_path = prefix / "bin" / "brew"
@@ -2609,6 +2637,7 @@ def test_install_codex_prefers_homebrew_when_npm_shares_prefix(monkeypatch, tmp_
     assert [str(npm_path), "install", "-g", "@openai/codex"] not in commands
 
 
+@pytest.mark.usefixtures("healthy_cli_observation")
 def test_install_codex_unknown_install_falls_back_to_cli_update(monkeypatch, tmp_path, only_tmp_binaries):
     codex_path = tmp_path / "bin" / "codex"
     codex_path.parent.mkdir(parents=True)
@@ -2648,6 +2677,7 @@ def test_install_codex_unknown_install_falls_back_to_cli_update(monkeypatch, tmp
     assert result["path"] == str(codex_path)
 
 
+@pytest.mark.usefixtures("healthy_cli_observation")
 def test_install_codex_unknown_install_without_update_command_fails(monkeypatch, tmp_path):
     codex_path = tmp_path / "bin" / "codex"
     codex_path.parent.mkdir(parents=True)
@@ -2681,6 +2711,7 @@ def test_install_codex_unknown_install_without_update_command_fails(monkeypatch,
     assert "does not expose an update command" in result["message"]
 
 
+@pytest.mark.usefixtures("healthy_cli_observation")
 def test_install_codex_npm_install_without_npm_fails(monkeypatch, tmp_path):
     codex_path = tmp_path / "lib" / "node_modules" / "@openai" / "codex" / "bin" / "codex.js"
     codex_path.parent.mkdir(parents=True)
@@ -2714,6 +2745,7 @@ def test_discord_list_channels_rejects_empty_guild_id(monkeypatch):
     assert result["error"] == "Discord guild_id is required"
 
 
+@pytest.mark.usefixtures("healthy_cli_observation")
 def test_install_codex_detects_existing_install_via_npm_prefix_and_upgrades_with_npm(monkeypatch, tmp_path, only_tmp_binaries):
     # Codex already installed under the npm global prefix; resolve_cli_path
     # must discover it (via `npm config get prefix`) and install_agent must
@@ -2760,6 +2792,7 @@ def test_install_codex_detects_existing_install_via_npm_prefix_and_upgrades_with
     assert update_calls[0][1]["PATH"].split(api.os.pathsep)[0] == str(prefix_path / "bin")
 
 
+@pytest.mark.usefixtures("healthy_cli_observation")
 def test_install_codex_symlinked_npm_install_upgrades_in_real_prefix(monkeypatch, tmp_path, only_tmp_binaries):
     # Regression coverage for the Incus layout: ~/.local/bin/codex is a shim to
     # ~/.npm-global/bin/codex. Running npm with prefix ~/.local tries to replace
@@ -2820,6 +2853,7 @@ def test_install_codex_symlinked_npm_install_upgrades_in_real_prefix(monkeypatch
     assert update_calls[0][1]["PATH"].split(api.os.pathsep)[0] == str(prefix_path / "bin")
 
 
+@pytest.mark.usefixtures("healthy_cli_observation")
 def test_install_codex_project_local_node_modules_does_not_become_prefix(
     monkeypatch,
     tmp_path,

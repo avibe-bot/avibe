@@ -76,8 +76,8 @@ beforeEach(() => {
   mock.api.getClaudeAuth.mockResolvedValue({ ok: true, active_auth_mode: 'none' });
   mock.api.getCodexAuth.mockResolvedValue({ ok: true, active_auth_mode: 'none' });
   mock.api.getOpencodeProviders.mockResolvedValue({ ok: true, providers: [] });
-  mock.api.detectCli.mockResolvedValue({ found: true, path: '/isolated/bin/assistant' });
-  mock.api.getBackendRuntime.mockResolvedValue({ installed: true, has_update: false });
+  mock.api.detectCli.mockResolvedValue({ found: true, status: 'ok' as const, path: '/isolated/bin/assistant' });
+  mock.api.getBackendRuntime.mockImplementation(async (_name, cliPath) => ({ ok: true, installed: true, status: 'ok', cli_path: cliPath, resolved_path: cliPath, has_update: false }));
   mock.api.listVibeAgents.mockResolvedValue({ ok: true, agents: [], default_agent_name: null });
   mock.api.getVibeAgent.mockResolvedValue({ ok: false, agent: null });
   mock.models.listSources.mockResolvedValue([]);
@@ -156,7 +156,7 @@ describe('assistant installation presentation', () => {
   it('does not enable from a stale Hub read when reentry offered ordinary Install', async () => {
     const saved = { ...data(), capabilities: { model_hub: { enabled: true } } };
     saved.agents.claude.enabled = false;
-    mock.api.detectCli.mockResolvedValue({ found: false, path: '' });
+    mock.api.detectCli.mockResolvedValue({ found: false, status: 'missing' as const, path: '' });
     mock.api.getBackendConnection.mockImplementation(async (backend) => ({
       ok: true, backend, installed: false, enabled: false, auth: 'none',
       application: 'applied', ready: false, entry_eligible: false, supply_mode: 'hub',
@@ -186,7 +186,7 @@ describe('assistant installation presentation', () => {
   it('does not promise enablement when a missing assistant has conflicting Hub and Direct reads', async () => {
     const saved = { ...data(), capabilities: { model_hub: { enabled: true } } };
     saved.agents.claude.enabled = false;
-    mock.api.detectCli.mockResolvedValue({ found: false, path: '' });
+    mock.api.detectCli.mockResolvedValue({ found: false, status: 'missing' as const, path: '' });
     mock.api.getBackendConnection.mockImplementation(async (backend) => ({
       ok: true, backend, installed: false, enabled: false, auth: 'none',
       application: 'applied', ready: false, entry_eligible: false, supply_mode: 'hub',
@@ -236,7 +236,7 @@ describe('assistant installation presentation', () => {
     mock.api.installAgent.mockResolvedValue({ ok: true, path: '/isolated/bin/claude' });
     fireEvent.click(row('Claude Code').getByRole('button', { name: 'Retry' }));
     await waitFor(() => expect(row('Claude Code').getByRole('button', { name: en.onboarding.setup.enabled })).toBeTruthy());
-    expect(mock.api.detectCli).toHaveBeenCalledWith('/isolated/bin/claude');
+    expect(mock.api.detectCli).toHaveBeenCalledWith('/isolated/bin/claude', 'claude');
     expect(row('Codex').getByRole('button', { name: en.onboarding.setup.enabled })).toBeTruthy();
   });
   it('does not undo a newer disable when an install finishes', async () => {
@@ -381,7 +381,7 @@ describe('assistant installation presentation', () => {
   });
   it('an available update keeps Continue and configuration usable', async () => {
     const saved = data(); saved.agents.claude.status = 'ok';
-    mock.api.getBackendRuntime.mockResolvedValue({ installed: true, has_update: true, current_version: '1', latest_version: '2' });
+    mock.api.getBackendRuntime.mockImplementation(async (_name, path) => ({ installed: true, status: 'ok', cli_path: path, resolved_path: path, has_update: true, current_version: '1', latest_version: '2' }));
     const next = vi.fn();
     render(wrap(<AgentDetection data={saved} onNext={next} />));
     await screen.findByRole('button', { name: en.backendLifecycle.statusUpdateAvailable });
@@ -392,7 +392,7 @@ describe('assistant installation presentation', () => {
   });
   it('keeps a failed upgrade from the state row on the card with its reason and output', async () => {
     const saved = data(); saved.agents.codex.status = 'ok';
-    mock.api.getBackendRuntime.mockResolvedValue({ installed: true, has_update: true, current_version: '1', latest_version: '2' });
+    mock.api.getBackendRuntime.mockImplementation(async (_name, path) => ({ installed: true, status: 'ok', cli_path: path, resolved_path: path, has_update: true, current_version: '1', latest_version: '2' }));
     const failure = {
       ok: false, message: 'Could not upgrade Codex.', code: 'npm_leftover_directory', exit_code: 190,
       hint: 'npm left a temporary folder behind from an earlier interrupted update: /usr/local/lib/node_modules/@openai/.codex-lD3lp9Ti. Delete that folder, then try again.',
@@ -414,10 +414,10 @@ describe('assistant installation presentation', () => {
   });
   it('re-detects a CLI a failed upgrade from the state row removed, keeping the reason', async () => {
     const saved = data(); saved.agents.codex.status = 'ok';
-    mock.api.getBackendRuntime.mockResolvedValue({ installed: true, has_update: true, current_version: '1', latest_version: '2' });
+    mock.api.getBackendRuntime.mockImplementation(async (_name, path) => ({ installed: true, status: 'ok', cli_path: path, resolved_path: path, has_update: true, current_version: '1', latest_version: '2' }));
     mock.api.installAgent.mockImplementation(async () => {
-      mock.api.detectCli.mockResolvedValue({ found: false, path: null });
-      mock.api.getBackendRuntime.mockResolvedValue({ installed: false, has_update: false, resolved_path: null });
+      mock.api.detectCli.mockResolvedValue({ found: false, status: 'missing' as const, path: null });
+      mock.api.getBackendRuntime.mockImplementation(async (_name, path) => ({ installed: false, status: 'missing', cli_path: path, has_update: false, resolved_path: null }));
       return { ok: false, message: 'Could not upgrade Codex.', output: 'npm error code ENOTEMPTY' };
     });
     render(wrap(<AgentDetection data={saved} onNext={vi.fn()} />));
@@ -431,9 +431,9 @@ describe('assistant installation presentation', () => {
   it('holds the state row until the chip reads an upgrade back, then offers it again if still behind', async () => {
     const path = '/isolated/bin/codex';
     const saved = data(); saved.agents.codex.status = 'ok'; saved.agents.codex.cli_path = path;
-    const behind = { installed: true, has_update: true, current_version: '1', latest_version: '2', resolved_path: path };
+    const behind = { installed: true, status: 'ok' as const, cli_path: path, has_update: true, current_version: '1', latest_version: '2', resolved_path: path };
     mock.api.getBackendRuntime.mockResolvedValue(behind);
-    mock.api.detectCli.mockResolvedValue({ found: true, path });
+    mock.api.detectCli.mockResolvedValue({ found: true, status: 'ok' as const, path });
     let readBack!: (runtime: typeof behind) => void;
     mock.api.installAgent.mockImplementation(async () => {
       // A native updater can exit zero without moving the version.
@@ -486,9 +486,9 @@ describe('assistant installation presentation', () => {
     fireEvent.keyDown(await screen.findByRole('dialog'), { key: 'Escape' });
     expect(screen.getByRole('button', { name: 'Back' }).hasAttribute('disabled')).toBe(true);
     await act(async () => finishConfig({ agents: { claude: { enabled: true, cli_path: '/isolated/新的路径/claude' } } }));
-    expect(mock.api.detectCli).toHaveBeenCalledWith('/isolated/新的路径/claude');
+    expect(mock.api.detectCli).toHaveBeenCalledWith('/isolated/新的路径/claude', 'claude');
     expect(screen.getByRole('button', { name: 'Back' }).hasAttribute('disabled')).toBe(true);
-    await act(async () => finishDetection({ found: true, path: '/isolated/真实路径/claude' }));
+    await act(async () => finishDetection({ found: true, status: 'ok' as const, path: '/isolated/真实路径/claude' }));
     fireEvent.click(screen.getByRole('button', { name: 'Back' }));
     expect(back).toHaveBeenCalledWith({ agents: expect.objectContaining({ claude: expect.objectContaining({ cli_path: '/isolated/真实路径/claude', status: 'ok' }) }) });
   });
@@ -500,8 +500,8 @@ describe('assistant installation presentation', () => {
     }
     await waitFor(() => expect(screen.getAllByRole('alert')).toHaveLength(3));
     mock.api.detectCli.mockImplementation((name) => name === 'claude'
-      ? Promise.resolve({ found: true, path: '/isolated/external/claude' })
-      : name === 'codex' ? Promise.resolve({ found: false }) : Promise.reject(new Error('Probe unavailable')));
+      ? Promise.resolve({ found: true, status: 'ok' as const, path: '/isolated/external/claude' })
+      : name === 'codex' ? Promise.resolve({ found: false, status: 'missing' as const }) : Promise.reject(new Error('Probe unavailable')));
     fireEvent.click(screen.getByRole('button', { name: en.agentDetection.rescan }));
     await waitFor(() => expect(row('Claude Code').getByRole('button', { name: en.onboarding.setup.enabled })).toBeTruthy());
     expect(row('Claude Code').queryByRole('alert')).toBeNull();
@@ -511,7 +511,7 @@ describe('assistant installation presentation', () => {
     expect(row('OpenCode').getByText('Error: Probe unavailable')).toBeTruthy();
     expect(row('OpenCode').queryByRole('button', { name: en.onboarding.setup.enabled })).toBeNull();
     // A rejected probe retains install evidence; a later missing result shows it again.
-    mock.api.detectCli.mockResolvedValue({ found: false });
+    mock.api.detectCli.mockResolvedValue({ found: false, status: 'missing' as const });
     fireEvent.click(row('OpenCode').getByRole('button', { name: 'Retry' }));
     await waitFor(() => expect(row('OpenCode').getByText('Failed opencode')).toBeTruthy());
     expect(row('OpenCode').getByText('Details opencode')).toBeTruthy();
@@ -603,7 +603,7 @@ describe('assistant installation presentation', () => {
     // Only the retained path resolves, so a probe that fell back to the snapshot is
     // visible twice over: in the call log, and as a backend reported missing again.
     mock.api.detectCli.mockImplementation((binary: string) => Promise.resolve(
-      binary === '/retained/claude' ? { found: true, path: '/retained/claude' } : { found: false }));
+      binary === '/retained/claude' ? { found: true, status: 'ok' as const, path: '/retained/claude' } : { found: false, status: 'missing' as const }));
     mock.api.installAgent.mockResolvedValue({ ok: true, path: '/retained/claude', message: '' });
     const probes = (binary: string) => mock.api.detectCli.mock.calls.filter(([called]) => called === binary).length;
     const publish = vi.fn();
@@ -1345,7 +1345,7 @@ describe('settled wizard enablement follows persistence and latest intent', () =
     const oldRead = pending<ReturnType<typeof stateFor>>();
     mock.api.getBackendConnection.mockImplementation((name) => name === 'claude' ? oldRead.promise : Promise.resolve(stateFor(name)));
     fireEvent.click(screen.getByRole('button', { name: en.agentDetection.rescan }));
-    await waitFor(() => expect(mock.api.detectCli).toHaveBeenCalledWith('claude'));
+    await waitFor(() => expect(mock.api.detectCli).toHaveBeenCalledWith('claude', 'claude'));
     const off = pending<unknown>(); const on = pending<unknown>();
     mock.api.mutateConfig.mockReturnValueOnce(off.promise).mockReturnValueOnce(on.promise);
     fireEvent.click(checkbox); fireEvent.click(checkbox);
@@ -1374,7 +1374,7 @@ describe('settled wizard enablement follows persistence and latest intent', () =
     const early = pending<ReturnType<typeof stateFor>>();
     mock.api.getBackendConnection.mockImplementation((name) => name === 'claude' ? early.promise : Promise.resolve(stateFor(name)));
     fireEvent.click(screen.getByRole('button', { name: en.agentDetection.rescan }));
-    await waitFor(() => expect(mock.api.detectCli).toHaveBeenCalledWith('claude'));
+    await waitFor(() => expect(mock.api.detectCli).toHaveBeenCalledWith('claude', 'claude'));
     mock.api.getBackendConnection.mockImplementation(async (name) => stateFor(name));
     await failedToggle(checkbox);
     await act(async () => early.resolve(stateFor('claude')));

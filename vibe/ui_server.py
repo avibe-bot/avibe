@@ -6780,12 +6780,19 @@ def web_push_test():
     )
 
 
-@app.route("/api/cli/detect")
-def cli_detect():
-    from vibe import api
+@app.get("/api/cli/detect", include_in_schema=False)
+async def cli_detect(starlette_request: FastAPIRequest):
+    async def handler():
+        from vibe import api
 
-    binary = request.args.get("binary", "")
-    return jsonify(api.detect_cli(binary))
+        backend = request.args.get("backend")
+        if backend is not None and backend not in NATIVE_CLI_BACKENDS:
+            return jsonify({"ok": False, "error": "unsupported_backend"}), 400
+        response = jsonify(await api.detect_cli_async(request.args.get("binary", ""), backend))
+        response.headers["Cache-Control"] = "private, no-store"
+        return response
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
 
 
 @app.route("/api/slack/manifest")
@@ -8243,15 +8250,18 @@ async def backend_connection(name: str, starlette_request: FastAPIRequest):
     return await _dispatch_native_ui_request(starlette_request, handler)
 
 
-@app.route("/api/backend/<name>/runtime")
-def backend_runtime(name):
-    """Return lifecycle info (version, update, process status) for a backend."""
-    if name not in NATIVE_CLI_BACKENDS:
-        return jsonify({"ok": False, "error": f"Unknown backend: {name}"}), 400
+@app.get("/api/backend/{name}/runtime", include_in_schema=False)
+async def backend_runtime(name: str, starlette_request: FastAPIRequest):
+    async def handler():
+        if name not in NATIVE_CLI_BACKENDS:
+            return jsonify({"ok": False, "error": "unsupported_backend"}), 400
+        from vibe import api
 
-    from vibe import api
+        response = jsonify(await api.get_backend_runtime_async(name, request.args.get("cli_path")))
+        response.headers["Cache-Control"] = "private, no-store"
+        return response
 
-    return jsonify(api.get_backend_runtime(name))
+    return await _dispatch_native_ui_request(starlette_request, handler)
 
 
 @app.route("/api/backend/<name>/restart", methods=["POST"])

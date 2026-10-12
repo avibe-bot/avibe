@@ -1,4 +1,4 @@
-import type { BackendConnectionState, VibeAgentBrief, VibeAgentFull } from '../../context/ApiContext';
+import type { BackendConnectionState, VibeAgentBrief, VibeAgentFull, CliStatus } from '../../context/ApiContext';
 import type { CollectionReadAuthority } from '../settings/models/collectionReadAuthority';
 import { runtimeIsRunning } from '../settings/models/runtimeLifecycle';
 import type { AgentSupply, RuntimeDependency, SupplyStatus } from '../settings/models/types';
@@ -50,8 +50,8 @@ export type EntryEvidence = {
   supplies: readonly AgentSupply[];
   /** Null when the Hub runtime read threw or did not answer. Unread is not "running". */
   runtime: RuntimeDependency | null;
-  /** Per-backend `detectCli(configured path)` result. Missing keys are not found. */
-  cliFound: Readonly<Record<AssistantId, boolean>>;
+  /** Per-backend detection health for that configured path; missing evidence is not healthy. */
+  cliHealthy: Readonly<Record<AssistantId, boolean>>;
 };
 
 /**
@@ -108,14 +108,14 @@ const backendUsable = (
   backend: AgentBackendId,
   connection: BackendConnectionState | undefined,
   supply: AgentSupply | undefined,
-  cliFound: Readonly<Record<AssistantId, boolean>>,
+  cliHealthy: Readonly<Record<AssistantId, boolean>>,
 ): boolean =>
   connection !== undefined && connection.ok
   && connection.enabled
   && connection.ready && connection.application === 'applied'
   && supply !== undefined
   && (isBuiltinBackend(backend)
-    || (supply.cli_present === true && cliFound[backend as AssistantId] === true));
+    || (supply.cli_present === true && cliHealthy[backend as AssistantId] === true));
 
 /**
  * Whether the server can route THIS named Agent to a model right now.
@@ -142,7 +142,7 @@ export function entryCandidates(evidence: EntryEvidence): EntryCandidate[] {
   const connectionOf = new Map(evidence.connections.map((connection) => [connection.backend, connection]));
   const supplyOf = new Map(evidence.supplies.map((supply) => [supply.backend, supply]));
   return ENTRY_ORDER.flatMap((backend) => {
-    if (!backendUsable(backend, connectionOf.get(backend), supplyOf.get(backend), evidence.cliFound)) return [];
+    if (!backendUsable(backend, connectionOf.get(backend), supplyOf.get(backend), evidence.cliHealthy)) return [];
     return evidence.agents
       .filter((agent) => agent.backend === backend && usableAgent(agent))
       .flatMap((agent) => {
@@ -213,7 +213,7 @@ export type EntryGateDeps = {
     name: string,
     params?: { cache?: boolean },
   ) => Promise<{ ok: boolean; agent: VibeAgentFull; default_agent_name: string | null }>;
-  detectCli: (binary: string) => Promise<{ found?: boolean; path?: string }>;
+  detectCli: (binary: string, backend: AssistantId) => Promise<{ status: CliStatus }>;
 };
 
 export type EntryReadOptions = {
@@ -257,8 +257,8 @@ export async function readEntryEvidence(
     asSettled(deps.listAgents()),
     Promise.allSettled(ASSISTANT_ORDER.map(async (backend) => {
       const path = configuredCliPath(options.config, backend);
-      const detected = await deps.detectCli(path);
-      return { backend, found: detected?.found === true };
+      const detected = await deps.detectCli(path, backend);
+      return { backend, healthy: detected?.status === 'ok' };
     })),
   ]);
   if (supplyOutcome.status === 'fulfilled' && supplyOutcome.value.kind === 'stale') return null;
@@ -270,9 +270,9 @@ export async function readEntryEvidence(
     : { ok: false, agents: [] as VibeAgentBrief[], default_agent_name: null };
   const listed = agents.ok ? agents.agents : [];
   const targets = agents.ok ? await readSetupTargets(listed, deps) : [];
-  const cliFound = noneFound();
+  const cliHealthy = noneFound();
   for (const result of cliResults) {
-    if (result.status === 'fulfilled') cliFound[result.value.backend] = result.value.found;
+    if (result.status === 'fulfilled') cliHealthy[result.value.backend] = result.value.healthy;
   }
   return {
     agentsRead: agents.ok,
@@ -284,6 +284,6 @@ export async function readEntryEvidence(
     suppliesRead: supplies !== null,
     supplies: supplies ?? [],
     runtime: runtimeOutcome.status === 'fulfilled' ? runtimeOutcome.value : null,
-    cliFound,
+    cliHealthy,
   };
 }

@@ -132,8 +132,8 @@ beforeEach(() => {
     return fresh();
   });
   serveConfig(baseConfig());
-  mock.api.detectCli.mockResolvedValue({ found: true, path: '/测试/bin/assistant' });
-  mock.api.getBackendRuntime.mockResolvedValue({ installed: true, has_update: false });
+  mock.api.detectCli.mockResolvedValue({ found: true, status: 'ok' as const, path: '/测试/bin/assistant' });
+  mock.api.getBackendRuntime.mockImplementation(async (_backend, path) => ({ installed: true, status: 'ok', cli_path: path, resolved_path: path, has_update: false }));
   mock.api.getBackendConnection.mockImplementation((backend) => Promise.resolve({ ok: true, backend, enabled: true, installed: true, auth: backend === 'claude' ? 'api_key' : 'none', application: running ? 'applied' : 'stopped', ready: backend === 'claude' && running, entry_eligible: backend === 'claude', permission_required: backend === 'opencode' }));
   serveAgents('missing-codex', [CLAUDE_AGENT]);
   mock.api.setDefaultVibeAgent.mockImplementation(async (name: string) => {
@@ -241,7 +241,7 @@ describe('the correlated entry gate', () => {
     serveAgents(null, [CLAUDE_AGENT, { name: 'codex-agent', backend: 'codex', enabled: true, archived: false, source: 'builtin' }]);
     mock.models.listAgents.mockResolvedValue([hubSupply('claude', []), hubSupply('codex', [route('codex-agent')])]);
     const enter = await setup();
-    mock.api.detectCli.mockImplementation(async (binary: string) => ({ found: binary !== 'codex', path: binary }));
+    mock.api.detectCli.mockImplementation(async (binary: string) => ({ found: binary !== 'codex', status: binary !== 'codex' ? 'ok' as const : 'missing' as const, path: binary }));
     fireEvent.click(enter);
     await refusal(en.onboarding.connection.modelUnavailable);
   });
@@ -307,7 +307,7 @@ describe('the correlated entry gate', () => {
     mock.api.detectCli.mockClear();
     fireEvent.click(enter);
     await screen.findByTestId('destination');
-    expect(mock.api.detectCli).toHaveBeenCalledWith('/opt/custom/claude-bin');
+    expect(mock.api.detectCli).toHaveBeenCalledWith('/opt/custom/claude-bin', 'claude');
     expect(mock.api.detectCli.mock.invocationCallOrder[0]).toBeLessThan(mock.api.mutateConfig.mock.invocationCallOrder[0]);
   });
 
@@ -322,6 +322,7 @@ describe('the correlated entry gate', () => {
     const enter = await setup();
     mock.api.detectCli.mockImplementation(async (binary: string) => ({
       found: binary !== '/opt/custom/claude-bin',
+      status: binary !== '/opt/custom/claude-bin' ? 'ok' as const : 'missing' as const,
       path: binary,
     }));
     fireEvent.click(enter);

@@ -11,7 +11,7 @@ import { SettingsPageShell } from './SettingsPageShell';
 import { hubSupplyBlocks, type HubSupplyBlock } from './models/featureFlags';
 import { modelsApi } from './models/modelsApi';
 import { agentsWithoutModel } from './models/supply';
-import { useApi } from '@/context/ApiContext';
+import { useApi, type CliStatus, type BackendRuntimeInfo } from '@/context/ApiContext';
 import { useToast } from '@/context/ToastContext';
 import { AGENT_BACKENDS, DEFAULT_AGENT_STATE, getBackendUiMeta } from '@/lib/agentBackends';
 import { configChanges } from '@/lib/configMutations';
@@ -25,12 +25,11 @@ import { errorMessage } from '@/lib/errorMessage';
 // detect, install, and permission profile live on the provider page now —
 // keep the level-1 page about backend availability, not Agent defaults.
 
-type CliStatus = 'unknown' | 'ok' | 'missing';
-
 type AgentState = {
   enabled: boolean;
   cli_path?: string;
   status: CliStatus;
+  detectedRuntime?: BackendRuntimeInfo;
 };
 
 const DEFAULT_AGENTS = DEFAULT_AGENT_STATE as Record<string, AgentState>;
@@ -102,7 +101,7 @@ export const SettingsBackendsPage: React.FC = () => {
       const results = await Promise.all(
         Object.entries(agents).filter(([name]) => getBackendUiMeta(name).capabilities.supports_cli).map(async ([name, agent]) => {
           try {
-            const result = await api.detectCli(agent.cli_path || name);
+            const result = await api.detectCli(agent.cli_path || name, name);
             return [name, result] as const;
           } catch {
             return [name, null] as const;
@@ -117,7 +116,8 @@ export const SettingsBackendsPage: React.FC = () => {
           next[name] = {
             ...next[name],
             cli_path: result.path || next[name].cli_path,
-            status: result.found ? 'ok' : 'missing',
+            status: result.status,
+            detectedRuntime: result.runtime,
           };
         }
         return next;
@@ -151,13 +151,14 @@ export const SettingsBackendsPage: React.FC = () => {
 
   const refreshDetectionFor = async (name: string, cli_path?: string) => {
     try {
-      const result = await api.detectCli(cli_path || name);
+      const result = await api.detectCli(cli_path || name, name);
       setAgents((prev) => ({
         ...prev,
         [name]: {
           ...prev[name],
           cli_path: result.path || prev[name].cli_path,
-          status: result.found ? 'ok' : 'missing',
+          status: result.status,
+            detectedRuntime: result.runtime,
         },
       }));
     } catch {
@@ -205,7 +206,15 @@ export const SettingsBackendsPage: React.FC = () => {
                       enabled={agent.enabled}
                       cliStatus={agent.status}
                       cliPath={agent.cli_path || ''}
+                      detectedRuntime={agent.detectedRuntime}
                       onChanged={async (info) => {
+                        const observed = info?.observation;
+                        if (observed) {
+                          setAgents((prev) => observed.cli_path === (prev[meta.id].cli_path || meta.id)
+                            ? { ...prev, [meta.id]: { ...prev[meta.id], cli_path: observed.resolved_path || prev[meta.id].cli_path,
+                              status: observed.status || 'unknown', detectedRuntime: observed } } : prev);
+                          return;
+                        }
                         const installedPath = info?.installedPath || null;
                         if (installedPath) {
                           setAgents((prev) => ({
