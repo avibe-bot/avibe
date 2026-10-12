@@ -854,10 +854,15 @@ Each family stays at its final value. Positive jitter adds at most 20%, capped
 at that family's local maximum, and never makes a local delay shorter. A valid
 `Retry-After` integer or HTTP date uses the response-header receipt instant,
 not body completion; admission uses the later of upstream advice and local
-backoff. Malformed, past, oversized, and non-ASCII advice is ignored with a
-redacted diagnostic. Scheduling and window duration are monotonic; aware UTC
-timestamps are read projections. Network state is never persisted. Existing
-shaped cooldown persistence remains compatible with earlier releases.
+backoff. Without that header, a usage cap's own reset in the failed response's
+error envelope is the same advice: `resets_at` (Unix seconds) as an HTTP date,
+else `resets_in_seconds` as an integer. A ChatGPT subscription past its cap
+answers 429 `usage_limit_reached` with both, so it cools as quota exhaustion
+until its reset instead of being re-probed. Malformed, past, oversized, and
+non-ASCII advice is ignored with a redacted diagnostic. Scheduling and window
+duration are monotonic; aware UTC timestamps are read projections. Network
+state is never persisted. Existing shaped cooldown persistence remains
+compatible with earlier releases.
 Direct `native_cli` failures do not enter this HTTP coordinator: no Hub handle
 can prove their later success. They retain fixed native cooldowns (server 30,
 rate 60, quota 300 seconds), existing deadline-based launch eligibility and

@@ -92,6 +92,22 @@ describe('sourceStatePresentation', () => {
     });
   });
 
+  it('names a used-up quota cycle instead of counting down to its reset', () => {
+    const now = Date.parse('2026-10-12T17:32:58Z');
+    const cooling = (detailKey: SourceState['detail_key'], retryAt: string) => sourceStatePresentation(
+      state('cooldown', { retry_at: retryAt, detail_key: detailKey }), 'card', 'en', now,
+    );
+    expect(cooling('models.source.cooldown.quota_exhausted', '2026-10-18T05:33:22Z')).toEqual({
+      key: 'models.source.cooldown.quota_exhausted',
+      textClass: 'model-hub-ink-gold',
+      dotClass: 'bg-gold',
+    });
+    expect(cooling('models.source.cooldown.quota_exhausted', '2026-10-12T17:30:00Z').key)
+      .toBe('settings.models.upstream.state.unavailableDue');
+    expect(cooling('models.source.cooldown.rate_limited', '2026-10-12T17:33:58Z').key)
+      .toBe('settings.models.upstream.state.unavailableRetry');
+  });
+
   it('does not imply another request ran after a cooldown deadline passed', () => {
     expect(sourceStatePresentation(
       state('cooldown', { retry_at: '2026-08-11T09:59:00Z' }),

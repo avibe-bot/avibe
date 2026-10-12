@@ -5,9 +5,10 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import time
 from contextlib import asynccontextmanager
 from dataclasses import replace
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import aiohttp
@@ -402,6 +403,38 @@ def test_failure_persistence_error_keeps_temporary_admission_and_original_termin
         with pytest.raises(ModelHubError) as terminal:
             await service.resolve(backend=backend, model_id=models[backend], request={})
         assert [blocker.reason for blocker in terminal.value.blockers] == ["cooldown"]
+    asyncio.run(run())
+
+
+def test_a_usage_cap_cools_its_source_as_quota_until_the_upstream_reset(tmp_path):
+    """MH-RETRY-ADVICE-002: a subscription's usage cap waits for its own reset, not a 60 s rate limit."""
+    async def run():
+        service, clock, models = configured_service(tmp_path)
+        # A ChatGPT subscription past its weekly cap, as the engine relays it:
+        # the upstream body unchanged and no Retry-After header.
+        resets_in = 475224
+        resets_at = int(time.time()) + resets_in
+        body = json.dumps({"error": {
+            "type": "usage_limit_reached", "message": "The usage limit has been reached",
+            "plan_type": "prolite", "resets_at": resets_at, "eligible_promo": None,
+            "limit_window_minutes": 10080, "resets_in_seconds": resets_in,
+        }}, separators=(",", ":"))
+        calls = []
+
+        async def respond(request):
+            calls.append(await request.json())
+            return web.Response(status=429, text=body, content_type="application/json")
+
+        async with loopback_engine(tmp_path, service, respond):
+            async with gateway_client(service, "codex", models["codex"]) as (_gateway, client, url, headers):
+                async with client.post(url, headers=headers, json={"model": "shared-model"}) as response:
+                    ending = (await response.json())["error"]
+                    assert (ending["code"], ending["cause"]) == (RECOVERY_EXHAUSTED_CODE, "quota_exhausted")
+        state = service.store.load().sources[0].state
+        assert (state.status, state.detail_key) == ("cooldown", "models.source.cooldown.quota_exhausted")
+        assert state.retry_at == datetime.fromtimestamp(resets_at, timezone.utc).isoformat()
+        # The cap is not probed again inside the turn's recovery window.
+        assert len(calls) == 1 and clock.delays == []
     asyncio.run(run())
 
 
