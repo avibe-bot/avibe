@@ -74,6 +74,14 @@ an agent argument. Session end/archive, native Computer Use stop, or disabling
 the toggle revokes it. Consent belongs in the existing ephemeral session/lease
 path, not a durable allowlist file.
 
+The toggle itself must not be reachable through Computer Use. The recommended
+owner action is an OS-secure gesture outside the targetable desktop surface,
+such as a system-authenticated confirmation; an equivalent design may exclude
+every consent control from every Computer Use route at the daemon boundary.
+Shell UI visibility and same-user IPC authentication alone do not prove that a
+human owner acted. If neither an OS-secure gesture nor an enforced exclusion
+exists, foreground remains refused.
+
 Every-call consent is the strongest prompt model, but it is incompatible with
 unattended IM and scheduled work: the required human may not be at the
 machine, and a prompt cannot safely become an agent retry loop. A per-app
@@ -100,10 +108,13 @@ response is accepted only by that Controller instance, and an agent-originated
 request receives no capability. If the OS cannot enforce both peer identities,
 foreground remains refused.
 
-The agent cannot mint, extend, or reuse a challenge or capability. Missing
-acknowledgement, stale shell generation, IPC loss, native stop, session
-end/archive, or shell-lock loss revokes the grant and fails closed. The exact
-IPC messages require owner and source review. The shell-origin proof should use
+The agent cannot mint, extend, or reuse a challenge or capability. Capabilities
+carry the live grant epoch and revocation generation; the Controller/daemon
+rechecks both before activation and immediately before posting HID. Disabling
+the toggle, ending the session, native Stop, shell-lock loss, or any generation
+change invalidates already-issued capabilities. Missing acknowledgement, stale
+shell generation, or IPC loss also revokes the grant and fails closed. The
+exact IPC messages require owner and source review. The shell-origin proof should use
 an OS-enforced native-shell identity, such as a shell-only signing key or
 keychain/secure-enclave key whose use is restricted to the signed shell. The
 Controller verifies the signed challenge and binds its key generation to the
@@ -173,27 +184,39 @@ After dispatch it stops restoration rather than overwriting newer human state,
 reports interruption by owner activity, and leaves the attention indicator
 visible.
 
-The activity fence alone cannot protect owner keystrokes during the
-focus-stealing interval: a key can reach the target before a later check sees
-it. Before activation, the shell must establish a bounded OS-level owner-input
-guard that suppresses owner keyboard events while the target is frontmost and
-replays them to the recorded prior target in order after restoration, or provide
-an equivalent OS guarantee. The guard must be acknowledged before activation;
-if capture, replay, or acknowledgement is unavailable, Route B remains
-refused. This guard covers owner input only and never authorizes agent typing.
+The activity fence alone cannot protect owner input during the focus-stealing
+interval: a keyboard, pointer-button, or scroll event can reach the target
+before a later check sees it. Before activation, the shell must establish a
+bounded OS-level owner-input guard that suppresses all owner keyboard,
+pointer-button, and scroll events while the target is frontmost and replays
+them to the recorded prior target in order after restoration, or provide an
+equivalent OS guarantee. The guard must cover the entire interval and be
+acknowledged before activation; if capture, replay, or acknowledgement is
+unavailable, Route B remains refused. This guard covers owner input only and
+never authorizes agent typing.
+
+Buffered owner input has a bounded terminal policy. The shell must verify the
+recorded process-start identity and native window before replay. If that target
+cannot be verified, restoration is interrupted, or any buffered event cannot be
+replayed safely, the shell must retain the events in an owner-visible attention
+state and enter quarantine; it must not send them to a replacement target or
+silently discard them. The owner must explicitly resolve that state.
 
 If the prior app/window exited, moved to an unaddressable workspace, or cannot
 be verified, the driver must not guess. It should make an independent bounded
 pointer-restoration attempt when possible, return
 `foreground_restoration_failed`, and enter a shell/Controller-owned quarantine
 for the whole desktop until the owner resolves the attention state. The
-quarantine is outside the disposable driver: it survives daemon shutdown and
-new daemon generations, and every generation must consult it before foreground
-admission. It is ephemeral runtime state, not a new product state file. This
-covers every session and foreground call; Route A remains governed by its
-existing rules. The driver must not retry, choose another target, or claim the
-input was undone. The same desktop quarantine applies to a post-forward
-transport failure with an unknown outcome or restoration state.
+quarantine is outside the disposable driver: every daemon generation must
+consult it before foreground admission. It must also survive a shell or
+Controller restart after an unclean foreground operation. The recommended
+marker is the existing persisted Computer Use lifecycle/attention state, with a
+fresh process refusing foreground until the owner explicitly clears and
+re-arms it; this design adds no Route B-specific state file. This covers every
+session and foreground call; Route A remains governed by its existing rules.
+The driver must not retry, choose another target, or claim the input was undone.
+The same desktop quarantine applies to a post-forward transport failure with an
+unknown outcome or restoration state.
 
 ## User-visible indication
 
@@ -255,7 +278,7 @@ exact target in the same session; carry `capture_id`; do not retry blindly;
 request foreground only when the owner toggle is active; and verify effect and
 restoration afterward. It must say that agents cannot grant consent and
 foreground is never an implicit fallback. Results should distinguish dispatch
-mode, target effect (`verified` or `unverifiable`), and restoration (`restored`
+mode, target effect (`confirmed` or `unverifiable`), and restoration (`restored`
 or a concrete failure); transport acknowledgement alone is not success.
 
 ## Windows and Q6
