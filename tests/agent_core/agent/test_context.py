@@ -185,22 +185,25 @@ def make_request(messages=(), *, system="system", tools=(), endpoint=ENDPOINT, m
 
 
 @pytest.mark.parametrize(
-    "window,input_limit,hop_output,configured,output,margin,threshold,keep",
+    "window,input_limit,hop_output,configured,output,margin,threshold,keep,checkpoint",
     [
-        (200_000, None, 32_000, 64_000, 32_000, 8_000, 160_000, 20_000),
-        (1_000_000, None, 32_000, 32_000, 32_000, 30_000, 900_000, 20_000),
-        (None, None, None, 8_192, 8_192, 8_000, 111_808, 20_000),  # unknown: W = 128,000, O = 8,192
-        (400_000, 272_000, 128_000, 128_000, 128_000, 12_000, 132_000, 20_000),
-        (32_000, None, 64_000, 4_096, 4_096, 4_000, 23_904, 5_976),  # O is the request's, capped by the Agent
-        (8_000, None, 2_000, 2_000, 2_000, 1_000, 5_000, 1_250),  # M is at most W / 8
+        (200_000, None, 32_000, 64_000, 32_000, 8_000, 160_000, 20_000, 32_000),  # a checkpoint asks for all of O
+        (1_000_000, None, 32_000, 32_000, 32_000, 30_000, 900_000, 20_000, 32_000),
+        (1_000_000, None, 128_000, 128_000, 128_000, 30_000, 842_000, 20_000, 64_000),  # and at most 64,000
+        (None, None, None, 8_192, 8_192, 8_000, 111_808, 20_000, 8_192),  # unknown: W = 128,000, O = 8,192
+        (400_000, 272_000, 128_000, 128_000, 128_000, 12_000, 132_000, 20_000, 64_000),
+        (200_000, None, 16_000, 64_000, 16_000, 8_000, 176_000, 20_000, 16_000),
+        (256_000, None, 64_000, 64_000, 64_000, 8_000, 184_000, 20_000, 64_000),
+        (32_000, None, 64_000, 4_096, 4_096, 4_000, 23_904, 5_976, 4_096),  # O is the request's, capped by the Agent
+        (8_000, None, 2_000, 2_000, 2_000, 1_000, 5_000, 1_250, 2_000),  # M is at most W / 8
     ],
 )
 def test_limits_follow_the_frozen_formula_from_the_route_capabilities(
-    window, input_limit, hop_output, configured, output, margin, threshold, keep
+    window, input_limit, hop_output, configured, output, margin, threshold, keep, checkpoint
 ):
     capabilities = ModelCapabilities(context_window=window, input_limit=input_limit, max_output_tokens=hop_output)
     assert output_tokens(capabilities, configured) == output
-    assert checkpoint_max_tokens(capabilities, configured) == min(16_000, output)
+    assert checkpoint_max_tokens(capabilities, configured) == checkpoint
     plan = budget(make_request(system="", max_tokens=output), capabilities, transcript=())
     assert (plan.output, plan.margin, plan.threshold, plan.keep) == (output, margin, threshold, keep)
     limit = input_limit or window or 128_000

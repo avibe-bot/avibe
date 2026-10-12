@@ -92,7 +92,8 @@ CLEARED_PLACEHOLDER = (
     "[Old tool result cleared to save context. Re-run the tool or re-read the file if you need it again.]"
 )
 
-CHECKPOINT_MAX_TOKENS = 16_000
+#: A checkpoint request asks for at most this many output tokens, its reasoning included (section 6).
+CHECKPOINT_MAX_TOKENS = 64_000
 CHECKPOINT_TRUNCATED = (
     "[Output truncated to fit this checkpoint turn: showing about {shown} of {total} tokens. "
     "Read a smaller range if you need more.]"
@@ -366,7 +367,7 @@ def output_tokens(capabilities: ModelCapabilities, configured: int) -> int:
 
 
 def checkpoint_max_tokens(capabilities: ModelCapabilities, configured: int) -> int:
-    """A checkpoint request's ``max_tokens``: ``min(16,000, O)`` (section 6)."""
+    """A checkpoint request's ``max_tokens``: ``min(64,000, O)`` (section 6)."""
     return min(CHECKPOINT_MAX_TOKENS, output_tokens(capabilities, configured))
 
 
