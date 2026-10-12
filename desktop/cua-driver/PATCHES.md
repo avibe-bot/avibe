@@ -27,6 +27,14 @@ native `mouseDown`/`mouseUp` delivery, so the acceptance can prove one raw
 mouse pair and unchanged default behavior without relying on the tool result
 alone.
 
+For embedded serve mode, the patch also makes parent-liveness shutdown
+terminal: stdin EOF removes only the socket bound by that process, removes its
+PID file, aborts accepted connection tasks, and drops the Tokio runtime without
+waiting for non-cancellable platform work. The terminal path leaves process
+globals intact because abandoned tasks may still reference them until process
+exit. Explicit daemon shutdown keeps the existing graceful drain and global
+teardown.
+
 The upstream investigation found no consumable maintainer-accepted contract
 with these semantics. The relevant discussions are:
 
@@ -42,11 +50,12 @@ contract, and upgrade plan are duplicated in `sources.json`. The release
 provenance uses schema 2 and includes those hashes plus the prepared binary
 hash and post-signing packaged hash.
 
-When upstream exposes an opt-in raw `count=1` macOS click selector with the
-same default-compatible contract, remove this patch and pin the upstream
-release. Otherwise, rebase the patch onto the next pinned source commit,
-rerun the fixture acceptance, refresh the source and snapshot hashes, and
-review the Avibe forwarding admission again.
+When upstream exposes both an opt-in raw `count=1` macOS click selector with
+the same default-compatible contract and terminal embedded parent-liveness
+cleanup, remove this patch and pin the upstream release. Otherwise, rebase the
+patch onto the next pinned source commit, rerun the fixture and lifecycle
+acceptance, refresh the source and snapshot hashes, and review the Avibe
+forwarding admission again.
 
 The bounded foreground mode remains deferred. It requires separate evidence
 for apps that reject both AX actions and background synthetic events; it is

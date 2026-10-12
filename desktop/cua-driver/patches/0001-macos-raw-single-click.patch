@@ -404,3 +404,258 @@ index 4621a4627..f8f0125ce 100644
  // Opt-in windows for the persistent exact-window activation certification.
  // Ordinary harness launches remain byte-for-byte and behaviorally unchanged.
  final class BringToFrontMatrixWindows {
+diff --git a/libs/cua-driver/rust/crates/cua-driver/src/serve.rs b/libs/cua-driver/rust/crates/cua-driver/src/serve.rs
+index b9637489..51b62d4c 100644
+--- a/libs/cua-driver/rust/crates/cua-driver/src/serve.rs
++++ b/libs/cua-driver/rust/crates/cua-driver/src/serve.rs
+@@ -931,2 +931,8 @@ mod peer_authentication_tests {
+ /// This is `async` and must be called from a tokio runtime.
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub enum ServeShutdown {
++    Requested,
++    ParentLiveness,
++}
++
+ #[cfg(unix)]
+@@ -936,3 +942,3 @@ pub async fn run_serve(
+     pid_file_path: Option<&str>,
+-) -> anyhow::Result<()> {
++) -> anyhow::Result<ServeShutdown> {
+     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+@@ -996,3 +1002,2 @@ pub async fn run_serve(
+-
+-    loop {
++    let shutdown = loop {
+         tokio::select! {
+@@ -1381,3 +1387,3 @@ pub async fn run_serve(
+                 eprintln!("Cua Driver daemon shutting down.");
+-                break;
++                break ServeShutdown::Requested;
+             }
+@@ -1385,5 +1391,18 @@ pub async fn run_serve(
+                 eprintln!("Cua Driver embedded host closed its lifetime pipe; shutting down.");
+-                break;
++                break ServeShutdown::ParentLiveness;
+             }
+         }
++    };
++
++    if shutdown == ServeShutdown::ParentLiveness {
++        // The owning shell is gone, so no accepted request may keep this
++        // embedded helper alive. Remove only the endpoint this listener bound,
++        // then abandon in-flight work without waiting for platform calls or
++        // blocking-pool tasks that cannot be cancelled.
++        remove_owned_socket(socket_path, bound_socket);
++        if let Some(pid_path) = pid_file_path {
++            let _ = std::fs::remove_file(pid_path);
++        }
++        connection_tasks.abort_all();
++        return Ok(shutdown);
+     }
+@@ -1404,3 +1423,2 @@ pub async fn run_serve(
+-
+-    Ok(())
++    Ok(shutdown)
+ }
+@@ -1663,3 +1682,3 @@ pub async fn run_serve(
+     pid_file_path: Option<&str>,
+-) -> anyhow::Result<()> {
++) -> anyhow::Result<ServeShutdown> {
+     use std::os::windows::io::AsRawHandle as _;
+@@ -2175,3 +2194,3 @@ pub async fn run_serve(
+         Some(error) => Err(error),
+-        None => Ok(()),
++        None => Ok(ServeShutdown::Requested),
+     }
+@@ -2221,3 +2240,3 @@ pub async fn run_serve(
+     _pid_file_path: Option<&str>,
+-) -> anyhow::Result<()> {
++) -> anyhow::Result<ServeShutdown> {
+     anyhow::bail!("cua-driver serve is not supported on this platform");
+@@ -2285,5 +2304,12 @@ pub fn run_serve_cmd(
+     let result = rt.block_on(run_serve(sdk, &socket_path, pid_file_path.as_deref()));
+-    rt.shutdown_timeout(std::time::Duration::from_secs(30));
+-    cua_driver_core::session_authorization::release_configured_registry_for_shutdown();
+-    cua_driver_core::session::release_process_state_for_shutdown();
++    if matches!(result.as_ref(), Ok(&ServeShutdown::ParentLiveness)) {
++        // Accepted tasks and blocking-pool work may still reference process
++        // globals. The owning host is gone, so abandon the runtime and let
++        // process exit reclaim those globals instead of clearing them first.
++        rt.shutdown_background();
++    } else {
++        rt.shutdown_timeout(std::time::Duration::from_secs(30));
++        cua_driver_core::session_authorization::release_configured_registry_for_shutdown();
++        cua_driver_core::session::release_process_state_for_shutdown();
++    }
+     if let Err(e) = result {
+@@ -2571,2 +2595,169 @@ mod socket_tests {
+-
++#[cfg(all(test, unix))]
++mod parent_liveness_tests {
++    use super::{run_serve_cmd, send_request, DaemonRequest};
++    use async_trait::async_trait;
++    use cua_driver_core::protocol::ToolResult;
++    use cua_driver_core::tool::{Tool, ToolDef, ToolRegistry};
++    use serde_json::Value;
++    use std::process::{Command, Stdio};
++    use std::sync::OnceLock;
++    use std::time::{Duration, Instant};
++
++    const CHILD_ENV: &str = "CUA_DRIVER_PARENT_LIVENESS_TEST_CHILD";
++    const SOCKET_ENV: &str = "CUA_DRIVER_PARENT_LIVENESS_TEST_SOCKET";
++    const PID_FILE_ENV: &str = "CUA_DRIVER_PARENT_LIVENESS_TEST_PID_FILE";
++    const STARTED_ENV: &str = "CUA_DRIVER_PARENT_LIVENESS_TEST_STARTED";
++
++    struct BlockingTool;
++
++    static BLOCKING_TOOL_DEF: OnceLock<ToolDef> = OnceLock::new();
++
++    #[async_trait]
++    impl Tool for BlockingTool {
++        fn def(&self) -> &ToolDef {
++            BLOCKING_TOOL_DEF.get_or_init(|| ToolDef {
++                name: "health_report".into(),
++                description: "test-only non-cancellable platform call".into(),
++                input_schema: serde_json::json!({"type": "object"}),
++                read_only: true,
++                destructive: false,
++                idempotent: true,
++                open_world: false,
++            })
++        }
++
++        async fn invoke(&self, _args: Value) -> ToolResult {
++            std::fs::write(
++                std::env::var(STARTED_ENV).expect("started marker path"),
++                "started\n",
++            )
++            .expect("write started marker");
++            std::thread::sleep(Duration::from_secs(60));
++            ToolResult::text("finished")
++        }
++    }
++
++    fn register_blocking_tool(registry: &mut ToolRegistry) {
++        registry.register(Box::new(BlockingTool));
++    }
++
++    fn wait_for_path(path: &std::path::Path, timeout: Duration) {
++        let deadline = Instant::now() + timeout;
++        while Instant::now() < deadline {
++            if path.exists() {
++                return;
++            }
++            std::thread::sleep(Duration::from_millis(20));
++        }
++        panic!("timed out waiting for {}", path.display());
++    }
++
++    #[test]
++    fn parent_liveness_child() {
++        if std::env::var_os(CHILD_ENV).is_none() {
++            return;
++        }
++        let driver =
++            cua_driver_sdk::CuaDriver::create_for_host(cua_driver_sdk::DriverHostOptions {
++                cursor: cursor_overlay::CursorConfig {
++                    enabled: false,
++                    ..cursor_overlay::CursorConfig::default()
++                },
++                host_owns_permission_ux: true,
++                host_bundle_id: Some("com.trycua.parent-liveness-test".into()),
++                claude_code_compatibility: false,
++                prepare_desktop_environment: false,
++                register_host_tools: Some(register_blocking_tool),
++                authorization_host: None,
++                activity_observer: None,
++            });
++        let socket = std::env::var(SOCKET_ENV).expect("socket path");
++        let pid_file = std::env::var(PID_FILE_ENV).expect("pid file path");
++        run_serve_cmd(driver, &socket, Some(&pid_file));
++    }
++
++    #[test]
++    fn parent_liveness_exits_without_waiting_for_blocked_calls_and_unlinks_only_its_socket() {
++        let directory = tempfile::tempdir().expect("temporary directory");
++        let socket = directory.path().join("driver.sock");
++        let pid_file = directory.path().join("driver.pid");
++        let started = directory.path().join("call-started");
++        let unrelated_socket = directory.path().join("unrelated.sock");
++        let unrelated_state = directory.path().join("unrelated-state");
++        let _unrelated_listener =
++            std::os::unix::net::UnixListener::bind(&unrelated_socket).expect("unrelated socket");
++        std::fs::write(&unrelated_state, "preserve\n").expect("unrelated state");
++
++        let home = directory.path().join("home");
++        std::fs::create_dir_all(&home).expect("test home");
++        let mut child = Command::new(std::env::current_exe().expect("test executable"))
++            .args([
++                "--exact",
++                "serve::parent_liveness_tests::parent_liveness_child",
++                "--nocapture",
++            ])
++            .env(CHILD_ENV, "1")
++            .env(SOCKET_ENV, &socket)
++            .env(PID_FILE_ENV, &pid_file)
++            .env(STARTED_ENV, &started)
++            .env("HOME", &home)
++            .env("XDG_CACHE_HOME", home.join(".cache"))
++            .env("XDG_CONFIG_HOME", home.join(".config"))
++            .env("XDG_DATA_HOME", home.join(".local/share"))
++            .env(cua_driver_core::EMBEDDED_ENV, "1")
++            .env(cua_driver_core::PARENT_LIVENESS_STDIN_ENV, "1")
++            .env("CUA_DRIVER_RS_TELEMETRY_ENABLED", "0")
++            .env("CUA_DRIVER_RS_UPDATE_CHECK", "0")
++            .stdin(Stdio::piped())
++            .stdout(Stdio::null())
++            .stderr(Stdio::inherit())
++            .spawn()
++            .expect("spawn test daemon");
++
++        wait_for_path(&socket, Duration::from_secs(10));
++        wait_for_path(&pid_file, Duration::from_secs(10));
++
++        let socket_for_call = socket.to_string_lossy().into_owned();
++        let call = std::thread::spawn(move || {
++            send_request(
++                &socket_for_call,
++                &DaemonRequest {
++                    method: "call".into(),
++                    name: Some("health_report".into()),
++                    args: Some(serde_json::json!({})),
++                    session_id: None,
++                    observation_origin: None,
++                    client_kind: None,
++                },
++            )
++        });
++        wait_for_path(&started, Duration::from_secs(10));
++
++        drop(child.stdin.take());
++        let deadline = Instant::now() + Duration::from_secs(5);
++        let status = loop {
++            if let Some(status) = child.try_wait().expect("poll test daemon") {
++                break status;
++            }
++            if Instant::now() >= deadline {
++                let _ = child.kill();
++                let _ = child.wait();
++                let _ = call.join();
++                panic!("embedded daemon stayed alive after its parent-liveness pipe closed");
++            }
++            std::thread::sleep(Duration::from_millis(20));
++        };
++        let _ = call.join();
++
++        assert!(status.success(), "child test failed: {status}");
++        assert!(!socket.exists(), "owned socket survived parent cleanup");
++        assert!(!pid_file.exists(), "owned pid file survived parent cleanup");
++        assert!(unrelated_socket.exists(), "unrelated socket was removed");
++        assert_eq!(
++            std::fs::read_to_string(unrelated_state).expect("unrelated state"),
++            "preserve\n"
++        );
++    }
++}
++
+ #[cfg(all(test, unix))]

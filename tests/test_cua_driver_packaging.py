@@ -33,7 +33,10 @@ def test_patched_source_manifest_hash_locks_the_divergence() -> None:
         (Path("desktop/cua-driver") / manifest["tool_snapshot"]).read_text()
     )
 
-    assert driver["patch"]["contract"] == "click.click_mode=raw"
+    assert (
+        driver["patch"]["contract"]
+        == "click.click_mode=raw; embedded parent-liveness cleanup"
+    )
     assert driver["patch"]["upstream_refs"]
     assert driver["patch"]["upgrade_plan"]
     assert _SCRIPT["digest"](patch) == driver["patch"]["sha256"]

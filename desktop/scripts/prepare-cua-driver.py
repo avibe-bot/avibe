@@ -69,7 +69,8 @@ def load_manifest(path: Path = SOURCES) -> dict:
         or driver["patch"].get("file")
         != "patches/0001-macos-raw-single-click.patch"
         or SHA256.fullmatch(str(driver["patch"].get("sha256"))) is None
-        or driver["patch"].get("contract") != "click.click_mode=raw"
+        or driver["patch"].get("contract")
+        != "click.click_mode=raw; embedded parent-liveness cleanup"
         or not isinstance(driver["patch"].get("upstream_refs"), list)
         or not driver["patch"]["upstream_refs"]
         or not isinstance(driver["patch"].get("upgrade_plan"), str)
