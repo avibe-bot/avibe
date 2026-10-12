@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import {
   useApi,
@@ -13,6 +13,15 @@ import { onPageReactivated } from '@/lib/pageActivity';
 import { useLatestRef } from '@/lib/useLatestRef';
 
 import { FencedSource } from './fencedSource';
+import { petShell } from './petShell';
+
+export type PetSurfaceEpoch = {
+  binding: string | null;
+  authorizationGeneration: number;
+  isCurrent: () => boolean;
+  /** A pick intentionally changes binding; its queued IPC still needs this gate. */
+  isAuthorizationCurrent: () => boolean;
+};
 
 export const PET_TAIL_LIMIT = 30;
 // Same cadences as the chat page: reconcile a dropped turn.end without ever
@@ -24,6 +33,7 @@ const ACTIVITY_RECONCILE_INTERVAL_MS = 10 * 1000;
 export const SEND_GRACE_MS = 4000;
 
 export type PetSessionData = {
+  epoch: PetSurfaceEpoch;
   session: WorkbenchSession | null;
   /** Project-level chat grant from GET session; null until a read lands. */
   canChat: boolean | null;
@@ -73,6 +83,24 @@ const mergeRow = (tail: Tail, row: WorkbenchMessage): Tail => {
  */
 export function usePetSession(sessionId: string | null, onInvalid: (sessionId: string) => void): PetSessionData {
   const api = useApi();
+  const [authorizationGeneration, setAuthorizationGeneration] = useState(0);
+  const authorizationNow = useRef(0);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
+  const identity = useMemo(() => ({ binding: sessionId, authorizationGeneration }), [sessionId, authorizationGeneration]);
+  const currentIdentity = useLatestRef(identity);
+  const epoch = useMemo<PetSurfaceEpoch>(() => {
+    const isAuthorizationCurrent = () => mounted.current && authorizationNow.current === identity.authorizationGeneration;
+    return {
+      ...identity,
+      isAuthorizationCurrent,
+      isCurrent: () => isAuthorizationCurrent() && currentIdentity.current === identity
+        && (petShell.currentBinding() ?? null) === identity.binding,
+    };
+  }, [identity, currentIdentity]);
 
   const [session, setSession] = useState<WorkbenchSession | null>(null);
   const [canChat, setCanChat] = useState<boolean | null>(null);
@@ -98,7 +126,7 @@ export function usePetSession(sessionId: string | null, onInvalid: (sessionId: s
 
   const sources = useMemo(() => ({
     session: new FencedSource<string, WorkbenchSessionReadResult>({
-      read: (key) => api.getSessionResult(key),
+      read: () => api.getMainSession(),
       apply: (key, { status, session: row, capabilities }) => {
         // A binding is valid only while S is writable: missing, archived and
         // Runtime-owned sessions all clear it.
@@ -146,17 +174,21 @@ export function usePetSession(sessionId: string | null, onInvalid: (sessionId: s
     sources.tail.setKey(sessionId);
     sources.turn.setKey(sessionId);
     if (sessionId) refreshAll();
+    return () => {
+      sources.session.setKey(null);
+      sources.tail.setKey(null);
+      sources.turn.setKey(null);
+    };
   }, [sessionId, sources, refreshAll]);
 
   // Report an invalid binding once, and only while it is still the binding.
   useEffect(() => {
-    if (invalid && invalid === sessionId) onInvalid(invalid);
-  }, [invalid, sessionId, onInvalid]);
+    if (epoch.isCurrent() && invalid && invalid === sessionId) onInvalid(invalid);
+  }, [invalid, sessionId, onInvalid, epoch]);
 
   // Live triggers and the reconnect gap fallback.
   useEffect(() => {
-    if (!sessionId) return undefined;
-    const mine = (id: string | null | undefined) => id === sessionId;
+    const mine = (id: string | null | undefined) => Boolean(sessionId && id === sessionId);
     return api.connectWorkbenchEvents({
       onConnected: refreshAll,
       onMessageNew: (row) => {
@@ -205,10 +237,15 @@ export function usePetSession(sessionId: string | null, onInvalid: (sessionId: s
       // once, then re-read (a refresh also drops any read in flight); a lost
       // session reads 403 and clears the binding.
       onAuthorizationChanged: () => {
+        // Invalidate callbacks synchronously, before React commits the reset.
+        authorizationNow.current += 1;
+        setAuthorizationGeneration(authorizationNow.current);
         setSession(null);
         setCanChat(null);
         setTail(EMPTY_TAIL);
         setTurn(null);
+        setInGrace(false);
+        setInvalid(null);
         refreshAll();
       },
       onQueueUpdated: ({ session_id }) => {
@@ -236,11 +273,12 @@ export function usePetSession(sessionId: string | null, onInvalid: (sessionId: s
   useEffect(() => {
     if (sendCount === 0) return undefined;
     const timer = window.setTimeout(() => {
+      if (!epoch.isCurrent()) return;
       setInGrace(false);
       sources.turn.refresh();
     }, SEND_GRACE_MS);
     return () => window.clearTimeout(timer);
-  }, [sendCount, sources]);
+  }, [sendCount, sources, epoch]);
 
   // Interval reconcile only while work is present and the window is visible.
   useEffect(() => {
@@ -252,6 +290,7 @@ export function usePetSession(sessionId: string | null, onInvalid: (sessionId: s
   }, [sessionId, working, hasBackground, sources]);
 
   const noteSent = useCallback((row: WorkbenchMessage | null) => {
+    if (!epoch.isCurrent()) return;
     setInGrace(true);
     setSendCount((count) => count + 1);
     if (row && row.session_id === sessionId && row.id) {
@@ -260,11 +299,12 @@ export function usePetSession(sessionId: string | null, onInvalid: (sessionId: s
     }
     sources.tail.refresh();
     sources.turn.refresh();
-  }, [sources, sessionId]);
+  }, [sources, sessionId, epoch]);
 
-  const refreshTail = useCallback(() => sources.tail.refresh(), [sources]);
+  const refreshTail = useCallback(() => { if (epoch.isCurrent()) sources.tail.refresh(); }, [sources, epoch]);
 
   return {
+    epoch,
     session,
     canChat,
     messages: tail.messages,

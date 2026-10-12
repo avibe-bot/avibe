@@ -5580,12 +5580,59 @@
     "chooseSession": "Choose a session",
     "switchSession": "Switch session",
     "openInAvibe": "Open in Avibe",
-    "inputPlaceholder": "Message the agent…",
+    "inputPlaceholder": "Message the main agent…",
     "send": "Send",
     "queued": "Queued — it will run after the current turn.",
     "moreInAvibe": "More replies in Avibe",
     "empty": "No messages yet. Say something to get started.",
     "vaultRequest": "Approval needed — open in Avibe",
-    "noSessions": "No active sessions yet. Start one in Avibe."
+    "noSessions": "No active sessions yet. Start one in Avibe.",
+    "mainAgent": "Main agent",
+    "mainAgentTitle": "Main agent",
+    "thinking": "Thinking",
+    "waiting": "Waiting",
+    "repliedPrefix": "Replied:",
+    "untitledTask": "Untitled task",
+    "dismiss": "Dismiss task",
+    "voiceContinue": "Continue voice input",
+    "voice": {
+      "cloudRequired": "Voice input needs Avibe Cloud. You can type a message instead.",
+      "listening": "Listening…",
+      "open": "Voice input",
+      "stop": "Stop voice input"
+    },
+    "keyboard": {
+      "open": "Type a message",
+      "close": "Close input"
+    },
+    "stack": {
+      "expand": "Expand session cards"
+    },
+    "activityKind": {
+      "watch": "Monitor",
+      "task": "Scheduled task",
+      "agent_run": "Delegated run",
+      "backend_activity": "Background activity"
+    },
+    "activityStatus": {
+      "running": "Running",
+      "queued": "Queued",
+      "waiting": "Waiting",
+      "stopped": "Stopped",
+      "completed": "Completed",
+      "failed": "Failed",
+      "unknown": "In progress"
+    },
+    "stop": {
+      "stop": "Stop",
+      "pause": "Pause",
+      "confirmStop": "Stop?",
+      "confirmPause": "Pause?",
+      "stopping": "Stopping…",
+      "pausing": "Pausing…",
+      "stopped": "Stopped",
+      "paused": "Paused",
+      "failed": "Could not stop; try again later"
+    }
   }
 }

@@ -723,6 +723,9 @@ export type ApiContextType = {
   createSession: (payload: WorkbenchSessionCreate) => Promise<WorkbenchSession>;
   forkSession: (sessionId: string) => Promise<WorkbenchSession>;
   getSession: (sessionId: string, params?: { cache?: boolean; handleError?: boolean }) => Promise<WorkbenchSession>;
+  /** Main-agent lookup seam. The endpoint is not shipped yet; the pet client
+   * currently resolves the session bound to its native window here. */
+  getMainSession: () => Promise<WorkbenchSessionReadResult>;
   getSessionResult: (sessionId: string) => Promise<WorkbenchSessionReadResult>;
   getSessionBootstrap: (sessionId: string) => Promise<WorkbenchSessionBootstrap>;
   updateSession: (sessionId: string, payload: Partial<WorkbenchSessionUpdate>) => Promise<WorkbenchSession>;
@@ -3728,6 +3731,20 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         ? await getJson(`/api/sessions/${encodeURIComponent(sessionId)}`, { handleError: params?.handleError })
         : await getCachedJson(`/api/sessions/${encodeURIComponent(sessionId)}`, undefined, { handleError: params?.handleError });
       return sessionRowFromPayload(payload);
+    },
+    getMainSession: async () => {
+      const binding = (window as unknown as { __AVIBE_PET_BINDING__?: unknown }).__AVIBE_PET_BINDING__;
+      if (typeof binding !== 'string' || !binding) return { status: 404, session: null };
+      const res = await apiFetch(`/api/sessions/${encodeURIComponent(binding)}`);
+      const payload = await res.json().catch(() => null);
+      if (!(res.ok && payload && typeof payload.id === 'string')) {
+        return { status: res.status, session: null };
+      }
+      return {
+        status: res.status,
+        session: sessionRowFromPayload(payload),
+        capabilities: sessionCanChatFromPayload(payload),
+      };
     },
     getSessionResult: async (sessionId) => {
       const res = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}`);

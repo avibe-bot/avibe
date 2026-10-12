@@ -1098,6 +1098,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     });
     voiceCaptureClaimRef.current = captureClaim;
     try {
+      await captureClaim.ready;
       stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       if (!captureClaim.isCurrent() || unmountedRef.current || disabledRef.current) {
         stream.getTracks().forEach((track) => track.stop());

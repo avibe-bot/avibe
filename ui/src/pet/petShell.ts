@@ -29,6 +29,7 @@ let outstanding = 0;
 let latestChange: string | null = null;
 let changes: Promise<void> = Promise.resolve();
 let pendingSummon: PetIntent | null = null;
+let dismissedIds: string[] = [];
 let started = false;
 // Bumped by every live summon, so a summon `pet_ready()` returns is used only
 // if no live one has arrived since it was asked.
@@ -40,6 +41,8 @@ const show = () => {
   const next = outstanding > 0 ? latestChange : reported?.binding;
   if (next === binding) return;
   binding = next;
+  dismissedIds = [];
+  (window as unknown as { __AVIBE_PET_BINDING__?: string | null }).__AVIBE_PET_BINDING__ = next;
   storeListeners.forEach((listener) => listener());
 };
 
@@ -55,13 +58,18 @@ const noteSummon = (intent: PetIntent) => {
 };
 
 /** A change made by this page: shown now, sent after the ones before it. */
-const change = (next: string | null, send: () => Promise<PetBinding>, failed: () => void) => {
+const change = (next: string | null, send: () => Promise<PetBinding>, failed: () => void, maySend?: () => boolean) => {
   outstanding += 1;
   latestChange = next;
   show();
   changes = changes
-    .then(send)
-    .then(report, failed)
+    .then(() => maySend?.() === false ? null : send())
+    .then((confirmed) => {
+      // An IPC already sent changes the shell's authoritative binding. Keep
+      // mirroring its revision even if authorization changed meanwhile; the
+      // surface must validate that binding afresh before displaying any data.
+      if (confirmed) report(confirmed);
+    }, failed)
     .finally(() => {
       outstanding -= 1;
       show();
@@ -80,7 +88,12 @@ const start = () => {
   });
   const liveSummonsAtRequest = liveSummons;
   void petBridge.ready().then((ready) => {
+    const applies = !reported || ready.revision >= reported.revision;
     report(ready);
+    if (applies && binding === ready.binding) {
+      dismissedIds = ready.dismissed_ids ?? [];
+      storeListeners.forEach((listener) => listener());
+    }
     if (ready.summon_pending && liveSummons === liveSummonsAtRequest) noteSummon(ready.summon_pending.intent);
   }).catch(() => {
     // Without an answer the pet starts unbound; the shell's next report wins.
@@ -90,7 +103,7 @@ const start = () => {
 
 export const petShell = {
   /** Bind `sessionId`. If the shell cannot, the pet shows what it holds. */
-  pick: (sessionId: string) => change(sessionId, () => petBridge.bind(sessionId), () => undefined),
+  pick: (sessionId: string, isAuthorizationCurrent?: () => boolean) => change(sessionId, () => petBridge.bind(sessionId), () => undefined, isAuthorizationCurrent),
 
   /**
    * Clear an invalid binding (compare-and-clear). Unlike a failed pick, a
@@ -116,6 +129,14 @@ export const petShell = {
 
   /** The binding now, for callbacks that must not read a stale render. */
   currentBinding: (): string | null | undefined => binding,
+  dismissed: (): string[] => dismissedIds,
+  setDismissed: (sessionId: string, ids: string[]) => {
+    if (sessionId !== binding) return;
+    dismissedIds = ids;
+    storeListeners.forEach((listener) => listener());
+    // Persist writes in order, so an older dismiss cannot resurrect a later one.
+    changes = changes.then(() => petBridge.setDismissedIds(sessionId, ids)).catch(() => undefined);
+  },
 };
 
 export function usePetBinding(): string | null | undefined {
@@ -145,4 +166,11 @@ export function useOnSummon(listener: () => void): void {
       summonListeners.delete(listener);
     };
   }, [listener]);
+}
+
+export function usePetDismissed(): string[] {
+  return useSyncExternalStore(
+    (listener) => { storeListeners.add(listener); return () => { storeListeners.delete(listener); }; },
+    () => dismissedIds,
+  );
 }

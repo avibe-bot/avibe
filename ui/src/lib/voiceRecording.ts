@@ -325,6 +325,12 @@ export const deleteMapValueIfCurrent = <Key, Value>(
 export type VoiceCaptureClaim = {
   isCurrent(): boolean;
   release(): void;
+  /**
+   * Resolves once the cross-window capture lock is held. Existing callers can
+   * start immediately in a browser without Web Locks; desktop callers await
+   * this before opening the microphone.
+   */
+  ready: Promise<void>;
 };
 
 type ActiveVoiceCapture = {
@@ -333,6 +339,7 @@ type ActiveVoiceCapture = {
 };
 
 let activeVoiceCapture: ActiveVoiceCapture | null = null;
+const VOICE_CAPTURE_LOCK = 'avibe.voice-capture';
 
 /**
  * Give the newest explicit voice action sole ownership of the browser mic.
@@ -341,21 +348,68 @@ let activeVoiceCapture: ActiveVoiceCapture | null = null;
  */
 export const claimVoiceCapture = (finish: () => void): VoiceCaptureClaim => {
   const token = Symbol('voice-capture');
+  let finished = false;
+  const finishOnce = () => {
+    if (finished) return;
+    finished = true;
+    try {
+      finish();
+    } catch {
+      // Ownership has already moved; a stale recorder cannot block the new one.
+    }
+  };
   const previous = activeVoiceCapture;
-  activeVoiceCapture = { token, finish };
-  try {
-    previous?.finish();
-  } catch {
-    // Ownership has already moved; a stale recorder cannot block the new one.
-  }
+  activeVoiceCapture = { token, finish: finishOnce };
+  previous?.finish();
   let released = false;
+  let revoked = false;
+  let releaseLock: (() => void) | null = null;
+  let resolveReady!: () => void;
+  let rejectReady!: (error: unknown) => void;
+  const ready = new Promise<void>((resolve, reject) => {
+    resolveReady = resolve;
+    rejectReady = reject;
+  });
+  // A claim can be replaced before its caller reaches the microphone step.
+  // The caller still observes the rejection when it awaits ready.
+  void ready.catch(() => undefined);
+  const locks = typeof navigator !== 'undefined' ? navigator.locks : undefined;
+  if (!locks) {
+    resolveReady();
+  } else {
+    const lockHold = new Promise<void>((resolve) => {
+      releaseLock = resolve;
+    });
+    void locks.request(
+      VOICE_CAPTURE_LOCK,
+      { steal: true },
+      async () => {
+        if (released || activeVoiceCapture?.token !== token) {
+          rejectReady(new DOMException('Voice capture replaced', 'AbortError'));
+          return;
+        }
+        resolveReady();
+        await lockHold;
+      },
+    ).catch((error: unknown) => {
+      // A newer claim steals this lock. The old surface finishes through its
+      // existing replacement path, preserving the captured speech.
+      if (!released && error instanceof DOMException && error.name === 'AbortError') {
+        revoked = true;
+        finishOnce();
+      }
+      rejectReady(error);
+    });
+  }
   return {
-    isCurrent: () => !released && activeVoiceCapture?.token === token,
+    isCurrent: () => !released && !revoked && activeVoiceCapture?.token === token,
     release: () => {
       if (released) return;
       released = true;
       if (activeVoiceCapture?.token === token) activeVoiceCapture = null;
+      releaseLock?.();
     },
+    ready,
   };
 };
 
