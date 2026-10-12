@@ -301,9 +301,64 @@ def _take_lock_file(lock_file) -> bool:
     return True
 
 
+# How long a service lock that no live service holds may take to come free.
+#
+# Holding the lock is how a service says it is running, but it is not the only
+# way the lock gets held. It cannot be tested without being taken -- a Windows
+# byte-range lock has no other test -- so every check holds it for an instant,
+# and `vibe start` checks it every 100 ms while it waits for the service it
+# launched. A service whose single attempt landed in one of those instants
+# took the check for another service and exited. A holder that is gone can
+# also keep it a while: Windows releases a terminated process's locks only as
+# its resources allow. Neither names a live process in the record, which a
+# service writes the moment it takes the lock, so only that state is waited
+# out, and only this long; a live holder is answered at once.
+_SERVICE_LOCK_SETTLE_SECONDS = 2.0
+_SERVICE_LOCK_SETTLE_INTERVAL_SECONDS = 0.02
+
+
+def _lock_file_names_live_holder(lock_file) -> bool:
+    """Whether the record names a process that is running and is the one that wrote it.
+
+    A record outlives its holder when a service is killed or the machine stops,
+    and its pid can pass to an unrelated process. The holder's start time,
+    written beside the pid, tells the two apart. A record without one, as an
+    older release writes it, cannot be told apart and names no one: a holder
+    that wrote it keeps the lock, and is refused once the wait runs out.
+    """
+
+    pid = _lock_file_pid(lock_file)
+    if pid is None or not pid_alive(pid):
+        return False
+    try:
+        lock_file.seek(0)
+        started_at = json.loads(lock_file.read() or "{}").get("started_at")
+    except (OSError, json.JSONDecodeError, TypeError, AttributeError):
+        return False
+    if not isinstance(started_at, (int, float)):
+        return False
+    create_time = process_create_time(pid)
+    return create_time is not None and abs(create_time - started_at) < 1.0
+
+
+def _take_service_lock(lock_file) -> bool:
+    """Take the service lock unless a service holds it; raises ``OSError`` when an attempt itself failed.
+
+    False when the record names a live holder, or when the lock stays held for
+    ``_SERVICE_LOCK_SETTLE_SECONDS`` with none named.
+    """
+
+    deadline = time.monotonic() + _SERVICE_LOCK_SETTLE_SECONDS
+    while not _take_lock_file(lock_file):
+        if _lock_file_names_live_holder(lock_file) or time.monotonic() >= deadline:
+            return False
+        time.sleep(_SERVICE_LOCK_SETTLE_INTERVAL_SECONDS)
+    return True
+
+
 def _try_lock_file(lock_file) -> bool:
     try:
-        return _take_lock_file(lock_file)
+        return _take_service_lock(lock_file)
     except OSError:
         return False
 
@@ -2998,7 +3053,7 @@ def desktop_service_lock_presence(while_absent: Callable[[], None] | None = None
     with lock_file:
         # Only another holder is a mismatch; a lock call that failed says nothing.
         try:
-            taken = _take_lock_file(lock_file)
+            taken = _take_service_lock(lock_file)
         except OSError:
             logger.warning("Could not probe the service instance lock", exc_info=True)
             return DesktopRuntimePresence.UNKNOWN
