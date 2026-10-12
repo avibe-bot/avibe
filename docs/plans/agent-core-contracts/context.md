@@ -1,6 +1,6 @@
 # C-9 Context management
 
-Frozen 2026-10-04 by owner decision; amended 2026-10-12 by owner decision (the estimate of opaque reasoning payloads
+Frozen 2026-10-04 by owner decision; amended 2026-10-13 by owner decision (the estimate of opaque reasoning payloads
 and the anchor's validity, §2; the cache lifetime per route, §3; the checkpoint request's output budget, §1 and §6).
 The `harness` owns the rules (`core/agent_core/harness/context.py`, `projection.py`); the loop applies them before
 every model request (`core/agent_core/agent/loop.py`); the adapter supplies the Session-specific parts (§9). Row
@@ -10,7 +10,8 @@ shapes: [`transcript-rows.schema.json`](transcript-rows.schema.json); events:
 Three tiers, cheapest first:
 
 1. **Output governance at write time** (C-7): no tool result exceeds 2,000 lines / 50 KB.
-2. **Clearing old tool results**, recorded as `context_edit` rows (§4). On by default.
+2. **Optional clearing of old tool results**, recorded as `context_edit` rows (§4). Off by default; an adapter may
+   enable it for evaluation or rollout.
 3. **Checkpoint**, recorded as a `context_compaction` row, written by the model in a forked request (§5–§7).
 
 Compaction and clearing only append rows; they never rewrite or delete one. A fork anchored before a checkpoint
@@ -113,9 +114,9 @@ before a retry alike:
    to its own tool results (§6), one helper for both. The run continues and compacts as usual. A batch that does not
    fit even with every result cut to its note, or a last unit that is an input, stops the run: the provider never
    sees the request. A batch that fits once the conversation moves out is never cut; the ladder makes room for it.
-2. **Clear** (§4) when the provider cache is cold (the request's route has not used it for longer than its
-   lifetime, below; after a restart, measured from the response rows' `created_at`) or `est >= 0.8 * T`, which does
-   not depend on the lifetime.
+2. **Clear**, when enabled (§4), if the provider cache is cold (the request's route has not used it for longer than
+   its lifetime, below; after a restart, measured from the response rows' `created_at`) or `est >= 0.8 * T`, which
+   does not depend on the lifetime.
 3. **Checkpoint** when `est >= T`, the run has not stopped compacting (§10), and there is something to summarize,
    at most once per model request: a normal checkpoint (§6, reason `threshold`) when the fork it would send can fit,
    otherwise the overflow ladder from (b) (§8, reason `overflow`). A checkpoint request that overflows continues at
@@ -151,9 +152,15 @@ content is committed as a non-final response, and the run ends `context_exhauste
 requests (§6) never run this stage (no clearing, checkpoint, or ladder; one compaction is in flight per Session);
 each is sent only when it can fit.
 
-## 4. Clearing old tool results
+## 4. Optional clearing of old tool results
 
-- Eligible: results of `read` and `bash` in the projected context (terminal screen snapshots join when they exist).
+This policy is disabled by default. When disabled, no new `clear_old_tool_result` rows are written; the normal
+`fit_tool_result` edits for a newest batch that cannot fit, checkpoints, and overflow ladder remain active. Existing
+`clear_old_tool_result` rows continue to project as recorded, so disabling the policy never changes already persisted
+Sessions.
+
+- Eligible when enabled: results of `read` and `bash` in the projected context (terminal screen snapshots join when
+  they exist).
 - Protected: results after the second-latest input (the last 2 user turns; with fewer than 2 inputs since the latest
   checkpoint, all of them), the newest 5 eligible results, and results already cleared (a result cut to fit, §3, can
   still be cleared). A skill load clears like any

@@ -218,7 +218,9 @@ class ContextConfig:
     host: Optional[ContextHost] = None
     #: This Session's scratch directory; checkpoint turns may write only there.
     scratch_dir: Optional[str] = None
-    clear_tool_results: bool = True
+    #: Opt-in policy for proactively replacing old tool results with the cleared placeholder. New Sessions keep
+    #: original results until normal compaction unless an adapter explicitly enables this experiment.
+    clear_tool_results: bool = False
     clock: Callable[[], float] = field(default=time.time, repr=False)
 
 

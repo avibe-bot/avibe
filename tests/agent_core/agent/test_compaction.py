@@ -44,6 +44,7 @@ from core.agent_core.cancel import CancelToken
 from core.agent_core.harness.context import (
     CHECKPOINT_REQUEST,
     CHECKPOINT_TRUNCATED,
+    CACHE_TTL_UNKNOWN_S,
     TOOL_TRUNCATED,
     ContextConfig,
     StateRequest,
@@ -1426,7 +1427,7 @@ CLAUDE = ModelEndpoint("anthropic", "http://model.invalid", "claude-opus-5-5", "
 async def test_clearing_runs_once_the_route_cache_has_gone_cold_and_spares_recent_turns(endpoint, lifetime):
     now = [1_000.0]
     store = InMemoryTranscriptStore(clock=lambda: now[0])
-    context = ContextConfig(clock=lambda: now[0])
+    context = ContextConfig(clock=lambda: now[0], clear_tool_results=True)
     script = [*_long_context(9), *([Done(assistant(word))] for word in ("one", "two", "three", "four"))]
     model = Model(script)
     route = ModelSelection(endpoint, LARGE.capabilities)
@@ -1451,6 +1452,27 @@ async def test_clearing_runs_once_the_route_cache_has_gone_cold_and_spares_recen
     assert store.transactions == [["context_edit"] * 4]  # one transition, one transaction
 
 
+async def test_old_tool_result_clearing_is_disabled_by_default():
+    now = [1_000.0]
+    store = InMemoryTranscriptStore(clock=lambda: now[0])
+    model = Model([*_long_context(9), *([Done(assistant(word))] for word in ("one", "two", "three"))])
+    agent = make_agent(
+        model,
+        store=store,
+        tools=[reader(tokens(6_000))],
+        selection=LARGE,
+        context=ContextConfig(clock=lambda: now[0]),
+    )
+    await run(agent, row="turn-1")
+    await run(agent, row="turn-2")
+    now[0] += CACHE_TTL_UNKNOWN_S + 1
+    await run(agent, row="turn-3")
+
+    rows = await store.load("session")
+    assert not [row for row in rows if row.kind == "context_edit"]
+    assert not model.checkpoint_requests
+
+
 #: A Model Hub Google hop as the adapter calls it: over Chat at the gateway, while the served-hop report names the
 #: Google protocol the gateway converted to (C-6). Its cache lifetime is unknown: an hour.
 GEMINI = ModelEndpoint("openai_chat", "http://model.invalid", "gemini-3-pro", "", provider="google")
@@ -1463,7 +1485,7 @@ async def routed_turn(store, now, endpoint, scripts, row, served=None):
     origin = served or endpoint_origin(endpoint)
     model = Model([[replace(event, message=replace(event.message, origin=origin)) for event in s] for s in scripts])
     route = ModelSelection(endpoint, LARGE.capabilities)
-    context = ContextConfig(clock=lambda: now[0])
+    context = ContextConfig(clock=lambda: now[0], clear_tool_results=True)
     agent = make_agent(model, store=store, tools=[reader(tokens(6_000))], selection=route, context=context)
     assert (await run(agent, row=row))[-1].reason == "completed"
     return [row for row in await store.load("session") if row.kind == "context_edit"]
@@ -1505,7 +1527,12 @@ async def test_pressure_clearing_runs_on_a_warm_cache():
     route = ModelSelection(ENDPOINT, replace(SELECTION.capabilities, context_window=72_000, input_limit=None))
     script = [*_long_context(9), *([Done(assistant(word))] for word in ("one", "two", "three"))]
     model = Model(script, [[Done(assistant(CHECKPOINT))]])
-    agent = make_agent(model, tools=[reader(tokens(6_000))], selection=route)
+    agent = make_agent(
+        model,
+        tools=[reader(tokens(6_000))],
+        selection=route,
+        context=ContextConfig(clear_tool_results=True),
+    )
     for turn in ("turn-1", "turn-2", "turn-3"):
         assert (await run(agent, row=turn))[-1].reason == "completed"
     edits = [row for row in await agent.store.load("session") if row.kind == "context_edit"]
@@ -1551,7 +1578,7 @@ async def test_a_return_to_a_long_reasoning_session_never_checkpoints_at_57_perc
     script = [*reads, *(responses_reply(value=word, reasoning=200) for word in ("noted", "two", "three"))]
     model = Model(script, [[Done(assistant(CHECKPOINT))]])
     route = ModelSelection(GPT, LARGE.capabilities)
-    context = ContextConfig(clock=lambda: now[0])
+    context = ContextConfig(clock=lambda: now[0], clear_tool_results=True)
     agent = make_agent(model, store=store, tools=[reader(tokens(7_300))], selection=route, context=context)
     await run(agent, row="turn-1")
     await run(agent, row="turn-2")

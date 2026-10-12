@@ -344,7 +344,7 @@ async def test_a_new_agent_anchors_on_the_stored_request_facts(c9):
 
 async def test_a_new_agent_clears_old_results_once_the_cache_has_gone_cold(c9):
     idle = [0.0]
-    context = ContextConfig(clock=lambda: time.time() + idle[0])
+    context = ContextConfig(clock=lambda: time.time() + idle[0], clear_tool_results=True)
     reads = [[Done(assistant(calls=[ToolCallBlock(f"r{index}", "read", {"path": "f"})]))] for index in range(9)]
     model = Model([*reads, [Done(assistant("one"))], [Done(assistant("two"))]])
     agent = make_agent(model, store=c9.store, tools=[reader(tokens(6_000))], selection=LARGE, context=context)
