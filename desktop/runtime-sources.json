@@ -1,25 +1,25 @@
 {
   "schema_version": 2,
-  "npm_version": "10.9.8",
+  "npm_version": "10.9.9",
   "sdist_build_allowlist": [
     "claude-agent-sdk",
     "http-ece"
   ],
   "show_runtime_manifest": {
-    "url": "https://github.com/avibe-bot/avibe/releases/download/v3.0.7/show-runtime-manifest.json",
-    "sha256": "e9ca5bc2106ec59f23394e164fb30ed41135240d6fdff8054535ea7cdd80f8e2"
+    "url": "https://github.com/avibe-bot/avibe/releases/download/v3.1.3/show-runtime-manifest.json",
+    "sha256": "c628743535cbf70014fe81c6fd502f26ce24b394f874cf347ed531f97f479cb1"
   },
   "targets": {
     "aarch64-apple-darwin": {
       "os": "macos",
       "arch": "aarch64",
       "python": {
-        "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20260510/cpython-3.12.13%2B20260510-aarch64-apple-darwin-install_only_stripped.tar.gz",
-        "sha256": "55bc1a5edbc8ac4da0081f4f5731ed2d1ed10c57cb37a820b2a0dbc7cad742e9"
+        "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20261009/cpython-3.12.15%2B20261009-aarch64-apple-darwin-install_only_stripped.tar.gz",
+        "sha256": "233f8e15255b3e1d1fd47ea5dd5230dfed803f371138e896e54d98c60ae19f6f"
       },
       "node": {
-        "url": "https://nodejs.org/dist/v22.23.1/node-v22.23.1-darwin-arm64.tar.gz",
-        "sha256": "ef28d8fab2c0e4314522d4bb1b7173270aa3937e93b92cb7de79c112ac1fa953"
+        "url": "https://nodejs.org/dist/v22.23.3/node-v22.23.3-darwin-arm64.tar.gz",
+        "sha256": "23b25245dcfb9af7262f8ff142e9e2e0af025368117329e7a7458a51e5922f53"
       },
       "python_entrypoint": "python/bin/python3",
       "node_source": "bin/node",
@@ -31,12 +31,12 @@
       "os": "macos",
       "arch": "x86_64",
       "python": {
-        "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20260510/cpython-3.12.13%2B20260510-x86_64-apple-darwin-install_only_stripped.tar.gz",
-        "sha256": "6bab7fa97d4f2ddba86da0e05acff66c53b5edaca1df8edcf00ddca785a9c59b"
+        "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20261009/cpython-3.12.15%2B20261009-x86_64-apple-darwin-install_only_stripped.tar.gz",
+        "sha256": "fb3187d95334813b88940db0f1ca57b84cedfd552739c3a5771c3ea0e49988c9"
       },
       "node": {
-        "url": "https://nodejs.org/dist/v22.23.1/node-v22.23.1-darwin-x64.tar.gz",
-        "sha256": "b8da981b8a0b1241b70249204916da76c63573ddf5814dbd2d1e41069105cb81"
+        "url": "https://nodejs.org/dist/v22.23.3/node-v22.23.3-darwin-x64.tar.gz",
+        "sha256": "8a677b0219178efd6eb0e475457c4afb452b521a92f6e67845a73bd85727f2a8"
       },
       "python_entrypoint": "python/bin/python3",
       "node_source": "bin/node",
@@ -48,12 +48,12 @@
       "os": "windows",
       "arch": "x86_64",
       "python": {
-        "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20260510/cpython-3.12.13%2B20260510-x86_64-pc-windows-msvc-install_only_stripped.tar.gz",
-        "sha256": "24168aff2e7d93784c6a436124c4ebb79b076a4e289bde4902c08333507b71d0"
+        "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20261009/cpython-3.12.15%2B20261009-x86_64-pc-windows-msvc-install_only_stripped.tar.gz",
+        "sha256": "11ed9f8a6ac64fb1b5a55e40e305a6744a3f77a70863c8f8197a6e4349abc64a"
       },
       "node": {
-        "url": "https://nodejs.org/dist/v22.23.1/node-v22.23.1-win-x64.zip",
-        "sha256": "7df0bc9375723f4a86b3aa1b7cc73342423d9677a8df4538aca31a049e309c29"
+        "url": "https://nodejs.org/dist/v22.23.3/node-v22.23.3-win-x64.zip",
+        "sha256": "2b0ff57b049cda1bbcea2240eec20467018713c1efe1f7360c2681859b90ed71"
       },
       "python_entrypoint": "python/python.exe",
       "node_source": "node.exe",
