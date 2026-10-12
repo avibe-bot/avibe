@@ -377,6 +377,20 @@ def test_scrub_data_redacts_sensitive_values():
         ("proxy error http://alice:px-s3cret@proxy.local:8080 timed out", "px-s3cret", "@proxy.local:8080 timed out"),
         ("bad proxy http://bob:p/w-s3cret@proxy.local/x", "w-s3cret", "bad proxy http://"),
         ("POST hooks.slack.com/actions/T01/123/ns-s3cret failed", "ns-s3cret", "POST hooks.slack.com/"),
+        # The same URLs spelled another way.
+        ('{"response_url":"https:\\/\\/hooks.slack.com\\/actions\\/T01\\/js-s3cret"}', "js-s3cret", "hooks.slack.com/"),
+        ("redirect=https%3A%2F%2Fhooks.slack.com%2Factions%2FT01%2Fpe-s3cret", "pe-s3cret", "hooks.slack.com/"),
+        ("next=https%253A%252F%252Fdiscord.com%252Fapi%252Fde-s3cret", "de-s3cret", "discord.com/"),
+        ("https:\\u002f\\u002fdiscord.com\\u002fapi\\u002fue-s3cret", "ue-s3cret", "discord.com/"),
+        ("https:&#x2F;&#x2F;discord.com&#x2F;api&#x2F;he-s3cret", "he-s3cret", "discord.com/"),
+        ("https:\\\\discord.com\\api\\bp-s3cret", "bp-s3cret", "discord.com/"),
+        ("fetch //discord.com/api/webhooks/1/sr-s3cret", "sr-s3cret", "fetch //discord.com/"),
+        ("GET 10.0.0.5:8080/download/ip-s3cret", "ip-s3cret", "GET 10.0.0.5:8080/"),
+        ("GET localhost:5123/api/media/lh-s3cret", "lh-s3cret", "GET localhost:5123/"),
+        ("GET [::1]:5123/api/media/v6-s3cret", "v6-s3cret", "GET [::1]:5123/"),
+        ("state=abc%26access_token%3Dqe-s3cret", "qe-s3cret", "state=abc&access_token="),
+        # A quoted value longer than any scan window is redacted to its end.
+        ('api_key="' + "x" * 9000 + 'lv-s3cret" next', "lv-s3cret", 'api_key="'),
     ],
 )
 def test_scrub_data_redacts_secrets_inside_free_text(text, secret, kept):
