@@ -34,28 +34,45 @@ NOT_LOADED = "[Not loaded, over the 65,536-byte limit for instruction files: {fi
 @dataclass(frozen=True)
 class InstructionFile:
     path: str
+    #: What was read: at most the limit's worth of the file, so a huge one costs no more than a full section.
     content: str
     is_global: bool = False
+    #: The file's size in bytes, without a byte-order mark; None means the size of ``content``.
+    size: Optional[int] = None
+
+    @property
+    def byte_size(self) -> int:
+        return self.size if self.size is not None else len(self.content.encode("utf-8"))
 
 
-def _read(path: str) -> Optional[str]:
-    """A candidate's text, or None when it is not a readable file. Symlinks are followed."""
+_BOM = b"\xef\xbb\xbf"
+
+
+def _read(path: str) -> Optional[tuple[str, int]]:
+    """A candidate's text and size, or None when it is not a readable file. Symlinks are followed.
+
+    Reads no more than the section can hold (plus a character's worth, so a cut still falls on a whole one): every
+    Turn reads the files, and a mistaken multi-gigabyte one must cost no more than a full section.
+    """
     try:
         if not os.path.isfile(path):
             return None
-        with open(path, encoding="utf-8", errors="replace") as handle:
-            text = handle.read()
+        with open(path, "rb") as handle:
+            size = os.fstat(handle.fileno()).st_size
+            data = handle.read(len(_BOM) + LIMIT + 4)
     except OSError:
         return None
-    return text[1:] if text.startswith("\ufeff") else text
+    if data.startswith(_BOM):
+        data, size = data[len(_BOM) :], size - len(_BOM)
+    return data[: LIMIT + 4].decode("utf-8", "replace"), size
 
 
 def _from_dir(directory: str) -> Optional[InstructionFile]:
     for name in CANDIDATES:
         path = os.path.join(directory, name)
-        text = _read(path)
-        if text is not None:
-            return InstructionFile(path, text)
+        read = _read(path)
+        if read is not None:
+            return InstructionFile(path, read[0], size=read[1])
     return None
 
 
@@ -102,7 +119,8 @@ def _shadowed(cwd: str) -> Optional[str]:
     if os.path.realpath(os.path.join(main_root, ".git")) != common:
         return None
     own = _from_dir(worktree_root)
-    return os.path.join(main_root, os.path.basename(own.path)) if own is not None else None
+    # Compared with each found file's real path, so the main repository's file may itself be a link.
+    return os.path.realpath(os.path.join(main_root, os.path.basename(own.path))) if own is not None else None
 
 
 def load_instruction_files(cwd: str, global_path: Path) -> list[InstructionFile]:
@@ -113,11 +131,11 @@ def load_instruction_files(cwd: str, global_path: Path) -> list[InstructionFile]
     """
     files: list[InstructionFile] = []
     seen: set[str] = set()
-    text = _read(str(global_path))
-    if text is not None:
+    read = _read(str(global_path))
+    if read is not None:
         seen.add(os.path.realpath(global_path))
-        if text.strip():
-            files.append(InstructionFile(str(global_path), text, is_global=True))
+        if read[0].strip():
+            files.append(InstructionFile(str(global_path), read[0], is_global=True, size=read[1]))
     if not cwd:
         return files
     directory = os.path.abspath(cwd)
@@ -142,18 +160,18 @@ def _cut(text: str, size: int) -> str:
     return text.encode("utf-8")[:size].decode("utf-8", "ignore")
 
 
-def project_context(files: Sequence[InstructionFile], limit: int = LIMIT) -> str:
+def project_context(files: Sequence[InstructionFile]) -> str:
     """The ``<project_context>`` section, or "" with no file.
 
-    The files share ``limit`` bytes: first the global file, then the files from the cwd upward, so the most specific
+    The files share ``LIMIT`` bytes: first the global file, then the files from the cwd upward, so the most specific
     one is the last cut. The section keeps the files' order either way.
     """
     if not files:
         return ""
-    sizes = [len(file.content.encode("utf-8")) for file in files]
+    sizes = [file.byte_size for file in files]
     first = [index for index, file in enumerate(files) if file.is_global]
     rest = [index for index in reversed(range(len(files))) if not files[index].is_global]
-    allowed, left = [0] * len(files), limit
+    allowed, left = [0] * len(files), LIMIT
     for index in first + rest:
         allowed[index] = min(sizes[index], left)
         left -= allowed[index]

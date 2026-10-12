@@ -379,6 +379,8 @@ How the files are read:
   - Instruction files themselves are read only from the ancestor chain and the global path.
 - A blank file is left out.
 - Each file is read as UTF-8, with a leading byte-order mark dropped and undecodable bytes replaced.
+- Each file is read only as far as the limit below (plus one character's bytes), and its size is taken from the file
+  system. Every Turn reads the files, so a mistaken huge one costs no more than a full section.
 
 **Where they enter.** A `<project_context>` section of the system prompt. It comes after the Agent's head (preamble,
 tools, guidelines) and before Avibe's injected sections:

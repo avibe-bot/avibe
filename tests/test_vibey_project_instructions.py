@@ -11,15 +11,20 @@ from pathlib import Path
 
 import pytest
 
-from modules.agents.vibey.instructions import (
-    HEADER,
-    NOT_LOADED,
-    PRECEDENCE,
-    TRUNCATED,
-    InstructionFile,
-    load_instruction_files,
-    project_context,
+from modules.agents.vibey.instructions import InstructionFile, load_instruction_files, project_context
+
+# The model-facing text, stated here rather than read from the constants it checks (C-7 tools.md section 9).
+HEADER = (
+    "Project-specific instructions and guidelines:\n"
+    "More general files come first; where two conflict, the later, more specific one wins."
 )
+
+
+def truncated(shown: int, size: int) -> str:
+    return (
+        f"[Truncated: the first {shown} of {size} bytes. The instruction files share a 65,536-byte limit; read the "
+        "file for the rest.]"
+    )
 
 
 def _write(path: Path, text: str) -> Path:
@@ -123,10 +128,14 @@ def _linked_worktree(main: Path, worktree: Path, name: str) -> None:
     _write(worktree / ".git", f"gitdir: {main / '.git/worktrees' / name}\n")
 
 
-def test_a_nested_linked_worktree_does_not_load_its_main_repository_file_twice(tmp_path) -> None:
+@pytest.mark.parametrize("main_is_a_link", (False, True), ids=("main file", "main file is a link"))
+def test_a_nested_linked_worktree_does_not_load_its_main_repository_file_twice(tmp_path, main_is_a_link) -> None:
     main = tmp_path / "repo"
     _git_repo(main)
-    _write(main / "AGENTS.md", "main copy")
+    if main_is_a_link:
+        (main / "AGENTS.md").symlink_to(_write(tmp_path / "elsewhere/main-rules.md", "main copy"))
+    else:
+        _write(main / "AGENTS.md", "main copy")
     nested = main / ".worktrees/feature"
     _linked_worktree(main, nested, "feature")
     _write(nested / "AGENTS.md", "worktree copy")
@@ -148,7 +157,7 @@ def test_the_section_holds_each_file_by_path_in_order() -> None:
     ]
 
     assert project_context(files) == (
-        f"<project_context>\n{HEADER}\n{PRECEDENCE}\n\n"
+        f"<project_context>\n{HEADER}\n\n"
         '<project_instructions path="/home/me/.avibe/AGENTS.md">\nglobal rules\n</project_instructions>\n\n'
         '<project_instructions path="/src/\\u003capp\\u003e/AGENTS.md">\nproject rules\n</project_instructions>\n'
         "</project_context>"
@@ -156,26 +165,37 @@ def test_the_section_holds_each_file_by_path_in_order() -> None:
     assert project_context([]) == ""
 
 
-def test_the_files_share_a_byte_limit_given_first_to_the_global_file_then_from_the_cwd_upward() -> None:
-    files = [
-        InstructionFile("/g/AGENTS.md", "g" * 10, is_global=True),
-        InstructionFile("/AGENTS.md", "r" * 50),
-        InstructionFile("/repo/AGENTS.md", "p" * 50),
-    ]
+def test_the_files_share_64_kib_given_first_to_the_global_file_then_from_the_cwd_upward() -> None:
+    global_file = InstructionFile("/g/AGENTS.md", "g" * 10, is_global=True)
+    root_file = InstructionFile("/AGENTS.md", "r" * 40_000)
 
     # The root file is cut: the global file and the cwd's come first.
-    section = project_context(files, limit=70)
-    assert "g" * 10 + "\n</project_instructions>" in section and "p" * 50 + "\n</project_instructions>" in section
-    assert "r" * 10 + "\n" + TRUNCATED.format(shown=10, size=50) + "\n</project_instructions>" in section
+    section = project_context([global_file, root_file, InstructionFile("/repo/AGENTS.md", "p" * 40_000)])
+    assert "g" * 10 + "\n</project_instructions>" in section and "p" * 40_000 + "\n</project_instructions>" in section
+    assert "r" * 25_526 + "\n" + truncated(25_526, 40_000) + "\n</project_instructions>" in section
     assert section.index("/g/AGENTS.md") < section.index('"/AGENTS.md"') < section.index("/repo/AGENTS.md")
 
     # Less room: the cwd's file is cut, and the root file is named as not loaded.
-    section = project_context(files, limit=55)
-    assert '"/AGENTS.md"' not in section and "p" * 45 + "\n" + TRUNCATED.format(shown=45, size=50) in section
-    assert section.endswith(NOT_LOADED.format(files="/AGENTS.md (50 bytes)") + "\n</project_context>")
+    section = project_context([global_file, root_file, InstructionFile("/repo/AGENTS.md", "p" * 70_000)])
+    assert '"/AGENTS.md"' not in section and "p" * 65_526 + "\n" + truncated(65_526, 70_000) in section
+    assert section.endswith(
+        "[Not loaded, over the 65,536-byte limit for instruction files: /AGENTS.md (40000 bytes). Read them if the "
+        "task needs them.]\n</project_context>"
+    )
 
 
 def test_a_cut_falls_on_a_character_boundary() -> None:
-    section = project_context([InstructionFile("/AGENTS.md", "é" * 10)], limit=5)
+    # One byte goes to the global file, leaving an odd 65,535 for a file of two-byte characters.
+    files = [InstructionFile("/g/AGENTS.md", "g", is_global=True), InstructionFile("/AGENTS.md", "é" * 40_000)]
 
-    assert "éé\n" + TRUNCATED.format(shown=4, size=20) in section
+    assert "é" * 32_767 + "\n" + truncated(65_534, 80_000) in project_context(files)
+
+
+def test_a_huge_file_is_read_only_as_far_as_the_section_can_hold(tmp_path) -> None:
+    # Every Turn reads the files: a mistaken multi-megabyte one must cost no more than a full section.
+    _write(tmp_path / "repo/AGENTS.md", "x" * (16 * 65_536))
+
+    (file,) = [found for found in load_instruction_files(str(tmp_path / "repo"), tmp_path / "none") if
+               Path(found.path).is_relative_to(tmp_path)]
+    assert len(file.content.encode("utf-8")) <= 65_536 + 4
+    assert truncated(65_536, 16 * 65_536) in project_context([file])

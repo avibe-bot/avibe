@@ -1755,7 +1755,6 @@ async def test_the_instruction_files_enter_between_the_head_and_avibes_sections_
     # C-7 tools.md section 9: the global file in the Avibe home, then the files from the root down to the Session's
     # cwd. They are read every Turn, and the system prompt changes only when one of them does, so the cache holds.
     from config import paths
-    from modules.agents.vibey.instructions import project_context, InstructionFile
     from modules.agents.vibey.prompt import FINAL_REPLY_RULE
 
     # The Avibe home holds the state database too, so only the global file's path moves.
@@ -1776,11 +1775,13 @@ async def test_the_instruction_files_enter_between_the_head_and_avibes_sections_
     await harness.agent.handle_message(harness.request("edited"))
 
     without, first, again, edited = (request.system for request in harness.provider.requests)
-    section = project_context(
-        [
-            InstructionFile(str(global_path), "Report in Chinese.", is_global=True),
-            InstructionFile(str(tmp_path / "AGENTS.md"), "Run tests under the sandbox."),
-        ]
+    # The section's text, stated here rather than built by the code under test.
+    section = (
+        "<project_context>\nProject-specific instructions and guidelines:\n"
+        "More general files come first; where two conflict, the later, more specific one wins.\n\n"
+        f'<project_instructions path="{global_path}">\nReport in Chinese.\n</project_instructions>\n\n'
+        f'<project_instructions path="{tmp_path / "AGENTS.md"}">\nRun tests under the sandbox.\n'
+        "</project_instructions>\n</project_context>"
     )
     head_end = without.index(FINAL_REPLY_RULE) + len(FINAL_REPLY_RULE)
     assert first == f"{without[:head_end]}\n\n{section}{without[head_end:]}"
