@@ -29,7 +29,7 @@
 
 ## Vibey, Avibe's own agent
 
-Avibe ships its own official agent, **Vibey**: built in, always on, nothing extra to install. Add one model source to Model Hub — a subscription sign-in or an API key — and Vibey is ready in the Workbench and in every chat app you connect.
+Avibe ships its own official agent, **Vibey**: built in, always on, nothing extra to install. Add a model source to Model Hub — a subscription sign-in or an API key — give Vibey a model, and it is ready in the Workbench and in every chat app you connect.
 
 - **It runs the platform for you.** Vibey schedules Tasks, waits on Watches, builds Show Pages, and hands parts of a job to Claude Code, Codex, or OpenCode — all through the same `vibe` commands every agent uses.
 - **It codes.** It reads, writes, and edits files and runs commands (`bash` on macOS and Linux, PowerShell on native Windows). Independent tool calls in one response run at the same time, and a long command becomes a Watch that reports back to the same session.

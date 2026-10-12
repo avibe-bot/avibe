@@ -29,7 +29,7 @@
 
 ## Vibey：Avibe 自己的 Agent
 
-Avibe 自带官方 Agent **Vibey**（歪比）：内置、始终开启，不用另外安装。给 Model Hub 加一个模型来源——登录一个订阅，或者填一个 API Key——Vibey 就能在 Workbench 和你接入的每个聊天软件里开工。
+Avibe 自带官方 Agent **Vibey**（歪比）：内置、始终开启，不用另外安装。给 Model Hub 加一个模型来源——登录一个订阅，或者填一个 API Key——再给 Vibey 选好模型，它就能在 Workbench 和你接入的每个聊天软件里开工。
 
 - **替你运转整个平台。** 安排定时任务、用 Watch 等结果、做 Show Page，把一件事的不同部分交给 Claude Code、Codex 或 OpenCode——用的都是每个 Agent 共用的 `vibe` 命令。
 - **会写代码。** 读、写、改文件，运行命令（macOS 和 Linux 上用 `bash`，原生 Windows 上用 PowerShell）。同一次回复里互不依赖的工具调用会同时运行；跑得久的命令会转成 Watch，结束后回到同一个会话汇报。
