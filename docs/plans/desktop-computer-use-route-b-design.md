@@ -111,8 +111,9 @@ proof of identity after reuse.
 After the explicit input call, the implementation restores the recorded
 frontmost application, exact window, and pointer. Any injected button state
 must be cleaned up before pointer restoration. It then takes a fresh
-observation and verifies all three restored values. A transport acknowledgement
-is not effect confirmation; the result must preserve the existing click effect
+observation and verifies all three restored values plus that the active Space
+for the affected display did not change. A transport acknowledgement is not
+effect confirmation; the result must preserve the existing click effect
 vocabulary, including `confirmed` and `unverifiable`.
 
 If restoration cannot be completed or cannot be verified, the operation stops
@@ -157,6 +158,12 @@ observe-first and lease checks, and a supported operation/platform. Omitted
 delivery mode remains background. An accepted background dispatch with an
 unverifiable result never escalates by itself; a later foreground call must be
 an explicit caller decision with its own admission.
+
+Route B v1 admits a target only when a fresh observation verifies that its
+exact window is on the current active Space of its display. An off-Space or
+unresolved target is refused with stable reason `target_off_active_space`,
+using the driver's `on_current_space` / `off_space_or_ax_unresolved` signal.
+Route B never switches Spaces; cross-Space targets are future work.
 
 The CLI should reuse the existing leaf command and argument shape rather than
 add a new top-level foreground command or hidden retry flag. The planned
@@ -204,6 +211,7 @@ This record does not include:
   mutual-authenticated minting, or a new process-authentication trust model;
 - owner-input quarantine, suppression, capture, or replay, including restart
   persistence and recovery markers;
+- cross-Space targets or Space switching;
 - general foreground typing, hotkeys, scrolling, dragging, desktop-wide HID,
   login-screen or lock-screen control;
 - QQ/WeChat acceptance, application-specific adapters, OCR, perception, or
