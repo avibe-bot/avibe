@@ -419,14 +419,14 @@ def test_real_official_child_is_kept_until_exit(installation, monkeypatch, tmp_p
         cwd=tmp_path, text=True,
     )
     monkeypatch.setattr(retention, "_runtime_paths", OFFICIAL_PATHS)
-    monkeypatch.setattr(runtime, "service_instance_lock_available", lambda: (True, None))
+    monkeypatch.setattr(runtime, "service_instance_lock_available", lambda **kwargs: (True, None))
     try:
         assert process.stdout.readline().strip() == "ready"
         paths.get_runtime_dir().mkdir(parents=True, exist_ok=True)
         if record == "status":
             paths.get_runtime_status_path().write_text(json.dumps({"service_pid": process.pid}))
         elif record == "lock-holder":
-            monkeypatch.setattr(runtime, "service_instance_lock_available", lambda: (False, process.pid))
+            monkeypatch.setattr(runtime, "service_instance_lock_available", lambda **kwargs: (False, process.pid))
         else:
             path = paths.get_runtime_pid_path() if record == "service-pid" else paths.get_runtime_ui_pid_path()
             path.write_text(str(process.pid))
@@ -436,7 +436,7 @@ def test_real_official_child_is_kept_until_exit(installation, monkeypatch, tmp_p
         assert current.exists()
     finally:
         process.communicate("\n", timeout=10)
-    monkeypatch.setattr(runtime, "service_instance_lock_available", lambda: (True, None))
+    monkeypatch.setattr(runtime, "service_instance_lock_available", lambda **kwargs: (True, None))
     collect(launcher)
     assert not exported.parent.parent.exists()
     assert current.exists()
@@ -449,10 +449,10 @@ def test_unreadable_official_reference_defers_without_invalidating_activation(
     root, launcher = installation
     old = candidate(root, "official")
     monkeypatch.setattr(retention, "_runtime_paths", OFFICIAL_PATHS)
-    monkeypatch.setattr(runtime, "service_instance_lock_available", lambda: (True, None))
+    monkeypatch.setattr(runtime, "service_instance_lock_available", lambda **kwargs: (True, None))
     paths.get_runtime_dir().mkdir(parents=True, exist_ok=True)
     if boundary == "lock-owner":
-        monkeypatch.setattr(runtime, "service_instance_lock_available", lambda: (False, None))
+        monkeypatch.setattr(runtime, "service_instance_lock_available", lambda **kwargs: (False, None))
     elif boundary == "status":
         paths.get_runtime_status_path().write_text("{")
     elif boundary == "pid":
@@ -478,7 +478,7 @@ def test_windows_official_base_python_child_keeps_redirector_generation(installa
     root, launcher = installation
     old = candidate(root, "official-ui")
     monkeypatch.setattr(retention, "_runtime_paths", OFFICIAL_PATHS)
-    monkeypatch.setattr(runtime, "service_instance_lock_available", lambda: (True, None))
+    monkeypatch.setattr(runtime, "service_instance_lock_available", lambda **kwargs: (True, None))
     monkeypatch.setattr(retention, "sys", SimpleNamespace(platform="win32"))
     paths.get_runtime_dir().mkdir(parents=True, exist_ok=True)
     paths.get_runtime_ui_pid_path().write_text("123")
@@ -501,7 +501,7 @@ def test_windows_redirector_loss_is_not_the_official_child_exiting(
     root, launcher = installation
     old = candidate(root, "official-ui")
     monkeypatch.setattr(retention, "_runtime_paths", OFFICIAL_PATHS)
-    monkeypatch.setattr(runtime, "service_instance_lock_available", lambda: (True, None))
+    monkeypatch.setattr(runtime, "service_instance_lock_available", lambda **kwargs: (True, None))
     monkeypatch.setattr(retention, "sys", SimpleNamespace(platform="win32"))
     paths.get_runtime_dir().mkdir(parents=True, exist_ok=True)
     paths.get_runtime_ui_pid_path().write_text("123")

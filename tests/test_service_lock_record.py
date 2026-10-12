@@ -305,7 +305,7 @@ class ServiceLockContentionTests(unittest.TestCase):
         unrelated = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
         self.addCleanup(unrelated.wait, 10)
         self.addCleanup(unrelated.kill)
-        self._hold_like_a_check(record=json.dumps({"pid": unrelated.pid, "started_at": 1.0}))
+        self._hold_like_a_check(record=json.dumps({"pid": unrelated.pid, "start_token": "not-its-start"}))
         self._acquire()
 
     def test_a_record_without_a_start_time_names_no_one_while_a_check_holds_the_lock(self):
@@ -341,11 +341,88 @@ class ServiceLockContentionTests(unittest.TestCase):
         self.assertLess(time.monotonic() - began, runtime._SERVICE_LOCK_SETTLE_SECONDS)
         self.assertEqual(refused.exception.holder_pid, holder.pid)
 
+    @unittest.skipUnless(sys.platform.startswith("linux"), "only Linux derives a start time from the boot time")
+    def test_a_running_service_is_still_recognised_after_the_clock_is_stepped(self):
+        """psutil's Linux start time moves with the clock; the holder's identity must not.
+
+        A VM's time sync, a WSL2 resume or NTP after boot steps the wall clock,
+        and psutil derives a Linux process's start time from the boot time that
+        step moves: the same holder then reads as started 21 seconds away from
+        its record. Recognising it by that time made every check wait out the
+        bound for a service that was running.
+        """
+
+        holder = self._holder()
+        real_create_time = runtime.psutil.Process.create_time
+        with patch.object(
+            runtime.psutil.Process, "create_time", lambda process: real_create_time(process) - 21.0
+        ), patch.object(runtime.time, "sleep", side_effect=AssertionError("waited for a running service")):
+            self.assertEqual(runtime.service_instance_lock_available(settle=True), (False, holder.pid))
+            with self.assertRaises(runtime.ServiceAlreadyRunningError) as refused:
+                runtime.acquire_service_instance_lock()
+        self.assertEqual(refused.exception.holder_pid, holder.pid)
+
+    def test_checks_outside_a_start_answer_from_one_attempt(self):
+        """The service asks these on its event loop, where a wait stalls everything behind it."""
+
+        self._hold_like_a_check()
+        with patch.object(runtime.time, "sleep", side_effect=AssertionError("a check waited")):
+            self.assertEqual(runtime.service_instance_lock_available(), (False, None))
+            self.assertFalse(runtime.service_lock_held_by(os.getpid()))
+
     def test_a_check_still_reads_a_running_service_at_once(self):
         holder = self._holder()
         began = time.monotonic()
         self.assertEqual(runtime.service_instance_lock_available(), (False, holder.pid))
         self.assertLess(time.monotonic() - began, runtime._SERVICE_LOCK_SETTLE_SECONDS)
+
+
+class ServiceOwnsItsLockTests(unittest.TestCase):
+    """The running service's own question, asked on its event loop by every lane.
+
+    It is answered from the handle the service holds: taking the lock again,
+    or reading a record that a clock step can make unrecognisable, cost each
+    call the full wait and stalled turns, scheduled tasks and watches.
+    """
+
+    def setUp(self) -> None:
+        tmp = TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        runtime_dir = Path(tmp.name) / "runtime"
+        runtime_dir.mkdir(parents=True)
+        self.lock_path = runtime_dir / "service.lock"
+        for started in (
+            patch("vibe.runtime.ensure_dirs", return_value=None),
+            patch("vibe.runtime.paths.get_runtime_service_lock_path", return_value=self.lock_path),
+            patch("vibe.runtime.paths.get_runtime_pid_path", return_value=runtime_dir / "vibe.pid"),
+        ):
+            started.start()
+            self.addCleanup(started.stop)
+        self.addCleanup(runtime.release_service_instance_lock)
+        runtime.acquire_service_instance_lock()
+
+    def test_the_owner_knows_without_taking_the_lock_or_waiting(self):
+        with patch.object(runtime, "_take_lock_file", side_effect=AssertionError("took the lock")), patch.object(
+            runtime.time, "sleep", side_effect=AssertionError("waited")
+        ), patch.object(runtime, "process_start_token", side_effect=AssertionError("read its start")):
+            self.assertTrue(runtime.current_process_owns_service_instance())
+
+    def test_a_released_lock_is_no_longer_owned(self):
+        runtime.release_service_instance_lock()
+        self.assertFalse(runtime.current_process_owns_service_instance())
+
+    def test_a_child_that_inherited_the_handle_does_not_own_it(self):
+        with patch.object(runtime, "_SERVICE_INSTANCE_LOCK_OWNER_PID", os.getpid() + 1):
+            self.assertFalse(runtime.current_process_owns_service_instance())
+
+    @unittest.skipIf(os.name == "nt", "Windows cannot remove a file this process holds open")
+    def test_a_lock_file_replaced_under_the_service_is_no_longer_owned(self):
+        """Another service could lock the new file, so this one must stop scheduling."""
+
+        self.lock_path.unlink()
+        self.assertFalse(runtime.current_process_owns_service_instance())
+        self.lock_path.write_text("", encoding="utf-8")
+        self.assertFalse(runtime.current_process_owns_service_instance())
 
 
 @unittest.skipUnless(os.name == "nt", "Windows byte-range lock semantics")
