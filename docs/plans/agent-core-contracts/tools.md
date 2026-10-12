@@ -398,7 +398,7 @@ tools, guidelines) and before Avibe's injected sections:
 <project_context>
 Project-specific instructions and guidelines:
 More general files come first; where two conflict, the later, more specific one wins.
-A directory below the working directory may hold its own instruction file (AGENTS.override.md, AGENTS.md, or CLAUDE.md) with more specific rules for that subtree: read it before changing files there.
+A directory below the working directory may hold its own instruction file with more specific rules for that subtree: the first that exists of AGENTS.override.md, AGENTS.md, AGENTS.MD, CLAUDE.md, CLAUDE.MD, the others in that directory ignored. Read it before changing files there.
 
 <project_instructions path="/Users/me/.avibe/AGENTS.md">
 ...
@@ -412,7 +412,8 @@ A directory below the working directory may hold its own instruction file (AGENT
 
 - The first line is Pi's. The second and third are Avibe's.
 - Files below the cwd are not loaded. As Codex does in its prompt, the third line tells the Agent that a subtree may
-  hold its own file and to read it before changing files there.
+  hold its own file and to read it before changing files there. It names the candidates in their order and says that
+  only the first that exists counts, as the loader's own rule is for each directory above.
   - The line is constant, so it keeps the section cache-stable.
   - It appears even when no file was loaded, since a subtree may still hold one. The section is then that line alone:
     `<project_context>`, the line, `</project_context>`.

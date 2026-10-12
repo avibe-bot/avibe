@@ -1789,9 +1789,9 @@ async def test_the_instruction_files_enter_between_the_head_and_avibes_sections_
     without, first, again, edited = (request.system for request in harness.provider.requests)
     # The section's text, stated here rather than built by the code under test.
     subtree = (
-        "A directory below the working directory may hold its own instruction file (AGENTS.override.md, AGENTS.md, "
-        "AGENTS.MD, CLAUDE.md, or CLAUDE.MD) with more specific rules for that subtree: read it before changing files "
-        "there."
+        "A directory below the working directory may hold its own instruction file with more specific rules for that "
+        "subtree: the first that exists of AGENTS.override.md, AGENTS.md, AGENTS.MD, CLAUDE.md, CLAUDE.MD, the others "
+        "in that directory ignored. Read it before changing files there."
     )
     section = (
         "<project_context>\nProject-specific instructions and guidelines:\n"
