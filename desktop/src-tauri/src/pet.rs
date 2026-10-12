@@ -16,17 +16,14 @@ use std::time::Duration;
 
 use avibe_runtime_host::deep_link::parse_deep_link;
 use avibe_runtime_host::pet::{
-    anchor_from_window, area_for, choose_layout, clamp_anchor, default_anchor, rescale, restored_window_origin,
-    shortcut_label, valid_session_id, window_origin, window_size, LogicalRect, PetAnchor, PetBinding, PetIntent,
-    PetLayout, PetReady, PetStore, WorkArea, SHORTCUT_PRESETS,
+    anchor_from_window, area_for, clamp_anchor, default_anchor, rescale, restored_window_origin, shortcut_label,
+    valid_session_id, window_size, HitRect, LogicalRect, PetAnchor, PetBinding, PetIntent, PetLayout, PetReady,
+    PetStore, WorkArea, SHORTCUT_PRESETS,
 };
 use avibe_runtime_host::LoopbackOrigin;
 use serde::{Deserialize, Serialize};
 use tauri::menu::{CheckMenuItem, MenuItem, Submenu};
-use tauri::{
-    AppHandle, LogicalPosition, LogicalSize, Manager, Monitor, PhysicalPosition, WebviewUrl, WebviewWindow,
-    WebviewWindowBuilder,
-};
+use tauri::{AppHandle, Manager, Monitor, PhysicalPosition, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 use tauri_plugin_global_shortcut::GlobalShortcutExt;
 use url::Url;
 
@@ -74,6 +71,9 @@ pub struct Pet {
     /// The accelerator the OS refused, shown in the tray until a registration succeeds.
     shortcut_error: Mutex<Option<String>>,
     move_generation: Arc<AtomicU64>,
+    hit_regions: Mutex<Vec<HitRect>>,
+    poll_generation: AtomicU64,
+    poll_wake: Arc<tokio::sync::Notify>,
 }
 
 impl Pet {
@@ -87,6 +87,9 @@ impl Pet {
             }),
             shortcut_error: Mutex::new(None),
             move_generation: Arc::new(AtomicU64::new(0)),
+            hit_regions: Mutex::new(Vec::new()),
+            poll_generation: AtomicU64::new(0),
+            poll_wake: Arc::new(tokio::sync::Notify::new()),
         }
     }
 
@@ -288,6 +291,8 @@ fn reconcile_now(app: &AppHandle) -> Option<WebviewWindow> {
     match window {
         Some(window) if !change.destroy => return Some(window),
         Some(window) => {
+            pet.poll_generation.fetch_add(1, Ordering::SeqCst);
+            pet.poll_wake.notify_one();
             let _ = window.destroy();
             *lock(&pet.window_origin) = None;
             pet.store().window_gone();
@@ -357,6 +362,8 @@ fn build_window(app: &AppHandle, origin: &LoopbackOrigin) -> Option<WebviewWindo
                 let (x, y) = rescale((x, y), scale, 1.0);
                 let _ = window.set_position(PhysicalPosition::new(x.round() as i32, y.round() as i32));
             }
+            let _ = window.set_ignore_cursor_events(true);
+            start_cursor_poll(app);
             Some(window)
         }
         Err(error) => {
@@ -378,11 +385,16 @@ pub fn wake(app: &AppHandle, intent: PetIntent) {
         let Some(window) = reconcile_now(&handle) else {
             // The Workbench has no Runtime yet; the summon waits for the
             // window that Runtime will bring.
-            pet.store().summon_before_window();
+            if intent != PetIntent::Release {
+                pet.store().summon_before_window(intent);
+            }
             return;
         };
-        let _ = window.show();
-        let _ = window.set_focus();
+        if intent != PetIntent::Release {
+            let _ = window.show();
+            pet.poll_wake.notify_one();
+            let _ = window.set_focus();
+        }
         let deliver = pet.store().summon(intent);
         if let Some(intent) = deliver {
             dispatch(&window, SUMMON_EVENT, &serde_json::json!({ "intent": intent }));
@@ -425,6 +437,7 @@ fn is_pet_page(origin: Option<&LoopbackOrigin>, url: &Url) -> bool {
 pub fn page_loading(app: &AppHandle) {
     if let Some(pet) = app.try_state::<Pet>() {
         pet.store().page_loading();
+        lock(&pet.hit_regions).clear();
     }
 }
 
@@ -585,13 +598,13 @@ pub fn pet_ready(window: WebviewWindow) -> Result<PetReady, String> {
     // window was built without focus.
     if ready.summon_pending.is_some() {
         let _ = window.show();
+        pet.poll_wake.notify_one();
         let _ = window.set_focus();
     }
     Ok(ready)
 }
 
-/// Grows the window to fit the panel, or shrinks it to the pet, keeping the
-/// pet where it is. The answer is the one placement the page renders from.
+/// Records the page state without moving or resizing the fixed mini window.
 #[tauri::command]
 pub fn pet_set_expanded(window: WebviewWindow, expanded: bool) -> Result<PetLayout, String> {
     ensure_pet_page(&window)?;
@@ -599,27 +612,91 @@ pub fn pet_set_expanded(window: WebviewWindow, expanded: bool) -> Result<PetLayo
 }
 
 fn set_expanded(window: &WebviewWindow, expanded: bool) -> Result<PetLayout, String> {
-    let app = window.app_handle();
-    let anchor = current_anchor(app, window).ok_or_else(|| "The pet window has no position.".to_owned())?;
-    let pet = app.state::<Pet>();
-    let previous = *lock(&pet.frame);
-    let layout = if expanded {
-        let areas = work_areas(app, window.scale_factor().unwrap_or(1.0));
-        match area_for(&areas, anchor) {
-            Some(area) => choose_layout(anchor, area.area),
-            None => PetLayout::default(),
-        }
-    } else {
-        previous.layout
-    };
+    let pet = window.state::<Pet>();
+    let layout = PetLayout::default();
     *lock(&pet.frame) = Frame { expanded, layout };
-    let (width, height) = window_size(expanded);
-    let (x, y) = window_origin(anchor, expanded, layout);
-    window
-        .set_size(LogicalSize::new(width, height))
-        .and_then(|()| window.set_position(LogicalPosition::new(x, y)))
-        .map_err(|_| "The pet window could not be resized.".to_owned())?;
     Ok(layout)
+}
+
+#[tauri::command]
+pub fn pet_hit_regions(window: WebviewWindow, rects: Vec<HitRect>) -> Result<(), String> {
+    ensure_pet_page(&window)?;
+    if rects.len() > 4096 || rects.iter().any(|rect| !rect.valid()) {
+        return Err("Invalid pet hit regions.".to_owned());
+    }
+    *lock(&window.state::<Pet>().hit_regions) = rects;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn pet_set_dismissed(window: WebviewWindow, session_id: String, ids: Vec<String>) -> Result<(), String> {
+    ensure_pet_page(&window)?;
+    window
+        .state::<Pet>()
+        .store()
+        .set_dismissed_ids(&session_id, ids)
+        .map_err(|_| "The dismissed pet cards could not be saved.".to_owned())
+}
+
+/// One poller per native window. All window calls and cursor-event toggles
+/// happen on the main thread; a hidden window waits for an explicit wake.
+fn start_cursor_poll(app: &AppHandle) {
+    let pet = app.state::<Pet>();
+    let generation = pet.poll_generation.fetch_add(1, Ordering::SeqCst) + 1;
+    let wake = pet.poll_wake.clone();
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let mut ignoring = true;
+        loop {
+            let handle = app.clone();
+            let (send, receive) = tokio::sync::oneshot::channel();
+            if app
+                .run_on_main_thread(move || {
+                    let pet = handle.state::<Pet>();
+                    if pet.poll_generation.load(Ordering::SeqCst) != generation {
+                        return;
+                    }
+                    let Some(window) = handle.get_webview_window(PET_WINDOW) else {
+                        return;
+                    };
+                    if !window.is_visible().unwrap_or(false) {
+                        let _ = send.send((None, ignoring));
+                        return;
+                    }
+                    let (Ok(cursor), Ok(origin), Ok(scale), Ok(size)) = (
+                        handle.cursor_position(),
+                        window.outer_position(),
+                        window.scale_factor(),
+                        window.inner_size(),
+                    ) else {
+                        let _ = send.send((Some(100), ignoring));
+                        return;
+                    };
+                    let x = (cursor.x - origin.x as f64) / scale;
+                    let y = (cursor.y - origin.y as f64) / scale;
+                    let in_window =
+                        x >= 0.0 && y >= 0.0 && x < size.width as f64 / scale && y < size.height as f64 / scale;
+                    let next = !lock(&pet.hit_regions).iter().any(|rect| rect.contains(x, y));
+                    if next != ignoring && window.set_ignore_cursor_events(next).is_ok() {
+                        ignoring = next;
+                    }
+                    let _ = send.send((Some(if in_window { 16 } else { 100 }), ignoring));
+                })
+                .is_err()
+            {
+                break;
+            }
+            let Ok((delay, applied)) = receive.await else {
+                break;
+            };
+            ignoring = applied;
+            if let Some(delay) = delay {
+                tokio::time::sleep(Duration::from_millis(delay)).await;
+            } else {
+                wake.notified().await;
+            }
+        }
+    });
 }
 
 #[derive(Serialize)]

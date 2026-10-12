@@ -1,0 +1,148 @@
+{
+  "desktop-collapsed": {
+    "pose": "running",
+    "expanded": false,
+    "detail": false,
+    "slot": false,
+    "avatar": {
+      "x": 172.5,
+      "y": 449,
+      "width": 115,
+      "height": 115,
+      "top": 449,
+      "right": 287.5,
+      "bottom": 564,
+      "left": 172.5
+    },
+    "size": [
+      460,
+      600
+    ]
+  },
+  "desktop-expanded": {
+    "pose": "running",
+    "expanded": true,
+    "detail": false,
+    "slot": false,
+    "avatar": {
+      "x": 172.5,
+      "y": 449,
+      "width": 115,
+      "height": 115,
+      "top": 449,
+      "right": 287.5,
+      "bottom": 564,
+      "left": 172.5
+    },
+    "size": [
+      460,
+      600
+    ],
+    "scroll": 0
+  },
+  "desktop-scrolled": {
+    "pose": "running",
+    "expanded": true,
+    "detail": false,
+    "slot": false,
+    "avatar": {
+      "x": 172.5,
+      "y": 449,
+      "width": 115,
+      "height": 115,
+      "top": 449,
+      "right": 287.5,
+      "bottom": 564,
+      "left": 172.5
+    },
+    "size": [
+      460,
+      600
+    ],
+    "scroll": 120
+  },
+  "desktop-main-detail": {
+    "pose": "running",
+    "expanded": true,
+    "detail": true,
+    "slot": false,
+    "avatar": {
+      "x": 172.5,
+      "y": 449,
+      "width": 115,
+      "height": 115,
+      "top": 449,
+      "right": 287.5,
+      "bottom": 564,
+      "left": 172.5
+    },
+    "size": [
+      460,
+      600
+    ],
+    "scroll": 0
+  },
+  "desktop-bubble-open": {
+    "pose": "running",
+    "expanded": true,
+    "detail": false,
+    "slot": true,
+    "avatar": {
+      "x": 172.5,
+      "y": 449,
+      "width": 115,
+      "height": 115,
+      "top": 449,
+      "right": 287.5,
+      "bottom": 564,
+      "left": 172.5
+    },
+    "size": [
+      460,
+      600
+    ],
+    "scroll": 0
+  },
+  "desktop-stop-confirm": {
+    "pose": "running",
+    "expanded": true,
+    "detail": false,
+    "slot": false,
+    "avatar": {
+      "x": 172.5,
+      "y": 449,
+      "width": 115,
+      "height": 115,
+      "top": 449,
+      "right": 287.5,
+      "bottom": 564,
+      "left": 172.5
+    },
+    "size": [
+      460,
+      600
+    ],
+    "scroll": 75
+  },
+  "desktop-dictating": {
+    "pose": "listening",
+    "expanded": true,
+    "detail": false,
+    "slot": true,
+    "avatar": {
+      "x": 172.5,
+      "y": 449,
+      "width": 115,
+      "height": 115,
+      "top": 449,
+      "right": 287.5,
+      "bottom": 564,
+      "left": 172.5
+    },
+    "size": [
+      460,
+      600
+    ],
+    "scroll": 148
+  }
+}

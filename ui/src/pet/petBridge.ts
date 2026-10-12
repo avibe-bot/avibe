@@ -30,11 +30,11 @@ import { openLinkInNewContext } from '@/lib/pwaNavigation';
  * order, so the page applies only a revision newer than the last it applied.
  *
  * Outside the shell (a browser tab during development) the bridge keeps the
- * binding in localStorage and lays the panel out to the right, so the route
+ * binding in localStorage with the same fixed mini layout, so the route
  * stays usable without the native window.
  */
 
-export type PetIntent = 'listen' | 'show';
+export type PetIntent = 'listen' | 'show' | 'release';
 
 export type PetLayout = {
   panel_side: 'left' | 'right';
@@ -49,6 +49,7 @@ export type PetBinding = {
 
 export type PetReady = PetBinding & {
   summon_pending: { intent: PetIntent } | null;
+  dismissed_ids: string[];
 };
 
 export const PET_SUMMON_EVENT = 'avibe:pet-summon';
@@ -67,7 +68,7 @@ const shellInvoke = (): TauriInternals['invoke'] | null => {
   return internals?.invoke ? internals.invoke.bind(internals) : null;
 };
 
-const isIntent = (value: unknown): value is PetIntent => value === 'listen' || value === 'show';
+const isIntent = (value: unknown): value is PetIntent => value === 'listen' || value === 'show' || value === 'release';
 
 const parseBinding = (value: unknown): PetBinding => {
   const result = value as { binding?: unknown; revision?: unknown } | null;
@@ -109,12 +110,15 @@ export const petBridge = {
 
   ready: async (): Promise<PetReady> => {
     const invoke = shellInvoke();
-    if (!invoke) return { ...readDevBinding(), summon_pending: null };
+    if (!invoke) return { ...readDevBinding(), summon_pending: null, dismissed_ids: [] };
     const result = (await invoke('pet_ready')) as { summon_pending?: { intent?: unknown } | null } | null;
     const pending = result?.summon_pending;
     return {
       ...parseBinding(result),
       summon_pending: pending && isIntent(pending.intent) ? { intent: pending.intent } : null,
+      dismissed_ids: Array.isArray((result as { dismissed_ids?: unknown } | null)?.dismissed_ids)
+        ? (result as { dismissed_ids: unknown[] }).dismissed_ids.filter((id): id is string => typeof id === 'string')
+        : [],
     };
   },
 
@@ -126,6 +130,18 @@ export const petBridge = {
       panel_side: layout?.panel_side === 'right' ? 'right' : 'left',
       panel_edge: layout?.panel_edge === 'top' ? 'top' : 'bottom',
     };
+  },
+
+  setHitRegions: async (rects: Array<{ x: number; y: number; width: number; height: number }>): Promise<void> => {
+    const invoke = shellInvoke();
+    if (!invoke) return;
+    await invoke('pet_hit_regions', { rects });
+  },
+
+  setDismissedIds: async (sessionId: string, ids: string[]): Promise<void> => {
+    const invoke = shellInvoke();
+    if (!invoke) return;
+    await invoke('pet_set_dismissed', { sessionId, ids });
   },
 
   bind: async (sessionId: string): Promise<PetBinding> => {

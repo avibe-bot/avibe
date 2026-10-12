@@ -29,6 +29,7 @@ let outstanding = 0;
 let latestChange: string | null = null;
 let changes: Promise<void> = Promise.resolve();
 let pendingSummon: PetIntent | null = null;
+let dismissedIds: string[] = [];
 let started = false;
 // Bumped by every live summon, so a summon `pet_ready()` returns is used only
 // if no live one has arrived since it was asked.
@@ -40,6 +41,8 @@ const show = () => {
   const next = outstanding > 0 ? latestChange : reported?.binding;
   if (next === binding) return;
   binding = next;
+  dismissedIds = [];
+  (window as unknown as { __AVIBE_PET_BINDING__?: string | null }).__AVIBE_PET_BINDING__ = next;
   storeListeners.forEach((listener) => listener());
 };
 
@@ -80,7 +83,12 @@ const start = () => {
   });
   const liveSummonsAtRequest = liveSummons;
   void petBridge.ready().then((ready) => {
+    const applies = !reported || ready.revision >= reported.revision;
     report(ready);
+    if (applies && binding === ready.binding) {
+      dismissedIds = ready.dismissed_ids ?? [];
+      storeListeners.forEach((listener) => listener());
+    }
     if (ready.summon_pending && liveSummons === liveSummonsAtRequest) noteSummon(ready.summon_pending.intent);
   }).catch(() => {
     // Without an answer the pet starts unbound; the shell's next report wins.
@@ -116,6 +124,14 @@ export const petShell = {
 
   /** The binding now, for callbacks that must not read a stale render. */
   currentBinding: (): string | null | undefined => binding,
+  dismissed: (): string[] => dismissedIds,
+  setDismissed: (sessionId: string, ids: string[]) => {
+    if (sessionId !== binding) return;
+    dismissedIds = ids;
+    storeListeners.forEach((listener) => listener());
+    // Persist writes in order, so an older dismiss cannot resurrect a later one.
+    changes = changes.then(() => petBridge.setDismissedIds(sessionId, ids)).catch(() => undefined);
+  },
 };
 
 export function usePetBinding(): string | null | undefined {
@@ -145,4 +161,11 @@ export function useOnSummon(listener: () => void): void {
       summonListeners.delete(listener);
     };
   }, [listener]);
+}
+
+export function usePetDismissed(): string[] {
+  return useSyncExternalStore(
+    (listener) => { storeListeners.add(listener); return () => { storeListeners.delete(listener); }; },
+    () => dismissedIds,
+  );
 }
