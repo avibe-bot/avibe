@@ -367,6 +367,58 @@ def test_codex_npm_certifies_its_declared_prefix_not_an_old_healthy_cli(native_c
         assert c["persist"] == []
 
 
+def test_bare_nonexecutable_npm_cli_outside_home_and_path_keeps_its_prefix(native_case, monkeypatch):
+    from vibe import cli_paths
+
+    c = native_case
+    prefix = c["home"].parent / "custom npm-global prefix"
+    pkg = prefix / "lib/node_modules/@anthropic-ai/claude-code"
+    pkg.mkdir(parents=True)
+    (pkg / "package.json").write_text(json.dumps({"name": "@anthropic-ai/claude-code"}))
+    forbidden = c["home"] / "damaged-cli-was-executed"
+    target = executable(pkg / "cli.js", f"from pathlib import Path\nPath({str(forbidden)!r}).touch()\n")
+    target.chmod(0o644)
+    launcher = prefix / "bin/claude"
+    launcher.parent.mkdir()
+    launcher.symlink_to(target)
+    calls = c["home"] / "repair-prefix.json"
+    replacement = "#!" + sys.executable + '\nprint("2.1.34 (Claude Code)")\n'
+    npm = executable(
+        c["tools"] / "npm",
+        f"import sys,json\nfrom pathlib import Path\nPath({str(calls)!r}).write_text(json.dumps(sys.argv[1:]))\np=Path({str(target)!r});p.write_text({replacement!r});p.chmod(0o755)\n",
+    )
+    monkeypatch.setenv("PATH", c["env"]["PATH"])
+    monkeypatch.setattr(api, "_configured_agent_cli_path", lambda _name: "claude")
+    monkeypatch.setattr(cli_paths, "_npm_global_binary_candidates", lambda name: [launcher] if name == "claude" else [])
+    observed_flags = []
+
+    def candidates(name, *, include_npm_global=True):
+        observed_flags.append(include_npm_global)
+        return [launcher] if name == "claude" and include_npm_global else []
+
+    monkeypatch.setattr(api, "_candidate_cli_paths", candidates)
+
+    def resolve(binary, **_):
+        if binary == "npm":
+            return str(npm)
+        return api._resolve_cli_path(binary, candidate_paths=candidates, include_desktop=False)
+
+    monkeypatch.setattr(api, "resolve_cli_path", resolve)
+    detection = api.detect_cli("claude", "claude")
+    assert detection["found"] and detection["status"] == "broken" and detection["path"] == str(launcher)
+    assert True in observed_flags and not forbidden.exists()
+    result = api.install_agent("claude")
+    assert result["ok"] and result["path"] == str(launcher)
+    assert json.loads(calls.read_text()) == [
+        "install",
+        "--global",
+        "--prefix",
+        str(prefix),
+        "@anthropic-ai/claude-code",
+    ]
+    assert c["persist"] == [("claude", str(launcher))] and not forbidden.exists()
+
+
 def test_unknown_installation_is_not_migrated(tmp_path):
     path = executable(tmp_path / "custom-claude", 'print("broken")\n')
     assert identify_repair_source("claude", str(path), home=tmp_path) is None

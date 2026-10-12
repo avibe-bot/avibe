@@ -141,13 +141,14 @@ export function useBackendRuntime({
       if (!supportsCli) return;
       const token = ++detectionToken.current;
       const intent = pathIntent.current;
+      const requestedPath = binary || cliPath || defaultCli;
       setDetecting(true);
       setCliStatus('unknown');
       setDetectedRuntime(undefined);
       try {
-        const result = await api.detectCli(binary || cliPath || defaultCli, backend);
+        const result = await api.detectCli(requestedPath, backend);
         if (!mounted.current || detectionToken.current !== token || pathIntent.current !== intent) return;
-        const nextPath = result.path || cliPath || defaultCli;
+        const nextPath = result.path || requestedPath;
         setCliPath(nextPath);
         setCliStatus(result.status);
         setDetectedRuntime(result.runtime);

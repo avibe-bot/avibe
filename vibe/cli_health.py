@@ -8,7 +8,6 @@ output is bounded, used for recognition and never becomes a UI diagnostic.
 from __future__ import annotations
 
 import asyncio
-import os
 import re
 from dataclasses import asdict, dataclass
 from typing import Literal, Mapping
@@ -66,6 +65,7 @@ async def probe_cli(
     # The same supplier as native backend launches owns app-private helpers
     # (notably Codex's support binaries); a generic PATH is not equivalent.
     from vibe.desktop_backends import DesktopBackendError, desktop_backend_subprocess_environment
+    from vibe.upgrade import get_safe_cwd
 
     try:
         env = desktop_backend_subprocess_environment(backend, path, env) or env
@@ -74,7 +74,7 @@ async def probe_cli(
     try:
         result = await run_supervised_command(
             command=[path, "--version"],
-            cwd=os.getcwd(),
+            cwd=get_safe_cwd(),
             env=env,
             timeout_seconds=timeout_seconds,
             max_output_bytes=PROBE_OUTPUT_BYTES,

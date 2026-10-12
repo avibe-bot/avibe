@@ -33,6 +33,20 @@ A residual resolution conflict is an actionable refusal, not an attempted repair
 
 Not included: npm residue cleanup, general install-source migration, generic health service, auth/routing rewrites, deployment, unrelated runtime/VM changes. Preserve #2452 startup diagnosis and input retry behavior.
 
+## Producer-to-consumer boundary ledger
+
+| Boundary | Authority and invariant | Regression evidence |
+| --- | --- | --- |
+| Explicit selection | Detection observes that path; missing stays missing without another-install fallback. | HTTP draft/saved separation; explicit and bare upgrade matrices. |
+| Bare selection / presence | Runnable discovery keeps its priority; if none works, existence discovery includes the same supported standard, PATH and npm-global sources without requiring execute permission. | Non-executable custom npm prefix outside standard HOME/PATH remains `found/broken` and repairs its original prefix. |
+| Probe execution | Shared supervised runner and stable existing cwd; backend version shape and normal/private launch environment. | Real valid CLI while the owned service subprocess's old cwd has been deleted; bounded timeout/cancellation and output. |
+| UI path / intent | A request captures its requested path. A missing observation retains that path, not an old render closure. Revision and human-intent guards reject late completions. | Saved-missing initial load, explicit retry, and edit-during-probe tests. |
+| Install/update result | Existing upgrades verify their preselected executable. An explicitly declared Codex npm prefix verifies its own output; an alias survives only if it names that artifact. | Missing/nonexec/broken/same-path success plus old-healthy/new-target-missing npm controls. |
+| Auth/source/application | CLI health is an independent conjunction, not an auth verdict or an application receipt. Built-in backends have no CLI requirement. | Guarded auth harness supplies deterministic command-observation inputs; real HTTP projection refuses broken CLI and recovers at the same selection while other gates can still refuse. |
+| Setup consumption | Wizard forwards the native backend identity; final entry gate consumes health plus the existing independent gates. | Wizard/entry-gate UI tests and cataloged HTTP auth/setup flow; not a claim of the pre-existing partial real-browser-to-real-API journey. |
+
+The first review correction stays within these boundaries. No new cache, source migration, cwd policy, scenario framework or permission model is introduced. CI fixtures follow the actual async producer signatures without relaxing process/host-effect guards. Capability-specific backend relations are classified explicitly rather than excluded from the catalog-universe audit.
+
 ## Evidence required
 
 Controlled real subprocesses cover valid backend versions, nonzero Node crash-tail versions, exit-zero wrong output, non-executable/missing paths, bounded output, timeout/descendants, replacements and draft-vs-saved paths. Installer consumers cover false-success read-back, healthy source-preserving update, and broken repair without invoking the damaged CLI. API/UI consumers cover broken state, stale completions and unchanged auth/entry gates. Focused tests, UI build and exact-head review/CI complete the gate; native-platform gaps are reported explicitly.

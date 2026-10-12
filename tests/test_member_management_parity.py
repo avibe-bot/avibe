@@ -392,7 +392,9 @@ def test_remote_management_handlers_reach_only_stubbed_host_effects(management_h
 
         return run
 
-    monkeypatch.setattr(api, "get_backend_runtime", effect("runtime"))
+    async def runtime_effect(*args, **kwargs):
+        return effect("runtime")(*args, **kwargs)
+    monkeypatch.setattr(api, "get_backend_runtime_async", runtime_effect)
     monkeypatch.setattr(api, "start_dependency_install_job", effect("dependency"))
     monkeypatch.setattr(api, "slack_auth_test", effect("platform"))
     monkeypatch.setattr(cli, "_doctor", effect("doctor"))
@@ -413,7 +415,7 @@ def test_remote_management_handlers_reach_only_stubbed_host_effects(management_h
         ["runtime", "dependency", "platform", "doctor", "transport"] if role in {"owner", "member"} else []
     )
     if calls:
-        assert calls[0][1] == ("claude",)
+        assert calls[0][1] == ("claude", None)
         assert calls[1][1] == ("avault",)
         assert calls[2][1][0] == "test-token"
         assert calls[3][2]["deep"] is True

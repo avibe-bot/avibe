@@ -65,6 +65,8 @@ PYTHON_DECLARATIONS = {
     ("vibe/backend_model_catalog.py", "Set", frozenset({"claude", "codex"})): (1, "native_subset", "Backends with bundled model catalogs."),
     ("vibe/cli.py", "Tuple", frozenset({"claude", "codex"})): (1, "native_subset", "Native-only model picker refresh."),
     ("vibe/desktop_backends.py", "Dict", NATIVE): (1, "native", "CLI package install specifications."),
+    ("vibe/cli_health.py", "Dict", NATIVE): (1, "native", "Backend-specific native CLI version grammars, not another Agent universe."),
+    ("vibe/cli_repair.py", "Dict", NATIVE): (2, "native", "npm package and Homebrew formula coordinates for source-preserving native CLI repair."),
     ("vibe/global_agents_md.py", "Dict", NATIVE): (1, "native", "Native global instruction filenames."),
     ("vibe/model_hub_runtime/adapter.py", "Dict", frozenset({"claude", "codex"})): (1, "native_subset", "Native subscription vendors."),
     ("vibe/model_hub_runtime/state.py", "Dict", frozenset({"claude", "codex"})): (1, "native_subset", "Vendor aliases, including provider names."),

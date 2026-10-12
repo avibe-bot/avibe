@@ -52,7 +52,7 @@ from core.handlers.model_hub.service import (
 )
 from core.show_pages import ShowPageStore
 from modules.agents.codex.agent import CodexAgent
-from tests.scenario_harness.auth_setup import AuthSetupScenarioHarness, FakeProcess, save_direct_auth_config
+from tests.scenario_harness.auth_setup import AuthSetupScenarioHarness, CliCommandObservations, FakeProcess, save_direct_auth_config
 from tests.scenario_harness.core import ScenarioExpect, ScenarioRunner, ScenarioStep
 from tests.ui_server_test_helpers import _save_config, csrf_headers, remote_session_cookie
 from storage import remote_access_authorization_service
@@ -102,6 +102,72 @@ def _guard_native_auth_boundaries(monkeypatch, _isolate_vibe_remote_home):
     monkeypatch.setattr(asyncio, "create_subprocess_shell", forbidden)
     monkeypatch.setattr(psutil, "process_iter", forbidden)
     monkeypatch.setattr(native_oauth_store, "_KEYCHAIN_STORE", native_oauth_store._FixtureKeychainStore())
+    # Keep the existing no-process guard. Supply command evidence only at the
+    # shared probe transport seam; production parsing/readiness remain real.
+    CliCommandObservations().bind(monkeypatch)
+
+
+def test_selected_cli_health_refusal_recovers_through_setup_http(monkeypatch, tmp_path):
+    """AUTH-SETUP-131: deterministic command boundary -> real HTTP setup projection.
+
+    UI Wizard/final-admission consumption is covered separately; this does not
+    claim the partial AUTH-SETUP-123 real-browser-to-real-API journey.
+    """
+    from vibe import api, internal_client
+
+    selected = tmp_path / "selected CLI" / "codex"
+    commands = CliCommandObservations().bind(monkeypatch)
+    commands.replace(selected, stdout="", exit_code=1, stderr="Missing dependency\nNode.js v22.18.0")
+    config = V2Config.default()
+    config.agents.codex.enabled = True
+    config.agents.codex.cli_path = str(selected)
+    save_direct_auth_config(config)
+    harness = AuthSetupScenarioHarness()
+    client = app.test_client()
+    auth = {"key": "fixture-only-key"}
+    application = {"state": "applied"}
+    monkeypatch.setattr(api, "get_codex_auth", lambda: {"ok": True, "active_auth_mode": "api_key" if auth["key"] else "none"})
+    async def applied(*_args, **_kwargs):
+        return {"status_code": 200, "body": {"ok": True, "state": application["state"], "controller_pid": 123}}
+    monkeypatch.setattr(internal_client, "backend_application", applied)
+    monkeypatch.setattr(api, "_backend_apply_receipts", {})
+    monkeypatch.setattr(api, "_cached_latest", lambda _name: None)
+    monkeypatch.setattr(api, "_codex_process_status", lambda _path: "stopped")
+    runner = ScenarioRunner(harness)
+    def refused(_h):
+        runtime, connection = harness.cli_setup_snapshot(client, "codex", str(selected))
+        assert runtime["installed"] and runtime["status"] == "broken" and runtime["current_version"] is None
+        assert connection["cli_status"] == "broken" and not connection["entry_eligible"]
+        assert V2Config.load().agents.codex.cli_path == str(selected)
+        assert not V2Config.load().setup_completed
+    def replace(_h):
+        commands.replace(selected, stdout="codex-cli 0.162.1")
+    def recovered(_h):
+        runtime, connection = harness.cli_setup_snapshot(client, "codex", str(selected))
+        assert runtime["status"] == "ok" and runtime["resolved_path"] == str(selected)
+        assert connection["entry_eligible"] and connection["auth"] == "api_key"
+        auth["key"] = None
+        assert not harness.cli_setup_snapshot(client, "codex", str(selected))[1]["entry_eligible"]
+        auth["key"] = "fixture-only-key"
+        application["state"] = "draining"
+        assert not harness.cli_setup_snapshot(client, "codex", str(selected))[1]["entry_eligible"]
+        application["state"] = "applied"
+        assert harness.cli_setup_snapshot(client, "codex", str(selected))[1]["entry_eligible"]
+        hub = V2Config.load()
+        hub.model_hub.agents["codex"].mode = "hub"
+        hub.model_hub.sources = []
+        hub.save()
+        source_blocked = harness.cli_setup_snapshot(client, "codex", str(selected))[1]
+        assert source_blocked["supply_mode"] == "hub" and not source_blocked["entry_eligible"]
+        save_direct_auth_config()
+        assert harness.cli_setup_snapshot(client, "codex", str(selected))[1]["entry_eligible"]
+    def complete(_h):
+        response = client.post("/api/config", json={"setup_completed": True}, headers=csrf_headers(client))
+        assert response.status_code == 200 and V2Config.load().setup_completed
+        assert V2Config.load().agents.codex.cli_path == str(selected)
+    asyncio.run(runner.run(ScenarioStep("refuse", refused), ScenarioStep("replace", replace), ScenarioStep("reobserve-and-gates", recovered), ScenarioStep("complete", complete)))
+    ScenarioExpect.step_history(runner, ["refuse", "replace", "reobserve-and-gates", "complete"])
+    assert commands.calls and {path for _backend, path in commands.calls} == {str(selected)}
 
 
 def test_auth_setup_catalog_priorities_reference_live_scenarios():

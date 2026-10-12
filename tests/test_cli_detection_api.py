@@ -1,6 +1,7 @@
 """Real detection evidence reaches HTTP and lifecycle consumers, without credentials."""
 
 import asyncio
+import json
 import os
 from unittest.mock import AsyncMock
 
@@ -81,6 +82,42 @@ def test_invalid_backend_does_not_execute_custom_path(cli_api, monkeypatch):
     response = client.get("/api/cli/detect", params={"binary": "/fixture/selected", "backend": "vibey"})
     assert response.status_code == 400
     probe.assert_not_called()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows cannot remove a process working directory")
+def test_health_and_runtime_http_survive_an_owned_removed_cwd(tmp_path):
+    import subprocess
+    import sys
+
+    cli = make_cli(tmp_path, 'print("codex-cli 0.162.1")\n')
+    env = fixture_env(tmp_path)
+    driver = tmp_path / "removed_cwd_driver.py"
+    driver.write_text(
+        """import asyncio,json,os
+from pathlib import Path
+from config.v2_config import V2Config
+from vibe import api,ui_server
+from vibe.cli_health import probe_cli
+config=V2Config.default();config.agents.codex.cli_path=CLI;config.save()
+api._cached_latest=lambda _name: None
+api._codex_process_status=lambda _path: 'stopped'
+client=ui_server.app.test_client()
+gone=Path(GONE);gone.mkdir();os.chdir(gone);gone.rmdir()
+try:os.getcwd();raise AssertionError('cwd was not removed')
+except FileNotFoundError:pass
+health=asyncio.run(probe_cli('codex',CLI,env=dict(os.environ)))
+response=client.get('/api/backend/codex/runtime',params={'cli_path':CLI})
+body=response.get_json()
+assert health.status=='ok' and health.version=='0.162.1'
+assert response.status_code==200 and body['status']=='ok' and body['current_version']=='0.162.1',body
+print(json.dumps({'probe':health.status,'runtime':body['status'],'version':body['current_version']}))
+""".replace("CLI", repr(str(cli))).replace("GONE", repr(str(tmp_path / "removed-service-cwd")))
+    )
+    result = subprocess.run(
+        [sys.executable, str(driver)], cwd=tmp_path, env=env, capture_output=True, text=True, timeout=25
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout.strip().splitlines()[-1]) == {"probe": "ok", "runtime": "ok", "version": "0.162.1"}
 
 
 def test_install_job_rejects_success_without_readback(monkeypatch):

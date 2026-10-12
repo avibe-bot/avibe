@@ -5334,7 +5334,7 @@ def _cli_detection_target(binary: str, backend: str | None) -> tuple[str | None,
     if path is None and backend is not None and not explicit:
         # Discovery normally skips non-executable files. If no runnable candidate
         # resolved, retain a present candidate so its failed launch is 'broken'.
-        candidates = _candidate_cli_paths(binary, include_npm_global=False)
+        candidates = _candidate_cli_paths(binary, include_npm_global=True)
         candidates += [Path(entry or os.curdir) / binary for entry in os.environ.get("PATH", "").split(os.pathsep)]
         path = next((str(p.absolute()) for p in candidates if p.is_file()), None)
     return backend, path

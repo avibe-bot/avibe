@@ -51,6 +51,33 @@ const mountRuntime = async () => {
 };
 
 describe('persisted backend install paths', () => {
+  it('retains a missing saved path on initial observation and explicit retry', async () => {
+    const path = '/saved/不存在/claude';
+    mocks.api.getConfig.mockResolvedValue({ agents: { claude: { enabled: true, cli_path: path } } });
+    mocks.api.detectCli.mockResolvedValue({ found: false, path: null, status: 'missing' });
+    const hook = await mountRuntime();
+    expect(hook.result.current.cliPath).toBe(path);
+    expect(hook.result.current.savedCliPath).toBe(path);
+    expect(hook.result.current.runtimeDirty).toBe(false);
+    await act(async () => hook.result.current.detect(path));
+    expect(mocks.api.detectCli).toHaveBeenLastCalledWith(path, 'claude');
+    expect(hook.result.current.cliPath).toBe(path);
+  });
+
+  it('does not overwrite a newer human edit with a missing initial-path completion', async () => {
+    const path = '/saved/claude';
+    const pending = deferred<{ found: boolean; path: null; status: 'missing' }>();
+    mocks.api.getConfig.mockResolvedValue({ agents: { claude: { enabled: true, cli_path: path } } });
+    mocks.api.detectCli.mockReturnValue(pending.promise);
+    const hook = renderHook(() => useBackendRuntime({ backend: 'claude', showToast: mocks.showToast }));
+    await waitFor(() => expect(hook.result.current.loaded).toBe(true));
+    act(() => hook.result.current.setCliPath('/new-human/claude'));
+    await act(async () => pending.resolve({ found: false, path: null, status: 'missing' }));
+    expect(hook.result.current.cliPath).toBe('/new-human/claude');
+    expect(hook.result.current.savedCliPath).toBe(path);
+    expect(hook.result.current.runtimeDirty).toBe(true);
+  });
+
   it('reports a present but broken CLI without converting presence to health', async () => {
     mocks.api.detectCli.mockResolvedValue({ found: true, path: '/broken/claude', status: 'broken' });
     const hook = await mountRuntime();

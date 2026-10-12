@@ -548,4 +548,27 @@ scenarios:
       test: tests/e2e/test_model_hub_engine_contract.py::test_oauth_callback_forwarder_is_loopback_only_and_optional
     supporting_tests:
       - tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_hub_oauth_mispaste_stays_recoverable_and_schemeless_address_signs_in
+  - id: AUTH-SETUP-131
+    name: Selected broken native CLI refuses setup eligibility, then recovers at the same path
+    status: covered
+    kind: recovery_path
+    layer: scenario
+    backend: codex
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_selected_cli_health_refusal_recovers_through_setup_http
+    # This is the real HTTP runtime/connection/config boundary with deterministic
+    # command observations supplied by the existing guarded auth_setup harness.
+    # The production health parser and eligibility projection remain real; no
+    # native process, host credential or provider request is permitted here.
+    # Replacement changes an owned test-home fixture at the SAME selected path.
+    # Auth, Hub source supply and application refusal remain required after CLI health recovers.
+    # Supporting UI tests exercise the actual Wizard adapter/final gate using
+    # controlled responses. This does NOT cover the partial assembled real-browser
+    # to real-API journey recorded in AUTH-SETUP-123, nor native platform installs.
+    supporting_tests:
+      - tests/test_cli_health.py
+      - tests/test_cli_repair.py
+      - tests/test_cli_detection_api.py
+      - ui/src/components/onboarding/WizardCompletion.test.tsx
+      - ui/src/components/onboarding/entryGate.test.ts
+      - ui/src/components/settings/shared/useBackendRuntime.test.tsx
 next_priority: []
