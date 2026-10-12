@@ -454,7 +454,12 @@ class Controller:
             await adopt_catalog()
 
     async def _seed_vibey_model_supply(self) -> None:
-        """Seed Vibey's Model Hub entry from existing Sources, then reconcile its built-in Agent's model."""
+        """Seed Vibey's Model Hub entry from existing Sources, then reconcile its built-in Agent's model.
+
+        A Vibey an earlier seed left with nothing to run on (an earlier build's empty seed,
+        or one that ran without a models.dev copy) starts here too, not only on the next
+        snapshot reconcile.
+        """
 
         model_hub_service = getattr(self, "model_hub_service", None)
         if model_hub_service is None:
@@ -463,6 +468,10 @@ class Controller:
             await model_hub_service.seed_vibey_supply()
         except Exception:
             logger.warning("Vibey starting model supply failed", exc_info=True)
+        try:
+            await self._start_vibey_without_a_model()
+        except Exception:
+            logger.warning("Vibey's starting model failed at startup", exc_info=True)
         try:
             self._reconcile_vibey_agent_model()
         except Exception:

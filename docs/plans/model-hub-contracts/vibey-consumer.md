@@ -36,7 +36,8 @@ taking text and tool calls and producing text. A model models.dev does not know 
 guessed at: with none described that way, the catalog stays empty and the setup
 card offers the pick. A Vibey left with nothing to run on is healed by the
 snapshot reconcile that also backfills MH-LIMITS-001, which runs when a copy
-arrives and on the controller's cadence. While Vibey's catalog is empty, records
+arrives and on the controller's cadence, and at every start, so a Vibey an earlier
+build seeded empty starts on the first upgraded start. While Vibey's catalog is empty, records
 no removal, and its built-in Agent has no model, it starts on the same rule's
 model, whether a new copy or a later Source made one describable. Nothing was
 ever chosen for that Vibey, so this is its start, not a re-seed. An Agent that

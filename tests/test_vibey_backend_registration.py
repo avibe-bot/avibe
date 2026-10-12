@@ -392,6 +392,46 @@ async def test_vibey_starts_once_a_models_dev_copy_describes_a_listed_model(
         store.close()
 
 
+@pytest.mark.asyncio
+async def test_an_rc1_vibey_left_empty_starts_at_the_first_upgraded_start(tmp_path, sqlite_db_factory):
+    """MH-VIBEY-007: a Vibey an earlier build seeded empty starts at the next start.
+
+    gh-v3.2.0rc1 seeded Vibey from a Source listing no built-in Agent's model and left its
+    catalog empty. The seed is spent, so the upgraded start does not run it again; it starts
+    that Vibey from the cached models.dev copy instead of waiting for a later refresh.
+    """
+    from config.v2_config import ModelHubConfig
+    from tests.test_model_hub_l3 import _service, _source
+
+    store = VibeAgentStore(sqlite_db_factory(tmp_path / "agents.sqlite"))
+    try:
+        store.ensure_builtin_default_agents(["vibey"])
+        relay = _source("src_relay0001", "Relay", vendor="custom", protocol="openai_chat", model_id="relay-tools-1")
+        # The persisted shape rc1 left: Vibey seeded (no longer pending), its Source placed, its catalog empty.
+        config = ModelHubConfig(sources=[relay])
+        config.agents["vibey"].sources.order = [relay.id]
+        config = ModelHubConfig.from_payload(config.to_payload())
+        assert not config.vibey_supply_pending and config.agents["vibey"].models == []
+        service = _service(tmp_path, sources=[])
+        service.store.config = config
+        service.models_dev_catalog = lambda: {"relay": {"name": "Relay", "models": {
+            "relay-tools-1": {"name": "Relay Tools 1", "tool_call": True,
+                              "modalities": {"input": ["text"], "output": ["text"]}},
+        }}}
+        controller = Controller.__new__(Controller)
+        controller.vibe_agent_store = store
+        controller.model_hub_service = service
+        service.builtin_agent_models_override = controller._builtin_agent_models
+        service.backend_catalog_changed = controller._model_hub_catalog_changed
+
+        await controller._seed_vibey_model_supply()
+
+        assert [model.id for model in service.store.load().agents["vibey"].models] == ["relay-tools-1"]
+        assert store.get("vibey").model == "relay-tools-1"
+    finally:
+        store.close()
+
+
 @pytest.mark.parametrize("name_taken", [False, True])
 def test_choosing_the_built_in_backend_in_an_im_picker_routes_to_its_agent(tmp_path, sqlite_db_factory, name_taken):
     """An IM picker chooses a backend; the routing it saves names that backend's built-in Agent.
