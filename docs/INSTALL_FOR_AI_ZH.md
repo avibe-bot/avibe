@@ -56,9 +56,10 @@ vibe doctor
 
 以 root 身份运行安装器时，启动器会安装到 `/usr/local/bin/vibe`，这是 root 安装唯一支持的位置。之后的升级会让所有选中这份安装的稳定 `vibe` 启动器一起切换版本，参见 [Upgrading](UPGRADING.md#stable-launchers)。
 
-## 第 3 步：至少安装一个编码 Agent
+## 第 3 步：可选：添加编码 CLI
 
-先问用户想用哪个后端。默认建议：OpenCode 上手最轻，Claude Code 适合复杂编码任务，Codex 适合 OpenAI 工作流。
+新安装默认使用 Avibe 内置的 Vibey。它不需要任何 CLI，设置向导添加一个模型网关来源后（第 4 步）就能用。只有用户还想用
+Claude Code、Codex 或 OpenCode 时才需要安装：Avibe 会和 Vibey 一起运行它们，之后也可以在「Agent」页把其中一个设为新会话的默认。
 
 OpenCode：
 
@@ -107,7 +108,7 @@ vibe
 在向导里帮用户选择：
 
 1. 聊天平台：Slack、Discord、Telegram、微信、飞书 / Lark。
-2. Agent 后端：Claude Code、OpenCode、Codex。
+2. Agent：新会话默认使用 Vibey；Claude Code、OpenCode、Codex 可选。
 3. 项目工作目录。
 4. 需要启用的频道或聊天范围。
 
