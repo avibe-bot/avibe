@@ -45,6 +45,12 @@ _SENSITIVE_KEY_PARTS = (
     "webhook",
     "workspace_token",
 )
+# Generic names a credential also travels under, matched only as the whole key so
+# ``cache_key`` or ``author`` stay readable. Model Hub sends ``{"key": ...}`` to
+# validate a credential before it is stored anywhere.
+_SENSITIVE_EXACT_KEYS = ("auth", "key")
+# Fields that carry a request's query string; dropped whole.
+_DROPPED_KEYS = frozenset({"http.query", "http.fragment", "query_string"})
 _REDACTED = "[Filtered]"
 
 
@@ -54,48 +60,80 @@ def _normalized_key(key: str) -> str:
 
 
 _SENSITIVE_KEY_TOKENS = tuple(_normalized_key(part) for part in _SENSITIVE_KEY_PARTS)
-# The same key match inside free text: any token, in any case, with an optional
-# ``_``, ``-`` or ``.`` between its characters.
-_SENSITIVE_KEY_TEXT_PATTERN = "|".join(
-    "[_.-]?".join(re.escape(char) for char in token) for token in _SENSITIVE_KEY_TOKENS
-)
+
+
+def _text_key_pattern(token: str) -> str:
+    # A normalized key as it may be written in text: any case, with an optional
+    # ``_``, ``-`` or ``.`` between its characters.
+    return "[_.-]?".join(re.escape(char) for char in token)
+
+
 # A sensitive key rendered into free text: a dataclass repr, a header line,
 # ``key=value``, or JSON, including JSON nested inside a JSON string. The key
-# starts at a word boundary and is length-bounded so long word runs stay linear;
-# a quoted value runs to its first unescaped closing delimiter.
+# starts at a word boundary and is length-bounded so long word runs stay linear.
+# A quoted value ends at its first unescaped closing delimiter; when none is
+# found, everything after the opening delimiter is redacted rather than kept. An
+# unquoted value led by an auth scheme (``Bearer <token>``) includes the token.
 _SENSITIVE_KEY_VALUE_RE = re.compile(
-    r"(?i)(?<![\w.-])(?P<kq>\\*[\"']?)[\w.-]{0,40}(?:" + _SENSITIVE_KEY_TEXT_PATTERN + r")[\w.-]{0,40}(?P=kq)"
-    r"\s*[:=]\s*"
-    r"(?:(?P<vq>\\*[\"'])(?P<quoted>.{0,8192}?)(?<!\\)(?P=vq)|(?P<bare>[^\s\"',;&(){}\[\]\\]+))",
+    r"(?i)(?<![\w.-])(?P<kq>\\*[\"']?)"
+    r"(?:[\w.-]{0,40}(?:" + "|".join(_text_key_pattern(token) for token in _SENSITIVE_KEY_TOKENS) + r")[\w.-]{0,40}"
+    r"|" + "|".join(_text_key_pattern(key) for key in _SENSITIVE_EXACT_KEYS) + r")"
+    r"(?P=kq)\s*[:=]\s*"
+    r"(?:(?P<vq>\\*[\"'])(?:(?P<quoted>.{0,8192}?)(?:(?<!\\)(?P=vq)|\Z)|(?P<capped>.{8192}))"
+    r"|(?P<bare>(?:(?:basic|bearer|bot|digest|token)\s+)?(?:[^\s\"'\\]|\\(?![\"']))+))",
     re.DOTALL,
 )
 
 
 def _redact_key_value(match: re.Match[str]) -> str:
-    group = "quoted" if match.group("quoted") is not None else "bare"
+    group = next(name for name in ("quoted", "capped", "bare") if match.group(name) is not None)
     start, end = match.span(group)
     offset = match.start()
     text = match.group(0)
     return text[: start - offset] + _REDACTED + text[end - offset :]
 
 
+# Any URL keeps only its origin. A path, query, fragment or userinfo carries
+# capabilities no key name announces: a Slack response_url, a Discord
+# interaction token, WeChat CDN parameters, a Telegram bot token, a proxy
+# password. An authority that is not a plain host[:port] is dropped whole.
+_URL_RE = re.compile(
+    r"(?i)\b(?P<scheme>[a-z][a-z0-9+.-]*://)(?P<authority>[^\s/?#\"'<>\\`]*)(?P<rest>[^\s\"'<>\\`]*)"
+)
+_URL_HOST_RE = re.compile(r"(?i)(?:[a-z0-9.-]+|\[[0-9a-f:.]+\])(?::\d{1,5})?")
+_URL_TRAILING_PUNCTUATION = ".,;:!?)]}"
+
+
+def _url_origin(match: re.Match[str]) -> str:
+    _, at, host = match.group("authority").rpartition("@")
+    if not _URL_HOST_RE.fullmatch(host):
+        return match.group("scheme") + _REDACTED
+    origin = match.group("scheme") + (_REDACTED + at if at else "") + host
+    rest = match.group("rest")
+    marker = "/" + _REDACTED
+    if rest.startswith(marker) and not rest[len(marker) :].rstrip(_URL_TRAILING_PUNCTUATION):
+        # Already reduced: scrubbing runs on a breadcrumb and again on its event.
+        return origin + rest
+    path = rest.rstrip(_URL_TRAILING_PUNCTUATION)
+    return origin + (marker if path else "") + rest[len(path) :]
+
+
 _STRING_REPLACEMENTS = (
+    (_URL_RE, _url_origin),
     (re.compile(r"(?i)(authorization[:=]\s*)(bearer\s+)?\S+"), r"\1" + _REDACTED),
     (re.compile(r"(?i)(token=)[^&\s]+"), r"\1" + _REDACTED),
     (re.compile(r"(?i)(cookie[:=]\s*)\S+"), r"\1" + _REDACTED),
     (re.compile(r"\bxox[baprs]-[A-Za-z0-9-]+\b"), _REDACTED),
     (re.compile(r"\bxapp-[A-Za-z0-9-]+\b"), _REDACTED),
-    # URL userinfo, such as a platform ``proxy_url`` of ``http://user:pass@host``.
-    (re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)[^\s/?#@]+@"), r"\1" + _REDACTED + "@"),
     (_SENSITIVE_KEY_VALUE_RE, _redact_key_value),
-    # Telegram Bot API tokens travel in request URLs (``/bot<id>:<secret>/``).
+    # A Telegram bot token outside a URL (``bot<id>:<secret>``).
     (re.compile(r"\b(bot)?\d{5,}:[A-Za-z0-9_-]{30,}"), r"\1" + _REDACTED),
 )
-# Credential values read from ``config.json``. Shorter values are too likely to
-# collide with ordinary text to redact by value.
-_CONFIGURED_SECRET_MIN_LENGTH = 8
-_CONFIGURED_SECRETS_LOCK = threading.Lock()
-_configured_secrets: tuple[tuple[int, int, int] | None, re.Pattern[str] | None] = (None, None)
+# Credential values Avibe stores. Shorter values are too likely to collide with
+# ordinary text to redact by value.
+_KNOWN_SECRET_MIN_LENGTH = 8
+_KNOWN_SECRETS_LOCK = threading.Lock()
+_known_secrets: tuple[tuple[tuple[str, int, int, int], ...] | None, re.Pattern[str] | None] = (None, None)
 _ONE_DAY_SECONDS = 60 * 60 * 24
 _NOISY_EVENT_TTL_SECONDS = _ONE_DAY_SECONDS
 _NOISY_EVENT_CACHE_LIMIT = 128
@@ -116,79 +154,126 @@ _NETWORK_EXCEPTION_TYPES = {
 }
 
 
-def _redact_string(value: str) -> str:
+def _redact_string(value: str, *, minimize_urls: bool = True) -> str:
     redacted = value
     for pattern, replacement in _STRING_REPLACEMENTS:
+        if pattern is _URL_RE and not minimize_urls:
+            continue
         redacted = pattern.sub(replacement, redacted)
     return redacted
 
 
 def _is_sensitive_key(key: str) -> bool:
     normalized = _normalized_key(key)
-    return any(token in normalized for token in _SENSITIVE_KEY_TOKENS)
+    return normalized in _SENSITIVE_EXACT_KEYS or any(token in normalized for token in _SENSITIVE_KEY_TOKENS)
 
 
-def scrub_data(value: Any) -> Any:
+def scrub_data(value: Any, *, minimize_urls: bool = True) -> Any:
     if isinstance(value, dict):
         scrubbed: dict[Any, Any] = {}
         for key, item in value.items():
-            if isinstance(key, str) and _is_sensitive_key(key):
+            if isinstance(key, str) and (key in _DROPPED_KEYS or _is_sensitive_key(key)):
                 scrubbed[key] = _REDACTED
             else:
-                scrubbed[key] = scrub_data(item)
+                scrubbed[key] = scrub_data(item, minimize_urls=minimize_urls)
         return scrubbed
     if isinstance(value, list):
-        return [scrub_data(item) for item in value]
+        return [scrub_data(item, minimize_urls=minimize_urls) for item in value]
     if isinstance(value, tuple):
-        return tuple(scrub_data(item) for item in value)
+        return tuple(scrub_data(item, minimize_urls=minimize_urls) for item in value)
     if isinstance(value, str):
-        return _redact_string(value)
+        return _redact_string(value, minimize_urls=minimize_urls)
     return value
 
 
-def _collect_secret_values(node: Any, found: set[str], *, sensitive: bool = False) -> None:
+def _minimize_breadcrumb(crumb: dict[str, Any]) -> dict[str, Any]:
+    if crumb.get("type") != "subprocess" and crumb.get("category") != "subprocess":
+        return crumb
+    # A command line carries whatever its caller passed; keep the program name.
+    words = crumb.get("message").split() if isinstance(crumb.get("message"), str) else []
+    return {**crumb, "message": os.path.basename(words[0]) if words else None, "data": {}}
+
+
+def _minimize_event(event: dict[str, Any]) -> dict[str, Any]:
+    minimized = dict(event)
+    request = event.get("request")
+    if isinstance(request, dict):
+        # An incoming request's query, body, cookies, headers and environment
+        # stay local; the transaction already names the route.
+        minimized["request"] = {key: request[key] for key in ("method", "url") if key in request}
+    breadcrumbs = event.get("breadcrumbs")
+    if isinstance(breadcrumbs, dict) and isinstance(breadcrumbs.get("values"), list):
+        minimized["breadcrumbs"] = {
+            **breadcrumbs,
+            "values": [
+                _minimize_breadcrumb(crumb) if isinstance(crumb, dict) else crumb for crumb in breadcrumbs["values"]
+            ],
+        }
+    return minimized
+
+
+def _collect_secret_values(
+    node: Any, found: set[str], *, value_keys: frozenset[str] = frozenset(), sensitive: bool = False
+) -> None:
     if isinstance(node, dict):
         for key, item in node.items():
-            item_sensitive = sensitive or (isinstance(key, str) and _is_sensitive_key(key))
-            _collect_secret_values(item, found, sensitive=item_sensitive)
+            item_sensitive = sensitive or (isinstance(key, str) and (key in value_keys or _is_sensitive_key(key)))
+            _collect_secret_values(item, found, value_keys=value_keys, sensitive=item_sensitive)
     elif isinstance(node, list):
         for item in node:
-            _collect_secret_values(item, found, sensitive=sensitive)
-    elif sensitive and isinstance(node, str) and len(node) >= _CONFIGURED_SECRET_MIN_LENGTH:
+            _collect_secret_values(item, found, value_keys=value_keys, sensitive=sensitive)
+    elif sensitive and isinstance(node, str) and len(node) >= _KNOWN_SECRET_MIN_LENGTH:
         found.add(node)
 
 
-def _configured_secret_pattern() -> re.Pattern[str] | None:
-    """Match each credential stored in ``config.json``, whatever text surrounds it.
+def _known_secret_files() -> list[tuple[Path, frozenset[str]]]:
+    """Files where Avibe stores credentials, with any extra keys naming a secret."""
+
+    model_hub_state = paths.get_runtime_dir() / "model-hub" / "state"
+    files = [(paths.get_config_path(), frozenset())]
+    for pattern in ("instances/*/runtime-secrets.json", "auth/*.json", "oauth-staging/*.json"):
+        files.extend((path, frozenset()) for path in model_hub_state.glob(pattern))
+    # An API-key credential keeps its secret under ``value``.
+    files.extend((path, frozenset({"value"})) for path in model_hub_state.glob("credentials/*.json"))
+    return files
+
+
+def _known_secret_pattern() -> re.Pattern[str] | None:
+    """Match each credential Avibe stores, whatever text surrounds it.
 
     Patterns cannot see a secret in prose, an unfamiliar URL, or an extra layer of
-    escaping; the exact value can. Read as plain JSON (no config migration or
-    logging inside a Sentry hook) and re-read only when the file changes.
+    escaping; the exact value can. Files are read as plain JSON (no config
+    migration or logging inside a Sentry hook) and re-read only when one changes.
     """
 
-    global _configured_secrets
-    try:
-        stat = paths.get_config_path().stat()
-    except OSError:
-        return None
-    signature = (stat.st_ino, stat.st_mtime_ns, stat.st_size)
-    with _CONFIGURED_SECRETS_LOCK:
-        cached_signature, cached_pattern = _configured_secrets
+    global _known_secrets
+    files: list[tuple[Path, frozenset[str], tuple[str, int, int, int]]] = []
+    for path, value_keys in _known_secret_files():
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        files.append((path, value_keys, (str(path), stat.st_ino, stat.st_mtime_ns, stat.st_size)))
+    signature = tuple(sorted(entry[2] for entry in files))
+    with _KNOWN_SECRETS_LOCK:
+        cached_signature, cached_pattern = _known_secrets
         if cached_signature == signature:
             return cached_pattern
-        try:
-            data = json.loads(paths.get_config_path().read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return cached_pattern
         values: set[str] = set()
-        _collect_secret_values(data, values)
+        for path, value_keys, _ in files:
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                # Keep the last good set until the file reads cleanly again.
+                return cached_pattern
+            _collect_secret_values(data, values, value_keys=value_keys)
         variants = values | {quote(value, safe="") for value in values}
         pattern = (
             re.compile("|".join(re.escape(value) for value in sorted(variants, key=len, reverse=True)))
             if variants
             else None
         )
-        _configured_secrets = (signature, pattern)
+        _known_secrets = (signature, pattern)
         return pattern
 
 
@@ -521,20 +606,24 @@ def _should_drop_repeated_event(event: dict[str, Any]) -> bool:
 
 def before_send(event: dict[str, Any], hint: dict[str, Any]) -> Optional[dict[str, Any]]:
     del hint
-    scrubbed = scrub_data(event)
-    configured_secrets = _configured_secret_pattern()
-    if configured_secrets is not None:
-        scrubbed = _redact_matches(scrubbed, configured_secrets)
-    if _should_drop_noisy_event(scrubbed):
+    # Drop decisions stay in process and match on URL paths (Slack's
+    # ``apps.connections.open``) and tell errors on one host apart, so they see
+    # the text before URLs are reduced to their origin.
+    fingerprinted = scrub_data(event, minimize_urls=False)
+    if _should_drop_noisy_event(fingerprinted):
         return None
-    if _should_drop_repeated_event(scrubbed):
+    if _should_drop_repeated_event(fingerprinted):
         return None
+    scrubbed = scrub_data(_minimize_event(event))
+    known_secrets = _known_secret_pattern()
+    if known_secrets is not None:
+        scrubbed = _redact_matches(scrubbed, known_secrets)
     return scrubbed
 
 
 def before_breadcrumb(crumb: dict[str, Any], hint: dict[str, Any]) -> dict[str, Any]:
     del hint
-    return scrub_data(crumb)
+    return scrub_data(_minimize_breadcrumb(crumb))
 
 
 def init_sentry(config: V2Config, component: str, enable_fastapi: bool = False) -> bool:

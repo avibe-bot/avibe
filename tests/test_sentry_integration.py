@@ -351,11 +351,6 @@ def test_scrub_data_redacts_sensitive_values():
             '"base_url": "https://api.example"',
         ),
         ("refresh failed client_secret=gw-s3cret status=401", "gw-s3cret", "status=401"),
-        (
-            "poll error url=https://api.telegram.org/bot123456:AAHs3cretS3cretS3cretS3cretS3cret/getUpdates",
-            "AAHs3cretS3cretS3cretS3cretS3cret",
-            "/getUpdates",
-        ),
         # Credential names the code uses, in the spellings it uses them.
         ({"provider": {"apiKey": "oc-s3cret"}, "model": "m1"}, "oc-s3cret", '"model": "m1"'),
         ("request headers x-api-key: an-s3cret accept: json", "an-s3cret", "accept: json"),
@@ -363,11 +358,24 @@ def test_scrub_data_redacts_sensitive_values():
         ("media decrypt failed aes_key=aes-s3cret file=a.jpg", "aes-s3cret", "file=a.jpg"),
         ('{"passphrase": "pp-s3cret", "vault": "v1"}', "pp-s3cret", '"vault": "v1"'),
         ("Binding(private_key='pk-s3cret', agent='a1')", "pk-s3cret", "agent='a1'"),
-        # Userinfo in any platform's proxy URL.
-        ("proxy error http://alice:px-s3cret@proxy.local:8080 timed out", "px-s3cret", "proxy.local:8080"),
-        # An escaped quote inside the value, and JSON nested in a JSON string.
+        # Generic names, as whole keys only: Model Hub validates ``{"key": ...}``.
+        ("probe failed {'vendor': 'openai', 'key': 'mh-s3cret'} cache_key=c1", "mh-s3cret", "cache_key=c1"),
+        ("upstream auth: Bearer au-s3cret author=me", "au-s3cret", "author=me"),
+        # Quoting: an escaped quote inside, a trailing backslash, JSON in a JSON string.
         ('api_key="ab\\"esc-s3cret" retry=2', "esc-s3cret", "retry=2"),
+        ("cfg {'api_key': 'bs-s3cret\\\\'}", "bs-s3cret", "cfg {'api_key': "),
         ('{"body": "{\\"api_key\\": \\"nest-s3cret\\", \\"n\\": 1}"}', "nest-s3cret", '\\"n\\": 1'),
+        # Any URL keeps only its origin.
+        (
+            "poll error url=https://api.telegram.org/bot123456:AAHs3cretS3cretS3cretS3cretS3cret/getUpdates",
+            "AAHs3cretS3cretS3cretS3cretS3cret",
+            "url=https://api.telegram.org/",
+        ),
+        ("409 url=https://hooks.slack.com/actions/T01/123/sl-s3cret", "sl-s3cret", "https://hooks.slack.com/"),
+        ("POST https://discord.com/api/v10/interactions/1/dc-s3cret/callback", "dc-s3cret", "https://discord.com/"),
+        ("GET https://cdn.weixin.qq.com/download?encrypted_query_param=wx-s3cret", "wx-s3cret", "https://cdn.weixin.qq.com/"),
+        ("proxy error http://alice:px-s3cret@proxy.local:8080 timed out", "px-s3cret", "@proxy.local:8080 timed out"),
+        ("bad proxy http://bob:p/w-s3cret@proxy.local/x", "w-s3cret", "bad proxy http://"),
     ],
 )
 def test_scrub_data_redacts_secrets_inside_free_text(text, secret, kept):
@@ -381,16 +389,18 @@ def test_scrub_data_redacts_secrets_inside_free_text(text, secret, kept):
     assert secret not in rendered
     assert "[Filtered]" in rendered
     assert kept in rendered
+    assert sentry_integration.scrub_data(value) == value
 
 
-def test_before_send_redacts_configured_secrets_in_any_text(monkeypatch, tmp_path):
-    """A configured credential leaves no trace however the text around it is shaped.
+def test_before_send_redacts_stored_credentials_in_any_text(monkeypatch, tmp_path):
+    """A credential Avibe stores leaves no trace however the text around it is shaped.
 
     Prose such as ``auth failed for <secret>`` has no key for a pattern to find.
-    Rotating the credential must protect the new value without a restart.
+    Rotating a credential must protect the new value without a restart.
     """
     import json
 
+    from config import paths
     from config.v2_config import LarkConfig
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
@@ -399,14 +409,24 @@ def test_before_send_redacts_configured_secrets_in_any_text(monkeypatch, tmp_pat
     config = _config()
     config.lark = LarkConfig(app_id="cli_x", app_secret="lark-first-s3cret")
     config.save()
+    state = paths.get_runtime_dir() / "model-hub" / "state"
+    (state / "credentials").mkdir(parents=True)
+    (state / "instances" / "i1").mkdir(parents=True)
+    (state / "credentials" / "cred_a.json").write_text(
+        json.dumps({"kind": "api_key", "vendor": "openai", "value": "mh-stored-s3cret"})
+    )
+    (state / "instances" / "i1" / "runtime-secrets.json").write_text(
+        json.dumps({"management_key": "mh-management-s3cret", "gateway_token": "mh-gateway-s3cret"})
+    )
 
     def send(message):
         event = {"logentry": {"message": message}, "breadcrumbs": {"values": [{"message": message}]}}
         return json.dumps(sentry_integration.before_send(event, {}))
 
-    first = send("lark auth failed for lark-first-s3cret")
-    assert "lark-first-s3cret" not in first
-    assert "lark auth failed for [Filtered]" in first
+    first = send("rejected lark-first-s3cret, mh-stored-s3cret and mh-management-s3cret (openai)")
+    for secret in ("lark-first-s3cret", "mh-stored-s3cret", "mh-management-s3cret"):
+        assert secret not in first
+    assert "rejected [Filtered], [Filtered] and [Filtered] (openai)" in first
 
     config.lark.app_secret = "lark-rotated-s3cret"
     config.save()
@@ -415,23 +435,86 @@ def test_before_send_redacts_configured_secrets_in_any_text(monkeypatch, tmp_pat
     assert "(cli_x)" in rotated
 
 
-def test_before_send_throttles_repeated_noisy_slack_socket_events(monkeypatch):
+def test_before_send_keeps_request_records_to_their_origin(monkeypatch, tmp_path):
+    """Request records keep method, origin and status, never paths, queries or bodies.
+
+    The shapes are the ones the SDK attaches: an HTTP client breadcrumb, a
+    subprocess breadcrumb and an incoming request.
+    """
+    import json
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    sentry_integration._NOISY_EVENT_LAST_SEEN.clear()
+    sentry_integration._EVENT_RATE_STATE.clear()
+    event = {
+        "message": "request records",
+        "request": {
+            "method": "POST",
+            "url": "http://127.0.0.1:5123/api/media/md-s3cret",
+            "query_string": "state=st-s3cret",
+            "data": {"content": "body-s3cret"},
+            "cookies": "__Host-vibe_remote_session=ck-s3cret",
+            "headers": {"x-forwarded-for": "203.0.113.10"},
+            "env": {"REMOTE_ADDR": "203.0.113.10"},
+        },
+        "breadcrumbs": {
+            "values": [
+                {
+                    "type": "http",
+                    "category": "httplib",
+                    "data": {
+                        "http.method": "POST",
+                        "url": "https://discord.com/api/webhooks/1/hk-s3cret",
+                        "http.query": "wait=hq-s3cret",
+                        "http.fragment": "fr-s3cret",
+                        "http.response.status_code": 404,
+                    },
+                },
+                {"type": "subprocess", "category": "subprocess", "message": "/usr/bin/git push https://x-access-token:gt-s3cret@github.com/o/r", "data": {"subprocess.cwd": "/srv/cw-s3cret"}},
+            ]
+        },
+    }
+
+    sent = sentry_integration.before_send(event, {})
+    rendered = json.dumps(sent)
+
+    assert "s3cret" not in rendered
+    assert sent["request"] == {"method": "POST", "url": "http://127.0.0.1:5123/[Filtered]"}
+    http_crumb, subprocess_crumb = sent["breadcrumbs"]["values"]
+    assert http_crumb["data"]["url"] == "https://discord.com/[Filtered]"
+    assert http_crumb["data"]["http.response.status_code"] == 404
+    assert subprocess_crumb["message"] == "git"
+    assert subprocess_crumb["data"] == {}
+
+
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [
+        (
+            "Failed to retrieve WSS URL: The request to the Slack API failed. "
+            "(url: https://slack.com/api/apps.connections.open, status: 200)",
+            "Failed to retrieve WSS URL: The request to the Slack API failed. "
+            "(url: https://slack.com/api/apps.connections.open, status: 200)",
+        ),
+        # Two different reconnect failures share the filter's fingerprint only
+        # through the method name, which appears inside the URL.
+        (
+            "The request to the Slack API failed. (url: https://slack.com/api/apps.connections.open, status: 200)",
+            "The request to the Slack API failed. (url: https://slack.com/api/apps.connections.open, status: 503)",
+        ),
+    ],
+)
+def test_before_send_throttles_repeated_noisy_slack_socket_events(monkeypatch, first, second):
     monkeypatch.delenv("VIBE_SENTRY_NOISE_FILTERS", raising=False)
     monkeypatch.delenv("VIBE_SENTRY_NOISE_TTL_SECONDS", raising=False)
     sentry_integration._NOISY_EVENT_LAST_SEEN.clear()
     sentry_integration._EVENT_RATE_STATE.clear()
-    event = {
-        "logger": "slack_sdk.socket_mode.aiohttp",
-        "logentry": {
-            "formatted": (
-                "Failed to retrieve WSS URL: The request to the Slack API failed. "
-                "(url: https://slack.com/api/apps.connections.open, status: 200)"
-            )
-        },
-    }
 
-    assert sentry_integration.before_send(dict(event), {}) is not None
-    assert sentry_integration.before_send(dict(event), {}) is None
+    def event(formatted):
+        return {"logger": "slack_sdk.socket_mode.aiohttp", "logentry": {"formatted": formatted}}
+
+    assert sentry_integration.before_send(event(first), {}) is not None
+    assert sentry_integration.before_send(event(second), {}) is None
 
 
 def test_before_send_throttles_repeated_normal_errors(monkeypatch):
@@ -448,17 +531,31 @@ def test_before_send_throttles_repeated_normal_errors(monkeypatch):
     assert sentry_integration.before_send(dict(event), {}) is None
 
 
-def test_before_send_allows_distinct_normal_errors(monkeypatch):
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [
+        (
+            "Failed to send result message: unexpected application bug",
+            "Failed to send result message: different application bug",
+        ),
+        # Errors on one host differ only by path, which the sent event no longer carries.
+        (
+            "Upload failed: 404 url=https://api.example.com/v1/files",
+            "Upload failed: 404 url=https://api.example.com/v1/messages",
+        ),
+    ],
+)
+def test_before_send_allows_distinct_normal_errors(monkeypatch, first, second):
     monkeypatch.delenv("VIBE_SENTRY_EVENT_RATE_LIMIT_PER_WINDOW", raising=False)
     sentry_integration._NOISY_EVENT_LAST_SEEN.clear()
     sentry_integration._EVENT_RATE_STATE.clear()
     first_event = {
         "logger": "core.message_dispatcher",
-        "logentry": {"formatted": "Failed to send result message: unexpected application bug"},
+        "logentry": {"formatted": first},
     }
     second_event = {
         "logger": "core.message_dispatcher",
-        "logentry": {"formatted": "Failed to send result message: different application bug"},
+        "logentry": {"formatted": second},
     }
 
     assert sentry_integration.before_send(dict(first_event), {}) is not None
