@@ -5,7 +5,9 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from types import SimpleNamespace
 
 from modules.agents import claude_process_reaper
@@ -796,3 +798,63 @@ def test_concurrent_registrations_keep_every_record(tmp_path, monkeypatch):
             child.wait(10)
 
     assert recorded == {child.pid for child in children}
+
+
+# Holds the registry's file lock the way another service process's registration does, until stdin closes.
+_HOLD_REGISTRY_LOCK = """
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from storage.lock import MigrationFileLock
+with MigrationFileLock(Path(sys.argv[2]), timeout_seconds=None):
+    print("held", flush=True)
+    sys.stdin.read()
+"""
+
+
+def test_a_registration_waits_while_another_process_rewrites_the_registry(tmp_path, monkeypatch):
+    # The Web UI's process registers auth and probe clients into the same file.
+    monkeypatch.setattr(claude_process_reaper, "_process_start_time", lambda pid: 1000.0)
+    lock_path = tmp_path / f"{claude_process_reaper.CLAUDE_PROCESS_REGISTRY_NAME}.lock"
+    holder = subprocess.Popen(
+        [sys.executable, "-c", _HOLD_REGISTRY_LOCK, str(Path(__file__).resolve().parents[1]), str(lock_path)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    child = _sleeper()
+    try:
+        assert holder.stdout.readline().strip() == "held"
+        pending = claude_process_reaper.register_claude_owned_process(_client(child.pid), runtime_dir=tmp_path)
+        time.sleep(0.5)
+        assert not pending.done()
+
+        holder.stdin.close()
+        holder.wait(10)
+        pending.result(timeout=10)
+
+        recorded = {record.pid for record in claude_process_reaper._load_owned_process_registry(tmp_path)}
+    finally:
+        for process in (holder, child):
+            process.kill()
+            process.wait(10)
+        holder.stdout.close()
+
+    assert recorded == {child.pid}
+
+
+def test_a_recorded_pid_no_process_can_have_is_dropped(tmp_path, monkeypatch):
+    monkeypatch.setattr(claude_process_reaper, "_process_start_time", lambda pid: 1000.0)
+    (tmp_path / claude_process_reaper.CLAUDE_PROCESS_REGISTRY_NAME).write_text(
+        '{"processes":[{"pid":%d,"native_session_id":null,"owner":"session","started_at":1.0}]}' % 2**70
+    )
+    child = _sleeper()
+    try:
+        claude_process_reaper.register_claude_owned_process(_client(child.pid), runtime_dir=tmp_path).result(timeout=10)
+
+        recorded = {record.pid for record in claude_process_reaper._load_owned_process_registry(tmp_path)}
+    finally:
+        child.kill()
+        child.wait(10)
+
+    assert recorded == {child.pid}

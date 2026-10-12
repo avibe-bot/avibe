@@ -18,9 +18,10 @@ AVIBE_CLAUDE_PROCESS_OWNER_ENV = "AVIBE_CLAUDE_PROCESS_OWNER"
 AVIBE_CLAUDE_SESSION_OWNER = "session"
 AVIBE_CLAUDE_AUTH_OWNER = "auth"
 CLAUDE_PROCESS_REGISTRY_NAME = "claude_processes.json"
-# The registry's only writer. Registering is called on the service's event
-# loop, so reading the process's start time (`ps`) and rewriting the file run
-# here instead, one write at a time, so no registration overwrites another.
+# This process's registry writer. Registering is called on the service's
+# event loop, so reading the process's start time (`ps`) and rewriting the file
+# run here instead, one write at a time; the registry's file lock orders them
+# against the other processes that register (the Web UI's auth and probes).
 _REGISTRY_WRITER = ThreadPoolExecutor(max_workers=1, thread_name_prefix="claude-process-registry")
 
 
@@ -214,29 +215,33 @@ def register_claude_owned_process(
 def _record_owned_process(runtime_dir: Path, owned: ClaudeOwnedProcess) -> None:
     """Rewrite the registry with ``owned``, without the records of processes that have exited."""
 
+    from storage.lock import MigrationFileLock
+
     path = _registry_path(runtime_dir)
-    records = [
-        existing
-        for existing in _load_owned_process_registry(runtime_dir)
-        if existing.pid != owned.pid and _pid_exists(existing.pid)
-    ]
-    records.append(replace(owned, started_at=_process_start_time(owned.pid)))
-    payload = {
-        "processes": [
-            {
-                "pid": record.pid,
-                "native_session_id": record.native_session_id,
-                "owner": record.owner,
-                "started_at": record.started_at,
-            }
-            for record in records
-        ]
-    }
+    started_at = _process_start_time(owned.pid)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = path.with_suffix(path.suffix + ".tmp")
-        tmp_path.write_text(json.dumps(payload, separators=(",", ":")) + "\n", encoding="utf-8")
-        tmp_path.replace(path)
+        with MigrationFileLock(path.with_suffix(path.suffix + ".lock")):
+            records = [
+                existing
+                for existing in _load_owned_process_registry(runtime_dir)
+                if existing.pid != owned.pid and _pid_exists(existing.pid)
+            ]
+            records.append(replace(owned, started_at=started_at))
+            payload = {
+                "processes": [
+                    {
+                        "pid": record.pid,
+                        "native_session_id": record.native_session_id,
+                        "owner": record.owner,
+                        "started_at": record.started_at,
+                    }
+                    for record in records
+                ]
+            }
+            tmp_path = path.with_suffix(path.suffix + ".tmp")
+            tmp_path.write_text(json.dumps(payload, separators=(",", ":")) + "\n", encoding="utf-8")
+            tmp_path.replace(path)
     except Exception:
         logger = logging.getLogger(__name__)
         logger.debug("Failed to persist Claude process registry", exc_info=True)
@@ -245,7 +250,8 @@ def _record_owned_process(runtime_dir: Path, owned: ClaudeOwnedProcess) -> None:
 def _pid_exists(pid: int) -> bool:
     try:
         os.kill(pid, 0)
-    except ProcessLookupError:
+    except (ProcessLookupError, OverflowError):
+        # OverflowError: a recorded pid no process can have.
         return False
     except OSError:
         # Another user's process: it exists.
