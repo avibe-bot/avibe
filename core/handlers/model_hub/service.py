@@ -5651,12 +5651,14 @@ class ModelHubService:
 
         The seed starts Vibey once, and a seed that ran with no models.dev copy to
         describe a listed model leaves the catalog empty. The controller calls this
-        once a copy arrives, and only while Vibey's built-in Agent has no model.
+        once a copy arrives, and only while Vibey's built-in Agent has no model. A
+        catalog a person emptied records its removals, so it is theirs and stays empty.
         """
 
         async with self._mutation_lock:
             previous = self.store.load()
-            if previous.vibey_supply_pending or previous.agents["vibey"].models:
+            vibey = previous.agents["vibey"]
+            if previous.vibey_supply_pending or vibey.models or vibey.removed_model_ids:
                 return []
             starting = self._vibey_starting_model(previous)
             if starting is None:

@@ -331,15 +331,18 @@ async def test_a_starting_model_needs_a_source_that_lists_it(tmp_path, sqlite_db
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("person_chose", "engine_up"), [(False, True), (True, True), (False, False)])
+@pytest.mark.parametrize(
+    ("person_chose", "person_emptied", "engine_up"),
+    [(False, False, True), (True, False, True), (False, True, True), (False, False, False)],
+)
 async def test_vibey_starts_once_a_models_dev_copy_describes_a_listed_model(
-    tmp_path, sqlite_db_factory, person_chose, engine_up,
+    tmp_path, sqlite_db_factory, person_chose, person_emptied, engine_up,
 ):
     """MH-VIBEY-007: a seed that ran with no models.dev copy heals when a copy arrives.
 
     With no copy to describe the Source's models, the seed leaves Vibey's catalog empty.
     Once a copy arrives, Vibey starts on its starting model, but only while its built-in
-    Agent has no model: a person who emptied the list keeps the model they chose.
+    Agent has no model and nobody emptied its list: a person's choice always stands.
     """
     from config.v2_config import ModelHubConfig
     from tests.test_model_hub_l3 import _service, _source
@@ -367,6 +370,9 @@ async def test_vibey_starts_once_a_models_dev_copy_describes_a_listed_model(
         assert store.get("vibey").model is None
         if person_chose:
             store.update("vibey", model="relay-tools-1")
+        if person_emptied:
+            # The person added the model and removed it again: the empty list is theirs.
+            service.store.config.agents["vibey"].removed_model_ids = ["relay-tools-1"]
 
         copy_on_disk.update({"relay": {"name": "Relay", "models": {
             "relay-tools-1": {"name": "Relay Tools 1", "tool_call": True,
@@ -380,8 +386,8 @@ async def test_vibey_starts_once_a_models_dev_copy_describes_a_listed_model(
         await controller._start_vibey_without_a_model()
 
         started = [model.id for model in service.store.load().agents["vibey"].models]
-        assert started == ([] if person_chose else ["relay-tools-1"])
-        assert store.get("vibey").model == "relay-tools-1"
+        assert started == ([] if person_chose or person_emptied else ["relay-tools-1"])
+        assert store.get("vibey").model == (None if person_emptied else "relay-tools-1")
     finally:
         store.close()
 

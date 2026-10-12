@@ -36,9 +36,10 @@ taking text and tool calls and producing text. A model models.dev does not know 
 guessed at: with none described that way, the catalog stays empty and the setup
 card offers the pick. A seed that ran before any models.dev copy could describe
 a listed model is healed when a copy arrives (the snapshot reconcile that also
-backfills MH-LIMITS-001): while Vibey's catalog is empty and its built-in Agent
-has no model, it starts on the same rule's model; an Agent that has a model is a
-person's choice and is never overridden. A Vibey Agent without a model cannot run a turn, so the
+backfills MH-LIMITS-001): while Vibey's catalog is empty, records no removal,
+and its built-in Agent has no model, it starts on the same rule's model. An Agent
+that has a model, or a list a person emptied, is that person's choice and is never
+overridden. A Vibey Agent without a model cannot run a turn, so the
 built-in one takes its catalog's first model while it has none: one controller
 rule, decided under the Agent store's write lock so a chosen model stands, run
 on every Vibey catalog change (`_refresh_backend_catalog`, which each seed also
