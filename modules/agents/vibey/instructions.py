@@ -27,12 +27,13 @@ LIMIT = 65_536
 OMITTED_ROOM = 1_024
 HEADER = "Project-specific instructions and guidelines:"
 PRECEDENCE = "More general files come first; where two conflict, the later, more specific one wins."
-#: Files below the cwd are never loaded; as Codex does, the section tells the Agent to look for them. Constant, and
-#: present even when no file loaded, since a subtree may still hold one.
+#: Files below the cwd are never loaded; as Codex does, the section tells the Agent to look for them. It states the
+#: loader's rule for each directory above, built from ``CANDIDATES`` so the two cannot drift. Constant, and present
+#: even when no file loaded, since a subtree may still hold one.
 SUBTREE = (
     "A directory below the working directory may hold its own instruction file with more specific rules for that "
-    "subtree: the first readable one of AGENTS.override.md, AGENTS.md, AGENTS.MD, CLAUDE.md, CLAUDE.MD in that "
-    "directory, and only that one. Read it before working with files there."
+    f"subtree: the first readable one of {', '.join(CANDIDATES)} in that directory, and only that one. Read it before "
+    "working with files there."
 )
 TRUNCATED = (
     "[Truncated: the first {shown} of {size} bytes. The instruction files share a 65,536-byte limit; read the file "
