@@ -127,6 +127,7 @@ export class ShowPageVoiceDictation {
     });
     this.captureClaim = captureClaim;
     try {
+      await captureClaim.ready;
       const stream = await this.dependencies.getUserMedia();
       if (this.abortController.signal.aborted || !captureClaim.isCurrent()) {
         stream.getTracks().forEach((track) => track.stop());
