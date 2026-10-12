@@ -16,9 +16,9 @@ it must be added to every agent-backend list.
 `vibey` is also the one **built-in** backend (`AgentBackendDescriptor.builtin`, owner decision 2026-10-06): part of the
 platform, so it is always enabled. It has no `agents.vibey` config section and no enable switch, the controller
 registers it at startup and never unregisters it, and its built-in Agent cannot be disabled. Registry order is display
-order, and the built-in backend comes first. A new install records its Agent as the first default
-([`vibey-default-agent.md`](../vibey-default-agent.md)); any fallback that replaces a default that cannot be used ranks
-it last ([`avibe-agent-always-on.md`](../avibe-agent-always-on.md)).
+order, and the built-in backend comes first. [`vibey-default-agent.md`](../vibey-default-agent.md) owns which Agent
+is recorded as the default; any fallback that replaces a default that cannot be used ranks the built-in backend last
+([`avibe-agent-always-on.md`](../avibe-agent-always-on.md)).
 
 ## 2. One declaration
 

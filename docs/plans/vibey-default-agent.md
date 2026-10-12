@@ -159,6 +159,8 @@ choice's labels.
     - Workbench: a caller who can open Models, and one who cannot
     - IM: with Avibe Cloud paired, and without
   - IM `/setup vibey`, and a bare `/setup` on a Vibey default
+  - every UI renderer of `no_source`: the setup card note, the Settings → Backends badge, and the backend page notice
+    with its Models link
 - **PR-3**, per the repository's rule for multi-step setup flows:
   - update `tests/scenarios/auth_setup/catalog.yaml`, and add a closed-loop case to
     `tests/scenarios/auth_setup/test_auth_setup_scenarios.py` that proves the default shown at completion is the

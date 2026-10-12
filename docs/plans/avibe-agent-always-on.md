@@ -15,10 +15,9 @@ backend list, it is always enabled, and it cannot be turned off.
   processing meaning), the Agent create picker, the Agents page groups and filter, the Global prompts tabs (the UI's
   `BACKEND_ORDER`, derived from the catalog; the separate `agentOrder` is gone), and IM routing pickers. Native
   backends therefore read OpenCode, Claude Code, Codex everywhere a backend list is shown.
-- **The first default, not a replacement.** A new install records the built-in Agent as its first default
-  (owner decision 2026-10-12, [`vibey-default-agent.md`](vibey-default-agent.md)). `implicit_default_rank`
-  (`modules/agents/catalog.py`) remains the rule for a *replacement*: a backend or Agent picked because the recorded
-  one cannot be used. There the built-in backend comes last, so it is chosen only when nothing else is enabled. Every
+- **The replacement rank.** Which Agent a new install records first, and which recorded defaults are kept, is owned
+  by [`vibey-default-agent.md`](vibey-default-agent.md). `implicit_default_rank` (`modules/agents/catalog.py`) is
+  the rule for a *replacement*: a backend or Agent picked because the recorded one cannot be used. There the built-in backend comes last, so it is chosen only when nothing else is enabled. Every
   replacement goes through it: the built-in sync's replacement of a missing or disabled default, the effective-default
   fallbacks (`resolve_effective_default_agent`, `_effective_default_agent`), the per-principal fallback
   (`resolve_usable_default_agent`), the archived default's replacement after its same-backend preference, and the
@@ -59,12 +58,12 @@ backend list, it is always enabled, and it cannot be turned off.
 
 - The setup wizard draws Vibey first, as the coordinator, ahead of the native setup sequence (Claude Code, Codex,
   OpenCode: `nativeOrder`), and Vibey alone can complete setup. That is the owner's follow-up decision, delivered by
-  `feat/vibey-setup-wizard`; see `setup-three-screen/contracts.md` §C4 (D3). Setup completion keeps the recorded
-  default when it can run, which on a new install is Vibey ([`vibey-default-agent.md`](vibey-default-agent.md)).
+  `feat/vibey-setup-wizard`; see `setup-three-screen/contracts.md` §C4 (D3). Which Agent setup completion records
+  as the default is owned by [`vibey-default-agent.md`](vibey-default-agent.md) §3.
 - Setup onboarding is therefore not CLI-only (owner override, 2026-10-07, of the registration contract's "native setup
   onboarding remains CLI-only"): the built-in backend is a setup card with no CLI to detect, install or enable. Native
   import and the global native prompt files remain CLI-only.
 - The Agents page detail panel mirrors `is_builtin_default_agent` from the Agent's `source` and markers;
   `setupTargets.isBuiltinAgent` reads the markers, which callers can no longer write.
-- Making Vibey the default for new chats was a separate owner decision: it is, for new installs only
-  ([`vibey-default-agent.md`](vibey-default-agent.md)).
+- Making Vibey the default for new chats was a separate owner decision, recorded in
+  [`vibey-default-agent.md`](vibey-default-agent.md).

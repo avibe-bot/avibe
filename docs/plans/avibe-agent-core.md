@@ -44,8 +44,8 @@ sits below the product boundary Avibe must own: loop semantics, persistence, and
 - The tension system itself. v1 guarantees only the seams it will need: steer, follow-up, hooks, events.
 - Any terminal UI, and any new Web UI beyond registering the backend where backends already appear.
 - Becoming the default agent for new installs in v1. v1 is the built-in backend, always enabled and listed first
-  ([`avibe-agent-always-on.md`](avibe-agent-always-on.md)). The owner has since decided that new installs start with
-  Vibey (2026-10-12, [`vibey-default-agent.md`](vibey-default-agent.md)); upgrades keep their default.
+  ([`avibe-agent-always-on.md`](avibe-agent-always-on.md)). The owner has since decided the default Agent for new
+  installs (2026-10-12); [`vibey-default-agent.md`](vibey-default-agent.md) owns that rule.
 - An MCP client in the engine or the adapter. Avibe is CLI-first: MCP servers are reached through the Avibe MCP
   Hub's `vibe` commands, the same way for every backend (§10).
 - Per-action permission prompts. No backend prompts per action today (§10). Sandboxing beyond Avibe's existing cwd
