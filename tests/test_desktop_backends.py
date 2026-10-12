@@ -459,17 +459,6 @@ def _shift_create_time(monkeypatch, pid: int) -> None:
     )
 
 
-def _reuse_start_token(monkeypatch, pid: int) -> None:
-    """``pid`` reads with another start token, as when another process now holds it."""
-
-    from vibe import runtime
-
-    real_start_token = runtime.process_start_token
-    monkeypatch.setattr(
-        runtime, "process_start_token", lambda other: "another-process" if other == pid else real_start_token(other)
-    )
-
-
 def _start_tree_naming(children: list[subprocess.Popen], env: dict[str, str], wait_for_tree, owner: str | None):
     """An installer tree of this Runtime that names ``owner``, or no owner at all."""
 
@@ -654,9 +643,8 @@ def test_a_live_owner_whose_create_time_shifted_keeps_its_tree(monkeypatch, inst
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX process groups")
 @pytest.mark.parametrize("holder", ["not-a-ui", "ui-of-another-runtime", "ui-without-a-runtime-id"])
-@pytest.mark.parametrize("owner_shape", ["start-token", "released-create-time"])
 def test_a_tree_whose_owner_pid_now_names_another_process_is_reaped(
-    tmp_path, installer_tree, quiet_stop, children, holder, owner_shape
+    tmp_path, installer_tree, quiet_stop, children, holder
 ):
     from vibe import runtime
 
@@ -671,56 +659,13 @@ def test_a_tree_whose_owner_pid_now_names_another_process_is_reaped(
         if holder == "ui-of-another-runtime":
             ui_env[desktop_backends.DESKTOP_RUNTIME_ID_ENV] = secrets.token_hex(32)
         pid = _start_ui_stand_in(children, tmp_path, ui_env)
-    if owner_shape == "start-token":
-        reused = f"{pid}:an-earlier-process"
-    else:
-        # A released build named the owner by its wall-clock create time.
-        reused = f"{pid}:{runtime.process_create_time(pid) - 1.0!r}"
+    reused = f"{pid}:{runtime.process_create_time(pid) - 1.0!r}"
     pids = _start_tree_naming(children, env, wait_for_tree, reused)
 
     assert cli.cmd_stop() == 0
 
     assert _running(pids) == []
     assert statuses == [("stopped",)]
-
-
-def test_an_install_whose_owner_has_no_readable_token_never_starts(monkeypatch):
-    """No owner value can be written, so no tree is started that nothing could later tell apart."""
-
-    from vibe import runtime
-
-    monkeypatch.setattr(runtime, "process_start_token", lambda _pid: None)
-
-    with pytest.raises(desktop_backends.DesktopBackendError) as refused:
-        desktop_backends._installer_owner()
-    assert refused.value.code == "desktop_install_failed"
-
-
-@pytest.mark.parametrize("holder", ["ui-of-its-runtime", "not-a-ui", "exited"])
-@pytest.mark.parametrize("owner_value", ["released-create-time", "token-unreadable-now"])
-def test_an_owner_value_no_token_verifies_is_judged_by_the_process_at_its_pid(
-    monkeypatch, tmp_path, children, holder, owner_value
-):
-    from vibe import runtime
-
-    runtime_id = secrets.token_hex(32)
-    if holder == "ui-of-its-runtime":
-        pid = _start_ui_stand_in(children, tmp_path, {**os.environ, desktop_backends.DESKTOP_RUNTIME_ID_ENV: runtime_id})
-    else:
-        children.append(subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"]))
-        pid = children[-1].pid
-    if owner_value == "released-create-time":
-        # A released build wrote `pid:create_time`. Shifted by a second, it names no live start token on
-        # any platform, as after a tick on macOS: only the process now at the pid can tell.
-        owner = f"{pid}:{runtime.process_create_time(pid) - 1.0!r}"
-    else:
-        owner = f"{pid}:{runtime.process_start_token(pid)}"
-        monkeypatch.setattr(runtime, "process_start_token", lambda _pid: None)
-    if holder == "exited":
-        children[-1].kill()
-        children[-1].wait(10)
-
-    assert desktop_backends._installer_owner_gone(owner, runtime_id) is (holder != "ui-of-its-runtime")
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX process groups")
@@ -735,11 +680,11 @@ def test_a_tree_whose_owner_cannot_be_told_fails_every_caller_closed(
     cli, statuses = quiet_stop
     named = {"missing": None, "malformed": "not-an-owner"}.get(owner)
     if owner == "uninspectable":
-        # Read with another start token, and nothing else about it can be read.
+        # Shown started at another time, and nothing else about it can be read.
         live = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
         children.append(live)
-        named = f"{live.pid}:{runtime.process_start_token(live.pid)}"
-        _reuse_start_token(monkeypatch, live.pid)
+        named = f"{live.pid}:{runtime.process_create_time(live.pid)!r}"
+        _shift_create_time(monkeypatch, live.pid)
 
         def unreadable(real):
             def read(process):

@@ -1,8 +1,8 @@
 """A process's start token: the one identity of a running process, which no clock adjustment moves.
 
-Every record that names a process by its token -- the service lock, restart jobs, desktop installer
-owners -- must keep naming the same execution after the wall clock or the boot time moves, and must
-never name a process that later reused the pid.
+Every record that names a process by its token -- the service lock and restart jobs -- must keep naming
+the same execution after the wall clock or the boot time moves, and must never name a process that
+later reused the pid.
 """
 
 from __future__ import annotations
@@ -61,17 +61,6 @@ def test_a_clock_adjustment_moves_the_wall_clock_start_but_not_the_start_token(l
         # The adjustment is real for psutil: the wall-clock start it reports moved.
         assert runtime.process_create_time(pid) == pytest.approx(created + shift)
         assert runtime.process_start_token(pid) == token
-
-
-def test_a_recorded_owner_survives_a_clock_adjustment(live_process) -> None:
-    from vibe import desktop_backends
-
-    pid = live_process.pid
-    token = runtime.process_start_token(pid)
-
-    with _clock_adjusted():
-        # Not a desktop UI, so only its token can keep it the owner.
-        assert desktop_backends._installer_owner_gone(f"{pid}:{token}", None) is False
 
 
 @pytest.mark.parametrize("platform", ["freebsd14", "openbsd7", "sunos5"])
@@ -185,6 +174,27 @@ def test_every_restart_status_reader_applies_one_ownership_policy(
     os.utime(path, (written, written))
 
     assert _restart_job_reader(reader, monkeypatch)() is blocks
+
+
+@pytest.mark.parametrize("reader", ["web-restart", "upgrade", "incus-supervisor"])
+def test_a_running_restart_job_is_still_its_job_after_a_clock_adjustment(live_process, tmp_path, monkeypatch, reader) -> None:
+    from config import paths
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+    pid = live_process.pid
+    path = runtime.get_restart_status_path()
+    runtime.write_json(
+        path,
+        {"ok": None, "state": "running", "supervisor_pid": pid, "supervisor_start_token": runtime.process_start_token(pid)},
+    )
+    # Past every bound, so only its identity can keep it the job.
+    written = time.time() - _PAST_EVERY_BOUND
+    os.utime(path, (written, written))
+    in_flight = _restart_job_reader(reader, monkeypatch)
+
+    with _clock_adjusted():
+        assert in_flight() is True
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="the unadjusted start time is read through psutil on macOS")

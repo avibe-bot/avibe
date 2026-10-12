@@ -842,38 +842,38 @@ def _clear_abandoned_install(record: _InstallerRecord) -> bool:
 def _installer_owner() -> str:
     from vibe import runtime
 
-    start_token = runtime.process_start_token(os.getpid())
-    if start_token is None:
+    started_at = runtime.process_create_time(os.getpid())
+    if started_at is None:
         raise DesktopBackendError(
             "Avibe could not identify itself as the owner of a desktop backend install.",
             code="desktop_install_failed",
         )
-    return f"{os.getpid()}:{start_token}"
+    return f"{os.getpid()}:{started_at!r}"
 
 
 def _installer_owner_gone(owner: str, runtime_id: str | None) -> bool | None:
     """Whether the process named by the owner value of a ``runtime_id`` tree has exited.
 
     The owner is gone when its pid is not alive, and alive while that pid
-    keeps its start token. Another token alone proves nothing, because an
-    owner value written before start tokens carries a wall-clock start time:
-    the pid was reused only when the process now holding it is readable and is
-    not a UI of that Runtime, as every owner is. ``None`` when the value is
-    malformed, or the token differs and the process cannot be read.
+    keeps its create time. macOS can shift the create time psutil shows for a
+    process that keeps running, so another one alone proves nothing: the pid
+    was reused only when the process now holding it is readable and is not a
+    UI of that Runtime, as every owner is. ``None`` when the value is
+    malformed, or the create time differs and the process cannot be read.
     """
 
     from vibe import runtime
 
-    pid_text, _, start_token = owner.partition(":")
+    pid_text, _, started_text = owner.partition(":")
     try:
-        pid = int(pid_text)
+        pid, started_at = int(pid_text), float(started_text)
     except ValueError:
         return None
-    if pid <= 0 or not start_token:
+    if pid <= 0 or not math.isfinite(started_at):
         return None
     if not runtime.pid_alive(pid):
         return True
-    if runtime.process_start_token(pid) == start_token:
+    if runtime.process_create_time(pid) == started_at:
         return False
     is_ui = runtime.is_desktop_ui(pid, runtime_id)
     return None if is_ui is None else not is_ui
