@@ -8,7 +8,8 @@ import logging
 import os
 import signal
 import subprocess
-from dataclasses import dataclass
+from concurrent.futures import Future, ThreadPoolExecutor
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 KILL_SIGNAL = getattr(signal, "SIGKILL", signal.SIGTERM)
@@ -17,6 +18,11 @@ AVIBE_CLAUDE_PROCESS_OWNER_ENV = "AVIBE_CLAUDE_PROCESS_OWNER"
 AVIBE_CLAUDE_SESSION_OWNER = "session"
 AVIBE_CLAUDE_AUTH_OWNER = "auth"
 CLAUDE_PROCESS_REGISTRY_NAME = "claude_processes.json"
+# This process's registry writer. Registering is called on the service's
+# event loop, so reading the process's start time (`ps`) and rewriting the file
+# run here instead, one write at a time; the registry's file lock orders them
+# against the other processes that register (the Web UI's auth and probes).
+_REGISTRY_WRITER = ThreadPoolExecutor(max_workers=1, thread_name_prefix="claude-process-registry")
 
 
 @dataclass(frozen=True)
@@ -186,39 +192,71 @@ def register_claude_owned_process(
     native_session_id: str | None = None,
     owner: str = AVIBE_CLAUDE_SESSION_OWNER,
     runtime_dir: Path | None = None,
-) -> None:
+) -> Future[None] | None:
+    """Record the client's Claude CLI process as this service's, on the registry's writer.
+
+    Returns the pending write, or None when there is no process to record.
+    """
+
     pid = get_claude_client_pid(client)
     if not pid or os.name == "nt":
-        return
-    path = _registry_path(runtime_dir)
-    records = [record for record in _load_owned_process_registry(runtime_dir) if record.pid != pid]
-    records.append(
+        return None
+    return _REGISTRY_WRITER.submit(
+        _record_owned_process,
+        _registry_path(runtime_dir).parent,
         ClaudeOwnedProcess(
             pid=pid,
             native_session_id=str(native_session_id) if native_session_id else None,
             owner=owner,
-            started_at=_process_start_time(pid),
-        )
+        ),
     )
-    payload = {
-        "processes": [
-            {
-                "pid": record.pid,
-                "native_session_id": record.native_session_id,
-                "owner": record.owner,
-                "started_at": record.started_at,
-            }
-            for record in records
-        ]
-    }
+
+
+def _record_owned_process(runtime_dir: Path, owned: ClaudeOwnedProcess) -> None:
+    """Rewrite the registry with ``owned``, without the records of processes that have exited."""
+
+    from storage.lock import MigrationFileLock
+
+    path = _registry_path(runtime_dir)
+    started_at = _process_start_time(owned.pid)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = path.with_suffix(path.suffix + ".tmp")
-        tmp_path.write_text(json.dumps(payload, separators=(",", ":")) + "\n", encoding="utf-8")
-        tmp_path.replace(path)
+        with MigrationFileLock(path.with_suffix(path.suffix + ".lock")):
+            records = [
+                existing
+                for existing in _load_owned_process_registry(runtime_dir)
+                if existing.pid != owned.pid and _pid_exists(existing.pid)
+            ]
+            records.append(replace(owned, started_at=started_at))
+            payload = {
+                "processes": [
+                    {
+                        "pid": record.pid,
+                        "native_session_id": record.native_session_id,
+                        "owner": record.owner,
+                        "started_at": record.started_at,
+                    }
+                    for record in records
+                ]
+            }
+            tmp_path = path.with_suffix(path.suffix + ".tmp")
+            tmp_path.write_text(json.dumps(payload, separators=(",", ":")) + "\n", encoding="utf-8")
+            tmp_path.replace(path)
     except Exception:
-        logger = logging.getLogger(__name__)
-        logger.debug("Failed to persist Claude process registry", exc_info=True)
+        # Nobody reads the write's future: this log is the only trace of a failure.
+        logging.getLogger(__name__).warning("Failed to persist Claude process registry", exc_info=True)
+
+
+def _pid_exists(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except (ProcessLookupError, OverflowError, ValueError):
+        # OverflowError and ValueError: a recorded pid no process can have.
+        return False
+    except OSError:
+        # Another user's process: it exists.
+        return True
+    return True
 
 
 def _run_ps() -> str:
@@ -619,7 +657,11 @@ async def reap_orphaned_claude_processes(
         if row.pid != service_pid and _command_is_claude(row.command, cli_path=cli_path)
     ]
     row_by_pid = {row.pid: row for row in claude_rows}
-    registry = owned_processes if owned_processes is not None else _load_owned_process_registry()
+    registry = (
+        owned_processes
+        if owned_processes is not None
+        else await loop.run_in_executor(None, _load_owned_process_registry)
+    )
     registry_pids = {
         record.pid
         for record in registry
