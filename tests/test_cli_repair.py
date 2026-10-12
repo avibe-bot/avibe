@@ -7,11 +7,13 @@ import shlex
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from vibe import api
-from vibe.cli_health import probe_cli
+from tests.test_cli_health import fixture_env
+from vibe.cli_health import cli_version, probe_cli
 from vibe.cli_repair import identify_repair_source, native_bootstrap_env
 
 
@@ -436,3 +438,156 @@ def test_path_isolation_removes_equivalent_directory_entries_only(tmp_path):
     }
     result = native_bootstrap_env(original, hide_directory=installed)
     assert result == {"PATH": "/usr/bin", "KEEP": "yes"} and "BASH_ENV" in original
+
+
+@pytest.mark.parametrize("outcome", ["missing", "broken", "healthy"])
+def test_windows_npm_upgrade_declares_active_prefix_and_never_certifies_old_cli(tmp_path, monkeypatch, outcome):
+    """A real npm child and real target children exercise the Windows contract on POSIX."""
+    home = tmp_path / "isolated home"
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    prefix_a = home / "npm-prefix-a"
+    prefix_b = home / "npm-prefix-b"
+    old_marker = home / "old-probed"
+    new_marker = home / "new-probed"
+    old = executable(
+        prefix_a / "codex.cmd",
+        f'from pathlib import Path\nPath({str(old_marker)!r}).touch()\nprint("codex-cli 0.161.0")\n',
+    )
+    replacement = (
+        "#!"
+        + sys.executable
+        + "\nfrom pathlib import Path\nPath("
+        + repr(str(new_marker))
+        + ").touch()\n"
+        + (
+            'print("codex-cli 0.162.1")\n'
+            if outcome == "healthy"
+            else 'print("Node.js v22.18.0")\n'
+            if outcome == "broken"
+            else ""
+        )
+    )
+    npm = executable(
+        tools / "npm",
+        f'import sys\nfrom pathlib import Path\nif sys.argv[1:] == ["config", "get", "prefix"]:\n print({str(prefix_b)!r}); raise SystemExit(0)\nif sys.argv[1:] == ["install", "-g", "@openai/codex"]:\n p=Path({str(prefix_b / "codex.cmd")!r}); p.parent.mkdir(parents=True,exist_ok=True)\n'
+        + (f"p.write_text({replacement!r}); p.chmod(0o755)\n" if outcome != "missing" else "")
+        + "raise SystemExit(0)\n",
+    )
+    env = fixture_env(tmp_path)
+    env.update(HOME=str(home), AVIBE_HOME=str(home / ".avibe"))
+    monkeypatch.setenv("AVIBE_HOME", str(home / ".avibe"))
+    monkeypatch.setattr(api.paths, "get_state_dir", lambda: home / "state")
+    env["NPM_CONFIG_PREFIX"] = str(prefix_b)
+    monkeypatch.setattr(api, "_command_env_for", lambda _path: dict(env))
+    monkeypatch.setattr(api, "_configured_agent_cli_path", lambda _name: "codex")
+    monkeypatch.setattr(api, "_is_npm_codex_install", lambda _path: True)
+    monkeypatch.setattr(api, "_is_homebrew_codex_install", lambda _path: False)
+    monkeypatch.setattr(api, "_npm_prefix_for_existing_codex_install", lambda *_args: None)
+    monkeypatch.setattr(
+        api,
+        "resolve_cli_path",
+        lambda name, **_kwargs: str(old) if name == "codex" else str(npm) if name == "npm" else None,
+    )
+    persisted = []
+    monkeypatch.setattr(api, "_persist_agent_cli_path", lambda _name, path: persisted.append(path))
+    observed = []
+
+    def observe(binary, backend):
+        path = str(old) if binary == "codex" else binary
+        observed.append(path)
+        if not Path(path).is_file() or not os.access(path, os.X_OK):
+            status = "missing" if not Path(path).exists() else "broken"
+            return api.CliHealth(False, path if Path(path).exists() else None, status).payload()
+        result = subprocess.run([path, "--version"], env=env, capture_output=True, text=True, check=False)
+        version = cli_version(backend, result.stdout, result.stderr) if result.returncode == 0 else None
+        return api.CliHealth(
+            True, path, "ok" if version else "broken", version=version, reason=None if version else "probe_failed"
+        ).payload()
+
+    monkeypatch.setattr(api, "detect_cli", observe)
+    observe(str(old), "codex")
+    result = api._run_install_command(
+        "codex",
+        [str(npm), "install", "-g", "@openai/codex"],
+        lambda value: value,
+        mode="upgrade",
+        env=env,
+        expected_path=str(prefix_b / "codex.cmd"),
+    )
+    target = str(prefix_b / "codex.cmd")
+    assert observed == [str(old), target]
+    assert old_marker.exists() and new_marker.exists() is (outcome != "missing")
+    if outcome == "healthy":
+        assert result["ok"] and result["path"] == target and persisted == [target]
+    else:
+        assert not result["ok"] and result["code"] == "cli_readback_failed" and persisted == []
+    assert result.get("detection", {}).get("path") in {target, None}
+
+
+def test_windows_npm_install_env_declares_prefix_from_real_npm_child(tmp_path, monkeypatch):
+    prefix = tmp_path / "active-prefix"
+    npm = executable(
+        tmp_path / "npm",
+        f'import sys\nif sys.argv[1:] == ["config", "get", "prefix"]: print({str(prefix)!r}); raise SystemExit(0)\nraise SystemExit(2)\n',
+    )
+    monkeypatch.setattr(api.os, "name", "nt", raising=False)
+    monkeypatch.setattr(api, "_command_env_for", lambda _path: {"PATH": str(tmp_path)})
+    observed = subprocess.run([str(npm), "config", "get", "prefix"], env={"PATH": str(tmp_path)}, capture_output=True, text=True, check=True)
+    monkeypatch.setattr(api, "_npm_prefix_for", lambda _path: Path(observed.stdout.strip()))
+    env = api._codex_npm_install_env(str(npm))
+    normalized_prefix = env["NPM_CONFIG_PREFIX"].replace("\\", "/")
+    assert env is not None and normalized_prefix == str(prefix)
+    assert env["PATH"].split(os.pathsep)[0].replace("\\", "/") == str(prefix)
+    assert normalized_prefix + "/codex.cmd" == str(prefix / "codex.cmd")
+
+
+def test_windows_npm_prefix_query_failure_fails_closed(tmp_path, monkeypatch):
+    npm = executable(tmp_path / "npm", "import sys\nraise SystemExit(1)\n")
+    monkeypatch.setattr(api.os, "name", "nt", raising=False)
+    monkeypatch.setattr(api, "_command_env_for", lambda _path: {"PATH": str(tmp_path)})
+    assert api._codex_npm_install_env(str(npm)) is None
+    assert api._declared_codex_npm_target(None) is None
+
+
+def test_homebrew_symlinked_stable_bin_target_is_attributable(tmp_path, monkeypatch):
+    prefix = tmp_path / "homebrew"
+    brew = executable(prefix / "bin/brew", "#!/bin/sh\n")
+    cell = prefix / "Caskroom/codex/1.2.3"
+    target = executable(cell / "codex", 'print("codex-cli 0.162.1")\n')
+    launcher = prefix / "bin/codex"
+    launcher.symlink_to(target)
+
+    def fake_run(cmd, **_kwargs):
+        if cmd == [str(brew), "--prefix"]:
+            return SimpleNamespace(returncode=0, stdout=str(prefix) + "\n", stderr="")
+        if cmd == [str(brew), "--prefix", "--cask"]:
+            return SimpleNamespace(returncode=0, stdout=str(prefix / "Caskroom") + "\n", stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(api.subprocess, "run", fake_run)
+    assert api._homebrew_codex_target(str(brew), str(launcher)) == str(launcher)
+    assert api._homebrew_codex_target(str(brew), str(tmp_path / "other/bin/codex")) is None
+
+
+def test_codex_homebrew_upgrade_plan_binds_the_stable_launcher(tmp_path, monkeypatch):
+    prefix = tmp_path / "homebrew"
+    brew = executable(prefix / "bin/brew", "#!/bin/sh\n")
+    target = executable(prefix / "Cellar/codex/1.2.3/codex", 'print("codex-cli 0.162.1")\n')
+    launcher = prefix / "bin/codex"
+    launcher.symlink_to(target)
+
+    def fake_run(cmd, **_kwargs):
+        if cmd == [str(brew), "--prefix"]:
+            return SimpleNamespace(returncode=0, stdout=str(prefix) + "\n", stderr="")
+        if cmd == [str(brew), "--prefix", "--cask"]:
+            return SimpleNamespace(returncode=0, stdout=str(prefix / "Caskroom") + "\n", stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(api.subprocess, "run", fake_run)
+    monkeypatch.setattr(api, "resolve_cli_path", lambda name, **_kwargs: str(brew) if name == "brew" else None)
+    monkeypatch.setattr(api, "_is_homebrew_codex_install", lambda _path: True)
+    plan = api._codex_upgrade_command(str(launcher))
+    assert plan == ([str(brew), "upgrade", "--cask", "codex"], None)
+    plan = api._codex_upgrade_command(str(tmp_path / "other/bin/codex"))
+    assert plan["code"] == "cli_target_unknown"

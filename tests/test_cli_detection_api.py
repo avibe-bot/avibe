@@ -3,6 +3,8 @@
 import asyncio
 import json
 import os
+import sys
+from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
@@ -91,6 +93,7 @@ def test_health_and_runtime_http_survive_an_owned_removed_cwd(tmp_path):
 
     cli = make_cli(tmp_path, 'print("codex-cli 0.162.1")\n')
     env = fixture_env(tmp_path)
+    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
     driver = tmp_path / "removed_cwd_driver.py"
     driver.write_text(
         """import asyncio,json,os
@@ -118,6 +121,55 @@ print(json.dumps({'probe':health.status,'runtime':body['status'],'version':body[
     )
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout.strip().splitlines()[-1]) == {"probe": "ok", "runtime": "ok", "version": "0.162.1"}
+
+
+@pytest.mark.parametrize(
+    "backend,target_rel,version",
+    [
+        ("opencode", Path(".opencode/bin/opencode"), "1.2.15"),
+        ("claude", Path(".local/bin/claude"), "2.1.34 (Claude Code)"),
+    ],
+)
+@pytest.mark.parametrize("write_target", [False, True])
+def test_fresh_vendor_install_reads_only_the_script_destination(
+    tmp_path, monkeypatch, backend, target_rel, version, write_target
+):
+    home = tmp_path / "vendor home"
+    env = fixture_env(tmp_path)
+    env["HOME"] = str(home)
+    script = tmp_path / "controlled-vendor-installer.py"
+    target = home / target_rel
+    target_body = "#!" + sys.executable + "\nprint(" + repr(version) + ")\n"
+    script.write_text(
+        "from pathlib import Path\n"
+        + (
+            f"p=Path({str(target)!r});p.parent.mkdir(parents=True,exist_ok=True);p.write_text({target_body!r});p.chmod(0o755)\n"
+            if write_target
+            else ""
+        )
+        + "print('installer-exit-zero')\n",
+        encoding="utf-8",
+    )
+    target_script = [sys.executable, str(script)]
+    monkeypatch.setattr(Path, "home", lambda: home)
+    monkeypatch.setattr(api.Path, "home", lambda: home)
+    monkeypatch.setenv("PATH", str(tmp_path / "empty-bin"))
+    monkeypatch.setattr(api, "_command_env_for", lambda _path: dict(env))
+    monkeypatch.setattr(api, "_configured_agent_cli_path", lambda _name: backend)
+    monkeypatch.setattr(api, "_candidate_cli_paths", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(api, "is_desktop_managed_runtime", lambda: False)
+    monkeypatch.setattr(api, "_persist_agent_cli_path", lambda _name, path: persisted.append(path))
+    monkeypatch.setattr(
+        api, "resolve_cli_path", lambda name, **_kwargs: "/usr/bin/" + name if name in {"curl", "bash"} else None
+    )
+    monkeypatch.setattr(api, "_curl_installer_command", lambda _url, _consumer: target_script)
+    persisted = []
+    result = api.install_agent(backend)
+    if write_target:
+        assert result["ok"] and result["path"] == str(target) and persisted == [str(target)]
+    else:
+        assert not result["ok"] and result["code"] == "cli_readback_failed" and persisted == []
+        assert not target.exists()
 
 
 def test_install_job_rejects_success_without_readback(monkeypatch):

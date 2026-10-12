@@ -358,17 +358,30 @@ def resolve_cli_paths(
 
 
 
-def _codex_npm_install_env(npm_path: str, *, prefix: str | Path | None = None) -> dict[str, str]:
+def _codex_npm_install_env(npm_path: str, *, prefix: str | Path | None = None) -> dict[str, str] | None:
     env = _command_env_for(npm_path)
+    if prefix is None:
+        if os.name == "nt":
+            # Windows npm's active global prefix is the install command's
+            # destination. Do not let post-install PATH discovery stand in for
+            # an explicit target when this query cannot be completed.
+            prefix = _npm_prefix_for(npm_path)
+            if prefix is None:
+                return None
+        else:
+            prefix = Path.home() / ".local"
+
+    install_prefix = Path(os.path.expanduser(str(prefix)))
+    prefix_text = str(install_prefix)
+    env["NPM_CONFIG_PREFIX"] = prefix_text
     if os.name == "nt":
+        path_entries = [entry for entry in env.get("PATH", "").split(os.pathsep) if entry and entry != prefix_text]
+        env["PATH"] = os.pathsep.join([prefix_text, *path_entries])
         return env
 
-    install_prefix = Path(os.path.expanduser(str(prefix))) if prefix is not None else Path.home() / ".local"
-    prefix = str(install_prefix)
     prefix_bin = str(install_prefix / "bin")
     path_entries = [entry for entry in env.get("PATH", "").split(os.pathsep) if entry and entry != prefix_bin]
     env["PATH"] = os.pathsep.join([prefix_bin, *path_entries])
-    env["NPM_CONFIG_PREFIX"] = prefix
     return env
 
 
@@ -458,6 +471,46 @@ def _is_npm_codex_install(codex_path: str) -> bool:
     return False
 
 
+def _homebrew_prefixes(brew_path: str) -> list[Path]:
+    prefixes: list[Path] = []
+    for command in ([brew_path, "--prefix"], [brew_path, "--prefix", "--cask"]):
+        try:
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=10,
+                env=_command_env_for(brew_path),
+            )
+        except Exception:
+            continue
+        if result.returncode == 0:
+            lines = (result.stdout or "").strip().splitlines()
+            if lines:
+                prefixes.append(Path(os.path.expanduser(lines[-1])))
+    prefixes.extend([Path("/opt/homebrew"), Path("/usr/local"), Path("/home/linuxbrew/.linuxbrew")])
+    return prefixes
+
+
+def _homebrew_codex_target(brew_path: str, selected_path: str) -> str | None:
+    """Return a selected Codex launcher attributable to Homebrew's stable bin link."""
+    selected = Path(selected_path).expanduser()
+    if selected.name not in {"codex", "codex.exe"}:
+        return None
+    try:
+        resolved = selected.resolve()
+    except OSError:
+        return None
+    for prefix in _homebrew_prefixes(brew_path):
+        try:
+            selected.absolute().relative_to((prefix / "bin").absolute())
+        except ValueError:
+            continue
+        if _path_is_relative_to(resolved, prefix):
+            return str(selected)
+    return None
+
+
 def _is_homebrew_codex_install(codex_path: str) -> bool:
     brew_path = resolve_cli_path("brew")
     if not brew_path:
@@ -481,25 +534,7 @@ def _is_homebrew_codex_install(codex_path: str) -> bool:
     except OSError:
         return False
 
-    brew_prefixes: list[Path] = []
-    for command in ([brew_path, "--prefix"], [brew_path, "--prefix", "--cask"]):
-        try:
-            prefix_result = subprocess.run(
-                command,
-                capture_output=True,
-                text=True,
-                timeout=10,
-                env=_command_env_for(brew_path),
-            )
-        except Exception:
-            continue
-        if prefix_result.returncode != 0:
-            continue
-        prefix = (prefix_result.stdout or "").strip().splitlines()
-        if prefix:
-            brew_prefixes.append(Path(os.path.expanduser(prefix[-1])))
-
-    brew_prefixes.extend([Path("/opt/homebrew"), Path("/usr/local"), Path("/home/linuxbrew/.linuxbrew")])
+    brew_prefixes = _homebrew_prefixes(brew_path)
     return any(_path_is_relative_to(resolved, prefix) for prefix in brew_prefixes)
 
 
@@ -529,6 +564,13 @@ def _codex_upgrade_command(existing_path: str) -> tuple[list[str], dict[str, str
                 "message": "Codex appears to be installed via Homebrew, but brew was not found. Please upgrade Codex manually.",
                 "output": None,
             }
+        if _homebrew_codex_target(brew_path, existing_path) is None:
+            return {
+                "ok": False,
+                "code": "cli_target_unknown",
+                "message": "Codex Homebrew installation target could not be attributed to the selected executable; no upgrade was started.",
+                "output": None,
+            }
         return [brew_path, "upgrade", "--cask", "codex"], None
 
     if _is_npm_codex_install(existing_path):
@@ -540,7 +582,15 @@ def _codex_upgrade_command(existing_path: str) -> tuple[list[str], dict[str, str
                 "output": None,
             }
         prefix = _npm_prefix_for_existing_codex_install(npm_path, existing_path)
-        return [npm_path, "install", "-g", "@openai/codex"], _codex_npm_install_env(npm_path, prefix=prefix)
+        command_env = _codex_npm_install_env(npm_path, prefix=prefix)
+        if command_env is None:
+            return {
+                "ok": False,
+                "code": "cli_target_unknown",
+                "message": "Codex npm global prefix could not be determined; no upgrade was started.",
+                "output": None,
+            }
+        return [npm_path, "install", "-g", "@openai/codex"], command_env
 
     if _codex_cli_supports_update(existing_path):
         return [existing_path, "update"], None
@@ -7457,6 +7507,15 @@ def _repair_broken_cli(name: str, selected: str, truncate_output) -> dict:
     return _run_install_command(name, cmd, truncate_output, mode="repair", env=command_env, expected_path=source.destination)
 
 
+def _native_vendor_install_target(name: str) -> str | None:
+    home = Path.home()
+    if name == "opencode":
+        return str(home / ".opencode" / "bin" / ("opencode.exe" if os.name == "nt" else "opencode"))
+    if name == "claude":
+        return str(home / ".local" / "bin" / ("claude.exe" if os.name == "nt" else "claude"))
+    return None
+
+
 def _install_agent(name: str) -> dict:
     """Install (or upgrade) an agent CLI tool.
 
@@ -7589,6 +7648,7 @@ def _install_agent(name: str) -> dict:
         return _run_desktop_backend_install(name, _truncate_output)
 
     command_env: dict[str, str] | None = None
+    expected_path: str | None = None
 
     if name == "opencode":
         # OpenCode: use curl installer (not supported on Windows)
@@ -7605,6 +7665,7 @@ def _install_agent(name: str) -> dict:
                 return {"ok": False, "message": error, "output": None}
         # Use pipefail to ensure curl failures are detected
         cmd = _curl_installer_command("https://opencode.ai/install", "bash")
+        expected_path = _native_vendor_install_target(name)
     elif name == "claude":
         # Claude Code: platform-specific installer
         if system == "windows":
@@ -7613,6 +7674,7 @@ def _install_agent(name: str) -> dict:
             if error:
                 return {"ok": False, "message": error, "output": None}
             cmd = ["powershell", "-NoProfile", "-Command", "irm https://claude.ai/install.ps1 -ErrorAction Stop | iex"]
+            expected_path = _native_vendor_install_target(name)
         else:
             # macOS/Linux: use bash with pipefail
             for binary in ["curl", "bash"]:
@@ -7620,6 +7682,7 @@ def _install_agent(name: str) -> dict:
                 if error:
                     return {"ok": False, "message": error, "output": None}
             cmd = _curl_installer_command("https://claude.ai/install.sh", "bash")
+            expected_path = _native_vendor_install_target(name)
     elif name == "codex":
         # Fresh installs use npm because it is the documented cross-platform
         # package source that does not require OS package-manager privileges.
@@ -7627,6 +7690,14 @@ def _install_agent(name: str) -> dict:
         if npm_path:
             cmd = [npm_path, "install", "-g", "@openai/codex"]
             command_env = _codex_npm_install_env(npm_path)
+            if command_env is None:
+                return {
+                    "ok": False,
+                    "code": "cli_target_unknown",
+                    "message": "Codex npm global prefix could not be determined; no installation was started.",
+                    "output": None,
+                }
+            expected_path = _declared_codex_npm_target(command_env)
         else:
             return {
                 "ok": False,
@@ -7638,7 +7709,7 @@ def _install_agent(name: str) -> dict:
 
     return _run_install_command(
         name, cmd, _truncate_output, mode="install", env=command_env,
-        expected_path=_declared_codex_npm_target(command_env) if name == "codex" else None,
+        expected_path=expected_path,
     )
 
 
