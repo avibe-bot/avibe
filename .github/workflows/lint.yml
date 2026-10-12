@@ -415,12 +415,12 @@ jobs:
     name: windows-install-smoke (${{ matrix.runner }})
     runs-on: ${{ matrix.runner }}
     needs: build-linux-artifacts
-    # The required PR gate runs the installer on Windows latest. ARM executes
-    # on master pushes, where the full platform matrix remains covered.
+    # Pull requests allocate only Windows latest; master pushes run the full
+    # Windows latest plus Windows on Arm matrix.
     strategy:
       fail-fast: false
       matrix:
-        runner: [windows-latest, windows-11-arm]
+        runner: ${{ fromJSON(github.event_name == 'pull_request' && '["windows-latest"]' || '["windows-latest","windows-11-arm"]') }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
 
@@ -430,7 +430,6 @@ jobs:
           path: dist
 
       - name: Run Windows installer smoke test
-        if: github.event_name != 'pull_request' || matrix.runner == 'windows-latest'
         shell: pwsh
         run: |
           $wheel = (Get-ChildItem dist\*.whl | Select-Object -First 1).FullName
@@ -466,7 +465,6 @@ jobs:
           }
 
       - name: Verify vibe in fresh PowerShell session
-        if: github.event_name != 'pull_request' || matrix.runner == 'windows-latest'
         shell: pwsh
         run: |
           $env:Path = [System.Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [System.Environment]::GetEnvironmentVariable('Path', 'User')
@@ -486,7 +484,6 @@ jobs:
       # Windows on Arm installs on x64 Python: cryptography and claude-agent-sdk
       # publish no win_arm64 wheels, so install.ps1 asks uv for x64 there.
       - name: Verify the installed Python is x64
-        if: github.event_name != 'pull_request' || matrix.runner == 'windows-latest'
         shell: pwsh
         run: |
           $python = @(Get-ChildItem "$env:USERPROFILE\.avibe\runtime\install-generations\*\uv\tools\avibe-os\Scripts\python.exe")[0].FullName
@@ -498,7 +495,6 @@ jobs:
       # The Model Hub engine needs no Python, so it stays native: arm64 on
       # Windows on Arm even though Avibe's Python there is x64.
       - name: Verify the Model Hub engine targets the native architecture
-        if: github.event_name != 'pull_request' || matrix.runner == 'windows-latest'
         shell: pwsh
         run: |
           $python = @(Get-ChildItem "$env:USERPROFILE\.avibe\runtime\install-generations\*\uv\tools\avibe-os\Scripts\python.exe")[0].FullName
@@ -511,7 +507,6 @@ jobs:
       # Windows PowerShell 5.1 is what `irm ... | iex` runs for most users, so
       # the uninstall owner runs there, in both its file and script-block forms.
       - name: Uninstall keeps user data and a purge needs confirmation
-        if: github.event_name != 'pull_request' || matrix.runner == 'windows-latest'
         shell: pwsh
         run: |
           $avibeHome = Join-Path $env:USERPROFILE ".avibe"

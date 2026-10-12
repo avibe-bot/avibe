@@ -34,14 +34,18 @@ jobs:
         run: npm ci
 
       - name: Install Chromium
+        id: install_chromium
         working-directory: ui
         run: npx playwright install --with-deps chromium
 
-      - name: Run Model Hub browser regression
+      - name: Run Model Catalog browser regression
         working-directory: ui
-        run: |
-          npm run test:model-catalog
-          npm run test:model-provider
+        run: npm run test:model-catalog
+
+      - name: Run Model Provider browser regression
+        if: ${{ always() && steps.install_chromium.outcome == 'success' }}
+        working-directory: ui
+        run: npm run test:model-provider
 
       - name: Upload browser artifacts
         if: failure()
