@@ -19,22 +19,22 @@ Accessibility success response is not proof that a custom surface handled a
 real mouse event. The research records the limitation that some applications
 require real HID origin or hardware pointer state:
 
-`docs/research/desktop-computer-use-background-input/findings.md`
+[`desktop-computer-use-background-input/findings.md`](../research/desktop-computer-use-background-input/findings.md)
 
-Slice 2 provides the application evidence. The final ledger records one
-owner-approved QQ Route A click against PID `97470`, window `6285`, at
-`(41,146)`, with `count=1`, left button, `click_mode:"raw"`, and
-`delivery_mode:"background"`. The driver accepted the dispatch and reported
-the `synthetic_events` route. The QQ before/after observations and screenshots
-showed no observable view change:
+The research note is committed in this PR as the durable record of the
+test-owned probe. Slice 2 provides the application evidence.
 
-`/tmp/avibe-cua-slice2-20261011-1540/evidence/final/slice2-live-acceptance-ledger.md`
+### Slice 2 QQ observation
 
-`/tmp/avibe-cua-slice2-20261011-1540/evidence/final/qq-direct-corrected-click-response-20261012.json`
+The owner-approved QQ Route A observation used one background raw click with
+`x=41`, `y=146`, `count=1`, `button=left`, `modifier=[]`,
+`click_mode:"raw"`, and `delivery_mode:"background"`. The driver accepted the
+dispatch and reported the `synthetic_events` route. Fresh before/after
+observations showed no observable QQ view change.
 
-`/tmp/avibe-cua-slice2-20261011-1540/evidence/final/qq-direct-corrected-before-response-20261012.json`
-
-`/tmp/avibe-cua-slice2-20261011-1540/evidence/final/qq-direct-corrected-after-response-20261012.json`
+The raw QQ responses, observations, and screenshots remain in the local Slice 2
+evidence directory and are intentionally not committed because they contain
+private third-party application content.
 
 The evidence shows a gap between accepted driver dispatch and observable
 application effect. It does not change Route A semantics or justify automatic
