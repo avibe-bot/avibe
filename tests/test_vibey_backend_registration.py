@@ -331,8 +331,10 @@ async def test_a_starting_model_needs_a_source_that_lists_it(tmp_path, sqlite_db
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("person_chose", [False, True])
-async def test_vibey_starts_once_a_models_dev_copy_describes_a_listed_model(tmp_path, sqlite_db_factory, person_chose):
+@pytest.mark.parametrize(("person_chose", "engine_up"), [(False, True), (True, True), (False, False)])
+async def test_vibey_starts_once_a_models_dev_copy_describes_a_listed_model(
+    tmp_path, sqlite_db_factory, person_chose, engine_up,
+):
     """MH-VIBEY-007: a seed that ran with no models.dev copy heals when a copy arrives.
 
     With no copy to describe the Source's models, the seed leaves Vibey's catalog empty.
@@ -355,7 +357,8 @@ async def test_vibey_starts_once_a_models_dev_copy_describes_a_listed_model(tmp_
         controller.model_hub_service = service
         service.builtin_agent_models_override = controller._builtin_agent_models
         service.backend_catalog_changed = controller._model_hub_catalog_changed
-        relay = _source("src_relay0001", "Relay", vendor="anthropic", protocol="anthropic", model_id="claude-opus-5-5")
+        # A model only Vibey would run, so starting on it adds the Source's route target and syncs the engine.
+        relay = _source("src_relay0001", "Relay", vendor="custom", protocol="openai_chat", model_id="relay-tools-1")
 
         with patch("vibe.models_dev_catalog.load_models_dev_catalog", side_effect=OSError("offline")):
             async with service._mutation_lock:
@@ -363,17 +366,22 @@ async def test_vibey_starts_once_a_models_dev_copy_describes_a_listed_model(tmp_
         assert service.store.load().agents["vibey"].models == []
         assert store.get("vibey").model is None
         if person_chose:
-            store.update("vibey", model="claude-opus-5-5")
+            store.update("vibey", model="relay-tools-1")
 
-        copy_on_disk.update({"anthropic": {"name": "Anthropic", "models": {
-            "claude-opus-5-5": {"name": "Claude Opus 5.5", "tool_call": True,
-                                "modalities": {"input": ["text"], "output": ["text"]}},
+        copy_on_disk.update({"relay": {"name": "Relay", "models": {
+            "relay-tools-1": {"name": "Relay Tools 1", "tool_call": True,
+                              "modalities": {"input": ["text"], "output": ["text"]}},
         }}})
+        if not engine_up:
+            from core.handlers.model_hub.service import ModelHubError
+
+            # The start is saved before the engine syncs, so the Agent hears of it even when the sync fails.
+            service.adapter.sync_sources = AsyncMock(side_effect=ModelHubError("engine_down", status=503))
         await controller._start_vibey_without_a_model()
 
         started = [model.id for model in service.store.load().agents["vibey"].models]
-        assert started == ([] if person_chose else ["claude-opus-5-5"])
-        assert store.get("vibey").model == "claude-opus-5-5"
+        assert started == ([] if person_chose else ["relay-tools-1"])
+        assert store.get("vibey").model == "relay-tools-1"
     finally:
         store.close()
 

@@ -278,16 +278,24 @@ _MODELS_DEV_CANDIDATE_FIELDS = (
 
 
 def _described_as_fit_for_agent_turns(match: Mapping[str, Any]) -> bool:
-    """models.dev says the model takes tool calls and answers in text: the least an Agent's turn needs."""
+    """models.dev says the model takes text and tool calls and answers in text: the least an Agent's turn needs."""
 
-    return match.get("supports_tools") is True and "text" in (match.get("output_modalities") or ())
+    return (
+        match.get("supports_tools") is True
+        and "text" in (match.get("input_modalities") or ())
+        and "text" in (match.get("output_modalities") or ())
+    )
 
 
 def _described_as_unfit_for_agent_turns(match: Mapping[str, Any]) -> bool:
-    """models.dev says the model takes no tool calls, or answers in something other than text."""
+    """models.dev says the model takes no tool calls, or takes or answers in something other than text."""
 
-    outputs = match.get("output_modalities") or ()
-    return match.get("supports_tools") is False or (bool(outputs) and "text" not in outputs)
+    if match.get("supports_tools") is False:
+        return True
+    return any(
+        bool(modalities) and "text" not in modalities
+        for modalities in (match.get("input_modalities") or (), match.get("output_modalities") or ())
+    )
 
 
 AGENT_CHAIN_CONTRACT_VERSION = 11
@@ -5655,8 +5663,13 @@ class ModelHubService:
                 return []
             config = self._clone_config(previous)
             config.agents["vibey"].models = [starting]
-            # As for the seed, an engine that is not up must not undo the start.
-            await self._commit_synced(previous, config, rollback_on_sync_failure=False)
+            try:
+                # As for the seed, an engine that is not up must not undo the start: the
+                # config is saved first, and the Agent still has to hear about it.
+                await self._commit_synced(previous, config, rollback_on_sync_failure=False)
+            except ModelHubError:
+                if not self.store.load().agents["vibey"].models:
+                    raise
         await self._announce_vibey_seed()
         return [starting.id]
 

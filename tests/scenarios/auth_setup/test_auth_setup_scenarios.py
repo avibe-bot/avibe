@@ -4722,7 +4722,7 @@ def test_vibey_starts_on_a_sources_tool_capable_model_and_setup_completes_withou
     try:
         vibey = next(row for row in client.get("/api/agents").get_json()["agents"] if row["backend"] == "vibey")
         assert vibey["model"] is None
-        # A new install records the built-in Agent as its default (docs/plans/vibey-default-agent.md §1).
+        # A new install records the built-in Agent as its default.
         recorded = client.post("/api/agents/default", json={"name": vibey["name"]}, headers=headers)
         assert recorded.status_code == 200, recorded.get_json()
 

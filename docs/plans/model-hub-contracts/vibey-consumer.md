@@ -26,13 +26,13 @@ keys), and its catalog becomes the models the built-in
 Claude, Codex, and OpenCode Agents run, in that order, that one of those Sources
 lists, deduplicated and added as the picker adds a provider model (models.dev
 metadata included). A selection that models.dev explicitly describes as taking
-no tool calls or producing no text does not qualify; one it does not know still
+no tool calls, or as taking or producing no text, does not qualify; one it does not know still
 does, being a person's own choice for a native Agent. With none qualifying, the
 seed starts Vibey on one model, so a new install's default Agent can run once
-setup places a Source (`docs/plans/vibey-default-agent.md` §3). That model is the
+setup places a Source. That model is the
 first one, in Vibey's Source order and then each Source's own non-retired
 inventory order, that models.dev describes, by the picker's exact match, as
-taking tool calls and producing text. A model models.dev does not know is never
+taking text and tool calls and producing text. A model models.dev does not know is never
 guessed at: with none described that way, the catalog stays empty and the setup
 card offers the pick. A seed that ran before any models.dev copy could describe
 a listed model is healed when a copy arrives (the snapshot reconcile that also

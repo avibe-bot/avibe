@@ -781,20 +781,22 @@ TOOL_CATALOG = {"relay": {"name": "Relay", "models": {
     "chat-1": {"name": "Chat 1", "tool_call": True, "modalities": {"input": ["text"], "output": ["text"]},
                "limit": {"context": 200_000, "output": 32_000}},
     "chat-2": {"name": "Chat 2", "tool_call": True, "modalities": {"input": ["text"], "output": ["text"]}},
+    "see-1": {"name": "See 1", "tool_call": True, "modalities": {"input": ["image"], "output": ["text"]}},
 }}}
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("selections", "sources", "seeded"), [
-    # The first listed model that takes tool calls and answers in text, past the ones that do not.
-    ([("codex", "gpt-6-astra")], [("src_seedrelay001", ("embed-1", "draw-1", "unknown-1", "chat-1", "chat-2"))], ["chat-1"]),
+    # The first listed model that takes text and tool calls and answers in text, past the ones that do not.
+    ([("codex", "gpt-6-astra")], [("src_seedrelay001", ("embed-1", "draw-1", "see-1", "unknown-1", "chat-1", "chat-2"))], ["chat-1"]),
     # Sources the user already had are read in Vibey's Source order, each in its own inventory order.
     ([("codex", "gpt-6-astra")], [("src_seedrelay001", ("unknown-1", "embed-1")), ("src_seedrelay002", ("chat-2", "chat-1"))], ["chat-2"]),
     # A model models.dev cannot describe is never guessed at.
     ([("codex", "gpt-6-astra")], [("src_seedrelay001", ("unknown-1", "unknown-2"))], []),
     # A native Agent's selection that models.dev rules out for an Agent's turn does not start Vibey;
     # one it does not know still does, being that person's own choice.
-    ([("codex", "embed-1"), ("opencode", "custom/draw-1")], [("src_seedrelay001", ("embed-1", "draw-1", "chat-2"))], ["chat-2"]),
+    ([("codex", "embed-1"), ("opencode", "custom/draw-1"), ("claude", "see-1")],
+     [("src_seedrelay001", ("embed-1", "draw-1", "see-1", "chat-2"))], ["chat-2"]),
     ([("codex", "unknown-1")], [("src_seedrelay001", ("unknown-1", "chat-2"))], ["unknown-1"]),
 ])
 async def test_a_seed_with_no_qualifying_selection_starts_vibey_on_a_tool_capable_model(
