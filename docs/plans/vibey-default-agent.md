@@ -60,7 +60,8 @@ On master before this change:
   - A store with no recorded default ends the sync on the built-in Agent, unless Model Hub is disabled on the
     instance. In that case the rank applies, and it still records the built-in Agent when no native backend is
     enabled, because that is the only enabled candidate.
-  - Once Vibey is the default, only an explicit set-default moves it, because it is always enabled.
+  - Once Vibey is the default, only two writers move it, because it is always enabled: an explicit set-default, and
+    setup completion's existing fallback when Vibey cannot run at completion (see Known by design).
 
 ### 2. A turn Vibey cannot run says what is missing and where to fix it (PR-2)
 
@@ -119,6 +120,8 @@ On master before this change:
      retired and that models.dev describes as accepting tool calls and producing text. The description uses the
      exact match the picker's candidates already use.
   2. If models.dev describes no listed model that way, choose none. The setup card's pick and §2's refusal remain.
+     A seed that ran before any models.dev copy could describe a listed model is healed when a copy arrives: while
+     Vibey's catalog is empty and its built-in Agent has no model, it starts on this rule's model.
 - **How the model is added.** It joins Vibey's list as the picker adds a provider model.
   `_reconcile_vibey_agent_model` then gives the built-in Agent that model, as it already does for the first model in
   the list.
@@ -194,8 +197,8 @@ and a closed-loop case in `tests/scenarios/auth_setup/test_auth_setup_scenarios.
   be a separate product decision.
 - The starting model comes only from what models.dev can describe. An endpoint whose models it does not know still
   needs one click on Vibey's setup card.
-- Setup completion keeps its existing fallback. If Vibey cannot run at completion, which takes a source models.dev
-  cannot describe and no pick, the existing rule records the first runnable CLI assistant. Otherwise setup would
-  finish on a default that cannot run.
+- Setup completion keeps its existing fallback, the second writer named in §1's invariants. If Vibey cannot run at
+  completion, which takes a source models.dev cannot describe and no pick, the existing rule records the first
+  runnable CLI assistant. Otherwise setup would finish on a default that cannot run.
 - The five replacement orderings (sync, archive, read-time fallback, per-caller fallback, setup) predate this
   change. Giving them one owner is a follow-up.
