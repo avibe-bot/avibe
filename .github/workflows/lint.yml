@@ -79,11 +79,11 @@ jobs:
           npm test
 
       - name: Test browser interactions
+        # Model Hub catalog/provider regression runs on the scheduled/manual
+        # model-hub-ui-regression workflow instead of blocking every PR.
         working-directory: ui
         run: |
           npx playwright install --with-deps chromium webkit
-          npm run test:model-catalog
-          npm run test:model-provider
           npm run test:onboarding-fidelity -- hub-ownership.spec.ts provider-gate.spec.ts lineup.spec.ts
           npm run test:project-order
           npm run test:inbox-return
