@@ -110,6 +110,9 @@ On master before this change:
   exists: on a new install, the source setup places; on an upgrade, the existing sources at the first start.
 - **Today,** the starting models are the native built-ins' model selections that a placed source lists. When none
   qualifies, the list stays empty, and Vibey has no model until someone picks one on its setup card.
+- **A native selection** still qualifies first, unless models.dev explicitly describes it as taking no tool calls or
+  producing no text. A selection models.dev does not know still qualifies, because it is a person's own choice for a
+  native Agent.
 - **New: when no selection qualifies, the seed starts Vibey on one model the placed sources list.** The rule is
   deterministic:
   1. Take the first model, in source placement order and then each source's own inventory order, that is not
@@ -120,6 +123,7 @@ On master before this change:
   `_reconcile_vibey_agent_model` then gives the built-in Agent that model, as it already does for the first model in
   the list.
 - **Later changes.** The person can change the model on the card or in Models. A later source never replaces it.
+
 ### Copy
 
 | Key | en | zh |
@@ -136,6 +140,9 @@ On master before this change:
 
 ## Validation
 
+Any PR here that changes the outcome of a setup flow also carries a `tests/scenarios/auth_setup/catalog.yaml` entry
+and a closed-loop case in `tests/scenarios/auth_setup/test_auth_setup_scenarios.py`, per the repository rule.
+
 - **PR-1, at the store boundary.**
   - An empty store records the built-in Agent.
   - A store whose recorded default exists and is enabled keeps it, whatever its backend. One that is missing or
@@ -144,6 +151,8 @@ On master before this change:
   - Model Hub disabled:
     - with a native backend enabled, records that native Agent;
     - with none enabled, records the built-in Agent, the only enabled candidate.
+- **PR-1, user docs.** `docs/INSTALL_FOR_AI.md` and `docs/INSTALL_FOR_AI_ZH.md` now say that a new install starts
+  with Vibey once setup adds a Model Hub source, and that the CLI assistants are optional.
 - **PR-2:**
   - a table test of `hub_supply_block`
   - one dispatch-level refusal test with its next step
@@ -158,7 +167,13 @@ On master before this change:
   - a source listing none starts Vibey on its first tool-capable text model, skipping models that lead its inventory
     but that models.dev describes as having no tool calls or no text output;
   - the order across two sources is deterministic;
-  - with no model models.dev can describe, Vibey starts with none.
+  - with no model models.dev can describe, Vibey starts with none;
+  - a native selection that models.dev rules out for an Agent's turn does not start Vibey, while one it does not
+    know still does.
+- **PR-4, closed loop (auth_setup).** A source with no native selection but a tool-capable model goes through the real
+  add-source route. The case checks the whole chain: the seed, the catalog-change announcement,
+  `_reconcile_vibey_agent_model`, and Vibey's runnable named route, which is the evidence setup's entry gate admits.
+  Completion on the Vibey default then succeeds with no pick.
 - **Hermetic upgrade runs**, as in the 3.2.0 merge readiness check:
   - fresh install → `vibey`
   - v3.1.3 (custom default) → unchanged
