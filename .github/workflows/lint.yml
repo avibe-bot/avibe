@@ -415,6 +415,8 @@ jobs:
     name: windows-install-smoke (${{ matrix.runner }})
     runs-on: ${{ matrix.runner }}
     needs: build-linux-artifacts
+    # The required PR gate runs the installer on Windows latest. ARM executes
+    # on master pushes, where the full platform matrix remains covered.
     strategy:
       fail-fast: false
       matrix:
@@ -428,6 +430,7 @@ jobs:
           path: dist
 
       - name: Run Windows installer smoke test
+        if: github.event_name != 'pull_request' || matrix.runner == 'windows-latest'
         shell: pwsh
         run: |
           $wheel = (Get-ChildItem dist\*.whl | Select-Object -First 1).FullName
@@ -463,6 +466,7 @@ jobs:
           }
 
       - name: Verify vibe in fresh PowerShell session
+        if: github.event_name != 'pull_request' || matrix.runner == 'windows-latest'
         shell: pwsh
         run: |
           $env:Path = [System.Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [System.Environment]::GetEnvironmentVariable('Path', 'User')
@@ -482,6 +486,7 @@ jobs:
       # Windows on Arm installs on x64 Python: cryptography and claude-agent-sdk
       # publish no win_arm64 wheels, so install.ps1 asks uv for x64 there.
       - name: Verify the installed Python is x64
+        if: github.event_name != 'pull_request' || matrix.runner == 'windows-latest'
         shell: pwsh
         run: |
           $python = @(Get-ChildItem "$env:USERPROFILE\.avibe\runtime\install-generations\*\uv\tools\avibe-os\Scripts\python.exe")[0].FullName
@@ -493,6 +498,7 @@ jobs:
       # The Model Hub engine needs no Python, so it stays native: arm64 on
       # Windows on Arm even though Avibe's Python there is x64.
       - name: Verify the Model Hub engine targets the native architecture
+        if: github.event_name != 'pull_request' || matrix.runner == 'windows-latest'
         shell: pwsh
         run: |
           $python = @(Get-ChildItem "$env:USERPROFILE\.avibe\runtime\install-generations\*\uv\tools\avibe-os\Scripts\python.exe")[0].FullName
@@ -505,6 +511,7 @@ jobs:
       # Windows PowerShell 5.1 is what `irm ... | iex` runs for most users, so
       # the uninstall owner runs there, in both its file and script-block forms.
       - name: Uninstall keeps user data and a purge needs confirmation
+        if: github.event_name != 'pull_request' || matrix.runner == 'windows-latest'
         shell: pwsh
         run: |
           $avibeHome = Join-Path $env:USERPROFILE ".avibe"
@@ -577,14 +584,12 @@ jobs:
           if (-not (Test-Path -LiteralPath $foreign)) { throw "A purge removed a vibe.exe it did not install" }
           if (-not (Select-String -Path purge.log -Pattern "session kept" -SimpleMatch -Quiet)) { throw "The script-block form ended the session" }
 
-  # The required check: the matrix above reports one check per runner under
-  # its own name, so this job keeps the name branch protection requires.
   windows-install-smoke:
     runs-on: ubuntu-latest
     needs: windows-install-smoke-runners
     if: always()
     steps:
-      - name: Verify the installer on every Windows runner
+      - name: Verify the installer on every PR-required runner
         env:
           SMOKE_RESULT: ${{ needs['windows-install-smoke-runners'].result }}
         run: |
@@ -592,7 +597,7 @@ jobs:
             echo "Windows installer smoke finished with result: $SMOKE_RESULT"
             exit 1
           fi
-          echo "The installer passed on every Windows runner."
+          echo "The installer passed on every PR-required runner."
 
   # The only job that starts the real service on Windows. A fresh install
   # installs the Model Hub engine from the packaged manifest, saves API-key
@@ -602,6 +607,7 @@ jobs:
     name: windows-model-hub (${{ matrix.runner }})
     runs-on: ${{ matrix.runner }}
     needs: build-linux-artifacts
+    if: github.event_name != 'pull_request'
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -653,6 +659,7 @@ jobs:
   windows-control-ipc:
     runs-on: windows-latest
     needs: build-linux-artifacts
+    if: github.event_name != 'pull_request'
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
 
@@ -751,6 +758,7 @@ jobs:
   windows-agent:
     name: windows-agent (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    if: github.event_name != 'pull_request'
     timeout-minutes: 20
     strategy:
       fail-fast: false

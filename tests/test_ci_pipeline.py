@@ -482,6 +482,29 @@ def test_ui_checks_run_once_without_fencing_artifact_consumers() -> None:
         assert jobs[name]["needs"] == "build-linux-artifacts"
 
 
+def test_windows_platform_checks_leave_only_latest_installer_smoke_on_prs() -> None:
+    jobs = _jobs()
+    for name in ("windows-agent", "windows-model-hub", "windows-control-ipc"):
+        assert jobs[name]["if"] == "github.event_name != 'pull_request'"
+
+    smoke = jobs["windows-install-smoke-runners"]
+    assert smoke["strategy"]["matrix"]["runner"] == ["windows-latest", "windows-11-arm"]
+    smoke_steps = {step["name"]: step for step in smoke["steps"] if "name" in step}
+    arm_skipped_steps = (
+        "Run Windows installer smoke test",
+        "Verify vibe in fresh PowerShell session",
+        "Verify the installed Python is x64",
+        "Verify the Model Hub engine targets the native architecture",
+        "Uninstall keeps user data and a purge needs confirmation",
+    )
+    for name in arm_skipped_steps:
+        assert smoke_steps[name]["if"] == (
+            "github.event_name != 'pull_request' || matrix.runner == 'windows-latest'"
+        )
+    assert jobs["windows-install-smoke"]["needs"] == "windows-install-smoke-runners"
+    assert jobs["windows-install-smoke"]["if"] == "always()"
+
+
 def test_install_suites_run_independently_without_losing_checks() -> None:
     jobs = _jobs()
     shards = jobs["install-upgrade-shards"]
