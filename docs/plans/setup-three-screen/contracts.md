@@ -307,11 +307,13 @@ ensure/start. Startup
 has no assistant/source readiness prerequisite. Do not restart after an enable/config write.
 
 Preserve `default_agent_name` if it remains in the available set, including a usable custom
-Agent outside the cards' designated builtin Agents. Otherwise take the first rank that can run —
+Agent outside the cards' designated builtin Agents. A new install records the built-in Agent as
+its default (`../vibey-default-agent.md`), so a runnable Vibey is kept even when a CLI assistant can
+also run; the ranking below applies only to a default that cannot run. Otherwise take the first rank that can run —
 the CLI assistants before a built-in backend, the server's `implicit_default_rank` — and
 within it prefer a runnable designated builtin Agent in card order, then an available named
-Agent in stable backend/name order. The built-in assistant therefore becomes the default
-only when no CLI assistant's Agent, its own or a custom one, can run (D3). Call `setDefaultVibeAgent` and verify a fresh Agent read. Write `setup_completed` last through
+Agent in stable backend/name order. As a fallback, the built-in assistant therefore replaces an
+unrunnable default only when no CLI assistant's Agent, its own or a custom one, can run (D3). Call `setDefaultVibeAgent` and verify a fresh Agent read. Write `setup_completed` last through
 `api.mutateConfig` with an explicit field mutation, then validate a fresh uncached
 `apiFetch('/api/config', {cache:'no-store'})` readback before navigating. Use that same
 read/parse path after an unknown/failed write; cached pre-write data cannot settle it.

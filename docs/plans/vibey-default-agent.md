@@ -95,9 +95,10 @@ On master before this change:
 - **IM `/setup`.** Two forms reach the built-in backend:
   - an explicit `/setup vibey`, which today is refused by the backend-hint gate in `handle_setup_command`;
   - a bare `/setup` that resolves to the built-in backend (`start_setup`).
-  Both answer with Model Hub guidance and the same next step instead of "does not support setup". With Model Hub
-  disabled on the instance, both answer with `errors.modelHubDisabled` instead, because Models is not there to send
-  anyone to. `docs/COMMANDS.md` and `docs/COMMANDS_ZH.md` document both answers.
+  Both answer with Model Hub guidance and the same next step instead of "does not support setup". When
+  `hub_supply_block` names a cause (gateway off, no source, Model Hub disabled), that cause is the answer instead,
+  as for a Turn, with the same next step (none when disabled). `docs/COMMANDS.md` and `docs/COMMANDS_ZH.md` document
+  the answers.
 - **UI.** `no_source` is rendered in the slots that already render `gateway_off` and `hub_disabled`:
   - the setup card note
   - the Settings → Backends list badge
@@ -120,9 +121,10 @@ On master before this change:
      retired and that models.dev describes as taking text and tool calls and producing text. The description uses the
      exact match the picker's candidates already use.
   2. If models.dev describes no listed model that way, choose none. The setup card's pick and §2's refusal remain.
-     A seed that ran before any models.dev copy could describe a listed model is healed when a copy arrives: while
-     Vibey's catalog is empty, records no removal, and its built-in Agent has no model, it starts on this rule's
-     model. A list a person emptied records its removals, so it stays empty.
+     A Vibey left with nothing to run on is healed at every start and by the snapshot reconcile (when a models.dev
+     copy arrives, and on its cadence): while Vibey's catalog is empty, records no removal, and its built-in Agent
+     has no model, it starts on this rule's model, whether a copy or a later source made one describable. A list a
+     person emptied records its removals, so it stays empty.
 - **How the model is added.** It joins Vibey's list as the picker adds a provider model.
   `_reconcile_vibey_agent_model` then gives the built-in Agent that model, as it already does for the first model in
   the list.
@@ -155,6 +157,8 @@ and a closed-loop case in `tests/scenarios/auth_setup/test_auth_setup_scenarios.
   - Model Hub disabled:
     - with a native backend enabled, records that native Agent;
     - with none enabled, records the built-in Agent, the only enabled candidate.
+- **PR-1, closed loop (auth_setup).** A new install's first Agent read records Vibey with the native backends
+  enabled, and once Vibey can run, setup completes with Vibey still the confirmed default.
 - **PR-1, user docs.** `docs/INSTALL_FOR_AI.md` and `docs/INSTALL_FOR_AI_ZH.md` now say that a new install starts
   with Vibey once setup adds a Model Hub source, and that the CLI assistants are optional.
 - **PR-2:**
