@@ -80,14 +80,14 @@ _SENSITIVE_KEY_VALUE_RE = re.compile(
     r"(?:[\w.-]{0,40}(?:" + "|".join(_text_key_pattern(token) for token in _SENSITIVE_KEY_TOKENS) + r")[\w.-]{0,40}"
     r"|" + "|".join(_text_key_pattern(key) for key in _SENSITIVE_EXACT_KEYS) + r")"
     r"(?P=kq)\s*[:=]\s*"
-    r"(?:(?P<vq>\\{0,4}[\"'])(?:(?P<quoted>.{0,8192}?)(?:(?<!\\)(?P=vq)|\Z)|(?P<capped>.{8192}))"
+    r"(?:(?P<vq>\\{0,4}[\"'])(?P<quoted>.*?)(?:(?<!\\)(?P=vq)|\Z)"
     r"|(?P<bare>(?:(?:basic|bearer|bot|digest|token)\s+)?(?:[^\s\"'\\]|\\(?![\"']))+))",
     re.DOTALL,
 )
 
 
 def _redact_key_value(match: re.Match[str]) -> str:
-    group = next(name for name in ("quoted", "capped", "bare") if match.group(name) is not None)
+    group = "quoted" if match.group("quoted") is not None else "bare"
     start, end = match.span(group)
     offset = match.start()
     text = match.group(0)
@@ -98,14 +98,50 @@ def _redact_key_value(match: re.Match[str]) -> str:
 # capabilities no key name announces: a Slack response_url, a Discord
 # interaction token, WeChat CDN parameters, a Telegram bot token, a proxy
 # password. An authority that is not a plain host[:port] is dropped whole. The
-# scheme is length-bounded so runs like ``a.a.a`` stay linear.
+# scheme is length-bounded so runs like ``a.a.a`` stay linear, and a backslash
+# stands for a slash as browsers read it; it ends the URL only before a quote.
 _URL_RE = re.compile(
-    r"(?i)\b(?P<scheme>[a-z][a-z0-9+.-]{0,30}://)(?P<authority>[^\s/?#\"'<>\\`]*)(?P<rest>[^\s\"'<>\\`]*)"
+    r"(?i)\b(?P<scheme>[a-z][a-z0-9+.-]{0,30}:[/\\]{2})(?P<authority>[^\s/\\?#\"'<>`]*)"
+    r"(?P<rest>(?:[^\s\"'<>`\\]|\\(?![\"']))*)"
 )
-# The same for a URL written without its scheme (``hooks.slack.com/actions/...``).
+# The same for a URL written without its scheme: ``hooks.slack.com/actions/...``,
+# ``//host/path``, ``10.0.0.5:8080/path``, ``localhost:5123/path``.
 _SCHEMELESS_URL_RE = re.compile(
-    r"(?i)(?<![\w.@/-])(?P<host>(?:[a-z0-9-]{1,63}\.){1,10}[a-z]{2,24}(?::\d{1,5})?)(?P<rest>/[^\s\"'<>\\`]*)"
+    r"(?i)(?:(?<=//)|(?<![\w.@/-]))"
+    r"(?P<host>(?:(?:[a-z0-9-]{1,63}\.){1,10}[a-z]{2,24}|\d{1,3}(?:\.\d{1,3}){3}|localhost|\[[0-9a-f:.]{2,45}\])"
+    r"(?::\d{1,5})?)(?P<rest>/(?:[^\s\"'<>`\\]|\\(?![\"']))*)"
 )
+# URL delimiters spelled another way: percent-encoded (any depth of ``%25``),
+# JSON ``\u00XX`` or ``\/``, or an HTML character reference. They are read as
+# the delimiter itself before URLs and keys are matched.
+_DELIMITER_CHARACTERS = {
+    "3a": ":", "2f": "/", "5c": "\\", "3f": "?", "23": "#", "40": "@", "3d": "=", "26": "&",
+}
+_DELIMITER_DECIMALS = {"58": ":", "47": "/", "92": "\\", "63": "?", "35": "#", "64": "@", "61": "=", "38": "&"}
+_DELIMITER_NAMES = {
+    "colon": ":", "sol": "/", "bsol": "\\", "quest": "?", "num": "#", "commat": "@", "equals": "=", "amp": "&",
+}
+_ENCODED_DELIMITER_RE = re.compile(
+    r"(?i)%(?:25)*(?P<pct>3a|2f|5c|3f|23|40|3d|26)"
+    r"|\\u00(?P<uni>3a|2f|5c|3f|23|40|3d|26)"
+    r"|&#x0*(?P<hex>3a|2f|5c|3f|23|40|3d|26);?"
+    r"|&#0*(?P<dec>58|47|92|63|35|64|61|38);?"
+    r"|&(?P<name>colon|sol|bsol|quest|num|commat|equals|amp);"
+    r"|\\(?P<slash>/)"
+)
+
+
+def _decoded_delimiter(match: re.Match[str]) -> str:
+    if match.group("slash"):
+        return "/"
+    if match.group("dec"):
+        return _DELIMITER_DECIMALS[match.group("dec")]
+    if match.group("name"):
+        return _DELIMITER_NAMES[match.group("name").lower()]
+    code = match.group("pct") or match.group("uni") or match.group("hex")
+    return _DELIMITER_CHARACTERS[code.lower()]
+
+
 _URL_HOST_RE = re.compile(r"(?i)(?:[a-z0-9.-]+|\[[0-9a-f:.]+\])(?::\d{1,5})?")
 _URL_TRAILING_PUNCTUATION = ".,;:!?)]}"
 
@@ -135,6 +171,7 @@ _URL_REPLACEMENTS = (
     (_SCHEMELESS_URL_RE, _schemeless_url_origin),
 )
 _STRING_REPLACEMENTS = (
+    (_ENCODED_DELIMITER_RE, _decoded_delimiter),
     *_URL_REPLACEMENTS,
     (re.compile(r"(?i)(authorization[:=]\s*)(bearer\s+)?\S+"), r"\1" + _REDACTED),
     (re.compile(r"(?i)(token=)[^&\s]+"), r"\1" + _REDACTED),
