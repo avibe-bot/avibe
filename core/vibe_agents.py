@@ -1783,11 +1783,16 @@ class VibeAgentStore:
         default_name = self.get_default_agent_name()
         default_agent = self.get(default_name) if default_name else None
         enabled_ensured = [agent for agent in ensured if agent.enabled]
-        if (default_agent is None or not default_agent.enabled) and enabled_ensured:
-            self.set_default_agent_name(
-                _implicit_default(enabled_ensured).name,
-                user_context=instance_owner_context(),
-            )
+        # A new install has no default yet and starts with the built-in Agent. A default that was
+        # recorded is kept; only one that can no longer be used is replaced, by the replacement rank.
+        if default_name is None:
+            chosen = _first_default(enabled_ensured)
+        elif default_agent is None or not default_agent.enabled:
+            chosen = _implicit_default(enabled_ensured)
+        else:
+            chosen = None
+        if chosen is not None:
+            self.set_default_agent_name(chosen.name, user_context=instance_owner_context())
         return ensured
 
     def get_builtin_default_agent_for_backend(self, backend: str, *, enabled_only: bool = True) -> Optional[VibeAgent]:
@@ -1948,6 +1953,18 @@ def is_always_enabled_agent(agent: VibeAgent) -> bool:
 def _implicit_default(candidates: Iterable[VibeAgent]) -> Optional[VibeAgent]:
     """The first candidate by ``implicit_default_rank``, keeping the given order among equals."""
     return min(candidates, key=lambda agent: implicit_default_rank(agent.backend), default=None)
+
+
+def _first_default(candidates: list[VibeAgent]) -> Optional[VibeAgent]:
+    """A new install's first default: the built-in backend's Agent, unless this instance can never run it."""
+    from config.v2_config import hub_supply_block
+
+    # Without a Model Hub config, the answer is the instance's own Model Hub switch: a built-in
+    # backend gets every model through the Hub, so with it switched off the built-in Agent cannot run.
+    for agent in candidates:
+        if is_always_enabled_agent(agent) and hub_supply_block(agent.backend, None) is None:
+            return agent
+    return _implicit_default(candidates)
 
 
 def iter_global_agent_files(source: str) -> list[tuple[Path, str]]:
