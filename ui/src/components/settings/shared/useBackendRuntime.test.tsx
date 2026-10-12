@@ -41,6 +41,12 @@ beforeEach(() => {
   mocks.api.saveConfig.mockResolvedValue({});
 });
 
+const deferred = <T,>() => {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => { resolve = done; });
+  return { promise, resolve };
+};
+
 const mountRuntime = async () => {
   const hook = renderHook(() =>
     useBackendRuntime({ backend: 'claude', defaultCli: 'claude' }),
@@ -57,7 +63,6 @@ describe('persisted backend install paths', () => {
     mocks.api.detectCli.mockResolvedValue({ found: false, path: null, status: 'missing' });
     const hook = await mountRuntime();
     expect(hook.result.current.cliPath).toBe(path);
-    expect(hook.result.current.savedCliPath).toBe(path);
     expect(hook.result.current.runtimeDirty).toBe(false);
     await act(async () => hook.result.current.detect(path));
     expect(mocks.api.detectCli).toHaveBeenLastCalledWith(path, 'claude');
@@ -74,8 +79,10 @@ describe('persisted backend install paths', () => {
     act(() => hook.result.current.setCliPath('/new-human/claude'));
     await act(async () => pending.resolve({ found: false, path: null, status: 'missing' }));
     expect(hook.result.current.cliPath).toBe('/new-human/claude');
-    expect(hook.result.current.savedCliPath).toBe(path);
     expect(hook.result.current.runtimeDirty).toBe(true);
+    // The saved path is private hook state; returning to it clears the draft.
+    act(() => hook.result.current.setCliPath(path));
+    expect(hook.result.current.runtimeDirty).toBe(false);
   });
 
   it('reports a present but broken CLI without converting presence to health', async () => {
