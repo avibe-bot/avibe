@@ -374,9 +374,17 @@ def test_windows_watch_worker_job_tracks_descendant_after_command_root_exits() -
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows exit code contract")
-def test_windows_watch_worker_preserves_full_exit_code() -> None:
+@pytest.mark.parametrize("entrypoint", ["runner copy", "installed file"])
+def test_windows_watch_worker_preserves_full_exit_code(entrypoint: str) -> None:
+    # A runner released before the copies starts the installed file itself while an upgrade waits for its
+    # restart, without the helper the copy carries beside it.
+    command = (
+        _supervisor_command()
+        if entrypoint == "runner copy"
+        else [os.path.abspath(sys.executable), str(Path(watch_worker.__file__).resolve())]
+    )
     result = subprocess.run(
-        _supervisor_command(),
+        command,
         input=watch_worker.encode_watch_worker_spec(
             command=[sys.executable, "-c", "import os; os._exit(513)"],
             shell_command=None,
