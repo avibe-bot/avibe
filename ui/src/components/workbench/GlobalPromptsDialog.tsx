@@ -10,47 +10,44 @@ import { useToast } from '../../context/ToastContext';
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '../ui/dialog';
 import { Button } from '../ui/button';
 import { MarkdownEditor } from '../ui/markdown-editor';
-import { NATIVE_BACKEND_ORDER as BACKEND_ORDER, BACKEND_LABEL, BACKEND_TEXT, BACKEND_DOT } from '../../lib/backendAccent';
-import type { NativeCliBackend as Backend } from '@/lib/agentBackends';
+import { BACKEND_ORDER, BACKEND_LABEL, BACKEND_TEXT, BACKEND_DOT, type Backend } from '../../lib/backendAccent';
 
 type FileMeta = { path: string; filename: string; exists: boolean; readError: boolean };
 
-const emptyStringMap = () => Object.fromEntries(BACKEND_ORDER.map((id) => [id, ''])) as Record<Backend, string>;
-const emptyMetaMap = () => Object.fromEntries(BACKEND_ORDER.map((id) => [id, null])) as Record<Backend, FileMeta | null>;
+// The backends with a global file, as the server lists them (Vibey's in the Avibe
+// home, and each native CLI's), in the canonical BACKEND_ORDER: the server owns
+// which backends have one, so the dialog never invents a file or drops a listed one.
+const backendsOf = (files: GlobalPromptFile[]): Backend[] =>
+  BACKEND_ORDER.filter((backend) => files.some((f) => f.backend === backend));
 
-// Index an API response (one entry per backend) into a per-backend map over the
-// canonical BACKEND_ORDER, so missing/extra ids never desync the editor state.
-const mapContent = (files: GlobalPromptFile[]): Record<Backend, string> => {
-  const out = emptyStringMap();
-  for (const backend of BACKEND_ORDER) out[backend] = files.find((f) => f.backend === backend)?.content ?? '';
-  return out;
-};
-const mapMeta = (files: GlobalPromptFile[]): Record<Backend, FileMeta | null> => {
-  const out = emptyMetaMap();
-  for (const backend of BACKEND_ORDER) {
-    const file = files.find((f) => f.backend === backend);
-    out[backend] = file
-      ? { path: file.path, filename: file.filename, exists: file.exists, readError: file.read_error }
-      : null;
-  }
-  return out;
-};
+// Index an API response (one entry per backend) into a per-backend map, so
+// missing/extra ids never desync the editor state.
+const mapContent = (files: GlobalPromptFile[]): Partial<Record<Backend, string>> =>
+  Object.fromEntries(backendsOf(files).map((backend) => [backend, files.find((f) => f.backend === backend)?.content ?? '']));
+const mapMeta = (files: GlobalPromptFile[]): Partial<Record<Backend, FileMeta>> =>
+  Object.fromEntries(
+    backendsOf(files).map((backend) => {
+      const file = files.find((f) => f.backend === backend)!;
+      return [backend, { path: file.path, filename: file.filename, exists: file.exists, readError: file.read_error }];
+    }),
+  );
 
 // Edit each backend's *global* instructions file from one place — the global
 // twin of the per-project AGENTS.md editor. Backends are tabs; each carries its
 // own in-memory draft seeded from the loaded file, so edits across tabs survive
-// switching until the user Saves (one backend) or Syncs (overwrites all three
-// with the active draft). Reuses the shared MarkdownEditor surface.
+// switching until the user Saves (one backend) or Syncs (overwrites every listed
+// file with the active draft). Reuses the shared MarkdownEditor surface.
 export const GlobalPromptsDialog: React.FC<{ open: boolean; onClose: () => void }> = ({ open, onClose }) => {
   const { t } = useTranslation();
   const api = useApi();
   const { showToast } = useToast();
 
   const [loading, setLoading] = useState(true);
-  const [saved, setSaved] = useState<Record<Backend, string>>(emptyStringMap);
-  const [drafts, setDrafts] = useState<Record<Backend, string>>(emptyStringMap);
-  const [meta, setMeta] = useState<Record<Backend, FileMeta | null>>(emptyMetaMap);
-  const [active, setActive] = useState<Backend>('claude');
+  const [order, setOrder] = useState<Backend[]>([]);
+  const [saved, setSaved] = useState<Partial<Record<Backend, string>>>({});
+  const [drafts, setDrafts] = useState<Partial<Record<Backend, string>>>({});
+  const [meta, setMeta] = useState<Partial<Record<Backend, FileMeta>>>({});
+  const [active, setActive] = useState<Backend | null>(null);
   const [busy, setBusy] = useState(false);
 
   // Load every backend's file once per open and seed both the saved baseline
@@ -59,10 +56,13 @@ export const GlobalPromptsDialog: React.FC<{ open: boolean; onClose: () => void 
     if (!open) return;
     let cancelled = false;
     setLoading(true);
-    setActive('claude');
     api.getGlobalPrompts().then(
       (res) => {
         if (cancelled) return;
+        const listed = backendsOf(res.backends);
+        setOrder(listed);
+        // The first listed backend: the built-in one, which leads every backend list.
+        setActive(listed[0] ?? null);
         setSaved(mapContent(res.backends));
         setDrafts(mapContent(res.backends));
         setMeta(mapMeta(res.backends));
@@ -81,13 +81,13 @@ export const GlobalPromptsDialog: React.FC<{ open: boolean; onClose: () => void 
 
   if (!open) return null;
 
-  const isDirty = (backend: Backend) => drafts[backend] !== saved[backend];
-  const anyDirty = BACKEND_ORDER.some(isDirty);
-  // Sync overwrites every backend, so any unreadable target (not just the
+  const isDirty = (backend: Backend) => (drafts[backend] ?? '') !== (saved[backend] ?? '');
+  const anyDirty = order.some(isDirty);
+  // Sync overwrites every listed file, so any unreadable target (not just the
   // active one) must block it — otherwise sync would clobber a file whose
   // contents were never shown, defeating the read-error safeguard.
-  const anyReadError = BACKEND_ORDER.some((backend) => meta[backend]?.readError);
-  const activeMeta = meta[active];
+  const anyReadError = order.some((backend) => meta[backend]?.readError);
+  const activeMeta = active ? meta[active] : undefined;
 
   // Fold the refreshed file list back into the saved baseline + metadata
   // (clearing the active tab's dirty state) without disturbing drafts the user
@@ -104,10 +104,10 @@ export const GlobalPromptsDialog: React.FC<{ open: boolean; onClose: () => void 
   };
 
   const handleSave = async () => {
-    if (busy || !isDirty(active) || meta[active]?.readError) return;
+    if (busy || !active || !isDirty(active) || meta[active]?.readError) return;
     setBusy(true);
     try {
-      const res = await api.saveGlobalPrompts({ content: drafts[active], backends: [active] });
+      const res = await api.saveGlobalPrompts({ content: drafts[active] ?? '', backends: [active] });
       applyResult(res.backends);
       showToast(t('globalPrompts.saved', { backend: BACKEND_LABEL[active] }), 'success');
     } catch {
@@ -118,11 +118,11 @@ export const GlobalPromptsDialog: React.FC<{ open: boolean; onClose: () => void 
   };
 
   const handleSync = async () => {
-    if (busy || anyReadError) return;
+    if (busy || !active || anyReadError) return;
     if (!window.confirm(t('globalPrompts.syncConfirm', { backend: BACKEND_LABEL[active] }))) return;
     setBusy(true);
     try {
-      const res = await api.saveGlobalPrompts({ content: drafts[active], backends: [...BACKEND_ORDER] });
+      const res = await api.saveGlobalPrompts({ content: drafts[active] ?? '', backends: [...order] });
       applyResult(res.backends);
       // Every backend now holds the active content — reflect it across all tabs
       // so they read clean and show the synced text.
@@ -161,7 +161,7 @@ export const GlobalPromptsDialog: React.FC<{ open: boolean; onClose: () => void 
           <>
             {/* Backend tabs — accent-colored, with a dot marking unsaved edits. */}
             <div role="tablist" className="flex items-center gap-1 border-b border-border px-3">
-              {BACKEND_ORDER.map((backend) => {
+              {order.map((backend) => {
                 const activeTab = backend === active;
                 return (
                   <Button
@@ -190,14 +190,17 @@ export const GlobalPromptsDialog: React.FC<{ open: boolean; onClose: () => void 
             </div>
 
             {/* Tip — the exact file being edited + what it does, in plain terms. */}
-            {activeMeta && (
+            {active && activeMeta && (
               <div className="flex flex-col gap-0.5 border-b border-border bg-surface-2 px-5 py-2">
                 <span className="font-mono text-[11px] text-foreground">{activeMeta.path}</span>
                 {activeMeta.readError ? (
                   <span className="text-[11px] leading-relaxed text-gold-ink">{t('globalPrompts.readError')}</span>
                 ) : (
                   <span className="text-[11px] leading-relaxed text-muted">
-                    {t('globalPrompts.tipEffect', { backend: BACKEND_LABEL[active] })}
+                    {/* Vibey reads its file every Turn; the CLIs at the start of a session. */}
+                    {active === 'vibey'
+                      ? t('globalPrompts.tipEffectVibey')
+                      : t('globalPrompts.tipEffect', { backend: BACKEND_LABEL[active] })}
                     {!activeMeta.exists && <> · {t('globalPrompts.missingHint')}</>}
                   </span>
                 )}
@@ -213,8 +216,10 @@ export const GlobalPromptsDialog: React.FC<{ open: boolean; onClose: () => void 
           </div>
         ) : (
           <MarkdownEditor
-            value={drafts[active]}
-            onChange={(next) => setDrafts((prev) => ({ ...prev, [active]: next }))}
+            value={active ? (drafts[active] ?? '') : ''}
+            onChange={(next) => {
+              if (active) setDrafts((prev) => ({ ...prev, [active]: next }));
+            }}
             placeholder={t('globalPrompts.placeholder')}
             onSubmit={handleSave}
           />
@@ -241,7 +246,7 @@ export const GlobalPromptsDialog: React.FC<{ open: boolean; onClose: () => void 
               variant="brand"
               size="sm"
               onClick={handleSave}
-              disabled={busy || loading || !!activeMeta?.readError || !isDirty(active)}
+              disabled={busy || loading || !active || !!activeMeta?.readError || !isDirty(active)}
             >
               {busy && <Loader2 className="size-3.5 animate-spin" />}
               {t('globalPrompts.save')}
