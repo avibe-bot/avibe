@@ -360,6 +360,7 @@ Repair backend login or provider auth through the IM flow.
 /setup claude
 /setup codex
 /setup opencode
+/setup vibey
 /setup cc
 /setup cx
 /setup oc
@@ -370,9 +371,9 @@ Repair backend login or provider auth through the IM flow.
 #### What it does
 
 - resolves the backend for the current scope, unless an explicit backend is given
-- starts a backend-specific auth recovery flow
-- sends browser links, device codes, or follow-up prompts into chat
-- waits for completion and verifies login status
+- for Claude Code, Codex and OpenCode: starts a backend-specific auth recovery flow, sends browser links, device
+  codes, or follow-up prompts into chat, then waits for completion and verifies login status
+- for Vibey: starts no flow, because Vibey signs in to nothing; it replies where Vibey's models come from (see below)
 
 #### Backend-specific behavior
 
@@ -402,6 +403,13 @@ Repair backend login or provider auth through the IM flow.
 ```text
 /setup code <value>
 ```
+
+##### Vibey
+
+- Vibey gets every model through Model Hub, so there is nothing to sign in to
+- replies that model sources are added and managed in Models, ending with where to find Models: the public
+  `/settings/models` URL when Avibe Cloud is paired, otherwise the Avibe Workbench
+- when Model Hub is disabled on the instance, replies that Vibey has no model to run on, since Models is unavailable
 
 #### Permission
 
