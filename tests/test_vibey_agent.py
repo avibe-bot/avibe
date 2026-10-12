@@ -1788,15 +1788,23 @@ async def test_the_instruction_files_enter_between_the_head_and_avibes_sections_
 
     without, first, again, edited = (request.system for request in harness.provider.requests)
     # The section's text, stated here rather than built by the code under test.
+    subtree = (
+        "A directory below the working directory may hold its own instruction file with more specific rules for that "
+        "subtree: the first readable one of AGENTS.override.md, AGENTS.md, AGENTS.MD, CLAUDE.md, CLAUDE.MD in that "
+        "directory, and only that one. Read it before working with files there."
+    )
     section = (
         "<project_context>\nProject-specific instructions and guidelines:\n"
-        "More general files come first; where two conflict, the later, more specific one wins.\n\n"
+        f"More general files come first; where two conflict, the later, more specific one wins.\n{subtree}\n\n"
         f'<project_instructions path="{global_path}">\nReport in Chinese.\n</project_instructions>\n\n'
         f'<project_instructions path="{tmp_path / "AGENTS.md"}">\nRun tests under the sandbox.\n'
         "</project_instructions>\n</project_context>"
     )
+    # With no file, the section holds only the rule to look below the cwd.
     head_end = without.index(FINAL_REPLY_RULE) + len(FINAL_REPLY_RULE)
-    assert first == f"{without[:head_end]}\n\n{section}{without[head_end:]}"
+    empty = f"\n\n<project_context>\n{subtree}\n</project_context>"
+    assert without[head_end:].startswith(empty)
+    assert first == f"{without[:head_end]}\n\n{section}{without[head_end + len(empty):]}"
     assert again == first
     assert edited != first and "Never push to master." in edited
 

@@ -27,6 +27,14 @@ LIMIT = 65_536
 OMITTED_ROOM = 1_024
 HEADER = "Project-specific instructions and guidelines:"
 PRECEDENCE = "More general files come first; where two conflict, the later, more specific one wins."
+#: Files below the cwd are never loaded; as Codex does, the section tells the Agent to look for them. It states the
+#: loader's rule for each directory above, built from ``CANDIDATES`` so the two cannot drift. Constant, and present
+#: even when no file loaded, since a subtree may still hold one.
+SUBTREE = (
+    "A directory below the working directory may hold its own instruction file with more specific rules for that "
+    f"subtree: the first readable one of {', '.join(CANDIDATES)} in that directory, and only that one. Read it before "
+    "working with files there."
+)
 TRUNCATED = (
     "[Truncated: the first {shown} of {size} bytes. The instruction files share a 65,536-byte limit; read the file "
     "for the rest.]"
@@ -196,14 +204,14 @@ def _not_loaded(files: Sequence[InstructionFile]) -> str:
 
 
 def project_context(files: Sequence[InstructionFile]) -> str:
-    """The ``<project_context>`` section, or "" with no file; at most ``LIMIT`` bytes, all of it counted.
+    """The ``<project_context>`` section, at most ``LIMIT`` bytes, all of it counted; with no file, only ``SUBTREE``.
 
     The room goes first to the global file, then to the files from the cwd upward, so the most specific one is the last
     cut. A file that gets no room is named in the closing notice. The section keeps the files' order either way.
     """
     if not files:
-        return ""
-    opening, closing = f"<project_context>\n{HEADER}\n{PRECEDENCE}", "\n</project_context>"
+        return f"<project_context>\n{SUBTREE}\n</project_context>"
+    opening, closing = f"<project_context>\n{HEADER}\n{PRECEDENCE}\n{SUBTREE}", "\n</project_context>"
     left = LIMIT - _bytes(opening) - _bytes(closing) - OMITTED_ROOM
     first = [index for index, file in enumerate(files) if file.is_global]
     rest = [index for index in reversed(range(len(files))) if not files[index].is_global]
