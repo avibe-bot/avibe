@@ -258,7 +258,8 @@ names `powershell` there, and "for example sed or a short script" becomes "for e
   before it; else the `$LASTEXITCODE` that statement set, when it is not 0, so a failed native program reports its
   code; else 1. A code an earlier statement left in `$LASTEXITCODE` is not the last statement's, and a function
   that writes an error and returns has succeeded, as `$?` says.
-- The command sees `$LASTEXITCODE` exactly as PowerShell sets it, and its named blocks may be written in any order.
+- The command sees `$LASTEXITCODE` and `$?` exactly as PowerShell sets them, so a last statement may test the one
+  before it (`cmd /c exit 7; if (-not $?) { exit $LASTEXITCODE }`), and its named blocks may be written in any order.
   A compound last statement (an `if`, a loop, a `try`) is one statement: when a native program in it fails and a
   cmdlet after it fails too, the code is the native program's, which that statement set.
 - Errors are reported at the command's own lines: the wrapping adds no line before the last statement, and one after
@@ -266,6 +267,9 @@ names `powershell` there, and "for example sed or a short script" becomes "for e
   shares its line with the statement before it or with its block's opening brace, or that follows a `--%` statement,
   is reported at a later column. Parameter binding, a `param` default included, runs before the last statement. The wrapping reads nothing that
   `Set-StrictMode` forbids, so a command may turn strict mode on.
+- Known limit: which statement set `$LASTEXITCODE` is tracked for ordinary scripts. In unusual code it can credit
+  the last statement with an earlier native code, for example after a named block's keyword followed by a comment
+  that holds a brace (`end <# { #> { … }`).
 - Known limit: PowerShell in ConstrainedLanguage mode (an AppLocker or WDAC policy) is not supported. The bootstrap
   needs .NET calls that mode blocks, so the tool says so and runs nothing.
 - Known limit, as with `powershell -Command`: an `exit` ends the process before PowerShell formats objects that are
