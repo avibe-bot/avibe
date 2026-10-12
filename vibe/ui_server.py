@@ -3112,18 +3112,46 @@ async def add_vault_sandbox_security_headers(starlette_request: FastAPIRequest, 
 # RFC 9112 §3.2 Host: ``uri-host [":" port]`` (same grammar Starlette >= 1.0.1
 # enforces). Anything else, e.g. ``/``, ``?`` or ``#``, would let the Host move
 # the path boundary of the URL rebuilt from it.
-_VALID_HOST_HEADER_RE = re.compile(
-    r"(?:[a-z0-9._~%!$&'()*+,;=-]+|\[[a-f0-9]*:[a-f0-9.:]+\]|\[(?-i:v)[a-f0-9]+\.[a-z0-9._~!$&'()*+,;=:-]+\])"
-    r"(?::(?P<port>[0-9]+))?",
+_VALID_REG_NAME_RE = re.compile(
+    r"(?:[a-z0-9._~!$&'()*+,;=-]|%[0-9a-f]{2})+",
+    re.IGNORECASE,
+)
+_VALID_IPV_FUTURE_RE = re.compile(
+    r"v[0-9a-f]+\.[a-z0-9._~!$&'()*+,;=:-]+",
     re.IGNORECASE,
 )
 
 
 def _is_valid_host_header(value: str) -> bool:
-    match = _VALID_HOST_HEADER_RE.fullmatch(value)
-    if match is None:
-        return False
-    port = (match["port"] or "").lstrip("0")
+    """Return whether *value* is a syntactically valid Host authority."""
+
+    host = value
+    port = ""
+    if value.startswith("["):
+        closing = value.find("]")
+        if closing < 0:
+            return False
+        literal = value[1:closing]
+        suffix = value[closing + 1 :]
+        if suffix:
+            if not suffix.startswith(":") or not suffix[1:].isdigit():
+                return False
+            port = suffix[1:]
+        try:
+            ipaddress.IPv6Address(literal)
+        except ValueError:
+            if _VALID_IPV_FUTURE_RE.fullmatch(literal) is None:
+                return False
+    else:
+        if value.count(":") > 1:
+            return False
+        host, separator, port = value.partition(":")
+        if separator and not port.isdigit():
+            return False
+        if _VALID_REG_NAME_RE.fullmatch(host) is None:
+            return False
+
+    port = port.lstrip("0")
     return len(port) <= 5 and int(port or "0") <= 65535
 
 

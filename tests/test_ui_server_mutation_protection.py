@@ -8,7 +8,7 @@ import pytest
 from config.v2_config import AgentsConfig, PlatformsConfig, RemoteAccessConfig, RuntimeConfig, SlackConfig, V2Config
 from vibe import ui_server
 from vibe.ui_compat import TEST_REMOTE_ADDR_HEADER
-from vibe.ui_server import app, protect_mutating_ui_requests
+from vibe.ui_server import _is_valid_host_header, app, protect_mutating_ui_requests
 
 from tests.ui_server_test_helpers import csrf_headers
 
@@ -99,7 +99,16 @@ def test_config_post_rejects_host_mismatch_before_parsing_malformed_json(monkeyp
     assert response.get_json()["error"] == "remote_access_host_mismatch"
 
 
-@pytest.mark.parametrize("host", ["lan.example/assets/x?", "lan.example/assets/x#"])
+@pytest.mark.parametrize(
+    "host",
+    [
+        "lan.example/assets/x?",
+        "lan.example/assets/x#",
+        "[::::]",
+        "[1:2:3:4:5:6:7:8:9]",
+        "lan.example%zz",
+    ],
+)
 def test_malformed_host_is_refused_before_request_hooks(monkeypatch, tmp_path, host):
     """A Host carrying path delimiters must not reshape the path the auth hooks see.
 
@@ -159,6 +168,11 @@ def test_config_post_accepts_vendor_json_content_type(monkeypatch, tmp_path):
 
     assert response.status_code == 200
     assert response.get_json()["mode"] == "self_host"
+
+
+def test_host_header_validation_accepts_valid_ipvfuture_and_percent_encoding():
+    assert _is_valid_host_header("[V1.fe80::1]")
+    assert _is_valid_host_header("lan.example%20:443")
 
 
 def test_config_post_rejects_untrusted_forwarded_origin(monkeypatch, tmp_path):
