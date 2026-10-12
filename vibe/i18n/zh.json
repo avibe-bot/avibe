@@ -8,6 +8,11 @@
     "agentModelRequired": "请先在 Avibe 中为 {backend} Agent 或会话选择模型。",
     "modelHubDisabled": "本实例已停用模型网关，{backend} 没有可用的模型。",
     "modelGatewayOff": "模型网关已关闭，{backend} 没有可用的模型。请在「模型」页开启网关并选择模型。",
+    "modelSourceRequired": "{backend} 还没有模型来源。请在「模型」页添加 API Key 或订阅。",
+    "modelsNextStepImUrl": "管理这个 Avibe 的人可以在「模型」页处理：{url}",
+    "modelsNextStepIm": "管理这个 Avibe 的人可以在 Avibe 工作台的「模型」页处理。",
+    "openModelsLink": "[打开「模型」页]({url})",
+    "askAdminForModels": "请联系 Avibe 管理员在「模型」页处理。",
     "opencodeModelProviderRequired": "请在 Avibe 中选择带供应商的 OpenCode 模型，或配置它的 Model Hub 路由。"
   },
   "status": {
@@ -734,6 +739,7 @@
     "setup": {
       "starting": "正在启动 {backend} 的登录修复流程...",
       "unsupportedBackend": "后端 `{backend}` 暂不支持 setup。",
+      "builtinBackend": "{backend} 通过模型网关获取模型，无需单独登录。请在「模型」页添加或管理模型来源。",
       "codeUsage": "用法：`/setup code <value>` 或 `/setup code <backend> <value>`",
       "claudeMethodUsage": "用法：`/setup claude <claudeai|console>`",
       "noActiveFlow": "当前频道没有正在进行的 setup 流程。",

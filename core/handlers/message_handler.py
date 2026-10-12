@@ -905,6 +905,7 @@ class MessageHandler(BaseHandler):
             error_text,
             display_text=error_text,
             request=request,
+            cause=error,
         )
 
     async def _admit_human_delivery(

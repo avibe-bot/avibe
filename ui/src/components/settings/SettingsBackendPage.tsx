@@ -60,9 +60,11 @@ export function SettingsBackendPage({ backend }: { backend: AgentBackendId }) {
                 <p className="text-[12px] text-gold-ink">
                   {supplyBlock === 'hub_disabled'
                     ? t('settings.backends.hubDisabledNotice', { name: meta.label })
-                    : t('settings.backends.gatewayOff', { name: meta.label })}
+                    : supplyBlock === 'no_source'
+                      ? t('settings.backends.noModelSourceNotice', { name: meta.label })
+                      : t('settings.backends.gatewayOff', { name: meta.label })}
                 </p>
-                {supplyBlock === 'gateway_off' && <Link
+                {supplyBlock !== 'hub_disabled' && <Link
                   to="/settings/models"
                   className="model-hub-action-mint inline-flex shrink-0 items-center gap-1 text-[13px] font-medium transition-colors"
                 >

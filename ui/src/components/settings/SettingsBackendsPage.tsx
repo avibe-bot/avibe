@@ -195,7 +195,9 @@ export const SettingsBackendsPage: React.FC = () => {
                       <Badge variant="warning">
                         {supplyBlocks.get(meta.id) === 'hub_disabled'
                           ? t('settings.backends.hubDisabled')
-                          : t('settings.models.shell.stopped')}
+                          : supplyBlocks.get(meta.id) === 'no_source'
+                            ? t('settings.backends.noModelSource')
+                            : t('settings.models.shell.stopped')}
                       </Badge>
                     ) : agent.enabled && withoutModel.has(meta.id) && (
                       <Badge variant="warning">{t('settings.models.gateway.agentIssues.modelMissing')}</Badge>

@@ -8,6 +8,11 @@
     "agentModelRequired": "Select a model for the {backend} Agent or Session in Avibe before running it.",
     "modelHubDisabled": "Model Hub is disabled on this instance, so {backend} has no model to run on.",
     "modelGatewayOff": "The model gateway is off, so {backend} has no model to run on. Turn it on in Models, then choose a model.",
+    "modelSourceRequired": "{backend} has no model source yet. Add an API key or a subscription in Models.",
+    "modelsNextStepImUrl": "Someone who manages this Avibe can fix it in Models: {url}",
+    "modelsNextStepIm": "Someone who manages this Avibe can fix it in Models, in the Avibe Workbench.",
+    "openModelsLink": "[Open Models]({url})",
+    "askAdminForModels": "Ask an Avibe admin to fix this in Models.",
     "opencodeModelProviderRequired": "Select an OpenCode model with a provider in Avibe, or configure its Model Hub route."
   },
   "status": {
@@ -734,6 +739,7 @@
     "setup": {
       "starting": "Starting {backend} setup...",
       "unsupportedBackend": "Backend `{backend}` does not support setup yet.",
+      "builtinBackend": "{backend} gets its models from Model Hub and needs no sign-in. Add or manage model sources in Models.",
       "codeUsage": "Usage: `/setup code <value>` or `/setup code <backend> <value>`",
       "claudeMethodUsage": "Usage: `/setup claude <claudeai|console>`",
       "noActiveFlow": "There is no active setup flow for this channel.",

@@ -143,6 +143,24 @@ describe('backend attention', () => {
     expect(screen.getByRole('link', { name: 'Open Models page' }).getAttribute('href')).toBe('/settings/models');
   });
 
+  // No source may supply the always-on backend: its status names that, and its page leads to Models.
+  it('says no model source supplies it, on the row and on the backend page', async () => {
+    vi.spyOn(modelsApi, 'listAgents').mockResolvedValue(withoutModel);
+    mocks.api.getConfig.mockResolvedValue({
+      agents: {}, capabilities: { model_hub: { enabled: true } }, agent_supply_blocks: { vibey: 'no_source' },
+    });
+    renderBackends();
+
+    const vibey = await rowOf('Vibey');
+    expect(await within(vibey).findByText('No model source')).toBeTruthy();
+    expect(within(vibey).queryByText('No model selected')).toBeNull();
+    expect(within(await rowOf('Claude Code')).queryByText('No model source')).toBeNull();
+
+    fireEvent.click(within(vibey).getByRole('link', { name: 'Configure' }));
+    expect(await screen.findByText('Vibey gets its models from Model Hub. Add a source in Models.')).toBeTruthy();
+    expect(screen.getByRole('link', { name: 'Open Models page' }).getAttribute('href')).toBe('/settings/models');
+  });
+
   // The operator's Model Hub switch leaves the always-on backend nothing to run on,
   // and there is no Models page to open.
   it('says Model Hub is disabled when the instance turns it off', async () => {

@@ -263,6 +263,13 @@ describe('the built-in assistant card', () => {
     expect(enter().disabled).toBe(true);
   });
 
+  it('says no model source supplies it yet', async () => {
+    render(wrap(<AgentDetection data={data({ agent_supply_blocks: { vibey: 'no_source' } })} onNext={vi.fn()} onNavigate={vi.fn()} agentReads={reads} />));
+    expect(await card().findByText(en.onboarding.setup.noteNoSource.replace('{{name}}', 'Vibey'))).toBeTruthy();
+    await act(async () => undefined);
+    expect(enter().disabled).toBe(true);
+  });
+
   it('says the Hub is disabled on this instance', async () => {
     render(wrap(<AgentDetection data={data({ capabilities: { model_hub: { enabled: false } }, agent_supply_blocks: { vibey: 'hub_disabled' } })}
       onNext={vi.fn()} onNavigate={vi.fn()} agentReads={reads} />));

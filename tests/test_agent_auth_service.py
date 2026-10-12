@@ -279,6 +279,29 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
             claude_login_method=None,
         )
 
+    async def test_setup_on_the_built_in_backend_points_to_model_hub(self):
+        """`/setup vibey`, and a bare `/setup` on a Vibey default, explain where its models come from."""
+        from vibe.i18n import t
+
+        for args, resolved in (("vibey", "codex"), ("", "vibey")):
+            controller = _StubController()
+            controller.resolve_agent_for_context = lambda _context, resolved=resolved: resolved
+            controller.config.remote_access = SimpleNamespace(
+                vibe_cloud=SimpleNamespace(enabled=True, public_url="https://team.avibe.bot")
+            )
+            service = AgentAuthService(controller)
+            context = MessageContext(user_id="U1", channel_id="C1", platform="slack")
+
+            with patch.dict(os.environ, {"VIBE_MODEL_HUB_ENABLED": "1"}):
+                await service.handle_setup_command(context, args)
+
+            assert controller.im_client.sent_messages == [(
+                "C1",
+                t("command.setup.builtinBackend", "en", backend="Vibey")
+                + "\n"
+                + t("errors.modelsNextStepImUrl", "en", url="https://team.avibe.bot/settings/models"),
+            )]
+
     async def test_handle_setup_command_supports_claude_console_login_option(self):
         controller = _StubController()
         service = AgentAuthService(controller)

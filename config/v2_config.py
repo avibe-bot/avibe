@@ -1603,21 +1603,28 @@ def is_model_hub_enabled(environ: Optional[Mapping[str, str]] = None) -> bool:
     return source.get(MODEL_HUB_ENABLED_ENV, "1").strip().lower() in {"1", "true", "yes", "on"}
 
 
-HubSupplyBlock = Literal["hub_disabled", "gateway_off"]
+HubSupplyBlock = Literal["hub_disabled", "gateway_off", "no_source"]
 
 
 def hub_supply_block(backend: str, hub: Optional["ModelHubConfig"]) -> Optional[HubSupplyBlock]:
     """Why the Model Hub leaves ``backend`` no model to run on now, or ``None``: the one owner of that answer.
 
     A backend without its own CLI gets every model through the Hub, so the operator's
-    Model Hub switch (``VIBE_MODEL_HUB_ENABLED``) leaves it none. Any backend the Hub
-    supplies has none while the user has turned the gateway off in Models.
+    Model Hub switch (``VIBE_MODEL_HUB_ENABLED``) leaves it none, and so does a Hub with no
+    source that may supply it. Any backend the Hub supplies has none while the user has
+    turned the gateway off in Models. Without a Hub config only the switch can be read.
     """
 
     if not is_model_hub_enabled():
         return None if backend in NATIVE_CLI_BACKENDS else "hub_disabled"
-    if hub is not None and not hub.enabled and hub.agents[backend].mode == "hub":
+    if hub is None:
+        return None
+    if not hub.enabled and hub.agents[backend].mode == "hub":
         return "gateway_off"
+    if backend not in NATIVE_CLI_BACKENDS and not any(
+        hub.source_eligible_for_backend(source, backend) for source in hub.sources
+    ):
+        return "no_source"
     return None
 
 
