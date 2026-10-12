@@ -14,7 +14,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Iterable, Literal, Mapping, Optional, Protocol, cast
 
-from sqlalchemy import func, select
+from sqlalchemy import func, literal_column, select
 
 from config import paths
 from modules.agents.catalog import NATIVE_CLI_BACKENDS
@@ -46,7 +46,7 @@ from core.agent_auth_service import BackendLoginInProgressError
 from core.os_errors import format_os_errno, local_error_detail
 from core.services.settings import default_config
 from storage.db import get_cached_sqlite_engine
-from storage.models import agent_sessions, messages
+from storage.models import MESSAGE_TURN_ID_SQL, agent_sessions, messages
 from vibe.backend_model_catalog import (
     PROTOCOL_REASONING_EFFORT_DEFAULTS,
     builtin_display_name,
@@ -7293,13 +7293,9 @@ class ModelHubService:
         with get_cached_sqlite_engine().begin() as conn:
             conn.execute(
                 messages.update()
-                .where(
-                    func.json_extract(
-                        messages.c.metadata_json,
-                        "$.turn_id",
-                    )
-                    == normalized
-                )
+                # The indexed expression, verbatim: a seek on this turn's rows
+                # instead of a scan of every Message under the write lock.
+                .where(literal_column(MESSAGE_TURN_ID_SQL) == normalized)
                 .values(
                     metadata_json=func.json_set(
                         messages.c.metadata_json,
@@ -7313,30 +7309,33 @@ class ModelHubService:
     def _known_turn(
         turn_id: str,
     ) -> tuple[Optional[str], Optional[Literal["direct", "hub"]]]:
+        # The turn's row is found alone, by the indexed expression: joined to
+        # ``agent_sessions``, whose ``metadata_json`` shares the column name, the
+        # expression's unqualified column would be ambiguous.
+        turn_row = (
+            select(
+                messages.c.session_id,
+                func.json_extract(
+                    messages.c.metadata_json,
+                    "$.model_hub_mode",
+                ).label("mode"),
+            )
+            .where(literal_column(MESSAGE_TURN_ID_SQL) == turn_id)
+            .limit(1)
+            .subquery()
+        )
         try:
             with get_cached_sqlite_engine().connect() as conn:
                 row = conn.execute(
                     select(
                         agent_sessions.c.agent_backend.label("backend"),
-                        func.json_extract(
-                            messages.c.metadata_json,
-                            "$.model_hub_mode",
-                        ).label("mode"),
-                    )
-                    .select_from(
-                        messages.join(
+                        turn_row.c.mode,
+                    ).select_from(
+                        turn_row.join(
                             agent_sessions,
-                            messages.c.session_id == agent_sessions.c.id,
+                            turn_row.c.session_id == agent_sessions.c.id,
                         )
                     )
-                    .where(
-                        func.json_extract(
-                            messages.c.metadata_json,
-                            "$.turn_id",
-                        )
-                        == turn_id
-                    )
-                    .limit(1)
                 ).mappings().first()
         except Exception:
             return None, None

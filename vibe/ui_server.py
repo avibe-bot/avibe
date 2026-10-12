@@ -3106,7 +3106,92 @@ def _apply_vault_sandbox_security_headers(response: FastAPIResponse, path: str) 
 @app.middleware("http")
 async def add_vault_sandbox_security_headers(starlette_request: FastAPIRequest, call_next):
     response = await call_next(starlette_request)
-    return _apply_vault_sandbox_security_headers(response, starlette_request.url.path)
+    return _apply_vault_sandbox_security_headers(response, starlette_request.scope["path"])
+
+
+# RFC 9112 §3.2 Host: ``uri-host [":" port]`` (same grammar Starlette >= 1.0.1
+# enforces). Anything else, e.g. ``/``, ``?`` or ``#``, would let the Host move
+# the path boundary of the URL rebuilt from it.
+_VALID_REG_NAME_RE = re.compile(
+    r"(?:[a-z0-9._~!$&'()*+,;=-]|%[0-9a-f]{2})+",
+    re.IGNORECASE,
+)
+_VALID_ZONE_ID_RE = re.compile(r"[a-z0-9._~-]+", re.IGNORECASE)
+_VALID_IPV_FUTURE_RE = re.compile(
+    r"(?-i:v)[0-9a-f]+\.[a-z0-9._~!$&'()*+,;=:-]+",
+    re.IGNORECASE,
+)
+_VALID_ASCII_DIGITS_RE = re.compile(r"[0-9]+")
+
+
+def _is_valid_host_header(value: str) -> bool:
+    """Return whether *value* is a syntactically valid Host authority."""
+
+    host = value
+    port = ""
+    if value.startswith("["):
+        closing = value.find("]")
+        if closing < 0:
+            return False
+        literal = value[1:closing]
+        suffix = value[closing + 1 :]
+        if suffix:
+            if not suffix.startswith(":") or _VALID_ASCII_DIGITS_RE.fullmatch(suffix[1:]) is None:
+                return False
+            port = suffix[1:]
+        address, separator, zone = literal.partition("%")
+        if separator:
+            if zone.startswith("25"):
+                zone = zone[2:]
+            if _VALID_ZONE_ID_RE.fullmatch(zone) is None:
+                return False
+        try:
+            ipaddress.IPv6Address(address)
+        except ValueError:
+            if separator or _VALID_IPV_FUTURE_RE.fullmatch(literal) is None:
+                return False
+    else:
+        if value.count(":") > 1:
+            return False
+        host, separator, port = value.partition(":")
+        if separator and _VALID_ASCII_DIGITS_RE.fullmatch(port) is None:
+            return False
+        if _VALID_REG_NAME_RE.fullmatch(host) is None:
+            return False
+
+    port = port.lstrip("0")
+    return len(port) <= 5 and int(port or "0") <= 65535
+
+
+class _RejectInvalidHostMiddleware:
+    """Refuse HTTP and WebSocket requests whose Host is not a valid authority.
+
+    Request hooks and handlers read origin and host values derived from Host;
+    this keeps every one of them on a well-formed value. Registered after the
+    other middleware so it wraps all of them.
+    """
+
+    def __init__(self, asgi_app: Any) -> None:
+        self.app = asgi_app
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if scope["type"] in {"http", "websocket"}:
+            hosts = [value for key, value in scope.get("headers") or () if key == b"host"]
+            if len(hosts) > 1 or (hosts and not _is_valid_host_header(hosts[0].decode("latin-1"))):
+                if scope["type"] == "websocket":
+                    await send({"type": "websocket.close", "code": 1008})
+                    return
+                response = FastAPIResponse(
+                    content='{"ok":false,"error":"invalid_host_header"}',
+                    status_code=400,
+                    media_type="application/json",
+                )
+                await response(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
+
+
+app.add_middleware(_RejectInvalidHostMiddleware)
 
 
 @app.after_request

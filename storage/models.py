@@ -741,6 +741,16 @@ messages = Table(
     ),
 )
 
+#: The turn a Message row belongs to, as ``ix_messages_turn_id`` indexes it
+#: (``20261012_0064``). A query must compile THIS text, through ``literal_column``,
+#: for the planner to use the index: SQLite matches an index expression by text,
+#: and a bound JSON path or a qualified column name is a different expression.
+#: The ``CASE json_valid`` guard keeps a malformed ``metadata_json`` writable.
+MESSAGE_TURN_ID_SQL = (
+    "CASE WHEN (json_valid(metadata_json) = 1) "
+    "THEN json_extract(metadata_json, '$.turn_id') END"
+)
+
 # Durable execution ownership for one logical Agent Turn per Session. The Turn
 # references its initial Delivery even before native acceptance has materialized
 # a Message. Accepted steer participants reference the Turn from their Delivery.
