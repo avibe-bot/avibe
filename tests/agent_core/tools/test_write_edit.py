@@ -34,6 +34,8 @@ from tests.agent_core.tools.conftest import result_text
 WINDOWS = os.name == "nt"
 # The OS's own words, which Windows chooses differently.
 NO_SUCH_FILE = "the system cannot find the file specified" if WINDOWS else "no such file or directory"
+# The command tool, as other tools' advice names it (C-7 tools.md section 5).
+SHELL = "powershell (for example a short script)" if WINDOWS else "bash (for example sed or a short script)"
 
 
 async def test_write_creates_parent_directories_and_keeps_bytes(tmp_path, make_ctx):
@@ -1026,7 +1028,7 @@ async def test_edit_refuses_files_with_more_lines_than_it_plans(tmp_path, make_c
     assert (big.is_error, result_text(big)) == (
         True,
         "File big.txt has 101 lines, over the 100 line edit limit. "
-        "Use bash (for example sed or a short script) to change files this large.",
+        f"Use {SHELL} to change files this large.",
     )
 
 
@@ -1036,7 +1038,7 @@ async def test_edit_refuses_files_with_more_lines_than_it_plans(tmp_path, make_c
         (
             [{"oldText": "a", "newText": "b", "replaceAll": True}],
             "Found 11 occurrences of the text in f.txt, over the 10 replaceAll limit. "
-            "Use bash (for example sed or a short script) to replace this many.",
+            f"Use {SHELL} to replace this many.",
         ),
         (
             # The budget is for the whole call: 11 + 10 replacements by two edits, each under it alone.
@@ -1045,13 +1047,13 @@ async def test_edit_refuses_files_with_more_lines_than_it_plans(tmp_path, make_c
                 {"oldText": "c", "newText": "d", "replaceAll": True},
             ],
             "The edits make 21 replacements in f.txt, over the 19 replacement limit. "
-            "Use bash (for example sed or a short script) to replace this many.",
+            f"Use {SHELL} to replace this many.",
         ),
         (
             # Ten replacements of 200 characters: over a 1,000-byte limit before anything is built.
             [{"oldText": "c", "newText": "y" * 200, "replaceAll": True}],
             "File f.txt would be over the 1000B edit limit after this edit. "
-            "Use bash (for example sed or a short script) to change files this large.",
+            f"Use {SHELL} to change files this large.",
         ),
     ],
     ids=["single", "batch-total", "inserted-text"],
@@ -1080,7 +1082,7 @@ async def test_edit_work_has_a_budget_over_all_edits(tmp_path, make_ctx, monkeyp
     assert (two.is_error, result_text(two)) == (
         True,
         "2 edits over f.txt (790 characters) are over the edit work limit. Split them into several edit calls, "
-        "or use bash (for example sed or a short script).",
+        f"or use {SHELL}.",
     )
 
 
@@ -1124,7 +1126,7 @@ async def test_a_planned_result_over_the_limit_is_refused_and_its_diff_skipped(t
     assert too_big.is_error
     assert result_text(too_big) == (
         "File small.txt would be over the 1000B edit limit after this edit. "
-        "Use bash (for example sed or a short script) to change files this large."
+        f"Use {SHELL} to change files this large."
     )
     assert (tmp_path / "small.txt").read_text(encoding="utf-8") == "x" * 600 + "\n"
 
@@ -1138,7 +1140,7 @@ async def test_files_over_the_edit_limit_are_refused_and_large_diffs_skipped(tmp
     assert refused.is_error
     assert result_text(refused) == (
         "File big.log is 500B, over the 400B edit limit. "
-        "Use bash (for example sed or a short script) to change files this large."
+        f"Use {SHELL} to change files this large."
     )
     assert (tmp_path / "big.log").read_text(encoding="utf-8") == "line\n" * 100
 

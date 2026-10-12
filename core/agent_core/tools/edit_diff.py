@@ -24,6 +24,7 @@ import unicodedata
 from dataclasses import dataclass
 from typing import Callable, Optional
 
+from core.agent_core.tools.shell import SHELL_ADVICE
 from core.agent_core.tools.text import shown
 
 BOM = "\ufeff"
@@ -189,18 +190,18 @@ def _too_many(path: str, total: int, replacements: int) -> EditError:
     if total == 1:
         return EditError(
             f"Found {replacements} occurrences of the text in {path}, over the {MAX_REPLACEMENTS} replaceAll limit. "
-            "Use bash (for example sed or a short script) to replace this many."
+            f"Use {SHELL_ADVICE} to replace this many."
         )
     return EditError(
         f"The edits make {replacements} replacements in {path}, over the {MAX_REPLACEMENTS} replacement limit. "
-        "Use bash (for example sed or a short script) to replace this many."
+        f"Use {SHELL_ADVICE} to replace this many."
     )
 
 
 def _too_much_work(path: str, total: int, chars: int) -> EditError:
     return EditError(
         f"{total} edits over {path} ({chars} characters) are over the edit work limit. Split them into several "
-        "edit calls, or use bash (for example sed or a short script)."
+        f"edit calls, or use {SHELL_ADVICE}."
     )
 
 

@@ -16,11 +16,12 @@ keeps the command in the foreground.
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Mapping, Optional, Sequence
 
 from core.agent_core.agent.recovery import RecoveryRenderer
 from core.agent_core.tools.base import CallInstance, JobHost, Tool
+from core.agent_core.tools.shell import default_shell
 
 ImageSink = Callable[[bytes, str, str], Awaitable[str]]
 #: Whether a job's tool call has a durable ``tool_result`` (the adapter's half of J5).
@@ -35,6 +36,8 @@ class ToolSuite:
     #: The job a call instance started, if any.
     find_job: Callable[[CallInstance], Optional[str]]
     prune: Optional[Callable[[CallSettled], list[str]]] = None
+    #: The shell commands run in, as the environment block names it (C-7 tools.md section 8).
+    shell: str = field(default_factory=lambda: default_shell().describe())
 
 
 #: The hand-over route for a job (``hand_over_job``'s keywords), from its owning Turn.
@@ -71,7 +74,7 @@ def local_tool_suite(jobs_dir: Optional[str] = None, *, route: Optional[HandOver
     host = LocalJobHost(str(jobs_dir or agent_jobs_dir()), on_hand_over=hand_over)
 
     def create_tools(jobs: JobHost, image_sink: Optional[ImageSink]) -> Sequence[Tool]:
-        return create_coding_tools(jobs, image_sink=image_sink)
+        return create_coding_tools(jobs, image_sink=image_sink, shell=host.shell)
 
     async def render(call: Any, job_id: str, status: Any, watch_id: Optional[str]) -> Any:
         return await recovered_result(host, job_id, status, watch_id)
@@ -82,5 +85,10 @@ def local_tool_suite(jobs_dir: Optional[str] = None, *, route: Optional[HandOver
         return host.prune(lambda meta: call_settled(meta) and watches.job_watch_settled(str(meta.get("job_id"))))
 
     return ToolSuite(
-        jobs=host, create_tools=create_tools, render_recovered=render, find_job=host.find_job, prune=prune
+        jobs=host,
+        create_tools=create_tools,
+        render_recovered=render,
+        find_job=host.find_job,
+        prune=prune,
+        shell=host.shell.describe(),
     )

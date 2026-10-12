@@ -5,6 +5,9 @@ The coding tools in `core/agent_core/tools/`. Names, parameters, logic, and mode
 are Pi's unless marked as an Avibe addition. tau 0.4.7 (MIT, Copyright (c) 2026 Alejandro AO) is the Python
 reference. One tool set serves every model.
 
+On Windows the command tool is `powershell` instead of `bash` (§5); what this contract and the others (C-3, C-9, C-10)
+say of `bash` holds for it.
+
 `Tool.concurrent` (Avibe) says whether a tool's calls may run at the same time as the neighbouring concurrent calls of
 the same response (C-3 [`loop-control.md`](loop-control.md) §2). When it is absent or `False`, every call of the tool
 is exclusive. `read` and `bash` are concurrent; `write` and `edit` are exclusive. Pi instead runs a response's calls at
@@ -42,7 +45,16 @@ Raw text, no line numbers, head kept. Model-facing suffixes:
 - `[Showing lines {start}-{end} of {total} (50KB limit). Use offset={next} to continue.]`
 - `[{remaining} more lines in file. Use offset={next} to continue.]` (an explicit `limit` stopped before the end)
 - `[Line {n} is {size}, exceeds 50KB limit. Use bash: sed -n '{n}p' {quoted_path} | head -c 51200]`, where
-  `{quoted_path}` is the path shell-quoted (Avibe change to Pi's text, so the suggested command is always safe to run)
+  `{quoted_path}` is the path shell-quoted (Avibe change to Pi's text, so the suggested command is always safe to run).
+  On Windows: `[Line {n} is {size}, exceeds 50KB limit. Use powershell: {command}]`, where `{command}` prints what
+  `sed` and `head -c` would: line `{n}` read as UTF-8, at most its first 51200 bytes, cut at a character boundary,
+  with no newline added, streaming the lines before it. The path is in single quotes with each `'` doubled:
+  `Get-Content -LiteralPath {quoted_path} -TotalCount {n} -Encoding UTF8 | Select-Object -Last 1 | ForEach-Object {
+  $b = [Text.Encoding]::UTF8.GetBytes($_); $n = [Math]::Min($b.Length, 51200); while ($n -lt $b.Length -and ($b[$n]
+  -band 0xC0) -eq 0x80) { $n-- }; [Console]::Out.Write([Text.Encoding]::UTF8.GetString($b, 0, $n)) }`.
+  Known limit: `Get-Content` ends a line at a bare `\r` as well, where `read` ends one only at `\n`, so in a file
+  with bare carriage returns the command can count lines differently and show part of the line. PowerShell 7
+  ignores `-Delimiter "`n"` for that, and a byte-scanning reader would not be a one-line command.
 - Error: `Offset {offset} is beyond end of file ({total} lines total)`
 
 Images are attached as `ImageBlock`s (C-1); for a model without image input the result says so and omits the image.
@@ -220,6 +232,50 @@ continue in the background as an Avibe Watch; you get a follow-up message when t
 - The Watch follow-up states the command, exit code, elapsed time, the tail under the same rules, and the output log
   under the same label.
 
+### On Windows: `powershell` (Avibe)
+
+The tool is named `powershell`, so the model writes PowerShell, with the same parameters, behavior, and results. Its
+description is the one above with `Execute a PowerShell command in the current working directory. Returns its output
+and errors.` as the first sentence; under Windows PowerShell 5.1 it adds `This is Windows PowerShell 5.1: it has no &&
+or ||, so separate commands with ; and test $? or $LASTEXITCODE.` The advice in other tools' results that names `bash`
+names `powershell` there, and "for example sed or a short script" becomes "for example a short script".
+
+- Shell: PowerShell 7 (`pwsh`) when it is on the `PATH` the commands run with, else Windows PowerShell 5.1, which
+  every Windows 10 and 11 has.
+- The command is written to `command.ps1` in the job directory, so no length limit applies (a command line holds
+  32,767 characters), and a fixed bootstrap runs it through `-NoProfile -NonInteractive -Command`
+  (`-EncodedCommand` makes Windows PowerShell write errors as CLIXML). It turns off progress records and color, and
+  makes the output UTF-8: PowerShell's own, and the console code page that native programs inherit;
+  `PYTHONIOENCODING=utf-8` is set unless the environment sets it, so Python's standard streams are UTF-8 while
+  the files it opens keep the system's encoding.
+- A command that does not parse fails with exit code 1 and the parser's messages before anything runs. Otherwise
+  it runs whole, as one script block, so PowerShell's own semantics hold (`return`, classes, named blocks, traps,
+  `using`). Only the statement that runs last is wrapped, to record how it ended; a `return`, `break`, or
+  `continue` at the top level ends the command.
+- The exit code follows PowerShell's `$?` for the last statement of the last block that runs (`clean`, which
+  PowerShell 7.3 and later run after the others, and not at all in a script with no other block; else `end`, else
+  `process`, else `begin`, else `dynamicparam`): the command's own `exit N`; else 0 when that statement succeeded, or the command ended
+  before it; else the `$LASTEXITCODE` that statement set, when it is not 0, so a failed native program reports its
+  code; else 1. A code an earlier statement left in `$LASTEXITCODE` is not the last statement's, and a function
+  that writes an error and returns has succeeded, as `$?` says.
+- The command sees `$LASTEXITCODE` and `$?` exactly as PowerShell sets them, so a last statement may test the one
+  before it (`cmd /c exit 7; if (-not $?) { exit $LASTEXITCODE }`), and its named blocks may be written in any order.
+  A compound last statement (an `if`, a loop, a `try`) is one statement: when a native program in it fails and a
+  cmdlet after it fails too, the code is the native program's, which that statement set.
+- Errors are reported at the command's own lines: the wrapping adds no line before the last statement, and one after
+  it only when it uses `--%`, whose arguments run to the end of its line. Only an error in a last statement that
+  shares its line with the statement before it or with its block's opening brace, or that follows a `--%` statement,
+  is reported at a later column. Parameter binding, a `param` default included, runs before the last statement. The wrapping reads nothing that
+  `Set-StrictMode` forbids, so a command may turn strict mode on.
+- Known limit: which statement set `$LASTEXITCODE` is tracked for ordinary scripts. In unusual code it can credit
+  the last statement with an earlier native code, for example after a named block's keyword followed by a comment
+  that holds a brace (`end <# { #> { … }`).
+- Known limit: PowerShell in ConstrainedLanguage mode (an AppLocker or WDAC policy) is not supported. The bootstrap
+  needs .NET calls that mode blocks, so the tool says so and runs nothing.
+- Known limit, as with `powershell -Command`: an `exit` ends the process before PowerShell formats objects that are
+  still waiting to be laid out as a table, so `Get-ChildItem | Select-Object Name; exit 2` can print nothing.
+  Strings and the output of native programs are written as they come.
+
 ## 6. Output normalizer
 
 Every model-facing command output (`bash` results, job logs, Watch follow-ups) passes through one normalizer: decode
@@ -280,13 +336,15 @@ the projected context no longer shows, because the inputs that carried the earli
 <environment>
 cwd: /absolute/path
 os: macOS 26.0 (arm64)
-shell: /bin/zsh
+shell: /bin/bash
 date: 2026-10-02
 timezone: Asia/Shanghai
 watches: wch_8f2k "nightly sync" command running; wch_3c1d job running
 </environment>
 ```
 
+`shell` is the shell the commands run in: the job host's on POSIX (`/bin/bash`, else `bash` on `PATH`, else `sh`), and
+on Windows `PowerShell 7 ({path})` or `Windows PowerShell 5.1 ({path})`.
 `watches` names the Session's enabled Watches by id, name, and kind, never a command: at most 20, then `and N more`.
 A field's identity is its raw value; only the block displays it, through the one display helper (`display`, C-9
 `context.md` §7): one line of plain text, escaped injectively (a backslash doubled, control characters and `<`, `>`

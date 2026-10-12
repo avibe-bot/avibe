@@ -16,6 +16,7 @@ import json
 import os
 from typing import Any, Mapping
 
+from core.agent_core.tools.shell import SHELL_ADVICE
 from core.agent_core.tools.args import ToolInputError, error_result, str_arg, text_result
 from core.agent_core.tools.base import ToolContext, ToolResult, ToolSpec
 from core.agent_core.tools.edit_diff import (
@@ -253,17 +254,17 @@ class EditTool:
                 # The whole file and several copies would sit in the process every Session shares.
                 return error_result(
                     f"File {path} is {format_size(exc.size)}, over the {format_size(MAX_EDIT_BYTES)} edit limit. "
-                    "Use bash (for example sed or a short script) to change files this large."
+                    f"Use {SHELL_ADVICE} to change files this large."
                 )
             except _TooManyLines as exc:
                 return error_result(
                     f"File {path} has {exc.lines} lines, over the {MAX_EDIT_LINES} line edit limit. "
-                    "Use bash (for example sed or a short script) to change files this large."
+                    f"Use {SHELL_ADVICE} to change files this large."
                 )
             except ResultTooLarge:
                 return error_result(
                     f"File {path} would be over the {format_size(MAX_EDIT_BYTES)} edit limit after this edit. "
-                    "Use bash (for example sed or a short script) to change files this large."
+                    f"Use {SHELL_ADVICE} to change files this large."
                 )
             except NotReplaceable:
                 return error_result(
@@ -272,7 +273,7 @@ class EditTool:
             except EditError as exc:
                 return error_result(str(exc))
             except FileChanged:
-                # Another writer (bash, an editor) changed it after it was read: the edit would overwrite that.
+                # Another writer (a command, an editor) changed it after it was read: the edit would overwrite that.
                 return error_result(
                     f"Could not edit file: {path}. It changed while the edit was being applied; read it again."
                 )

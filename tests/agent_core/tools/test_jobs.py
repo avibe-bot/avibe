@@ -21,6 +21,7 @@ import pytest
 
 import core.agent_core.tools.jobs as jobs_module
 from core.agent_core.tools.jobs import JobStartError, LocalJobHost
+from core.agent_core.tools.shell import Shell
 from tests.agent_core.tools.conftest import instance
 
 # Starts real job wrappers: none may outlive its test (tests/process_reaper.py).
@@ -317,7 +318,7 @@ async def test_a_deadline_that_passed_during_the_launch_never_starts_the_command
         return identity
 
     monkeypatch.setattr(LocalJobHost, "_await_pid", slow_host)
-    host = LocalJobHost(str(tmp_path / "jobs"), shell=str(tmp_path / "no-such-shell"))
+    host = LocalJobHost(str(tmp_path / "jobs"), shell=Shell(str(tmp_path / "no-such-shell")))
     job_id = await _start(host, tmp_path, "true", timeout_s=0.1)
 
     assert _wait_until(lambda: _wrapper_gone(host.job_dir(job_id)))
@@ -407,7 +408,7 @@ async def test_a_command_outliving_a_killed_wrapper_is_still_running_and_held_to
 
     monkeypatch.setattr(jobs_module, "_WRAPPER_DECIDES_S", 0.2)
     # Python as the shell: its environment, and so the marker, is readable on macOS too.
-    host = LocalJobHost(str(tmp_path / "jobs"), shell=sys.executable)
+    host = LocalJobHost(str(tmp_path / "jobs"), shell=Shell(sys.executable))
     script = f"import os, time; open({str(tmp_path / 'sh.pid')!r}, 'w').write(str(os.getpid())); time.sleep(30)"
     job_id = await _start(host, tmp_path, script, timeout_s=60)
     shell_pid = _pid_written(tmp_path / "sh.pid")
@@ -522,7 +523,7 @@ async def test_a_cancelled_kill_still_finishes_the_group(tmp_path):
     """Once the first signal is sent, the SIGKILL fallback runs even if the caller is cancelled meanwhile."""
     import sys
 
-    host = LocalJobHost(str(tmp_path / "jobs"), shell=sys.executable)
+    host = LocalJobHost(str(tmp_path / "jobs"), shell=Shell(sys.executable))
     script = (
         "import os, signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
         f"open({str(tmp_path / 'sh.pid')!r}, 'w').write(str(os.getpid())); time.sleep(60)"
@@ -640,7 +641,7 @@ def test_the_wrapper_stops_its_group_even_when_its_diagnostics_fail(tmp_path, mo
     monkeypatch.setattr(wrapper, "_BoundedLog", full_disk)
     monkeypatch.setattr(wrapper.traceback, "print_exc", full_disk)
     monkeypatch.setattr(wrapper, "_stop_group", stop_group)
-    argv = ["job_wrapper.py", "avibe-job", str(tmp_path), "/bin/sh", "true", "30", "10", "10", "-"]
+    argv = ["job_wrapper.py", "avibe-job", str(tmp_path), "30", "10", "10", "-", "/bin/sh", "-c", "true"]
 
     with pytest.raises(Stopped):
         wrapper.main(argv)

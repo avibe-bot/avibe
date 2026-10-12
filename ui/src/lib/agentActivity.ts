@@ -259,7 +259,7 @@ export const toolIconKind = (toolName: string): ToolIconKind => {
   // ``ls`` inside "SomethingElse", ``run`` inside "current".
   const name = (toolName || '').trim().toLowerCase();
   const startsWithAny = (prefixes: string[]) => prefixes.some((p) => name.startsWith(p));
-  if (startsWithAny(['bash', 'shell', 'terminal', 'exec', 'command', 'run', 'sh'])) return 'terminal';
+  if (startsWithAny(['bash', 'powershell', 'pwsh', 'shell', 'terminal', 'exec', 'command', 'run', 'sh'])) return 'terminal';
   if (startsWithAny(['write', 'edit', 'patch', 'create', 'update', 'apply', 'notebook', 'todo', 'file'])) return 'edit';
   if (startsWithAny(['read', 'cat', 'grep', 'glob', 'ls', 'open', 'view', 'list', 'find'])) return 'file';
   if (startsWithAny(['web', 'fetch', 'http', 'browse', 'url'])) return 'web';
@@ -387,7 +387,7 @@ export const toolRecipe = (name: string, args: Record<string, unknown>): ToolRec
   const path = asStr(args.file_path) ?? asStr(args.filePath) ?? asStr(args.path) ?? asStr(args.file);
   const command = asStr(args.command) ?? asStr(args.cmd);
 
-  if (starts(['bash', 'shell', 'exec', 'run', 'sh', 'zsh', 'terminal', 'command'])) {
+  if (starts(['bash', 'powershell', 'pwsh', 'shell', 'exec', 'run', 'sh', 'zsh', 'terminal', 'command'])) {
     return command != null ? { kind: 'command', command: summarizeShellCommand(command) } : null;
   }
   if (starts(['write', 'edit', 'create', 'update', 'apply', 'patch', 'notebook', 'multiedit', 'file_change', 'filechange'])) {

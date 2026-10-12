@@ -63,6 +63,7 @@ import psutil
 from core.agent_core.tools import windows_files, windows_job
 from core.agent_core.tools.base import CallInstance, JobStatus
 from core.agent_core.tools.paths import os_reason, run_to_end
+from core.agent_core.tools.shell import Shell, default_shell
 from core.process_isolation import (
     DEFAULT_PROCESS_TERMINATE_TIMEOUT_SECONDS,
     KILL_SIGNAL,
@@ -123,15 +124,6 @@ class JobStartError(RuntimeError):
 
 class JobHandOverUnavailable(RuntimeError):
     """This host has no Watch to hand a job to."""
-
-
-def default_shell() -> Optional[str]:
-    """Pi's choice: ``/bin/bash``, then ``bash`` on PATH, then ``sh``. None on Windows, which has no such shell."""
-    if _WINDOWS:
-        return None
-    if os.path.exists("/bin/bash"):
-        return "/bin/bash"
-    return shutil.which("bash") or "sh"
 
 
 def _job_object_name(job_id: str) -> str:
@@ -215,7 +207,7 @@ class LocalJobHost:
         jobs_dir: str,
         *,
         on_hand_over: Optional[HandOver] = None,
-        shell: Optional[str] = None,
+        shell: Optional[Shell] = None,
     ) -> None:
         # Canonical, so every host names a job's directory (and its wrapper's argv) the same way, whatever
         # alias it was given (``~/.vibe_remote`` -> ``~/.avibe``, ``/tmp`` -> ``/private/tmp``).
@@ -225,6 +217,11 @@ class LocalJobHost:
         # Wrappers this host spawned. Each has a reaper thread, so a finished wrapper never lingers
         # as a zombie (which would keep its process group alive), and an unreaped pid cannot be recycled.
         self._children: dict[str, subprocess.Popen] = {}
+
+    @property
+    def shell(self) -> Shell:
+        """The shell every command of this host runs in."""
+        return self._shell
 
     # --- paths and metadata ---------------------------------------------
 
@@ -328,8 +325,6 @@ class LocalJobHost:
 
         Raises ``JobStartError`` when the command did not start.
         """
-        if self._shell is None:
-            raise JobStartError("No shell is available to run the command.")
         if not sys.executable:
             raise JobStartError("No Python interpreter is available to run the command.")
         # The host's own steps are small and synchronous, so the only await is the wait for the pid: a cancel
@@ -391,6 +386,10 @@ class LocalJobHost:
         marker = new_process_identity_marker()
         child_env = dict(env)
         child_env[PROCESS_IDENTITY_ENV] = marker
+        if self._shell.powershell:
+            # Python writes a pipe in the ANSI code page otherwise; the bootstrap makes everything else UTF-8. Only
+            # its standard streams: UTF-8 mode would also change the encoding of every file it opens.
+            child_env.setdefault("PYTHONIOENCODING", "utf-8")
         argv = [
             sys.executable,
             "-I",
@@ -399,12 +398,11 @@ class LocalJobHost:
             _WRAPPER,
             "avibe-job",
             job_dir,
-            self._shell,
-            command,
             repr(DECISION_TIMEOUT_S),
             str(OUTPUT_HEAD_BYTES),
             str(OUTPUT_TAIL_BYTES),
             repr(deadline.timestamp()) if deadline is not None else "-",
+            *self._shell.prepare(command, job_dir),
         ]
         open(self.output_path(job_id), "ab").close()
         diagnostics = os.open(

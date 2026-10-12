@@ -76,7 +76,9 @@ CLEAR_SOFT_RATIO = 0.8
 CLEAR_MIN_TOKENS = 20_000
 CLEAR_KEEP_RESULTS = 5
 CLEAR_PROTECTED_TURNS = 2
-CLEARABLE_TOOLS = frozenset({"read", "bash"})
+#: The command tool: ``bash``, and ``powershell`` on Windows (C-7 tools.md).
+COMMAND_TOOLS = frozenset({"bash", "powershell"})
+CLEARABLE_TOOLS = frozenset({"read"}) | COMMAND_TOOLS
 #: How long a route's provider prompt cache stays warm after its last use, in seconds, by cache family (section 3):
 #: the documented lifetime of the cache mode Vibey requests for the conversation, where clearable results live.
 #: ``anthropic``: the message breakpoints' ``cache_control`` is ephemeral with no ``ttl``, 5 minutes, refreshed on use.
