@@ -8,7 +8,12 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import subprocess
+import sys
 import threading
+import time
+from concurrent.futures import Future
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 from contextlib import closing
 from importlib import import_module
 from pathlib import Path
@@ -242,12 +247,61 @@ def test_a_failed_mode_stamp_is_logged_and_never_fails_settlement(caplog) -> Non
     assert "Model Hub turn mode was not stored" in caplog.text
 
 
-def test_shutdown_waits_for_queued_stamps_only_up_to_its_bound(caplog) -> None:
+def test_shutdown_waits_for_queued_stamps_only_up_to_its_bound_and_discards_the_rest(caplog) -> None:
     release = threading.Event()
+    ran: list[int] = []
     model_hub._TURN_MODE_WRITER.submit(release.wait, 10)
+    queued = [model_hub._TURN_MODE_WRITER.submit(ran.append, index) for index in range(3)]
 
+    started = time.monotonic()
     assert model_hub.drain_turn_mode_stamps(timeout=0.2) is False
-    assert "still queued at shutdown" in caplog.text
+    assert time.monotonic() - started < 1.0
+    assert all(stamp.cancelled() for stamp in queued)
+    assert "3 discarded" in caplog.text
 
     release.set()
     assert model_hub.drain_turn_mode_stamps(timeout=10) is True
+    assert ran == []
+
+
+def test_a_futures_timeout_from_the_drain_is_caught_on_every_python(monkeypatch) -> None:
+    # Python 3.10 raises concurrent.futures.TimeoutError, which is not the builtin there.
+    class TimingOut(Future):
+        def result(self, timeout=None):
+            raise FuturesTimeoutError()
+
+    monkeypatch.setattr(model_hub._TURN_MODE_WRITER, "submit", lambda fn, *args: TimingOut())
+
+    assert model_hub.drain_turn_mode_stamps(timeout=0.1) is False
+
+
+# A service process whose stamp writer is blocked on a write that will not finish, with more queued.
+_EXIT_WITH_A_BLOCKED_STAMP = """
+import sys, time
+sys.path.insert(0, sys.argv[1])
+from modules.agents import model_hub
+marker = sys.argv[2]
+model_hub._TURN_MODE_WRITER.submit(time.sleep, 60)
+for _ in range(3):
+    model_hub._TURN_MODE_WRITER.submit(lambda: open(marker, "a").write("ran"))
+drained = model_hub.drain_turn_mode_stamps(timeout=0.5)
+print(drained, time.time(), flush=True)
+"""
+
+
+def test_a_blocked_stamp_never_holds_process_exit(tmp_path: Path) -> None:
+    marker = tmp_path / "queued-stamp-ran"
+    finished = subprocess.run(
+        [sys.executable, "-c", _EXIT_WITH_A_BLOCKED_STAMP, str(Path(__file__).resolve().parents[1]), str(marker)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    exited_at = time.time()
+
+    assert finished.returncode == 0, finished.stderr
+    drained, drained_at = finished.stdout.split()
+    assert drained == "False"
+    # From the drain's return to the process being gone, despite the stamp still sleeping.
+    assert exited_at - float(drained_at) < 3.0
+    assert not marker.exists()

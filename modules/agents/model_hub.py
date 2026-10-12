@@ -8,9 +8,12 @@ import ipaddress
 import json
 import logging
 import os
+import queue
 import re
 import shutil
-from concurrent.futures import Future, ThreadPoolExecutor
+import threading
+from concurrent.futures import Future
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Literal, Mapping, Optional, cast
@@ -67,27 +70,85 @@ logger = logging.getLogger(__name__)
 
 LaunchChannel = Literal["direct", "native_cli", "hub"]
 TurnMode = Literal["direct", "hub"]
-# Stamps each settled turn's mode on its Message rows. Settlement runs on the
-# service's event loop and never waits on this database write; one worker
-# keeps the stamps in settlement order.
-_TURN_MODE_WRITER = ThreadPoolExecutor(max_workers=1, thread_name_prefix="model-hub-turn-mode")
+class _TurnModeWriter:
+    """Stamps each settled turn's mode on its Message rows, one at a time, in settlement order.
+
+    Settlement runs on the service's event loop and never waits on this
+    database write. The worker is a daemon thread: an abandoned stamp costs only
+    that turn's provenance detail, and SQLite rolls back a write cut off
+    mid-transaction, so nothing here may hold process exit.
+    """
+
+    def __init__(self, name: str) -> None:
+        self._name = name
+        self._jobs: queue.SimpleQueue[tuple[Future[None], Callable[..., object], tuple[Any, ...]]] = (
+            queue.SimpleQueue()
+        )
+        self._start_lock = threading.Lock()
+        self._thread: threading.Thread | None = None
+
+    def submit(self, fn: Callable[..., object], *args: Any) -> Future[None]:
+        future: Future[None] = Future()
+        self._jobs.put((future, fn, args))
+        with self._start_lock:
+            if self._thread is None:
+                self._thread = threading.Thread(target=self._run, name=self._name, daemon=True)
+                self._thread.start()
+        return future
+
+    def _run(self) -> None:
+        while True:
+            future, fn, args = self._jobs.get()
+            if not future.set_running_or_notify_cancel():
+                continue
+            try:
+                fn(*args)
+            except BaseException as error:  # noqa: BLE001 - delivered through the future
+                future.set_exception(error)
+            else:
+                future.set_result(None)
+
+    def drain(self, timeout: float) -> bool:
+        """Wait up to ``timeout`` for every queued stamp; on timeout discard the rest and return False."""
+
+        drained = self.submit(lambda: None)
+        try:
+            drained.result(timeout=timeout)
+        except FuturesTimeoutError:
+            # Python 3.10's futures timeout is not the builtin TimeoutError.
+            discarded = 0
+            while True:
+                try:
+                    future, _fn, _args = self._jobs.get_nowait()
+                except queue.Empty:
+                    break
+                if future.cancel() and future is not drained:
+                    discarded += 1
+            logger.warning(
+                "Model Hub turn mode stamps abandoned at shutdown after %.1fs: %d discarded",
+                timeout,
+                discarded,
+            )
+            return False
+        return True
+
+
+_TURN_MODE_WRITER = _TurnModeWriter("model-hub-turn-mode")
 
 
 def _log_turn_mode_failure(stamp: Future[None]) -> None:
+    if stamp.cancelled():
+        return
     error = stamp.exception()
     if error is not None:
         logger.warning("Model Hub turn mode was not stored", exc_info=error)
 
 
 def drain_turn_mode_stamps(timeout: float) -> bool:
-    """Wait up to ``timeout`` for every queued mode stamp; return whether all were stored or failed."""
+    """Wait up to ``timeout`` for every queued mode stamp; abandon the rest and return False on timeout."""
 
-    try:
-        _TURN_MODE_WRITER.submit(lambda: None).result(timeout=timeout)
-    except TimeoutError:
-        logger.warning("Model Hub turn mode stamps still queued at shutdown after %.1fs", timeout)
-        return False
-    return True
+    return _TURN_MODE_WRITER.drain(timeout)
+
 
 _CONTEXT_LAUNCH_ATTR = "_vibe_model_hub_launch"
 _CONTEXT_MODE_ATTR = "_vibe_model_hub_turn_mode"

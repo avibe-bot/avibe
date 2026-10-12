@@ -2604,8 +2604,9 @@ class Controller:
         model_hub_turn_gateway = getattr(self, "model_hub_turn_gateway", None)
         if model_hub_turn_gateway is not None:
             _stop_loop_coroutine(model_hub_turn_gateway.close(), "Model Hub turn gateway")
-        # Turns settled up to here queued their mode stamps on the stamp writer;
-        # the wait is bounded so a locked database cannot hold service exit.
+        # Turns settled up to here queued their mode stamps on the stamp writer.
+        # Wait at most 2 s, then abandon what is left; the writer is a daemon
+        # thread, so even a stamp blocked on a locked database cannot hold exit.
         from modules.agents.model_hub import drain_turn_mode_stamps
 
         drain_turn_mode_stamps(timeout=2.0)
