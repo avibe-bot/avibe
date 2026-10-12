@@ -6,7 +6,7 @@ import asyncio
 import json
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from sqlalchemy.exc import OperationalError
@@ -325,6 +325,54 @@ async def test_a_starting_model_needs_a_source_that_lists_it(tmp_path, sqlite_db
 
         vibey = service.store.load().agents["vibey"]
         assert (vibey.sources.order, [model.id for model in vibey.models]) == ([anthropic.id], ["claude-opus-5-5"])
+        assert store.get("vibey").model == "claude-opus-5-5"
+    finally:
+        store.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("person_chose", [False, True])
+async def test_vibey_starts_once_a_models_dev_copy_describes_a_listed_model(tmp_path, sqlite_db_factory, person_chose):
+    """MH-VIBEY-007: a seed that ran with no models.dev copy heals when a copy arrives.
+
+    With no copy to describe the Source's models, the seed leaves Vibey's catalog empty.
+    Once a copy arrives, Vibey starts on its starting model, but only while its built-in
+    Agent has no model: a person who emptied the list keeps the model they chose.
+    """
+    from config.v2_config import ModelHubConfig
+    from tests.test_model_hub_l3 import _service, _source
+
+    store = VibeAgentStore(sqlite_db_factory(tmp_path / "agents.sqlite"))
+    try:
+        store.ensure_builtin_default_agents(["codex", "vibey"])
+        store.update("codex", model="gpt-6-astra")
+        service = _service(tmp_path, sources=[])
+        service.store.config = ModelHubConfig()
+        copy_on_disk: dict = {}
+        service.models_dev_catalog = lambda: copy_on_disk
+        controller = Controller.__new__(Controller)
+        controller.vibe_agent_store = store
+        controller.model_hub_service = service
+        service.builtin_agent_models_override = controller._builtin_agent_models
+        service.backend_catalog_changed = controller._model_hub_catalog_changed
+        relay = _source("src_relay0001", "Relay", vendor="anthropic", protocol="anthropic", model_id="claude-opus-5-5")
+
+        with patch("vibe.models_dev_catalog.load_models_dev_catalog", side_effect=OSError("offline")):
+            async with service._mutation_lock:
+                await service._commit_new_source_locked(relay)
+        assert service.store.load().agents["vibey"].models == []
+        assert store.get("vibey").model is None
+        if person_chose:
+            store.update("vibey", model="claude-opus-5-5")
+
+        copy_on_disk.update({"anthropic": {"name": "Anthropic", "models": {
+            "claude-opus-5-5": {"name": "Claude Opus 5.5", "tool_call": True,
+                                "modalities": {"input": ["text"], "output": ["text"]}},
+        }}})
+        await controller._start_vibey_without_a_model()
+
+        started = [model.id for model in service.store.load().agents["vibey"].models]
+        assert started == ([] if person_chose else ["claude-opus-5-5"])
         assert store.get("vibey").model == "claude-opus-5-5"
     finally:
         store.close()

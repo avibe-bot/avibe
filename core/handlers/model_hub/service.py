@@ -5638,6 +5638,28 @@ class ModelHubService:
         await self._announce_vibey_seed()
         return [model.id for model in config.agents["vibey"].models]
 
+    async def start_vibey_without_models(self) -> list[str]:
+        """Start a seeded Vibey whose catalog is still empty on its starting model; the ids it took.
+
+        The seed starts Vibey once, and a seed that ran with no models.dev copy to
+        describe a listed model leaves the catalog empty. The controller calls this
+        once a copy arrives, and only while Vibey's built-in Agent has no model.
+        """
+
+        async with self._mutation_lock:
+            previous = self.store.load()
+            if previous.vibey_supply_pending or previous.agents["vibey"].models:
+                return []
+            starting = self._vibey_starting_model(previous)
+            if starting is None:
+                return []
+            config = self._clone_config(previous)
+            config.agents["vibey"].models = [starting]
+            # As for the seed, an engine that is not up must not undo the start.
+            await self._commit_synced(previous, config, rollback_on_sync_failure=False)
+        await self._announce_vibey_seed()
+        return [starting.id]
+
     def _ensure_models_dev_copy(self) -> None:
         """Fetch models.dev in the foreground, bounded, when no copy is cached.
 
