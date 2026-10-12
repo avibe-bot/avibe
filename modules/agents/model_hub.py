@@ -33,6 +33,7 @@ from core.handlers.model_hub.provenance import (
     TurnOutcomeProjectionInput,
     exact_hop_blockers,
     is_unlisted_model_outcome,
+    project_turn_outcome_copy,
     render_turn_outcome_copy,
     supply_interruption_reason,
 )
@@ -366,11 +367,30 @@ def launch_refusal_copy(controller: Any, error: BaseException) -> str | None:
     return render_turn_outcome_copy(outcome, _language(controller))
 
 
-_HUB_SUPPLY_REFUSALS = {"hub_disabled": "errors.modelHubDisabled", "gateway_off": "errors.modelGatewayOff"}
+_HUB_SUPPLY_REFUSALS = {
+    "hub_disabled": "errors.modelHubDisabled",
+    "gateway_off": "errors.modelGatewayOff",
+    "no_source": "errors.modelSourceRequired",
+}
+# The turn-outcome copy that already sends its reader to Models.
+_MODELS_ROUTE_REFUSALS = frozenset({"modelHub.launch.interrupted", "modelHub.launch.route_unconfigured"})
+MODELS_PAGE_PATH = "/settings/models"
 
 
-def hub_supply_refusal(controller: Any, backend: str, language: str) -> str | None:
-    """The copy a turn shows when ``hub_supply_block`` names why ``backend`` has no model, else ``None``."""
+class ModelSupplyRefusal(ValueError):
+    """A turn refused because the Model Hub leaves its backend no model to run on.
+
+    It carries its copy, and whether Models is where the fix is: everywhere but an
+    instance whose operator switched the Model Hub off, which takes Models away too.
+    """
+
+    def __init__(self, copy: str, *, fixed_in_models: bool) -> None:
+        super().__init__(copy)
+        self.fixed_in_models = fixed_in_models
+
+
+def hub_supply_refusal(controller: Any, backend: str, language: str) -> ModelSupplyRefusal | None:
+    """The refusal a turn raises when ``hub_supply_block`` names why ``backend`` has no model, else ``None``."""
 
     from config.v2_config import hub_supply_block
 
@@ -378,7 +398,74 @@ def hub_supply_refusal(controller: Any, backend: str, language: str) -> str | No
     block = hub_supply_block(backend, store.load() if store is not None else None)
     if block is None:
         return None
-    return t(_HUB_SUPPLY_REFUSALS[block], language, backend=display_name_for_backend(backend))
+    return ModelSupplyRefusal(
+        t(_HUB_SUPPLY_REFUSALS[block], language, backend=display_name_for_backend(backend)),
+        fixed_in_models=block != "hub_disabled",
+    )
+
+
+def is_model_hub_refusal(error: BaseException | None) -> bool:
+    """Whether ``error`` is a Model Hub refusal, which states its own cause."""
+
+    return isinstance(error, ModelSupplyRefusal) or turn_refusal(error) is not None
+
+
+def models_next_step(
+    controller: Any,
+    context: Any,
+    *,
+    cause: BaseException | None = None,
+    outcome: TurnOutcomeProjectionInput | None = None,
+) -> str | None:
+    """The line that ends a refused turn whose fix is in Models, else ``None``.
+
+    A supply refusal says whether Models fixes it; a turn outcome does when its own
+    copy already sends the reader there. The Workbench knows its requester: one who
+    manages the instance gets the link, anyone else is told to ask an admin. No IM
+    identity maps to a Workbench principal, so an IM refusal makes no claim about its
+    requester: it says who can fix it, offering Avibe Cloud's public URL when there is one.
+    """
+
+    if isinstance(cause, ModelSupplyRefusal):
+        fixed_in_models = cause.fixed_in_models
+    else:
+        refused = outcome if outcome is not None else turn_refusal(cause)
+        copy = project_turn_outcome_copy(refused) if refused is not None else None
+        fixed_in_models = copy is not None and copy.key in _MODELS_ROUTE_REFUSALS
+    if not fixed_in_models:
+        return None
+    language = _language(controller)
+    if _context_platform(controller, context) == "avibe":
+        if _workbench_caller_manages_instance(context):
+            return t("errors.openModelsLink", language, url=MODELS_PAGE_PATH)
+        return t("errors.askAdminForModels", language)
+    from core.avibe_cloud import workbench_url
+
+    url = workbench_url(MODELS_PAGE_PATH, getattr(controller, "config", None))
+    return t("errors.modelsNextStepImUrl", language, url=url) if url else t("errors.modelsNextStepIm", language)
+
+
+def _context_platform(controller: Any, context: Any) -> str | None:
+    return (
+        getattr(context, "platform", None)
+        or (getattr(context, "platform_specific", None) or {}).get("platform")
+        or getattr(controller, "primary_platform", None)
+    )
+
+
+def _workbench_caller_manages_instance(context: Any) -> bool:
+    """Whether the Workbench caller passes the gate on Models (``can_manage_instance``)."""
+
+    from core.caller_context import caller_context_from_platform_payload, caller_resource_user_context
+    from storage.resource_access_service import current_resource_context
+
+    caller = caller_context_from_platform_payload(getattr(context, "platform_specific", None), message=context)
+    remote = caller.is_remote if caller is not None else str(getattr(context, "user_id", "")).startswith("remote:")
+    if not remote:
+        return True  # The local Workbench is the instance owner's.
+    # A remote caller is judged by its own authorization snapshot; a missing one fails closed.
+    snapshot = caller_resource_user_context(caller) if caller is not None else None
+    return current_resource_context(snapshot or {}, is_remote=True).can_manage_instance
 
 
 def _hold_unrunnable_input(context: Any, error: ModelHubError) -> None:

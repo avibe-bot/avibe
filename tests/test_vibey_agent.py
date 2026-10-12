@@ -1433,18 +1433,26 @@ async def test_a_failure_while_settling_reaches_the_shared_owner(engine, session
         await harness.agent.handle_message(harness.request("hello"))
 
 
-@pytest.mark.parametrize(("hub_switch", "gateway_enabled"), [("1", True), ("1", False), ("0", True)])
+@pytest.mark.parametrize(
+    ("hub_switch", "gateway_enabled", "has_source"), [("1", True, True), ("1", True, False), ("1", False, True), ("0", True, True)]
+)
 async def test_a_refused_model_route_fails_before_the_input_is_written(
-    engine, session, tmp_path, published, monkeypatch, hub_switch, gateway_enabled
+    engine, session, tmp_path, published, monkeypatch, hub_switch, gateway_enabled, has_source
 ) -> None:
+    from tests.scenario_harness.model_hub import config_with_sources, source
+
     monkeypatch.setenv("VIBE_MODEL_HUB_ENABLED", hub_switch)
     harness = _Harness(engine, tmp_path, "telegram", [])
+    harness.controller.config.remote_access = SimpleNamespace(
+        vibe_cloud=SimpleNamespace(enabled=True, public_url="https://team.avibe.bot")
+    )
 
     async def refuse(*_args, **_kwargs):
         raise RuntimeError("no source serves this model")
 
     harness.controller.model_hub_runtime = SimpleNamespace(resolve=refuse)
-    hub = SimpleNamespace(enabled=gateway_enabled, agents={"vibey": SimpleNamespace(mode="hub")})
+    hub = config_with_sources([source("src_supply01", ["claude-opus-5-5"])] if has_source else [])
+    hub.enabled = gateway_enabled
     harness.controller.model_hub_service = SimpleNamespace(store=SimpleNamespace(load=lambda: hub))
     request = harness.request("hello")
     await harness.agent.handle_message(request)
@@ -1452,11 +1460,15 @@ async def test_a_refused_model_route_fails_before_the_input_is_written(
     assert harness.controller.started == []
     assert await harness.context_rows() == []
     assert harness.provider.requests == []
-    # Every route runs through the Model Hub: disabled, or its gateway off, the copy names that cause.
+    # Every route runs through the Model Hub: disabled, its gateway off, or no source to supply it,
+    # the copy names that cause, and ends with where to fix it unless the operator switched it off.
+    next_step = "\n" + i18n_t("errors.modelsNextStepImUrl", "en", url="https://team.avibe.bot/settings/models")
     if hub_switch == "0":
         expected = i18n_t("errors.modelHubDisabled", "en", backend="Vibey")
     elif not gateway_enabled:
-        expected = i18n_t("errors.modelGatewayOff", "en", backend="Vibey")
+        expected = i18n_t("errors.modelGatewayOff", "en", backend="Vibey") + next_step
+    elif not has_source:
+        expected = i18n_t("errors.modelSourceRequired", "en", backend="Vibey") + next_step
     else:
         expected = "Vibey's run failed."
     assert harness.controller.im_client.sent == [f"❌ {expected}"]

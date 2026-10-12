@@ -367,24 +367,30 @@ def test_model_selection_is_required_before_any_backend_dispatch(backend, model,
 
 
 @pytest.mark.parametrize(
-    ("backend", "hub_switch", "gateway_enabled", "refusal"),
+    ("backend", "hub_switch", "gateway_enabled", "has_source", "refusal", "fixed_in_models"),
     [
-        ("vibey", "1", False, "The model gateway is off, so Vibey has no model to run on"),
-        ("vibey", "1", True, "Select a model"),
-        ("vibey", "0", True, "Model Hub is disabled on this instance, so Vibey has no model to run on"),
+        ("vibey", "1", False, True, "The model gateway is off, so Vibey has no model to run on", True),
+        ("vibey", "1", True, False, "Vibey has no model source yet", True),
+        # A source but no model: the built-in backend's models all come from its Model Hub list.
+        ("vibey", "1", True, True, "Select a model for the Vibey Agent", True),
+        ("vibey", "0", True, True, "Model Hub is disabled on this instance, so Vibey has no model to run on", False),
         # A native backend runs direct without the Hub: choosing a model is still the fix.
-        ("codex", "0", True, "Select a model"),
+        ("codex", "0", True, True, "Select a model for the Codex Agent", None),
     ],
 )
 def test_a_missing_model_the_model_hub_explains_names_the_model_hub(
-    monkeypatch, backend, hub_switch, gateway_enabled, refusal
+    monkeypatch, backend, hub_switch, gateway_enabled, has_source, refusal, fixed_in_models
 ):
     """The Avibe Agent's models come only through the Model Hub: while it cannot supply any, choosing a model is not the fix."""
+    from modules.agents.model_hub import ModelSupplyRefusal
+    from tests.scenario_harness.model_hub import config_with_sources, source
+
     monkeypatch.setenv("VIBE_MODEL_HUB_ENABLED", hub_switch)
 
     async def run():
         controller = _Controller()
-        hub = SimpleNamespace(enabled=gateway_enabled, agents={backend: SimpleNamespace(mode="hub")})
+        hub = config_with_sources([source("src_supply01", ["claude-opus-5-5"])] if has_source else [])
+        hub.enabled = gateway_enabled
         controller.model_hub_service = SimpleNamespace(store=SimpleNamespace(load=lambda: hub))
         service = AgentService(controller=controller)
         controller.agent_service = service
@@ -395,9 +401,15 @@ def test_a_missing_model_the_model_hub_explains_names_the_model_hub(
         request.vibe_agent_model = None
         request.failure_handler = AsyncMock(return_value=True)
 
-        with pytest.raises(ValueError, match=refusal):
+        with pytest.raises(ValueError, match=refusal) as refused:
             await service.handle_message(backend, request)
         assert agent.started == []
+        # Whether Models is where the fix is decides the notice's next step.
+        if fixed_in_models is None:
+            assert not isinstance(refused.value, ModelSupplyRefusal)
+        else:
+            assert isinstance(refused.value, ModelSupplyRefusal)
+            assert refused.value.fixed_in_models is fixed_in_models
 
     asyncio.run(run())
 

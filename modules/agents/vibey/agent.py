@@ -1238,11 +1238,11 @@ class VibeyAgent(BaseAgent):
 
         logger.warning("Vibey could not resolve its model route: %s", error)
         language = self._language()
-        # Every route runs through the Model Hub: when it is disabled or its gateway is off, that explains the failure.
-        refusal = (
-            await asyncio.to_thread(hub_supply_refusal, self.controller, BACKEND, language)
-            or launch_refusal_copy(self.controller, error)
-            or error_text(None, language)
+        # Every route runs through the Model Hub: when it leaves Vibey no model (disabled, its gateway
+        # off, no source), that explains the failure, and the supply refusal is the failure's cause.
+        supply = await asyncio.to_thread(hub_supply_refusal, self.controller, BACKEND, language)
+        refusal = str(supply) if supply is not None else (
+            launch_refusal_copy(self.controller, error) or error_text(None, language)
         )
         # Recorded on every start failure, as the other backends do: a no-op unless a launch is bound.
         await self.record_model_hub_native_failure(request.context, str(error))
@@ -1254,7 +1254,7 @@ class VibeyAgent(BaseAgent):
             str(error),
             display_text=display,
             request=request,
-            cause=error,
+            cause=supply or error,
         )
 
     # --- lookups ---------------------------------------------------------------

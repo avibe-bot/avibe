@@ -17,7 +17,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Callable, Coroutine, Optional
-from modules.agents.catalog import AGENT_BACKENDS, NATIVE_CLI_BACKENDS, is_builtin_backend
+from modules.agents.catalog import AGENT_BACKENDS, NATIVE_CLI_BACKENDS, display_name_for_backend, is_builtin_backend
 
 from core.backend_failure import terminal_backend_failure_output
 from core.backend_restart import NativeCredentialLease, NativeMigrationBlockedError, finish_native_operation
@@ -915,6 +915,9 @@ class AgentAuthService:
                 await self._send_message(context, f"❌ {self._t('command.setup.claudeMethodUsage')}")
                 return
 
+        if backend_hint and is_builtin_backend(backend_hint):
+            await self._send_builtin_setup_guidance(context, backend_hint)
+            return
         if backend_hint and backend_hint not in NATIVE_CLI_BACKENDS:
             await self._send_message(context, f"❌ {self._t('command.setup.unsupportedBackend', backend=backend_hint)}")
             return
@@ -935,6 +938,23 @@ class AgentAuthService:
             backend = None
         await self.start_setup(context, backend=backend, force_reset=True, claude_login_method=claude_login_method)
 
+    async def _send_builtin_setup_guidance(self, context: MessageContext, backend: str) -> None:
+        """Answer `/setup` for the built-in backend: it signs in to nothing, its models come from Model Hub.
+
+        When the Model Hub leaves it no model now (``hub_supply_block``: disabled, gateway off,
+        no source), that cause is the answer, as it is for a Turn; otherwise the guidance is.
+        """
+        from modules.agents.model_hub import ModelSupplyRefusal, hub_supply_refusal, models_next_step
+
+        refusal = await asyncio.to_thread(hub_supply_refusal, self.controller, backend, self._lang())
+        if refusal is not None:
+            answer, cause = f"❌ {refusal}", refusal
+        else:
+            answer = self._t("command.setup.builtinBackend", backend=display_name_for_backend(backend))
+            cause = ModelSupplyRefusal(answer, fixed_in_models=True)
+        next_step = models_next_step(self.controller, context, cause=cause)
+        await self._send_message(context, "\n".join(line for line in (answer, next_step) if line))
+
     async def start_setup(
         self,
         context: MessageContext,
@@ -944,6 +964,9 @@ class AgentAuthService:
     ) -> None:
         """Start an auth flow for the resolved backend."""
         resolved_backend = backend or self.controller.resolve_agent_for_context(context)
+        if is_builtin_backend(resolved_backend):
+            await self._send_builtin_setup_guidance(context, resolved_backend)
+            return
         if resolved_backend not in NATIVE_CLI_BACKENDS:
             await self._send_message(
                 context,

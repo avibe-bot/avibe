@@ -386,3 +386,104 @@ def test_terminal_copy_never_promises_automatic_recovery(language):
         assert "2026-09-09" not in text
         assert "自动恢复。" not in text
         assert "has recovered" not in text
+
+
+def _next_step_controller(language: str, *, public_url: str | None):
+    cloud = SimpleNamespace(enabled=public_url is not None, public_url=public_url or "")
+    return SimpleNamespace(
+        config=SimpleNamespace(language=language, remote_access=SimpleNamespace(vibe_cloud=cloud)),
+        emit_agent_message=AsyncMock(return_value="msg-failed"),
+    )
+
+
+def _remote_workbench_context(role: str) -> MessageContext:
+    snapshot = {"sub": "member-1", "vibe_instance_role": role, "vibe_instance_access_source": "email"}
+    return MessageContext(
+        user_id="remote:member-1", channel_id="proj-1", platform="avibe",
+        platform_specific={"agent_session_id": "ses-1", "message_metadata": {"resource_user_context": snapshot}},
+    )
+
+
+_LOCAL_WORKBENCH = MessageContext(user_id="local", channel_id="proj-1", platform="avibe", platform_specific={})
+_IM = MessageContext(user_id="U1", channel_id="C1", platform="slack", platform_specific={})
+
+
+@pytest.mark.parametrize("language", ["en", "zh"])
+@pytest.mark.parametrize(
+    ("context", "public_url", "key", "url"),
+    [
+        # The Workbench knows its requester: it links to Models only for one who can open it.
+        (_LOCAL_WORKBENCH, None, "errors.openModelsLink", "/settings/models"),
+        (_remote_workbench_context("member"), None, "errors.openModelsLink", "/settings/models"),
+        (_remote_workbench_context("editor"), None, "errors.askAdminForModels", None),
+        # No IM identity maps to a Workbench principal: IM says who can fix it, with the public URL when there is one.
+        (_IM, "https://team.avibe.bot", "errors.modelsNextStepImUrl", "https://team.avibe.bot/settings/models"),
+        (_IM, None, "errors.modelsNextStepIm", None),
+    ],
+)
+async def test_a_refusal_fixed_in_models_ends_with_where_to_fix_it(language, context, public_url, key, url):
+    from modules.agents.model_hub import ModelSupplyRefusal
+
+    controller = _next_step_controller(language, public_url=public_url)
+    refusal = ModelSupplyRefusal("Vibey has no model source yet.", fixed_in_models=True)
+
+    await emit_backend_failure(controller, context, "vibey", str(refusal), display_text=f"❌ {refusal}", cause=refusal)
+
+    next_step = t(key, language, url=url) if url else t(key, language)
+    assert controller.emit_agent_message.await_args_list[0].args[2] == f"❌ {refusal}\n{next_step}"
+
+
+@pytest.mark.parametrize(
+    "cause",
+    [
+        # The operator switched the Model Hub off, which takes Models away too.
+        "hub_disabled",
+        # Not a Model Hub refusal at all.
+        "native",
+    ],
+)
+async def test_a_failure_models_cannot_fix_gets_no_next_step(cause):
+    from modules.agents.model_hub import ModelSupplyRefusal
+
+    controller = _next_step_controller("en", public_url="https://team.avibe.bot")
+    error = (
+        ModelSupplyRefusal("Model Hub is disabled on this instance.", fixed_in_models=False)
+        if cause == "hub_disabled" else RuntimeError("process exited")
+    )
+
+    await emit_backend_failure(controller, _LOCAL_WORKBENCH, "vibey", str(error), display_text=f"❌ {error}", cause=error)
+
+    assert controller.emit_agent_message.await_args_list[0].args[2] == f"❌ {error}"
+
+
+@pytest.mark.parametrize(
+    ("discriminator", "supply_state", "linked"),
+    [
+        # Copy that already sends its reader to Models ends with the way there...
+        ("route_unconfigured", "interrupted", True),
+        ("blocked_supply_state", "interrupted", True),
+        # ...and copy that does not, such as a source still cooling down, does not.
+        ("blocked_supply_state", "waiting", False),
+    ],
+)
+async def test_a_route_refusal_links_models_only_when_its_copy_sends_the_reader_there(
+    discriminator, supply_state, linked,
+):
+    from core.handlers.model_hub.service import ModelHubError
+
+    outcome = TurnOutcomeProjectionInput(
+        outcome="no_candidate",
+        discriminator=discriminator,
+        supply_facts=TurnSupplyFacts(
+            backend="claude", model="claude-opus-5-5", supply_state=supply_state,
+            retry_at="2026-10-12T08:00:00+00:00",
+        ),
+    )
+    refused = ModelHubError("no_candidate", turn_outcome=outcome)
+    controller = _next_step_controller("en", public_url=None)
+    copy = render_turn_outcome_copy(outcome, "en")
+
+    await emit_backend_failure(controller, _LOCAL_WORKBENCH, "claude", str(refused), display_text=copy, cause=refused)
+
+    link = t("errors.openModelsLink", "en", url="/settings/models")
+    assert controller.emit_agent_message.await_args_list[0].args[2] == (f"{copy}\n{link}" if linked else copy)
