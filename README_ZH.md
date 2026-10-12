@@ -277,7 +277,7 @@ vibe vault      # 管理密钥、请求、认证请求与签名
 1. `~/.avibe/AGENTS.md`，对所有项目生效；
 2. 再从文件系统根目录一路到工作目录，读每一层的 `AGENTS.md`（或 `CLAUDE.md`）。
 
-`AGENTS.override.md` 会替代所在目录的 `AGENTS.md`。几份文件冲突时，越具体的那份为准。改了文件，下一个 Turn 就生效。所有文件合计上限 64 KiB；超出时，Vibey 会被告知哪份被截断或没有加载。
+`AGENTS.override.md` 会替代所在目录的 `AGENTS.md`。几份文件冲突时，越具体的那份为准。改了文件，下一个 Turn 就生效。这部分说明合计上限 64 KiB；超出时，Vibey 会被告知哪份被截断或没有加载。
 
 设置向导会检测你机器上的 Claude Code、Codex 和 OpenCode，缺哪个、你选了哪个，就帮你装上。想自己装的话：
 

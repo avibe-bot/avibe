@@ -376,6 +376,8 @@ How the files are read:
   ancestor of the cwd, and the worktree root holds its own. Loading both would apply that repository's instructions
   twice, so the main repository's file with the same name as the worktree root's is left out.
   - This is Pi's rule. Finding the main repository reads the worktree's `.git` file and the `commondir` it points to.
+  - What is left out is a place: the main checkout's directory and the file's name. If both checkouts link one shared
+    file, the worktree's copy still loads.
   - Instruction files themselves are read only from the ancestor chain and the global path.
 - A blank file is left out.
 - Each file is read as UTF-8, with a leading byte-order mark dropped and undecodable bytes replaced.
@@ -408,7 +410,7 @@ More general files come first; where two conflict, the later, more specific one 
 ```
 
 - The first line is Pi's. The second is Avibe's.
-- Each path is escaped as the environment block's cwd is (§8): never cut.
+- Each path is escaped (see Bound below) and never cut.
 - Three reasons for the place:
   - It is Pi's order: rules, then project context, then skills.
   - The head and these files are the same for every Session in that cwd, while Avibe's sections carry the Session's
@@ -422,14 +424,19 @@ modification stamps, so the system prompt changes only when a file does. What us
 same section: the checkpoint turn and the request after a checkpoint (C-9), and a side turn (C-10). A fork Session reads
 its own at its first Turn.
 
-**Bound.** The files share 65,536 bytes (64 KiB) of content, about 16,000 tokens. The owner's own set is about 31 KB
-(a global file, a workspace file, and a repository file), so Codex's 32 KiB default would already cut it.
-- **Who gets the budget.** First the global file, then the files from the cwd upward. The most specific project file is
+**Bound.** The section carries at most 65,536 bytes (64 KiB), about 16,000 tokens. That count includes the header,
+each file's path and markup, the files' text, and the notices, so the bound holds by construction, whatever the
+number of files or the length of their paths. The owner's own set (a global file, a workspace file, and a repository
+file) is about 31 KB, so Codex's 32 KiB default would already cut it.
+- **Who gets the room.** First the global file, then the files from the cwd upward. The most specific project file is
   therefore the last to be cut. The section keeps the order above either way.
-- **A file the budget cuts** keeps its first bytes, on a character boundary, and ends with:
+- **A file the room cuts** keeps its first bytes, on a character boundary, and ends with:
   `[Truncated: the first {shown} of {size} bytes. The instruction files share a 65,536-byte limit; read the file for the rest.]`
-- **Files the budget leaves out entirely** are named after the last block:
-  `[Not loaded, over the 65,536-byte limit for instruction files: {path} ({size} bytes); ... Read them if the task needs them.]`
+- **Files that get no room** are named after the last block, as many as fit 1,024 bytes kept for this notice, then how
+  many more:
+  `[Not loaded, over the 65,536-byte limit for instruction files: {path} ({size} bytes); ...; and {count} more. Read them if the task needs them.]`
+- **Paths.** A path is escaped as the environment block's cwd is (§8). A path in the attribute also has `"` and `&` as
+  `\u0022` and `\u0026`. This stays injective, because escaping doubles every backslash.
 
 **Deviations from Pi.**
 - The global file is one path, `AGENTS.md` in the Avibe home, not the candidate list in the agent's own directory.
