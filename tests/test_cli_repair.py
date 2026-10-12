@@ -262,6 +262,111 @@ def test_broken_npm_cli_is_repaired_by_its_prefix_not_self_update(
     assert result["detection"]["status"] == "ok" and result["detection"]["path"] == str(alias)
 
 
+@pytest.mark.parametrize("configured_bare", [False, True])
+@pytest.mark.parametrize("outcome", ["missing", "permission", "broken", "healthy"])
+def test_healthy_upgrade_certifies_only_the_selected_executable(native_case, monkeypatch, configured_bare, outcome):
+    c = native_case
+    selected = c["target"]
+    other_marker = c["home"] / "unrelated-probed"
+    other = executable(
+        c["home"] / "other/bin/opencode",
+        f'from pathlib import Path\nPath({str(other_marker)!r}).touch()\nprint("1.1.0")\n',
+    )
+    replacement = "#!" + sys.executable + '\nprint("1.2.16")\n'
+    operation = {
+        "missing": "Path(__file__).unlink()",
+        "permission": "Path(__file__).chmod(0o644)",
+        "broken": "Path(__file__).write_text(" + repr("#!" + sys.executable + '\nprint("Node.js v22.18.0")\n') + ")",
+        "healthy": "Path(__file__).write_text(" + repr(replacement) + ")",
+    }[outcome]
+    executable(
+        selected,
+        'import sys\nfrom pathlib import Path\nif sys.argv[1] == "--version":\n print("1.2.15")\nelif sys.argv[1] == "upgrade":\n '
+        + operation
+        + "\n",
+    )
+    configured = "opencode" if configured_bare else str(selected)
+    monkeypatch.setattr(api, "_configured_agent_cli_path", lambda _name: configured)
+    # Exercise the real resolver, including basename fallback, but restrict all
+    # discovered candidates to this test's two owned installations.
+    monkeypatch.setattr(
+        api,
+        "resolve_cli_path",
+        lambda binary, **_: api._resolve_cli_path(
+            binary,
+            candidate_paths=lambda _name, **_kw: [selected, other],
+            include_npm_global=False,
+            include_desktop=False,
+        ),
+    )
+    result = api.install_agent("opencode")
+    assert not other_marker.exists()
+    if outcome == "healthy":
+        assert result["ok"] and result["path"] == str(selected)
+        assert result["detection"]["version"] == "1.2.16"
+        assert c["persist"] == [("opencode", str(selected))]
+    else:
+        assert not result["ok"] and result["code"] == "cli_readback_failed"
+        assert c["persist"] == []
+        if outcome in {"missing", "permission"}:
+            # Negative witness: the old post-install resolver WOULD choose the
+            # unrelated installation, so this case can expose the prior bug.
+            assert api.resolve_cli_path(configured) == str(other)
+
+
+@pytest.mark.parametrize("fresh", [False, True])
+@pytest.mark.parametrize("outcome", ["missing", "broken", "healthy"])
+def test_codex_npm_certifies_its_declared_prefix_not_an_old_healthy_cli(native_case, monkeypatch, fresh, outcome):
+    c = native_case
+    old = executable(c["home"] / "old/lib/node_modules/@openai/codex/bin/codex.js", 'print("codex-cli 0.161.0")\n')
+    destination = c["home"] / ".local/bin/codex"
+    installed = c["home"] / "npm-finished"
+    replacement = (
+        "#!"
+        + sys.executable
+        + "\nprint("
+        + repr("codex-cli 0.162.1" if outcome == "healthy" else "Node.js v22.18.0")
+        + ")\n"
+    )
+    install_body = (
+        f'p=Path(os.environ["NPM_CONFIG_PREFIX"])/"bin/codex";p.parent.mkdir(parents=True,exist_ok=True);p.write_text({replacement!r});p.chmod(0o755)\n'
+        if outcome != "missing"
+        else ""
+    )
+    npm = executable(
+        c["tools"] / "npm",
+        'import os,sys\nfrom pathlib import Path\nif sys.argv[1:]==["config","get","prefix"]:\n print("/fixture/different-global-prefix");sys.exit(0)\n'
+        + install_body
+        + f"Path({str(installed)!r}).touch()\n",
+    )
+    configured = "codex" if fresh else str(old)
+    monkeypatch.setattr(api, "_configured_agent_cli_path", lambda _name: configured)
+    monkeypatch.setattr(api, "_candidate_cli_paths", lambda *_args, **_kwargs: [])
+    monkeypatch.setenv("PATH", c["env"]["PATH"])
+
+    def resolve(binary, **_):
+        if binary == "npm":
+            return str(npm)
+        if binary == "brew":
+            return None
+        if fresh and not installed.exists():
+            return None
+        return str(old) if binary in {"codex", str(old)} else None
+
+    monkeypatch.setattr(api, "resolve_cli_path", resolve)
+    result = api.install_agent("codex")
+    assert installed.exists()
+    assert old.exists()  # the old selected/discovered CLI is still healthy
+    assert api.resolve_cli_path("codex") == str(old)  # old fallback would certify it
+    if outcome == "healthy":
+        assert result["ok"] and result["path"] == str(destination)
+        assert result["detection"]["version"] == "0.162.1"
+        assert c["persist"] == [("codex", str(destination))]
+    else:
+        assert not result["ok"] and result["code"] == "cli_readback_failed"
+        assert c["persist"] == []
+
+
 def test_unknown_installation_is_not_migrated(tmp_path):
     path = executable(tmp_path / "custom-claude", 'print("broken")\n')
     assert identify_repair_source("claude", str(path), home=tmp_path) is None

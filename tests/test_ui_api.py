@@ -2035,7 +2035,7 @@ def test_install_agent_upgrades_exact_configured_external_path(monkeypatch, tmp_
     assert result["ok"] is True
     assert result["path"] == str(external)
     assert commands == [[str(external), "update"]]
-    assert resolved == [str(external), str(external)]
+    assert resolved == [str(external)]  # post-upgrade uses the bound path, not rediscovery
 
 
 @pytest.mark.usefixtures("healthy_cli_observation")
@@ -2455,8 +2455,9 @@ def test_install_codex_fresh_install_uses_resolved_npm(monkeypatch, tmp_path):
         calls.append((cmd, kwargs.get("env", {})))
         return CompletedProcess()
 
-    # Codex is missing before install, present after.
-    codex_resolve = iter([None, None, "/Users/test/.nvm/versions/node/v22.18.0/bin/codex"])
+    # Discovery is consulted before installation only. The command declares
+    # its user-prefix target; an unrelated Node prefix cannot certify it.
+    codex_resolve = iter([None, None])
 
     def fake_resolve(binary):
         if binary == "npm":
@@ -2477,7 +2478,7 @@ def test_install_codex_fresh_install_uses_resolved_npm(monkeypatch, tmp_path):
     assert calls[0][0] == ["/Users/test/.nvm/versions/node/v22.18.0/bin/npm", "install", "-g", "@openai/codex"]
     assert calls[0][1]["NPM_CONFIG_PREFIX"] == str(api.Path.home() / ".local")
     assert calls[0][1]["PATH"].split(api.os.pathsep)[0] == str(api.Path.home() / ".local" / "bin")
-    assert result["path"] == "/Users/test/.nvm/versions/node/v22.18.0/bin/codex"
+    assert result["path"] == str(tmp_path / ".local" / "bin" / "codex")
 
 
 @pytest.mark.usefixtures("healthy_cli_observation")
@@ -2506,6 +2507,9 @@ def test_install_codex_npm_install_runs_npm_upgrade(monkeypatch, tmp_path):
         if cmd == [str(npm_path), "config", "get", "prefix"]:
             return CompletedProcess(stdout=f"{npm_path.parent.parent}\n")
         if cmd == [str(npm_path), "install", "-g", "@openai/codex"]:
+            # The declared launcher and configured package entry are aliases
+            # of the same installed artifact, so retain the selected path.
+            (npm_path.parent / "codex").symlink_to(codex_path)
             return CompletedProcess(stdout="updated")
         raise AssertionError(f"unexpected command: {cmd}")
 

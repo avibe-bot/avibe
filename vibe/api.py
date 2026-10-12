@@ -372,6 +372,15 @@ def _codex_npm_install_env(npm_path: str, *, prefix: str | Path | None = None) -
     return env
 
 
+def _declared_codex_npm_target(env: dict[str, str] | None) -> str | None:
+    """The destination the existing npm command policy explicitly declares."""
+    prefix = (env or {}).get("NPM_CONFIG_PREFIX")
+    if not prefix:
+        return None
+    root = Path(prefix).expanduser().absolute()
+    return str(root / ("codex.cmd" if os.name == "nt" else "bin/codex"))
+
+
 def _npm_prefix_from_node_modules_path(codex_path: str) -> Path | None:
     try:
         paths = [Path(codex_path).expanduser(), Path(codex_path).expanduser().resolve()]
@@ -7451,14 +7460,11 @@ def _repair_broken_cli(name: str, selected: str, truncate_output) -> dict:
 def _install_agent(name: str) -> dict:
     """Install (or upgrade) an agent CLI tool.
 
-    Upgrade path (binary already on disk): keep the user's install method
-    stable. Without this, our previous flow bricked Claude installs whenever
-    the user's bootstrap method differed from our hard-coded installer URL —
-    e.g. the Dockerfile bootstraps via ``npm install -g
-    @anthropic-ai/claude-code`` but our upgrade ran ``curl
-    https://claude.ai/install.sh | bash``, which migrated the binary to
-    ``~/.local/bin/claude`` and left V2Config pointing at the now-empty
-    ``/usr/local/bin/claude``.
+    Existing installations keep their install method and their selected
+    executable. Post-upgrade verification is bound before invoking the updater;
+    a missing launcher cannot be replaced by an unrelated same-name discovery.
+    An unattributed relocation fails verification rather than silently changing
+    the configured selection.
 
     Upgrade commands:
       - ``claude update``   — auto-detects npm-global vs native install
@@ -7563,13 +7569,17 @@ def _install_agent(name: str) -> dict:
         else:
             cmd = None
         if cmd is not None:
+            # Codex's existing npm policy may explicitly select a user prefix.
+            # Only that command-declared destination can certify a relocation.
+            declared_target = _declared_codex_npm_target(command_env) if name == "codex" else None
             return _run_install_command(
                 name,
                 cmd,
                 _truncate_output,
                 mode="upgrade",
                 env=command_env,
-                resolve_from=configured_path,
+                expected_path=declared_target or existing_path,
+                preserve_selected_path=existing_path if declared_target else None,
             )
 
     # A damaged private toolchain must fail closed. Falling through here would
@@ -7626,7 +7636,10 @@ def _install_agent(name: str) -> dict:
     else:
         return {"ok": False, "message": f"Unknown agent: {name}", "output": None}
 
-    return _run_install_command(name, cmd, _truncate_output, mode="install", env=command_env)
+    return _run_install_command(
+        name, cmd, _truncate_output, mode="install", env=command_env,
+        expected_path=_declared_codex_npm_target(command_env) if name == "codex" else None,
+    )
 
 
 def _curl_installer_command(url: str, consumer: str) -> list[str]:
@@ -7785,6 +7798,7 @@ def _run_install_command(
     env: dict[str, str] | None = None,
     resolve_from: str | None = None,
     expected_path: str | None = None,
+    preserve_selected_path: str | None = None,
 ) -> dict:
     """Shared subprocess + post-success bookkeeping for install / upgrade.
 
@@ -7829,7 +7843,15 @@ def _run_install_command(
         # Exit zero alone does not certify the executable it left behind.
         if result.returncode == 0:
             selected = expected_path if expected_path is not None else resolve_cli_path(resolve_from or name)
-            # A repair must certify its exact destination, never a different
+            if expected_path and preserve_selected_path and _is_executable_file(Path(expected_path)):
+                try:
+                    # Keep a configured alias only while it still names the
+                    # exact artifact at this operation's declared destination.
+                    if os.path.samefile(expected_path, preserve_selected_path):
+                        selected = preserve_selected_path
+                except OSError:
+                    pass
+            # An install must certify its exact destination, never a different
             # healthy installation found by missing-path fallback.
             health = None
             if is_native_cli_backend(name):
