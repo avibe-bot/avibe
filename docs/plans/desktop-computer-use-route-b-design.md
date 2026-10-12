@@ -95,8 +95,14 @@ caller without it is refused. A Controller-only grant is not sufficient.
 The agent cannot mint, extend, or reuse a challenge or capability. Missing
 acknowledgement, stale shell generation, IPC loss, native stop, session
 end/archive, or shell-lock loss revokes the grant and fails closed. The exact
-IPC messages and shell-origin proof require owner and source review; this must
-not become agent-writable state.
+IPC messages require owner and source review. The shell-origin proof should use
+an OS-enforced native-shell identity, such as a shell-only signing key or
+keychain/secure-enclave key whose use is restricted to the signed shell. The
+Controller verifies the signed challenge and binds its key generation to the
+shell instance; reinstall, shell update, explicit owner revocation, or
+Controller-generation change rotates or invalidates it. If the platform cannot
+enforce this boundary, foreground remains refused. This must not become
+agent-writable state.
 
 ### Recording and restoration
 
@@ -110,8 +116,9 @@ the same serialized desktop lease:
   platform exposes it.
 - **Pointer:** global coordinates, display/scale, and button state sufficient
   to reject an existing ambiguous drag.
-- **Target:** freshly observed PID/window ID, frame, coordinate transform, and
-  the observation `capture_id` used for the coordinates.
+- **Target:** freshly observed PID/window ID, target process-start identity,
+  frame, coordinate transform, and the observation `capture_id` used for the
+  coordinates.
 
 If any required snapshot is unavailable, stale, or internally inconsistent, the
 call is refused before activation. A foreground pixel click must include the
@@ -128,13 +135,17 @@ no modifiers, no element token, no portable or desktop target, and no
 actions, modifiers, element actions, and every other tool operation require a
 separate contract and validation.
 
-Restoration is ordered and verified: restore the recorded app, its recorded
-window, and the recorded pointer position, then read state again. App/window
-restoration must match process identity and native window ID; another window in
-the same app is not success. Pointer restoration must match display and
-coordinates within readback precision. If Route B emitted button-down, cleanup
-must emit a bounded matching release when needed and verify that no button
-remains pressed before returning `restored`.
+Restoration is ordered and verified. If Route B emitted button-down, cleanup
+must first emit a bounded matching release at the current target point and
+verify that the injected button is no longer pressed. Only then may the driver
+move the pointer or restore the recorded app and window. App/window restoration
+must match the recorded process identity and native window ID; another window
+in the same app is not success. Pointer restoration must match display and
+coordinates within readback precision before returning `restored`.
+
+The target process-start identity must match the admitted PID/window through
+activation, the final window readback, and dispatch. PID/window numbers alone
+are insufficient because a target can exit and those identifiers can be reused.
 
 The sequence carries a user-activity fence that distinguishes the operation's
 expected mutations from owner activity. Each activation, pointer move, and
@@ -151,12 +162,15 @@ visible.
 If the prior app/window exited, moved to an unaddressable workspace, or cannot
 be verified, the driver must not guess. It should make an independent bounded
 pointer-restoration attempt when possible, return
-`foreground_restoration_failed`, and quarantine foreground delivery for the
-whole desktop until the owner resolves the attention state. This covers every
-session and foreground call; Route A remains governed by its existing rules.
-The driver must not retry, choose another target, or claim the input was undone.
-The same desktop quarantine applies to a post-forward transport failure with an
-unknown outcome or restoration state.
+`foreground_restoration_failed`, and enter a shell/Controller-owned quarantine
+for the whole desktop until the owner resolves the attention state. The
+quarantine is outside the disposable driver: it survives daemon shutdown and
+new daemon generations, and every generation must consult it before foreground
+admission. It is ephemeral runtime state, not a new product state file. This
+covers every session and foreground call; Route A remains governed by its
+existing rules. The driver must not retry, choose another target, or claim the
+input was undone. The same desktop quarantine applies to a post-forward
+transport failure with an unknown outcome or restoration state.
 
 ## User-visible indication
 
