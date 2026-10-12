@@ -86,10 +86,16 @@ opaque, short-lived challenge for the selected active session. After the owner
 toggles foreground control, the native shell sends the session identity, shell
 instance/generation, challenge, and owner action over authenticated local IPC.
 The Controller stores the grant in its ephemeral session/lease registry and
-acknowledges it. The agent cannot mint, extend, or reuse the challenge. Missing
+acknowledges it. For each call, the shell then mints a short-lived,
+single-use capability bound to the session, shell generation, exact target,
+allowed operation, and call id. The daemon/driver validates that capability at
+the actual foreground admission boundary; a same-user direct socket or proxy
+caller without it is refused. A Controller-only grant is not sufficient.
+
+The agent cannot mint, extend, or reuse a challenge or capability. Missing
 acknowledgement, stale shell generation, IPC loss, native stop, session
 end/archive, or shell-lock loss revokes the grant and fails closed. The exact
-IPC message and shell-origin proof require owner and source review; this must
+IPC messages and shell-origin proof require owner and source review; this must
 not become agent-writable state.
 
 ### Recording and restoration
@@ -130,8 +136,12 @@ coordinates within readback precision. If Route B emitted button-down, cleanup
 must emit a bounded matching release when needed and verify that no button
 remains pressed before returning `restored`.
 
-The sequence carries a user-activity fence. The snapshot records an OS-level
-activation/pointer input generation; the driver checks it before activation,
+The sequence carries a user-activity fence that distinguishes the operation's
+expected mutations from owner activity. Each activation, pointer move, and
+restoration step records or advances an operation-owned generation/token; the
+driver compares the next observation against that expected value and treats an
+unmatched OS change as owner activity. If the platform cannot distinguish those
+sources, the call is refused. The driver checks the fence before activation,
 before posting HID, and before each restoration step. If the owner changes the
 frontmost app or pointer, the driver cancels before dispatch when possible.
 After dispatch it stops restoration rather than overwriting newer human state,
@@ -151,19 +161,26 @@ unknown outcome or restoration state.
 ## User-visible indication
 
 Foreground mode must be visible before activation and remain visible until
-restoration is verified. Keep the existing agent-cursor overlay enabled. The
-native tray/app-menu status must say "Foreground control active" and name the
-target app/window. A shell-owned banner or equivalent must expose the same
-state with an immediate Stop action. The Workbench may mirror it, but cannot be
-the only indication because IM-triggered work can run while it is hidden.
+restoration is verified. Keep the existing agent-cursor overlay enabled. Before
+activation, the Controller sends an operation id, target, and `preparing`
+state to the native shell. The shell renders the tray/banner state, names the
+target app/window, exposes Stop, and acknowledges successful rendering. Missing
+or negative acknowledgement is a refusal before activation. The shell also
+receives terminal `restored`, `cancelled`, `failed`, or `quarantined` states;
+it clears the indicator only after an acknowledged `restored` state and keeps
+attention visible for every other terminal state. The Workbench may mirror it,
+but cannot be the only indication because IM-triggered work can run while it is
+hidden.
 
-Stopping from the native surface revokes the session consent and marks the
-in-flight operation cancelled. The operation checks that cancellation before
-activation and again immediately before posting the HID event; if it has not
-posted, it aborts and restores any state it changed. After dispatch, Stop
-cannot claim to undo the event, but the operation still completes its bounded
-restoration or enters the attention/quarantine state. A failed restoration
-keeps the indicator visible as an error until the owner resolves the state.
+Stopping from the native surface revokes consent and marks the operation
+cancelled. Stop first enters a bounded cancel/restore phase: the driver checks
+cancellation before activation and before posting HID, and after dispatch
+completes restoration or reports quarantine. Only after a terminal
+acknowledgement, or after the bounded timeout has entered quarantine, may the
+shell invoke the existing daemon shutdown directive. This ordering prevents
+`stop_daemon` from destroying the channel needed for restoration. Stop cannot
+claim to undo an event already posted; failed or interrupted restoration keeps
+the indicator visible as an error until the owner resolves the state.
 
 ## Admission and API shape
 
@@ -175,8 +192,10 @@ default:
 - Route A `click_mode:"raw"` remains background-only and keeps its existing
   exact-window contract;
 - `delivery_mode:"foreground"` is accepted only for the first-release click
-  allowlist, explicit session consent, a fresh exact target, its matching
-  `capture_id`, a supported platform, and existing lease/caller checks;
+  allowlist, explicit session consent, a shell-rendered pre-activation
+  acknowledgement, a daemon-valid shell capability, a fresh exact target, its
+  matching `capture_id`, a supported platform, and existing lease/caller
+  checks;
 - unknown modes, desktop-wide targets, stale captures, locked sessions,
   missing consent, and unsupported operations remain structured refusals; and
 - an unchanged or unverifiable background result never escalates by itself. A
