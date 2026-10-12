@@ -327,15 +327,7 @@ fn build_window(app: &AppHandle, origin: &LoopbackOrigin) -> Option<WebviewWindo
     let scale = anchor_scale(app, None);
     let areas = work_areas(app, scale);
     let saved = pet.store().anchor().cloned();
-    let anchor = match (saved, areas.first()) {
-        (Some(saved), _) => clamp_anchor(&saved, &areas),
-        (None, Some(primary)) => default_anchor(primary),
-        (None, None) => PetAnchor {
-            x: 0.0,
-            y: 0.0,
-            monitor: None,
-        },
-    };
+    let anchor = initial_anchor(saved.as_ref(), &areas);
     let layout = PetLayout::default();
     *lock(&pet.frame) = Frame {
         expanded: false,
@@ -381,6 +373,19 @@ fn build_window(app: &AppHandle, origin: &LoopbackOrigin) -> Option<WebviewWindo
             pet.window_gone();
             None
         }
+    }
+}
+
+/// Both restored and first-use positions must remain reachable on short displays.
+fn initial_anchor(saved: Option<&PetAnchor>, areas: &[WorkArea]) -> PetAnchor {
+    match (saved, areas.first()) {
+        (Some(saved), _) => clamp_anchor(saved, areas),
+        (None, Some(primary)) => clamp_anchor(&default_anchor(primary), areas),
+        (None, None) => PetAnchor {
+            x: 0.0,
+            y: 0.0,
+            monitor: None,
+        },
     }
 }
 
@@ -773,6 +778,102 @@ pub fn pet_open(window: WebviewWindow, link: String) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn window_build_placement_keeps_the_image_and_dock_reachable_on_small_displays() {
+        let area = |name: &str, x, y, width, height, unit| WorkArea {
+            name: Some(name.into()),
+            area: LogicalRect { x, y, width, height },
+            unit,
+        };
+        let detached = PetAnchor {
+            x: 9000.0,
+            y: 9000.0,
+            monitor: Some("detached".into()),
+        };
+        let primary_125 = area("primary", 0.0, 0.0, 1366.0 / 1.25, 718.0 / 1.25, 1.0);
+        let side_150 = area("side", -1200.0, -180.0, 1200.0, 660.0, 1.5 / 1.25);
+        let cases = [
+            (
+                "detached display",
+                Some(detached.clone()),
+                vec![area("primary", 0.0, 0.0, 800.0, 550.0, 1.0)],
+                1.0,
+                "primary",
+            ),
+            (
+                "125% primary",
+                Some(detached.clone()),
+                vec![primary_125.clone()],
+                1.25,
+                "primary",
+            ),
+            (
+                "mixed DPI with negative origin",
+                Some(PetAnchor {
+                    monitor: Some("side".into()),
+                    ..detached.clone()
+                }),
+                vec![primary_125, side_150],
+                1.25,
+                "side",
+            ),
+            (
+                "negative primary",
+                Some(detached),
+                vec![area("primary", -800.0, -550.0, 800.0, 550.0, 1.0)],
+                1.0,
+                "primary",
+            ),
+            (
+                "first use on narrow display",
+                None,
+                vec![area("primary", 0.0, 0.0, 200.0, 500.0, 1.0)],
+                1.0,
+                "primary",
+            ),
+        ];
+        for (case, saved, areas, primary_scale, expected_display) in cases {
+            // This is build_window's actual anchor selection and coordinate
+            // conversion, including the target monitor's own logical scale.
+            let anchor = initial_anchor(saved.as_ref(), &areas);
+            let target = area_for(&areas, (anchor.x, anchor.y)).unwrap();
+            assert_eq!(target.name.as_deref(), Some(expected_display), "{case}");
+            let origin = restored_window_origin((anchor.x, anchor.y), target.unit);
+            let (dx, dy) = avibe_runtime_host::pet::pet_offset(false, PetLayout::default());
+            let image = (origin.0 + dx * target.unit, origin.1 + dy * target.unit);
+            let physical_image = rescale(image, primary_scale, 1.0);
+            let physical_unit = target.unit * primary_scale;
+            let physical_area = LogicalRect {
+                x: target.area.x * primary_scale,
+                y: target.area.y * primary_scale,
+                width: target.area.width * primary_scale,
+                height: target.area.height * primary_scale,
+            };
+            // CSS: 115px image; dock top 103px, height 40px, centred and
+            // narrower than the image. Both rects must fit in physical pixels.
+            assert!(physical_image.0 >= physical_area.x - 1e-9, "{case}");
+            assert!(physical_image.1 >= physical_area.y - 1e-9, "{case}");
+            assert!(
+                physical_image.0 + 115.0 * physical_unit <= physical_area.x + physical_area.width + 1e-9,
+                "{case}"
+            );
+            assert!(
+                physical_image.1 + 143.0 * physical_unit <= physical_area.y + physical_area.height + 1e-9,
+                "{case}"
+            );
+            assert_eq!(window_size(false), (460.0, 600.0));
+            assert_eq!(window_size(true), (460.0, 600.0));
+        }
+        assert_eq!(
+            initial_anchor(None, &[]),
+            PetAnchor {
+                x: 0.0,
+                y: 0.0,
+                monitor: None
+            }
+        );
+    }
 
     #[test]
     fn document_and_window_lifetimes_release_input_regions_and_fence_summons() {

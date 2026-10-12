@@ -29,6 +29,12 @@ quick-reply, and pet lifecycle paths. Backend APIs are outside this change.
   enforce the existing pet-only origin/caller check and capability boundary.
   Unmounting the page clears the rectangles, so authorization rechecks leave
   the empty native window fully click-through.
+- If no connected work area fits the fixed frame, placement instead contains
+  the 115px image and its dock (143px combined height). The transparent frame
+  may overflow; the expanded list can be clipped at the top. Selection keeps
+  image-overlap, saved-display, primary priority. Both saved and first-use
+  anchors take the same path; full-frame fitting and no-display behavior stay
+  intact. This is the owner-approved §9.1 fallback after breaker diagnosis.
 - Hotkey press and release are distinct. A released hotkey during page/runtime
   startup opens text rather than starting a microphone later. Hold threshold is
   320ms; leaving before the threshold cancels it. Dragging retains the existing path.
@@ -113,6 +119,8 @@ keeps its page-coloured plate solely to cover the surrounding web-page text.
 ## Validation
 
 - Focused pet, voice ownership, dictation-wrapper and bridge suites: 142 tests.
+  The post-breaker parity sweep also ran all 15 existing session-action tests,
+  including “Show in pet”: 157 passing UI tests in total.
 - `npm run test:pet-mini`: 14 real-browser layout/lifecycle checks across Chromium and
   WebKit. They cover both front-card heights and 1/3/5 layers, exact stack/peek
   geometry, long-title containment, unchanged avatar bounds on expansion, and
@@ -120,8 +128,11 @@ keeps its page-coloured plate solely to cover the surrounding web-page text.
   Unmounting during motion releases all hit regions without later reinstalling
   them; remounting reports the new surface's regions.
 - UI production build.
-- Desktop workspace Rust tests: 367 passed, including shell capability boundaries,
+- Desktop workspace Rust tests: 370 passed, including shell capability boundaries,
   fixed-window anchoring, optional persistence and cold-start shortcut release.
+  Small-display cases consume the shell's actual initial-anchor function and
+  window-origin/DPI conversion, checking the image and dock in physical pixels;
+  they do not claim an OS display reconfiguration on this Mac.
 - Desktop workspace formatting and clippy for all targets/features, warnings denied.
 - Separate macOS app bundle build and native screenshots above.
 
@@ -150,6 +161,27 @@ exercise both orders of `message.updated` and the POST response, preserve the
 single-message lock while pending, and verify an older update cannot reclaim a
 newer result's options. A separate uncertain quick-reply case blocks both typed
 input and newer quick-reply groups until admission uncertainty is resolved.
+
+## v1 capability parity sweep
+
+Checked against base `5018b6ffc` before the post-breaker push. Every requested
+capability remains; the deliberate v1 removals are the resizable side-panel
+geometry and automatic panel expansion, replaced by the spec's fixed stack.
+The following separates automated consuming evidence from native event-wiring
+inspection; it does not claim new manual OS-input tests.
+
+| Capability | v2 status and evidence |
+| --- | --- |
+| Summon before ready; setup pending | Preserved. Runtime-host tests cover queued summons and release during startup; PetPage tests cover pre-ready binding/revision races and setup recovery on summon/focus. |
+| “Show in pet” under the main-session mock | Preserved. `useSessionActions` still calls `petBridge.showInPet`; its three existing tests cover availability, binding, off-state and failure messages. `api.getMainSession()` reads the same shell binding. |
+| Tray toggle; shortcut-refused message | Preserved. Native `toggle` persists the explicit preference, registers/unregisters shortcuts and reconciles the window. Registration failure still populates the localized tray message. Store and native catalog tests pass; OS shortcut contention was verified by source parity, not a fresh registration probe. |
+| Drag and anchor save | Preserved. The avatar's drag threshold calls `startDragging`; native `Moved` debounces for 400ms and saves the image anchor in the stable coordinate space. Persistence and mixed-DPI placement tests cover the storage/restore path; the new build-boundary tests cover too-small work areas. |
+| Closing only hides the pet | Preserved. `CloseRequested` still prevents closure and calls `pet::hide`, retaining the page and binding. This native event wiring is unchanged from v1. |
+| Dock reopen while the pet is visible | Preserved. The macOS `Reopen` branch checks main-window visibility, independently of the pet, then restores main. Existing shell-boundary coverage and unchanged event wiring were checked. |
+| Destroy on Runtime stop, loss or origin change | Preserved. The sole active-origin setter calls `pet::reconcile`; `window_change` destroys/rebuilds as required. Its consuming tests cover loss, replacement and disabling. Destruction also invalidates the poller and clears hit regions. |
+| Navigation guard | Preserved. The pet admits only `/pet` at the exact Runtime origin; new windows are denied. Native tests exercise the origin/path predicate. |
+| Caller checks on every pet command | Preserved. `pet_ready`, `pet_set_expanded`, `pet_hit_regions`, `pet_set_dismissed`, `pet_unbind` and `pet_open` check the pet caller. `pet_bind` admits either the validated main caller or the pet. Caller tests and the complete command/capability inventory in `shell_boundaries` pass. |
+| Mark-read rules | Preserved and narrowed to the visible main detail. Active-window, complete-unread-tail and rendered-result checks remain; viewport intersection adds the v2 scroll gate. PetPage tests cover hidden/switcher/unfocused states, retry, duplicate avoidance, old binding, trimmed tails, and “More in Avibe” when the unread tail is incomplete. |
 
 ## Review inventory
 
@@ -180,10 +212,20 @@ The whole lifecycle class was checked in this repair:
   first page-load callback. Navigation/reload uses the same loading method.
   Queued summons survive loading but are discarded when the window is gone.
 
-There are two distinct findings-bearing heads; no root-cause class has repeated
-across reviewed heads. Counts use the review envelope's commit, not the inline
-comment's reanchored commit. The circuit breaker has not tripped. The owner's
-corrected layer geometry is included in the first repair, with the browser and
-native evidence above. This UI rewrite is subject to the three-head breaker:
-a third findings-bearing head pauses edits/pushes for parent-session diagnosis,
-even if that head introduces another distinct root-cause class.
+The third findings-bearing head, `b4b835cad`, received one finding:
+
+| Root-cause class | Resolution and consuming evidence |
+| --- | --- |
+| Fixed-frame work-area fallback / anchor recoverability | When every work area is too small for the frame, contain the image and dock instead. The shell's actual `initial_anchor`/window-origin conversion is tested for a detached display, a 125% primary, mixed DPI, negative origins, and first use on a narrow display. Selection priority and preference for full-frame-fitting displays are also tested. |
+
+Three distinct findings-bearing heads carried five findings in five classes.
+Counts use the review envelope's commit, not the inline comment's reanchored
+commit. The post-rewrite breaker tripped and the lane stopped before edits or
+pushes. Parent session `sesexk2xpr89k` independently verified the entire GitHub
+inventory, inspected the placement implementation and consuming tests, and
+recorded its diagnosis and resumption authorization on 2026-10-12 at 17:52
+UTC+08:00. The model stays; no architecture rewrite is needed. The classes are
+v1 affordances omitted by the rewrite, plus lifecycle/placement boundaries
+introduced by the fixed frame. The amended authoritative spec §9.1 records the
+small-display fallback. The breaker remains armed: a repeated root class on the
+next head stops the lane again before further edits or pushes.

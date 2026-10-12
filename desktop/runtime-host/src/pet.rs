@@ -388,6 +388,8 @@ pub const PET_SIZE: f64 = 115.0;
 pub const WINDOW_WIDTH: f64 = 460.0;
 pub const WINDOW_HEIGHT: f64 = 600.0;
 const PET_BOTTOM: f64 = 36.0;
+// pet-mini.css: the dock starts 103px below the image top and is 40px high.
+const PET_AND_DOCK_HEIGHT: f64 = 143.0;
 /// Distance from the work area's corner for a pet with no saved place.
 const DEFAULT_MARGIN: f64 = 24.0;
 
@@ -490,14 +492,35 @@ pub fn restored_window_origin(anchor: (f64, f64), unit: f64) -> (f64, f64) {
 /// Keeps a restored pet whole on a connected display. A pet already inside a
 /// work area stays exactly where it was. Otherwise it moves into the area it
 /// overlaps most; with no overlap, into its own display if that is still
-/// connected, else the first area (the primary display).
+/// connected, else the first area (the primary display). If no work area fits
+/// the fixed window, preserve access to the image and dock instead.
 pub fn clamp_anchor(anchor: &PetAnchor, work_areas: &[WorkArea]) -> PetAnchor {
     let at = (anchor.x, anchor.y);
-    let usable: Vec<&WorkArea> = work_areas
+    let mut usable: Vec<&WorkArea> = work_areas
         .iter()
         .filter(|area| area.area.width >= WINDOW_WIDTH * area.unit && area.area.height >= WINDOW_HEIGHT * area.unit)
         .collect();
-    if let Some(home) = usable.iter().find(|area| area.area.contains(&area.pet_at(at))) {
+    let full_frame = !usable.is_empty();
+    if !full_frame {
+        usable.extend(work_areas.iter());
+    }
+    let image = |area: &WorkArea| LogicalRect {
+        x: anchor.x,
+        y: anchor.y,
+        width: PET_SIZE * area.unit,
+        height: PET_SIZE * area.unit,
+    };
+    let footprint = |area: &WorkArea| {
+        if full_frame {
+            area.pet_at(at)
+        } else {
+            LogicalRect {
+                height: PET_AND_DOCK_HEIGHT * area.unit,
+                ..image(area)
+            }
+        }
+    };
+    if let Some(home) = usable.iter().find(|area| area.area.contains(&footprint(area))) {
         return PetAnchor {
             monitor: home.name.clone().or_else(|| anchor.monitor.clone()),
             ..anchor.clone()
@@ -505,7 +528,10 @@ pub fn clamp_anchor(anchor: &PetAnchor, work_areas: &[WorkArea]) -> PetAnchor {
     }
     let overlapping = usable
         .iter()
-        .map(|area| (area.area.overlap(&area.pet_at(at)), *area))
+        .map(|area| {
+            let overlap = if full_frame { area.pet_at(at) } else { image(area) };
+            (area.area.overlap(&overlap), *area)
+        })
         .filter(|(overlap, _)| *overlap > 0.0)
         .max_by(|a, b| a.0.total_cmp(&b.0))
         .map(|(_, area)| area);
@@ -518,16 +544,14 @@ pub fn clamp_anchor(anchor: &PetAnchor, work_areas: &[WorkArea]) -> PetAnchor {
     let Some(target) = overlapping.or_else(named).or_else(|| usable.first().copied()) else {
         return anchor.clone();
     };
-    let (dx, dy) = pet_offset(false, PetLayout::default());
+    let bounds = footprint(target);
+    let left = target.area.x + anchor.x - bounds.x;
+    let top = target.area.y + anchor.y - bounds.y;
     PetAnchor {
-        x: anchor.x.clamp(
-            target.area.x + dx * target.unit,
-            target.area.right() - (WINDOW_WIDTH - dx) * target.unit,
-        ),
-        y: anchor.y.clamp(
-            target.area.y + dy * target.unit,
-            target.area.bottom() - (WINDOW_HEIGHT - dy) * target.unit,
-        ),
+        x: anchor
+            .x
+            .clamp(left, (left + target.area.width - bounds.width).max(left)),
+        y: anchor.y.clamp(top, (top + target.area.height - bounds.height).max(top)),
         monitor: target.name.clone(),
     }
 }
@@ -976,6 +1000,58 @@ mod tests {
 
         let corner = default_anchor(&areas[0]);
         assert_eq!(clamp_anchor(&corner, &areas), corner);
+    }
+
+    #[test]
+    fn short_display_fallback_selects_by_image_overlap_then_saved_display_then_primary() {
+        let areas = [
+            area("primary", 0.0, 0.0, 800.0, 550.0),
+            area("side", 800.0, 0.0, 800.0, 550.0),
+        ];
+        for (x, saved, expected) in [
+            (750.0, "primary", "side"), // Image overlaps side most; transparent frame overlaps primary most.
+            (9000.0, "side", "side"),
+            (9000.0, "detached", "primary"),
+        ] {
+            let restored = clamp_anchor(
+                &PetAnchor {
+                    x,
+                    y: 500.0,
+                    monitor: Some(saved.into()),
+                },
+                &areas,
+            );
+            assert_eq!(restored.monitor.as_deref(), Some(expected));
+            let target = areas
+                .iter()
+                .find(|area| area.name.as_deref() == Some(expected))
+                .unwrap();
+            assert!(target.area.contains(&LogicalRect {
+                x: restored.x,
+                y: restored.y,
+                width: PET_SIZE,
+                height: PET_AND_DOCK_HEIGHT,
+            }));
+            assert_eq!(restored.y, 407.0, "the dock, not only the image, must fit");
+        }
+    }
+
+    #[test]
+    fn a_full_frame_display_still_wins_over_the_short_display_fallback() {
+        let areas = [
+            area("short", 0.0, 0.0, 800.0, 550.0),
+            area("full", 800.0, -100.0, 1000.0, 900.0),
+        ];
+        let restored = clamp_anchor(
+            &PetAnchor {
+                x: 100.0,
+                y: 100.0,
+                monitor: Some("short".into()),
+            },
+            &areas,
+        );
+        assert_eq!(restored.monitor.as_deref(), Some("full"));
+        assert!(areas[1].area.contains(&areas[1].pet_at((restored.x, restored.y))));
     }
 
     #[test]

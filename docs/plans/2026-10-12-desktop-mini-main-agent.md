@@ -410,6 +410,20 @@ sessions.
   - The window is clamped into the work area, so Vibey cannot sit higher
     than the window's height above it.
   - Dragging Vibey drags the window (existing `startDragging`).
+- **When the frame does not fit (decision 2026-10-12, from the #2508
+  breaker).** On a work area shorter or narrower than the frame (for
+  example 1366×768 at 125% minus the taskbar), full-frame clamping is
+  impossible.
+  - **Priority:** Vibey and its dock must always be fully inside a connected
+    work area and reachable. The transparent rest of the frame may extend
+    past the work area.
+  - **How:** when no work area fits the whole frame, clamp so that Vibey's
+    rect plus the dock (not the frame) lies inside the target. Keep the
+    target selection: the area Vibey overlaps most, else its saved display if
+    connected, else the primary. With no display at all, keep today's
+    behaviour.
+  - **Expanded list on a short display:** its top may fall off-screen. This
+    is accepted in v1; do not shrink or flip the column.
 
 ### 9.2 Click-through (verified in a spike)
 
