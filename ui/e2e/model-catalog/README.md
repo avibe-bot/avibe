@@ -28,8 +28,8 @@ contracts remain covered by their existing tests; this is not live acceptance.
 
 The live `playwright.config.ts` excludes this fixture directory. The consuming
 `scripts/modelCatalogDiscovery.test.mjs` checks both real configs with `--list`:
-live discovery excludes the fixture, while isolated discovery retains the original
-36 catalog scenarios and discovers every fixture spec on desktop and mobile.
+live discovery excludes the fixture, while isolated discovery finds every fixture
+spec on desktop and mobile.
 Collection starts no browser, web server or fixture.
 
 `gateway-status.spec.ts` consumes `MH-GATEWAY-STATUS-001`. It renders the real
