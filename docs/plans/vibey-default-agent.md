@@ -91,10 +91,12 @@ On master before this change:
   - With Avibe Cloud paired, `errors.modelsNextStepImUrl` offers `workbench_url('/settings/models')` as information.
   - Without it, `errors.modelsNextStepIm` names where the fix is.
 - **Exception:** `hub_disabled` gets no step, because the Models page is unavailable there.
-- **IM `/setup`.** Both forms answer with Model Hub guidance and the same next step, instead of "does not support
-  setup":
+- **IM `/setup`.** Two forms reach the built-in backend:
   - an explicit `/setup vibey`, which today is refused by the backend-hint gate in `handle_setup_command`;
   - a bare `/setup` that resolves to the built-in backend (`start_setup`).
+  Both answer with Model Hub guidance and the same next step instead of "does not support setup". With Model Hub
+  disabled on the instance, both answer with `errors.modelHubDisabled` instead, because Models is not there to send
+  anyone to. `docs/COMMANDS.md` and `docs/COMMANDS_ZH.md` document both answers.
 - **UI.** `no_source` is rendered in the slots that already render `gateway_off` and `hub_disabled`:
   - the setup card note
   - the Settings → Backends list badge
@@ -148,7 +150,7 @@ On master before this change:
   - a table test of the next step:
     - Workbench: a caller who can open Models, and one who cannot
     - IM: with Avibe Cloud paired, and without
-  - IM `/setup vibey`, and a bare `/setup` on a Vibey default
+  - IM `/setup vibey`, and a bare `/setup` on a Vibey default, with Model Hub on and with it disabled
   - every UI renderer of `no_source`: the setup card note, the Settings → Backends badge, and the backend page notice
     with its Models link
 - **PR-4, at the seed boundary:**
