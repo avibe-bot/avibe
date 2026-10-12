@@ -3998,30 +3998,73 @@ def test_vibe_agent_api_rejects_non_boolean_enabled(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("backends", "expected"),
-    [(list(AGENT_BACKENDS), "opencode"), (["claude", "vibey"], "claude"), ([], "vibey")],
+    ("hub_enabled", "backends", "users_vibey", "expected"),
+    [
+        (True, list(AGENT_BACKENDS), False, "vibey"),
+        (True, ["claude"], False, "vibey"),
+        (True, [], False, "vibey"),
+        # A user's own Agent keeps the name; the built-in Agent is the default under its own.
+        (True, ["claude"], True, "vibey-2"),
+        # Model Hub switched off on the instance: the built-in Agent can never run, so the
+        # replacement rank applies, and it is chosen only when it is the only enabled Agent.
+        (False, list(AGENT_BACKENDS), False, "opencode"),
+        (False, ["claude"], False, "claude"),
+        (False, [], False, "vibey"),
+    ],
 )
-def test_builtin_default_agent_uses_first_enabled_backend_when_no_default_exists(
-    tmp_path, monkeypatch, backends, expected
+def test_a_new_installs_first_default_is_the_built_in_vibey_agent(
+    tmp_path, monkeypatch, hub_enabled, backends, users_vibey, expected
 ):
-    """The built-in backend leads the catalog, but becomes the default only when nothing else is enabled."""
+    """With no default recorded yet, the sync records the built-in Agent wherever the instance can run it."""
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path / ".vibe_remote"))
+    monkeypatch.setenv("VIBE_MODEL_HUB_ENABLED", "1" if hub_enabled else "0")
     store = VibeAgentStore()
     try:
+        if users_vibey:
+            store.create(name="vibey", backend="claude")
         store.ensure_builtin_default_agents(backends)
         assert store.get_default_agent_name() == expected
     finally:
         store.close()
 
 
-def test_a_default_nobody_chose_is_not_the_built_in_vibey_agent(tmp_path, monkeypatch):
-    """With the chosen default disabled, new chats fall back to an enabled Agent, as before Avibe was built in."""
-    from core.vibe_agents import resolve_effective_default_agent
+@pytest.mark.parametrize(
+    ("recorded", "disable", "expected"),
+    [
+        ("claude", False, "claude"),
+        ("reviewer", False, "reviewer"),
+        # A recorded default that can no longer be used is replaced by the rank, not by the built-in Agent.
+        ("reviewer", True, "opencode"),
+    ],
+)
+def test_a_recorded_default_survives_the_sync_while_it_can_be_used(tmp_path, monkeypatch, recorded, disable, expected):
+    """An install that recorded a default keeps it: the first-default rule never moves an existing choice."""
+    from vibe.authorization import instance_owner_context
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path / ".vibe_remote"))
     store = VibeAgentStore()
     try:
         store.ensure_builtin_default_agents(["opencode", "claude"])
+        store.create(name="reviewer", backend="codex")
+        store.set_default_agent_name(recorded, user_context=instance_owner_context())
+        if disable:
+            store.set_enabled(recorded, False)
+        store.ensure_builtin_default_agents(["opencode", "claude"])
+        assert store.get_default_agent_name() == expected
+    finally:
+        store.close()
+
+
+def test_a_replacement_default_is_not_the_built_in_vibey_agent(tmp_path, monkeypatch):
+    """With the recorded default disabled, new chats fall back to an enabled native Agent before the built-in one."""
+    from core.vibe_agents import resolve_effective_default_agent
+    from vibe.authorization import instance_owner_context
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / ".vibe_remote"))
+    store = VibeAgentStore()
+    try:
+        store.ensure_builtin_default_agents(["opencode", "claude"])
+        store.set_default_agent_name("opencode", user_context=instance_owner_context())
         store.set_enabled("opencode", False)
         with store.engine.connect() as conn:
             assert resolve_effective_default_agent(conn).name == "claude"
@@ -4095,7 +4138,8 @@ def test_api_builtin_default_agents_ignore_legacy_config_default_backend(tmp_pat
     api._ensure_builtin_default_agents(config)
     store = VibeAgentStore()
     try:
-        assert store.get_default_agent_name() == "opencode"
+        # The legacy field names no default: a new install starts with the built-in Agent, not Codex.
+        assert store.get_default_agent_name() == "vibey"
     finally:
         store.close()
 

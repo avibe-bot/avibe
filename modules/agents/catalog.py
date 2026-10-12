@@ -157,10 +157,11 @@ def is_builtin_backend(name: str) -> bool:
 
 
 def implicit_default_rank(name: str) -> int:
-    """The one rule for a default nobody chose, among backends or their Agents: a built-in backend comes last.
+    """The one rule for a replacement default, among backends or their Agents: a built-in backend comes last.
 
-    Making the built-in backend the default for new chats is its own decision, so no fallback
-    picks it while another candidate exists.
+    A new install's first default is the built-in backend's Agent (``ensure_builtin_default_agents``).
+    A replacement stands in for a default that can no longer be used, on an install that may never have
+    given the built-in backend a model source, so no replacement picks it while another candidate exists.
     """
     return 1 if is_builtin_backend(name) else 0
 

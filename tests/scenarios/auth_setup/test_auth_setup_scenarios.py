@@ -4580,6 +4580,83 @@ def test_explicit_opencode_model_recovery_preserves_agent_and_completes(monkeypa
         store.close()
 
 
+def test_a_new_install_starts_on_vibey_and_setup_completes_without_choosing_a_default(monkeypatch, tmp_path):
+    """AUTH-SETUP-132: first Agent read -> Vibey default -> runnable route -> completion keeps Vibey.
+
+    A fresh install with the native backends enabled records the built-in Vibey Agent as its
+    default on the first read; setup never writes a default for it. Once Vibey can run, setup
+    completes and Vibey is still the confirmed default. Every step is the HTTP route setup
+    calls; the browser's rule of keeping a recorded default that can run is the supporting test.
+    """
+    from core.vibe_agents import VibeAgentStore
+    from tests.test_model_hub_api import _service
+
+    monkeypatch.setenv("VIBE_MODEL_HUB_ENABLED", "1")
+    V2Config.default().save()
+    assert V2Config.load().agents.opencode.enabled and V2Config.load().agents.claude.enabled
+    service, store, _adapter = _service(tmp_path / "hub")
+    agents = VibeAgentStore()
+    service.named_agents_override = lambda backend: [
+        (agent.name, agent.model)
+        for agent in agents.list_agents(include_disabled=False)
+        if agent.backend == backend
+    ]
+    monkeypatch.setattr(ui_server, "_model_hub_service", lambda: service)
+    source = ModelHubSourceConfig(
+        id="src_vibey132",
+        kind="api_key",
+        vendor="custom",
+        display_name="Mock Lab",
+        protocol="openai_chat",
+        supply_channel="hub",
+        billing="metered",
+        state=ModelHubSourceStateConfig(status="standby"),
+        models=[ModelHubModelConfig(id="mock-large", provenance="discovered")],
+        credential_ref="cred_vibey132",
+    )
+    store.config.sources = [source]
+    store.config.agents["vibey"].sources.order = [source.id]
+    client = app.test_client()
+    headers = csrf_headers(client)
+    try:
+        listed = client.get("/api/agents").get_json()
+        vibey = next(row for row in listed["agents"] if row["backend"] == "vibey")
+        assert listed["default_agent_name"] == vibey["name"]
+
+        candidate = next(
+            row for row in client.get("/api/models/agents/vibey/models/candidates").get_json()["candidates"]["providers"]
+            if row["id"] == "mock-large"
+        )
+        added = {
+            "id": candidate["id"], "display_name": candidate["display_name"], "origin": candidate["origin"],
+            "models_dev_id": None, "context_window": None, "max_output_tokens": None,
+            "input_modalities": [], "output_modalities": [], "supports_tools": None,
+            "supports_reasoning": None, "reasoning_efforts": list(candidate["reasoning_efforts"]),
+            "locked": False, "routeable": True,
+        }
+        suppliers = [{"source_id": row["source_id"], "model_id": row["model_id"]} for row in candidate["suppliers"]]
+        written = client.put(
+            "/api/models/agents/vibey/models",
+            json={"baseline": [], "models": [added], "expected_suppliers": {"mock-large": suppliers}},
+            headers=headers,
+        )
+        assert written.status_code == 200, written.get_json()
+        named = client.patch(f"/api/agents/{vibey['name']}", json={"model": "mock-large"}, headers=headers)
+        assert named.status_code == 200, named.get_json()
+        supply = next(row for row in client.get("/api/models/agents").get_json()["agents"] if row["backend"] == "vibey")
+        route = next(row for row in supply["named_agents"] if row["name"] == vibey["name"])
+        assert route["supply_status"] in {"ok", "degraded"}
+
+        # Setup writes no default: completion keeps the one the new install recorded.
+        completed = client.post("/api/config", json={"setup_completed": True}, headers=headers)
+        assert completed.status_code == 200, completed.get_json()
+        assert V2Config.load().setup_completed
+        assert client.get("/api/agents").get_json()["default_agent_name"] == vibey["name"]
+        assert agents.get_default_agent().name == vibey["name"]
+    finally:
+        agents.close()
+
+
 def test_builtin_vibey_model_pick_completes_setup_without_a_cli(monkeypatch, tmp_path):
     """AUTH-SETUP-129: Vibey candidates -> catalog write -> Agent model -> runnable route -> completion.
 
