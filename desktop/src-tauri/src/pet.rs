@@ -809,6 +809,20 @@ mod tests {
                 "primary",
             ),
             (
+                "small laptop with full-size external connected",
+                Some(PetAnchor {
+                    x: 100.0,
+                    y: 500.0,
+                    monitor: Some("primary".into()),
+                }),
+                vec![
+                    primary_125.clone(),
+                    area("external", 1366.0 / 1.25, 0.0, 1920.0, 1080.0, 1.2),
+                ],
+                1.25,
+                "primary",
+            ),
+            (
                 "mixed DPI with negative origin",
                 Some(PetAnchor {
                     monitor: Some("side".into()),

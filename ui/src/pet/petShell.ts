@@ -58,13 +58,18 @@ const noteSummon = (intent: PetIntent) => {
 };
 
 /** A change made by this page: shown now, sent after the ones before it. */
-const change = (next: string | null, send: () => Promise<PetBinding>, failed: () => void) => {
+const change = (next: string | null, send: () => Promise<PetBinding>, failed: () => void, maySend?: () => boolean) => {
   outstanding += 1;
   latestChange = next;
   show();
   changes = changes
-    .then(send)
-    .then(report, failed)
+    .then(() => maySend?.() === false ? null : send())
+    .then((confirmed) => {
+      // An IPC already sent changes the shell's authoritative binding. Keep
+      // mirroring its revision even if authorization changed meanwhile; the
+      // surface must validate that binding afresh before displaying any data.
+      if (confirmed) report(confirmed);
+    }, failed)
     .finally(() => {
       outstanding -= 1;
       show();
@@ -98,7 +103,7 @@ const start = () => {
 
 export const petShell = {
   /** Bind `sessionId`. If the shell cannot, the pet shows what it holds. */
-  pick: (sessionId: string) => change(sessionId, () => petBridge.bind(sessionId), () => undefined),
+  pick: (sessionId: string, isAuthorizationCurrent?: () => boolean) => change(sessionId, () => petBridge.bind(sessionId), () => undefined, isAuthorizationCurrent),
 
   /**
    * Clear an invalid binding (compare-and-clear). Unlike a failed pick, a

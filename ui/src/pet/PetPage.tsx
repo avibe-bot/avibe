@@ -21,7 +21,7 @@ import { petComposer, usePetComposer } from './petComposer';
 import { petShell, useOnSummon, usePetBinding, usePetDismissed } from './petShell';
 import { derivePetPose, derivePetState, latestExchange, openQuickReplies } from './petState';
 import { useConversationAgentWorking } from './useConversationAgentWorking';
-import { usePetSession } from './usePetSession';
+import { usePetSession, type PetSurfaceEpoch } from './usePetSession';
 import { usePetSetup } from './usePetSetup';
 import { useSessionSwitcher } from './useSessionSwitcher';
 import './pet-mini.css';
@@ -144,6 +144,7 @@ const PetSurface: React.FC = () => {
   const { expanded, setPanel } = usePetPanel();
   const { draft, uncertain, sending, listenPending, setDraft, setUncertain } = usePetComposer(binding);
   const data = usePetSession(binding, petShell.unbind);
+  const epoch = data.epoch;
   const canChat = capabilities.can_chat && data.canChat === true;
   const { requests: vaultRequests } = usePendingVaultRequests(binding ?? '');
   const unreadCount = binding ? inbox.unreadBySession[binding] ?? 0 : 0;
@@ -163,9 +164,9 @@ const PetSurface: React.FC = () => {
   useEffect(() => {
     setAsleep(false);
     if (state !== 'idle' || busy) return;
-    const timer = window.setTimeout(() => setAsleep(true), 5 * 60 * 1000);
+    const timer = window.setTimeout(() => { if (epoch.isCurrent()) setAsleep(true); }, 5 * 60 * 1000);
     return () => window.clearTimeout(timer);
-  }, [state, busy, binding]);
+  }, [state, busy, epoch]);
   const pose: PetPose = derivePetPose(state, { othersWorking: othersWorking || activeSubtasks.length > 0, asleep });
   const [detailOpen, setDetailOpen] = useState(false);
   const [composing, setComposing] = useState(false);
@@ -183,11 +184,16 @@ const PetSurface: React.FC = () => {
   const dismissTimers = useRef<Record<string, number>>({});
   const stopPhases = useRef<Record<string, StopPhase>>({});
   const leavingIds = useRef(new Set<string>());
-  useEffect(() => {
+  const previousBinding = useRef(binding);
+  useLayoutEffect(() => {
     setDetailOpen(false);
     setSwitcherOpen(false);
-    setComposing(false);
-    setOptimisticTitle('');
+    // Authorization changes remove authorized presentation, not the user's text.
+    if (previousBinding.current !== binding) {
+      setComposing(false);
+      setOptimisticTitle('');
+      previousBinding.current = binding;
+    }
     setStops({});
     setLeaving([]);
     setOrderedIds([]);
@@ -198,8 +204,11 @@ const PetSurface: React.FC = () => {
       Object.values(stopTimers.current).forEach(window.clearTimeout);
       Object.values(dismissTimers.current).forEach(window.clearTimeout);
       if (pressRef.current) window.clearTimeout(pressRef.current.timer);
+      stopTimers.current = {};
+      dismissTimers.current = {};
+      pressRef.current = null;
     };
-  }, [binding]);
+  }, [binding, epoch]);
   useEffect(() => {
     if (!expanded) setDetailOpen(false);
   }, [expanded]);
@@ -259,26 +268,29 @@ const PetSurface: React.FC = () => {
     setDraft('');
   }, [setDraft]);
   const openComposer = useCallback((text = '') => {
+    if (!epoch.isCurrent()) return;
     setDraft(text);
     setComposing(true);
-    window.setTimeout(() => inputRef.current?.focus(), 0);
-  }, [setDraft]);
+    window.setTimeout(() => { if (epoch.isCurrent()) inputRef.current?.focus(); }, 0);
+  }, [setDraft, epoch]);
 
   const send = useCallback(async (text: string, metadata?: Record<string, unknown>) => {
-    if (!text.trim() || !binding || !canChat || data.session?.id !== binding) return false;
+    if (!epoch.isCurrent() || !text.trim() || !binding || !canChat || data.session?.id !== binding) return false;
     if (petComposer.isSending() || petComposer.isUncertain(binding)) return false;
     petComposer.setSending(true);
     try {
       const row = await api.sendSessionMessage(binding, { text: text.trim(), ...(metadata ? { metadata } : {}) });
-      if (petShell.currentBinding() === binding) {
+      if (epoch.isCurrent()) {
         data.noteSent(row && typeof row === 'object' && 'id' in row ? row : null);
         setOptimisticTitle(text.trim());
       }
-      return true;
+      return epoch.isCurrent();
     } catch (error) {
       if (!sendRefused(error)) {
+        // Admission uncertainty belongs to the document's send ledger, even
+        // after a recheck/remount. It must not permit another duplicate send.
         setUncertain(binding, true);
-        if (petShell.currentBinding() === binding) {
+        if (epoch.isCurrent()) {
           setComposing(false);
           setDetailOpen(true);
           void setPanel(true);
@@ -287,24 +299,26 @@ const PetSurface: React.FC = () => {
       }
       return false;
     } finally {
+      // Release this request's document-wide lock, not a new surface's state.
       petComposer.setSending(false);
     }
-  }, [api, binding, canChat, data, setPanel, setUncertain]);
+  }, [api, binding, canChat, data, setPanel, setUncertain, epoch]);
   const submit = async () => {
     const submitted = draft;
-    if (!(await send(submitted)) || petShell.currentBinding() !== binding) return;
+    if (!(await send(submitted)) || !epoch.isCurrent()) return;
     if (petComposer.clearDraftIf(submitted)) setComposing(false);
   };
   const choose = (message: WorkbenchMessage, choice: string) => send(choice, { quick_reply_for: message.id });
 
   const dismiss = useCallback((id: string) => {
-    if (leavingIds.current.has(id) || id === 'main-agent') return;
+    if (!epoch.isCurrent() || leavingIds.current.has(id) || id === 'main-agent') return;
     leavingIds.current.add(id);
     const card = visibleCards.find((item) => item.id === id);
     if (card) setRetainedCards((current) => ({ ...current, [id]: card }));
     setLeaving((current) => [...current, id]);
     const remove = () => {
-      if (binding && petShell.currentBinding() === binding) {
+      if (!epoch.isCurrent()) return;
+      if (binding) {
         petShell.setDismissed(binding, [...new Set([...petShell.dismissed(), id])]);
         setLeaving((current) => current.filter((item) => item !== id));
       }
@@ -313,12 +327,12 @@ const PetSurface: React.FC = () => {
     };
     if (reducedMotion) remove();
     else dismissTimers.current[id] = window.setTimeout(remove, DISMISS_EXIT_MS);
-  }, [binding, reducedMotion, visibleCards]);
+  }, [binding, reducedMotion, visibleCards, epoch]);
 
   const setStop = useCallback((card: PetCard) => {
-    if (!card.canPause || card.main) return;
+    if (!epoch.isCurrent() || !card.canPause || card.main) return;
     const updatePhase = (phase?: StopPhase) => {
-      if (petShell.currentBinding() !== binding) return;
+      if (!epoch.isCurrent()) return;
       if (phase) stopPhases.current[card.id] = phase;
       else delete stopPhases.current[card.id];
       setStops({ ...stopPhases.current });
@@ -336,19 +350,20 @@ const PetSurface: React.FC = () => {
     setRetainedCards((current) => ({ ...current, [card.id]: card }));
     const update = card.kind === 'watch' ? api.setHarnessWatchEnabled(harnessItemNativeId(card), false) : api.setHarnessTaskEnabled(harnessItemNativeId(card), false);
     void update.then((result) => {
+      if (!epoch.isCurrent()) return;
       if (!result.ok) throw new Error('stop failed');
-      if (petShell.currentBinding() !== binding) return;
       updatePhase('stopped');
       stopTimers.current[card.id] = window.setTimeout(() => dismiss(card.id), STOP_LINGER_MS);
     }).catch(() => {
+      if (!epoch.isCurrent()) return;
       updatePhase('failed');
-      if (petShell.currentBinding() === binding) setRetainedCards((current) => { const next = { ...current }; delete next[card.id]; return next; });
+      setRetainedCards((current) => { const next = { ...current }; delete next[card.id]; return next; });
     });
-  }, [api, binding, dismiss]);
+  }, [api, dismiss, epoch]);
 
   const voice = usePetVoice({
     enabled: canChat && Boolean(binding) && !uncertain,
-    binding,
+    epoch,
     draft,
     onOpenComposer: openComposer,
   });
@@ -405,10 +420,8 @@ const PetSurface: React.FC = () => {
     node.style.height = `${Math.min(node.scrollHeight, 96)}px`;
   }, [draft, composing]);
 
-  useEffect(() => () => Object.values(stopTimers.current).forEach((timer) => window.clearTimeout(timer)), []);
-
   const rootRef = useRef<HTMLDivElement>(null);
-  useHitRegions(rootRef);
+  useHitRegions(rootRef, epoch);
   const collapsedRef = useRef<HTMLDivElement>(null);
   const [collapsedHeight, setCollapsedHeight] = useState(0);
   useLayoutEffect(() => {
@@ -436,6 +449,7 @@ const PetSurface: React.FC = () => {
           const target = event.currentTarget;
           const pointerId = event.pointerId;
           pressRef.current = { held: false, dragged: false, x: event.clientX, y: event.clientY, timer: window.setTimeout(() => {
+            if (!epoch.isCurrent()) return;
             const press = pressRef.current;
             if (!press) return;
             press.held = true;
@@ -501,7 +515,11 @@ const PetSurface: React.FC = () => {
         <div className={clsx('pet-mini-cards', voice.listening && 'is-hidden')} inert={voice.listening || undefined} aria-label={expanded ? t('pet.panel') : undefined} style={{ height: expanded ? STACK_HEIGHT : collapsedHeight }}>
           <div ref={collapsedRef} key={expanded ? 'expanded' : 'collapsed'} className="pet-mini-swap is-switching" onAnimationEnd={(event) => { if (event.target === event.currentTarget) event.currentTarget.classList.remove('is-switching'); }}>
           {expanded && (!binding || switcherOpen || visibleCards.length === 0) ? (
-            <SessionPicker onPick={(sessionId) => { petShell.pick(sessionId); setSwitcherOpen(false); }} />
+            <SessionPicker onPick={(sessionId) => {
+              if (!epoch.isCurrent()) return;
+              petShell.pick(sessionId, epoch.isAuthorizationCurrent);
+              setSwitcherOpen(false);
+            }} />
           ) : visibleCards.length > 0 && (
             expanded ? (
               <ExpandedCards
@@ -514,7 +532,7 @@ const PetSurface: React.FC = () => {
                 stops={stops}
                 onStop={setStop}
                 t={(key, options) => String(t(key as never, options as never))}
-                detail={binding ? <MainDetail voiceNeedsCloud={voice.cloudRequired} canChat={canChat} visible={detailOpen && !voice.listening} onSwitch={() => setSwitcherOpen(true)} binding={binding} exchange={exchange} running={data.running} queued={(data.turn?.pending_input_count ?? 0) > 0} markRead={inbox.markRead} onRead={data.refreshTail} vaultRequestIds={vaultRequests.map((request) => request.id)} quickReplies={quickReplies} onChoose={choose} uncertain={uncertain} onInspect={() => { void petBridge.open(sessionLink(binding)).then(() => setUncertain(binding, false)).catch(() => undefined); }} /> : null}
+                detail={binding ? <MainDetail epoch={epoch} voiceNeedsCloud={voice.cloudRequired} canChat={canChat} visible={detailOpen && !voice.listening} onSwitch={() => setSwitcherOpen(true)} binding={binding} exchange={exchange} running={data.running} queued={(data.turn?.pending_input_count ?? 0) > 0} markRead={inbox.markRead} onRead={data.refreshTail} vaultRequestIds={vaultRequests.map((request) => request.id)} quickReplies={quickReplies} onChoose={choose} uncertain={uncertain} onInspect={() => { void petBridge.open(sessionLink(binding)).then(() => { if (epoch.isCurrent()) setUncertain(binding, false); }).catch(() => undefined); }} /> : null}
               />
             ) : (
               <CollapsedCards cards={visibleCards} onOpen={() => void setPanel(true)} t={(key) => String(t(key as never))} />
@@ -580,14 +598,21 @@ function useReducedMotion() {
   return reduced;
 }
 
-function useHitRegions(rootRef: React.RefObject<HTMLDivElement | null>) {
+function useHitRegions(rootRef: React.RefObject<HTMLDivElement | null>, epoch?: PetSurfaceEpoch) {
   useEffect(() => {
     const root = rootRef.current;
     if (!root) return;
     let frame = 0;
     let movingUntil = 0;
     let last = '';
+    let active = true;
     const report = () => {
+      if (!active) return;
+      if (epoch && !epoch.isCurrent()) {
+        frame = 0;
+        void petBridge.setHitRegions([]).catch(() => undefined);
+        return;
+      }
       const rects = Array.from(root.querySelectorAll<HTMLElement>('[data-pet-hit]')).flatMap((node) => {
         if (node.closest('[inert], .is-leaving')) return [];
         const style = getComputedStyle(node);
@@ -625,6 +650,7 @@ function useHitRegions(rootRef: React.RefObject<HTMLDivElement | null>) {
     root.addEventListener('pointerout', motion);
     observe();
     return () => {
+      active = false;
       cancelAnimationFrame(frame); resize?.disconnect(); mutations.disconnect();
       root.removeEventListener('scroll', schedule, true);
       root.removeEventListener('transitionrun', motion);
@@ -634,10 +660,10 @@ function useHitRegions(rootRef: React.RefObject<HTMLDivElement | null>) {
       // stays alive. Release its desktop input regions together with the DOM.
       void petBridge.setHitRegions([]).catch(() => undefined);
     };
-  }, [rootRef]);
+  }, [rootRef, epoch]);
 }
 
-function usePetVoice({ enabled, binding, draft, onOpenComposer }: { enabled: boolean; binding: string | null; draft: string; onOpenComposer: (text?: string) => void }) {
+function usePetVoice({ enabled, epoch, draft, onOpenComposer }: { enabled: boolean; epoch: PetSurfaceEpoch; draft: string; onOpenComposer: (text?: string) => void }) {
   const [asr, setAsr] = useState<{ available: boolean; checked: boolean; maxFileBytes?: number }>({ available: false, checked: false });
   const [preview, setPreview] = useState('');
   const [listening, setListening] = useState(false);
@@ -651,10 +677,10 @@ function usePetVoice({ enabled, binding, draft, onOpenComposer }: { enabled: boo
     if (!enabled) return;
     let alive = true;
     void fetch('/api/asr/status', { credentials: 'same-origin' }).then((response) => response.ok ? response.json() : null).then((value) => {
-      if (alive) setAsr({ available: Boolean(value?.available), checked: value !== null, maxFileBytes: value?.max_file_bytes });
-    }).catch(() => { if (alive) setAsr({ available: false, checked: false }); });
+      if (alive && epoch.isCurrent()) setAsr({ available: Boolean(value?.available), checked: value !== null, maxFileBytes: value?.max_file_bytes });
+    }).catch(() => { if (alive && epoch.isCurrent()) setAsr({ available: false, checked: false }); });
     return () => { alive = false; };
-  }, [enabled]);
+  }, [enabled, epoch]);
   const stop = useCallback((commit: boolean) => {
     const capture = captureRef.current;
     if (!capture) return;
@@ -669,21 +695,21 @@ function usePetVoice({ enabled, binding, draft, onOpenComposer }: { enabled: boo
     }
   }, []);
   const start = useCallback(() => {
-    if (!available || captureRef.current) return;
+    if (!epoch.isCurrent() || !available || captureRef.current) return;
     const before = draft;
     const capture: Capture = {
-      dictation: new ShowPageVoiceDictation({ before, after: '', maxFileBytes: asr.maxFileBytes, onPreview: setPreview }),
+      dictation: new ShowPageVoiceDictation({ before, after: '', maxFileBytes: asr.maxFileBytes, onPreview: (text) => { if (epoch.isCurrent()) setPreview(text); } }),
       ending: false,
       cancelled: false,
     };
     captureRef.current = capture;
     setListening(true);
     const settle = () => {
-      if (captureRef.current !== capture) return false;
+      if (captureRef.current !== capture || !epoch.isCurrent()) return false;
       captureRef.current = null;
       setListening(false);
       setPreview('');
-      return !capture.cancelled && petShell.currentBinding() === binding;
+      return !capture.cancelled;
     };
     void capture.dictation.done.then((text) => {
       if (!settle()) return;
@@ -691,12 +717,13 @@ function usePetVoice({ enabled, binding, draft, onOpenComposer }: { enabled: boo
       onOpenComposer(next ? [before.trim(), next].filter(Boolean).join(' ') : before);
     }).catch(settle);
     void capture.dictation.start().then(() => {
+      if (!epoch.isCurrent()) { capture.dictation.abort(); return; }
       // Release may precede microphone permission or pipeline startup.
       if (capture.ending && !capture.cancelled) capture.dictation.finish();
     }).catch(() => { settle(); capture.dictation.abort(); });
-  }, [asr.maxFileBytes, available, binding, draft, onOpenComposer]);
+  }, [asr.maxFileBytes, available, epoch, draft, onOpenComposer]);
   const cancel = useCallback(() => stop(false), [stop]);
-  useEffect(() => cancel, [binding, enabled, cancel]);
+  useEffect(() => cancel, [epoch, enabled, cancel]);
   return { available, cloudRequired: asr.checked && !asr.available, listening, preview, start, stop, cancel };
 }
 
@@ -817,22 +844,24 @@ const CardBody: React.FC<{ card: PetCard; expanded: boolean; t: (key: string, op
   );
 };
 
-const MainDetail: React.FC<{ voiceNeedsCloud: boolean; canChat: boolean; visible: boolean; onSwitch: () => void; binding: string; exchange: ReturnType<typeof latestExchange>; running: boolean; queued: boolean; markRead: (sessionId: string, untilMessageId?: string) => Promise<boolean>; onRead: () => void; vaultRequestIds: string[]; quickReplies: ReturnType<typeof openQuickReplies>; onChoose: (message: WorkbenchMessage, choice: string) => Promise<boolean>; uncertain: boolean; onInspect: () => void }> = (props) => {
+const MainDetail: React.FC<{ epoch: PetSurfaceEpoch; voiceNeedsCloud: boolean; canChat: boolean; visible: boolean; onSwitch: () => void; binding: string; exchange: ReturnType<typeof latestExchange>; running: boolean; queued: boolean; markRead: (sessionId: string, untilMessageId?: string) => Promise<boolean>; onRead: () => void; vaultRequestIds: string[]; quickReplies: ReturnType<typeof openQuickReplies>; onChoose: (message: WorkbenchMessage, choice: string) => Promise<boolean>; uncertain: boolean; onInspect: () => void }> = (props) => {
   const { t } = useTranslation();
   const lastResultRef = useRef<HTMLDivElement>(null);
   const resultKey = `${props.binding}\u0000${props.exchange.results.at(-1)?.id ?? ''}`;
-  const [seenResult, setSeenResult] = useState<string | null>(null);
+  const [seenResult, setSeenResult] = useState<{ epoch: PetSurfaceEpoch; key: string } | null>(null);
   useEffect(() => {
     const node = lastResultRef.current;
     if (!props.visible || !node) return;
     if (typeof IntersectionObserver === 'undefined') return;
-    const observer = new IntersectionObserver(([entry]) => setSeenResult(entry.isIntersecting ? resultKey : null), {
+    const observer = new IntersectionObserver(([entry]) => {
+      if (props.epoch.isCurrent()) setSeenResult(entry.isIntersecting ? { epoch: props.epoch, key: resultKey } : null);
+    }, {
       root: node.closest('.pet-mini-scroll'),
     });
     observer.observe(node);
     return () => observer.disconnect();
-  }, [props.visible, resultKey]);
-  usePetMarkRead(props.binding, props.exchange, props.markRead, props.onRead, props.visible && (typeof IntersectionObserver === 'undefined' || seenResult === resultKey));
+  }, [props.visible, resultKey, props.epoch]);
+  usePetMarkRead(props.epoch, props.binding, props.exchange, props.markRead, props.onRead, props.visible && (typeof IntersectionObserver === 'undefined' || (seenResult?.epoch === props.epoch && seenResult.key === resultKey)));
   return (
     <div className="pet-mini-detail-inner">
       <Button variant="link" size="sm" aria-label={t('pet.switchSession')} onClick={props.onSwitch}>{t('pet.switchSession')}</Button>
@@ -850,16 +879,20 @@ const MainDetail: React.FC<{ voiceNeedsCloud: boolean; canChat: boolean; visible
   );
 };
 
-function usePetMarkRead(binding: string, exchange: ReturnType<typeof latestExchange>, markRead: (sessionId: string, untilMessageId?: string) => Promise<boolean>, onRead: () => void, visible: boolean) {
+function usePetMarkRead(epoch: PetSurfaceEpoch, binding: string, exchange: ReturnType<typeof latestExchange>, markRead: (sessionId: string, untilMessageId?: string) => Promise<boolean>, onRead: () => void, visible: boolean) {
   const active = usePageActive();
   const last = exchange.results.at(-1);
   const unreadId = last && last.read_at === null ? last.id : null;
   const marker = useRef<string | null>(null);
+  useEffect(() => { marker.current = null; }, [epoch]);
   useEffect(() => {
-    if (!unreadId || !exchange.unreadComplete || !active || !visible) return;
+    if (!epoch.isCurrent() || !unreadId || !exchange.unreadComplete || !active || !visible) return;
     const key = `${binding}\u0000${unreadId}`;
     if (marker.current === key) return;
     marker.current = key;
-    void markRead(binding, unreadId).then((applied) => { if (applied) onRead(); else marker.current = null; }, () => { marker.current = null; });
-  }, [active, binding, exchange.unreadComplete, markRead, onRead, unreadId, visible]);
+    void markRead(binding, unreadId).then((applied) => {
+      if (!epoch.isCurrent()) return;
+      if (applied) onRead(); else marker.current = null;
+    }, () => { if (epoch.isCurrent()) marker.current = null; });
+  }, [active, binding, exchange.unreadComplete, markRead, onRead, unreadId, visible, epoch]);
 }

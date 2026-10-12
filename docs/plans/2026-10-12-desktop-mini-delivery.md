@@ -16,6 +16,11 @@ quick-reply, and pet lifecycle paths. Backend APIs are outside this change.
   fixed scroll viewport. One document-level send owner survives component changes.
   The unread badge remains until the inbox confirms the read. Without a main
   exchange, the picker remains reachable, including when sub-task cards exist.
+- `usePetSession` owns one surface epoch: binding plus authorization generation.
+  A change clears retained cards, stop/dismiss phases and timers, ordering and
+  the switcher before paint. Late surface callbacks cannot write into another
+  epoch. Authorization changes preserve the user's draft and composing state;
+  binding changes retain their existing reset behavior.
 - Background activities supply sub-task cards. Running items lead when collapsed;
   expanded order is stable and new items enter below main. Watch/task pause calls
   use their native IDs, require a second press within 3s, and wait for the response.
@@ -29,11 +34,13 @@ quick-reply, and pet lifecycle paths. Backend APIs are outside this change.
   enforce the existing pet-only origin/caller check and capability boundary.
   Unmounting the page clears the rectangles, so authorization rechecks leave
   the empty native window fully click-through.
-- If no connected work area fits the fixed frame, placement instead contains
+- If the selected work area cannot fit the fixed frame, placement instead contains
   the 115px image and its dock (143px combined height). The transparent frame
   may overflow; the expanded list can be clipped at the top. Selection keeps
-  image-overlap, saved-display, primary priority. Both saved and first-use
-  anchors take the same path; full-frame fitting and no-display behavior stay
+  image-overlap, saved-display, primary priority across all connected displays.
+  The footprint is decided per target, so a small laptop keeps its pet when a
+  large external display is connected. Both saved and first-use anchors take
+  the same path; full-frame fitting on the target and no-display behavior stay
   intact. This is the owner-approved §9.1 fallback after breaker diagnosis.
 - Hotkey press and release are distinct. A released hotkey during page/runtime
   startup opens text rather than starting a microphone later. Hold threshold is
@@ -118,9 +125,14 @@ keeps its page-coloured plate solely to cover the surrounding web-page text.
 
 ## Validation
 
-- Focused pet, voice ownership, dictation-wrapper and bridge suites: 142 tests.
-  The post-breaker parity sweep also ran all 15 existing session-action tests,
-  including “Show in pet”: 157 passing UI tests in total.
+- Focused pet, voice ownership, dictation-wrapper and bridge suites: 156 tests.
+  The parity sweep also ran all 15 existing session-action hook tests,
+  including “Show in pet”, and 13 session-action component tests:
+  184 passing UI tests in total.
+  The five retained-card regressions were also run against isolated copies of
+  the pre-fix `be8701709` surface: all five fail because the revoked title
+  remains visible. They pass with the epoch repair. The temporary copies were
+  removed without changing the worktree's production files.
 - `npm run test:pet-mini`: 14 real-browser layout/lifecycle checks across Chromium and
   WebKit. They cover both front-card heights and 1/3/5 layers, exact stack/peek
   geometry, long-title containment, unchanged avatar bounds on expansion, and
@@ -156,7 +168,7 @@ background work. A failed-first-session-read case verifies that the status event
 performs a second read, restores the validated chat capability and permits a
 send; it no longer uses the removed v1 session-title header as a proxy.
 
-The suite has 78 cases after additions. In particular, the quick-reply tests
+The suite has 92 cases after additions. In particular, the quick-reply tests
 exercise both orders of `message.updated` and the POST response, preserve the
 single-message lock while pending, and verify an older update cannot reclaim a
 newer result's options. A separate uncertain quick-reply case blocks both typed
@@ -216,7 +228,7 @@ The third findings-bearing head, `b4b835cad`, received one finding:
 
 | Root-cause class | Resolution and consuming evidence |
 | --- | --- |
-| Fixed-frame work-area fallback / anchor recoverability | When every work area is too small for the frame, contain the image and dock instead. The shell's actual `initial_anchor`/window-origin conversion is tested for a detached display, a 125% primary, mixed DPI, negative origins, and first use on a narrow display. Selection priority and preference for full-frame-fitting displays are also tested. |
+| Fixed-frame work-area fallback / anchor recoverability | Select the display by image overlap, saved display, then primary; contain the full frame if that target fits it, or the image and dock otherwise. The shell's actual `initial_anchor`/window-origin conversion is tested for a detached display, a 125% primary, mixed DPI, negative origins, and first use on a narrow display. Selection priority and per-target footprint choice are also tested, including a small laptop coexisting with a full-size external display. |
 
 Three distinct findings-bearing heads carried five findings in five classes.
 Counts use the review envelope's commit, not the inline comment's reanchored
@@ -229,3 +241,63 @@ v1 affordances omitted by the rewrite, plus lifecycle/placement boundaries
 introduced by the fixed frame. The amended authoritative spec §9.1 records the
 small-display fallback. The breaker remains armed: a repeated root class on the
 next head stops the lane again before further edits or pushes.
+
+The parent spot-check of `be8701709` identified a sibling before the next bot
+verdict: globally filtering to full-frame-fitting displays moved a pet from a
+small laptop to its large external screen. At 18:03 UTC+08:00 the parent amended
+spec §9.1 to choose from all displays first and decide the footprint per target,
+and explicitly authorized the correction. The tests now keep the laptop pet on
+the laptop while still clamping the full frame on its external display. This
+correction was prepared locally while review was pending; it must not be pushed
+until that exact-head review is terminal.
+
+The fourth findings-bearing head, `be8701709`, received one finding:
+
+| Root-cause class | Resolution and consuming evidence |
+| --- | --- |
+| Authorized surface state outliving its binding/authorization context | One epoch from `usePetSession` invalidates retained cards and every late presentation writer. PetPage tests cover watch/task pause success and failure, dismiss with an already-queued removal callback, binding A→B→A, typed and quick-reply sends, remount uncertainty, a queued native pick, voice preview/finalization, animation hit reports, and result intersection/read completion. |
+
+The inventory is now four findings-bearing heads and six findings in six narrow
+classes. Native hit-region lifetime and authorized UI retention share the wider
+family of surface state outliving its context. The lane stopped again. Parent
+`sesexk2xpr89k` independently fetched the review envelopes, read the affected
+code and authorized this family-wide repair at 18:12 UTC+08:00 on 2026-10-12,
+together with the per-display correction. **Any finding on the next head stops
+the lane for another full inventory and parent diagnosis before edits or push.**
+Before this push, the parent independently inspected the epoch owner, callback
+fences and per-display diff, ran nine selected consuming cases successfully,
+and confirmed the repair could proceed (parent Run `936fd3cc76bd`).
+
+### Epoch ownership and callback audit
+
+The existing authorization event owner in `usePetSession` synchronously advances
+the generation before React commits its reset. No second surface authorization
+listener was added. The epoch also checks the current binding and mount lifetime.
+The only production `currentBinding()` read in pet code is this central check;
+the previous call-site comparisons have been replaced.
+
+| Writer | Boundary |
+| --- | --- |
+| Typed send / quick reply | Capture the epoch before admission; ignore late rows, optimistic titles and draft clearing after invalidation. |
+| Dismiss / stop | Clear retained cards, phase refs, leaving IDs, ordering and timers before paint. Guard confirmation expiry, pause success/failure, stopped linger and queued removal by their captured epoch. |
+| Voice | Abort on epoch cleanup; fence status reads, capture startup, preview and final text. User-typed draft survives. Production voice remains off. |
+| Switcher | Close on epoch reset. Gate the UI pick with the full epoch and any queued, unsent native bind with its authorization generation. |
+| Hit regions | Dispose the old reporter, clear regions and fence queued animation callbacks before the new reporter takes ownership. Setup-only reporting is fenced by its mount lifetime because it has no session. |
+| Mark-read | Tag result intersections with the epoch. Ignore old observer/read completions; a new epoch requires a new visible-result observation. |
+| Focus / hold / sleep / post-send grace | Timers check the captured epoch before changing surface state. |
+
+Intentional document-owned exceptions preserve existing invariants:
+
+- The send ledger always releases its own in-flight slot, and records uncertain
+  admission for the original session even after a recheck or remount. Discarding
+  those writes would leave a stuck lock or permit duplicate messages. These
+  records contain no retained task/watch title.
+- A bind IPC already sent changes the native shell's authoritative binding.
+  Its reply still enters the monotonic revision ledger; the UI reads authorized
+  session data afresh. A queued pick that has not reached native is dropped on
+  authorization invalidation. Using the full binding predicate on that queue
+  would reject the pick's own intentional optimistic binding change.
+- Panel acknowledgments stay serialized by the existing document-level panel
+  owner. Persisted dismissal IDs likewise record already-completed user actions;
+  they do not carry authorized presentation data. Surface callbacks that create
+  those actions are epoch-fenced.

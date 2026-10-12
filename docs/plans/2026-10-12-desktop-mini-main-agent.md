@@ -417,10 +417,12 @@ sessions.
   - **Priority:** Vibey and its dock must always be fully inside a connected
     work area and reachable. The transparent rest of the frame may extend
     past the work area.
-  - **How:** when no work area fits the whole frame, clamp so that Vibey's
-    rect plus the dock (not the frame) lies inside the target. Keep the
-    target selection: the area Vibey overlaps most, else its saved display if
-    connected, else the primary. With no display at all, keep today's
+  - **How, decided per display:** choose the target from all connected
+    displays: the one Vibey overlaps most, else its saved display if it is
+    connected, else the primary. Then clamp with the whole frame if *that
+    display* fits it, otherwise with Vibey's rect plus the dock. A pet the
+    user parked on a small laptop screen stays there, even when a large
+    external display is connected. With no display at all, keep today's
     behaviour.
   - **Expanded list on a short display:** its top may fall off-screen. This
     is accepted in v1; do not shrink or flip the column.

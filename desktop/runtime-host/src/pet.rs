@@ -492,18 +492,10 @@ pub fn restored_window_origin(anchor: (f64, f64), unit: f64) -> (f64, f64) {
 /// Keeps a restored pet whole on a connected display. A pet already inside a
 /// work area stays exactly where it was. Otherwise it moves into the area it
 /// overlaps most; with no overlap, into its own display if that is still
-/// connected, else the first area (the primary display). If no work area fits
-/// the fixed window, preserve access to the image and dock instead.
+/// connected, else the first area (the primary display). Use the fixed window
+/// on a display that fits it, otherwise preserve access to the image and dock.
 pub fn clamp_anchor(anchor: &PetAnchor, work_areas: &[WorkArea]) -> PetAnchor {
     let at = (anchor.x, anchor.y);
-    let mut usable: Vec<&WorkArea> = work_areas
-        .iter()
-        .filter(|area| area.area.width >= WINDOW_WIDTH * area.unit && area.area.height >= WINDOW_HEIGHT * area.unit)
-        .collect();
-    let full_frame = !usable.is_empty();
-    if !full_frame {
-        usable.extend(work_areas.iter());
-    }
     let image = |area: &WorkArea| LogicalRect {
         x: anchor.x,
         y: anchor.y,
@@ -511,7 +503,7 @@ pub fn clamp_anchor(anchor: &PetAnchor, work_areas: &[WorkArea]) -> PetAnchor {
         height: PET_SIZE * area.unit,
     };
     let footprint = |area: &WorkArea| {
-        if full_frame {
+        if area.area.width >= WINDOW_WIDTH * area.unit && area.area.height >= WINDOW_HEIGHT * area.unit {
             area.pet_at(at)
         } else {
             LogicalRect {
@@ -520,28 +512,24 @@ pub fn clamp_anchor(anchor: &PetAnchor, work_areas: &[WorkArea]) -> PetAnchor {
             }
         }
     };
-    if let Some(home) = usable.iter().find(|area| area.area.contains(&footprint(area))) {
+    if let Some(home) = work_areas.iter().find(|area| area.area.contains(&footprint(area))) {
         return PetAnchor {
             monitor: home.name.clone().or_else(|| anchor.monitor.clone()),
             ..anchor.clone()
         };
     }
-    let overlapping = usable
+    let overlapping = work_areas
         .iter()
-        .map(|area| {
-            let overlap = if full_frame { area.pet_at(at) } else { image(area) };
-            (area.area.overlap(&overlap), *area)
-        })
+        .map(|area| (area.area.overlap(&image(area)), area))
         .filter(|(overlap, _)| *overlap > 0.0)
         .max_by(|a, b| a.0.total_cmp(&b.0))
         .map(|(_, area)| area);
     let named = || {
-        usable
+        work_areas
             .iter()
             .find(|area| area.name.is_some() && area.name == anchor.monitor)
-            .copied()
     };
-    let Some(target) = overlapping.or_else(named).or_else(|| usable.first().copied()) else {
+    let Some(target) = overlapping.or_else(named).or_else(|| work_areas.first()) else {
         return anchor.clone();
     };
     let bounds = footprint(target);
@@ -1037,21 +1025,36 @@ mod tests {
     }
 
     #[test]
-    fn a_full_frame_display_still_wins_over_the_short_display_fallback() {
+    fn a_small_laptop_keeps_its_pet_when_a_full_frame_external_display_is_connected() {
         let areas = [
             area("short", 0.0, 0.0, 800.0, 550.0),
             area("full", 800.0, -100.0, 1000.0, 900.0),
         ];
-        let restored = clamp_anchor(
+        let on_laptop = PetAnchor {
+            x: 100.0,
+            y: 100.0,
+            monitor: Some("short".into()),
+        };
+        assert_eq!(clamp_anchor(&on_laptop, &areas), on_laptop);
+        let low_laptop = clamp_anchor(&PetAnchor { y: 500.0, ..on_laptop }, &areas);
+        assert_eq!(low_laptop.monitor.as_deref(), Some("short"));
+        assert_eq!((low_laptop.x, low_laptop.y), (100.0, 407.0));
+        assert!(areas[0].area.contains(&LogicalRect {
+            x: low_laptop.x,
+            y: low_laptop.y,
+            width: PET_SIZE,
+            height: PET_AND_DOCK_HEIGHT,
+        }));
+        let external = clamp_anchor(
             &PetAnchor {
-                x: 100.0,
-                y: 100.0,
-                monitor: Some("short".into()),
+                x: 900.0,
+                y: 0.0,
+                monitor: Some("full".into()),
             },
             &areas,
         );
-        assert_eq!(restored.monitor.as_deref(), Some("full"));
-        assert!(areas[1].area.contains(&areas[1].pet_at((restored.x, restored.y))));
+        assert_eq!(external.monitor.as_deref(), Some("full"));
+        assert!(areas[1].area.contains(&areas[1].pet_at((external.x, external.y))));
     }
 
     #[test]
