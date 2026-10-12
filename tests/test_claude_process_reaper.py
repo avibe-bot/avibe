@@ -846,7 +846,7 @@ def test_a_registration_waits_while_another_process_rewrites_the_registry(tmp_pa
 def test_a_recorded_pid_no_process_can_have_is_dropped(tmp_path, monkeypatch):
     monkeypatch.setattr(claude_process_reaper, "_process_start_time", lambda pid: 1000.0)
     (tmp_path / claude_process_reaper.CLAUDE_PROCESS_REGISTRY_NAME).write_text(
-        '{"processes":[{"pid":%d,"native_session_id":null,"owner":"session","started_at":1.0}]}' % 2**70
+        '{"processes":[{"pid":%d,"native_session_id":null,"owner":"session","started_at":1.0}]}' % 2**63
     )
     child = _sleeper()
     try:
@@ -858,3 +858,46 @@ def test_a_recorded_pid_no_process_can_have_is_dropped(tmp_path, monkeypatch):
         child.wait(10)
 
     assert recorded == {child.pid}
+
+
+def test_two_writers_interleaved_by_force_keep_both_records(tmp_path, monkeypatch):
+    # Without the registry lock, the second writer would load the file before the first replaced it,
+    # and its rewrite would drop the first record.
+    monkeypatch.setattr(claude_process_reaper, "_process_start_time", lambda pid: 1000.0)
+    first_loaded = threading.Event()
+    release_first = threading.Event()
+    real_load = claude_process_reaper._load_owned_process_registry
+
+    def load(runtime_dir=None):
+        records = real_load(runtime_dir)
+        if threading.current_thread().name == "first-writer":
+            first_loaded.set()
+            assert release_first.wait(10)
+        return records
+
+    monkeypatch.setattr(claude_process_reaper, "_load_owned_process_registry", load)
+    first, second = _sleeper(), _sleeper()
+    try:
+        writers = [
+            threading.Thread(
+                target=claude_process_reaper._record_owned_process,
+                args=(tmp_path, claude_process_reaper.ClaudeOwnedProcess(pid=child.pid)),
+                name=name,
+            )
+            for child, name in ((first, "first-writer"), (second, "second-writer"))
+        ]
+        writers[0].start()
+        assert first_loaded.wait(10)
+        writers[1].start()
+        time.sleep(0.3)
+        release_first.set()
+        for writer in writers:
+            writer.join(10)
+
+        recorded = {record.pid for record in real_load(tmp_path)}
+    finally:
+        for child in (first, second):
+            child.kill()
+            child.wait(10)
+
+    assert recorded == {first.pid, second.pid}

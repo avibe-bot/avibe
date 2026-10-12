@@ -243,15 +243,15 @@ def _record_owned_process(runtime_dir: Path, owned: ClaudeOwnedProcess) -> None:
             tmp_path.write_text(json.dumps(payload, separators=(",", ":")) + "\n", encoding="utf-8")
             tmp_path.replace(path)
     except Exception:
-        logger = logging.getLogger(__name__)
-        logger.debug("Failed to persist Claude process registry", exc_info=True)
+        # Nobody reads the write's future: this log is the only trace of a failure.
+        logging.getLogger(__name__).warning("Failed to persist Claude process registry", exc_info=True)
 
 
 def _pid_exists(pid: int) -> bool:
     try:
         os.kill(pid, 0)
-    except (ProcessLookupError, OverflowError):
-        # OverflowError: a recorded pid no process can have.
+    except (ProcessLookupError, OverflowError, ValueError):
+        # OverflowError and ValueError: a recorded pid no process can have.
         return False
     except OSError:
         # Another user's process: it exists.
