@@ -124,7 +124,7 @@ def test_vibey_agent_can_be_created_listed_selected_and_routed(tmp_path, sqlite_
 
 def test_vibey_native_operations_are_rejected_before_any_native_probe(monkeypatch):
     """Expanding Agent registration must not enable the same id on native APIs."""
-    from vibe import cli, global_agents_md
+    from vibe import cli
 
     def forbidden(*_args, **_kwargs):
         pytest.fail("in-process backend reached a native/CLI path")
@@ -137,8 +137,6 @@ def test_vibey_native_operations_are_rejected_before_any_native_probe(monkeypatc
     assert api.install_agent("vibey")["ok"] is False
     assert api.get_backend_runtime("vibey")["ok"] is False
     assert api.restart_backend("vibey")["ok"] is False
-    with pytest.raises(ValueError):
-        global_agents_md.global_instruction_path("vibey")
     parser = cli.build_parser()
     assert parser.parse_args(["agent", "create", "worker", "--backend", "vibey"]).backend == "vibey"
     assert parser.parse_args(["agent", "models", "--backend", "vibey"]).backend == "vibey"

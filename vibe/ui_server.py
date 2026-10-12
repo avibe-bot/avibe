@@ -8911,9 +8911,9 @@ def global_prompts_get():
     """Read every backend's *global* instructions file for the editor.
 
     The global twin of the per-project AGENTS.md editor: each backend's
-    user-level prompt file (claude→~/.claude/CLAUDE.md, codex→~/.codex/AGENTS.md,
-    opencode→~/.config/opencode/AGENTS.md) that the CLI prepends to every
-    session's system prompt.
+    user-level prompt file (vibey→~/.avibe/AGENTS.md, claude→~/.claude/CLAUDE.md,
+    codex→~/.codex/AGENTS.md, opencode→~/.config/opencode/AGENTS.md) that it
+    puts ahead of every system prompt.
     """
     from vibe.global_agents_md import read_all_global_agents_md
 

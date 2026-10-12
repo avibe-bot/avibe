@@ -1,20 +1,24 @@
 """Read/write each agent backend's *global* instructions file.
 
-These are the user-level "global system prompt" files the agent CLIs read at
-the start of every session, ahead of any project- or agent-specific prompt:
+These are the user-level "global system prompt" files each backend reads ahead
+of any project- or agent-specific prompt:
 
+- ``vibey``    -> ``<Avibe home>/AGENTS.md``       (default ``~/.avibe/AGENTS.md``; read every Turn, C-7 tools.md section 9)
 - ``claude``   -> ``~/.claude/CLAUDE.md``          (Claude Code "user memory")
 - ``codex``    -> ``$CODEX_HOME/AGENTS.md``        (default ``~/.codex/AGENTS.md``)
 - ``opencode`` -> ``~/.config/opencode/AGENTS.md`` (OpenCode global rules)
 
 This is the *global* twin of :mod:`vibe.project_agents_md`, which edits a single
-project's ``AGENTS.md``. The Web UI "Global prompts" dialog edits all three from
+project's ``AGENTS.md``. The Web UI "Global prompts" dialog edits all of them from
 one place and can sync one backend's content over the others.
 
 Path resolution reuses the existing per-backend home resolvers
 (:func:`get_claude_home` / :func:`get_codex_home` / :func:`get_opencode_config_paths`)
 so we always point at the directory the live CLI actually consults — including
 ``CLAUDE_CONFIG_DIR`` / ``CODEX_HOME`` overrides.
+
+Vibey is no CLI: its file is where :func:`config.paths.get_global_instructions_path`
+says, the one owner of that path, so it follows ``AVIBE_HOME`` rather than ``home``.
 
 The functions are deliberately pure filesystem helpers keyed by backend id,
 accepting an optional ``home`` override so they stay unit-testable in isolation
@@ -27,7 +31,8 @@ from collections.abc import Iterable
 from pathlib import Path
 
 from config.atomic_io import write_atomic
-from modules.agents.catalog import NATIVE_CLI_BACKENDS, is_agent_backend
+from config.paths import get_global_instructions_path
+from modules.agents.catalog import AGENT_BACKENDS
 from vibe.claude_config import get_claude_home
 from vibe.codex_config import get_codex_home
 from vibe.opencode_config import get_opencode_config_paths
@@ -39,6 +44,10 @@ GLOBAL_INSTRUCTION_FILENAME: dict[str, str] = {
     "codex": "AGENTS.md",
     "opencode": "AGENTS.md",
 }
+#: Every backend with a global instructions file, in catalog order: Vibey, built in, and the native CLIs.
+GLOBAL_PROMPT_BACKENDS: tuple[str, ...] = tuple(
+    backend for backend in AGENT_BACKENDS if backend == "vibey" or backend in GLOBAL_INSTRUCTION_FILENAME
+)
 
 
 def _opencode_global_dir(home: Path | None = None) -> Path:
@@ -56,6 +65,8 @@ def _opencode_global_dir(home: Path | None = None) -> Path:
 
 def global_instruction_path(backend: str, home: Path | None = None) -> Path:
     """Resolve the absolute path to *backend*'s global instructions file."""
+    if backend == "vibey":
+        return get_global_instructions_path()
     if backend == "claude":
         return get_claude_home(home) / GLOBAL_INSTRUCTION_FILENAME["claude"]
     if backend == "codex":
@@ -87,7 +98,7 @@ def read_global_agents_md(backend: str, home: Path | None = None) -> dict:
     return {
         "backend": backend,
         "path": str(path),
-        "filename": GLOBAL_INSTRUCTION_FILENAME[backend],
+        "filename": path.name,
         "content": content,
         "exists": exists,
         "read_error": read_error,
@@ -95,8 +106,8 @@ def read_global_agents_md(backend: str, home: Path | None = None) -> dict:
 
 
 def read_all_global_agents_md(home: Path | None = None) -> list[dict]:
-    """Return the editor seed for every known backend, in catalog order."""
-    return [read_global_agents_md(backend, home) for backend in NATIVE_CLI_BACKENDS]
+    """Return the editor seed for every backend with a global file, in catalog order."""
+    return [read_global_agents_md(backend, home) for backend in GLOBAL_PROMPT_BACKENDS]
 
 
 def write_global_agents_md(backend: str, content: str, home: Path | None = None) -> dict:
@@ -121,7 +132,7 @@ def write_many_global_agents_md(
     """
     targets: list[str] = []
     for backend in backends:
-        if not is_agent_backend(backend) or backend not in GLOBAL_INSTRUCTION_FILENAME:
+        if backend not in GLOBAL_PROMPT_BACKENDS:
             raise ValueError(f"Unsupported agent backend: {backend!r}")
         targets.append(backend)
     if not targets:

@@ -4210,11 +4210,12 @@
     "description": "Edit each backend's global instructions file — applied ahead of every agent's system prompt on this machine.",
     "placeholder": "Write global instructions for this backend in Markdown…",
     "tipEffect": "Prepended to the system prompt of every {{backend}} agent. New sessions pick it up.",
+    "tipEffectVibey": "Loaded into the system prompt of every Vibey agent at the start of each Turn, ahead of the project's AGENTS.md files. An edit applies on the next Turn.",
     "missingHint": "this file doesn't exist yet — saving creates it",
     "readError": "Couldn't read this file (not valid UTF-8). Fix it on disk before editing it here.",
     "save": "Save",
     "sync": "Sync to all backends",
-    "syncConfirm": "Overwrite all three backends' global prompt files with {{backend}}'s current content?",
+    "syncConfirm": "Overwrite every backend's global prompt file with {{backend}}'s current content?",
     "saved": "Saved {{backend}}'s global prompt.",
     "synced": "Synced to all backends.",
     "discardConfirm": "You have unsaved changes. Close and discard them?"
