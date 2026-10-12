@@ -100,6 +100,16 @@ impl Pet {
     pub fn enabled(&self) -> bool {
         self.store().enabled()
     }
+
+    fn page_loading(&self) {
+        self.store().page_loading();
+        lock(&self.hit_regions).clear();
+    }
+
+    fn window_gone(&self) {
+        self.store().window_gone();
+        lock(&self.hit_regions).clear();
+    }
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -295,7 +305,7 @@ fn reconcile_now(app: &AppHandle) -> Option<WebviewWindow> {
             pet.poll_wake.notify_one();
             let _ = window.destroy();
             *lock(&pet.window_origin) = None;
-            pet.store().window_gone();
+            pet.window_gone();
         }
         None => {}
     }
@@ -335,7 +345,7 @@ fn build_window(app: &AppHandle, origin: &LoopbackOrigin) -> Option<WebviewWindo
     let at = (anchor.x, anchor.y);
     let unit = area_for(&areas, at).map_or(1.0, |area| area.unit);
     let (x, y) = restored_window_origin(at, unit);
-    pet.store().page_loading();
+    pet.page_loading();
     let builder = WebviewWindowBuilder::new(app, PET_WINDOW, WebviewUrl::External(url))
         .initialization_script(DESKTOP_SHELL_MARKER)
         .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny)
@@ -368,7 +378,7 @@ fn build_window(app: &AppHandle, origin: &LoopbackOrigin) -> Option<WebviewWindo
         }
         Err(error) => {
             eprintln!("The desktop pet window could not be created: {error}");
-            pet.store().window_gone();
+            pet.window_gone();
             None
         }
     }
@@ -436,8 +446,7 @@ fn is_pet_page(origin: Option<&LoopbackOrigin>, url: &Url) -> bool {
 /// The pet window's own document is starting over: summons wait for it.
 pub fn page_loading(app: &AppHandle) {
     if let Some(pet) = app.try_state::<Pet>() {
-        pet.store().page_loading();
-        lock(&pet.hit_regions).clear();
+        pet.page_loading();
     }
 }
 
@@ -764,6 +773,40 @@ pub fn pet_open(window: WebviewWindow, link: String) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn document_and_window_lifetimes_release_input_regions_and_fence_summons() {
+        let directory = tempfile::tempdir().unwrap();
+        let pet = Pet::new(directory.path().join("pet.json"));
+        let seed = || {
+            pet.store().page_ready();
+            lock(&pet.hit_regions).push(HitRect {
+                x: 10.0,
+                y: 20.0,
+                width: 100.0,
+                height: 50.0,
+            });
+        };
+        seed();
+        pet.page_loading();
+        assert!(lock(&pet.hit_regions).is_empty());
+        assert!(!pet.store().page_is_ready());
+        assert_eq!(pet.store().summon(PetIntent::Show), None);
+        // A reload/build keeps a queued summon until the replacement is ready.
+        pet.page_loading();
+        assert_eq!(pet.store().page_ready().summon_pending.unwrap().intent, PetIntent::Show);
+
+        seed();
+        pet.store().page_loading();
+        assert_eq!(pet.store().summon(PetIntent::Listen), None);
+        pet.window_gone();
+        assert!(lock(&pet.hit_regions).is_empty());
+        assert!(!pet.store().page_is_ready());
+        assert!(pet.store().page_ready().summon_pending.is_none());
+        // A fresh document may register its own regions after the old ones go.
+        seed();
+        assert!(lock(&pet.hit_regions)[0].contains(50.0, 40.0));
+    }
 
     #[test]
     fn the_pet_navigates_only_to_its_own_route_on_its_own_runtime() {

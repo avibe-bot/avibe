@@ -630,6 +630,9 @@ function useHitRegions(rootRef: React.RefObject<HTMLDivElement | null>) {
       root.removeEventListener('transitionrun', motion);
       root.removeEventListener('pointerover', motion);
       root.removeEventListener('pointerout', motion);
+      // Authorization rechecks can remove this surface while its native window
+      // stays alive. Release its desktop input regions together with the DOM.
+      void petBridge.setHitRegions([]).catch(() => undefined);
     };
   }, [rootRef]);
 }

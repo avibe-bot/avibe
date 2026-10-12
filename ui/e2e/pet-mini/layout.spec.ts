@@ -1,5 +1,34 @@
 import { expect, test } from '@playwright/test';
 
+test('an unmounted surface releases desktop input and a remount reports fresh regions', async ({ page }) => {
+  await page.goto('/e2e/pet-mini/fixture.html');
+  await expect(page.locator('.pet-mini-collapsed')).toBeVisible();
+  await expect.poll(() => page.evaluate(() => window.petLayoutHitRegions.length)).toBeGreaterThan(0);
+  // Unmount during the reporter's motion window, as an authorization recheck
+  // does. Queued animation/observer work must not reinstall invisible regions.
+  await page.locator('.pet-mini-collapsed').click();
+  await page.evaluate(() => window.setPetLayoutVisible(false));
+  await expect(page.locator('.pet-mini-avatar-button')).toHaveCount(0);
+  await expect.poll(() => page.evaluate(() => window.petLayoutHitRegions)).toEqual([]);
+  await page.evaluate(() => new Promise<void>((resolve, reject) => {
+    const until = performance.now() + 600;
+    const check = () => {
+      if (window.petLayoutHitRegions.length) reject(new Error('Unmounted pet reclaimed desktop input'));
+      else if (performance.now() >= until) resolve();
+      else requestAnimationFrame(check);
+    };
+    requestAnimationFrame(check);
+  }));
+  await page.evaluate(() => window.setPetLayoutVisible(true));
+  await expect(page.locator('.pet-mini-avatar-button')).toBeVisible();
+  await expect.poll(() => page.evaluate(() => {
+    const avatar = document.querySelector('.pet-mini-avatar-button')!.getBoundingClientRect();
+    const x = avatar.left + avatar.width / 2, y = avatar.top + avatar.height / 2;
+    return window.petLayoutHitRegions.some((rect) =>
+      x >= rect.x && x < rect.x + rect.width && y >= rect.y && y < rect.y + rect.height);
+  })).toBe(true);
+});
+
 for (const main of [true, false]) {
   for (const layers of [1, 3, 5]) {
     test(`collapsed layers follow the front height (main=${main}, layers=${layers})`, async ({ page }) => {

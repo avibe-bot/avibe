@@ -929,7 +929,7 @@ describe('PetPage review fixes, round 10', () => {
 });
 
 describe('PetPage review fixes, round 12', () => {
-  it('keeps the panel matching the native frame when a resize fails', async () => {
+  it('keeps the panel matching the acknowledged shell state when activation fails', async () => {
     const invoke = vi.fn((command: string) => {
       if (command === 'pet_ready') return Promise.resolve({ binding: 'S', revision: 1, summon_pending: null });
       if (command === 'pet_set_expanded') return Promise.reject(new Error('no monitor'));
@@ -1216,7 +1216,7 @@ describe('PetPage live convergence', () => {
     expect(screen.getByLabelText('pet.panel')).toBeTruthy();
   });
 
-  it('shows the panel and marks replies read only once the shell has grown the frame', async () => {
+  it('shows the panel and marks replies read only once the shell acknowledges activation', async () => {
     tails.S = [message('u', 'S', { author: 'user', type: 'user' }), message('r', 'S', { read_at: null })];
     unreadBySession = { S: 1 };
     const grow = deferred<unknown>();
@@ -1234,7 +1234,7 @@ describe('PetPage live convergence', () => {
     expect(screen.queryByLabelText('pet.panel')).toBeNull();
     expect(markRead).not.toHaveBeenCalled();
 
-    await act(async () => grow.reject(new Error('resize failed')));
+    await act(async () => grow.reject(new Error('panel activation failed')));
     await settle();
     expect(screen.queryByLabelText('pet.panel')).toBeNull();
     expect(markRead).not.toHaveBeenCalled();
@@ -1243,16 +1243,21 @@ describe('PetPage live convergence', () => {
   it('reads the session on a status event when no read has supplied it yet', async () => {
     sessionReads.S = vi.fn()
       .mockResolvedValueOnce({ status: 500, session: null })
-      .mockResolvedValue({ status: 200, session: session('S') });
+      .mockResolvedValue({ status: 200, session: session('S'), capabilities: { can_chat: true } });
     devBind('S');
     render(<PetPage />);
     await showDetail();
     await screen.findByLabelText('pet.panel');
     await settle();
-    expect(api.getSessionResult).toHaveBeenCalledWith('S');
+    expect(sessionReads.S).toHaveBeenCalledTimes(1);
+    expect(screen.getByLabelText('pet.keyboard.open').hasAttribute('disabled')).toBe(true);
 
     await emit((h) => h.onSessionStatus?.({ session_id: 'S', agent_status: 'idle' }));
-    expect(await screen.findAllByText('Session S')).toBeTruthy();
+    await waitFor(() => expect(sessionReads.S).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.getByLabelText('pet.keyboard.open').hasAttribute('disabled')).toBe(false));
+    summon('listen');
+    await userEvent.type(await screen.findByRole('textbox'), 'recovered{Enter}');
+    expect(api.sendSessionMessage).toHaveBeenCalledExactlyOnceWith('S', { text: 'recovered' });
   });
 
   it('reads the tail on a live row when no tail read has landed yet', async () => {
@@ -1401,6 +1406,64 @@ describe('desktop mini v2 interaction contract', () => {
   afterEach(() => {
     vi.useRealTimers();
     api.getTurnState.mockResolvedValue(idleTurn);
+  });
+
+  it.each(['update-first', 'ack-first'])('keeps quick-reply ownership when message.updated and the send response arrive %s', async (order) => {
+    const asking = message('q1', 'S', { content: { quick_replies: ['Yes', 'No'] } });
+    tails.S = [message('u', 'S', { author: 'user', type: 'user' }), asking];
+    const pending = deferred<WorkbenchMessage>();
+    api.sendSessionMessage.mockImplementationOnce(() => pending.promise);
+    devBind('S'); render(<PetPage />); await showDetail();
+    summon('listen');
+    const input = await screen.findByRole('textbox');
+    await userEvent.click(await screen.findByText('Yes'));
+    const chosen = { ...asking, content: { ...asking.content, quick_reply_chosen: 'Yes' } };
+    const update = () => {
+      tails.S = tails.S.map((row) => row.id === chosen.id ? chosen : row);
+      return emit((h) => h.onMessageUpdated?.(chosen));
+    };
+    const acknowledge = () => act(async () => {
+      const sent = message('sent', 'S', { author: 'user', type: 'user', text: 'Yes' });
+      // The post-send tail read must reflect the acknowledged durable write.
+      tails.S = [...tails.S, sent];
+      pending.resolve(sent);
+    });
+    if (order === 'update-first') {
+      await update();
+      await userEvent.type(input, 'duplicate{Enter}');
+      expect(api.sendSessionMessage).toHaveBeenCalledTimes(1);
+      await acknowledge();
+    } else {
+      await userEvent.type(input, 'duplicate{Enter}');
+      expect(api.sendSessionMessage).toHaveBeenCalledTimes(1);
+      await acknowledge();
+      await update();
+    }
+    expect(api.sendSessionMessage).toHaveBeenCalledExactlyOnceWith('S', { text: 'Yes', metadata: { quick_reply_for: 'q1' } });
+    expect(screen.queryByRole('button', { name: 'Yes', exact: true })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'No', exact: true })).toBeNull();
+    // An older update must never reclaim a newer result's quick-reply group.
+    await emit((h) => h.onMessageNew?.(message('q2', 'S', { content: { quick_replies: ['Continue', 'Wait'] } })));
+    expect(await screen.findByRole('button', { name: 'Continue', exact: true })).toBeTruthy();
+    await update();
+    expect(screen.getByRole('button', { name: 'Continue', exact: true }).hasAttribute('disabled')).toBe(false);
+    expect(api.sendSessionMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps quick replies behind the same uncertain-send lock as typed input', async () => {
+    tails.S = [message('u', 'S', { author: 'user', type: 'user' }), message('q1', 'S', { content: { quick_replies: ['Yes', 'No'] } })];
+    api.sendSessionMessage.mockRejectedValueOnce(new Error('connection lost'));
+    devBind('S'); render(<PetPage />); await showDetail();
+    await userEvent.click(await screen.findByText('Yes'));
+    expect(await screen.findByText('newSession.sendUncertain')).toBeTruthy();
+    summon('listen');
+    expect(screen.queryByRole('textbox')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Yes', exact: true })).toBeNull();
+    // A newer result cannot bypass a send whose admission is still unknown.
+    await emit((h) => h.onMessageNew?.(message('q2', 'S', { content: { quick_replies: ['Continue', 'Wait'] } })));
+    expect(screen.queryByRole('button', { name: 'Continue', exact: true })).toBeNull();
+    await userEvent.keyboard('duplicate{Enter}');
+    expect(api.sendSessionMessage).toHaveBeenCalledExactlyOnceWith('S', { text: 'Yes', metadata: { quick_reply_for: 'q1' } });
   });
 
   it('keeps waiting definitions pausable without marking them as executing', async () => {

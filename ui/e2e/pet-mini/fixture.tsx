@@ -14,6 +14,7 @@ await i18n.changeLanguage('en');
 declare global {
   interface Window {
     petLayoutHitRegions: Parameters<typeof petBridge.setHitRegions>[0];
+    setPetLayoutVisible: (visible: boolean) => void;
   }
 }
 window.petLayoutHitRegions = [];
@@ -70,12 +71,14 @@ class FixtureEvents {
 }
 window.EventSource = FixtureEvents as unknown as typeof EventSource;
 
-createRoot(document.getElementById('root')!).render(
+const root = createRoot(document.getElementById('root')!);
+window.setPetLayoutVisible = (visible) => root.render(
   <ToastProvider>
     <ApiProvider>
       <InstanceAuthorizationProvider session={{ remote: false, instance_kind: 'personal', capabilities: OWNER_INSTANCE_CAPABILITIES }}>
-        <WorkbenchInboxProvider><PetWindow><PetPage /></PetWindow></WorkbenchInboxProvider>
+        <WorkbenchInboxProvider><PetWindow>{visible ? <PetPage /> : null}</PetWindow></WorkbenchInboxProvider>
       </InstanceAuthorizationProvider>
     </ApiProvider>
   </ToastProvider>,
 );
+window.setPetLayoutVisible(true);

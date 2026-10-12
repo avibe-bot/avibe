@@ -27,6 +27,8 @@ quick-reply, and pet lifecycle paths. Backend APIs are outside this change.
 - The page reports clipped logical hit rectangles. The native poller runs at 16ms
   inside the window, 100ms outside, and sleeps while hidden. Both new commands
   enforce the existing pet-only origin/caller check and capability boundary.
+  Unmounting the page clears the rectangles, so authorization rechecks leave
+  the empty native window fully click-through.
 - Hotkey press and release are distinct. A released hotkey during page/runtime
   startup opens text rather than starting a microphone later. Hold threshold is
   320ms; leaving before the threshold cancels it. Dragging retains the existing path.
@@ -110,13 +112,15 @@ keeps its page-coloured plate solely to cover the surrounding web-page text.
 
 ## Validation
 
-- Focused pet, voice ownership, dictation-wrapper and bridge suites: 139 tests.
-- `npm run test:pet-mini`: 12 real-browser layout checks across Chromium and
+- Focused pet, voice ownership, dictation-wrapper and bridge suites: 142 tests.
+- `npm run test:pet-mini`: 14 real-browser layout/lifecycle checks across Chromium and
   WebKit. They cover both front-card heights and 1/3/5 layers, exact stack/peek
   geometry, long-title containment, unchanged avatar bounds on expansion, and
   transparent gaps excluded from the actual hit-region reporter's output.
+  Unmounting during motion releases all hit regions without later reinstalling
+  them; remounting reports the new surface's regions.
 - UI production build.
-- Desktop workspace Rust tests: 366 passed, including shell capability boundaries,
+- Desktop workspace Rust tests: 367 passed, including shell capability boundaries,
   fixed-window anchoring, optional persistence and cold-start shortcut release.
 - Desktop workspace formatting and clippy for all targets/features, warnings denied.
 - Separate macOS app bundle build and native screenshots above.
@@ -124,6 +128,28 @@ keeps its page-coloured plate solely to cover the surrounding web-page text.
 The PR's exact-head Codex review, unresolved-thread inventory and CI are separate
 delivery gates. Windows/Linux native visual and voice handoff evidence is not
 claimed by these macOS captures. Production voice stays off pending its gate.
+
+## Test preservation
+
+All 66 pre-v2 `PetPage` cases from base `5018b6ffc` remain. Twenty keep their
+original titles and bodies; 46 adapt entry points, selectors or names to the
+main-card/detail and input-slot model. Five of those have renamed titles:
+four replace native-resize terminology with panel activation, and one follows
+v2 §8 by including the main session's own running sub-tasks in Vibey's busy pose.
+No binding, authorization, send, unread, setup or event-order invariant was
+removed. The PR body lists every adapted original test and its reason.
+
+The default bound-session fixtures now contain one user message so a main card
+exists to open; separate empty-session cases cover switching with and without
+background work. A failed-first-session-read case verifies that the status event
+performs a second read, restores the validated chat capability and permits a
+send; it no longer uses the removed v1 session-title header as a proxy.
+
+The suite has 78 cases after additions. In particular, the quick-reply tests
+exercise both orders of `message.updated` and the POST response, preserve the
+single-message lock while pending, and verify an older update cannot reclaim a
+newer result's options. A separate uncertain quick-reply case blocks both typed
+input and newer quick-reply groups until admission uncertainty is resolved.
 
 ## Review inventory
 
@@ -135,6 +161,29 @@ The first findings-bearing head, `6b969e9d2`, received three Codex findings:
 | Unread affordance preservation | Restore the existing ready-state badge and test that the inbox owns its removal. |
 | Binding control reachability | Keep the picker accessible before the first exchange, with and without sub-task cards; test selecting another session in both states. |
 
-There is one findings-bearing head so far; no root-cause class has repeated
-across reviewed heads. The owner's corrected layer geometry is included in the
-same repair, with the browser and native evidence above.
+The second findings-bearing head, `fe0736241`, received one finding:
+
+| Root-cause class | Resolution and consuming evidence |
+| --- | --- |
+| Native hit-region lifecycle cleanup | Clear shell rectangles when PetPage unmounts and when the shell loads a document or loses a window. Chromium/WebKit tests remove the page during motion, assert the empty surface stays click-through beyond the motion window, and verify new regions on remount. A shell lifecycle test consumes the same loading/destruction methods and checks input release and pending-summon ownership. |
+
+The whole lifecycle class was checked in this repair:
+
+- Authorization loading removes only PetPage: its effect cleanup clears regions
+  and cancels its animation/observer work.
+- Hide/show retains the document and its regions. A hidden native window cannot
+  intercept desktop input; the poller sleeps while hidden and wakes on summon.
+  Summon changes the rendered panel through the existing DOM reporter.
+- Runtime loss or replacement destroys the window and invalidates its poller
+  generation. The shell now clears the old rectangles at this boundary as well.
+- Window creation now clears regions before building, without waiting for the
+  first page-load callback. Navigation/reload uses the same loading method.
+  Queued summons survive loading but are discarded when the window is gone.
+
+There are two distinct findings-bearing heads; no root-cause class has repeated
+across reviewed heads. Counts use the review envelope's commit, not the inline
+comment's reanchored commit. The circuit breaker has not tripped. The owner's
+corrected layer geometry is included in the first repair, with the browser and
+native evidence above. This UI rewrite is subject to the three-head breaker:
+a third findings-bearing head pauses edits/pushes for parent-session diagnosis,
+even if that head introduces another distinct root-cause class.
