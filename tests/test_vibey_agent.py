@@ -1749,6 +1749,46 @@ async def test_another_agent_on_the_backend_is_not_told_it_is_vibey(engine, sess
     assert "You are Rex, a careful code reviewer." in system and f"- {CONCURRENT_CALLS_RULE}" in system
 
 
+async def test_the_instruction_files_enter_between_the_head_and_avibes_sections_and_are_read_every_turn(
+    engine, session, tmp_path, published, monkeypatch
+) -> None:
+    # C-7 tools.md section 9: the global file in the Avibe home, then the files from the root down to the Session's
+    # cwd. They are read every Turn, and the system prompt changes only when one of them does, so the cache holds.
+    from config import paths
+    from modules.agents.vibey.prompt import FINAL_REPLY_RULE
+
+    # The Avibe home holds the state database too, so only the global file's path moves.
+    global_path = tmp_path / "avibe-home/AGENTS.md"
+    monkeypatch.setattr(paths, "get_global_instructions_path", lambda: global_path)
+    harness = _Harness(
+        engine, tmp_path, "avibe", [[Done(assistant(reply))] for reply in ("one", "two", "three", "four")],
+        tools=[FakeTool("read"), FakeTool("bash")],
+    )
+
+    await harness.agent.handle_message(harness.request("no files yet"))
+    global_path.parent.mkdir(parents=True, exist_ok=True)
+    global_path.write_text("Report in Chinese.", encoding="utf-8")
+    (tmp_path / "AGENTS.md").write_text("Run tests under the sandbox.", encoding="utf-8")
+    await harness.agent.handle_message(harness.request("now with files"))
+    await harness.agent.handle_message(harness.request("unchanged"))
+    (tmp_path / "AGENTS.md").write_text("Run tests under the sandbox. Never push to master.", encoding="utf-8")
+    await harness.agent.handle_message(harness.request("edited"))
+
+    without, first, again, edited = (request.system for request in harness.provider.requests)
+    # The section's text, stated here rather than built by the code under test.
+    section = (
+        "<project_context>\nProject-specific instructions and guidelines:\n"
+        "More general files come first; where two conflict, the later, more specific one wins.\n\n"
+        f'<project_instructions path="{global_path}">\nReport in Chinese.\n</project_instructions>\n\n'
+        f'<project_instructions path="{tmp_path / "AGENTS.md"}">\nRun tests under the sandbox.\n'
+        "</project_instructions>\n</project_context>"
+    )
+    head_end = without.index(FINAL_REPLY_RULE) + len(FINAL_REPLY_RULE)
+    assert first == f"{without[:head_end]}\n\n{section}{without[head_end:]}"
+    assert again == first
+    assert edited != first and "Never push to master." in edited
+
+
 async def test_an_idle_session_holds_no_adapter_state(engine, session, tmp_path, published) -> None:
     harness = _Harness(engine, tmp_path, "avibe", _tool_turn() + [[Done(assistant("again"))]])
 
