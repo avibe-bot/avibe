@@ -1455,6 +1455,10 @@ async def test_a_refused_model_route_fails_before_the_input_is_written(
     hub.enabled = gateway_enabled
     harness.controller.model_hub_service = SimpleNamespace(store=SimpleNamespace(load=lambda: hub))
     request = harness.request("hello")
+    # The shared turn pipeline opens every Turn in the prewrite phase (MessageHandler._handle_turn).
+    from core.native_dispatch_phase import DISPATCH_PHASE_PREWRITE, set_dispatch_phase
+
+    set_dispatch_phase(request.context, DISPATCH_PHASE_PREWRITE)
     await harness.agent.handle_message(request)
 
     assert harness.controller.started == []
@@ -1473,6 +1477,11 @@ async def test_a_refused_model_route_fails_before_the_input_is_written(
         expected = "Vibey's run failed."
     assert harness.controller.im_client.sent == [f"❌ {expected}"]
     assert [terminal["is_error"] for terminal in harness.controller.terminals] == [True]
+    # A supply refusal holds its input for an explicit retry; an unclassified failure keeps the automatic ones.
+    from core.native_dispatch_phase import prewrite_failure_evidence
+
+    held = prewrite_failure_evidence(request.context).get("requires_explicit_retry") is True
+    assert held is (hub_switch == "0" or not gateway_enabled or not has_source)
 
 
 # --- settlement and run shape -----------------------------------------------------------

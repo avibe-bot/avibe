@@ -4634,6 +4634,10 @@
     },
     "notifyLabel": "通知",
     "retryRequested": "已请求重试",
+    "failureNextStep": {
+      "openModels": "打开「模型」页",
+      "askAdmin": "请联系 Avibe 管理员在「模型」页处理。"
+    },
     "retryFailed": "未能提交重试，可以再次点击。",
     "collapse": "收起",
     "turnInProgress": "当前回合还在进行中，请等待回复后再发送。",

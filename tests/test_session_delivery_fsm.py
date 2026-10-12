@@ -5227,6 +5227,31 @@ async def test_concurrent_start_refusal_does_not_spend_or_reset_prewrite_budget(
 
 
 @pytest.mark.anyio
+async def test_a_held_input_does_not_block_a_new_message(managers):
+    """MESSAGE-DELIVERY-031: a hold keeps its input for an explicit retry; an IM person, who
+    has no Retry control, still gets a new message through."""
+    manager, restarted, engine, _other, starts = managers
+    held = await manager.deliver(
+        DeliveryRequest(session_id="ses_fsm", priority="p1", content="first"), context=_context(),
+    )
+    manager._settle_durable_prewrite_failure(
+        starts[-1][0], outcome=SETTLED_BY_NO_TERMINAL_RESULT,
+        failure_evidence={"reason": "model_supply_refusal", "requires_explicit_retry": True},
+    )
+    await restarted.recover_durable_delivery_state("ses_fsm")
+    assert delivery_store.requires_explicit_start_retry(_row(engine, held.delivery_id))
+    count = len(starts)
+
+    follow_up = await manager.deliver(
+        DeliveryRequest(session_id="ses_fsm", priority="p1", content="second"), context=_context(),
+    )
+
+    assert follow_up.state == "claimed"
+    assert [text for _, text in starts[count:]] == ["second"]
+    assert delivery_store.requires_explicit_start_retry(_row(engine, held.delivery_id))
+
+
+@pytest.mark.anyio
 async def test_prewrite_batched_retry_budget_is_per_input(managers):
     manager, restarted, engine, _other, starts = managers
     older = await manager.deliver(

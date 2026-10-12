@@ -372,8 +372,11 @@ _HUB_SUPPLY_REFUSALS = {
     "gateway_off": "errors.modelGatewayOff",
     "no_source": "errors.modelSourceRequired",
 }
-# The turn-outcome copy that already sends its reader to Models.
-_MODELS_ROUTE_REFUSALS = frozenset({"modelHub.launch.interrupted", "modelHub.launch.route_unconfigured"})
+# The turn-outcome copy whose fix is in Models: it sends its reader there, or names a backend's
+# model list, which Models keeps (a model the person removed from the list, even its last one).
+_MODELS_ROUTE_REFUSALS = frozenset(
+    {"modelHub.launch.interrupted", "modelHub.launch.route_unconfigured", "modelHub.launch.model_unlisted"}
+)
 MODELS_PAGE_PATH = "/settings/models"
 
 
@@ -410,62 +413,53 @@ def is_model_hub_refusal(error: BaseException | None) -> bool:
     return isinstance(error, ModelSupplyRefusal) or turn_refusal(error) is not None
 
 
-def models_next_step(
-    controller: Any,
-    context: Any,
+# The structured next step a Workbench notice carries; the Workbench draws it from its own copy.
+MODELS_NEXT_STEP = "models"
+SUPPLY_REFUSAL_RETRY_REASON = "model_supply_refusal"
+
+
+def refusal_fixed_in_models(
     *,
     cause: BaseException | None = None,
     outcome: TurnOutcomeProjectionInput | None = None,
-) -> str | None:
-    """The line that ends a refused turn whose fix is in Models, else ``None``.
+) -> bool:
+    """Whether a refused turn's fix is in Models.
 
-    A supply refusal says whether Models fixes it; a turn outcome does when its own
-    copy already sends the reader there. The Workbench knows its requester: one who
-    manages the instance gets the link, anyone else is told to ask an admin. No IM
-    identity maps to a Workbench principal, so an IM refusal makes no claim about its
-    requester: it says who can fix it, offering Avibe Cloud's public URL when there is one.
+    A supply refusal says so itself; a turn outcome does when its own copy already
+    sends the reader there.
     """
 
     if isinstance(cause, ModelSupplyRefusal):
-        fixed_in_models = cause.fixed_in_models
-    else:
-        refused = outcome if outcome is not None else turn_refusal(cause)
-        copy = project_turn_outcome_copy(refused) if refused is not None else None
-        fixed_in_models = copy is not None and copy.key in _MODELS_ROUTE_REFUSALS
-    if not fixed_in_models:
-        return None
-    language = _language(controller)
-    if _context_platform(controller, context) == "avibe":
-        if _workbench_caller_manages_instance(context):
-            return t("errors.openModelsLink", language, url=MODELS_PAGE_PATH)
-        return t("errors.askAdminForModels", language)
+        return cause.fixed_in_models
+    refused = outcome if outcome is not None else turn_refusal(cause)
+    copy = project_turn_outcome_copy(refused) if refused is not None else None
+    return copy is not None and copy.key in _MODELS_ROUTE_REFUSALS
+
+
+def models_next_step_text(controller: Any) -> str:
+    """The IM line that ends a refusal whose fix is in Models.
+
+    No IM identity maps to a Workbench principal, so the line makes no claim about its
+    requester: it says who can fix it, offering Avibe Cloud's public URL when there is one.
+    The Workbench draws its own next step from ``MODELS_NEXT_STEP`` instead.
+    """
+
     from core.avibe_cloud import workbench_url
 
+    language = _language(controller)
     url = workbench_url(MODELS_PAGE_PATH, getattr(controller, "config", None))
     return t("errors.modelsNextStepImUrl", language, url=url) if url else t("errors.modelsNextStepIm", language)
 
 
-def _context_platform(controller: Any, context: Any) -> str | None:
-    return (
-        getattr(context, "platform", None)
-        or (getattr(context, "platform_specific", None) or {}).get("platform")
-        or getattr(controller, "primary_platform", None)
-    )
+def hold_refused_input(context: Any) -> None:
+    """Keep an input the Model Hub refused for want of a model for an explicit retry.
 
+    A supply refusal fails the same way until someone changes Models, so it must not
+    spend the automatic startup retries a transient failure gets.
+    """
 
-def _workbench_caller_manages_instance(context: Any) -> bool:
-    """Whether the Workbench caller passes the gate on Models (``can_manage_instance``)."""
-
-    from core.caller_context import caller_context_from_platform_payload, caller_resource_user_context
-    from storage.resource_access_service import current_resource_context
-
-    caller = caller_context_from_platform_payload(getattr(context, "platform_specific", None), message=context)
-    remote = caller.is_remote if caller is not None else str(getattr(context, "user_id", "")).startswith("remote:")
-    if not remote:
-        return True  # The local Workbench is the instance owner's.
-    # A remote caller is judged by its own authorization snapshot; a missing one fails closed.
-    snapshot = caller_resource_user_context(caller) if caller is not None else None
-    return current_resource_context(snapshot or {}, is_remote=True).can_manage_instance
+    if context is not None:
+        mark_prewrite_recovery_required(context, SUPPLY_REFUSAL_RETRY_REASON)
 
 
 def _hold_unrunnable_input(context: Any, error: ModelHubError) -> None:

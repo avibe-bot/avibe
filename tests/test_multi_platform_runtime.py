@@ -26,7 +26,7 @@ from core.native_dispatch_phase import (
 from core.processing_indicator import ProcessingIndicatorService
 from core.resource_governance import AgentResourceFailure
 from modules.agents.base import AgentRequest
-from modules.agents.model_hub import OpenCodeOverlay, launch_for_context
+from modules.agents.model_hub import OpenCodeOverlay, launch_for_context, models_next_step_text
 from modules.agents.service import AgentService
 from modules.agents.opencode.agent import OpenCodeAgent
 from modules.agents.opencode.server import (
@@ -248,7 +248,8 @@ def test_opencode_turn_on_an_unlisted_model_fails_once_with_the_shared_copy(
 
     controller.agent_auth_service.maybe_emit_auth_recovery_message.assert_not_awaited()
     notices = [call.args[2] for call in controller.emit_agent_message.await_args_list if call.args[1] == "notify"]
-    assert notices == [f"❌ {unlisted_model_copy('opencode', language)}"]
+    # The list is kept in Models, so IM ends the refusal with where to fix it.
+    assert notices == [f"❌ {unlisted_model_copy('opencode', language)}\n{models_next_step_text(controller)}"]
     assert prewrite_failure_evidence(context) == {
         "reason": "model_hub_model_unlisted", "requires_explicit_retry": True,
     }

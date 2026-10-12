@@ -944,15 +944,15 @@ class AgentAuthService:
         When the Model Hub leaves it no model now (``hub_supply_block``: disabled, gateway off,
         no source), that cause is the answer, as it is for a Turn; otherwise the guidance is.
         """
-        from modules.agents.model_hub import ModelSupplyRefusal, hub_supply_refusal, models_next_step
+        from modules.agents.model_hub import hub_supply_refusal, models_next_step_text
 
         refusal = await asyncio.to_thread(hub_supply_refusal, self.controller, backend, self._lang())
         if refusal is not None:
-            answer, cause = f"❌ {refusal}", refusal
+            answer, fixed_in_models = f"❌ {refusal}", refusal.fixed_in_models
         else:
-            answer = self._t("command.setup.builtinBackend", backend=display_name_for_backend(backend))
-            cause = ModelSupplyRefusal(answer, fixed_in_models=True)
-        next_step = models_next_step(self.controller, context, cause=cause)
+            answer, fixed_in_models = self._t("command.setup.builtinBackend", backend=display_name_for_backend(backend)), True
+        # `/setup` is an IM command, so it carries the IM form of the step.
+        next_step = models_next_step_text(self.controller) if fixed_in_models else None
         await self._send_message(context, "\n".join(line for line in (answer, next_step) if line))
 
     async def start_setup(

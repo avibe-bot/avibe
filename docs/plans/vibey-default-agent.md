@@ -83,10 +83,17 @@ On master before this change:
   `modules/agents/model_hub.py`. This covers:
   - the supply blocks other than `hub_disabled`;
   - the built-in backend's missing model;
-  - route refusals whose copy already sends the reader to Models.
-- **On the Workbench,** the requester is known, so the step depends on them:
-  - a caller with `can_manage_instance` (the gate on `/settings/models`) gets a link to `/settings/models`;
-  - anyone else gets `errors.askAdminForModels`, never a link they would be bounced from.
+  - route refusals whose copy already sends the reader to Models;
+  - an Agent model that is not in its backend's model list (`model_unlisted`), including one a person emptied the list
+    of. The list and the Agent row stay as the person left them; the step points to where the list is kept. Like the
+    supply refusals, this refusal already holds its input for an explicit retry.
+- **On the Workbench,** notices are drawn as plain text, never Markdown: a notice can carry provider or upstream text,
+  and that must not become clickable. So the step travels as data, not text. The notice's metadata says
+  `failure_next_step: "models"`, and the Workbench draws the step from its own copy, for the viewer:
+  - a viewer with `can_manage_instance` (the gate on `/settings/models`) gets an **Open Models** button;
+  - anyone else gets "Ask an Avibe admin to fix this in Models.", never a link they would be bounced from.
+- **The form follows where the notice goes:** a scheduled or Harness Turn whose notices go to an IM channel gets the
+  IM line. A restart's copy replaces the refusal, and its step with it.
 - **In IM,** no identity maps an IM user to a Workbench principal. So the step is the same for everyone and makes no
   claim about the requester's access:
   - With Avibe Cloud paired, `errors.modelsNextStepImUrl` offers `workbench_url('/settings/models')` as information.
@@ -103,6 +110,12 @@ On master before this change:
   - the setup card note
   - the Settings → Backends list badge
   - the backend page notice and its Models link
+- **One refusal, held.** A supply refusal fails the same way until someone changes Models, so its input is held for
+  an explicit retry (prewrite failure evidence `model_supply_refusal`) instead of spending the automatic startup
+  retries. IM has no Retry control, so there the held input waits in the Session's queue, where the Workbench
+  retries or removes it; the person's next message still runs. The notice is plain text: a supply refusal is shown as
+  its own copy (`❌ …`), with no "Error:" wrapper and no formatter markup. Another dispatch error is escaped for the
+  IM it goes to, never for the Workbench.
 - **No fallback.** A turn sent to an Agent that cannot run is refused. It is never re-routed: the first turn pins its
   Agent to the Session, so a fallback would silently become permanent.
 
@@ -135,8 +148,8 @@ On master before this change:
 | Key | en | zh |
 |---|---|---|
 | `errors.modelSourceRequired` (server, new) | {backend} has no model source yet. Add an API key or a subscription in Models. | {backend} 还没有模型来源。请在「模型」页添加 API Key 或订阅。 |
-| `errors.openModelsLink` (server, new; Workbench) | [Open Models]({url}) | [打开「模型」页]({url}) |
-| `errors.askAdminForModels` (server, new; Workbench) | Ask an Avibe admin to fix this in Models. | 请联系 Avibe 管理员在「模型」页处理。 |
+| `chat.failureNextStep.openModels` (UI, new; Workbench) | Open Models | 打开「模型」页 |
+| `chat.failureNextStep.askAdmin` (UI, new; Workbench) | Ask an Avibe admin to fix this in Models. | 请联系 Avibe 管理员在「模型」页处理。 |
 | `errors.modelsNextStepImUrl` (server, new; IM) | Someone who manages this Avibe can fix it in Models: {url} | 管理这个 Avibe 的人可以在「模型」页处理：{url} |
 | `errors.modelsNextStepIm` (server, new; IM) | Someone who manages this Avibe can fix it in Models, in the Avibe Workbench. | 管理这个 Avibe 的人可以在 Avibe 工作台的「模型」页处理。 |
 | `command.setup.builtinBackend` (server, new) | {backend} gets its models from Model Hub and needs no sign-in. Add or manage model sources in Models. | {backend} 通过模型网关获取模型，无需单独登录。请在「模型」页添加或管理模型来源。 |
@@ -202,9 +215,8 @@ and a closed-loop case in `tests/scenarios/auth_setup/test_auth_setup_scenarios.
   be a separate product decision.
 - Without a qualifying native selection, the starting model comes only from what models.dev can describe. An endpoint
   whose models it does not know, and that lists no native selection, still needs one click on Vibey's setup card.
-- Route refusals and the gateway-off copy keep their own "in Models" clause. The appended §2 step adds the link, or
-  tells a requester who cannot open Models to ask an admin. The two lines can overlap; only the step varies by
-  requester.
+- Route refusals and the gateway-off copy keep their own "in Models" clause. The §2 step (the Workbench's button or
+  admin hint, or the IM line) adds the way there. The two can overlap; only the step varies by viewer or surface.
 - Setup completion keeps its existing fallback, the second writer named in §1's invariants. If Vibey cannot run at
   completion, which takes a source models.dev cannot describe and no pick, the existing rule records the first
   runnable CLI assistant. Otherwise setup would finish on a default that cannot run.

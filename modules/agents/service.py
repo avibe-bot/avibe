@@ -477,7 +477,7 @@ class AgentService:
             await self._begin_turn_status(request.context)
             from core.agent_model_selection import require_agent_model
             from modules.agents.catalog import AGENT_BACKENDS, is_builtin_backend
-            from modules.agents.model_hub import ModelSupplyRefusal, hub_supply_refusal
+            from modules.agents.model_hub import ModelSupplyRefusal, hold_refused_input, hub_supply_refusal
 
             if agent.name in AGENT_BACKENDS:
                 has_subagent_model = request.subagent_model is not None
@@ -487,6 +487,7 @@ class AgentService:
                     # When the Model Hub is why there is no model to select, say so, not "select a model".
                     refusal = await asyncio.to_thread(hub_supply_refusal, self.controller, agent.name, language)
                     if refusal is not None:
+                        hold_refused_input(request.context)
                         raise refusal
                 try:
                     selected_model = require_agent_model(requested_model, agent.name, language)
@@ -494,6 +495,7 @@ class AgentService:
                     if not is_builtin_backend(agent.name):
                         raise
                     # A built-in backend's models all come from its Model Hub list, so Models is the fix.
+                    hold_refused_input(request.context)
                     raise ModelSupplyRefusal(str(exc), fixed_in_models=True) from None
                 if has_subagent_model:
                     request.subagent_model = selected_model
