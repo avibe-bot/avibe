@@ -15,9 +15,13 @@ import pytest
 from modules.agents.vibey.instructions import InstructionFile, load_instruction_files, project_context
 
 # The model-facing text, stated here rather than read from the constants it checks (C-7 tools.md section 9).
+SUBTREE = (
+    "A directory below the working directory may hold its own instruction file (AGENTS.override.md, AGENTS.md, or "
+    "CLAUDE.md) with more specific rules for that subtree: read it before changing files there."
+)
 HEADER = (
     "Project-specific instructions and guidelines:\n"
-    "More general files come first; where two conflict, the later, more specific one wins."
+    f"More general files come first; where two conflict, the later, more specific one wins.\n{SUBTREE}"
 )
 
 
@@ -166,7 +170,8 @@ def test_the_section_holds_each_file_by_path_in_order() -> None:
         '<project_instructions path="/src/\\u003ca \\u0022b\\u0022 \\u0026 c\\u003e/AGENTS.md">\nproject rules\n'
         "</project_instructions>\n</project_context>"
     )
-    assert project_context([]) == ""
+    # Files below the cwd are never loaded, so the rule to look for them stands even when no file loaded.
+    assert project_context([]) == f"<project_context>\n{SUBTREE}\n</project_context>"
 
 
 _NOTICE = re.compile(

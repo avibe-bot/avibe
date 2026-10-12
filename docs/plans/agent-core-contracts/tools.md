@@ -398,6 +398,7 @@ tools, guidelines) and before Avibe's injected sections:
 <project_context>
 Project-specific instructions and guidelines:
 More general files come first; where two conflict, the later, more specific one wins.
+A directory below the working directory may hold its own instruction file (AGENTS.override.md, AGENTS.md, or CLAUDE.md) with more specific rules for that subtree: read it before changing files there.
 
 <project_instructions path="/Users/me/.avibe/AGENTS.md">
 ...
@@ -409,14 +410,18 @@ More general files come first; where two conflict, the later, more specific one 
 </project_context>
 ```
 
-- The first line is Pi's. The second is Avibe's.
+- The first line is Pi's. The second and third are Avibe's.
+- Files below the cwd are not loaded. As Codex does in its prompt, the third line tells the Agent that a subtree may
+  hold its own file and to read it before changing files there.
+  - The line is constant, so it keeps the section cache-stable.
+  - It appears even when no file was loaded, since a subtree may still hold one. The section is then that line alone:
+    `<project_context>`, the line, `</project_context>`.
 - Each path is escaped (see Bound below) and never cut.
 - Three reasons for the place:
   - It is Pi's order: rules, then project context, then skills.
   - The head and these files are the same for every Session in that cwd, while Avibe's sections carry the Session's
     own facts, so the provider's cache shares the longer prefix across Sessions.
   - The Agent's own definition, in Avibe's sections, is more specific than a repository's guidance, and comes later.
-- With no file to load, the section is absent.
 
 **Read every Turn, cache-stable.** The files are read again at the start of every Turn, from that Turn's cwd, so an
 edit takes effect on the next Turn. The section depends only on the files' paths and contents, never on times or
@@ -444,4 +449,4 @@ file) is about 31 KB, so Codex's 32 KiB default would already cut it.
 - A file is loaded once per real path, not once per path string.
 - A blank file is left out.
 - An unreadable file is skipped silently. Pi warns on stderr, which the Agent has no place to show.
-- The precedence line.
+- The precedence line, and the line about files below the cwd (Codex's approach).
