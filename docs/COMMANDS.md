@@ -409,7 +409,9 @@ Repair backend login or provider auth through the IM flow.
 - Vibey gets every model through Model Hub, so there is nothing to sign in to
 - replies that model sources are added and managed in Models, ending with where to find Models: the public
   `/settings/models` URL when Avibe Cloud is paired, otherwise the Avibe Workbench
-- when Model Hub is disabled on the instance, replies that Vibey has no model to run on, since Models is unavailable
+- when Model Hub leaves Vibey no model right now, replies with that cause instead: the gateway is off, or no model
+  source exists yet (both end with the same pointer to Models), or Model Hub is disabled on the instance (no pointer,
+  since Models is unavailable)
 
 #### Permission
 

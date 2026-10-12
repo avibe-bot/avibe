@@ -280,27 +280,38 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
         )
 
     async def test_setup_on_the_built_in_backend_points_to_model_hub(self):
-        """`/setup vibey`, and a bare `/setup` on a Vibey default, explain where its models come from."""
+        """`/setup vibey`, and a bare `/setup` on a Vibey default, explain where its models come from.
+
+        When the Model Hub leaves Vibey no model now, that cause is the answer, as for a Turn.
+        """
+        from tests.scenario_harness.model_hub import config_with_sources, source
         from vibe.i18n import t
 
-        for args, resolved in (("vibey", "codex"), ("", "vibey")):
-            controller = _StubController()
-            controller.resolve_agent_for_context = lambda _context, resolved=resolved: resolved
-            controller.config.remote_access = SimpleNamespace(
-                vibe_cloud=SimpleNamespace(enabled=True, public_url="https://team.avibe.bot")
-            )
-            service = AgentAuthService(controller)
-            context = MessageContext(user_id="U1", channel_id="C1", platform="slack")
+        im_step = t("errors.modelsNextStepImUrl", "en", url="https://team.avibe.bot/settings/models")
+        cases = (
+            ("1", True, True, t("command.setup.builtinBackend", "en", backend="Vibey") + "\n" + im_step),
+            ("1", False, True, "❌ " + t("errors.modelGatewayOff", "en", backend="Vibey") + "\n" + im_step),
+            ("1", True, False, "❌ " + t("errors.modelSourceRequired", "en", backend="Vibey") + "\n" + im_step),
+            # Model Hub disabled on the instance takes Models away too: no step.
+            ("0", True, True, "❌ " + t("errors.modelHubDisabled", "en", backend="Vibey")),
+        )
+        for hub_switch, gateway_enabled, has_source, expected in cases:
+            for args, resolved in (("vibey", "codex"), ("", "vibey")):
+                controller = _StubController()
+                controller.resolve_agent_for_context = lambda _context, resolved=resolved: resolved
+                controller.config.remote_access = SimpleNamespace(
+                    vibe_cloud=SimpleNamespace(enabled=True, public_url="https://team.avibe.bot")
+                )
+                hub = config_with_sources([source("src_supply01", ["claude-opus-5-5"])] if has_source else [])
+                hub.enabled = gateway_enabled
+                controller.model_hub_service = SimpleNamespace(store=SimpleNamespace(load=lambda hub=hub: hub))
+                service = AgentAuthService(controller)
+                context = MessageContext(user_id="U1", channel_id="C1", platform="slack")
 
-            with patch.dict(os.environ, {"VIBE_MODEL_HUB_ENABLED": "1"}):
-                await service.handle_setup_command(context, args)
+                with patch.dict(os.environ, {"VIBE_MODEL_HUB_ENABLED": hub_switch}):
+                    await service.handle_setup_command(context, args)
 
-            assert controller.im_client.sent_messages == [(
-                "C1",
-                t("command.setup.builtinBackend", "en", backend="Vibey")
-                + "\n"
-                + t("errors.modelsNextStepImUrl", "en", url="https://team.avibe.bot/settings/models"),
-            )]
+                assert controller.im_client.sent_messages == [("C1", expected)], (hub_switch, gateway_enabled, has_source, args)
 
     async def test_handle_setup_command_supports_claude_console_login_option(self):
         controller = _StubController()

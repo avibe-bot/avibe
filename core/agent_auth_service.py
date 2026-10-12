@@ -939,17 +939,21 @@ class AgentAuthService:
         await self.start_setup(context, backend=backend, force_reset=True, claude_login_method=claude_login_method)
 
     async def _send_builtin_setup_guidance(self, context: MessageContext, backend: str) -> None:
-        """Answer `/setup` for the built-in backend: it signs in to nothing, its models come from Model Hub."""
-        from config.v2_config import hub_supply_block
-        from modules.agents.model_hub import ModelSupplyRefusal, models_next_step
+        """Answer `/setup` for the built-in backend: it signs in to nothing, its models come from Model Hub.
 
-        name = display_name_for_backend(backend)
-        if hub_supply_block(backend, None) == "hub_disabled":
-            await self._send_message(context, f"❌ {self._t('errors.modelHubDisabled', backend=name)}")
-            return
-        guidance = self._t("command.setup.builtinBackend", backend=name)
-        next_step = models_next_step(self.controller, context, cause=ModelSupplyRefusal(guidance, fixed_in_models=True))
-        await self._send_message(context, "\n".join(line for line in (guidance, next_step) if line))
+        When the Model Hub leaves it no model now (``hub_supply_block``: disabled, gateway off,
+        no source), that cause is the answer, as it is for a Turn; otherwise the guidance is.
+        """
+        from modules.agents.model_hub import ModelSupplyRefusal, hub_supply_refusal, models_next_step
+
+        refusal = await asyncio.to_thread(hub_supply_refusal, self.controller, backend, self._lang())
+        if refusal is not None:
+            answer, cause = f"❌ {refusal}", refusal
+        else:
+            answer = self._t("command.setup.builtinBackend", backend=display_name_for_backend(backend))
+            cause = ModelSupplyRefusal(answer, fixed_in_models=True)
+        next_step = models_next_step(self.controller, context, cause=cause)
+        await self._send_message(context, "\n".join(line for line in (answer, next_step) if line))
 
     async def start_setup(
         self,
