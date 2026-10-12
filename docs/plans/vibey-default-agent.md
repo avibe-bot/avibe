@@ -3,8 +3,9 @@
 ## Owner decision (2026-10-12)
 
 Avibe leads with its own agent. A new install starts new chats with Vibey. An install that already recorded a
-default keeps it: upgrades never change a user's choice. When Vibey cannot run, Avibe says what is missing and
-where to fix it; it never hands the turn to another Agent.
+default keeps it while that Agent exists and is enabled: upgrades never change a user's choice. A default that can no
+longer be used is replaced exactly as before. When Vibey cannot run, Avibe says what is missing and where to fix
+it; it never hands the turn to another Agent.
 
 This amends [`avibe-agent-always-on.md`](avibe-agent-always-on.md), whose "Not the default" rule left this to a
 separate decision.
@@ -51,8 +52,11 @@ On master before this change:
   - the per-caller fallback (`resolve_usable_default_agent`)
   - the archive replacement
 - **Invariants:**
-  - An install with a recorded default keeps it across this release.
-  - A store with no recorded default ends the sync on the built-in Agent, unless Model Hub is disabled on the instance.
+  - An install whose recorded default exists and is enabled keeps it across this release. The global default is
+    always an enabled Agent, so a recorded default that is missing or disabled is replaced, as before.
+  - A store with no recorded default ends the sync on the built-in Agent, unless Model Hub is disabled on the
+    instance. In that case the rank applies, and it still records the built-in Agent when no native backend is
+    enabled, because that is the only enabled candidate.
   - Once Vibey is the default, only an explicit set-default moves it, because it is always enabled.
 
 ### 2. A turn Vibey cannot run says what is missing and where to fix it (PR-2)
@@ -73,12 +77,18 @@ On master before this change:
   - `errors.agentModelRequired` renders the backend's display name.
 - **The next step.** Every Model Hub refusal of a turn appends one next step to Models, built by one helper in
   `modules/agents/model_hub.py`. This covers supply blocks, a missing model and route refusals.
+  - **Who gets the link.** Only a requester who can open Models gets it:
+    - on the Workbench, a caller with `can_manage_instance`, the gate on `/settings/models`;
+    - in IM, an admin, the gate `/setup` already uses (`core/auth.py`).
+    Anyone else gets `errors.askAdminForModels` instead of a link they would be bounced from.
   - **Web Workbench:** a link to `/settings/models`.
   - **IM:** `workbench_url('/settings/models')` when Avibe Cloud is paired; otherwise no URL, because the copy
     already names Models.
   - **Exception:** `hub_disabled` gets no link, because the Models page is unavailable there.
-- **IM `/setup`.** When it resolves to the built-in backend, it answers with Model Hub guidance and the same next
-  step instead of "does not support setup".
+- **IM `/setup`.** Both forms answer with Model Hub guidance and the same next step, instead of "does not support
+  setup":
+  - an explicit `/setup vibey`, which today is refused by the backend-hint gate in `handle_setup_command`;
+  - a bare `/setup` that resolves to the built-in backend (`start_setup`).
 - **UI.** `no_source` is rendered in the slots that already render `gateway_off` and `hub_disabled`:
   - the setup card note
   - the Settings → Backends list badge
@@ -88,8 +98,15 @@ On master before this change:
 
 ### 3. Setup lets the person choose who starts new chats (PR-3, after the design is approved)
 
-The design is frame F1, "Assistants · who starts new chats", in `avibe-docs/design_desktop.pen` (EN/ZH, four
-states). PR-3 implements the approved frame and amends `setup-three-screen/contracts.md` §C4.
+The design is frame F1, "Assistants · who starts new chats" (EN/ZH, four states). PR-3 implements the approved
+frame and amends `setup-three-screen/contracts.md` §C4.
+
+The design source is an explicit exception to the repository's `design.pen` default. F1 lives in
+`avibe-docs/design_desktop.pen`, beside the approved Vibey setup frames (avibe-docs #55):
+- `setup-three-screen/contracts.md` §C3 names that file as the design source for the setup screens (owner handoff);
+- the orchestrator directed F1 there on 2026-10-12.
+
+PR-3 waits for the owner's approval of the rendered frame.
 
 - **Options.** Screen 3 marks exactly one ready assistant as the one new chats start with. The ready assistants are
   listed with Vibey first. A saved custom default that can run is listed too.
@@ -107,6 +124,7 @@ states). PR-3 implements the approved frame and amends `setup-three-screen/contr
 |---|---|---|
 | `errors.modelSourceRequired` (server, new) | {backend} has no model source yet. Add an API key or a subscription in Models. | {backend} 还没有模型来源。请在「模型」页添加 API Key 或订阅。 |
 | `errors.openModels` (server, new) | Open Models: {url} | 打开「模型」页：{url} |
+| `errors.askAdminForModels` (server, new) | Ask an Avibe admin to fix this in Models. | 请联系 Avibe 管理员在「模型」页处理。 |
 | `command.setup.builtinBackend` (server, new) | {backend} gets its models from Model Hub and needs no sign-in. Add or manage model sources in Models. | {backend} 通过模型网关获取模型，无需单独登录。请在「模型」页添加或管理模型来源。 |
 | `onboarding.setup.noteNoSource` (new) | No model source supplies {{name}} yet. | 还没有模型来源供给 {{name}}。 |
 | `settings.backends.noModelSource` (new) | No model source | 无模型来源 |
@@ -119,14 +137,17 @@ choice's labels.
 
 - **PR-1, at the store boundary.**
   - An empty store records the built-in Agent.
-  - A store with a recorded default keeps it, enabled or not; one that is missing or disabled is replaced by the
-    unchanged rank.
+  - A store whose recorded default exists and is enabled keeps it, whatever its backend. One that is missing or
+    disabled is replaced by the unchanged rank.
   - A user Agent named `vibey` leads to `vibey-2`.
-  - Model Hub disabled records a native Agent.
+  - Model Hub disabled:
+    - with a native backend enabled, records that native Agent;
+    - with none enabled, records the built-in Agent, the only enabled candidate.
 - **PR-2:**
   - a table test of `hub_supply_block`
-  - one dispatch-level refusal test with its next step, on Web and IM
-  - IM `/setup` on the built-in backend
+  - one dispatch-level refusal test with its next step, on Web and IM, for a requester who can open Models and one
+    who cannot
+  - IM `/setup vibey`, and a bare `/setup` on a Vibey default
 - **Hermetic upgrade runs**, as in the 3.2.0 merge readiness check:
   - fresh install → `vibey`
   - v3.1.3 (custom default) → unchanged
