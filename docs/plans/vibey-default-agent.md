@@ -112,7 +112,9 @@ On master before this change:
   - the backend page notice and its Models link
 - **One refusal, held.** A supply refusal fails the same way until someone changes Models, so its input is held for
   an explicit retry (prewrite failure evidence `model_supply_refusal`) instead of spending the automatic startup
-  retries. IM has no Retry control, so there the held input waits in the Session's queue, where the Workbench
+  retries. So are the two route refusals only Models can clear, as their §4.5 matrix rows in
+  [model-hub.md](model-hub.md) say: a model with no Route (`model_hub_route_unconfigured`) and a model not in the
+  backend's list (`model_hub_model_unlisted`). IM has no Retry control, so there the held input waits in the Session's queue, where the Workbench
   retries or removes it; the person's next message still runs. The notice is plain text: a supply refusal is shown as
   its own copy (`❌ …`), with no "Error:" wrapper and no formatter markup. Another dispatch error is escaped for the
   IM it goes to, never for the Workbench.

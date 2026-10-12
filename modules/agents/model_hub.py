@@ -38,6 +38,7 @@ from core.handlers.model_hub.provenance import (
     TurnOutcomeProjectionInput,
     exact_hop_blockers,
     is_unlisted_model_outcome,
+    outcome_holds_input,
     project_turn_outcome_copy,
     render_turn_outcome_copy,
     supply_interruption_reason,
@@ -153,9 +154,6 @@ def drain_turn_mode_stamps(timeout: float) -> bool:
 _CONTEXT_LAUNCH_ATTR = "_vibe_model_hub_launch"
 _CONTEXT_MODE_ATTR = "_vibe_model_hub_turn_mode"
 _CONTEXT_FAILURE_RECORDED_ATTR = "_vibe_model_hub_failure_recorded"
-# The durable hold's reason when a turn asks for a model its backend's list
-# does not hold: the same input fails the same way until another model is chosen.
-UNLISTED_MODEL_RETRY_REASON = "model_hub_model_unlisted"
 _NATIVE_QUOTA_RE = re.compile(
     r"(?:quota|usage|credit|billing).{0,32}(?:exhaust|exceed|limit|deplet|insufficient)|"
     r"(?:exhaust|exceed|limit|deplet|insufficient).{0,32}(?:quota|usage|credit|billing)|"
@@ -549,14 +547,17 @@ def hold_refused_input(context: Any) -> None:
 
 
 def _hold_unrunnable_input(context: Any, error: ModelHubError) -> None:
-    """Keep an input whose model the backend does not list for an explicit retry.
+    """Keep an input only a Models change can run for an explicit retry.
 
-    Sending it again unchanged fails the same way, so it must not spend the
-    automatic startup retries a transient failure gets.
+    Its model is not in the backend's list, or has no Route: sending it again
+    unchanged fails the same way, so it must not spend the automatic startup
+    retries a transient failure gets. The hold's reason names the refusal, as
+    ``model_hub_model_unlisted`` or ``model_hub_route_unconfigured``.
     """
 
-    if context is not None and is_unlisted_model_outcome(error.turn_outcome):
-        mark_prewrite_recovery_required(context, UNLISTED_MODEL_RETRY_REASON)
+    outcome = error.turn_outcome
+    if context is not None and outcome_holds_input(outcome):
+        mark_prewrite_recovery_required(context, f"model_hub_{outcome.discriminator}")
 
 
 def _language(controller: Any) -> str:
