@@ -11,7 +11,7 @@ import threading
 import time
 from pathlib import Path
 from typing import Any, Optional
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 from config.v2_config import V2Config
 from config import paths
@@ -100,8 +100,15 @@ def _redact_key_value(match: re.Match[str]) -> str:
 # password. An authority that is not a plain host[:port] is dropped whole. The
 # scheme is length-bounded so runs like ``a.a.a`` stay linear, and a backslash
 # stands for a slash as browsers read it; it ends the URL only before a quote.
+# A ``user:pass`` whose password holds a quote or bracket would end the URL
+# early, so a colon-bearing authority cut by one of them, with an ``@`` before
+# the next space, is read as userinfo running to that ``@`` - unless the cut is
+# compact JSON structure (``","`` or ``":"``), as after ``"http://host:8080"``.
 _URL_RE = re.compile(
-    r"(?i)\b(?P<scheme>[a-z][a-z0-9+.-]{0,30}:[/\\]{2})(?P<authority>[^\s/\\?#\"'<>`]*)"
+    r"(?i)\b(?P<scheme>[a-z][a-z0-9+.-]{0,30}:[/\\]{2})"
+    r"(?:(?P<userinfo>[^\s/\\?#\"'<>`@]*:[^\s/\\?#\"'<>`@]*"
+    r"(?![\"'][,:][\"'])\\{0,4}[\"'<>`](?:(?![\"'][,:][\"'])[^\s@]){0,256})@)?"
+    r"(?P<authority>[^\s/\\?#\"'<>`]*)"
     r"(?P<rest>(?:[^\s\"'<>`\\]|\\(?![\"']))*)"
 )
 # The same for a URL written without its scheme: ``hooks.slack.com/actions/...``,
@@ -159,7 +166,8 @@ def _url_origin(match: re.Match[str]) -> str:
     _, at, host = match.group("authority").rpartition("@")
     if not _URL_HOST_RE.fullmatch(host):
         return match.group("scheme") + _REDACTED
-    return _reduced_url(match.group("scheme") + (_REDACTED + at if at else "") + host, match.group("rest"))
+    has_userinfo = bool(at or match.group("userinfo") is not None)
+    return _reduced_url(match.group("scheme") + (_REDACTED + "@" if has_userinfo else "") + host, match.group("rest"))
 
 
 def _schemeless_url_origin(match: re.Match[str]) -> str:
@@ -293,8 +301,24 @@ def _collect_secret_values(
     elif isinstance(node, list):
         for item in node:
             _collect_secret_values(item, found, value_keys=value_keys, sensitive=sensitive)
-    elif sensitive and isinstance(node, str) and len(node) >= _KNOWN_SECRET_MIN_LENGTH:
-        found.add(node)
+    elif isinstance(node, str):
+        if sensitive and len(node) >= _KNOWN_SECRET_MIN_LENGTH:
+            found.add(node)
+        # A stored URL's userinfo is a credential whatever its key is called,
+        # such as a platform ``proxy_url`` of ``http://user:pass@host``.
+        if "@" in node and "://" in node:
+            try:
+                parts = urlsplit(node.strip())
+            except ValueError:
+                return
+            if parts.password and len(parts.password) >= _KNOWN_SECRET_MIN_LENGTH:
+                found.add(parts.password)
+            # A username is a secret when it carries the credential alone
+            # (``https://<token>@host``) or is token-length; ``admin`` is not.
+            username = parts.username or ""
+            if username and (not parts.password or len(username) >= _KNOWN_SECRET_BOUNDARY_LENGTH):
+                if len(username) >= _KNOWN_SECRET_MIN_LENGTH:
+                    found.add(username)
 
 
 def _known_secret_files() -> list[tuple[Path, frozenset[str]]]:
@@ -310,8 +334,17 @@ def _known_secret_files() -> list[tuple[Path, frozenset[str]]]:
 
 
 def _secret_spellings(value: str) -> set[str]:
-    # The value as it appears raw, URL-encoded, and escaped inside JSON or a repr.
-    return {value, quote(value, safe=""), json.dumps(value)[1:-1], repr(value)[1:-1]}
+    # The value as it appears raw, URL-encoded, escaped inside JSON or a repr, and
+    # with either quote backslash-escaped as a repr picks its quote.
+    backslashed = value.replace("\\", "\\\\")
+    return {
+        value,
+        quote(value, safe=""),
+        json.dumps(value)[1:-1],
+        repr(value)[1:-1],
+        backslashed.replace("'", "\\'"),
+        backslashed.replace('"', '\\"'),
+    }
 
 
 def _secret_alternative(spelling: str) -> str:

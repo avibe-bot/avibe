@@ -376,6 +376,11 @@ def test_scrub_data_redacts_sensitive_values():
         ("GET https://cdn.weixin.qq.com/download?encrypted_query_param=wx-s3cret", "wx-s3cret", "https://cdn.weixin.qq.com/"),
         ("proxy error http://alice:px-s3cret@proxy.local:8080 timed out", "px-s3cret", "@proxy.local:8080 timed out"),
         ("bad proxy http://bob:p/w-s3cret@proxy.local/x", "w-s3cret", "bad proxy http://"),
+        # A quote or bracket in the password must not end the URL early.
+        ("proxy error http://alice:pa'sq-s3cret@proxy.local:8080 timed out", "sq-s3cret", "@proxy.local:8080 timed out"),
+        ('proxy error http://alice:pa"dq-s3cret@proxy.local:8080 timed out', "dq-s3cret", "@proxy.local:8080 timed out"),
+        ("proxy error http://alice:pa`bt-s3cret@proxy.local:8080 timed out", "bt-s3cret", "@proxy.local:8080 timed out"),
+        ("cfg {'proxy_url': 'http://alice:pa\\'rq-s3cret@proxy.local:8080'}", "rq-s3cret", "@proxy.local:8080'}"),
         ("POST hooks.slack.com/actions/T01/123/ns-s3cret failed", "ns-s3cret", "POST hooks.slack.com/"),
         # The same URLs spelled another way.
         ('{"response_url":"https:\\/\\/hooks.slack.com\\/actions\\/T01\\/js-s3cret"}', "js-s3cret", "hooks.slack.com/"),
@@ -407,6 +412,20 @@ def test_scrub_data_redacts_secrets_inside_free_text(text, secret, kept):
     assert sentry_integration.scrub_data(value) == value
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        '{"url":"http://host:8080","email":"me@x.com"}',
+        "{'url':'http://host:8080','email':'me@x.com'}",
+        "path /Users/x/.avibe/config/config.json line 3, see ./scripts/run.sh",
+        "Retrying in 5s (attempt 2/3) status: 401 cache_key=c1 author=me",
+    ],
+)
+def test_scrub_data_keeps_ordinary_text(text):
+    """Over-redaction costs the debugging the events exist for."""
+    assert sentry_integration.scrub_data(text) == text
+
+
 def test_before_send_redacts_stored_credentials_in_any_text(monkeypatch, tmp_path):
     """A credential Avibe stores leaves no trace however the text around it is shaped.
 
@@ -423,7 +442,11 @@ def test_before_send_redacts_stored_credentials_in_any_text(monkeypatch, tmp_pat
     sentry_integration._NOISY_EVENT_LAST_SEEN.clear()
     sentry_integration._EVENT_RATE_STATE.clear()
     config = _config()
-    config.lark = LarkConfig(app_id="cli_x", app_secret='lark"first\\s3cret')
+    config.lark = LarkConfig(
+        app_id="cli_x",
+        app_secret='lark"first\\s3cret',
+        proxy_url="http://bob:q'proxy-s3cret@proxy.local:8080",
+    )
     config.telegram = TelegramConfig(bot_token="s3cr7")
     config.save()
     state = paths.get_runtime_dir() / "model-hub" / "state"
@@ -446,10 +469,11 @@ def test_before_send_redacts_stored_credentials_in_any_text(monkeypatch, tmp_pat
         "rejected mh-stored-s3cret and mh-management-s3cret (openai); short s3cr7! "
         + json.dumps({"note": 'lark"first\\s3cret'})
         + " "
-        + repr('lark"first\\s3cret'),
+        + repr('lark"first\\s3cret')
+        + " proxy refused q'proxy-s3cret",
         extra={"sessions": {"mh-gateway-s3cret": "active"}},
     )
-    for secret in ("mh-stored-s3cret", "mh-management-s3cret", "mh-gateway-s3cret", "s3cr7", "first"):
+    for secret in ("mh-stored-s3cret", "mh-management-s3cret", "mh-gateway-s3cret", "s3cr7", "first", "proxy-s3cret"):
         assert secret not in first
     assert "rejected [Filtered] and [Filtered] (openai); short [Filtered]!" in first
 
