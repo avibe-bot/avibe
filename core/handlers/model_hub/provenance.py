@@ -204,6 +204,9 @@ class TurnOutcomeRenderingRule:
     upstream_failure_key: str | None = None
     upstream_failure_without_status_key: str | None = None
     connection_failure_key: str | None = None
+    # Only a Models change clears this refusal: the same input fails the same way until
+    # then, so it waits for an explicit retry instead of the automatic startup retries.
+    holds_input: bool = False
 
 
 # This is the only executable projection of the authoritative section 4.5 matrix.
@@ -258,11 +261,13 @@ TURN_OUTCOME_RENDERING_AUTHORITY: dict[str, TurnOutcomeRenderingRule] = {
         outcome="no_candidate",
         discriminator="route_unconfigured",
         copy_keys=(("interrupted", "modelHub.launch.route_unconfigured"),),
+        holds_input=True,
     ),
     "turn.no_candidate.unlisted": TurnOutcomeRenderingRule(
         outcome="no_candidate",
         discriminator="model_unlisted",
         copy_keys=(("interrupted", "modelHub.launch.model_unlisted"),),
+        holds_input=True,
     ),
     "turn.no_candidate.blocked": TurnOutcomeRenderingRule(
         outcome="no_candidate",
@@ -471,6 +476,16 @@ def is_unlisted_model_outcome(projection: TurnOutcomeProjectionInput | None) -> 
     return projection is not None and (projection.outcome, projection.discriminator) == (
         rule.outcome,
         rule.discriminator,
+    )
+
+
+def outcome_holds_input(projection: TurnOutcomeProjectionInput | None) -> bool:
+    """Whether a refused turn's input waits for an explicit retry, as its matrix row says."""
+
+    return projection is not None and any(
+        rule.holds_input
+        and (rule.outcome, rule.discriminator) == (projection.outcome, projection.discriminator)
+        for rule in TURN_OUTCOME_RENDERING_AUTHORITY.values()
     )
 
 
