@@ -527,6 +527,19 @@ scenarios:
       - ui/src/components/onboarding/BuiltinAssistant.test.tsx
       - ui/src/components/onboarding/entryGate.test.ts
       - ui/e2e/onboarding-fidelity/lineup.spec.ts
+  - id: AUTH-SETUP-132
+    name: A new install starts on Vibey, and setup completes without writing a default
+    status: covered
+    kind: happy_path
+    layer: scenario
+    backend: vibey
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_a_new_install_starts_on_vibey_and_setup_completes_without_choosing_a_default
+    # The scenario owns the server boundary: the first Agent read records the built-in Vibey
+    # Agent as the default with the native backends enabled, its route becomes runnable, and
+    # completion keeps it. The browser's rule of keeping a recorded default that can run, even
+    # when a CLI assistant can run too, is the supporting test below.
+    supporting_tests:
+      - ui/src/components/onboarding/entryGate.test.ts
   - id: AUTH-SETUP-130
     name: "Occupied vendor callback port: OAuth start succeeds and the pasted callback completes the login"
     status: partial
