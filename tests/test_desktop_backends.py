@@ -459,6 +459,17 @@ def _shift_create_time(monkeypatch, pid: int) -> None:
     )
 
 
+def _reuse_start_token(monkeypatch, pid: int) -> None:
+    """``pid`` reads with another start token, as when another process now holds it."""
+
+    from vibe import runtime
+
+    real_start_token = runtime.process_start_token
+    monkeypatch.setattr(
+        runtime, "process_start_token", lambda other: "another-process" if other == pid else real_start_token(other)
+    )
+
+
 def _start_tree_naming(children: list[subprocess.Popen], env: dict[str, str], wait_for_tree, owner: str | None):
     """An installer tree of this Runtime that names ``owner``, or no owner at all."""
 
@@ -659,7 +670,7 @@ def test_a_tree_whose_owner_pid_now_names_another_process_is_reaped(
         if holder == "ui-of-another-runtime":
             ui_env[desktop_backends.DESKTOP_RUNTIME_ID_ENV] = secrets.token_hex(32)
         pid = _start_ui_stand_in(children, tmp_path, ui_env)
-    reused = f"{pid}:{runtime.process_create_time(pid) - 1.0!r}"
+    reused = f"{pid}:an-earlier-process"
     pids = _start_tree_naming(children, env, wait_for_tree, reused)
 
     assert cli.cmd_stop() == 0
@@ -680,11 +691,11 @@ def test_a_tree_whose_owner_cannot_be_told_fails_every_caller_closed(
     cli, statuses = quiet_stop
     named = {"missing": None, "malformed": "not-an-owner"}.get(owner)
     if owner == "uninspectable":
-        # Shown started at another time, and nothing else about it can be read.
+        # Read with another start token, and nothing else about it can be read.
         live = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
         children.append(live)
-        named = f"{live.pid}:{runtime.process_create_time(live.pid)!r}"
-        _shift_create_time(monkeypatch, live.pid)
+        named = f"{live.pid}:{runtime.process_start_token(live.pid)}"
+        _reuse_start_token(monkeypatch, live.pid)
 
         def unreadable(real):
             def read(process):

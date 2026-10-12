@@ -250,7 +250,7 @@ def test_opencode_binding_resolver_follows_each_sessions_generation() -> None:
             pid=fake_pid(port),
             port=port,
             spec_digest=generation_id,
-            process_created_at=1.0,
+            process_start_token="1.0",
         )
 
     retiring = generation("ocg_old", 1)

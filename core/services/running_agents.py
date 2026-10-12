@@ -322,7 +322,7 @@ def _collect_orphans(seen_native: dict[str, Optional[int]], seen_pids: set[int])
             AVIBE_CLAUDE_SESSION_OWNER,
             _load_owned_process_registry,
             _process_ages,
-            _process_start_time,
+            _process_start_token,
         )
     except Exception:  # noqa: BLE001
         return rows
@@ -335,9 +335,9 @@ def _collect_orphans(seen_native: dict[str, Optional[int]], seen_pids: set[int])
     # Filter to session-owned registry rows not already backed by a live client.
     # The registry accumulates stale rows (the reaper prunes lazily), so an entry
     # alone proves nothing — we must verify the process is genuinely alive. A
-    # missing/non-numeric ``started_at`` means we cannot prove identity, so we
-    # skip it rather than risk a false orphan from pid reuse.
-    candidates: list[tuple[Any, int, Optional[str], float]] = []
+    # missing ``start_token`` means we cannot prove identity, so we skip it
+    # rather than risk a false orphan from pid reuse.
+    candidates: list[tuple[Any, int, Optional[str], str]] = []
     for record in registry:
         if getattr(record, "owner", None) != AVIBE_CLAUDE_SESSION_OWNER:
             continue
@@ -354,10 +354,10 @@ def _collect_orphans(seen_native: dict[str, Optional[int]], seen_pids: set[int])
                 continue
         if not isinstance(record_pid, int) or record_pid in seen_pids:
             continue
-        recorded = getattr(record, "started_at", None)
-        if not isinstance(recorded, (int, float)):
+        recorded = getattr(record, "start_token", None)
+        if not isinstance(recorded, str) or not recorded:
             continue  # identity unprovable — don't risk a false orphan
-        candidates.append((record, record_pid, native, float(recorded)))
+        candidates.append((record, record_pid, native, recorded))
 
     if not candidates:
         return rows
@@ -370,11 +370,8 @@ def _collect_orphans(seen_native: dict[str, Optional[int]], seen_pids: set[int])
     for record, record_pid, native, recorded in candidates:
         if record_pid not in ages:
             continue  # not alive — stale registry entry, not a leak
-        current_started_at = _process_start_time(record_pid)
-        if current_started_at is None:
-            continue
-        if abs(current_started_at - recorded) >= 1.0:
-            continue  # pid was reused by a different process
+        if _process_start_token(record_pid) != recorded:
+            continue  # gone, or the pid was reused by a different process
         rows.append(
             _make_row(
                 backend="claude",
@@ -518,7 +515,7 @@ async def _end_orphan_pid(pid: int) -> dict[str, Any]:
             _descendant_pids,
             _load_owned_process_registry,
             _parse_ps_rows,
-            _process_start_time,
+            _process_start_token,
             _reap_pid_set,
             _run_ps,
         )
@@ -532,17 +529,17 @@ async def _end_orphan_pid(pid: int) -> dict[str, Any]:
             break
     if record is None:
         return {"ok": False, "error": "not_an_owned_process", "pid": pid}
-    current = _process_start_time(pid)
+    current = _process_start_token(pid)
     if current is None:
         return {"ok": False, "error": "process_not_alive", "pid": pid}
-    recorded = getattr(record, "started_at", None)
-    # FAIL CLOSED: refuse to kill unless identity is provable. A record with a
-    # missing/non-numeric ``started_at`` (e.g. the registration-time ``ps`` failed)
+    recorded = getattr(record, "start_token", None)
+    # FAIL CLOSED: refuse to kill unless identity is provable. A record without a
+    # ``start_token`` (registered before tokens, or whose start could not be read)
     # cannot be distinguished from a reused pid, so we never SIGKILL it — matching
     # the read path's conservatism (``_collect_orphans`` skips such records too).
-    if not isinstance(recorded, (int, float)):
+    if not isinstance(recorded, str) or not recorded:
         return {"ok": False, "error": "identity_unprovable", "pid": pid}
-    if abs(current - recorded) >= 1.0:
+    if current != recorded:
         return {"ok": False, "error": "pid_reused", "pid": pid}
     # NOTE: a microscopic TOCTOU remains between this check and the signal (the pid
     # could exit + be reused in the gap); it's inherent to pid-based signaling and

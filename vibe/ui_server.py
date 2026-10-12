@@ -6833,12 +6833,12 @@ def _restart_in_flight() -> bool:
         # Guard against PID reuse: a dead supervisor's pid can be reclaimed by an
         # unrelated process (notably across a reboot), which would otherwise keep
         # blocking restarts until that process exits. The job records its
-        # ``supervisor_started_at`` (process create time), so only treat the pid
+        # ``supervisor_start_token`` (its start identity), so only treat the pid
         # as the live supervisor when the create time still matches.
-        started_at = status.get("supervisor_started_at")
-        if started_at is not None:
-            current = runtime.process_create_time(sup_pid)
-            if current is not None and current != started_at:
+        start_token = status.get("supervisor_start_token")
+        if start_token is not None:
+            current = runtime.process_start_token(sup_pid)
+            if current is not None and current != start_token:
                 return False
         return True
     # No supervisor pid recorded yet: in flight only while the seed is fresh

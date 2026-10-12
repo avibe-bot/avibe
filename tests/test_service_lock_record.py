@@ -362,6 +362,29 @@ class ServiceLockContentionTests(unittest.TestCase):
                 runtime.acquire_service_instance_lock()
         self.assertEqual(refused.exception.holder_pid, holder.pid)
 
+    @unittest.skipUnless(sys.platform == "darwin", "macOS moves kern.boottime in routine clock adjustments")
+    def test_a_running_service_is_still_recognised_after_kern_boottime_ticks(self):
+        """psutil's macOS start time moves with kern.boottime; the holder's identity must not.
+
+        psutil adds the change in whole seconds of kern.boottime since it was
+        imported, and the system time daemon moves kern.boottime across a whole
+        second in routine adjustments. The holder then reads exactly one second
+        away from its record, in this process and in no fresh one.
+        """
+
+        from psutil import _psosx
+
+        holder = self._holder()
+        before = runtime.process_create_time(holder.pid)
+        with patch.object(_psosx, "boot_time", lambda: _psosx.INIT_BOOT_TIME - 1), patch.object(
+            runtime.time, "sleep", side_effect=AssertionError("waited for a running service")
+        ):
+            self.assertEqual(runtime.process_create_time(holder.pid), before + 1.0)
+            self.assertEqual(runtime.service_instance_lock_available(settle=True), (False, holder.pid))
+            with self.assertRaises(runtime.ServiceAlreadyRunningError) as refused:
+                runtime.acquire_service_instance_lock()
+        self.assertEqual(refused.exception.holder_pid, holder.pid)
+
     def test_checks_outside_a_start_answer_from_one_attempt(self):
         """The service asks these on its event loop, where a wait stalls everything behind it."""
 

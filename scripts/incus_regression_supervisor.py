@@ -75,13 +75,13 @@ def _restart_in_progress() -> bool:
     if not (isinstance(restart_pid, int) and restart_pid > 0 and runtime.pid_alive(restart_pid)):
         return False
     # Defend against pid reuse (notably across a reboot): confirm the live pid is
-    # still the same process the restart job recorded, by start time. Only treat a
-    # mismatch as stale; if either start time is unavailable, fall back to the
+    # still the same process the restart job recorded, by its start token. Only
+    # treat a mismatch as stale; if either token is unavailable, fall back to the
     # liveness check above.
-    recorded_started_at = status.get("supervisor_started_at")
-    current_started_at = runtime.process_create_time(restart_pid)
-    if isinstance(recorded_started_at, (int, float)) and current_started_at is not None:
-        return abs(current_started_at - recorded_started_at) < 1.0
+    recorded_start_token = status.get("supervisor_start_token")
+    current_start_token = runtime.process_start_token(restart_pid)
+    if isinstance(recorded_start_token, str) and current_start_token is not None:
+        return current_start_token == recorded_start_token
     return True
 
 

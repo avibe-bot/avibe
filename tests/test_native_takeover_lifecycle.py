@@ -924,7 +924,7 @@ async def test_opencode_strict_stop_failure_retains_tracking(tmp_path, monkeypat
         pid=4321,
         port=4100,
         spec_digest="spec",
-        process_created_at=1.0,
+        process_start_token="1.0",
     )
     generation.write_record()
     monkeypatch.setattr(generation, "process_alive", lambda: True)
