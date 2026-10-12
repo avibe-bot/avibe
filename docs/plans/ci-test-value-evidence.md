@@ -83,5 +83,24 @@ integration exclusions and exactly-once discovery remain intact.
   was deleted, and the README was aligned. The separate read-only audit's
   conservative concern was evaluated at this consuming boundary, not ignored.
 
+## Integrated validation before first CI
+
+- Master `169c31333` was merged into the task branch; no ownership or migration
+  conflicts. Two newly added master test files are discovered normally (the
+  measured snapshot remains attributed to its older 536-file source).
+- Python lane `47ff8390e` reviewed and integrated: two duplicate cases deleted;
+  migrated template copies reused in Vibey/context and Claude recovery tests;
+  feedback test-server shutdown polling shortened, not client timeouts.
+- CI/shard-focused tests after integration: 63 passed in 27.98s; changed Python
+  Ruff 0.4.9 and actionlint pass. UI build/typecheck validation above also passes.
+- A grouped local probe reported 75 assertions passed but did not exit before
+  its 110-second command deadline. This is **not** counted as a successful
+  command and is further reason not to remove file-process isolation here.
+  Repeating the same files plus the ledger under the actual CI per-file
+  launcher/watchdog semantics completed successfully: context 27, fixture
+  contract 12, memory-removal 10, removed-feature contract 26, ledger 75
+  (150 tests, all five processes exit 0). Logs/metrics confirm interpreter
+  shutdown, not just pytest summaries. No full local backend suite was run.
+
 Performance acceptance and lane-specific deletion inventories are recorded
 separately after integration and exact-head CI.

@@ -72,9 +72,14 @@ checkout and unrelated active worktrees untouched.
 - Independent read-only audit: session `sesvtw3epcdgv`, worktree
   `.worktrees/avibe/ci-test-value-independent`.
 - Shared contract commit before dispatch: `e089ae4429aae72d49b448ca4cc59d806cc2f82e`.
+- All three lanes are complete. Python commit `47ff8390e` and UI commits
+  `9eacb1c7d`, `a6a6e3e1d`, `12f71d572` were independently inspected and
+  integrated. The read-only auditor approved the two Python duplicate
+  deletions and identified unique routing/state contracts to retain.
 - Orchestrator has removed shell/toolchain self-tests, split required UI lanes,
   and rebuilt a complete timing snapshot. See `ci-test-value-evidence.md`.
-  Integration waits for lane commits; no partial PR has been pushed yet.
+  Master `169c31333` was integrated before the first full-CI measurement.
+  Required checks, native process isolation and real browser coverage remain.
 
 ## Work sequence
 
