@@ -173,8 +173,14 @@ def _read_watch_worker_spec() -> tuple[list[str], str | None]:
 def _install_windows_kill_on_close_job() -> Any:
     if os.name != "nt":
         return None
-    from core.agent_core.tools import windows_job
+    import importlib.util
 
+    # Beside this file, where the runner copies it with this one (``core.frozen_script``): the installed
+    # package may already hold a newer version.
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "windows_job.py")
+    spec = importlib.util.spec_from_file_location("avibe_windows_job", path)
+    windows_job = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(windows_job)
     return windows_job.create_kill_on_close_job()
 
 

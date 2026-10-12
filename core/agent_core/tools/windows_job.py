@@ -1,8 +1,8 @@
 """Windows Job Objects, and the pipe check the job wrapper needs, through ``ctypes`` alone.
 
 Standard library only: the job wrapper beside it runs as ``python -I -S`` and loads this file by its
-path, and ``core/watch_worker.py`` imports it. Importing it works everywhere; calling it works only
-on Windows.
+path, as ``core/watch_worker.py`` does; each runs from a copy with this file beside it
+(``core.frozen_script``). Importing it works everywhere; calling it works only on Windows.
 
 A job object holds a process tree as a POSIX session does, and more strictly. A process started by
 a member is a member, and it cannot leave, since no job here allows breakaway. With

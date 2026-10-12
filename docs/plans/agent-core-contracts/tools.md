@@ -311,6 +311,10 @@ at most once and recovery can always decide whether it did; its identity is reco
 absolute deadline that survives handover and restarts; output on disk is bounded; files are kept until the call is
 durably settled; handover creates at most one Watch per job.
 
+The host starts the wrapper from a copy, under `<state>/agent_core/jobs/wrapper/`, of the wrapper and the files it
+loads beside itself, as the host read them when it was imported. An upgrade that installs its files before the service
+restarts therefore never puts a newer wrapper, whose argv may differ, under the running host.
+
 On Windows the wrapper's tree is a job object it creates and joins before it can run the command, named after the
 job and ended when the wrapper's handle to it closes. Every process the command starts is in it and cannot leave it.
 `kill` terminates the job object; a kill of the wrapper alone (`TerminateProcess`, which nothing can catch) also ends

@@ -13,7 +13,7 @@ from pathlib import Path
 import psutil
 import pytest
 
-from core import watch_worker
+from core import command_runner, watch_worker
 from core.process_isolation import (
     PROCESS_IDENTITY_ENV,
     PersistedProcessIdentity,
@@ -23,10 +23,7 @@ from core.process_isolation import (
 
 
 def _supervisor_command() -> list[str]:
-    return [
-        os.path.abspath(sys.executable),
-        str(Path(watch_worker.__file__).resolve()),
-    ]
+    return [os.path.abspath(sys.executable), command_runner.supervisor_path()]
 
 
 def _supervisor_isolation_kwargs() -> dict[str, object]:
