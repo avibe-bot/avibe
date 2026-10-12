@@ -84,6 +84,7 @@ from modules.agents.vibey.context import (
     mark_skill_loads,
 )
 from modules.agents.vibey.errors import error_text
+from modules.agents.vibey.instructions import load_instruction_files, project_context
 from modules.agents.vibey.media import MediaSnapshots
 from modules.agents.vibey.models import HubModelRouter, ProviderFactory, registry_providers, selection_from_hop
 from modules.agents.vibey.prompt import EnvironmentValue, current_environment, system_prompt
@@ -128,6 +129,12 @@ def _relative_to(cwd: str) -> Callable[[str], str]:
         return absolute if shown.startswith(os.path.join(os.pardir, os.pardir)) else shown
 
     return relative
+
+
+def _project_instructions(cwd: str) -> str:
+    """The ``<project_context>`` section for a Turn in ``cwd``: the user's global file, then the instruction files from
+    the filesystem root down to ``cwd`` (C-7 tools.md section 9)."""
+    return project_context(load_instruction_files(cwd, paths.get_global_instructions_path()))
 
 
 #: ``Agent.max_tokens`` for every Turn: the resolved hop's budgeted maximum decides the output (``budgeted``).
@@ -296,7 +303,9 @@ class VibeyAgent(BaseAgent):
         sections, skill_catalog = await self._avibe_sections(request, cwd)
         builtin_agent = await asyncio.to_thread(self._is_builtin_agent, request)
         environment = await asyncio.to_thread(self._turn_environment, request, cwd)
-        self._start_agent(turn, cwd, sections, environment, builtin_agent=builtin_agent)
+        # Read again every Turn, so an edit takes effect on the next one (C-7 tools.md section 9).
+        instructions = await asyncio.to_thread(_project_instructions, cwd)
+        self._start_agent(turn, cwd, sections, environment, builtin_agent=builtin_agent, instructions=instructions)
         runtime.cwd = cwd
         # Prepared before anything is dispatched (``core.native_dispatch_phase``).
         message = await self._render_input(session_id, request.message, request.files, request.input_metadata)
@@ -550,13 +559,20 @@ class VibeyAgent(BaseAgent):
         return HubModelRouter(resolve, self._providers, first=await resolve())
 
     def _start_agent(
-        self, turn: _Run, cwd: str, sections: str, environment: Mapping[str, str], *, builtin_agent: bool
+        self,
+        turn: _Run,
+        cwd: str,
+        sections: str,
+        environment: Mapping[str, str],
+        *,
+        builtin_agent: bool,
+        instructions: str = "",
     ) -> None:
         """The Turn's loop, over its router, tools, system prompt, and the environment its commands run in.
 
         The bash rule names ``rg`` only when that environment's PATH finds it. That PATH is the service's
         PATH plus the installed managed tools, which change only on an install or upgrade, so a Session's
-        Turns keep one system prompt, which changes only when ripgrep's availability does.
+        Turns keep one system prompt, which changes only when ripgrep's availability or an instruction file does.
         """
         request, session_id = turn.request, turn.session_id
         suite = self._tools()
@@ -579,7 +595,11 @@ class VibeyAgent(BaseAgent):
         agent.set_tools(tools)
         finds_rg = shutil.which("rg", path=environment.get("PATH", "")) is not None
         agent.system = system_prompt(
-            [tool.spec.name for tool in tools], sections, builtin_agent=builtin_agent, rg=finds_rg
+            [tool.spec.name for tool in tools],
+            sections,
+            builtin_agent=builtin_agent,
+            rg=finds_rg,
+            project_context=instructions,
         )
         turn.agent, turn.cwd = agent, cwd
 
