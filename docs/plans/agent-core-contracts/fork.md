@@ -494,7 +494,7 @@ through `reserve_forked_session`:
 
 - When to compact: the trigger, the overflow ladder, and the bounds.
 - Which prefix to use: the whole view for a normal checkpoint, or `units` from `rolling_cut` for a rolling one.
-- The checkpoint request and `max_tokens = min(16,000, O)`.
+- The checkpoint request and `max_tokens = min(64,000, O)`.
 - The validator (the side turn's check, with its one repair), the row, and the events.
 
 Behavior does not change. The C-9 tests pass, with only the audit kind renamed.
@@ -625,7 +625,7 @@ class SideTurn:
                                                            # the request puts the caller's rehydrated messages first
     prompt: UserMessage
     policy: ForkPolicy
-    max_tokens: Callable[[ModelCapabilities], int]         # per route; C-9: min(16,000, O)
+    max_tokens: Callable[[ModelCapabilities], int]         # per route; C-9: min(64,000, O)
     fold: Callable[[SideReply], Awaitable[Folded]]         # sees only a reply the check accepted
     check: Optional[Callable[[AssistantMessage], Optional[str]]] = None   # None accepts; else the problem
     repair: Optional[Callable[[str], UserMessage]] = None  # the one corrective follow-up; comes with check

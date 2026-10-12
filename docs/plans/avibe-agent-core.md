@@ -184,7 +184,7 @@ and `bash` results with `context_edit` rows, on by default; and a checkpoint wri
 
 - **Limits from Model Hub.** `W` and `L_in` come from the `context_window` and `input_limit` of the route resolved
   for the request (128,000 when unknown). `O` is the request's `max_tokens`: the hop's `max_output_tokens` (8,192
-  when unknown) capped by the Agent's output budget, and `min(16,000, O)` for a checkpoint request. One pure
+  when unknown) capped by the Agent's output budget, and `min(64,000, O)` for a checkpoint request. One pure
   function derives the rest and `est` from the final request, immediately before it is sent.
   `M = min(max(8,000, 3% W), W / 8)`, `T = min(L_in - O - M, 0.9 W)`.
 - **Trigger** before every model request, including inside the tool loop, on the final request (in v1 no user hook

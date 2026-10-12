@@ -1,10 +1,10 @@
 # C-9 Context management
 
 Frozen 2026-10-04 by owner decision; amended 2026-10-12 by owner decision (the estimate of opaque reasoning payloads
-and the anchor's validity, §2; the cache lifetime per route, §3). The `harness` owns the rules
-(`core/agent_core/harness/context.py`, `projection.py`); the loop applies them before every model request
-(`core/agent_core/agent/loop.py`); the adapter supplies the Session-specific parts (§9). Row shapes:
-[`transcript-rows.schema.json`](transcript-rows.schema.json); events:
+and the anchor's validity, §2; the cache lifetime per route, §3; the checkpoint request's output budget, §1 and §6).
+The `harness` owns the rules (`core/agent_core/harness/context.py`, `projection.py`); the loop applies them before
+every model request (`core/agent_core/agent/loop.py`); the adapter supplies the Session-specific parts (§9). Row
+shapes: [`transcript-rows.schema.json`](transcript-rows.schema.json); events:
 [`agent-event.schema.json`](agent-event.schema.json).
 
 Three tiers, cheapest first:
@@ -30,7 +30,7 @@ stage only considers: the fork it would send first, and the minimal request of t
 W    = context_window                              (128,000 when unknown)
 L_in = input_limit                                 (W when unknown)
 O    = the request's max_tokens: for a conversation request max_output_tokens (8,192 when unknown), capped by the
-       Agent's output budget; for a checkpoint request min(16,000, that)
+       Agent's output budget; for a checkpoint request min(64,000, that)
 M    = min(max(8,000, ceil(0.03 * W)), floor(W / 8))
 T    = min(L_in - O - M, floor(0.9 * W))           the compaction threshold
 keep = min(20,000, floor(0.25 * T))                the verbatim tail of a normal checkpoint
@@ -199,7 +199,12 @@ A checkpoint is written by a **side turn** of the conversation (C-10 `fork.md` �
 - The request uses the same hop, system prompt, tool definitions, tool choice, and reasoning settings as the
   conversation's next request, and its messages begin with the conversation's projected messages unchanged, so its
   prefix is byte-identical to the previous request's and a warm provider cache hits. Tool choice, thinking, and
-  effort are never changed: Anthropic renders them into the prompt. `max_tokens = min(16,000, O)`.
+  effort are never changed: Anthropic renders them into the prompt. `max_tokens = min(64,000, O)`. It bounds the
+  reasoning as well as the checkpoint text, and a length stop fails the turn (below). Three checkpoints measured at
+  `xhigh` effort on 246,000 to 307,000-token contexts wrote 9,200 to 10,600 tokens of checkpoint text, and 11,552 to
+  20,644 tokens of output with their reasoning. Reasoning grows with the context, and a checkpoint near `T` on a
+  1,000,000-token window reads about three times those contexts. Output is billed as produced, so an unused budget
+  costs nothing, and `T` already reserves `O` (§1), so the request can fit at `est = T`.
 - **Normal**: the prefix is the whole projected conversation. **Rolling**: the prefix is the projected context up to
   the cut, which is a prefix of the original request.
 - One user message is appended: the checkpoint request (§11). It takes the user role, but it comes from the harness,
@@ -224,9 +229,9 @@ below, and the budget's 5 rounds, 4,000-token floor, and 1,000-token slack; C-10
   unavailable. Write the checkpoint as your reply text, not into a file.` (a model denied a file write may otherwise
   keep trying one; the owner-approved request, §11, stays untouched).
 - Every request of the turn is budgeted on the route resolved for it (§1): its `max_tokens` is that route's
-  `min(16,000, O)`.
+  `min(64,000, O)`.
 - The bound is the window, not `T`, the same way in threshold and rolling turns. Before each call,
-  `room = L_in - est - min(16,000, O) - reserved`, where `est` is the budget of the turn's latest request plus the
+  `room = L_in - est - min(64,000, O) - reserved`, where `est` is the budget of the turn's latest request plus the
   tokens of the response and results since, and `reserved` is one fixed-text result (the longer of the two below)
   for each later call of the same response, so every result of the batch is accounted for before it exists. This is
   the one bound that extends the latest request's budget by arithmetic (§10, invariant 1). A call runs only while
