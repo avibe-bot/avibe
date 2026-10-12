@@ -159,7 +159,9 @@ class RawCallOutcome:
     # tokens billed for them whether or not the call ended well.
     usage: ProtocolUsageReport | None = None
     # Only failed HTTP responses supply retry advice: ASCII, at most 128
-    # characters, unparsed. L2 owns validation and the resulting retry policy.
+    # characters, unparsed. The Retry-After header, else a usage cap's own reset
+    # from the error envelope in that header's syntax. L2 owns validation and
+    # the resulting retry policy.
     retry_after: str | None = None
     # Aware UTC receipt time of those headers, before reading the error body.
     response_received_at: datetime | None = None
