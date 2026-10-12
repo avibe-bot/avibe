@@ -7,6 +7,8 @@ import ast
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from config.v2_config import AgentsConfig, RuntimeConfig, SlackConfig, V2Config
@@ -333,6 +335,37 @@ def test_scrub_data_redacts_sensitive_values():
     assert scrubbed["request"]["data"]["bot_token"] == "[Filtered]"
     assert scrubbed["request"]["data"]["nested"][0]["client_secret"] == "[Filtered]"
     assert "[Filtered]" in scrubbed["message"]
+
+
+@pytest.mark.parametrize(
+    ("text", "secret", "kept"),
+    [
+        (
+            "lark config rejected: LarkConfig(app_id='cli_x', app_secret='lark-s3cret', domain='feishu')",
+            "lark-s3cret",
+            "app_id='cli_x'",
+        ),
+        (
+            'save failed: {"api_key": "sk-s3cret", "base_url": "https://api.example"}',
+            "sk-s3cret",
+            '"base_url": "https://api.example"',
+        ),
+        ("refresh failed client_secret=gw-s3cret status=401", "gw-s3cret", "status=401"),
+        (
+            "poll error url=https://api.telegram.org/bot123456:AAHs3cretS3cretS3cretS3cretS3cret/getUpdates",
+            "AAHs3cretS3cretS3cretS3cretS3cret",
+            "/getUpdates",
+        ),
+    ],
+)
+def test_scrub_data_redacts_secrets_inside_free_text(text, secret, kept):
+    """Log and exception messages carry secrets as text, not under a dict key."""
+    scrubbed = sentry_integration.scrub_data({"logentry": {"params": [text]}})
+
+    (value,) = scrubbed["logentry"]["params"]
+    assert secret not in value
+    assert "[Filtered]" in value
+    assert kept in value
 
 
 def test_before_send_throttles_repeated_noisy_slack_socket_events(monkeypatch):

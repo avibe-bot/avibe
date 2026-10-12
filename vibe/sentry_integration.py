@@ -39,12 +39,25 @@ _SENSITIVE_KEY_PARTS = (
     "workspace_token",
 )
 _REDACTED = "[Filtered]"
+_SENSITIVE_KEY_PATTERN = "|".join(re.escape(part) for part in _SENSITIVE_KEY_PARTS)
 _STRING_REPLACEMENTS = (
     (re.compile(r"(?i)(authorization[:=]\s*)(bearer\s+)?\S+"), r"\1" + _REDACTED),
     (re.compile(r"(?i)(token=)[^&\s]+"), r"\1" + _REDACTED),
     (re.compile(r"(?i)(cookie[:=]\s*)\S+"), r"\1" + _REDACTED),
     (re.compile(r"\bxox[baprs]-[A-Za-z0-9-]+\b"), _REDACTED),
     (re.compile(r"\bxapp-[A-Za-z0-9-]+\b"), _REDACTED),
+    # A sensitive key rendered into free text, as a dataclass repr, JSON, or
+    # ``key=value`` puts it inside log and exception messages. The key starts at
+    # a word boundary and its length is bounded, so long word runs stay linear.
+    (
+        re.compile(
+            r"(?i)((?<![\w.-])[\"']?[\w.-]{0,40}(?:" + _SENSITIVE_KEY_PATTERN + r")[\w.-]{0,40}[\"']?\s*[:=]\s*)"
+            r"(\"[^\"]*\"|'[^']*'|[^\s\"',;&(){}\[\]]+)"
+        ),
+        r"\1" + _REDACTED,
+    ),
+    # Telegram Bot API tokens travel in request URLs (``/bot<id>:<secret>/``).
+    (re.compile(r"\b(bot)?\d{5,}:[A-Za-z0-9_-]{30,}"), r"\1" + _REDACTED),
 )
 _ONE_DAY_SECONDS = 60 * 60 * 24
 _NOISY_EVENT_TTL_SECONDS = _ONE_DAY_SECONDS
