@@ -3116,10 +3116,12 @@ _VALID_REG_NAME_RE = re.compile(
     r"(?:[a-z0-9._~!$&'()*+,;=-]|%[0-9a-f]{2})+",
     re.IGNORECASE,
 )
+_VALID_ZONE_ID_RE = re.compile(r"[a-z0-9._~-]+", re.IGNORECASE)
 _VALID_IPV_FUTURE_RE = re.compile(
-    r"v[0-9a-f]+\.[a-z0-9._~!$&'()*+,;=:-]+",
+    r"(?-i:v)[0-9a-f]+\.[a-z0-9._~!$&'()*+,;=:-]+",
     re.IGNORECASE,
 )
+_VALID_ASCII_DIGITS_RE = re.compile(r"[0-9]+")
 
 
 def _is_valid_host_header(value: str) -> bool:
@@ -3134,19 +3136,25 @@ def _is_valid_host_header(value: str) -> bool:
         literal = value[1:closing]
         suffix = value[closing + 1 :]
         if suffix:
-            if not suffix.startswith(":") or not suffix[1:].isdigit():
+            if not suffix.startswith(":") or _VALID_ASCII_DIGITS_RE.fullmatch(suffix[1:]) is None:
                 return False
             port = suffix[1:]
+        address, separator, zone = literal.partition("%")
+        if separator:
+            if zone.startswith("25"):
+                zone = zone[2:]
+            if _VALID_ZONE_ID_RE.fullmatch(zone) is None:
+                return False
         try:
-            ipaddress.IPv6Address(literal)
+            ipaddress.IPv6Address(address)
         except ValueError:
-            if _VALID_IPV_FUTURE_RE.fullmatch(literal) is None:
+            if separator or _VALID_IPV_FUTURE_RE.fullmatch(literal) is None:
                 return False
     else:
         if value.count(":") > 1:
             return False
         host, separator, port = value.partition(":")
-        if separator and not port.isdigit():
+        if separator and _VALID_ASCII_DIGITS_RE.fullmatch(port) is None:
             return False
         if _VALID_REG_NAME_RE.fullmatch(host) is None:
             return False

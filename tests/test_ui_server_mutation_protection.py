@@ -171,7 +171,7 @@ def test_config_post_accepts_vendor_json_content_type(monkeypatch, tmp_path):
 
 
 def test_host_header_validation_accepts_valid_ipvfuture_and_percent_encoding():
-    assert _is_valid_host_header("[V1.fe80::1]")
+    assert _is_valid_host_header("[v1.fe80::1]")
     assert _is_valid_host_header("lan.example%20:443")
 
 
