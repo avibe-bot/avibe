@@ -202,9 +202,10 @@ A checkpoint is written by a **side turn** of the conversation (C-10 `fork.md` �
   effort are never changed: Anthropic renders them into the prompt. `max_tokens = min(64,000, O)`. It bounds the
   reasoning as well as the checkpoint text, and a length stop fails the turn (below). Three checkpoints measured at
   `xhigh` effort on 246,000 to 307,000-token contexts wrote 9,200 to 10,600 tokens of checkpoint text, and 11,552 to
-  20,644 tokens of output with their reasoning. Reasoning grows with the context, and a checkpoint near `T` on a
-  1,000,000-token window reads about three times those contexts. Output is billed as produced, so an unused budget
-  costs nothing, and `T` already reserves `O` (§1), so the request can fit at `est = T`.
+  20,644 tokens of output with their reasoning. Reasoning varied from 2,070 to 10,018 tokens and may grow with the
+  context; a checkpoint near `T` on a 1,000,000-token window reads about three times those contexts. Output is billed
+  as produced, so an unused budget costs nothing, and `T` already reserves `O` (§1), so the request can fit at
+  `est = T`.
 - **Normal**: the prefix is the whole projected conversation. **Rolling**: the prefix is the projected context up to
   the cut, which is a prefix of the original request.
 - One user message is appended: the checkpoint request (§11). It takes the user role, but it comes from the harness,
