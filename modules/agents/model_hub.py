@@ -6,9 +6,11 @@ import asyncio
 import hashlib
 import ipaddress
 import json
+import logging
 import os
 import re
 import shutil
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Literal, Mapping, Optional, cast
@@ -61,8 +63,31 @@ from vibe.i18n import t
 from vibe.opencode_config import managed_opencode_runtime_config_content
 
 
+logger = logging.getLogger(__name__)
+
 LaunchChannel = Literal["direct", "native_cli", "hub"]
 TurnMode = Literal["direct", "hub"]
+# Stamps each settled turn's mode on its Message rows. Settlement runs on the
+# service's event loop and never waits on this database write; one worker
+# keeps the stamps in settlement order.
+_TURN_MODE_WRITER = ThreadPoolExecutor(max_workers=1, thread_name_prefix="model-hub-turn-mode")
+
+
+def _log_turn_mode_failure(stamp: Future[None]) -> None:
+    error = stamp.exception()
+    if error is not None:
+        logger.warning("Model Hub turn mode was not stored", exc_info=error)
+
+
+def drain_turn_mode_stamps(timeout: float) -> bool:
+    """Wait up to ``timeout`` for every queued mode stamp; return whether all were stored or failed."""
+
+    try:
+        _TURN_MODE_WRITER.submit(lambda: None).result(timeout=timeout)
+    except TimeoutError:
+        logger.warning("Model Hub turn mode stamps still queued at shutdown after %.1fs", timeout)
+        return False
+    return True
 
 _CONTEXT_LAUNCH_ATTR = "_vibe_model_hub_launch"
 _CONTEXT_MODE_ATTR = "_vibe_model_hub_turn_mode"
@@ -1080,16 +1105,16 @@ class ModelHubRuntimeRouter:
         mode: Optional[Literal["direct", "hub"]] = None,
     ) -> asyncio.Task[None] | None:
         def finish() -> None:
-            try:
-                if mode is not None:
-                    self.service.note_turn_mode(turn_id, mode)
-            finally:
-                if self.turn_gateway is not None:
-                    self.turn_gateway.correlation.settle(
-                        turn_id,
-                        settled_by=settled_by,
-                        ts=ts,
-                    )
+            if mode is not None:
+                _TURN_MODE_WRITER.submit(self.service.note_turn_mode, turn_id, mode).add_done_callback(
+                    _log_turn_mode_failure
+                )
+            if self.turn_gateway is not None:
+                self.turn_gateway.correlation.settle(
+                    turn_id,
+                    settled_by=settled_by,
+                    ts=ts,
+                )
 
         if self.turn_gateway is not None:
             return self.turn_gateway.finalize_turn(turn_id, settled_by=settled_by, finish=finish)

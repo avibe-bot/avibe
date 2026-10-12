@@ -923,6 +923,20 @@ def _ensure_messages_query_indexes(conn: sqlite3.Connection, tables: set[str]) -
     ):
         conn.execute(transcript_index.DROP_INDEX_SQL)
         conn.execute(transcript_index.CREATE_INDEX_SQL)
+    # The turn-id expression index, from the revision that owns its DDL: the
+    # planner matches an index expression by text, so a retyped copy is ignored.
+    turn_id_index = import_module(
+        "storage.alembic.versions.20261012_0064_messages_turn_id_index"
+    )
+    turn_id_row = conn.execute(
+        "select sql from sqlite_master where type = 'index' and name = ?",
+        (turn_id_index._INDEX,),
+    ).fetchone()
+    if turn_id_row is None or _normalized_index_sql(turn_id_row[0]) != _normalized_index_sql(
+        turn_id_index.CREATE_INDEX_SQL
+    ):
+        conn.execute(turn_id_index.DROP_INDEX_SQL)
+        conn.execute(turn_id_index.CREATE_INDEX_SQL)
     conn.execute('create index if not exists ix_messages_session_created_id on messages (session_id, created_at, id)')
     conn.execute('create index if not exists ix_messages_session_type_created_id on messages (session_id, type, created_at, id)')
     conn.execute('create index if not exists ix_messages_platform_session_created_id on messages (platform, session_id, created_at, id)')

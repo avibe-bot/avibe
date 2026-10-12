@@ -5713,13 +5713,14 @@ def test_settlement_retires_correlation_when_mode_persistence_fails(
         turn_gateway=ModelHubTurnGateway(service, correlation=correlation),
     )
 
-    with pytest.raises(OSError, match="mode store unavailable"):
-        router.settle_turn(
-            "turn_mode_failure",
-            settled_by=SETTLED_BY_TERMINAL_RESULT,
-            ts=NOW.isoformat(),
-            mode="hub",
-        )
+    # The stamp runs on its own writer thread: its failure is logged there and
+    # never reaches, or holds up, settlement.
+    router.settle_turn(
+        "turn_mode_failure",
+        settled_by=SETTLED_BY_TERMINAL_RESULT,
+        ts=NOW.isoformat(),
+        mode="hub",
+    )
 
     correlation.settle.assert_called_once_with(
         "turn_mode_failure",
