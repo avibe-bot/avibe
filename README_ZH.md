@@ -15,7 +15,7 @@
 
 [文档](https://docs.avibe.bot/zh) · [English](README.md) · [中文](README_ZH.md)
 
-**驱动** ![Claude Code](https://img.shields.io/badge/Claude%20Code-D4A27F?style=flat-square&logo=anthropic&logoColor=white) ![OpenCode](https://img.shields.io/badge/OpenCode-00B4D8?style=flat-square) ![Codex](https://img.shields.io/badge/Codex-412991?style=flat-square)
+**Agent** ![Vibey](https://img.shields.io/badge/Vibey-built--in-14B8A6?style=flat-square) ![Claude Code](https://img.shields.io/badge/Claude%20Code-D4A27F?style=flat-square&logo=anthropic&logoColor=white) ![OpenCode](https://img.shields.io/badge/OpenCode-00B4D8?style=flat-square) ![Codex](https://img.shields.io/badge/Codex-412991?style=flat-square)
 
 **从这些地方找到它** ![Browser](https://img.shields.io/badge/Browser-111827?style=flat-square&logo=googlechrome&logoColor=white) ![Slack](https://img.shields.io/badge/Slack-4A154B?style=flat-square&logo=slack&logoColor=white) ![Discord](https://img.shields.io/badge/Discord-5865F2?style=flat-square&logo=discord&logoColor=white) ![Telegram](https://img.shields.io/badge/Telegram-26A5E4?style=flat-square&logo=telegram&logoColor=white) ![WeChat](https://img.shields.io/badge/WeChat-07C160?style=flat-square&logo=wechat&logoColor=white) ![Lark](https://img.shields.io/badge/Lark%20%2F%20Feishu-3370FF?style=flat-square&logo=bytedance&logoColor=white)
 
@@ -24,6 +24,18 @@
 <br/>
 
 <img src="assets/screenshots/v4/workbench-chat-zh.png" alt="Avibe Workbench——在浏览器里和本地 Agent 对话、查看执行过程并直接回应" />
+
+---
+
+## Vibey：Avibe 自己的 Agent
+
+Avibe 自带官方 Agent **Vibey**（歪比）：内置、始终开启，不用另外安装。给 Model Hub 加一个模型来源——登录一个订阅，或者填一个 API Key——再给 Vibey 选好模型，它就能在 Workbench 和你接入的每个聊天软件里开工。
+
+- **替你运转整个平台。** 安排定时任务、用 Watch 等结果、做 Show Page，把一件事的不同部分交给 Claude Code、Codex 或 OpenCode——用的都是每个 Agent 共用的 `vibe` 命令。
+- **会写代码。** 读、写、改文件，运行命令（macOS 和 Linux 上用 `bash`，原生 Windows 上用 PowerShell）。同一次回复里互不依赖的工具调用会同时运行；跑得久的命令会转成 Watch，结束后回到同一个会话汇报。
+- **一直接得住。** 分叉会话、随时停止、继续往下聊：对话一长，Vibey 会在不打断你的情况下压缩前面的内容。
+
+已经有用顺手的 Agent？Avibe 也照原样运行官方的 Claude Code、Codex、OpenCode，和 Vibey 并肩干活。→ [Vibey 文档](https://docs.avibe.bot/zh/agents/vibey)
 
 ---
 
@@ -213,7 +225,7 @@ Avibe 开源（MIT），免费运行。你自带 agent 订阅或 API Key，直�
 <details>
 <summary><b>支持哪些 agent 和平台？</b></summary>
 
-**Agent：** 官方 Claude Code、Codex、OpenCode CLI。**界面：** 内置浏览器 Workbench（可安装到桌面和手机），以及 Slack、Discord、Telegram、微信、飞书。
+**Agent：** Avibe 内置的 Vibey，加上官方 Claude Code、Codex、OpenCode CLI。**界面：** 内置浏览器 Workbench（可安装到桌面和手机），以及 Slack、Discord、Telegram、微信、飞书。
 </details>
 
 <details>
@@ -225,7 +237,7 @@ Avibe 开源（MIT），免费运行。你自带 agent 订阅或 API Key，直�
 <details>
 <summary><b>Avibe 和 OpenClaw、Hermes 有什么不同？</b></summary>
 
-OpenClaw 和 Hermes 是 *agent*——一个是网关式助手，一个是会自我进化的 agent。Avibe 在另一层：**Agent OS**。它给自己运行的每个 agent 一个统一的世界模型——Agent、会话、Show Page、Harness、Model Hub——让 agent 能自己排期、搭自己的循环、通过真正的交互层找到你；然后它运行的是你自带的官方 Claude Code、Codex、OpenCode（Avibe 原生 agent [在路线图上](#路线图)）。OpenClaw 的具体对比见上面的[对比表](#avibe-vs-openclaw)。
+OpenClaw 和 Hermes 是 *agent*——一个是网关式助手，一个是会自我进化的 agent。Avibe 在另一层：**Agent OS**。它给自己运行的每个 agent 一个统一的世界模型——Agent、会话、Show Page、Harness、Model Hub——让 agent 能自己排期、搭自己的循环、通过真正的交互层找到你；它自带 Agent Vibey，也运行你自带的官方 Claude Code、Codex、OpenCode。OpenClaw 的具体对比见上面的[对比表](#avibe-vs-openclaw)。
 </details>
 
 ---
@@ -240,7 +252,7 @@ OpenClaw 和 Hermes 是 *agent*——一个是网关式助手，一个是会自�
 
 > Avibe 是 agent 住的那个家，歪比是住在里面的那位同事。
 
-什么都记得，有自己的脾气。你修了它的 bug，它会道谢。
+有自己的脾气。你修了它的 bug，它会道谢。
 
 ---
 
@@ -346,9 +358,8 @@ bash -o pipefail -c 'curl -fsSL https://avibe.bot/install.sh | bash -s -- --unin
 - **更深入的交互式工作流**——在 Chat、应用与 Show Page 之间加入更多直接操作、结构化决策和原位协作。
 - **保护档 Vault 托管**——完成不可变 sandbox 完整性门禁后，再向真实用户开放 passkey 保护的密钥。
 - **SaaS 模式**——一键托管上手 + 云端中继，而执行依然留在你自己的机器上。
-- **Avibe 原生 agent**——为这个运行时调校的第一方 agent，与你自带的官方 CLI 并存。
 
-近期已上线：支持自动接管、额度追踪和用量分析的 Model Hub · 实时语音输入 · Show Page 分享 · 三个后端统一的 Skills · 三步设置向导 · Agent Harness 与运行关系图 · 多窗口应用 · 标准档 Vaults。
+近期已上线：Avibe 自己的 Agent Vibey · 支持自动接管、额度追踪和用量分析的 Model Hub · 实时语音输入 · Show Page 分享 · 三个后端统一的 Skills · 三步设置向导 · Agent Harness 与运行关系图 · 多窗口应用 · 标准档 Vaults。
 
 ---
 
