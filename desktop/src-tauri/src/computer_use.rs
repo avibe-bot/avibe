@@ -744,18 +744,10 @@ impl RuntimeState {
     }
 
     async fn stop_daemon(&mut self) {
-        let Some(mut daemon) = self.daemon.take() else {
+        let Some(daemon) = self.daemon.take() else {
             return;
         };
-        drop(daemon.stdin.take());
-        if timeout(PROCESS_STOP_TIMEOUT, daemon.child.wait()).await.is_err() {
-            let _ = daemon.child.kill().await;
-            let _ = daemon.child.wait().await;
-        }
-        if let Ok(Ok(stderr_tail)) = timeout(PROCESS_STOP_TIMEOUT, daemon.stderr_tail).await {
-            record_daemon_stderr(&self.diagnostics, &stderr_tail);
-        }
-        let _ = std::fs::remove_file(&self.paths.socket);
+        stop_daemon_process(daemon, &self.paths.socket, &self.diagnostics, PROCESS_STOP_TIMEOUT).await;
     }
 
     async fn start_permission_probe(&mut self) {
@@ -999,6 +991,56 @@ async fn socket_accepts(path: &Path) -> bool {
     timeout(Duration::from_millis(300), tokio::net::UnixStream::connect(path))
         .await
         .is_ok_and(|result| result.is_ok())
+}
+
+async fn request_daemon_shutdown(socket: &Path, pid: u32) -> io::Result<()> {
+    let stream = tokio::net::UnixStream::connect(socket).await?;
+    let (reader, mut writer) = stream.into_split();
+    write_json_line(
+        &mut writer,
+        &json!({
+            "method": "shutdown_if_pid",
+            "args": {"expected_pid": pid},
+        }),
+    )
+    .await?;
+    let mut reader = BufReader::new(reader);
+    let mut line = String::new();
+    if reader.read_line(&mut line).await? == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "computer-use daemon closed the shutdown connection without a response",
+        ));
+    }
+    let response = serde_json::from_str::<Value>(&line).map_err(io::Error::other)?;
+    if response.get("ok").and_then(Value::as_bool) != Some(true) {
+        return Err(io::Error::other(
+            "computer-use daemon rejected the pid-bound shutdown request",
+        ));
+    }
+    Ok(())
+}
+
+async fn stop_daemon_process(mut daemon: Daemon, socket: &Path, diagnostics: &BootstrapLog, stop_timeout: Duration) {
+    let deadline = tokio::time::Instant::from_std(Instant::now() + stop_timeout);
+    let graceful_shutdown_requested = match daemon.child.id() {
+        Some(pid) => timeout_at(deadline, request_daemon_shutdown(socket, pid))
+            .await
+            .is_ok_and(|result| result.is_ok()),
+        None => false,
+    };
+    if !graceful_shutdown_requested {
+        drop(daemon.stdin.take());
+    }
+    if timeout_at(deadline, daemon.child.wait()).await.is_err() {
+        let _ = daemon.child.kill().await;
+        let _ = daemon.child.wait().await;
+    }
+    drop(daemon.stdin.take());
+    if let Ok(Ok(stderr_tail)) = timeout(stop_timeout, daemon.stderr_tail).await {
+        record_daemon_stderr(diagnostics, &stderr_tail);
+    }
+    let _ = std::fs::remove_file(socket);
 }
 
 fn spawn_daemon(driver: &Path, socket: &Path, host_bundle_id: &str, policy: &Path) -> io::Result<Daemon> {
@@ -2249,6 +2291,28 @@ esac
         path
     }
 
+    fn write_graceful_daemon_driver(root: &Path, socket: &Path, request_path: &Path) -> PathBuf {
+        let path = root.join("fake-graceful-cua-driver");
+        let executable = std::env::current_exe().expect("current test executable");
+        let body = format!(
+            "#!/bin/sh\n\
+             AVIBE_TEST_GRACEFUL_DAEMON_CHILD=1 \\\n\
+             AVIBE_TEST_GRACEFUL_DAEMON_SOCKET={} \\\n\
+             AVIBE_TEST_GRACEFUL_DAEMON_REQUEST={} \\\n\
+             exec {} --exact computer_use::tests::intentional_stop_daemon_child --nocapture\n",
+            shell_quote(socket),
+            shell_quote(request_path),
+            shell_quote(&executable),
+        );
+        std::fs::write(&path, body).expect("fake graceful driver");
+        let mut permissions = std::fs::metadata(&path)
+            .expect("fake graceful driver metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&path, permissions).expect("fake graceful driver executable");
+        path
+    }
+
     fn read_environment(path: &Path) -> BTreeMap<String, String> {
         std::fs::read_to_string(path)
             .unwrap_or_else(|error| panic!("{} is readable: {error}", path.display()))
@@ -2258,6 +2322,117 @@ esac
                 (name.to_owned(), value.to_owned())
             })
             .collect()
+    }
+
+    fn pinned_shutdown_response(request: &Value, actual_pid: u32) -> (Value, bool) {
+        let expected_pid = request
+            .pointer("/args/expected_pid")
+            .and_then(Value::as_u64)
+            .and_then(|pid| u32::try_from(pid).ok())
+            .filter(|pid| *pid != 0);
+        let Some(expected_pid) = expected_pid else {
+            return (
+                json!({
+                    "ok": false,
+                    "error": "shutdown_if_pid requires a positive integer expected_pid",
+                    "exit_code": 64,
+                }),
+                false,
+            );
+        };
+        if expected_pid != actual_pid {
+            return (
+                json!({
+                    "ok": false,
+                    "error": format!(
+                        "daemon pid mismatch (expected {expected_pid}, found {actual_pid})"
+                    ),
+                    "exit_code": 1,
+                }),
+                false,
+            );
+        }
+        (json!({"ok": true, "result": {"shutdown": true}}), true)
+    }
+
+    #[test]
+    fn intentional_stop_pinned_shutdown_contract_rejects_legacy_pid_field() {
+        let (response, should_shutdown) = pinned_shutdown_response(
+            &json!({
+                "method": "shutdown_if_pid",
+                "args": {"pid": std::process::id()},
+            }),
+            std::process::id(),
+        );
+
+        assert!(!should_shutdown);
+        assert_eq!(response.get("ok").and_then(Value::as_bool), Some(false));
+        assert_eq!(response.get("exit_code").and_then(Value::as_u64), Some(64));
+        assert_eq!(
+            response.get("error").and_then(Value::as_str),
+            Some("shutdown_if_pid requires a positive integer expected_pid")
+        );
+    }
+
+    #[tokio::test]
+    async fn intentional_stop_daemon_child() {
+        if std::env::var_os("AVIBE_TEST_GRACEFUL_DAEMON_CHILD").is_none() {
+            return;
+        }
+        let socket = PathBuf::from(std::env::var_os("AVIBE_TEST_GRACEFUL_DAEMON_SOCKET").expect("socket path"));
+        let request_path = PathBuf::from(std::env::var_os("AVIBE_TEST_GRACEFUL_DAEMON_REQUEST").expect("request path"));
+        let listener = tokio::net::UnixListener::bind(&socket).expect("bind fake daemon");
+        let (stream, _) = listener.accept().await.expect("accept shutdown request");
+        let (reader, mut writer) = stream.into_split();
+        let mut reader = BufReader::new(reader);
+        let mut line = String::new();
+        assert_ne!(reader.read_line(&mut line).await.expect("read shutdown request"), 0);
+        let request: Value = serde_json::from_str(&line).expect("parse shutdown request");
+        assert_eq!(request.get("method").and_then(Value::as_str), Some("shutdown_if_pid"));
+        std::fs::write(&request_path, &line).expect("record shutdown request");
+        let (response, should_shutdown) = pinned_shutdown_response(&request, std::process::id());
+        write_json_line(&mut writer, &response)
+            .await
+            .expect("write pinned shutdown response");
+        if !should_shutdown {
+            let mut stdin = std::io::stdin();
+            let mut byte = [0_u8; 1];
+            let _ = stdin.read(&mut byte);
+        }
+    }
+
+    #[tokio::test]
+    async fn intentional_stop_requests_graceful_shutdown_before_closing_parent_liveness() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let socket = temporary.path().join("driver.sock");
+        let request_path = temporary.path().join("shutdown-request.json");
+        let policy = temporary.path().join("policy.yaml");
+        std::fs::write(&policy, "version: 1\n").expect("policy fixture");
+        let driver = write_graceful_daemon_driver(temporary.path(), &socket, &request_path);
+        let daemon =
+            spawn_daemon(&driver, &socket, "bot.avibe.desktop.test", &policy).expect("spawn graceful daemon fixture");
+        let daemon_pid = daemon.child.id().expect("spawned daemon pid");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !socket.exists() {
+            assert!(Instant::now() < deadline, "timed out waiting for fake daemon socket");
+            sleep(Duration::from_millis(20)).await;
+        }
+
+        let diagnostics = BootstrapLog::at(temporary.path().join(BOOTSTRAP_LOG_NAME));
+        stop_daemon_process(daemon, &socket, &diagnostics, Duration::from_secs(3)).await;
+
+        let request: Value = serde_json::from_slice(&std::fs::read(&request_path).expect("graceful shutdown request"))
+            .expect("recorded request");
+        assert_eq!(request.get("method").and_then(Value::as_str), Some("shutdown_if_pid"));
+        assert_eq!(
+            request.pointer("/args/expected_pid").and_then(Value::as_u64),
+            Some(daemon_pid.into())
+        );
+        assert!(
+            request.pointer("/args/pid").is_none(),
+            "legacy pid field bypassed the pinned shutdown parser contract"
+        );
+        assert!(!socket.exists(), "stopped daemon socket survived cleanup");
     }
 
     fn assert_shared_driver_environment(environment: &BTreeMap<String, String>) {

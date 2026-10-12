@@ -4,7 +4,7 @@
     "version": "0.31.0",
     "tag": "cua-driver-rs-v0.31.0",
     "source_commit": "5272e492d61b96caf08e3bf434d91126c1f3dccc",
-    "tool_snapshot_sha256": "4257e598f5a6ad7e632b48e96c03257d7c5ed618a93b72820b2d4fef0f196acf",
+    "tool_snapshot_sha256": "4c6a9c351f9ead8dac182ee8b9e4bb2ec5b9f66f35e4d36373643792e97a8d67",
     "license": "MIT",
     "release_base_url": "https://github.com/trycua/cua/releases/download/cua-driver-rs-v0.31.0",
     "release_checksums_asset": "checksums.txt",
@@ -22,8 +22,8 @@
     "patch": {
       "variant": "avibe-raw-single-click-v1",
       "file": "patches/0001-macos-raw-single-click.patch",
-      "sha256": "45c28ca5fc737649b85ddebbb57ef837490b6349ecc1e0ac04782bfee58bdbe8",
-      "contract": "click.click_mode=raw",
+      "sha256": "b720fb0e80a5fcc7796de175c905d73208ce8a53716a517074087f50d09ed584",
+      "contract": "click.click_mode=raw; embedded parent-liveness cleanup",
       "upstream_refs": [
         "https://github.com/trycua/cua/pull/3922",
         "https://github.com/trycua/cua/pull/3539",
@@ -32,7 +32,7 @@
         "https://github.com/trycua/cua/issues/4350",
         "https://github.com/trycua/cua/issues/2874"
       ],
-      "upgrade_plan": "Drop this patch when an upstream release exposes an opt-in raw count=1 macOS click selector with the same default-compatible contract; otherwise rebase it onto the next pinned source commit and rerun the hit-test-only acceptance."
+      "upgrade_plan": "Drop this patch when an upstream release exposes both an opt-in raw count=1 macOS click selector with the same default-compatible contract and terminal embedded parent-liveness cleanup; otherwise rebase it onto the next pinned source commit and rerun the hit-test and lifecycle acceptance."
     }
   },
   "managed_policy": "policy.yaml",
