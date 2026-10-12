@@ -15,6 +15,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from decimal import Decimal
+from email.utils import format_datetime
 from typing import Any, AsyncIterator, BinaryIO, Literal, Mapping, TypeVar, cast
 
 import aiohttp
@@ -564,6 +565,10 @@ class EngineClient:
                     observed_payload = ProtocolObservation()
                 finally:
                     error_body.close()
+                if retry_after is None:
+                    retry_after = _upstream_reset_advice(
+                        payload, observed_payload.error_envelope_paths or (("error",),),
+                    )
                 if _is_local_model_registration_failure(
                     response.status,
                     payload,
@@ -1917,6 +1922,52 @@ def _upstream_error_detail(
         text = _bounded_upstream_detail(values.get(path, ""))
         if text:
             return text
+    return None
+
+
+def _upstream_reset_advice(
+    payload: bytes,
+    envelope_paths: tuple[ErrorEnvelopePath, ...],
+) -> str | None:
+    """Project a usage cap's own reset as Retry-After advice, in that header's syntax.
+
+    A ChatGPT subscription past its cap answers 429 ``usage_limit_reached`` with
+    ``resets_at`` (Unix seconds) and ``resets_in_seconds`` in the error envelope
+    and no header. The first becomes an HTTP-date and the second delay-seconds;
+    L2 validates either exactly like the header. Only that envelope's reset is
+    advice: the same field names in any other error say nothing about when the
+    Source can serve again.
+    """
+
+    fields = ("type", "resets_at", "resets_in_seconds")
+    reset_paths = tuple((*path, field) for path in envelope_paths for field in fields)
+    values: dict[JSONPath, object] = {}
+
+    def visit(
+        path: JSONPath,
+        event: JSONEvent,
+        value: object | None,
+        _scope: JSONScope,
+    ) -> None:
+        if event == "replace":
+            values.pop(path, None)
+        elif event == "scalar":
+            values[path] = value
+
+    if not payload or not project_json_reader(io.BytesIO(payload), reset_paths, visit):
+        return None
+    for path in envelope_paths:
+        if values.get((*path, "type")) != "usage_limit_reached":
+            continue
+        resets_at = values.get((*path, "resets_at"))
+        if type(resets_at) is int and resets_at > 0:
+            try:
+                return format_datetime(datetime.fromtimestamp(resets_at, timezone.utc), usegmt=True)
+            except (OverflowError, OSError, ValueError):
+                pass
+        resets_in_seconds = values.get((*path, "resets_in_seconds"))
+        if type(resets_in_seconds) is int and resets_in_seconds >= 0:
+            return str(resets_in_seconds)
     return None
 
 

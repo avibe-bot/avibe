@@ -125,6 +125,9 @@ _MACHINE_ERROR_TAXONOMY: Final[Mapping[str, _MachineErrorRule]] = {
     "rate_limit_exceeded": _MachineErrorRule("transient", True, 80, "fallback", "rate_limited", None, 60, None),
     "quota_exceeded": _MachineErrorRule("transient", True, 80, "fallback", "quota_exhausted", None, 300, None),
     "insufficient_quota": _MachineErrorRule("transient", True, 80, "fallback", "quota_exhausted", None, 300, None),
+    # A ChatGPT subscription past its usage cap: a 429 whose envelope also names
+    # the reset, which the engine client carries as retry advice.
+    "usage_limit_reached": _MachineErrorRule("transient", True, 80, "fallback", "quota_exhausted", None, 300, None),
     "billing_error": _MachineErrorRule("transient", True, 80, "fallback", "balance_exhausted", None, 0, None),
     "overloaded": _MachineErrorRule("transient", True, 80, "fallback", "server_error", None, 30, None),
     "overloaded_error": _MachineErrorRule("transient", True, 80, "fallback", "server_error", None, 30, None),

@@ -1,4 +1,5 @@
 import type { TranslationKey } from '@/i18n/types';
+import { QUOTA_EXHAUSTED } from './supply';
 import type { AgentBackend, AdoptedBy, NeedsActionDetailKey, SourceState, SourceStatus } from './types';
 
 export type SourceStateSurface = 'card' | 'detail';
@@ -66,6 +67,15 @@ const STATUS_RULES: Readonly<Record<SourceStatus, Rule>> = {
     if (!Number.isFinite(retryAt) || remainingMinutes <= 0) {
       return {
         key: 'settings.models.upstream.state.unavailableDue',
+        textClass: 'model-hub-ink-gold',
+        dotClass: 'bg-gold',
+      };
+    }
+    // A used-up cycle returns at the provider's reset, often days away: the
+    // cause is the reading, not a countdown in minutes.
+    if (state.detail_key === QUOTA_EXHAUSTED) {
+      return {
+        key: QUOTA_EXHAUSTED,
         textClass: 'model-hub-ink-gold',
         dotClass: 'bg-gold',
       };

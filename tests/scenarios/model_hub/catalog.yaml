@@ -327,6 +327,12 @@ scenarios:
     kind: contract
     layer: unit
     test: tests/test_model_hub_retry_advice.py::test_retry_advice_survives_error_body_delays_and_failures
+  - id: MH-RETRY-ADVICE-002
+    name: A subscription usage cap cools its Source as quota exhaustion until the upstream's reset
+    status: covered
+    kind: recovery
+    layer: unit
+    test: tests/test_model_hub_retry_lifecycle.py::test_a_usage_cap_cools_its_source_as_quota_until_the_upstream_reset
   - id: MH-RETRY-EVIDENCE-001
     name: Unknown buffered success passes through without proving recovery
     status: covered

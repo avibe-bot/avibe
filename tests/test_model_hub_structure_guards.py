@@ -307,6 +307,7 @@ MACHINE_ERROR_FAMILY_FIXTURES = {
         "rate_limit_exceeded",
         "quota_exceeded",
         "insufficient_quota",
+        "usage_limit_reached",
         "billing_error",
         "overloaded",
         "overloaded_error",
