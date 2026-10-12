@@ -7,6 +7,9 @@ default keeps it while that Agent exists and is enabled: upgrades never change a
 longer be used is replaced exactly as before. When Vibey cannot run, Avibe says what is missing and where to fix
 it; it never hands the turn to another Agent.
 
+Setup stays as it is (owner, 15:01): it asks nothing about the default and adds no copy about it. A new install
+simply starts with Vibey, and Vibey has a model as soon as setup places a source.
+
 This amends [`avibe-agent-always-on.md`](avibe-agent-always-on.md), whose "Not the default" rule left this to a
 separate decision.
 
@@ -99,32 +102,22 @@ On master before this change:
 - **No fallback.** A turn sent to an Agent that cannot run is refused. It is never re-routed: the first turn pins its
   Agent to the Session, so a fallback would silently become permanent.
 
-### 3. Setup lets the person choose who starts new chats (PR-3, after the design is approved)
+### 3. Vibey has a model as soon as a source is placed (PR-4)
 
-The design is frame F1, "Assistants · who starts new chats" (EN/ZH, four states). PR-3 implements the approved
-frame and amends `setup-three-screen/contracts.md` §C4.
-
-The design source is an explicit exception to the repository's `design.pen` default. F1 lives in
-`avibe-docs/design_desktop.pen`, beside the approved Vibey setup frames (avibe-docs #55):
-- `setup-three-screen/contracts.md` §C3 names that file as the design source for the setup screens (owner handoff);
-- the orchestrator directed F1 there on 2026-10-12.
-
-PR-3 waits for the owner's approval of the rendered frame.
-
-- **Options.** Screen 3 marks exactly one ready assistant as the one new chats start with. The ready assistants are
-  listed with Vibey first. A saved custom default that can run is listed too.
-- **Which one is marked.** The mark is derived, in order:
-  1. the person's pick, while it is ready
-  2. the saved default, if it is ready
-  3. Vibey, if it is ready
-  4. the first ready CLI assistant
-- **A pick that stops being ready** (its source removed, the gateway stopped) is not kept. The mark re-derives from
-  the list above, and the picked card says why it can no longer start new chats.
-- **On completion.** The completion gate re-reads readiness, as it does today, and judges the mark against that
-  completion-time evidence. A mark that is no longer ready holds completion until it re-derives; setup never writes a
-  default that cannot run. The default is written only when the mark differs from the saved default, through the
-  existing completion write and its uncached confirmation.
-
+- **Owner.** `ModelHubService._seed_vibey` gives Vibey its starting supply once, when the first source eligible for it
+  exists: on a new install, the source setup places; on an upgrade, the existing sources at the first start.
+- **Today,** the starting models are the native built-ins' model selections that a placed source lists. When none
+  qualifies, the list stays empty, and Vibey has no model until someone picks one on its setup card.
+- **New: when no selection qualifies, the seed starts Vibey on one model the placed sources list.** The rule is
+  deterministic:
+  1. Take the first model, in source placement order and then each source's own inventory order, that is not
+     retired and that models.dev describes as accepting tool calls and producing text. The description uses the
+     exact match the picker's candidates already use.
+  2. If models.dev describes no listed model that way, choose none. The setup card's pick and §2's refusal remain.
+- **How the model is added.** It joins Vibey's list as the picker adds a provider model.
+  `_reconcile_vibey_agent_model` then gives the built-in Agent that model, as it already does for the first model in
+  the list.
+- **Later changes.** The person can change the model on the card or in Models. A later source never replaces it.
 ### Copy
 
 | Key | en | zh |
@@ -138,9 +131,6 @@ PR-3 waits for the owner's approval of the rendered frame.
 | `onboarding.setup.noteNoSource` (new) | No model source supplies {{name}} yet. | 还没有模型来源供给 {{name}}。 |
 | `settings.backends.noModelSource` (new) | No model source | 无模型来源 |
 | `settings.backends.noModelSourceNotice` (new) | {{name}} gets its models from Model Hub. Add a source in Models. | {{name}} 通过模型网关获取模型，请在「模型」页添加来源。 |
-
-PR-3 owns the setup copy that goes with F1: the screen 2 title and subtitle, the screen 3 subtitle, and the
-choice's labels.
 
 ## Validation
 
@@ -161,12 +151,12 @@ choice's labels.
   - IM `/setup vibey`, and a bare `/setup` on a Vibey default
   - every UI renderer of `no_source`: the setup card note, the Settings → Backends badge, and the backend page notice
     with its Models link
-- **PR-3**, per the repository's rule for multi-step setup flows:
-  - update `tests/scenarios/auth_setup/catalog.yaml`, and add a closed-loop case to
-    `tests/scenarios/auth_setup/test_auth_setup_scenarios.py` that proves the default shown at completion is the
-    default the server confirms. It covers: Vibey marked and written; the person's CLI pick written; and a pick that
-    stops being ready before completion, which is never written
-  - the mark's order and its re-derivation in focused `entryGate` and `AgentDetection` tests
+- **PR-4, at the seed boundary:**
+  - a source listing a native selection still starts Vibey on that selection;
+  - a source listing none starts Vibey on its first tool-capable text model, skipping models that lead its inventory
+    but that models.dev describes as having no tool calls or no text output;
+  - the order across two sources is deterministic;
+  - with no model models.dev can describe, Vibey starts with none.
 - **Hermetic upgrade runs**, as in the 3.2.0 merge readiness check:
   - fresh install → `vibey`
   - v3.1.3 (custom default) → unchanged
@@ -176,16 +166,19 @@ choice's labels.
 ## Rollout
 
 - These ship in 3.2.0rc2 and merge after the gh-v3.2.0rc1 tag.
-- PR-1 and PR-2 are each safe alone.
-  - With PR-1 only, setup completion already keeps a runnable Vibey, and picks the first runnable CLI assistant
-    otherwise.
+- PR-1, PR-2 and PR-4 are each safe alone.
+  - Setup completion is unchanged: it keeps the recorded default when it can run. On a new install that default is
+    Vibey, which can run once PR-4 has given it a starting model.
   - The UI ignores supply-block values it does not know.
 
 ## Known by design
 
 - An upgraded install is never moved to Vibey, even when Vibey is runnable there. Inviting upgraders to switch would
   be a separate product decision.
-- A source that lists none of the native recommendations still needs one click on Vibey's setup card (owner decision
-  2026-10-12). Setup does not choose a model nobody picked.
+- The starting model comes only from what models.dev can describe. An endpoint whose models it does not know still
+  needs one click on Vibey's setup card.
+- Setup completion keeps its existing fallback. If Vibey cannot run at completion, which takes a source models.dev
+  cannot describe and no pick, the existing rule records the first runnable CLI assistant. Otherwise setup would
+  finish on a default that cannot run.
 - The five replacement orderings (sync, archive, read-time fallback, per-caller fallback, setup) predate this
   change. Giving them one owner is a follow-up.

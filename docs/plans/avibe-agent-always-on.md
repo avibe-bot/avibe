@@ -58,8 +58,8 @@ backend list, it is always enabled, and it cannot be turned off.
 
 - The setup wizard draws Vibey first, as the coordinator, ahead of the native setup sequence (Claude Code, Codex,
   OpenCode: `nativeOrder`), and Vibey alone can complete setup. That is the owner's follow-up decision, delivered by
-  `feat/vibey-setup-wizard`; see `setup-three-screen/contracts.md` §C4 (D3). Which Agent setup completion records
-  as the default is owned by [`vibey-default-agent.md`](vibey-default-agent.md) §3.
+  `feat/vibey-setup-wizard`; see `setup-three-screen/contracts.md` §C4 (D3). Which Agent a new install records as
+  its default is owned by [`vibey-default-agent.md`](vibey-default-agent.md).
 - Setup onboarding is therefore not CLI-only (owner override, 2026-10-07, of the registration contract's "native setup
   onboarding remains CLI-only"): the built-in backend is a setup card with no CLI to detect, install or enable. Native
   import and the global native prompt files remain CLI-only.
