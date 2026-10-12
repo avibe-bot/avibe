@@ -11,8 +11,6 @@
     "modelSourceRequired": "{backend} 还没有模型来源。请在「模型」页添加 API Key 或订阅。",
     "modelsNextStepImUrl": "管理这个 Avibe 的人可以在「模型」页处理：{url}",
     "modelsNextStepIm": "管理这个 Avibe 的人可以在 Avibe 工作台的「模型」页处理。",
-    "openModelsLink": "[打开「模型」页]({url})",
-    "askAdminForModels": "请联系 Avibe 管理员在「模型」页处理。",
     "opencodeModelProviderRequired": "请在 Avibe 中选择带供应商的 OpenCode 模型，或配置它的 Model Hub 路由。"
   },
   "status": {

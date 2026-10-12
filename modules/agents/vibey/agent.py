@@ -1234,13 +1234,15 @@ class VibeyAgent(BaseAgent):
         )
 
     async def _fail_preflight(self, request: AgentRequest, error: BaseException) -> None:
-        from modules.agents.model_hub import hub_supply_refusal, launch_refusal_copy
+        from modules.agents.model_hub import hold_refused_input, hub_supply_refusal, launch_refusal_copy
 
         logger.warning("Vibey could not resolve its model route: %s", error)
         language = self._language()
         # Every route runs through the Model Hub: when it leaves Vibey no model (disabled, its gateway
         # off, no source), that explains the failure, and the supply refusal is the failure's cause.
         supply = await asyncio.to_thread(hub_supply_refusal, self.controller, BACKEND, language)
+        if supply is not None:
+            hold_refused_input(request.context)
         refusal = str(supply) if supply is not None else (
             launch_refusal_copy(self.controller, error) or error_text(None, language)
         )

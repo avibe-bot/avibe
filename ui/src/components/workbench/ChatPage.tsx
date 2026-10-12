@@ -65,6 +65,7 @@ import {
 import { AnnotationMessage } from './AnnotationMessage';
 import { FailureDetails } from './FailureDetails';
 import { FailureRetry } from './FailureRetry';
+import { FailureNextStep } from './FailureNextStep';
 import { AGENT_BUBBLE, SYSTEM_BUBBLE, USER_BUBBLE } from './chatBubble';
 import { RoleAvatar } from './RoleAvatar';
 import { SenderHead } from './SenderHead';
@@ -4926,14 +4927,17 @@ export const MessageRow = memo(function MessageRow({
               <FailureDetails message={message} />
             </span>
           </div>
-          {onFailureRetry && (
-            <FailureRetry
-              message={message}
-              readOnly={readOnly}
-              disabled={retryDisabled}
-              onRetry={onFailureRetry}
-            />
-          )}
+          <div className="flex flex-wrap items-center gap-1.5 empty:hidden">
+            <FailureNextStep message={message} readOnly={readOnly} />
+            {onFailureRetry && (
+              <FailureRetry
+                message={message}
+                readOnly={readOnly}
+                disabled={retryDisabled}
+                onRetry={onFailureRetry}
+              />
+            )}
+          </div>
           {time}
         </div>
       </div>

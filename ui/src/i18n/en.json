@@ -4633,6 +4633,10 @@
     },
     "notifyLabel": "Notify",
     "retryRequested": "Retry requested",
+    "failureNextStep": {
+      "openModels": "Open Models",
+      "askAdmin": "Ask an Avibe admin to fix this in Models."
+    },
     "retryFailed": "Could not request retry. You can try again safely.",
     "collapse": "Collapse",
     "turnInProgress": "A turn is already running — wait for the reply.",

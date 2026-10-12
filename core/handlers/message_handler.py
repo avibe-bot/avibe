@@ -893,11 +893,19 @@ class MessageHandler(BaseHandler):
         request: AgentRequest | None,
         error: BaseException,
     ) -> None:
-        """Report one backend dispatch failure through the shared live boundary."""
+        """Report one backend dispatch failure through the shared live boundary.
 
-        error_text = self.formatter.format_error(
-            self._t("error.processMessageFailed", error=str(error))
-        )
+        Like every backend failure notice, the text is plain: the Workbench draws notices
+        without Markdown, and the primary IM platform's formatter is not this context's.
+        A Model Hub supply refusal is already the user's copy and names its own cause.
+        """
+
+        from modules.agents.model_hub import ModelSupplyRefusal
+
+        if isinstance(error, ModelSupplyRefusal):
+            error_text = f"❌ {error}"
+        else:
+            error_text = f"❌ {self._t('error.processMessageFailed', error=str(error))}"
         await emit_backend_failure(
             self.controller,
             context,

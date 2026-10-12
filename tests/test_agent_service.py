@@ -382,6 +382,7 @@ def test_a_missing_model_the_model_hub_explains_names_the_model_hub(
     monkeypatch, backend, hub_switch, gateway_enabled, has_source, refusal, fixed_in_models
 ):
     """The Avibe Agent's models come only through the Model Hub: while it cannot supply any, choosing a model is not the fix."""
+    from core.native_dispatch_phase import DISPATCH_PHASE_PREWRITE, prewrite_failure_evidence, set_dispatch_phase
     from modules.agents.model_hub import ModelSupplyRefusal
     from tests.scenario_harness.model_hub import config_with_sources, source
 
@@ -400,6 +401,7 @@ def test_a_missing_model_the_model_hub_explains_names_the_model_hub(
         request = _request("hello")
         request.vibe_agent_model = None
         request.failure_handler = AsyncMock(return_value=True)
+        set_dispatch_phase(request.context, DISPATCH_PHASE_PREWRITE)
 
         with pytest.raises(ValueError, match=refusal) as refused:
             await service.handle_message(backend, request)
@@ -407,9 +409,15 @@ def test_a_missing_model_the_model_hub_explains_names_the_model_hub(
         # Whether Models is where the fix is decides the notice's next step.
         if fixed_in_models is None:
             assert not isinstance(refused.value, ModelSupplyRefusal)
+            assert prewrite_failure_evidence(request.context) == {}
         else:
             assert isinstance(refused.value, ModelSupplyRefusal)
             assert refused.value.fixed_in_models is fixed_in_models
+            # A supply refusal fails the same way until Models changes, so the input waits for an
+            # explicit retry rather than spending the automatic startup retries.
+            assert prewrite_failure_evidence(request.context) == {
+                "reason": "model_supply_refusal", "requires_explicit_retry": True,
+            }
 
     asyncio.run(run())
 

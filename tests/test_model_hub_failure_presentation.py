@@ -396,32 +396,28 @@ def _next_step_controller(language: str, *, public_url: str | None):
     )
 
 
-def _remote_workbench_context(role: str) -> MessageContext:
-    snapshot = {"sub": "member-1", "vibe_instance_role": role, "vibe_instance_access_source": "email"}
-    return MessageContext(
-        user_id="remote:member-1", channel_id="proj-1", platform="avibe",
-        platform_specific={"agent_session_id": "ses-1", "message_metadata": {"resource_user_context": snapshot}},
-    )
-
-
-_LOCAL_WORKBENCH = MessageContext(user_id="local", channel_id="proj-1", platform="avibe", platform_specific={})
+_WORKBENCH = MessageContext(user_id="local", channel_id="proj-1", platform="avibe", platform_specific={})
 _IM = MessageContext(user_id="U1", channel_id="C1", platform="slack", platform_specific={})
+
+
+def _notice(controller):
+    """The visible text and metadata of the notice a failure emitted."""
+    notify = controller.emit_agent_message.await_args_list[0]
+    return notify.args[2], notify.kwargs["output"].metadata
 
 
 @pytest.mark.parametrize("language", ["en", "zh"])
 @pytest.mark.parametrize(
-    ("context", "public_url", "key", "url"),
+    ("context", "public_url", "line_key", "url"),
     [
-        # The Workbench knows its requester: it links to Models only for one who can open it.
-        (_LOCAL_WORKBENCH, None, "errors.openModelsLink", "/settings/models"),
-        (_remote_workbench_context("member"), None, "errors.openModelsLink", "/settings/models"),
-        (_remote_workbench_context("editor"), None, "errors.askAdminForModels", None),
+        # The Workbench draws notices as plain text: the step rides as data, and the body stays the refusal.
+        (_WORKBENCH, "https://team.avibe.bot", None, None),
         # No IM identity maps to a Workbench principal: IM says who can fix it, with the public URL when there is one.
         (_IM, "https://team.avibe.bot", "errors.modelsNextStepImUrl", "https://team.avibe.bot/settings/models"),
         (_IM, None, "errors.modelsNextStepIm", None),
     ],
 )
-async def test_a_refusal_fixed_in_models_ends_with_where_to_fix_it(language, context, public_url, key, url):
+async def test_a_refusal_fixed_in_models_ends_with_where_to_fix_it(language, context, public_url, line_key, url):
     from modules.agents.model_hub import ModelSupplyRefusal
 
     controller = _next_step_controller(language, public_url=public_url)
@@ -429,10 +425,16 @@ async def test_a_refusal_fixed_in_models_ends_with_where_to_fix_it(language, con
 
     await emit_backend_failure(controller, context, "vibey", str(refusal), display_text=f"❌ {refusal}", cause=refusal)
 
-    next_step = t(key, language, url=url) if url else t(key, language)
-    assert controller.emit_agent_message.await_args_list[0].args[2] == f"❌ {refusal}\n{next_step}"
+    text, metadata = _notice(controller)
+    if line_key is None:
+        assert (text, metadata.get("failure_next_step")) == (f"❌ {refusal}", "models")
+        assert "](" not in text
+    else:
+        line = t(line_key, language, url=url) if url else t(line_key, language)
+        assert (text, metadata.get("failure_next_step")) == (f"❌ {refusal}\n{line}", None)
 
 
+@pytest.mark.parametrize("context", [_WORKBENCH, _IM])
 @pytest.mark.parametrize(
     "cause",
     [
@@ -442,7 +444,7 @@ async def test_a_refusal_fixed_in_models_ends_with_where_to_fix_it(language, con
         "native",
     ],
 )
-async def test_a_failure_models_cannot_fix_gets_no_next_step(cause):
+async def test_a_failure_models_cannot_fix_gets_no_next_step(context, cause):
     from modules.agents.model_hub import ModelSupplyRefusal
 
     controller = _next_step_controller("en", public_url="https://team.avibe.bot")
@@ -451,23 +453,24 @@ async def test_a_failure_models_cannot_fix_gets_no_next_step(cause):
         if cause == "hub_disabled" else RuntimeError("process exited")
     )
 
-    await emit_backend_failure(controller, _LOCAL_WORKBENCH, "vibey", str(error), display_text=f"❌ {error}", cause=error)
+    await emit_backend_failure(controller, context, "vibey", str(error), display_text=f"❌ {error}", cause=error)
 
-    assert controller.emit_agent_message.await_args_list[0].args[2] == f"❌ {error}"
+    text, metadata = _notice(controller)
+    assert (text, metadata.get("failure_next_step")) == (f"❌ {error}", None)
 
 
 @pytest.mark.parametrize(
-    ("discriminator", "supply_state", "linked"),
+    ("discriminator", "supply_state", "pointed"),
     [
-        # Copy that already sends its reader to Models ends with the way there...
+        # Copy that already sends its reader to Models carries the way there...
         ("route_unconfigured", "interrupted", True),
         ("blocked_supply_state", "interrupted", True),
         # ...and copy that does not, such as a source still cooling down, does not.
         ("blocked_supply_state", "waiting", False),
     ],
 )
-async def test_a_route_refusal_links_models_only_when_its_copy_sends_the_reader_there(
-    discriminator, supply_state, linked,
+async def test_a_route_refusal_points_to_models_only_when_its_copy_sends_the_reader_there(
+    discriminator, supply_state, pointed,
 ):
     from core.handlers.model_hub.service import ModelHubError
 
@@ -483,7 +486,7 @@ async def test_a_route_refusal_links_models_only_when_its_copy_sends_the_reader_
     controller = _next_step_controller("en", public_url=None)
     copy = render_turn_outcome_copy(outcome, "en")
 
-    await emit_backend_failure(controller, _LOCAL_WORKBENCH, "claude", str(refused), display_text=copy, cause=refused)
+    await emit_backend_failure(controller, _WORKBENCH, "claude", str(refused), display_text=copy, cause=refused)
 
-    link = t("errors.openModelsLink", "en", url="/settings/models")
-    assert controller.emit_agent_message.await_args_list[0].args[2] == (f"{copy}\n{link}" if linked else copy)
+    text, metadata = _notice(controller)
+    assert (text, metadata.get("failure_next_step")) == (copy, "models" if pointed else None)
