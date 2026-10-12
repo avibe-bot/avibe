@@ -36,13 +36,21 @@ The pinned source tag is `cua-driver-rs-v0.31.0` at
 corresponding managed tool snapshot in
 `desktop/cua-driver/tools-v0.31.0.json`.
 
+The probe below used the exact earlier snapshot from source-worktree commit
+`d40a5fda4c5d2be230e2a898528b25cda2cbe220`, whose SHA-256 is recorded below.
+The current repository snapshot has SHA-256
+`4257e598f5a6ad7e632b48e96c03257d7c5ed618a93b72820b2d4fef0f196acf` and
+includes Avibe's later `click_mode:"raw"` patch. The probe therefore records
+historical behavior of the earlier snapshot; it is not a conformance result
+for the current snapshot or its raw-click selector.
+
 The relevant routes are:
 
 | Route | Mechanism | Background behavior |
 | --- | --- | --- |
 | Semantic AX actions | `AXUIElementPerformAction`, including `AXPress` | Calls the target's accessibility action without moving the hardware pointer. A successful AX return is not proof that a custom surface handled a real mouse event. |
 | Pixel mouse, per PID | Private SkyLight `SLEventPostToPid`, with public `CGEvent::post_to_pid` fallback | Sends a synthetic mouse event to one process. The driver stamps screen/window routing metadata, including `CGEventSetWindowLocation` and the target PID/window fields. |
-| Window-pointer pixel route | Window-local coordinates converted from the exact window snapshot, then routed as PID-targeted CGEvents | Provides precise window targeting. In the 0.31.0 click tool, a normal single left-click may be intercepted by the AX hit-test optimization before this route runs. |
+| Window-pointer pixel route | Window-local coordinates converted from the exact window snapshot, then routed as PID-targeted CGEvents | Provides precise window targeting. In the earlier snapshot used by the probe, a normal single left-click could be intercepted by the AX hit-test optimization before this route ran. The current Avibe snapshot exposes `click_mode:"raw"` for the exact background left-click case. |
 | PID keyboard | `SLEventPostToPid` with an `SLSEventAuthenticationMessage` where needed, then public PID fallback | Background key transitions and text synthesis without a global HID post. The auth envelope is for Chromium-like targets; menu shortcuts have a no-auth path. |
 | Foreground HID | Global `CGEvent` posts through the HID tap after explicit activation | Not a background route. It is the fallback for surfaces that require real HID origin or hardware pointer state. |
 | Focus without raise | SkyLight event-record SPI used by the background pixel activation guard | Uses private records to make the target AppKit-active for routing while suppressing normal raise/Space-follow behavior. This is separate from the raw click transport. |
@@ -93,13 +101,20 @@ driver sha256: a72b09106ee1c962eef465a407b6e2f172d38944f6702e5f11e6ad85feb390d1
 tool snapshot sha256: b03c3e48d1b00c8fe7c0e8b9813eb5ea104ad38313672fc4b68af203a827f43b
 ```
 
+The `b03c3e48...` snapshot is the exact
+`desktop/cua-driver/tools-v0.31.0.json` artifact at source-worktree commit
+`d40a5fda...`; it predates the current repository snapshot and its
+`click_mode:"raw"` selector. The observations below are consequently bounded
+to the installed/pre-patch probe artifact and must not be read as validation
+of the current checked-in snapshot.
+
 The original post-merge acceptance helper under
 `~/Applications/Avibe CUA Post-Merge Acceptance 20261009.app` was removed by
 the later rc4 replacement, so its previous binary hash
 `2a05d3e8...` is preserved only in the earlier acceptance evidence. The
-source tag and tool snapshot remain pinned to 0.31.0; this note distinguishes
-the current 0.31.0 binary hash rather than treating the two binaries as
-identical.
+source tag remains pinned to 0.31.0, but the probe and current repository
+snapshot are distinct artifacts; this note keeps both hashes explicit rather
+than treating them as identical.
 
 Observed results from the latest run:
 
@@ -129,18 +144,14 @@ context had been omitted.
 
 ## Does `core/computer_server.py` need a change?
 
-No change is needed to use the existing working raw route. The server already
-accepts the exact `pid` plus `window_id`, enforces observe-first, preserves the
-background delivery mode, and forwards the remaining arguments unchanged.
-
-A product-quality fix for the AX-first trap would belong first in the driver
-contract: it needs an explicit, auditable way to request a raw pixel click
-when the caller has evidence that AXPress is a hollow success. The current
-tool contract has no such single-click route selector. Once the driver exposes
-that field in its tool snapshot, the core server's forwarding model can carry
-it without reimplementing macOS event posting; only the snapshot/admission
-contract would need to be checked for any new field. Reusing `count=2` is not
-an acceptable product workaround because it changes the click gesture.
+The current Avibe snapshot already exposes `click_mode:"raw"` for the exact
+background left-click case, and the core server validates and forwards that
+selector. The historical probe predates this selector, so its `count=2`
+synthetic-event result does not validate the current raw-click contract.
+Reusing `count=2` is not an acceptable product workaround because it changes
+the click gesture. The next evidence question is whether the current raw
+selector is accepted by target applications that reject background synthetic
+events; that is separate from Route B foreground design.
 
 ## Options if a target still rejects the raw route
 
@@ -205,10 +216,11 @@ limitation for canvases and other surfaces that require real HID origin.
 ## Scope and follow-up
 
 This is a research result, not an implementation recommendation to enable
-foreground input. The smallest next implementation question is whether the
-driver should expose an explicit raw single-click selector for the AX-hollow
-case. That should be decided with a driver contract and consuming test before
-changing `core/computer_server.py`.
+foreground input. The current raw single-click selector is already part of the
+checked-in Avibe contract. The next implementation question is validation of
+that existing selector against target applications that reject synthetic
+events; that requires a driver contract and consuming test before any further
+change to `core/computer_server.py`.
 
 The probe sources are not included in this PR; this note is the evidence
 record. No commit, push, PR, TCC mutation, credential access, installed-Avibe
