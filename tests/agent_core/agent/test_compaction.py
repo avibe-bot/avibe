@@ -35,6 +35,7 @@ from core.agent_core.agent.loop import Agent
 from core.agent_core.agent.models import RetryPolicy
 from core.agent_core.ai._common import endpoint_origin, prepare_messages
 from core.agent_core.ai.anthropic import build_messages_payload
+from core.agent_core.ai.errors import classify_error
 from core.agent_core.ai.openai_chat import build_chat_payload
 from core.agent_core.ai.openai_responses import build_responses_payload
 from core.agent_core.ai.provider import Done, ModelEndpoint, ProviderError, TextDelta
@@ -72,8 +73,11 @@ from tests.agent_core.fakes import (
     FakeModelRouter,
     FakeTool,
     InMemoryTranscriptStore,
+    WINDOW_REFUSAL,
+    anthropic_error,
     assistant,
     input_row,
+    model_hub_error,
 )
 
 DENIED, BUDGET_USED = DREAMING.denied, DREAMING.budget_used
@@ -643,6 +647,32 @@ async def test_a_checkpoint_request_that_cannot_fit_a_new_route_is_audited_and_t
     assert events[-1].reason == "completed"
 
 
+#: A request the provider refuses because its input plus ``max_tokens`` exceeds the window (an Anthropic model before
+#: Claude 4.5), at the endpoint and through Model Hub, classified as the Anthropic adapter classifies an HTTP error.
+WINDOW_REFUSALS = [
+    pytest.param(classify_error(status=400, body=json.dumps(envelope(WINDOW_REFUSAL)), protocol="anthropic"), id=name)
+    for name, envelope in (("window-endpoint", anthropic_error), ("window-model-hub", model_hub_error))
+]
+
+
+@pytest.mark.parametrize("refusal", WINDOW_REFUSALS)
+async def test_a_threshold_checkpoint_the_provider_refuses_for_its_window_rolls(refusal):
+    # The threshold checkpoint's request can fit by the estimate, but the provider refuses it for its window: an
+    # overflow, so the ladder goes on at (b) and rolls (section 3, section 8 a).
+    store = InMemoryTranscriptStore()
+    await run(make_agent(Model(history()), store=store, tools=[reader(tokens(3_000))], selection=ROOMY))
+    model = Model([[Done(assistant("after"))]], [[refusal], [Done(assistant(CHECKPOINT))]])
+    agent = make_agent(model, store=store, tools=[reader(tokens(3_000))], selection=ROOMY)
+    events = await cross(agent)
+    finished = [(event.reason, event.mode) for event in events if isinstance(event, CompactionFinished)]
+    assert finished == [("overflow", "rolling")]
+    failed = [event for event in events if isinstance(event, CompactionFailed)]
+    assert [event.reason for event in failed] == ["threshold"] and failed[0].error.startswith("overflow: ")
+    normal, rolling = model.checkpoint_requests
+    assert len(rolling.messages) < len(normal.messages)  # the rolling fork carries a prefix of the context
+    assert events[-1].reason == "completed"
+
+
 #: Checkpoint turns that fail without a repair: a length stop, and a provider error.
 FAILURES = [
     [Done(assistant(CHECKPOINT, stop_reason="length"))],
@@ -854,9 +884,10 @@ async def test_two_ineffective_checkpoints_stop_compaction_for_the_run():
 OVERFLOW = ProviderError("overflow", "prompt is too long: 40000 tokens > 32000 maximum", False, status=400)
 
 
-async def test_a_provider_overflow_below_T_takes_a_normal_checkpoint_and_retries():
+@pytest.mark.parametrize("refusal", [pytest.param(OVERFLOW, id="prompt-too-long"), *WINDOW_REFUSALS])
+async def test_a_provider_overflow_below_T_takes_a_normal_checkpoint_and_retries(refusal):
     model = Model(
-        [call("read", "r0", path="f"), call("read", "r1", path="f"), [OVERFLOW], [Done(assistant("done"))]],
+        [call("read", "r0", path="f"), call("read", "r1", path="f"), [refusal], [Done(assistant("done"))]],
         [[Done(assistant(CHECKPOINT))]],
     )
     agent = make_agent(model, tools=[reader(tokens(4_000))])

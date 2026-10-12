@@ -1053,6 +1053,9 @@ def _normalize_stop_reason(value: Any) -> str:
         "stop_sequence": "stop",
         "pause_turn": "stop",
         "max_tokens": "length",
+        # Generation reached the context window (Claude 4.5 and newer accept input plus max_tokens over the window);
+        # Anthropic says to treat the response as truncated, as at max_tokens.
+        "model_context_window_exceeded": "length",
         "tool_use": "tool_use",
         "refusal": "refusal",
         "safety": "safety",
