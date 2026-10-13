@@ -22,7 +22,10 @@ Reuse the request queue, approval surfaces, notification delivery, and callbacks
    Session after the decision; do not rerun rm." Explicit waiting remains
    available through `vibe vault await <request_id>`. Orchestrator clarification
    (2026-10-13): with `--no-callback` or no resolvable requesting Session, give
-   truthful `await` guidance instead of claiming an automatic resume.
+   truthful `await` guidance instead of claiming an automatic resume. Global
+   dedupe preserves the original request's provenance/callback; when a reused
+   request belongs to another Session or has callbacks disabled, `rm` gives the
+   same truthful `await` guidance rather than promising a new callback.
 2. Persist `request_type="delete"`, `secret_name=NAME`, and the existing
    requester/session provenance. `delivery={reason, card}`; card fields are
    `{card_type: "approval", request_type: "delete", secret_name, kind,
@@ -97,3 +100,8 @@ Avibe service, real home/keychain, or external tenant mutation. Tests run throug
 
 The PR Known-by-design ledger records that all Agent deletes need approval, the
 keypair/protected hold is retained, and single-field deletion is out of scope.
+Global per-secret request dedupe intentionally retains the first requester/session
+and callback; a later caller receives explicit `vibe vault await` guidance when
+that callback cannot resume the later Session. The desktop mini reuses its
+pending-request deep link to Vaults rather than adding a second inline approval
+surface.

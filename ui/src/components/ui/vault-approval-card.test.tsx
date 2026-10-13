@@ -15,6 +15,8 @@ const api = vi.hoisted(() => ({
   fulfillVaultAccessRequest: vi.fn(),
   getVaultSettings: vi.fn(),
   saveVaultSettings: vi.fn(),
+  denyVaultRequest: vi.fn(),
+  approveVaultDeleteRequest: vi.fn(),
 }));
 const useVaultSandboxWarm = vi.hoisted(() => vi.fn((_enabled: boolean) => true));
 const vault = vi.hoisted(() => ({
@@ -60,6 +62,25 @@ const protectedAccess = {
   },
 } satisfies VaultRequest;
 
+const deleteRequest = {
+  ...protectedAccess,
+  id: 'vrq_delete',
+  request_type: 'delete',
+  secret_name: 'OLD_TOKEN',
+  delivery: { reason: 'rotated' },
+  card: {
+    card_type: 'approval',
+    request_type: 'delete',
+    secret_name: 'OLD_TOKEN',
+    kind: 'static',
+    protection: 'standard',
+    description: 'Old credential',
+    tags: ['prod'],
+    session_id: 'ses_delete',
+    reason: 'rotated',
+  },
+} satisfies VaultRequest;
+
 // The batch endpoint's reply for one issue; each issue carries its own approval nonce.
 const issuedFor = (grantDuration: VaultGrantDuration) => ({
   ok: true,
@@ -83,6 +104,7 @@ beforeEach(() => {
   api.getVaultSettings.mockResolvedValue({ ok: true, settings: { last_grant_ttl: 300 } });
   api.saveVaultSettings.mockResolvedValue({ ok: true });
   api.fulfillVaultAccessRequest.mockResolvedValue({ ok: true });
+  api.approveVaultDeleteRequest.mockResolvedValue({ ok: true, removed: true, name: 'OLD_TOKEN' });
   api.createVaultAgentBindingsBatch.mockImplementation(async ({ grant_duration }: { grant_duration: VaultGrantDuration }) =>
     issuedFor(grant_duration),
   );
@@ -209,5 +231,20 @@ describe('VaultApprovalCard protected access approval', () => {
 
     await vi.waitFor(() => expect(vault.approveProtectedRelease).toHaveBeenCalledOnce());
     expect(vault.approveProtectedRelease.mock.calls[0][0].map((item: { context: unknown }) => item.context)).toEqual([{ issuedFor: 300 }]);
+  });
+
+  it('renders and approves a standard delete request in one click', async () => {
+    const onResolved = vi.fn();
+    render(
+      <I18nextProvider i18n={i18n}>
+        <VaultApprovalCard request={deleteRequest} onResolved={onResolved} onCancel={vi.fn()} />
+      </I18nextProvider>,
+    );
+
+    expect(screen.getByText('Old credential')).toBeTruthy();
+    expect(screen.getByText('rotated')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: /^delete$/i }));
+    await vi.waitFor(() => expect(api.approveVaultDeleteRequest).toHaveBeenCalledWith('vrq_delete'));
+    expect(onResolved).toHaveBeenCalledWith({ kind: 'approved', requestType: 'delete' });
   });
 });

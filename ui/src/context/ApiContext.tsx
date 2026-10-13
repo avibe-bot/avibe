@@ -837,6 +837,7 @@ export type ApiContextType = {
   getVaultProvisionRequestById: (requestId: string, opts?: { handleError?: boolean }) => Promise<{ ok: boolean; request: VaultRequest | null }>;
   getVaultRequests: (params?: { status?: string; type?: string; limit?: number; session?: string }, opts?: { handleError?: boolean }) => Promise<{ ok: boolean; requests: VaultRequest[] }>;
   denyVaultRequest: (requestId: string) => Promise<{ ok: boolean; request?: VaultRequest; code?: string; message?: string }>;
+  approveVaultDeleteRequest: (requestId: string) => Promise<{ ok: boolean; request?: VaultRequest; removed?: boolean; name?: string; code?: string; message?: string }>;
   fulfillVaultAccessRequest: (requestId: string, payload: VaultAccessFulfillmentPayload) => Promise<{ ok: boolean; request_id?: string; grant?: VaultGrant; result?: { type: string; grant?: VaultGrant }; code?: string; message?: string }>;
   getVaultGrants: (params?: { status?: string; sessionId?: string }, opts?: { handleError?: boolean }) => Promise<{ ok: boolean; grants: VaultGrant[] }>;
   createVaultGrant: (payload: Record<string, unknown>) => Promise<{ ok: boolean; grant: VaultGrant; code?: string; message?: string }>;
@@ -4016,6 +4017,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return getCachedJson(qs ? `/api/vault/requests?${qs}` : '/api/vault/requests', 1500, opts);
     },
     denyVaultRequest: (requestId) => postJson(`/api/vault/requests/${encodeURIComponent(requestId)}/deny`, {}),
+    approveVaultDeleteRequest: (requestId) => postJson(`/api/vault/requests/${encodeURIComponent(requestId)}/approve-delete`, {}),
     fulfillVaultAccessRequest: (requestId, payload) =>
       postJson(`/api/vault/requests/${encodeURIComponent(requestId)}/fulfill-access`, payload),
     getVaultGrants: (params, opts) => {
