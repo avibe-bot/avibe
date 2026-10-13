@@ -25,6 +25,19 @@ from harbor.models.agent.context import AgentContext
 from scripts.terminal_bench.harbor_agent import FullAvibeAgent
 
 
+# These are fixture coordination bounds, not Agent/product timeouts. Cold HD1
+# writes and event-loop scheduling can take longer than the former 2s barrier.
+_SETUP_BARRIER_SECONDS = 60
+
+
+async def _finish_pending(pending, env):
+    """A failed setup assertion must not leave a shielded upload/task behind."""
+    env.allow_upload.set()
+    if not pending.done():
+        pending.cancel()
+    await asyncio.wait_for(asyncio.gather(pending, return_exceptions=True), _SETUP_BARRIER_SECONDS)
+
+
 @pytest.fixture
 def wheel(tmp_path):
     path = tmp_path / "avibe_os-9.9.9-py3-none-any.whl"
@@ -175,13 +188,16 @@ async def test_run_joins_cancel_before_artifact_handoff(tmp_path, wheel, monkeyp
     env = Environment(block=cancel, fail_cleanup=fail_cleanup)
     ctx = AgentContext()
     pending = asyncio.create_task(agent.run("Write the requested note.", env, ctx))
-    if cancel:
-        await asyncio.wait_for(env.started.wait(), 2)
-        pending.cancel()
-        with pytest.raises(RuntimeError if fail_cleanup else asyncio.CancelledError):
+    try:
+        if cancel:
+            await asyncio.wait_for(env.started.wait(), _SETUP_BARRIER_SECONDS)
+            pending.cancel()
+            with pytest.raises(RuntimeError if fail_cleanup else asyncio.CancelledError):
+                await pending
+        else:
             await pending
-    else:
-        await pending
+    finally:
+        await _finish_pending(pending, env)
     if fail_cleanup:
         assert not env.downloaded
     else:
@@ -217,14 +233,17 @@ async def test_upload_failure_or_cancel_joins_then_removes_staged_key(tmp_path, 
     env.upload_error = not cancel
     env.block_upload = cancel
     pending = asyncio.create_task(agent.run("fixture", env, AgentContext()))
-    if cancel:
-        await asyncio.wait_for(env.upload_started.wait(), 2)
-        pending.cancel()
-        await asyncio.sleep(.01)
-        assert not env.key_removed, "in-flight transfer must settle before cleanup"
-        env.allow_upload.set()
-    with pytest.raises(asyncio.CancelledError if cancel else OSError):
-        await pending
+    try:
+        if cancel:
+            await asyncio.wait_for(env.upload_started.wait(), _SETUP_BARRIER_SECONDS)
+            pending.cancel()
+            await asyncio.sleep(.01)
+            assert not env.key_removed, "in-flight transfer must settle before cleanup"
+            env.allow_upload.set()
+        with pytest.raises(asyncio.CancelledError if cancel else OSError):
+            await pending
+    finally:
+        await _finish_pending(pending, env)
     assert env.key_removed
     assert not env.started.is_set()
     assert not env.downloaded
