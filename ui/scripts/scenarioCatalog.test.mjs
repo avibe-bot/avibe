@@ -174,6 +174,8 @@ describe('UI evidence resolution', () => {
         related_tests: ['ui/src/e.test.tsx::names its neighbour', 'tests/test_e.py::test_e'],
         supporting_tests: ['ui/src/f.test.tsx::supports it'],
       },
+      // Evidence several cases prove together: each listed case is asked on its own.
+      { id: 'MH-LIST', status: 'covered', test: ['ui/src/h.test.tsx::MH-LIST first', 'tests/test_g.py::test_g', 'ui/src/h.test.tsx::MH-LIST second'] },
       {
         id: 'MH-PARTIAL',
         status: 'partial',
@@ -182,7 +184,7 @@ describe('UI evidence resolution', () => {
       },
       { id: 'MH-GAP', status: 'gap', test: null },
     ];
-    const asked = ['MH-UI', 'MH-SCRIPT', 'MH-FILE', 'MH-CONTRACT', 'MH-POINTER', 'MH-POINTER', 'MH-PARTIAL'];
+    const asked = ['MH-UI', 'MH-SCRIPT', 'MH-FILE', 'MH-CONTRACT', 'MH-POINTER', 'MH-POINTER', 'MH-LIST', 'MH-LIST', 'MH-PARTIAL'];
     const rowsOf = (catalog) => uiEvidenceRows({ ...catalog, scenarios });
 
     expect(rowsOf({ status_legend: { covered: { test_required: true } } }).map((row) => row.id)).toEqual(asked);

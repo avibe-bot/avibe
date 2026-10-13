@@ -5600,6 +5600,10 @@ def test_legacy_hold_metadata_does_not_change_turn_or_run_ownership(
 
     service._sweep_stale_runs()
 
+    # The attributed run outlives its orphan grace because a Turn owns it, and the
+    # legacy hold flag gives the other two rows no owner at all.
+    assert request_store.get_run(primary)["status"] == "running"
+    assert session_turns.owned_agent_run_ids() == {primary}
     assert request_store.get_run(held)["status"] == "queued"
     assert request_store.get_run(unowned)["status"] == "queued"
 

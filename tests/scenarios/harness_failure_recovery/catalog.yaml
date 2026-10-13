@@ -42,7 +42,10 @@ scenarios:
     kind: restart
     layer: scenario
     backend: shared
-    test: tests/test_scheduled_tasks.py::test_restart_does_not_flush_user_queue_ahead_of_held_agent_run
+    test:
+      - tests/test_scheduled_tasks.py::test_restart_recovers_delivery_owned_run_without_unrelated_run_arbitration
+      - tests/test_scheduled_tasks.py::test_restart_does_not_flush_user_queue_ahead_of_held_agent_run
+      - tests/test_scheduled_tasks.py::test_restart_does_not_auto_send_pure_user_queue
   - id: HFR-005
     name: live long-running owner is never stolen by age
     status: covered
@@ -3739,8 +3742,8 @@ scenarios:
     # PATCH and the archive now serialize, so there is no race left to refuse. Both
     # halves are proved by test_update_session_serializes_rename_before_archive and
     # test_update_session_serializes_route_change_before_archive.
-    test: tests/test_sqlite_sessions_store.py::test_update_session_serializes_rename_before_archive
-    related_tests:
+    test:
+      - tests/test_sqlite_sessions_store.py::test_update_session_serializes_rename_before_archive
       - tests/test_sqlite_sessions_store.py::test_update_session_serializes_route_change_before_archive
   - id: HFR-281
     name: >-

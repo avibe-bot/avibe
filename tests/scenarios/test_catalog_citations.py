@@ -12,9 +12,11 @@ A pytest citation resolves when its file holds a case pytest collects:
 ``file::Class::method``, or ``file::name`` naming a module-level test, a test
 class, or a test method of a class in that file, which is how several catalogs
 cite unittest cases. A helper or a plain class is no case. A parametrized id
-resolves through its function. An evidence key must name a case (STANDARD.md
-§4): a bare file stays collected for whatever else cites it, so it evidences
-no row in particular. Pointer keys may name a bare file, which must exist.
+resolves through its function. An evidence key names exactly one case per
+entry (STANDARD.md §4): a bare file or a test class stays collected for
+whatever else cites it, so it evidences no row in particular, and a row whose
+contract several cases prove lists each of them under ``test``. Pointer keys
+may name a bare file, a class or a group of cases, which must exist.
 
 UI (vitest) citations are resolved against vitest's own collection by
 ``ui/scripts/validate-scenario-catalog.mjs``; here only their file is checked.
@@ -73,23 +75,27 @@ def _collectable_cases(path: Path) -> tuple[frozenset[str], dict[str, frozenset[
     return test_names(tree.body), test_classes
 
 
-def _holds_case(path: Path, name: str) -> bool:
+def _named_cases(path: Path, name: str) -> tuple[int, bool]:
+    """How many collected cases ``name`` names in ``path``, and whether it names a test class."""
+
     functions, classes = _collectable_cases(path)
     parts = name.partition("[")[0].split("::")
     if len(parts) == 2:
-        return parts[1] in classes.get(parts[0], frozenset())
+        return int(parts[1] in classes.get(parts[0], frozenset())), False
     if len(parts) != 1:
-        return False
+        return 0, False
     (case,) = parts
-    return case in functions or case in classes or any(case in methods for methods in classes.values())
+    return int(case in functions) + sum(case in methods for methods in classes.values()), case in classes
 
 
-def _citations(row: dict) -> list[tuple[str, str]]:
+def _citations(row: dict) -> list[tuple[str, object]]:
     """Each (key, reference) the row cites a test file or case with."""
 
-    cited: list[tuple[str, str]] = []
-    if isinstance(row.get("test"), str):
-        cited.append(("test", row["test"]))
+    cited: list[tuple[str, object]] = []
+    evidence = row.get("test")
+    # A row whose contract several cases prove names each of them.
+    for reference in evidence if isinstance(evidence, list) else [evidence] if evidence is not None else []:
+        cited.append(("test", reference))
     partial = row.get("partial_evidence")
     if isinstance(partial, dict) and isinstance(partial.get("test"), str):
         cited.append(("partial_evidence", partial["test"]))
@@ -116,10 +122,22 @@ def test_every_catalog_citation_resolves_to_a_case(catalog: Path) -> None:
                 continue
             path_text, separator, name = reference.partition("::")
             path = REPO_ROOT / path_text
-            if key not in _POINTER_KEYS and not name.strip():
+            pointer = key in _POINTER_KEYS
+            if not pointer and not name.strip():
                 dead.append(f"{where} (evidence must name a case, not only its file)")
-            elif not path.is_file():
+                continue
+            if not path.is_file():
                 dead.append(f"{where} (no such file)")
-            elif separator and path.suffix not in _UI_SUFFIXES and not _holds_case(path, name):
-                dead.append(f"{where} (no such case in the file)")
+                continue
+            if not separator or path.suffix in _UI_SUFFIXES:
+                continue
+            count, names_class = _named_cases(path, name)
+            if pointer:
+                # A pointer claims no evidence, so a class or a group of cases is a fine destination.
+                if not count and not names_class:
+                    dead.append(f"{where} (no such case in the file)")
+            elif names_class:
+                dead.append(f"{where} (names a test class, not one case; cite each case that proves the row)")
+            elif count != 1:
+                dead.append(f"{where} (names {count} cases, expected exactly one; cite it as Class::method)")
     assert not dead, f"{catalog.relative_to(REPO_ROOT)} has citations that resolve to no case:\n" + "\n".join(dead)
