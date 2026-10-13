@@ -14,7 +14,10 @@ import { InstanceAuthorizationContext } from '../../context/InstanceAuthorizatio
 import { OWNER_INSTANCE_CAPABILITIES } from '../../lib/sessionInfo';
 import { VaultsPage } from './VaultsPage';
 
-type WorkbenchEventHandlers = { onVaultsUpdated?: (data: unknown) => void };
+type WorkbenchEventHandlers = {
+  onVaultsUpdated?: (data: unknown) => void;
+  onEventBridgeStatus?: (data: { connected: boolean }) => void;
+};
 
 const eventHandlers = vi.hoisted(() => [] as WorkbenchEventHandlers[]);
 const api = vi.hoisted(() => ({
@@ -285,6 +288,30 @@ describe('VaultsPage list discovery', () => {
     expect(count()).toBe('1 / 4');
     await user.click(screen.getByRole('radio', { name: 'All', exact: true }));
     expect(count()).toBe('4');
+  });
+
+  // With SSE connected there is no fallback polling, and an inventory without
+  // grants has no countdown. Relative labels still need to advance: the earlier
+  // static-label tests could not detect coupling the clock to grant lifetime.
+  it('advances last-use labels with a connected bridge and no grants, without refetching', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    try {
+      api.listVaultSecrets.mockResolvedValue({ secrets: [makeSecret('alpha', { last_used_at: '2026-10-13T11:55:00Z' })] });
+      renderPage();
+      await screen.findByText('alpha');
+      await act(async () => {
+        for (const handler of eventHandlers) handler.onEventBridgeStatus?.({ connected: true });
+      });
+      expect(rows()[0].textContent).toContain('5m ago');
+      const fetches = api.listVaultSecrets.mock.calls.length;
+      vi.mocked(Date.now).mockReturnValue(Date.parse('2026-10-13T12:01:00Z'));
+      act(() => vi.advanceTimersByTime(60_000));
+      expect(rows()[0].textContent).toContain('6m ago');
+      expect(api.listVaultSecrets).toHaveBeenCalledTimes(fetches);
+    } finally {
+      cleanup();
+      vi.useRealTimers();
+    }
   });
 
   it('round-trips repeatable URL filters with replace, preserving pending handoff and unrelated parameters', async () => {

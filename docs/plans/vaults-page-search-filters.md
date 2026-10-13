@@ -46,8 +46,11 @@ lint; CI owns the broad suite. Never restart or probe the live local runtime.
 
 ## Validation evidence
 
-- Focused Vitest: 46 passing cases across the matcher, Vaults page and existing
-  browser-handoff suite. Includes unchanged audit/reveal behavior.
+- Focused Vitest: 47 passing cases across the matcher, Vaults page and existing
+  browser-handoff suite. Includes unchanged audit/reveal behavior and a clock
+  regression (red on `dd655fb823`): connected SSE with no grants still advances
+  last-use labels without refetching. One page clock ticks each second for
+  grants, otherwise each minute when the inventory has last-use labels.
 - `npm run build`, `npm run typecheck:tests`, and baseline-aware `npm run lint`
   pass. No Python changes and no full local test-suite run.
 - Hermetic Chromium sanity check: real page/components and CSS with 26 synthetic

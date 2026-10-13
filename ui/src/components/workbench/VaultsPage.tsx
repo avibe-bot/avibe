@@ -685,14 +685,13 @@ export const VaultsPage: React.FC = () => {
     };
   }, [eventBridgeConnected, refresh]);
 
-  // Tick once a second while there are live grants: advance the countdown and
-  // drop any grant that has reached its expiry. The backend's status=active
-  // filter only applies at fetch time, so without this the "Active access"
-  // strip and its count would linger on a dead grant and the timer would run
-  // forever; when the last grant expires the interval tears down on its own.
+  // One page clock serves both grant countdowns and relative last-use labels.
+  // Live grants need seconds; an otherwise idle, SSE-connected inventory still
+  // needs minutes even though it has neither countdowns nor fallback polling.
   const hasGrants = grants.length > 0;
+  const hasLastUse = secrets.some((secret) => Boolean(secret.last_used_at));
   useEffect(() => {
-    if (!hasGrants) return;
+    if (!hasGrants && !hasLastUse) return;
     const id = setInterval(() => {
       const t = Date.now();
       setNow(t);
@@ -700,9 +699,9 @@ export const VaultsPage: React.FC = () => {
         const live = prev.filter((g) => !isExpired(g.expires_at, t));
         return live.length === prev.length ? prev : live;
       });
-    }, 1000);
+    }, hasGrants ? 1000 : 60_000);
     return () => clearInterval(id);
-  }, [hasGrants]);
+  }, [hasGrants, hasLastUse]);
 
   const terms = useMemo(() => vaultSearchTerms(query), [query]);
   const selected = [...activeSkills.map(toSkillTag), ...activeTags];
