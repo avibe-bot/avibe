@@ -88,10 +88,28 @@ const renderTranscript = (over: Partial<Props> = {}) => {
   const scroller = view.getByTestId('chat-transcript');
   const geometry = { extraAbove: 0 };
   let scrollTop = 0;
-  const loadingSlotHeight = () => scroller.querySelector('[role="status"], button')?.classList.contains('h-8') ? 44 : 0;
+  // jsdom has no layout, so geometry comes from the committed content column's
+  // direct children: the head slot and the rows, which pickScrollAnchor walks too.
+  // Walk siblings instead of querying the subtree. The anchor search reads one
+  // rect per row above the viewport, and a subtree query per rect made each
+  // scroll cost (rows above) x (whole DOM): seconds over 300 rows on CI.
+  const column = () => scroller.firstElementChild!;
+  const rowsFrom = (node: Element | null) => {
+    let count = 0;
+    for (; node; node = node.previousElementSibling) if ((node as HTMLElement).dataset.messageId !== undefined) count += 1;
+    return count;
+  };
+  // The loading slot or failed-load retry above the rows, plus the column gap.
+  const loadingSlotHeight = () => {
+    for (const child of column().children) {
+      if ((child as HTMLElement).dataset.messageId !== undefined) return 0;
+      if (child.matches('[role="status"], button') && child.classList.contains('h-8')) return 44;
+    }
+    return 0;
+  };
   Object.defineProperties(scroller, {
     clientHeight: { configurable: true, get: () => 800 },
-    scrollHeight: { configurable: true, get: () => scroller.querySelectorAll('[data-message-id]').length * 112 + 40 + loadingSlotHeight() + geometry.extraAbove },
+    scrollHeight: { configurable: true, get: () => rowsFrom(column().lastElementChild) * 112 + 40 + loadingSlotHeight() + geometry.extraAbove },
     scrollTop: {
       configurable: true,
       get: () => scrollTop,
@@ -99,12 +117,10 @@ const renderTranscript = (over: Partial<Props> = {}) => {
     },
   });
   scroller.getBoundingClientRect = () => ({ top: 10, bottom: 810, height: 800 }) as DOMRect;
-  // jsdom has no layout. Derive every row's position from the committed DOM,
-  // including prepended rows and the transient loading slot + column gap.
+  // A row's position counts the rows before it and the transient loading slot.
   vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
     if (this.dataset.messageId === undefined) return { top: 0, bottom: 0, height: 0 } as DOMRect;
-    const rows = Array.from(scroller.querySelectorAll('[data-message-id]'));
-    const index = rows.indexOf(this);
+    const index = rowsFrom(this.previousElementSibling);
     const top = 30 + index * 112 + loadingSlotHeight() + (index > 0 ? geometry.extraAbove : 0) - scrollTop;
     return { top, bottom: top + 100, height: 100 } as DOMRect;
   });
