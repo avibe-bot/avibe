@@ -8,6 +8,7 @@ import type {
   HostedToolCandidate,
   HostedToolExecutor,
   HostedToolName,
+  HostedToolProbeResult,
   HostedToolsStatus,
   HostedToolStatus,
 } from './types';
@@ -92,6 +93,10 @@ export const pendingChecks = (status: HostedToolsStatus): ProbeTarget[] =>
  * never zero: one unknown estimate makes the total unknown. A set run entirely on
  * subscriptions is included.
  */
+/** Whether a probe's answer became no evidence: inconclusive, transient, or a request that failed (null). */
+export const probeUnanswered = (result: HostedToolProbeResult | null): boolean =>
+  result === null || result.call.outcome === 'inconclusive' || result.call.outcome === 'transient';
+
 export const probeTotal = (targets: readonly ProbeTarget[]): HostedCostEstimate | null => {
   let usd = 0;
   let listed = false;

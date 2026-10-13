@@ -16,6 +16,7 @@ import { cn } from '@/lib/utils';
 import { formatDayTime, formatMonthDay } from './format';
 import { probeableTool, probeKey, type ModelCapability, type ProbeTarget } from './hostedTools';
 import type { HostedToolName, HostedToolProbeResult, RefusedEffort } from './types';
+import { ProbeAnswerNote } from './HostedProbeDialog';
 import { useEstimateLabel } from './useEstimateLabel';
 
 const TOOL_ICON: Record<HostedToolName, React.ComponentType<{ className?: string }>> = {
@@ -172,6 +173,8 @@ const CapabilityChip: React.FC<{
   const tool = t(`settings.models.tools.tool.${capability.tool}.name`) as string;
   const target: ProbeTarget = { tool: capability.tool, candidate: capability.candidate };
   const running = probing.has(probeKey(target));
+  // The last answer from this chip's check, so one that became no evidence still answers here.
+  const [last, setLast] = React.useState<HostedToolProbeResult | null | undefined>(undefined);
   const label = t(`settings.models.capability.chip.${state}`, {
     tool,
     date: capability.evidence.observed_at ? formatMonthDay(capability.evidence.observed_at) : '',
@@ -182,10 +185,13 @@ const CapabilityChip: React.FC<{
   }) as string;
   const action = onProbe && probeableTool(capability.tool)
     ? (
-        <Button variant="outline" size="xs" className="self-end" disabled={running || probing.size > 0} aria-busy={running} onClick={() => void onProbe(target)}>
-          {running ? <Loader2 className="animate-spin" aria-hidden /> : <Radar aria-hidden />}
-          {estimate ? t('settings.models.capability.recheckCost', { cost: estimate }) : t('settings.models.capability.recheck')}
-        </Button>
+        <span className="flex flex-col items-end gap-1">
+          {last !== undefined && <ProbeAnswerNote result={last} />}
+          <Button variant="outline" size="xs" disabled={running || probing.size > 0} aria-busy={running} onClick={() => void onProbe(target).then(setLast)}>
+            {running ? <Loader2 className="animate-spin" aria-hidden /> : <Radar aria-hidden />}
+            {estimate ? t('settings.models.capability.recheckCost', { cost: estimate }) : t('settings.models.capability.recheck')}
+          </Button>
+        </span>
       )
     : undefined;
   return (

@@ -8,27 +8,27 @@
 // a route, and every claim about one comes from `bound`, the server's answer.
 import * as React from 'react';
 import { useTranslation } from 'react-i18next';
-import { AlertCircle, AtSign, Ban, Check, Globe, Image as ImageIcon, Info, Loader2, Radar, RotateCw, TriangleAlert, Waypoints } from 'lucide-react';
+import { AtSign, Ban, Check, Globe, Image as ImageIcon, Info, Loader2, Radar, RotateCw, TriangleAlert, Waypoints } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
 import { Select } from '@/components/ui/select';
 import { cn } from '@/lib/utils';
 import { ToggleSwitch } from '../SettingsPrimitives';
 import { formatMonthDay, formatNameList, formatSmallUsd } from './format';
-import { HostedProbeDialog } from './HostedProbeDialog';
+import { HostedProbeDialog, ProbeAnswerNote } from './HostedProbeDialog';
 import {
   evidenceChip,
   pendingChecks,
   probeableTool,
   probeKey,
   probeTotal,
+  probeUnanswered,
   sameExecutor,
   verifiedCandidates,
   type HostedEvidenceChip,
   type ProbeTarget,
 } from './hostedTools';
 import { foldRegionRead, regionFailed, type RegionRead } from './regionRead';
-import { serverText } from './serverCopy';
 import { ACCENT_ICON, ACCENT_PILL, ACCENT_TILE, sourceVisual } from './vendorMeta';
 import type {
   HostedToolCandidate,
@@ -113,8 +113,7 @@ const ProbeCell: React.FC<{
   const { t } = useTranslation();
   const estimate = useEstimateLabel()(target.candidate.probe_estimate);
   const checked = target.candidate.call.basis !== null;
-  const unanswered = last !== undefined && (last === null || last.call.outcome === 'inconclusive' || last.call.outcome === 'transient');
-  const failure = serverText(t, last?.call.error);
+  const unanswered = last !== undefined && probeUnanswered(last);
   const label = running
     ? t('settings.models.tools.probe.running')
     : unanswered
@@ -137,17 +136,7 @@ const ProbeCell: React.FC<{
         {running ? <Loader2 className="animate-spin" aria-hidden /> : checked || unanswered ? <RotateCw aria-hidden /> : <Radar aria-hidden />}
         {label}
       </Button>
-      {unanswered && (
-        <span className="model-hub-tool-cost-note flex items-center gap-1 model-hub-ink-gold" role="status">
-          <AlertCircle className="size-3 shrink-0" aria-hidden />
-          {/* A request that failed says why; one that completed without the tool says that. */}
-          {failure
-            ? t('settings.models.tools.probe.outcome.transientReason', { reason: failure })
-            : last?.call.outcome === 'inconclusive'
-              ? t('settings.models.tools.probe.outcome.inconclusive')
-              : t('settings.models.tools.probe.outcome.transient')}
-        </span>
-      )}
+      {last !== undefined && <ProbeAnswerNote result={last} />}
     </span>
   );
 };

@@ -30,7 +30,7 @@ import {
   NEEDS_ACTION_DETAIL_KEYS,
   SOURCE_STATUSES,
 } from './types';
-import type { HostedEvidence, HostedToolCandidate, HostedToolsStatus, Source, SourceDetailKey, SourceKind, SourceProtocol, SupplyChannel } from './types';
+import type { HostedEvidence, HostedToolCandidate, HostedToolProbeResult, HostedToolsStatus, Source, SourceDetailKey, SourceKind, SourceProtocol, SupplyChannel } from './types';
 
 const source: Source = {
   id: 'src_detail',
@@ -1452,13 +1452,17 @@ describe('SourceDetailPanel hosted-tool capability chips', () => {
     within(detail).getByText(/until 10-20, then the default applies|到 10-20，过期后按默认判断/);
   });
 
-  it('checks a tool again from its chip, with the cost on the action', async () => {
-    const onProbe = vi.fn(async () => null);
+  it('checks a tool again from its chip, with the cost on the action, and answers there when the check is not evidence', async () => {
+    const onProbe = vi.fn(async (): Promise<HostedToolProbeResult> => ({
+      tool: 'x_search', source_id: source.id, model_id: 'model-a', call: { outcome: 'inconclusive', error: null }, replay: null,
+    }));
     renderChips(status({ enabled: false, bound: null }), { onProbe });
     await userEvent.hover(screen.getByRole('button', { name: /X search · not supported on this Source|X 搜索 · 此供应商不支持/ }));
     const detail = await screen.findByRole('dialog');
     await userEvent.click(within(detail).getByRole('button', { name: /Check again · about \$0\.02|重新检测 · 约 \$0\.02/ }));
     expect(onProbe).toHaveBeenCalledWith({ tool: 'x_search', candidate: expect.objectContaining({ source_id: source.id, model_id: 'model-a' }) });
+    // Nothing was recorded, so the chip still reads as before; the detail says why.
+    await within(detail).findByText(/the model didn't use the tool|模型没有调用工具/);
   });
 
   it('draws a chip for each reasoning effort the Source refused, even with no tool evidence', () => {

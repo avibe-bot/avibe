@@ -11,7 +11,7 @@ import { AlertCircle, AtSign, Check, Globe, Image as ImageIcon, Loader2, RotateC
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog';
 import { cn } from '@/lib/utils';
-import { probeKey, probeTotal, type ProbeTarget } from './hostedTools';
+import { probeKey, probeTotal, probeUnanswered, type ProbeTarget } from './hostedTools';
 import { serverText } from './serverCopy';
 import type { HostedToolName, HostedToolProbeResult, Source } from './types';
 import { useEstimateLabel } from './useEstimateLabel';
@@ -52,6 +52,27 @@ const OutcomeChip: React.FC<{ outcome: Outcome }> = ({ outcome }) => {
   return <span className="model-hub-pill model-hub-status-gold gap-1 border"><AlertCircle className="size-3" aria-hidden />{t('settings.models.tools.result.outcome.unverified')}</span>;
 };
 
+/**
+ * What a probe that became no evidence says where it was asked (a Tools row, a
+ * Source chip): a request that failed says why, and one that completed without
+ * the tool says that. Nothing for an answer that is evidence.
+ */
+export const ProbeAnswerNote: React.FC<{ result: HostedToolProbeResult | null }> = ({ result }) => {
+  const { t } = useTranslation();
+  if (!probeUnanswered(result)) return null;
+  const failure = serverText(t, result?.call.error);
+  return (
+    <span className="model-hub-tool-cost-note flex items-center gap-1 model-hub-ink-gold" role="status">
+      <AlertCircle className="size-3 shrink-0" aria-hidden />
+      {failure
+        ? t('settings.models.tools.probe.outcome.transientReason', { reason: failure })
+        : result?.call.outcome === 'inconclusive'
+          ? t('settings.models.tools.probe.outcome.inconclusive')
+          : t('settings.models.tools.probe.outcome.transient')}
+    </span>
+  );
+};
+
 /** Mounted for one check: the set it shows is the one it was opened with. */
 export const HostedProbeDialog: React.FC<{
   targets: readonly ProbeTarget[];
@@ -78,7 +99,7 @@ export const HostedProbeDialog: React.FC<{
   const total = probeTotal(planned);
   const totalLabel = estimateLabel(total);
   const outcomes = planned.map((target) => outcomeOf(results.get(probeKey(target)) ?? null));
-  const unverified = planned.filter((target, index) => results.has(probeKey(target)) && !['verified', 'unsupported'].includes(outcomes[index]));
+  const unverified = planned.filter((target) => results.has(probeKey(target)) && probeUnanswered(results.get(probeKey(target)) ?? null));
   const count = (wanted: (outcome: Outcome) => boolean) => outcomes.filter(wanted).length;
   const done = results.size;
 
