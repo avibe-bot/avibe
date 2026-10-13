@@ -1125,7 +1125,7 @@ scenarios:
       - tests/test_model_hub_background_discovery.py::test_schedule_covers_hub_sources_and_skips_native_and_waiting_credentials
       - tests/test_model_hub_background_discovery.py::test_stale_sources_catch_up_together_then_refresh_at_different_times
       - tests/test_model_hub_background_discovery.py::test_listing_that_would_strand_a_menu_model_is_left_to_manual_refresh
-      - tests/test_model_hub_background_discovery.py::test_stop_retires_the_background_schedule
+      - tests/test_model_hub_background_discovery.py::test_stop_retires_the_background_schedule_without_waiting_for_a_listing
   - id: MH-QUOTA-005
     name: Each subscription's quota is re-read at most every five minutes and concurrent reads share one fetch
     status: covered
@@ -1477,7 +1477,7 @@ scenarios:
     layer: scenario
     test: tests/scenarios/model_hub/test_model_hub_live_resolution_scenarios.py::test_mh_unlisted_001_removed_model_fails_its_next_turn_with_one_clear_reason
     related_tests:
-      - tests/scenarios/model_hub/test_model_hub_live_resolution_scenarios.py::test_only_an_unlisted_model_holds_its_input_for_an_explicit_retry
+      - tests/scenarios/model_hub/test_model_hub_live_resolution_scenarios.py::test_a_refusal_only_models_can_clear_holds_its_input_for_an_explicit_retry
       - tests/scenarios/model_hub/test_model_hub_live_resolution_scenarios.py::test_opencode_refuses_an_unlisted_model_its_retained_route_cannot_address
       - tests/test_claude_cli_path.py::test_claude_launch_on_an_unlisted_model_holds_the_input
       - tests/test_claude_session_recovery.py::test_unlisted_hub_model_shows_the_shared_refusal_once
@@ -1526,7 +1526,7 @@ scenarios:
     related_tests:
       - ui/src/components/onboarding/providers/ProvidersScreen.test.tsx::counts the takeable group beside it, and only that one
       - ui/src/components/settings/models/migrationScan.test.ts::counts an OpenCode key, which never arrives as kind api_key
-      - ui/src/components/settings/models/MigrationDialog.test.tsx::applies only complete backend groups with one migration action
+      - ui/src/components/settings/models/MigrationDialog.test.tsx::applies every carried row with one migration action, leaving the rest native
   - id: MH-MIG-005
     name: Persisted migration ignores runtime authentication and preserves shared-file custody
     status: covered
@@ -1575,7 +1575,7 @@ scenarios:
       - tests/test_model_hub_native_takeover.py::test_mode_only_adoption_refuses_a_native_config_the_cli_cannot_parse
       - tests/test_model_hub_native_takeover.py::test_mode_switch_refuses_an_unreadable_completed_receipt_before_interrupting
       - tests/test_opencode_restore_polls.py::test_forced_refresh_neither_waits_on_nor_strands_a_stuck_restored_poll
-      - tests/test_agent_auth_service.py::AgentAuthServiceTests::test_opencode_agent_force_refresh_restarts_after_global_config_change
+      - tests/test_opencode_generations.py::test_strict_retirement_retries_a_stop_that_declined_while_a_request_ran
   - id: MH-MIG-010
     name: A refused switch to the gateway is reported where it was made and retried in place
     status: covered
@@ -2002,7 +2002,7 @@ scenarios:
     test: tests/e2e/test_model_hub_migration_persisted.py::test_f4_persisted_configuration_migrates_with_runtime_auth_present
     related_tests:
       - tests/e2e/test_model_hub_migration_persisted.py::test_f4_unproven_shell_key_is_not_removed
-      - tests/e2e/test_model_hub_migration_persisted.py::test_f4_custom_api_key_transport_is_refused_without_cleanup
+      - tests/e2e/test_model_hub_migration_persisted.py::test_f4_custom_api_key_refusing_bearer_is_kept_without_cleanup
       - tests/e2e/test_model_hub_migration_persisted.py::test_f4_explicit_dynamic_writer_refuses_http_apply_without_proof
       - tests/e2e/test_model_hub_migration_persisted.py::test_f4_replace_migrated_bearer_without_old_secret_retains_cpa_transport
       - tests/e2e/test_model_hub_migration_persisted.py::test_f4_oauth_history_fence_survives_later_api_batch_over_http
