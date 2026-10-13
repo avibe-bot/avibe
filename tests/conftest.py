@@ -455,17 +455,27 @@ def _no_background_web_push(request: pytest.FixtureRequest, monkeypatch) -> list
     return pushed
 
 
+def _models_dev_unreachable(_previous: dict) -> dict:
+    raise OSError("tests do not fetch models.dev")
+
+
 @pytest.fixture(autouse=True)
-def _no_background_catalog_refresh(request: pytest.FixtureRequest, monkeypatch) -> None:
-    """Keep the remote catalog refreshes off threads that outlive their test.
+def _no_catalog_fetch(request: pytest.FixtureRequest, monkeypatch) -> None:
+    """Keep the remote catalog fetches off the network and off threads that outlive their test.
 
     Reading the backend model catalog or the models.dev catalog from a fresh home
     finds its cache stale and starts a daemon thread that fetches over the network
     and only then resolves the state directory to write the cache, usually after
     the test has ended -- the same shape as the Web Push sender, and the real-home
     tripwire caught both writing the developer's state. Each scheduler reports
-    that no refresh started. ``real_catalog_refresh`` opts out a test that drives
-    the refresh itself.
+    that no refresh started.
+
+    A foreground read of models.dev with no fresh copy fetches on the caller's
+    thread: Model Hub reads it whenever it seeds Vibey, so any such test fetched
+    models.dev and a slow answer held its CI shard until the watchdog. That fetch
+    fails here as it does offline, so the reader keeps a stale copy or reports
+    the catalog unavailable. ``real_catalog_refresh`` opts out a test that drives
+    a refresh or fetch itself.
     """
 
     if request.node.get_closest_marker("real_catalog_refresh"):
@@ -477,6 +487,9 @@ def _no_background_catalog_refresh(request: pytest.FixtureRequest, monkeypatch) 
         module = _module_this_test_can_import(name)
         if module is not None:
             monkeypatch.setattr(module, scheduler, lambda: False)
+    models_dev = _module_this_test_can_import("vibe.models_dev_catalog")
+    if models_dev is not None:
+        monkeypatch.setattr(models_dev, "_fetch_catalog", _models_dev_unreachable)
 
 
 @pytest.fixture(autouse=True)
