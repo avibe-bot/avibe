@@ -65,7 +65,7 @@ _MAX_CACHE_BREAKPOINTS = 4
 # and requires every longer lifetime to come before every shorter one, which this placement satisfies.
 _PREFIX_TTL = "1h"
 # Routes whose endpoint rejected the field. They keep the default lifetime for the rest of the process.
-_TTL_REJECTED_ROUTES: set[tuple[str, str, str]] = set()
+_TTL_REJECTED_ROUTES: set[tuple[str, str | None, str, str]] = set()
 _TTL_REJECTION = re.compile(r"cache_control|\bttl\b", re.IGNORECASE)
 _LEGACY_THINKING_BUDGETS = {
     "minimal": 1024,
@@ -1025,8 +1025,10 @@ def _prefix_ttl(request: ModelRequest) -> str | None:
     return _PREFIX_TTL
 
 
-def _ttl_route(endpoint: ModelEndpoint) -> tuple[str, str, str]:
-    return (endpoint.base_url, endpoint.provider, endpoint.model_id)
+def _ttl_route(endpoint: ModelEndpoint) -> tuple[str, str | None, str, str]:
+    """The route a TTL rejection is remembered for. Every Vibey hop shares the one gateway URL, so the Source behind
+    it is part of the route: one relay's rejection never changes what another Source is sent."""
+    return (endpoint.base_url, endpoint.source_id, endpoint.provider, endpoint.model_id)
 
 
 def _rejects_ttl(event: Any) -> bool:
