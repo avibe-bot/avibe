@@ -11726,6 +11726,27 @@ def get_claude_auth(
         )
     except Exception:
         claude_status_env = None
+    def _refresh_claude_auth_snapshot() -> None:
+        nonlocal disk_state, disk_oauth_signed_in, settings_env, settings_key, settings_base
+        nonlocal config, cfg, configured_mode, configured_key, configured_base, configured_cli_path, status_probe_cwd
+        disk_state = read_claude_auth_state()
+        disk_oauth_signed_in = False if connection_observation else read_claude_oauth_signed_in()
+        settings_env = read_claude_settings_env()
+        settings_key = settings_env.get("ANTHROPIC_API_KEY") or settings_env.get("ANTHROPIC_AUTH_TOKEN") or ""
+        settings_base = settings_env.get("ANTHROPIC_BASE_URL") or ""
+        try:
+            config = load_config()
+            cfg = getattr(getattr(config, "agents", None), "claude", None)
+            configured_mode = getattr(cfg, "auth_mode", None)
+            configured_key = getattr(cfg, "api_key", None) or ""
+            configured_base = getattr(cfg, "base_url", None) or ""
+            configured_cli_path = getattr(cfg, "cli_path", None)
+            status_probe_cwd = _resolve_claude_status_probe_cwd(config)
+        except Exception:
+            logger.debug("Failed to refresh Claude auth snapshot after custody acquisition", exc_info=True)
+        configured_key = configured_key.strip() if isinstance(configured_key, str) else ""
+        configured_base = configured_base.strip() if isinstance(configured_base, str) else ""
+
     # Every status probe can refresh and persist native OAuth state. Reuse an
     # existing writer/observation lease when the caller already owns one;
     # otherwise wait briefly for a writer or completing OAuth flow to release
@@ -11741,6 +11762,7 @@ def get_claude_auth(
                     env=claude_status_env,
                     cwd=status_probe_cwd,
                 )
+                _refresh_claude_auth_snapshot()
             else:
                 status_lease = NativeCredentialLease(("claude",)).acquire()
                 try:
@@ -11751,6 +11773,7 @@ def get_claude_auth(
                         env=claude_status_env,
                         cwd=status_probe_cwd,
                     )
+                    _refresh_claude_auth_snapshot()
                 except ClaudeAuthStatusCleanupPending as pending:
                     _handoff_claude_auth_status_cleanup(status_lease, pending.worker_fingerprint)
                     status_lease = None
