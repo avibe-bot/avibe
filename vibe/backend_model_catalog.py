@@ -562,9 +562,11 @@ def bundled_catalog_client_presets_by_model() -> Mapping[str, tuple[str, ...]]:
     return _bundled_catalog_lists_by_model("client_presets")
 
 
-def _bundled_catalog_lists_by_model(key: str) -> Mapping[str, tuple[str, ...]]:
+def _bundled_catalog_lists_by_model(
+    key: str, catalog: Mapping[str, Any] | None = None
+) -> Mapping[str, tuple[str, ...]]:
     values_by_model: dict[str, tuple[str, ...]] = {}
-    backends = load_bundled_catalog().get("backends")
+    backends = (load_bundled_catalog() if catalog is None else catalog).get("backends")
     if not isinstance(backends, dict):
         return MappingProxyType(values_by_model)
     for backend in backends.values():
@@ -591,6 +593,36 @@ def bundled_catalog_reasoning_efforts_for_model(
     """Return one bundled catalog row's exact declared effort list."""
 
     return bundled_catalog_reasoning_efforts_by_model().get(model_id)
+
+
+def without_client_presets(model_ids: Sequence[str], efforts: Sequence[str]) -> list[str]:
+    """Efforts as a wire client may send them: without any listed model's client presets.
+
+    Vibey is not the client a preset belongs to, so a preset is never one of its
+    tiers, whatever wrote the list it reads (#2539).
+    """
+
+    presets = bundled_catalog_client_presets_by_model()
+    dropped = {preset for model_id in model_ids for preset in presets.get(model_id, ())}
+    return [effort for effort in efforts if effort not in dropped]
+
+
+def bundled_catalog_wire_efforts_by_model() -> Mapping[str, tuple[str, ...]]:
+    """Index bundled rows' efforts as a Source's wire tiers: each row's list minus its ``client_presets``.
+
+    One catalog read builds both, so a discovery batch still loads the bundled
+    file once (#2539).
+    """
+
+    catalog = load_bundled_catalog()
+    efforts = _bundled_catalog_lists_by_model("reasoning_efforts", catalog)
+    presets = _bundled_catalog_lists_by_model("client_presets", catalog)
+    return MappingProxyType(
+        {
+            model_id: tuple(effort for effort in values if effort not in presets.get(model_id, ()))
+            for model_id, values in efforts.items()
+        }
+    )
 
 
 # The ``providers`` section (model-hub-capability-model.md §4,

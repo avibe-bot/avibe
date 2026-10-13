@@ -50,7 +50,7 @@ from storage.models import MESSAGE_TURN_ID_SQL, agent_sessions, messages
 from vibe.backend_model_catalog import (
     PROTOCOL_REASONING_EFFORT_DEFAULTS,
     builtin_display_name,
-    bundled_catalog_reasoning_efforts_by_model,
+    bundled_catalog_wire_efforts_by_model,
     hosted_tool_spec,
 )
 from vibe.model_hub_runtime.api_key_vendors import (
@@ -2481,7 +2481,7 @@ class ModelHubService:
         discovered_by_id = {model.id: model for model in canonical_models}
         overrides: list[tuple[str, Literal["upstream", "catalog"]]] = []
         if catalog_efforts_by_model is None:
-            catalog_efforts_by_model = bundled_catalog_reasoning_efforts_by_model()
+            catalog_efforts_by_model = bundled_catalog_wire_efforts_by_model()
 
         def apply_tiers(
             model: ModelHubModelConfig,
@@ -2957,7 +2957,7 @@ class ModelHubService:
                     )
                 else:
                     catalog_efforts_by_model = (
-                        bundled_catalog_reasoning_efforts_by_model()
+                        bundled_catalog_wire_efforts_by_model()
                     )
                     for model in source.models:
                         resolution = resolve_reasoning_tiers(
@@ -3744,7 +3744,7 @@ class ModelHubService:
                     allow_empty=True,
                 )
             else:
-                catalog_efforts_by_model = bundled_catalog_reasoning_efforts_by_model()
+                catalog_efforts_by_model = bundled_catalog_wire_efforts_by_model()
                 for model in source.models:
                     resolution = resolve_reasoning_tiers(
                         protocol=source.protocol,
@@ -5820,15 +5820,16 @@ class ModelHubService:
         as if it were not a candidate (capability model §3.4).
         """
 
-        effort = wire_effort(request, getattr(request, "protocol", ""))
-        if effort is None:
+        feature = EvidenceFeature.effort_or_none(wire_effort(request, getattr(request, "protocol", "")))
+        if feature is None:
             return False
         if not self.capability_evidence.loaded:
             await asyncio.to_thread(self.capability_evidence.records)
+        # Lock-free after the load: published snapshots are immutable.
         view = self.capability_evidence.view(
             source,
             model_id,
-            EvidenceFeature.effort(effort),
+            feature,
             engine=engine_stamp(),
             shape=HOSTED_PROBE_SHAPE,
             now=self.now(),
@@ -9318,6 +9319,7 @@ class ModelHubService:
                         origin=origin,
                     )
                 decision = classify_outcome(outcome, refresh_attempted=True)
+                await self._learn_capability_evidence(source, target_model, request, outcome)
                 if cancelled is not None:
                     await self._settle_cancelled_attempt(
                         source=source,

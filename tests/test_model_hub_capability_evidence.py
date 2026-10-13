@@ -184,3 +184,41 @@ def test_lookups_after_the_first_read_never_touch_the_disk(tmp_path, monkeypatch
     store.write(_record(source, REPLAY), live=[source])
     assert store.view(source, "grok-4.6", REPLAY, engine=ENGINE, shape=1, now=NOW).status == "verified"
     assert touched == []
+
+
+def test_a_read_never_waits_for_a_write_on_a_slow_disk(tmp_path, monkeypatch):
+    """MH-HOSTED-003: the request path reads a published snapshot, so a write stuck on the disk cannot stall it."""
+    import threading
+
+    from core.handlers.model_hub import capability_evidence
+
+    path = tmp_path / "model_hub_capability_evidence.json"
+    source = _source()
+    store = CapabilityEvidenceStore(path)
+    store.write(_record(source, CALL), live=[source])
+
+    on_disk = threading.Event()
+    release = threading.Event()
+    persist = capability_evidence.write_state_document
+
+    def slow_disk(target, payload):
+        on_disk.set()
+        assert release.wait(5)
+        persist(target, payload)
+
+    monkeypatch.setattr(capability_evidence, "write_state_document", slow_disk)
+    writer = threading.Thread(target=store.write, args=(_record(source, REPLAY),), kwargs={"live": [source]})
+    writer.start()
+    try:
+        assert on_disk.wait(5)
+        read = []
+        reader = threading.Thread(
+            target=lambda: read.append(store.view(source, "grok-4.6", CALL, engine=ENGINE, shape=1, now=NOW).status)
+        )
+        reader.start()
+        reader.join(1)
+        assert read == ["verified"]
+    finally:
+        release.set()
+        writer.join(5)
+    assert store.view(source, "grok-4.6", REPLAY, engine=ENGINE, shape=1, now=NOW).status == "verified"

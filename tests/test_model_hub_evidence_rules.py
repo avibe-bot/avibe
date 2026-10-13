@@ -167,3 +167,61 @@ async def test_a_refused_effort_skips_its_hop_instead_of_another_provider_400(tm
         )
         assert served.source_id == "src_evidence1"
         assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_refreshed_attempt_teaches_what_it_names(tmp_path):
+    """MH-HOSTED-006: after a credential refresh, the exact retry's 400 is learned too."""
+    from dataclasses import replace as replaced
+
+    from core.handlers.model_hub.adapter import RawOutcomeKind, UpstreamRejection
+    from tests.test_model_hub_l3 import _canonicalize_fixed_test_routes, _outcome, _service
+
+    source = _source("src_refreshed1", "Refreshed")
+    refused = replaced(
+        _outcome(RawOutcomeKind.HTTP_ERROR, status=400, code="invalid_request_error", source_id=source.id),
+        rejection=UpstreamRejection(status=400, error_type="invalid_request_error", invalid_value="ultra"),
+    )
+    service = _service(
+        tmp_path,
+        sources=[source],
+        outcomes=[_outcome(RawOutcomeKind.HTTP_ERROR, status=401, code="unauthorized", source_id=source.id), refused],
+    )
+    service.adapter.refreshable_credential_refs.add(source.credential_ref)
+    model = _canonicalize_fixed_test_routes(service)["codex"]
+
+    with pytest.raises(ModelHubError):
+        await service.resolve_with_recovery(
+            backend="codex",
+            model_id=model,
+            request=ModelHubRequest({"input": "hi", "reasoning": {"effort": "ultra"}}, protocol="openai_responses"),
+            stream=False,
+        )
+
+    [record] = service.capability_evidence.records()
+    assert (record.source_id, record.feature) == ("src_refreshed1", EvidenceFeature.effort("ultra"))
+
+
+@pytest.mark.asyncio
+async def test_a_free_form_effort_is_forwarded_and_never_breaks_the_gateway(tmp_path):
+    """MH-HOSTED-006: evidence cannot name a free-form effort, so it learns nothing and the 400 surfaces as is."""
+    source = _source("src_evidence1", "Relay", vendor="openai", protocol="openai_responses")
+    service, _clock, models = configured_service(tmp_path, sources=[source])
+    refused = {"error": {"code": "invalid_value", "type": "invalid_request_error", "param": "reasoning.effort"}}
+
+    async def respond(_request):
+        return web.json_response(refused, status=400)
+
+    async with loopback_engine(tmp_path, service, respond):
+        for _ in range(2):
+            with pytest.raises(ModelHubError) as error:
+                await service.resolve_with_recovery(
+                    backend="codex",
+                    model_id=models["codex"],
+                    request=ModelHubRequest(
+                        {"input": "hi", "reasoning": {"effort": "future effort"}}, protocol="openai_responses"
+                    ),
+                    stream=False,
+                )
+            assert error.value.code != "effort_unsupported"
+    assert service.capability_evidence.records() == []

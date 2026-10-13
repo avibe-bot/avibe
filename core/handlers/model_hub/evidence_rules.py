@@ -67,16 +67,16 @@ def learn(
 ) -> Optional[LearnedEvidence]:
     """The one feature this rejection names for this request, if any."""
 
-    effort = wire_effort(request, request_protocol)
+    effort = EvidenceFeature.effort_or_none(wire_effort(request, request_protocol))
     if effort is not None and (
-        rejection.invalid_value == effort
+        rejection.invalid_value == effort.name
         or (
             rejection.invalid_value is None
             and rejection.param in _EFFORT_PARAMS
             and request_protocol == source.protocol
         )
     ):
-        return LearnedEvidence(EvidenceFeature.effort(effort), _detail(rejection))
+        return LearnedEvidence(effort, _detail(rejection))
 
     rejected_type = rejection.unsupported_tool_type
     if rejected_type is not None and rejected_type in declared_tool_types(request):

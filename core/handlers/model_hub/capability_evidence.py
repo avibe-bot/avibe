@@ -74,6 +74,12 @@ class EvidenceFeature:
         return cls("effort", name)
 
     @classmethod
+    def effort_or_none(cls, name: object) -> Optional["EvidenceFeature"]:
+        """The effort feature, or None for a name evidence cannot hold (free-form efforts are allowed)."""
+
+        return cls("effort", name) if isinstance(name, str) and _NAME_RE.fullmatch(name) else None
+
+    @classmethod
     def hosted(cls, tool: str, aspect: Literal["call", "replay"]) -> "EvidenceFeature":
         return cls("hosted_tool", tool, aspect)
 
@@ -230,7 +236,14 @@ class CapabilityEvidenceStore:
         self._by_hop: dict[tuple[str, str], list[EvidenceRecord]] = {}
 
     def _loaded(self) -> dict[tuple, EvidenceRecord]:
-        if self._records is None:
+        # Published snapshots are never mutated, so a reader that finds one needs
+        # no lock: a write builds the next snapshot and swaps both references.
+        records = self._records
+        if records is not None:
+            return records
+        with self._lock:
+            if self._records is not None:
+                return self._records
             try:
                 payload = json.loads(self.path.read_text(encoding="utf-8"))
             except (OSError, ValueError):
@@ -250,7 +263,9 @@ class CapabilityEvidenceStore:
         by_hop: dict[tuple[str, str], list[EvidenceRecord]] = {}
         for record in records.values():
             by_hop.setdefault((record.source_id, record.model_id), []).append(record)
-        self._records, self._by_hop = records, by_hop
+        # The index first: a reader that sees the new records also sees their index.
+        self._by_hop = by_hop
+        self._records = records
 
     @property
     def loaded(self) -> bool:
@@ -259,8 +274,7 @@ class CapabilityEvidenceStore:
         return self._records is not None
 
     def get(self, source_id: str, model_id: str, feature: EvidenceFeature) -> Optional[EvidenceRecord]:
-        with self._lock:
-            return self._loaded().get((source_id, model_id, feature.kind, feature.name, feature.aspect or ""))
+        return self._loaded().get((source_id, model_id, feature.kind, feature.name, feature.aspect or ""))
 
     def view(
         self,
@@ -275,15 +289,13 @@ class CapabilityEvidenceStore:
         return resolve(self.get(source.id, model_id, feature), source=source, engine=engine, shape=shape, now=now)
 
     def records(self) -> list[EvidenceRecord]:
-        with self._lock:
-            return list(self._loaded().values())
+        return list(self._loaded().values())
 
     def for_hop(self, source_id: str, model_id: str) -> list[EvidenceRecord]:
         """Every record of one (Source, model), without scanning the others."""
 
-        with self._lock:
-            self._loaded()
-            return list(self._by_hop.get((source_id, model_id), ()))
+        self._loaded()
+        return list(self._by_hop.get((source_id, model_id), ()))
 
     def write(self, record: EvidenceRecord, *, live: Iterable[ModelHubSourceConfig]) -> None:
         """Replace the record for its key; prune records of removed or re-identified Sources.

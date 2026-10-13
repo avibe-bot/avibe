@@ -6988,7 +6988,11 @@ def agent_model_options(
                     "value": model.id,
                     "label": model.display_name or model.id,
                     "reasoning_efforts": (
-                        [] if model.supports_reasoning is False else list(model.reasoning_efforts)
+                        []
+                        if model.supports_reasoning is False
+                        else backend_model_catalog.without_client_presets((model.id,), model.reasoning_efforts)
+                        if normalized_backend == "vibey"
+                        else list(model.reasoning_efforts)
                     ),
                 }
                 for model in supply.models

@@ -167,7 +167,7 @@ validates it):
   "anthropic": {"models": [
     {"match": {"prefix": "claude-"},
      "hosted_tools": {"anthropic": {
-       "web_search": {"declaration": {"type": "web_search_20250305", "name": "web_search"},
+       "web_search": {"declaration": {"type": "web_search_20250305", "name": "web_search", "max_uses": 5},
                       "price": {"unit": "search", "usd_per_1k": 10, "as_of": "2026-10-13", "url": "https://platform.claude.com/docs/en/about-claude/pricing"}}}}}
   ]}
 }

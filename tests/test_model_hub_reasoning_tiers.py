@@ -70,8 +70,8 @@ def test_catalog_row_is_not_filtered_through_the_vocabulary(
 ) -> None:
     monkeypatch.setattr(
         reasoning_tiers,
-        "bundled_catalog_reasoning_efforts_for_model",
-        lambda _model_id: pytest.fail("injected catalog index was ignored"),
+        "bundled_catalog_wire_efforts_by_model",
+        lambda: pytest.fail("injected catalog index was ignored"),
     )
 
     resolution = resolve_reasoning_tiers(

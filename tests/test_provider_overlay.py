@@ -106,7 +106,7 @@ def test_bundled_providers_section_satisfies_its_schema():
             "claude-opus-5-5",
             "web_search",
             (
-                {"type": "web_search_20250305", "name": "web_search"},
+                {"type": "web_search_20250305", "name": "web_search", "max_uses": 5},
                 (),
                 HostedToolPrice("search", 10.0, AS_OF, "https://platform.claude.com/docs/en/about-claude/pricing"),
             ),
