@@ -88,20 +88,36 @@ def _named_cases(path: Path, name: str) -> tuple[int, bool]:
     return int(case in functions) + sum(case in methods for methods in classes.values()), case in classes
 
 
-def _citations(row: dict) -> list[tuple[str, object]]:
-    """Each (key, reference) the row cites a test file or case with."""
+def _citations(row: dict) -> tuple[list[tuple[str, object]], list[str]]:
+    """Each (key, reference) the row cites a test file or case with, and each malformed key.
+
+    A malformed key is reported rather than skipped: read as absent, ``test: []``
+    or a ``partial_evidence`` with no reference would cite nothing and pass.
+    """
 
     cited: list[tuple[str, object]] = []
+    malformed: list[str] = []
     evidence = row.get("test")
-    # A row whose contract several cases prove names each of them.
-    for reference in evidence if isinstance(evidence, list) else [evidence] if evidence is not None else []:
-        cited.append(("test", reference))
-    partial = row.get("partial_evidence")
-    if isinstance(partial, dict) and isinstance(partial.get("test"), str):
-        cited.append(("partial_evidence", partial["test"]))
+    if isinstance(evidence, list):
+        # A row whose contract several cases prove names each of them.
+        if not evidence:
+            malformed.append("test lists no case")
+        cited.extend(("test", reference) for reference in evidence)
+    elif evidence is not None:
+        cited.append(("test", evidence))
+    if "partial_evidence" in row:
+        partial = row["partial_evidence"]
+        if isinstance(partial, dict) and "test" in partial:
+            cited.append(("partial_evidence", partial["test"]))
+        else:
+            malformed.append("partial_evidence names no test")
     for key in _POINTER_KEYS:
-        cited.extend((key, reference) for reference in row.get(key) or [])
-    return cited
+        pointers = row.get(key)
+        if isinstance(pointers, list):
+            cited.extend((key, reference) for reference in pointers)
+        elif pointers is not None:
+            malformed.append(f"{key} is not a list")
+    return cited, malformed
 
 
 def _catalogs() -> list[Path]:
@@ -115,7 +131,9 @@ def test_every_catalog_citation_resolves_to_a_case(catalog: Path) -> None:
     rows = yaml.safe_load(catalog.read_text(encoding="utf-8")).get("scenarios") or []
     dead: list[str] = []
     for row in rows:
-        for key, reference in _citations(row):
+        cited, malformed = _citations(row)
+        dead.extend(f"{row['id']} {problem}" for problem in malformed)
+        for key, reference in cited:
             where = f"{row['id']} {key}: {reference}"
             if not isinstance(reference, str):
                 dead.append(f"{row['id']} {key}: {reference!r} is not a reference")
