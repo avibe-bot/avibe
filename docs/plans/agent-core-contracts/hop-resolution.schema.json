@@ -116,53 +116,6 @@
         }
       },
       "description": "Null means Model Hub does not know the value; it never guesses. supports_images is null when the model declares no input modalities."
-    },
-    "hosted_tools": {
-      "type": "object",
-      "description": "Planned (`../vibey-hosted-tools.md` §3.5). For each hosted tool the user enabled: how the primary hop runs it. Absent or empty when none is enabled.",
-      "additionalProperties": {
-        "type": "object",
-        "required": [
-          "mode",
-          "replay"
-        ],
-        "additionalProperties": false,
-        "properties": {
-          "mode": {
-            "enum": [
-              "native",
-              "proxy"
-            ]
-          },
-          "declaration": {
-            "type": "object",
-            "description": "The hosted tool's wire declaration for the primary hop's protocol."
-          },
-          "replay": {
-            "type": "boolean",
-            "description": "Current `replay` evidence for the primary hop's Source and model. True only while that evidence is positive; read at every request, never stored in the transcript."
-          }
-        },
-        "if": {
-          "properties": {
-            "mode": {
-              "const": "native"
-            }
-          }
-        },
-        "then": {
-          "required": [
-            "declaration"
-          ]
-        },
-        "else": {
-          "not": {
-            "required": [
-              "declaration"
-            ]
-          }
-        }
-      }
     }
   },
   "examples": [

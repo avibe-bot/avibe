@@ -42,6 +42,8 @@ consumer's requirements, and the Model Hub lane lands the change in both places.
    - `HopResolution.hosted_tools` names, for each tool the user enabled:
      - the primary hop's `mode` (`native` or `proxy`);
      - for `native`, the wire declaration, which is required exactly then;
+     - for `proxy`, the executor bound for this turn (`{source_id, model_id}` or `null`), which is required exactly
+       then. A config change applies from the next turn;
      - `replay`, the current replay evidence for the primary hop's Source.
    - `native` requires all of these ([`../model-hub-capability-model.md`](../model-hub-capability-model.md) §3):
      - an eligible credential (never a Claude subscription);
@@ -59,9 +61,9 @@ consumer's requirements, and the Model Hub lane lands the change in both places.
    - Item 6 (the opaque thinking strip) is unchanged and applies only to unpinned requests.
    - The served-hop report gains `source`, the serving Source id, so that a hosted block's payload is tagged with
      the exact Source; two Sources can share an origin. The parser in `conversion-tables.md` (exactly `provider`,
-     `api`, `model` today) changes in the same release, within the deferred Model Hub contract v12 bump that #2483's
-     spec describes. Native hosted mode lands with or after v12; `../vibey-hosted-tools.md` §5 lists the frozen
-     exact-shape contracts that the bump edits together.
+     `api`, `model` today) changes in the same release, in a coordinated Model Hub contract bump (v12). Native
+     hosted mode lands with or after v12. `../vibey-hosted-tools.md` §5 lists the frozen exact-shape contracts that
+     the bump edits together.
 
 ## 3. Not required
 

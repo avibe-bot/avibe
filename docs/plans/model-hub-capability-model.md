@@ -56,43 +56,23 @@ Rules:
 
 ### 3.1 Record
 
-One record per (`source_id`, `model_id`, `feature`). Absence of a record is `unknown`. The persisted shape, which
-lands as `model-hub-contracts/capability-evidence.schema.json` with Phase 0:
+One record per (`source_id`, `model_id`, `feature`). Absence of a record is `unknown`. The persisted shape is
+below. Its JSON Schema (`model-hub-contracts/capability-evidence.schema.json`) lands with Phase 0, where the store
+validates it.
 
-```json
-{
-  "type": "object",
-  "required": ["version", "source_id", "model_id", "feature", "status", "basis", "observed_at", "engine", "shape"],
-  "additionalProperties": false,
-  "properties": {
-    "version": {"const": 1},
-    "source_id": {"type": "string", "minLength": 1},
-    "model_id": {"type": "string", "minLength": 1},
-    "feature": {
-      "oneOf": [
-        {"type": "object", "required": ["kind", "name"], "additionalProperties": false,
-         "properties": {"kind": {"const": "effort"}, "name": {"type": "string", "minLength": 1}}},
-        {"type": "object", "required": ["kind", "name", "aspect"], "additionalProperties": false,
-         "properties": {"kind": {"const": "hosted_tool"}, "name": {"enum": ["web_search", "x_search"]},
-                        "aspect": {"enum": ["call", "replay"]}}}
-      ]
-    },
-    "status": {"enum": ["verified", "unsupported"]},
-    "basis": {"enum": ["probe", "observed"]},
-    "observed_at": {"type": "string", "format": "date-time"},
-    "engine": {"type": "string", "minLength": 1},
-    "shape": {"type": "integer", "minimum": 1},
-    "detail": {"type": "string", "maxLength": 64, "pattern": "^[0-9]{3} [a-z_]+$"}
-  },
-  "if": {"properties": {"basis": {"const": "observed"}}},
-  "then": {"required": ["detail"], "properties": {"status": {"const": "unsupported"}}}
-}
-```
+| Field | Rule |
+| --- | --- |
+| `version` | `1` |
+| `source_id`, `model_id` | non-empty |
+| `feature` | `{kind: "effort", name}` or `{kind: "hosted_tool", name: "web_search" \| "x_search", aspect: "call" \| "replay"}` |
+| `status` | `verified` or `unsupported` |
+| `basis` | `probe` (a live probe the user started) or `observed` (learned from a real request's error) |
+| `observed_at` | timestamp |
+| `engine` | engine release at that time; a change makes `probe` evidence stale (§3.3) |
+| `shape` | version of the request shape that produced the record; a change makes `probe` evidence stale |
+| `detail` | required when `basis` is `observed`: the HTTP status and upstream machine code, e.g. `400 invalid_value`, at most 64 characters, never upstream text |
 
-- `observed` evidence is always negative, and always says which error produced it: `detail` holds the HTTP status
-  and the upstream machine code, e.g. `400 invalid_value`. It never holds upstream text beyond a code.
-- `engine` is the engine release at that time, and `shape` the version of the request shape that produced the
-  record. A change to either makes `probe` evidence stale (§3.3).
+`observed` evidence is always `unsupported`.
 
 Records live with the Source's runtime state (`model_hub` state dir). They follow Source identity:
 `retry.source_identity` covers kind, vendor, protocol, channel, base URL, credential and verification marker.
@@ -176,35 +156,15 @@ family inherits its row. Shape (`vibe/data/backend_models.json`, `providers`; th
 }
 ```
 
-The loader validates each vendor entry against this schema:
+Fields of one vendor entry. The loader validates them; their JSON Schema lands with Phase 0.
 
-```json
-{"type": "object", "required": ["models"], "additionalProperties": false,
- "properties": {"models": {"type": "array", "items": {
-   "type": "object", "required": ["match"], "additionalProperties": false,
-   "properties": {
-     "match": {"oneOf": [
-       {"type": "object", "required": ["prefix"], "additionalProperties": false, "properties": {"prefix": {"type": "string", "minLength": 1}}},
-       {"type": "object", "required": ["id"], "additionalProperties": false, "properties": {"id": {"type": "string", "minLength": 1}}}]},
-     "wire_efforts": {"type": ["array", "null"], "items": {"type": "string", "minLength": 1}},
-     "hosted_tools": {"type": "object",
-       "propertyNames": {"enum": ["anthropic", "openai_responses", "openai_chat", "google"]},
-       "additionalProperties": {"type": "object",
-         "propertyNames": {"enum": ["web_search", "x_search"]},
-         "additionalProperties": {"type": "object", "required": ["declaration", "price"], "additionalProperties": false,
-           "properties": {
-             "declaration": {"type": "object", "required": ["type"]},
-             "price": {"$ref": "#/definitions/price"}}}}}}}}},
- "definitions": {"price": {"type": "object", "required": ["unit", "usd_per_1k", "as_of", "url"], "additionalProperties": false,
-   "properties": {"unit": {"enum": ["call", "search", "post", "profile"]},
-                  "usd_per_1k": {"type": "number", "minimum": 0},
-                  "as_of": {"type": "string", "format": "date"},
-                  "url": {"type": "string", "format": "uri"},
-                  "extra": {"type": "array", "items": {"type": "object", "required": ["unit", "usd_per_1k"], "additionalProperties": false,
-                    "properties": {"unit": {"enum": ["call", "search", "post", "profile"]}, "usd_per_1k": {"type": "number", "minimum": 0}}}}}}}}
-```
-
-`wire_efforts: null` defers to models.dev.
+| Field | Rule |
+| --- | --- |
+| `models[]` | required; ordered, first match wins |
+| `match` | exactly one of `prefix` or `id`, non-empty |
+| `wire_efforts` | a list of effort names, or `null` to defer to models.dev |
+| `hosted_tools` | protocol (`anthropic`, `openai_responses`, `openai_chat`, `google`) → tool (`web_search`, `x_search`) → `{declaration, price}`, both required; `declaration` has a `type` |
+| `price` | `unit` (`call`, `search`, `post`, `profile`), `usd_per_1k` ≥ 0, `as_of` (date) and `url`, all required; optional `extra[]` of `{unit, usd_per_1k}` |
 - The overlay records what the **provider** offers. Whether a Source (a relay, a subscription) carries it is
   evidence.
 - An invalid vendor entry disables that entry with a warning; startup never fails.
@@ -279,7 +239,9 @@ and the existing tone vocabulary (`TimeHint` for dates):
    - native: the tool fee per call plus a token estimate;
    - proxy: the same plus the executor model's call.
 
-   All of it is computed by the one pricing owner, `pricing.py`, and stored as the record's `cost`. Neither the
+   All of it is computed by the one pricing owner, `pricing.py`. It is stored once per response: as the message's
+   `hosted_summary.cost` for native calls, and as `ProxyExecution.cost` for a proxied call, which is its own executor
+   response. A provider-reported figure is never copied into individual calls. Neither the
    executor nor an adapter prices anything itself.
 2. **Executor choice.** The Tools tab lists the verified executor candidates with their cost hints and billing mode.
    The user picks one; the default is the first verified candidate in Vibey's Source order. Avibe does not

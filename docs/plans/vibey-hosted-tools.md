@@ -69,24 +69,26 @@ verified for X search.
 ### 3.2 Verification
 
 - **Live probes are the only way to `verified`.** They run on an explicit user action (capability model §3.3).
-- **The `call` probe.** One request to the (Source, model) with the native declaration forced through `tool_choice`
-  and a minimal prompt ("search for 'Avibe local-first agent OS', reply with the first result URL").
-  - **`verified`:** the response completes and carries the tool's result. That is a `web_search_call` with
-    `action.query`, a `server_tool_use` + `web_search_tool_result` pair, or, for X search, an xAI
-    `custom_tool_call` named `x_keyword_search`.
-  - **`unsupported`:** an HTTP 400 that names the tool type (observed: `Unsupported tool type: x_search`), or a
-    completed response with **no** tool result despite the forcing. The second case is a translated path that drops
-    the tool, as observed with `image_generation` on an Anthropic route.
+- **A probe is the production request.** It is built by the same Vibey request builder and with the same native
+  declaration as a real turn on that (Source, model). Only the transcript differs: one fixed user message. So a
+  probe cannot pass or fail for a shape that production never sends.
+- **The `call` probe.** The fixed message is "search for 'Avibe local-first agent OS' and reply with the first
+  result's URL".
+  - **`verified`:** the response completes and carries the provider's own result item for that tool (§4.2).
+  - **`unsupported`:** either an HTTP 400 that names the tool type (observed: `Unsupported tool type: x_search`), or a
+    completed response without that item. The second case is a path that drops the tool silently, as observed with
+    `image_generation` on a translated Anthropic route.
   - **Not evidence:** a transient failure (overload, 5xx, timeout). The UI reports "couldn't verify, try again"
     (observed: every OpenAI-relay web search ended with an in-stream "servers overloaded").
-- **The `replay` probe.** One follow-up request that carries the first response's native items verbatim. No tool
-  is declared, and the request asks for something only the first search's results contain ("give the URL of the
-  second result you found, without searching").
-  - **`verified`:** the request is accepted and the answer contains a URL from the first response's results. An
-    accepted request whose answer shows the content did not arrive is `unsupported` (dropped). Transport acceptance
-    alone is never verification.
-  - **`unsupported`:** a 400 that names the replayed hosted content. Observed on the Anthropic relay, 3 of 3:
-    `Invalid encrypted_content in search_result block`. xAI accepted verbatim replay, 3 of 3.
+- **The `replay` probe.** A second production request with the native declaration still present. Its history is
+  the call probe's turn, with the native payload verbatim, followed by "give the URL of the second result you found,
+  without searching again".
+  - **`verified`:** the answer contains a URL from the first response's results, and the response makes no new
+    call to the tool.
+  - **`unsupported`:** a 400 that names the replayed hosted content (observed on the Anthropic relay, 3 of 3:
+    `Invalid encrypted_content in search_result block`), or an answer that does not use the earlier results (a new
+    tool call, or no URL from them). Transport acceptance alone is never verification. xAI accepted verbatim
+    replay, 3 of 3.
 - **Cost and when probes run.** A probe pair costs about $0.02–0.15 (spike: xAI $0.01–0.11 per call, Anthropic $0.01
   per search plus tokens). The Tools tab shows the estimate before running.
 - **What makes probe results stale** (capability model §3.3): a Source identity change, an engine upgrade, a probe
@@ -112,21 +114,12 @@ verified for X search.
   }
   ```
 
-  - Its shape, enforced by the loader:
+  - Fields, keyed by catalog tool name (`web_search`, `x_search`):
 
-    ```json
-    {"type": "object",
-     "propertyNames": {"enum": ["web_search", "x_search"]},
-     "additionalProperties": {
-       "type": "object", "required": ["enabled", "executor"], "additionalProperties": false,
-       "properties": {
-         "enabled": {"type": "boolean"},
-         "executor": {"oneOf": [
-           {"type": "null"},
-           {"type": "object", "required": ["source_id", "model_id"], "additionalProperties": false,
-            "properties": {"source_id": {"type": "string", "minLength": 1},
-                           "model_id": {"type": "string", "minLength": 1}}}]}}}}
-    ```
+    | Field | Rule |
+    | --- | --- |
+    | `enabled` | boolean, required |
+    | `executor` | required: `null`, or `{source_id, model_id}` with both non-empty |
   - The section is absent on every released config, and absence means every tool is off. No migration is needed:
     `ModelHubConfig`'s loader accepts the new optional section. An unknown tool key disables that entry and logs a
     warning (safe degradation); it never fails startup.
@@ -136,10 +129,16 @@ verified for X search.
 ### 3.4 Proxy executor
 
 - **Endpoint:** `POST /vibey/v1/hosted-tools/{tool}` on the gateway, authenticated with the turn's gateway token.
-  The body is the canonical arguments.
-- **Executor choice.**
-  - The configured executor, which must have `call: verified`.
-  - Without one, the first verified (Source, model) in Vibey's Source order.
+  The body is the canonical arguments and the turn's executor binding (§3.4).
+- **Executor choice, bound per turn.**
+  - Hop resolution picks the executor and returns it in `HopResolution.hosted_tools[tool].executor` (§3.5). The pick
+    is the configured executor if it has `call: verified`, otherwise the first verified (Source, model) in Vibey's
+    Source order.
+  - The proxy call sends that binding with the turn token, and the gateway runs that executor and no other.
+  - A config change (another executor, a disabled tool, a removed Source) applies from the next turn, as every
+    runtime config change does (AGENTS.md).
+  - If the bound executor can no longer run (its Source was removed or disabled mid-turn), the call returns a tool
+    error. It never silently switches Source or billing.
   - **Only an eligible credential.** A Claude subscription Source is never eligible: not as executor, not for a
     probe, and not for native mode (§3.5). Anthropic restricts OAuth credentials to Claude Code and its own apps
     ([`model-hub-tos-review.md`](model-hub-tos-review.md)).
@@ -149,9 +148,11 @@ verified for X search.
   a small output cap.
   - It sends **no reasoning effort**. The executor (Source, model) is verified for the tool, not for any effort, and
     an unverified effort could fail a verified tool.
-- **The result is the canonical record only:** `queries`, `sources[]` (`url`, `title`, and, where available,
-  `snippet` and `page_age`), `status`, `error`, `cost`, plus the `ProxyExecution` (executor origin, Source,
-  billing).
+- **The result is the canonical record only:**
+  - the `HostedRecord`, with the action, `status`, `error` and per-call `sources[]` (`url`, `title`, and, where
+    available, `snippet` and `page_age`);
+  - the `ProxyExecution`: executor origin, Source, billing mode, and the call's cost. A proxied call is a whole
+    executor response, so its cost is per call.
   - The executor does not write model-facing text. Vibey's tool runtime renders the tool result from the record with
     the **same function** that renders a synthetic replay (§5), so the text a model sees for a proxied call and for a
     replayed native call never diverge.
@@ -169,9 +170,10 @@ verified for X search.
 
 ### 3.5 Per-hop selection and failover
 
-- **Hop resolution.** C-6 `HopResolution` gains `hosted_tools`. For each enabled tool it gives three things:
+- **Hop resolution.** C-6 `HopResolution` gains `hosted_tools`. For each enabled tool it gives:
   - the primary hop's `mode` (`native` | `proxy`);
   - for `native`, the wire declaration;
+  - for `proxy`, the bound executor `{source_id, model_id}` (§3.4), which may be `null` when none is verified;
   - `replay`, the **current** `replay` evidence for the primary hop's Source and model.
 
   `native` requires all of these:
@@ -234,53 +236,80 @@ verified for X search.
 
 ### 4.2 Parsing: the C-1 change
 
-- **New assistant content block `HostedToolBlock`** (`message.schema.json`):
+The field tables below are the contract. The JSON Schema for them lands with the Phase 1 implementation PR, where a
+producer validates it (§12 lists every invariant it must encode).
 
-  | Field | Meaning |
-  | --- | --- |
-  | `type` | `"hosted_tool"` |
-  | `id` | canonical id |
-  | `tool` | catalog name (`web_search`, `x_search`) |
-  | `arguments` | canonical arguments; the schema fixes their shape per `tool` (§2) |
-  | `record` | `HostedRecord`, all of whose invariants are in the schema: `status` (`completed` / `failed` / `incomplete` / `pending`); `error`, required exactly for `failed` / `incomplete`; `queries[]`; `sources[]` (`url`, `title?`, `snippet?`, `page_age?`); `sources_scope` (`call` / `response`), required; `cost?`, where `basis` is `reported` / `list` with `usd`, or `included` without it |
-  | `native` | `{source_id, payload[]}`: the provider's own items, verbatim and in order, tagged with the Source that produced them. The payload's origin is the message's `origin`; it is not stored twice. |
+**Mapping rule.** Every item the provider emits for a declared hosted tool becomes exactly one `HostedToolBlock`,
+in stream order, with a provider-neutral `action`. An action this design does not know becomes `other` and is kept,
+never dropped.
 
-  The block stores no replay authorization. Whether `payload` may be replayed is decided at every request from the
-  current evidence (§5), so demoted or expired evidence, or a changed Source identity, takes effect on the next
-  request.
-- **New optional `TextBlock.citations`:** `[{url, title?, cited_text?, start?, end?}]`. `start` and `end` come
-  together, as a half-open code-point range into `text`.
-  - Citations belong to the text that cites them. Every provider attaches them there: OpenAI and xAI `url_citation`
-    with offsets, and Anthropic `citations[]` on text blocks.
-  - They are presentation only and are never replayed.
-  - **One materialization boundary.** At delivery, `core/citations.py` gains one builder from (text, citations) to
-    the existing delivered shape: Markdown links written into the text, plus the sidecar the Web renders as
-    `CitationBadge` (numbered sources, UTF-16 ranges, `body_sha256`). Adapters only parse; IM gets the Markdown
-    links.
-- **New optional `ToolResultMessage.hosted`:** `{record, execution}`, both required.
-  - `record` is the `HostedRecord`.
-  - `execution` is a `ProxyExecution`, every field required: `mode: "proxy"`, `executor_origin`,
-    `executor_source_id`, `executor_billing`.
-  - So a proxied call renders like a native one, and the card names the exact Source even when two Sources share an
-    origin.
-- **Per adapter:**
-  - **`openai_responses`:** `web_search_call` items, each a block with `arguments.query` from `action.query`.
-    Annotations become citations.
-    - xAI X search arrives as `custom_tool_call` `x_keyword_search` (`input` is a JSON string) followed by
-      `reasoning` items with id `tco_…` that hold the tool output, encrypted.
-    - Those reasoning items stay ThinkingBlocks as today. The `custom_tool_call` becomes the HostedToolBlock, and
-      Vibey must not treat it as a local tool call. Today's adapter already ignores `custom_tool_call_input.*`.
-    - **Sources for X search.** xAI returns no readable per-call results; the output exists only inside the
-      encrypted `tco_…` items. Each X-search block's record therefore has `sources_scope: "response"`: its
-      `sources` are the X posts the response cites, the `url_citation` annotations to `x.com` and `twitter.com`.
-      Every X-search block of that response shares them.
-      - The card says "cited in the answer" instead of showing per-search results.
-      - A synthetic replay of such a block lists those posts with that wording, and the canonical record never
-        claims per-search attribution.
-  - **`anthropic`:** each `server_tool_use` and its `web_search_tool_result` become one block. Results become
-    `sources`; `encrypted_content` is kept only in `native.payload`. Text-block `citations` become `TextBlock`
-    citations.
-  - **`openai_chat`:** no native hosted results in Phase 1.
+| Provider item | `tool` | `action` |
+| --- | --- | --- |
+| OpenAI/xAI `web_search_call`, `action.type: search` | `web_search` | `{type: "search", queries[]}`, taken from `action.queries`, else from the deprecated singular `action.query` |
+| `web_search_call`, `action.type: open_page` | `web_search` | `{type: "open_page", url}` |
+| `web_search_call`, `action.type: find_in_page` | `web_search` | `{type: "find_in_page", url, pattern}` |
+| Anthropic `server_tool_use` (`name: web_search`) plus its `web_search_tool_result` | `web_search` | `{type: "search", queries: [input.query]}` |
+| xAI `custom_tool_call` `x_keyword_search` / `x_semantic_search` | `x_search` | `{type: "x_search", variant: "keyword" \| "semantic", query}` |
+| xAI `custom_tool_call` `x_user_search` | `x_search` | `{type: "x_user_search", query}` |
+| xAI `custom_tool_call` `x_thread_fetch` | `x_search` | `{type: "x_thread_fetch", ref}` |
+| any other item under a declared hosted tool | that tool | `{type: "other", name}`, with the provider's item name |
+
+**`HostedToolBlock`** (assistant content):
+
+| Field | Rule |
+| --- | --- |
+| `type` | `"hosted_tool"` |
+| `id` | canonical id |
+| `tool` | catalog name: `web_search` or `x_search` (Phase 2 adds `image_generation`) |
+| `action` | one of the mapping rule's actions, with its fields required |
+| `record` | the `HostedRecord`, per-call facts only |
+| `native` | required: `{source_id, payload[]}`. `payload` holds the provider's own items, verbatim and in order, and is never empty. The payload's origin is the message's `origin`, not stored twice. No replay authorization is stored; replay is decided at every request from current evidence (§5). |
+
+A native hosted call always has its native payload. A proxied call is a `ToolCallBlock` plus
+`ToolResultMessage.hosted`, never a `HostedToolBlock`.
+
+**`HostedRecord`** (per call):
+
+| Field | Rule |
+| --- | --- |
+| `status` | `completed` / `failed` / `incomplete` / `pending` |
+| `error` | present exactly when `status` is `failed` or `incomplete`; bounded and redacted |
+| `sources[]` | this call's own results: `url` required; `title`, `snippet`, `page_age` optional. Empty when the provider returns none per call (xAI X search). |
+
+**`AssistantMessage.hosted_summary`** (per response, present when the message has hosted blocks). This is where
+response-scoped facts live, so nothing is copied into calls or split across them:
+
+| Field | Rule |
+| --- | --- |
+| `cost` | `{basis, usd}`: `basis` is `reported` (the provider's figure for the whole response, e.g. xAI `cost_in_usd_ticks`) or `list` (computed by the pricing module), and both carry `usd`; or `basis: included`, with no `usd` |
+| `counts` | provider-reported counters, by name (`web_search_calls`, `x_search_calls`, `x_posts_fetched`, `x_users_fetched`, Anthropic `web_search_requests`) |
+| `cited_sources[]` | sources the response cites when the provider gives none per call: the xAI X-search `url_citation`s to `x.com` / `twitter.com` |
+
+**`TextBlock.citations`** (optional): `[{url, title?, cited_text?, start?, end?}]`, with `start` and `end` together
+as a half-open code-point range into `text`.
+- Citations belong to the text that cites them. Every provider attaches them there: OpenAI and xAI `url_citation`
+  with offsets, and Anthropic `citations[]` on text blocks.
+- They are presentation only and are never replayed.
+- **One materialization boundary.** At delivery, `core/citations.py` gains one builder from (text, citations) to
+  the existing delivered shape: Markdown links written into the text, plus the sidecar the Web renders as
+  `CitationBadge` (numbered sources, UTF-16 ranges, `body_sha256`). Adapters only parse; IM gets the Markdown links.
+
+**`ToolResultMessage.hosted`** (optional): `{record, execution}`, both required.
+- `execution` is a `ProxyExecution`, every field required: `mode: "proxy"`, `executor_origin`,
+  `executor_source_id`, `executor_billing`, `cost`.
+- `is_error` is `true` exactly when `record.status` is `failed` or `incomplete`.
+- So a proxied call renders like a native one, and the card names the exact Source even when two Sources share an
+  origin.
+
+**Per adapter notes.**
+- **`openai_responses`.**
+  - xAI's X-search `reasoning` items with id `tco_…`, which hold the tool output encrypted, stay ThinkingBlocks as
+    today.
+  - The `custom_tool_call` becomes the HostedToolBlock, and Vibey must not treat it as a local tool call. Today's
+    adapter already ignores `custom_tool_call_input.*`.
+- **`anthropic`.** `encrypted_content` is kept only in `native.payload`. Text-block `citations` become `TextBlock`
+  citations.
+- **`openai_chat`.** No native hosted results in Phase 1.
 - **Assembled-output budget.** Hosted payloads count against the existing 32 MiB `StreamAssembler` budget. Search
   events measured at most 96 KB.
 
@@ -329,10 +358,22 @@ These rules become C-1 rows in `cross-provider.md` and per-protocol rows in `con
 
 | History item | Target hop is `native.source_id` and `HopResolution.hosted_tools[tool].replay` is true now | Any other target |
 | --- | --- | --- |
-| `HostedToolBlock` | `native.payload` verbatim, in place | synthetic same-named call plus result: Anthropic `tool_use` / `tool_result`, Responses `function_call` / `function_call_output`, Chat `tool_calls` / `tool` message. The assistant message is split around it. The result is rendered from the record by the one record-to-text function (§3.4): the record's numbered sources (title, URL, snippet). A `failed` or `incomplete` record renders as an error result: Anthropic `is_error: true`, or a text that starts `[<tool> failed: <error>]` where the protocol has no error flag. A `pending` record, a call cut off with the turn, renders as the C-1 interrupted-call result. |
+| `HostedToolBlock` | `native.payload` verbatim, in place | a synthetic same-named call plus result (Anthropic `tool_use` / `tool_result`, Responses `function_call` / `function_call_output`, Chat `tool_calls` / `tool` message), with the assistant message split around it. One record-to-text function (§3.4) renders the result, under the rules below. |
 | `TextBlock.citations` | not sent | not sent |
 | Proxy call (`ToolCallBlock` + `ToolResultMessage.hosted`) | ordinary tool call and result | same |
 
+- **Synthetic rendering rules**, by action:
+  - A `search` action becomes one call with arguments `{query: queries[0]}`. Its result lists any further queries,
+    then the record's numbered sources (title, URL, snippet).
+  - An `x_search` or `x_user_search` action becomes one `x_search` call with `{query}`.
+  - A non-search action (`open_page`, `find_in_page`, `x_thread_fetch`, `other`) becomes a line in the result of the
+    preceding synthetic call of the same tool in that response, e.g. "opened <url>" or "fetched thread <ref>".
+    Without a preceding call, it becomes its own call with `{query: "<action type> <target>"}`.
+  - The response's `hosted_summary.cited_sources` are listed once, in the first synthetic result of that tool, as
+    "posts cited in the answer".
+  - A `failed` or `incomplete` record renders as an error result: Anthropic `is_error: true`, or text starting
+    `[<tool> failed: <error>]` where the protocol has no error flag.
+  - A `pending` record (a call cut off with the turn) renders as the C-1 interrupted-call result.
 - **Why synthetic beats plain text.**
   - Anthropic and Responses targets accepted the synthetic form, with the proxy or the native tool declared.
   - With snippets in the result, the target answered from it without searching again.
@@ -349,9 +390,10 @@ These rules become C-1 rows in `cross-provider.md` and per-protocol rows in `con
 - **C-6 change: the served-hop report gains `source`**, the serving Source id. Two Sources can share an origin, e.g.
   a subscription and a relay serving the same model. Native mode depends on this field three times: to tag
   `native.source_id` (§4.2), to authorize replay (above), and to pin in-flight continuations (§3.5).
-  - It ships in the deferred Model Hub contract v12 bump, the one #2483's closing spec describes (`terminal_error`
-    for a pending attempt that never streamed). That makes one coordinated bump, not two (orchestrator decision,
-    2026-10-13).
+  - It ships as a coordinated Model Hub contract bump, v12.
+    - The orchestrator decided on 2026-10-13 to share the bump that #2483's provenance spec was deferred to.
+    - That provenance fix then landed in #2544 within v11, without a bump. So this change now owns v12, and any other
+      contract change pending at that time joins it.
   - The gateway and the served-hop parser change in that same release.
   - **Phase 1's native mode therefore lands with or after v12.** Proxy mode does not depend on it.
   - **The v12 bump edits these exact-shape contracts together:**
@@ -502,14 +544,55 @@ shapes. No live upstream and no real credentials.
 
 | Layer | Owner boundary | Cases |
 | --- | --- | --- |
-| Adapter parsing | each adapter against stub SSE | Responses `web_search_call` + annotations; xAI `custom_tool_call` `x_keyword_search` + `tco_` reasoning with response-scoped X sources (one and several searches); Anthropic `server_tool_use` / `web_search_tool_result` / citations; pending `server_tool_use` at `pause_turn`; a hosted call that fails |
+| Adapter parsing | each adapter against stub SSE | the mapping rule, one case per row of §4.2's table, including `queries[]` versus the deprecated `query`, every xAI X-search variant, and an unknown item becoming `other`; `hosted_summary` with one and with several X searches (reported cost once, no per-call copies); Anthropic citations; pending `server_tool_use` at `pause_turn`; a hosted call that fails |
 | Cross-provider transform | `ai` request builders | each hosted block to each target, verified same Source versus other: native verbatim, synthetic call/result, split assistant message; citations never sent |
 | `pause_turn` | Anthropic adapter, stub returns `pause_turn`, then `end_turn` | one logical response; the bound; the merged message with summed usage; the pin header; `pin_unavailable` falls back to the in-place text form |
 | Gateway selection and pinning | real gateway + loopback fake engine | native only with evidence and an eligible credential; a pinned request is never failed over; an inadmissible pinned Source and a pre-output failure both answer `pin_unavailable`; Vibey's portable re-render is then served by failover; `x_search` to OpenAI never sent |
 | Evidence | classifier against recorded error bodies | `400 Unsupported tool type`, `invalid_value` effort and `Invalid encrypted_content` each create exactly one record; overload and 5xx create none |
 | Proxy executor | gateway endpoint, stub provider | executor choice; no effort sent; the record with excerpts; metering on the executor Source; error when no executor is verified; refusal of a Claude subscription |
-| Record rendering and citations | the record-to-text function; `core/citations.py` builder | completed, failed, incomplete and pending records; response-scoped X sources; provider annotations through to the Web sidecar and the IM Markdown link (end to end) |
+| Record rendering and citations | the record-to-text function; `core/citations.py` builder | completed, failed, incomplete and pending records; every action's synthetic rule; summary cited sources listed once; provider annotations through to the Web sidecar and the IM Markdown link (end to end) |
 | Config | `ModelHubConfig` loader | a released config without `hosted_tools` loads with all tools off; an unknown tool key degrades with a warning |
 | Probes | gateway, stub provider | verified / unsupported / dropped / transient outcomes; a replay probe whose answer lacks the first search's URL is `unsupported`; probes only from the API action |
 | UI | Models Tools tab, Source chips, tool card | toggle off by default; Verify shows the cost; chips per evidence state; card modes; IM line |
 | E2E, once per release | real engine + stub upstream | a native web search and a proxied X search through the shipped engine on each protocol |
+
+## 12. Contract checklist for the Phase 1 schemas
+
+The JSON Schemas land with the Phase 1 implementation PR. There, a producer validates them, through the existing
+`_validate` and mandatory-field tests for `HopResolution`, and new ones for the C-1 blocks. Each invariant below is
+encoded either as a schema clause or as a producer test. The PR names which for each item.
+
+**C-1 `message.schema.json`:**
+1. `HostedToolBlock` requires `type`, `id`, `tool`, `action`, `record` and `native`.
+   - `native` requires `source_id` and a non-empty `payload`.
+   - It has no origin of its own and no replay flag.
+2. `action` is one of the mapping rule's types (§4.2), with that type's fields required:
+   - `search` with `queries`, at least one;
+   - `open_page` with `url`;
+   - `find_in_page` with `url` and `pattern`;
+   - `x_search` with `variant` and `query`;
+   - `x_user_search` with `query`;
+   - `x_thread_fetch` with `ref`;
+   - `other` with `name`.
+3. `HostedRecord`: `status` is in its enum. `error` is present exactly for `failed` and `incomplete`. Each
+   `sources[]` entry requires `url`.
+4. `AssistantMessage.hosted_summary`:
+   - it is present exactly when the message has a `HostedToolBlock`;
+   - `cost.usd` is present exactly when `basis` is not `included`.
+5. `TextBlock.citations`: `start` and `end` come together.
+6. `ToolResultMessage.hosted` requires `record` and `execution`.
+   - `execution` requires `mode: "proxy"`, `executor_origin`, `executor_source_id`, `executor_billing` and `cost`.
+   - `is_error` is `true` exactly when `record.status` is `failed` or `incomplete`.
+
+**C-6 `HopResolution.hosted_tools` (both copies):**
+7. Each entry requires `mode` and `replay`.
+   - `declaration` is present exactly for `native`.
+   - `executor` (`{source_id, model_id}` or `null`) is present exactly for `proxy`.
+
+**Model Hub:**
+8. V2 `model_hub.hosted_tools`: keys are catalog tool names, and each entry requires `enabled` and `executor`.
+   - `executor` is `null` or a pair of non-empty ids.
+   - An unknown key degrades with a warning.
+9. Overlay `providers` entries and the evidence record follow the field tables in the capability model (§3.1, §4),
+   including: `observed` ⇒ `unsupported` with `detail`.
+10. The `pin_unavailable` answer is exactly the 409 envelope in §3.5.

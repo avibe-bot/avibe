@@ -29,23 +29,6 @@
         "supports_reasoning": { "type": ["boolean", "null"] },
         "reasoning_efforts": { "type": "array", "items": { "type": "string" } }
       }
-    },
-    "hosted_tools": {
-      "type": "object",
-      "description": "Planned (../vibey-hosted-tools.md §3.5): per enabled hosted tool, how the primary hop runs it.",
-      "additionalProperties": {
-        "type": "object",
-        "required": ["mode", "replay"],
-        "additionalProperties": false,
-        "properties": {
-          "mode": { "enum": ["native", "proxy"] },
-          "declaration": { "type": "object" },
-          "replay": { "type": "boolean" }
-        },
-        "if": { "properties": { "mode": { "const": "native" } } },
-        "then": { "required": ["declaration"] },
-        "else": { "not": { "required": ["declaration"] } }
-      }
     }
   }
 }
