@@ -23,7 +23,6 @@ from core.agent_core.ai._common import (
     drive_sse_stream,
     dispatch_wire_event,
     endpoint_origin,
-    forced_tool,
     hosted_declarations,
     hosted_pin,
     join_endpoint_url,
@@ -820,11 +819,10 @@ def build_messages_payload(
     tools = [*hosted_declarations(request.endpoint), *functions]
     if tools:
         payload["tools"] = tools
-    forced = forced_tool(request)
-    if forced is not None:
-        name, route = forced
-        declared = (route.declaration or {}).get("name") if route is not None else None
-        payload["tool_choice"] = {"type": "tool", "name": declared if isinstance(declared, str) else name}
+    if request.tool_choice is not None:
+        # Current Claude models refuse a forced `tool` or `any` choice, as does extended thinking, so a request that
+        # forces one would test the refusal instead of the tool. A hosted-tool probe asks in its message instead.
+        raise ValueError("an Anthropic request never forces a tool")
     effort = (request.reasoning_effort or "").lower()
     if effort in {"none", "off", "disabled"}:
         payload["thinking"] = {"type": "disabled"}

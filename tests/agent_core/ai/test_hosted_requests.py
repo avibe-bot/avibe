@@ -149,20 +149,20 @@ async def test_without_a_native_route_the_request_is_unchanged_and_unpinned(
 
 
 @pytest.mark.parametrize(
-    ("protocol", "hosted", "tool_choice"),
+    ("protocol", "hosted", "tools", "tool_choice"),
     [
-        ("anthropic", {"web_search": _native(ANTHROPIC_SEARCH)}, None),
-        ("openai_responses", {"web_search": _native(OPENAI_SEARCH, (SOURCES_INCLUDE,))}, None),
-        ("openai_chat", {"web_search": PROXY}, "read"),
-        # A call probe: the hosted tool alone, forced.
-        ("anthropic", {"web_search": _native(ANTHROPIC_SEARCH)}, "web_search"),
-        ("openai_responses", {"x_search": _native(X_SEARCH)}, "x_search"),
+        ("anthropic", {"web_search": _native(ANTHROPIC_SEARCH)}, (READ, BASH), None),
+        ("openai_responses", {"web_search": _native(OPENAI_SEARCH, (SOURCES_INCLUDE,))}, (READ, BASH), None),
+        ("openai_chat", {"web_search": PROXY}, (READ, BASH), "read"),
+        # Call probes: the hosted tool alone, forced on Responses and asked for in the message on Anthropic.
+        ("anthropic", {"web_search": _native(ANTHROPIC_SEARCH)}, (), None),
+        ("openai_responses", {"x_search": _native(X_SEARCH)}, (), "x_search"),
     ],
 )
 async def test_the_probe_entry_builds_exactly_the_request_the_adapter_sends(
-    protocol: str, hosted: dict[str, HostedToolRoute], tool_choice: str | None
+    protocol: str, hosted: dict[str, HostedToolRoute], tools: tuple[ToolSpec, ...], tool_choice: str | None
 ) -> None:
-    request = _request(protocol, hosted, tool_choice=tool_choice, tools=() if tool_choice in hosted else (READ, BASH))
+    request = _request(protocol, hosted, tools=tools, tool_choice=tool_choice)
     sent: list[httpx.Request] = []
 
     def gateway(wire: httpx.Request) -> httpx.Response:
@@ -184,8 +184,6 @@ async def test_the_probe_entry_builds_exactly_the_request_the_adapter_sends(
 @pytest.mark.parametrize(
     ("protocol", "hosted", "tools", "tool_choice", "expected"),
     [
-        ("anthropic", {"web_search": _native(ANTHROPIC_SEARCH)}, (), "web_search", {"type": "tool", "name": "web_search"}),
-        ("anthropic", {}, (READ,), "read", {"type": "tool", "name": "read"}),
         # OpenAI's hosted choice types have no web_search or x_search: `required` over the tool alone forces it.
         ("openai_responses", {"web_search": _native(OPENAI_SEARCH)}, (), "web_search", "required"),
         ("openai_responses", {}, (READ, BASH), "read", {"type": "function", "name": "read"}),
@@ -208,11 +206,13 @@ async def test_tool_choice_forces_the_named_tool_in_each_protocols_form(
             _request("openai_responses", {"web_search": _native(OPENAI_SEARCH)}, tool_choice="web_search"),
             "only tool",
         ),
-        (_request("anthropic", {}, tool_choice="web_search"), "does not declare"),
+        (_request("openai_chat", {}, tool_choice="web_search"), "does not declare"),
+        # Current Claude models and extended thinking refuse a forced choice: a probe would test that refusal.
+        (_request("anthropic", {"web_search": _native(ANTHROPIC_SEARCH)}, tools=(), tool_choice="web_search"), "never"),
         # A native declaration is never sent unpinned: unpinned, the gateway could fail it over to an unverified hop.
         (_request("anthropic", {"web_search": _native(ANTHROPIC_SEARCH)}, source_id=None), "pinned"),
     ],
-    ids=["forced-hosted-beside-functions", "forced-undeclared", "native-without-source"],
+    ids=["forced-hosted-beside-functions", "forced-undeclared", "anthropic-forced", "native-without-source"],
 )
 async def test_a_request_that_cannot_be_sent_as_specified_is_refused(request_: ModelRequest, refusal: str) -> None:
     with pytest.raises(ValueError, match=refusal):

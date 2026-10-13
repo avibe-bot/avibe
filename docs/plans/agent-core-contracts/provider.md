@@ -58,9 +58,9 @@ Every request declares each native hosted route's `declaration` verbatim, ahead 
 Responses route's `include` values into `include`, and carries `x-avibe-pin-source: <source_id>`. A proxied route
 declares nothing yet: its same-named function lands with the proxy executor. `registry.build_wire_request` returns
 the URL, headers and body the adapter would send, without sending it; a hosted-tool probe sends exactly that
-request (`vibey-hosted-tools.md` §3.2). A forced tool is `{"type": "tool", "name": …}` on Anthropic; on Responses
-and Chat a function is named, and a native hosted tool is forced with `"required"`, which needs it to be the
-request's only tool.
+request (`vibey-hosted-tools.md` §3.2). On Responses and Chat a forced function is named, and a native hosted tool
+is forced with `"required"`, which needs it to be the request's only tool. An Anthropic request is never forced:
+current Claude models and extended thinking refuse a forced `tool` or `any` choice.
 
 The loop's `ModelRouter` returns the `ModelEndpoint` together with its `ModelCapabilities`. Every capability has a
 defined effect, including when it is unknown:

@@ -131,7 +131,8 @@ class ModelRequest:
     """Resolved by the loop from ``ModelCapabilities``; an unknown capability counts as False."""
     tool_choice: Optional[str] = None
     """The one tool the response must call, by name (a function's, or a hosted tool's catalog name); ``None``
-    leaves the choice to the model. Only a hosted-tool probe sets it (``vibey-hosted-tools.md`` §3.2)."""
+    leaves the choice to the model. Only a hosted-tool probe sets it (``vibey-hosted-tools.md`` §3.2), and never on
+    Anthropic, whose current models refuse a forced choice."""
 
 
 @dataclass(frozen=True)
