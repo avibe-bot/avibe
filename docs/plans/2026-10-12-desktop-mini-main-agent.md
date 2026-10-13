@@ -494,9 +494,10 @@ Until the `main` type exists, the mini's main agent is a Vibey conversation
 - **Who the caller is.** The principal comes from the request's authorization
   context, never from a second lookup that could fall back: a remote context
   without a subject owns nothing and is refused.
-- **Reuse.** The same session is returned while it passes the checks a new one
-  would: active, foreground, a Project the caller can chat in, and an Agent the
-  caller may use. An archived session, an archived Project or lost
+- **Reuse.** The same session is returned while it is still what creation
+  would produce: active, foreground, a Project the caller can chat in, still on
+  the built-in Agent (a Workbench route change makes it an ordinary chat), which
+  the caller may use. Title, model and effort are the user's to change. An archived session, an archived Project or lost
   access gets a new one. With no chat Project at all the answer is
   `409 no_chat_project`, and the mini asks the user to create a Project.
 - **Binding.** The mini binds that session whenever nothing is bound. An

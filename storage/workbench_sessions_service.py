@@ -674,8 +674,20 @@ def desktop_mini_owner_key(context: AuthorizationContext) -> Optional[str]:
     return "local"
 
 
-def _usable_desktop_mini_session(conn: Connection, context: AuthorizationContext, session_id: str) -> bool:
-    """Whether the caller can still talk in ``session_id``: the same checks a new one passes."""
+def _usable_desktop_mini_session(
+    conn: Connection,
+    context: AuthorizationContext,
+    session_id: str,
+    agent_id: Optional[str],
+) -> bool:
+    """Whether ``session_id`` is still what ``ensure_desktop_mini_session`` would create.
+
+    One predicate for the whole contract, so reuse cannot drift from creation: an
+    active foreground session, in an enabled Project the caller can chat in, still
+    on the requested Agent (a Workbench route change makes it an ordinary chat that
+    the mini no longer owns), which the caller may still use. The title, model and
+    effort are the user's to change.
+    """
     row = conn.execute(
         select(
             agent_sessions.c.status,
@@ -692,6 +704,8 @@ def _usable_desktop_mini_session(conn: Connection, context: AuthorizationContext
         return False
     project_id = project_access_service.project_id_from_scope_id(row["scope_id"])
     if project_id is None or not project_access_service.can_chat_project(conn, context, project_id):
+        return False
+    if not agent_id or row["agent_id"] != agent_id:
         return False
     if row["agent_name"] or row["agent_id"]:
         from core.vibe_agents import (
@@ -735,7 +749,10 @@ def ensure_desktop_mini_session(
     reserve_write_lock(conn)
     key = f"{DESKTOP_MINI_SESSION_META_PREFIX}{owner_key}"
     recorded = _desktop_mini_session_id(conn, key)
-    if recorded and _usable_desktop_mini_session(conn, context, recorded):
+    agent_id = conn.execute(
+        select(agents.c.id).where(agents.c.name == agent_name, agents.c.archived_at.is_(None))
+    ).scalar_one_or_none()
+    if recorded and _usable_desktop_mini_session(conn, context, recorded, agent_id):
         return get_session(conn, recorded, authorization_context=context)
 
     from storage import projects_service

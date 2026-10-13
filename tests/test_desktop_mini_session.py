@@ -219,3 +219,25 @@ def test_a_recorded_session_whose_agent_the_caller_lost_is_not_reused(state, mon
     # Not reused; a new one is refused by the same check instead of being handed out.
     with pytest.raises(vibe_agents.VibeAgentAccessError):
         _ensure("local", vibey.name)
+
+
+def test_a_session_moved_to_another_agent_is_not_reused(state):
+    from core.vibe_agents import VibeAgentStore
+    from storage.db import create_sqlite_engine
+    from storage.workbench_sessions_service import update_session
+    from vibe.authorization import instance_owner_context
+
+    tmp_path, vibey = state
+    _project(tmp_path, "p")
+    first = _ensure("local", vibey.name)
+    store = VibeAgentStore()
+    try:
+        store.create(name="reviewer", backend="vibey")
+    finally:
+        store.close()
+    with create_sqlite_engine().begin() as conn:
+        update_session(conn, first["id"], agent_name="reviewer", authorization_context=instance_owner_context())
+    second = _ensure("local", vibey.name)
+    assert second["id"] != first["id"]
+    assert second["agent_name"] == vibey.name
+    assert _ensure("local", vibey.name)["id"] == second["id"]
