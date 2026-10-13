@@ -23,7 +23,10 @@ from scripts.terminal_bench.profile import Profile, validate_layout
 from scripts.terminal_bench.runner import FullRuntimeTrial, OwnedProcesses, TrialError
 
 ROOT = Path(__file__).resolve().parents[1]
-PROFILE = Profile(model="fixture-model", base_url="http://127.0.0.1:9/v1", setup_seconds=30,
+# Fresh SQLite migrations reached Controller construction only after 30s in
+# cold HD1 runs. Startup gets its own 120s allowance; this does not relax the
+# 30s Agent deadline or the deliberately short 2s cancellation scenario.
+PROFILE = Profile(model="fixture-model", base_url="http://127.0.0.1:9/v1", setup_seconds=120,
                   wall_seconds=30, cleanup_seconds=5, poll_seconds=0.1, offline=True)
 
 
@@ -193,3 +196,72 @@ def test_owned_cleanup_reaps_detached_child_and_preserves_bystander(tmp_path):
             owner.close(.1)
         bystander.kill()
         bystander.wait(timeout=5)
+
+
+@pytest.mark.parametrize("stage, failure, code", [
+    ("startup", "timeout", "initialize_helper_timeout"),
+    ("poll", "timeout", "cli_helper_timeout"),
+    ("poll", "exit", "cli_helper_failed_2"),
+    ("poll", "signal", "cli_helper_failed_-9"),
+    ("poll", "json", "cli_helper_invalid_json"),
+    ("poll", "quiescence", "harness_quiescence_unconfirmed"),
+    ("poll", "unsafe_trial_error", "unclassified_trial_error"),
+    ("poll", "upstream_exception", None),
+])
+def test_failure_report_preserves_only_wrapper_codes(tmp_path, monkeypatch, capsys, stage, failure, code):
+    """The CLI/report boundary lost safe codes; raw exception bodies can leak keys.
+
+    The existing subprocess happy-path test cannot expose that loss. Inject the
+    helper failure, but use real _call conversion, context exit, report and main.
+    """
+    from scripts.terminal_bench import runner
+
+    private = "private-upstream-error-not-for-export"
+    task = tmp_path / "task"
+    task.mkdir()
+    profile_file = tmp_path / "profile.json"
+    profile_file.write_text(json.dumps(PROFILE.payload()))
+    instruction = tmp_path / "instruction.txt"
+    instruction.write_text("fixture")
+    monkeypatch.setenv(PROFILE.credential_env, "fixture-key")
+    if stage == "poll":
+        monkeypatch.setattr(FullRuntimeTrial, "start", lambda self: self._result.update(outcome="ready"))
+
+    def helper(argv, **kwargs):
+        is_poll = "runs" in argv and "show" in argv
+        if stage == "startup" or is_poll:
+            if failure == "timeout":
+                raise subprocess.TimeoutExpired(argv, kwargs["timeout"], output=private, stderr=private)
+            if failure in {"exit", "signal"}:
+                return subprocess.CompletedProcess(argv, 2 if failure == "exit" else -9, private, private)
+            if failure == "json":
+                return subprocess.CompletedProcess(argv, 0, private, "")
+            if failure == "unsafe_trial_error":
+                raise TrialError(private)
+            if failure == "upstream_exception":
+                raise ValueError(private)
+            body = {"run": {"status": "succeeded", "result_text": "fixture"}}
+        elif "agent" in argv and "run" in argv:
+            body = {"run_id": "fixture-run", "session_id": "fixture-session"}
+        elif "harness" in argv:
+            body = {"controller": {"available": False}}
+        else:
+            body = {}
+        return subprocess.CompletedProcess(argv, 0, json.dumps(body), "")
+
+    monkeypatch.setattr(subprocess, "run", helper)
+    assert runner.main([
+        "--workdir", str(task), "--state", str(tmp_path / "private-state"),
+        "--output", str(tmp_path / "output"), "--profile", str(profile_file),
+        "--instruction", str(instruction),
+    ]) == 2
+    captured = capsys.readouterr()
+    report_text = (tmp_path / "output" / "execution.json").read_text()
+    assert private not in report_text + captured.out + captured.err
+    for payload in (json.loads(report_text), json.loads(captured.out), json.loads(captured.err)):
+        assert payload["outcome"] == "infrastructure_error"
+        assert payload["error_type"] == ("ValueError" if failure == "upstream_exception" else "TrialError")
+        if code is None:
+            assert "error_code" not in payload
+        else:
+            assert payload["error_code"] == code

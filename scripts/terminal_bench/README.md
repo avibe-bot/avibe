@@ -105,6 +105,10 @@ or impose a model-provider-only rule on tasks that legitimately need the network
 - A failed cleanup prevents a normal handoff. Keep the surrounding sandbox alive
   until all writers are gone; if the supervisor is killed outright, its container
   owner must stop/remove the entire task container before any separate grading.
+- Wrapper failures retain a bounded symbolic `error_code` (for example,
+  `cli_helper_timeout` or `harness_quiescence_unconfirmed`) in `execution.json`
+  and the CLI stdout/stderr summaries. Only wrapper-owned codes are accepted;
+  arbitrary upstream exception text and captured helper output are never echoed.
 - `outcome` is the product Run state, `time_limit`, `blocked`, or a wrapper failure;
   `verifier_reward` remains null. Do not treat wrapper/Harbor exit status as a
   success rate.
@@ -134,7 +138,20 @@ pollution. These are local integration tests, **not** acceptance of the real CPA
 engine or a benchmark score. The parent's installed-wheel + real-engine + local
 HTTP upstream check is a separate evidence layer.
 
+The subprocess fixture has a separate 120-second setup budget for fresh SQLite
+migrations on cold/contended filesystems. Its Agent execution budgets remain
+30 seconds (normal) and 2 seconds (deadline cancellation); a service that exits
+before readiness is still reported immediately. This is not a retry policy.
+
+The startup updater log may initially show compatibility defaults (60 minutes,
+`auto_update=true`). The real `_do_check()` reloads the saved config before its
+interval-zero early return; the intervening askill reconcile is explicitly
+disabled by this wrapper. That log alone does not prove updater egress. No product
+updater behavior is changed by this integration.
+
 Still required: parent-run installed-wheel wrapper smoke in the real sandbox,
-Harbor installed-agent wiring and schema-valid trajectory export, pinned task
-verification, same-profile paired trials, network-policy/resource equivalence,
-review/CI, and cost assessment before any larger paid batch.
+Harbor installed-agent wiring (declare `atif=False` until conversion is implemented),
+pinned task verification, same-profile paired trials, network-policy/resource
+equivalence, review/CI, and cost assessment before any larger paid batch. ATIF
+conversion is a later submission feature, not a prerequisite to an honest local
+pilot with official verifier rewards and structured/native execution evidence.

@@ -10,6 +10,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import re
 import secrets
 import signal
 import subprocess
@@ -29,7 +30,27 @@ _TERMINAL = {"succeeded", "failed", "canceled", "cancelled"}
 
 
 class TrialError(RuntimeError):
-    """A setup/lifecycle failure, never a verifier reward."""
+    """A wrapper-owned symbolic code, never an upstream diagnostic body."""
+
+    _CODES = {
+        "owned_process_cleanup_unconfirmed", "service_exited_before_ready",
+        "controller_readiness_timeout", "service_not_ready", "harness_quiescence_unconfirmed",
+    }
+    _HELPER_CODE = re.compile(
+        r"(?:initialize|serve|health|configure|usage|versions|cli)_helper_"
+        r"(?:timeout|invalid_json|failed_-?[0-9]+)\Z"
+    )
+
+    def __init__(self, code: str):
+        self.code = code if code in self._CODES or self._HELPER_CODE.fullmatch(code) else "unclassified_trial_error"
+        super().__init__(self.code)
+
+
+def failure_details(exc: BaseException) -> dict[str, str]:
+    result = {"outcome": "infrastructure_error", "error_type": type(exc).__name__}
+    if isinstance(exc, TrialError):
+        result["error_code"] = exc.code
+    return result
 
 
 def scrub(value, key: str | None):
@@ -374,13 +395,13 @@ class FullRuntimeTrial:
             self.start()
             return self
         except BaseException as exc:
-            self._result.update(outcome="infrastructure_error", error_type=type(exc).__name__)
+            self._result.update(failure_details(exc))
             self.close()
             raise
 
-    def __exit__(self, exc_type, *_):
-        if exc_type is not None:
-            self._result.update(outcome="infrastructure_error", error_type=exc_type.__name__)
+    def __exit__(self, exc_type, exc, _tb):
+        if exc is not None:
+            self._result.update(failure_details(exc))
         self.close()
 
 
@@ -406,7 +427,9 @@ def main(argv=None):
         with trial:
             trial.execute(args.instruction.read_text(encoding="utf-8"), key=os.environ.get(profile.credential_env))
     except (Exception, KeyboardInterrupt) as exc:
-        print(json.dumps({"outcome": "infrastructure_error", "error_type": type(exc).__name__}))
+        summary = json.dumps(failure_details(exc))
+        print(summary)
+        print(summary, file=sys.stderr)
         return 2
     finally:
         signal.signal(signal.SIGTERM, previous_term)
