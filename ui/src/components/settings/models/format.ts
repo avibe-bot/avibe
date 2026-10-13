@@ -104,6 +104,17 @@ export function formatDayTime(instant: string, locale: string): string {
 }
 
 /**
+ * A small per-call dollar figure with its first significant digits: $0.005, not
+ * $0.01, since a hosted tool's price is often under a cent. A figure of a dime or
+ * more keeps two decimals.
+ */
+export function formatSmallUsd(value: number): string {
+  if (value >= 0.1) return value.toFixed(2);
+  const digits = value >= 0.001 ? 3 : 4;
+  return value.toFixed(digits).replace(/0+$/, '').replace(/\.$/, '');
+}
+
+/**
  * The local calendar day as `MM-DD`, the stamp the capability chips carry
  * ("verified 10-13"). Both locales use the same numeric form, so the chip reads
  * the same width in either. An unparseable stamp renders verbatim.

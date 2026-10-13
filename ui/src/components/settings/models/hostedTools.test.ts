@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
-import { chosenExecutor, evidenceChip, modelCapabilities } from './hostedTools';
-import type { HostedEvidence, HostedToolCandidate, HostedToolStatus } from './types';
+import { evidenceChip, modelCapabilities, pendingChecks, probeTotal, type ProbeTarget } from './hostedTools';
+import type { HostedEvidence, HostedToolCandidate } from './types';
 
 const evidence = (overrides: Partial<HostedEvidence>): HostedEvidence => ({
   status: 'unknown',
@@ -9,6 +9,7 @@ const evidence = (overrides: Partial<HostedEvidence>): HostedEvidence => ({
   basis: null,
   observed_at: null,
   detail: null,
+  changes_at: null,
   ...overrides,
 });
 
@@ -19,6 +20,9 @@ const candidate = (sourceId: string, modelId: string, call: HostedEvidence): Hos
   model_id: modelId,
   call,
   replay: null,
+  billing: 'metered',
+  price: null,
+  probe_estimate: null,
 });
 
 describe('hosted-tool evidence projection', () => {
@@ -41,26 +45,37 @@ describe('hosted-tool evidence projection', () => {
     for (const [name, call, chip] of cases) expect(evidenceChip(call), name).toEqual(chip);
   });
 
-  it('names only a verified choice as the executor, never a guessed automatic one', () => {
-    const verified = evidence({ status: 'verified', basis: 'probe', observed_at: AT });
-    const tool = (executor: HostedToolStatus['executor'], candidates: HostedToolCandidate[]): HostedToolStatus => ({
-      name: 'web_search',
-      enabled: true,
-      executor,
-      candidates,
+  it('totals a check only from what the server estimates, and never counts unknown as zero', () => {
+    const at = (estimate: HostedToolCandidate['probe_estimate']): ProbeTarget => ({
+      tool: 'web_search',
+      candidate: { ...candidate('src_relay001', 'gpt-6-astra', evidence({})), probe_estimate: estimate },
     });
-    const grok = candidate('src_grok0001', 'grok-4.6', verified);
-    const relay = candidate('src_relay001', 'gpt-6-astra', verified);
 
-    expect(chosenExecutor(tool({ source_id: 'src_grok0001', model_id: 'grok-4.6' }, [relay, grok]))).toBe(grok);
-    // Automatic binds the first verified pair in Vibey's order, which this read
-    // does not state (its candidates also list Sources outside that order).
-    expect(chosenExecutor(tool(null, [relay, grok]))).toBeNull();
-    // A saved choice that is no longer verified is not what the turn binds.
-    expect(chosenExecutor(tool(
-      { source_id: 'src_grok0001', model_id: 'grok-4.6' },
-      [relay, candidate('src_grok0001', 'grok-4.6', evidence({ status: 'unknown', stale: 'wire', basis: 'probe', observed_at: AT }))],
-    ))).toBeNull();
+    expect(probeTotal([at({ basis: 'list', usd: 0.02 }), at({ basis: 'included' }), at({ basis: 'list', usd: 0.03 })]))
+      .toEqual({ basis: 'list', usd: 0.05 });
+    // One unknown estimate makes the whole set's cost unknown.
+    expect(probeTotal([at({ basis: 'list', usd: 0.02 }), at(null)])).toBeNull();
+    // A check run only on subscriptions adds no charge.
+    expect(probeTotal([at({ basis: 'included' })])).toEqual({ basis: 'included' });
+  });
+
+  it('offers to check every pair with no current answer, and never an image', () => {
+    const verified = evidence({ status: 'verified', basis: 'probe', observed_at: AT });
+    const status = {
+      tools: [
+        { name: 'web_search' as const, enabled: false, executor: null, bound: null, candidates: [
+          candidate('src_relay001', 'gpt-6-astra', evidence({})),
+          candidate('src_relay001', 'gpt-6-sol', verified),
+          candidate('src_relay001', 'gpt-6-luna', evidence({ status: 'unknown', stale: 'wire', basis: 'probe', observed_at: AT })),
+          candidate('src_relay001', 'gpt-6-terra', evidence({ status: 'verified', stale: 'age', basis: 'probe', observed_at: AT })),
+        ] },
+        { name: 'image_generation' as const, enabled: false, executor: null, bound: null, candidates: [candidate('src_relay001', 'gpt-6.1-sol', evidence({}))] },
+      ],
+      reverify: { engine_upgraded: 1, aged: 1 },
+    };
+
+    expect(pendingChecks(status).map(({ tool, candidate: c }) => `${tool}:${c.model_id}`))
+      .toEqual(['web_search:gpt-6-astra', 'web_search:gpt-6-luna', 'web_search:gpt-6-terra']);
   });
 
   it('gives a Source model one capability per tool with evidence, in catalog order', () => {
@@ -68,10 +83,10 @@ describe('hosted-tool evidence projection', () => {
     const refused = evidence({ status: 'unsupported', basis: 'observed', observed_at: AT, detail: '400 · unsupported_tool_type' });
     const status = {
       tools: [
-        { name: 'web_search' as const, enabled: true, executor: null, candidates: [candidate('src_relay001', 'gpt-6-astra', verified)] },
-        { name: 'x_search' as const, enabled: true, executor: null, candidates: [candidate('src_relay001', 'gpt-6-astra', refused)] },
+        { name: 'web_search' as const, enabled: true, executor: null, bound: null, candidates: [candidate('src_relay001', 'gpt-6-astra', verified)] },
+        { name: 'x_search' as const, enabled: true, executor: null, bound: null, candidates: [candidate('src_relay001', 'gpt-6-astra', refused)] },
         // Unchecked draws nothing: absence is the normal state, not a problem.
-        { name: 'image_generation' as const, enabled: false, executor: null, candidates: [candidate('src_relay001', 'gpt-6-astra', evidence({}))] },
+        { name: 'image_generation' as const, enabled: false, executor: null, bound: null, candidates: [candidate('src_relay001', 'gpt-6-astra', evidence({}))] },
       ],
       reverify: { engine_upgraded: 0, aged: 0 },
     };

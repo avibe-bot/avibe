@@ -15,7 +15,7 @@ import type { HostedToolsStatus } from './types';
 import { useHostedTools } from './useHostedTools';
 
 const status = (enabled: boolean): HostedToolsStatus => ({
-  tools: [{ name: 'web_search', enabled, executor: null, candidates: [] }],
+  tools: [{ name: 'web_search', enabled, executor: null, bound: null, candidates: [] }],
   reverify: { engine_upgraded: 0, aged: 0 },
 });
 

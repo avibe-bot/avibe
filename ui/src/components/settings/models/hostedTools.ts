@@ -3,6 +3,7 @@
 // (`hosted-tools-status.schema.json`): the server has already folded staleness
 // into `status`, so nothing here re-derives routing.
 import type {
+  HostedCostEstimate,
   HostedEvidence,
   HostedToolCandidate,
   HostedToolExecutor,
@@ -48,21 +49,59 @@ export const sameExecutor = (left: HostedToolExecutor | null, right: HostedToolE
 export const verifiedCandidates = (tool: HostedToolStatus): HostedToolCandidate[] =>
   tool.candidates.filter((candidate) => candidate.call.status === 'verified');
 
-/**
- * The candidate shown as the proxy executor. Only the user's own choice, and
- * only while it is verified: resolution then binds exactly it. Without a
- * choice the turn takes the first verified pair in Vibey's Source order, which
- * this read does not state, so no row claims it.
- */
-export const chosenExecutor = (tool: HostedToolStatus): HostedToolCandidate | null =>
-  verifiedCandidates(tool).find((candidate) => sameExecutor(candidate, tool.executor)) ?? null;
-
-export type ModelCapability = { tool: HostedToolName; evidence: HostedEvidence; chip: HostedEvidenceChip };
+export type ModelCapability = {
+  tool: HostedToolName;
+  evidence: HostedEvidence;
+  chip: HostedEvidenceChip;
+  candidate: HostedToolCandidate;
+  /** The tool is on and a turn would bind an executor (`bound`): a model that
+   *  cannot run it natively reaches it through that proxy. */
+  proxied: boolean;
+};
 
 /** A Source model's evidence for each tool, in catalog order, for its detail chips. */
 export const modelCapabilities = (status: HostedToolsStatus, sourceId: string, modelId: string): ModelCapability[] =>
   status.tools.flatMap((tool) => {
     const candidate = tool.candidates.find((entry) => entry.source_id === sourceId && entry.model_id === modelId);
     const chip = candidate ? evidenceChip(candidate.call) : null;
-    return candidate && chip ? [{ tool: tool.name, evidence: candidate.call, chip }] : [];
+    return candidate && chip
+      ? [{ tool: tool.name, evidence: candidate.call, chip, candidate, proxied: tool.enabled && tool.bound !== null }]
+      : [];
   });
+
+/** Tools a user can check. An image probe waits until Vibey parses image results, so the server refuses it. */
+export const probeableTool = (tool: HostedToolName): boolean => tool !== 'image_generation';
+
+export type ProbeTarget = { tool: HostedToolName; candidate: HostedToolCandidate };
+
+export const probeKey = ({ tool, candidate }: ProbeTarget): string => `${tool}:${candidate.source_id}:${candidate.model_id}`;
+
+/**
+ * What the header check offers to run: every checkable pair with no current
+ * answer, i.e. no record, or one an engine upgrade or age made stale.
+ */
+export const pendingChecks = (status: HostedToolsStatus): ProbeTarget[] =>
+  status.tools.flatMap((tool) => (probeableTool(tool.name)
+    ? tool.candidates
+      .filter((candidate) => candidate.call.status === 'unknown' || candidate.call.stale !== null)
+      .map((candidate) => ({ tool: tool.name, candidate }))
+    : []));
+
+/**
+ * The cost of running these probes, as the server estimates each one. Unknown is
+ * never zero: one unknown estimate makes the total unknown. A set run entirely on
+ * subscriptions is included.
+ */
+export const probeTotal = (targets: readonly ProbeTarget[]): HostedCostEstimate | null => {
+  let usd = 0;
+  let listed = false;
+  for (const { candidate } of targets) {
+    const estimate = candidate.probe_estimate;
+    if (!estimate) return null;
+    if (estimate.basis === 'list') {
+      usd += estimate.usd;
+      listed = true;
+    }
+  }
+  return listed ? { basis: 'list', usd } : { basis: 'included' };
+};

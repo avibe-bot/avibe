@@ -4,7 +4,8 @@ import { useTranslation } from 'react-i18next';
 import { useToast } from '@/context/ToastContext';
 import { modelsApi } from './modelsApi';
 import { beginRegionRead, loadingRegion, readRegion, readyRegion, settleRegionRead, type RegionRead } from './regionRead';
-import type { HostedToolName, HostedToolPut, HostedToolsStatus } from './types';
+import { probeKey, type ProbeTarget } from './hostedTools';
+import type { HostedToolName, HostedToolProbeResult, HostedToolPut, HostedToolsStatus } from './types';
 
 /**
  * The hosted-tools read, shared by the Tools tab and the Source chips.
@@ -29,6 +30,7 @@ export function useHostedTools(active: boolean, revision: string | null = null) 
   }, []);
   const [read, setRead] = React.useState<RegionRead<HostedToolsStatus>>(loadingRegion);
   const [pending, setPending] = React.useState<ReadonlySet<HostedToolName>>(() => new Set());
+  const [probing, setProbing] = React.useState<ReadonlySet<string>>(() => new Set());
   const order = React.useRef({ reads: 0, writes: 0, queued: 0, rereadAfterWrites: false });
   const writeQueue = React.useRef<Promise<void>>(Promise.resolve());
 
@@ -83,5 +85,34 @@ export function useHostedTools(active: boolean, revision: string | null = null) 
     }
   }, [refresh, showToast, t]);
 
-  return { read, pending, refresh, save };
+  /**
+   * Run one call probe: a real, cost-bearing request the user asked for. Its
+   * answer carries the status it left, but a probe runs long beside writes, so
+   * the screen converges through an ordinary read rather than that snapshot.
+   * Null when the request itself failed.
+   */
+  const probe = React.useCallback(async (target: ProbeTarget): Promise<HostedToolProbeResult | null> => {
+    const key = probeKey(target);
+    setProbing((previous) => new Set(previous).add(key));
+    try {
+      const { probe: result } = await modelsApi.probeHostedTool(target.tool, {
+        source_id: target.candidate.source_id,
+        model_id: target.candidate.model_id,
+      });
+      return result;
+    } catch {
+      return null;
+    } finally {
+      if (alive.current) {
+        setProbing((previous) => {
+          const next = new Set(previous);
+          next.delete(key);
+          return next;
+        });
+        void refresh();
+      }
+    }
+  }, [refresh]);
+
+  return { read, pending, probing, refresh, save, probe };
 }

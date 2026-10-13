@@ -112,6 +112,18 @@ export type SuppliedModel = {
   /** Persistent retirement tombstone; retired entries stay readable but are not callable. */
   retired?: boolean;
   discovered_at?: string | null;
+  /** Server-derived, read-only: the reasoning efforts this Source model currently
+   *  refuses (capability evidence). Absent when none; never written back. */
+  refused_efforts?: RefusedEffort[];
+};
+
+/** One reasoning effort a Source model refused, as capability evidence records it. */
+export type RefusedEffort = {
+  effort: string;
+  basis: 'probe' | 'observed';
+  observed_at: string;
+  detail: string | null;
+  changes_at: string | null;
 };
 
 export type Source = {
@@ -1007,7 +1019,23 @@ export type HostedEvidence = {
   basis: null | 'probe' | 'observed';
   observed_at: string | null;
   detail: string | null;
+  /** When the record stops reading as it does now: an observed record's expiry,
+   *  or a probe record's 30-day re-verify mark; null when nothing is scheduled. */
+  changes_at: string | null;
 };
+
+/** The overlay's list price for one hosted tool on a provider (`usd_per_1k` per `unit`). */
+export type HostedToolPriceUnit = 'call' | 'search' | 'post' | 'profile';
+export type HostedToolListPrice = {
+  unit: HostedToolPriceUnit;
+  usd_per_1k: number;
+  extra: { unit: HostedToolPriceUnit; usd_per_1k: number }[];
+  as_of: string;
+  url: string;
+};
+
+/** A cost the server states: at list price (`usd`), or included in a subscription (no `usd`). */
+export type HostedCostEstimate = { basis: 'list'; usd: number } | { basis: 'included' };
 
 export type HostedToolExecutor = { source_id: string; model_id: string };
 
@@ -1017,6 +1045,11 @@ export type HostedToolCandidate = HostedToolExecutor & {
   call: HostedEvidence;
   /** Null for image generation, which is never replayed. */
   replay: HostedEvidence | null;
+  billing: 'monthly' | 'metered';
+  /** Null when no list price is known, never zero (image generation has none). */
+  price: HostedToolListPrice | null;
+  /** One call probe's cost; null when unknown, which is never added as zero. */
+  probe_estimate: HostedCostEstimate | null;
 };
 
 export type HostedToolStatus = {
@@ -1024,6 +1057,8 @@ export type HostedToolStatus = {
   enabled: boolean;
   /** The user's choice, or null for the first verified candidate. */
   executor: HostedToolExecutor | null;
+  /** The executor a turn would bind now, by hop resolution's own rule; null when none is verified. */
+  bound: HostedToolExecutor | null;
   candidates: HostedToolCandidate[];
 };
 
@@ -1034,6 +1069,22 @@ export type HostedToolsStatus = {
 
 /** PUT /api/models/hosted-tools/<tool>: the whole setting, applied from the next turn. */
 export type HostedToolPut = { enabled: boolean; executor: HostedToolExecutor | null };
+
+/** One aspect of a probe: only verified and unsupported become evidence. */
+export type HostedProbeAspect = {
+  outcome: 'verified' | 'unsupported' | 'inconclusive' | 'transient';
+  /** The Source test's detail key, for a request that failed before completing. */
+  error: string | null;
+};
+
+/** POST /api/models/hosted-tools/<tool>/probe (`hosted-tool-probe-result.schema.json`). */
+export type HostedToolProbeResult = {
+  tool: HostedToolName;
+  source_id: string;
+  model_id: string;
+  call: HostedProbeAspect;
+  replay: HostedProbeAspect | null;
+};
 
 // ── API envelope + request shapes (api.md) ──────────────────────────────
 export type ApiOk<T> = { ok: true; contract_version: typeof CONTRACT_VERSION } & T;

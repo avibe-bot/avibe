@@ -17,7 +17,7 @@ import { Field } from './dialogFields';
 import { GuardDialog } from './GuardDialog';
 import { GuardImpact } from './GuardImpact';
 import { HostedCapabilityChips } from './HostedCapabilityChips';
-import { modelCapabilities } from './hostedTools';
+import { modelCapabilities, type ProbeTarget } from './hostedTools';
 import { confirmGuardPlan, sendAgreed, unansweredRefusal } from './guardedWrite';
 import { ModelHubInfoHint } from './ModelHubInfoHint';
 import { SourcePrivateValue, SourcePrivacyToggle } from './SourcePrivacy';
@@ -61,6 +61,7 @@ import { SourceTestDialog } from './SourceTestDialog';
 import { ACCENT_ICON, ACCENT_TILE, sourceVisual } from './vendorMeta';
 import type {
   AgentBackend,
+  HostedToolProbeResult,
   HostedToolsStatus,
   RouteHopRef,
   Source,
@@ -144,6 +145,8 @@ const GUARD_COPY_KIND: Record<GuardedAction['kind'], 'refetch' | 'removeModel'> 
 const committedPlan = (hops: RouteHopRef[], gaps: SupplyGap[]): ManageGuardPlan | null =>
   hops.length > 0 || gaps.length > 0 ? { hops, gaps } : null;
 
+const NO_PROBES: ReadonlySet<string> = new Set();
+
 type SourceReconciliation =
   | { kind: 'source'; source: Source }
   | { kind: 'gone'; sources: Source[]; snapshot: number };
@@ -173,7 +176,10 @@ export const SourceDetailPanel: React.FC<{
   /** The hosted-tools read, for each model's capability chips (§6.2), and its retry. */
   hostedTools?: RegionRead<HostedToolsStatus>;
   onRetryHostedTools?: () => void;
-}> = ({ source, trackMutation, onReauth, onMutationCommitted, headingRef, activeBackends, hostedTools, onRetryHostedTools }) => {
+  /** Probe keys running now, and the action a chip's re-check runs. */
+  hostedProbing?: ReadonlySet<string>;
+  onProbeHostedTool?: (target: ProbeTarget) => Promise<HostedToolProbeResult | null>;
+}> = ({ source, trackMutation, onReauth, onMutationCommitted, headingRef, activeBackends, hostedTools, onRetryHostedTools, hostedProbing, onProbeHostedTool }) => {
   const { t, i18n } = useTranslation();
   const detailsHidden = useSourceDetailsHidden();
   const now = useDeadlineClock(source.state.status === 'cooldown' ? source.state.retry_at : null);
@@ -210,7 +216,8 @@ export const SourceDetailPanel: React.FC<{
     capabilityStatus ? modelCapabilities(capabilityStatus, source.id, model.id) : [],
   ]));
   // The column appears only when a model has evidence: unchecked draws nothing.
-  const showCapabilities = [...capabilities.values()].some((list) => list.length > 0);
+  const showCapabilities = [...capabilities.values()].some((list) => list.length > 0)
+    || models.some((model) => (model.refused_efforts?.length ?? 0) > 0);
   // A failed read is not "nothing checked": say so where chips would be. Only a
   // hub Source can carry hosted-tool evidence.
   const capabilitiesFailed = source.supply_channel === 'hub' && hostedTools !== undefined && regionFailed(hostedTools);
@@ -760,7 +767,7 @@ export const SourceDetailPanel: React.FC<{
         {models.map((model) => (
           <div key={model.id} hidden={!visibleModelIds.has(model.id)} className="model-hub-source-table-row grid gap-3 border-b border-border last:border-b-0 md:items-center md:gap-y-0">
             <span className="flex min-w-0 items-center gap-2"><span className="model-hub-source-model truncate font-mono text-foreground" title={model.id}>{model.id}</span>{model.origin !== 'discovered' && <span className="model-hub-source-pill model-hub-source-entry-pill model-hub-source-entry-pill--manual w-fit rounded-full border font-semibold">{t('settings.models.sourceDetail.entry.manual')}</span>}{result?.added.includes(model.id) && <span className="model-hub-accent-pill--mint model-hub-source-pill rounded-full border px-2 py-0.5 font-semibold">{t('settings.models.sourceDetail.refetch.added')}</span>}</span>
-            {showCapabilities && <span className="model-hub-source-capabilities min-w-0"><HostedCapabilityChips capabilities={capabilities.get(model.id) ?? []} /></span>}
+            {showCapabilities && <span className="model-hub-source-capabilities min-w-0"><HostedCapabilityChips capabilities={capabilities.get(model.id) ?? []} refusedEfforts={model.refused_efforts} probing={hostedProbing ?? NO_PROBES} onProbe={onProbeHostedTool} /></span>}
             <div className="model-hub-source-row-actions flex items-center justify-end gap-1">
               {removeFailure?.modelId === model.id && <span className="model-hub-source-tier text-right text-destructive-ink">{t('settings.models.sourceDetail.fail.removeModel')} <button type="button" disabled={busy} onClick={() => {
                 if (!removeFailure.retryRead) void remove(model);

@@ -2398,7 +2398,17 @@
         "cost": {
           "included": "Included in subscription",
           "includedNote": "No extra charge",
-          "imageTokens": "Billed per image token · no per-image price yet"
+          "imageTokens": "Billed per image token · no per-image price yet",
+          "list": "≈ {{price}}",
+          "perUnit": "${{usd}} / {{unit}}",
+          "unit": {
+            "call": "call",
+            "search": "search",
+            "post": "post",
+            "profile": "profile"
+          },
+          "listNote": "At API price",
+          "unknown": "No list price"
         },
         "empty": "None of your Sources can run {{toolInline}} natively. Add a Source that offers it, then check it here.",
         "noNative": "Models on {{sources}} have no native {{toolInline}}.",
@@ -2411,13 +2421,74 @@
           "notVerified": "{{source}} · {{model}} (not verified)",
           "note": {
             "off": "Applies when the tool is on.",
-            "none": "When the current model can't run it natively, the proxy executor runs it and the call is billed to that Source. You can pick one once a Source is verified.",
-            "chosen": "Verified models run it natively. Other models use {{source}}, and those calls are billed to it.",
-            "automatic": "Verified models run it natively. Other models use the first verified Source in Vibey's order, and those calls are billed to it."
-          }
+            "bound": "Verified models run it natively. Other models use {{source}}, and those calls are billed to it.",
+            "unbound": "No Source is verified, so calls to it fail until you check one."
+          },
+          "automaticBound": "Automatic ({{source}} · {{model}})"
         },
         "footnote": "Costs are estimates per call. API keys are valued at the vendor's list price, and a relay may bill differently. Subscriptions add no charge. A Claude subscription can't run hosted tools.",
-        "saveFailed": "Couldn't save the {{toolInline}} setting. Please retry."
+        "saveFailed": "Couldn't save the {{toolInline}} setting. Please retry.",
+        "probe": {
+          "check": "Check",
+          "checkCost": "Check · {{cost}}",
+          "recheck": "Check again",
+          "retry": "Retry",
+          "running": "Checking…",
+          "about": "about ${{usd}}",
+          "included": "included in subscription",
+          "unknown": "cost unknown",
+          "outcome": {
+            "inconclusive": "Not verified · the model didn't use the tool; try again",
+            "transient": "Couldn't verify · try again",
+            "transientReason": "Couldn't verify · {{reason}}"
+          }
+        },
+        "header": {
+          "pending_one": "{{count}} pair to check",
+          "pending_other": "{{count}} pairs to check",
+          "total": "{{cost}} in total",
+          "totalIncluded": "included in subscriptions",
+          "totalUnknown": "cost unknown",
+          "none": "Everything is checked",
+          "action": "Check available tools"
+        },
+        "dialog": {
+          "title": "Check available tools",
+          "subtitle": "Hosted tools · Vibey",
+          "body_one": "This sends {{count}} real request to the Source below to confirm it can run the tool natively.",
+          "body_other": "This sends {{count}} real requests to the Sources below to confirm they can run these tools natively.",
+          "privacy": "Each request carries one fixed test query and none of your conversation. Checking turns no tool on and changes no route.",
+          "listTitle": "To check",
+          "total": "Total",
+          "totalNote": "Estimated at API price; a relay may bill differently",
+          "cancel": "Cancel",
+          "start": "Start check",
+          "startCost": "Start check · {{cost}}",
+          "running_one": "Checking {{done}} of {{count}}…",
+          "running_other": "Checking {{done}} of {{count}}…"
+        },
+        "result": {
+          "title": "Check finished",
+          "verified_one": "{{count}} runs natively",
+          "verified_other": "{{count}} run natively",
+          "unsupported_one": "{{count}} not supported",
+          "unsupported_other": "{{count}} not supported",
+          "unverified_one": "{{count}} not verified",
+          "unverified_other": "{{count}} not verified",
+          "outcome": {
+            "verified": "Runs natively",
+            "unsupported": "Not supported",
+            "unverified": "Not verified"
+          },
+          "reason": {
+            "inconclusive": "The model didn't use the tool. Try again; this is not recorded as unsupported.",
+            "transient": "Couldn't verify this time. Try again; this is not recorded as unsupported."
+          },
+          "note": "Verified models call the tool natively; other models use the proxy executor. Tools stay off until you turn them on.",
+          "retry_one": "Retry {{count}}",
+          "retry_other": "Retry {{count}}",
+          "done": "Done"
+        }
       },
       "capability": {
         "readFailed": "Couldn't read this Source's tool capabilities.",
@@ -2427,14 +2498,18 @@
           "native": "{{tool}} · native · verified {{date}}",
           "reverify": "{{tool}} · verified {{date}} · check again",
           "engineUpgraded": "{{tool}} · engine upgraded · check again",
-          "unsupported": "{{tool}} · not supported on this Source"
+          "unsupported": "{{tool}} · not supported on this Source",
+          "viaProxy": "{{tool}} · via proxy",
+          "viaProxyAged": "{{tool}} · via proxy · check again"
         },
         "explain": {
           "unsupportedAged": "This Source refused {{toolInline}} in a check over 30 days old. Check again to see whether it supports it now.",
           "native": "Verified: this model runs the vendor's own tool on this Source.",
           "reverify": "This check is over 30 days old. The tool still runs natively; check again when convenient.",
-          "engineUpgraded": "The model engine was upgraded after this check, so calls go to the proxy executor until it is checked again.",
-          "unsupported": "This Source refused {{toolInline}}, so it is never sent here."
+          "engineUpgraded": "The model engine was upgraded after this check, so it no longer counts as verified until it is checked again.",
+          "unsupported": "This Source refused {{toolInline}}, so it is never sent here.",
+          "viaProxy": "{{tool}} is on, but this Source can't run it natively, so calls go to the proxy executor.",
+          "viaProxyAged": "{{tool}} is on. This Source refused it in a check over 30 days old, so calls go to the proxy executor; check again to see whether it runs natively now."
         },
         "recorded": "Recorded",
         "recordedValue": "{{time}} · {{basis}}",
@@ -2442,7 +2517,16 @@
           "probe": "a check",
           "observed": "a real request"
         },
-        "reason": "Reason"
+        "reason": "Reason",
+        "expiry": "Valid",
+        "expiryObserved": "until {{date}}, then the default applies",
+        "expiryProbe": "check again after {{date}}",
+        "recheck": "Check again",
+        "recheckCost": "Check again · {{cost}}",
+        "effort": {
+          "unsupported": "{{effort}} · not supported on this Source",
+          "explain": "This Source refused this reasoning effort, so requests at it skip this Source."
+        }
       }
     }
   },

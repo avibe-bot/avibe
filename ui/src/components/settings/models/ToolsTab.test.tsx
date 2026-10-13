@@ -10,9 +10,18 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import en from '../../../i18n/en.json';
 import zh from '../../../i18n/zh.json';
+import type { ProbeTarget } from './hostedTools';
 import { readyRegion } from './regionRead';
 import { ToolsTab } from './ToolsTab';
-import type { HostedEvidence, HostedToolName, HostedToolsStatus, HostedToolStatus, Source } from './types';
+import type {
+  HostedEvidence,
+  HostedToolCandidate,
+  HostedToolName,
+  HostedToolProbeResult,
+  HostedToolsStatus,
+  HostedToolStatus,
+  Source,
+} from './types';
 
 const translator = (lng: 'en' | 'zh') => {
   const instance = createInstance();
@@ -44,24 +53,54 @@ const GROK = source('src_grok0001', 'Grok', { vendor: 'xai' });
 const SUBSCRIPTION = source('src_chatgpt1', 'OpenAI subscription', { kind: 'subscription', billing: 'monthly' });
 const CLAUDE = source('src_claude01', 'relay-claude', { vendor: 'anthropic', protocol: 'anthropic' });
 
-const unknown: HostedEvidence = { status: 'unknown', stale: null, basis: null, observed_at: null, detail: null };
-const verified: HostedEvidence = { status: 'verified', stale: null, basis: 'probe', observed_at: '2026-10-13T10:20:00Z', detail: null };
+const unknown: HostedEvidence = { status: 'unknown', stale: null, basis: null, observed_at: null, detail: null, changes_at: null };
+const verified: HostedEvidence = {
+  status: 'verified', stale: null, basis: 'probe', observed_at: '2026-10-13T10:20:00Z', detail: null, changes_at: '2026-11-12T10:20:00Z',
+};
+const SOURCES = [CLAUDE, RELAY, GROK, SUBSCRIPTION];
 
-const tool = (name: HostedToolName, over: Partial<HostedToolStatus> = {}): HostedToolStatus => ({
+/** A candidate as the server reports it; billing follows its Source unless a test states it. */
+type CandidateInput = Pick<HostedToolCandidate, 'source_id' | 'model_id' | 'call' | 'replay'> & Partial<HostedToolCandidate>;
+const tool = (
+  name: HostedToolName,
+  over: Omit<Partial<HostedToolStatus>, 'candidates'> & { candidates?: CandidateInput[] } = {},
+): HostedToolStatus => ({
   name,
   enabled: false,
   executor: null,
-  candidates: [],
+  bound: null,
   ...over,
+  candidates: (over.candidates ?? []).map((candidate) => ({
+    billing: SOURCES.find((entry) => entry.id === candidate.source_id)?.billing ?? 'metered',
+    price: null,
+    probe_estimate: null,
+    ...candidate,
+  })),
 });
 
 const status = (tools: HostedToolStatus[], reverify = { engine_upgraded: 0, aged: 0 }): HostedToolsStatus => ({ tools, reverify });
 
-const renderTab = (value: HostedToolsStatus, { lng = 'en' as 'en' | 'zh', pending = new Set<HostedToolName>() } = {}) => {
+type RunProbe = (target: ProbeTarget) => Promise<HostedToolProbeResult | null>;
+const renderTab = (
+  value: HostedToolsStatus,
+  {
+    lng = 'en',
+    pending = new Set<HostedToolName>(),
+    onProbe = vi.fn<RunProbe>(async () => null),
+  }: { lng?: 'en' | 'zh'; pending?: ReadonlySet<HostedToolName>; onProbe?: RunProbe } = {},
+) => {
   const onChange = vi.fn();
   render(
     <I18nextProvider i18n={translator(lng)}>
-      <ToolsTab read={readyRegion(value)} sources={[CLAUDE, RELAY, GROK, SUBSCRIPTION]} pending={pending} onChange={onChange} onRetry={() => {}} />
+      <ToolsTab
+        read={readyRegion(value)}
+        sources={SOURCES}
+        pending={pending}
+        probing={new Set()}
+        onChange={onChange}
+        onProbe={onProbe}
+        onRetry={() => {}}
+      />
     </I18nextProvider>,
   );
   return onChange;
@@ -120,6 +159,7 @@ describe('ToolsTab writes', () => {
     const onChange = renderTab(status([
       tool('web_search', {
         enabled: true,
+        bound: { source_id: GROK.id, model_id: 'grok-4.6' },
         candidates: [
           { source_id: RELAY.id, model_id: 'gpt-6-astra', call: unknown, replay: unknown },
           { source_id: GROK.id, model_id: 'grok-4.6', call: verified, replay: verified },
@@ -130,10 +170,11 @@ describe('ToolsTab writes', () => {
 
     const picker = within(card('Web search')).getByRole('combobox', { name: 'Proxy executor for Web search' });
     expect(within(picker).getAllByRole('option').map((option) => option.textContent))
-      .toEqual(["Automatic: first verified in Vibey's order", 'Grok · grok-4.6']);
+      // Automatic names what the server binds for it now.
+      .toEqual(['Automatic (Grok · grok-4.6)', 'Grok · grok-4.6']);
     await userEvent.selectOptions(picker, 'Grok · grok-4.6');
     expect(onChange).toHaveBeenLastCalledWith('web_search', { enabled: true, executor: { source_id: GROK.id, model_id: 'grok-4.6' } });
-    await userEvent.selectOptions(picker, "Automatic: first verified in Vibey's order");
+    await userEvent.selectOptions(picker, 'Automatic (Grok · grok-4.6)');
     expect(onChange).toHaveBeenLastCalledWith('web_search', { enabled: true, executor: null });
 
     // Nothing verified: nothing to pick, and the control says why.
@@ -147,6 +188,8 @@ describe('ToolsTab writes', () => {
     renderTab(status([tool('web_search', {
       enabled: true,
       executor,
+      // The saved choice is stale, so the server binds the first verified pair.
+      bound: { source_id: RELAY.id, model_id: 'gpt-6-astra' },
       candidates: [
         { source_id: RELAY.id, model_id: 'gpt-6-astra', call: verified, replay: verified },
         { ...executor, call: { ...verified, status: 'unknown', stale: 'wire' }, replay: unknown },
@@ -155,8 +198,9 @@ describe('ToolsTab writes', () => {
 
     const picker = within(card('Web search')).getByRole('combobox', { name: 'Proxy executor for Web search' });
     expect((picker as HTMLSelectElement).selectedOptions[0]?.textContent).toBe('Grok · grok-4.6 (not verified)');
-    // Only a verified choice is what a turn binds, so no row claims the badge.
-    expect(within(card('Web search')).queryByText('Proxy executor', { selector: '.model-hub-pill' })).toBeNull();
+    // The badge is on what a turn binds, not on the saved choice.
+    const badge = within(card('Web search')).getByText('Proxy executor', { selector: '.model-hub-pill' });
+    expect(badge.closest('[data-candidate]')?.getAttribute('data-candidate')).toBe('src_relay001:gpt-6-astra');
   });
 
   it('keeps a saved executor visible as itself when nothing is verified any more', () => {
@@ -191,8 +235,8 @@ describe('ToolsTab claims', () => {
     const executor = { source_id: GROK.id, model_id: 'grok-4.6' };
     const candidates = [{ ...executor, call: verified, replay: verified }];
     renderTab(status([
-      tool('web_search', { enabled: true, executor, candidates }),
-      tool('x_search', { enabled: false, executor, candidates }),
+      tool('web_search', { enabled: true, executor, bound: executor, candidates }),
+      tool('x_search', { enabled: false, executor, bound: executor, candidates }),
     ]));
 
     const on = card('Web search');
@@ -210,21 +254,31 @@ describe('ToolsTab claims', () => {
   it('MH-HOSTED-UI-003: states a cost only where one is known, and never prices an image', () => {
     renderTab(status([
       tool('web_search', { candidates: [
-        { source_id: RELAY.id, model_id: 'gpt-6-astra', call: unknown, replay: unknown },
+        {
+          source_id: RELAY.id, model_id: 'gpt-6-astra', call: unknown, replay: unknown,
+          price: { unit: 'call', usd_per_1k: 10, extra: [], as_of: '2026-10-13', url: 'https://openai.com/api/pricing' },
+        },
+        { source_id: CLAUDE.id, model_id: 'claude-opus-5-5', call: unknown, replay: unknown },
         { source_id: SUBSCRIPTION.id, model_id: 'gpt-6.1-sol', call: unknown, replay: unknown },
       ] }),
+      tool('x_search', { candidates: [{
+        source_id: GROK.id, model_id: 'grok-4.6', call: unknown, replay: unknown,
+        price: { unit: 'post', usd_per_1k: 5, extra: [{ unit: 'profile', usd_per_1k: 10 }], as_of: '2026-10-13', url: 'https://docs.x.ai/pricing' },
+      }] }),
       tool('image_generation', { candidates: [{ source_id: RELAY.id, model_id: 'gpt-6.1-sol', call: unknown, replay: null }] }),
     ]));
 
-    const search = card('Web search');
-    const metered = search.querySelector('[data-candidate="src_relay001:gpt-6-astra"]') as HTMLElement;
-    const included = search.querySelector('[data-candidate="src_chatgpt1:gpt-6.1-sol"]') as HTMLElement;
-    within(included).getByText('Included in subscription');
-    // No list price yet for a metered search: unknown is not drawn as zero.
-    expect(metered.textContent).not.toMatch(/\$|Included/);
-    const image = card('Image generation').querySelector('[data-candidate="src_relay001:gpt-6.1-sol"]') as HTMLElement;
-    within(image).getByText('Billed per image token · no per-image price yet');
-    expect(image.textContent).not.toMatch(/\$/);
+    const row = (name: string, key: string) => card(name).querySelector(`[data-candidate="${key}"]`) as HTMLElement;
+    within(row('Web search', 'src_relay001:gpt-6-astra')).getByText('≈ $0.01 / call');
+    within(row('Web search', 'src_relay001:gpt-6-astra')).getByText('At API price');
+    // No list price for this provider: said to be unknown, never drawn as zero.
+    within(row('Web search', 'src_claude01:claude-opus-5-5')).getByText('No list price');
+    expect(row('Web search', 'src_claude01:claude-opus-5-5').textContent).not.toMatch(/\$/);
+    within(row('Web search', 'src_chatgpt1:gpt-6.1-sol')).getByText('Included in subscription');
+    within(row('X search', 'src_grok0001:grok-4.6')).getByText('≈ $0.005 / post');
+    within(row('X search', 'src_grok0001:grok-4.6')).getByText('At API price · + $0.01 / profile');
+    within(row('Image generation', 'src_relay001:gpt-6.1-sol')).getByText('Billed per image token · no per-image price yet');
+    expect(row('Image generation', 'src_relay001:gpt-6.1-sol').textContent).not.toMatch(/\$/);
   });
 
   it('the image cost copy is the orchestrator-decided Chinese line', () => {
@@ -258,3 +312,72 @@ describe('ToolsTab claims', () => {
     expect(note.textContent).toMatch(/^Models on relay-claude, relay-gpt,? (and )?OpenAI subscription have no native X search\.$/);
   });
 });
+
+describe('ToolsTab checks', () => {
+  const searchable = () => status([
+    tool('web_search', { candidates: [
+      { source_id: RELAY.id, model_id: 'gpt-6-astra', call: unknown, replay: unknown, probe_estimate: { basis: 'list', usd: 0.02 } },
+      { source_id: SUBSCRIPTION.id, model_id: 'gpt-6.1-sol', call: unknown, replay: unknown, probe_estimate: { basis: 'included' } },
+      { source_id: GROK.id, model_id: 'grok-4.6', call: verified, replay: verified, probe_estimate: { basis: 'list', usd: 0.01 } },
+    ] }),
+    tool('image_generation', { candidates: [{ source_id: RELAY.id, model_id: 'gpt-6.1-sol', call: unknown, replay: null }] }),
+  ]);
+  const result = (outcome: HostedToolProbeResult['call']['outcome'], source_id: string, model_id: string): HostedToolProbeResult => ({
+    tool: 'web_search', source_id, model_id, call: { outcome, error: null }, replay: null,
+  });
+
+  it('MH-HOSTED-UI-013: checks one row with its cost on the button, and says when the answer was not evidence', async () => {
+    const onProbe = vi.fn<RunProbe>(async () => result('inconclusive', RELAY.id, 'gpt-6-astra'));
+    renderTab(searchable(), { onProbe });
+
+    const row = card('Web search').querySelector('[data-candidate="src_relay001:gpt-6-astra"]') as HTMLElement;
+    await userEvent.click(within(row).getByRole('button', { name: 'Check · about $0.02' }));
+    expect(onProbe).toHaveBeenCalledTimes(1);
+    expect(onProbe.mock.calls[0][0]).toMatchObject({ tool: 'web_search', candidate: { source_id: RELAY.id, model_id: 'gpt-6-astra' } });
+    // The model never used the tool: not recorded as unsupported, and the row offers another try.
+    within(row).getByText("Not verified · the model didn't use the tool; try again");
+    within(row).getByRole('button', { name: 'Retry' });
+
+    // A verified row checks again; a subscription row says the check costs nothing extra.
+    within(card('Web search').querySelector('[data-candidate="src_grok0001:grok-4.6"]') as HTMLElement).getByRole('button', { name: 'Check again' });
+    within(card('Web search').querySelector('[data-candidate="src_chatgpt1:gpt-6.1-sol"]') as HTMLElement)
+      .getByRole('button', { name: 'Check · included in subscription' });
+    // Images cannot be checked yet, so their rows offer nothing to run.
+    expect(within(card('Image generation')).queryByRole('button', { name: /Check/ })).toBeNull();
+  });
+
+  it('runs the header check only after the dialog shows what it sends and costs', async () => {
+    const onProbe = vi.fn<RunProbe>(async (target) =>
+      result(target.candidate.source_id === RELAY.id ? 'verified' : 'transient', target.candidate.source_id, target.candidate.model_id));
+    renderTab(searchable(), { onProbe });
+
+    // Two unchecked pairs (the verified one and the image are not offered); the subscription adds nothing.
+    screen.getByText('2 pairs to check · about $0.02 in total');
+    await userEvent.click(screen.getByRole('button', { name: 'Check available tools' }));
+    const dialog = await screen.findByRole('dialog');
+    within(dialog).getByText('This sends 2 real requests to the Sources below to confirm they can run these tools natively.');
+    expect(onProbe).not.toHaveBeenCalled();
+
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Start check · about $0.02' }));
+    await within(dialog).findByText('Check finished');
+    expect(onProbe).toHaveBeenCalledTimes(2);
+    within(dialog).getByText('1 runs natively');
+    within(dialog).getByText('1 not verified');
+    within(dialog).getByText('Couldn\'t verify this time. Try again; this is not recorded as unsupported.');
+
+    // Retrying runs only the pair that got no answer.
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Retry 1' }));
+    await within(dialog).findByText('Check finished');
+    expect(onProbe).toHaveBeenCalledTimes(3);
+    expect(onProbe.mock.calls[2][0]).toMatchObject({ candidate: { source_id: SUBSCRIPTION.id } });
+  });
+
+  it('says an enabled tool with nothing verified fails its calls, instead of naming a proxy', () => {
+    renderTab(status([tool('x_search', {
+      enabled: true,
+      candidates: [{ source_id: GROK.id, model_id: 'grok-4.6', call: { ...verified, status: 'unknown', stale: 'wire' }, replay: unknown }],
+    })]));
+    within(card('X search')).getByText('No Source is verified, so calls to it fail until you check one.');
+  });
+});
+

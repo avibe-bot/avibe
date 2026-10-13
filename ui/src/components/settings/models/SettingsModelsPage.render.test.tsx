@@ -251,9 +251,9 @@ const routedImpact = {
 
 const hostedToolsStatus: HostedToolsStatus = {
   tools: [
-    { name: 'web_search', enabled: false, executor: null, candidates: [] },
-    { name: 'x_search', enabled: false, executor: null, candidates: [] },
-    { name: 'image_generation', enabled: false, executor: null, candidates: [] },
+    { name: 'web_search', enabled: false, executor: null, bound: null, candidates: [] },
+    { name: 'x_search', enabled: false, executor: null, bound: null, candidates: [] },
+    { name: 'image_generation', enabled: false, executor: null, bound: null, candidates: [] },
   ],
   reverify: { engine_upgraded: 0, aged: 0 },
 };

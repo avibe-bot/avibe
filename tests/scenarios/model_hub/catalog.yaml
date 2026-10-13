@@ -412,7 +412,7 @@ scenarios:
     layer: unit
     test: ui/src/components/settings/models/SettingsModelsPage.render.test.tsx::MH-HOSTED-UI-005
   - id: MH-HOSTED-UI-006
-    name: A Source model shows one chip per tool with evidence; a refused tool reads as unsupported whatever its toggle, and unchecked draws nothing
+    name: A Source model shows one chip per tool with evidence; a refused tool reads via proxy only while the server binds one for it, and unchecked draws nothing
     status: covered
     kind: observation
     layer: unit
@@ -423,6 +423,12 @@ scenarios:
     kind: concurrency
     layer: unit
     test: ui/src/components/settings/models/useHostedTools.test.tsx::MH-HOSTED-UI-007
+  - id: MH-HOSTED-UI-013
+    name: A hosted-tool check runs only on the user's ask with its estimated cost shown first, and an answer that is not evidence reads as not verified with a retry
+    status: covered
+    kind: contract
+    layer: unit
+    test: ui/src/components/settings/models/ToolsTab.test.tsx::MH-HOSTED-UI-013
   - id: MH-VIBEY-007
     name: Vibey starts once with the user's Sources and built-in Agent models, seeded when its first Source exists
     status: covered

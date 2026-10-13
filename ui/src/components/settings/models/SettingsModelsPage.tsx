@@ -1625,7 +1625,7 @@ export const SettingsModelsPage: React.FC = () => {
                         selectSource({ sourceId, returnFocus: () => opener });
                       }}
                     />
-                    : tab === 'tools' ? <ToolsTab read={hostedTools.read} sources={sources} pending={hostedTools.pending} onChange={(tool, body) => void hostedTools.save(tool, body)} onRetry={() => void hostedTools.refresh()} />
+                    : tab === 'tools' ? <ToolsTab read={hostedTools.read} sources={sources} pending={hostedTools.pending} probing={hostedTools.probing} onChange={(tool, body) => void hostedTools.save(tool, body)} onProbe={hostedTools.probe} onRetry={() => void hostedTools.refresh()} />
                     : tab === 'usage' ? <UsageTab usage={usageRead} windowKey={usageWindow} onWindowChange={setUsageWindow} onRetry={retryUsage} />
                     : tab === 'logs' ? <RecentSwitchesCard events={eventsRead} sources={sourcesRead} onRetry={retryEvents} loadingMore={loadingEvents} onLoadMore={loadOlderEvents} />
                     : directEmpty ? <DirectHome agents={installedNativeAgents} switchFailures={switchFailures} connectingBackend={adoptAgent?.backend ?? null} onSwitch={switchToGateway} />
@@ -1773,6 +1773,8 @@ export const SettingsModelsPage: React.FC = () => {
                 source={selectedSource}
                 hostedTools={hostedTools.read}
                 onRetryHostedTools={() => void hostedTools.refresh()}
+                hostedProbing={hostedTools.probing}
+                onProbeHostedTool={hostedTools.probe}
                 activeBackends={activeBackends}
                 headingRef={sourceDetailHeadingRef}
                 trackMutation={trackSourceMutation(selectedSource.id)}
