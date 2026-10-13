@@ -243,9 +243,10 @@ Source-of-truth rule:
 
 ### Service Event Loop
 
-- The service runs one asyncio loop (`core/controller.py`). Every session's
-  turns, the scheduler, and the local Model Hub gateway share it, so anything
-  that blocks it stalls all of them at once.
+- The controller's asyncio loop (`core/controller.py`) runs every session's
+  turns, the scheduler, and the local Model Hub gateway, so anything that blocks
+  it stalls all of them at once. IM transports run on their own threads and
+  loops.
 - Code reachable on that loop must not block. Move subprocess calls, sleeps and
   retry waits, synchronous waits on futures, file rewrites, and any SQLite work
   that is not a bounded, index-keyed lookup onto a thread (an existing executor
@@ -254,9 +255,11 @@ Source-of-truth rule:
   `EXPLAIN QUERY PLAN` must not show a `SCAN` of a growing table such as
   `messages`, `agent_events`, or `agent_runs`. Pin the plan in a test, and add
   indexes through an alembic migration.
-- `core/loop_watchdog.py` writes thread stacks to `~/.avibe/logs/vibe_remote.log`
-  for any loop stall over 2 s. Treat each report as a defect at the call site it
-  names.
+- `core/loop_watchdog.py` logs every stall over 2 s in
+  `~/.avibe/logs/vibe_remote.log` with its length. It adds thread stacks at most
+  once every 5 minutes. A stall while the loop is serving work is a defect at
+  the call site the stacks name. Reports during shutdown cleanup, after the loop
+  has stopped, come from expected bounded waits.
 
 ### Web UI Server
 
