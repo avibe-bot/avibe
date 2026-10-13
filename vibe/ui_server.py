@@ -5970,6 +5970,16 @@ def vault_request_deny_post(request_id):
         return _vault_error_response(exc)
 
 
+@app.route("/api/vault/requests/<request_id>/approve-delete", methods=["POST"])
+def vault_request_approve_delete_post(request_id):
+    from vibe import api
+
+    try:
+        return jsonify(api.approve_vault_delete_request(request_id, user_context=getattr(g, "authorization_context", None)))
+    except ValueError as exc:
+        return _vault_error_response(exc)
+
+
 @app.route("/api/vault/requests/<request_id>/fulfill-access", methods=["POST"])
 def vault_request_fulfill_access_post(request_id):
     from vibe import api

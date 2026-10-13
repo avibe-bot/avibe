@@ -1100,7 +1100,42 @@ def test_avault_failure_maps_to_api_error(monkeypatch):
     assert exc.value.code == "avault_failed"
 
 
-def test_delete_missing_is_404():
+def test_approve_delete_request_api_deletes_and_returns_request(monkeypatch):
+    with api._vault_engine().begin() as conn:
+        vault_service.create_secret(conn, name="API_DELETE", sealed=_sealed("api-delete"))
+        request = vault_service.create_delete_request(
+            conn,
+            "API_DELETE",
+            reason="cleanup",
+            requester={"source": "agent-cli", "session_id": "ses_api_delete"},
+        )
+
+    released: list[dict] = []
+    monkeypatch.setattr(api, "release_vault_agent_scopes", lambda scopes, *, reason: released.extend(scopes))
+    approved = api.approve_vault_delete_request(request["id"])
+
+    assert approved["ok"] is True
+    assert approved["removed"] is True
+    assert approved["name"] == "API_DELETE"
+    assert approved["request"]["status"] == "approved"
+    with api._vault_engine().connect() as conn:
+        with pytest.raises(vault_service.SecretNotFoundError):
+            vault_service.get_secret_meta(conn, "API_DELETE")
+
+
+def test_approve_delete_request_api_rejects_decided_request():
+    with api._vault_engine().begin() as conn:
+        vault_service.create_secret(conn, name="API_DELETE_STATE", sealed=_sealed("api-delete-state"))
+        request = vault_service.create_delete_request(conn, "API_DELETE_STATE")
+        vault_service.deny_request(conn, request["id"])
+
+    with pytest.raises(api.VaultApiError) as exc:
+        api.approve_vault_delete_request(request["id"])
+    assert exc.value.code == "invalid_request"
+    assert exc.value.status == 409
+
+
+
     with pytest.raises(api.VaultApiError) as exc:
         api.delete_vault_secret("NOPE")
     assert exc.value.code == "secret_not_found"

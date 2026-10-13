@@ -605,7 +605,102 @@ def test_secret_delete_rotate_and_classification_changes_expire_covering_grants(
     assert statuses == {grant_a["id"]: "expired", grant_b["id"]: "expired", grant_c["id"]: "expired"}
 
 
-def test_protected_delete_does_not_require_authz_at_chokepoint(vault):
+def test_delete_request_deduplicates_and_keeps_value_free_card(vault):
+    _create(vault, name="DELETE_ME", protection="protected", description="old credential", tags=["prod"])
+
+    with vault.begin() as conn:
+        first = vs.create_delete_request(
+            conn,
+            "DELETE_ME",
+            reason="rotated",
+            requester={"source": "agent-cli", "session_id": "ses_delete"},
+        )
+        second = vs.create_delete_request(
+            conn,
+            "DELETE_ME",
+            reason="different reason",
+            requester={"source": "agent-cli", "session_id": "ses_other"},
+        )
+        rows = list(conn.execute(select(vault_requests).where(vault_requests.c.request_type == "delete")).mappings())
+        events = vs.list_audit(conn, secret_name="DELETE_ME")
+
+    assert second["id"] == first["id"]
+    assert len(rows) == 1
+    assert first["card"] == {
+        "card_type": "approval",
+        "request_type": "delete",
+        "secret_name": "DELETE_ME",
+        "kind": "static",
+        "protection": "protected",
+        "description": "old credential",
+        "tags": ["prod"],
+        "session_id": "ses_delete",
+        "reason": "rotated",
+    }
+    assert "ciphertext" not in json.dumps(first)
+    assert "unlock_material" not in json.dumps(first)
+    assert any(event["event"] == "delete_requested" for event in events)
+
+
+def test_delete_request_approve_expires_grants_and_arms_callback(vault):
+    _create(vault, name="DELETE_APPROVE", protection="protected")
+
+    with vault.begin() as conn:
+        access = vs.create_access_request(conn, "DELETE_APPROVE", requester={"session_id": "ses_access"})
+        grant = _grant_from_request(conn, access)
+        request = vs.create_delete_request(conn, "DELETE_APPROVE", requester={"session_id": "ses_delete"})
+        release_scopes: list[dict[str, str]] = []
+        approved = vs.approve_delete_request(conn, request["id"], release_scopes=release_scopes)
+        grant_row = dict(conn.execute(select(vault_grants).where(vault_grants.c.id == grant["id"])).mappings().one())
+        callback = vs.resolve_request_callback(dict(conn.execute(select(vault_requests).where(vault_requests.c.id == request["id"])).mappings().one()))
+
+    assert approved["status"] == "approved"
+    assert grant_row["status"] == "expired"
+    assert release_scopes == [{"grant_id": grant["id"]}]
+    assert callback is not None
+    assert callback.message == "The user approved deleting the secret 'DELETE_APPROVE'; it has been deleted. Continue the task."
+    with vault.connect() as conn:
+        with pytest.raises(vs.SecretNotFoundError):
+            vs.get_secret_meta(conn, "DELETE_APPROVE")
+
+
+def test_delete_request_deleted_elsewhere_is_fulfilled(vault):
+    _create(vault, name="DELETE_ELSEWHERE")
+
+    with vault.begin() as conn:
+        request = vs.create_delete_request(conn, "DELETE_ELSEWHERE", requester={"session_id": "ses_delete"})
+        vs.delete_secret(conn, "DELETE_ELSEWHERE")
+        row = dict(conn.execute(select(vault_requests).where(vault_requests.c.id == request["id"])).mappings().one())
+
+    assert row["status"] == "fulfilled"
+    callback = vs.resolve_request_callback(row)
+    assert callback is not None
+    assert callback.message == "The user approved deleting the secret 'DELETE_ELSEWHERE'; it has been deleted. Continue the task."
+
+
+def test_delete_request_expiry_and_deny_callbacks(vault):
+    _create(vault, name="DELETE_EXPIRE")
+    past = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+
+    with vault.begin() as conn:
+        request = vs.create_delete_request(conn, "DELETE_EXPIRE", requester={"session_id": "ses_delete"})
+        conn.execute(vault_requests.update().where(vault_requests.c.id == request["id"]).values(expires_at=past))
+        expired = vs.get_request(conn, request["id"])
+        raw_expired = dict(conn.execute(select(vault_requests).where(vault_requests.c.id == request["id"])).mappings().one())
+        assert expired["status"] == "expired"
+        assert "expired" in (vs.resolve_request_callback(raw_expired).message if vs.resolve_request_callback(raw_expired) else "")
+
+    _create(vault, name="DELETE_DENY")
+    with vault.begin() as conn:
+        request = vs.create_delete_request(conn, "DELETE_DENY", requester={"session_id": "ses_delete"})
+        denied = vs.deny_request(conn, request["id"])
+        callback = vs.resolve_request_callback(dict(conn.execute(select(vault_requests).where(vault_requests.c.id == request["id"])).mappings().one()))
+
+    assert denied["status"] == "denied"
+    assert callback is not None
+    assert callback.message == "The user declined deleting the secret 'DELETE_DENY'. Do not retry — keep the secret and ask the user if needed."
+
+
     _create(vault, name="PROTECTED_KEY", protection="protected")
 
     with vault.begin() as conn:

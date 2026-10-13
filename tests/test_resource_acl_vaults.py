@@ -247,6 +247,20 @@ def test_active_org_member_reads_and_denies_all_vault_requests(vault) -> None:
     assert public_denied["status"] == "denied"
 
 
+def test_delete_request_approval_requires_resource_management(vault) -> None:
+    owner = _context("owner-1", instance_role="owner")
+    member = _context("member-1")
+    with vault.begin() as conn:
+        _create_secret(conn, "PRIVATE_DELETE")
+        _set_policy(conn, "PRIVATE_DELETE", access_level="private")
+        request = vault_service.create_delete_request(conn, "PRIVATE_DELETE", user_context=owner)
+        with pytest.raises(vault_service.VaultSecretAccessError):
+            vault_service.approve_delete_request(conn, request["id"], user_context=member)
+        row = conn.execute(select(vault_requests).where(vault_requests.c.id == request["id"])).mappings().one()
+
+    assert row["status"] == "pending"
+
+
 def test_active_org_member_can_lookup_pending_provision_requests(vault, monkeypatch) -> None:
     member = _context("member-1")
     with vault.begin() as conn:

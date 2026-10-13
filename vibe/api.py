@@ -3786,6 +3786,37 @@ def deny_vault_request(request_id: str, payload: dict | None = None) -> dict:
     return {"ok": True, "request": request}
 
 
+def approve_vault_delete_request(request_id: str, *, user_context: Any = None) -> dict:
+    from storage import vault_service
+
+    release_scopes: list[dict[str, str]] = []
+    engine = _vault_engine()
+    try:
+        with engine.begin() as conn:
+            request = vault_service.approve_delete_request(
+                conn,
+                str(request_id),
+                release_scopes=release_scopes,
+                user_context=user_context,
+            )
+    except vault_service.RequestNotFoundError as exc:
+        raise VaultApiError(f"request '{request_id}' not found", code="request_not_found", status=404) from exc
+    except vault_service.SecretNotFoundError as exc:
+        raise VaultApiError(f"secret '{exc}' not found", code="secret_not_found", status=404) from exc
+    except vault_service.VaultSecretAccessError as exc:
+        raise _vault_secret_access_forbidden(exc) from exc
+    except vault_service.InvalidRequestError as exc:
+        raise VaultApiError(str(exc), code="invalid_request", status=409) from exc
+    release_vault_agent_scopes(release_scopes, reason="approve_vault_delete_request")
+    _publish_vaults_updated(
+        scope="secret",
+        request_id=request.get("id") or str(request_id),
+        request_status=request.get("status"),
+        secret_name=request.get("secret_name"),
+    )
+    return {"ok": True, "request": request, "removed": True, "name": request.get("secret_name")}
+
+
 def get_vault_grants(*, status: Optional[str] = "active", session_id: Optional[str] = None) -> dict:
     from storage import vault_service
 

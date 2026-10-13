@@ -1129,6 +1129,7 @@ def _request_row_payload(
     if (
         policy.include_protected_unlock_material
         and row.get("status") == "pending"
+        and row.get("request_type") != "delete"
         and conn is not None
         and isinstance(card, dict)
     ):
@@ -1425,9 +1426,12 @@ def _build_request_callback_message(row: dict[str, Any]) -> str:
         "provision": f"vault request for the secret{label}",
         "access": f"vault access request{label}",
         "sign": f"signature request{label}",
+        "delete": f"vault delete request{label}",
     }.get(request_type, f"vault request{label}")
 
     if status in {"approved", "fulfilled"}:
+        if request_type == "delete":
+            return f"The user approved deleting the secret{label}; it has been deleted. Continue the task."
         if request_type == "provision":
             usage = f" You can use it, e.g. `vibe vault run --env {name} -- <command>`." if name else ""
             return f"The user provided your {subject}; the secret is now available.{usage} Continue the task."
@@ -1443,6 +1447,8 @@ def _build_request_callback_message(row: dict[str, Any]) -> str:
             )
         return f"The user approved your {subject}. Continue the task."
     if status == "denied":
+        if request_type == "delete":
+            return f"The user declined deleting the secret{label}. Do not retry — keep the secret and ask the user if needed."
         return f"The user declined your {subject}. Do not retry — adjust your approach or ask the user how to proceed."
     if status == "failed":
         # 'failed' is a signing error (transient/crypto/browser), NOT a user decision — retry is fine.
@@ -2889,6 +2895,20 @@ def delete_secret(
     context = resolve_resource_access_context(user_context)
     row = _require_secret_resource_management(conn, _require_row(conn, name), context)
     audit_snapshot = _build_audit_access_snapshot(conn, [name])
+    # A direct delete also satisfies an Agent's outstanding delete request. Claim
+    # these before removing the ACL resource so their audits retain its snapshot.
+    fulfilled_ids = conn.execute(
+        vault_requests.update()
+        .where(
+            vault_requests.c.request_type == "delete",
+            vault_requests.c.secret_name == name,
+            vault_requests.c.status == "pending",
+        )
+        .values(status="fulfilled", decided_at=_now(), callback_status="pending")
+        .returning(vault_requests.c.id)
+    ).scalars().all()
+    for request_id in fulfilled_ids:
+        audit(conn, "delete-fulfilled", secret_name=name, request_id=request_id, access_snapshot=audit_snapshot)
     _expire_pending_requests_for_secret(conn, name, reason="request-expired-envelope-changed")
     _expire_active_grants_for_secret(conn, name, cache=cache, reason="grant-expired-envelope-changed")
     conn.execute(vault_secrets.delete().where(vault_secrets.c.name == name))
@@ -3610,6 +3630,107 @@ def create_sign_request(
     return _request_row_payload(dict(row), conn=conn, audience=payload_audience)
 
 
+def create_delete_request(
+    conn: Connection,
+    name: str,
+    *,
+    reason: str | None = None,
+    requester: Any = None,
+    message_id: str | None = None,
+    user_context: Any = None,
+) -> dict[str, Any]:
+    """Ask for deletion without accessing any secret value or unlock material."""
+    context = resolve_resource_access_context(user_context)
+    # Acquire SQLite's writer reservation before lookup/dedupe. A no-op write
+    # serializes simultaneous asks with deletion without changing the envelope.
+    conn.execute(
+        vault_secrets.update().where(vault_secrets.c.name == name)
+        .values(updated_at=vault_secrets.c.updated_at)
+    )
+    secret = _require_secret_resource_access(conn, _require_row(conn, name), context)
+    requester_payload = requester if isinstance(requester, dict) else {}
+    session_id = requester_payload.get("session_id")
+    _require_request_session_authority(conn, session_id, context)
+    audience = _request_audience_from_requester(requester)
+    pending_rows = conn.execute(
+        select(vault_requests).where(
+            vault_requests.c.request_type == "delete",
+            vault_requests.c.secret_name == name,
+            vault_requests.c.status == "pending",
+        )
+    ).mappings().all()
+    for pending in pending_rows:
+        existing, _ = _expire_request_if_due(conn, dict(pending))
+        if existing["status"] == "pending":
+            return _request_row_payload(existing, conn=conn, audience=audience)
+    request_id = _id("vrq")
+    card = {
+        "card_type": "approval",
+        "request_type": "delete",
+        "secret_name": name,
+        "kind": secret.get("kind"),
+        "protection": secret.get("protection"),
+        "description": _public_meta(secret.get("public_meta")).get("description"),
+        "tags": _row_tags(secret),
+        "session_id": session_id,
+        "reason": reason,
+    }
+    delivery = {"reason": reason, "card": card}
+    stored_requester = _requester_with_authorization(requester, context)
+    conn.execute(
+        vault_requests.insert().values(
+            id=request_id,
+            request_type="delete",
+            secret_name=name,
+            requester=json.dumps(stored_requester) if stored_requester is not None else None,
+            delivery=json.dumps(delivery),
+            status="pending",
+            message_id=message_id,
+            created_at=_now(),
+            expires_at=_request_expiry(),
+        )
+    )
+    audit(conn, "delete_requested", secret_name=name, requester=stored_requester, delivery=delivery, request_id=request_id)
+    row = conn.execute(select(vault_requests).where(vault_requests.c.id == request_id)).mappings().one()
+    return _request_row_payload(dict(row), conn=conn, audience=audience)
+
+
+def approve_delete_request(
+    conn: Connection,
+    request_id: str,
+    *,
+    release_scopes: list[dict[str, str]] | None = None,
+    user_context: Any = None,
+) -> dict[str, Any]:
+    """Atomically decide and delete; release collected avault scopes after commit."""
+    row = _load_request_for_transition(
+        conn,
+        request_id,
+        request_type="delete",
+        allowed_statuses={"pending"},
+        wrong_type_message="delete approval must target a delete request",
+        wrong_status_message="delete request is not pending",
+        expired_message="delete request has expired",
+    )
+    name = str(row["secret_name"])
+    context = resolve_resource_access_context(user_context)
+    _require_secret_resource_management(conn, _require_row(conn, name), context)
+    claim = conn.execute(
+        vault_requests.update()
+        .where(vault_requests.c.id == request_id, vault_requests.c.status == "pending")
+        .values(status="approved", decided_at=_now(), callback_status="pending")
+    )
+    if claim.rowcount != 1:
+        raise InvalidRequestError("delete request is not pending")
+    grant_rows = active_grant_rows_for_secret(conn, name)
+    delete_secret(conn, name, user_context=context)
+    scopes = agent_release_scopes_after_rows(conn, grant_rows)
+    if release_scopes is not None:
+        release_scopes.extend(scopes)
+    updated = conn.execute(select(vault_requests).where(vault_requests.c.id == request_id)).mappings().one()
+    return _request_row_payload(dict(updated), conn=conn, audience=REQUEST_AUDIENCE_AGENT)
+
+
 def _signature_bytes(raw: str) -> bytes:
     try:
         return bytes.fromhex(raw)
@@ -4165,7 +4286,7 @@ def expire_session_requests(conn: Connection, session_id: str, *, reason: str = 
         for row in conn.execute(
             select(vault_requests).where(
                 vault_requests.c.status == "pending",
-                vault_requests.c.request_type.in_(("access", "sign")),
+                vault_requests.c.request_type.in_(("access", "sign", "delete")),
             )
         ).mappings()
         if _request_session_id(dict(row)) == session_id

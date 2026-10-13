@@ -472,26 +472,25 @@ def test_tags_filters_skill_tags_by_query(capfd):
     assert [item["tag"] for item in payload["tags"]] == ["skill:model-work"]
 
 
-def test_rm_refuses_protected_secret_and_leaves_it(capfd):
+def test_rm_requests_deletion_for_protected_secret_and_leaves_it(capfd):
     with cli._open_vault_engine().begin() as conn:
         vault_service.create_secret(conn, name="PROTECTED_RM", protection="protected", sealed=_sealed("protected-rm"))
 
     code = cli.cmd_vault_rm(_ns(name="PROTECTED_RM"))
     captured = capfd.readouterr()
 
-    assert code == 1
-    payload = json.loads(captured.err)
-    assert payload["code"] == "protected_delete_forbidden"
-    assert payload["help_command"] == "vibe vault rm --help"
-    cli.cmd_vault_list(_ns())
-    listed = json.loads(capfd.readouterr().out)["secrets"]
-    assert [secret["name"] for secret in listed] == ["PROTECTED_RM"]
-    assert listed[0]["protection"] == "protected"
+    assert code == 0
+    payload = json.loads(captured.out)
+    assert payload["kind"] == "vault_delete_request"
+    assert payload["request"]["request_type"] == "delete"
+    assert payload["request"]["secret_name"] == "PROTECTED_RM"
+    assert "Waiting for the user to approve deleting PROTECTED_RM in Avibe." in payload["message"]
+    assert "do not rerun rm" in payload["message"]
     with cli._open_vault_engine().connect() as conn:
         assert vault_service.get_secret_meta(conn, "PROTECTED_RM")["protection"] == "protected"
 
 
-def test_rm_standard_secret_still_deletes(capfd):
+def test_rm_requests_deletion_for_standard_secret_and_leaves_it(capfd):
     _create_standard_secret("STANDARD_RM")
 
     code = cli.cmd_vault_rm(_ns(name="STANDARD_RM"))
@@ -499,12 +498,22 @@ def test_rm_standard_secret_still_deletes(capfd):
 
     assert code == 0
     payload = json.loads(captured.out)
-    assert payload["kind"] == "vault_secret"
-    assert payload["removed"] is True
-    assert payload["name"] == "STANDARD_RM"
+    assert payload["kind"] == "vault_delete_request"
+    assert payload["request"]["request_type"] == "delete"
+    assert payload["request"]["secret_name"] == "STANDARD_RM"
     with cli._open_vault_engine().connect() as conn:
-        with pytest.raises(vault_service.SecretNotFoundError):
-            vault_service.get_secret_meta(conn, "STANDARD_RM")
+        assert vault_service.get_secret_meta(conn, "STANDARD_RM")["name"] == "STANDARD_RM"
+
+
+def test_rm_no_callback_points_to_await(capfd):
+    _create_standard_secret("NO_CALLBACK_RM")
+
+    code = cli.cmd_vault_rm(_ns(name="NO_CALLBACK_RM", no_callback=True))
+    payload = json.loads(capfd.readouterr().out)
+
+    assert code == 0
+    assert "vibe vault await" in payload["message"]
+    assert "resumes this Session" not in payload["message"]
 
 
 def test_rm_missing_secret_still_reports_not_found(capfd):
