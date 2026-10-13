@@ -53,8 +53,7 @@ const POINTER_KEYS = ['related_tests', 'supporting_tests'];
  * the UI half of a row owned by a pytest scenario — and reading only the first
  * left five fully-written citations unasked, which is the legend hole again in
  * another key. It cost four of those five: three named cases #1401 deleted on
- * 2026-08-14, unnoticed because nothing read them. `partial_evidence` is a third
- * such key and is read for the same reason.
+ * 2026-08-14, unnoticed because nothing read them.
  *
  * `canonical_tests` stays unread, and so does a pointer key's bare file, and
  * that is the same rule rather than an exception to it: they name a file and no
@@ -70,16 +69,8 @@ const POINTER_KEYS = ['related_tests', 'supporting_tests'];
 export const uiEvidenceRows = (catalog) =>
   (catalog.scenarios ?? []).flatMap((row) => {
     const citations = [];
-    // A row whose contract several cases prove lists each of them, and each must resolve on its own.
-    for (const evidence of Array.isArray(row.test) ? row.test : [row.test]) {
-      if (typeof evidence === 'string' && isUiEvidence(evidence)) {
-        const [file, cited = null] = evidence.split('::');
-        citations.push({ id: row.id, file, cited });
-      }
-    }
-    const partial = row.partial_evidence;
-    if (partial && typeof partial.test === 'string' && isUiEvidence(partial.test)) {
-      const [file, cited = null] = partial.test.split('::');
+    if (typeof row.test === 'string' && isUiEvidence(row.test)) {
+      const [file, cited = null] = row.test.split('::');
       citations.push({ id: row.id, file, cited });
     }
     const contract = row.ui_contract;

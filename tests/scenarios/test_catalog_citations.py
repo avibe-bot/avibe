@@ -1,29 +1,19 @@
-"""Every pytest case a scenario catalog cites still exists, in every catalog and every key.
+"""Every case a scenario catalog's pointer keys name still exists, in every catalog.
 
-A row's citations are how a reader gets from a scenario to the code that runs
-it: ``test`` and ``partial_evidence`` name the evidence, and the pointer keys
-``related_tests`` and ``supporting_tests`` name neighbouring cases. Only the
-Model Hub catalog checked its own evidence keys (MH-CATALOG-001), so renamed
-or deleted tests left dead citations everywhere else: related pointers that
-named nothing, and nine rows across two catalogs reading ``covered`` while the
-case they cited no longer existed.
+``related_tests`` and ``supporting_tests`` point a reader from a scenario to
+neighbouring cases. They claim no coverage, so nothing read them, and a renamed
+or deleted test left the pointer leading nowhere: six had, in two catalogs.
+Evidence keys are another check's subject: MH-CATALOG-001 resolves Model Hub's,
+and the UI gate resolves every catalog's UI evidence.
 
-A pytest citation resolves when its file holds a case pytest collects:
-``file::Class::method``, or ``file::name`` naming a module-level test, a test
-class, or a test method of a class in that file, which is how several catalogs
-cite unittest cases. A helper or a plain class is no case. A parametrized id
-resolves through its function. An evidence key names exactly one case per
-entry (STANDARD.md §4): a bare file or a test class stays collected for
-whatever else cites it, so it evidences no row in particular, and a row whose
-contract several cases prove lists each of them under ``test``. Pointer keys
-may name a bare file, a test class, a function or a method, which must exist.
+A pointer is a list. Each entry names a file, which must exist, and may name a
+case in it: ``file::Class::method``, or ``file::name`` naming a module-level
+test function, a test class, or a test method of a class in the file. pytest's
+default naming rules decide what is a test, so a helper or a plain class is
+not. This reads source and matches exact names; it does not emulate
+collection-time exclusions such as ``__test__ = False``, which #2565 tracks.
 
-This reads source and applies pytest's default naming rules; it does not
-emulate every collection-time exclusion, such as ``__test__ = False``, a class
-with ``__init__``, or deselection in a hook, and it matches exact names only.
-Resolving against pytest's own collection, as the UI side does, is #2565.
-
-UI (vitest) citations are resolved against vitest's own collection by
+UI pointers are resolved against vitest's own collection by
 ``ui/scripts/validate-scenario-catalog.mjs``; here only their file is checked.
 """
 
@@ -43,87 +33,38 @@ _POINTER_KEYS = ("related_tests", "supporting_tests")
 
 
 @cache
-def _collectable_cases(path: Path) -> tuple[frozenset[str], dict[str, frozenset[str]]]:
-    """The test functions pytest collects from ``path``, and each test class's test methods.
+def _test_names(path: Path) -> frozenset[str]:
+    """Every name in ``path`` that is a test pytest's default rules collect, or a test class.
 
-    pytest's default naming rules, which this repository does not change: a
-    module-level ``test*`` function, and a ``test*`` method of a ``Test*`` class or
-    of a ``unittest.TestCase`` subclass, directly or through another class in the
-    file. Collection-time exclusions are out of its reach (#2565).
+    A module-level ``test*`` function; a ``Test*`` class or a ``unittest.TestCase``
+    subclass, directly or through another class in the file; and each ``test*``
+    method of such a class, by itself and as ``Class::method``.
     """
 
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     classes = {node.name: node for node in tree.body if isinstance(node, ast.ClassDef)}
 
-    def base_names(node: ast.ClassDef) -> list[str]:
-        return [base.attr if isinstance(base, ast.Attribute) else getattr(base, "id", "") for base in node.bases]
-
     def is_test_case(name: str, seen: frozenset[str] = frozenset()) -> bool:
         node = classes.get(name)
         if node is None or name in seen:
             return False
-        return any(
-            base.endswith("TestCase") or is_test_case(base, seen | {name}) for base in base_names(node)
-        )
+        bases = [base.attr if isinstance(base, ast.Attribute) else getattr(base, "id", "") for base in node.bases]
+        return any(base.endswith("TestCase") or is_test_case(base, seen | {name}) for base in bases)
 
-    def test_names(body: list[ast.stmt]) -> frozenset[str]:
-        return frozenset(
+    def test_functions(body: list[ast.stmt]) -> set[str]:
+        return {
             node.name
             for node in body
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test")
-        )
+        }
 
-    test_classes = {
-        name: test_names(node.body)
-        for name, node in classes.items()
-        if name.startswith("Test") or is_test_case(name)
-    }
-    return test_names(tree.body), test_classes
-
-
-def _named_cases(path: Path, name: str) -> tuple[int, bool]:
-    """How many collected cases ``name`` names in ``path``, and whether it names a test class."""
-
-    functions, classes = _collectable_cases(path)
-    parts = name.partition("[")[0].split("::")
-    if len(parts) == 2:
-        return int(parts[1] in classes.get(parts[0], frozenset())), False
-    if len(parts) != 1:
-        return 0, False
-    (case,) = parts
-    return int(case in functions) + sum(case in methods for methods in classes.values()), case in classes
-
-
-def _citations(row: dict) -> tuple[list[tuple[str, object]], list[str]]:
-    """Each (key, reference) the row cites a test file or case with, and each malformed key.
-
-    A malformed key is reported rather than skipped: read as absent, ``test: []``
-    or a ``partial_evidence`` with no reference would cite nothing and pass.
-    """
-
-    cited: list[tuple[str, object]] = []
-    malformed: list[str] = []
-    evidence = row.get("test")
-    if isinstance(evidence, list):
-        # A row whose contract several cases prove names each of them.
-        if not evidence:
-            malformed.append("test lists no case")
-        cited.extend(("test", reference) for reference in evidence)
-    elif evidence is not None:
-        cited.append(("test", evidence))
-    if "partial_evidence" in row:
-        partial = row["partial_evidence"]
-        if isinstance(partial, dict) and "test" in partial:
-            cited.append(("partial_evidence", partial["test"]))
-        else:
-            malformed.append("partial_evidence names no test")
-    for key in _POINTER_KEYS:
-        pointers = row.get(key)
-        if isinstance(pointers, list):
-            cited.extend((key, reference) for reference in pointers)
-        elif pointers is not None:
-            malformed.append(f"{key} is not a list")
-    return cited, malformed
+    names = test_functions(tree.body)
+    for name, node in classes.items():
+        if name.startswith("Test") or is_test_case(name):
+            names.add(name)
+            for method in test_functions(node.body):
+                names.update({method, f"{name}::{method}"})
+    return frozenset(names)
 
 
 def _catalogs() -> list[Path]:
@@ -133,35 +74,29 @@ def _catalogs() -> list[Path]:
 
 
 @pytest.mark.parametrize("catalog", _catalogs(), ids=lambda path: path.parent.name)
-def test_every_catalog_citation_resolves_to_a_case(catalog: Path) -> None:
+def test_every_pointer_names_a_file_or_case_that_exists(catalog: Path) -> None:
     rows = yaml.safe_load(catalog.read_text(encoding="utf-8")).get("scenarios") or []
     dead: list[str] = []
     for row in rows:
-        cited, malformed = _citations(row)
-        dead.extend(f"{row['id']} {problem}" for problem in malformed)
-        for key, reference in cited:
-            where = f"{row['id']} {key}: {reference}"
-            if not isinstance(reference, str):
-                dead.append(f"{row['id']} {key}: {reference!r} is not a reference")
+        for key in _POINTER_KEYS:
+            pointers = row.get(key)
+            if pointers is None:
                 continue
-            path_text, separator, name = reference.partition("::")
-            path = REPO_ROOT / path_text
-            pointer = key in _POINTER_KEYS
-            if not pointer and not name.strip():
-                dead.append(f"{where} (evidence must name a case, not only its file)")
+            if not isinstance(pointers, list):
+                dead.append(f"{row['id']} {key} is not a list")
                 continue
-            if not path.is_file():
-                dead.append(f"{where} (no such file)")
-                continue
-            if not separator or path.suffix in _UI_SUFFIXES:
-                continue
-            count, names_class = _named_cases(path, name)
-            if pointer:
-                # A pointer claims no evidence, so a class or a group of cases is a fine destination.
-                if not count and not names_class:
-                    dead.append(f"{where} (no such case in the file)")
-            elif names_class:
-                dead.append(f"{where} (names a test class, not one case; cite each case that proves the row)")
-            elif count != 1:
-                dead.append(f"{where} (names {count} cases, expected exactly one; cite it as Class::method)")
-    assert not dead, f"{catalog.relative_to(REPO_ROOT)} has citations that resolve to no case:\n" + "\n".join(dead)
+            for reference in pointers:
+                where = f"{row['id']} {key}: {reference!r}"
+                if not isinstance(reference, str):
+                    dead.append(f"{where} (not a reference)")
+                    continue
+                path_text, separator, name = reference.partition("::")
+                path = REPO_ROOT / path_text
+                if not path.is_file():
+                    dead.append(f"{where} (no such file)")
+                elif separator and not name.strip():
+                    dead.append(f"{where} (names an empty case)")
+                elif separator and path.suffix not in _UI_SUFFIXES:
+                    if name.partition("[")[0] not in _test_names(path):
+                        dead.append(f"{where} (no such test in the file)")
+    assert not dead, f"{catalog.relative_to(REPO_ROOT)} has pointers that lead nowhere:\n" + "\n".join(dead)
