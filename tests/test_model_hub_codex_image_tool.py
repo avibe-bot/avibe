@@ -165,6 +165,7 @@ CODEX_CASES = [
 async def test_codex_requests_reach_the_engine_with_the_engines_own_image_tool(
     tmp_path, fields, model, grant, tools,
 ):
+    """MH-HOSTED-GATEWAY-001: one row per CPA condition; the engine receives exactly CPA's bytes."""
     configured = _source("src_codex001", "Codex", model_id=model)
     if grant is not None:
         configured = _subscription(configured)
@@ -196,6 +197,7 @@ async def test_codex_requests_reach_the_engine_with_the_engines_own_image_tool(
     ("claude", "messages"), ("opencode", "responses"), ("vibey", "responses"),
 ])
 async def test_other_callers_reach_the_engine_with_exactly_their_declared_tools(tmp_path, backend, path, declared):
+    """MH-HOSTED-GATEWAY-001: Claude, OpenCode and Vibey get no image tool they did not declare."""
     configured = _source("src_shared001", "Responses key")
     tools = [SHELL, DECLARED_IMAGE] if declared else [SHELL]
     if backend == "claude":
