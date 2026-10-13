@@ -299,7 +299,10 @@ async def test_a_proxied_image_returns_its_bytes_once_for_vibey_to_save(tmp_path
     # Megabytes of base64 are never encoded on the controller loop.
     assert encoding_threads and threading.main_thread() not in encoding_threads
     sent = service.adapter.requests[0]
-    assert sent["tools"] == [{"type": "image_generation", "partial_images": 2, "size": "1024x1024"}]
+    assert sent["tools"] == [{
+        "type": "image_generation", "partial_images": 2, "output_format": "jpeg", "output_compression": 90,
+        "size": "1024x1024",
+    }]
     assert sent["tool_choice"] == {"type": "image_generation"}
     assert "reasoning" not in sent
     assert answer["record"] == {"status": "completed", "sources": []}
