@@ -9,6 +9,7 @@ import logging
 import os
 import re
 import stat
+import threading
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
@@ -90,9 +91,10 @@ def recover_deferred_native_cleanups(backends: tuple[str, ...]) -> None:
             payload = json.loads(path.read_text(encoding="utf-8"))
             backend = payload.get("backend")
             fingerprint = payload.get("worker_fingerprint")
+            if backend not in backends:
+                continue
             if (
                 payload.get("version") != _DEFERRED_NATIVE_CLEANUP_VERSION
-                or backend not in backends
                 or not isinstance(fingerprint, str)
                 or not is_valid_worker_fingerprint(fingerprint)
             ):
@@ -154,6 +156,7 @@ class NativeCredentialLease:
         self.directory = (state_dir if state_dir is not None else get_state_dir()) / "native-takeover"
         self._handles: list[Any] = []
         self._detached = False
+        self._release_lock = threading.RLock()
 
     def acquire(self, *, recovery: bool = False) -> NativeCredentialLease:
         from storage.lock import _try_lock
@@ -248,22 +251,28 @@ class NativeCredentialLease:
     def detach(self) -> None:
         """Transfer release responsibility to a cleanup owner."""
 
-        if not self._handles:
-            raise RuntimeError("Native credential lease is not held")
-        self._detached = True
+        with self._release_lock:
+            if not self._handles:
+                raise RuntimeError("Native credential lease is not held")
+            self._detached = True
 
     def release_detached(self) -> None:
         """Release a lease previously transferred to a cleanup owner."""
 
-        self._detached = False
-        self.release()
+        with self._release_lock:
+            self._detached = False
+            self._release_handles_locked()
 
-    def release(self) -> None:
-        if self._detached:
-            return
-        # Closing the descriptor releases the OS lock, including on Windows.
+    def _release_handles_locked(self) -> None:
         while self._handles:
             self._handles.pop().close()
+
+    def release(self) -> None:
+        with self._release_lock:
+            if self._detached:
+                return
+            # Closing the descriptor releases the OS lock, including on Windows.
+            self._release_handles_locked()
 
     def __enter__(self) -> NativeCredentialLease:
         return self.acquire()

@@ -11757,12 +11757,9 @@ def get_claude_auth(
 
     flow_source_id: str | None = None
     try:
-        if _native_lease is None and _flow_id:
+        if _flow_id:
             oauth_service = _get_oauth_service()
-            flow_lease = oauth_service.native_lease_for_flow(_flow_id, "claude")
             flow_source_id = oauth_service.native_flow_source_for_flow(_flow_id, "claude")
-            if flow_lease is not None:
-                _native_lease = flow_lease
     except Exception:
         logger.debug("Unable to reuse the native lease for Claude auth flow %s", _flow_id, exc_info=True)
 
