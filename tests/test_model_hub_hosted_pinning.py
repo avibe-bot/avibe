@@ -59,7 +59,7 @@ def _verify(service, source, model_id, tool, aspect, *, engine=None):
 
 
 async def _post(hop, body, *, pin=None, model=None):
-    headers = {"Authorization": f'Bearer {hop["token"]}'}
+    headers = {"Authorization": f'Bearer {hop["token"]}', **hop["request_headers"]}
     if pin is not None:
         headers[PIN] = pin
     if model is not None:
@@ -351,7 +351,7 @@ async def test_a_pinned_hop_must_speak_the_requests_protocol(tmp_path):
         async with aiohttp.ClientSession() as client:
             async with client.post(
                 f'{hop["base_url"]}/messages',
-                headers={"Authorization": f'Bearer {hop["token"]}', PIN: primary.id},
+                headers={"Authorization": f'Bearer {hop["token"]}', **hop["request_headers"], PIN: primary.id},
                 json={"model": hop["runtime_model"], "max_tokens": 64, "messages": [{"role": "user", "content": "q"}]},
             ) as response:
                 assert (response.status, await response.json()) == (409, PIN_UNAVAILABLE)

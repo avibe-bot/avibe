@@ -714,7 +714,9 @@ async def test_a_call_cancelled_before_its_handle_is_still_metered(tmp_path):
             await service.run_hosted_tool(
                 "web_search",
                 {"arguments": {"query": "q"}, "executor": {"source_id": XAI, "model_id": "grok-4.6"}},
-                bindings=gateway.correlation.hosted_executor_bindings(backend="vibey", token=hop["token"])[1],
+                bindings=gateway.correlation.hosted_executor_bindings(
+                    backend="vibey", token=hop["token"], request_metadata={"avibe_turn_id": "turn-cancel"},
+                )[1],
             )
     finally:
         await gateway.close()

@@ -61,7 +61,7 @@ from core.handlers.model_hub.service import (
     turn_refusal,
 )
 from core.services.settings import load_config_or_default
-from core.handlers.model_hub.turn_gateway import ModelHubTurnGateway
+from core.handlers.model_hub.turn_gateway import VIBEY_TURN_HEADER, ModelHubTurnGateway
 from core.native_dispatch_phase import mark_prewrite_recovery_required
 from modules.agents.catalog import display_name_for_backend
 from vibe.codex_config import format_toml_basic_string
@@ -1376,6 +1376,20 @@ class ModelHubRuntimeRouter:
             if self.turn_gateway is None:
                 prefix = await self._source_prefix(source.id)
                 runtime_model = f"{prefix}/{target_model}"
+            request_metadata: dict[str, str] = {}
+            if self.turn_gateway is not None and backend == "codex":
+                request_metadata = self.turn_gateway.correlation.gateway_request_metadata(
+                    backend=backend, token=gateway_token, turn_id=turn_id,
+                    route=PreparedGatewayRoute(
+                        requested_model_id=requested_model,
+                        resolved_model_id=target_model,
+                        source_id=source.id,
+                        gateway_request_model_id=runtime_model,
+                    ),
+                )
+            elif self.turn_gateway is not None and backend == "vibey" and str(turn_id or "").strip():
+                # Vibey names its turn on every gateway request (HopResolution.request_headers).
+                request_metadata = {VIBEY_TURN_HEADER: str(turn_id).strip()}
             launch = ModelHubLaunch(
                 backend=backend,
                 channel="hub",
@@ -1385,19 +1399,7 @@ class ModelHubRuntimeRouter:
                 source_id=source.id,
                 gateway_base_url=gateway_base_url,
                 gateway_token=gateway_token,
-                gateway_request_metadata=(
-                    self.turn_gateway.correlation.gateway_request_metadata(
-                        backend=backend, token=gateway_token, turn_id=turn_id,
-                        route=PreparedGatewayRoute(
-                            requested_model_id=requested_model,
-                            resolved_model_id=target_model,
-                            source_id=source.id,
-                            gateway_request_model_id=runtime_model,
-                        ),
-                    )
-                    if self.turn_gateway is not None and backend == "codex"
-                    else {}
-                ),
+                gateway_request_metadata=request_metadata,
                 context_window=context_window,
                 max_output_tokens=max_output_tokens,
                 supports_tools=supports_tools,

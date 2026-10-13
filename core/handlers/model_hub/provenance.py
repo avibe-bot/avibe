@@ -1348,28 +1348,22 @@ class TurnCorrelationRegistry:
             return trace.hosted_executors if trace is not None else None
 
     def hosted_executor_bindings(
-        self, *, backend: str, token: str,
+        self, *, backend: str, token: str, request_metadata: Mapping[str, str] | None,
     ) -> tuple[str, dict[str, tuple[str, str, str] | None]] | None:
-        """The live turn a credential belongs to and the proxy executors it bound, per tool; None without one.
+        """The live turn a request belongs to and the proxy executors it bound, per tool; None without one.
 
-        Only a credential whose route is the current route of an active turn
-        that still admits work has bindings: a superseded or turnless
-        credential, or a turn being stopped or finalized, cannot start a call.
+        Only the turn the request names, while it holds the credential's route
+        and still admits work, has bindings: a request from a finished,
+        superseded or unnamed turn, or from a turn being stopped or finalized,
+        cannot start a call.
         """
 
         with self._lock:
-            credential = self._credential(backend, token)
-            scope = self._scopes.get(credential.scope_key) if credential is not None else None
-            if scope is None or credential.route is None:
+            owner = self._request_turn(backend, token, request_metadata)
+            if owner is None:
                 return None
-            for turn_id in scope.active_turns:
-                trace = self._traces.get(turn_id)
-                if (
-                    scope.prepared_routes.get(turn_id) == credential.route
-                    and (trace is None or not trace.admission_closed)
-                ):
-                    return turn_id, dict(credential.route.hosted_executors)
-            return None
+            credential = self._credential(backend, token)
+            return owner[0], dict(credential.route.hosted_executors)
 
     def gateway_primary_origin(self, *, backend: str, token: str) -> HopOrigin | None:
         """Read the immutable launch origin, independent of live turn ownership."""
@@ -1421,6 +1415,52 @@ class TurnCorrelationRegistry:
             and turn_id not in scope.routing_conflicts
             and scope.prepared_routes.get(turn_id) == route
         )
+
+    def _request_turn(
+        self,
+        backend: str,
+        token: str,
+        request_metadata: Mapping[str, str] | None,
+    ) -> tuple[str, ScopeKey] | None:
+        """The live turn one gateway request on a route credential belongs to; call under `_lock`.
+
+        Vibey names its turn on every request (``VIBEY_TURN_HEADER``), because
+        its credential answers for a route that later turns of the session
+        reuse: the named turn owns the request only while it holds that route
+        and still admits work, so a request from a finished turn is never
+        credited to its successor. Other credential-bound clients name no
+        turn, and their sole live turn is inferred.
+        """
+
+        if backend != "vibey":
+            return self._exact_turn(backend, token)
+        turn_id = self._named_route_turn(backend, token, request_metadata)
+        if turn_id is None:
+            return None
+        trace = self._traces.get(turn_id)
+        if trace is not None and (trace.ambiguous or trace.admission_closed):
+            return None
+        return turn_id, self._credential(backend, token).scope_key
+
+    def _named_route_turn(
+        self,
+        backend: str,
+        token: str,
+        request_metadata: Mapping[str, str] | None,
+    ) -> str | None:
+        """The turn a request names, if it holds the request credential's route; call under `_lock`."""
+
+        credential = self._credential(backend, token)
+        scope = self._scopes.get(credential.scope_key) if credential is not None else None
+        turn_id = request_metadata.get("avibe_turn_id") if isinstance(request_metadata, Mapping) else None
+        if (
+            scope is None
+            or credential.route is None
+            or not isinstance(turn_id, str)
+            or not self._explicit_turn_owns_route(scope, turn_id=turn_id, route=credential.route)
+        ):
+            return None
+        return turn_id
 
     def retire_scope(
         self,
@@ -1517,9 +1557,10 @@ class TurnCorrelationRegistry:
         backend: str,
         token: str,
         requested_model_id: str,
+        request_metadata: Mapping[str, str] | None = None,
     ) -> Optional[str]:
         with self._lock:
-            exact = self._exact_turn(backend, token)
+            exact = self._request_turn(backend, token, request_metadata)
             if exact is None:
                 return None
             turn_id, key = exact
@@ -1819,6 +1860,7 @@ class TurnCorrelationRegistry:
                     backend=backend,
                     token=token,
                     requested_model_id=gateway_model_id,
+                    request_metadata=request_metadata,
                 )
                 if owner != prepared_turn_id:
                     owner = None
@@ -1938,9 +1980,13 @@ class TurnCorrelationRegistry:
         # can resolve to one upstream model id, and crediting a turn for a
         # request that belongs to the other one is how a turn ends up
         # ambiguous over a model it never asked for.
-        claimed = any(
-            prepared == route and turn_id in scope.active_turns
-            for turn_id, prepared in scope.prepared_routes.items()
+        claimed = (
+            self._named_route_turn(backend, token, request_metadata) is not None
+            if backend == "vibey"
+            else any(
+                prepared == route and turn_id in scope.active_turns
+                for turn_id, prepared in scope.prepared_routes.items()
+            )
         )
         return route.requested_model_id, claimed
 
@@ -2016,7 +2062,7 @@ class TurnCorrelationRegistry:
                 )
                 return turn_id
 
-            exact = self._exact_turn(backend, token)
+            exact = self._request_turn(backend, token, request_metadata)
             if exact is None:
                 return None
             turn_id, _ = exact
@@ -2028,10 +2074,6 @@ class TurnCorrelationRegistry:
             ):
                 return None
             if backend == "vibey":
-                if credential.route != scope.prepared_routes.get(turn_id):
-                    # A superseded credential must not poison the successor
-                    # even when malformed JSON fails before body attribution.
-                    return None
                 trace.gateway_requests.add(request_id)
             trace.pending_attempts[request_id] = AttemptIdentity(
                 source_id=trace.gateway_source_id,
