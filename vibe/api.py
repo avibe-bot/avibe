@@ -11672,37 +11672,41 @@ def get_claude_auth(
         )
     except Exception:
         claude_status_env = None
-    try:
-        if _native_lease is None and _flow_id:
-            oauth_service = _get_oauth_service()
-            flow_lease = oauth_service.native_lease_for_flow(_flow_id, "claude")
-            if flow_lease is not None:
-                _native_lease = flow_lease
-    except Exception:
-        logger.debug("Unable to reuse the native lease for Claude auth flow %s", _flow_id, exc_info=True)
-
     # Every status probe can refresh and persist native OAuth state. Reuse an
     # existing writer/observation lease when the caller already owns one;
-    # otherwise acquire the same cross-process exclusion before starting CLI.
-    try:
-        if _native_lease is not None:
-            _native_lease.assert_owned("claude")
-            cli_oauth_signed_in = _read_claude_cli_oauth_signed_in(
-                configured_cli_path if isinstance(configured_cli_path, str) else None,
-                env=claude_status_env,
-                cwd=status_probe_cwd,
-            )
-        else:
-            with NativeCredentialLease(("claude",)):
+    # otherwise wait briefly for a writer or completing OAuth flow to release
+    # the same cross-process exclusion before starting Claude.
+    cli_oauth_signed_in = None
+    lease_blocked = False
+    for attempt in range(30):
+        try:
+            if _native_lease is not None:
+                _native_lease.assert_owned("claude")
                 cli_oauth_signed_in = _read_claude_cli_oauth_signed_in(
                     configured_cli_path if isinstance(configured_cli_path, str) else None,
                     env=claude_status_env,
                     cwd=status_probe_cwd,
                 )
-    except NativeMigrationBlockedError:
-        cli_oauth_signed_in = None
-    except (OSError, subprocess.SubprocessError):
-        cli_oauth_signed_in = None
+            else:
+                with NativeCredentialLease(("claude",)):
+                    cli_oauth_signed_in = _read_claude_cli_oauth_signed_in(
+                        configured_cli_path if isinstance(configured_cli_path, str) else None,
+                        env=claude_status_env,
+                        cwd=status_probe_cwd,
+                    )
+            break
+        except NativeMigrationBlockedError as exc:
+            if exc.reason != "native_auth_in_progress" or attempt == 29:
+                lease_blocked = True
+                break
+            time.sleep(0.1)
+        except (OSError, subprocess.SubprocessError):
+            break
+    if lease_blocked and _flow_id:
+        # A just-completed OAuth flow is still the authoritative owner. Do not
+        # fall back to file-only state (which is false on Keychain installs) and
+        # report a false logout while its cleanup is releasing the lease.
+        raise NativeMigrationBlockedError("native_auth_in_progress", ("claude",))
     if connection_observation:
         if cli_oauth_signed_in is not None:
             return {"ok": True, "active_auth_mode": "oauth" if cli_oauth_signed_in else "none"}

@@ -507,18 +507,7 @@ class AgentAuthService:
         """Compatibility view; Web and IM flows share one registry by id."""
         return self._flow_registry.by_id
 
-    def native_lease_for_flow(
-        self,
-        flow_id: str,
-        backend: str,
-    ) -> NativeCredentialLease | None:
-        """Return an active flow lease for a same-backend status observer."""
-
-        flow = self._flows_by_id.get(flow_id)
-        if flow is None or getattr(flow, "backend", None) != backend:
-            return None
-        return getattr(flow, "native_lease", None)
-
+    def _active_claude_auth_clients(self) -> list[Any]:
         clients: list[Any] = []
         for flow in self._flows_by_id.values():
             if flow.backend != "claude" or flow.claude_client is None:

@@ -249,7 +249,7 @@ def test_claude_auth_status_bounds_final_pipe_drain(
     from vibe import api
 
     process = Mock()
-    process.returncode = -signal.SIGKILL
+    process.returncode = -api.KILL_SIGNAL
     process.stdout = Mock()
     process.stderr = None
     process.communicate.side_effect = [
