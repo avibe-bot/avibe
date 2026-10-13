@@ -626,21 +626,30 @@ export type TurnProvenance = {
     source_id: string | null;
     configured_model_id: string | null;
     channel: SupplyChannel | null;
-    reason: 'invalid_parameter' | 'protocol_error' | 'tool_incompatible' | 'stream_interrupted' | 'engine_down' | 'backend_error';
-    /** Null only on `backend_error`: its reporter cannot see the failing request's phase. */
-    stream_started: boolean | null;
-    http_status?: number | null;
-    upstream_error_code?: string | null;
-    upstream_detail?: string;
-    /** `backend_error` only: the backend's typed failure kind, a machine identifier such as `stalled`. */
-    error_kind?: string;
-    /** `backend_error` only: the backend's own redacted diagnostic, never an upstream answer. */
-    backend_error_detail?: string;
     local_error_detail?: string;
     origin?: { provider: string; api: SourceProtocol; model: string };
     stripped_reasoning_efforts?: string[];
     declared_reasoning_efforts?: string[];
-  } | null;
+  } & ({
+    reason: 'invalid_parameter' | 'protocol_error' | 'tool_incompatible' | 'stream_interrupted' | 'engine_down';
+    stream_started: boolean;
+    http_status?: number | null;
+    upstream_error_code?: string | null;
+    upstream_detail?: string;
+    error_kind?: never;
+    backend_error_detail?: never;
+  } | {
+    reason: 'backend_error';
+    /** The reporter has no failing-request phase evidence or upstream API verdict. */
+    stream_started: null;
+    http_status?: never;
+    upstream_error_code?: never;
+    upstream_detail?: never;
+    /** The backend's typed failure kind, a machine identifier such as `stalled`. */
+    error_kind?: string;
+    /** The backend's own redacted diagnostic, never an upstream answer. */
+    backend_error_detail?: string;
+  }) | null;
   model_supply_state: 'waiting' | 'interrupted' | null;
   blockers: Array<RouteHop & { reason: ChainUnavailableReason; retry_at?: string | null }>;
 };

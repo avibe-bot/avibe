@@ -253,11 +253,20 @@
             "required": ["reason"]
           },
           "then": {
-            "properties": { "stream_started": { "const": null } }
+            "properties": { "stream_started": { "const": null } },
+            "not": {
+              "type": "object",
+              "anyOf": [
+                { "required": ["http_status"] },
+                { "required": ["upstream_error_code"] },
+                { "required": ["upstream_detail"] }
+              ]
+            }
           },
           "else": {
             "properties": { "stream_started": { "type": "boolean" } },
             "not": {
+              "type": "object",
               "anyOf": [
                 { "required": ["error_kind"] },
                 { "required": ["backend_error_detail"] }

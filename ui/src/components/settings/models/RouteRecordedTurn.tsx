@@ -7,7 +7,7 @@ import type { RecordedError, RecordedTurn } from './recordedTurn';
 function useReason(record: RecordedError) {
   const { t } = useTranslation();
   const error = record.terminal_error;
-  return error.upstream_error_code === 'model_not_found'
+  return error.reason !== 'backend_error' && error.upstream_error_code === 'model_not_found'
     ? t('settings.models.routing.modelNotFound')
     : t(`settings.models.routing.errorReason.${error.reason}`);
 }
@@ -18,7 +18,7 @@ function RecordedSummary({ record }: { record: RecordedError }) {
   return <>
     <time dateTime={record.ts}>{new Date(record.ts).toLocaleString(i18n.language)}</time>
     <span className="font-mono">{error.source_id ?? '—'} · {error.configured_model_id ?? '—'}</span>
-    {error.upstream_error_code && <span className="font-mono">{error.upstream_error_code}</span>}
+    {error.reason !== 'backend_error' && error.upstream_error_code && <span className="font-mono">{error.upstream_error_code}</span>}
     {error.error_kind && <span>{t(`settings.models.routing.errorKind.${error.error_kind}`, { defaultValue: error.error_kind })}</span>}
   </>;
 }
@@ -30,7 +30,8 @@ export function RecordedTurnBadge({ record, onOpen }: { record: RecordedError; o
   const label = `${t('settings.models.routing.latestRecorded')} · ${reason}`;
   return <button type="button" className="model-hub-recorded-turn-badge flex shrink-0 items-center font-mono" aria-label={label} title={label} onClick={onOpen}>
     <AlertTriangle aria-hidden="true" />
-    {record.terminal_error.http_status ?? record.terminal_error.upstream_error_code ?? t('settings.models.routing.errorShort')}
+    {(record.terminal_error.reason !== 'backend_error'
+      ? record.terminal_error.http_status ?? record.terminal_error.upstream_error_code : null) ?? t('settings.models.routing.errorShort')}
   </button>;
 }
 

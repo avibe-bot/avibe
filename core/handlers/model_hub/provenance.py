@@ -708,7 +708,9 @@ class TurnTrace:
     ambiguous: bool = False
     terminal_outcome: TurnOutcomeProjectionInput | None = None
     admission_closed: bool = False
-    outcome_frozen: bool = False
+    # Both causes veto mutation. Backend acknowledgments keep terminal copy
+    # readable; explicit user cancellation suppresses live copy as before.
+    outcome_frozen: Literal["backend_failure", "user_cancellation"] | None = None
     recovery_requests: dict[str, dict] = field(default_factory=dict)
 
     @property
@@ -1081,13 +1083,15 @@ class TurnCorrelationRegistry:
         self.on_recovery_changed = on_recovery_changed
 
     def _readable_trace(
-        self, turn_id: str, backend: str | None = None, *, allow_closed: bool = False,
+        self, turn_id: str, backend: str | None = None, *,
+        allow_closed: bool = False, allow_acknowledged: bool = False,
     ) -> TurnTrace | None:
         """Called under the registry lock; attribution is never inferred."""
 
         trace = self._traces.get(turn_id)
         if (
-            trace is None or trace.ambiguous or trace.outcome_frozen
+            trace is None or trace.ambiguous
+            or (trace.outcome_frozen and not (allow_acknowledged and trace.outcome_frozen == "backend_failure"))
             or (trace.admission_closed and not allow_closed)
             or (backend is not None and trace.agent != backend)
         ):
@@ -1104,9 +1108,9 @@ class TurnCorrelationRegistry:
 
     def terminal_projection(self, turn_id: str, *, backend: str) -> TurnOutcomeProjectionInput | None:
         with self._lock:
-            trace = self._readable_trace(turn_id, backend, allow_closed=True)
+            trace = self._readable_trace(turn_id, backend, allow_closed=True, allow_acknowledged=True)
             if (
-                trace is None or trace.pending_attempts or trace.terminal_outcome is None
+                trace is None or (trace.pending_attempts and not trace.outcome_frozen) or trace.terminal_outcome is None
                 or trace.terminal_outcome.outcome in {"served", "canceled"}
             ):
                 return None
@@ -2303,11 +2307,14 @@ class TurnCorrelationRegistry:
             if self.terminal_projection(normalized, backend=trace.agent) is not None:
                 # The native failure is reporting the gateway's completed
                 # failure, not rejecting content that the gateway served.
+                # Protect that acknowledged terminal while retaining its copy
+                # for callers that read it after reporting backend failure.
+                trace.outcome_frozen = "backend_failure"
                 return
             if trace.terminal_error is not None and not trace.pending_attempts:
                 # The same for a completed failure that has no copy. A request
                 # still open after it would supersede it, but none is.
-                trace.outcome_frozen = True
+                trace.outcome_frozen = "backend_failure"
                 return
             identity = trace.pending_attempt
             payload = (
@@ -2320,7 +2327,7 @@ class TurnCorrelationRegistry:
             # The backend rejected the turn's result, not one request's.
             # A callback without an attributed payload must not freeze out
             # gateway evidence that has yet to arrive.
-            trace.outcome_frozen = True
+            trace.outcome_frozen = "backend_failure"
             trace.pending_attempts.clear()
             trace.served = None
             trace.terminal_error = {
@@ -2417,7 +2424,7 @@ class TurnCorrelationRegistry:
             if settled_by in _USER_CANCELLATIONS:
                 # Preserve the exact facts present at Stop. Teardown may expose
                 # a later producer success, but cannot change who ended the turn.
-                trace.outcome_frozen = True
+                trace.outcome_frozen = "user_cancellation"
         if had_recovery:
             self._notify_recovery_changed(turn_id)
 

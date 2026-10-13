@@ -1366,7 +1366,14 @@ without one, is kept instead, unless a later request was still open when the bac
 failed. Admission of a new actual attempt atomically retires the preceding
 request's terminal error and copy projection, keeping its fallback history.
 An unattributed callback with neither a payload nor a concrete gateway terminal
-is a no-op; it must not freeze out later gateway evidence.
+is a no-op; it must not freeze out later gateway evidence. The supersession rule
+applies before backend acknowledgment. Once the backend acknowledges an existing
+gateway terminal, that terminal is frozen against later requests while its exact
+copy remains readable; explicit user cancellation continues to suppress live copy.
+Backend-error records prohibit `http_status`, `upstream_error_code`, and
+`upstream_detail` (including null-valued members), so no upstream verdict can be
+presented as a backend-only fact. A null `terminal_error` remains valid for all
+other turn outcomes.
 The record carries only the backend's facts: optional `error_kind`, the
 backend's typed failure kind from its closed vocabulary (Vibey supplies its named
 `AgentError` kind, such as `stalled`, for a failure the served Source produced; other

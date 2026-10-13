@@ -95,6 +95,43 @@ closure pass. GitHub Codex passed the previous head `22b9342c4`; a new exact-hea
 review is still required after this correction. No GitHub findings-bearing head
 has recurred; the independent audit findings were reconciled together once.
 
+## Circuit-breaker decision: terminal evidence ownership
+
+GitHub review `5501580777` on `08f641f42` raised two findings (threads
+`PRRT_kwDOPbFPYs6ry_u_` and `PRRT_kwDOPbFPYs6ry_vK`): backend-error schema rows
+still admitted upstream-only fields, and acknowledging a gateway projection did
+not protect it from a request arriving before Turn settlement. The latter is
+the same ownership class as the independent review of `53e7da45a`; the schema
+finding also revisits the closed-shape class. Owner paused editing, fetched the
+complete review/CI inventory, and re-examined every mutation/read of the trace.
+
+Root cause: `outcome_frozen` conflates a mutation veto with suppression of live
+copy reads. Freezing an acknowledged projection as an undifferentiated boolean
+would hide the exact error copy callers still need. Leaving it unfrozen permits
+later admission to erase it. The existing freeze therefore needs to identify
+its cause, not an additional terminal ledger or a retry-policy change.
+
+Owner decision: retain the existing freeze gate, distinguish backend-failure
+acknowledgment from explicit user cancellation, and allow only the former's
+frozen terminal projection to remain readable. Recovery reads and all writes
+remain blocked. Once a backend acknowledges a terminal, later requests cannot
+replace it; before acknowledgment, already pending/new actual attempts retain
+the supersession rule. Empty callbacks still freeze nothing. Exercise both
+projection and concrete terminal paths, late admission/success/interruption,
+wrong backend, ordinary closure, and Stop. Backend-error schema shapes exclude
+upstream-only fields, and the TypeScript/display consumer follows that same
+partition. This is the smallest local correction; no lifecycle, Source-health,
+or retry architecture is changed. New regressions must fail before these edits.
+
+Validation of that decision: the four projection/closure combinations, the
+backend-only shape check, and the malformed UI record each fail on `08f641f42`.
+After correction, 957 correlation/retention/failure-presentation tests, 154 retry
+lifecycle tests, 158 Vibey adapter/context tests, and 33 UI tests pass; build,
+Ruff and authority closure pass. The schema negative constraints are object-only
+so the existing null terminal on served/exhausted/canceled/no-candidate outcomes
+continues to validate. Full CI on `08f641f42` was green; the corrected head still
+requires its own Codex verdict and CI.
+
 ## Known-by-design
 
 - Records remain generation 11 as with earlier additive diagnostic additions;

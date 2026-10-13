@@ -214,9 +214,12 @@ describe('failed-turn upstream details', () => {
   });
 
   it.each([
-    ['stalled', '模型请求等待数据超时'],
-    ['ProviderProtocolViolation', 'ProviderProtocolViolation'],
-  ])('shows a backend-reported %s failure as the backend\'s diagnostic, never an upstream answer', async (kind, shown) => {
+    ['stalled', '模型请求等待数据超时', {}],
+    ['ProviderProtocolViolation', 'ProviderProtocolViolation', {}],
+    ['stalled', '模型请求等待数据超时', {
+      http_status: 418, upstream_error_code: 'invalid_request_error', upstream_detail: 'untrusted mixed record',
+    }],
+  ])('shows a backend-reported %s failure as the backend\'s diagnostic, never an upstream answer', async (kind, shown, upstreamFields) => {
     vi.spyOn(modelsApi, 'getTurnProvenance').mockResolvedValue({
       ...record,
       agent: 'vibey',
@@ -224,9 +227,10 @@ describe('failed-turn upstream details', () => {
       terminal_error: {
         source_id: 'src_b', configured_model_id: 'grok-4.6-beta', channel: 'hub', reason: 'backend_error',
         stream_started: null, error_kind: kind, backend_error_detail: 'provider sent no data for 600s',
+        ...upstreamFields,
       },
       blockers: [],
-    } as TurnProvenance);
+    } as unknown as TurnProvenance);
     mount();
     fireEvent.click(await screen.findByRole('button', { name: '查看详情' }));
     expect(screen.getByText('grok-4.6 的请求失败了，原因见下方。')).toBeTruthy();
@@ -238,6 +242,9 @@ describe('failed-turn upstream details', () => {
     expect(screen.queryByText(/上游返回/)).toBeNull();
     expect(screen.queryByText(/上游 API 拒绝/)).toBeNull();
     expect(screen.queryByText(/由上游供应商的 API 返回/)).toBeNull();
+    expect(screen.queryByText('418')).toBeNull();
+    expect(screen.queryByText('invalid_request_error')).toBeNull();
+    expect(screen.queryByText('untrusted mixed record')).toBeNull();
   });
 
   it('names Avibe-side terminal failures and localizes every blocker reason', async () => {

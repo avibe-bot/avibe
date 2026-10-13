@@ -131,16 +131,43 @@ def test_new_attempt_retires_previous_request_terminal_before_fsm_drop(tmp_path,
     assert terminal["reason"] == "stream_interrupted"
 
 
-def test_native_hub_failure_keeps_the_gateway_terminal_projection_readable(tmp_path):
+@pytest.mark.parametrize("late_outcome", [RawOutcomeKind.SUCCESS, RawOutcomeKind.NETWORK_ERROR])
+@pytest.mark.parametrize("closure", [SETTLED_BY_TERMINAL_RESULT, SETTLED_BY_STOPPED])
+def test_native_hub_failure_keeps_the_gateway_terminal_projection_readable(tmp_path, late_outcome, closure):
     registry = _live_registry(tmp_path)
-    projection = produce_turn_outcome("turn.engine_down")
+    registry.begin_attempt(
+        "turn-live", source_id="src_primary01", resolved_model_id=MODEL, channel="hub", via_mapping=False,
+    )
+    failure = RawCallOutcome(
+        kind=RawOutcomeKind.HTTP_ERROR, http_status=400, error_code="invalid_request_error",
+        redacted_message=None, stream_started=False, model_id=MODEL, source_id="src_primary01",
+    )
+    registry.finish_attempt("turn-live", outcome=failure, decision=classify_outcome(failure))
+    projection = produce_turn_outcome("turn.request_nonfallback")
     registry.record_turn_outcome("turn-live", projection)
+    terminal = dict(registry._traces["turn-live"].terminal_error)
     registry.fail_hub_attempt("turn-live")
     assert registry.terminal_projection("turn-live", backend="codex") == projection
-    assert not registry._traces["turn-live"].outcome_frozen
-    registry.close_turn_admission("turn-live", settled_by=SETTLED_BY_STOPPED)
+
+    # After the backend has acknowledged the terminal, late admission cannot
+    # clear it, and late success/interruption cannot contradict the notice.
+    registry.begin_attempt(
+        "turn-live", source_id="src_late0001", resolved_model_id=MODEL, channel="hub", via_mapping=False,
+    )
+    late = replace(failure, kind=late_outcome, error_code=None, stream_started=True, source_id="src_late0001")
+    registry.finish_attempt("turn-live", outcome=late, decision=classify_outcome(late))
+    registry.record_turn_outcome("turn-live", produce_turn_outcome("turn.served"))
+    assert registry.terminal_projection("turn-live", backend="codex") == projection
+    assert registry.terminal_projection("turn-live", backend="claude") is None
+    registry.close_turn_admission("turn-live", settled_by=closure)
+    assert registry.terminal_projection("turn-live", backend="codex") == (
+        None if closure == SETTLED_BY_STOPPED else projection
+    )
     registry.fail_hub_attempt("turn-live")
-    assert registry.terminal_projection("turn-live", backend="codex") is None
+    registry.settle("turn-live", settled_by=closure)
+    record = registry.store.get("turn-live")
+    assert record["outcome"] == "failed_terminal"
+    assert record["terminal_error"] == terminal
 
 
 @pytest.mark.parametrize("terminal", ["exhausted", "no_candidate"])
