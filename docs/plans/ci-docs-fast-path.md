@@ -62,6 +62,28 @@ another Agent's PR just to manufacture it. No unrelated PRs are modified or
 cancelled. Exact-head Codex, all expected CI results and zero open review
 threads remain close-out gates.
 
+## Implementation and evidence
+
+- `scripts/ci_docs_only.py` is standard-library-only. Classification does not
+  install Avibe, execute documentation, read user data or call a changed-file
+  API. Errors choose full; missing/invalid outputs never authorize gate success.
+- Workflow-level triggers and all nine required names are unchanged. Expected
+  docs result is: `changes` and three aggregate jobs succeed; expensive leaf
+  checks explicitly skip. These skipped leaf statuses are intentional completed
+  checks, not a claim that their underlying tests ran.
+- Focused tests: **89 passed** (`test_ci_docs_only.py` and the existing
+  `test_ci_pipeline.py`), including actual aggregate Bash execution. Changed
+  Python Ruff 0.4.9, actionlint and diff whitespace checks pass.
+- Real docs-only PR #2533 replayed read-only with a depth-two checkout:
+  base `9b63a3009bef1c81d95c6d866f909179fb7c9cc0`,
+  head `a66890ba25aa47b63314f1d2274fa6a605e17c80`,
+  synthetic merge `ea74a8cc110de06f0d1faef864ecda75463472fc`.
+  It changes only `AGENTS.md`; the new classifier emits `docs_only=true`.
+  No changes, comments, cancellations or pushes were made to that PR.
+- First full-CI run, exact-head Codex review, and a future real docs-only
+  scheduling observation remain separate verification layers. No time saving
+  is claimed measured until the corresponding GitHub run exists.
+
 ## Ownership
 
 Session sesp2bd67rp9c owns implementation, independent review decisions and the
