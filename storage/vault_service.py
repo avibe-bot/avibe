@@ -3048,6 +3048,8 @@ def _searchable_secret_text(secret: dict[str, Any]) -> str:
         secret.get("signer_kind"),
         secret.get("description"),
         secret.get("tags"),
+        secret.get("default_field"),
+        secret.get("fields"),
     ]
     policy = secret.get("policy")
     if isinstance(policy, dict):

@@ -2417,6 +2417,21 @@ def _vault_secret_management_meta(
     return dict(vault_service.get_secret_meta(conn, secret_name, user_context=user_context))
 
 
+# Stable Web field errors: ApiContext/vaultErrorMessage resolve errors.<code>.
+# The catalog contract test also probes all service exception mappings so adding
+# a mapped code without declaring and translating it fails validation.
+_VAULT_FIELD_ERROR_CODES = (
+    "invalid_field_name",
+    "field_exists",
+    "field_not_found",
+    "too_many_fields",
+    "fields_corrupt",
+    "fields_not_supported",
+    "record_mismatch",
+    "secret_conflict",
+)
+
+
 def _vault_field_service_error(exc: Exception) -> VaultApiError:
     from storage import vault_service
 
@@ -3701,6 +3716,7 @@ def update_vault_secret(name: str, payload: dict, *, user_context: Any = None) -
         vault_service.FieldExistsError,
         vault_service.TooManyFieldsError,
         vault_service.FieldsNotSupportedError,
+        vault_service.FieldsCorruptError,
         vault_service.SecretConflictError,
     ) as exc:
         raise _vault_field_service_error(exc) from exc

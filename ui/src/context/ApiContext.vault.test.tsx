@@ -35,7 +35,7 @@ it('sends the displayed field version in the DELETE request body', async () => {
 
 it.each([
   'invalid_field_name', 'field_exists', 'field_not_found', 'too_many_fields',
-  'fields_not_supported', 'record_mismatch', 'secret_conflict',
+  'fields_not_supported', 'record_mismatch', 'secret_conflict', 'fields_corrupt',
 ] as const)('localizes the Web toast for %s instead of displaying the service English', async (code) => {
   apiFetch.mockResolvedValue(new Response(JSON.stringify({ code, message: 'English service detail' }), { status: 409 }));
   const { result } = renderHook(useApi, { wrapper: ApiProvider });

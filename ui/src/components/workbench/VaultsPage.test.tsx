@@ -364,6 +364,24 @@ describe('VaultsPage protected reveal', () => {
     expect(api.createVaultRevealContext).toHaveBeenCalledTimes(preparedBeforeRefresh);
   });
 
+  it('refreshes a prepared extra-field context when only the default label changes', async () => {
+    const entry = { ...protectedSecret('alpha'), default_field: 'password', fields: ['password', 'username'] };
+    api.listVaultSecrets.mockResolvedValue({ secrets: [entry] });
+    api.createVaultRevealContext.mockResolvedValue({ ok: true, context: { label: 'password' }, envelope });
+    await openMenu();
+    await vi.waitFor(() => expect(api.createVaultRevealContext).toHaveBeenCalledOnce());
+    fireEvent.change(screen.getByRole('combobox', { name: 'vaults.fields.revealField' }), { target: { value: 'username' } });
+    await vi.waitFor(() => expect(api.createVaultRevealContext).toHaveBeenCalledTimes(2));
+    api.listVaultSecrets.mockResolvedValue({ secrets: [{ ...entry, default_field: 'credential', fields: ['credential', 'username'] }] });
+    api.createVaultRevealContext.mockResolvedValue({ ok: true, context: { label: 'credential' }, envelope });
+    await act(async () => {
+      for (const handler of eventHandlers) handler.onVaultsUpdated?.({ scope: 'secret', secret_name: 'alpha' });
+    });
+    await vi.waitFor(() => expect(api.createVaultRevealContext).toHaveBeenCalledTimes(3));
+    await clickShowValue();
+    expect(revealProtectedValue.mock.calls[0][1]).toEqual({ label: 'credential' });
+  });
+
   it('prepares the replacement envelope when an open secret changes version', async () => {
     let version = 'old';
     api.createVaultRevealContext.mockImplementation(async () => ({ ok: true, context: { version }, envelope }));

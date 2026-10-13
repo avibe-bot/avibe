@@ -6,7 +6,7 @@ import { sealBlindBox, standardCreateBlindBoxContext } from '@/lib/vaultCrypto';
 import { vaultErrorMessage } from '@/lib/vaultErrors';
 import { useProtectedVault } from '@/lib/useProtectedVault';
 import { openVaultsInBrowser } from '@/lib/vaultBrowserHandoff';
-import { MAX_VAULT_FIELDS, VAULT_FIELD_PATTERN, vaultDefaultField, vaultFieldNames, vaultRecordName } from '@/lib/vaultFields';
+import { MAX_VAULT_FIELDS, VAULT_FIELD_PATTERN, vaultDefaultField, vaultFieldFingerprint, vaultFieldNames, vaultRecordName } from '@/lib/vaultFields';
 import { Badge } from './badge';
 import { Button } from './button';
 import { ConfirmDialog } from './confirm-dialog';
@@ -27,7 +27,7 @@ export function VaultSecretFieldsEditor({
   const { refresh } = vault;
   const [current, setCurrent] = useState(secret);
   const currentRef = useRef(secret);
-  const stalePropVersionRef = useRef<string | null>(null);
+  const stalePropFingerprintRef = useRef<string | null>(null);
   const [drafts, setDrafts] = useState<Map<string, string>>(() => new Map());
   const [defaultLabel, setDefaultLabel] = useState(vaultDefaultField(secret));
   const defaultLabelDirtyRef = useRef(false);
@@ -51,15 +51,20 @@ export function VaultSecretFieldsEditor({
     const local = currentRef.current;
     if (secret.name !== local.name) {
       currentRef.current = secret;
-      stalePropVersionRef.current = null;
+      stalePropFingerprintRef.current = null;
       defaultLabelDirtyRef.current = false;
       setCurrent(secret);
       setDefaultLabel(vaultDefaultField(secret));
       setDrafts(new Map());
       return;
     }
-    if (secret.updated_at === local.updated_at) return;
-    if (secret.updated_at === stalePropVersionRef.current) return;
+    const incomingFingerprint = vaultFieldFingerprint(secret);
+    if (incomingFingerprint === vaultFieldFingerprint(local)) {
+      stalePropFingerprintRef.current = null;
+      return;
+    }
+    if (incomingFingerprint === stalePropFingerprintRef.current) return;
+    stalePropFingerprintRef.current = null;
     currentRef.current = secret;
     setCurrent(secret);
     if (!defaultLabelDirtyRef.current) setDefaultLabel(vaultDefaultField(secret));
@@ -87,8 +92,8 @@ export function VaultSecretFieldsEditor({
     typeof result === 'object' && result !== null && 'code' in result && result.code === code;
   const conflict = () => new Error(t('vaults.fields.recordConflict'));
   const adoptSecret = (next: VaultSecret, ownWrite = false) => {
-    if (ownWrite && next.updated_at !== currentRef.current.updated_at) {
-      stalePropVersionRef.current = currentRef.current.updated_at;
+    if (ownWrite && vaultFieldFingerprint(next) !== vaultFieldFingerprint(currentRef.current)) {
+      stalePropFingerprintRef.current = vaultFieldFingerprint(currentRef.current);
     }
     currentRef.current = next;
     setCurrent(next);

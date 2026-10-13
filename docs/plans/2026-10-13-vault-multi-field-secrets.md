@@ -180,7 +180,10 @@ The secret metadata payload (`_meta_payload`, REST, and `vibe vault list/find
   409 `record_mismatch` without storing anything, and the UI re-reads metadata
   and re-seals once (the top-level create record is implicitly `NAME`).
 - New error codes: `invalid_field_name`, `field_exists`, `field_not_found`,
-  `too_many_fields`, `fields_not_supported`, `record_mismatch`.
+  `too_many_fields`, `fields_not_supported`, `record_mismatch`, `fields_corrupt`.
+  Corrupt extra-field storage is warned about and unavailable as a whole; the
+  default record remains usable, while field mutations preserve the original
+  bytes and refuse until the stored section is repaired.
 - Plaintext rejection, resource-access checks, SSE updates, and audit apply to
   every new path. Field changes audit as `updated` with
   `{"field": "<name>", "op": "add" | "replace" | "remove"}`.
@@ -265,8 +268,9 @@ secrets with fields work without it; protected secrets with fields need it.
   deletion is out of scope; browser/REST removal of extra fields is supported.
 - There are no plaintext or non-secret fields; non-secret notes belong in the
   description.
-- Web field errors are localized from stable error codes in English and Chinese;
-  agent-facing CLI/service diagnostic text stays English.
+- Web field errors are localized from the canonical stable-code tuple in
+  `vibe/api.py`, guarded against both catalogs; agent-facing CLI/service
+  diagnostic text stays English.
 - VMK-copy discovery (`latest_protected_vmk_wrap_meta`) selects the default
   envelope on the most recently updated secret. Updating an extra field can
   move a secret with older VMK copies to the front. This is latent while the

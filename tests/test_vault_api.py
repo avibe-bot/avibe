@@ -4546,6 +4546,56 @@ def test_protected_reveal_context_uses_field_record_name(monkeypatch):
     assert context["display"]["secrets"] == [{"name": "PROTECTED_LOGIN.username", "kind": "static"}]
 
 
+def test_every_web_field_error_code_has_english_and_chinese_translations():
+    codes = api._VAULT_FIELD_ERROR_CODES
+    assert codes and len(codes) == len(set(codes))
+    root = Path(__file__).resolve().parents[1]
+    for language in ("en", "zh"):
+        catalog = json.loads((root / "ui" / "src" / "i18n" / f"{language}.json").read_text(encoding="utf-8"))
+        for code in codes:
+            assert isinstance(catalog["errors"].get(code), str) and catalog["errors"][code].strip(), (language, code)
+
+    # Probe the real translator for every service exception type, rather than a
+    # second manually maintained list of field classes. Only type and message
+    # matter to this boundary; storage-specific constructor data is not read.
+    translated = set()
+    for error_type in vars(vault_service).values():
+        if isinstance(error_type, type) and issubclass(error_type, vault_service.VaultServiceError):
+            error = Exception.__new__(error_type)
+            Exception.__init__(error, "metadata error")
+            translated.add(api._vault_field_service_error(error).code)
+    generic_codes = {"vault_error", "invalid_request", "secret_not_found", "resource_access_forbidden"}
+    assert translated - generic_codes == set(codes)
+
+
+def test_corrupt_fields_return_stable_error_without_disabling_default_reveal():
+    api.create_vault_secret({
+        "name": "CORRUPT_LOGIN", "protection": "protected",
+        "sealed": {"ciphertext": "ct-default", "nonce": "n-default", "wrap_meta": "wm-default"},
+    })
+    engine = api._vault_engine()
+    damaged = '[{"name":"username","ciphertext":"retain-this-record"}]'
+    with engine.begin() as conn:
+        conn.execute(vault_secrets.update().where(vault_secrets.c.name == "CORRUPT_LOGIN").values(fields=damaged))
+    for operation in (
+        lambda: api.update_vault_secret("CORRUPT_LOGIN", {"default_field": "password"}),
+        lambda: api.update_vault_secret_field("CORRUPT_LOGIN", "value", {
+            "record": "CORRUPT_LOGIN",
+            "sealed": {"ciphertext": "ct-new", "nonce": "n-new", "wrap_meta": "wm-new"},
+        }),
+        lambda: api.delete_vault_secret_field("CORRUPT_LOGIN", "username"),
+        lambda: api.create_vault_reveal_context("CORRUPT_LOGIN", {"field": "username"}),
+    ):
+        with pytest.raises(api.VaultApiError) as exc:
+            operation()
+        assert (exc.value.status, exc.value.code) == (409, "fields_corrupt")
+    assert api.create_vault_reveal_context("CORRUPT_LOGIN")["envelope"] == {
+        "ciphertext": "ct-default", "nonce": "n-default", "wrap_meta": "wm-default",
+    }
+    with engine.connect() as conn:
+        assert conn.execute(select(vault_secrets.c.fields).where(vault_secrets.c.name == "CORRUPT_LOGIN")).scalar_one() == damaged
+
+
 def test_store_vault_pubkey_pin_maps_storage_cas_conflict_to_409(monkeypatch):
     """A CAS conflict is a retryable API response, not an uncaught storage error."""
     pin = {"public_key": "test-public-key", "fingerprint": "test-fingerprint"}

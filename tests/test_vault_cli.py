@@ -479,6 +479,20 @@ def test_find_filters_by_query_and_multiple_tags(capfd):
     assert payload["pagination"]["has_more"] is False
 
 
+@pytest.mark.parametrize("command", ["find", "list"])
+@pytest.mark.parametrize("query,expected_names", [("password", ["LOGIN"]), ("username", ["LOGIN"]), ("hidden_ciphertext", [])])
+def test_value_free_search_matches_field_labels(capfd, command, query, expected_names):
+    _create_standard_secret(
+        "LOGIN", default_field="password",
+        fields=[{"name": "username", "sealed": _sealed("hidden_ciphertext")}],
+    )
+    _create_standard_secret("UNRELATED")
+    assert getattr(cli, f"cmd_vault_{command}")(_ns(query_filter=query)) == 0
+    payload = json.loads(capfd.readouterr().out)
+    assert [secret["name"] for secret in payload["secrets"]] == expected_names
+    assert "hidden_ciphertext" not in json.dumps(payload["secrets"])
+
+
 def test_tags_lists_normal_and_skill_tags(capfd):
     _create_standard_secret("OPENAI_PROD_KEY", tags=["openai", "prod", "skill:model-work"])
     _create_standard_secret("OPENAI_DEV_KEY", tags=["openai", "dev", "skill:model-work"])
@@ -565,6 +579,14 @@ def test_access_request_cli_uses_caller_session(tmp_path, capfd, monkeypatch):
     assert payload["request"]["delivery"]["skill"] == "deploy"
     assert payload["request"]["card"]["skill"] == "deploy"
     assert payload["request"]["status"] == "pending"
+
+
+def test_access_non_requestable_standard_secret_keeps_not_grantable_code(capfd):
+    _create_standard_secret("STANDARD_KEY")
+    assert cli.cmd_vault_access(_ns(name="STANDARD_KEY")) == 1
+    assert json.loads(capfd.readouterr().err)["code"] == "not_grantable"
+    with cli._open_vault_engine().connect() as conn:
+        assert vault_service.list_requests(conn) == []
 
 
 def test_access_request_cli_accepts_protected_static_request(capfd):

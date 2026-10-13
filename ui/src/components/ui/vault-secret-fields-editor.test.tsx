@@ -70,16 +70,28 @@ it('updates envelope versions after replacing a field and renaming the default l
     'LOGIN', 'username', { record: 'LOGIN.username', blind_box: box, expected_updated_at: 'version-2' }, { handleError: false },
   ));
   await waitFor(() => expect((screen.getByLabelText('Value for username') as HTMLInputElement).value).toBe(''));
-  api.updateVaultSecret.mockResolvedValue({ ok: true, secret: { ...secret, default_field: 'credential', fields: ['credential', 'username'], updated_at: 'version-3' } });
+  const beforeRename = { ...secret, updated_at: 'version-2' };
+  rendered.rerender(
+    <I18nextProvider i18n={i18n}>
+      <VaultSecretFieldsEditor secret={beforeRename} disabled={false} onBusyChange={vi.fn()} />
+    </I18nextProvider>,
+  );
+  api.updateVaultSecret.mockResolvedValue({ ok: true, secret: { ...secret, default_field: 'credential', fields: ['credential', 'username'], updated_at: 'version-2' } });
   change('Default field name', 'credential');
   fireEvent.click(screen.getByRole('button', { name: 'Rename' }));
   await screen.findByLabelText('Value for credential');
   expect(api.updateVaultSecret).toHaveBeenCalledWith('LOGIN', { default_field: 'credential' }, { handleError: false });
-  api.updateVaultSecretField.mockResolvedValue({ ok: true, secret: { ...secret, default_field: 'credential', fields: ['credential', 'username'], updated_at: 'version-4' } });
+  rendered.rerender(
+    <I18nextProvider i18n={i18n}>
+      <VaultSecretFieldsEditor secret={{ ...beforeRename }} disabled={false} onBusyChange={vi.fn()} />
+    </I18nextProvider>,
+  );
+  expect((screen.getByLabelText('Default field name') as HTMLInputElement).value).toBe('credential');
+  api.updateVaultSecretField.mockResolvedValue({ ok: true, secret: { ...secret, default_field: 'credential', fields: ['credential', 'username'], updated_at: 'version-3' } });
   change('Value for credential', 'next');
   fireEvent.click(screen.getByRole('button', { name: 'Save credential' }));
   await waitFor(() => expect(api.updateVaultSecretField).toHaveBeenLastCalledWith(
-    'LOGIN', 'credential', { record: 'LOGIN', blind_box: box, expected_updated_at: 'version-3' }, { handleError: false },
+    'LOGIN', 'credential', { record: 'LOGIN', blind_box: box, expected_updated_at: 'version-2' }, { handleError: false },
   ));
   expect(sealBlindBox.mock.calls.map((call) => (call as unknown[])[2])).toEqual([
     { purpose: 'seal', name: 'LOGIN' }, { purpose: 'seal', name: 'LOGIN.username' }, { purpose: 'seal', name: 'LOGIN' },
@@ -113,21 +125,23 @@ it.each(['constructor', 'tostring', 'valueof'])('treats %s as a normal field key
   );
 });
 
-it('adopts newer metadata while preserving an unsaved field draft', () => {
+it.each(['version-1', 'version-2'])('adopts current labels at %s while preserving default and extra drafts', (updated_at) => {
   const { rerender } = renderEditor();
+  change('Value for password', 'keep-default-draft');
   change('Value for username', 'keep-this-draft');
   const renamed = {
     ...secret,
     default_field: 'credential',
     fields: ['credential', 'username'],
-    updated_at: 'version-2',
+    updated_at,
   };
   rerender(
     <I18nextProvider i18n={i18n}>
       <VaultSecretFieldsEditor secret={renamed} disabled={false} onBusyChange={vi.fn()} />
     </I18nextProvider>,
   );
-  expect(screen.getByLabelText('Value for credential')).toBeTruthy();
+  expect((screen.getByLabelText('Default field name') as HTMLInputElement).value).toBe('credential');
+  expect((screen.getByLabelText('Value for credential') as HTMLInputElement).value).toBe('keep-default-draft');
   expect((screen.getByLabelText('Value for username') as HTMLInputElement).value).toBe('keep-this-draft');
 });
 

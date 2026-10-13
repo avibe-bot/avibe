@@ -13,7 +13,7 @@ import { VaultLockIndicator } from '../ui/vault-lock-indicator';
 import { onPageReactivated } from '../../lib/pageActivity';
 import { cn } from '../../lib/utils';
 import { partitionTags } from '../../lib/vaultTags';
-import { vaultDefaultField, vaultFieldNames, vaultRecordName } from '../../lib/vaultFields';
+import { vaultDefaultField, vaultFieldFingerprint, vaultFieldNames, vaultRecordName } from '../../lib/vaultFields';
 import {
   useApi,
   type VaultAuditEvent,
@@ -797,7 +797,7 @@ export const VaultsPage: React.FC = () => {
     return {
       name: secret.name,
       field: menuField ?? vaultDefaultField(secret),
-      version: secret.updated_at,
+      version: vaultFieldFingerprint(secret),
     };
   }, [secrets, menuSecret, menuField]);
   const revealContext = usePreparedRequest(menuRevealKey, requestRevealContext, revealContextIssued, PREPARED_REVEAL);
@@ -808,7 +808,7 @@ export const VaultsPage: React.FC = () => {
     async (secret: VaultSecret, field: string) => {
       const authorizationWindow = openVaultAuthorizationWindow();
       try {
-        const res = await revealContext.claim({ name: secret.name, field, version: secret.updated_at });
+        const res = await revealContext.claim({ name: secret.name, field, version: vaultFieldFingerprint(secret) });
         if (!res?.ok || !res.context) throw new Error(res?.message || t('vaults.reveal.errors.contextFailed'));
         // The sandbox needs the sealed record to open it. The daemon returns it alongside the signed
         // reveal context; if it's absent, surface a clear message rather than a cryptic sandbox error.
