@@ -10527,7 +10527,17 @@ _CLAUDE_AUTH_STATUS_TIMEOUT_SECONDS = 10.0
 _CLAUDE_AUTH_STATUS_COMPLETION_GRACE_SECONDS = 10.0
 _CLAUDE_AUTH_STATUS_TERMINATION_GRACE_SECONDS = 5.0
 _CLAUDE_AUTH_STATUS_DRAIN_TIMEOUT_SECONDS = 5.0
+_CLAUDE_AUTH_STATUS_CLEANUP_RETRIES = 3
+_CLAUDE_AUTH_STATUS_CLEANUP_RETRY_DELAY_SECONDS = 0.25
 _CLAUDE_AUTH_STATUS_LABEL = "Claude auth status"
+
+
+class ClaudeAuthStatusCleanupPending(RuntimeError):
+    """The probe's process tree still needs a separate lease-owning cleanup."""
+
+    def __init__(self, worker_fingerprint: str) -> None:
+        super().__init__("Claude auth status process cleanup is still pending")
+        self.worker_fingerprint = worker_fingerprint
 
 
 def _mask_api_key(api_key: str | None) -> str | None:
@@ -10568,6 +10578,40 @@ def _graceful_stop_claude_auth_status(process: subprocess.Popen) -> None:
     signal_process_tree(process, signal.SIGTERM, logger, _CLAUDE_AUTH_STATUS_LABEL)
 
 
+def _deferred_claude_auth_status_cleanup(
+    lease: NativeCredentialLease,
+    worker_fingerprint: str,
+) -> None:
+    """Keep native custody until marker-based cleanup is confirmed."""
+
+    try:
+        while True:
+            result = reap_marked_processes(
+                logger,
+                _CLAUDE_AUTH_STATUS_LABEL,
+                worker_fingerprint=worker_fingerprint,
+                terminate_timeout=_CLAUDE_AUTH_STATUS_TERMINATION_GRACE_SECONDS,
+            )
+            if result != "unconfirmed":
+                return
+            time.sleep(_CLAUDE_AUTH_STATUS_CLEANUP_RETRY_DELAY_SECONDS)
+    finally:
+        lease.release_detached()
+
+
+def _handoff_claude_auth_status_cleanup(
+    lease: NativeCredentialLease,
+    worker_fingerprint: str,
+) -> None:
+    lease.detach()
+    threading.Thread(
+        target=_deferred_claude_auth_status_cleanup,
+        args=(lease, worker_fingerprint),
+        name="claude-auth-status-cleanup",
+        daemon=True,
+    ).start()
+
+
 def _force_stop_claude_auth_status(
     process: subprocess.Popen,
     identity: Any | None,
@@ -10593,27 +10637,21 @@ def _force_stop_claude_auth_status(
         except (OSError, RuntimeError):
             logger.debug("Failed to terminate the verified %s tree", _CLAUDE_AUTH_STATUS_LABEL, exc_info=True)
     try:
-        marker_result = reap_marked_processes(
-            logger,
-            _CLAUDE_AUTH_STATUS_LABEL,
-            worker_fingerprint=worker_fingerprint,
-            terminate_timeout=_CLAUDE_AUTH_STATUS_TERMINATION_GRACE_SECONDS,
-        )
-        if marker_result == "reaped":
-            return tree_stopped or identity is None
-        # A marker owner that cannot yet be confirmed is still a credential
-        # owner. Keep retrying until the caller can safely release its lease.
-        while marker_result == "unconfirmed":
-            time.sleep(0.1)
+        for attempt in range(_CLAUDE_AUTH_STATUS_CLEANUP_RETRIES):
             marker_result = reap_marked_processes(
                 logger,
                 _CLAUDE_AUTH_STATUS_LABEL,
                 worker_fingerprint=worker_fingerprint,
                 terminate_timeout=_CLAUDE_AUTH_STATUS_TERMINATION_GRACE_SECONDS,
             )
-        return tree_stopped or identity is None
+            if marker_result != "unconfirmed":
+                return tree_stopped or identity is None
+            if attempt + 1 < _CLAUDE_AUTH_STATUS_CLEANUP_RETRIES:
+                time.sleep(_CLAUDE_AUTH_STATUS_CLEANUP_RETRY_DELAY_SECONDS)
+        raise ClaudeAuthStatusCleanupPending(worker_fingerprint)
+    except ClaudeAuthStatusCleanupPending:
+        raise
     except (OSError, RuntimeError):
-        logger.debug("Failed to reap the marked %s tree", _CLAUDE_AUTH_STATUS_LABEL, exc_info=True)
         return False
 
 
@@ -11704,7 +11742,8 @@ def get_claude_auth(
                     cwd=status_probe_cwd,
                 )
             else:
-                with NativeCredentialLease(("claude",)) as status_lease:
+                status_lease = NativeCredentialLease(("claude",)).acquire()
+                try:
                     if getattr(config if "config" in locals() else None, "model_hub", None) is not None:
                         status_lease.assert_auth_custody("claude")
                     cli_oauth_signed_in = _read_claude_cli_oauth_signed_in(
@@ -11712,6 +11751,19 @@ def get_claude_auth(
                         env=claude_status_env,
                         cwd=status_probe_cwd,
                     )
+                except ClaudeAuthStatusCleanupPending as pending:
+                    _handoff_claude_auth_status_cleanup(status_lease, pending.worker_fingerprint)
+                    status_lease = None
+                    raise
+                finally:
+                    if status_lease is not None:
+                        status_lease.release()
+            break
+        except ClaudeAuthStatusCleanupPending as pending:
+            if _native_lease is not None:
+                _handoff_claude_auth_status_cleanup(_native_lease, pending.worker_fingerprint)
+                _native_lease = None
+            lease_blocked = True
             break
         except NativeMigrationBlockedError as exc:
             if exc.reason != "native_auth_in_progress" or attempt == 29:
