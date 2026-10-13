@@ -34,7 +34,11 @@ Base: master `a5c6cbf17` (#2542). Session `sesp2bd67rp9c` owns the task branch
    per-PR / master concurrency group. Every `push` trigger here is master;
    publishing/deployment workflows and other PRs' groups are untouched. A
    superseded commit may lack a completed master verdict; the newest must still
-   pass all gates. No manual cancellation of peers' runs.
+   pass all gates. **Master pushes always use full CI**, even for a docs-only
+   before..after diff: a docs push may cancel an unvalidated earlier code push.
+   Documentation fast-path authority is retained for PRs only. This deliberate
+   trade-off was identified by the independent design reviewer and avoids
+   creating a validation gap. No manual cancellation of peers' runs.
 2. Refresh per-file launcher timings from complete successful current-generation
    CI. Replay a separate run to check balance before trialling **eight** lanes
    rather than nine. Keep all discovered files exactly once, isolated-process
@@ -59,6 +63,40 @@ Base: master `a5c6cbf17` (#2542). Session `sesp2bd67rp9c` owns the task branch
   workaround remains needed until then; no broad local full-suite gate.
 - Keep Windows artifact/installer/engine coverage. Cache downloads rather than
   user state only if observed setup dominates after queue reduction.
+
+## First candidate evidence
+
+- Snapshot: median launcher elapsed time from complete successful master runs
+  38350418272 (`f73106bd1`, 538 files, 3843s) and 38355727304 (`9efb8b95c`,
+  540 files, 3943s); new files use their one available measured sample. The
+  current network guard file has no sample in those runs and retains the
+  existing structural fallback, not an invented measured duration.
+- Eight-lane median planning predicts 487–488.5s of launcher work each.
+  Replaying the later source sample gives 476–503s; using only the older sample
+  to plan and holding out the newer gives 466–515s. Add roughly 30–45s measured
+  setup/cleanup overhead: eight lanes are a plausible sub-ten-minute candidate
+  with less queue demand, not a promised service-level bound.
+- Observational labels are `docs-only`, `ui-source-only`,
+  `python-source-only`, `shared-or-mixed`, `unknown`. They classify path areas,
+  not independent behavioral boundaries: App/API/routing or migration code
+  may still couple both sides. They appear only in stdout/Actions summary,
+  never `GITHUB_OUTPUT`; the sole output remains `docs_only` and no new skip
+  condition exists. Incomplete/invalid mode/event evidence yields unknown/full.
+- Independent read-only design review on contract `c4c014684` found the
+  docs-push cancellation hole above; no artifact consumer or isolation issue.
+  All assertions, installers, branch protection and release workflows remain.
+
+- Focused validation: 50 docs/event/impact cases and 62 pipeline/shard cases
+  pass in separate invocations, including a real code-B/docs-C push whose
+  effective output must be full and a matching docs PR whose output stays true.
+  The first combined probe exceeded its command deadline during execution and
+  is not counted as passing; the bounded focused reruns completed normally.
+  Ruff 0.4.9 and actionlint pass. No repository-wide local gate was run.
+- No ARM code change is needed for the observed failure: job 115166968293
+  failed inside setup-python extracting the x64 archive with PowerShell
+  `Internal CLR error (0x80131506)` / exit 3221225477, before dependency setup
+  and tests. It is not counted as success; future full master CI must verify
+  Windows Agent coverage again. No retries/failure suppression were added.
 
 ## Validation boundary
 

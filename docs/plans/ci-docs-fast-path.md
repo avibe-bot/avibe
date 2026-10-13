@@ -1,5 +1,11 @@
 # Documentation-only CI fast path
 
+Current scheduling policy: the fast path applies to PRs. Latest-wins master
+cancellation requires every replacement master run to validate the full tree,
+including code from an older cancelled run; even a docs-only push uses full CI.
+See `ci-under-10m.md` for that follow-up contract. The original diff-classifier
+and failure-closed gate design below remain unchanged.
+
 ## Contract
 
 Owner request: avoid a full `lint` run for changes that are proven to affect

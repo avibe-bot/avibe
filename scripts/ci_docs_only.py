@@ -47,8 +47,28 @@ def revision(value: object) -> str:
     return value
 
 
-def classify(event_name: str, event: dict, sha: str, repo: Path) -> tuple[bool, str]:
-    """Return explicit docs/full disposition; never infer docs from partial data."""
+def impact_category(paths: list[str]) -> str:
+    """Path-area telemetry only, not evidence that other checks can be skipped.
+
+    An API file under ui/src can affect Python consumers and vice versa. These
+    labels deliberately say where code changed, not which tests are safe to omit.
+    """
+    code = [path for path in paths if not narrative_path(path)]
+    if not paths:
+        return "unknown"
+    if not code:
+        return "docs-only"
+    if all(path.startswith("ui/src/") and PurePosixPath(path).suffix in {".ts", ".tsx", ".css"}
+           for path in code):
+        return "ui-source-only"
+    if all(path.split("/", 1)[0] in {"core", "modules", "vibe", "storage", "config", "tests"}
+           and path.endswith(".py") for path in code):
+        return "python-source-only"
+    return "shared-or-mixed"
+
+
+def classify(event_name: str, event: dict, sha: str, repo: Path) -> tuple[bool, str, str]:
+    """Return docs disposition, reason, and non-authoritative impact telemetry."""
     try:
         if not isinstance(event, dict):
             raise ValueError("event payload is not an object")
@@ -86,20 +106,23 @@ def classify(event_name: str, event: dict, sha: str, repo: Path) -> tuple[bool, 
         fields = raw[:-1].split(b"\0")
         if len(fields) % 2:
             raise ValueError("incomplete diff records")
+        paths = []
         for header, name in zip(fields[::2], fields[1::2]):
             meta = header.decode("ascii").split()
             if len(meta) != 5 or not meta[0].startswith(":"):
                 raise ValueError("unexpected diff record")
             old_mode, new_mode = meta[0][1:], meta[1]
             if meta[4] not in {"A", "M", "D"} or {old_mode, new_mode} - {"000000", "100644"}:
-                return False, "non-document file type or mode changed"
-            path = name.decode("utf-8")
+                return False, "non-document file type or mode changed", "unknown"
+            paths.append(name.decode("utf-8"))
+        impact = impact_category(paths)
+        for path in paths:
             if not narrative_path(path):
-                return False, f"full CI required by {json.dumps(path, ensure_ascii=True)}"
-        return True, f"all {len(fields) // 2} changed paths are narrative documentation"
+                return False, f"full CI required by {json.dumps(path, ensure_ascii=True)}", impact
+        return True, f"all {len(paths)} changed paths are narrative documentation", impact
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as exc:
         # Do not print Git stderr, event payloads or arbitrary commit data.
-        return False, f"full CI: classification unavailable ({type(exc).__name__})"
+        return False, f"full CI: classification unavailable ({type(exc).__name__})", "unknown"
 
 
 def main() -> None:
@@ -107,10 +130,16 @@ def main() -> None:
         event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text(encoding="utf-8"))
     except (OSError, ValueError, KeyError):
         event = {}
-    docs_only, reason = classify(
-        os.environ.get("GITHUB_EVENT_NAME", ""), event,
-        os.environ.get("GITHUB_SHA", ""), Path.cwd(),
+    event_name = os.environ.get("GITHUB_EVENT_NAME", "")
+    docs_only, reason, impact = classify(
+        event_name, event, os.environ.get("GITHUB_SHA", ""), Path.cwd(),
     )
+    # A master push supersedes the preceding run even when only docs changed.
+    # It must cover code inherited from that cancelled run, not merely its own
+    # before..after diff. PRs retain the reviewed documentation fast path.
+    if event_name == "push" and docs_only:
+        docs_only = False
+        reason = "latest master push validates the whole tree, including superseded code changes"
     # Output/write failures remain job failures; consumers require success AND
     # a literal disposition, so no missing output can authorize a skip.
     output = os.environ.get("GITHUB_OUTPUT")
@@ -118,10 +147,14 @@ def main() -> None:
         with Path(output).open("a", encoding="utf-8") as stream:
             stream.write(f"docs_only={str(docs_only).lower()}\n")
     print(f"docs_only={str(docs_only).lower()}: {reason}")
+    print(f"Impact shadow: {impact} (observation only; no test selection)")
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary:
         with Path(summary).open("a", encoding="utf-8") as stream:
             stream.write(f"## CI scope: {'documentation only' if docs_only else 'full'}\n\n{reason}\n")
+            # Keep shadow out of GITHUB_OUTPUT; no downstream job may use it as
+            # skip authority without a separately reviewed coverage contract.
+            stream.write(f"\nImpact shadow: **{impact}** (observation only; no test selection).\n")
 
 
 if __name__ == "__main__":

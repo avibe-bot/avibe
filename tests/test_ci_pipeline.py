@@ -525,6 +525,18 @@ def test_required_gates_accept_skips_only_for_proven_docs_and_fail_closed(tmp_pa
         assert (result.returncode == 0) == passes, (results, result.stdout, result.stderr)
 
 
+def test_lint_replaces_only_the_same_pr_or_branch_and_runs_no_release_listener() -> None:
+    # A shared global group would cancel unrelated PRs; master must cancel its
+    # own obsolete full run. Trigger scope is part of that scheduling contract.
+    workflow = yaml.safe_load((ROOT / ".github/workflows/lint.yml").read_text())
+    assert workflow["concurrency"] == {
+        "group": "${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}",
+        "cancel-in-progress": True,
+    }
+    assert set(workflow[True]) == {"pull_request", "push"}
+    assert workflow[True]["push"]["branches"] == ["master"]
+
+
 def test_docs_scope_gates_all_work_without_filtering_away_required_checks() -> None:
     workflow = yaml.safe_load((ROOT / ".github/workflows/lint.yml").read_text())
     events = workflow[True]  # PyYAML YAML 1.1 reads the Actions `on` key as True.
