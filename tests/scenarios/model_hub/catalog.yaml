@@ -263,6 +263,8 @@ scenarios:
       - tests/test_model_hub_reasoning_tiers.py::test_a_persisted_catalog_list_offers_no_client_preset_to_vibey
       - tests/test_model_hub_vibey_consumer.py::test_a_released_vibey_row_loads_without_its_client_preset
       - tests/test_model_hub_evidence_rules.py::test_a_refused_effort_still_waits_for_a_capable_hop_that_is_cooling_down
+      - tests/test_model_hub_reasoning_tiers.py::test_the_hop_declares_exactly_its_models_levels
+      - tests/test_model_hub_reasoning_tiers.py::test_rows_saved_by_3_2_0_are_derived_again_once_at_startup
   - id: MH-HOSTED-VIBEY-002
     name: Every native hosted item becomes one hosted call with a provider-neutral action and its record; citations stay on the text that cites them; the response's counters and reported cost go to its summary
     status: covered

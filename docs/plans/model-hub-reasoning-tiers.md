@@ -51,7 +51,22 @@ shape and treats everything else as "not carried":
 - OpenRouter-shape `supported_parameters` arrays: if the model entry contains
   `"reasoning"` (or `"reasoning_effort"`), the model is reasoning-capable.
   Upstream signals are capability booleans, not level enums, so the applied
-  tier list is the UNIFIED VOCABULARY for the source's protocol family (below).
+  tier list is the UNIFIED VOCABULARY for the source's protocol family (below),
+  bounded by the model's own catalog row when it has one: a generic signal says
+  the upstream takes the protocol's levels, not that this model has all of
+  them (Opus 4.6 has `max` but no `xhigh`). A model without a row keeps the
+  whole list.
+- Every catalog lookup finds a model's row by its id, or by the id a snapshot
+  date, a context tag or a provider prefix folds to
+  (`backend_model_catalog.catalog_model_id`, the one folding owner, which
+  pricing also uses): `claude-opus-5-20260724` and `anthropic/claude-opus-5[1m]`
+  are `claude-opus-5`.
+- Rows a released build derived by older rules (3.2.0 matched only exact ids
+  and never bounded the protocol list) are derived again once at controller
+  startup (`ModelHubService.reconcile_source_reasoning_tiers`): every `catalog`
+  or `upstream` row, or a row with no source and no tiers, whose model has a
+  catalog row. A user's list waits for the next discovery, which records the
+  override event.
 - Any other/unknown metadata shape → rung 1 does not apply. No guessing from
   model-id patterns (family inference was explicitly deferred; wrong claims
   turn into upstream 400s).

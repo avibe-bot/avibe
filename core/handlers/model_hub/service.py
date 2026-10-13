@@ -181,7 +181,7 @@ from .provenance import (
     produce_turn_outcome,
 )
 from .request import ModelHubRequest, without_opaque_history
-from .reasoning_tiers import catalog_wire_efforts, resolve_reasoning_tiers
+from .reasoning_tiers import catalog_wire_efforts, rederive_persisted_tiers, resolve_reasoning_tiers
 from .stream_wire import ProtocolSSEState, ProtocolUsageReport
 from .resolver import (
     BackendName,
@@ -6545,6 +6545,43 @@ class ModelHubService:
         from vibe.backend_model_catalog import backend_builtin_models
 
         return backend_builtin_models(backend)
+
+    async def reconcile_source_reasoning_tiers(self) -> list[tuple[str, str]]:
+        """Derive saved Source tiers again by the current ladder, once at startup; the (Source, model) pairs it changed.
+
+        Rows an earlier build derived keep its rules until discovery revisits
+        them: 3.2.0 found no catalog row for a snapshot id and declared the whole
+        protocol default list for Opus 4.6. ``rederive_persisted_tiers`` decides
+        which rows are derived again. The result is saved once, so a later start
+        changes nothing.
+        """
+
+        async with self._mutation_lock:
+            previous = self.store.load()
+            config = self._clone_config(previous)
+            catalog_efforts_by_model = bundled_catalog_wire_efforts_by_model()
+            changed: list[tuple[str, str]] = []
+            for source in config.sources:
+                for model in source.models:
+                    resolution = rederive_persisted_tiers(
+                        protocol=source.protocol,
+                        model_id=model.id,
+                        efforts=model.reasoning_efforts,
+                        source=model.reasoning_efforts_source,
+                        catalog_efforts_by_model=catalog_efforts_by_model,
+                    )
+                    if resolution is None or (
+                        list(resolution.efforts) == list(model.reasoning_efforts)
+                        and resolution.source == model.reasoning_efforts_source
+                    ):
+                        continue
+                    model.reasoning_efforts = list(resolution.efforts)
+                    model.reasoning_efforts_source = resolution.source
+                    changed.append((source.id, model.id))
+            if changed and self._reconcile_store_writable():
+                await self._commit_synced(previous, config)
+                return changed
+            return []
 
     async def reconcile_builtin_models(
         self,

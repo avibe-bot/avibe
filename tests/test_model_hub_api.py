@@ -7066,7 +7066,8 @@ def test_add_model_upsert_cannot_bypass_catalog_tier_lock(tmp_path):
                 id="gpt-5.6-sol",
                 supported_parameters=("reasoning_effort",),
             ),
-            ["minimal", "low", "medium", "high", "xhigh"],
+            # The protocol defaults, bounded by the model's catalog row.
+            ["low", "medium", "high", "xhigh"],
             "upstream",
             "upstream_tiers",
         ),

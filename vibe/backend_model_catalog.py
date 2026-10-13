@@ -542,6 +542,32 @@ def prepare_codex_hub_catalog(
     )
 
 
+#: Spellings that name the same model: a snapshot date or version tag, and a context-window tag.
+_MODEL_SNAPSHOT_SUFFIX: Final = re.compile(r"(?:-\d{8}|-\d{4}-\d{2}-\d{2}|@[^/]*)$")
+_MODEL_CONTEXT_TAG: Final = re.compile(r"\[[^\]]*\]$")
+
+
+def catalog_model_id(model_id: str) -> str:
+    """Fold the spellings agents send onto the one catalogs list.
+
+    ``anthropic/claude-opus-5[1m]`` and ``claude-opus-4-5-20251101`` become ``claude-opus-5`` and ``claude-opus-4-5``:
+    a provider prefix, the context-window tag and the snapshot date name the same model, its levels and its price.
+    """
+
+    text = model_id.strip().lower()
+    text = text.rsplit("/", 1)[-1]
+    text = _MODEL_CONTEXT_TAG.sub("", text)
+    text = _MODEL_SNAPSHOT_SUFFIX.sub("", text)
+    return text.strip()
+
+
+def catalog_row_value(index: Mapping[str, tuple[str, ...]], model_id: str) -> tuple[str, ...] | None:
+    """A per-model catalog list for ``model_id``: its own row's, else the row's its spelling folds to."""
+
+    value = index.get(model_id)
+    return value if value is not None else index.get(catalog_model_id(model_id))
+
+
 def load_bundled_catalog(path: Path | None = None) -> dict[str, Any]:
     return _read_catalog(path or get_bundled_catalog_path()) or {}
 
@@ -621,7 +647,7 @@ def without_client_presets(model_ids: Sequence[str], efforts: Sequence[str]) -> 
     """
 
     presets = bundled_client_presets_once()
-    dropped = {preset for model_id in model_ids for preset in presets.get(model_id, ())}
+    dropped = {preset for model_id in model_ids for preset in catalog_row_value(presets, model_id) or ()}
     return [effort for effort in efforts if effort not in dropped]
 
 

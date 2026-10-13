@@ -3000,6 +3000,13 @@ class Controller:
                 "Model Hub built-in reconciliation failed during startup",
                 exc_info=True,
             )
+        try:
+            asyncio.run(self.model_hub_service.reconcile_source_reasoning_tiers())
+        except Exception:
+            logger.warning(
+                "Model Hub could not derive saved Source tiers again during startup",
+                exc_info=True,
+            )
         self.model_hub_turn_gateway = ModelHubTurnGateway(
             self.model_hub_service,
             language_provider=lambda: self.config.language,
