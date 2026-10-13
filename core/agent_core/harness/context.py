@@ -22,8 +22,8 @@ from itertools import accumulate
 from dataclasses import dataclass, field
 from typing import Any, Callable, Collection, Mapping, Optional, Protocol, Sequence
 
-from core.agent_core.ai._common import endpoint_origin
-from core.agent_core.ai.provider import ModelCapabilities, ModelEndpoint, ModelRequest
+from core.agent_core.ai._common import endpoint_origin, native_hosted_tools
+from core.agent_core.ai.provider import HostedToolRoute, ModelCapabilities, ModelEndpoint, ModelRequest
 from core.agent_core.harness.projection import ContextView, Unit, context_view
 from core.agent_core.harness.store import ContextEntry
 from core.agent_core.messages import (
@@ -279,10 +279,27 @@ def messages_tokens(messages: Sequence[Message]) -> int:
     return sum(message_tokens(message) for message in messages)
 
 
-def request_tokens(system: str, tools: Sequence[ToolSpec], messages: Sequence[Message]) -> int:
-    """The whole request: system prompt, tool definitions, and messages."""
+def request_tokens(
+    system: str,
+    tools: Sequence[ToolSpec],
+    messages: Sequence[Message],
+    native: Optional[Mapping[str, HostedToolRoute]] = None,
+) -> int:
+    """The whole request: system prompt, tool definitions, and messages.
+
+    ``native`` holds the request's hosted tools that its hop runs natively (``native_hosted_tools``): such a tool is
+    sent as the provider's declaration in its spec's place, so that is what it counts as.
+    """
+    native = native or {}
     definitions = sum(
-        _utf8(json.dumps([spec.name, spec.description, dict(spec.input_schema)], ensure_ascii=False))
+        _utf8(
+            json.dumps(
+                dict(native[spec.name].declaration or {})
+                if spec.name in native
+                else [spec.name, spec.description, dict(spec.input_schema)],
+                ensure_ascii=False,
+            )
+        )
         for spec in tools
     )
     return math.ceil((_utf8(system) + definitions) / 4) + messages_tokens(messages)
@@ -340,7 +357,7 @@ def _valid_usage(message: Optional[Message]) -> bool:
 
 def sent_tokens(request: ModelRequest) -> int:
     """``tokens()`` of a whole request (section 2): system prompt, tool definitions, and messages."""
-    return request_tokens(request.system, request.tools, request.messages)
+    return request_tokens(request.system, request.tools, request.messages, native_hosted_tools(request))
 
 
 def request_facts(request: ModelRequest) -> dict[str, int]:
