@@ -17,13 +17,16 @@ entry (STANDARD.md §4): a bare file or a test class stays collected for
 whatever else cites it, so it evidences no row in particular, and a row whose
 contract several cases prove lists each of them under ``test``;
 ``partial_evidence.test`` names one. A cited Python file must be one pytest's
-default discovery collects (``test_*.py`` or ``*_test.py``). Pointer keys may
-name a bare file, a test class, a function or a method, which must exist.
+default discovery collects (``test_*.py`` or ``*_test.py``), and an evidence
+case must not be skipped unconditionally on itself, its class or its module.
+Pointer keys may name a bare file, a test class, a function or a method, which
+must exist.
 
 This reads source and applies pytest's default naming rules; it does not
 emulate every collection-time exclusion, such as ``__test__ = False``, a class
-with ``__init__``, or deselection in a hook, and it matches exact names only.
-Resolving against pytest's own collection, as the UI side does, is #2565.
+with ``__init__``, or deselection in a hook; it matches exact names only; and it
+leaves conditional skips (``skipif``) to the environment. Resolving against
+pytest's own collection, and execution status against CI's results, is #2565.
 
 UI (vitest) citations are resolved against vitest's own collection by
 ``ui/scripts/validate-scenario-catalog.mjs``; here only their file is checked.
@@ -84,6 +87,57 @@ def _collectable_cases(path: Path) -> tuple[frozenset[str], dict[str, frozenset[
         if name.startswith("Test") or is_test_case(name)
     }
     return test_names(tree.body), test_classes
+
+
+def _is_unconditional_skip(marker: ast.expr) -> bool:
+    """``pytest.mark.skip`` or ``unittest.skip``, bare or called; ``skipif`` is a condition and passes."""
+
+    target = marker.func if isinstance(marker, ast.Call) else marker
+    return (target.attr if isinstance(target, ast.Attribute) else getattr(target, "id", "")) == "skip"
+
+
+@cache
+def _unconditionally_skipped(path: Path) -> tuple[bool, frozenset[str]]:
+    """Whether the module's ``pytestmark`` skips it, and the functions and classes a skip decorates."""
+
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    module = False
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(getattr(target, "id", "") == "pytestmark" for target in node.targets):
+            marks = node.value.elts if isinstance(node.value, (ast.List, ast.Tuple)) else [node.value]
+            module = module or any(_is_unconditional_skip(mark) for mark in marks)
+    decorated = {
+        f"{owner.name}::{node.name}" if owner is not None else node.name
+        for owner, node in (
+            [(None, node) for node in tree.body]
+            + [(cls, node) for cls in tree.body if isinstance(cls, ast.ClassDef) for node in cls.body]
+        )
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+        and any(_is_unconditional_skip(decorator) for decorator in node.decorator_list)
+    }
+    return module, frozenset(decorated)
+
+
+def _never_runs(path: Path, name: str) -> bool:
+    """Whether an unconditional skip on the module, the case's class or the case itself disables it.
+
+    A short ``name`` is a method of the one class holding it, which the caller has
+    already established. Conditional skips (``skipif``) are platform scoping and
+    depend on the environment; deciding them belongs to CI's results (#2565).
+    """
+
+    module, decorated = _unconditionally_skipped(path)
+    if module:
+        return True
+    parts = name.partition("[")[0].split("::")
+    if len(parts) == 2:
+        return parts[0] in decorated or "::".join(parts) in decorated
+    (case,) = parts
+    if case in decorated:
+        return True
+    _, classes = _collectable_cases(path)
+    owner = next((cls for cls, methods in classes.items() if case in methods), None)
+    return owner is not None and (owner in decorated or f"{owner}::{case}" in decorated)
 
 
 def _named_cases(path: Path, name: str) -> tuple[int, bool]:
@@ -176,4 +230,6 @@ def test_every_catalog_citation_resolves_to_a_case(catalog: Path) -> None:
                 dead.append(f"{where} (names a test class, not one case; cite each case that proves the row)")
             elif count != 1:
                 dead.append(f"{where} (names {count} cases, expected exactly one; cite it as Class::method)")
+            elif _never_runs(path, name):
+                dead.append(f"{where} (is skipped unconditionally, so it never runs)")
     assert not dead, f"{catalog.relative_to(REPO_ROOT)} has citations that resolve to no case:\n" + "\n".join(dead)
