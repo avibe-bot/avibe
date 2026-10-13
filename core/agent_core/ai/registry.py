@@ -65,6 +65,7 @@ async def build_wire_request(
         protocol=protocol,
         media_loader=media_loader,
         cancel=cancel or CancelToken(),
+        endpoint=request.endpoint,
     )
     if isinstance(prepared, ProviderError):
         raise ValueError(prepared.message)

@@ -218,6 +218,13 @@ verified for X search.
 
   The value is `HopResolution.source_id` for the first two. For a continuation it is the Source the previous
   response came from, according to the served-hop report.
+
+  **As implemented (orchestrator decision, 2026-10-14):** every model attempt resolves a fresh hop (C-6 item 3), so
+  verbatim content goes only to the hop whose own Source served it, on the same origin, and every pin is
+  `HopResolution.source_id`. A continuation whose fresh hop is another Source takes the in-place text form (§4.4),
+  unpinned. Pinning it to the previous Source would build the request for one hop (declarations, model, efforts,
+  signature target) and serve it from another. A continuation also sends `x-avibe-pin-model` with its served model
+  when that id is ASCII. Without the header, the gateway takes the pinned Source's own model, which is the same hop.
   - The gateway serves a pinned request only from that Source, with no failover and no recovery wait.
   - The gateway answers the local error `pin_unavailable` in three cases:
     - the Source cannot be admitted for this content, checked before invoking anything: it is cooling down, it was

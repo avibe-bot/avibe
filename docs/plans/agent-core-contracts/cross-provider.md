@@ -29,7 +29,7 @@ Invariants:
   `[tool call interrupted; no result recorded]`, with `is_error: true` (C-5 settles most such calls from the job handle
   first).
 - Responses API requests use `store: false` and never `previous_response_id`.
-- Hosted tool blocks (planned, [`../vibey-hosted-tools.md`](../vibey-hosted-tools.md) §5): `native.payload` is an
+- Hosted tool blocks ([`../vibey-hosted-tools.md`](../vibey-hosted-tools.md) §5): `native.payload` is an
   opaque provider payload under every rule above, and its replay is further limited to the recorded Source while
   that Source's current replay evidence is positive. The block never stores replay authorization. A different
   origin loses page text: Anthropic returns it only encrypted, and OpenAI and xAI never return it. Within one

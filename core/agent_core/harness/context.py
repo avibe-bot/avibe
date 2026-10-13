@@ -265,11 +265,12 @@ def message_tokens(message: Message) -> int:
             if block.signature is not None:
                 payload = (payload or 0) + _utf8(block.signature)
         elif isinstance(block, HostedToolBlock):
-            # Replayed in portable form, never as its native payload (§5): the larger of its synthetic call and
-            # result and its in-place text, so the estimate holds wherever the message sits.
+            # The largest form it can go back in (§5), so the estimate holds wherever the message sits and whatever
+            # hop it goes to: its synthetic call and result, its in-place text, or its native payload verbatim.
             if hosted is None:
                 hosted = portable_sizes(message, interrupted=SYNTHETIC_TOOL_RESULT)  # type: ignore[arg-type]
-            hosted_bytes += hosted[id(block)]
+            native = json.dumps(list(block.native.payload), ensure_ascii=False, separators=(",", ":"))
+            hosted_bytes += max(hosted[id(block)], _utf8(native))
     reasoning = 0 if payload is None else max(math.ceil(signed / 4), _reasoning(message, payload))
     return math.ceil((size + hosted_bytes) / 4) + images * IMAGE_TOKENS + reasoning
 

@@ -22,6 +22,8 @@ from core.agent_core.ai._common import (
     endpoint_origin,
     forced_tool,
     hosted_pin,
+    PIN_UNAVAILABLE,
+    portable_request,
     join_endpoint_url,
     json_object,
     native_declaration,
@@ -198,6 +200,7 @@ class OpenAIChatAdapter(ProviderAdapter):
             protocol=self.protocol,
             media_loader=self._media_loader,
             cancel=cancel,
+            endpoint=request.endpoint,
         )
         if isinstance(prepared, ProviderError):
             terminal = assembler.terminal(prepared)
@@ -636,24 +639,51 @@ class OpenAIChatAdapter(ProviderAdapter):
                 terminal = assembler.terminal(final if isinstance(final, ProviderError) else Done(final))
                 if terminal is not None:
                     yield terminal
-            driver = drive_sse_stream(
-                self._client,
-                method="POST",
-                url=wire.url,
-                json_body=wire.body,
-                headers=wire.headers,
-                cancel=cancel,
-                assembler=assembler,
-                endpoint=request.endpoint,
-                resolver=self._served_hop_resolver,
-                gateway=self._gateway,
-                translate=translate,
-            )
-            try:
-                async for event in driver:
-                    yield event
-            finally:
-                await driver.aclose()
+            sending = request
+            while True:
+                driver = drive_sse_stream(
+                    self._client,
+                    method="POST",
+                    url=wire.url,
+                    json_body=wire.body,
+                    headers=wire.headers,
+                    cancel=cancel,
+                    assembler=assembler,
+                    endpoint=sending.endpoint,
+                    resolver=self._served_hop_resolver,
+                    gateway=self._gateway,
+                    translate=translate,
+                )
+                unavailable = False
+                try:
+                    async for event in driver:
+                        if event is PIN_UNAVAILABLE:
+                            unavailable = True
+                            break
+                        yield event
+                finally:
+                    await driver.aclose()
+                if not unavailable or sending is not request:
+                    return
+                # The pinned Source cannot serve this content: the same request once more, in portable form and
+                # unpinned, which the gateway fails over as any other (§3.5). Never the generic retry.
+                sending = portable_request(request)
+                prepared = await prepare_messages(
+                    sending.messages,
+                    target=endpoint_origin(sending.endpoint),
+                    supports_images=sending.supports_images,
+                    protocol=self.protocol,
+                    media_loader=self._media_loader,
+                    cancel=cancel,
+                    endpoint=sending.endpoint,
+                )
+                if isinstance(prepared, ProviderError):
+                    terminal = assembler.terminal(prepared)
+                    if terminal is not None:
+                        yield terminal
+                    return
+                transformed_messages, loaded_images = prepared
+                wire = wire_request(sending, transformed_messages, gateway=self._gateway, loaded_images=loaded_images)
         except Exception as exc:
             terminal = assembler.terminal(assembler.exception(exc))
             if terminal is not None:
@@ -732,7 +762,7 @@ def wire_request(
     payload = build_chat_payload(request, messages, loaded_images=loaded_images)
     headers = auth_headers(request.endpoint, provider="openai", gateway=gateway)
     headers.setdefault("content-type", "application/json")
-    headers.update(hosted_pin(request))
+    headers.update(hosted_pin(request, messages))
     return WireRequest(join_endpoint_url(request.endpoint.base_url, "/chat/completions"), headers, payload)
 
 

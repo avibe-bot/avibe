@@ -7,6 +7,7 @@ httpx directly so Model Hub remains the only gateway boundary.
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import re
@@ -25,6 +26,8 @@ from core.agent_core.ai._common import (
     dispatch_wire_event,
     endpoint_origin,
     hosted_pin,
+    PIN_UNAVAILABLE,
+    portable_request,
     join_endpoint_url,
     json_object,
     native_declaration,
@@ -48,6 +51,7 @@ from core.agent_core.ai.provider import (
 from core.agent_core.cancel import CancelToken
 from core.agent_core.messages import (
     AssistantMessage,
+    HostedToolBlock,
     ImageBlock,
     TextBlock,
     ThinkingBlock,
@@ -232,6 +236,7 @@ class AnthropicAdapter(ProviderAdapter):
             protocol=self.protocol,
             media_loader=self._media_loader,
             cancel=cancel,
+            endpoint=request.endpoint,
         )
         if isinstance(prepared, ProviderError):
             terminal = assembler.terminal(prepared)
@@ -792,10 +797,11 @@ class AnthropicAdapter(ProviderAdapter):
                 terminal = assembler.terminal(assembler.incomplete())
                 if terminal is not None:
                     yield terminal
+            sending = request
             while True:
                 # The lifetime ``wire_request`` gives the prefix: the default once this route has rejected the field.
-                prefix_ttl = _prefix_ttl(request)
-                wire = wire_request(request, transformed_messages, gateway=self._gateway, loaded_images=loaded_images)
+                prefix_ttl = _prefix_ttl(sending)
+                wire = wire_request(sending, transformed_messages, gateway=self._gateway, loaded_images=loaded_images)
                 driver = drive_sse_stream(
                     self._client,
                     method="POST",
@@ -804,20 +810,45 @@ class AnthropicAdapter(ProviderAdapter):
                     headers=wire.headers,
                     cancel=cancel,
                     assembler=assembler,
-                    endpoint=request.endpoint,
+                    endpoint=sending.endpoint,
                     resolver=self._served_hop_resolver,
                     gateway=self._gateway,
                     translate=translate,
                 )
-                rejected = False
+                rejected = unavailable = False
                 try:
                     async for event in driver:
+                        if event is PIN_UNAVAILABLE:
+                            unavailable = True
+                            break
                         if prefix_ttl is not None and _rejects_ttl(event):
                             rejected = True
                             break
                         yield event
                 finally:
                     await driver.aclose()
+                if unavailable and sending is request:
+                    # The pinned Source cannot serve this content: the same request once more, in portable form and
+                    # unpinned, which the gateway fails over as any other (§3.5). Never the generic retry.
+                    sending = portable_request(request)
+                    hosted = frozenset()
+                    prepared = await prepare_messages(
+                        sending.messages,
+                        target=origin,
+                        supports_images=sending.supports_images,
+                        protocol=self.protocol,
+                        media_loader=self._media_loader,
+                        cancel=cancel,
+                        endpoint=sending.endpoint,
+                    )
+                    if isinstance(prepared, ProviderError):
+                        terminal = assembler.terminal(prepared)
+                        if terminal is not None:
+                            yield terminal
+                        return
+                    transformed_messages, loaded_images = prepared
+                    assembler = new_assembler()
+                    continue
                 if not rejected:
                     return
                 # The endpoint refused the request before answering, so the consumer saw nothing: send it once more
@@ -914,7 +945,7 @@ def wire_request(
     payload = build_messages_payload(request, messages, loaded_images=loaded_images, prefix_ttl=_prefix_ttl(request))
     headers = auth_headers(request.endpoint, provider="anthropic", gateway=gateway)
     headers.update({"anthropic-version": ANTHROPIC_VERSION, "content-type": "application/json"})
-    headers.update(hosted_pin(request))
+    headers.update(hosted_pin(request, messages))
     return WireRequest(join_endpoint_url(request.endpoint.base_url, "/messages"), headers, payload)
 
 
@@ -941,6 +972,9 @@ def _message_to_anthropic(
                     content.append({"type": "text", "text": block.text})
             elif isinstance(block, ToolCallBlock):
                 content.append({"type": "tool_use", "id": block.id, "name": block.name, "input": dict(block.arguments)})
+            elif isinstance(block, HostedToolBlock):
+                # Its server_tool_use and web_search_tool_result, verbatim (transform allowed it for this Source).
+                content.extend(copy.deepcopy(list(block.native.payload)))
         return {"role": "assistant", "content": content}
     if isinstance(message, ToolResultMessage):
         result = _anthropic_user_content(message.content, supports_images, loaded_images)
