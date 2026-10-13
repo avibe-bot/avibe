@@ -1120,7 +1120,7 @@ class Agent:
     async def _commit_result(
         self, call: ToolCallBlock, result: ToolResult, emit: Callable[..., Awaitable[None]]
     ) -> None:
-        message = ToolResultMessage(call.id, call.name, result.content, result.is_error)
+        message = ToolResultMessage(call.id, call.name, result.content, result.is_error, hosted=result.hosted)
         validate_message_append(self._rows, session_id=self.session_id, kind="tool_result", message=message)
         await self._save_state()
         row = await self._scope.call(
@@ -1810,7 +1810,9 @@ class Agent:
             # A side turn's call has no committed response, so no instance: it starts no job (F4).
             result = await self._execute(tool, call, None, _silent)
         # Every other result that enters the turn is bounded to the room the window leaves (C-9 section 6).
-        return ToolResultMessage(call.id, call.name, fit_result(result.content, limit), result.is_error)
+        return ToolResultMessage(
+            call.id, call.name, fit_result(result.content, limit), result.is_error, hosted=result.hosted
+        )
 
     async def _drop(
         self,

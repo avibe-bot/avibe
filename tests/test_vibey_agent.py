@@ -297,7 +297,7 @@ async def _unused_renderer(*_args) -> ToolResult:
 class _Harness:
     def __init__(
         self, engine, tmp_path: Path, platform: str, scripts, *, tools=None, suite=None, language="en", session_id=SESSION,
-        providers=None,
+        providers=None, gateway_client=None,
     ):
         self.session_id = session_id
         self.engine = engine
@@ -306,6 +306,7 @@ class _Harness:
         self.controller = _Controller(engine, platform, language=language)
         self.provider = ScriptedProvider(scripts)
         self.providers = providers or (lambda protocol: self.provider)
+        self.gateway_client = gateway_client
         self.jobs = FakeJobHost()
         self.tools = list(tools or [FakeTool("echo")])
         self.suite = suite or ToolSuite(
@@ -325,6 +326,7 @@ class _Harness:
             providers=self.providers,
             tool_suite=self.suite,
             state_dir=self.tmp_path / "agent_core",
+            gateway_client=self.gateway_client,
         )
         self.controller.agent = agent
         self.agent = agent
@@ -2394,7 +2396,7 @@ async def test_a_hop_resolved_native_hosted_tool_reaches_the_gateway_pinned_to_i
 ) -> None:
     """MH-HOSTED-VIBEY-001 (vibey-hosted-tools.md §3.5, §4.1): Vibey takes each tool's mode from the hop. A tool the
     preflight hop runs natively joins the Turn's tools first, and goes out as the provider's declaration, verbatim, with
-    its include values, on a request pinned to the hop's Source. A proxied tool is not offered yet."""
+    its include values, on a request pinned to the hop's Source; a proxied tool goes out as its function."""
     import httpx
 
     from modules.agents.vibey.models import registry_providers
@@ -2430,9 +2432,10 @@ async def test_a_hop_resolved_native_hosted_tool_reaches_the_gateway_pinned_to_i
     sent = json.loads(request.content)
     assert request.url.path == path
     assert request.headers["x-avibe-pin-source"] == "src_test"
-    # The native tool leads the Turn's tools; the proxied one is not offered until its executor exists.
+    # The hosted tools lead the Turn's tools: the native one as the provider's declaration, the proxied one as its
+    # canonical function.
     assert sent["tools"][0] == declaration
-    assert all(tool.get("name") != "x_search" and tool.get("type") != "x_search" for tool in sent["tools"])
+    assert sent["tools"][1]["name"] == "x_search" and sent["tools"][1].get("type", "function") == "function"
     assert set(include) <= set(sent.get("include", []))
     assert harness.controller.im_client.sent == ["hi"]
 
@@ -2492,6 +2495,98 @@ async def test_a_native_search_is_kept_as_one_hosted_call_and_replayed_next_turn
     assert [item["type"] for item in replayed] == ["function_call", "function_call_output"]
     assert json.loads(replayed[0]["arguments"]) == {"query": "avibe release"} and replayed[0]["name"] == "web_search"
     assert "https://avibe.bot/r" in replayed[1]["output"]
+
+
+_EXECUTOR = {"source_id": "src_executor01", "model_id": "grok-4.6"}
+
+
+def _anthropic_reply(*blocks: str, stop_reason: str) -> str:
+    """An Anthropic stream of whole content blocks, each given as its ``content_block_start`` JSON."""
+    events = ['data: {"type":"message_start","message":{"usage":{}}}\n\n']
+    for index, block in enumerate(blocks):
+        events.append(f'data: {{"type":"content_block_start","index":{index},"content_block":{block}}}\n\n')
+        events.append(f'data: {{"type":"content_block_stop","index":{index}}}\n\n')
+    events.append(f'data: {{"type":"message_delta","delta":{{"stop_reason":"{stop_reason}"}}}}\n\n')
+    events.append('data: {"type":"message_stop"}\n\n')
+    return "".join(events)
+
+
+@pytest.mark.parametrize(
+    ("status", "answer", "is_error", "seen"),
+    [
+        (
+            200,
+            {
+                "record": {"status": "completed", "sources": [{"url": "https://avibe.bot/r", "title": "Release", "snippet": "v3.2"}]},
+                "execution": {
+                    "mode": "proxy",
+                    "executor_origin": {"provider": "xai", "api": "openai_responses", "model": "grok-4.6"},
+                    "executor_source_id": "src_executor01",
+                    "executor_billing": "metered",
+                },
+            },
+            False,
+            "https://avibe.bot/r",
+        ),
+        (200, {"record": {"status": "failed", "error": "no Source is verified for web search", "sources": []}}, True, "[web_search failed: no Source is verified"),
+        (404, {"type": "error", "error": {"type": "not_found", "code": "unknown_tool"}}, True, "HTTP 404 unknown_tool"),
+    ],
+    ids=["executed", "no-executor", "refused"],
+)
+async def test_a_proxied_hosted_call_runs_on_the_bound_executor_and_keeps_its_record(
+    engine, session, tmp_path, published, status, answer, is_error, seen
+) -> None:
+    """MH-HOSTED-VIBEY-004 (vibey-hosted-tools.md §3.4): on a hop that does not run the tool natively, the model calls
+    the same-named function; Vibey asks the gateway's executor bound for the Turn, keeps the record and execution on
+    the tool result, and the model reads the record as text. A call that never reached an executor is a failed
+    record, never an empty success."""
+    import httpx
+
+    from modules.agents.vibey.models import registry_providers
+
+    served = json.dumps(
+        {"provider": "anthropic", "api": "anthropic", "model": "claude-opus-5-5", "source": "src_upstream01"},
+        separators=(",", ":"),
+    )
+    call = '{"type":"tool_use","id":"toolu_1","name":"web_search","input":{"query":"avibe release"}}'
+    replies = [
+        _anthropic_reply(call, stop_reason="tool_use"),
+        _anthropic_reply('{"type":"text","text":"done"}', stop_reason="end_turn"),
+    ]
+    models: list[dict] = []
+    executed: list[httpx.Request] = []
+
+    def gateway(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/vibey/v1/hosted-tools/web_search":
+            executed.append(request)
+            return httpx.Response(status, json=answer)
+        models.append(json.loads(request.content))
+        return httpx.Response(
+            200, headers={"content-type": "text/event-stream", "x-avibe-served-hop": served}, text=replies.pop(0)
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(gateway)) as client:
+        harness = _Harness(
+            engine,
+            tmp_path,
+            "telegram",
+            [],
+            providers=registry_providers(media_loader=None, client=client),
+            gateway_client=client,
+        )
+        harness.controller.hub_hosted_tools = {"web_search": {"mode": "proxy", "executor": _EXECUTOR, "replay": False}}
+        await harness.agent.handle_message(harness.request("search"))
+
+    (request,) = executed
+    assert json.loads(request.content) == {"arguments": {"query": "avibe release"}, "executor": _EXECUTOR}
+    assert request.headers["authorization"] == "Bearer hub-token"
+    # The proxied tool is the canonical function, first among the Turn's tools.
+    assert models[0]["tools"][0]["name"] == "web_search" and "input_schema" in models[0]["tools"][0]
+    result = next(row.message for row in await harness.context_rows() if isinstance(row.message, ToolResultMessage))
+    assert result.is_error is is_error and result.hosted is not None
+    assert (result.hosted.execution is not None) == (not is_error)
+    sent = models[1]["messages"][-1]["content"][0]
+    assert sent["type"] == "tool_result" and seen in json.dumps(sent)
 
 
 _NATIVE_SEARCH = {"mode": "native", "declaration": {"type": "web_search"}, "include": [], "executor": None, "replay": False}

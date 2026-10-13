@@ -658,7 +658,10 @@ far:
   So does a hosted call that follows a client tool call of the same response, because a split there would separate
   that call from its result.
 
-Still to come: native verbatim replay, the `pin_unavailable` re-render, `pause_turn`, the proxy executor and images.
+- **Proxy.** A hosted tool that a hop does not run natively is its canonical function, and a call to it runs on the
+  gateway's executor bound for the Turn. The result keeps the record on `ToolResultMessage.hosted`.
+
+Still to come: native verbatim replay, the `pin_unavailable` re-render, `pause_turn` and images.
 Until `pause_turn` lands, the Anthropic stop table above still maps it to `stop`. An Anthropic citation covers its
 whole text block, so it carries no range.
 

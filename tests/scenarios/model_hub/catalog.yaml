@@ -248,6 +248,12 @@ scenarios:
       - tests/agent_core/ai/test_hosted_transform.py::test_every_hosted_call_is_one_result_that_shows_its_own_status
       - tests/agent_core/ai/test_hosted_transform.py::test_the_posts_an_answer_cites_show_on_a_call_kept_in_place
       - tests/agent_core/agent/test_context.py::test_a_hosted_call_counts_as_the_call_and_result_it_is_replayed_as_never_as_its_opaque_payload
+  - id: MH-HOSTED-VIBEY-004
+    name: A proxied hosted call runs on the executor bound for the Turn; its record and execution stay on the tool result and the model reads the record as text, a call that reached no executor as a failure
+    status: covered
+    kind: contract
+    layer: contract
+    test: tests/test_vibey_agent.py::test_a_proxied_hosted_call_runs_on_the_bound_executor_and_keeps_its_record
   - id: MH-VIBEY-007
     name: Vibey starts once with the user's Sources and built-in Agent models, seeded when its first Source exists
     status: covered

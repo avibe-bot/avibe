@@ -19,9 +19,14 @@ import asyncio
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Mapping, Optional, Sequence
 
+import httpx
+
 from core.agent_core.agent.models import ModelSelection
 from core.agent_core.agent.recovery import RecoveryRenderer
-from core.agent_core.messages import TextBlock
+from core.agent_core.ai._common import CONNECT_TIMEOUT_S, auth_headers, join_endpoint_url
+from core.agent_core.ai.hosted import bounded_error, record_text
+from core.agent_core.ai.provider import HostedExecutor, ModelEndpoint
+from core.agent_core.messages import HostedRecord, HostedResult, TextBlock, ToolResultMessage, message_from_dict
 from core.agent_core.tools.base import CallInstance, JobHost, Tool, ToolContext, ToolResult, ToolSpec
 from core.agent_core.tools.hosted import hosted_tool_spec
 from core.agent_core.tools.shell import default_shell
@@ -97,36 +102,108 @@ def local_tool_suite(jobs_dir: Optional[str] = None, *, route: Optional[HandOver
     )
 
 
-@dataclass(frozen=True)
-class NativeHostedTool:
-    """A hosted tool the Turn's preflight hop runs natively (``vibey-hosted-tools.md`` §4.1).
-
-    Its spec is the canonical one; on a hop whose route is native the adapter sends the provider's declaration in
-    its place, and the provider runs the call. A call reaches ``execute`` only when a later hop of the Turn resolved
-    the tool as proxied, and no proxy executor is wired yet.
-    """
-
-    spec: ToolSpec
-
-    async def execute(self, arguments: Mapping[str, Any], ctx: ToolContext) -> ToolResult:
-        del arguments, ctx
-        return ToolResult(content=(TextBlock(f"{self.spec.name} is not available on this route."),), is_error=True)
-
-
 #: The hosted tools whose native results the adapters parse. A generated image arrives as base64 that history must
 #: never hold (§7.3), so ``image_generation`` joins with its media handling.
 PARSED_HOSTED_TOOLS = ("web_search", "x_search")
 
 
-def native_hosted_tools(selection: Optional[ModelSelection]) -> tuple[Tool, ...]:
-    """The hosted tools preflight's hop runs natively, in Model Hub's order. They lead the Turn's tools, so its last
-    tool stays a local one whatever a hop renders them as."""
+@dataclass(frozen=True)
+class HostedTool:
+    """One hosted tool of the Turn (``vibey-hosted-tools.md`` §3.4, §4.1), with one name and schema in both modes.
+
+    On a hop whose route for it is native, the adapter sends the provider's declaration in its spec's place and the
+    provider runs the call. A call that reaches ``execute`` is proxied: the gateway runs it on the executor Model Hub
+    bound for the Turn, and nothing else. The gateway writes the record; this tool writes the text the model reads,
+    with the same function that renders a replayed call.
+    """
+
+    spec: ToolSpec
+    executor: Optional[HostedExecutor]
+    #: The Turn's gateway: where the executor endpoint lives, and the token and headers that authorize the call.
+    endpoint: ModelEndpoint = field(repr=False)
+    client: Optional[httpx.AsyncClient] = field(default=None, repr=False)
+
+    async def execute(self, arguments: Mapping[str, Any], ctx: ToolContext) -> ToolResult:
+        del ctx
+        hosted = await self._run(dict(arguments))
+        query = arguments.get("query")
+        text = record_text(self.spec.name, hosted.record, query=query if isinstance(query, str) else None)
+        failed = hosted.record.status in ("failed", "incomplete")
+        return ToolResult(content=(TextBlock(text),), is_error=failed, hosted=hosted)
+
+    async def _run(self, arguments: dict[str, Any]) -> HostedResult:
+        url = join_endpoint_url(self.endpoint.base_url, f"/hosted-tools/{self.spec.name}")
+        executor = self.executor
+        body = {
+            "arguments": arguments,
+            "executor": {"source_id": executor.source_id, "model_id": executor.model_id} if executor else None,
+        }
+        headers = auth_headers(self.endpoint, provider="openai", gateway=True)
+        # The gateway bounds the call (180 s for a search); only connecting is bounded here.
+        timeout = httpx.Timeout(None, connect=CONNECT_TIMEOUT_S)
+        try:
+            if self.client is not None:
+                response = await self.client.post(url, json=body, headers=headers, timeout=timeout)
+            else:
+                # The Model Hub gateway is loopback: an environment or system proxy must never carry it.
+                async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
+                    response = await client.post(url, json=body, headers=headers)
+        except httpx.HTTPError as error:
+            return _failed(f"the gateway could not run the call ({type(error).__name__})")
+        if response.status_code != 200:
+            return _failed(f"the gateway refused the call (HTTP {response.status_code} {_error_code(response)})")
+        try:
+            return _hosted_result(self.spec.name, response.json())
+        except (TypeError, ValueError):
+            return _failed("the gateway answered with no hosted result")
+
+
+def _failed(reason: str) -> HostedResult:
+    """A call that never reached an executor: a failed record, and no execution (§4.2)."""
+
+    return HostedResult(record=HostedRecord(status="failed", error=bounded_error(reason)))
+
+
+def _error_code(response: httpx.Response) -> str:
+    try:
+        error = response.json().get("error")
+    except (TypeError, ValueError, AttributeError):
+        return ""
+    code = error.get("code") or error.get("type") if isinstance(error, Mapping) else None
+    return code if isinstance(code, str) else ""
+
+
+def _hosted_result(tool: str, body: Any) -> HostedResult:
+    """The executor's answer, read with the transcript's own reader for ``ToolResultMessage.hosted``."""
+
+    if not isinstance(body, Mapping) or not isinstance(body.get("record"), Mapping):
+        raise ValueError("no hosted record")
+    hosted = {key: body[key] for key in ("record", "execution") if key in body}
+    message = message_from_dict(
+        {
+            "role": "tool_result",
+            "tool_call_id": "proxied",
+            "tool_name": tool,
+            "content": [],
+            "is_error": body["record"].get("status") in ("failed", "incomplete"),
+            "hosted": hosted,
+        }
+    )
+    if not isinstance(message, ToolResultMessage) or message.hosted is None:
+        raise ValueError("no hosted result")
+    return message.hosted
+
+
+def hosted_tools(selection: Optional[ModelSelection], client: Optional[httpx.AsyncClient] = None) -> tuple[Tool, ...]:
+    """The Turn's hosted tools: every tool the user enabled, in Model Hub's order, whatever preflight's hop runs it as.
+    They lead the Turn's tools, so its last tool stays a local one whatever a hop renders them as, and the list stays
+    the same for the whole Turn."""
 
     if selection is None:
         return ()
-    routes = selection.endpoint.hosted_tools
+    endpoint = selection.endpoint
     return tuple(
-        NativeHostedTool(hosted_tool_spec(name))
-        for name, route in routes.items()
-        if route.mode == "native" and name in PARSED_HOSTED_TOOLS
+        HostedTool(hosted_tool_spec(name), route.executor, endpoint, client)
+        for name, route in endpoint.hosted_tools.items()
+        if name in PARSED_HOSTED_TOOLS
     )
