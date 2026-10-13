@@ -10544,6 +10544,42 @@ def _mask_api_key(api_key: str | None) -> str | None:
     return f"{'•' * 6}{last4}"
 
 
+def _graceful_stop_claude_auth_status(process: subprocess.Popen[str]) -> None:
+    """Request a non-destructive stop before forceful termination."""
+
+    if os.name == "nt":
+        control_break = getattr(signal, "CTRL_BREAK_EVENT", None)
+        if control_break is not None:
+            try:
+                process.send_signal(control_break)
+                return
+            except (OSError, ProcessLookupError):
+                return
+    signal_process_tree(process, signal.SIGTERM, logger, _CLAUDE_AUTH_STATUS_LABEL)
+
+
+def _force_stop_claude_auth_status(process: subprocess.Popen[str]) -> None:
+    """Stop the isolated status process tree without relying on a soft signal."""
+
+    if os.name == "nt":
+        try:
+            process.kill()
+        except ProcessLookupError:
+            return
+        return
+    signal_process_tree(process, KILL_SIGNAL, logger, _CLAUDE_AUTH_STATUS_LABEL)
+
+
+def _close_claude_auth_status_pipes(process: subprocess.Popen[str]) -> None:
+    for stream in (process.stdout, process.stderr):
+        if stream is None:
+            continue
+        try:
+            stream.close()
+        except OSError:
+            logger.debug("Failed to close %s output pipe", _CLAUDE_AUTH_STATUS_LABEL, exc_info=True)
+
+
 def _run_claude_auth_status(
     command: list[str],
     *,
@@ -10588,7 +10624,7 @@ def _run_claude_auth_status(
                     "%s did not finish during completion grace; requesting graceful termination",
                     _CLAUDE_AUTH_STATUS_LABEL,
                 )
-                signal_process_tree(process, signal.SIGTERM, logger, _CLAUDE_AUTH_STATUS_LABEL)
+                _graceful_stop_claude_auth_status(process)
                 try:
                     stdout, _ = process.communicate(timeout=_CLAUDE_AUTH_STATUS_TERMINATION_GRACE_SECONDS)
                 except subprocess.TimeoutExpired:
@@ -10596,14 +10632,22 @@ def _run_claude_auth_status(
                         "%s ignored graceful termination; forcefully stopping it",
                         _CLAUDE_AUTH_STATUS_LABEL,
                     )
-                    signal_process_tree(process, KILL_SIGNAL, logger, _CLAUDE_AUTH_STATUS_LABEL)
+                    _force_stop_claude_auth_status(process)
                     try:
                         stdout, _ = process.communicate(timeout=_CLAUDE_AUTH_STATUS_DRAIN_TIMEOUT_SECONDS)
                     except subprocess.TimeoutExpired:
-                        # Reap our direct child even if a descendant keeps a
-                        # pipe open after the isolated process group is gone.
-                        process.kill()
-                        stdout, _ = process.communicate()
+                        # A descendant may retain the inherited output pipe.
+                        # Close our handles and reap only the direct child with
+                        # a bounded wait; never let a status request wait forever.
+                        _close_claude_auth_status_pipes(process)
+                        try:
+                            process.wait(timeout=_CLAUDE_AUTH_STATUS_DRAIN_TIMEOUT_SECONDS)
+                        except subprocess.TimeoutExpired:
+                            logger.error(
+                                "%s process did not settle after forceful termination",
+                                _CLAUDE_AUTH_STATUS_LABEL,
+                            )
+                        return None
         return subprocess.CompletedProcess(command, process.returncode, stdout, None)
     except (OSError, subprocess.SubprocessError):
         return None

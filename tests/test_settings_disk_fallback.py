@@ -241,6 +241,61 @@ def test_claude_auth_status_terminates_only_after_completion_grace(
     assert process.communicate.call_count == 4
 
 
+
+
+def test_claude_auth_status_bounds_final_pipe_drain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vibe import api
+
+    process = Mock()
+    process.returncode = -signal.SIGKILL
+    process.stdout = Mock()
+    process.stderr = None
+    process.communicate.side_effect = [
+        subprocess.TimeoutExpired(["claude"], 10),
+        subprocess.TimeoutExpired(["claude"], 10),
+        subprocess.TimeoutExpired(["claude"], 5),
+        subprocess.TimeoutExpired(["claude"], 5),
+    ]
+    process.wait.side_effect = subprocess.TimeoutExpired(["claude"], 5)
+    monkeypatch.setattr(api.subprocess, "Popen", lambda *_args, **_kwargs: process)
+    monkeypatch.setattr(api, "signal_process_tree", Mock())
+
+    result = api._run_claude_auth_status(["claude"], env={}, cwd=None)
+
+    assert result is None
+    process.stdout.close.assert_called_once()
+    process.wait.assert_called_once()
+
+
+def test_claude_auth_status_uses_ctrl_break_before_windows_force_kill(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vibe import api
+
+    process = Mock()
+    process.returncode = 0
+    process.communicate.side_effect = [
+        subprocess.TimeoutExpired(["claude"], 10),
+        subprocess.TimeoutExpired(["claude"], 10),
+        ("", None),
+    ]
+    monkeypatch.setattr(api.os, "name", "nt")
+    monkeypatch.setattr(api.subprocess, "CREATE_NEW_PROCESS_GROUP", 0, raising=False)
+    monkeypatch.setattr(api.subprocess, "CREATE_NO_WINDOW", 0, raising=False)
+    monkeypatch.setattr(api.signal, "CTRL_BREAK_EVENT", 21, raising=False)
+    monkeypatch.setattr(api.subprocess, "Popen", lambda *_args, **_kwargs: process)
+    signal_tree = Mock()
+    monkeypatch.setattr(api, "signal_process_tree", signal_tree)
+
+    result = api._run_claude_auth_status(["claude"], env={}, cwd=None)
+
+    assert result is not None
+    process.send_signal.assert_called_once_with(21)
+    signal_tree.assert_not_called()
+
+
 def test_get_claude_auth_prefers_cli_oauth_status(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
