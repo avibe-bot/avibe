@@ -65,7 +65,11 @@ def test_connected_inference_waits_for_its_owner(
 
         def track_session(**kwargs):
             timeout = kwargs["timeout"]
-            assert timeout.total is None and timeout.sock_read is None
+            # Elapsed time never ends inference; only a stream's silence does (MH-RUNTIME-013).
+            assert timeout.total is None
+            # Gateway Sources name their vendor; the bare client fixture is a custom vendor.
+            idle_bounded = streaming and entrypoint == "gateway" and protocol in {"anthropic", "openai_responses"}
+            assert timeout.sock_read == (client_module._STREAM_IDLE_TIMEOUT_SECONDS if idle_bounded else None)
             assert timeout.connect == timeout.sock_connect == 0.02
             session = real_session(**kwargs)
             sessions.append(session)

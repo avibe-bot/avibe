@@ -75,7 +75,10 @@ class WireField:
 # OpenCode allow 300s of silence; Avibe allows 600s (owner decision,
 # 2026-10-10), because Model Hub withholds even the response headers until the
 # first model output, so a high-effort reasoning model's thinking time is all
-# silence and can exceed five minutes. Connecting stays separately short, so an
+# silence and can exceed five minutes. For the Sources whose streams keep
+# sending, the gateway bounds the engine's silence at 120s first and retries a
+# stall before output itself (docs/plans/model-hub-inference-deadlines.md), so
+# this bound is the outer guard. Connecting stays separately short, so an
 # unreachable provider still fails fast. Both bounds are shared by every native
 # adapter; the loop may retry the resulting error only when no model output has
 # been emitted.
