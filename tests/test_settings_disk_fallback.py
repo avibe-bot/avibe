@@ -291,7 +291,7 @@ def test_claude_auth_status_uses_ctrl_break_before_windows_force_kill(
 
     result = api._run_claude_auth_status(["claude"], env={}, cwd=None)
 
-    assert result is not None
+    assert result is None
     process.send_signal.assert_called_once_with(21)
     signal_tree.assert_not_called()
 
