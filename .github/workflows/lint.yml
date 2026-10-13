@@ -8,7 +8,9 @@ on:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  # Only test runs share these groups; superseded master checks must not
+  # occupy runners needed by the latest commit. Release workflows are separate.
+  cancel-in-progress: true
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -261,11 +263,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # The last complete run still held ~77 minutes of isolated-file work.
-        # Nine balanced lanes bring that work to ~8m30s each before setup,
-        # without changing discovery, watchdogs or test process isolation.
-        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8]
-        shard-total: [9]
+        # Refreshed complete-run timings balance eight lanes below nine minutes
+        # of file work, reducing the initial hosted-runner burst by one.
+        # Preserve discovery, watchdogs and one-process-per-file isolation.
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+        shard-total: [8]
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
 
