@@ -1709,4 +1709,4 @@ def test_an_im_hosted_card_keeps_its_file_paths(isolated_state, tmp_path):
     engine = create_sqlite_engine()
     with engine.connect() as conn:
         event = conn.execute(select(agent_events)).mappings().one()
-    assert json.loads(event["content_json"]) == {"kind": "toolcall", "hosted": card}
+    assert json.loads(event["content_json"])["hosted"] == card

@@ -3389,7 +3389,9 @@ async def test_a_proxied_hosted_result_shows_once_its_result_is_committed(engine
     """The record the executor returned, read back from the committed tool-result row."""
     from modules.agents.vibey.agent import _Run
 
-    harness = _Harness(engine, tmp_path, "telegram", [])
+    harness = _Harness(engine, tmp_path, "telegram", [[Done(assistant("ok"))]])
+    # A tool result answers a Turn, so the Session has consumed an input first.
+    await harness.agent.handle_message(harness.request("hello"))
     request = harness.request("what did OpenAI post?")
     call = ToolCallBlock(id="call_x1", name="x_search", arguments={"query": "from:OpenAI"})
     result = ToolResultMessage(
@@ -3412,7 +3414,7 @@ async def test_a_proxied_hosted_result_shows_once_its_result_is_committed(engine
 
     await harness.agent._on_event(run, ToolFinished("turn", 1, call.id, entry.row_id, False))
 
-    assert harness.controller.im_client.sent == ["🔎 X search “from:OpenAI” · via xAI proxy · 1 post · $0.11"]
+    assert harness.controller.im_client.sent[-1:] == ["🔎 X search “from:OpenAI” · via xAI proxy · 1 post · $0.11"]
 
 
 async def test_generated_images_reach_the_user_when_no_final_reply_follows(engine, session, tmp_path, published) -> None:
@@ -3463,7 +3465,9 @@ async def test_a_hosted_named_call_without_a_record_still_shows_its_tool_line(en
     """A hosted tool that failed before producing a record (a plain error result) is not silently dropped."""
     from modules.agents.vibey.agent import _Run
 
-    harness = _Harness(engine, tmp_path, "telegram", [])
+    harness = _Harness(engine, tmp_path, "telegram", [[Done(assistant("ok"))]])
+    # A tool result answers a Turn, so the Session has consumed an input first.
+    await harness.agent.handle_message(harness.request("hello"))
     request = harness.request("search X")
     call = ToolCallBlock(id="call_x1", name="x_search", arguments={"query": "from:OpenAI"})
     entry = await harness.agent.store.append_tool_result(
@@ -3476,7 +3480,7 @@ async def test_a_hosted_named_call_without_a_record_still_shows_its_tool_line(en
 
     await harness.agent._on_event(run, ToolFinished("turn", 1, call.id, entry.row_id, True))
 
-    assert harness.controller.im_client.sent == ['🔧 x_search {"query": "from:OpenAI"}']
+    assert harness.controller.im_client.sent[-1:] == ['🔧 x_search {"query": "from:OpenAI"}']
 
 
 async def test_a_final_whose_cited_text_is_all_silent_stays_silent(engine, session, tmp_path, published) -> None:
