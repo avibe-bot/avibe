@@ -58,8 +58,9 @@ can be verified on a real desktop test prerelease. Pet voice now appears
 whenever Web Locks, `getUserMedia` and ASR are all available; missing Web Locks
 still denies it, and hotkey/hold still falls back to text in that case. ASR
 status is read as soon as voice may be used (the pet window starts unfocused,
-so this read does not wait for focus), and a held-hotkey summon waits for that
-first read. Each window reactivation re-reads it, so a settings change takes
+so this read does not wait for focus). Every press-and-hold entry (hotkey and
+avatar) goes through one queued decision that waits for that first read while
+held and falls back to text if released first. Each window reactivation re-reads it, so a settings change takes
 effect without restarting the pet; a failed re-read keeps the last known status.
 Availability gates only starting a capture; an active capture keeps its stop
 control.

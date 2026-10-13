@@ -1737,6 +1737,35 @@ describe('desktop mini v2 interaction contract', () => {
     });
   });
 
+  it.each([
+    ['still held', true],
+    ['released', false],
+  ])('decides an avatar hold that outlives a pending ASR read once it settles (%s)', async (_label, held) => {
+    const status = deferred<{ ok: boolean; json: () => Promise<unknown> }>();
+    class Dictation { done = new Promise<string>(() => {}); start = async () => {}; finish = () => {}; abort = () => {}; }
+    await withVoiceEnv(() => true, Dictation, async () => {
+      vi.stubGlobal('fetch', vi.fn(() => status.promise));
+      devBind('S'); render(<PetPage />); await screen.findByText('Session S');
+      const avatar = screen.getByLabelText('pet.toggle');
+      vi.useFakeTimers();
+      try {
+        fireEvent.pointerDown(avatar, { button: 0, pointerId: 1 });
+        await act(async () => vi.advanceTimersByTime(400));
+        expect(screen.queryByRole('textbox')).toBeNull();
+        expect(pose()).not.toBe('listening');
+        if (!held) fireEvent.pointerUp(avatar, { pointerId: 1 });
+        await act(async () => status.resolve({ ok: true, json: async () => ({ available: true }) }));
+      } finally {
+        vi.useRealTimers();
+      }
+      if (held) await waitFor(() => expect(pose()).toBe('listening'));
+      else {
+        expect(await screen.findByRole('textbox')).toBeTruthy();
+        expect(pose()).not.toBe('listening');
+      }
+    });
+  });
+
   it('discards voice preview and final text from the previous authorization epoch', async () => {
     const done = deferred<string>();
     let preview!: (text: string) => void;

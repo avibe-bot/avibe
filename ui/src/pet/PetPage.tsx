@@ -418,12 +418,12 @@ const PetSurface: React.FC = () => {
   }, [setPanel, voice.stop, voice.listening, composing]);
   useOnSummon(onSummon);
   useEffect(() => {
-    if (!listenPending || !binding || !canChat || !expanded || voice.pending) return;
+    if (!listenPending || !binding || !canChat || !expanded) return;
     petComposer.takeListen();
     if (uncertain) { setDetailOpen(true); return; }
-    if (voice.available && hotkeyHeld.current) voice.start();
+    if (hotkeyHeld.current) voice.begin();
     else openComposer(draft);
-  }, [listenPending, binding, canChat, expanded, voice.pending, voice.available, voice.start, openComposer, draft, uncertain]);
+  }, [listenPending, binding, canChat, expanded, voice.begin, openComposer, draft, uncertain]);
   useEffect(() => {
     const onBlur = () => { if (!voice.listening && !draft.trim()) void setPanel(false); };
     window.addEventListener('blur', onBlur);
@@ -484,8 +484,7 @@ const PetSurface: React.FC = () => {
             target.setPointerCapture?.(pointerId);
             if (!canChat || !binding) { void setPanel(true); return; }
             if (uncertain) { void setPanel(true); setDetailOpen(true); return; }
-            if (voice.available) voice.start();
-            else openComposer(draft);
+            voice.begin();
           }, HOLD_MS) };
         }}
         onPointerMove={(event) => {
@@ -743,7 +742,18 @@ function usePetVoice({ enabled, epoch, draft, onOpenComposer }: { enabled: boole
     }).catch(() => { if (alive && epoch.isCurrent()) unknown(); });
     return () => { alive = false; };
   }, [enabled, epoch, asrReads]);
+  // A press-and-hold is queued here and decided by an effect with the current
+  // render's state, so callers holding a stale closure still decide correctly.
+  // Before the first status read settles a held press waits; releasing it
+  // falls back to text right away.
+  const queuedRef = useRef<'held' | 'released' | null>(null);
+  const [queueTick, setQueueTick] = useState(0);
   const stop = useCallback((commit: boolean) => {
+    if (queuedRef.current) {
+      queuedRef.current = commit ? 'released' : null;
+      setQueueTick((tick) => tick + 1);
+      return;
+    }
     const capture = captureRef.current;
     if (!capture) return;
     capture.ending = true;
@@ -796,9 +806,24 @@ function usePetVoice({ enabled, epoch, draft, onOpenComposer }: { enabled: boole
   const clearError = useCallback(() => setError(null), []);
   useEffect(() => cancel, [epoch, enabled, cancel]);
   useEffect(() => () => setError(null), [epoch, enabled]);
-  // Until the first status read settles, a voice summon cannot tell voice from text.
+  // Press-and-hold entry for every surface (hotkey and avatar): voice when it
+  // is available, text otherwise.
   const pending = enabled && supported && !asr.settled;
-  return { available, pending, cloudRequired: asr.checked && !asr.available, listening, preview, error, clearError, start, stop, cancel };
+  const begin = useCallback(() => {
+    queuedRef.current = 'held';
+    setQueueTick((tick) => tick + 1);
+  }, []);
+  useEffect(() => {
+    const queued = queuedRef.current;
+    if (!queued || (queued === 'held' && pending)) return;
+    queuedRef.current = null;
+    // A deferred press handler: it acts on a user press once state allows.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    if (queued === 'held' && available) start();
+    else onOpenComposer(draft);
+  }, [queueTick, pending, available, start, onOpenComposer, draft]);
+  useEffect(() => () => { queuedRef.current = null; }, [epoch, enabled]);
+  return { available, begin, cloudRequired: asr.checked && !asr.available, listening, preview, error, clearError, start, stop, cancel };
 }
 
 type VoiceFailure = 'startFailed' | 'empty' | 'failed';
