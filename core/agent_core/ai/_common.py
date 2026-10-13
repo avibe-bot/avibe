@@ -49,9 +49,31 @@ from core.agent_core.ai.provider import (
     ToolCallStart,
 )
 
+
+@dataclass(frozen=True)
+class ServedHop:
+    """The C-6 served-hop report: the message origin and the serving Source."""
+
+    origin: Origin
+    source_id: str
+
+
+@dataclass(frozen=True)
+class ServedResolution:
+    """The response origin, whether its signature data is verified, and its Source.
+
+    ``source_id`` is ``None`` in direct mode and for a missing or invalid report.
+    """
+
+    origin: Origin
+    verified: bool
+    source_id: str | None
+
+
 ServedHopResolver = Callable[
-    [Mapping[str, str]], Origin | None | Awaitable[Origin | None]
+    [Mapping[str, str]], ServedHop | None | Awaitable[ServedHop | None]
 ]
+_SOURCE_ID = re.compile(r"src_[a-z0-9]{8,}")
 _T = TypeVar("_T")
 WireTranslator = Callable[[AsyncIterator[SSEEvent]], AsyncIterator[Any]]
 
@@ -1305,12 +1327,12 @@ async def resolve_served_origin(
     *,
     gateway: bool,
     cancel: CancelToken,
-) -> tuple[Origin, bool] | None:
-    """Return the served origin and whether its signature data is verified."""
+) -> ServedResolution | None:
+    """Return the served origin, whether its signature data is verified, and its Source."""
 
     direct = endpoint_origin(endpoint)
     if not gateway:
-        return direct, True
+        return ServedResolution(direct, True, None)
     candidate = resolver(headers) if resolver is not None else default_served_hop_resolver(headers)
     if inspect.isawaitable(candidate):
         try:
@@ -1321,10 +1343,12 @@ async def resolve_served_origin(
         served = candidate
     if cancel.cancelled:
         return None
-    return served or direct, served is not None
+    if served is None:
+        return ServedResolution(direct, False, None)
+    return ServedResolution(served.origin, True, served.source_id)
 
 
-def default_served_hop_resolver(headers: Mapping[str, str]) -> Origin | None:
+def default_served_hop_resolver(headers: Mapping[str, str]) -> ServedHop | None:
     """Read the exact C-6 served-hop header."""
 
     normalized = {key.lower(): value for key, value in headers.items()}
@@ -1337,12 +1361,15 @@ def default_served_hop_resolver(headers: Mapping[str, str]) -> Origin | None:
         return None
     if not isinstance(value, Mapping):
         return None
-    if set(value) != {"provider", "api", "model"} or any(not isinstance(value[key], str) for key in value):
+    if set(value) != {"provider", "api", "model", "source"} or any(not isinstance(value[key], str) for key in value):
+        return None
+    if not _SOURCE_ID.fullmatch(value["source"]):
         return None
     try:
-        return Origin(provider=value["provider"], api=value["api"], model=value["model"])
+        origin = Origin(provider=value["provider"], api=value["api"], model=value["model"])
     except (KeyError, TypeError, ValueError):
         return None
+    return ServedHop(origin=origin, source_id=value["source"])
 
 
 def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -1495,7 +1522,7 @@ async def drive_sse_stream(
                     if resolved_origin is None:
                         candidate = assembler.aborted(cancel.reason)
                     else:
-                        assembler.set_origin(*resolved_origin)
+                        assembler.set_origin(resolved_origin.origin, resolved_origin.verified)
                         async for item in translate(iter_sse_events(response, cancel)):
                             if isinstance(item, (Done, ProviderError)):
                                 candidate = item

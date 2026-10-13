@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import queue
+import copy
 import re
 import shutil
 import threading
@@ -187,6 +188,8 @@ class ModelHubLaunch:
     provider: Optional[str] = None
     input_limit: Optional[int] = None
     supports_images: Optional[bool] = None
+    # Vibey only: each enabled hosted tool's mode, declaration, executor and replay.
+    hosted_tools: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
 
     def to_hop_resolution(self) -> dict[str, Any]:
         """Project C-6 from the same launch that owns routing and credentials."""
@@ -216,6 +219,7 @@ class ModelHubLaunch:
                 "supports_reasoning": self.supports_reasoning,
                 "reasoning_efforts": list(self.reasoning_efforts),
             },
+            "hosted_tools": copy.deepcopy({tool: dict(entry) for tool, entry in self.hosted_tools.items()}),
         }
 
     @property
@@ -1322,7 +1326,7 @@ class ModelHubRuntimeRouter:
                 via_mapping=False,
                 gateway_request_model_id=runtime_model,
                 primary_origin=(
-                    HopOrigin(source.vendor, source.protocol, target_model)
+                    HopOrigin(source.vendor, source.protocol, target_model, source.id)
                     if backend == "vibey" else None
                 ),
             )
@@ -1362,6 +1366,9 @@ class ModelHubRuntimeRouter:
                     "image" in backend_model.input_modalities
                     if backend_model is not None and backend_model.input_modalities
                     else None
+                ),
+                hosted_tools=(
+                    self.service.hosted_tools_for_hop(config, source, target_model) if backend == "vibey" else {}
                 ),
             )
         self._emit_transition(launch, config)

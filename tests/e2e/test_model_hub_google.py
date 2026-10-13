@@ -116,7 +116,7 @@ async def test_real_google_frontend_uses_pinned_engine_and_reports_serving_origi
                             assert b"candidates" in raw
                         assert b"mock response" in raw or b"Answer" in raw
                         origin = json.loads(response.headers[SERVED_HOP_HEADER])
-                        assert origin == {"provider": "custom", "api": protocol, "model": model_id}
+                        assert origin == {"provider": "custom", "api": protocol, "model": model_id, "source": source.id}
                 completion = router.settle_turn(
                     "real-google", settled_by=SETTLED_BY_TERMINAL_RESULT, ts="2026-10-02T09:00:00Z",
                 )
@@ -124,7 +124,7 @@ async def test_real_google_frontend_uses_pinned_engine_and_reports_serving_origi
                     await completion
                 record = service.provenance.get("real-google")
                 assert record["outcome"] == "served", (record, raw)
-                assert record["served"]["origin"] == origin
+                assert {**record["served"]["origin"], "source": record["served"]["source_id"]} == origin
                 assert len(requests) == 1
                 path, body, headers = requests[0]
                 assert "真实 fixture: 上海" in json.dumps(body, ensure_ascii=False)

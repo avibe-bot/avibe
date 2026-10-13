@@ -51,6 +51,7 @@ from vibe.backend_model_catalog import (
     PROTOCOL_REASONING_EFFORT_DEFAULTS,
     builtin_display_name,
     bundled_catalog_reasoning_efforts_by_model,
+    hosted_tool_spec,
 )
 from vibe.model_hub_runtime.api_key_vendors import (
     catalog_api_key_vendor_label,
@@ -103,7 +104,15 @@ from .events import (
     build_resolution_event,
     contains_credential_material,
 )
+from .capability_evidence import CapabilityEvidenceStore
 from .errors import ModelDiscoveryError
+from .hosted_tools import (
+    HostedToolSettingRefused,
+    engine_stamp,
+    hosted_tools_status,
+    parse_hosted_tool_setting,
+    resolve_hosted_tools,
+)
 from .identifiers import (
     OPENCODE_PROVIDER_BY_NATIVE_PROTOCOL,
     canonical_model_id,
@@ -175,7 +184,7 @@ from .usage import (
     local_usage_day,
 )
 
-CONTRACT_VERSION = 11
+CONTRACT_VERSION = 12
 
 
 def seeded_source_name(vendor: str) -> str:
@@ -298,8 +307,8 @@ def _described_as_unfit_for_agent_turns(match: Mapping[str, Any]) -> bool:
     )
 
 
-AGENT_CHAIN_CONTRACT_VERSION = 11
-PROBE_RESULT_CONTRACT_VERSION = 11
+AGENT_CHAIN_CONTRACT_VERSION = 12
+PROBE_RESULT_CONTRACT_VERSION = 12
 _SOURCE_DISCOVERY_TIMEOUT_SECONDS = 15
 _SOURCE_PROBE_TIMEOUT_SECONDS = 60
 # Background inventory refresh. The first tick doubles as the startup delay, so
@@ -1024,7 +1033,7 @@ def _runtime_payload(status: EngineStatus, *, enabled: bool) -> dict:
 
     manager = EngineRuntimeManager()
     return {
-        "contract_version": 11,
+        "contract_version": 12,
         "enabled": enabled,
         "host_platform": status.host_platform or manager.host_platform(),
         "manifest": manager.contract_manifest(),
@@ -1136,6 +1145,7 @@ class ModelHubService:
         recovery: RecoveryPolicy | None = None,
         price_table: Callable[[], PriceTable] | None = None,
         models_dev_catalog: Callable[[], Mapping[str, Any]] | None = None,
+        capability_evidence: CapabilityEvidenceStore | None = None,
     ):
         self.store = store
         self.adapter = adapter
@@ -1162,6 +1172,10 @@ class ModelHubService:
         self.migration_project_roots = migration_project_roots or (lambda: ())
         self.migration_journal = migration_journal or NativeTakeoverJournal(
             events.path.parent / "native-takeover" / "current.json"
+        )
+        # Beside the other state documents, so it follows wherever they live.
+        self.capability_evidence = capability_evidence or CapabilityEvidenceStore(
+            events.path.parent / "model_hub_capability_evidence.json"
         )
         self.migration_blocked_backends: set[str] = set()
         self.migration_guard = migration_guard or self._unavailable_migration_guard
@@ -5753,6 +5767,47 @@ class ModelHubService:
                 await self._refresh_backend_catalog(backend)
             return changed
 
+    def hosted_tools_status(self) -> dict:
+        """The Tools tab read: toggles, where each tool can run, and pending re-verifications."""
+
+        return {
+            "hosted_tools": hosted_tools_status(
+                self.store.load(),
+                evidence=self.capability_evidence,
+                spec_for=hosted_tool_spec,
+                engine=engine_stamp(),
+                now=self.now(),
+            )
+        }
+
+    async def set_hosted_tool(self, tool: str, payload: object) -> dict:
+        """Replace one hosted tool's toggle and chosen executor; it applies from the next turn."""
+
+        async with self._mutation_lock:
+            previous = self.store.load()
+            try:
+                setting = parse_hosted_tool_setting(previous, tool, payload, spec_for=hosted_tool_spec)
+            except HostedToolSettingRefused as refused:
+                raise ModelHubError(refused.code, status=refused.status) from None
+            if previous.hosted_tools.get(tool) != setting:
+                config = self._clone_config(previous)
+                config.hosted_tools[tool] = setting
+                await self._commit_synced(previous, config)
+        return self.hosted_tools_status()
+
+    def hosted_tools_for_hop(self, config: ModelHubConfig, source: ModelHubSourceConfig, model_id: str) -> dict:
+        """``HopResolution.hosted_tools`` for a Vibey launch served by this Source and model."""
+
+        return resolve_hosted_tools(
+            config,
+            source=source,
+            model_id=model_id,
+            evidence=self.capability_evidence,
+            spec_for=hosted_tool_spec,
+            engine=engine_stamp(),
+            now=self.now(),
+        )
+
     async def set_agent_mode(self, backend: str, mode: object) -> dict:
         if mode not in {"hub", "direct"} or (backend == "vibey" and mode != "hub"):
             raise ModelHubError("mode_switch_blocked")
@@ -8609,7 +8664,7 @@ class ModelHubService:
                     # hop, including fallback/refresh. Persisted ids stay intact;
                     # refusal must precede a transport, attempt, or recovery slot.
                     try:
-                        origin = HopOrigin(source.vendor, source.protocol, model_id)
+                        origin = HopOrigin(source.vendor, source.protocol, model_id, source.id)
                         origin.response_headers()
                     except ServedHopHeaderTooLarge:
                         raise ModelHubError("served_hop_too_large", status=422) from None
@@ -8771,7 +8826,7 @@ class ModelHubService:
                 decision,
                 (),
                 (),
-                HopOrigin(source.vendor, source.protocol, source_model_id) if backend == "vibey" else None,
+                HopOrigin(source.vendor, source.protocol, source_model_id, source.id) if backend == "vibey" else None,
             )
         if decision.action == "fallback" or (
             decision.action == "surface"
@@ -8991,7 +9046,7 @@ class ModelHubService:
             if source is None or target_model is None:
                 raise AssertionError("runnable hop must have an exact identity")
             verification_pending = source.verification_pending
-            origin = HopOrigin(source.vendor, source.protocol, target_model) if backend == "vibey" else None
+            origin = HopOrigin(source.vendor, source.protocol, target_model, source.id) if backend == "vibey" else None
             if source.supply_channel == "native_cli":
                 self._emit_switch(
                     agent=event_agent,
