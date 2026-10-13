@@ -66,6 +66,15 @@ export const hostedActivityFrom = (raw: unknown): HostedActivity | undefined => 
   };
 };
 
+/**
+ * Whether the call finished: the one gate every surface reads. Only a completed
+ * call claims how it ran (its mode, who ran it, how long it took) and what it
+ * produced (counts, sources, images); a cut-off or failed call shows its status
+ * instead. A known cost shows whatever the status: a charge stands whatever
+ * happened after it. The IM line reads the same rule (`HostedActivity.completed`).
+ */
+export const hostedCompleted = (card: HostedActivity): boolean => card.status === 'completed';
+
 /** The media token of a proxy URL (``/api/media/<token>?w=&h=``), which joins a card's image to the answer's. */
 export const mediaToken = (url: string | undefined): string | null => {
   if (!url) return null;

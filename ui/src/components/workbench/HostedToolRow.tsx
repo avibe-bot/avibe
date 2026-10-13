@@ -9,7 +9,7 @@ import clsx from 'clsx';
 
 import { ChatImage } from '../ui/chat-image';
 import { apiKeyVendorPreset } from '../settings/models/apiKeyVendors';
-import type { HostedActivity, HostedActivityImage, HostedToolName } from '../../lib/hostedActivity';
+import { hostedCompleted, type HostedActivity, type HostedActivityImage, type HostedToolName } from '../../lib/hostedActivity';
 
 const TOOL_ICON: Record<HostedToolName, React.ComponentType<{ className?: string }>> = {
   web_search: Globe,
@@ -54,23 +54,20 @@ const useHostedCost = (card: HostedActivity): string | null => {
   return cost.calls > 1 ? t('chat.agentActivity.hosted.cost.calls', { cost: figure, count: cost.calls }) : figure;
 };
 
-/** 「原生 · Anthropic」 or 「由 xAI 代理」, and the failure state when it failed. */
+/** 「原生 · Anthropic」 or 「由 xAI 代理」 once it completed; until then, its status. */
 export const HostedModeChip: React.FC<{ card: HostedActivity }> = ({ card }) => {
   const { t } = useTranslation();
-  if (card.status === 'failed' || card.status === 'incomplete') {
-    return (
-      <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-destructive/40 bg-destructive/10 px-2 py-px text-[11px] font-medium text-destructive-ink">
-        <TriangleAlert className="size-3" aria-hidden="true" />
-        {t(`chat.agentActivity.hosted.status.${card.status}`)}
-      </span>
-    );
-  }
-  if (card.status === 'pending') {
-    // Cut off with its turn: it never finished, so it claims no way of having run.
-    return (
+  if (!hostedCompleted(card)) {
+    // It did not finish, so it claims no way of having run: cut off with its turn, or failed.
+    return card.status === 'pending' ? (
       <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-gold/40 bg-gold/10 px-2 py-px text-[11px] font-medium text-gold-ink">
         <CircleSlash className="size-3" aria-hidden="true" />
         {t('chat.agentActivity.hosted.status.pending')}
+      </span>
+    ) : (
+      <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-destructive/40 bg-destructive/10 px-2 py-px text-[11px] font-medium text-destructive-ink">
+        <TriangleAlert className="size-3" aria-hidden="true" />
+        {t(`chat.agentActivity.hosted.status.${card.status === 'incomplete' ? 'incomplete' : 'failed'}`)}
       </span>
     );
   }
@@ -92,6 +89,7 @@ export const HostedModeChip: React.FC<{ card: HostedActivity }> = ({ card }) => 
 /** What the row counts ("1 image · 1536×1024", "2 posts"), when there is anything to count. */
 const useCountLabel = (card: HostedActivity): string | null => {
   const { t } = useTranslation();
+  if (!hostedCompleted(card)) return null;
   if (card.tool === 'image_generation') {
     if (card.images.length === 0) return null;
     const [first] = card.images;
@@ -142,17 +140,20 @@ export const HostedImageFigure: React.FC<{ card: HostedActivity; image: HostedAc
 const HostedDetail: React.FC<{ card: HostedActivity }> = ({ card }) => {
   const { t } = useTranslation();
   const cost = useHostedCost(card);
-  const where = [card.source_name ?? vendorLabel(card.provider), card.model].filter(Boolean).join(' · ');
+  const completed = hostedCompleted(card);
+  const where = completed ? [card.source_name ?? vendorLabel(card.provider), card.model].filter(Boolean).join(' · ') : '';
   const facts = [
     where && t(card.mode === 'proxy' ? 'chat.agentActivity.hosted.ranProxy' : 'chat.agentActivity.hosted.ranNative', { where }),
-    card.duration_ms !== undefined && t('chat.agentActivity.hosted.duration', { seconds: Math.max(1, Math.round(card.duration_ms / 1000)) }),
+    completed && card.duration_ms !== undefined && t('chat.agentActivity.hosted.duration', { seconds: Math.max(1, Math.round(card.duration_ms / 1000)) }),
     cost,
   ].filter(Boolean);
   return (
     <div className="mx-1.5 mb-1 mt-0.5 flex flex-col overflow-hidden rounded-md border border-border bg-foreground/[0.03]">
       {facts.length > 0 && (
         <div className="flex items-center gap-1.5 border-b border-border px-2.5 py-1.5 text-[11px] text-muted">
-          {card.mode === 'proxy' ? <Waypoints className="size-3 shrink-0 text-cyan-ink" aria-hidden="true" /> : <Check className="size-3 shrink-0 text-mint-ink" aria-hidden="true" />}
+          {completed && (card.mode === 'proxy'
+            ? <Waypoints className="size-3 shrink-0 text-cyan-ink" aria-hidden="true" />
+            : <Check className="size-3 shrink-0 text-mint-ink" aria-hidden="true" />)}
           <span className="min-w-0">{facts.join(' · ')}</span>
         </div>
       )}
@@ -164,7 +165,7 @@ const HostedDetail: React.FC<{ card: HostedActivity }> = ({ card }) => {
           {t('chat.agentActivity.hosted.alsoSearched', { queries: card.extra_queries.join(' · ') })}
         </p>
       )}
-      {card.sources.length > 0 && (
+      {completed && card.sources.length > 0 && (
         <ol className="flex flex-col">
           {card.sources.map((source, index) => (
             <li key={`${source.url}:${index}`} className="flex gap-2.5 border-b border-border px-2.5 py-2 last:border-b-0">
@@ -180,7 +181,7 @@ const HostedDetail: React.FC<{ card: HostedActivity }> = ({ card }) => {
           ))}
         </ol>
       )}
-      {card.images.map((image) => (
+      {completed && card.images.map((image) => (
         <div key={image.path} className="p-2"><HostedImageFigure card={card} image={image} /></div>
       ))}
     </div>
@@ -208,7 +209,7 @@ export const HostedToolRow: React.FC<{ card: HostedActivity }> = ({ card }) => {
           ? <span className="min-w-0 flex-1 truncate"><span className="rounded-md border border-border bg-foreground/[0.03] px-1.5 py-px text-[12px] text-foreground/90" title={card.subject}>{card.subject}</span></span>
           : <span className="min-w-0 flex-1" />}
         <HostedModeChip card={card} />
-        {cost && card.status === 'completed' && <span className="shrink-0 text-[11px] text-muted">{cost}</span>}
+        {cost && <span className="shrink-0 text-[11px] text-muted">{cost}</span>}
         {count && <span className="hidden shrink-0 text-[11px] text-muted sm:inline">{count}</span>}
         <ChevronRight className={clsx('size-3.5 shrink-0 text-muted transition-transform', open && 'rotate-90')} aria-hidden="true" />
       </button>

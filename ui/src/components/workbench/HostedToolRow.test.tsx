@@ -99,11 +99,24 @@ describe('hosted tool cards', () => {
     within(figure).getByText(fixture.native_image.revised_prompt);
   });
 
-  it('shows a call cut off with its turn as cut off, never as having run', () => {
-    renderGroup([{ ...fixture.native_web_search, status: 'pending', cost: undefined }]);
-    const pending = row('srvtoolu_01');
-    within(pending).getByText('Cut off');
-    expect(within(pending).queryByText('Native · Anthropic')).toBeNull();
+  it.each([
+    ['pending', undefined, 'Cut off'],
+    ['failed', 'upstream timeout', 'Failed'],
+    ['incomplete', 'response ended', 'Incomplete'],
+  ] as const)('MH-HOSTED-UI-014 (%s): shows its status and known charge, collapsed or expanded, never how it ran or what it found', (status, error, label) => {
+    renderGroup([{ ...fixture.native_web_search, status, error }]);
+    const card = row('srvtoolu_01');
+    within(card).getByText(label);
+    within(card).getByText('≈ $0.01');
+    expect(within(card).queryByText('Native · Anthropic')).toBeNull();
+    expect(within(card).queryByText('2 sources')).toBeNull();
+
+    // Expanding it must not bring the claims back.
+    fireEvent.click(within(card).getByRole('button'));
+    expect(card.textContent).not.toMatch(/Ran natively|took \d+ s/);
+    expect(within(card).queryByRole('link')).toBeNull();
+    within(card).getAllByText('≈ $0.01');
+    if (error) within(card).getByText(error);
   });
 
   it('keeps the plain tool line for a row whose card this client cannot read', () => {

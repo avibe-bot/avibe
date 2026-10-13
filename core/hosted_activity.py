@@ -76,6 +76,19 @@ class HostedActivity:
     # before that row, as the call happened before the text that reads its result.
     response_id: Optional[str] = None
 
+    @property
+    def completed(self) -> bool:
+        """Whether the call finished: the one gate every surface reads.
+
+        Only a completed call claims how it ran (its mode, who ran it, how long it
+        took) and what it produced (counts, sources, images). A cut-off or failed
+        call shows its status instead. A known cost shows whatever the status:
+        a charge stands whatever happened after it. The Web card reads the same
+        rule from ``hostedCompleted`` (``ui/src/lib/hostedActivity.ts``).
+        """
+
+        return self.status == "completed"
+
     def to_payload(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "version": HOSTED_ACTIVITY_VERSION,
@@ -291,25 +304,22 @@ def _cost(activity: HostedActivity, lang: str) -> Optional[str]:
 def hosted_line(activity: HostedActivity, lang: str, *, escape: Callable[[str], str] = lambda text: text) -> str:
     """The one-line form IM shows per hosted call.
 
-    ``🔎 Web search "query" · native (xAI) · 6 sources · $0.01``. A failed call
-    says why instead of counting results it never had. ``escape`` makes the
-    quoted subject safe for the destination's markup.
+    ``🔎 Web search "query" · native (xAI) · 6 sources · $0.01``. A call that did
+    not complete says why instead of how it ran or what it found, and keeps a
+    known cost (``HostedActivity.completed``). ``escape`` makes the quoted
+    subject safe for the destination's markup.
     """
 
     emoji = "🖼" if activity.tool == "image_generation" else "🔎"
-    parts = [f"{emoji} {i18n_t(f'hostedTools.tool.{activity.tool}', lang)}"]
+    parts: list[Optional[str]] = [f"{emoji} {i18n_t(f'hostedTools.tool.{activity.tool}', lang)}"]
     if activity.subject:
         parts[0] += " " + i18n_t("hostedTools.quoted", lang, subject=escape(_clip(activity.subject)))
-    if activity.status in ("failed", "incomplete"):
+    if activity.completed:
+        vendor = _vendor_label(activity.provider)
+        if vendor:
+            parts.append(i18n_t(f"hostedTools.mode.{activity.mode}", lang, provider=vendor))
+        parts.append(_count(activity, lang))
+    else:
         parts.append(i18n_t(f"hostedTools.status.{activity.status}", lang, error=escape(activity.error or "")))
-        return " · ".join(parts)
-    vendor = _vendor_label(activity.provider)
-    if vendor:
-        parts.append(i18n_t(f"hostedTools.mode.{activity.mode}", lang, provider=vendor))
-    if activity.status == "pending":
-        parts.append(i18n_t("hostedTools.status.pending", lang))
-        return " · ".join(parts)
-    for part in (_count(activity, lang), _cost(activity, lang)):
-        if part:
-            parts.append(part)
-    return " · ".join(parts)
+    parts.append(_cost(activity, lang))
+    return " · ".join(part for part in parts if part)
