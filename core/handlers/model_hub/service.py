@@ -5809,24 +5809,21 @@ class ModelHubService:
                 await self._commit_synced(previous, config)
         return await asyncio.to_thread(self.hosted_tools_status)
 
-    async def _effort_rejected_on(self, source: ModelHubSourceConfig, model_id: str, request: Any) -> bool:
+    def _effort_refused(self, source: ModelHubSourceConfig, model_id: str, request: Any) -> bool:
         """Whether this hop has negative evidence for the effort the request sends.
 
-        Efforts are forwarded unchanged; a hop known to refuse one is skipped,
-        as if it were not a candidate (capability model §3.4).
+        Efforts are forwarded unchanged; a hop known to refuse one is not a
+        candidate for this request (capability model §3.4). Every place that
+        decides on candidates asks this one predicate, so the resolve loop and
+        the recovery loop never disagree. Memory-only and lock-free: the store
+        read its file at startup.
         """
 
         feature = EvidenceFeature.effort_or_none(wire_effort(request, getattr(request, "protocol", "")))
         if feature is None:
             return False
-        # Memory-only and lock-free: the store read its file at startup.
         view = self.capability_evidence.view(
-            source,
-            model_id,
-            feature,
-            engine=self.engine_stamp,
-            shape=HOSTED_PROBE_SHAPE,
-            now=self.now(),
+            source, model_id, feature, engine=self.engine_stamp, shape=HOSTED_PROBE_SHAPE, now=self.now(),
         )
         return view.status == "unsupported"
 
@@ -5835,19 +5832,13 @@ class ModelHubService:
     ) -> bool:
         """Whether a temporarily blocked hop of this route does not refuse the request's effort."""
 
-        feature = EvidenceFeature.effort_or_none(wire_effort(request, getattr(request, "protocol", "")))
-        if feature is None:
-            return False
         resolution = self._invocation_resolution(
             self.store.load(), cast(BackendName, backend), model_id, supply_channel,
         )
         return any(
             hop.source is not None
             and hop.model_id is not None
-            and self.capability_evidence.view(
-                hop.source, hop.model_id, feature, engine=self.engine_stamp, shape=HOSTED_PROBE_SHAPE, now=self.now(),
-            ).status
-            != "unsupported"
+            and not self._effort_refused(hop.source, hop.model_id, request)
             for hop in resolution.self_healing_hops(supply_channel)
         )
 
@@ -9214,7 +9205,7 @@ class ModelHubService:
                     )
                     if reason is not None:
                         raise _InvocationUnsupported(reason)
-                if await self._effort_rejected_on(source, target_model, request):
+                if self._effort_refused(source, target_model, request):
                     effort_rejected_sources.append(source.id)
                     raise _InvocationUnsupported("effort_unsupported")
                 await self._prepare_engine_for_demand(already_synced=engine_prepared)
@@ -9552,7 +9543,15 @@ class ModelHubService:
                     resolution = self._invocation_resolution(
                         config, kwargs["backend"], kwargs["model_id"], supply_channel,
                     )
-                    if resolution.candidate_hops:
+                    request = kwargs.get("request")
+                    if any(
+                        hop.source is not None
+                        and hop.model_id is not None
+                        and not self._effort_refused(hop.source, hop.model_id, request)
+                        for hop in resolution.candidate_hops
+                    ):
+                        # Retry now only for a hop this request may use: a hop
+                        # that refuses its effort would spin the loop.
                         continue
                     # An action already owed elsewhere in the chain keeps it
                     # `interrupted` for display, but must not end this request

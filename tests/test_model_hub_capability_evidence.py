@@ -76,6 +76,7 @@ RESOLUTION = [
     ("engine-upgrade-effort-negative-still-applies", ULTRA, {"status": "unsupported"}, "model-hub-engine-v9", 1, 0 * DAYS, "unsupported", "wire"),
     ("observed-negative-within-ttl", ULTRA, {"status": "unsupported", "basis": "observed", "detail": "400 invalid_value"}, "model-hub-engine-v9", 1, 6 * DAYS, "unsupported", None),
     ("observed-negative-expires", CALL, {"status": "unsupported", "basis": "observed", "detail": "400 invalid_request_error"}, ENGINE, 1, 8 * DAYS, "unknown", None),
+    ("unknown-engine-never-vouches", CALL, {"engine": "unknown-engine"}, "unknown-engine", 1, 0 * DAYS, "unknown", "wire"),
 ]
 
 

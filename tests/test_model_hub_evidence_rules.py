@@ -306,9 +306,64 @@ async def test_no_request_path_reads_a_bundled_file_after_startup(tmp_path, monk
         rejection=UpstreamRejection(status=400, unsupported_tool_type="web_search"),
     )
     config = service.store.load()
-    assert await service._effort_rejected_on(source, "shared-model", request) is False
+    assert service._effort_refused(source, "shared-model", request) is False
     await service._learn_capability_evidence(source, "shared-model", request, rejected)
     service.hosted_tools_for_hop(config, source, "shared-model")
     service.agent_chain("codex", model)
     service.list_sources()
     assert reads == []
+
+
+@pytest.mark.asyncio
+async def test_a_refusing_runnable_hop_never_makes_recovery_spin(tmp_path):
+    """MH-HOSTED-006: recovery waits for the capable cooling hop instead of re-resolving around the refusing one."""
+    from datetime import timedelta as delta
+
+    from core.handlers.model_hub.adapter import RawOutcomeKind
+    from core.handlers.model_hub.capability_evidence import EvidenceRecord, identity_digest
+    from core.handlers.model_hub.hosted_tools import HOSTED_PROBE_SHAPE
+    from tests.test_model_hub_l3 import NOW, _canonicalize_fixed_test_routes, _outcome
+    from tests.test_model_hub_retry_policy import clock_service
+
+    refusing = _source("src_refuses02", "Refuses ultra")
+    cooling = _source("src_cooling02", "Cooling", status="cooldown", retry_at=(NOW + delta(seconds=30)).isoformat())
+    service, clock = clock_service(
+        tmp_path,
+        sources=[refusing, cooling],
+        outcomes=[_outcome(RawOutcomeKind.SUCCESS, status=200, source_id=cooling.id)],
+    )
+    model = _canonicalize_fixed_test_routes(service)["codex"]
+    service.capability_evidence.write(
+        EvidenceRecord(
+            source_id=refusing.id,
+            model_id="shared-model",
+            feature=EvidenceFeature.effort("ultra"),
+            status="unsupported",
+            basis="observed",
+            observed_at=service.now(),
+            engine=service.engine_stamp,
+            shape=HOSTED_PROBE_SHAPE,
+            source_identity=identity_digest(refusing),
+            detail="400 invalid_request_error",
+        ),
+        live=[refusing, cooling],
+    )
+    passes = 0
+    resolve = service.resolve
+
+    async def counted(**kwargs):
+        nonlocal passes
+        passes += 1
+        assert passes <= 5, "recovery re-resolved without waiting"
+        return await resolve(**kwargs)
+
+    service.resolve = counted
+    served = await service.resolve_with_recovery(
+        backend="codex",
+        model_id=model,
+        request=ModelHubRequest({"input": "hi", "reasoning": {"effort": "ultra"}}, protocol="openai_responses"),
+    )
+
+    assert served.source_id == cooling.id
+    assert clock.delays and all(delay > 0 for delay in clock.delays)
+    assert [invocation[0] for invocation in service.adapter.invocations] == [cooling.id]

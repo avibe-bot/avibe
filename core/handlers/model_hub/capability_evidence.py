@@ -37,6 +37,9 @@ MAX_RECORDS = 4000
 OBSERVED_TTL_SECONDS = 7 * 24 * 3600
 PROBE_REVERIFY_AFTER_SECONDS = 30 * 24 * 3600
 DETAIL_MAX_CHARS = 64
+# The engine stamp when the engine manifest cannot be read. It names no release,
+# so probe evidence taken under it, or checked against it, never vouches for a wire.
+UNKNOWN_ENGINE_STAMP = "unknown-engine"
 
 FeatureKind = Literal["effort", "hosted_tool"]
 EvidenceStatus = Literal["verified", "unsupported"]
@@ -210,7 +213,11 @@ def resolve(
     if record.basis == "observed":
         # Relays change; an expired negative record falls back to the priors.
         return UNKNOWN if age > OBSERVED_TTL_SECONDS else EvidenceView("unsupported", None, record)
-    wire_stale = record.engine != engine or record.shape != shape
+    wire_stale = (
+        record.engine != engine
+        or record.shape != shape
+        or UNKNOWN_ENGINE_STAMP in (record.engine, engine)
+    )
     stale: Optional[Staleness] = "wire" if wire_stale else "age" if age > PROBE_REVERIFY_AFTER_SECONDS else None
     if record.feature.kind == "hosted_tool" and wire_stale:
         # Evidence taken on another wire cannot vouch for this one, and a silent

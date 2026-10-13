@@ -26,7 +26,7 @@ from typing import Any, Callable, Mapping, Optional
 from config.v2_config import MODEL_HUB_HOSTED_TOOLS, ModelHubConfig, ModelHubHostedToolConfig, ModelHubSourceConfig
 from vibe.backend_model_catalog import HostedToolSpec
 
-from .capability_evidence import HOSTED_TOOL_ASPECTS, CapabilityEvidenceStore, EvidenceFeature
+from .capability_evidence import HOSTED_TOOL_ASPECTS, UNKNOWN_ENGINE_STAMP, CapabilityEvidenceStore, EvidenceFeature
 
 # The request shape a hosted-tool probe sends. Changing the probe or the native
 # request it mirrors bumps this, which makes earlier probe evidence wire-stale.
@@ -63,9 +63,6 @@ def _manifest_engine_stamp(path: Optional[str]) -> str:
     if not isinstance(stamp, str) or not stamp:
         raise ValueError("the engine manifest names no release")
     return stamp
-
-
-UNKNOWN_ENGINE_STAMP = "unknown-engine"
 
 
 def engine_stamp() -> str:
