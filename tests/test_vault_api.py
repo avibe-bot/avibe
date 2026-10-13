@@ -4321,3 +4321,115 @@ def test_vault_sign_rejects_malformed_digest_before_request_or_avault(monkeypatc
     assert exc.value.code == "invalid_digest"
     sign.assert_not_called()
     assert api.get_vault_requests()["requests"] == []
+
+
+def test_create_vault_secret_seals_each_standard_record_name(monkeypatch):
+    seal = Mock(side_effect=[_sealed("default"), _sealed("username"), _sealed("totp")])
+    monkeypatch.setattr(api, "avault_seal_blind_box", seal)
+
+    result = api.create_vault_secret(
+        {
+            "name": "LOGIN",
+            "default_field": "password",
+            "blind_box": _agent_dek_blindbox("default", "default"),
+            "fields": [
+                {"name": "username", "blind_box": _agent_dek_blindbox("username", "username")},
+                {"name": "totp", "blind_box": _agent_dek_blindbox("totp", "totp")},
+            ],
+        }
+    )
+
+    assert result["secret"]["default_field"] == "password"
+    assert result["secret"]["fields"] == ["password", "username", "totp"]
+    assert [call.args[0] for call in seal.call_args_list] == ["LOGIN", "LOGIN.username", "LOGIN.totp"]
+    with api._vault_engine().connect() as conn:
+        assert vault_service.get_envelope(conn, "LOGIN.username") == _sealed("username")
+        assert vault_service.get_envelope(conn, "LOGIN.totp") == _sealed("totp")
+
+
+def test_vault_field_update_and_default_rename_are_value_free(monkeypatch):
+    seal = Mock(side_effect=[_sealed("default"), _sealed("username")])
+    monkeypatch.setattr(api, "avault_seal_blind_box", seal)
+    api.create_vault_secret(
+        {
+            "name": "LOGIN",
+            "blind_box": _agent_dek_blindbox("default", "default"),
+        }
+    )
+    updated = api.update_vault_secret_field(
+        "LOGIN",
+        "username",
+        {"blind_box": _agent_dek_blindbox("username", "username")},
+    )
+
+    assert updated["secret"]["fields"] == ["value", "username"]
+    assert [call.args[0] for call in seal.call_args_list] == ["LOGIN", "LOGIN.username"]
+    renamed = api.update_vault_secret("LOGIN", {"default_field": "password"})
+    assert renamed["secret"]["default_field"] == "password"
+    assert renamed["secret"]["fields"] == ["password", "username"]
+
+    with pytest.raises(api.VaultApiError) as exc:
+        api.update_vault_secret_field(
+            "LOGIN",
+            "totp",
+            {
+                "blind_box": _agent_dek_blindbox("totp", "totp"),
+                "value": "plaintext",
+            },
+        )
+    assert exc.value.code == "plaintext_value_rejected"
+    assert [call.args[0] for call in seal.call_args_list] == ["LOGIN", "LOGIN.username"]
+
+
+def test_protected_reveal_context_uses_field_record_name(monkeypatch):
+    api.create_vault_secret(
+        {
+            "name": "PROTECTED_LOGIN",
+            "protection": "protected",
+            "default_field": "password",
+            "sealed": {"ciphertext": "ct-password", "nonce": "n-password", "wrap_meta": "wm-password"},
+            "fields": [
+                {
+                    "name": "username",
+                    "sealed": {"ciphertext": "ct-username", "nonce": "n-username", "wrap_meta": "wm-username"},
+                }
+            ],
+        }
+    )
+
+    result = api.create_vault_reveal_context("PROTECTED_LOGIN", {"field": "username"})
+    context = _verified_signed_context(result["context"])
+
+    assert result["envelope"] == {
+        "ciphertext": "ct-username",
+        "nonce": "n-username",
+        "wrap_meta": "wm-username",
+    }
+    assert context["release"]["name"] == "PROTECTED_LOGIN.username"
+    assert context["display"]["secrets"] == [{"name": "PROTECTED_LOGIN.username", "kind": "static"}]
+
+
+def test_protected_agent_binding_batch_expands_record_names(monkeypatch):
+    monkeypatch.setattr(api, "_require_avault_grant_delivery_surface", lambda _feature: None)
+    monkeypatch.setattr(api, "avault_agent_pubkey", Mock(return_value=TEST_AGENT_PUBKEY))
+    api.create_vault_secret(
+        {
+            "name": "PROTECTED_LOGIN",
+            "protection": "protected",
+            "default_field": "password",
+            "sealed": {"ciphertext": "ct-password", "nonce": "n-password", "wrap_meta": "wm-password"},
+            "fields": [
+                {
+                    "name": "username",
+                    "sealed": {"ciphertext": "ct-username", "nonce": "n-username", "wrap_meta": "wm-username"},
+                }
+            ],
+        }
+    )
+    requested = api.request_vault_access({"name": "PROTECTED_LOGIN", "session_id": "ses_1"})
+
+    result = api.create_vault_agent_bindings_batch({"request_id": requested["request"]["id"], "grant_duration": 300})
+
+    assert [item["name"] for item in result["items"]] == ["PROTECTED_LOGIN", "PROTECTED_LOGIN.username"]
+    display_names = [item["name"] for item in _verified_signed_context(result["items"][0]["context"])["display"]["secrets"]]
+    assert display_names == ["PROTECTED_LOGIN", "PROTECTED_LOGIN.username"]

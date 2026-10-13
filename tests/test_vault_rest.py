@@ -550,3 +550,58 @@ def test_rest_sign_errors_are_stable(monkeypatch):
     )
     assert not_key.status_code == 409
     assert not_key.get_json()["code"] == "not_signing_key"
+
+
+def test_rest_field_put_delete_routes_use_canonical_record_name(monkeypatch):
+    seal = Mock(side_effect=[_sealed("default"), _sealed("username")])
+    monkeypatch.setattr(api, "avault_seal_blind_box", seal)
+    api.create_vault_secret(
+        {
+            "name": "REST_LOGIN",
+            "blind_box": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "default"},
+        }
+    )
+    client = app.test_client()
+    headers = csrf_headers(client)
+
+    put = client.put(
+        "/api/vault/secrets/REST_LOGIN/fields/username",
+        json={"blind_box": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "username"}},
+        headers=headers,
+    )
+    assert put.status_code == 200
+    assert put.get_json()["secret"]["fields"] == ["value", "username"]
+    assert seal.call_args_list[1].args[0] == "REST_LOGIN.username"
+
+    removed = client.delete("/api/vault/secrets/REST_LOGIN/fields/username", headers=headers)
+    assert removed.status_code == 200
+    assert removed.get_json()["secret"]["fields"] == ["value"]
+
+
+def test_rest_field_routes_reject_plaintext_and_default_delete(monkeypatch):
+    seal = Mock(return_value=_sealed())
+    monkeypatch.setattr(api, "avault_seal_blind_box", seal)
+    api.create_vault_secret(
+        {
+            "name": "REST_LOGIN",
+            "blind_box": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "default"},
+        }
+    )
+    client = app.test_client()
+    headers = csrf_headers(client)
+
+    rejected = client.put(
+        "/api/vault/secrets/REST_LOGIN/fields/password",
+        json={
+            "blind_box": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "password"},
+            "nested": {"value": "plaintext"},
+        },
+        headers=headers,
+    )
+    assert rejected.status_code == 400
+    assert rejected.get_json()["code"] == "plaintext_value_rejected"
+    seal.assert_called_once()
+
+    default_delete = client.delete("/api/vault/secrets/REST_LOGIN/fields/value", headers=headers)
+    assert default_delete.status_code == 409
+    assert default_delete.get_json()["code"] == "invalid_request"
