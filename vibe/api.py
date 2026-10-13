@@ -139,6 +139,7 @@ from core.process_isolation import (
     KILL_SIGNAL,
     PROCESS_IDENTITY_ENV,
     capture_spawned_process_identity,
+    fingerprint_process_marker,
     isolated_subprocess_kwargs,
     new_process_identity_marker,
     reap_marked_processes,
@@ -10570,11 +10571,17 @@ def _graceful_stop_claude_auth_status(process: subprocess.Popen[str]) -> None:
 def _force_stop_claude_auth_status(
     process: subprocess.Popen[str],
     identity: Any | None,
+    worker_fingerprint: str,
 ) -> bool:
     """Stop the entire verified status process tree, then report its state."""
 
     tree_stopped = False
-    if identity is not None and isinstance(getattr(process, "pid", None), int):
+    if identity is None:
+        try:
+            signal_process_tree(process, KILL_SIGNAL, logger, _CLAUDE_AUTH_STATUS_LABEL)
+        except (OSError, RuntimeError):
+            logger.debug("Failed to force-stop %s", _CLAUDE_AUTH_STATUS_LABEL, exc_info=True)
+    elif isinstance(getattr(process, "pid", None), int):
         try:
             tree_stopped = terminate_process_tree_by_pid(
                 process.pid,
@@ -10585,21 +10592,29 @@ def _force_stop_claude_auth_status(
             )
         except (OSError, RuntimeError):
             logger.debug("Failed to terminate the verified %s tree", _CLAUDE_AUTH_STATUS_LABEL, exc_info=True)
-        marker_fingerprint = getattr(identity, "worker_fingerprint", None)
-        if isinstance(marker_fingerprint, str):
+    try:
+        marker_result = reap_marked_processes(
+            logger,
+            _CLAUDE_AUTH_STATUS_LABEL,
+            worker_fingerprint=worker_fingerprint,
+            terminate_timeout=_CLAUDE_AUTH_STATUS_TERMINATION_GRACE_SECONDS,
+        )
+        if marker_result == "reaped":
+            return tree_stopped or identity is None
+        # A marker owner that cannot yet be confirmed is still a credential
+        # owner. Keep retrying until the caller can safely release its lease.
+        while marker_result == "unconfirmed":
+            time.sleep(0.1)
             marker_result = reap_marked_processes(
                 logger,
                 _CLAUDE_AUTH_STATUS_LABEL,
-                worker_fingerprint=marker_fingerprint,
+                worker_fingerprint=worker_fingerprint,
                 terminate_timeout=_CLAUDE_AUTH_STATUS_TERMINATION_GRACE_SECONDS,
             )
-            tree_stopped = tree_stopped and marker_result != "unconfirmed"
-        return tree_stopped
-    try:
-        signal_process_tree(process, KILL_SIGNAL, logger, _CLAUDE_AUTH_STATUS_LABEL)
+        return tree_stopped or identity is None
     except (OSError, RuntimeError):
-        logger.debug("Failed to force-stop %s", _CLAUDE_AUTH_STATUS_LABEL, exc_info=True)
-    return process.poll() is not None
+        logger.debug("Failed to reap the marked %s tree", _CLAUDE_AUTH_STATUS_LABEL, exc_info=True)
+        return False
 
 
 def _close_claude_auth_status_pipes(process: subprocess.Popen[str]) -> None:
@@ -10649,6 +10664,7 @@ def _run_claude_auth_status(
     """
 
     marker = new_process_identity_marker()
+    worker_fingerprint = fingerprint_process_marker(marker)
     spawn_env = dict(env) if env is not None else dict(os.environ)
     spawn_env[PROCESS_IDENTITY_ENV] = marker
     process: subprocess.Popen[str] | None = None
@@ -10690,7 +10706,7 @@ def _run_claude_auth_status(
                         _CLAUDE_AUTH_STATUS_LABEL,
                     )
                     termination_requested = True
-                    _force_stop_claude_auth_status(process, identity)
+                    _force_stop_claude_auth_status(process, identity, worker_fingerprint)
                     if not _reap_claude_auth_status_after_force(process):
                         return None
                     return None
@@ -10702,7 +10718,7 @@ def _run_claude_auth_status(
     finally:
         if process is not None and process.poll() is None:
             termination_requested = True
-            _force_stop_claude_auth_status(process, identity)
+            _force_stop_claude_auth_status(process, identity, worker_fingerprint)
             _reap_claude_auth_status_after_force(process)
 
 
@@ -11707,7 +11723,10 @@ def get_claude_auth(
         # fall back to file-only state (which is false on Keychain installs) and
         # report a false logout while its cleanup is releasing the lease.
         raise NativeMigrationBlockedError("native_auth_in_progress", ("claude",))
+    status_probe_uncertain = lease_blocked
     if connection_observation:
+        if status_probe_uncertain:
+            return {"ok": True, "auth_mode_uncertain": True}
         if cli_oauth_signed_in is not None:
             return {"ok": True, "active_auth_mode": "oauth" if cli_oauth_signed_in else "none"}
         from vibe.native_oauth_store import read_native_oauth
@@ -11789,6 +11808,7 @@ def get_claude_auth(
         ),
         "settings_env_base_url": disk_state.get("settings_env_base_url"),
         "settings_conflict": settings_conflict,
+        "auth_mode_uncertain": bool(disk_state.get("auth_mode_uncertain") or status_probe_uncertain),
     }
 
 
