@@ -5458,17 +5458,23 @@ def test_fsm_drop_overrides_a_completed_gateway_attempt(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    "error_kind,recorded",
+    "error_kind,recorded,diagnostic,expected_detail",
     [
         # A backend with no typed kind (Claude, Codex, OpenCode) reports its failure neutrally.
-        (None, {}),
-        ("stalled", {"error_kind": "stalled"}),
+        (None, {}, "API Error: 上游连接已关闭\x07 api_key=sk-proj-detail0secret0value",
+         "API Error: 上游连接已关闭 api_key=[redacted]"),
+        ("stalled", {"error_kind": "stalled"}, "provider sent no data for 600s", "provider sent no data for 600s"),
         # Only a kind's shape is ever kept: text in the kind field is dropped, never persisted.
-        ("Authorization: Bearer sk-proj-kind0secret0value", {}),
+        ("Authorization: Bearer sk-proj-kind0secret0value", {}, "", None),
+        # Newly retained native diagnostics must not disclose transport credentials.
+        (None, {}, "connection failed to https://alice:dummy-password@example.invalid/v1",
+         "connection failed to https://example.invalid/v1"),
+        (None, {}, "Authorization: Basic ZHVtbXk6ZHVtbXk=", "Authorization: Basic [redacted]"),
+        (None, {}, "request failed: eyJkdW1teSI6MX0.eyJkdW1teSI6MX0.ZHVtbXk", "request failed: [redacted]"),
     ],
 )
 def test_backend_terminal_failure_overrides_gateway_success(
-    tmp_path: Path, error_kind: str | None, recorded: dict
+    tmp_path: Path, error_kind: str | None, recorded: dict, diagnostic: str, expected_detail: str | None
 ) -> None:
     store = BoundedProvenanceStore(tmp_path / "backend-terminal.json")
     registry = TurnCorrelationRegistry(store)
@@ -5486,7 +5492,7 @@ def test_backend_terminal_failure_overrides_gateway_success(
     registry.fail_hub_attempt(
         "turn_backend_terminal",
         error_kind=error_kind,
-        diagnostic="API Error: 上游连接已关闭\x07 api_key=sk-proj-detail0secret0value",
+        diagnostic=diagnostic,
     )
     registry.settle(
         "turn_backend_terminal",
@@ -5506,7 +5512,7 @@ def test_backend_terminal_failure_overrides_gateway_success(
         "reason": "backend_error",
         "stream_started": None,
         **recorded,
-        "backend_error_detail": "API Error: 上游连接已关闭 api_key=[redacted]",
+        **({"backend_error_detail": expected_detail} if expected_detail else {}),
     }
     _assert_valid("turn-provenance.schema.json", record)
 

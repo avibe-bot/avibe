@@ -47,3 +47,38 @@ redaction. Add UI consumption coverage distinguishing backend diagnostics from
 upstream API facts; run focused tests, changed-file Ruff, UI build, exact-head
 Codex review and full CI. No production-state writes, deployment, release,
 service restart, or merge is authorized.
+
+## Implementation and owner verification
+
+- The main regression and the updated late-success/correlation expectations
+  fail on the base implementation for the intended reason; the main regression
+  uses the real shared bridge, not a mock of its classification.
+- The implementation preserves an existing concrete gateway terminal only when
+  no pending request supersedes it. It freezes that terminal before the late
+  success can replace it. The regression covers both branches and mutation of
+  the freeze.
+- Owner review found the old upstream-text redactor insufficient for newly
+  retained native diagnostics: credentialed URLs, Basic authentication, and
+  JWT-shaped tokens survived. Reuse `redact_provider_text` on backend diagnostics
+  before the shared display sanitizer. Three consuming cases fail without this
+  step and all pass with it. The existing upstream message path is unchanged.
+- The stall label describes the observation (a model request timed out waiting
+  for data), not an unproved claim about which remote component stopped.
+- Focused owner verification includes the Vibey-to-provenance regression,
+  gateway terminal preservation and native diagnostics, released-record reads,
+  all of `test_model_hub_provenance.py`, late-success/Stop tests, 32 UI tests,
+  Model Hub authority closure, changed-file Ruff, and `npm run build`.
+- Scenario: `MH-TURN-RESULT-001`. Repository-wide CI and exact-head Codex review
+  remain the asynchronous delivery gates. No live provider/Incus regression was
+  run; this change introduces no model request or retry behavior.
+
+## Known-by-design
+
+- Records remain generation 11 as with earlier additive diagnostic additions;
+  old records are not rewritten. Downgrading to an older UI may show an unknown
+  label for a new backend-error record, without making stored data unreadable.
+- Only Vibey currently supplies a typed kind, from `NAMED_ERROR_KINDS`; generic
+  native callbacks retain no guessed kind. The shared identifier-shape check is
+  not a classifier or authority for future backend kind vocabularies.
+- The 600-second silence bound, gateway idle recovery, Source health and routing,
+  and the separate raw warning-log format are outside this change.

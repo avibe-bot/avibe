@@ -214,7 +214,7 @@ describe('failed-turn upstream details', () => {
   });
 
   it.each([
-    ['stalled', '模型服务商停止返回数据'],
+    ['stalled', '模型请求等待数据超时'],
     ['ProviderProtocolViolation', 'ProviderProtocolViolation'],
   ])('shows a backend-reported %s failure as the backend\'s diagnostic, never an upstream answer', async (kind, shown) => {
     vi.spyOn(modelsApi, 'getTurnProvenance').mockResolvedValue({

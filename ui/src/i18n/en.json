@@ -1328,7 +1328,7 @@
           "backend_error": "Agent backend reported a failure"
         },
         "errorKind": {
-          "stalled": "The model provider stopped sending data"
+          "stalled": "The model request timed out waiting for data"
         },
         "origin": {
           "automatic": "Automatic",

@@ -84,7 +84,7 @@ describe('recorded turn error', () => {
     vi.spyOn(modelsApi, 'getAgentProvenance').mockResolvedValue(reported);
     render(view());
     expect(await screen.findByText('Latest recorded turn · Agent backend reported a failure')).toBeTruthy();
-    expect(screen.getByText('The model provider stopped sending data')).toBeTruthy();
+    expect(screen.getByText('The model request timed out waiting for data')).toBeTruthy();
     expect(screen.queryByText(/Protocol error|model not found/)).toBeNull();
     await user.click(screen.getByRole('button', { name: 'View error details' }));
     expect(screen.getByRole('dialog').querySelector('pre')?.textContent).toBe(JSON.stringify(reported, null, 2));

@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Literal, Mapping, Optional
 
+from core.agent_core.ai.errors import redact_provider_text
 from config.v2_config import MODEL_HUB_BACKENDS, ModelHubConfig
 from modules.agents.catalog import display_name_for_backend
 from core.os_errors import format_os_errno
@@ -2289,7 +2290,10 @@ class TurnCorrelationRegistry:
         normalized = str(turn_id or "").strip()
         if not normalized:
             return
-        detail = bounded_diagnostic_detail(diagnostic or "")
+        # Native backends may include credentialed URLs or Basic auth in their
+        # transport diagnostic. Redact those before the shared display bound;
+        # redacting only upstream-style labeled keys is insufficient here.
+        detail = bounded_diagnostic_detail(redact_provider_text(diagnostic or ""))
         with self._lock:
             trace = self._traces.get(normalized)
             if trace is None or trace.outcome_frozen:

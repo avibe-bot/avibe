@@ -184,7 +184,7 @@
         "error_kind": {
           "type": "string",
           "pattern": "^[A-Za-z][A-Za-z0-9_]{0,63}$",
-          "description": "Optional backend_error fact: the reporting backend's typed failure kind from its closed vocabulary (Vibey: its named AgentError kinds, for example stalled). Never free text, an exception name, or an upstream code. Absent when the backend has no typed kind and in historical records."
+          "description": "Optional backend_error fact: the reporting backend's typed failure kind from its closed vocabulary (Vibey: its named AgentError kinds, for example stalled). Never free text, an unexpected exception class, or an upstream code. Absent when the backend has no typed kind and in historical records."
         },
         "backend_error_detail": {
           "type": "string",

@@ -1256,15 +1256,15 @@ async def test_a_run_failure_is_reported_to_model_hub_like_the_other_backends(en
 
 
 async def test_model_hub_records_a_source_stall_as_the_backend_reported_it(engine, session, tmp_path, published) -> None:
-    """The Turn's Model Hub record holds what Vibey observed, through the shared failure bridge: the stall's kind and
-    its sanitized diagnostic, never a guessed protocol error, and no claim about when the failing request streamed."""
+    """MH-TURN-RESULT-001: the Turn's Model Hub record holds what Vibey observed through the shared failure bridge:
+    the stall's kind and sanitized diagnostic, never a guessed protocol error or failing-request output phase."""
     from core.agent_core.ai.provider import ProviderError
     from core.handlers.model_hub.provenance import BoundedProvenanceStore, TurnCorrelationRegistry
     from core.run_settlement import SETTLED_BY_TERMINAL_RESULT
     from modules.agents.model_hub import ModelHubRuntimeRouter
     from tests.test_model_hub_l3 import _assert_valid
 
-    stall = ProviderError("stalled", "provider sent no data for 600s\n‮上游 key=sk-proj-stall0secret0value", False)
+    stall = ProviderError("stalled", "provider sent no data for 600s\n\u202e上游 key=sk-proj-stall0secret0value", False)
     harness = _Harness(engine, tmp_path, "telegram", [[stall]])
     registry = TurnCorrelationRegistry(BoundedProvenanceStore(tmp_path / "provenance.json"))
     router = ModelHubRuntimeRouter(

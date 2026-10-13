@@ -1594,6 +1594,10 @@ scenarios:
     kind: turn_lifecycle
     layer: scenario
     test: tests/scenarios/model_hub/test_model_hub_turn_contract_scenarios.py::test_mh_turn_outcomes_and_cancel_are_closed_provenance_products
+    related_tests:
+      - tests/test_vibey_agent.py::test_model_hub_records_a_source_stall_as_the_backend_reported_it
+      - tests/test_model_hub_l3.py::test_backend_failure_keeps_the_gateway_terminal_error_no_later_request_superseded
+      - tests/test_model_hub_l3.py::test_backend_terminal_failure_overrides_gateway_success
   - id: MH-TURN-COPY-001
     name: Every turn decision resolves to its authoritative backend copy key or silence
     status: covered
