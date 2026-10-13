@@ -2,7 +2,7 @@
 name: use-avibe-vault
 slug: use-avibe-vault
 description: Use Avibe Vault for API keys, tokens, passwords, protected credentials, authenticated HTTP requests, or digest signing without exposing secret values to the agent.
-version: 0.2.0
+version: 0.3.0
 ---
 
 # Use Avibe Vault
@@ -11,12 +11,13 @@ When a task needs API keys, access tokens, passwords, wallet private keys, or ot
 
 Core concepts:
 - Static secret: a regular secret value, such as an API key, token, database password, or deployment credential. Use it with `vibe vault run` for environment injection or `vibe vault fetch` for authenticated HTTP egress.
+- A static secret may contain several named fields. The default field is delivered under the bare secret record name; extra fields use record refs such as `GITHUB_LOGIN.username`. A default field can also be referenced explicitly as `GITHUB_LOGIN.password` after it is renamed. Field names are lowercase and extra fields are immutable labels.
 - Keypair secret: a signing key for digests or transactions, such as a wallet key or deployment signer. It cannot be exported as an environment variable and cannot be used with `run` / `fetch`; use `vibe vault sign`.
 - Standard: for lower-risk routine automation. Agents can usually use it without interrupting the user unless it is configured to ask first.
 - Protected: for high-risk secrets, such as production databases or wallet/funds keys. Because protected secrets are end-to-end encrypted, use requires browser approval and passkey unlock.
 
 Rules:
-- Refer to secrets only by secret name, tag, or skill tag.
+- Refer to secrets only by secret name, record ref (`NAME.field`), tag, or skill tag.
 - Static secrets can be used with `run` / `fetch`; keypair secrets can only be used with `vibe vault sign`.
 - With `vibe vault run`, the child process receives static secrets as environment variables, so never run commands that may print env vars, debug config, or secret-bearing errors.
 - When protected `run` / `fetch` needs approval, Avibe automatically asks the user to decrypt and authorize access. After the user approves, Avibe resumes this session; it does not replay the command for you, so run the same `run` / `fetch` command again.
@@ -40,15 +41,16 @@ List or find existing Vault entries:
 
 Run a command with selected static secrets injected as environment variables:
 `vibe vault run --env OPENAI_API_KEY,GITHUB_TOKEN -- python script.py`
-`vibe vault run --env GITHUB_TOKEN=GH_PAT --env OPENAI_API_KEY -- python script.py`
+`vibe vault run --env GITHUB_LOGIN.username -- python script.py`
+`vibe vault run --env PASSWORD=GITHUB_LOGIN.password -- python script.py`
 `vibe vault run --tag deploy -- ./deploy.sh`
 `vibe vault run --skill github-release -- ./release.sh`
 
 Make an authenticated HTTP request. The credential is attached only at egress, and the agent never sees the secret:
-`vibe vault fetch --auth GITHUB_PAT --url https://api.github.com/user`
+`vibe vault fetch --auth GITHUB_LOGIN.password --url https://api.github.com/user`
 
 Request approval before a protected `run` with an existing static secret:
-`vibe vault access PROD_DB_URL --skill deploy --command "run database migration" --egress "connect to production database"`
+`vibe vault access PROD_DB_URL.password --skill deploy --command "run database migration" --egress "connect to production database"`
 
 For protected `fetch`, run `vibe vault fetch`; it creates the correct fetch approval request when needed.
 

@@ -8330,7 +8330,7 @@ def _parse_env_specs_parts(specs) -> tuple[dict[str, str], list[str]]:
     comma-separated ``A,B`` within one flag.
     """
     mapping: dict[str, str] = {}
-    env_by_secret: dict[str, str] = {}
+    env_by_record: dict[str, str] = {}
     normalized: list[str] = []
     for spec in specs or []:
         for part in str(spec).split(","):
@@ -8342,6 +8342,9 @@ def _parse_env_specs_parts(specs) -> tuple[dict[str, str], list[str]]:
                 local, vault_name = local.strip(), vault_name.strip()
             else:
                 local = vault_name = part
+                if "." in vault_name:
+                    base, _, field = vault_name.partition(".")
+                    local = f"{base}_{field}".upper()
             if not local or not vault_name:
                 raise TaskCliError(f"invalid --env spec: {part!r}", code="invalid_env_spec", help_command="vibe vault run --help")
             # The local (LHS) becomes an env var name / is interpolated into `export`
@@ -8356,7 +8359,7 @@ def _parse_env_specs_parts(specs) -> tuple[dict[str, str], list[str]]:
                     code="conflicting_env_alias",
                     help_command="vibe vault run --help",
                 )
-            existing_env = env_by_secret.get(vault_name)
+            existing_env = env_by_record.get(vault_name)
             if existing_env is not None and existing_env != local:
                 raise TaskCliError(
                     f"secret '{vault_name}' was selected as both {existing_env!r} and {local!r}",
@@ -8367,7 +8370,7 @@ def _parse_env_specs_parts(specs) -> tuple[dict[str, str], list[str]]:
             if existing == vault_name:
                 continue
             mapping[local] = vault_name
-            env_by_secret[vault_name] = local
+            env_by_record[vault_name] = local
             normalized.append(vault_name if local == vault_name else f"{local}={vault_name}")
     return mapping, normalized
 
@@ -8376,6 +8379,13 @@ def _parse_env_specs(specs) -> dict:
     return _parse_env_specs_parts(specs)[0]
 
 
+def _record_secret_name(record: str) -> str:
+    return str(record).split(".", 1)[0]
+
+
+def _record_field_name(record: str) -> str | None:
+    parts = str(record).split(".", 1)
+    return parts[1] if len(parts) == 2 else None
 def _arg_list(args, name: str) -> list[str]:
     value = getattr(args, name, None)
     if value is None:
@@ -8903,17 +8913,19 @@ def cmd_vault_access(args):
 
     help_command = "vibe vault access --help"
     name = getattr(args, "name", "")
+    secret_name = _record_secret_name(name)
     try:
-        if not vault_crypto.is_valid_secret_name(name):
-            raise TaskCliError(f"invalid secret name: {name!r} (use ^[A-Za-z_][A-Za-z0-9_]*$)", code="invalid_name", help_command=help_command)
+        if not vault_crypto.is_valid_secret_name(secret_name):
+            raise TaskCliError(f"invalid secret reference: {name!r}", code="invalid_name", help_command=help_command)
         engine = _open_vault_engine()
         with engine.begin() as conn:
-            vault_service.get_secret_meta(conn, name)
+            vault_service.get_secret_field_envelope(conn, name)
+            vault_service.get_secret_meta(conn, secret_name)
             request = vault_service.create_access_request(
                 conn,
-                name,
+                secret_name,
                 requester=_vault_cli_requester(args),
-                delivery=_vault_cli_delivery(args, mode="access"),
+                delivery={**_vault_cli_delivery(args, mode="access"), "record": name},
             )
         _publish_cli_vaults_updated(scope="request", request=request)
         _print_cli_payload(
@@ -8925,6 +8937,12 @@ def cmd_vault_access(args):
         return 0
     except vault_service.SecretNotFoundError:
         _print_task_error(TaskCliError(f"secret '{name}' not found", code="secret_not_found", help_command=help_command))
+        return 1
+    except vault_service.FieldNotFoundError as exc:
+        _print_task_error(TaskCliError(str(exc), code="field_not_found", help_command=help_command))
+        return 1
+    except vault_service.FieldsNotSupportedError as exc:
+        _print_task_error(TaskCliError(str(exc), code="fields_not_supported", help_command=help_command))
         return 1
     except vault_service.NotGrantableError as exc:
         _print_task_error(TaskCliError(str(exc), code="not_grantable", help_command=help_command))
@@ -9018,21 +9036,36 @@ def _preflight_vault_run_batch(engine, mapping: dict[str, str]) -> dict[str, dic
 
     metas: dict[str, dict] = {}
     with engine.connect() as conn:
-        for name in dict.fromkeys(mapping.values()):
+        for record in dict.fromkeys(mapping.values()):
+            name = _record_secret_name(record)
+            if name in metas:
+                continue
             metas[name] = vault_service.get_secret_meta(conn, name)
             if metas[name].get("kind") == "keypair":
                 raise vault_service.KeypairNotValueDeliverableError(
-                    f"{name} is a signing key; use vibe vault sign instead of value delivery"
+                    f"{record} is a signing key; use vibe vault sign instead of value delivery"
                 )
     return metas
 
 
 def _preflight_vault_inject_batch(engine, names: list[str]) -> dict[str, dict]:
-    return _preflight_vault_names(
-        engine,
-        names,
-        mixed_message="mixing protected and standard secrets in one vault inject is not wired yet",
-    )
+    from storage import vault_service
+
+    metas: dict[str, dict] = {}
+    with engine.connect() as conn:
+        for record in dict.fromkeys(names):
+            name = _record_secret_name(record)
+            if name in metas:
+                continue
+            metas[name] = vault_service.get_secret_meta(conn, name)
+            if metas[name].get("kind") == "keypair":
+                raise vault_service.KeypairNotValueDeliverableError(
+                    f"{record} is a signing key; use vibe vault sign instead of value delivery"
+                )
+    tiers = {str(meta.get("protection") or "standard") for meta in metas.values()}
+    if len(tiers) > 1:
+        raise TaskCliError("mixing protected and standard secrets in one vault inject is not wired yet", code="mixed_protection_tiers")
+    return metas
 
 
 class _AgentRunOutputBridge:
@@ -9416,14 +9449,14 @@ def _resolve_vault_run_delivery(
     metas = _preflight_vault_run_batch(engine, mapping)
     protected_names = [
         name
-        for name in dict.fromkeys(mapping.values())
+        for name in dict.fromkeys(_record_secret_name(record) for record in mapping.values())
         if str(metas[name].get("protection") or "standard") == "protected"
     ]
     standard_approval_error: TaskCliError | None = None
     approval_request_to_publish: dict | None = None
     if metas and not protected_names:
         with engine.begin() as conn:
-            standard_names = list(dict.fromkeys(mapping.values()))
+            standard_names = list(dict.fromkeys(_record_secret_name(record) for record in mapping.values()))
             approval_names = _always_ask_names(metas, standard_names)
             common_grant = vault_service.find_active_grant_for_secrets(
                 conn,
@@ -9434,8 +9467,8 @@ def _resolve_vault_run_delivery(
             )
             if isinstance(common_grant, dict) and common_grant.get("one_shot") is True:
                 return None, [common_grant], [
-                    {"name": vault_name, "env": env_name, "envelope": vault_service.get_envelope(conn, vault_name)}
-                    for env_name, vault_name in mapping.items()
+                    {"name": record, "env": env_name, "envelope": vault_service.get_envelope(conn, record)}
+                    for env_name, record in mapping.items()
                 ]
             if approval_names and _source_selector_tags(source_selector):
                 req = vault_service.create_access_request(
@@ -9466,7 +9499,7 @@ def _resolve_vault_run_delivery(
                 needs_selector_set = _needs_protected_selector_set(protected_names, source_selector)
                 selector_standard_names = [
                     name
-                    for name in dict.fromkeys(mapping.values())
+                    for name in dict.fromkeys(_record_secret_name(record) for record in mapping.values())
                     if name not in protected_names and str(metas[name].get("protection") or "standard") == "standard"
                 ]
                 selector_standard_approval_names = _always_ask_names(metas, selector_standard_names)
@@ -9532,15 +9565,16 @@ def _resolve_vault_run_delivery(
                         )
                 elif grant.get("one_shot") is True:
                     one_shot_grants.append(grant)
-            for env_name, vault_name in mapping.items():
+            for env_name, record in mapping.items():
+                vault_name = _record_secret_name(record)
                 if approval_error is not None:
                     break
                 if vault_name in protected_names:
                     secrets.append(
                         {
-                            "name": vault_name,
+                            "name": record,
                             "env": env_name,
-                            "envelope": vault_service.get_protected_envelope(conn, vault_name),
+                            "envelope": vault_service.get_protected_envelope(conn, record),
                             "tier": "protected",
                         }
                     )
@@ -9549,7 +9583,7 @@ def _resolve_vault_run_delivery(
                 if resolved is None:
                     resolved = vault_service.resolve_secret_access(
                         conn,
-                        vault_name,
+                        record,
                         purpose="run",
                         requester=requester,
                         delivery=delivery,
@@ -9570,7 +9604,7 @@ def _resolve_vault_run_delivery(
                     current_grant = resolved.get("grant")
                     if isinstance(current_grant, dict) and current_grant.get("one_shot") is True:
                         one_shot_grants.append(current_grant)
-                    item = {"name": vault_name, "env": env_name, "envelope": resolved["envelope"]}
+                    item = {"name": record, "env": env_name, "envelope": vault_service.get_envelope(conn, record)}
                     if protected_names:
                         item["tier"] = "standard"
                     secrets.append(item)
@@ -9628,31 +9662,32 @@ def _resolve_vault_inject_delivery(engine, names: list[str], *, path: str, fmt: 
     from storage import vault_service
 
     requester, delivery, session_id = _vault_cli_delivery_context(args, mode="inject", path=path, format=fmt)
+    secret_names = list(dict.fromkeys(_record_secret_name(record) for record in names))
     metas = _preflight_vault_inject_batch(engine, names)
     tiers = {str(meta.get("protection") or "standard") for meta in metas.values()}
     if metas and tiers == {"protected"}:
         with engine.begin() as conn:
             common_grant = vault_service.find_active_grant_for_secrets(
                 conn,
-                names,
+                secret_names,
                 session_id=session_id,
                 purpose="inject",
                 reserve_one_shot=True,
             )
             if common_grant is not None:
                 return common_grant, [common_grant] if common_grant.get("one_shot") is True else [], [
-                    {"name": name, "key": name, "envelope": vault_service.get_protected_envelope(conn, name)}
-                    for name in names
+                    {"name": record, "key": record, "envelope": vault_service.get_protected_envelope(conn, record)}
+                    for record in names
                 ]
     if metas and tiers == {"standard"}:
         with engine.begin() as conn:
             standard_secrets = [
-                {"name": name, "key": name, "envelope": vault_service.get_envelope(conn, name)}
-                for name in names
+                {"name": record, "key": record, "envelope": vault_service.get_envelope(conn, record)}
+                for record in names
             ]
             common_grant = vault_service.find_active_grant_for_secrets(
                 conn,
-                names,
+                secret_names,
                 session_id=session_id,
                 purpose="inject",
                 reserve_one_shot=True,
@@ -9668,12 +9703,13 @@ def _resolve_vault_inject_delivery(engine, names: list[str], *, path: str, fmt: 
     resolved_by_name: dict[str, dict] = {}
     try:
         with engine.begin() as conn:
-            for name in names:
+            for record in names:
+                name = _record_secret_name(record)
                 resolved = resolved_by_name.get(name)
                 if resolved is None:
                     resolved = vault_service.resolve_secret_access(
                         conn,
-                        name,
+                        record,
                         purpose="inject",
                         requester=requester,
                         delivery=delivery,
@@ -9694,7 +9730,7 @@ def _resolve_vault_inject_delivery(engine, names: list[str], *, path: str, fmt: 
                     current_grant = resolved.get("grant")
                     if isinstance(current_grant, dict) and current_grant.get("one_shot") is True:
                         one_shot_grants.append(current_grant)
-                    secrets.append({"name": name, "key": name, "envelope": resolved["envelope"], "protected": False})
+                    secrets.append({"name": record, "key": record, "envelope": vault_service.get_envelope(conn, record), "protected": False})
                     continue
                 if resolved["status"] == "agent_delivery_ready":
                     current_grant = resolved["grant"]
@@ -9709,7 +9745,7 @@ def _resolve_vault_inject_delivery(engine, names: list[str], *, path: str, fmt: 
                         break
                     if current_grant.get("one_shot") is True:
                         one_shot_grants.append(current_grant)
-                    secrets.append({"name": name, "key": name, "envelope": resolved["envelope"], "protected": True})
+                    secrets.append({"name": record, "key": record, "envelope": vault_service.get_protected_envelope(conn, record), "protected": True})
                     continue
                 raise TaskCliError(f"unsupported vault access status: {resolved['status']}", code="vault_access_error")
     except Exception as exc:
@@ -9796,6 +9832,12 @@ def cmd_vault_run(args):
                 help_command=help_command,
             )
         )
+        return 1
+    except vault_service.FieldNotFoundError as exc:
+        _print_task_error(TaskCliError(str(exc), code="field_not_found", help_command=help_command))
+        return 1
+    except vault_service.FieldsNotSupportedError as exc:
+        _print_task_error(TaskCliError(str(exc), code="fields_not_supported", help_command=help_command))
         return 1
     except vault_service.UnsupportedProtectionError as exc:
         _print_task_error(TaskCliError(str(exc), code="protected_tier_unavailable", help_command=help_command))
@@ -10512,7 +10554,7 @@ def _build_vault_fetch_request(
     # injection policy in the egress frame.
     with engine.connect() as conn:
         policy = vault_service.get_secret_policy(conn, name)
-        meta = vault_service.get_secret_meta(conn, name)
+        meta = vault_service.get_secret_meta(conn, _record_secret_name(name))
         if meta.get("kind") == "keypair":
             raise vault_service.KeypairNotValueDeliverableError(
                 f"{name} is a signing key; use vault_sign instead of value delivery"
@@ -17890,7 +17932,7 @@ def build_parser():
         "--env",
         action="append",
         metavar="NAME[,N2]|LOCAL=NAME",
-        help="Inject secret NAME as env var NAME (LOCAL=NAME to rename; comma-separates several). Repeatable.",
+        help="Inject secret NAME or NAME.field as env var NAME (NAME.field defaults to NAME_FIELD; LOCAL=NAME[.field] to rename; comma-separates several). Repeatable.",
     )
     vault_run_parser.add_argument("--tag", action="append", metavar="TAG", help="Inject all value-deliverable secrets with this tag. Repeatable.")
     vault_run_parser.add_argument("--skill", action="append", metavar="SKILL", help="Sugar for --tag skill:SKILL. Repeatable.")
@@ -17911,7 +17953,7 @@ def build_parser():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         error_help_command="vibe vault fetch --help",
     )
-    vault_fetch_parser.add_argument("--auth", required=True, metavar="NAME", help="Secret to attach as the request credential")
+    vault_fetch_parser.add_argument("--auth", required=True, metavar="NAME[.field]", help="Secret record to attach as the request credential")
     vault_fetch_parser.add_argument("--url", required=True, help="Target URL (host must be in the secret's allowed_hosts)")
     vault_fetch_parser.add_argument("--method", default="GET", help="HTTP method (default GET)")
     vault_fetch_parser.add_argument("--header", action="append", metavar="'Name: value'", help="Extra request header (repeatable)")
@@ -17932,7 +17974,7 @@ def build_parser():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         error_help_command="vibe vault access --help",
     )
-    vault_access_parser.add_argument("name", help="Static secret name to request")
+    vault_access_parser.add_argument("name", help="Static secret or record reference NAME[.field] to request")
     vault_access_parser.add_argument("--session-id", help="Agent Session ID. Defaults from AVIBE_SESSION_ID inside an Agent shell.")
     vault_access_parser.add_argument("--skill", help="Skill requesting the secret")
     vault_access_parser.add_argument("--command", dest="operation_command", help="Command or operation shown to the user")
@@ -18014,7 +18056,7 @@ def build_parser():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         error_help_command="vibe vault inject --help",
     )
-    vault_inject_parser.add_argument("--keys", required=True, metavar="A,B", help="Comma-separated secret names")
+    vault_inject_parser.add_argument("--keys", required=True, metavar="NAME[.field],...", help="Comma-separated secret record references")
     vault_inject_parser.add_argument("--out", required=True, metavar="FILE", help="Output file (written 0600)")
     vault_inject_parser.add_argument("--format", default="dotenv", choices=["dotenv", "json", "yaml", "toml"], help="Output format (default dotenv)")
     _add_json_noop(vault_inject_parser)
