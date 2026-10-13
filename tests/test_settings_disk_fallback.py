@@ -308,7 +308,7 @@ def test_claude_auth_status_force_stop_uses_verified_process_tree(
     terminate_tree = Mock(return_value=True)
     monkeypatch.setattr(api, "terminate_process_tree_by_pid", terminate_tree)
 
-    assert api._force_stop_claude_auth_status(process, identity) is True
+    assert api._force_stop_claude_auth_status(process, identity, "sha256:" + "0" * 64) is True
     terminate_tree.assert_called_once_with(
         123,
         api.logger,
