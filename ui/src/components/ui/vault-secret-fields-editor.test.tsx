@@ -3,18 +3,22 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { createInstance } from 'i18next';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import type { VaultSecret } from '@/context/ApiContext';
+import { ApiError, type VaultSecret } from '@/context/ApiContext';
 import en from '@/i18n/en.json';
 import { VaultSecretFieldsEditor } from './vault-secret-fields-editor';
 
 const api = vi.hoisted(() => ({
   updateVaultSecret: vi.fn(), updateVaultSecretField: vi.fn(), deleteVaultSecretField: vi.fn(),
+  listVaultSecrets: vi.fn(),
   getVaultPubkey: vi.fn(async () => ({ public_key: 'public' })),
 }));
 const box = vi.hoisted(() => ({ scheme: 'test', enc: 'enc', ct: 'ciphertext' }));
 const sealBlindBox = vi.hoisted(() => vi.fn(async () => box));
 const vault = vi.hoisted(() => ({ status: 'unlocked', refresh: vi.fn(), sealValue: vi.fn() }));
-vi.mock('@/context/ApiContext', () => ({ useApi: () => api }));
+vi.mock('@/context/ApiContext', async (original) => ({
+  ...await original<typeof import('@/context/ApiContext')>(),
+  useApi: () => api,
+}));
 vi.mock('@/lib/useProtectedVault', () => ({ useProtectedVault: () => vault }));
 vi.mock('./vault-protected-unlock', () => ({ VaultProtectedUnlock: () => null }));
 vi.mock('@/lib/vaultCrypto', async (original) => ({
@@ -35,6 +39,7 @@ const renderEditor = (entry = secret) => render(
 );
 beforeEach(() => {
   api.updateVaultSecretField.mockResolvedValue({ ok: true, secret: { ...secret, updated_at: 'version-2' } });
+  api.listVaultSecrets.mockResolvedValue({ ok: true, secrets: [secret] });
 });
 afterEach(() => { cleanup(); vi.clearAllMocks(); });
 
@@ -46,14 +51,14 @@ it('updates envelope versions after replacing a field and renaming the default l
   change('Value for password', 'replacement');
   fireEvent.click(screen.getByRole('button', { name: 'Save password' }));
   await waitFor(() => expect(api.updateVaultSecretField).toHaveBeenCalledWith(
-    'LOGIN', 'password', { blind_box: box, expected_updated_at: 'version-1' }, { handleError: false },
+    'LOGIN', 'password', { record: 'LOGIN', blind_box: box, expected_updated_at: 'version-1' }, { handleError: false },
   ));
   await screen.findByRole('status');
   expect((screen.getByLabelText('Value for password') as HTMLInputElement).value).toBe('');
   change('Value for username', 'next-user');
   fireEvent.click(screen.getByRole('button', { name: 'Save username' }));
   await waitFor(() => expect(api.updateVaultSecretField).toHaveBeenLastCalledWith(
-    'LOGIN', 'username', { blind_box: box, expected_updated_at: 'version-2' }, { handleError: false },
+    'LOGIN', 'username', { record: 'LOGIN.username', blind_box: box, expected_updated_at: 'version-2' }, { handleError: false },
   ));
   await waitFor(() => expect((screen.getByLabelText('Value for username') as HTMLInputElement).value).toBe(''));
   api.updateVaultSecret.mockResolvedValue({ ok: true, secret: { ...secret, default_field: 'credential', fields: ['credential', 'username'], updated_at: 'version-3' } });
@@ -65,7 +70,7 @@ it('updates envelope versions after replacing a field and renaming the default l
   change('Value for credential', 'next');
   fireEvent.click(screen.getByRole('button', { name: 'Save credential' }));
   await waitFor(() => expect(api.updateVaultSecretField).toHaveBeenLastCalledWith(
-    'LOGIN', 'credential', { blind_box: box, expected_updated_at: 'version-3' }, { handleError: false },
+    'LOGIN', 'credential', { record: 'LOGIN', blind_box: box, expected_updated_at: 'version-3' }, { handleError: false },
   ));
   expect(sealBlindBox.mock.calls.map((call) => (call as unknown[])[2])).toEqual([
     { purpose: 'seal', name: 'LOGIN' }, { purpose: 'seal', name: 'LOGIN.username' }, { purpose: 'seal', name: 'LOGIN' },
@@ -109,9 +114,54 @@ it('seals a protected replacement with its field record and drops its entered va
   change('Value for username', '私密用户');
   fireEvent.click(screen.getByRole('button', { name: 'Save username' }));
   await waitFor(() => expect(api.updateVaultSecretField).toHaveBeenCalledWith(
-    'LOGIN', 'username', { sealed: envelope, expected_updated_at: 'version-1' }, { handleError: false },
+    'LOGIN', 'username', { record: 'LOGIN.username', sealed: envelope, expected_updated_at: 'version-1' }, { handleError: false },
   ));
   expect(vault.sealValue.mock.calls[0].slice(0, 2)).toEqual(['LOGIN.username', 'static']);
   expect((screen.getByLabelText('Value for username') as HTMLInputElement).value).toBe('');
   expect(sealBlindBox).not.toHaveBeenCalled();
+});
+
+it('re-reads metadata and re-seals exactly once after a record mismatch', async () => {
+  const renamed = { ...secret, default_field: 'credential', fields: ['credential', 'username'], updated_at: 'version-2' };
+  api.updateVaultSecretField
+    .mockResolvedValueOnce({ ok: false, code: 'record_mismatch', message: 'stale record' })
+    .mockResolvedValueOnce({ ok: true, secret: { ...renamed, updated_at: 'version-3' } });
+  api.listVaultSecrets.mockResolvedValueOnce({ ok: true, secrets: [renamed] });
+  renderEditor();
+  change('Value for password', 'replacement');
+  fireEvent.click(screen.getByRole('button', { name: 'Save password' }));
+  await waitFor(() => expect(api.updateVaultSecretField).toHaveBeenCalledTimes(2));
+  expect(api.listVaultSecrets).toHaveBeenCalledWith({ cache: false });
+  expect(api.updateVaultSecretField.mock.calls).toEqual([
+    ['LOGIN', 'password', { record: 'LOGIN', blind_box: box, expected_updated_at: 'version-1' }, { handleError: false }],
+    ['LOGIN', 'credential', { record: 'LOGIN', blind_box: box, expected_updated_at: 'version-2' }, { handleError: false }],
+  ]);
+  expect(sealBlindBox).toHaveBeenCalledTimes(2);
+  expect((screen.getByLabelText('Value for credential') as HTMLInputElement).value).toBe('');
+  expect(screen.queryByRole('alert')).toBeNull();
+});
+
+it('surfaces an extra-field record conflict without retrying under a changed default label', async () => {
+  const changed = { ...secret, default_field: 'username', fields: ['username'], updated_at: 'version-2' };
+  api.updateVaultSecretField.mockResolvedValueOnce({ ok: false, code: 'record_mismatch', message: 'stale record' });
+  api.listVaultSecrets.mockResolvedValueOnce({ ok: true, secrets: [changed] });
+  renderEditor();
+  change('Value for username', 'replacement');
+  fireEvent.click(screen.getByRole('button', { name: 'Save username' }));
+  await waitFor(() => expect(screen.getByRole('alert')).toBeTruthy());
+  expect(api.updateVaultSecretField).toHaveBeenCalledOnce();
+  expect(sealBlindBox).toHaveBeenCalledOnce();
+});
+
+it('retries once when the API client throws ApiError for record_mismatch', async () => {
+  api.updateVaultSecretField
+    .mockRejectedValueOnce(new ApiError('stale record', 409, 'record_mismatch'))
+    .mockResolvedValueOnce({ ok: true, secret: { ...secret, updated_at: 'version-2' } });
+  api.listVaultSecrets.mockResolvedValueOnce({ ok: true, secrets: [secret] });
+  renderEditor();
+  change('Value for username', 'replacement');
+  fireEvent.click(screen.getByRole('button', { name: 'Save username' }));
+  await waitFor(() => expect(api.updateVaultSecretField).toHaveBeenCalledTimes(2));
+  expect(api.listVaultSecrets).toHaveBeenCalledWith({ cache: false });
+  expect(api.updateVaultSecretField.mock.calls[1][2]).toMatchObject({ record: 'LOGIN.username', expected_updated_at: 'version-1' });
 });

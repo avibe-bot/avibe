@@ -364,7 +364,7 @@ export type VaultWebAuthnRegistrationPayload = {
 export type VaultCreatePayload = {
   name: string;
   default_field?: string;
-  fields?: Array<{ name: string } & VaultFieldValuePayload>;
+  fields?: VaultCreateFieldPayload[];
   protection?: 'standard' | 'protected';
   blind_box?: VaultBlindBox;
   sealed?: VaultSealedEnvelope;
@@ -401,9 +401,19 @@ export type VaultMetadataUpdatePayload = {
 };
 
 export type VaultFieldValuePayload = {
+  /** Canonical record name bound into the envelope (NAME for the default field). */
+  record: string;
   blind_box?: VaultBlindBox;
   sealed?: VaultSealedEnvelope;
   expected_updated_at?: string;
+};
+
+export type VaultCreateFieldPayload = {
+  name: string;
+  /** Canonical record name bound into this extra field's envelope. */
+  record: string;
+  blind_box?: VaultBlindBox;
+  sealed?: VaultSealedEnvelope;
 };
 
 export type TunnelQualitySnapshot = {
@@ -820,7 +830,7 @@ export type ApiContextType = {
   updateVibeAgent: (name: string, payload: VibeAgentUpdatePayload) => Promise<{ ok: boolean; agent: VibeAgentFull }>;
   setDefaultVibeAgent: (name: string) => Promise<{ ok: boolean; default_agent_name: string; agent: VibeAgentBrief }>;
   removeVibeAgent: (name: string) => Promise<{ ok: boolean; code?: string; message?: string; references?: Record<string, number>; removed_agent?: string; archived_agent?: VibeAgentBrief; default_agent_name?: string | null }>;
-  listVaultSecrets: () => Promise<{ ok: boolean; secrets: VaultSecret[] }>;
+  listVaultSecrets: (opts?: { cache?: boolean }) => Promise<{ ok: boolean; secrets: VaultSecret[] }>;
   getVaultVmk: () => Promise<VaultVmkResult>;
   getVaultPubkey: () => Promise<{ ok: boolean; public_key: string; fingerprint: string }>;
   getVaultAgentPubkey: () => Promise<{ ok: boolean; public_key: string; fingerprint: string }>;
@@ -2543,12 +2553,12 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // absent page there means it vanished mid-session rather than never existed.
   const readShowPageJson = (path: string) => getJson(path, { expectedCodes: ['show_page_not_found'] });
 
-  const getCachedJson = (path: string, ttlMs = 1500, opts?: { handleError?: boolean }) => {
+  const getCachedJson = (path: string, ttlMs = 1500, opts?: { cache?: boolean; handleError?: boolean }) => {
     // Best-effort callers (handleError: false) bypass the shared read cache so a
     // silently-failing request can't hand its suppressed-error promise to a
     // toast-enabled caller hitting the same path.
-    if (opts?.handleError === false) {
-      return getJson(path, opts);
+    if (opts?.cache === false || opts?.handleError === false) {
+      return getJson(path, { handleError: opts?.handleError });
     }
     const now = Date.now();
     const cached = readCacheRef.current.get(path);
@@ -4001,7 +4011,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setDefaultVibeAgent: (name) => postJson('/api/agents/default', { name }),
     removeVibeAgent: (name) => deleteJson(`/api/agents/${encodeURIComponent(name)}`),
     getVaultVmk: () => getCachedJson('/api/vault/vmk', 1500, { handleError: false }),
-    listVaultSecrets: () => getCachedJson('/api/vault/secrets', 1500),
+    listVaultSecrets: (opts) => getCachedJson('/api/vault/secrets', 1500, opts),
     getVaultPubkey: () => getCachedJson('/api/vault/pubkey', 1500),
     getVaultAgentPubkey: () => getCachedJson('/api/vault/agent/pubkey', 1500),
     getVaultSandboxRootMetadata: () => getCachedJson('/api/vault/sandbox/root-metadata', 1500, { handleError: false }),

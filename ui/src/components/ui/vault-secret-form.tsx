@@ -645,7 +645,7 @@ export const VaultSecretForm: React.FC<{
             fieldCrypto = { blind_box: await sealBlindBox(row.value, pubkey!, standardCreateBlindBoxContext(record)) };
           }
           if (index === defaultFieldIndex) defaultCrypto = fieldCrypto;
-          else extraFields.push({ name: row.name, ...fieldCrypto });
+          else extraFields.push({ name: row.name, record, ...fieldCrypto });
         }
         cryptoFields = defaultCrypto!;
       } else if (protection === 'protected') {
@@ -889,7 +889,7 @@ export const VaultSecretForm: React.FC<{
         </div>
       ) : valueField}
       <div className="flex gap-2">
-        <Button type="button" variant="ghost" size="sm" disabled={submitting || (fieldRows?.length ?? 1) >= MAX_VAULT_FIELDS}
+        <Button type="button" variant="ghost" size="sm" disabled={submitting || staticSource === 'file' || (fieldRows?.length ?? 1) >= MAX_VAULT_FIELDS}
           onClick={() => {
             setFieldRows((rows) => [...(rows ?? [{ name: 'value', value }]), { name: '', value: '' }]);
             setStaticValue('');
@@ -898,7 +898,7 @@ export const VaultSecretForm: React.FC<{
           }}>
           <Plus className="size-3.5" />{t('vaults.fields.add')}
         </Button>
-        {!fieldRows && <Button type="button" variant="ghost" size="sm" disabled={submitting}
+        {!fieldRows && <Button type="button" variant="ghost" size="sm" disabled={submitting || staticSource === 'file'}
           onClick={() => {
             setFieldRows([{ name: 'username', value: '' }, { name: 'password', value }, { name: 'totp', value: '' }]);
             setDefaultFieldIndex(1);
@@ -907,6 +907,7 @@ export const VaultSecretForm: React.FC<{
             clearSelectedFile();
           }}>{t('vaults.fields.loginTemplate')}</Button>}
       </div>
+      {staticSource === 'file' && <span className="text-[11px] text-muted-foreground">{t('vaults.fields.singleFile')}</span>}
     </div>
   );
 

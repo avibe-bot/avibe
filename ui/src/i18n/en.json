@@ -4969,10 +4969,12 @@
       "save": "Save field",
       "saveNamed": "Save {{field}}",
       "saved": "Field saved",
+      "recordConflict": "This field changed while you were saving. The value was not written; reload the secret and try again.",
       "replacePlaceholder": "Enter a replacement value",
       "revealField": "Field to reveal",
       "namesHelp": "Use lowercase letters, digits and underscores; start with a letter. Each field needs a unique name and a value.",
-      "editHelp": "Field changes save immediately and expire existing grants. Leave a value blank to keep it. Extra field names cannot be changed."
+      "singleFile": "File upload supports one value. Switch to Text before adding fields.",
+      "editHelp": "Changes save immediately. Adding, replacing or removing values expires grants; renaming the default field does not. Leave a value blank to keep it. Extra field names cannot be changed."
     },
     "protectedUnlock": {
       "checking": "Checking your protected vault…",

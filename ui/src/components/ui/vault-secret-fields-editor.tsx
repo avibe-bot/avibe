@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Loader2, Plus, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
-import { useApi, type VaultSecret } from '@/context/ApiContext';
+import { ApiError, useApi, type VaultFieldValuePayload, type VaultSecret } from '@/context/ApiContext';
 import { sealBlindBox, standardCreateBlindBoxContext } from '@/lib/vaultCrypto';
 import { useProtectedVault } from '@/lib/useProtectedVault';
 import { openVaultsInBrowser } from '@/lib/vaultBrowserHandoff';
@@ -77,21 +77,83 @@ export function VaultSecretFieldsEditor({
     }
   };
 
-  const saveValue = (field: string, value: string, adding = false) => void mutate(async () => {
-    const record = vaultRecordName(current.name, field, defaultField);
-    const clear = () => adding ? setNewValue('') : setDrafts((values) => ({ ...values, [field]: '' }));
-    const cryptoFields = isProtected
-      ? { sealed: (await vault.sealValue(record, 'static', { valueRef: { current: value }, clear })).envelope }
-      : { blind_box: await sealBlindBox(value, await api.getVaultPubkey(), standardCreateBlindBoxContext(record)) };
-    const result = await api.updateVaultSecretField(current.name, field, {
-      ...cryptoFields, expected_updated_at: current.updated_at,
-    }, { handleError: false });
-    if (result.ok) {
-      clear();
-      if (adding) setNewField(null);
-    }
-    return result;
-  });
+  const saveValue = (field: string, value: string, adding = false) => {
+    // Keep this one local copy only until the write settles. Protected sealing clears the
+    // persistent input immediately through `clear`, while this copy permits exactly one
+    // re-seal if the server reports that its record mapping changed.
+    let capturedValue = value;
+    const clear = () =>
+      adding ? setNewValue('') : setDrafts((values) => ({ ...values, [field]: '' }));
+    const isRecordMismatch = (result: { code?: string } | unknown): boolean =>
+      (result instanceof ApiError && result.code === 'record_mismatch') ||
+      (typeof result === 'object' && result !== null && 'code' in result && result.code === 'record_mismatch');
+    const conflict = () => new Error(t('vaults.fields.recordConflict'));
+    const adoptSecret = (next: VaultSecret) => {
+      setCurrent(next);
+      setDefaultLabel(vaultDefaultField(next));
+      setDrafts((values) => {
+        const remaining = { ...values };
+        const names = new Set(vaultFieldNames(next));
+        for (const name of Object.keys(remaining)) {
+          if (!names.has(name)) delete remaining[name];
+        }
+        return remaining;
+      });
+    };
+    const freshSecret = async (): Promise<VaultSecret> => {
+      const result = await api.listVaultSecrets({ cache: false });
+      const next = result.secrets.find((entry) => entry.name === current.name);
+      if (!next) throw conflict();
+      adoptSecret(next);
+      return next;
+    };
+    const sealAndWrite = async (secret: VaultSecret, targetField: string, wasDefault: boolean) => {
+      const latestDefault = vaultDefaultField(secret);
+      if (!wasDefault && latestDefault === targetField) throw conflict();
+      const exists = vaultFieldNames(secret).includes(targetField);
+      if (adding ? exists : !exists) throw conflict();
+      const record = vaultRecordName(secret.name, targetField, latestDefault);
+      let cryptoFields: Omit<VaultFieldValuePayload, 'record' | 'expected_updated_at'>;
+      if (isProtected) {
+        const valueRef = { current: capturedValue };
+        const sealed = await vault.sealValue(record, 'static', { valueRef, clear });
+        cryptoFields = { sealed: sealed.envelope };
+      } else {
+        cryptoFields = {
+          blind_box: await sealBlindBox(capturedValue, await api.getVaultPubkey(), standardCreateBlindBoxContext(record)),
+        };
+      }
+      try {
+        return await api.updateVaultSecretField(secret.name, targetField, {
+          record,
+          ...cryptoFields,
+          expected_updated_at: secret.updated_at,
+        }, { handleError: false });
+      } catch (error) {
+        if (isRecordMismatch(error)) return { ok: false, code: 'record_mismatch' };
+        throw error;
+      }
+    };
+    void mutate(async () => {
+      try {
+        const wasDefault = field === defaultField;
+        let result = await sealAndWrite(current, field, wasDefault);
+        if (isRecordMismatch(result)) {
+          const next = await freshSecret();
+          result = await sealAndWrite(next, wasDefault ? vaultDefaultField(next) : field, wasDefault);
+          if (isRecordMismatch(result)) throw conflict();
+        }
+        if (result.ok && result.secret) {
+          adoptSecret(result.secret);
+          clear();
+          if (adding) setNewField(null);
+        }
+        return result;
+      } finally {
+        capturedValue = '';
+      }
+    });
+  };
 
   return (
     <div className="flex flex-col gap-3" onKeyDown={(event) => {

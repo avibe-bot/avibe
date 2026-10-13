@@ -79,13 +79,19 @@ it.each(['standard', 'protected'] as const)('creates a complete %s login with ca
       { purpose: 'seal', name: 'GITHUB_LOGIN.totp' },
     ]);
     expect(payload.blind_box).toEqual(blindBox);
-    expect(payload.fields).toEqual([{ name: 'username', blind_box: blindBox }, { name: 'totp', blind_box: blindBox }]);
+    expect(payload.fields).toEqual([
+      { name: 'username', record: 'GITHUB_LOGIN.username', blind_box: blindBox },
+      { name: 'totp', record: 'GITHUB_LOGIN.totp', blind_box: blindBox },
+    ]);
   } else {
     expect(vault.sealValue.mock.calls.map((call) => call[0])).toEqual(['GITHUB_LOGIN.username', 'GITHUB_LOGIN', 'GITHUB_LOGIN.totp']);
     expect(payload.sealed).toEqual(envelope);
     expect(payload.establishing_vmk).toBe(true);
     expect(payload.authz_factor_registration).toEqual({ challenge_id: 'setup' });
-    expect(payload.fields).toEqual([{ name: 'username', sealed: envelope }, { name: 'totp', sealed: envelope }]);
+    expect(payload.fields).toEqual([
+      { name: 'username', record: 'GITHUB_LOGIN.username', sealed: envelope },
+      { name: 'totp', record: 'GITHUB_LOGIN.totp', sealed: envelope },
+    ]);
     expect(vault.afterCreated).toHaveBeenCalledOnce();
   }
 });
@@ -99,6 +105,23 @@ it('keeps the legacy single-value create payload until fields are added', async 
   await waitFor(() => expect(api.createVaultSecret).toHaveBeenCalledOnce());
   expect(api.createVaultSecret.mock.calls[0][0]).not.toHaveProperty('fields');
   expect(api.createVaultSecret.mock.calls[0][0]).not.toHaveProperty('default_field');
+});
+
+it('preserves a selected file instead of silently switching it to empty field rows', async () => {
+  const { container } = render(form(<VaultSecretForm fixedName="TOKEN" onCancel={vi.fn()} onCreated={vi.fn()} />));
+  fireEvent.click(screen.getByRole('radio', { name: 'File' }));
+  const file = new File(['secret bytes'], 'credential.bin');
+  fireEvent.change(container.querySelector('input[type="file"]')!, { target: { files: [file] } });
+  expect(screen.getByText('credential.bin')).toBeTruthy();
+  const add = screen.getByRole('button', { name: 'Add field' }) as HTMLButtonElement;
+  const template = screen.getByRole('button', { name: 'Login template' }) as HTMLButtonElement;
+  expect(add.disabled).toBe(true);
+  expect(template.disabled).toBe(true);
+  fireEvent.click(add);
+  fireEvent.click(template);
+  expect(screen.getByText('credential.bin')).toBeTruthy();
+  expect(screen.getByText(en.vaults.fields.singleFile)).toBeTruthy();
+  expect(screen.queryByLabelText('Field 1 name')).toBeNull();
 });
 
 it('seeds provision rows once, validates duplicate names, and permits removing extra rows', async () => {
@@ -118,5 +141,7 @@ it('seeds provision rows once, validates duplicate names, and permits removing e
   await waitFor(() => expect(submit.disabled).toBe(false));
   fireEvent.click(submit);
   await waitFor(() => expect(api.createVaultSecret).toHaveBeenCalledOnce());
-  expect(api.createVaultSecret.mock.calls[0][0].fields).toEqual([{ name: 'user_name', blind_box: blindBox }]);
+  expect(api.createVaultSecret.mock.calls[0][0].fields).toEqual([
+    { name: 'user_name', record: 'LOGIN.user_name', blind_box: blindBox },
+  ]);
 });
