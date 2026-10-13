@@ -87,6 +87,7 @@
   "POST /api/asr/telemetry": "editor",
   "POST /api/asr/transcribe": "editor",
   "POST /api/config": "editor",
+  "POST /api/desktop-mini/session": "editor",
   "POST /api/dock/pins": "editor",
   "POST /api/files/copy": "editor",
   "POST /api/files/delete": "editor",

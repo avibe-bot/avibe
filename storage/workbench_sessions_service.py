@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, Mapping, Optional
 
 from sqlalchemy import Integer, and_, cast, func, or_, select, update
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Connection
 
 from config import paths
@@ -56,6 +57,7 @@ from storage.models import (
     scope_settings,
     scopes,
     show_pages,
+    state_meta,
     agents,
 )
 
@@ -636,15 +638,38 @@ def create_session(
 
 
 # The desktop mini's conversation, until sessions get a built-in ``main`` type
-# (docs/plans/2026-10-12-desktop-mini-main-agent.md §10.1). The value is the
-# principal the session was made for, so each person keeps their own.
-DESKTOP_MINI_OWNER_METADATA_KEY = "desktop_mini_owner"
+# (docs/plans/2026-10-12-desktop-mini-main-agent.md §10.1). The association lives in
+# server-owned ``state_meta``, one key per principal, never in client-writable
+# session metadata: a marker any editor can set on their own session (or inherit by
+# forking) would let them hand someone else's mini a conversation they control.
+DESKTOP_MINI_SESSION_META_PREFIX = "desktop_mini_session:"
 
 
 class NoChatProjectError(LookupError):
     """The caller has no active Project they can chat in, so there is no home for the session."""
 
     code = "no_chat_project"
+
+
+def _desktop_mini_session_id(conn: Connection, key: str) -> Optional[str]:
+    raw = conn.execute(select(state_meta.c.value_json).where(state_meta.c.key == key)).scalar_one_or_none()
+    try:
+        value = json.loads(raw) if raw else None
+    except (TypeError, json.JSONDecodeError):
+        return None
+    return value if isinstance(value, str) and value else None
+
+
+def _usable_desktop_mini_session(conn: Connection, context: AuthorizationContext, session_id: str) -> bool:
+    row = conn.execute(
+        select(agent_sessions.c.status, agent_sessions.c.visibility, agent_sessions.c.scope_id, scope_settings.c.enabled)
+        .select_from(agent_sessions.outerjoin(scope_settings, scope_settings.c.scope_id == agent_sessions.c.scope_id))
+        .where(agent_sessions.c.id == session_id)
+    ).mappings().first()
+    if row is None or row["status"] != "active" or row["visibility"] != "foreground" or row["enabled"] == 0:
+        return False
+    project_id = project_access_service.project_id_from_scope_id(row["scope_id"])
+    return project_id is not None and project_access_service.can_chat_project(conn, context, project_id)
 
 
 def ensure_desktop_mini_session(
@@ -657,10 +682,11 @@ def ensure_desktop_mini_session(
 ) -> dict[str, Any]:
     """Return ``owner_key``'s desktop mini session, creating it on first use.
 
-    An existing session is reused while the caller can still chat in it: active,
+    The recorded session is reused while the caller can still chat in it: active,
     foreground, in an enabled Project they can chat in. Otherwise a new one is
     created for ``agent_name`` in the caller's most recently active chat Project,
-    so it has a sidebar home and "Open in Avibe" lands on it.
+    so it has a sidebar home and "Open in Avibe" lands on it, and the record moves
+    to it.
     """
 
     context = require_instance_role(authorization_context, "editor")
@@ -668,37 +694,32 @@ def ensure_desktop_mini_session(
     if not owner_key:
         raise ValueError("owner_key is required")
     reserve_write_lock(conn)
-    candidates = conn.execute(
-        select(agent_sessions.c.id, agent_sessions.c.scope_id, scope_settings.c.enabled)
-        .select_from(agent_sessions.outerjoin(scope_settings, scope_settings.c.scope_id == agent_sessions.c.scope_id))
-        .where(
-            agent_sessions.c.status == "active",
-            agent_sessions.c.visibility == "foreground",
-            func.json_extract(agent_sessions.c.metadata_json, f"$.{DESKTOP_MINI_OWNER_METADATA_KEY}") == owner_key,
-        )
-        .order_by(agent_sessions.c.created_at.desc(), agent_sessions.c.id.desc())
-    ).mappings().all()
-    for row in candidates:
-        project_id = project_access_service.project_id_from_scope_id(row["scope_id"])
-        if project_id is None or row["enabled"] == 0:
-            continue
-        if project_access_service.can_chat_project(conn, context, project_id):
-            return get_session(conn, str(row["id"]), authorization_context=context)
+    key = f"{DESKTOP_MINI_SESSION_META_PREFIX}{owner_key}"
+    recorded = _desktop_mini_session_id(conn, key)
+    if recorded and _usable_desktop_mini_session(conn, context, recorded):
+        return get_session(conn, recorded, authorization_context=context)
 
     from storage import projects_service
 
     for project in projects_service.list_projects(conn, authorization_context=context):
         if project.get("archived") or not (project.get("capabilities") or {}).get("can_chat"):
             continue
-        return create_session(
+        session = create_session(
             conn,
             scope_id=project["scope_id"],
             agent_backend="",
             agent_name=agent_name,
             title=title,
-            metadata={DESKTOP_MINI_OWNER_METADATA_KEY: owner_key},
             authorization_context=context,
         )
+        statement = sqlite_insert(state_meta).values(
+            key=key, value_json=json.dumps(session["id"]), updated_at=_utc_now_iso()
+        )
+        conn.execute(statement.on_conflict_do_update(
+            index_elements=[state_meta.c.key],
+            set_={"value_json": statement.excluded.value_json, "updated_at": statement.excluded.updated_at},
+        ))
+        return session
     raise NoChatProjectError("No project to start the desktop mini conversation in")
 
 

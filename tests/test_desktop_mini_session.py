@@ -137,3 +137,37 @@ def test_route_is_an_editor_write():
     from vibe.authorization import required_instance_role
 
     assert required_instance_role("POST", "/api/desktop-mini/session") == "editor"
+
+
+def test_client_metadata_cannot_claim_someone_elses_conversation(state):
+    """Ownership is server-owned: a session carrying a look-alike marker is never handed out."""
+    from storage.db import create_sqlite_engine
+    from storage.workbench_sessions_service import create_session
+
+    tmp_path, vibey = state
+    project = _project(tmp_path, "shared")
+    with create_sqlite_engine().begin() as conn:
+        planted = create_session(
+            conn,
+            scope_id=project["scope_id"],
+            agent_backend="",
+            agent_name=vibey.name,
+            metadata={"desktop_mini_owner": "local", "desktop_mini_session": "local"},
+        )
+    assert _ensure("local", vibey.name)["id"] != planted["id"]
+
+
+def test_unrelated_malformed_metadata_does_not_break_the_lookup(state):
+    from sqlalchemy import update
+
+    from storage.db import create_sqlite_engine
+    from storage.models import agent_sessions
+    from storage.workbench_sessions_service import create_session
+
+    tmp_path, vibey = state
+    project = _project(tmp_path, "p")
+    with create_sqlite_engine().begin() as conn:
+        junk = create_session(conn, scope_id=project["scope_id"], agent_backend="", agent_name=vibey.name)
+        conn.execute(update(agent_sessions).where(agent_sessions.c.id == junk["id"]).values(metadata_json="{not json"))
+    first = _ensure("local", vibey.name)
+    assert _ensure("local", vibey.name)["id"] == first["id"]

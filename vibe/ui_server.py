@@ -9438,10 +9438,10 @@ def desktop_mini_session_ensure():
         vibey = store.get_builtin_default_agent_for_backend("vibey")
     finally:
         store.close()
-    if vibey is None:
-        return _coded_error_response("builtin_agent_unavailable", "The built-in Agent is not available.", 409)
-    authorization_context = getattr(g, "authorization_context", None)
     lang = _request_ui_language()
+    if vibey is None:
+        return _coded_error_response("builtin_agent_unavailable", t("desktopMini.builtinAgentUnavailable", lang), 409)
+    authorization_context = getattr(g, "authorization_context", None)
     engine = _projects_engine()
     try:
         with engine.begin() as conn:

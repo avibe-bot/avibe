@@ -54,7 +54,8 @@ export const latestFailureNotice = (messages: WorkbenchMessage[]): WorkbenchMess
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index];
     if (isUserInput(message) || isAgentResult(message)) return null;
-    if (isBackendFailureNotice(message)) return message;
+    // A detached or replayed notice reports work outside this exchange.
+    if (isBackendFailureNotice(message) && !message.metadata?.detached && !message.metadata?.replayed) return message;
   }
   return null;
 };

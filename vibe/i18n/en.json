@@ -1714,6 +1714,7 @@
   },
   "desktopMini": {
     "sessionTitle": "Vibey · Desktop mini",
-    "noChatProject": "Create a project in Avibe first, so the desktop mini has a place for its conversation."
+    "noChatProject": "Create a project in Avibe first, so the desktop mini has a place for its conversation.",
+    "builtinAgentUnavailable": "The built-in Agent is not available, so the desktop mini has no one to talk to."
   }
 }

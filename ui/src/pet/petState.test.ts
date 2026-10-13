@@ -217,6 +217,13 @@ describe('latestFailureNotice', () => {
     expect(latestFailureNotice([user(), failure(), user('retry')])).toBeNull();
   });
 
+  it('ignores detached or replayed failures, which report work outside this exchange', () => {
+    const detached = row({ type: 'notify', metadata: { event: 'backend_failure', failure_id: 'f', turn_id: 't', detached: true } });
+    const replayed = row({ type: 'notify', metadata: { event: 'backend_failure', failure_id: 'f', turn_id: 't', replayed: true } });
+    expect(latestFailureNotice([user(), detached])).toBeNull();
+    expect(latestFailureNotice([user(), replayed])).toBeNull();
+  });
+
   it('ignores notices that are not backend failures', () => {
     expect(latestFailureNotice([user(), row({ type: 'notify', metadata: {} })])).toBeNull();
   });

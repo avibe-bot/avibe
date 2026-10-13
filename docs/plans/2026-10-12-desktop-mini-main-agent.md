@@ -486,9 +486,11 @@ Until the `main` type exists, the mini's main agent is a Vibey conversation
   (Editor) returns the caller's conversation, creating it the first time in
   their most recently active Project they can chat in. A session needs a
   Project so it has a Workbench sidebar home and "在 Avibe 中打开" lands on it.
-  It is an ordinary foreground session marked with
-  `metadata.desktop_mini_owner = <principal>` (`local` or `remote:<sub>`), so
-  the Workbench shows and manages it like any other.
+  It is an ordinary foreground session, so the Workbench shows and manages it
+  like any other. Which session belongs to whom is recorded server-side in
+  `state_meta` (`desktop_mini_session:<principal>`, principal `local` or
+  `remote:<sub>`), never in session metadata a client can write or a fork can
+  copy.
 - **Reuse.** The same session is returned while it is active and the caller can
   still chat in its Project. An archived session, an archived Project or lost
   access gets a new one. With no chat Project at all the answer is

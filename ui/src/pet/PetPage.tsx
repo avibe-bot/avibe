@@ -599,7 +599,10 @@ const SessionPicker: React.FC<{ onPick: (sessionId: string) => void }> = ({ onPi
   const [vibeyError, setVibeyError] = useState<string | null>(null);
   const [vibeyPending, setVibeyPending] = useState(false);
   const mounted = useRef(true);
-  useEffect(() => () => { mounted.current = false; }, []);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
   const pickVibey = () => {
     if (vibeyPending) return;
     setVibeyPending(true);

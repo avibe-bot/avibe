@@ -3749,7 +3749,21 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         capabilities: sessionCanChatFromPayload(payload),
       };
     },
-    ensureDesktopMiniSession: async () => sessionRowFromPayload(await postJson('/api/desktop-mini/session', {}, { handleError: false })),
+    ensureDesktopMiniSession: async () => {
+      // No global toast: the pet shows its own copy. Errors still reject, with the code.
+      const res = await apiFetch('/api/desktop-mini/session', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      const payload = await res.json().catch(() => null);
+      if (!res.ok || !payload || typeof payload.id !== 'string') {
+        const parsed = selectApiErrorFields(payload, `Request failed: /api/desktop-mini/session (${res.status})`);
+        throw new ApiError(parsed?.fallback ?? `Request failed (${res.status})`, res.status, parsed?.code ?? null);
+      }
+      clearReadCacheMatching((path) => path.startsWith('/api/sessions') || path.startsWith('/api/workbench/projects-bootstrap'));
+      return sessionRowFromPayload(payload);
+    },
     getSessionResult: async (sessionId) => {
       const res = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}`);
       const payload = await res.json().catch(() => null);
