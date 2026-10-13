@@ -4,8 +4,9 @@ import json
 import sqlite3
 from pathlib import Path
 
+import pytest
 from alembic import command
-from sqlalchemy import text
+from sqlalchemy import inspect, text
 
 from storage.db import create_sqlite_engine
 from storage import migrations
@@ -82,6 +83,9 @@ def test_vault_fields_migration_round_trip_preserves_old_rows(tmp_path: Path):
                 "2026-10-13T00:00:00+00:00",
             ),
         )
+        cursor = conn.execute("select * from vault_secrets where id = ?", ("vlt_old",))
+        original_row = cursor.fetchone()
+        original_columns = ", ".join(column[0] for column in cursor.description)
         conn.commit()
 
     migrations.run_migrations(db_path)
@@ -103,6 +107,27 @@ def test_vault_fields_migration_round_trip_preserves_old_rows(tmp_path: Path):
         ).fetchone()
         assert "fields" not in columns
         assert row == ("OLD_SECRET", "ct-old", json.dumps({"description": "legacy"}))
+        assert conn.execute(
+            f"select {original_columns} from vault_secrets where id = ?", ("vlt_old",)
+        ).fetchone() == original_row
+        indexes = {row[1] for row in conn.execute("pragma index_list(vault_secrets)")}
+        assert {"ix_vault_secrets_name_kind", "uq_vault_secrets_name_folded"} <= indexes
+        assert [row[2] for row in conn.execute("pragma index_info(ix_vault_secrets_name_kind)")] == ["name", "kind"]
+        conn.execute(
+            "insert into vault_secrets (id, name, created_at, updated_at) values ('vlt_other', 'OTHER', 'now', 'now')"
+        )
+        for duplicate in ("OLD_SECRET", "old_secret"):
+            with pytest.raises(sqlite3.IntegrityError, match="UNIQUE constraint failed"):
+                conn.execute(
+                    "insert into vault_secrets (id, name, created_at, updated_at) values (?, ?, 'now', 'now')",
+                    (f"vlt_duplicate_{duplicate}", duplicate),
+                )
+        assert conn.execute("pragma integrity_check").fetchone() == ("ok",)
+    engine = create_sqlite_engine(db_path)
+    try:
+        assert {"name": "uq_vault_secrets_name", "column_names": ["name"]} in inspect(engine).get_unique_constraints("vault_secrets")
+    finally:
+        engine.dispose()
 
 
 def test_head_repair_adds_missing_fields_column_without_dropping_rows(tmp_path: Path):

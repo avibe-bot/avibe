@@ -28,4 +28,12 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     if "fields" in _columns():
-        op.drop_column("vault_secrets", "fields")
+        # SQLite before 3.35 cannot DROP COLUMN. Batch rebuilding also preserves
+        # the ordinary name constraint/index, but reflection skips expression
+        # indexes, so restore the folded-name uniqueness guard explicitly.
+        with op.batch_alter_table("vault_secrets") as batch:
+            batch.drop_column("fields")
+        op.get_bind().exec_driver_sql(
+            "create unique index if not exists uq_vault_secrets_name_folded "
+            "on vault_secrets (lower(name))"
+        )
