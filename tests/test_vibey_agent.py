@@ -33,14 +33,25 @@ from typing import Any, Optional
 import pytest
 from sqlalchemy import select, update
 
-from core.agent_core.agent.events import NAMED_ERROR_KINDS
+from core.agent_core.agent.events import NAMED_ERROR_KINDS, ToolFinished
 from core.agent_core.agent.recovery import UNRECORDED_EFFECT
 from core.agent_core.ai.provider import Done
 from core.agent_core.harness.projection import project
 from core.agent_core.messages import (
     AssistantMessage,
+    Citation,
+    HostedAction,
+    HostedCost,
+    HostedImage,
+    HostedNative,
+    HostedRecord,
+    HostedResult,
+    HostedSource,
+    HostedSummary,
     HostedToolBlock,
     ImageBlock,
+    Origin,
+    ProxyExecution,
     TextBlock,
     ThinkingBlock,
     ToolCallBlock,
@@ -99,6 +110,9 @@ class _Formatter:
 
     def format_result_footer(self, subtype: str, *_args: Any, **_kwargs: Any) -> str:
         return "❌ failed" if subtype == "error" else "✅ done"
+
+    def escape_special_chars(self, text: str) -> str:
+        return text.replace("*", "\\*")
 
 
 class _IMClient:
@@ -3283,3 +3297,120 @@ async def test_a_running_service_prunes_settled_jobs_after_its_runs(engine, sess
     await harness.agent.handle_message(harness.request("anything else?"))
 
     await _until(lambda: not job_dir.exists(), "a settled job outlived its retention while the service ran")
+
+
+CHANGELOG = "https://platform.openai.com/docs/changelog"
+
+
+def _cited_search_turn(image: Optional[Path] = None) -> list:
+    """One response with a native web search, an answer that cites it, and optionally a generated image."""
+    blocks: list = [
+        HostedToolBlock(
+            id="srvtoolu_1",
+            tool="web_search",
+            action=HostedAction(type="search", queries=("responses api *domain* filters",)),
+            record=HostedRecord(status="completed", sources=(HostedSource(url=CHANGELOG, title="Changelog"),)),
+            native=HostedNative(source_id="src_testsrc1", payload=({"type": "server_tool_use"},)),
+        )
+    ]
+    if image is not None:
+        blocks.append(
+            HostedToolBlock(
+                id="ig_1",
+                tool="image_generation",
+                action=HostedAction(type="generate", prompt="a laptop at night", size="1536x1024"),
+                record=HostedRecord(status="completed", images=(HostedImage(path=str(image), mime="image/png"),)),
+                native=HostedNative(source_id="src_testsrc1", payload=({"type": "image_generation_call"},)),
+            )
+        )
+    answer = "Domain filters shipped."
+    blocks.append(TextBlock(text=answer, citations=(Citation(url=CHANGELOG, title="Changelog", start=0, end=len(answer)),)))
+    message = AssistantMessage(
+        tuple(blocks), ORIGIN, "stop", hosted_summary=HostedSummary(cost=HostedCost(basis="list", usd=0.01))
+    )
+    return [[Done(message)]]
+
+
+async def test_a_native_hosted_call_reaches_im_as_one_line_with_its_cited_answer_and_image(
+    engine, session, tmp_path, published
+) -> None:
+    """MH-HOSTED-UI-011: the line, the cited answer and the generated image, as an IM channel gets them."""
+    image = tmp_path / "image-3f2a.png"
+    image.write_bytes(b"\x89PNG\r\n\x1a\nimage")
+    harness = _Harness(engine, tmp_path, "telegram", _cited_search_turn(image))
+
+    await harness.agent.handle_message(harness.request("what shipped?"))
+
+    search = "🔎 Web search “responses api \\*domain\\* filters” · native (test-provider) · 1 source"
+    image_line = "🖼 Image generation “a laptop at night” · native (test-provider) · 1 image · ≈ $0.01 for 2 calls"
+    with engine.connect() as conn:
+        lines = [
+            row["content_text"]
+            for row in conn.execute(
+                select(agent_events)
+                .where(agent_events.c.session_id == SESSION, agent_events.c.event_type == "tool_call")
+                .order_by(agent_events.c.created_at, agent_events.c.id)
+            ).mappings()
+        ]
+    # One line per hosted call, escaped for the destination; the response's cost is
+    # shown once, on its last call. The process log opens with the first of them.
+    assert lines == [search, image_line]
+    sent = harness.controller.im_client.sent
+    assert sent[0] == search
+    [answer] = [item for item in sent if item.startswith("Domain filters shipped.")]
+    # The citation is a Markdown link where its span ends; the image is an upload, not a link.
+    assert f"]({CHANGELOG})" in answer
+    assert "file://" not in answer
+    assert harness.controller.im_client.uploads == [str(image)]
+
+
+async def test_a_native_hosted_call_reaches_the_workbench_as_a_card_and_cited_answer(
+    engine, session, tmp_path, published
+) -> None:
+    harness = _Harness(engine, tmp_path, "avibe", _cited_search_turn())
+
+    await harness.agent.handle_message(harness.request("what shipped?"))
+
+    with engine.connect() as conn:
+        [event] = conn.execute(
+            select(agent_events).where(agent_events.c.session_id == SESSION, agent_events.c.event_type == "tool_call")
+        ).mappings().all()
+    card = json.loads(event["content_json"])["hosted"]
+    assert (card["call_id"], card["mode"], card["subject"], card["cost"]) == (
+        "srvtoolu_1", "native", "responses api *domain* filters", {"basis": "list", "usd": 0.01, "calls": 1}
+    )
+    [result] = harness.rows("result")
+    [citation] = json.loads(result["content_json"])["citations"]
+    assert citation["url"] == CHANGELOG
+    assert result["content_text"].startswith("Domain filters shipped.") and f"]({CHANGELOG})" in result["content_text"]
+
+
+async def test_a_proxied_hosted_result_shows_once_its_result_is_committed(engine, session, tmp_path, published) -> None:
+    """The record the executor returned, read back from the committed tool-result row."""
+    from modules.agents.vibey.agent import _Run
+
+    harness = _Harness(engine, tmp_path, "telegram", [])
+    request = harness.request("what did OpenAI post?")
+    call = ToolCallBlock(id="call_x1", name="x_search", arguments={"query": "from:OpenAI"})
+    result = ToolResultMessage(
+        tool_call_id="call_x1",
+        tool_name="x_search",
+        content=(text("1. DevDay 2026 recap"),),
+        hosted=HostedResult(
+            record=HostedRecord(status="completed", sources=(HostedSource(url="https://x.com/OpenAI/status/1"),)),
+            execution=ProxyExecution(
+                executor_origin=Origin(provider="xai", api="openai_responses", model="grok-4.6"),
+                executor_source_id="src_grok0001",
+                executor_billing="metered",
+                cost=HostedCost(basis="reported", usd=0.11),
+            ),
+        ),
+    )
+    entry = await harness.agent.store.append_tool_result(SESSION, result, details={})
+    run = _Run(request=request, session_id=SESSION, turn_id="turn", instance="test")
+    run.tool_calls[call.id] = call
+
+    await harness.agent._on_event(run, ToolFinished("turn", 1, call.id, entry.row_id, False))
+
+    assert harness.controller.im_client.sent == ["🔎 X search “from:OpenAI” · via xAI proxy · 1 post · $0.11"]
+

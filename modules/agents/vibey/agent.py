@@ -23,6 +23,7 @@ One Turn is one ``Agent.run`` (plan section 4). The adapter
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import secrets
@@ -46,6 +47,7 @@ from core.agent_core.agent.events import (
     CompactionFinished,
     MessageCommitted,
     RunEnded,
+    ToolFinished,
     ToolStarted,
 )
 from core.agent_core.agent.hooks import AgentInput
@@ -58,10 +60,14 @@ from core.agent_core.harness.store import ContextEntry
 from core.agent_core.tools.base import CallInstance
 from core.agent_core.tools.jobs import call_instance
 from core.agent_core.messages import (
+    HOSTED_TOOLS,
     IMAGE_MIME_TYPES,
     AssistantMessage,
+    TextBlock,
     ToolCallBlock,
+    ToolResultMessage,
     UserMessage,
+    message_from_dict,
     text as text_block,
 )
 from core.agent_input import AgentInputMetadata
@@ -74,6 +80,8 @@ from core.services.agent_steering import (
     result as steer_result,
 )
 from core.backend_failure import emit_backend_failure
+from core.citations import CitationBundle, register_text_citations
+from core.hosted_activity import HostedActivity, hosted_line, native_activities, proxy_activity
 from core.message_output import MessageOutput, stop_output_for, terminal_output_for
 from core.native_dispatch_phase import mark_backend_dispatch_attempted
 from core.processing_indicator import STOPPED_REACTION_EMOJI
@@ -105,6 +113,7 @@ from storage.agent_transcript import (
 )
 from storage.db import get_cached_sqlite_engine
 from storage.models import agent_events, agent_sessions, message_deliveries, messages, session_turns
+from vibe.i18n import t as i18n_t
 
 logger = logging.getLogger(__name__)
 
@@ -184,6 +193,10 @@ class _Run:
     # Steer attempts ``Agent.steer`` accepted into this run: reconcile's in-process evidence.
     accepted_steers: set[str] = field(default_factory=set)
     stop_requested: bool = False
+    # When each tool call started (monotonic), for a proxied hosted call's duration.
+    tool_started: dict[str, float] = field(default_factory=dict)
+    # Images the run's hosted calls generated, as (path, label), attached to its final reply.
+    hosted_images: list[tuple[str, str]] = field(default_factory=list)
 
     @property
     def native_turn_id(self) -> str:
@@ -616,13 +629,18 @@ class VibeyAgent(BaseAgent):
 
     async def _on_event(self, run: _Run, event: AgentEvent) -> None:
         if isinstance(event, MessageCommitted):
+            # A response's native hosted calls show before the text that reads their results.
+            await self._emit_native_hosted(run, event.message_id)
             if event.final:
                 # Delivered at the end of the run, which decides how the Turn settles.
                 run.final_row = event.message_id
             else:
                 await self._emit_narration(run, event.message_id)
         elif isinstance(event, ToolStarted):
+            run.tool_started[event.tool_call_id] = time.monotonic()
             await self._emit_tool_started(run, event)
+        elif isinstance(event, ToolFinished):
+            await self._emit_proxy_hosted(run, event)
         elif isinstance(event, AgentError):
             run.errors.append(event)
         elif isinstance(event, RunEnded):
@@ -660,7 +678,8 @@ class VibeyAgent(BaseAgent):
             failed = final_outcome(final) == "failed" or run_failed_after_commit
             if failed:
                 self._log_failure(run, reason, kind, origin, diagnostic)
-            body = self._display_source(final, final=True)
+            body, citations = self._display_with_citations(final, final=True)
+            body = self._with_hosted_images(run, body)
             if failed and not body.strip():
                 # A silent final whose run failed after the commit: like a final without text
                 # of its own (``_display_source``), its row carries the explanation.
@@ -678,6 +697,7 @@ class VibeyAgent(BaseAgent):
                     started_at=request.started_at,
                     request=request,
                     output=replace(terminal_output_for(request), persisted_row_id=run.final_row),
+                    citations=citations,
                 )
             else:
                 # A reply the model chose to keep silent.
@@ -1160,7 +1180,7 @@ class VibeyAgent(BaseAgent):
     async def _emit_narration(self, run: _Run, row_id: str) -> None:
         """A non-final response through the same process path as the other backends' narration."""
         message = run.responses.get(row_id)
-        body = self._display_source(message, final=False) if message is not None else ""
+        body, citations = self._display_with_citations(message, final=False) if message is not None else ("", None)
         if not body.strip():
             return
         try:
@@ -1169,11 +1189,107 @@ class VibeyAgent(BaseAgent):
                 "assistant",
                 body,
                 output=MessageOutput(completes_turn=False, completes_run=False, persisted_row_id=row_id),
+                citations=citations,
             )
         except Exception:
             logger.exception("Vibey could not show narration %s", row_id)
 
+    def _display_with_citations(
+        self, message: AssistantMessage, *, final: bool
+    ) -> tuple[str, Optional[CitationBundle]]:
+        """The display text and, when the provider cited sources, the bundle that links them.
+
+        The same text ``_display_source`` gives, with each cited span carrying a
+        token that delivery writes out as a Markdown link (IM) and a badge (Web),
+        through ``core.citations`` like every other backend's citations.
+        """
+        blocks = [(block.text, block.citations or ()) for block in message.content if isinstance(block, TextBlock) and block.text]
+        if not any(citations for _, citations in blocks):
+            return self._display_source(message, final=final), None
+        body, bundle = register_text_citations(
+            blocks,
+            unresolved_label=i18n_t("message.citationUnresolved", self._language()),
+            transform=strip_silent_blocks,
+        )
+        if final and not body.strip():
+            return self._display_source(message, final=True), None
+        return body, bundle
+
+    def _with_hosted_images(self, run: _Run, body: str) -> str:
+        """The final reply with the run's generated images attached, as file links.
+
+        A file link is how every surface delivers a local file: IM uploads it as an
+        attachment, and the Web shows it inline from the same media token its card
+        registered. An image the reply already links is not attached twice.
+        """
+        links = []
+        for path, label in run.hosted_images:
+            uri = Path(path).as_uri()
+            if uri in body or path in body:
+                continue
+            safe = label.replace("[", "(").replace("]", ")")
+            links.append(f"![{safe}]({uri})")
+        if not links:
+            return body
+        return "\n\n".join(part for part in (body.rstrip(), "\n\n".join(links)) if part)
+
+    def _source_name(self, source_id: str) -> Optional[str]:
+        hub = getattr(self.config, "model_hub", None)
+        for source in getattr(hub, "sources", None) or ():
+            if getattr(source, "id", None) == source_id:
+                return getattr(source, "display_name", None) or None
+        return None
+
+    async def _emit_hosted(self, run: _Run, activity: HostedActivity) -> None:
+        """One hosted call: its line for IM and its card for the Web (``core.hosted_activity``)."""
+        run.hosted_images.extend((image.path, Path(image.path).name) for image in activity.images)
+        formatter = self._get_formatter(run.request.context)
+        line = hosted_line(activity, self._language(), escape=formatter.escape_special_chars)
+        try:
+            await self.controller.emit_agent_message(
+                run.request.context, "toolcall", line, status_label=line, hosted=activity.to_payload()
+            )
+        except Exception:
+            logger.exception("Vibey could not show hosted call %s", activity.call_id)
+
+    async def _emit_native_hosted(self, run: _Run, row_id: str) -> None:
+        message = run.responses.get(row_id)
+        if message is None:
+            return
+        for activity in native_activities(message, source_names=self._source_name):
+            await self._emit_hosted(run, activity)
+
+    async def _emit_proxy_hosted(self, run: _Run, event: ToolFinished) -> None:
+        """A proxied hosted call, once its result is committed: the record its executor returned."""
+        call = run.tool_calls.get(event.tool_call_id)
+        started = run.tool_started.pop(event.tool_call_id, None)
+        if call is None or call.name not in HOSTED_TOOLS:
+            return
+        try:
+            result = await asyncio.to_thread(self._committed_tool_result, event.event_id)
+        except Exception:
+            logger.exception("Vibey could not read hosted result %s", event.event_id)
+            return
+        if result is None or result.hosted is None:
+            return
+        duration = int((time.monotonic() - started) * 1000) if started is not None else None
+        await self._emit_hosted(
+            run, proxy_activity(call, result.hosted, source_names=self._source_name, duration_ms=duration)
+        )
+
+    def _committed_tool_result(self, event_id: str) -> Optional[ToolResultMessage]:
+        """The tool result a ``ToolFinished`` names: one row, by primary key."""
+        with self._engine.connect() as conn:
+            raw = conn.execute(select(agent_events.c.content_json).where(agent_events.c.id == event_id)).scalar()
+        if not raw:
+            return None
+        message = message_from_dict((json.loads(raw) or {}).get("message") or {})
+        return message if isinstance(message, ToolResultMessage) else None
+
     async def _emit_tool_started(self, run: _Run, event: ToolStarted) -> None:
+        if event.name in HOSTED_TOOLS:
+            # A proxied hosted call shows once, as its card, when its result lands.
+            return
         call = run.tool_calls.get(event.tool_call_id)
         arguments = dict(call.arguments) if call is not None else {}
         formatter = self._get_formatter(run.request.context)

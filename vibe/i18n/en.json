@@ -1717,5 +1717,36 @@
     "sessionTitle": "Vibey · Desktop mini",
     "noChatProject": "Create a project in Avibe first, so the desktop mini has a place for its conversation.",
     "builtinAgentUnavailable": "The built-in Agent is not available, so the desktop mini has no one to talk to."
+  },
+  "hostedTools": {
+    "tool": {
+      "web_search": "Web search",
+      "x_search": "X search",
+      "image_generation": "Image generation"
+    },
+    "quoted": "“{subject}”",
+    "mode": {
+      "native": "native ({provider})",
+      "proxy": "via {provider} proxy"
+    },
+    "count": {
+      "sourceOne": "1 source",
+      "sources": "{count} sources",
+      "postOne": "1 post",
+      "posts": "{count} posts",
+      "imageOne": "1 image",
+      "images": "{count} images"
+    },
+    "cost": {
+      "included": "included in subscription",
+      "list": "≈ ${usd}",
+      "reported": "${usd}",
+      "calls": "{cost} for {calls} calls"
+    },
+    "status": {
+      "failed": "failed: {error}",
+      "incomplete": "incomplete: {error}",
+      "pending": "cut off"
+    }
   }
 }

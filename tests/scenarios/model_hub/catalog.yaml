@@ -10,6 +10,8 @@ capability:
     - tests/test_model_hub_hosted_tools_config.py
     - tests/test_model_hub_capability_evidence.py
     - tests/test_provider_overlay.py
+    - tests/test_hosted_activity.py
+    - ui/src/components/workbench/HostedToolRow.test.tsx
     - tests/agent_core/ai/test_hosted_requests.py
     - tests/agent_core/ai/test_hosted_parsing.py
     - tests/agent_core/ai/test_hosted_transform.py
@@ -196,6 +198,39 @@ scenarios:
     related_tests:
       - tests/test_provider_overlay.py::test_bundled_providers_section_satisfies_its_schema
       - tests/test_provider_overlay.py::test_an_invalid_vendor_entry_disables_only_that_vendor
+  - id: MH-HOSTED-UI-008
+    name: The execution-process group draws a native and a proxied hosted call as one card, with how it ran, its known cost and its sources or image
+    status: covered
+    kind: observation
+    layer: unit
+    test: ui/src/components/workbench/HostedToolRow.test.tsx::MH-HOSTED-UI-008
+  - id: MH-HOSTED-UI-009
+    name: A hosted call's card payload is projected from the canonical C-1 records in the shape the Web renders
+    status: covered
+    kind: contract
+    layer: contract
+    test: tests/test_hosted_activity.py::test_payloads_match_the_shape_the_web_card_renders
+    related_tests:
+      - tests/test_hosted_activity.py::test_a_response_scoped_summary_is_shown_once
+      - tests/test_agent_activity_service.py::test_a_hosted_tool_row_carries_its_card
+      - tests/test_message_mirror.py::test_a_hosted_card_rides_on_its_toolcall_row_and_its_image_joins_the_answer
+  - id: MH-HOSTED-UI-010
+    name: IM shows one line per hosted call with tool, query, mode, count and a cost only when known
+    status: covered
+    kind: observation
+    layer: unit
+    test: tests/test_hosted_activity.py::test_the_im_line_states_tool_query_mode_count_and_known_cost
+    related_tests:
+      - tests/test_hosted_activity.py::test_the_im_line_names_a_subscription_and_a_shared_response_cost
+  - id: MH-HOSTED-UI-011
+    name: Vibey delivers a native hosted call as its IM line and Web card, its answer with provider citations as links, and its generated image as an attachment
+    status: covered
+    kind: contract
+    layer: contract
+    test: tests/test_vibey_agent.py::test_a_native_hosted_call_reaches_im_as_one_line_with_its_cited_answer_and_image
+    related_tests:
+      - tests/test_vibey_agent.py::test_a_native_hosted_call_reaches_the_workbench_as_a_card_and_cited_answer
+      - tests/test_vibey_agent.py::test_a_proxied_hosted_result_shows_once_its_result_is_committed
   - id: MH-HOSTED-VIBEY-001
     name: Vibey declares a hop's native hosted tool verbatim with its include values and pins that request to the hop's Source; the probe builds the same request
     status: covered

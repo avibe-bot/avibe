@@ -27,6 +27,7 @@ import type { LucideIcon } from 'lucide-react';
 import clsx from 'clsx';
 
 import { Markdown } from '../ui/markdown';
+import { HostedToolRow } from './HostedToolRow';
 import { Dialog, DialogContent } from '../ui/dialog';
 import { copyTextToClipboard } from '../../lib/utils';
 import { bindCitations } from '../../lib/citations';
@@ -352,7 +353,9 @@ const ActivityAssistantRow: React.FC<{ row: ActivityRow }> = ({ row }) => {
 };
 
 const ActivityRowItem = memo(function ActivityRowItem({ row }: { row: ActivityRow }) {
-  return row.kind === 'tool_call' ? <ActivityToolRow row={row} /> : <ActivityAssistantRow row={row} />;
+  if (row.kind !== 'tool_call') return <ActivityAssistantRow row={row} />;
+  // A hosted call's text is its IM line; the card renders it from the record instead.
+  return row.hosted ? <HostedToolRow card={row.hosted} /> : <ActivityToolRow row={row} />;
 });
 
 // ``variant`` picks the all-filtered placeholder: the compact LIVE card shows a single

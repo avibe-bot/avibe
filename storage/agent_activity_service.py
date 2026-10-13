@@ -400,6 +400,9 @@ def _timeline(conn, session_id: str, *, include_text: bool) -> list[dict[str, An
                 "turn_id": str(event.get("turn_id") or "").strip() or None,
                 "row_kind": "tool_call",
                 "text": event.get("text") if include_text else None,
+                # A hosted-tool call carries its card (``core.hosted_activity``); every
+                # other tool call is its text alone.
+                "hosted": ((event.get("content") or {}).get("hosted") if include_text else None),
             }
         )
     for turn in conn.execute(
@@ -488,6 +491,7 @@ def _make_group(
                     if isinstance(item.get("citations"), list) and item["citations"]
                     else {}
                 ),
+                **({"hosted": item["hosted"]} if isinstance(item.get("hosted"), dict) else {}),
             }
             for item in pending
         ]

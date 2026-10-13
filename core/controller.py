@@ -1945,6 +1945,7 @@ class Controller:
         terminal_error: Optional[str] = None,
         delivery: Any = None,
         citations: Optional[CitationBundle] = None,
+        hosted: Optional[dict] = None,
     ):
         """Backward-compatible entrypoint; delegated to message dispatcher."""
         result = await self.message_dispatcher.emit_agent_message(
@@ -1965,6 +1966,7 @@ class Controller:
             # signature of every stand-in. The citation sidecar rides the same way.
             **({"delivery": delivery} if delivery is not None else {}),
             **({"citations": citations} if citations else {}),
+            **({"hosted": hosted} if hosted else {}),
         )
         manager = getattr(self, "session_turns", None)
         complete = getattr(manager, "on_terminal_delivery_complete", None)

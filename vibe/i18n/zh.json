@@ -1717,5 +1717,36 @@
     "sessionTitle": "歪比 · 桌宠",
     "noChatProject": "先在 Avibe 里建一个项目，桌宠的对话需要放在项目里。",
     "builtinAgentUnavailable": "内置 Agent 当前不可用，桌宠暂时没有对话对象。"
+  },
+  "hostedTools": {
+    "tool": {
+      "web_search": "网页搜索",
+      "x_search": "X 搜索",
+      "image_generation": "图片生成"
+    },
+    "quoted": "“{subject}”",
+    "mode": {
+      "native": "原生（{provider}）",
+      "proxy": "由 {provider} 代理"
+    },
+    "count": {
+      "sourceOne": "1 个来源",
+      "sources": "{count} 个来源",
+      "postOne": "1 条帖子",
+      "posts": "{count} 条帖子",
+      "imageOne": "1 张",
+      "images": "{count} 张"
+    },
+    "cost": {
+      "included": "订阅内含",
+      "list": "≈ ${usd}",
+      "reported": "${usd}",
+      "calls": "{cost}（{calls} 次调用）"
+    },
+    "status": {
+      "failed": "失败：{error}",
+      "incomplete": "未完成：{error}",
+      "pending": "已中断"
+    }
   }
 }
