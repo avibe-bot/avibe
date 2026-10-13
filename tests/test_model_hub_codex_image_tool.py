@@ -21,6 +21,8 @@ import aiohttp
 import pytest
 from aiohttp import web
 
+from core.handlers.model_hub.capability_evidence import EvidenceFeature, EvidenceRecord, identity_digest
+from core.handlers.model_hub.hosted_tools import HOSTED_PROBE_SHAPE, engine_stamp
 from core.handlers.model_hub.turn_gateway import ModelHubTurnGateway
 from modules.agents.model_hub import ModelHubRuntimeRouter
 from tests.test_model_hub_l3 import _canonicalize_fixed_test_routes, _service, _source
@@ -102,9 +104,11 @@ def _wire(service, tmp_path, root: str, grants: dict[str, dict]) -> EngineStateS
     return state
 
 
-async def _post(url: str, token: str, body: dict) -> None:
+async def _post(url: str, token: str, body: dict, headers: dict | None = None) -> None:
     async with aiohttp.ClientSession() as downstream:
-        async with downstream.post(url, json=body, headers={"Authorization": f"Bearer {token}"}) as response:
+        async with downstream.post(
+            url, json=body, headers={"Authorization": f"Bearer {token}", **(headers or {})},
+        ) as response:
             assert response.status == 200, await response.text()
             await response.read()
 
@@ -197,8 +201,12 @@ async def test_codex_requests_reach_the_engine_with_the_engines_own_image_tool(
     ("claude", "messages"), ("opencode", "responses"), ("vibey", "responses"),
 ])
 async def test_other_callers_reach_the_engine_with_exactly_their_declared_tools(tmp_path, backend, path, declared):
-    """MH-HOSTED-GATEWAY-001: Claude, OpenCode and Vibey get no image tool they did not declare."""
-    configured = _source("src_shared001", "Responses key")
+    """MH-HOSTED-GATEWAY-001: Claude, OpenCode and Vibey get no image tool they did not declare.
+
+    A Vibey request that declares it is a native declaration, so it is pinned to
+    a hop verified for the tool (MH-HOSTED-GATEWAY-002).
+    """
+    configured = _source("src_shared001", "Responses key", model_id="gpt-6-astra" if backend == "vibey" else "shared-model")
     tools = [SHELL, DECLARED_IMAGE] if declared else [SHELL]
     if backend == "claude":
         tools = [{"name": "shell", "input_schema": {"type": "object"}}, *([DECLARED_IMAGE] if declared else [])]
@@ -211,6 +219,19 @@ async def test_other_callers_reach_the_engine_with_exactly_their_declared_tools(
             _canonicalize_fixed_test_routes(service)
             service.store.requested_models["opencode"] = "shared-model"
         _wire(service, tmp_path, root, {})
+        pin = {}
+        if backend == "vibey" and declared:
+            source = service.store.config.sources[0]
+            service.capability_evidence.write(
+                EvidenceRecord(
+                    source_id=source.id, model_id="gpt-6-astra",
+                    feature=EvidenceFeature.hosted("image_generation", "call"), status="verified", basis="probe",
+                    observed_at=service.now(), engine=engine_stamp(), shape=HOSTED_PROBE_SHAPE,
+                    source_identity=identity_digest(source),
+                ),
+                live=service.store.config.sources,
+            )
+            pin = {"x-avibe-pin-source": source.id}
         gateway = ModelHubTurnGateway(service)
         try:
             if backend == "vibey":
@@ -224,7 +245,7 @@ async def test_other_callers_reach_the_engine_with_exactly_their_declared_tools(
                     resolved_model_id="shared-model", source_id=configured.id,
                 )
                 url, model = f"{base_url}/v1/{path}", "shared-model"
-            await _post(url, token, {"model": model, "stream": True, "tools": tools, "input": INPUT})
+            await _post(url, token, {"model": model, "stream": True, "tools": tools, "input": INPUT}, pin)
         finally:
             await gateway.close()
     assert len(received) == 1

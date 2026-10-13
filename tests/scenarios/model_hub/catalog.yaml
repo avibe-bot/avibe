@@ -5,6 +5,7 @@ capability:
   canonical_tests:
     - tests/test_model_hub_api.py
     - tests/test_model_hub_vibey_consumer.py
+    - tests/test_model_hub_hosted_pinning.py
     - tests/test_model_hub_hosted_tools_resolution.py
     - tests/test_model_hub_hosted_tools_config.py
     - tests/test_model_hub_capability_evidence.py
@@ -230,6 +231,23 @@ scenarios:
       - tests/test_vibey_backend_registration.py::test_vibey_agent_runs_its_catalogs_first_model_until_it_has_one
       - tests/test_vibey_backend_registration.py::test_a_lost_vibey_model_hand_off_heals_on_the_next_start
       - tests/test_controller_im_ready.py::test_runtime_services_start_when_post_update_notification_fails
+  - id: MH-HOSTED-GATEWAY-002
+    name: A pinned Vibey request is served only by its Source and unchanged; every refusal or pre-output failure there is pin_unavailable, and unpinned hosted content never reaches an unverified hop
+    status: covered
+    kind: contract
+    layer: contract
+    test: tests/test_model_hub_hosted_pinning.py::test_a_pinned_request_is_served_only_by_its_source_or_handed_back
+    related_tests:
+      - tests/test_model_hub_hosted_pinning.py::test_the_portable_resend_fails_over_and_the_turn_settles_on_it
+      - tests/test_model_hub_hosted_pinning.py::test_an_unpinned_request_never_reaches_a_hop_unverified_for_its_hosted_content
+  - id: MH-HOSTED-GATEWAY-003
+    name: Hosted declarations are recognized by any vendor's type, and only replayed items outside the in-flight response need replay evidence
+    status: covered
+    kind: contract
+    layer: unit
+    test: tests/test_model_hub_hosted_pinning.py::test_only_items_outside_the_in_flight_response_need_replay_evidence
+    related_tests:
+      - tests/test_model_hub_hosted_pinning.py::test_declarations_are_recognized_by_every_vendors_type
   - id: MH-LIMITS-001
     name: Provider rows written before any models.dev copy was cached take its limits once one arrives, keeping every limit already set
     status: covered

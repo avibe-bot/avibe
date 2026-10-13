@@ -862,6 +862,32 @@ class GatewayTurnTerminalizer:
     ) -> None:
         self._staged_exit = {**(self._staged_exit or {}), "fail_reason": reason}
 
+    def pinned_hop(self, source_id: str, model_id: str | None) -> tuple[str, str | None]:
+        """The exact hop an ``x-avibe-pin-source`` request was rendered for, from explicit or immutable data.
+
+        A continuation names its model (``x-avibe-pin-model``: the served-hop
+        model of the response it continues). Otherwise the pin is the launch's
+        primary hop, whose origin this route credential fixes. A pin that is
+        neither has no model and matches no hop. Nothing turn-wide is read: a
+        turn may have concurrent requests.
+        """
+
+        if model_id is None and self.primary_origin is not None and self.primary_origin.source == source_id:
+            model_id = self.primary_origin.model
+        return source_id, model_id
+
+    def hand_back(self) -> None:
+        """End this request without an exit of its own: its caller re-sends the content.
+
+        A pinned Vibey request the gateway cannot serve (``pin_unavailable``)
+        is re-rendered and sent again in the same turn. Attempts it made stay
+        recorded; the turn settles on the request that follows.
+        """
+
+        self._registry.clear_prepared_attempt(self.turn_id, request_id=self._request_id)
+        self._staged_exit = None
+        self._exit_committed = True
+
     def engine_down(self, *, local_error_detail: str | None = None) -> None:
         self._registry._terminalize_gateway_exit(
             self.turn_id,

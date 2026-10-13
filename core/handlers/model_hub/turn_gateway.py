@@ -44,6 +44,7 @@ from .provenance import (
     project_turn_outcome_copy,
     render_turn_outcome_copy,
 )
+from .hosted_admission import PIN_MODEL_HEADER, PIN_SOURCE_HEADER, PIN_UNAVAILABLE_CODE
 from .request import FORWARDED_CALLER_HEADERS, ModelHubRequest
 from .retry import RECOVERY_EXHAUSTED_CODE, RECOVERY_EXHAUSTED_MESSAGE
 from .resolver import parse_model_hub_timestamp
@@ -961,7 +962,12 @@ class ModelHubTurnGateway:
                 execution, terminalizer, status=400, code="invalid_request_error",
                 turn_outcome=REQUEST_NONFALLBACK_TURN_OUTCOME,
             )
-        if not isinstance(model_id, str) or not model_id or not isinstance(stream, bool):
+        pin_source_id = request.headers.get(PIN_SOURCE_HEADER) if backend == "vibey" else None
+        pin_model_id = request.headers.get(PIN_MODEL_HEADER) if backend == "vibey" else None
+        if (
+            not isinstance(model_id, str) or not model_id or not isinstance(stream, bool)
+            or pin_source_id == "" or pin_model_id == "" or (pin_model_id is not None and pin_source_id is None)
+        ):
             terminalizer.fail("invalid_parameter")
             return self._terminal_error_response(
                 execution,
@@ -1026,6 +1032,9 @@ class ModelHubTurnGateway:
                         protocol=protocol,
                         headers=caller_headers,
                         primary_origin=terminalizer.primary_origin,
+                        pinned_hop=(
+                            terminalizer.pinned_hop(pin_source_id, pin_model_id) if pin_source_id else None
+                        ),
                     ),
                     stream=stream,
                     supply_channel="hub",
@@ -1039,6 +1048,15 @@ class ModelHubTurnGateway:
                     execution.handle = resolved.handle
                     resources.push_async_callback(resolved.handle.close_stream)
         except ModelHubError as exc:
+            if exc.code == PIN_UNAVAILABLE_CODE:
+                # Never shown to the user: Vibey re-renders the request in
+                # portable form and sends it again unpinned in this same turn.
+                terminalizer.hand_back()
+                return web.json_response(
+                    {"type": "error", "error": {"type": "model_hub_pin_unavailable", "code": PIN_UNAVAILABLE_CODE}},
+                    status=409,
+                    headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
+                )
             turn_outcome = exc.turn_outcome
             if turn_outcome is None and exc.code == "engine_down":
                 turn_outcome = ENGINE_DOWN_TURN_OUTCOME
