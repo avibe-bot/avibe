@@ -710,9 +710,10 @@ def test_usage_metering_has_one_owner_per_call_population() -> None:
     meter_calls = [
         node for node in ast.walk(service_tree) if _call_name(node) == "_meter_call"
     ]
-    # Explicit Source tests consume their own response rather than forwarding a
-    # Turn to the gateway. They reuse the same metering owner, exactly once.
-    consumers = (invoke, _functions(service_tree)["probe_source"])
+    # Explicit Source tests and proxied hosted-tool calls consume their own
+    # response rather than forwarding a Turn to the gateway. They reuse the same
+    # metering owner, exactly once.
+    consumers = (invoke, _functions(service_tree)["probe_source"], _functions(service_tree)["run_hosted_tool"])
     assert len(meter_calls) == len(consumers)
     assert all(
         sum(call in set(ast.walk(consumer)) for call in meter_calls) == 1
@@ -1244,9 +1245,11 @@ def test_machine_error_field_access_has_one_extractor() -> None:
             if (history := functions.get(name)) is not None
             for node in ast.walk(history)
         }
-        if path.name == "hosted_admission.py":
-            # Hosted admission discriminates request tools and history items,
-            # never an error envelope; its type reads are exempt too.
+        if path.name in {"hosted_admission.py", "hosted_executor.py"}:
+            # Hosted admission discriminates request tools and history items, and
+            # the proxy executor response items and stream events, never an error
+            # envelope (executor error codes come from the call's outcome). Their
+            # type reads are exempt too.
             history_nodes = set(ast.walk(tree))
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):

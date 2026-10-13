@@ -56,12 +56,14 @@ from vibe.backend_model_catalog import (
     bundled_provider_overlay,
     hosted_tool_spec,
 )
+from vibe.i18n import t as i18n_t
 from vibe.model_hub_runtime.api_key_vendors import (
     catalog_api_key_vendor_label,
     pinned_api_key_protocol,
 )
 
 from .adapter import (
+    ENGINE_TRANSPORT_TIMEOUT_SECONDS,
     DiscoveredModel,
     EngineAdapter,
     EngineEnsureResult,
@@ -113,9 +115,24 @@ from .evidence_rules import LearnedEvidence
 from .evidence_rules import learn as learn_from_rejection
 from .evidence_rules import wire_effort
 from .hosted_admission import PIN_UNAVAILABLE_CODE, HostedContent, admits, hosted_content
+from .hosted_executor import (
+    EXECUTOR_RESPONSE_MAX_BYTES,
+    ExecutorCallRefused,
+    ExecutorResponseRefused,
+    ResponsesStreamReader,
+    anthropic_result,
+    call_timeout,
+    executor_request,
+    executor_streams,
+    failed_record,
+    parse_call,
+    responses_result,
+)
 from .hosted_tools import (
     HOSTED_PROBE_SHAPE,
     HostedToolSettingRefused,
+    credential_eligible,
+    untranslated,
     engine_stamp,
     hosted_tools_status,
     parse_hosted_tool_setting,
@@ -697,6 +714,34 @@ def _pin_unavailable() -> ModelHubError:
     """The pinned hop cannot serve this request before output (``vibey-hosted-tools.md`` §3.5)."""
 
     return ModelHubError(PIN_UNAVAILABLE_CODE, status=409)
+
+
+def _executor_failure(outcome: RawCallOutcome | None, say: Callable[..., str], *, refused: str | None) -> str | None:
+    """How a proxied hosted call failed, in the user's language; None when it succeeded.
+
+    ``refused`` names a bound the response itself broke (size, nesting).
+    """
+
+    if refused is not None:
+        return say(refused)
+    if outcome is None or outcome.kind is RawOutcomeKind.SUCCESS:
+        return None
+    if outcome.kind is RawOutcomeKind.TIMEOUT:
+        return say("modelHub.hostedTools.timedOut")
+    if outcome.kind is RawOutcomeKind.NETWORK_ERROR:
+        return say("modelHub.hostedTools.unreachable")
+    if outcome.kind is RawOutcomeKind.PROTOCOL_ERROR:
+        return say("modelHub.hostedTools.unreadable")
+    # The provider's own machine code and its redacted, bounded detail stay verbatim.
+    detail = " ".join(
+        part for part in (
+            f"HTTP {outcome.http_status}" if outcome.http_status is not None else None,
+            outcome.error_code,
+        ) if part
+    )
+    if outcome.upstream_detail:
+        detail = f"{detail}: {outcome.upstream_detail}" if detail else outcome.upstream_detail
+    return say("modelHub.hostedTools.providerRefused", detail=detail or outcome.kind.value)
 
 
 def _google_admission_skip_reason(
@@ -5951,8 +5996,205 @@ class ModelHubService:
         basis, usd = priced
         return HostedCost(basis=basis, usd=None if usd is None else round(usd, 6))
 
-    def hosted_tools_for_hop(self, config: ModelHubConfig, source: ModelHubSourceConfig, model_id: str) -> dict:
-        """``HopResolution.hosted_tools`` for a Vibey launch served by this Source and model."""
+    @staticmethod
+    def _hosted_executor(config: ModelHubConfig, source_id: str, model_id: str, tool: str, identity: str):
+        """The bound executor Source if it can still run this tool, else None.
+
+        The binding is the turn's: ordinary Source edits apply from the next
+        turn. A removed or ineligible Source refuses it, and so does one whose
+        identity (base URL, credential, ...) changed since launch: the engine
+        no longer holds the bound credential, and the new one was never
+        verified. A Claude subscription never runs a hosted tool.
+        """
+
+        source = next((item for item in config.sources if item.id == source_id), None)
+        if (
+            source is None
+            or identity_digest(source) != identity
+            or source.supply_channel != "hub"
+            or not source.credential_ref
+            or not credential_eligible(source)
+            or not untranslated(source)
+        ):
+            return None
+        spec = hosted_tool_spec(source.vendor, source.protocol, model_id, tool)
+        return (source, spec) if spec is not None else None
+
+    async def run_hosted_tool(
+        self,
+        tool: str,
+        payload: object,
+        *,
+        bindings: Mapping[str, tuple[str, str, str] | None] | None,
+        language: str = "en",
+    ) -> dict:
+        """Run one proxied hosted call on the executor bound for its turn (``vibey-hosted-tools.md`` §3.4).
+
+        ``bindings`` are the executors the caller's live turn bound, per tool,
+        with each executor Source's identity at launch (None without a live
+        turn). The call must name exactly that binding:
+        the gateway runs it and no other, with no failover and no Source
+        switch. A call that reaches no executor answers a failed record without
+        an execution; one that ran carries its ``ProxyExecution`` and is
+        metered on the executor Source. It never changes Source health: a
+        proxy call is a tool call, not the turn's model hop.
+        """
+
+        def say(key: str, **params: str) -> str:
+            return i18n_t(key, language, **params)
+
+        try:
+            # Validation is proportional to the request: off the controller loop.
+            call = await asyncio.to_thread(parse_call, tool, payload)
+        except ExecutorCallRefused as refused:
+            raise ModelHubError(refused.code, status=refused.status) from None
+        binding = bindings.get(tool, False) if bindings is not None else False
+        if binding is False or (binding[:2] if binding is not None else None) != call.executor:
+            raise ModelHubError("executor_not_bound", status=409)
+        if binding is None:
+            return {"record": failed_record(say("modelHub.hostedTools.noExecutor", tool=tool))}
+        source_id, model_id, identity = binding
+        unavailable = {"record": failed_record(say("modelHub.hostedTools.executorUnavailable", tool=tool))}
+        bound = self._hosted_executor(self.store.load(), source_id, model_id, tool, identity)
+        if bound is None:
+            return unavailable
+        source, spec = bound
+        request = executor_request(call, source, model_id, spec)
+        stream = executor_streams(source)
+        declaration = spec.declaration
+        reader = (
+            ResponsesStreamReader(
+                partial_images=declaration.get("partial_images", 0) if tool == "image_generation" else None,
+            )
+            if stream else None
+        )
+        body = bytearray()
+        handle = None
+        outcome: RawCallOutcome | None = None
+        admitted = False
+        refused: str | None = None
+
+        async def invoke() -> None:
+            nonlocal handle, outcome, admitted, refused
+            while True:
+                await self._prepare_engine_for_demand()
+                await self._mutation_lock.acquire()
+                held = True
+
+                def release_owner() -> None:
+                    nonlocal held
+                    if held:
+                        held = False
+                        self._mutation_lock.release()
+
+                def on_admitted() -> None:
+                    nonlocal admitted
+                    admitted = True
+                    release_owner()
+
+                try:
+                    if self._hosted_executor(self.store.load(), source_id, model_id, tool, identity) is None:
+                        return
+                    if not self._engine_synced:
+                        continue
+                    handle = await self._engine_call(self.adapter.invoke(
+                        source.id, model_id, request, stream, "vibey", on_admitted=on_admitted,
+                    ))
+                    break
+                finally:
+                    release_owner()
+            if handle.stream is not None:
+                async for chunk in handle.stream:
+                    if refused is not None:
+                        continue
+                    try:
+                        if reader is not None:
+                            # An image event is megabytes of JSON: parse it off the controller loop.
+                            await asyncio.to_thread(reader.feed, chunk)
+                        elif len(body) + len(chunk) > EXECUTOR_RESPONSE_MAX_BYTES:
+                            raise ExecutorResponseRefused("modelHub.hostedTools.tooLarge")
+                        else:
+                            body.extend(chunk)
+                    except ExecutorResponseRefused as broken:
+                        # The response broke a bound: the call failed. Its usage is still metered.
+                        refused = broken.key
+            outcome = await self._engine_call(handle.outcome())
+
+        async def settle() -> None:
+            if handle is not None:
+                try:
+                    # Bounded like the gateway's own teardown: a stuck close must
+                    # not hold the call past its deadline or the gateway's shutdown.
+                    await asyncio.wait_for(handle.close_stream(), timeout=ENGINE_TRANSPORT_TIMEOUT_SECONDS)
+                except (asyncio.TimeoutError, Exception):
+                    logger.warning("Model Hub hosted-tool executor stream did not close cleanly", exc_info=True)
+                finally:
+                    await self._meter_call(
+                        source_id=source.id, model_id=model_id, outcome=outcome, observed=handle.observed,
+                    )
+
+        try:
+            await asyncio.wait_for(invoke(), timeout=call_timeout(tool))
+        except asyncio.TimeoutError:
+            if admitted:
+                outcome = RawCallOutcome(
+                    kind=RawOutcomeKind.TIMEOUT, http_status=None, error_code=None, redacted_message=None,
+                    stream_started=False, model_id=model_id, source_id=source.id,
+                )
+        except ModelHubError as error:
+            if not admitted:
+                logger.info("Model Hub hosted-tool executor was not reached: %s", error.code)
+                return unavailable
+            outcome = RawCallOutcome(
+                kind=RawOutcomeKind.NETWORK_ERROR, http_status=None, error_code=error.code, redacted_message=None,
+                stream_started=False, model_id=model_id, source_id=source.id,
+            )
+        finally:
+            # A known outcome belongs to the call even if its caller leaves:
+            # drain the bounded settlement before propagating cancellation.
+            settlement = asyncio.create_task(settle())
+            try:
+                await asyncio.shield(settlement)
+            except asyncio.CancelledError as cancelled:
+                try:
+                    await await_owned_task(settlement)
+                except BaseException:
+                    pass
+                raise cancelled
+        if not admitted:
+            return unavailable
+        execution = {
+            "mode": "proxy",
+            "executor_origin": {"provider": source.vendor, "api": source.protocol, "model": model_id},
+            "executor_source_id": source.id,
+            "executor_billing": source.billing,
+        }
+        failure = _executor_failure(outcome, say, refused=refused)
+        if reader is not None:
+            result = await asyncio.to_thread(responses_result, tool, reader.readout, say, failure=failure)
+        elif failure is not None:
+            result = None
+        else:
+            result = await asyncio.to_thread(anthropic_result, bytes(body), say)
+        if result is None:
+            return {"record": failed_record(failure or say("modelHub.hostedTools.unreadable")), "execution": execution}
+        answer: dict[str, Any] = {"record": result.record, "execution": execution}
+        if result.generation is not None:
+            answer["generation"] = result.generation
+            answer["images"] = list(result.images)
+        return answer
+
+    def hosted_tools_for_hop(
+        self,
+        config: ModelHubConfig,
+        source: ModelHubSourceConfig,
+        model_id: str,
+        frozen: Mapping[str, tuple[str, str] | None] | None = None,
+    ) -> dict:
+        """``HopResolution.hosted_tools`` for a Vibey launch served by this Source and model.
+
+        ``frozen`` is the turn's tool set and executors from its first resolution.
+        """
 
         return resolve_hosted_tools(
             config,
@@ -5962,6 +6204,7 @@ class ModelHubService:
             spec_for=hosted_tool_spec,
             engine=self.engine_stamp,
             now=self.now(),
+            frozen=frozen,
         )
 
     async def set_agent_mode(self, backend: str, mode: object) -> dict:

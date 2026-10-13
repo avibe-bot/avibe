@@ -10,7 +10,7 @@ import socket
 import tempfile
 from collections import deque
 from collections.abc import AsyncIterator, Callable, Mapping
-from contextlib import AsyncExitStack, asynccontextmanager, contextmanager, suppress
+from contextlib import AsyncExitStack, asynccontextmanager, contextmanager, nullcontext, suppress
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import BinaryIO, Final, Optional
@@ -97,6 +97,8 @@ _SSE_RESPONSE_HEADERS: Final = {
 # The ending a local error response carries, so a stream whose headers already
 # left can still deliver it as the protocol's terminal event.
 _LOCAL_ENDING: Final = "model_hub_local_ending"
+# A proxied hosted-tool call carries a few canonical arguments, never content.
+_HOSTED_TOOL_REQUEST_MAX_BYTES: Final = 1024 * 1024
 _SUPPORTED_PATHS: Final = frozenset(
     {
         "messages",
@@ -331,8 +333,10 @@ class _DownstreamDisconnected(ConnectionError):
 @dataclass(eq=False)
 class _OwnedGatewayRequest:
     task: asyncio.Task
-    terminalizer: GatewayTurnTerminalizer
-    execution: _TurnExecution
+    # None for a proxied hosted-tool call: a tool call, not the turn's model
+    # hop, so it owns no provenance and no settlement.
+    terminalizer: GatewayTurnTerminalizer | None
+    execution: _TurnExecution | None
     done: asyncio.Future[None]
 
 
@@ -405,6 +409,19 @@ class ModelHubTurnGateway:
             terminalizer.on_attribution_released = None
             self._release_turn_request(turn_id, owned)
 
+    @contextmanager
+    def _own_turn_call(self, turn_id: str):
+        """Own a proxied hosted-tool call by its turn, so stopping or finalizing the turn ends it too."""
+
+        task = asyncio.current_task()
+        assert task is not None
+        owned = _OwnedGatewayRequest(task, None, None, asyncio.get_running_loop().create_future())
+        self._turn_requests.setdefault(turn_id, set()).add(owned)
+        try:
+            yield
+        finally:
+            self._release_turn_request(turn_id, owned)
+
     def _release_turn_request(self, turn_id: str, owned: _OwnedGatewayRequest) -> None:
         requests = self._turn_requests.get(turn_id)
         if requests is not None:
@@ -471,6 +488,11 @@ class ModelHubTurnGateway:
         for owned in requests:
             if owned.done not in pending or owned.done.done():
                 continue
+            if owned.terminalizer is None or owned.execution is None:
+                # A hosted-tool call has no turn facts to settle; it was cancelled above.
+                logger.error("Abandoned a Model Hub hosted-tool call after the engine transport deadline")
+                self._release_turn_request(turn_id, owned)
+                continue
             self._abandon_owned_task(
                 owned.task, phase="request", terminalizer=owned.terminalizer, execution=owned.execution
             )
@@ -522,6 +544,7 @@ class ModelHubTurnGateway:
         gateway_request_model_id: Optional[str] = None,
         request_scoped: bool = False,
         primary_origin: HopOrigin | None = None,
+        hosted_executors: tuple[tuple[str, tuple[str, str, str] | None], ...] = (),
     ) -> tuple[str, str]:
         if backend not in MODEL_HUB_BACKENDS:
             raise ModelHubError("mapping_target_unavailable", status=409)
@@ -531,7 +554,8 @@ class ModelHubTurnGateway:
             # work; the registry still refuses any remaining overlap.
             finishing = [
                 owned.done for owned in self._turn_requests.get(turn_id, ())
-                if owned.execution.settlement_recorded or owned.execution.terminal_fact_committed
+                if owned.execution is not None
+                and (owned.execution.settlement_recorded or owned.execution.terminal_fact_committed)
             ]
             if finishing:
                 await asyncio.wait(finishing, timeout=self._transport_timeout)
@@ -554,6 +578,7 @@ class ModelHubTurnGateway:
                     via_mapping=via_mapping,
                     gateway_request_model_id=gateway_request_model_id,
                     primary_origin=primary_origin,
+                    hosted_executors=hosted_executors,
                 )
             except PreparedGatewayRouteConflict:
                 raise ModelHubError("mapping_target_unavailable", status=409) from None
@@ -602,6 +627,8 @@ class ModelHubTurnGateway:
                 client_max_size += 1
             app = web.Application(client_max_size=client_max_size)
             app.router.add_get("/{backend}/v1/models", self._handle_models)
+            # Before the catch-all model route, which would otherwise take it.
+            app.router.add_post("/vibey/v1/hosted-tools/{tool}", self._handle_hosted_tool)
             app.router.add_post("/{backend}/v1/{endpoint:.*}", self._handle_request)
             app.router.add_post("/{backend}/v1beta/models/{google_action:.*}", self._handle_google_request)
             runner = web.AppRunner(
@@ -643,6 +670,55 @@ class ModelHubTurnGateway:
             if candidate and self.correlation.authenticates(backend, candidate):
                 return candidate
         return None
+
+    async def _handle_hosted_tool(self, request: web.Request) -> web.StreamResponse:
+        """Run one proxied hosted call for a Vibey turn (``vibey-hosted-tools.md`` §3.4).
+
+        Authenticated with the turn's gateway token. Every outcome of a
+        well-formed call is a 200 carrying its canonical record; only a
+        malformed call is an error status.
+        """
+
+        def refused(status: int, code: str) -> web.Response:
+            return web.json_response(
+                {"type": "error", "error": {"type": code, "code": code}},
+                status=status,
+                headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
+            )
+
+        token = self._authorized_token(request, "vibey")
+        if token is None:
+            return refused(401, "authentication_error")
+        # Every step proportional to the request or the answer runs off the
+        # controller loop; the call's arguments are small, so the body is bounded.
+        if request.content_length is None or request.content_length > _HOSTED_TOOL_REQUEST_MAX_BYTES:
+            return refused(400, "invalid_request_error")
+        raw = await request.read()
+        try:
+            payload = await asyncio.to_thread(json.loads, raw)
+        except (ValueError, RecursionError):
+            return refused(400, "invalid_request_error")
+        # Checked and owned with no await between them: once admitted, the
+        # call belongs to its turn, and stopping or finalizing the turn ends it.
+        live = self.correlation.hosted_executor_bindings(backend="vibey", token=token)
+        try:
+            with self._own_turn_call(live[0]) if live is not None else nullcontext():
+                result = await self.service.run_hosted_tool(
+                    request.match_info["tool"],
+                    payload,
+                    # Only the executor the caller's live turn bound may run.
+                    bindings=live[1] if live is not None else None,
+                    language=self._language_provider() or "en",
+                )
+        except ModelHubError as exc:
+            return refused(exc.status, exc.code)
+        # An image answer carries megabytes of base64: encode it off the loop.
+        body = await asyncio.to_thread(lambda: json.dumps(result).encode("utf-8"))
+        return web.Response(
+            body=body,
+            content_type="application/json",
+            headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
+        )
 
     async def _handle_models(self, request: web.Request) -> web.StreamResponse:
         backend = request.match_info["backend"]
