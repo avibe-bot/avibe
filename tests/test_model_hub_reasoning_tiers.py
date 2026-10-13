@@ -28,7 +28,8 @@ def test_upstream_reasoning_signal_uses_only_the_protocol_default(
     assert resolution.source == "upstream"
 
 
-def test_catalog_row_outranks_user_and_is_returned_verbatim() -> None:
+def test_catalog_row_outranks_user_and_drops_its_client_presets() -> None:
+    """MH-HOSTED-006 (#2539): Codex's ``ultra`` is a client preset, never a Source's wire tier."""
     resolution = resolve_reasoning_tiers(
         protocol="openai_responses",
         model_id="gpt-5.6-sol",
@@ -36,14 +37,7 @@ def test_catalog_row_outranks_user_and_is_returned_verbatim() -> None:
         existing_source="user",
     )
 
-    assert resolution.efforts == (
-        "low",
-        "medium",
-        "high",
-        "xhigh",
-        "max",
-        "ultra",
-    )
+    assert resolution.efforts == ("low", "medium", "high", "xhigh", "max")
     assert resolution.source == "catalog"
 
 
@@ -121,3 +115,45 @@ def test_upstream_reasoning_parameter_matching_is_case_and_space_tolerant(
     )
 
     assert resolution.source == "upstream"
+
+
+@pytest.mark.parametrize(
+    ("provenance", "expected"),
+    (
+        ("catalog", ["low", "medium", "high", "xhigh", "max"]),
+        ("user", ["low", "medium", "high", "xhigh", "max", "ultra"]),
+    ),
+)
+def test_a_persisted_catalog_list_offers_no_client_preset_to_vibey(tmp_path, provenance, expected) -> None:
+    """MH-HOSTED-006 (#2539): a released build persisted Codex's ``ultra`` in catalog lists; only user lists keep it."""
+    from config.v2_config import ModelHubModelConfig, ModelHubSourceConfig, ModelHubSourceStateConfig
+    from tests.test_model_hub_api import _service
+
+    service, store, _adapter = _service(tmp_path)
+    store.config.sources = [
+        ModelHubSourceConfig(
+            id="src_relay0001",
+            kind="api_key",
+            vendor="openai",
+            display_name="OpenAI relay",
+            protocol="openai_responses",
+            supply_channel="hub",
+            billing="metered",
+            state=ModelHubSourceStateConfig(status="standby"),
+            models=[
+                ModelHubModelConfig(
+                    id="gpt-5.6-sol",
+                    provenance="discovered",
+                    reasoning_efforts=["low", "medium", "high", "xhigh", "max", "ultra"],
+                    reasoning_efforts_source=provenance,
+                )
+            ],
+            credential_ref="cred_relay",
+        )
+    ]
+    store.config.agents["vibey"].sources.order = ["src_relay0001"]
+
+    providers = service.agent_model_candidates("vibey")["providers"]
+
+    [row] = [row for row in providers if row["id"] == "gpt-5.6-sol"]
+    assert row["reasoning_efforts"] == expected

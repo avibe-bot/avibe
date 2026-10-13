@@ -28,6 +28,7 @@ from core.handlers.model_hub.adapter import (
     InvokeCancelledError,
     RawCallOutcome,
     RawOutcomeKind,
+    UpstreamRejection,
 )
 from core.handlers.model_hub.async_owner import run_owned_in_thread
 from core.handlers.model_hub.classification import UPSTREAM_MACHINE_ERROR_CODES
@@ -1778,6 +1779,15 @@ def _reduce_protocol_observation(
             usage=observation.usage,
             recovery_verified=observation.recovery_verified,
             upstream_detail=upstream_detail,
+            rejection=_upstream_rejection(
+                http_status,
+                stream_started,
+                error_code,
+                error_type,
+                observation.error_payload or b"",
+                observation.error_envelope_paths or (("error",),),
+                observation.error_message,
+            ),
         )
     return _outcome(
         kind=RawOutcomeKind.PROTOCOL_ERROR,
@@ -1880,6 +1890,7 @@ def _outcome(
     recovery_verified: bool = False,
     upstream_detail: str | None = None,
     os_errno: int | None = None,
+    rejection: UpstreamRejection | None = None,
 ) -> RawCallOutcome:
     return RawCallOutcome(
         kind=kind,
@@ -1895,6 +1906,7 @@ def _outcome(
         recovery_verified=recovery_verified,
         upstream_detail=upstream_detail,
         os_errno=os_errno,
+        rejection=rejection,
     )
 
 
@@ -1942,6 +1954,68 @@ def _upstream_error_detail(
         if text:
             return text
     return None
+
+
+_REJECTION_TOKEN = re.compile(r"[A-Za-z0-9_.\[\]-]{1,64}")
+_REJECTION_MESSAGE_SCAN_CHARS = 2000
+_INVALID_VALUE_MESSAGE = re.compile(r"Invalid value: '([A-Za-z0-9_.-]{1,64})'")
+_UNSUPPORTED_TOOL_TYPE_MESSAGE = re.compile(r"Unsupported tool type: ([A-Za-z0-9_.-]{1,64})")
+_INVALID_ENCRYPTED_CONTENT_MESSAGE = re.compile(r"Invalid encrypted_content in ([a-z_]{1,64}) block")
+
+
+def _upstream_rejection(
+    http_status: int | None,
+    stream_started: bool,
+    error_code: str | None,
+    error_type: str | None,
+    payload: bytes,
+    envelope_paths: tuple[ErrorEnvelopePath, ...],
+    message: str | None,
+) -> UpstreamRejection | None:
+    """Project a 400 before output into the closed tokens the evidence rules read.
+
+    The machine code and type come from the one extractor (``_raw_error_fields``
+    and its projection); this adds only the first envelope's ``param`` and the
+    single token each recognized message names. The prose itself never leaves.
+    """
+
+    if http_status != 400 or stream_started:
+        return None
+    names = ("param", "message")
+    paths = tuple((*path, name) for path in envelope_paths for name in names)
+    values: dict[JSONPath, str] = {}
+
+    def visit(path: JSONPath, event: JSONEvent, value: object | None, _scope: JSONScope) -> None:
+        if event == "replace":
+            values.pop(path, None)
+        elif event == "scalar" and isinstance(value, str):
+            values[path] = value
+
+    if payload:
+        project_json_reader(io.BytesIO(payload), paths, visit)
+    envelope = next(
+        (path for path in envelope_paths if any((*path, name) in values for name in names)),
+        None,
+    )
+    fields = {name: values.get((*envelope, name)) for name in names} if envelope is not None else {}
+    text = (fields.get("message") or message or "")[:_REJECTION_MESSAGE_SCAN_CHARS]
+
+    def token(value: object) -> str | None:
+        return value if isinstance(value, str) and _REJECTION_TOKEN.fullmatch(value) else None
+
+    def named(pattern: re.Pattern[str]) -> str | None:
+        found = pattern.search(text)
+        return found.group(1) if found else None
+
+    return UpstreamRejection(
+        status=400,
+        code=token(error_code),
+        error_type=token(error_type),
+        param=token(fields.get("param")),
+        invalid_value=named(_INVALID_VALUE_MESSAGE),
+        unsupported_tool_type=named(_UNSUPPORTED_TOOL_TYPE_MESSAGE),
+        invalid_encrypted_content_block=named(_INVALID_ENCRYPTED_CONTENT_MESSAGE),
+    )
 
 
 def _upstream_reset_advice(

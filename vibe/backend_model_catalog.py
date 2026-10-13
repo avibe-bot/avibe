@@ -639,6 +639,12 @@ class HostedToolSpec:
 
         return json.loads(self.declaration_json)
 
+    @property
+    def declaration_type(self) -> str:
+        """The declaration's tool ``type``, as the provider names it on the wire."""
+
+        return self.declaration["type"]
+
 
 @dataclass(frozen=True)
 class ProviderModelOverlay:

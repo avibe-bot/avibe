@@ -227,6 +227,7 @@ class CapabilityEvidenceStore:
         self.max_records = max_records
         self._lock = threading.RLock()
         self._records: dict[tuple, EvidenceRecord] | None = None
+        self._by_hop: dict[tuple[str, str], list[EvidenceRecord]] = {}
 
     def _loaded(self) -> dict[tuple, EvidenceRecord]:
         if self._records is None:
@@ -242,8 +243,20 @@ class CapabilityEvidenceStore:
                     # An unreadable record is unknown, never negative.
                     continue
                 records[record.key] = record
-            self._records = records
+            self._remember(records)
         return self._records
+
+    def _remember(self, records: dict[tuple, EvidenceRecord]) -> None:
+        by_hop: dict[tuple[str, str], list[EvidenceRecord]] = {}
+        for record in records.values():
+            by_hop.setdefault((record.source_id, record.model_id), []).append(record)
+        self._records, self._by_hop = records, by_hop
+
+    @property
+    def loaded(self) -> bool:
+        """Whether lookups are memory-only now; until then the first one reads the file."""
+
+        return self._records is not None
 
     def get(self, source_id: str, model_id: str, feature: EvidenceFeature) -> Optional[EvidenceRecord]:
         with self._lock:
@@ -265,6 +278,13 @@ class CapabilityEvidenceStore:
         with self._lock:
             return list(self._loaded().values())
 
+    def for_hop(self, source_id: str, model_id: str) -> list[EvidenceRecord]:
+        """Every record of one (Source, model), without scanning the others."""
+
+        with self._lock:
+            self._loaded()
+            return list(self._by_hop.get((source_id, model_id), ()))
+
     def write(self, record: EvidenceRecord, *, live: Iterable[ModelHubSourceConfig]) -> None:
         """Replace the record for its key; prune records of removed or re-identified Sources.
 
@@ -283,4 +303,4 @@ class CapabilityEvidenceStore:
             records[record.key] = record
             kept = sorted(records.values(), key=lambda item: item.observed_at)[-self.max_records :]
             write_state_document(self.path, [item.payload() for item in kept])
-            self._records = {item.key: item for item in kept}
+            self._remember({item.key: item for item in kept})

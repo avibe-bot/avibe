@@ -104,9 +104,12 @@ from .events import (
     build_resolution_event,
     contains_credential_material,
 )
-from .capability_evidence import CapabilityEvidenceStore
+from .capability_evidence import CapabilityEvidenceStore, EvidenceFeature, EvidenceRecord, identity_digest
 from .errors import ModelDiscoveryError
+from .evidence_rules import learn as learn_from_rejection
+from .evidence_rules import wire_effort
 from .hosted_tools import (
+    HOSTED_PROBE_SHAPE,
     HostedToolSettingRefused,
     engine_stamp,
     hosted_tools_status,
@@ -155,7 +158,7 @@ from .provenance import (
     produce_turn_outcome,
 )
 from .request import ModelHubRequest, without_opaque_history
-from .reasoning_tiers import resolve_reasoning_tiers
+from .reasoning_tiers import catalog_wire_efforts, resolve_reasoning_tiers
 from .stream_wire import ProtocolSSEState
 from .resolver import (
     BackendName,
@@ -1213,6 +1216,7 @@ class ModelHubService:
         self._runtime_lifecycle_lock = asyncio.Lock()
         self._runtime_resume_task: asyncio.Task[None] | None = None
         self._background_discovery_task: asyncio.Task[None] | None = None
+        self._evidence_load_task: asyncio.Task[Any] | None = None
         self._background_discovery_stop: asyncio.Event | None = None
         # Process-local schedule state: an unchanged listing persists nothing,
         # and a restart rediscovers stale Sources one tick after startup.
@@ -4472,7 +4476,17 @@ class ModelHubService:
             }
 
     def start_background_discovery(self) -> None:
-        """Keep Hub Source inventories current until `stop()` retires the schedule."""
+        """Keep Hub Source inventories current until `stop()` retires the schedule.
+
+        It also loads the capability evidence once, off the loop, so the chain
+        reads and launches that run on the loop afterwards find it in memory.
+        """
+
+        if self._evidence_load_task is None:
+            self._evidence_load_task = asyncio.create_task(
+                asyncio.to_thread(self.capability_evidence.records),
+                name="model-hub-capability-evidence-load",
+            )
 
         task = self._background_discovery_task
         if task is not None and not task.done():
@@ -5179,7 +5193,11 @@ class ModelHubService:
             )
             proposed_name, proposed_efforts = _storable_backend_model_metadata(
                 model.display_name,
-                model.reasoning_efforts,
+                (
+                    catalog_wire_efforts(model.id, model.reasoning_efforts)
+                    if model.reasoning_efforts_source == "catalog"
+                    else model.reasoning_efforts
+                ),
             )
             if display_name is None and proposed_name is not None:
                 display_name = proposed_name
@@ -5794,6 +5812,66 @@ class ModelHubService:
                 config.hosted_tools[tool] = setting
                 await self._commit_synced(previous, config)
         return await asyncio.to_thread(self.hosted_tools_status)
+
+    async def _effort_rejected_on(self, source: ModelHubSourceConfig, model_id: str, request: Any) -> bool:
+        """Whether this hop has negative evidence for the effort the request sends.
+
+        Efforts are forwarded unchanged; a hop known to refuse one is skipped,
+        as if it were not a candidate (capability model §3.4).
+        """
+
+        effort = wire_effort(request, getattr(request, "protocol", ""))
+        if effort is None:
+            return False
+        if not self.capability_evidence.loaded:
+            await asyncio.to_thread(self.capability_evidence.records)
+        view = self.capability_evidence.view(
+            source,
+            model_id,
+            EvidenceFeature.effort(effort),
+            engine=engine_stamp(),
+            shape=HOSTED_PROBE_SHAPE,
+            now=self.now(),
+        )
+        return view.status == "unsupported"
+
+    async def _learn_capability_evidence(
+        self, source: ModelHubSourceConfig, model_id: str, request: Any, outcome: RawCallOutcome
+    ) -> None:
+        """Record the one feature a 400 before output names, through the narrow rules."""
+
+        if outcome.rejection is None:
+            return
+        learned = learn_from_rejection(
+            request,
+            outcome.rejection,
+            request_protocol=getattr(request, "protocol", ""),
+            source=source,
+            model_id=model_id,
+            spec_for=hosted_tool_spec,
+        )
+        if learned is None:
+            return
+        try:
+            await asyncio.to_thread(
+                self.capability_evidence.write,
+                EvidenceRecord(
+                    source_id=source.id,
+                    model_id=model_id,
+                    feature=learned.feature,
+                    status="unsupported",
+                    basis="observed",
+                    observed_at=self.now(),
+                    engine=engine_stamp(),
+                    shape=HOSTED_PROBE_SHAPE,
+                    source_identity=identity_digest(source),
+                    detail=learned.detail,
+                ),
+                live=self.store.load().sources,
+            )
+        except (OSError, ValueError):
+            # Evidence is advisory state: losing one record leaves the priors.
+            logger.warning("Model Hub could not record capability evidence", exc_info=True)
 
     def hosted_tools_for_hop(self, config: ModelHubConfig, source: ModelHubSourceConfig, model_id: str) -> dict:
         """``HopResolution.hosted_tools`` for a Vibey launch served by this Source and model."""
@@ -6809,6 +6887,7 @@ class ModelHubService:
                 if status in {"active", "standby", "cooldown"}
                 else status
             )
+            refused = self._refused_efforts(source, inspection.model_id, observed_at)
             chain.append(
                 {
                     "source_id": source.id,
@@ -6819,6 +6898,7 @@ class ModelHubService:
                     "reason": inspection.reason,
                     "retry_at": inspection.retry_at,
                     **({"recovery": inspection.recovery} if inspection.recovery is not None else {}),
+                    **({"refused_efforts": refused} if refused else {}),
                 }
             )
         current = next(
@@ -6843,6 +6923,28 @@ class ModelHubService:
                 else "interrupted"
             ),
         }
+
+    def _refused_efforts(self, source: ModelHubSourceConfig, model_id: str, now: datetime) -> list[dict]:
+        """The efforts this hop currently refuses, as routing reads the evidence."""
+
+        refused = []
+        for record in self.capability_evidence.for_hop(source.id, model_id):
+            if record.feature.kind != "effort":
+                continue
+            view = self.capability_evidence.view(
+                source, model_id, record.feature, engine=engine_stamp(), shape=HOSTED_PROBE_SHAPE, now=now,
+            )
+            if view.status == "unsupported":
+                refused.append(record)
+        return [
+            {
+                "effort": record.feature.name,
+                "basis": record.basis,
+                "observed_at": record.payload()["observed_at"],
+                "detail": record.detail,
+            }
+            for record in sorted(refused, key=lambda item: (item.observed_at, item.feature.name))
+        ]
 
     def agent_chain(self, backend: str, model_id: object) -> dict:
         if backend not in MODEL_HUB_BACKENDS or not isinstance(model_id, str) or not model_id:
@@ -9022,6 +9124,7 @@ class ModelHubService:
         globally_blocked_source_ids: set[str] = set()
         unsupported_hops: set[tuple[str, str]] = set()
         unsupported_reason: str | None = None
+        effort_rejected_sources: list[str] = []
         while True:
             async with self._mutation_lock:
                 if recovery_request is not None and recovery_request.expired:
@@ -9095,6 +9198,9 @@ class ModelHubService:
                     )
                     if reason is not None:
                         raise _InvocationUnsupported(reason)
+                if await self._effort_rejected_on(source, target_model, request):
+                    effort_rejected_sources.append(source.id)
+                    raise _InvocationUnsupported("effort_unsupported")
                 await self._prepare_engine_for_demand(already_synced=engine_prepared)
                 engine_prepared = True
                 handle, outcome, cancelled = await self._invoke(
@@ -9148,6 +9254,7 @@ class ModelHubService:
                     origin=origin,
                 )
             decision = await self._classify_source_outcome(source, outcome)
+            await self._learn_capability_evidence(source, target_model, request, outcome)
             if cancelled is not None:
                 await self._settle_cancelled_attempt(
                     source=source,
@@ -9334,7 +9441,17 @@ class ModelHubService:
             # No upstream attempt exists. Exhaustion would invent a failed
             # attempt (and a retryable supply state) for a local limitation.
             raise ModelHubError(
-                unsupported_reason, status=422, turn_outcome=REQUEST_NONFALLBACK_TURN_OUTCOME,
+                unsupported_reason,
+                status=422,
+                turn_outcome=REQUEST_NONFALLBACK_TURN_OUTCOME,
+                data=(
+                    {
+                        "effort": wire_effort(request, getattr(request, "protocol", "")),
+                        "source_ids": list(dict.fromkeys(effort_rejected_sources)),
+                    }
+                    if unsupported_reason == "effort_unsupported"
+                    else None
+                ),
             )
         final_config, final_resolution = self._inspect_terminal_chain(
             backend=cast(BackendName, backend),
