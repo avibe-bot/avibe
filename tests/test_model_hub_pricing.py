@@ -923,3 +923,25 @@ def test_xai_cost_ticks_are_converted_by_the_pricing_module():
 
     assert usd_from_xai_ticks(1127268800) == pytest.approx(0.11272688)
     assert usd_from_xai_ticks(-1) is None and usd_from_xai_ticks(True) is None and usd_from_xai_ticks("9") is None
+    # An absurd figure from a malformed relay is unknown, never an OverflowError that fails the turn.
+    assert usd_from_xai_ticks(10**400) is None
+
+
+def test_a_price_table_parses_every_price_when_built_and_none_on_lookup(monkeypatch):
+    """MH-PRICE-016: building the table (never on the loop) parses every price, so a lookup on the loop parses none."""
+    from core.handlers.model_hub import pricing
+
+    parsed = []
+    original = pricing.model_price
+
+    def counting(cost):
+        parsed.append(cost)
+        return original(cost)
+
+    monkeypatch.setattr(pricing, "model_price", counting)
+    table = _table(overrides={"models": {"house-model": {"input": 1, "output": 2}, "relay-opus": {"alias": "claude-opus-5"}}})
+    built = len(parsed)
+    assert built > 0
+    for model_id in ("gpt-6-astra", "openai/gpt-5.5", "claude-opus-5[1m]", "house-model", "relay-opus", "unknown-model"):
+        table.price(model_id)
+    assert len(parsed) == built

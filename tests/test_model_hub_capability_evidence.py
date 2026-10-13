@@ -151,8 +151,12 @@ def test_persisted_records_match_the_schema_and_unreadable_ones_are_unknown(tmp_
         {"observed_at": datetime(2026, 10, 13)},
         {"shape": -1},
         {"source_identity": ""},
+        {"observed_at": datetime(9999, 12, 31, tzinfo=timezone.utc)},
     ],
-    ids=["observed-without-detail", "observed-positive", "long-detail", "naive-time", "negative-shape", "no-identity"],
+    ids=[
+        "observed-without-detail", "observed-positive", "long-detail", "naive-time", "negative-shape", "no-identity",
+        "expiry-out-of-range",
+    ],
 )
 def test_a_record_refuses_what_the_contract_forbids(changes):
     with pytest.raises(ValueError):

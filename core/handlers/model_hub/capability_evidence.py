@@ -121,6 +121,12 @@ class EvidenceRecord:
             raise ValueError("evidence shape is a non-negative integer")
         if self.observed_at.tzinfo is None:
             raise ValueError("evidence time must be timezone-aware")
+        try:
+            # Its expiry and re-verify instants must be representable, or every
+            # read that resolves it would fail; such a record reads as unknown.
+            self.observed_at + timedelta(seconds=max(OBSERVED_TTL_SECONDS, PROBE_REVERIFY_AFTER_SECONDS))
+        except OverflowError:
+            raise ValueError("evidence time is out of range") from None
 
     @property
     def key(self) -> tuple[str, str, str, str, str]:

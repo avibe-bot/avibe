@@ -316,14 +316,24 @@ class PriceTable:
         self.pending = pending
         # Only first-party prices are ever read, so they are all a table keeps:
         # held between reads it costs kilobytes, not the parsed models.dev copy.
-        self._costs = _first_party_costs(catalog, vendor_map)
+        # Every price is parsed here, when the table is built, which is never on the
+        # controller loop (at startup, then on the usage writer's thread), so a
+        # lookup on the loop is a dictionary read however large the catalog is.
+        self._prices: dict[str, dict[str, Optional[ModelPrice]]] = {
+            vendor: {key: model_price(cost) for key, cost in costs.items()}
+            for vendor, costs in _first_party_costs(catalog, vendor_map).items()
+        }
         self._vendor_map = vendor_map
-        self._model_overrides: dict[str, Mapping[str, Any]] = {}
+        self._model_overrides: dict[str, tuple[Optional[str], Optional[ModelPrice]]] = {}
         models = overrides.get("models")
         if isinstance(models, Mapping):
             for key, entry in models.items():
                 if isinstance(key, str) and len(key) <= _MAX_KEY_CHARS and isinstance(entry, Mapping):
-                    self._model_overrides[normalize_model_id(key)] = entry
+                    alias = entry.get("alias")
+                    self._model_overrides[normalize_model_id(key)] = (
+                        normalize_model_id(alias) if isinstance(alias, str) and alias.strip() else None,
+                        model_price(entry),
+                    )
         self._fees = dict(PLAN_FEES_USD)
         plans = overrides.get("plans")
         if isinstance(plans, Mapping):
@@ -363,10 +373,9 @@ class PriceTable:
             return None
         override = self._model_overrides.get(key)
         if override is not None:
-            alias = override.get("alias")
-            if isinstance(alias, str) and alias.strip():
-                return self._resolve(normalize_model_id(alias), hops=hops + 1)
-            price = model_price(override)
+            alias, price = override
+            if alias is not None:
+                return self._resolve(alias, hops=hops + 1)
             if price is not None:
                 return price
         price = self._catalog_price(key)
@@ -381,7 +390,7 @@ class PriceTable:
         vendor = _first_party(key, self._vendor_map)
         if vendor is None:
             return None
-        return model_price(self._costs.get(vendor, {}).get(key))
+        return self._prices.get(vendor, {}).get(key)
 
     def fields(self) -> dict[str, Any]:
         """The table's own part of every priced block: currency, date, and a first fetch still running."""
@@ -624,6 +633,8 @@ def quota_values(
 # response reported.
 
 XAI_USD_TICKS_PER_USD: Final = 10_000_000_000
+# Above this (about $100M for one response) a reported figure is not a cost.
+_MAX_XAI_TICKS: Final = 10**18
 
 # The provider counter that counts one unit of a hosted tool's list price.
 _HOSTED_UNIT_COUNTERS: Final[Mapping[tuple[str, str], str]] = {
@@ -638,7 +649,7 @@ _HOSTED_UNIT_COUNTERS: Final[Mapping[tuple[str, str], str]] = {
 def usd_from_xai_ticks(ticks: object) -> Optional[float]:
     """xAI's ``cost_in_usd_ticks`` in USD; None when it is not a non-negative integer."""
 
-    if isinstance(ticks, bool) or not isinstance(ticks, int) or ticks < 0:
+    if isinstance(ticks, bool) or not isinstance(ticks, int) or not 0 <= ticks <= _MAX_XAI_TICKS:
         return None
     return ticks / XAI_USD_TICKS_PER_USD
 
