@@ -24,11 +24,13 @@ export type VaultBrowserStep =
   | { kind: 'request'; requestId: string; startProtected?: boolean }
   /** Add a new protected secret, fixed to `name` when an agent asked for it by name. */
   | { kind: 'add'; name?: string }
+  /** Replace fields of an existing protected secret. */
+  | { kind: 'edit'; secretName: string }
   /** Show a protected secret's value. */
-  | { kind: 'reveal'; secretName: string };
+  | { kind: 'reveal'; secretName: string; field?: string };
 
 // `request_id` is also the deep link Avibe sends to IM (`vault_request_url`).
-const STEP_PARAMS = ['request_id', 'protection', 'add', 'name', 'reveal'];
+const STEP_PARAMS = ['request_id', 'protection', 'add', 'name', 'edit', 'reveal', 'field'];
 
 /** Opens Vaults in the user's browser on `step`. */
 export function openVaultsInBrowser(step: VaultBrowserStep): void {
@@ -38,7 +40,9 @@ export function openVaultsInBrowser(step: VaultBrowserStep): void {
       ? { request_id: step.requestId, ...(step.startProtected ? { protection: 'protected' } : {}) }
       : step.kind === 'add'
         ? { add: 'protected', ...(step.name ? { name: step.name } : {}) }
-        : { reveal: step.secretName };
+        : step.kind === 'edit'
+          ? { edit: step.secretName }
+          : { reveal: step.secretName, ...(step.field ? { field: step.field } : {}) };
   for (const [key, value] of Object.entries(params)) url.searchParams.set(key, value);
   openLinkInNewContext(url.toString());
 }
@@ -48,8 +52,11 @@ export function readVaultBrowserStep(params: URLSearchParams): VaultBrowserStep 
   const requestId = params.get('request_id')?.trim();
   if (requestId) return { kind: 'request', requestId, startProtected: params.get('protection') === 'protected' };
   if (params.get('add') === 'protected') return { kind: 'add', name: params.get('name')?.trim() || undefined };
+  const editName = params.get('edit')?.trim();
+  if (editName) return { kind: 'edit', secretName: editName };
   const secretName = params.get('reveal')?.trim();
-  return secretName ? { kind: 'reveal', secretName } : null;
+  const field = params.get('field')?.trim();
+  return secretName ? { kind: 'reveal', secretName, ...(field ? { field } : {}) } : null;
 }
 
 /** `params` without a step, so a step resumed once doesn't resume again on reload. */

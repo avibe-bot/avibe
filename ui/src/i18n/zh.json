@@ -4945,12 +4945,34 @@
       }
     },
     "saved": "已更新 {{name}}",
-    "editSecret": "编辑信息",
+    "editSecret": "编辑 Secret",
     "rowActions": "更多操作",
     "edit": {
-      "title": "编辑信息",
-      "subtitle": "普通信息不影响授权;Fetch 策略变化会重新审批",
+      "title": "编辑 Secret",
+      "subtitle": "值或 Fetch 策略变化后需要重新审批",
       "lockedHint": "名称、类型、保护级别不可修改"
+    },
+    "fields": {
+      "title": "字段",
+      "name": "字段 {{index}} 名称",
+      "namePlaceholder": "field_name",
+      "value": "{{field}} 的值",
+      "default": "默认",
+      "defaultName": "默认字段名称",
+      "newName": "新字段名称",
+      "newValue": "新字段值",
+      "add": "添加字段",
+      "loginTemplate": "登录模板",
+      "remove": "移除 {{field}}",
+      "removeConfirm": "移除此字段及其值？已有授权将失效。",
+      "rename": "改名",
+      "save": "保存字段",
+      "saveNamed": "保存 {{field}}",
+      "saved": "字段已保存",
+      "replacePlaceholder": "输入替换值",
+      "revealField": "要显示的字段",
+      "namesHelp": "使用小写字母、数字和下划线，以字母开头。每个字段的名称必须唯一且必须填写值。",
+      "editHelp": "字段修改立即保存，已有授权会失效。值留空则保留原值。额外字段不能改名。"
     },
     "protectedUnlock": {
       "checking": "正在检查你的保护层…",

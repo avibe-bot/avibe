@@ -17,6 +17,7 @@ const NONCE_BYTES = 12;
 const PASSKEY_PRF_SALT_BYTES = 32;
 const PASSKEY_HKDF_INFO = 'avault:protected-vmk:kek-passkey:v1';
 const SECRET_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const RECORD_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*(\.[a-z][a-z0-9_]{0,63})?$/;
 
 const textEncoder = new TextEncoder();
 
@@ -460,7 +461,7 @@ export function passkeyPrfSaltEntries(wrapMeta: string | WrapMeta): PasskeyPrfSa
 }
 
 function protectedRecordAad(context: ProtectedRecordContext): Uint8Array {
-  const name = utf8(validateSecretName(context.name));
+  const name = utf8(validateRecordName(context.name));
   const scheme = utf8(context.scheme ?? WRAP_SCHEME);
   const out = new Uint8Array(name.length + scheme.length + 1);
   out.set(name, 0);
@@ -492,7 +493,7 @@ async function requireValidPinnedPublicKey(publicKey: AvaultPublicKey): Promise<
 }
 
 function assertReleaseMatchesRecord(recordContext: ProtectedRecordContext, context: ProtectedDekReleaseBlindBoxContext): void {
-  if (validateSecretName(recordContext.name) !== validateSecretName(context.name)) {
+  if (validateRecordName(recordContext.name) !== validateRecordName(context.name)) {
     throw new Error('protected DEK release context name does not match record name');
   }
 }
@@ -708,6 +709,13 @@ function validateSecretName(name: string): string {
   return name;
 }
 
+function validateRecordName(name: string): string {
+  if (typeof name !== 'string' || !RECORD_NAME_PATTERN.test(name)) {
+    throw new Error('vault secret name / record name must be NAME or NAME.field');
+  }
+  return name;
+}
+
 function validateNonEmpty(value: string, field: string): string {
   if (typeof value !== 'string' || value.trim() === '') {
     throw new Error(`${field} is required`);
@@ -779,7 +787,7 @@ function normalizeBlindBoxContext(context: BlindBoxContext): BlindBoxContext {
       });
       return {
         purpose: 'agent-deliver',
-        name: validateSecretName(context.name),
+        name: validateRecordName(context.name),
         grantId: validateNonEmpty(context.grantId, 'grant id'),
         ttlSecs: normalizeU64(context.ttlSecs, 'ttl seconds'),
         approvalNonce: approval.approvalNonce,
@@ -812,7 +820,7 @@ function normalizeBlindBoxContext(context: BlindBoxContext): BlindBoxContext {
 export function standardCreateBlindBoxContext(name: string): StandardCreateBlindBoxContext {
   return {
     purpose: 'seal',
-    name: validateSecretName(name),
+    name: validateRecordName(name),
   };
 }
 
@@ -840,7 +848,7 @@ export async function protectedDekReleaseBlindBoxContext(
   name: string,
   operation: ProtectedDekReleaseOperation,
 ): Promise<ProtectedDekReleaseBlindBoxContext> {
-  const normalizedName = validateSecretName(name);
+  const normalizedName = operation.kind === 'agent-sign' ? validateSecretName(name) : validateRecordName(name);
   const approval = normalizeApproval(operation.approval);
 
   switch (operation.kind) {
@@ -901,7 +909,7 @@ export async function blindBoxAgentDeliverOperationHash(
 ): Promise<Uint8Array> {
   return blindBoxOperationHash([
     'agent-deliver',
-    validateSecretName(name),
+    validateRecordName(name),
     u64Be(ttlSecs, 'ttl seconds'),
   ]);
 }
@@ -1014,6 +1022,7 @@ export async function signProtectedDigest(
   scheme: SignatureScheme,
   options: SignDigestOptions = {},
 ): Promise<SignatureResult> {
+  validateSecretName(context.name);
   const privateKey = await openProtected(sealedKey, vmk, context);
   try {
     return signDigest(privateKey, digest, scheme, options);

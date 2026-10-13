@@ -265,6 +265,45 @@ describe('VaultsPage protected reveal', () => {
     expect(revealProtectedValue.mock.calls[0][1]).toEqual({ secret_name: 'beta' });
   });
 
+  // A field switch needs its own prepared context. The single-secret cases above cannot detect
+  // displaying the default envelope for an extra field, or using NAME.password as a default record.
+  it.each([
+    { field: 'password', record: 'alpha' },
+    { field: 'username', record: 'alpha.username' },
+  ])('reveals $field with its own context and canonical record', async ({ field, record }) => {
+    api.listVaultSecrets.mockResolvedValue({
+      secrets: [{ ...protectedSecret('alpha'), default_field: 'password', fields: ['password', 'username'] }],
+    });
+    api.createVaultRevealContext.mockImplementation(async (_name, payload) => ({
+      ok: true, context: { field: payload.field }, envelope,
+    }));
+    await openMenu();
+    fireEvent.change(screen.getByRole('combobox', { name: 'vaults.fields.revealField' }), { target: { value: field } });
+    await vi.waitFor(() => expect(api.createVaultRevealContext).toHaveBeenLastCalledWith(
+      'alpha', { session_label: 'vaults.title', field },
+    ));
+    await clickShowValue();
+    expect(revealProtectedValue.mock.calls[0][0].name).toBe(record);
+    expect(revealProtectedValue.mock.calls[0][1]).toEqual({ field });
+  });
+
+  it('prepares the replacement envelope when an open secret changes version', async () => {
+    let version = 'old';
+    api.createVaultRevealContext.mockImplementation(async () => ({ ok: true, context: { version }, envelope }));
+    await openMenu();
+    await vi.waitFor(() => expect(api.createVaultRevealContext).toHaveBeenCalledOnce());
+    version = 'new';
+    api.listVaultSecrets.mockResolvedValue({
+      secrets: [{ ...protectedSecret('alpha'), updated_at: '2026-10-13T12:00:00Z' }],
+    });
+    await act(async () => {
+      for (const handler of eventHandlers) handler.onVaultsUpdated?.({ scope: 'secret', secret_name: 'alpha' });
+    });
+    await vi.waitFor(() => expect(api.createVaultRevealContext).toHaveBeenCalledTimes(2));
+    await clickShowValue();
+    expect(revealProtectedValue.mock.calls[0][1]).toEqual({ version: 'new' });
+  });
+
   it('refreshes the context while the menu stays open, so the click fetches nothing', async () => {
     let fetched = 0;
     api.createVaultRevealContext.mockImplementation(async () => ({ ok: true, context: { fetch: ++fetched }, envelope }));

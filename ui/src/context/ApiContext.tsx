@@ -82,6 +82,9 @@ export type SigningAddresses = {
 
 export type VaultSecret = {
   name: string;
+  /** Absent on legacy servers; the default record is always the bare secret name. */
+  default_field?: string;
+  fields?: string[];
   /** Flat tag list; skill association is a reserved `skill:<name>` tag (see lib/vaultTags). */
   tags: string[];
   kind: string;
@@ -134,6 +137,8 @@ export type VaultRequestSession = {
 
 export type VaultRequestSpec = {
   kind?: 'static';
+  default_field?: string;
+  fields?: string[];
   protection?: 'standard' | 'protected';
   description?: string;
   /** May already include `skill:<name>` tags; `links.skills` is a bare-name convenience mirror. */
@@ -358,6 +363,8 @@ export type VaultWebAuthnRegistrationPayload = {
 
 export type VaultCreatePayload = {
   name: string;
+  default_field?: string;
+  fields?: Array<{ name: string } & VaultFieldValuePayload>;
   protection?: 'standard' | 'protected';
   blind_box?: VaultBlindBox;
   sealed?: VaultSealedEnvelope;
@@ -387,9 +394,16 @@ export type VaultCreatePayload = {
  * such as `always_ask`. Name / kind / protection / value are never editable through this path.
  */
 export type VaultMetadataUpdatePayload = {
+  default_field?: string;
   description?: string | null;
   tags?: string[];
   policy?: Record<string, unknown>;
+};
+
+export type VaultFieldValuePayload = {
+  blind_box?: VaultBlindBox;
+  sealed?: VaultSealedEnvelope;
+  expected_updated_at?: string;
 };
 
 export type TunnelQualitySnapshot = {
@@ -820,7 +834,7 @@ export type ApiContextType = {
   saveVaultSettings: (payload: Partial<VaultSettings>) => Promise<VaultSettingsResult>;
   createVaultRevealContext: (
     name: string,
-    payload?: { session_label?: string },
+    payload?: { session_label?: string; field?: string },
   ) => Promise<VaultRevealContextResult>;
   deriveSigningAddresses: (publicKey: string) => Promise<{ ok: boolean; addresses?: SigningAddresses; code?: string; message?: string }>;
   createVaultAuthzWebAuthnOptions: () => Promise<VaultWebAuthnRegistrationOptions>;
@@ -829,6 +843,8 @@ export type ApiContextType = {
   ) => Promise<{ ok: boolean; factor?: Record<string, unknown>; code?: string; message?: string }>;
   createVaultSecret: (payload: VaultCreatePayload, opts?: { handleError?: boolean }) => Promise<{ ok: boolean; secret?: VaultSecret; code?: string; message?: string }>;
   updateVaultSecret: (name: string, payload: VaultMetadataUpdatePayload, opts?: { handleError?: boolean }) => Promise<{ ok: boolean; secret?: VaultSecret; code?: string; message?: string }>;
+  updateVaultSecretField: (name: string, field: string, payload: VaultFieldValuePayload, opts?: { handleError?: boolean }) => Promise<{ ok: boolean; secret?: VaultSecret; code?: string; message?: string }>;
+  deleteVaultSecretField: (name: string, field: string) => Promise<{ ok: boolean; secret?: VaultSecret; code?: string; message?: string }>;
   deleteVaultSecret: (name: string) => Promise<{ ok: boolean; removed?: boolean; code?: string; message?: string }>;
   getVaultProvisionRequest: (
     name: string,
@@ -4001,6 +4017,17 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     registerVaultAuthzWebAuthnFactor: (payload) => postJson('/api/vault/authz/factors/webauthn', payload),
     createVaultSecret: (payload, opts) => postJson('/api/vault/secrets', payload, opts),
     updateVaultSecret: (name, payload, opts) => patchJson(`/api/vault/secrets/${encodeURIComponent(name)}`, payload, opts),
+    updateVaultSecretField: async (name, field, payload, opts) => {
+      const path = `/api/vault/secrets/${encodeURIComponent(name)}/fields/${encodeURIComponent(field)}`;
+      const { payloadJson } = await requestJson(path, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      }, path, opts);
+      return payloadJson;
+    },
+    deleteVaultSecretField: (name, field) =>
+      deleteJson(`/api/vault/secrets/${encodeURIComponent(name)}/fields/${encodeURIComponent(field)}`),
     deleteVaultSecret: (name) => deleteJson(`/api/vault/secrets/${encodeURIComponent(name)}`),
     getVaultProvisionRequest: (name, opts) =>
       getCachedJson(`/api/vault/provision-requests/${encodeURIComponent(name)}`, 1500, opts),
