@@ -240,6 +240,17 @@ scenarios:
     related_tests:
       - tests/test_vibey_agent.py::test_a_native_hosted_call_reaches_the_workbench_as_a_card_and_cited_answer
       - tests/test_vibey_agent.py::test_a_proxied_hosted_result_shows_once_its_result_is_committed
+  - id: MH-HOSTED-UI-014
+    name: A hosted call that did not complete shows its status and any known charge, and claims neither how it ran nor what it found, on the IM line, the Web card (collapsed or expanded) and image delivery alike
+    status: covered
+    kind: contract
+    layer: unit
+    test:
+      - tests/test_hosted_activity.py::test_the_im_line_claims_how_a_call_ran_and_what_it_found_only_once_it_completed
+      - tests/test_vibey_agent.py::test_an_image_from_a_call_that_did_not_complete_is_not_delivered
+      - ui/src/components/workbench/HostedToolRow.test.tsx::MH-HOSTED-UI-014 (pending)
+      - ui/src/components/workbench/HostedToolRow.test.tsx::MH-HOSTED-UI-014 (failed)
+      - ui/src/components/workbench/HostedToolRow.test.tsx::MH-HOSTED-UI-014 (incomplete)
   - id: MH-HOSTED-VIBEY-001
     name: Vibey declares a hop's native hosted tool verbatim with its include values and pins that request to the hop's Source; the probe builds the same request
     status: covered

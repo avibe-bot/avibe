@@ -1283,7 +1283,9 @@ class VibeyAgent(BaseAgent):
 
     async def _emit_hosted(self, run: _Run, activity: HostedActivity) -> None:
         """One hosted call: its line for IM and its card for the Web (``core.hosted_activity``)."""
-        run.hosted_images.extend((image.path, Path(image.path).name) for image in activity.images)
+        # Only a completed call delivers what it produced, as only its image counts as a reply (``has_reply``).
+        if activity.completed:
+            run.hosted_images.extend((image.path, Path(image.path).name) for image in activity.images)
         formatter = self._get_formatter(run.request.context)
         line = hosted_line(activity, self._language(), escape=formatter.escape_special_chars)
         try:

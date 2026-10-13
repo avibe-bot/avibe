@@ -3641,3 +3641,34 @@ async def test_an_image_only_final_is_a_reply_and_reaches_the_user(engine, sessi
     assert result["content_text"].startswith(i18n_t("info.generatedImagesFallback", "en"))
     assert not any(i18n_t("vibeyAgent.error.emptyResponse", "en") in item for item in harness.controller.im_client.sent)
 
+
+async def test_an_image_from_a_call_that_did_not_complete_is_not_delivered(engine, session, tmp_path, published) -> None:
+    """MH-HOSTED-UI-014: delivery follows the card and ``has_reply``: a call that did not complete shows no image."""
+    image = tmp_path / "partial.png"
+    image.write_bytes(b"\x89PNG\r\n\x1a\npartial")
+    final = AssistantMessage(
+        (
+            HostedToolBlock(
+                id="ig_2",
+                tool="image_generation",
+                action=HostedAction(type="generate", prompt="a laptop at night"),
+                record=HostedRecord(
+                    status="incomplete",
+                    error="the provider stopped the image",
+                    images=(HostedImage(path=str(image), mime="image/png"),),
+                ),
+                native=HostedNative(source_id="src_testsrc1", payload=({"type": "image_generation_call"},)),
+            ),
+            TextBlock(text="The image could not be finished."),
+        ),
+        ORIGIN,
+        "stop",
+        hosted_summary=HostedSummary(),
+    )
+    harness = _Harness(engine, tmp_path, "telegram", [[Done(final)]])
+
+    await harness.agent.handle_message(harness.request("draw a laptop at night"))
+
+    assert harness.controller.terminals[-1]["is_error"] is False
+    assert harness.controller.im_client.uploads == []
+

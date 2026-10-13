@@ -58,12 +58,14 @@ def _native(source_id: str) -> HostedNative:
     return HostedNative(source_id=source_id, payload=({"type": "provider_item"},))
 
 
-def _search(call_id: str, *queries: str, sources=(), source_id="src_relayclaude") -> HostedToolBlock:
+def _search(
+    call_id: str, *queries: str, sources=(), source_id="src_relayclaude", status="completed", error=None
+) -> HostedToolBlock:
     return HostedToolBlock(
         id=call_id,
         tool="web_search",
         action=HostedAction(type="search", queries=tuple(queries)),
-        record=HostedRecord(status="completed", sources=tuple(sources)),
+        record=HostedRecord(status=status, error=error, sources=tuple(sources)),
         native=_native(source_id),
     )
 
@@ -207,6 +209,30 @@ def test_a_response_scoped_summary_is_shown_once():
 def test_the_im_line_states_tool_query_mode_count_and_known_cost(build, lang, line):
     """MH-HOSTED-UI-010: one line per hosted call, the same for either mode, with a cost only when one is known."""
     assert hosted_line(build(), lang) == line
+
+
+@pytest.mark.parametrize(
+    ("status", "error", "line"),
+    [
+        ("completed", None, "🔎 Web search “OpenAI news” · native (Anthropic) · 2 sources · ≈ $0.01"),
+        ("pending", None, "🔎 Web search “OpenAI news” · cut off · ≈ $0.01"),
+        ("failed", "upstream timeout", "🔎 Web search “OpenAI news” · failed: upstream timeout · ≈ $0.01"),
+        ("incomplete", "response ended", "🔎 Web search “OpenAI news” · incomplete: response ended · ≈ $0.01"),
+    ],
+)
+def test_the_im_line_claims_how_a_call_ran_and_what_it_found_only_once_it_completed(status, error, line):
+    """MH-HOSTED-UI-014: a call that did not complete shows its status instead, and its known charge still shows.
+
+    The same records the Web card renders (``HostedToolRow.test.tsx`` reads the rule from ``hostedCompleted``).
+    """
+
+    [activity] = native_activities(
+        _message(
+            _search("srvtoolu_01", "OpenAI news", sources=(DEVDAY, CHANGELOG), status=status, error=error),
+            summary=HostedSummary(cost=HostedCost(basis="list", usd=0.01)),
+        )
+    )
+    assert hosted_line(activity, "en") == line
 
 
 def test_the_im_line_names_a_subscription_and_a_shared_response_cost():
