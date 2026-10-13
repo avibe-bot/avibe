@@ -199,7 +199,7 @@ scenarios:
     test: tests/test_vibey_agent.py::test_a_hop_resolved_native_hosted_tool_reaches_the_gateway_pinned_to_its_source
     related_tests:
       - tests/test_vibey_agent.py::test_a_hop_with_an_invalid_hosted_tool_entry_is_refused
-      - tests/agent_core/ai/test_hosted_requests.py::test_a_native_route_declares_its_tool_verbatim_first_and_pins_the_request
+      - tests/agent_core/ai/test_hosted_requests.py::test_a_hosted_spec_on_a_native_route_is_sent_as_the_declaration_in_its_place_and_pinned
       - tests/agent_core/ai/test_hosted_requests.py::test_the_probe_entry_builds_exactly_the_request_the_adapter_sends
       - tests/agent_core/ai/test_hosted_requests.py::test_tool_choice_forces_the_named_tool_in_each_protocols_form
   - id: MH-VIBEY-007
