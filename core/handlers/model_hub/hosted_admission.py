@@ -132,7 +132,13 @@ def _responses_replays(items: Any, *, pinned: bool) -> frozenset[str]:
             end -= 1
         while end and _responses_output_item(items[end - 1]):
             end -= 1
-    return frozenset(tool for item in items[:end] if (tool := _responses_hosted_tool(item)) is not None)
+    tools = {tool for item in items[:end] if (tool := _responses_hosted_tool(item)) is not None}
+    # An image call is never replayed verbatim, in flight or not: Vibey has
+    # replaced its result with the path record, so no hop may receive it.
+    tools.update(
+        "image_generation" for item in items[end:] if _responses_hosted_tool(item) == "image_generation"
+    )
+    return frozenset(tools)
 
 
 def _anthropic_hosted_tool(block: Any) -> str | None:

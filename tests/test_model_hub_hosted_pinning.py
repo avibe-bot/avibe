@@ -26,7 +26,7 @@ from core.handlers.model_hub.capability_evidence import EvidenceFeature, Evidenc
 from core.handlers.model_hub.hosted_admission import hosted_content
 from core.handlers.model_hub.hosted_tools import HOSTED_PROBE_SHAPE, engine_stamp
 from core.handlers.model_hub.turn_gateway import ModelHubTurnGateway
-from core.run_settlement import SETTLED_BY_TERMINAL_RESULT
+from core.run_settlement import SETTLED_BY_STOPPED, SETTLED_BY_TERMINAL_RESULT
 from modules.agents.model_hub import ModelHubRuntimeRouter
 from tests.test_model_hub_l3 import NOW, InvokeHandle, LiveInvokeHandle, _outcome, _source
 from tests.test_model_hub_vibey_consumer import _validate, _vibey_service
@@ -308,6 +308,37 @@ async def test_unpinned_hosted_content_is_refused_before_anything_runs(tmp_path,
 
 
 @pytest.mark.asyncio
+async def test_a_handed_back_refusal_does_not_end_the_turn(tmp_path):
+    """MH-HOSTED-GATEWAY-002: the handback withdraws its own surfaced terminal; the resend's outcome decides the turn."""
+
+    primary, _fallback = _sources()
+    refusal = replace(
+        _outcome(RawOutcomeKind.HTTP_ERROR, status=400, code="invalid_request_error"),
+        rejection=UpstreamRejection(status=400, code="invalid_request_error", unsupported_tool_type="x_search"),
+    )
+    service = _vibey_service(tmp_path, [primary], handles=[InvokeHandle(refusal)])
+    _verify(service, primary, "grok-4.6", "x_search", "call")
+    gateway = ModelHubTurnGateway(service)
+    router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
+    turn_id = "turn-withdraw"
+    try:
+        hop = await router.resolve_hop("menu-alias", process_scope="vibey:withdraw", turn_id=turn_id)
+        assert await _post(hop, _native(hop), pin=primary.id) == (409, PIN_UNAVAILABLE)
+        # The turn ends before any resend (the user stops it): the handed-back
+        # refusal must not stand as the turn's terminal error.
+        completion = router.settle_turn(turn_id, settled_by=SETTLED_BY_STOPPED, ts=NOW.isoformat())
+        if completion:
+            await completion
+    finally:
+        await gateway.close()
+    record = service.provenance.get(turn_id)
+    _validate("turn-provenance.schema.json", record)
+    # Not the handed-back hosted-tool refusal: that request never ended the turn.
+    assert record["terminal_error"] is None
+    assert record["outcome"] != "failed_terminal"
+
+
+@pytest.mark.asyncio
 async def test_a_pinned_hop_must_speak_the_requests_protocol(tmp_path):
     """MH-HOSTED-GATEWAY-002: native content is never translated; a pin across protocols is handed back."""
 
@@ -385,6 +416,9 @@ IN_FLIGHT_CASES = [
     ("responses_steer_after_tools", "openai_responses", [USER, X_CALL, LOCAL_CALL, LOCAL_OUTPUT, USER], True,
      {"x_search"}),
     ("responses_image_cross_turn", "openai_responses", [USER, IMAGE_CALL, ASSISTANT_TEXT, USER], True,
+     {"image_generation"}),
+    # An image call is never replayed verbatim, even in flight: its result is Vibey's path record.
+    ("responses_image_in_flight", "openai_responses", [USER, IMAGE_CALL, LOCAL_CALL, LOCAL_OUTPUT], True,
      {"image_generation"}),
     # Only known model output forms the in-flight response; an unknown item ends it.
     ("responses_unknown_client_item_after_hosted_call", "openai_responses",

@@ -719,6 +719,9 @@ class TurnTrace:
     # readable; explicit user cancellation suppresses live copy as before.
     outcome_frozen: Literal["backend_failure", "user_cancellation"] | None = None
     recovery_requests: dict[str, dict] = field(default_factory=dict)
+    # The request whose surfaced attempt set ``terminal_error``, and that exact
+    # value: a handed-back request withdraws only its own terminal.
+    terminal_error_by: Optional[tuple[str, dict]] = None
 
     @property
     def pending_attempt(self) -> Optional[AttemptIdentity]:
@@ -884,6 +887,7 @@ class GatewayTurnTerminalizer:
         recorded; the turn settles on the request that follows.
         """
 
+        self._registry.withdraw_terminal_error(self.turn_id, request_id=self._request_id)
         self._registry.clear_prepared_attempt(self.turn_id, request_id=self._request_id)
         self._staged_exit = None
         self._exit_committed = True
@@ -2443,6 +2447,21 @@ class TurnCorrelationRegistry:
                     "upstream_error_code": diagnostic_code,
                     **detail,
                 }
+                trace.terminal_error_by = (request_id, trace.terminal_error)
+
+    def withdraw_terminal_error(self, turn_id: Optional[str], *, request_id: str) -> None:
+        """Drop the terminal a handed-back request surfaced; it did not end the turn."""
+
+        if turn_id is None:
+            return
+        with self._lock:
+            trace = self._traces.get(turn_id)
+            if trace is None or trace.outcome_frozen or trace.terminal_error_by is None:
+                return
+            owner, value = trace.terminal_error_by
+            if owner == request_id and trace.terminal_error is value:
+                trace.terminal_error = None
+                trace.terminal_error_by = None
 
     def close_turn_admission(self, turn_id: str, *, settled_by: Optional[str]) -> None:
         """Latch the FSM boundary without discarding already-owned requests."""
