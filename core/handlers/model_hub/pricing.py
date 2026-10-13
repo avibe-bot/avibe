@@ -29,6 +29,8 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Final, Mapping, Optional
 
+from vibe.backend_model_catalog import catalog_model_id
+
 logger = logging.getLogger(__name__)
 
 PRICE_OVERRIDE_FILENAME: Final = "model_hub_prices.json"
@@ -101,10 +103,6 @@ _PLAN_KEYS: Final[Mapping[tuple[str, str], str]] = {
 # Vendors whose subscriptions have built-in plan names. Any other vendor's plan
 # resolves only through a fee key the override file names outright.
 _PLAN_FAMILIES: Final[Mapping[str, str]] = {"anthropic": "anthropic", "openai": "openai", "codex": "openai"}
-
-_DATE_SUFFIX: Final = re.compile(r"(?:-\d{8}|-\d{4}-\d{2}-\d{2}|@[^/]*)$")
-_BRACKET_SUFFIX: Final = re.compile(r"\[[^\]]*\]$")
-
 
 @dataclass(frozen=True)
 class ModelPrice:
@@ -223,18 +221,10 @@ def _flat_price(cost: object) -> Optional[ModelPrice]:
 
 
 def normalize_model_id(model_id: str) -> str:
-    """Fold the spellings agents send onto the one a price table lists.
+    """Fold the spellings agents send onto the one a price table lists (``catalog_model_id``): the context-window
+    tag, the snapshot date, and a provider prefix do not change a list price."""
 
-    `anthropic/claude-opus-5[1m]` and `claude-opus-4-5-20251101` become
-    `claude-opus-5` and `claude-opus-4-5`: the context-window tag, the snapshot
-    date, and a provider prefix do not change a list price.
-    """
-
-    text = model_id.strip().lower()
-    text = text.rsplit("/", 1)[-1]
-    text = _BRACKET_SUFFIX.sub("", text)
-    text = _DATE_SUFFIX.sub("", text)
-    return text.strip()
+    return catalog_model_id(model_id)
 
 
 def _first_party(model_id: str, vendor_map: Mapping[str, Any]) -> Optional[str]:
