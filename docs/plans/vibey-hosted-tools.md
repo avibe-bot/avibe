@@ -251,7 +251,7 @@ verified for X search.
 
 | Protocol | Native declaration | Proxy declaration |
 | --- | --- | --- |
-| `openai_responses` (OpenAI, xAI) | `{"type": "web_search"}`, `{"type": "x_search"}`, `{"type": "image_generation", "partial_images": 2}`, plus the overlay entry's `include` values. OpenAI's web search requires `include: ["web_search_call.action.sources"]`, merged with Vibey's existing `reasoning.encrypted_content`; without it, `action.sources` is not returned. xAI's `web_search_call` carried `action.sources` without it (spike). | `{"type": "function", "name": "web_search", "parameters": <canonical>}` |
+| `openai_responses` (OpenAI, xAI) | `{"type": "web_search"}`, `{"type": "x_search"}`, `{"type": "image_generation", "partial_images": 2, "output_format": "jpeg", "output_compression": 90}`, plus the overlay entry's `include` values. OpenAI's web search requires `include: ["web_search_call.action.sources"]`, merged with Vibey's existing `reasoning.encrypted_content`; without it, `action.sources` is not returned. xAI's `web_search_call` carried `action.sources` without it (spike). | `{"type": "function", "name": "web_search", "parameters": <canonical>}` |
 | `anthropic` | `{"type": "web_search_20250305", "name": "web_search", "max_uses": 5}` | `{"name": "web_search", "input_schema": <canonical>}` |
 | `openai_chat`, `google` | none in Phase 1 | a function with the canonical schema. Vibey reaches a `google` hop over Chat Completions at the gateway (C-1 conversion tables), so the Chat form applies, and the engine translates it to Gemini `functionDeclarations`. |
 
@@ -569,9 +569,10 @@ Each has a **Re-verify** action with its cost. Unknown shows nothing.
   - If the model wants to look, it opens the file with its `read` tool, the same as any other file.
   - The file the record names must fit `read`'s inline image cap. `MAX_INLINE_IMAGE_BYTES` in
     `core/agent_core/tools/read.py` is about 3.4 MiB, and `read` does not resize. A high-quality PNG of 4–6 MB would
-    come back as "Image omitted". So either the declaration bounds the output (`output_format` and compression), or
-    the store also writes a bounded preview and the record names it. The Phase 1 PR picks one and tests it with a
-    6 MB image.
+    come back as "Image omitted". Phase 1 bounds it in the declaration: OpenAI's asks for `output_format: "jpeg"`
+    at `output_compression: 90`, so a 1.6 MP image is about 0.3–1 MB, and every IM platform shows JPEG. An image
+    still over the cap gets a record saying it is too large to view inline. Transparent backgrounds are out of scope
+    in Phase 1.
 - **The user sees the image.** The Workbench renders it inline from the file, and IM attaches it. That is display,
   separate from model context.
 - **History and replay never contain base64.**
