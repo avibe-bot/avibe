@@ -257,13 +257,21 @@ class ResponsesStreamReader:
         ):
             response = dict(payload["response"])
             output = response.pop("output", None)
-            if not self.readout.items and isinstance(output, list):
-                # Only when the stream itself carried no items; otherwise its
-                # copy, image included, is a duplicate and is neither kept nor counted.
-                self.readout.items = [item for item in output if isinstance(item, dict)]
-                for adopted in self.readout.items:
-                    if adopted.get("type") == "image_generation_call":
-                        self._count_image(adopted.get("result"))
+            # The terminal output repeats the streamed items (the image included);
+            # only the items the stream did not carry are taken from it, and only
+            # their images count toward the budget.
+            seen = {item.get("id") for item in self.readout.items if isinstance(item.get("id"), str)}
+            streamed = bool(self.readout.items)
+            for adopted in output if isinstance(output, list) else ():
+                if not isinstance(adopted, dict):
+                    continue
+                ident = adopted.get("id")
+                if (ident in seen) if isinstance(ident, str) else streamed:
+                    # A repeat, or an item without an id the stream may already hold.
+                    continue
+                if adopted.get("type") == "image_generation_call":
+                    self._count_image(adopted.get("result"))
+                self.readout.items.append(adopted)
             self.readout.response = response
 
     def _count_image(self, encoded: Any) -> None:
@@ -480,6 +488,9 @@ def _sentence(text: str, start: int, end: int, line_start: int, line_end: int) -
 def _image_result(
     calls: list[Mapping[str, Any]], readout: ResponsesReadout, say: Say, failure: str | None,
 ) -> ExecutorResult:
+    if failure is None and any(call.get("status") == "failed" for call in calls):
+        # The one failure-precedence rule: a provider-marked failed call fails the call.
+        return ExecutorResult(failed_record(say("modelHub.hostedTools.callFailed", tool="image_generation")))
     done = [call for call in calls if call.get("status") == "completed" and isinstance(call.get("result"), str)]
     if done and done[-1]["result"] and failure is None and (readout.response or {}).get("status") != "completed":
         settled = _settled(readout.response or {}, [], say)
@@ -513,7 +524,7 @@ def _image_result(
     )
 
 
-def anthropic_result(body: bytes, say: Say) -> ExecutorResult:
+def anthropic_result(body: bytes | bytearray, say: Say) -> ExecutorResult:
     """The canonical record of one buffered Anthropic web search executor call; parse it off the loop."""
 
     try:
@@ -561,6 +572,14 @@ def anthropic_result(body: bytes, say: Say) -> ExecutorResult:
     # Success is an allow-list here too: an early stop is incomplete, anything else unknown fails.
     stop = message.get("stop_reason")
     if stop in {"end_turn", "stop_sequence"}:
+        uses = {
+            block.get("id") for block in blocks
+            if block.get("type") == "server_tool_use" and block.get("name") == "web_search"
+        }
+        answered = {block.get("tool_use_id") for block in blocks if block.get("type") == "web_search_tool_result"}
+        if not uses <= answered:
+            # A finished response must carry every search's result block, even an empty one.
+            return ExecutorResult(failed_record(say("modelHub.hostedTools.unreadable"), sources))
         return ExecutorResult({"status": "completed", "sources": sources})
     ended = say("modelHub.hostedTools.responseEnded", status=str(stop or "unknown"))
     if stop in {"max_tokens", "pause_turn"}:

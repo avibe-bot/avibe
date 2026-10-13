@@ -691,7 +691,13 @@ class ModelHubTurnGateway:
             return refused(401, "authentication_error")
         # Every step proportional to the request or the answer runs off the
         # controller loop; the call's arguments are small, so the body is bounded.
-        if request.content_length is None or request.content_length > _HOSTED_TOOL_REQUEST_MAX_BYTES:
+        # The bound is on the bytes parsed: an encoded body would be inflated
+        # past it, and on the loop, before the check could see it.
+        if (
+            request.headers.get("Content-Encoding", "identity").strip().lower() not in {"", "identity"}
+            or request.content_length is None
+            or request.content_length > _HOSTED_TOOL_REQUEST_MAX_BYTES
+        ):
             return refused(400, "invalid_request_error")
         raw = await request.read()
         try:

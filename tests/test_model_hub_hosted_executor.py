@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import gzip
 import json
 import threading
 from dataclasses import replace
@@ -22,11 +23,11 @@ from config.v2_config import ModelHubHostedToolConfig, ModelHubRouteHopConfig
 from core.agent_core.messages import message_from_dict
 from core.handlers.model_hub import hosted_executor as executor_module
 from core.handlers.model_hub import service as service_module
-from core.handlers.model_hub.adapter import RawOutcomeKind
+from core.handlers.model_hub.adapter import InvokeCancelledError, RawOutcomeKind
 from core.handlers.model_hub.capability_evidence import EvidenceFeature, EvidenceRecord, identity_digest
 from core.handlers.model_hub.hosted_executor import excerpt
 from core.handlers.model_hub.hosted_tools import HOSTED_PROBE_SHAPE, engine_stamp
-from core.handlers.model_hub.stream_wire import ProtocolUsageReport
+from core.handlers.model_hub.stream_wire import ProtocolSSEState, ProtocolUsageReport
 from core.handlers.model_hub.turn_gateway import ModelHubTurnGateway
 from modules.agents.model_hub import ModelHubRuntimeRouter
 from core.run_settlement import SETTLED_BY_STOPPED
@@ -405,6 +406,7 @@ async def test_only_the_executor_the_live_turn_bound_may_run(tmp_path, case):
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("case", "call", "error"), [
     ("unreadable_base64", {"result": "not base64!"}, "could not be used"),
+    ("one_of_two_calls_failed", None, "image_generation call failed"),
     ("too_many_images", None, "larger than allowed"),
     ("partials_over_the_byte_budget", None, "larger than allowed"),
 ])
@@ -421,7 +423,9 @@ async def test_an_image_the_executor_cannot_vouch_for_is_a_failed_record(tmp_pat
              "result": base64.b64encode(b"\x89PNG fixture").decode(), **(call or {})}
     partial = _event({"type": "response.image_generation_call.partial_image", "partial_image_index": 0,
                       "partial_image_b64": base64.b64encode(b"preview" * 8).decode()})
-    frames = _responses(final)
+    frames = _responses(final) if case != "one_of_two_calls_failed" else _responses(
+        {"type": "image_generation_call", "id": "ig_0", "status": "failed"}, final,
+    )
     # Two partials were asked for; six are more than the final and the margin allow.
     stream = (frames[0], *([partial] * (6 if case == "too_many_images" else 1)), *frames[1:])
     service = _vibey_service(tmp_path, _sources(), handles=[
@@ -520,6 +524,12 @@ DEEP = "[" * 100_000 + "]" * 100_000
             {"type": "web_search_tool_result", "tool_use_id": "srvtoolu_1", "content": [
                 {"type": "web_search_result", "url": PAGE_A, "title": "Releases"}]},
         ]}).encode(),), "incomplete", "max_tokens", [{"url": PAGE_A, "title": "Releases"}]),
+    # A finished Anthropic response must carry each search's result block.
+    ("anthropic_search_without_its_result", (ANTHROPIC, "claude-haiku-4-5"), (json.dumps({
+        "type": "message", "stop_reason": "end_turn", "content": [
+            {"type": "server_tool_use", "id": "srvtoolu_1", "name": "web_search", "input": {"query": "q"}},
+            {"type": "text", "text": "Nothing found."},
+        ]}).encode(),), "failed", "could not be read", []),
     ("responses_without_an_ending", (XAI, "grok-4.6"), INCOMPLETE[:1], "failed", "unknown",
      [{"url": PAGE_A}, {"url": PAGE_B}]),
     # Nesting past the decoder's recursion limit is an unreadable response, not a 500.
@@ -591,6 +601,81 @@ async def test_a_proxy_call_body_is_bounded(tmp_path):
         {"arguments": {"query": "q" * (1024 * 1024)}, "executor": None},
     ).encode())
     assert (status, answer["error"]["code"]) == (400, "invalid_request_error")
+    assert service.adapter.invocations == []
+
+
+@pytest.mark.asyncio
+async def test_items_only_the_terminal_response_carries_are_kept(tmp_path):
+    """MH-HOSTED-GATEWAY-004: a relay that streams some items but not others still yields the terminal list's."""
+
+    reasoning = {"type": "reasoning", "id": "rs_1", "summary": []}
+    image = {"type": "image_generation_call", "id": "ig_1", "status": "completed", "output_format": "png",
+             "result": base64.b64encode(b"\x89PNG fixture").decode(), "revised_prompt": "a boat"}
+    frames = (
+        _event({"type": "response.output_item.done", "item": reasoning}),
+        _event({"type": "response.completed", "response": {
+            "id": "resp_1", "status": "completed", "output": [reasoning, image]}}),
+    )
+    service = _vibey_service(tmp_path, _sources(), handles=[
+        LiveInvokeHandle(_outcome(RawOutcomeKind.SUCCESS, source_id=OPENAI), frames),
+    ])
+    _bind(service, "image_generation", (OPENAI, "gpt-6-astra"))
+    status, answer = await _call(service, "image_generation", {
+        "arguments": {"prompt": "a boat"}, "executor": {"source_id": OPENAI, "model_id": "gpt-6-astra"},
+    })
+    assert status == 200
+    assert answer["record"]["status"] == "completed"
+    assert [base64.b64decode(item["data"]) for item in answer["images"]] == [b"\x89PNG fixture"]
+
+
+@pytest.mark.asyncio
+async def test_a_call_cancelled_before_its_handle_is_still_metered(tmp_path):
+    """MH-HOSTED-GATEWAY-005: wire facts observed after admission are billed, so they reach the usage ledger."""
+
+    service = _vibey_service(tmp_path, _sources())
+    _bind(service, "web_search", (XAI, "grok-4.6"))
+    observed = ProtocolSSEState("openai_responses")
+    observed.observe(_responses(usage={"input_tokens": 1200, "output_tokens": 3})[-1])
+
+    async def cancelled_after_admission(source_id, model_id, request, stream, origin, *, on_admitted=None):
+        on_admitted()
+        raise InvokeCancelledError(observed)
+
+    service.adapter.invoke = cancelled_after_admission
+    gateway = ModelHubTurnGateway(service)
+    router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
+    try:
+        hop = await router.resolve_hop("menu-alias", process_scope="vibey:cancel", turn_id="turn-cancel")
+        with pytest.raises(asyncio.CancelledError):
+            await service.run_hosted_tool(
+                "web_search",
+                {"arguments": {"query": "q"}, "executor": {"source_id": XAI, "model_id": "grok-4.6"}},
+                bindings=gateway.correlation.hosted_executor_bindings(backend="vibey", token=hop["token"])[1],
+            )
+    finally:
+        await gateway.close()
+    assert _usage_of(service, XAI)
+
+
+@pytest.mark.asyncio
+async def test_an_encoded_proxy_call_body_is_refused(tmp_path):
+    """MH-HOSTED-GATEWAY-005: the 1 MiB bound is on what is parsed, so an encoded body is refused before inflating."""
+
+    service = _vibey_service(tmp_path, _sources())
+    _bind(service, "web_search", None)
+    gateway = ModelHubTurnGateway(service)
+    router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
+    try:
+        hop = await router.resolve_hop("menu-alias", process_scope="vibey:gzip", turn_id="turn-gzip")
+        async with aiohttp.ClientSession(auto_decompress=False) as client:
+            async with client.post(
+                f'{hop["base_url"]}/hosted-tools/web_search',
+                headers={"Authorization": f'Bearer {hop["token"]}', "Content-Encoding": "gzip"},
+                data=gzip.compress(json.dumps({"arguments": {"query": "q"}, "executor": None}).encode()),
+            ) as response:
+                assert response.status == 400
+    finally:
+        await gateway.close()
     assert service.adapter.invocations == []
 
 

@@ -6070,12 +6070,13 @@ class ModelHubService:
         )
         body = bytearray()
         handle = None
+        cancelled_observed: ProtocolSSEState | None = None
         outcome: RawCallOutcome | None = None
         admitted = False
         refused: str | None = None
 
         async def invoke() -> None:
-            nonlocal handle, outcome, admitted, refused
+            nonlocal handle, outcome, admitted, refused, cancelled_observed
             while True:
                 await self._prepare_engine_for_demand()
                 await self._mutation_lock.acquire()
@@ -6097,9 +6098,15 @@ class ModelHubService:
                         return
                     if not self._engine_synced:
                         continue
-                    handle = await self._engine_call(self.adapter.invoke(
-                        source.id, model_id, request, stream, "vibey", on_admitted=on_admitted,
-                    ))
+                    try:
+                        handle = await self._engine_call(self.adapter.invoke(
+                            source.id, model_id, request, stream, "vibey", on_admitted=on_admitted,
+                        ))
+                    except InvokeCancelledError as cancelled_early:
+                        # Cancelled after admission, before a handle: the wire
+                        # facts already observed are still billed, so still metered.
+                        cancelled_observed = cancelled_early.observed
+                        raise
                     break
                 finally:
                     release_owner()
@@ -6121,16 +6128,20 @@ class ModelHubService:
             outcome = await self._engine_call(handle.outcome())
 
         async def settle() -> None:
-            if handle is not None:
-                try:
+            try:
+                if handle is not None:
                     # Bounded like the gateway's own teardown: a stuck close must
                     # not hold the call past its deadline or the gateway's shutdown.
                     await asyncio.wait_for(handle.close_stream(), timeout=ENGINE_TRANSPORT_TIMEOUT_SECONDS)
-                except (asyncio.TimeoutError, Exception):
-                    logger.warning("Model Hub hosted-tool executor stream did not close cleanly", exc_info=True)
-                finally:
+            except (asyncio.TimeoutError, Exception):
+                logger.warning("Model Hub hosted-tool executor stream did not close cleanly", exc_info=True)
+            finally:
+                if handle is not None or cancelled_observed is not None:
                     await self._meter_call(
-                        source_id=source.id, model_id=model_id, outcome=outcome, observed=handle.observed,
+                        source_id=source.id,
+                        model_id=model_id,
+                        outcome=outcome,
+                        observed=handle.observed if handle is not None else cancelled_observed,
                     )
 
         try:
@@ -6175,7 +6186,8 @@ class ModelHubService:
         elif failure is not None:
             result = None
         else:
-            result = await asyncio.to_thread(anthropic_result, bytes(body), say)
+            # The bytearray itself goes to the worker: no copy of up to the response budget on the loop.
+            result = await asyncio.to_thread(anthropic_result, body, say)
         if result is None:
             return {"record": failed_record(failure or say("modelHub.hostedTools.unreadable")), "execution": execution}
         answer: dict[str, Any] = {"record": result.record, "execution": execution}
