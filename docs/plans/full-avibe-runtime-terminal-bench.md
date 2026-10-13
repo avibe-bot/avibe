@@ -2,11 +2,11 @@
 
 ## Scope and ownership
 
-Worktree: `feature/vibey-terminal-bench-full-runtime`, base `9a89da41b`.
-Implementation owner: `sesxksgh2gjus`; original orchestrator: `sesu69aqh5sc7`.
-All earlier fork-parent claims are superseded; this Session is the only writer.
-The paused standalone worktree and its partial changes are out of scope.
-No Docker, paid upstream requests, deployment, push, or PR is authorized here.
+Worktree: `feature/vibey-terminal-bench-full-runtime`, starting base `9a89da41b`.
+This change adds source-only evaluation tooling around the installed product.
+The earlier standalone-core experiment is out of scope and is not used for
+product benchmark results. Deployment, merge, public leaderboard submission,
+and remote/GPU provisioning remain separate decisions.
 
 ## Source-backed correction to the investigation
 
@@ -32,9 +32,8 @@ A new embedded Controller or a second Agent loop is unnecessary. Existing paths:
 
 Add only source-side tooling under `scripts/terminal_bench/` and focused tests,
 not product wheel dependencies, not a Harbor dependency in the product lock.
-Consolidate the sibling's untracked bridge/profile here; delete only the two
-unused package initializers and the superseded untracked plan after consolidation. The wrapper invokes the normal
-service entrypoint in an owned subprocess. All product imports and CLI operations
+The wrapper invokes the normal service entrypoint in an owned subprocess.
+All product imports and CLI operations
 run in child processes with their own environment; the parent environment and
 running user service are never modified.
 
@@ -55,8 +54,8 @@ Per trial:
    by the product. No Source means a reported `blocked` bootstrap, not a fake pass.
 5. Use the real CLI Run path with explicit Agent/model/effort, task cwd, and
    instruction. Collect the durable run outcome and redacted terminal result.
-   A result is not a verifier reward. Harbor execution and ATIF export are later
-   gates, not claims made by this slice.
+   A result is not a verifier reward. The optional Harbor adapter runs the
+   separate verifier; ATIF export and public submission are not pilot gates.
 6. Gracefully terminate the exact owned service and collect its descendants while
    alive. Join/terminate/kill by recorded process identity within bounded grace;
    never use a global `vibe stop`, pattern kill, or the user's runtime records.
@@ -87,8 +86,9 @@ installation, credential custody, provider connectivity, or a benchmark score.
 ## Implemented evidence
 
 - `scripts/terminal_bench/{profile,control,runner}.py` and `README.md` are the
-  single source-only wrapper. The sibling bridge/profile were consolidated;
-  unused benchmark package initializers and the superseded plan were removed.
+  single source-only wrapper. Optional `harbor_agent.py`, `launch.py` and
+  `credential.py` adapt its lifecycle and private credential transport to
+  Harbor; no extracted product packages are uploaded.
 - Product `pyproject.toml`, `uv.lock`, service, Agent and storage files are unchanged.
 - The subprocess test uses normal `main.py`, IPC Source/catalog/route APIs and
   the real CLI Run path. It proves a native Bash tool writes a Unicode note and
@@ -105,13 +105,32 @@ installation, credential custody, provider connectivity, or a benchmark score.
   reported usage (completeness explicitly unknown), cleanup and null verifier
   reward. Raw product state/logs are not copied.
 
-Remaining gates: parent-run **wrapper** acceptance with an installed wheel and
-real CPA engine; thin Harbor wiring (honestly `atif=False` until a later converter);
-exact-source/benchmark/resource pinning; paired scored tasks; current-head
-review/CI. ATIF is not a prerequisite to the first honest local scored pilot. The original orchestrator separately
-reported successful `avibe-os 3.2.0rc5` + real-engine + loopback upstream acceptance
-(source `98cc70a1c`), which is not evidence for this wrapper or this checkout's
-base `9a89da41b` and is not a benchmark score.
+## Installed-runtime acceptance and remaining gates
+
+An independent container check used the official `avibe-os 3.2.0rc5` wheel
+(source `98cc70a1c`, SHA256
+`5b1b59cd1cf93f36b00f1bef8490612da180366244e2cee163e0d59977fffea0`), its real
+managed Model Hub engine, and a local scripted HTTP upstream. It confirmed
+ordinary CLI Run dispatch, native file writes/reads, task-owned SQLite, Harness
+quiescence and process cleanup. The full Harbor path subsequently passed its
+synthetic separate verifier with reward 1 and zero infrastructure exceptions.
+These are integration checks, **not model capability scores**. Source-checkout
+unit tests use an external-engine fixture and are a separate evidence layer.
+
+The optional adapter requires Harbor 0.24.0, verifies wheel bytes before upload,
+and records the actual wrapper source and installation. It declares `atif=False`;
+a local verifier score does not depend on ATIF or official leaderboard submission.
+Docker Compose can preserve a host UID on uploaded files; credential setup
+adopts only a validated single-link regular inode under its private directory,
+while normal consumption retains strict ownership and permission checks.
+
+Remaining gates: one same-profile paired official task with measured usage,
+cost assessment before larger batches, and current-head review/CI before code
+delivery. Benchmark results must name the tested wheel and wrapper revisions,
+not assume they match the latest product branch. Preserve failed attempts and
+resource/protocol differences; do not extrapolate a small pilot to a leaderboard
+rank. See `scripts/terminal_bench/HARBOR.md` for supported images and lifecycle
+limitations.
 
 Run only focused tests through `~/.local/bin/hd1-test`; retain product dependency
 files unchanged. Any unproven lifecycle/provider capability remains a named gate.
