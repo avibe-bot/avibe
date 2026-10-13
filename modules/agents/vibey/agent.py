@@ -36,6 +36,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, AsyncIterator, Callable, Mapping, Optional, Sequence
 
+import httpx
 from sqlalchemy import and_, select
 from sqlalchemy.engine import Engine
 
@@ -99,7 +100,7 @@ from modules.agents.vibey.media import MediaSnapshots
 from modules.agents.vibey.models import HubModelRouter, ProviderFactory, registry_providers, selection_from_hop
 from modules.agents.vibey.prompt import EnvironmentValue, current_environment, system_prompt
 from modules.agents.vibey.store import AdapterTranscriptStore
-from modules.agents.vibey.tools import ToolSuite, local_tool_suite, native_hosted_tools
+from modules.agents.vibey.tools import ToolSuite, hosted_tools, local_tool_suite
 from modules.agents.base import AGENT_RUNTIME_TURN_KEY, AgentRequest, BaseAgent
 from modules.agents.catalog import display_name_for_backend
 from modules.im.base import FileAttachment
@@ -229,6 +230,7 @@ class VibeyAgent(BaseAgent):
         providers: Optional[ProviderFactory] = None,
         tool_suite: Optional[ToolSuite] = None,
         state_dir: Optional[Path] = None,
+        gateway_client: Optional[httpx.AsyncClient] = None,
     ) -> None:
         super().__init__(controller)
         self._engine = engine or get_cached_sqlite_engine()
@@ -242,6 +244,8 @@ class VibeyAgent(BaseAgent):
             on_response=self._on_response,
         )
         self._providers = providers or registry_providers(media_loader=self.media)
+        # The client of the Turn's other gateway calls (the hosted-tool executor); None opens one per call.
+        self._gateway_client = gateway_client
         # C-9: the Session parts a checkpoint carries (context.md section 9).
         self.context_host = VibeyContextHost(self._engine, environment=self._environment)
         self._tool_suite = tool_suite
@@ -613,7 +617,7 @@ class VibeyAgent(BaseAgent):
         # Job-backed tools receive the loop's tracking wrapper, so Stop kills foreground commands.
         tools = mark_skill_loads(
             (
-                *native_hosted_tools(turn.router.preflight),
+                *hosted_tools(turn.router.preflight, self._gateway_client),
                 *suite.create_tools(agent.jobs, self.media.image_sink(session_id)),
             )
         )
