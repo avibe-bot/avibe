@@ -5091,6 +5091,7 @@
       "signSubtitle": "Each signature needs your approval — it can't be pre-approved.",
       "deleteTitle": "Agent wants to delete a secret",
       "deleteSubtitle": "Review the details before permanently deleting this secret.",
+      "deleteManagementHint": "Only instance managers can delete Vault secrets.",
       "secret": "Secret",
       "description": "Description",
       "reason": "Reason",

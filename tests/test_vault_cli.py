@@ -530,7 +530,7 @@ def test_rm_reuses_pending_request_without_repeating_notification(capfd, monkeyp
     assert [item.get("notify_request", True) for item in published] == [True, False]
 
 
-
+def test_rm_missing_secret_still_reports_not_found(capfd):
     code = cli.cmd_vault_rm(_ns(name="MISSING_RM"))
     captured = capfd.readouterr()
 

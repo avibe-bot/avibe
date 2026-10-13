@@ -118,7 +118,10 @@ def test_complete_registered_api_management_inventory():
         for method in (getattr(route, "methods", None) or ())
         if method not in {"HEAD", "OPTIONS"}
     }
-    assert len(endpoints) == 283
+    assert len(endpoints) == 284
+    # The route matches the editor-tier Vault namespace like direct DELETE; the service still
+    # enforces instance management before mutating the secret.
+    assert http_authorization_policy("POST", "/api/vault/requests/{request_id}/approve-delete").minimum_role == "editor"
     assert http_authorization_policy("POST", "/api/desktop-mini/session").minimum_role == "editor"
     assert http_authorization_policy("GET", "/api/desktop/capabilities").minimum_role == "member"
     assert http_authorization_policy("GET", "/api/desktop/computer-use/status").minimum_role == "member"

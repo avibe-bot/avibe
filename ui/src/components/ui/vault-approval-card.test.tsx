@@ -19,6 +19,7 @@ const api = vi.hoisted(() => ({
   approveVaultDeleteRequest: vi.fn(),
 }));
 const useVaultSandboxWarm = vi.hoisted(() => vi.fn((_enabled: boolean) => true));
+const authorization = vi.hoisted(() => ({ capabilities: { can_use_vault_secrets: true, can_manage_instance: true } }));
 const vault = vi.hoisted(() => ({
   status: 'locked',
   refresh: vi.fn(),
@@ -27,7 +28,7 @@ const vault = vi.hoisted(() => ({
 
 vi.mock('@/context/ApiContext', () => ({ useApi: () => api }));
 vi.mock('@/context/InstanceAuthorizationContext', () => ({
-  useInstanceAuthorization: () => ({ capabilities: { can_use_vault_secrets: true } }),
+  useInstanceAuthorization: () => authorization,
 }));
 vi.mock('@/lib/useProtectedVault', () => ({ useProtectedVault: () => vault, useVaultSandboxWarm }));
 
@@ -106,6 +107,8 @@ const blindBox = { scheme: 'hpke-x25519-hkdfsha256-aes256gcm-v1', enc: 'enc', ct
 beforeEach(() => {
   // Only the card's refresh interval is faked, so promises and Testing Library keep real timers.
   vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+  authorization.capabilities.can_use_vault_secrets = true;
+  authorization.capabilities.can_manage_instance = true;
   api.getVaultSettings.mockResolvedValue({ ok: true, settings: { last_grant_ttl: 300 } });
   api.saveVaultSettings.mockResolvedValue({ ok: true });
   api.fulfillVaultAccessRequest.mockResolvedValue({ ok: true });
@@ -236,6 +239,21 @@ describe('VaultApprovalCard protected access approval', () => {
 
     await vi.waitFor(() => expect(vault.approveProtectedRelease).toHaveBeenCalledOnce());
     expect(vault.approveProtectedRelease.mock.calls[0][0].map((item: { context: unknown }) => item.context)).toEqual([{ issuedFor: 300 }]);
+  });
+
+  it('disables delete approval for editors without instance management', async () => {
+    authorization.capabilities.can_manage_instance = false;
+    const onResolved = vi.fn();
+    render(
+      <I18nextProvider i18n={i18n}>
+        <VaultApprovalCard request={deleteRequest} onResolved={onResolved} onCancel={vi.fn()} />
+      </I18nextProvider>,
+    );
+
+    const deleteButton = screen.getByRole('button', { name: /^delete$/i });
+    expect(deleteButton.disabled).toBe(true);
+    expect(screen.getByText('Only instance managers can delete Vault secrets.')).toBeTruthy();
+    expect(api.approveVaultDeleteRequest).not.toHaveBeenCalled();
   });
 
   it('keeps the destructive confirmation open and shows an approval failure', async () => {

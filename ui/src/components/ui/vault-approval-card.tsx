@@ -244,6 +244,7 @@ export const VaultApprovalCard: React.FC<{
   // (no binding contexts, no sandbox ceremony) starts here.
   const approveInBrowser = needsProtectedApproval && vaultPasskeyNeedsBrowser();
   const canApprove = capabilities.can_use_vault_secrets;
+  const canManageDelete = capabilities.can_manage_instance;
   // Set once this card has approved or denied its request, which is then no longer pending.
   const [resolved, setResolved] = useState(false);
   const sendBindings = useCallback(
@@ -434,7 +435,7 @@ export const VaultApprovalCard: React.FC<{
     );
   }
 
-  const approveDisabled = busy || preparing || !canApprove || (!isSign && !isDelete && !option);
+  const approveDisabled = busy || preparing || !canApprove || (isDelete && !canManageDelete) || (!isSign && !isDelete && !option);
 
   return (
     <div className="flex min-w-0 flex-col gap-4">
@@ -652,15 +653,18 @@ export const VaultApprovalCard: React.FC<{
           </span>
         ) : null}
         <div className="ml-auto flex items-center gap-2">
-          <Button type="button" variant="outline" onClick={deny} disabled={busy || !canApprove}>
+          <Button type="button" variant="outline" onClick={deny} disabled={busy || !canApprove || (isDelete && !canManageDelete)}>
             {t('vaults.approval.deny')}
           </Button>
+          {isDelete && !canManageDelete ? (
+            <span className="text-xs text-muted-foreground">{t('vaults.approval.deleteManagementHint')}</span>
+          ) : null}
           {isDelete ? (
             <Button
               type="button"
               variant="destructive"
               onClick={() => (deleteNeedsHold ? setDeleteConfirmOpen(true) : void approveDelete())}
-              disabled={busy || !canApprove}
+              disabled={busy || !canApprove || !canManageDelete}
             >
               {busy ? <Loader2 className="size-4 animate-spin" /> : <Trash2 className="size-4" />}
               {t('vaults.delete')}

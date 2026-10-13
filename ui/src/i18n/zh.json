@@ -5091,6 +5091,7 @@
       "signSubtitle": "每次签名都要你批准——无法预先批准。",
       "deleteTitle": "Agent 想删除一个密钥",
       "deleteSubtitle": "请确认详情，再永久删除这条密钥。",
+      "deleteManagementHint": "只有实例管理者可以删除 Vault 密钥。",
       "secret": "密钥",
       "description": "说明",
       "reason": "原因",
