@@ -111,6 +111,7 @@ beforeEach(() => {
   authorization.capabilities.can_manage_instance = true;
   api.getVaultSettings.mockResolvedValue({ ok: true, settings: { last_grant_ttl: 300 } });
   api.saveVaultSettings.mockResolvedValue({ ok: true });
+  api.denyVaultRequest.mockResolvedValue({ ok: true });
   api.fulfillVaultAccessRequest.mockResolvedValue({ ok: true });
   api.approveVaultDeleteRequest.mockResolvedValue({ ok: true, removed: true, name: 'OLD_TOKEN' });
   api.createVaultAgentBindingsBatch.mockImplementation(async ({ grant_duration }: { grant_duration: VaultGrantDuration }) =>
@@ -254,7 +255,9 @@ describe('VaultApprovalCard protected access approval', () => {
     const denyButton = screen.getByRole('button', { name: /^deny$/i });
     expect(deleteButton.disabled).toBe(true);
     expect(denyButton.disabled).toBe(false);
-    expect(screen.getByText('Only instance managers can delete Vault secrets.')).toBeTruthy();
+    expect(screen.getByText('Deleting needs instance management access. You can still deny this request.')).toBeTruthy();
+    fireEvent.click(denyButton);
+    expect(api.denyVaultRequest).toHaveBeenCalledWith('vrq_delete');
     expect(api.approveVaultDeleteRequest).not.toHaveBeenCalled();
   });
 
