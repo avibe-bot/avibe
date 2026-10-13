@@ -67,6 +67,7 @@ from core.agent_core.messages import (
     ToolCallBlock,
     ToolResultMessage,
     UserMessage,
+    has_reply,
     message_from_dict,
     text as text_block,
 )
@@ -1060,7 +1061,9 @@ class VibeyAgent(BaseAgent):
         never shows nothing for a failed Turn (loop-control.md section 2).
         """
         value = render_text(message)
-        if final and not value.strip():
+        # A final whose reply is a generated image has no text to show; its image
+        # is attached on delivery (``_with_hosted_images``), so there is nothing to explain.
+        if final and not value.strip() and not has_reply(message):
             kind = message.stop_reason if message.stop_reason in _EXPLAINED_STOPS else "empty_response"
             return error_text(kind, self._language())
         return strip_silent_blocks(value)

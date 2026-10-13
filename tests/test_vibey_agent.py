@@ -3541,6 +3541,8 @@ async def test_an_image_only_final_is_a_reply_and_reaches_the_user(engine, sessi
 
     assert harness.controller.terminals[-1]["is_error"] is False
     assert harness.controller.im_client.uploads == [str(image.resolve())]
-    assert any(item.startswith(i18n_t("info.generatedImagesFallback", "en")) for item in harness.controller.im_client.sent)
+    # The reply is the image under its heading, never the empty-reply error.
+    [result] = harness.rows("result")
+    assert result["content_text"].startswith(i18n_t("info.generatedImagesFallback", "en"))
     assert not any(i18n_t("vibeyAgent.error.emptyResponse", "en") in item for item in harness.controller.im_client.sent)
 
