@@ -22,6 +22,7 @@ petBridge.setHitRegions = async (rects) => { window.petLayoutHitRegions = rects;
 const params = new URLSearchParams(location.search);
 const hasMain = params.get('main') !== 'false';
 const layers = Number(params.get('layers') ?? 3);
+const sessionCount = Number(params.get('sessions') ?? 1);
 const title = 'A long unbroken title '.repeat(40);
 const session = {
   id: 'pet-layout', scope_id: 'fixture', title, agent_backend: 'codex',
@@ -37,6 +38,7 @@ const activities = Array.from({ length: layers + (hasMain ? 0 : 1) }, (_, i) => 
   description: title, backend: 'codex', runtime_key: `fixture-${i}`,
   session_id: session.id, kind: 'watch', started_at: '2026-10-12T00:00:00Z',
 }));
+const switcherSessions = [session, ...Array.from({ length: sessionCount - 1 }, (_, i) => ({ ...session, id: `fixture-session-${i}`, title: `Session ${i + 1} ${title}` }))];
 localStorage.setItem('avibe.pet.devBinding', JSON.stringify({ binding: session.id, revision: 1 }));
 
 // Every API read is fixture-owned. Unexpected calls fail rather than reaching a
@@ -55,7 +57,7 @@ window.fetch = async (input) => {
     '/api/vault/requests': { ok: true, requests: [] },
     '/api/asr/status': { available: false },
     '/api/running-agents': { ok: true, agents: [], counts: { total: 0, active: 0, idle: 0, orphan: 0, by_backend: {} } },
-    '/api/sessions': { sessions: [session], next_before_id: null },
+    '/api/sessions': { sessions: switcherSessions, next_before_id: null },
     '/api/inbox': { ok: true, sessions: [], unread_by_session: {}, total_unread: 0, next_before_id: null },
   };
   if (!(path in payloads)) throw new Error(`Unexpected pet fixture request: ${path}`);

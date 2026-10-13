@@ -17,13 +17,17 @@ import httpx
 
 from core.agent_core.ai._common import (
     ServedHopResolver,
+    WireRequest,
     auth_headers,
     content_parts,
     drive_sse_stream,
     dispatch_wire_event,
     endpoint_origin,
+    hosted_pin,
     join_endpoint_url,
     json_object,
+    native_declaration,
+    native_hosted_tools,
     prepare_messages,
     request_credential_values,
     StreamAssembler,
@@ -242,11 +246,7 @@ class AnthropicAdapter(ProviderAdapter):
         stop_reason: str | None = None
         message_started = False
         message_stopped = False
-        prefix_ttl = _prefix_ttl(request)
         try:
-            headers = auth_headers(request.endpoint, provider="anthropic", gateway=self._gateway)
-            headers.update({"anthropic-version": ANTHROPIC_VERSION, "content-type": "application/json"})
-            url = join_endpoint_url(request.endpoint.base_url, "/messages")
             async def translate(events: AsyncIterator[Any]) -> AsyncIterator[Any]:
                 nonlocal message_started, message_stopped, stop_reason
                 async for event in events:
@@ -740,15 +740,15 @@ class AnthropicAdapter(ProviderAdapter):
                 if terminal is not None:
                     yield terminal
             while True:
-                payload = build_messages_payload(
-                    request, transformed_messages, loaded_images=loaded_images, prefix_ttl=prefix_ttl
-                )
+                # The lifetime ``wire_request`` gives the prefix: the default once this route has rejected the field.
+                prefix_ttl = _prefix_ttl(request)
+                wire = wire_request(request, transformed_messages, gateway=self._gateway, loaded_images=loaded_images)
                 driver = drive_sse_stream(
                     self._client,
                     method="POST",
-                    url=url,
-                    json_body=payload,
-                    headers=headers,
+                    url=wire.url,
+                    json_body=wire.body,
+                    headers=wire.headers,
                     cancel=cancel,
                     assembler=assembler,
                     endpoint=request.endpoint,
@@ -770,7 +770,6 @@ class AnthropicAdapter(ProviderAdapter):
                 # The endpoint refused the request before answering, so the consumer saw nothing: send it once more
                 # with the default lifetime, which this route keeps from now on.
                 _remember_ttl_rejection(request.endpoint)
-                prefix_ttl = None
                 assembler = new_assembler()
         except Exception as exc:
             terminal = assembler.terminal(assembler.exception(exc))
@@ -811,20 +810,24 @@ def build_messages_payload(
         "system": system,
         "messages": payload_messages,
     }
-    if request.tools:
-        payload["tools"] = [
-            {
-                "name": tool.name,
-                "description": tool.description,
-                "input_schema": dict(tool.input_schema),
-                **(
-                    {"cache_control": _cache_control(prefix_ttl)}
-                    if request.cache == "default" and index == len(request.tools) - 1
-                    else {}
-                ),
-            }
-            for index, tool in enumerate(request.tools)
-        ]
+    # A hosted tool this hop runs natively is sent as the provider's declaration in its spec's place (§4.1). The tools
+    # breakpoint goes on the last function tool, never on a server tool.
+    native = native_hosted_tools(request)
+    tools: list[dict[str, Any]] = [
+        native_declaration(native[tool.name])
+        if tool.name in native
+        else {"name": tool.name, "description": tool.description, "input_schema": dict(tool.input_schema)}
+        for tool in request.tools
+    ]
+    functions = [index for index, tool in enumerate(request.tools) if tool.name not in native]
+    if request.cache == "default" and functions:
+        tools[functions[-1]]["cache_control"] = _cache_control(prefix_ttl)
+    if tools:
+        payload["tools"] = tools
+    if request.tool_choice is not None:
+        # Current Claude models refuse a forced `tool` or `any` choice, as does extended thinking, so a request that
+        # forces one would test the refusal instead of the tool. A hosted-tool probe asks in its message instead.
+        raise ValueError("an Anthropic request never forces a tool")
     effort = (request.reasoning_effort or "").lower()
     if effort in {"none", "off", "disabled"}:
         payload["thinking"] = {"type": "disabled"}
@@ -844,6 +847,22 @@ def build_messages_payload(
                 "budget_tokens": budget,
             }
     return payload
+
+
+def wire_request(
+    request: ModelRequest,
+    messages: tuple[Any, ...],
+    *,
+    gateway: bool,
+    loaded_images: Mapping[str, tuple[str, str]] | None = None,
+) -> WireRequest:
+    """The Messages request for already prepared ``messages``, as the adapter sends it."""
+
+    payload = build_messages_payload(request, messages, loaded_images=loaded_images, prefix_ttl=_prefix_ttl(request))
+    headers = auth_headers(request.endpoint, provider="anthropic", gateway=gateway)
+    headers.update({"anthropic-version": ANTHROPIC_VERSION, "content-type": "application/json"})
+    headers.update(hosted_pin(request))
+    return WireRequest(join_endpoint_url(request.endpoint.base_url, "/messages"), headers, payload)
 
 
 def _message_to_anthropic(

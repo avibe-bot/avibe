@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useLayoutEffect, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
-import { ExternalLink, KeyRound } from 'lucide-react';
+import { ArrowLeftRight, ExternalLink, KeyRound } from 'lucide-react';
 
 import { ApiError, useApi, type SessionActivityState, type WorkbenchMessage } from '@/context/ApiContext';
 import { useInstanceAuthorization } from '@/context/InstanceAuthorizationContext';
@@ -13,6 +13,7 @@ import { harnessItemNativeId } from '@/lib/backgroundActivity';
 import { usePageActive } from '@/lib/pageActivity';
 import { usePendingVaultRequests } from '@/lib/usePendingVaultRequests';
 import { ShowPageVoiceDictation } from '@/lib/showPageVoiceDictation';
+import { VoiceTranscriptionError } from '@/lib/voiceTranscription';
 
 import { PetAvatar, type PetPose } from './PetAvatar';
 import { petBridge, sessionLink, vaultRequestLink } from './petBridge';
@@ -392,6 +393,9 @@ const PetSurface: React.FC = () => {
     onOpenComposer: openComposer,
   });
 
+  const clearVoiceError = voice.clearError;
+  useEffect(() => { if (!composing) clearVoiceError(); }, [composing, clearVoiceError]);
+
   const hotkeyHeld = useRef(false);
   const onSummon = useCallback(() => {
     const intent = petShell.takeSummon();
@@ -417,7 +421,7 @@ const PetSurface: React.FC = () => {
     if (!listenPending || !binding || !canChat || !expanded) return;
     petComposer.takeListen();
     if (uncertain) { setDetailOpen(true); return; }
-    if (voice.available && hotkeyHeld.current) voice.start();
+    if (hotkeyHeld.current && voice.available) voice.start();
     else openComposer(draft);
   }, [listenPending, binding, canChat, expanded, voice.available, voice.start, openComposer, draft, uncertain]);
   useEffect(() => {
@@ -521,7 +525,8 @@ const PetSurface: React.FC = () => {
         enabled={canChat && Boolean(binding)}
         listening={voice.listening}
         typing={composing}
-        showMic={voice.available}
+        // Availability gates starting a capture; an active one always keeps its stop control.
+        showMic={voice.available || voice.listening}
         onMic={() => (voice.listening ? voice.stop(true) : voice.start())}
         onKeyboard={() => {
           if (uncertain) { void setPanel(true); setDetailOpen(true); return; }
@@ -566,6 +571,8 @@ const PetSurface: React.FC = () => {
         </div>
         <SpeechSlot open={voice.listening || composing}>
           {voice.listening ? <Marquee text={voice.preview} listeningLabel={t('pet.voice.listening')} /> : canChat && !uncertain ? (
+          <>
+          {voice.error && <p className="pet-mini-input-note" role="status">{t(`pet.voice.${voice.error}`)}</p>}
           <form className="pet-mini-input" data-pet-hit onSubmit={(event) => { event.preventDefault(); void submit(); }}>
             <textarea
               ref={inputRef}
@@ -584,6 +591,7 @@ const PetSurface: React.FC = () => {
             {voice.available && <button type="button" className="pet-mini-input-button" onClick={() => voice.start()} aria-label={t('pet.voiceContinue')}><MicIcon /></button>}
             <button type="submit" className="pet-mini-send" disabled={!draft.trim() || sending || uncertain} aria-label={t('pet.send')}><SendIcon /></button>
           </form>
+          </>
           ) : null}
         </SpeechSlot>
       </div>
@@ -591,6 +599,10 @@ const PetSurface: React.FC = () => {
     </div>
   );
 };
+
+const SwitchSessionButton: React.FC<{ onClick: () => void; label: string }> = ({ onClick, label }) => (
+  <button type="button" className="pet-mini-chip" data-pet-hit aria-label={label} onClick={onClick}><ArrowLeftRight aria-hidden />{label}</button>
+);
 
 const SessionPicker: React.FC<{ onPick: (sessionId: string) => void; canStartVibey: boolean }> = ({ onPick, canStartVibey }) => {
   const { t } = useTranslation();
@@ -617,7 +629,7 @@ const SessionPicker: React.FC<{ onPick: (sessionId: string) => void; canStartVib
     <div className="pet-mini-panel" aria-label={t('pet.chooseSession')}>
       <div className="pet-mini-scroll">
         <div className="pet-mini-session-picker" data-pet-hit>
-          {canStartVibey && <button type="button" onClick={pickVibey} disabled={vibeyPending} className="pet-mini-session-option">{t('pet.talkToVibey')}</button>}
+          {canStartVibey && <button type="button" onClick={pickVibey} disabled={vibeyPending} className="pet-mini-session-option is-vibey">{t('pet.talkToVibey')}</button>}
           {vibeyError && <p className="pet-mini-detail-muted">{vibeyError}</p>}
           {sessions.length === 0 && <p className="pet-mini-detail-muted">{loading ? t('common.loading') : t('pet.noSessions')}</p>}
           {sessions.map((session) => (
@@ -708,21 +720,28 @@ function useHitRegions(rootRef: React.RefObject<HTMLDivElement | null>, epoch?: 
 }
 
 function usePetVoice({ enabled, epoch, draft, onOpenComposer }: { enabled: boolean; epoch: PetSurfaceEpoch; draft: string; onOpenComposer: (text?: string) => void }) {
-  const [asr, setAsr] = useState<{ available: boolean; checked: boolean; maxFileBytes?: number }>({ available: false, checked: false });
+  const [asr, setAsr] = useState<{ epoch: PetSurfaceEpoch; enabled: boolean; available: boolean; checked: boolean; maxFileBytes?: number }>({ epoch, enabled, available: false, checked: false });
   const [preview, setPreview] = useState('');
   const [listening, setListening] = useState(false);
+  // A failed capture or transcription falls back to text with this note.
+  const [error, setError] = useState<VoiceFailure | null>(null);
   type Capture = { dictation: ShowPageVoiceDictation; ending: boolean; cancelled: boolean };
   const captureRef = useRef<Capture | null>(null);
   const supported = typeof navigator !== 'undefined' && Boolean(navigator.locks && navigator.mediaDevices?.getUserMedia);
-  // Remains off until the desktop main/pet captured-speech handoff has been
-  // verified on the platform. The QA harness alone sets this marker today.
-  const available = enabled && supported && asr.available && (window as unknown as { __AVIBE_PET_VOICE_ENABLED__?: boolean }).__AVIBE_PET_VOICE_ENABLED__ === true;
+  const asrForEpoch = asr.epoch === epoch && asr.enabled === enabled ? asr : { epoch, enabled, available: false, checked: false };
+  const available = enabled && supported && asrForEpoch.available;
+  // Read ASR status as soon as voice may be used. The pet window is created
+  // unfocused, so this read does not wait for activation. Status is keyed to
+  // this bind/epoch: a previous available result cannot start a capture on
+  // the next one. Settings changes take effect on that next epoch.
   useEffect(() => {
     if (!enabled) return;
     let alive = true;
     void fetch('/api/asr/status', { credentials: 'same-origin' }).then((response) => response.ok ? response.json() : null).then((value) => {
-      if (alive && epoch.isCurrent()) setAsr({ available: Boolean(value?.available), checked: value !== null, maxFileBytes: value?.max_file_bytes });
-    }).catch(() => { if (alive && epoch.isCurrent()) setAsr({ available: false, checked: false }); });
+      if (!alive || !epoch.isCurrent()) return;
+      if (value === null) setAsr({ epoch, enabled, available: false, checked: false });
+      else setAsr({ epoch, enabled, available: Boolean(value.available), checked: true, maxFileBytes: value.max_file_bytes });
+    }).catch(() => { if (alive && epoch.isCurrent()) setAsr({ epoch, enabled, available: false, checked: false }); });
     return () => { alive = false; };
   }, [enabled, epoch]);
   const stop = useCallback((commit: boolean) => {
@@ -742,12 +761,13 @@ function usePetVoice({ enabled, epoch, draft, onOpenComposer }: { enabled: boole
     if (!epoch.isCurrent() || !available || captureRef.current) return;
     const before = draft;
     const capture: Capture = {
-      dictation: new ShowPageVoiceDictation({ before, after: '', maxFileBytes: asr.maxFileBytes, onPreview: (text) => { if (epoch.isCurrent()) setPreview(text); } }),
+      dictation: new ShowPageVoiceDictation({ before, after: '', maxFileBytes: asrForEpoch.maxFileBytes, onPreview: (text) => { if (epoch.isCurrent()) setPreview(text); } }),
       ending: false,
       cancelled: false,
     };
     captureRef.current = capture;
     setListening(true);
+    setError(null);
     const settle = () => {
       if (captureRef.current !== capture || !epoch.isCurrent()) return false;
       captureRef.current = null;
@@ -755,20 +775,38 @@ function usePetVoice({ enabled, epoch, draft, onOpenComposer }: { enabled: boole
       setPreview('');
       return !capture.cancelled;
     };
+    // Whichever of start/done rejects first settles; the other is a no-op.
+    const fail = (reason: unknown) => {
+      if (!settle()) return;
+      if (reason instanceof VoiceTranscriptionError && reason.code === 'cancelled') return;
+      setError(voiceFailure(reason));
+      onOpenComposer(before);
+    };
     void capture.dictation.done.then((text) => {
       if (!settle()) return;
       const next = text.trim();
       onOpenComposer(next ? [before.trim(), next].filter(Boolean).join(' ') : before);
-    }).catch(settle);
+    }).catch((reason: unknown) => fail(reason));
     void capture.dictation.start().then(() => {
       if (!epoch.isCurrent()) { capture.dictation.abort(); return; }
       // Release may precede microphone permission or pipeline startup.
       if (capture.ending && !capture.cancelled) capture.dictation.finish();
-    }).catch(() => { settle(); capture.dictation.abort(); });
-  }, [asr.maxFileBytes, available, epoch, draft, onOpenComposer]);
+    }).catch((reason: unknown) => { fail(reason); capture.dictation.abort(); });
+  }, [asrForEpoch.maxFileBytes, available, epoch, draft, onOpenComposer]);
   const cancel = useCallback(() => stop(false), [stop]);
+  const clearError = useCallback(() => setError(null), []);
   useEffect(() => cancel, [epoch, enabled, cancel]);
-  return { available, cloudRequired: asr.checked && !asr.available, listening, preview, start, stop, cancel };
+  useEffect(() => () => setError(null), [epoch, enabled]);
+  return { available, cloudRequired: asrForEpoch.checked && !asrForEpoch.available, listening, preview, error, clearError, start, stop, cancel };
+}
+
+type VoiceFailure = 'startFailed' | 'empty' | 'failed';
+
+// Anything that is not a transcription error comes from getting the
+// microphone itself (permission denied, no input device, capture setup).
+function voiceFailure(reason: unknown): VoiceFailure {
+  if (!(reason instanceof VoiceTranscriptionError)) return 'startFailed';
+  return reason.code === 'empty' ? 'empty' : 'failed';
 }
 
 const SpeechSlot: React.FC<{ open: boolean; children: ReactNode }> = ({ open, children }) => (
@@ -842,7 +880,7 @@ const ExpandedCards: React.FC<{ cards: PetCard[]; leaving: string[]; detailOpen:
   return (
     <div className="pet-mini-panel">
       <div ref={scrollRef} onScroll={measure} className="pet-mini-scroll" style={{ maskImage: mask, WebkitMaskImage: mask }}>
-        {onSwitch && <Button variant="link" size="sm" data-pet-hit onClick={onSwitch}>{t('pet.switchSession')}</Button>}
+        {onSwitch && <div className="pet-mini-action-row"><SwitchSessionButton onClick={onSwitch} label={t('pet.switchSession')} /></div>}
         <ul className="pet-mini-list">
           {cards.map((card) => {
             const phase = stops[card.id];
@@ -908,7 +946,7 @@ const MainDetail: React.FC<{ epoch: PetSurfaceEpoch; voiceNeedsCloud: boolean; c
   usePetMarkRead(props.epoch, props.binding, props.exchange, props.markRead, props.onRead, props.visible && (typeof IntersectionObserver === 'undefined' || (seenResult?.epoch === props.epoch && seenResult.key === resultKey)));
   return (
     <div className="pet-mini-detail-inner">
-      <Button variant="link" size="sm" aria-label={t('pet.switchSession')} onClick={props.onSwitch}>{t('pet.switchSession')}</Button>
+      <div className="pet-mini-action-row"><SwitchSessionButton onClick={props.onSwitch} label={t('pet.switchSession')} /></div>
       {props.exchange.user && <div className="pet-mini-detail-user"><Markdown content={props.exchange.user.text} softBreaks /></div>}
       {props.exchange.results.map((message, index) => <div ref={index === props.exchange.results.length - 1 ? lastResultRef : undefined} key={message.id} className="pet-mini-detail-result"><Markdown content={message.text} softBreaks /></div>)}
       {props.failure && (

@@ -79,3 +79,21 @@ for (const main of [true, false]) {
     });
   }
 }
+
+test('the session picker keeps every row at its text height and scrolls', async ({ page }) => {
+  await page.goto('/e2e/pet-mini/fixture.html?main=true&layers=0&sessions=14');
+  await page.locator('.pet-mini-collapsed').click();
+  await page.locator('.pet-mini-card[role=button]').click();
+  const toggle = page.getByRole('button', { name: 'Switch session' });
+  await expect(toggle).toBeVisible();
+  // The switcher is a real button, not a text link.
+  expect(await toggle.evaluate((node) => getComputedStyle(node).borderTopStyle)).toBe('solid');
+  await toggle.click();
+  const options = page.locator('.pet-mini-session-option');
+  await expect(options).toHaveCount(15);
+  // A shrunk flex column squeezes overflow-hidden rows below their text height.
+  const rows = await options.evaluateAll((nodes) => nodes.map((node) => ({ client: node.clientHeight, content: node.scrollHeight })));
+  expect(rows.every((row) => row.client >= 36 && row.client >= row.content)).toBe(true);
+  const scroll = await page.locator('.pet-mini-scroll').evaluate((node) => ({ client: node.clientHeight, content: node.scrollHeight }));
+  expect(scroll.content).toBeGreaterThan(scroll.client);
+});

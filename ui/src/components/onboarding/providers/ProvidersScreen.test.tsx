@@ -79,7 +79,7 @@ const supply = (over: Partial<AgentSupply> & { backend: AgentSupply['backend'] }
 });
 
 const runtimeOf = (health: RuntimeHealth, over: Partial<RuntimeDependency> = {}): RuntimeDependency => ({
-  contract_version: 11,
+  contract_version: 12,
   manifest: { name: 'cliproxyapi', resolution: 'resolved', version: '1.0.0', source_sha: 'sha', assets: [] },
   status: { verified: true, health },
   ...over,

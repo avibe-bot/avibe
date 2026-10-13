@@ -19,6 +19,10 @@ class ModelEndpoint:            # built by the adapter layer from C-6 HopResolut
     request_headers: Mapping[str, str]
     provider: str               # vendor identity of the hop (HopResolution.provider); with protocol and model it
                                 # forms the target origin for the cross-provider rules
+    source_id: str | None       # HopResolution.source_id: the pin of a request with native hosted content
+    hosted_tools: Mapping[str, HostedToolRoute]   # HopResolution.hosted_tools, in Model Hub's order: per enabled
+                                # tool its mode, and for native its declaration and Responses include values,
+                                # plus the turn's executor and replay (vibey-hosted-tools.md §3.5)
 
 
 @dataclass(frozen=True)
@@ -47,7 +51,19 @@ class ModelRequest:
     cache: Literal["default", "none"]    # "default": the protocol's cache breakpoints and their lifetimes
                                          # (conversion-tables.md); "none" for the compaction summarizer
     supports_images: bool                # resolved by the loop; unknown capability counts as False
+    tool_choice: str | None              # the one tool the response must call; set only by a hosted-tool probe
 ```
+
+`tools` is the one owner of what a request declares. A hosted tool is its canonical `ToolSpec`
+(`core/agent_core/tools/hosted.py`, `hosted_tool_spec`). On a hop whose route for it is native, the adapter sends the
+route's `declaration` verbatim in the spec's place, merges a Responses route's `include` values into `include`, and
+pins the request with `x-avibe-pin-source: <source_id>`; on any other hop the spec is an ordinary function. Vibey
+lists its hosted tools first, so Anthropic's tools breakpoint, which goes on the last function tool, never moves.
+`registry.build_wire_request` returns the URL, headers and body the adapter would send, without sending it; a
+hosted-tool probe sends exactly that request (`vibey-hosted-tools.md` §3.2). On Responses and Chat a forced function
+is named, and a native hosted tool is forced with `"required"`, which needs it to be the request's only tool. An
+Anthropic request is never forced: current Claude models and extended thinking refuse a forced `tool` or `any`
+choice.
 
 The loop's `ModelRouter` returns the `ModelEndpoint` together with its `ModelCapabilities`. Every capability has a
 defined effect, including when it is unknown:
@@ -65,7 +81,9 @@ token names an immutable snapshot (`message.schema.json`), so the bytes never ch
 `stream` yields `ProviderEvent`s (`provider-event.schema.json`) and always ends with exactly one `done` or one
 `error`. `done.message` is the complete canonical `AssistantMessage`; its `origin` comes from the served-hop report
 (C-6), which the gateway sends as the `x-avibe-served-hop` response header: compact JSON with exactly `provider`,
-`api`, `model`, before the first model byte. On the direct channel (no gateway) the endpoint is the served hop. When a gateway response carries no
+`api`, `model`, `source` (Model Hub contract v12), before the first model byte. The `origin` is `provider`, `api`,
+`model`; `source` is the serving Source id, which is not part of a message's origin. A report of any other shape
+counts as no report. On the direct channel (no gateway) the endpoint is the served hop. When a gateway response carries no
 served-hop report, the origin is unverified: the adapter commits the message with every opaque provider payload
 removed (the `signature` of every block of any kind, and redacted thinking), keeping the endpoint as `origin`, so no
 opaque payload of an unknown vendor can ever be replayed. A block without a signature is always sent without one

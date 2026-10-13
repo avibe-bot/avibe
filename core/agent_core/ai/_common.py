@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import copy
 import io
 import inspect
 import json
 import re
 from collections.abc import AsyncIterator, Awaitable, Callable, Hashable, Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any, TypeVar
 from urllib.parse import parse_qsl, unquote, unquote_to_bytes, urlencode, urlsplit, urlunsplit
 
@@ -40,8 +41,10 @@ from core.agent_core.ai.provider import (
     THINKING_DROP_RETRY_KINDS,
     BlockEnd,
     Done,
+    HostedToolRoute,
     MediaLoader,
     ModelEndpoint,
+    ModelRequest,
     ProviderError,
     TextDelta,
     ThinkingDelta,
@@ -49,9 +52,31 @@ from core.agent_core.ai.provider import (
     ToolCallStart,
 )
 
+
+@dataclass(frozen=True)
+class ServedHop:
+    """The C-6 served-hop report: the message origin and the serving Source."""
+
+    origin: Origin
+    source_id: str
+
+
+@dataclass(frozen=True)
+class ServedResolution:
+    """The response origin, whether its signature data is verified, and its Source.
+
+    ``source_id`` is ``None`` in direct mode and for a missing or invalid report.
+    """
+
+    origin: Origin
+    verified: bool
+    source_id: str | None
+
+
 ServedHopResolver = Callable[
-    [Mapping[str, str]], Origin | None | Awaitable[Origin | None]
+    [Mapping[str, str]], ServedHop | None | Awaitable[ServedHop | None]
 ]
+_SOURCE_ID = re.compile(r"src_[a-z0-9]{8,}")
 _T = TypeVar("_T")
 WireTranslator = Callable[[AsyncIterator[SSEEvent]], AsyncIterator[Any]]
 
@@ -1305,12 +1330,12 @@ async def resolve_served_origin(
     *,
     gateway: bool,
     cancel: CancelToken,
-) -> tuple[Origin, bool] | None:
-    """Return the served origin and whether its signature data is verified."""
+) -> ServedResolution | None:
+    """Return the served origin, whether its signature data is verified, and its Source."""
 
     direct = endpoint_origin(endpoint)
     if not gateway:
-        return direct, True
+        return ServedResolution(direct, True, None)
     candidate = resolver(headers) if resolver is not None else default_served_hop_resolver(headers)
     if inspect.isawaitable(candidate):
         try:
@@ -1321,10 +1346,12 @@ async def resolve_served_origin(
         served = candidate
     if cancel.cancelled:
         return None
-    return served or direct, served is not None
+    if served is None:
+        return ServedResolution(direct, False, None)
+    return ServedResolution(served.origin, True, served.source_id)
 
 
-def default_served_hop_resolver(headers: Mapping[str, str]) -> Origin | None:
+def default_served_hop_resolver(headers: Mapping[str, str]) -> ServedHop | None:
     """Read the exact C-6 served-hop header."""
 
     normalized = {key.lower(): value for key, value in headers.items()}
@@ -1337,12 +1364,15 @@ def default_served_hop_resolver(headers: Mapping[str, str]) -> Origin | None:
         return None
     if not isinstance(value, Mapping):
         return None
-    if set(value) != {"provider", "api", "model"} or any(not isinstance(value[key], str) for key in value):
+    if set(value) != {"provider", "api", "model", "source"} or any(not isinstance(value[key], str) for key in value):
+        return None
+    if not _SOURCE_ID.fullmatch(value["source"]):
         return None
     try:
-        return Origin(provider=value["provider"], api=value["api"], model=value["model"])
+        origin = Origin(provider=value["provider"], api=value["api"], model=value["model"])
     except (KeyError, TypeError, ValueError):
         return None
+    return ServedHop(origin=origin, source_id=value["source"])
 
 
 def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -1383,6 +1413,71 @@ def request_credential_values(endpoint: ModelEndpoint) -> tuple[str, ...]:
             if _is_sensitive_key(name)
         )
     return tuple(dict.fromkeys(values))
+
+
+#: Pins a request that carries Source-specific hosted content to one Source (``vibey-hosted-tools.md`` §3.5): the
+#: gateway serves it from that Source only, and answers ``pin_unavailable`` where it would otherwise fail over.
+PIN_SOURCE_HEADER = "x-avibe-pin-source"
+
+
+@dataclass(frozen=True)
+class WireRequest:
+    """One model request exactly as its adapter sends it. A hosted-tool probe sends this request (§3.2)."""
+
+    url: str
+    headers: dict[str, str] = field(repr=False)
+    body: dict[str, Any]
+
+
+def native_hosted_tools(request: ModelRequest) -> dict[str, HostedToolRoute]:
+    """The request's tools that this hop runs natively: a declared tool whose hosted route here is ``native``."""
+
+    routes = request.endpoint.hosted_tools
+    return {
+        spec.name: routes[spec.name]
+        for spec in request.tools
+        if spec.name in routes and routes[spec.name].mode == "native"
+    }
+
+
+def native_declaration(route: HostedToolRoute) -> dict[str, Any]:
+    """A native route's wire declaration, verbatim (§4.1), as a fresh object the payload may own."""
+
+    return copy.deepcopy(dict(route.declaration or {}))
+
+
+def hosted_pin(request: ModelRequest) -> dict[str, str]:
+    """The pin header of a request that sends a native hosted declaration, else nothing."""
+
+    if not native_hosted_tools(request):
+        return {}
+    if not request.endpoint.source_id:
+        raise ValueError("a native hosted declaration needs the Source the request is pinned to")
+    return {PIN_SOURCE_HEADER: request.endpoint.source_id}
+
+
+def forced_tool(request: ModelRequest) -> tuple[str, HostedToolRoute | None] | None:
+    """``request.tool_choice`` with its native hosted route (None when it is sent as a function); None when nothing
+    is forced. The forced tool must be one the request declares."""
+
+    name = request.tool_choice
+    if name is None:
+        return None
+    if not any(tool.name == name for tool in request.tools):
+        raise ValueError(f"tool_choice names {name!r}, which the request does not declare")
+    return name, native_hosted_tools(request).get(name)
+
+
+def required_only_tool(tools: list[Any]) -> str:
+    """OpenAI's forced choice of a hosted tool: ``required`` over a request that declares only that tool.
+
+    The Responses and Chat named choices name a function, and their hosted-tool choice types have no
+    ``web_search`` or ``x_search``, so ``required`` is the one form that forces any hosted tool.
+    """
+
+    if len(tools) != 1:
+        raise ValueError("forcing a hosted tool on this protocol needs it to be the request's only tool")
+    return "required"
 
 
 async def iter_sse_events(
@@ -1495,7 +1590,7 @@ async def drive_sse_stream(
                     if resolved_origin is None:
                         candidate = assembler.aborted(cancel.reason)
                     else:
-                        assembler.set_origin(*resolved_origin)
+                        assembler.set_origin(resolved_origin.origin, resolved_origin.verified)
                         async for item in translate(iter_sse_events(response, cancel)):
                             if isinstance(item, (Done, ProviderError)):
                                 candidate = item

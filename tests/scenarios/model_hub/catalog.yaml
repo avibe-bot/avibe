@@ -5,6 +5,12 @@ capability:
   canonical_tests:
     - tests/test_model_hub_api.py
     - tests/test_model_hub_vibey_consumer.py
+    - tests/test_model_hub_hosted_tools_resolution.py
+    - tests/test_model_hub_hosted_tools_config.py
+    - tests/test_model_hub_capability_evidence.py
+    - tests/test_provider_overlay.py
+    - tests/agent_core/ai/test_hosted_requests.py
+    - tests/test_vibey_agent.py
     - tests/test_model_hub_config.py
     - tests/test_model_hub_legacy_opencode_migration.py
     - tests/test_member_management_parity.py
@@ -132,12 +138,70 @@ scenarios:
       - tests/test_model_hub_vibey_consumer.py::test_served_hop_transport_bound_does_not_restrict_native_clients
       - tests/test_model_hub_vibey_consumer.py::test_slow_anthropic_resolution_waits_to_publish_origin_and_keeps_source_snapshot
       - tests/test_model_hub_vibey_consumer.py::test_concurrent_responses_keep_their_own_origin
+      - tests/agent_core/ai/test_provider_adapters.py::test_served_hop_report_is_exactly_origin_and_source
   - id: MH-VIBEY-003
     name: Released three-backend configs gain only an empty Vibey Hub row without changing existing routes
     status: covered
     kind: compatibility
     layer: contract
     test: tests/test_model_hub_vibey_consumer.py::test_released_config_adds_only_empty_vibey_supply
+  - id: MH-HOSTED-001
+    name: Vibey hop resolution states each enabled hosted tool; native only on current-wire call evidence, an executor bound for every entry
+    status: covered
+    kind: contract
+    layer: contract
+    test: tests/test_model_hub_vibey_consumer.py::test_hop_resolution_states_each_enabled_hosted_tool
+    related_tests:
+      - tests/test_model_hub_vibey_consumer.py::test_both_hop_resolution_copies_state_the_same_contract
+      - tests/test_model_hub_hosted_tools_resolution.py::test_verified_call_makes_the_hop_native_and_binds_the_first_verified_executor
+      - tests/test_model_hub_hosted_tools_resolution.py::test_evidence_from_another_engine_routes_as_proxy
+      - tests/test_model_hub_hosted_tools_resolution.py::test_ineligible_or_translated_hops_never_go_native_or_execute
+  - id: MH-HOSTED-002
+    name: A broken hosted-tools config entry turns off only its tool, without the whole-section Model Hub reset
+    status: covered
+    kind: compatibility
+    layer: contract
+    test: tests/test_model_hub_hosted_tools_config.py::test_a_broken_hosted_tool_entry_turns_off_only_itself
+    related_tests:
+      - tests/test_model_hub_hosted_tools_config.py::test_disk_load_with_a_broken_hosted_tools_section_keeps_model_hub
+      - tests/test_model_hub_hosted_tools_config.py::test_released_configs_load_with_every_tool_off_and_stay_without_the_section
+  - id: MH-HOSTED-003
+    name: Capability evidence resolves for routing; hosted-tool evidence from another engine or probe shape is unknown
+    status: covered
+    kind: contract
+    layer: contract
+    test: tests/test_model_hub_capability_evidence.py::test_evidence_resolves_for_routing
+    related_tests:
+      - tests/test_model_hub_capability_evidence.py::test_a_changed_source_identity_reads_as_unknown_and_is_pruned
+      - tests/test_model_hub_capability_evidence.py::test_persisted_records_match_the_schema_and_unreadable_ones_are_unknown
+  - id: MH-HOSTED-004
+    name: The Tools API reads every tool's candidates and evidence and writes one toggle without touching other Model Hub state
+    status: covered
+    kind: contract
+    layer: contract
+    test: tests/test_model_hub_hosted_tools_config.py::test_the_tools_api_reads_and_writes_one_tool_at_a_time
+    related_tests:
+      - tests/test_model_hub_hosted_tools_resolution.py::test_status_lists_where_each_tool_can_run_and_counts_re_verifications
+  - id: MH-HOSTED-005
+    name: The bundled provider overlay resolves hosted-tool declarations, includes and prices; a broken vendor entry disables only that vendor
+    status: covered
+    kind: compatibility
+    layer: contract
+    test: tests/test_provider_overlay.py::test_bundled_overlay_resolves_hosted_tools
+    related_tests:
+      - tests/test_provider_overlay.py::test_bundled_providers_section_satisfies_its_schema
+      - tests/test_provider_overlay.py::test_an_invalid_vendor_entry_disables_only_that_vendor
+  - id: MH-HOSTED-VIBEY-001
+    name: Vibey declares a hop's native hosted tool verbatim with its include values and pins that request to the hop's Source; the probe builds the same request
+    status: covered
+    kind: contract
+    layer: contract
+    test: tests/test_vibey_agent.py::test_a_hop_resolved_native_hosted_tool_reaches_the_gateway_pinned_to_its_source
+    related_tests:
+      - tests/test_vibey_agent.py::test_a_hop_with_an_invalid_hosted_tool_entry_is_refused
+      - tests/agent_core/ai/test_hosted_requests.py::test_a_hosted_spec_on_a_native_route_is_sent_as_the_declaration_in_its_place_and_pinned
+      - tests/agent_core/ai/test_hosted_requests.py::test_the_probe_entry_builds_exactly_the_request_the_adapter_sends
+      - tests/agent_core/ai/test_hosted_requests.py::test_tool_choice_forces_the_named_tool_in_each_protocols_form
   - id: MH-VIBEY-007
     name: Vibey starts once with the user's Sources and built-in Agent models, seeded when its first Source exists
     status: covered

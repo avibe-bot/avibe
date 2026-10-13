@@ -28,7 +28,7 @@ const supply: AgentSupply = {
   sources: { order: sources.map((source) => source.id), eligibility: sources.map((source) => ({ source_id: source.id, eligible: true })) },
 };
 const makeChain = (hops: RouteHop[], manual: boolean): AgentChain => ({
-  contract_version: 11, backend, model_id: modelId,
+  contract_version: 12, backend, model_id: modelId,
   manual_override: manual ? { hops } : null,
   route_origin: manual ? 'manual' : origin === 'passthrough' ? 'passthrough' : 'automatic',
   current: hops[0] ?? null, supply_state: hops.length ? 'ok' : 'interrupted',

@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from core.agent_core.ai.provider import ModelCapabilities, ModelEndpoint, ModelRequest
+from core.agent_core.ai.provider import HostedToolRoute, ModelCapabilities, ModelEndpoint, ModelRequest
 from core.agent_core.harness.context import (
     KEPT_INPUTS_WIN,
     CLEARED_PLACEHOLDER,
@@ -54,6 +54,7 @@ from core.agent_core.harness.context import (
 from core.agent_core.harness.projection import context_view, project
 from core.agent_core.harness.store import ContextEntry
 from core.agent_core.tools.base import ToolSpec
+from core.agent_core.tools.hosted import hosted_tool_spec
 from core.agent_core.messages import (
     AssistantMessage,
     ImageBlock,
@@ -279,6 +280,22 @@ def test_the_anchor_holds_while_the_transcript_up_to_its_response_is_unchanged()
     tool = ToolSpec("t", "d" * 400, {})
     tool_delta = request_tokens("system", (tool,), ()) - request_tokens("system", (), ())
     assert _est(rows, make_request(messages, tools=(tool,))) == 5_000 + after + tool_delta
+    # A hosted tool counts as what its hop sends: the provider's declaration where its route is native, its spec
+    # elsewhere, so a route that turns proxied grows the estimate though the request's tools are the same.
+    search = hosted_tool_spec("web_search")
+    declaration = {"type": "web_search_20250305", "name": "web_search", "max_uses": 5}
+    proxied = make_request(messages, tools=(search,))
+    native = replace(
+        proxied,
+        endpoint=replace(
+            ENDPOINT,
+            source_id="src_hostedtest1",
+            hosted_tools={"web_search": HostedToolRoute("native", None, False, declaration=declaration)},
+        ),
+    )
+    as_spec = len(json.dumps([search.name, search.description, dict(search.input_schema)]).encode())
+    as_declaration = len(json.dumps(declaration).encode())
+    assert _est(rows, proxied) - _est(rows, native) == math.ceil((6 + as_spec) / 4) - math.ceil((6 + as_declaration) / 4)
     rehydrated = user("state " * 50)
     assert _est(rows, make_request((rehydrated, *messages))) == 5_000 + after + message_tokens(rehydrated)
     # An edit after the anchored response is counted by its bytes.
