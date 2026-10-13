@@ -10554,7 +10554,7 @@ def _mask_api_key(api_key: str | None) -> str | None:
     return f"{'•' * 6}{last4}"
 
 
-def _graceful_stop_claude_auth_status(process: subprocess.Popen[str]) -> None:
+def _graceful_stop_claude_auth_status(process: subprocess.Popen) -> None:
     """Request a non-destructive stop before forceful termination."""
 
     if os.name == "nt":
@@ -10569,7 +10569,7 @@ def _graceful_stop_claude_auth_status(process: subprocess.Popen[str]) -> None:
 
 
 def _force_stop_claude_auth_status(
-    process: subprocess.Popen[str],
+    process: subprocess.Popen,
     identity: Any | None,
     worker_fingerprint: str,
 ) -> bool:
@@ -10617,7 +10617,7 @@ def _force_stop_claude_auth_status(
         return False
 
 
-def _close_claude_auth_status_pipes(process: subprocess.Popen[str]) -> None:
+def _close_claude_auth_status_pipes(process: subprocess.Popen) -> None:
     for stream in (process.stdout, process.stderr):
         if stream is None:
             continue
@@ -10627,7 +10627,7 @@ def _close_claude_auth_status_pipes(process: subprocess.Popen[str]) -> None:
             logger.debug("Failed to close %s output pipe", _CLAUDE_AUTH_STATUS_LABEL, exc_info=True)
 
 
-def _reap_claude_auth_status_after_force(process: subprocess.Popen[str]) -> bool:
+def _reap_claude_auth_status_after_force(process: subprocess.Popen) -> bool:
     try:
         process.communicate(timeout=_CLAUDE_AUTH_STATUS_DRAIN_TIMEOUT_SECONDS)
         return True
@@ -10667,7 +10667,7 @@ def _run_claude_auth_status(
     worker_fingerprint = fingerprint_process_marker(marker)
     spawn_env = dict(env) if env is not None else dict(os.environ)
     spawn_env[PROCESS_IDENTITY_ENV] = marker
-    process: subprocess.Popen[str] | None = None
+    process: subprocess.Popen | None = None
     identity: Any | None = None
     termination_requested = False
     try:
@@ -10710,7 +10710,7 @@ def _run_claude_auth_status(
                     if not _reap_claude_auth_status_after_force(process):
                         return None
                     return None
-        if termination_requested or process.returncode != 0:
+        if termination_requested:
             return None
         return subprocess.CompletedProcess(command, process.returncode, stdout, None)
     except (OSError, subprocess.SubprocessError):
@@ -11704,7 +11704,9 @@ def get_claude_auth(
                     cwd=status_probe_cwd,
                 )
             else:
-                with NativeCredentialLease(("claude",)):
+                with NativeCredentialLease(("claude",)) as status_lease:
+                    if getattr(config if "config" in locals() else None, "model_hub", None) is not None:
+                        status_lease.assert_auth_custody("claude")
                     cli_oauth_signed_in = _read_claude_cli_oauth_signed_in(
                         configured_cli_path if isinstance(configured_cli_path, str) else None,
                         env=claude_status_env,

@@ -335,6 +335,21 @@ def test_claude_auth_status_cleans_up_after_post_spawn_error(
     assert process.communicate.call_count == 2
 
 
+
+
+def test_claude_auth_status_accepts_natural_nonzero_logged_out_json(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vibe import api
+
+    process = Mock()
+    process.returncode = 1
+    process.communicate.return_value = ('{"loggedIn": false}', None)
+    monkeypatch.setattr(api.subprocess, "Popen", lambda *_args, **_kwargs: process)
+
+    assert api._read_claude_cli_oauth_signed_in("claude") is False
+
+
 def test_get_claude_auth_prefers_cli_oauth_status(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

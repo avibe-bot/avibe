@@ -638,7 +638,12 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
         controller = _StubController()
         service = AgentAuthService(controller)
         context = MessageContext(user_id="U1", channel_id="C1")
-        process = SimpleNamespace(stdout=object(), returncode=None)
+        process = SimpleNamespace(
+            stdout=object(),
+            returncode=0,
+            wait=AsyncMock(return_value=None),
+            kill=Mock(),
+        )
         service._start_codex_process = AsyncMock(return_value=process)
         service._read_codex_output = AsyncMock()
         service._wait_for_completion = AsyncMock()
