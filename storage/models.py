@@ -1260,6 +1260,9 @@ vault_secrets = Table(
     Column("ciphertext", Text, nullable=True),
     Column("nonce", Text, nullable=True),
     Column("wrap_meta", Text, nullable=True),
+    # JSON array of extra named field envelopes. The default field remains in the
+    # legacy ciphertext/nonce/wrap_meta columns for released-version compatibility.
+    Column("fields", Text, nullable=True),
     Column("public_meta", Text, nullable=True),  # JSON: desc / pubkey / address / op:// uri
     Column("policy", Text, nullable=True),  # JSON: allowed modes, allowed hosts, always_ask
     Column("last_used_at", String, nullable=True),

@@ -158,6 +158,7 @@ HEAD_REQUIRED_COLUMNS = PRE_SHOW_SESSION_EVENTS_REQUIRED_COLUMNS | {
     },
 }
 HEAD_ONLY_REQUIRED_COLUMNS = {
+    "vault_secrets": {"fields"},
     "show_pages": {"access_mode", "access_revision", "share_id", "offline_at"},
     "show_page_access_entries": {
         "page_id",
