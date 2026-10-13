@@ -547,7 +547,7 @@ async def test_a_turn_owns_its_proxied_calls(tmp_path):
         async with aiohttp.ClientSession() as client:
             pending = asyncio.create_task(client.post(
                 f'{hop["base_url"]}/hosted-tools/web_search',
-                headers={"Authorization": f'Bearer {hop["token"]}'}, data=body,
+                headers={"Authorization": f'Bearer {hop["token"]}', **hop["request_headers"]}, data=body,
             ))
             await asyncio.wait_for(blocked.started.wait(), timeout=5)
             finished = []
@@ -559,7 +559,7 @@ async def test_a_turn_owns_its_proxied_calls(tmp_path):
             # The turn no longer admits work: a new call is refused before anything runs.
             async with client.post(
                 f'{hop["base_url"]}/hosted-tools/web_search',
-                headers={"Authorization": f'Bearer {hop["token"]}'}, data=body,
+                headers={"Authorization": f'Bearer {hop["token"]}', **hop["request_headers"]}, data=body,
             ) as response:
                 assert response.status == 409
                 assert (await response.json())["error"]["code"] == "executor_not_bound"
@@ -640,7 +640,7 @@ async def test_a_turn_keeps_its_hosted_binding_until_the_next_turn(tmp_path):
         async with aiohttp.ClientSession() as client:
             async with client.post(
                 f'{again["base_url"]}/hosted-tools/web_search',
-                headers={"Authorization": f'Bearer {again["token"]}'},
+                headers={"Authorization": f'Bearer {again["token"]}', **again["request_headers"]},
                 data=json.dumps({"arguments": {"query": "q"}, "executor": again["hosted_tools"]["web_search"]["executor"]}),
             ) as response:
                 assert response.status == 200

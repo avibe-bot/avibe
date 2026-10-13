@@ -1475,7 +1475,7 @@ async def test_slow_anthropic_resolution_waits_to_publish_origin_and_keeps_sourc
         hop = await router.resolve_hop("menu-alias", process_scope="vibey:test", turn_id="turn-slow")
         async with aiohttp.ClientSession() as client:
             task = asyncio.create_task(client.post(
-                f'{hop["base_url"]}/messages', headers={"x-api-key": hop["token"]},
+                f'{hop["base_url"]}/messages', headers={"x-api-key": hop["token"], **hop["request_headers"]},
                 json={"model": hop["runtime_model"], "stream": True, "messages": []},
             ))
             await asyncio.wait_for(entered.wait(), 2)
