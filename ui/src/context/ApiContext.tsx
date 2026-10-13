@@ -726,6 +726,9 @@ export type ApiContextType = {
   /** Main-agent lookup seam. The endpoint is not shipped yet; the pet client
    * currently resolves the session bound to its native window here. */
   getMainSession: () => Promise<WorkbenchSessionReadResult>;
+  /** The caller's desktop mini conversation with Vibey, created on first use
+   * in their most recently active chat Project. */
+  ensureDesktopMiniSession: () => Promise<WorkbenchSession>;
   getSessionResult: (sessionId: string) => Promise<WorkbenchSessionReadResult>;
   getSessionBootstrap: (sessionId: string) => Promise<WorkbenchSessionBootstrap>;
   updateSession: (sessionId: string, payload: Partial<WorkbenchSessionUpdate>) => Promise<WorkbenchSession>;
@@ -3746,6 +3749,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         capabilities: sessionCanChatFromPayload(payload),
       };
     },
+    ensureDesktopMiniSession: async () => sessionRowFromPayload(await postJson('/api/desktop-mini/session', {}, { handleError: false })),
     getSessionResult: async (sessionId) => {
       const res = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}`);
       const payload = await res.json().catch(() => null);

@@ -5638,6 +5638,11 @@
       "stopped": "已停止",
       "paused": "已暂停",
       "failed": "没停下来，稍后再试"
-    }
+    },
+    "failedPrefix": "没跑起来：",
+    "fixInAvibe": "在 Avibe 中处理",
+    "talkToVibey": "和歪比对话",
+    "noChatProject": "先在 Avibe 里建一个项目，和歪比的对话需要放在项目里。",
+    "vibeyUnavailable": "没能打开和歪比的对话，请稍后再试。"
   }
 }

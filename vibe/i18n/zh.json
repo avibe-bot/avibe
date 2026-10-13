@@ -1711,5 +1711,9 @@
       "internal": "{backend} 因内部错误而停止。可以重试；如果再次出现，服务日志里记录了原因。",
       "generic": "{backend} 运行失败。"
     }
+  },
+  "desktopMini": {
+    "sessionTitle": "歪比 · 桌宠",
+    "noChatProject": "先在 Avibe 里建一个项目，桌宠的对话需要放在项目里。"
   }
 }

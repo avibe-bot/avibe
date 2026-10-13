@@ -1711,5 +1711,9 @@
       "internal": "{backend} stopped because of an internal error. Try again; if it happens again, the service log names the cause.",
       "generic": "{backend}'s run failed."
     }
+  },
+  "desktopMini": {
+    "sessionTitle": "Vibey · Desktop mini",
+    "noChatProject": "Create a project in Avibe first, so the desktop mini has a place for its conversation."
   }
 }

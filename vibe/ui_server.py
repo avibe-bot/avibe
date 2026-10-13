@@ -9421,6 +9421,46 @@ def sessions_create():
     return jsonify(session), 201
 
 
+@app.route("/api/desktop-mini/session", methods=["POST"])
+def desktop_mini_session_ensure():
+    """The caller's desktop mini conversation with the built-in Agent, created on first use.
+
+    Interim rule until sessions get a built-in ``main`` type: see
+    docs/plans/2026-10-12-desktop-mini-main-agent.md §10.1.
+    """
+    from core.services import sessions as workbench_sessions_service
+    from core.vibe_agents import VibeAgentAccessError, VibeAgentStore
+    from storage.workbench_sessions_service import NoChatProjectError, ensure_desktop_mini_session
+    from vibe.sse_broker import broker
+
+    store = VibeAgentStore()
+    try:
+        vibey = store.get_builtin_default_agent_for_backend("vibey")
+    finally:
+        store.close()
+    if vibey is None:
+        return _coded_error_response("builtin_agent_unavailable", "The built-in Agent is not available.", 409)
+    authorization_context = getattr(g, "authorization_context", None)
+    lang = _request_ui_language()
+    engine = _projects_engine()
+    try:
+        with engine.begin() as conn:
+            session = ensure_desktop_mini_session(
+                conn,
+                owner_key=_web_push_user_key(),
+                agent_name=vibey.name,
+                title=t("desktopMini.sessionTitle", lang),
+                authorization_context=authorization_context,
+            )
+            can_chat = _session_can_chat(conn, authorization_context, session["id"])
+    except NoChatProjectError:
+        return _coded_error_response(NoChatProjectError.code, t("desktopMini.noChatProject", lang), 409)
+    except (VibeAgentAccessError, workbench_sessions_service.ProjectAccessDeniedError):
+        return _coded_error_response("project_access_denied", t("error.projectAccessDenied", lang), 403)
+    broker.publish("session.activity", {"session_id": session["id"], "scope_id": session["scope_id"], "event": "created"})
+    return jsonify({**session, "capabilities": {"can_chat": can_chat}})
+
+
 def _session_fork_error_response(err: Exception):
     """Map a ``SessionForkError`` to its machine code, in the STRUCTURED body.
 

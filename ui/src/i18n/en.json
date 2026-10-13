@@ -5638,6 +5638,11 @@
       "stopped": "Stopped",
       "paused": "Paused",
       "failed": "Could not stop; try again later"
-    }
+    },
+    "failedPrefix": "Didn't run:",
+    "fixInAvibe": "Fix it in Avibe",
+    "talkToVibey": "Talk to Vibey",
+    "noChatProject": "Create a project in Avibe first, so Vibey has a place for this conversation.",
+    "vibeyUnavailable": "Couldn't open the conversation with Vibey. Try again in a moment."
   }
 }

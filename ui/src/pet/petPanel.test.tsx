@@ -12,6 +12,7 @@ vi.mock('react-i18next', () => ({
 const api = {
   getConfig: vi.fn(async () => ({ mode: 'self_host', setup_state: { needs_setup: true } })),
   getMainSession: vi.fn(async () => ({ status: 200, session: null })),
+  ensureDesktopMiniSession: vi.fn(async () => { throw new Error('no project'); }),
   listSessionMessages: vi.fn(async () => ({ messages: [], next_after_id: null, next_before_id: null })),
   getTurnState: vi.fn(async () => ({
     in_flight: false, foreground: 'idle', native_turn_started: false,

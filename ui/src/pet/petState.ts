@@ -4,7 +4,7 @@ import type {
   WorkbenchMessage,
   WorkbenchSession,
 } from '@/context/ApiContext';
-import { isTranscriptMessage } from '@/lib/chatMessageTypes';
+import { isBackendFailureNotice, isTranscriptMessage } from '@/lib/chatMessageTypes';
 import { specFor } from '@/lib/messageTypes';
 
 import type { PetPose } from './PetAvatar';
@@ -44,6 +44,20 @@ const isAgentResult = (message: WorkbenchMessage): boolean =>
  *  a display-only row such as a Show Page annotation. */
 const isUserInput = (message: WorkbenchMessage): boolean =>
   message.author === 'user' && specFor(message.type).inputAuthors.includes('user');
+
+/**
+ * The backend failure notice that ended the latest exchange, or null: a notice
+ * after the last user input with no result since. A turn the agent could not run
+ * (Vibey with no model source, say) ends with one of these instead of a result.
+ */
+export const latestFailureNotice = (messages: WorkbenchMessage[]): WorkbenchMessage | null => {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (isUserInput(message) || isAgentResult(message)) return null;
+    if (isBackendFailureNotice(message)) return message;
+  }
+  return null;
+};
 
 /** The latest agent result in the tail, or null. */
 export const latestAgentResult = (messages: WorkbenchMessage[]): WorkbenchMessage | null => {
