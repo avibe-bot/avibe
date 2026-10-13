@@ -4162,6 +4162,13 @@ def request_vault_access(payload: dict, *, user_context: Any = None) -> dict:
         raise VaultApiError(str(exc), code="not_grantable", status=409) from exc
     except vault_service.KeypairNotValueDeliverableError as exc:
         raise VaultApiError(str(exc), code="keypair_not_value_deliverable", status=409) from exc
+    except (
+        vault_service.FieldNotFoundError,
+        vault_service.FieldsCorruptError,
+        vault_service.InvalidFieldNameError,
+        vault_service.FieldsNotSupportedError,
+    ) as exc:
+        raise _vault_field_service_error(exc) from exc
     except vault_service.InvalidRequestError as exc:
         raise VaultApiError(str(exc), code="invalid_request", status=409) from exc
     except vault_service.VaultServiceError as exc:

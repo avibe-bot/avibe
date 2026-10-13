@@ -10214,6 +10214,16 @@ def _wait_for_vault_delivery_approval(args, exc: TaskCliError, *, timeout: float
         raise terminal_error
 
 
+def _vault_provision_success_usage(engine, name: str, spec: dict | None) -> str:
+    from storage import vault_service
+
+    if spec and spec.get("fields"):
+        with engine.connect() as conn:
+            metadata = vault_service.get_secret_meta(conn, name)
+        return vault_service.provision_field_hint(metadata)
+    return f" — use it via: vibe vault run --env {name} -- <command>"
+
+
 def cmd_vault_request(args):
     from storage import vault_crypto, vault_service
 
@@ -10243,7 +10253,7 @@ def cmd_vault_request(args):
                 secret_name=name,
                 status="fulfilled",
                 request=req,
-                message=f"'{name}' is already in the vault — use it via: vibe vault run --env {name} -- <command>",
+                message=f"'{name}' is already in the vault{_vault_provision_success_usage(engine, name, spec)}",
             )
             return 0
         wait_seconds = getattr(args, "wait", None)
@@ -10296,7 +10306,7 @@ def cmd_vault_request(args):
                     secret_name=name,
                     status="fulfilled",
                     request=waited,
-                    message=f"'{name}' is now available — use it via: vibe vault run --env {name} -- <command>",
+                    message=f"'{name}' is now available{_vault_provision_success_usage(engine, name, spec)}",
                 )
                 return 0
             _print_task_error(

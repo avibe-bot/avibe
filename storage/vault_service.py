@@ -1668,6 +1668,21 @@ def _request_callback_disabled(row: dict[str, Any]) -> bool:
     return bool(isinstance(requester, dict) and requester.get("callback_disabled"))
 
 
+def provision_field_hint(metadata: dict[str, Any]) -> str:
+    """Value-free current-field usage shared by synchronous and async provision replies."""
+    name = str(metadata["name"])
+    fields = list(metadata.get("fields") or [metadata.get("default_field") or "value"])
+    default_field = str(metadata.get("default_field") or fields[0])
+    labels = ", ".join(str(field) for field in fields)
+    usage = (
+        f" Current fields: {labels}. Default alias: `{name}.{default_field}`."
+        f" Select a field with `vibe vault run --env {name}.{fields[-1]} -- <command>`."
+    )
+    if metadata.get("fields_state") == "corrupt":
+        return usage + " Extra fields are unavailable because their stored metadata is corrupt."
+    return usage + " Tag and skill selectors deliver every field."
+
+
 def _build_request_callback_message(row: dict[str, Any]) -> str:
     """Agent-facing text delivered to the requesting session when a request resolves."""
     request_type = str(row.get("request_type") or "")
@@ -1686,13 +1701,7 @@ def _build_request_callback_message(row: dict[str, Any]) -> str:
             usage = f" You can use it, e.g. `vibe vault run --env {name} -- <command>`." if name else ""
             current = row.get("provision_secret")
             if name and isinstance(current, dict) and current.get("fields"):
-                fields = current["fields"]
-                labels = ", ".join(str(field) for field in fields)
-                usage += f" Current fields: {labels}. Select a field with `vibe vault run --env {name}.{fields[-1]} -- <command>`."
-                if current.get("fields_state") == "corrupt":
-                    usage += " Extra fields are unavailable because their stored metadata is corrupt."
-                else:
-                    usage += " Tag and skill selectors deliver every field."
+                usage = provision_field_hint(current)
             return f"The user provided your {subject}; the secret is now available.{usage} Continue the task."
         if request_type == "access":
             return f"The user approved your {subject}; the grant is ready. Continue the task."

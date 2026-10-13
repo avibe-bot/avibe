@@ -2536,6 +2536,39 @@ def test_request_for_existing_secret_returns_fulfilled(tmp_path, capfd, monkeypa
     assert json.loads(capfd.readouterr().out)["status"] == "fulfilled"
 
 
+@pytest.mark.parametrize("already_exists", [False, True])
+def test_field_provision_success_hints_use_current_subset(capfd, monkeypatch, already_exists):
+    def provide_subset():
+        _create_standard_secret(
+            "LOGIN", default_field="credential", sealed=_sealed("do-not-expose"),
+            fields=[{"name": "username", "sealed": _sealed("hidden-user")}],
+        )
+
+    def complete_during_wait(request_id, **_kwargs):
+        provide_subset()
+        with cli._open_vault_engine().connect() as conn:
+            return vault_service.get_request(conn, request_id)
+
+    wait = Mock(side_effect=complete_during_wait)
+    monkeypatch.setattr(cli, "_wait_for_provision", wait)
+    if already_exists:
+        provide_subset()
+    args = cli.build_parser().parse_args([
+        "vault", "request", "LOGIN", "--spec-json",
+        '{"fields":["username","password","totp"],"default_field":"password"}', "--wait", "30",
+    ])
+    assert cli.cmd_vault_request(args) == 0
+    payload = json.loads(capfd.readouterr().out)
+    assert payload["status"] == "fulfilled"
+    assert wait.call_count == (0 if already_exists else 1)
+    message = payload["message"]
+    assert "credential" in message and "username" in message
+    assert "LOGIN.credential" in message
+    assert "vibe vault run --env LOGIN.username" in message
+    assert "password" not in message and "totp" not in message
+    assert "do-not-expose" not in message and "hidden-user" not in message
+
+
 def test_request_wait_outputs_fulfilled_request(capfd, monkeypatch):
     def wait_mock(request_id, *, timeout, poll_interval=2.0):
         with cli._open_vault_engine().begin() as conn:

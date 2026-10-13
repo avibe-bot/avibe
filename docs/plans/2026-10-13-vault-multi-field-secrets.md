@@ -209,9 +209,10 @@ vibe vault request GITHUB_LOGIN --reason "Log in to GitHub" \
 ```
 
 The browser form starts with those rows. The user may remove rows, and every
-submitted field needs a value. A fulfilled field-aware provision callback lists
-current field labels from the created secret (not the requested spec) and gives
-a field-ref delivery example.
+submitted field needs a value. Field-aware provision replies (asynchronous
+callbacks, synchronous `--wait`, and already-existing results) list current field
+labels and the default alias from the created secret, not the requested spec,
+and share the same field-ref delivery hint.
 
 ## 10. UI
 

@@ -2105,6 +2105,25 @@ def test_request_vault_access_malformed_selector_returns_vault_api_error():
     assert exc.value.status == 409
 
 
+@pytest.mark.parametrize("selector,status,code", [
+    ({"env": ["LOGIN.nope"]}, 404, "field_not_found"),
+    ({"env": ["LOGIN.UPPER"]}, 400, "invalid_field_name"),
+    ({"env": ["KEY.value"]}, 409, "fields_not_supported"),
+    ({"tags": ["broken"]}, 409, "fields_corrupt"),
+])
+def test_access_request_preserves_record_error_codes(selector, status, code):
+    with api._vault_engine().begin() as conn:
+        vault_service.create_secret(conn, name="LOGIN", protection="protected", sealed=_sealed("default"))
+        vault_service.create_secret(conn, name="KEY", kind="keypair", protection="protected", sealed=_sealed("key"))
+        vault_service.create_secret(conn, name="BROKEN", protection="protected", tags=["broken"], sealed=_sealed("broken"))
+        conn.execute(vault_secrets.update().where(vault_secrets.c.name == "BROKEN").values(fields="corrupt"))
+    with pytest.raises(api.VaultApiError) as exc:
+        api.request_vault_access({"source_selector": selector})
+    assert (exc.value.status, exc.value.code) == (status, code)
+    with api._vault_engine().connect() as conn:
+        assert list(conn.execute(select(vault_service.vault_requests))) == []
+
+
 def test_request_vault_access_reports_missing_selector_member_name():
     with pytest.raises(api.VaultApiError) as exc:
         api.request_vault_access({"source_selector": {"env": ["MISSING_KEY"]}, "session_id": "ses_1"})
