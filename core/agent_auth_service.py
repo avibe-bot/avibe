@@ -507,6 +507,23 @@ class AgentAuthService:
         """Compatibility view; Web and IM flows share one registry by id."""
         return self._flow_registry.by_id
 
+    def native_lease_for_flow(
+        self,
+        flow_id: str,
+        backend: str,
+    ) -> NativeCredentialLease | None:
+        flow = self._flows_by_id.get(flow_id)
+        if flow is None or getattr(flow, "backend", None) != backend:
+            return None
+        return getattr(flow, "native_lease", None)
+
+    def native_flow_source_for_flow(self, flow_id: str, backend: str) -> str | None:
+        flow = self._flows_by_id.get(flow_id)
+        if flow is None or getattr(flow, "backend", None) != backend:
+            return None
+        source_id = getattr(flow, "source_id", None)
+        return source_id if isinstance(source_id, str) and source_id else None
+
     def _active_claude_auth_clients(self) -> list[Any]:
         clients: list[Any] = []
         for flow in self._flows_by_id.values():

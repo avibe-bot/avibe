@@ -52,7 +52,13 @@ from config.v2_settings import (
 from config.v2_sessions import SessionsStore
 from config.platform_registry import get_platform_descriptor
 from core import latest_version_cache
-from core.backend_restart import NativeCredentialLease, NativeMigrationBlockedError, finish_native_operation
+from core.backend_restart import (
+    NativeCredentialLease,
+    NativeMigrationBlockedError,
+    clear_deferred_native_cleanup,
+    finish_native_operation,
+    register_deferred_native_cleanup,
+)
 from core.install_integrity import verify_python_environment
 from vibe.opencode_config import (
     get_opencode_config_paths,
@@ -10585,7 +10591,7 @@ def _deferred_claude_auth_status_cleanup(
     """Keep native custody until marker-based cleanup is confirmed."""
 
     try:
-        while True:
+        for _attempt in range(_CLAUDE_AUTH_STATUS_CLEANUP_RETRIES):
             result = reap_marked_processes(
                 logger,
                 _CLAUDE_AUTH_STATUS_LABEL,
@@ -10593,8 +10599,10 @@ def _deferred_claude_auth_status_cleanup(
                 terminate_timeout=_CLAUDE_AUTH_STATUS_TERMINATION_GRACE_SECONDS,
             )
             if result != "unconfirmed":
+                clear_deferred_native_cleanup("claude", worker_fingerprint)
                 return
             time.sleep(_CLAUDE_AUTH_STATUS_CLEANUP_RETRY_DELAY_SECONDS)
+        register_deferred_native_cleanup("claude", worker_fingerprint)
     finally:
         lease.release_detached()
 
@@ -11747,7 +11755,17 @@ def get_claude_auth(
         configured_key = configured_key.strip() if isinstance(configured_key, str) else ""
         configured_base = configured_base.strip() if isinstance(configured_base, str) else ""
 
-    # Every status probe can refresh and persist native OAuth state. Reuse an
+    flow_source_id: str | None = None
+    try:
+        if _native_lease is None and _flow_id:
+            oauth_service = _get_oauth_service()
+            flow_lease = oauth_service.native_lease_for_flow(_flow_id, "claude")
+            flow_source_id = oauth_service.native_flow_source_for_flow(_flow_id, "claude")
+            if flow_lease is not None:
+                _native_lease = flow_lease
+    except Exception:
+        logger.debug("Unable to reuse the native lease for Claude auth flow %s", _flow_id, exc_info=True)
+
     # existing writer/observation lease when the caller already owns one;
     # otherwise wait briefly for a writer or completing OAuth flow to release
     # the same cross-process exclusion before starting Claude.
@@ -11767,7 +11785,7 @@ def get_claude_auth(
                 status_lease = NativeCredentialLease(("claude",)).acquire()
                 try:
                     if getattr(config if "config" in locals() else None, "model_hub", None) is not None:
-                        status_lease.assert_auth_custody("claude")
+                        status_lease.assert_auth_custody("claude", source_id=flow_source_id, new_source=flow_source_id is not None)
                     cli_oauth_signed_in = _read_claude_cli_oauth_signed_in(
                         configured_cli_path if isinstance(configured_cli_path, str) else None,
                         env=claude_status_env,

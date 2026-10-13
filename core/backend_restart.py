@@ -13,6 +13,8 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
 from typing import Any, TypeVar
+from config.atomic_io import write_atomic
+from core.process_isolation import is_valid_worker_fingerprint, reap_marked_processes
 from modules.agents.catalog import NATIVE_CLI_BACKENDS
 
 logger = logging.getLogger(__name__)
@@ -28,6 +30,8 @@ _POLL_INTERVAL_SECONDS = 0.1
 # Model Hub RPC timeout the Web UI waits under.
 _INTERRUPT_SETTLE_SECONDS = 120.0
 _NATIVE_BACKENDS = frozenset(NATIVE_CLI_BACKENDS)
+_DEFERRED_NATIVE_CLEANUP_VERSION = 1
+_DEFERRED_NATIVE_CLEANUP_DIR = "deferred-native-cleanups"
 _T = TypeVar("_T")
 
 
@@ -39,6 +43,72 @@ class NativeMigrationBlockedError(RuntimeError):
         self.reason = reason
         self.backends = backends
         self.pids = pids
+
+
+def _deferred_native_cleanup_path(backend: str, worker_fingerprint: str) -> Path:
+    from config.paths import get_state_dir
+
+    safe_fingerprint = worker_fingerprint.replace(":", "_")
+    return get_state_dir() / "native-takeover" / _DEFERRED_NATIVE_CLEANUP_DIR / f"{backend}-{safe_fingerprint}.json"
+
+
+def register_deferred_native_cleanup(backend: str, worker_fingerprint: str) -> Path:
+    if backend not in _NATIVE_BACKENDS or not is_valid_worker_fingerprint(worker_fingerprint):
+        raise ValueError("Invalid deferred native cleanup")
+    path = _deferred_native_cleanup_path(backend, worker_fingerprint)
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    write_atomic(
+        path,
+        json.dumps(
+            {"version": _DEFERRED_NATIVE_CLEANUP_VERSION, "backend": backend, "worker_fingerprint": worker_fingerprint},
+            separators=(",", ":"),
+        )
+        + "\n",
+    )
+    return path
+
+
+def clear_deferred_native_cleanup(backend: str, worker_fingerprint: str) -> None:
+    try:
+        _deferred_native_cleanup_path(backend, worker_fingerprint).unlink()
+    except FileNotFoundError:
+        return
+    except OSError:
+        logger.warning("Failed to clear deferred native cleanup for %s", backend, exc_info=True)
+
+
+def recover_deferred_native_cleanups(backends: tuple[str, ...]) -> None:
+    from config.paths import get_state_dir
+
+    directory = get_state_dir() / "native-takeover" / _DEFERRED_NATIVE_CLEANUP_DIR
+    try:
+        entries = list(directory.glob("*.json"))
+    except OSError as exc:
+        raise NativeMigrationBlockedError("native_auth_in_progress", backends) from exc
+    for path in entries:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            backend = payload.get("backend")
+            fingerprint = payload.get("worker_fingerprint")
+            if (
+                payload.get("version") != _DEFERRED_NATIVE_CLEANUP_VERSION
+                or backend not in backends
+                or not isinstance(fingerprint, str)
+                or not is_valid_worker_fingerprint(fingerprint)
+            ):
+                raise ValueError("invalid deferred native cleanup")
+            result = reap_marked_processes(
+                logger,
+                f"deferred {backend} native auth cleanup",
+                worker_fingerprint=fingerprint,
+            )
+            if result == "unconfirmed":
+                raise NativeMigrationBlockedError("native_auth_in_progress", (backend,))
+            path.unlink(missing_ok=True)
+        except NativeMigrationBlockedError:
+            raise
+        except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+            raise NativeMigrationBlockedError("native_auth_in_progress", backends) from exc
 
 
 def pending_native_backends(directory: Path) -> set[str]:
@@ -90,6 +160,7 @@ class NativeCredentialLease:
 
         if self._handles:
             raise RuntimeError("Native credential lease is not reentrant")
+        recover_deferred_native_cleanups(self.backends)
         try:
             self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
             directory_stat = self.directory.lstat()
