@@ -52,6 +52,7 @@ def _catalog():
     }
 
 
+@pytest.mark.real_catalog_refresh
 def test_models_dev_search_normalizes_editable_metadata(monkeypatch, tmp_path):
     cache_path = tmp_path / "models-dev.json"
     monkeypatch.setattr(models_dev_catalog, "_cache_path", lambda: cache_path)
@@ -109,6 +110,7 @@ def test_models_dev_search_preserves_validator_accepted_long_names(monkeypatch):
     assert match["display_name"] == display_name
 
 
+@pytest.mark.real_catalog_refresh
 def test_models_dev_search_uses_fresh_cache_without_network(monkeypatch, tmp_path):
     cache_path = tmp_path / "models-dev.json"
     monkeypatch.setattr(models_dev_catalog, "_cache_path", lambda: cache_path)
@@ -131,6 +133,7 @@ def test_models_dev_search_uses_fresh_cache_without_network(monkeypatch, tmp_pat
     assert models_dev_catalog.search_models_dev("deepseek/deepseek-v4")[0]["models_dev_id"] == "deepseek/deepseek-v4"
 
 
+@pytest.mark.real_catalog_refresh
 def test_models_dev_search_falls_back_to_stale_cache(monkeypatch, tmp_path):
     cache_path = tmp_path / "models-dev.json"
     monkeypatch.setattr(models_dev_catalog, "_cache_path", lambda: cache_path)
@@ -153,6 +156,7 @@ def test_models_dev_search_falls_back_to_stale_cache(monkeypatch, tmp_path):
     assert models_dev_catalog.search_models_dev("DeepSeek V4")[0]["context_window"] == 1_048_576
 
 
+@pytest.mark.real_catalog_refresh
 def test_models_dev_stale_cache_is_scoped_to_its_url(monkeypatch, tmp_path):
     cache_path = tmp_path / "models-dev.json"
     monkeypatch.setattr(models_dev_catalog, "_cache_path", lambda: cache_path)

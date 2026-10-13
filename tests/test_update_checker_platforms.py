@@ -20,6 +20,14 @@ from core.update_checker import UpdateChecker
 RELEASE_URL_101 = "https://github.com/avibe-bot/avibe/releases/tag/v1.0.1"
 
 
+@pytest.fixture(autouse=True)
+def _no_askill_reconcile(monkeypatch):
+    """Every update check also reconciles the managed askill, which downloads it from GitHub
+    when the machine has none (#2531). The tests of that reconcile patch their own stand-in."""
+
+    monkeypatch.setattr("vibe.api.reconcile_askill_auto_update", lambda: {"ok": True, "skipped": True})
+
+
 class _StubSettingsManager:
     def __init__(self, store):
         self._store = store
@@ -1069,7 +1077,6 @@ def _backend_auto_update_checker(monkeypatch, tmp_path, sqlite_schema_db_factory
         lambda name: {"ok": True, "enabled": True, "installed": True, **runtimes[name]},
     )
     monkeypatch.setattr("vibe.api.install_agent", install)
-    monkeypatch.setattr("vibe.api.reconcile_askill_auto_update", lambda: {"ok": True, "skipped": True})
     monkeypatch.setattr(
         update_checker,
         "_fetch_pypi_version_sync",
