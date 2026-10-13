@@ -2,9 +2,13 @@
 
 import type { ReactNode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter, useLocation, useNavigate, useNavigationType } from 'react-router-dom';
+import { createInstance } from 'i18next';
+import en from '../../i18n/en.json';
+import type { VaultSecret } from '../../context/ApiContext';
+import { RouteSurfaceActiveContext } from '../../lib/routeSurfaceActivity';
 
 import { InstanceAuthorizationContext } from '../../context/InstanceAuthorizationContext';
 import { OWNER_INSTANCE_CAPABILITIES } from '../../lib/sessionInfo';
@@ -59,8 +63,10 @@ vi.mock('../../lib/useProtectedVault', () => ({
   useVaultLock: () => ({ unlocked: false, remainingMs: 0, lockNow: vi.fn() }),
 }));
 
+const testI18n = createInstance();
+void testI18n.init({ lng: 'en', resources: { en: { translation: en } }, initAsync: false });
 vi.mock('react-i18next', () => ({
-  useTranslation: () => ({ t: (key: string) => key }),
+  useTranslation: () => ({ t: testI18n.t }),
 }));
 
 vi.mock('./CapabilityTabs', () => ({
@@ -76,11 +82,23 @@ vi.mock('./WorkbenchPageHeader', () => ({
   ),
 }));
 
-function renderPage(context = remoteOwner) {
+function LocationProbe() {
+  const location = useLocation();
+  const navigation = useNavigationType();
+  const navigate = useNavigate();
+  return <>
+    <output data-testid="location">{location.search}</output>
+    <output data-testid="navigation">{navigation}</output>
+    <button onClick={() => navigate('/vaults?q=beta&tag=shared&sort=added')}>Follow saved view</button>
+  </>;
+}
+
+function renderPage(context = remoteOwner, entry = '/vaults', active = true) {
   return render(
     <InstanceAuthorizationContext.Provider value={context}>
-      <MemoryRouter initialEntries={['/vaults']}>
-        <VaultsPage />
+      <MemoryRouter initialEntries={[entry]}>
+        <RouteSurfaceActiveContext.Provider value={active}><VaultsPage /></RouteSurfaceActiveContext.Provider>
+        <LocationProbe />
       </MemoryRouter>
     </InstanceAuthorizationContext.Provider>,
   );
@@ -115,13 +133,13 @@ describe('VaultsPage remote audit history', () => {
 
     renderPage();
 
-    const history = await screen.findByRole('button', { name: 'vaults.history' });
-    expect(screen.getByRole('button', { name: 'vaults.add' })).toBeTruthy();
+    const history = await screen.findByRole('button', { name: 'History' });
+    expect(screen.getByRole('button', { name: 'Add secret' })).toBeTruthy();
 
     await user.click(history);
 
     await waitFor(() => expect(api.getVaultAudit).toHaveBeenCalledWith({ limit: 50 }));
-    expect(await screen.findByText('vaults.audit.title')).toBeTruthy();
+    expect(await screen.findByText('Recent activity')).toBeTruthy();
     expect(await screen.findByText('grant_created')).toBeTruthy();
     expect(await screen.findByText('alpha')).toBeTruthy();
   });
@@ -129,8 +147,199 @@ describe('VaultsPage remote audit history', () => {
   it('shows Vault management controls to an Editor', async () => {
     renderPage(activeOrgMember);
 
-    expect(await screen.findByRole('button', { name: 'vaults.add' })).toBeTruthy();
-    expect(screen.queryByText('vaults.remoteReadOnly')).toBeNull();
+    expect(await screen.findByRole('button', { name: 'Add secret' })).toBeTruthy();
+    expect(screen.queryByText('Read-only')).toBeNull();
+  });
+});
+
+describe('VaultsPage list discovery', () => {
+  const makeSecret = (name: string, overrides: Partial<VaultSecret> = {}): VaultSecret => ({
+    name, description: `${name} deployment`, tags: [], kind: 'static', protection: 'standard',
+    signer_kind: null, source: 'user', policy: {}, last_used_at: null, use_count: 0,
+    created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', ...overrides,
+  });
+  const inventory = [
+    makeSecret('beta', { kind: 'keypair', protection: 'protected', tags: ['shared', 'prod', 'skill:sign'], last_used_at: '2026-10-13T11:00:00Z', created_at: '2026-05-01T00:00:00Z' }),
+    makeSecret('zeta', { tags: ['shared', 'z-only', 'skill:release', 'third'], created_at: '2026-09-01T00:00:00Z', policy: { allowed_hosts: ['api.example.test'] } }),
+    makeSecret('alpha', { description: 'Alpha 支付 [prod]', protection: 'protected', tags: ['shared', 'shared', 'prod', 'skill:release'], last_used_at: '2026-10-10T12:00:00Z', use_count: 7 }),
+  ];
+  const rows = () => within(screen.getByRole('list', { name: 'Vaults' })).getAllByRole('listitem');
+  const names = () => rows().map((row) => row.querySelector('.font-mono')?.textContent);
+  const params = () => new URLSearchParams(screen.getByTestId('location').textContent ?? '');
+  const count = () => screen.getByRole('status', { name: 'Secret count' }).textContent;
+
+  beforeEach(() => {
+    api.listVaultSecrets.mockResolvedValue({ secrets: inventory });
+    vi.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-10-13T12:00:00Z'));
+  });
+
+  // Existing tests cover audit and reveal, not any of the list's discovery controls.
+  // These assert the page's actual rendered rows rather than duplicating the matcher.
+  it('searches and highlights literal name/description terms, reports counts, and clears from keyboard and button', async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText('alpha');
+    const search = screen.getByRole('textbox', { name: 'Search secrets' });
+    expect(count()).toBe('3');
+    await user.keyboard('/');
+    expect(document.activeElement).toBe(search);
+    await user.type(search, 'ALPHA 支付');
+    expect(names()).toEqual(['alpha']);
+    expect(count()).toBe('1 / 3');
+    expect([...rows()[0].querySelectorAll('mark')].map((mark) => mark.textContent)).toEqual(['alpha', 'Alpha', '支付']);
+    expect(rows()[0].textContent).toContain('used 7× · 3d ago');
+    await user.keyboard('{Escape}');
+    expect(count()).toBe('3');
+    await user.paste('[prod]');
+    expect(rows()[0].querySelector('mark')?.textContent).toBe('[prod]');
+    await user.click(screen.getByRole('button', { name: 'Clear search' }));
+    expect(params().has('q')).toBe(false);
+    expect(names()).toEqual(['alpha', 'beta', 'zeta']);
+  });
+
+  it('leaves slash in editable controls and does not steal focus from a hidden route', async () => {
+    const user = userEvent.setup();
+    const view = renderPage();
+    await screen.findByText('alpha');
+    await user.click(screen.getByRole('button', { name: 'Tags' }));
+    const tagSearch = screen.getByRole('textbox', { name: 'Search tags' });
+    await user.type(tagSearch, '/');
+    expect(document.activeElement).toBe(tagSearch);
+    expect((tagSearch as HTMLInputElement).value).toBe('/');
+    view.unmount();
+    renderPage(remoteOwner, '/vaults', false);
+    await screen.findByText('alpha');
+    await user.keyboard('/');
+    expect(document.activeElement).not.toBe(screen.getByRole('textbox', { name: 'Search secrets' }));
+  });
+
+  it('groups and sorts dropdown inventory counts, searches tags, and intersects multi-selection without closing', async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText('alpha');
+    await user.click(screen.getByRole('button', { name: 'Tags' }));
+    expect(screen.getAllByRole('checkbox').map((item) => item.textContent)).toEqual(['release2', 'sign1', 'shared3', 'prod2', 'third1', 'z-only1']);
+    await user.click(screen.getByRole('checkbox', { name: 'release · 2' }));
+    await user.click(screen.getByRole('checkbox', { name: 'prod · 2' }));
+    expect(names()).toEqual(['alpha']);
+    expect(screen.getByRole('checkbox', { name: 'release · 2' }).getAttribute('aria-checked')).toBe('true');
+    expect(count()).toBe('1 / 3');
+    const tagSearch = screen.getByRole('textbox', { name: 'Search tags' });
+    await user.type(tagSearch, 'SHAR');
+    expect(screen.getAllByRole('checkbox').map((item) => item.textContent)).toEqual(['shared3']);
+    await user.clear(tagSearch);
+    await user.type(tagSearch, 'no-such-tag');
+    expect(screen.getByText('No matching tags')).toBeTruthy();
+    await user.keyboard('{Escape}');
+    expect(screen.getByRole('button', { name: 'Tags (2)' })).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: 'Remove filter: prod' }));
+    expect(names()).toEqual(['alpha', 'zeta']);
+    await user.click(screen.getByRole('button', { name: 'Clear all' }));
+    expect(count()).toBe('3');
+  });
+
+  it.each(['hover', 'click', 'focus'] as const)('caps inline tags at two with skills first and reveals actionable overflow on %s', async (method) => {
+    api.listVaultSecrets.mockResolvedValue({ secrets: [inventory[1]] });
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText('zeta');
+    const row = rows()[0];
+    expect(within(row).getAllByRole('button').map((button) => button.textContent)).toEqual(['release', 'shared', '+2', '']);
+    expect(screen.queryByRole('button', { name: 'z-only' })).toBeNull();
+    const more = within(row).getByRole('button', { name: 'Show 2 more tags' });
+    if (method === 'hover') await user.hover(more);
+    if (method === 'click') await user.click(more);
+    if (method === 'focus') {
+      act(() => more.focus());
+      await user.keyboard('{Tab}');
+      expect(document.activeElement).toBe(screen.getByRole('button', { name: 'z-only' }));
+    }
+    await user.click(screen.getByRole('button', { name: 'z-only' }));
+    expect(params().getAll('tag')).toEqual(['z-only']);
+    await user.keyboard('{Escape}');
+    expect(document.activeElement).toBe(more);
+    expect(screen.queryByRole('button', { name: 'z-only' })).toBeNull();
+    await user.click(within(row).getByRole('button', { name: 'release' }));
+    expect(params().getAll('skill')).toEqual(['release']);
+    expect(count()).toBe('1 / 1');
+  });
+
+  it('composes quick filters and sorting, keeping unused last and dates relative even beyond a week', async () => {
+    api.listVaultSecrets.mockResolvedValue({ secrets: [...inventory, makeSecret('aardvark', { last_used_at: '2026-09-30T12:00:00Z' })] });
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText('alpha');
+    expect(names()).toEqual(['aardvark', 'alpha', 'beta', 'zeta']);
+    expect(rows()[0].textContent).toContain('13d ago');
+    const sort = screen.getByRole('combobox', { name: 'Sort' });
+    await user.selectOptions(sort, 'recent');
+    expect(names()).toEqual(['beta', 'alpha', 'aardvark', 'zeta']);
+    await user.selectOptions(sort, 'added');
+    expect(names()).toEqual(['zeta', 'beta', 'aardvark', 'alpha']);
+    await user.click(screen.getByRole('radio', { name: 'Protected' }));
+    expect(names()).toEqual(['beta', 'alpha']);
+    await user.click(screen.getByRole('radio', { name: 'Signing keys' }));
+    expect(names()).toEqual(['beta']);
+    await user.click(screen.getByRole('radio', { name: 'Never used' }));
+    expect(names()).toEqual(['zeta']);
+    expect(count()).toBe('1 / 4');
+    await user.click(screen.getByRole('radio', { name: 'All', exact: true }));
+    expect(count()).toBe('4');
+  });
+
+  it('round-trips repeatable URL filters with replace, preserving pending handoff and unrelated parameters', async () => {
+    const user = userEvent.setup();
+    const entry = '/vaults?q=ALPHA&tag=shared&tag=prod&skill=release&filter=protected&sort=added&request_id=waiting&protection=protected&other=keep';
+    const view = renderPage(remoteOwner, entry);
+    await screen.findByText('alpha');
+    expect(names()).toEqual(['alpha']);
+    expect((screen.getByRole('textbox', { name: 'Search secrets' }) as HTMLInputElement).value).toBe('ALPHA');
+    expect((screen.getByRole('combobox', { name: 'Sort' }) as HTMLSelectElement).value).toBe('added');
+    await user.click(screen.getByRole('button', { name: 'Remove filter: prod' }));
+    expect(params().getAll('tag')).toEqual(['shared']);
+    expect(params().get('request_id')).toBe('waiting');
+    expect(screen.getByTestId('navigation').textContent).toBe('REPLACE');
+    const saved = `/vaults${screen.getByTestId('location').textContent}`;
+    view.unmount();
+    renderPage(remoteOwner, saved);
+    await screen.findByText('alpha');
+    expect(names()).toEqual(['alpha']);
+    await user.click(screen.getByRole('button', { name: 'Clear all' }));
+    expect(Object.fromEntries(params())).toEqual({ sort: 'added', request_id: 'waiting', protection: 'protected', other: 'keep' });
+    await user.click(screen.getByRole('button', { name: 'Follow saved view' }));
+    expect(names()).toEqual(['beta']);
+    expect((screen.getByRole('textbox', { name: 'Search secrets' }) as HTMLInputElement).value).toBe('beta');
+  });
+
+  it('consumes a reveal handoff without dropping the saved view', async () => {
+    api.createVaultRevealContext.mockResolvedValue({ ok: true, context: {} });
+    renderPage(remoteOwner, '/vaults?q=alpha&tag=shared&skill=release&filter=protected&sort=recent&reveal=alpha&other=keep');
+    await screen.findByRole('menuitem', { name: 'Show value' });
+    await waitFor(() => expect(Object.fromEntries(params())).toEqual({ q: 'alpha', tag: 'shared', skill: 'release', filter: 'protected', sort: 'recent', other: 'keep' }));
+    expect(names()).toEqual(['alpha']);
+  });
+
+  it('opens a reveal target hidden by saved filters, clearing those filters but keeping sort', async () => {
+    api.createVaultRevealContext.mockResolvedValue({ ok: true, context: {} });
+    renderPage(remoteOwner, '/vaults?q=zeta&tag=z-only&skill=missing&filter=unused&sort=added&reveal=alpha&other=keep');
+    await screen.findByRole('menuitem', { name: 'Show value' });
+    await waitFor(() => expect(Object.fromEntries(params())).toEqual({ sort: 'added', other: 'keep' }));
+    expect(names()).toEqual(['zeta', 'beta', 'alpha']);
+  });
+
+  it('distinguishes no matches from empty inventory and resets search/filters but not sorting', async () => {
+    const user = userEvent.setup();
+    const view = renderPage(remoteOwner, '/vaults?q=not-found&tag=shared&filter=protected&sort=added');
+    await screen.findByText('No matching secrets');
+    expect(count()).toBe('0 / 3');
+    await user.click(screen.getByRole('button', { name: 'Clear search and filters' }));
+    expect(names()).toEqual(['zeta', 'beta', 'alpha']);
+    expect(Object.fromEntries(params())).toEqual({ sort: 'added' });
+    view.unmount();
+    api.listVaultSecrets.mockResolvedValue({ secrets: [] });
+    renderPage();
+    await screen.findByText(en.vaults.empty);
+    expect(screen.queryByText('No matching secrets')).toBeNull();
   });
 });
 
@@ -191,12 +400,12 @@ describe('VaultsPage protected reveal', () => {
     vi.useRealTimers();
   });
 
-  const showValue = () => screen.getByRole('menuitem', { name: 'vaults.reveal.show' }) as HTMLButtonElement;
+  const showValue = () => screen.getByRole('menuitem', { name: 'Show value' }) as HTMLButtonElement;
 
   const openMenu = async (index = 0) => {
     const user = userEvent.setup();
     if (index === 0) renderPage();
-    const [button] = (await screen.findAllByRole('button', { name: 'vaults.rowActions' })).slice(index);
+    const [button] = (await screen.findAllByRole('button', { name: 'More actions' })).slice(index);
     await user.click(button);
   };
 
