@@ -4,7 +4,7 @@ import type {
   WorkbenchMessage,
   WorkbenchSession,
 } from '@/context/ApiContext';
-import { isBackendFailureNotice, isTranscriptMessage } from '@/lib/chatMessageTypes';
+import { isBackendFailureNotice, isTerminalAgentMessage, isTranscriptMessage } from '@/lib/chatMessageTypes';
 import { specFor } from '@/lib/messageTypes';
 
 import type { PetPose } from './PetAvatar';
@@ -53,9 +53,10 @@ const isUserInput = (message: WorkbenchMessage): boolean =>
 export const latestFailureNotice = (messages: WorkbenchMessage[]): WorkbenchMessage | null => {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index];
-    if (isUserInput(message) || isAgentResult(message)) return null;
-    // A detached or replayed notice reports work outside this exchange.
-    if (isBackendFailureNotice(message) && !message.metadata?.detached && !message.metadata?.replayed) return message;
+    if (isUserInput(message)) return null;
+    // The foreground exchange ends at its terminal row, by the transcript's own rule:
+    // detached completions and replayed failures report work outside it and are skipped.
+    if (isTerminalAgentMessage(message)) return isBackendFailureNotice(message) ? message : null;
   }
   return null;
 };

@@ -491,8 +491,12 @@ Until the `main` type exists, the mini's main agent is a Vibey conversation
   `state_meta` (`desktop_mini_session:<principal>`, principal `local` or
   `remote:<sub>`), never in session metadata a client can write or a fork can
   copy.
-- **Reuse.** The same session is returned while it is active and the caller can
-  still chat in its Project. An archived session, an archived Project or lost
+- **Who the caller is.** The principal comes from the request's authorization
+  context, never from a second lookup that could fall back: a remote context
+  without a subject owns nothing and is refused.
+- **Reuse.** The same session is returned while it passes the checks a new one
+  would: active, foreground, a Project the caller can chat in, and an Agent the
+  caller may use. An archived session, an archived Project or lost
   access gets a new one. With no chat Project at all the answer is
   `409 no_chat_project`, and the mini asks the user to create a Project.
 - **Binding.** The mini binds that session whenever nothing is bound. An
@@ -501,7 +505,9 @@ Until the `main` type exists, the mini's main agent is a Vibey conversation
   re-bound automatically, so a bad answer cannot loop.
 - **A turn Vibey cannot run is shown.** When the latest exchange ended in a
   backend failure notice (for example no model source), the main card's
-  subtitle reads "没跑起来：<notice>", and the detail shows the notice as plain
+  subtitle reads "没跑起来：<notice>" (the exchange ends at its foreground
+  terminal row, by the transcript's own rule, so detached completions and
+  replayed failures never decide it), and the detail shows the notice as plain
   text with "在 Avibe 中处理" when it names a next step. That opens the session,
   where the Workbench draws "Open Models" for those who manage the instance.
 - **Not in this change.** A live step label ("Ran command", …) for the main

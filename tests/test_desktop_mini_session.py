@@ -39,18 +39,24 @@ def _project(tmp_path, name: str):
         return create_project(conn, str(folder), display_name=name)
 
 
-def _ensure(owner_key: str, agent_name: str):
+def _context(principal: str):
+    from vibe.authorization import AuthorizationContext, instance_owner_context
+
+    if principal == "local":
+        return instance_owner_context()
+    return AuthorizationContext(instance_role="owner", is_remote=True, subject=principal.removeprefix("remote:"))
+
+
+def _ensure(principal: str, agent_name: str):
     from storage.db import create_sqlite_engine
     from storage.workbench_sessions_service import ensure_desktop_mini_session
-    from vibe.authorization import instance_owner_context
 
     with create_sqlite_engine().begin() as conn:
         return ensure_desktop_mini_session(
             conn,
-            owner_key=owner_key,
             agent_name=agent_name,
             title="Vibey",
-            authorization_context=instance_owner_context(),
+            authorization_context=_context(principal),
         )
 
 
@@ -171,3 +177,45 @@ def test_unrelated_malformed_metadata_does_not_break_the_lookup(state):
         conn.execute(update(agent_sessions).where(agent_sessions.c.id == junk["id"]).values(metadata_json="{not json"))
     first = _ensure("local", vibey.name)
     assert _ensure("local", vibey.name)["id"] == first["id"]
+
+
+def test_owner_comes_from_the_authorization_context():
+    from vibe.authorization import AuthorizationContext, instance_owner_context
+    from storage.workbench_sessions_service import desktop_mini_owner_key
+
+    assert desktop_mini_owner_key(instance_owner_context()) == "local"
+    assert desktop_mini_owner_key(AuthorizationContext(instance_role="editor", is_remote=True, subject="u1")) == "remote:u1"
+    # A remote caller without a subject is nobody, never the local owner.
+    assert desktop_mini_owner_key(AuthorizationContext(instance_role="editor", is_remote=True)) is None
+
+
+def test_a_remote_caller_without_a_subject_is_refused(state):
+    from storage.db import create_sqlite_engine
+    from storage.workbench_sessions_service import ProjectAccessDeniedError, ensure_desktop_mini_session
+    from vibe.authorization import AuthorizationContext
+
+    tmp_path, vibey = state
+    _project(tmp_path, "p")
+    _ensure("local", vibey.name)
+    with pytest.raises(ProjectAccessDeniedError), create_sqlite_engine().begin() as conn:
+        ensure_desktop_mini_session(
+            conn,
+            agent_name=vibey.name,
+            authorization_context=AuthorizationContext(instance_role="owner", is_remote=True),
+        )
+
+
+def test_a_recorded_session_whose_agent_the_caller_lost_is_not_reused(state, monkeypatch):
+    from core import vibe_agents
+
+    tmp_path, vibey = state
+    _project(tmp_path, "p")
+    _ensure("local", vibey.name)
+
+    def refuse(*_args, **_kwargs):
+        raise vibe_agents.VibeAgentAccessError("Agent access is not permitted.")
+
+    monkeypatch.setattr(vibe_agents, "ensure_agent_selection_access", refuse)
+    # Not reused; a new one is refused by the same check instead of being handed out.
+    with pytest.raises(vibe_agents.VibeAgentAccessError):
+        _ensure("local", vibey.name)

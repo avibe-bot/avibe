@@ -357,6 +357,16 @@ describe('PetPage Vibey conversation', () => {
     await waitFor(() => expect(devBinding().binding).toBe('V'));
   });
 
+  it('does not offer Vibey to someone who cannot chat', async () => {
+    canChat = false;
+    switcherSessions = [session('B', { title: 'Another session' })];
+    render(<PetPage />);
+    summon('show');
+    expect(await screen.findByText('Another session')).toBeTruthy();
+    expect(screen.queryByText('pet.talkToVibey')).toBeNull();
+    expect(api.ensureDesktopMiniSession).not.toHaveBeenCalled();
+  });
+
   it('shows a turn the agent could not run, with the way to fix it', async () => {
     tails.S = [
       message('u', 'S', { author: 'user', type: 'user', text: 'hello' }),

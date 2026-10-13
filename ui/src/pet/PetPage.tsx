@@ -539,7 +539,7 @@ const PetSurface: React.FC = () => {
         <div className={clsx('pet-mini-cards', voice.listening && 'is-hidden')} inert={voice.listening || undefined} aria-label={expanded ? t('pet.panel') : undefined} style={{ height: expanded ? STACK_HEIGHT : collapsedHeight }}>
           <div ref={collapsedRef} key={expanded ? 'expanded' : 'collapsed'} className="pet-mini-swap is-switching" onAnimationEnd={(event) => { if (event.target === event.currentTarget) event.currentTarget.classList.remove('is-switching'); }}>
           {expanded && (!binding || switcherOpen || visibleCards.length === 0) ? (
-            <SessionPicker onPick={(sessionId) => {
+            <SessionPicker canStartVibey={capabilities.can_chat} onPick={(sessionId) => {
               if (!epoch.isCurrent()) return;
               petShell.pick(sessionId, epoch.isAuthorizationCurrent);
               setSwitcherOpen(false);
@@ -592,7 +592,7 @@ const PetSurface: React.FC = () => {
   );
 };
 
-const SessionPicker: React.FC<{ onPick: (sessionId: string) => void }> = ({ onPick }) => {
+const SessionPicker: React.FC<{ onPick: (sessionId: string) => void; canStartVibey: boolean }> = ({ onPick, canStartVibey }) => {
   const { t } = useTranslation();
   const api = useApi();
   const { sessions, loading } = useSessionSwitcher(true);
@@ -617,7 +617,7 @@ const SessionPicker: React.FC<{ onPick: (sessionId: string) => void }> = ({ onPi
     <div className="pet-mini-panel" aria-label={t('pet.chooseSession')}>
       <div className="pet-mini-scroll">
         <div className="pet-mini-session-picker" data-pet-hit>
-          <button type="button" onClick={pickVibey} disabled={vibeyPending} className="pet-mini-session-option">{t('pet.talkToVibey')}</button>
+          {canStartVibey && <button type="button" onClick={pickVibey} disabled={vibeyPending} className="pet-mini-session-option">{t('pet.talkToVibey')}</button>}
           {vibeyError && <p className="pet-mini-detail-muted">{vibeyError}</p>}
           {sessions.length === 0 && <p className="pet-mini-detail-muted">{loading ? t('common.loading') : t('pet.noSessions')}</p>}
           {sessions.map((session) => (

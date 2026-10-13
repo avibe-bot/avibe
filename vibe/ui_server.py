@@ -9447,7 +9447,6 @@ def desktop_mini_session_ensure():
         with engine.begin() as conn:
             session = ensure_desktop_mini_session(
                 conn,
-                owner_key=_web_push_user_key(),
                 agent_name=vibey.name,
                 title=t("desktopMini.sessionTitle", lang),
                 authorization_context=authorization_context,

@@ -224,6 +224,12 @@ describe('latestFailureNotice', () => {
     expect(latestFailureNotice([user(), replayed])).toBeNull();
   });
 
+  it('is not hidden by a detached result from background work', () => {
+    const notice = failure();
+    const detachedResult = result({ metadata: { detached: true } });
+    expect(latestFailureNotice([user(), notice, detachedResult])).toBe(notice);
+  });
+
   it('ignores notices that are not backend failures', () => {
     expect(latestFailureNotice([user(), row({ type: 'notify', metadata: {} })])).toBeNull();
   });

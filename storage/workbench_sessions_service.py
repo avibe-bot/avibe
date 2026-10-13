@@ -660,27 +660,66 @@ def _desktop_mini_session_id(conn: Connection, key: str) -> Optional[str]:
     return value if isinstance(value, str) and value else None
 
 
+def desktop_mini_owner_key(context: AuthorizationContext) -> Optional[str]:
+    """The principal a desktop mini conversation belongs to, from the request's authority.
+
+    Same identity the Workbench writes a reader's rows as: ``remote:<sub>`` for a
+    Cloud session, ``local`` otherwise. A remote context without a subject has no
+    identity to own anything, so it gets none rather than falling back to ``local``.
+    """
+
+    if context.is_remote:
+        subject = str(context.subject or "").strip()
+        return f"remote:{subject}" if subject else None
+    return "local"
+
+
 def _usable_desktop_mini_session(conn: Connection, context: AuthorizationContext, session_id: str) -> bool:
+    """Whether the caller can still talk in ``session_id``: the same checks a new one passes."""
     row = conn.execute(
-        select(agent_sessions.c.status, agent_sessions.c.visibility, agent_sessions.c.scope_id, scope_settings.c.enabled)
+        select(
+            agent_sessions.c.status,
+            agent_sessions.c.visibility,
+            agent_sessions.c.scope_id,
+            agent_sessions.c.agent_name,
+            agent_sessions.c.agent_id,
+            scope_settings.c.enabled,
+        )
         .select_from(agent_sessions.outerjoin(scope_settings, scope_settings.c.scope_id == agent_sessions.c.scope_id))
         .where(agent_sessions.c.id == session_id)
     ).mappings().first()
     if row is None or row["status"] != "active" or row["visibility"] != "foreground" or row["enabled"] == 0:
         return False
     project_id = project_access_service.project_id_from_scope_id(row["scope_id"])
-    return project_id is not None and project_access_service.can_chat_project(conn, context, project_id)
+    if project_id is None or not project_access_service.can_chat_project(conn, context, project_id):
+        return False
+    if row["agent_name"] or row["agent_id"]:
+        from core.vibe_agents import (
+            VibeAgentAccessError,
+            ensure_agent_selection_access,
+            resolve_resource_access_context,
+        )
+
+        try:
+            ensure_agent_selection_access(
+                conn,
+                agent_name=row["agent_name"],
+                agent_id=row["agent_id"],
+                user_context=resolve_resource_access_context(None),
+            )
+        except (VibeAgentAccessError, ValueError):
+            return False
+    return True
 
 
 def ensure_desktop_mini_session(
     conn: Connection,
     *,
-    owner_key: str,
     agent_name: str,
     title: Optional[str] = None,
     authorization_context: AuthorizationContext | Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Return ``owner_key``'s desktop mini session, creating it on first use.
+    """Return the caller's desktop mini session, creating it on first use.
 
     The recorded session is reused while the caller can still chat in it: active,
     foreground, in an enabled Project they can chat in. Otherwise a new one is
@@ -690,9 +729,9 @@ def ensure_desktop_mini_session(
     """
 
     context = require_instance_role(authorization_context, "editor")
-    owner_key = str(owner_key or "").strip()
-    if not owner_key:
-        raise ValueError("owner_key is required")
+    owner_key = desktop_mini_owner_key(context)
+    if owner_key is None:
+        raise ProjectAccessDeniedError
     reserve_write_lock(conn)
     key = f"{DESKTOP_MINI_SESSION_META_PREFIX}{owner_key}"
     recorded = _desktop_mini_session_id(conn, key)
