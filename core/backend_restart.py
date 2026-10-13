@@ -83,6 +83,7 @@ class NativeCredentialLease:
         self.backends = tuple(sorted(set(backends)))
         self.directory = (state_dir if state_dir is not None else get_state_dir()) / "native-takeover"
         self._handles: list[Any] = []
+        self._detached = False
 
     def acquire(self, *, recovery: bool = False) -> NativeCredentialLease:
         from storage.lock import _try_lock
@@ -173,7 +174,22 @@ class NativeCredentialLease:
                 return
         raise NativeMigrationBlockedError("native_auth_hub_owned", (backend,))
 
+    def detach(self) -> None:
+        """Transfer release responsibility to a cleanup owner."""
+
+        if not self._handles:
+            raise RuntimeError("Native credential lease is not held")
+        self._detached = True
+
+    def release_detached(self) -> None:
+        """Release a lease previously transferred to a cleanup owner."""
+
+        self._detached = False
+        self.release()
+
     def release(self) -> None:
+        if self._detached:
+            return
         # Closing the descriptor releases the OS lock, including on Windows.
         while self._handles:
             self._handles.pop().close()
