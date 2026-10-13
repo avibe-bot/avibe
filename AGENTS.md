@@ -241,6 +241,23 @@ Source-of-truth rule:
 - add new IM integrations under `modules/im/` and new agent backends under `modules/agents/`
 - no repo-wide formatter is enforced; keep diffs focused if you use Black/Ruff
 
+### Service Event Loop
+
+- The service runs one asyncio loop (`core/controller.py`). Every session's
+  turns, the scheduler, and the local Model Hub gateway share it, so anything
+  that blocks it stalls all of them at once.
+- Code reachable on that loop must not block. Move subprocess calls, sleeps and
+  retry waits, synchronous waits on futures, file rewrites, and any SQLite work
+  that is not a bounded, index-keyed lookup onto a thread (an existing executor
+  or `asyncio.to_thread`).
+- A query on a per-turn, per-message, or per-tick path must be index-keyed:
+  `EXPLAIN QUERY PLAN` must not show a `SCAN` of a growing table such as
+  `messages`, `agent_events`, or `agent_runs`. Pin the plan in a test, and add
+  indexes through an alembic migration.
+- `core/loop_watchdog.py` writes thread stacks to `~/.avibe/logs/vibe_remote.log`
+  for any loop stall over 2 s. Treat each report as a defect at the call site it
+  names.
+
 ### Web UI Server
 
 - `vibe/ui_server.py` is served by FastAPI/uvicorn; new UI routes should use native async FastAPI patterns where practical.
