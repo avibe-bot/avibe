@@ -125,9 +125,11 @@ The secret metadata payload (`_meta_payload`, REST, and `vibe vault list/find
   fields. Keypair rejection (`keypair_not_value_deliverable`) is unchanged.
 - `vibe vault fetch --auth NAME[.field]` attaches that record. The allowed
   hosts and auth scheme come from the secret's policy.
-- `vibe vault inject` and `export` accept the same selectors as `run`. Avibe
-  always sends an explicit `key`, because avault's fallback key would be the
-  record name, which is not a valid key.
+- `vibe vault inject` accepts the same selectors as `run`, including field refs.
+  Avibe always sends an explicit `key`, because avault's fallback key would be
+  the record name, which is not a valid key.
+- `vibe vault export` stays deprecated and returns `export_deprecated`, with no
+  delivery. Its parser and help are unchanged.
 - Commands that only authorize, such as `vibe vault access`, accept
   `NAME.field` and authorize the secret.
 - Every avault entry carries `name` = record name, that record's `envelope`,
@@ -251,5 +253,7 @@ secrets with fields work without it; protected secrets with fields need it.
   creation.
 - Standard values stay hidden in the UI.
 - The CLI cannot write fields; values enter only through the browser.
+- `export` remains deprecated and never delivers values. Agent-initiated field
+  deletion is out of scope; browser/REST removal of extra fields is supported.
 - There are no plaintext or non-secret fields; non-secret notes belong in the
   description.
