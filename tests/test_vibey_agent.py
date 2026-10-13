@@ -2391,8 +2391,9 @@ async def test_a_turn_runs_through_the_real_provider_registry(engine, session, t
 async def test_a_hop_resolved_native_hosted_tool_reaches_the_gateway_pinned_to_its_source(
     engine, session, tmp_path, published, hub_protocol, declaration, include
 ) -> None:
-    """vibey-hosted-tools.md §3.5, §4.1: Vibey takes each tool's mode from the hop, declares a native tool verbatim
-    with its include values, pins that request to the hop's Source, and declares nothing for a proxied tool here."""
+    """MH-HOSTED-VIBEY-001 (vibey-hosted-tools.md §3.5, §4.1): Vibey takes each tool's mode from the hop, declares a
+    native tool verbatim with its include values, pins that request to the hop's Source, and declares nothing for a
+    proxied tool here."""
     import httpx
 
     from modules.agents.vibey.models import registry_providers
@@ -2435,19 +2436,30 @@ async def test_a_hop_resolved_native_hosted_tool_reaches_the_gateway_pinned_to_i
 
 
 _NATIVE_SEARCH = {"mode": "native", "declaration": {"type": "web_search"}, "include": [], "executor": None, "replay": False}
+_PROXY_IMAGE = {"mode": "proxy", "executor": {"source_id": "src_executor01", "model_id": "gpt-image"}, "replay": False}
+
+
+def _without(entry: dict, key: str) -> dict:
+    return {name: value for name, value in entry.items() if name != key}
 
 
 @pytest.mark.parametrize(
     "hosted_tools",
     [
         None,
-        {"web_fetch": {"mode": "proxy", "executor": None, "replay": False}},
-        {"web_search": {key: value for key, value in _NATIVE_SEARCH.items() if key != "declaration"}},
-        {"web_search": {"mode": "proxy", "declaration": {"type": "web_search"}, "executor": None, "replay": False}},
-        {"web_search": {**_NATIVE_SEARCH, "executor": {"source_id": "src_executor01"}}},
-        {"web_search": {key: value for key, value in _NATIVE_SEARCH.items() if key != "replay"}},
+        {"web_fetch": _PROXY_IMAGE},
+        {"web_search": _without(_NATIVE_SEARCH, "declaration")},
+        {"web_search": {**_without(_NATIVE_SEARCH, "declaration"), "mode": "proxy"}},
+        {"web_search": {**_NATIVE_SEARCH, "note": "extra"}},
+        {"web_search": _without(_NATIVE_SEARCH, "replay")},
+        {"image_generation": {**_PROXY_IMAGE, "executor": {"source_id": "src_executor01"}}},
+        {"image_generation": {**_PROXY_IMAGE, "executor": {"source_id": "openai-main", "model_id": "gpt-image"}}},
+        {"image_generation": {**_PROXY_IMAGE, "replay": True}},
     ],
-    ids=["absent", "unknown-tool", "native-without-declaration", "proxy-with-declaration", "half-executor", "no-replay"],
+    ids=[
+        "absent", "unknown-tool", "native-without-declaration", "proxy-with-include", "extra-field", "no-replay",
+        "half-executor", "executor-not-a-source-id", "image-replay",
+    ],
 )
 def test_a_hop_with_an_invalid_hosted_tool_entry_is_refused(hosted_tools) -> None:
     from modules.agents.vibey.models import HopResolutionError, selection_from_hop

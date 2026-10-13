@@ -2,7 +2,7 @@
 
 A native route puts the overlay's declaration into the request verbatim, ahead of the function tools, with its
 Responses ``include`` values, and pins the request to the hop's Source. ``build_wire_request`` is the probe's entry:
-it must be exactly what the adapter sends.
+it must be exactly what the adapter sends. Scenario MH-HOSTED-VIBEY-001.
 """
 
 from __future__ import annotations

@@ -20,6 +20,7 @@ is ``native``, and pins that request to the hop's Source
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, Awaitable, Callable, Mapping, Optional
 
 from core.agent_core.agent.models import ModelSelection
@@ -50,6 +51,14 @@ def _optional(value: Any, kind: type, what: str) -> Any:
     return value
 
 
+#: The keys of one ``hosted_tools`` entry per mode, exactly (hop-resolution.schema.json).
+_HOSTED_ENTRY_KEYS = {
+    "native": {"mode", "executor", "replay", "declaration", "include"},
+    "proxy": {"mode", "executor", "replay"},
+}
+_SOURCE_ID = re.compile(r"src_[a-z0-9]{8,}")
+
+
 def _hosted_routes(raw: Any) -> dict[str, HostedToolRoute]:
     """``HopResolution.hosted_tools``: each enabled tool's mode, native declaration, executor and replay."""
     if not isinstance(raw, Mapping):
@@ -57,25 +66,43 @@ def _hosted_routes(raw: Any) -> dict[str, HostedToolRoute]:
     routes: dict[str, HostedToolRoute] = {}
     for tool, entry in raw.items():
         try:
-            if tool not in HOSTED_TOOLS or not isinstance(entry, Mapping):
-                raise ValueError("not a hosted tool entry")
-            missing = {"mode", "executor", "replay"} - set(entry)
-            if missing:
-                raise ValueError(f"no {', '.join(sorted(missing))}")
-            executor = entry["executor"]
-            if executor is not None and not isinstance(executor, Mapping):
-                raise ValueError("the executor must be an object or null")
-            include = entry.get("include", [])
-            routes[tool] = HostedToolRoute(
-                mode=entry["mode"],
-                executor=HostedExecutor(executor.get("source_id"), executor.get("model_id")) if executor is not None else None,
-                replay=entry["replay"],
-                declaration=entry.get("declaration"),
-                include=tuple(include) if isinstance(include, list) else include,
-            )
+            routes[tool] = _hosted_route(tool, entry)
         except ValueError as error:
             raise HopResolutionError(f"hop hosted tool {tool!r} is invalid: {error}") from None
     return routes
+
+
+def _hosted_route(tool: Any, entry: Any) -> HostedToolRoute:
+    """One entry, exactly as the hop schema allows it."""
+    if tool not in HOSTED_TOOLS or not isinstance(entry, Mapping):
+        raise ValueError("not a hosted tool entry")
+    keys = _HOSTED_ENTRY_KEYS.get(entry.get("mode"))
+    if keys is None:
+        raise ValueError(f"unknown mode {entry.get('mode')!r}")
+    if set(entry) != keys:
+        raise ValueError(f"a {entry['mode']} entry has exactly {', '.join(sorted(keys))}")
+    executor = entry["executor"]
+    if executor is not None:
+        if (
+            not isinstance(executor, Mapping)
+            or set(executor) != {"source_id", "model_id"}
+            or not isinstance(executor["source_id"], str)
+            or not _SOURCE_ID.fullmatch(executor["source_id"])
+        ):
+            raise ValueError("the executor is a Source id and a model id, or null")
+        executor = HostedExecutor(executor["source_id"], executor["model_id"])
+    if tool == "image_generation" and entry["replay"] is not False:
+        raise ValueError("an image_generation call is never replayed")
+    include = entry.get("include", [])
+    if not isinstance(include, list):
+        raise ValueError("include must be a list")
+    return HostedToolRoute(
+        mode=entry["mode"],
+        executor=executor,
+        replay=entry["replay"],
+        declaration=entry.get("declaration"),
+        include=tuple(include),
+    )
 
 
 def selection_from_hop(hop: Mapping[str, Any], *, gateway_base_url: Optional[str] = None) -> ModelSelection:
