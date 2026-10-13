@@ -1634,6 +1634,9 @@ describe('desktop mini v2 interaction contract', () => {
     expect(screen.queryByText('Session B')).toBeNull();
   });
 
+  // A tapped (not held) hotkey opens the text input once voice status is known.
+  const tapHotkey = () => { summon('listen'); summon('release'); };
+
   async function withVoiceEnv(asrAvailable: () => boolean, dictation: unknown, body: () => Promise<void>) {
     vi.doMock('@/lib/showPageVoiceDictation', () => ({ ShowPageVoiceDictation: dictation }));
     const locks = Object.getOwnPropertyDescriptor(navigator, 'locks');
@@ -1670,7 +1673,7 @@ describe('desktop mini v2 interaction contract', () => {
     }
     await withVoiceEnv(() => true, Dictation, async () => {
       ({ VoiceTranscriptionError: TranscriptionError } = await import('@/lib/voiceTranscription'));
-      devBind('S'); render(<PetPage />); summon('listen');
+      devBind('S'); render(<PetPage />); tapHotkey();
       const input = await screen.findByRole('textbox');
       await userEvent.type(input, 'typed before voice');
       await userEvent.click(await screen.findByLabelText('pet.voice.open'));
@@ -1685,7 +1688,7 @@ describe('desktop mini v2 interaction contract', () => {
     let asr = false;
     class Dictation { done = new Promise<string>(() => {}); start = async () => {}; finish = () => {}; abort = () => {}; }
     await withVoiceEnv(() => asr, Dictation, async () => {
-      devBind('S'); render(<PetPage />); summon('listen');
+      devBind('S'); render(<PetPage />); tapHotkey();
       await screen.findByRole('textbox');
       await waitFor(() => expect(fetch).toHaveBeenCalled());
       expect(screen.queryByLabelText('pet.voice.open')).toBeNull();
@@ -1704,7 +1707,7 @@ describe('desktop mini v2 interaction contract', () => {
     const finish = vi.fn();
     class Dictation { done = new Promise<string>(() => {}); start = async () => {}; finish = finish; abort = () => {}; }
     await withVoiceEnv(() => asr, Dictation, async () => {
-      devBind('S'); render(<PetPage />); summon('listen');
+      devBind('S'); render(<PetPage />); tapHotkey();
       await screen.findByRole('textbox');
       await userEvent.click(await screen.findByLabelText('pet.voice.open'));
       expect(pose()).toBe('listening');
@@ -1717,6 +1720,20 @@ describe('desktop mini v2 interaction contract', () => {
       await userEvent.click(await screen.findByLabelText('pet.voice.stop'));
       expect(finish).toHaveBeenCalled();
       focus.mockRestore();
+    });
+  });
+
+  it('holds a voice summon until the first ASR status read settles', async () => {
+    const status = deferred<{ ok: boolean; json: () => Promise<unknown> }>();
+    class Dictation { done = new Promise<string>(() => {}); start = async () => {}; finish = () => {}; abort = () => {}; }
+    await withVoiceEnv(() => true, Dictation, async () => {
+      vi.stubGlobal('fetch', vi.fn(() => status.promise));
+      devBind('S'); render(<PetPage />); summon('listen');
+      await act(async () => new Promise((resolve) => setTimeout(resolve, 15)));
+      expect(screen.queryByRole('textbox')).toBeNull();
+      expect(pose()).not.toBe('listening');
+      await act(async () => status.resolve({ ok: true, json: async () => ({ available: true }) }));
+      await waitFor(() => expect(pose()).toBe('listening'));
     });
   });
 
@@ -1741,7 +1758,7 @@ describe('desktop mini v2 interaction contract', () => {
       vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({ available: true }) })));
       vi.resetModules();
       ({ PetPage } = await import('./PetPage'));
-      devBind('S'); render(<PetPage />); summon('listen');
+      devBind('S'); render(<PetPage />); tapHotkey();
       const input = await screen.findByRole('textbox');
       await userEvent.type(input, 'typed before voice');
       await userEvent.click(await screen.findByLabelText('pet.voice.open'));

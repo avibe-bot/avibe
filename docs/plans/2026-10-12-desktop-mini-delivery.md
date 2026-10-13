@@ -57,8 +57,12 @@ everywhere. The owner has since removed that gate so the captured-speech handoff
 can be verified on a real desktop test prerelease. Pet voice now appears
 whenever Web Locks, `getUserMedia` and ASR are all available; missing Web Locks
 still denies it, and hotkey/hold still falls back to text in that case. ASR
-status is re-read whenever the pet window becomes active, so enabling or
-disabling transcription in settings takes effect without restarting the pet.
+status is read as soon as voice may be used (the pet window starts unfocused,
+so this read does not wait for focus), and a held-hotkey summon waits for that
+first read. Each window reactivation re-reads it, so a settings change takes
+effect without restarting the pet; a failed re-read keeps the last known status.
+Availability gates only starting a capture; an active capture keeps its stop
+control.
 A microphone or transcription failure reopens the text input with the pre-voice
 draft and a short note; the mini does not keep the failed recording for retry
 (the main Composer does).

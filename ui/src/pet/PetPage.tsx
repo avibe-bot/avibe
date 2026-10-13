@@ -10,7 +10,7 @@ import { Button } from '@/components/ui/button';
 import { Markdown } from '@/components/ui/markdown';
 import { QuickReplies } from '@/components/workbench/QuickReplies';
 import { harnessItemNativeId } from '@/lib/backgroundActivity';
-import { usePageActive } from '@/lib/pageActivity';
+import { onPageReactivated, usePageActive } from '@/lib/pageActivity';
 import { usePendingVaultRequests } from '@/lib/usePendingVaultRequests';
 import { ShowPageVoiceDictation } from '@/lib/showPageVoiceDictation';
 import { VoiceTranscriptionError } from '@/lib/voiceTranscription';
@@ -418,12 +418,12 @@ const PetSurface: React.FC = () => {
   }, [setPanel, voice.stop, voice.listening, composing]);
   useOnSummon(onSummon);
   useEffect(() => {
-    if (!listenPending || !binding || !canChat || !expanded) return;
+    if (!listenPending || !binding || !canChat || !expanded || voice.pending) return;
     petComposer.takeListen();
     if (uncertain) { setDetailOpen(true); return; }
     if (voice.available && hotkeyHeld.current) voice.start();
     else openComposer(draft);
-  }, [listenPending, binding, canChat, expanded, voice.available, voice.start, openComposer, draft, uncertain]);
+  }, [listenPending, binding, canChat, expanded, voice.pending, voice.available, voice.start, openComposer, draft, uncertain]);
   useEffect(() => {
     const onBlur = () => { if (!voice.listening && !draft.trim()) void setPanel(false); };
     window.addEventListener('blur', onBlur);
@@ -716,26 +716,33 @@ function useHitRegions(rootRef: React.RefObject<HTMLDivElement | null>, epoch?: 
 }
 
 function usePetVoice({ enabled, epoch, draft, onOpenComposer }: { enabled: boolean; epoch: PetSurfaceEpoch; draft: string; onOpenComposer: (text?: string) => void }) {
-  const [asr, setAsr] = useState<{ available: boolean; checked: boolean; maxFileBytes?: number }>({ available: false, checked: false });
+  // `settled` turns true once the first status read has finished either way.
+  const [asr, setAsr] = useState<{ available: boolean; checked: boolean; settled: boolean; maxFileBytes?: number }>({ available: false, checked: false, settled: false });
   const [preview, setPreview] = useState('');
   const [listening, setListening] = useState(false);
   // A failed capture or transcription falls back to text with this note.
   const [error, setError] = useState<VoiceFailure | null>(null);
-  const pageActive = usePageActive();
+  const [asrReads, setAsrReads] = useState(0);
   type Capture = { dictation: ShowPageVoiceDictation; ending: boolean; cancelled: boolean };
   const captureRef = useRef<Capture | null>(null);
   const supported = typeof navigator !== 'undefined' && Boolean(navigator.locks && navigator.mediaDevices?.getUserMedia);
   const available = enabled && supported && asr.available;
-  // The pet window outlives settings changes made elsewhere, so ASR status is
-  // re-read whenever the window becomes active again.
+  // Read ASR status as soon as voice may be used; the pet window is created
+  // unfocused, so the first read cannot wait for activation. The window also
+  // outlives settings changes made elsewhere, so each reactivation re-reads it.
+  useEffect(() => onPageReactivated(() => setAsrReads((count) => count + 1)), []);
   useEffect(() => {
-    if (!enabled || !pageActive) return;
+    if (!enabled) return;
     let alive = true;
+    // A failed re-read keeps the last known status instead of flapping to off.
+    const unknown = () => setAsr((current) => (current.checked ? current : { available: false, checked: false, settled: true }));
     void fetch('/api/asr/status', { credentials: 'same-origin' }).then((response) => response.ok ? response.json() : null).then((value) => {
-      if (alive && epoch.isCurrent()) setAsr({ available: Boolean(value?.available), checked: value !== null, maxFileBytes: value?.max_file_bytes });
-    }).catch(() => { if (alive && epoch.isCurrent()) setAsr({ available: false, checked: false }); });
+      if (!alive || !epoch.isCurrent()) return;
+      if (value === null) unknown();
+      else setAsr({ available: Boolean(value.available), checked: true, settled: true, maxFileBytes: value.max_file_bytes });
+    }).catch(() => { if (alive && epoch.isCurrent()) unknown(); });
     return () => { alive = false; };
-  }, [enabled, epoch, pageActive]);
+  }, [enabled, epoch, asrReads]);
   const stop = useCallback((commit: boolean) => {
     const capture = captureRef.current;
     if (!capture) return;
@@ -789,7 +796,9 @@ function usePetVoice({ enabled, epoch, draft, onOpenComposer }: { enabled: boole
   const clearError = useCallback(() => setError(null), []);
   useEffect(() => cancel, [epoch, enabled, cancel]);
   useEffect(() => () => setError(null), [epoch, enabled]);
-  return { available, cloudRequired: asr.checked && !asr.available, listening, preview, error, clearError, start, stop, cancel };
+  // Until the first status read settles, a voice summon cannot tell voice from text.
+  const pending = enabled && supported && !asr.settled;
+  return { available, pending, cloudRequired: asr.checked && !asr.available, listening, preview, error, clearError, start, stop, cancel };
 }
 
 type VoiceFailure = 'startFailed' | 'empty' | 'failed';
