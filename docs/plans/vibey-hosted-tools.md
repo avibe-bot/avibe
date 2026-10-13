@@ -571,8 +571,9 @@ Each has a **Re-verify** action with its cost. Unknown shows nothing.
     `core/agent_core/tools/read.py` is about 3.4 MiB, and `read` does not resize. A high-quality PNG of 4–6 MB would
     come back as "Image omitted". Phase 1 bounds it in the declaration: OpenAI's asks for `output_format: "jpeg"`
     at `output_compression: 90`, so a 1.6 MP image is about 0.3–1 MB, and every IM platform shows JPEG. An image
-    still over the cap gets a record saying it is too large to view inline. Transparent backgrounds are out of scope
-    in Phase 1.
+    still over the cap gets a record saying it is too large to view inline.
+  - Known limitation: no transparent backgrounds in Phase 1. A later per-call format choice (an
+    `output_format`/`background` argument on the tool) restores them.
 - **The user sees the image.** The Workbench renders it inline from the file, and IM attaches it. That is display,
   separate from model context.
 - **History and replay never contain base64.**
