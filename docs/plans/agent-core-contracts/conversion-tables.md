@@ -640,3 +640,20 @@ Responses terminal states:
 | `incomplete_details.reason=max_output_tokens` or `length` | `length` |
 | `incomplete_details.reason=content_filter` or `safety` | `safety` |
 | Failed/cancelled | terminal `ProviderError` (classified `unknown` when no provider error code is present) |
+
+## Hosted tools (planned)
+
+Planned by [`../vibey-hosted-tools.md`](../vibey-hosted-tools.md) (Phase 1: `web_search`, `x_search`). These rows
+describe the wire mapping the `ai` lane implements with that phase. Until then the adapters ignore hosted items, as
+the sections above record, and the Anthropic stop table above still maps `pause_turn` to `stop`.
+
+| Concern | Anthropic Messages | OpenAI Responses (OpenAI, xAI) | OpenAI Chat Completions |
+| --- | --- | --- | --- |
+| Native declaration (mode from `HopResolution.hosted_tools`) | `{"type": "web_search_20250305", "name": "web_search", "max_uses": 5}` | `{"type": "web_search"}`; xAI also `{"type": "x_search"}` | none |
+| Proxy declaration | `{"name": <tool>, "input_schema": <canonical>}` | `{"type": "function", "name": <tool>, "parameters": <canonical>}` | `{"type": "function", "function": {...}}` |
+| Native result → `HostedToolBlock` | `server_tool_use` (`input.query`) plus its `web_search_tool_result` (results → `record.sources`; `encrypted_content` only in `native.payload`) | `web_search_call` (`action.query`, `action.sources`); xAI X search: `custom_tool_call` named `x_keyword_search` (`input` is a JSON string). The `tco_…` `reasoning` items that follow stay thinking blocks. | — |
+| Citations → `TextBlock.citations` | text-block `citations[]` (`web_search_result_location`: `url`, `title`, `cited_text`) | `output_text.annotations[]` of type `url_citation` (`url`, `title`, `start_index`, `end_index`) | — |
+| Same-Source replay (`replay_verified`) | `native.payload` blocks verbatim, in place; citations not sent | `native.payload` items verbatim, in place; annotations not sent | — |
+| Other-origin replay | assistant `tool_use(name=<tool>, input=arguments)` + user `tool_result(record as text)`, splitting the assistant message | `function_call(name=<tool>, arguments)` + `function_call_output(record as text)` | assistant `tool_calls` + `tool` message |
+| `pause_turn` | not a stop: the adapter re-sends the request with the paused assistant content appended (no new user message) and keeps streaming as one response, at most 5 continuations | — | — |
+| In-flight replay (same hop, same turn) | verbatim; on a narrow rejection, each server block pair is replaced in place by one text block, and signed thinking is kept | verbatim | — |

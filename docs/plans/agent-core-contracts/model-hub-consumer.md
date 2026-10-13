@@ -38,6 +38,18 @@ consumer's requirements, and the Model Hub lane lands the change in both places.
    the next request targets the primary origin again, so payloads returned by a fallback origin are not replayed if a
    later request fails over to that same fallback; a provider that then rejects the call surfaces as a provider error.
 
+7. **Hosted tools** (planned, [`../vibey-hosted-tools.md`](../vibey-hosted-tools.md) §3.5).
+   - `HopResolution.hosted_tools` names, for each tool the user enabled, the primary hop's `mode` (`native` or
+     `proxy`) and, for `native`, the wire declaration.
+   - `native` requires positive `call` evidence for that (Source, model) on an untranslated path
+     ([`../model-hub-capability-model.md`](../model-hub-capability-model.md) §3).
+   - At failover the gateway re-applies the rule for the new hop. A native declaration that hop is not verified for
+     becomes the same-named proxy function. Native hosted payloads that hop may not replay become the synthetic call
+     and result. Item 6's owner and timing apply.
+   - The served-hop report gains `source`, the serving Source id, so that a hosted block's payload is tagged with
+     the exact Source; two Sources can share an origin. The parser in `conversion-tables.md` (exactly `provider`,
+     `api`, `model` today) changes in the same release.
+
 ## 3. Not required
 
 Failover, credentials, quota, and Source health stay in Model Hub. The agent never contacts a vendor directly.

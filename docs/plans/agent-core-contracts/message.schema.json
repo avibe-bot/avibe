@@ -83,6 +83,13 @@
         },
         "ref": {
           "$ref": "#/definitions/LargeRef"
+        },
+        "citations": {
+          "type": "array",
+          "description": "Sources the text cites, from the provider's own citation data (OpenAI/xAI `url_citation`, Anthropic text-block `citations`). Presentation only: never sent in a request. Offsets are code points into `text`. Planned with `HostedToolBlock` (`../vibey-hosted-tools.md` §4.2).",
+          "items": {
+            "$ref": "#/definitions/Citation"
+          }
         }
       },
       "oneOf": [
@@ -219,6 +226,178 @@
         }
       }
     },
+    "Citation": {
+      "type": "object",
+      "required": [
+        "url"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "url": {
+          "type": "string",
+          "minLength": 1
+        },
+        "title": {
+          "type": "string"
+        },
+        "cited_text": {
+          "type": "string",
+          "description": "Excerpt the provider quotes (Anthropic `cited_text`)."
+        },
+        "start": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "end": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "HostedRecord": {
+      "type": "object",
+      "required": [
+        "status",
+        "queries",
+        "sources"
+      ],
+      "additionalProperties": false,
+      "description": "Canonical, provider-neutral record of one hosted-tool call. What every surface renders and what a different origin receives (as a synthetic tool result).",
+      "properties": {
+        "status": {
+          "enum": [
+            "completed",
+            "failed",
+            "incomplete",
+            "pending"
+          ]
+        },
+        "queries": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "sources": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "url"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "url": {
+                "type": "string",
+                "minLength": 1
+              },
+              "title": {
+                "type": "string"
+              },
+              "snippet": {
+                "type": "string"
+              },
+              "page_age": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "cost": {
+          "type": "object",
+          "required": [
+            "usd",
+            "basis"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "usd": {
+              "type": "number",
+              "minimum": 0
+            },
+            "basis": {
+              "enum": [
+                "reported",
+                "list",
+                "included"
+              ]
+            }
+          }
+        },
+        "mode": {
+          "enum": [
+            "native",
+            "proxy"
+          ]
+        },
+        "executor_origin": {
+          "$ref": "#/definitions/Origin",
+          "description": "For `mode: proxy`, who ran the call."
+        }
+      }
+    },
+    "HostedToolBlock": {
+      "type": "object",
+      "required": [
+        "type",
+        "id",
+        "tool",
+        "arguments",
+        "record"
+      ],
+      "additionalProperties": false,
+      "description": "A provider-hosted tool call (web search, X search) the model ran natively. Planned: `../vibey-hosted-tools.md` §4.2.",
+      "properties": {
+        "type": {
+          "const": "hosted_tool"
+        },
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tool": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Catalog name, e.g. `web_search`, `x_search`."
+        },
+        "arguments": {
+          "type": "object",
+          "description": "Canonical arguments, e.g. `{\"query\": \"...\"}`."
+        },
+        "record": {
+          "$ref": "#/definitions/HostedRecord"
+        },
+        "native": {
+          "type": "object",
+          "required": [
+            "source_id",
+            "origin",
+            "payload",
+            "replay_verified"
+          ],
+          "additionalProperties": false,
+          "description": "Opaque provider payload: the provider's own items, verbatim and in order. Replayed only to the same Source when its replay is verified; never synthesized, never sent to another Source or origin.",
+          "properties": {
+            "source_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "origin": {
+              "$ref": "#/definitions/Origin"
+            },
+            "payload": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              }
+            },
+            "replay_verified": {
+              "type": "boolean"
+            }
+          }
+        }
+      }
+    },
     "Usage": {
       "type": "object",
       "required": [
@@ -318,6 +497,9 @@
               },
               {
                 "$ref": "#/definitions/ToolCallBlock"
+              },
+              {
+                "$ref": "#/definitions/HostedToolBlock"
               }
             ]
           }
@@ -375,6 +557,10 @@
         },
         "is_error": {
           "type": "boolean"
+        },
+        "hosted": {
+          "$ref": "#/definitions/HostedRecord",
+          "description": "Set when the result came from the gateway's hosted-tool proxy executor (`mode: proxy`)."
         }
       }
     }
