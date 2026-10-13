@@ -126,10 +126,12 @@ ${XDG_CONFIG_HOME:-$HOME/.config}/opencode/skills
 ${CODEX_HOME:-$HOME/.codex}/skills/.system
 ```
 
-When Claude reports enabled plugins through its supported CLI, their standard
-`skills` directories are also best-effort compatibility roots. Plugin lookup
-failure omits only plugin roots; it never prevents static discovery or a
-backend Turn.
+When Claude has an installed plugin registry, Avibe reads the registry and
+Claude's `enabledPlugins` settings directly. It then resolves each enabled
+plugin's installation directory, reads its manifest, and scans the default
+`skills/` directory plus any manifest-declared Skill directories. Plugin
+registry or settings lookup failure omits only plugin roots; it never prevents
+static discovery or a backend Turn.
 
 Native locations are read in place. Avibe does not migrate or rename them, and
 the Catalog never annotates their source. A successful load still includes the

@@ -1134,37 +1134,54 @@ def test_distinct_same_name_candidates_keep_precedence_winner(tmp_path: Path) ->
     assert skills[0].description == "Codex"
 
 
-def test_enabled_claude_plugin_skills_join_the_managed_catalog(
+def test_enabled_claude_plugin_skills_are_read_from_registry_and_manifest(
     tmp_path: Path,
-    monkeypatch,
 ) -> None:
-    home, cwd = _isolate_live_commands(monkeypatch, tmp_path)
+    home = tmp_path / "home"
+    cwd = tmp_path / "project"
+    cwd.mkdir()
     claude_home = home / ".claude"
     registry = claude_home / "plugins" / "installed_plugins.json"
     registry.parent.mkdir(parents=True)
-    registry.write_text('{"version": 2, "plugins": {}}', encoding="utf-8")
     plugin = tmp_path / "plugin-cache" / "formatter"
     _write_skill(plugin / "skills", "format-code", "format-code", "Format code")
-    captured = {}
-
-    def plugin_list(command, **kwargs):
-        captured.update(command=command, **kwargs)
-        return json.dumps(
-            [
-                {
-                    "id": "formatter@example",
-                    "enabled": True,
-                    "installPath": str(plugin),
+    _write_skill(plugin / "extra-skills", "lint-code", "lint-code", "Lint code")
+    (plugin / ".claude-plugin").mkdir(parents=True)
+    (plugin / ".claude-plugin" / "plugin.json").write_text(
+        json.dumps({"name": "formatter", "skills": ["extra-skills"]}),
+        encoding="utf-8",
+    )
+    disabled = tmp_path / "plugin-cache" / "disabled"
+    _write_skill(disabled / "skills", "hidden", "hidden", "Hidden")
+    registry.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "plugins": {
+                    "formatter@example": [
+                        {
+                            "scope": "user",
+                            "installPath": str(plugin),
+                            "version": "1.0.0",
+                        }
+                    ],
+                    "disabled@example": [
+                        {
+                            "scope": "user",
+                            "installPath": str(disabled),
+                            "version": "1.0.0",
+                        }
+                    ],
                 },
-                {
-                    "id": "disabled@example",
-                    "enabled": False,
-                    "installPath": str(tmp_path / "disabled"),
-                },
-            ]
-        ).encode()
-
-    monkeypatch.setattr(managed_skills, "_bounded_subprocess_stdout", plugin_list)
+            }
+        ),
+        encoding="utf-8",
+    )
+    (claude_home / "settings.json").parent.mkdir(parents=True, exist_ok=True)
+    (claude_home / "settings.json").write_text(
+        json.dumps({"enabledPlugins": {"disabled@example": False}}),
+        encoding="utf-8",
+    )
 
     skills = resolve_skills(
         cwd,
@@ -1172,74 +1189,139 @@ def test_enabled_claude_plugin_skills_join_the_managed_catalog(
         avibe_home=tmp_path / "avibe",
         codex_home=home / ".codex",
         claude_home=claude_home,
-        claude_cli_path="/opt/claude-custom",
+        claude_cli_path="/does/not/exist",
         xdg_config_home=home / ".config",
         builtin_snapshot_id="",
     )
 
-    assert [skill.name for skill in skills] == ["format-code"]
-    assert captured["command"] == [
-        "/opt/claude-custom",
-        "plugin",
-        "list",
-        "--json",
-    ]
-    assert captured["cwd"] == cwd
-    assert captured["env"]["CLAUDE_CONFIG_DIR"] == str(claude_home)
-    assert captured["timeout"] == managed_skills.CLAUDE_PLUGIN_LIST_TIMEOUT_SECONDS
-    assert captured["max_bytes"] == managed_skills.CLAUDE_PLUGIN_LIST_MAX_BYTES
+    assert [skill.name for skill in skills] == ["format-code", "lint-code"]
 
 
-@pytest.mark.parametrize(
-    ("stdout_bytes", "stderr_bytes"),
-    [(4097, 0), (0, 4097), (2049, 2049)],
-)
-def test_bounded_subprocess_capture_rejects_oversized_combined_output(
-    tmp_path: Path,
-    stdout_bytes: int,
-    stderr_bytes: int,
-) -> None:
-    limit = 4096
-
-    assert managed_skills._bounded_subprocess_stdout(
-        [
-            sys.executable,
-            "-c",
-            (
-                "import os; "
-                f"os.write(1, b'x' * {stdout_bytes}); "
-                f"os.write(2, b'x' * {stderr_bytes})"
-            ),
-        ],
-        cwd=tmp_path,
-        env=dict(os.environ),
-        timeout=1,
-        max_bytes=limit,
-    ) is None
-
-
-def test_bounded_subprocess_capture_rejects_timeout(tmp_path: Path) -> None:
-    assert managed_skills._bounded_subprocess_stdout(
-        [sys.executable, "-c", "import time; time.sleep(1)"],
-        cwd=tmp_path,
-        env=dict(os.environ),
-        timeout=0.01,
-        max_bytes=4096,
-    ) is None
-
-
-def test_claude_plugin_discovery_fails_closed_when_capture_fails(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    home, cwd = _isolate_live_commands(monkeypatch, tmp_path)
+def test_claude_plugin_enablement_obeys_scope_and_defaults(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    other_project = tmp_path / "other-project"
+    project.mkdir()
+    other_project.mkdir()
     claude_home = home / ".claude"
     registry = claude_home / "plugins" / "installed_plugins.json"
     registry.parent.mkdir(parents=True)
-    registry.write_text("{}", encoding="utf-8")
-    monkeypatch.setattr(managed_skills.shutil, "which", lambda _: "/usr/bin/claude")
 
-    monkeypatch.setattr(managed_skills, "_bounded_subprocess_stdout", lambda *args, **kwargs: None)
+    disabled_by_default = tmp_path / "plugin-cache" / "default-off"
+    _write_skill(disabled_by_default / "skills", "default-off", "default-off", "Default off")
+    (disabled_by_default / ".claude-plugin").mkdir(parents=True)
+    (disabled_by_default / ".claude-plugin" / "plugin.json").write_text(
+        json.dumps({"name": "default-off", "defaultEnabled": False}),
+        encoding="utf-8",
+    )
+    project_plugin = tmp_path / "plugin-cache" / "project"
+    _write_skill(project_plugin / "skills", "project-only", "project-only", "Project only")
+    registry.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "plugins": {
+                    "default-off@example": [
+                        {"scope": "user", "installPath": str(disabled_by_default)}
+                    ],
+                    "project@example": [
+                        {
+                            "scope": "project",
+                            "projectPath": str(other_project),
+                            "installPath": str(project_plugin),
+                        }
+                    ],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    (claude_home / "settings.json").parent.mkdir(parents=True, exist_ok=True)
+    (claude_home / "settings.json").write_text(
+        json.dumps({"enabledPlugins": {"project@example": True}}),
+        encoding="utf-8",
+    )
+
+    assert resolve_skills(
+        project,
+        home=home,
+        avibe_home=tmp_path / "avibe",
+        codex_home=home / ".codex",
+        claude_home=claude_home,
+        xdg_config_home=home / ".config",
+        builtin_snapshot_id="",
+    ) == []
+
+    (claude_home / "settings.json").write_text(
+        json.dumps({"enabledPlugins": {"default-off@example": True}}),
+        encoding="utf-8",
+    )
+    assert [
+        skill.name
+        for skill in resolve_skills(
+            project,
+            home=home,
+            avibe_home=tmp_path / "avibe",
+            codex_home=home / ".codex",
+            claude_home=claude_home,
+            xdg_config_home=home / ".config",
+            builtin_snapshot_id="",
+        )
+    ] == ["default-off"]
+
+
+def test_claude_plugin_enablement_local_settings_override_user_settings(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    claude_home = home / ".claude"
+    registry = claude_home / "plugins" / "installed_plugins.json"
+    registry.parent.mkdir(parents=True)
+    plugin = tmp_path / "plugin-cache" / "formatter"
+    _write_skill(plugin / "skills", "format-code", "format-code", "Format code")
+    registry.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "plugins": {
+                    "formatter@example": [
+                        {"scope": "user", "installPath": str(plugin)}
+                    ]
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    (claude_home / "settings.json").parent.mkdir(parents=True, exist_ok=True)
+    (claude_home / "settings.json").write_text(
+        json.dumps({"enabledPlugins": {"formatter@example": True}}),
+        encoding="utf-8",
+    )
+    (project / ".claude").mkdir()
+    (project / ".claude" / "settings.local.json").write_text(
+        json.dumps({"enabledPlugins": {"formatter@example": False}}),
+        encoding="utf-8",
+    )
+
+    assert resolve_skills(
+        project,
+        home=home,
+        avibe_home=tmp_path / "avibe",
+        codex_home=home / ".codex",
+        claude_home=claude_home,
+        xdg_config_home=home / ".config",
+        builtin_snapshot_id="",
+    ) == []
+
+
+def test_claude_plugin_discovery_fails_closed_on_invalid_registry(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    cwd = tmp_path / "project"
+    cwd.mkdir()
+    claude_home = home / ".claude"
+    registry = claude_home / "plugins" / "installed_plugins.json"
+    registry.parent.mkdir(parents=True)
+    registry.write_text("not-json", encoding="utf-8")
 
     assert resolve_skills(
         cwd,
@@ -1252,22 +1334,29 @@ def test_claude_plugin_discovery_fails_closed_when_capture_fails(
     ) == []
 
 
-def test_enabled_claude_plugin_skill_overrides_codex_system_default(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    home, cwd = _isolate_live_commands(monkeypatch, tmp_path)
+def test_enabled_claude_plugin_skill_overrides_codex_system_default(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    cwd = tmp_path / "project"
+    cwd.mkdir()
     claude_home = home / ".claude"
     registry = claude_home / "plugins" / "installed_plugins.json"
     registry.parent.mkdir(parents=True)
-    registry.write_text("{}", encoding="utf-8")
     plugin = tmp_path / "plugin-cache" / "formatter"
     plugin_skill = _write_skill(plugin / "skills", "shared", "shared", "Plugin")
     _write_skill(home / ".codex" / "skills" / ".system", "shared", "shared", "System")
-    payload = json.dumps(
-        [{"id": "formatter@example", "enabled": True, "installPath": str(plugin)}]
-    ).encode()
-    monkeypatch.setattr(managed_skills, "_bounded_subprocess_stdout", lambda *args, **kwargs: payload)
+    registry.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "plugins": {
+                    "formatter@example": [
+                        {"scope": "user", "installPath": str(plugin), "enabled": True}
+                    ]
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
 
     skills = resolve_skills(
         cwd,

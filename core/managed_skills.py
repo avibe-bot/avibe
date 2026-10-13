@@ -12,9 +12,6 @@ import re
 import shutil
 import stat
 import struct
-import subprocess
-import threading
-import time
 import unicodedata
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -55,9 +52,11 @@ DISCOVERY_CLASS_MAX_CHILDREN = 4096
 PROJECT_ROOT_MAX_DIRECTORIES = 128
 BUILTIN_TREE_MAX_ENTRIES = 4096
 BUILTIN_TREE_MAX_BYTES = 32 * 1024 * 1024
-CLAUDE_PLUGIN_LIST_MAX_BYTES = 1024 * 1024
-CLAUDE_PLUGIN_LIST_MAX_ENTRIES = 256
-CLAUDE_PLUGIN_LIST_TIMEOUT_SECONDS = 1
+CLAUDE_PLUGIN_REGISTRY_MAX_BYTES = 1024 * 1024
+CLAUDE_PLUGIN_REGISTRY_MAX_ENTRIES = 256
+CLAUDE_PLUGIN_SETTINGS_MAX_BYTES = 1024 * 1024
+CLAUDE_PLUGIN_MANIFEST_MAX_BYTES = 256 * 1024
+CLAUDE_PLUGIN_SKILL_PATHS_MAX = 64
 
 _SNAPSHOT_DOMAIN = b"avibe-builtin-snapshot-v1\0"
 _SNAPSHOT_ID_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -825,141 +824,230 @@ def _selected_builtin_root(
     return root if stat.S_ISDIR(root_stat.st_mode) else None
 
 
+def _read_bounded_json(path: Path, *, max_bytes: int) -> Any | None:
+    try:
+        if not path.is_file():
+            return None
+        with path.open("rb") as stream:
+            raw = stream.read(max_bytes + 1)
+    except OSError:
+        return None
+    if len(raw) > max_bytes:
+        return None
+    try:
+        return json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+
+
+def _claude_plugin_enabled_overrides(
+    working_directory: Path,
+    claude_home: Path,
+    project_base: str | Path | None,
+) -> dict[str, bool]:
+    """Read Claude's plugin enablement without starting the Claude CLI."""
+
+    directories = _project_directories(working_directory, project_base=project_base)
+    settings_paths = [claude_home / "settings.json"]
+    settings_paths.extend(directory / ".claude" / "settings.json" for directory in reversed(directories))
+    settings_paths.extend(directory / ".claude" / "settings.local.json" for directory in reversed(directories))
+
+    overrides: dict[str, bool] = {}
+    for path in settings_paths:
+        payload = _read_bounded_json(path, max_bytes=CLAUDE_PLUGIN_SETTINGS_MAX_BYTES)
+        if not isinstance(payload, dict):
+            continue
+        enabled_plugins = payload.get("enabledPlugins")
+        if not isinstance(enabled_plugins, dict):
+            continue
+        for plugin_id, enabled in enabled_plugins.items():
+            if isinstance(plugin_id, str) and plugin_id and isinstance(enabled, bool):
+                overrides[plugin_id] = enabled
+    return overrides
+
+
+def _claude_plugin_registry_records(payload: Any) -> list[tuple[str, dict[str, Any]]]:
+    records: list[tuple[str, dict[str, Any]]] = []
+    if isinstance(payload, dict):
+        plugins = payload.get("plugins")
+        if isinstance(plugins, dict):
+            for plugin_id, raw_records in plugins.items():
+                if not isinstance(plugin_id, str) or not plugin_id:
+                    continue
+                entries = raw_records if isinstance(raw_records, list) else [raw_records]
+                for record in entries:
+                    if isinstance(record, dict):
+                        records.append((plugin_id, record))
+                        if len(records) >= CLAUDE_PLUGIN_REGISTRY_MAX_ENTRIES:
+                            return records
+    elif isinstance(payload, list):
+        for record in payload:
+            if not isinstance(record, dict):
+                continue
+            plugin_id = record.get("id")
+            if isinstance(plugin_id, str) and plugin_id:
+                records.append((plugin_id, record))
+                if len(records) >= CLAUDE_PLUGIN_REGISTRY_MAX_ENTRIES:
+                    break
+    return records
+
+
+def _claude_plugin_project_root(
+    working_directory: Path,
+    project_base: str | Path | None,
+) -> Path | None:
+    if project_base is not None:
+        resolved = _project_base_for_working_directory(working_directory, project_base)
+        return resolved
+    for directory in _project_directories(working_directory):
+        if (directory / ".git").exists():
+            return directory
+    return None
+
+
+def _claude_plugin_record_applies(
+    plugin_id: str,
+    record: dict[str, Any],
+    *,
+    working_directory: Path,
+    project_base: str | Path | None,
+    overrides: dict[str, bool],
+) -> bool:
+    scope = str(record.get("scope") or "user").strip().lower()
+    if scope not in {"project", "local"}:
+        return True
+
+    raw_project = next(
+        (
+            record.get(field)
+            for field in ("projectPath", "projectRoot", "projectDirectory", "cwd")
+            if isinstance(record.get(field), str) and record.get(field).strip()
+        ),
+        None,
+    )
+    if isinstance(raw_project, str):
+        try:
+            project_root = _absolute_path(raw_project).resolve()
+        except OSError:
+            return False
+        current_root = _claude_plugin_project_root(working_directory, project_base)
+        return current_root is not None and current_root == project_root
+
+    # Older registry records may not retain the project path. An explicit
+    # enablement in the current project's settings is the only safe fallback.
+    return overrides.get(plugin_id) is True
+
+
+def _claude_plugin_skill_roots_from_manifest(
+    plugin_root: Path,
+    manifest: dict[str, Any],
+) -> list[Path]:
+    raw_paths = manifest.get("skills")
+    if isinstance(raw_paths, str):
+        raw_paths = [raw_paths]
+    if not isinstance(raw_paths, list):
+        raw_paths = []
+
+    try:
+        resolved_root = plugin_root.resolve()
+    except OSError:
+        return []
+    roots: list[Path] = []
+    seen: set[Path] = set()
+    for raw_path in ["skills", *raw_paths][:CLAUDE_PLUGIN_SKILL_PATHS_MAX]:
+        if not isinstance(raw_path, str) or not raw_path.strip():
+            continue
+        relative_path = Path(raw_path.strip())
+        if relative_path.is_absolute():
+            continue
+        try:
+            candidate = (plugin_root / relative_path).resolve()
+            candidate.relative_to(resolved_root)
+        except (OSError, RuntimeError, ValueError):
+            continue
+        if candidate in seen or not _path_is_utf8(candidate):
+            continue
+        seen.add(candidate)
+        roots.append(candidate)
+    return roots
+
+
 def _claude_plugin_skill_roots(
     working_directory: Path,
     claude_home: Path,
-    claude_cli_path: str | None,
+    project_base: str | Path | None,
 ) -> list[Path]:
     registry = claude_home / "plugins" / "installed_plugins.json"
-    try:
-        if not registry.is_file():
-            return []
-    except OSError:
+    payload = _read_bounded_json(registry, max_bytes=CLAUDE_PLUGIN_REGISTRY_MAX_BYTES)
+    records = _claude_plugin_registry_records(payload)
+    if not records:
         return []
 
-    command = (
-        claude_cli_path
-        or os.environ.get(SKILL_CLAUDE_CLI_PATH_ENV)
-        or os.environ.get("CLAUDE_CLI_PATH")
-        or shutil.which("claude")
+    overrides = _claude_plugin_enabled_overrides(
+        working_directory,
+        claude_home,
+        project_base,
     )
-    if not command:
-        return []
-    environment = dict(os.environ)
-    environment["CLAUDE_CONFIG_DIR"] = str(claude_home)
-    output = _bounded_subprocess_stdout(
-        [command, "plugin", "list", "--json"],
-        cwd=working_directory,
-        env=environment,
-        timeout=CLAUDE_PLUGIN_LIST_TIMEOUT_SECONDS,
-        max_bytes=CLAUDE_PLUGIN_LIST_MAX_BYTES,
-    )
-    if output is None:
-        return []
-    try:
-        payload = json.loads(output.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        return []
-    if not isinstance(payload, list) or len(payload) > CLAUDE_PLUGIN_LIST_MAX_ENTRIES:
-        return []
-
-    roots: list[tuple[str, Path]] = []
-    for item in payload:
-        if not isinstance(item, dict) or item.get("enabled") is not True:
+    selected: dict[str, tuple[tuple[int, str, str, str], Path, dict[str, Any]]] = {}
+    scope_ranks = {"local": 0, "project": 1, "user": 2, "managed": 3}
+    for plugin_id, record in records:
+        raw_path = record.get("installPath")
+        if not isinstance(raw_path, str) or not raw_path.strip():
             continue
-        plugin_id = item.get("id")
-        install_path = item.get("installPath")
-        if not isinstance(plugin_id, str) or not isinstance(install_path, str):
-            continue
-        raw_path = Path(install_path).expanduser()
-        if not raw_path.is_absolute():
-            continue
-        root = _absolute_path(raw_path) / "skills"
-        if not _path_is_utf8(root):
-            continue
-        roots.append((plugin_id, root))
-    return [root for _, root in sorted(roots, key=lambda item: (item[0], str(item[1])))]
-
-
-def _bounded_subprocess_stdout(
-    command: Sequence[str],
-    *,
-    cwd: Path,
-    env: dict[str, str],
-    timeout: float,
-    max_bytes: int,
-) -> bytes | None:
-    """Capture stdout while bounding combined stdout and stderr in memory."""
-
-    try:
-        process = subprocess.Popen(
-            command,
-            cwd=cwd,
-            env=env,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-    except OSError:
-        logger.info("Unable to start bounded subprocess", exc_info=True)
-        return None
-
-    stdout = bytearray()
-    total_bytes = 0
-    lock = threading.Lock()
-    limit_exceeded = threading.Event()
-
-    def drain(stream, *, collect: bool) -> None:
-        nonlocal total_bytes
         try:
-            while chunk := stream.read(64 * 1024):
-                with lock:
-                    total_bytes += len(chunk)
-                    if collect and len(stdout) <= max_bytes:
-                        remaining = max_bytes + 1 - len(stdout)
-                        stdout.extend(chunk[:remaining])
-                    if total_bytes > max_bytes:
-                        limit_exceeded.set()
-        except (OSError, ValueError):
-            return
+            plugin_root = Path(raw_path).expanduser()
+        except (OSError, TypeError):
+            continue
+        if not plugin_root.is_absolute() or not _path_is_utf8(plugin_root):
+            continue
+        plugin_root = _absolute_path(plugin_root)
+        try:
+            if not plugin_root.is_dir():
+                continue
+        except OSError:
+            continue
 
-    assert process.stdout is not None
-    assert process.stderr is not None
-    streams = (process.stdout, process.stderr)
-    threads = (
-        threading.Thread(target=drain, args=(process.stdout,), kwargs={"collect": True}, daemon=True),
-        threading.Thread(target=drain, args=(process.stderr,), kwargs={"collect": False}, daemon=True),
-    )
-    for thread in threads:
-        thread.start()
+        manifest = _read_bounded_json(
+            plugin_root / ".claude-plugin" / "plugin.json",
+            max_bytes=CLAUDE_PLUGIN_MANIFEST_MAX_BYTES,
+        )
+        if not isinstance(manifest, dict):
+            manifest = {}
+        if not _claude_plugin_record_applies(
+            plugin_id,
+            record,
+            working_directory=working_directory,
+            project_base=project_base,
+            overrides=overrides,
+        ):
+            continue
 
-    deadline = time.monotonic() + timeout
-    timed_out = False
-    while process.poll() is None:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            timed_out = True
-            break
-        if limit_exceeded.wait(min(0.02, remaining)):
-            break
+        enabled = overrides.get(plugin_id)
+        if enabled is None and isinstance(record.get("enabled"), bool):
+            enabled = record["enabled"]
+        if enabled is None:
+            enabled = manifest.get("defaultEnabled") is not False
+        if not enabled:
+            continue
 
-    if (timed_out or limit_exceeded.is_set()) and process.poll() is None:
-        process.kill()
-    try:
-        process.wait(timeout=1)
-    except subprocess.TimeoutExpired:
-        process.kill()
-        process.wait()
+        scope = str(record.get("scope") or "user").strip().lower()
+        selection_key = (
+            scope_ranks.get(scope, 4),
+            str(record.get("lastUpdated") or record.get("installedAt") or ""),
+            str(record.get("version") or ""),
+            str(plugin_root),
+        )
+        current = selected.get(plugin_id)
+        if current is None or (
+            selection_key[0] < current[0][0]
+            or selection_key[0] == current[0][0] and selection_key[1:] > current[0][1][1:]
+        ):
+            selected[plugin_id] = (selection_key, plugin_root, manifest)
 
-    for thread in threads:
-        thread.join(timeout=1)
-    if any(thread.is_alive() for thread in threads):
-        for stream in streams:
-            stream.close()
-        return None
-    if timed_out or limit_exceeded.is_set() or process.returncode != 0:
-        return None
-    return bytes(stdout)
+    roots: list[Path] = []
+    for _, plugin_root, manifest in sorted(selected.values(), key=lambda item: item[0]):
+        roots.extend(_claude_plugin_skill_roots_from_manifest(plugin_root, manifest))
+    return roots
 
 
 def resolve_skills(
@@ -975,7 +1063,11 @@ def resolve_skills(
     builtin_snapshot_id: str | None = None,
     builtin_snapshot_root: str | Path | None = None,
 ) -> list[ManagedSkill]:
-    """Resolve the live Skill catalog using Avibe's v1 precedence rules."""
+    """Resolve the live Skill catalog using Avibe's v1 precedence rules.
+
+    ``claude_cli_path`` remains an accepted compatibility argument for callers
+    that bind backend environments; plugin discovery itself is filesystem-only.
+    """
 
     resolved_home = (
         Path(home).expanduser().resolve()
@@ -1080,7 +1172,7 @@ def resolve_skills(
     for root in _claude_plugin_skill_roots(
         working_directory,
         resolved_claude_home,
-        claude_cli_path,
+        selected_project_base,
     ):
         if compatibility_budget.exhausted:
             break
