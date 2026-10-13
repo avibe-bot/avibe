@@ -715,8 +715,9 @@ def build_chat_payload(
         payload["tool_choice"] = (
             required_only_tool(tools) if route is not None else {"type": "function", "function": {"name": name}}
         )
-    if request.reasoning_effort and request.reasoning_effort.lower() not in {"off", "disabled"}:
-        payload["reasoning_effort"] = _openai_effort(request.reasoning_effort)
+    effort = sent_effort(request.reasoning_effort or "")
+    if effort is not None:
+        payload["reasoning_effort"] = effort
     return payload
 
 
@@ -881,11 +882,12 @@ def _signature_details(signature: str) -> Any:
     return value if isinstance(value, (list, dict)) else None
 
 
-def _openai_effort(value: str) -> str:
-    # Pi preserves extended tiers when the resolved model advertises them;
-    # the loop has already filtered ``reasoning_effort`` through
-    # ModelCapabilities.reasoning_efforts.
-    return value.lower()
+def sent_effort(effort: str) -> str | None:
+    """The token a Chat Completions request carries at ``reasoning_effort``: the effort as given, lower-cased, since the
+    loop sends only an effort the hop declares; None when it is off."""
+
+    value = effort.lower()
+    return None if not value or value in {"off", "disabled"} else value
 
 
 def _uses_completion_tokens(model: str, effort: str | None) -> bool:

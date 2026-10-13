@@ -887,7 +887,7 @@ def build_messages_payload(
     elif effort:
         if _uses_adaptive_thinking(request.endpoint.model_id):
             payload["thinking"] = {"type": "adaptive"}
-            payload["output_config"] = {"effort": _anthropic_effort(effort)}
+            payload["output_config"] = {"effort": sent_effort(request.endpoint.model_id, effort)}
         else:
             # Pi's Anthropic adapter uses legacy budget thinking for Claude
             # 4.5 and older families. The API requires room for the thinking
@@ -1135,8 +1135,19 @@ def _normalize_stop_reason(value: Any) -> str:
     return normalized or "error"
 
 
-def _anthropic_effort(effort: str) -> str:
-    return {"minimal": "low", "xhigh": "max"}.get(effort, effort)
+def sent_effort(model_id: str, effort: str) -> str | None:
+    """The token an Anthropic request carries at ``output_config.effort`` for ``effort`` on ``model_id``; None when it
+    carries none, for an off effort or a model that thinks on a legacy token budget.
+
+    The effort goes as given: the hop declares only the levels its model takes (Model Hub bounds them by the model's
+    catalog row), so ``xhigh`` reaches Opus 4.7 and later natively and never Opus 4.6, which has no such level.
+    ``minimal`` has no Anthropic level and goes as ``low``.
+    """
+
+    value = effort.lower()
+    if not value or value in {"none", "off", "disabled"} or not _uses_adaptive_thinking(model_id):
+        return None
+    return "low" if value == "minimal" else value
 
 
 def _uses_adaptive_thinking(model_id: str) -> bool:
@@ -1152,6 +1163,7 @@ def _uses_adaptive_thinking(model_id: str) -> bool:
             "claude-opus-5",
             "claude-fable-5",
             "claude-mythos-5",
+            "claude-haiku-5",
         )
     )
 
