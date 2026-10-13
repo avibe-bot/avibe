@@ -76,7 +76,7 @@
                 "price": {"unit": "call", "usd_per_1k": 10, "as_of": "2026-10-13", "url": "https://developers.openai.com/api/docs/pricing"}
               },
               "image_generation": {
-                "declaration": {"type": "image_generation", "partial_images": 2}
+                "declaration": {"type": "image_generation", "partial_images": 2, "output_format": "jpeg", "output_compression": 90}
               }
             }
           }
