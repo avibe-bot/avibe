@@ -20,7 +20,8 @@ caller imported, and between tests. It refuses:
   than ``localhost``, so a lookup fails before it queries DNS and the refusal
   names the host rather than the address it would have resolved to. IP
   literals resolve without a query and are left to the connect check;
-- ``socket.gethostbyaddr``, a reverse lookup, of anything but loopback.
+- ``socket.gethostbyaddr``, a reverse lookup, of anything but loopback, an
+  unspecified address included.
 
 Unix sockets and every other address family pass. A refusal raises
 ``NetworkAccessRefused``, an ``OSError``, so the product takes its offline path
@@ -139,8 +140,16 @@ def _refused_target(event: str, args: tuple) -> str | None:
 
     if event in _LOOKUP_EVENTS:
         host = _host_text(args[0])
-        # A forward lookup of an IP literal sends no query; a reverse one does.
-        if not host or not _is_remote(host) or (_ip(host) is not None and event != "socket.gethostbyaddr"):
+        if not host:
+            return None
+        ip = _ip(host)
+        if event == "socket.gethostbyaddr":
+            # A reverse lookup asks DNS about any address but loopback, an unspecified one included.
+            local = ip.is_loopback if ip is not None else _is_local_name(host)
+        else:
+            # A forward lookup of an IP literal sends no query.
+            local = ip is not None or _is_local_name(host)
+        if local:
             return None
         return f"{host}:{args[1]}" if event == "socket.getaddrinfo" and args[1] is not None else host
     sock, address = args[0], args[-1]

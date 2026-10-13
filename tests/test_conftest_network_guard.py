@@ -202,6 +202,13 @@ def test_only_loopback_and_unspecified_addresses_are_reachable(address: tuple[st
         sock.close()
 
 
+@pytest.mark.parametrize("address", ["0.0.0.0", "::", "203.0.113.16", "refused-reverse.invalid"])
+def test_a_reverse_lookup_past_loopback_is_refused(address: str) -> None:
+    with pytest.raises(network_guard.NetworkAccessRefused, match="socket.gethostbyaddr"):
+        socket.gethostbyaddr(address)
+    assert len(network_guard.take_refusals()) == 1
+
+
 def test_a_forward_lookup_of_an_address_sends_no_query_and_passes() -> None:
     assert socket.getaddrinfo("203.0.113.13", 443, type=socket.SOCK_STREAM)[0][4][:2] == ("203.0.113.13", 443)
 
