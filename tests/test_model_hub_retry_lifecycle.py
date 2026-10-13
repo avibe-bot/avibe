@@ -919,7 +919,20 @@ def test_slow_stream_resolution_keeps_claude_connected(monkeypatch, tmp_path, ba
     asyncio.run(run())
 
 
-IDLE_BOUNDED_STALLS = ("before_headers", "before_output", "after_output", "heartbeat")
+def _large_output(protocol: str) -> bytes:
+    """One model-output frame carrying 1 MiB of text in the protocol's shape."""
+
+    text = "x" * (1 << 20)
+    if protocol == "anthropic":
+        payload = {"type": "content_block_delta", "delta": {"type": "text_delta", "text": text}}
+        return b"event: content_block_delta\ndata: " + json.dumps(payload).encode() + b"\n\n"
+    payload = {"type": "response.output_text.delta", "delta": text}
+    return b"event: response.output_text.delta\ndata: " + json.dumps(payload).encode() + b"\n\n"
+
+
+IDLE_BOUNDED_STALLS = ("before_headers", "before_output", "after_output", "heartbeat", "backpressure")
+# Large enough to fill every buffer between the engine and a caller that stops reading.
+BACKPRESSURE_FRAMES = 24
 
 
 @pytest.mark.parametrize(
@@ -949,7 +962,7 @@ def test_a_silent_engine_stream_is_cancelled_and_retried_at_its_idle_bound(
     gives up. The gateway cancels that engine request at its idle bound: before
     model output it retries without the caller seeing anything; after output it
     ends the stream inside the protocol. Any byte, such as an Anthropic ping,
-    keeps a slow stream alive.
+    keeps a slow stream alive, and a caller that stops reading pauses the bound.
     """
     bound = 0.3
     monkeypatch.setattr(engine_client_module, "_STREAM_IDLE_TIMEOUT_SECONDS", bound)
@@ -959,12 +972,14 @@ def test_a_silent_engine_stream_is_cancelled_and_retried_at_its_idle_bound(
         source = _source("src_silent01", "Silent", vendor=vendor, protocol=source_protocol)
         service, clock, models = configured_service(tmp_path, sources=[source])
         metadata, output, terminal, _buffered = WIRE[protocol]
+        if stall == "backpressure":
+            output = _large_output(protocol) * BACKPRESSURE_FRAMES
         calls: list[dict] = []
         stalled_for: list[float] = []
 
         async def respond(request: web.Request) -> web.StreamResponse:
             calls.append(await request.json())
-            stalls = len(calls) == 1 and stall != "heartbeat"
+            stalls = len(calls) == 1 and stall not in {"heartbeat", "backpressure"}
             started = time.monotonic()
             try:
                 if stalls and stall == "before_headers":
@@ -999,6 +1014,9 @@ def test_a_silent_engine_stream_is_cancelled_and_retried_at_its_idle_bound(
                     async with client.post(
                         url, headers=headers, json={"model": "shared-model", "stream": True},
                     ) as response:
+                        if stall == "backpressure":
+                            # The engine keeps sending while the caller reads nothing.
+                            await asyncio.sleep(bound * 3)
                         return response.status, await response.read()
 
                 # Without the idle bound the stalled engine request never ends.
@@ -1006,7 +1024,7 @@ def test_a_silent_engine_stream_is_cancelled_and_retried_at_its_idle_bound(
                 assert status == 200
             assert adapter._active_transports == 0
 
-        if stall in {"heartbeat", "unbounded"}:
+        if stall in {"heartbeat", "unbounded", "backpressure"}:
             keepalives = b": keep-alive\n\n" * 4 if stall == "heartbeat" else b""
             assert body == metadata + keepalives + output + terminal
             assert len(calls) == 1 and stalled_for == []
