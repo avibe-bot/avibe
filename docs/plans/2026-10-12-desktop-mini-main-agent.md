@@ -477,6 +477,45 @@ sessions.
     binding writes. Older `pet.json` files that contain `binding` must still
     load; ignore the field (persisted-shape rule).
 
+### 10.1 Interim: the mini talks to Vibey (owner decision, 2026-10-13)
+
+Until the `main` type exists, the mini's main agent is a Vibey conversation
+(the built-in Agent, `backend: vibey`).
+
+- **One per person, created on first use.** `POST /api/desktop-mini/session`
+  (Editor) returns the caller's conversation, creating it the first time in
+  their most recently active Project they can chat in. A session needs a
+  Project so it has a Workbench sidebar home and "在 Avibe 中打开" lands on it.
+  It is an ordinary foreground session, so the Workbench shows and manages it
+  like any other. Which session belongs to whom is recorded server-side in
+  `state_meta` (`desktop_mini_session:<principal>`, principal `local` or
+  `remote:<sub>`), never in session metadata a client can write or a fork can
+  copy.
+- **Who the caller is.** The principal comes from the request's authorization
+  context, never from a second lookup that could fall back: a remote context
+  without a subject owns nothing and is refused.
+- **Reuse.** The same session is returned while it is still what creation
+  would produce: active, foreground, a Project the caller can chat in, still on
+  the built-in Agent (a Workbench route change makes it an ordinary chat), which
+  the caller may use. Title, model and effort are the user's to change. An archived session, an archived Project or lost
+  access gets a new one. With no chat Project at all the answer is
+  `409 no_chat_project`, and the mini asks the user to create a Project.
+- **Binding.** The mini binds that session whenever nothing is bound. An
+  existing binding is kept; the switcher offers "和歪比对话" to move to it.
+  A session the mini already bound and then cleared as invalid is not
+  re-bound automatically, so a bad answer cannot loop.
+- **A turn Vibey cannot run is shown.** When the latest exchange ended in a
+  backend failure notice (for example no model source), the main card's
+  subtitle reads "没跑起来：<notice>" (the exchange ends at its foreground
+  terminal row, by the transcript's own rule, so detached completions and
+  replayed failures never decide it), and the detail shows the notice as plain
+  text with "在 Avibe 中处理" when it names a next step. That opens the session,
+  where the Workbench draws "Open Models" for those who manage the instance.
+- **Not in this change.** A live step label ("Ran command", …) for the main
+  card still waits on §11.1; the server already computes `status_label` for
+  the IM status bubble and can expose it later.
+- When `main` lands, this endpoint is replaced by `GET /api/sessions/main`.
+
 ## 11. Backend gaps (not in this delivery; degrade gracefully)
 
 1. **No "current step" text.**
