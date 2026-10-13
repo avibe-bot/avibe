@@ -384,6 +384,13 @@ def test_edit_policy_releases_resident_grant(capfd, monkeypatch):
     assert status == "expired"
 
 
+def test_edit_cas_conflict_preserves_machine_readable_code(capfd, monkeypatch):
+    _create_standard_secret("EDIT_CONFLICT")
+    monkeypatch.setattr(vault_service, "update_secret_metadata", Mock(side_effect=vault_service.SecretConflictError("changed")))
+    assert cli.cmd_vault_edit(_ns(name="EDIT_CONFLICT", description="new")) == 1
+    assert json.loads(capfd.readouterr().err)["code"] == "secret_conflict"
+
+
 def test_edit_metadata_json_rejects_secret_material(capfd):
     _create_standard_secret("EDIT_SAFE")
 
@@ -480,7 +487,11 @@ def test_find_filters_by_query_and_multiple_tags(capfd):
 
 
 @pytest.mark.parametrize("command", ["find", "list"])
-@pytest.mark.parametrize("query,expected_names", [("password", ["LOGIN"]), ("username", ["LOGIN"]), ("hidden_ciphertext", [])])
+@pytest.mark.parametrize("query,expected_names", [
+    ("password", ["LOGIN"]), ("username", ["LOGIN"]),
+    ("LOGIN.password", ["LOGIN"]), ("LOGIN.username", ["LOGIN"]),
+    ("hidden_ciphertext", []),
+])
 def test_value_free_search_matches_field_labels(capfd, command, query, expected_names):
     _create_standard_secret(
         "LOGIN", default_field="password",
@@ -491,6 +502,28 @@ def test_value_free_search_matches_field_labels(capfd, command, query, expected_
     payload = json.loads(capfd.readouterr().out)
     assert [secret["name"] for secret in payload["secrets"]] == expected_names
     assert "hidden_ciphertext" not in json.dumps(payload["secrets"])
+
+
+@pytest.mark.parametrize("command", ["run", "inject"])
+@pytest.mark.parametrize("selector", [{"tag": ["deploy"]}, {"skill": ["deploy"]}])
+def test_corrupt_fields_are_visible_and_selector_delivery_fails_closed(tmp_path, capfd, monkeypatch, command, selector):
+    from vibe import api
+
+    _create_standard_secret("CORRUPT", tags=["deploy", "skill:deploy"])
+    with cli._open_vault_engine().begin() as conn:
+        conn.execute(vault_service.vault_secrets.update().where(vault_service.vault_secrets.c.name == "CORRUPT").values(fields='[{"name":"username"}]'))
+    for lookup in (cli.cmd_vault_find, cli.cmd_vault_list):
+        assert lookup(_ns()) == 0
+        payload = json.loads(capfd.readouterr().out)
+        assert payload["secrets"][0]["fields_state"] == "corrupt"
+        assert payload["secrets"][0]["fields"] == ["value"]
+    deliver = Mock()
+    for mode in ("run", "inject"):
+        monkeypatch.setattr(api, f"avault_deliver_{mode}", deliver)
+    args = _ns(command_argv=["python3", "-c", "pass"], out=str(tmp_path / "unused.env"), format="dotenv", **selector)
+    assert getattr(cli, f"cmd_vault_{command}")(args) == 1
+    assert json.loads(capfd.readouterr().err)["code"] == "fields_corrupt"
+    deliver.assert_not_called()
 
 
 def test_tags_lists_normal_and_skill_tags(capfd):

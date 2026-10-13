@@ -3140,6 +3140,7 @@ def create_vault_agent_binding(payload: dict) -> dict:
         vault_service.InvalidFieldNameError,
         vault_service.FieldNotFoundError,
         vault_service.FieldsNotSupportedError,
+        vault_service.FieldsCorruptError,
     ) as exc:
         raise _vault_field_service_error(exc) from exc
     except vault_service.VaultServiceError as exc:

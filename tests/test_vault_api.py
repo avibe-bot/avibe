@@ -4568,6 +4568,24 @@ def test_every_web_field_error_code_has_english_and_chinese_translations():
     assert translated - generic_codes == set(codes)
 
 
+def test_single_agent_binding_maps_corrupt_extra_fields_to_fields_corrupt(monkeypatch):
+    agent_key = Mock(return_value=TEST_AGENT_PUBKEY)
+    monkeypatch.setattr(api, "avault_agent_pubkey", agent_key)
+    api.create_vault_secret({
+        "name": "CORRUPT_BIND", "protection": "protected",
+        "sealed": {"ciphertext": "ct", "nonce": "nonce", "wrap_meta": "wrap"},
+        "fields": [{"name": "username", "record": "CORRUPT_BIND.username", "sealed": {"ciphertext": "ct-u", "nonce": "nonce-u", "wrap_meta": "wrap-u"}}],
+    })
+    request = api.request_vault_access({"name": "CORRUPT_BIND"})["request"]
+    grant_id = request["card"]["grant_options"][0]["grant_id"]
+    with api._vault_engine().begin() as conn:
+        conn.execute(vault_secrets.update().where(vault_secrets.c.name == "CORRUPT_BIND").values(fields="invalid"))
+    with pytest.raises(api.VaultApiError) as exc:
+        api.create_vault_agent_binding({"name": "CORRUPT_BIND.username", "request_id": request["id"], "grant_id": grant_id})
+    assert (exc.value.status, exc.value.code) == (409, "fields_corrupt")
+    agent_key.assert_not_called()
+
+
 def test_corrupt_fields_return_stable_error_without_disabling_default_reveal():
     api.create_vault_secret({
         "name": "CORRUPT_LOGIN", "protection": "protected",

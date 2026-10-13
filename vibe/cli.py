@@ -8565,6 +8565,7 @@ def _vault_capability_payload(secret: dict) -> dict:
         "protection": secret.get("protection"),
         "default_field": default_field,
         "fields": secret.get("fields") or [default_field],
+        **({"fields_state": "corrupt"} if secret.get("fields_state") == "corrupt" else {}),
         "tags": secret.get("tags") or [],
         "description": secret.get("description"),
         "policy": secret.get("policy") or {},
@@ -8924,6 +8925,9 @@ def cmd_vault_edit(args):
         return 0
     except vault_service.SecretNotFoundError:
         _print_task_error(TaskCliError(f"secret '{args.name}' not found", code="secret_not_found", help_command=help_command))
+        return 1
+    except vault_service.SecretConflictError as exc:
+        _print_task_error(TaskCliError(str(exc), code="secret_conflict", help_command=help_command))
         return 1
     except vault_service.VaultServiceError as exc:
         _print_task_error(TaskCliError(str(exc), code="invalid_metadata", help_command=help_command))

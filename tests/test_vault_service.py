@@ -455,12 +455,14 @@ def test_corrupt_fields_disable_mutations_without_losing_bytes(vault, caplog, ma
         }[malformed]
         conn.execute(vault_secrets.update().where(vault_secrets.c.name == "LOGIN").values(fields=damaged))
         caplog.clear()
-        assert vs.get_secret_meta(conn, "LOGIN")["fields"] == ["value"]
-        assert vs.list_secrets(conn)[0]["default_field"] == "value"
+        meta = vs.get_secret_meta(conn, "LOGIN")
+        assert meta["fields"] == ["value"]
+        assert meta["fields_state"] == "corrupt"
+        assert vs.list_secrets(conn)[0]["fields_state"] == "corrupt"
         get_envelope = vs.get_protected_record_envelope if protection == "protected" else vs.get_envelope
         assert get_envelope(conn, "LOGIN") == _sealed("login")
         assert get_envelope(conn, "LOGIN.value") == _sealed("login")
-        assert any("corrupt" in entry.message.lower() for entry in caplog.records)
+        assert sum("corrupt fields" in entry.message.lower() for entry in caplog.records) == 1
         assert "must-not-disappear" not in caplog.text
         before = dict(conn.execute(select(vault_secrets).where(vault_secrets.c.name == "LOGIN")).mappings().one())
         with pytest.raises(vs.FieldsCorruptError):

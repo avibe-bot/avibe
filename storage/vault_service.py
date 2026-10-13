@@ -22,6 +22,7 @@ import threading
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from functools import lru_cache
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -573,6 +574,12 @@ def _default_field_name(row: dict[str, Any] | None = None, value: Any = None) ->
         return "value"
 
 
+@lru_cache(maxsize=512)
+def _warn_corrupt_fields(name: str, secret_id: str, updated_at: str) -> None:
+    """Bounded warning cache: repeated reads of one damaged revision stay quiet."""
+    logger.warning("Vault secret %s has corrupt fields; extra records and field mutations are unavailable", name)
+
+
 def _extra_field_rows(row: dict[str, Any] | None, *, strict: bool = False) -> list[dict[str, Any]]:
     """Read the complete optional section, never a lossy partial projection.
 
@@ -600,7 +607,7 @@ def _extra_field_rows(row: dict[str, Any] | None, *, strict: bool = False) -> li
         return [dict(item) for item in raw]
     except (TypeError, ValueError, InvalidFieldNameError):
         # Neither malformed serialized values nor exception details are safe to log.
-        logger.warning("Vault secret %s has corrupt fields; extra records and field mutations are unavailable", row.get("name"))
+        _warn_corrupt_fields(str(row.get("name") or ""), str(row.get("id") or ""), str(row.get("updated_at") or ""))
         if strict:
             raise FieldsCorruptError(f"secret {row.get('name')!r} has corrupt fields; existing data was preserved") from None
         return []
@@ -614,7 +621,7 @@ def record_name_for_field(secret_name: str, field_name: str, *, default_field: s
     return secret_name if field_name == default_field else f"{secret_name}.{field_name}"
 
 
-def _record_entries(row: dict[str, Any]) -> list[dict[str, Any]]:
+def _record_entries(row: dict[str, Any], *, strict: bool = False) -> list[dict[str, Any]]:
     default_field = _default_field_name(row)
     entries = [
         {
@@ -625,7 +632,7 @@ def _record_entries(row: dict[str, Any]) -> list[dict[str, Any]]:
             "protection": row.get("protection"),
         }
     ]
-    for field in _extra_field_rows(row, strict=False):
+    for field in _extra_field_rows(row, strict=strict):
         entries.append(
             {
                 "name": record_name_for_field(str(row["name"]), str(field["name"]), default_field=default_field),
@@ -932,7 +939,7 @@ def _meta_payload(row: dict[str, Any]) -> dict[str, Any]:
     kind = row.get("kind")
     protection = row.get("protection")
     payload = {
-        "name": row["name"],
+        **_field_metadata(row),
         "tags": _row_tags(row),
         "kind": kind,
         "protection": protection,
@@ -940,8 +947,6 @@ def _meta_payload(row: dict[str, Any]) -> dict[str, Any]:
         "source": row.get("source"),
         "access_grantable": _secret_agent_access_grantable(row),
         "per_use_sign": _secret_agent_per_use_signable(row),
-        "default_field": _default_field_name(row),
-        "fields": secret_field_names(row),
         "description": public_meta.get("description"),
         # Policy is non-secret (allowed hosts, auth scheme name) — safe to surface.
         "policy": _loads(row.get("policy")) or {},
@@ -1266,7 +1271,13 @@ def _unique_grant_release_refs(rows: list[dict[str, Any]]) -> list[dict[str, str
 
 
 def _field_metadata(row: dict[str, Any]) -> dict[str, Any]:
-    return {"name": str(row["name"]), "default_field": _default_field_name(row), "fields": secret_field_names(row)}
+    default_field = _default_field_name(row)
+    payload = {"name": str(row["name"]), "default_field": default_field, "fields": [default_field]}
+    try:
+        payload["fields"].extend(item["name"] for item in _extra_field_rows(row, strict=True))
+    except FieldsCorruptError:
+        payload["fields_state"] = "corrupt"
+    return payload
 
 
 def _hydrate_card_unlock_material(conn: Connection, row: dict[str, Any], card: dict[str, Any]) -> dict[str, Any]:
@@ -1673,6 +1684,15 @@ def _build_request_callback_message(row: dict[str, Any]) -> str:
     if status in {"approved", "fulfilled"}:
         if request_type == "provision":
             usage = f" You can use it, e.g. `vibe vault run --env {name} -- <command>`." if name else ""
+            current = row.get("provision_secret")
+            if name and isinstance(current, dict) and current.get("fields"):
+                fields = current["fields"]
+                labels = ", ".join(str(field) for field in fields)
+                usage += f" Current fields: {labels}. Select a field with `vibe vault run --env {name}.{fields[-1]} -- <command>`."
+                if current.get("fields_state") == "corrupt":
+                    usage += " Extra fields are unavailable because their stored metadata is corrupt."
+                else:
+                    usage += " Tag and skill selectors deliver every field."
             return f"The user provided your {subject}; the secret is now available.{usage} Continue the task."
         if request_type == "access":
             return f"The user approved your {subject}; the grant is ready. Continue the task."
@@ -1820,8 +1840,24 @@ def list_pending_request_callbacks(
     query = query.order_by(vault_requests.c.decided_at, vault_requests.c.id)
     if limit is not None:
         query = query.limit(limit)
-    rows = conn.execute(query).mappings()
-    return [dict(row) for row in rows]
+    rows = [dict(row) for row in conn.execute(query).mappings()]
+    for row in rows:
+        if row.get("request_type") != "provision" or row.get("status") != "fulfilled":
+            continue
+        _, delivery = _request_json_payloads(row)
+        spec = delivery.get("spec") if isinstance(delivery, dict) else None
+        if not isinstance(spec, dict) or not spec.get("fields"):
+            continue
+        # Transient callback projection: use the user's actual current fields,
+        # never the requested hints and never any envelope/value material.
+        secret = conn.execute(
+            select(vault_secrets.c.name, vault_secrets.c.kind, vault_secrets.c.id,
+                   vault_secrets.c.public_meta, vault_secrets.c.fields, vault_secrets.c.updated_at)
+            .where(vault_secrets.c.name == row.get("secret_name"))
+        ).mappings().first()
+        if secret is not None:
+            row["provision_secret"] = _field_metadata(dict(secret))
+    return rows
 
 
 def mark_request_callback(conn: Connection, request_id: str, *, status: str) -> None:
@@ -3050,6 +3086,8 @@ def _searchable_secret_text(secret: dict[str, Any]) -> str:
         secret.get("tags"),
         secret.get("default_field"),
         secret.get("fields"),
+        secret_record_names(secret),
+        f"{secret.get('name')}.{secret.get('default_field') or 'value'}",
     ]
     policy = secret.get("policy")
     if isinstance(policy, dict):
@@ -3775,7 +3813,8 @@ def expand_value_delivery_selector(
             if normalized in _row_tags(dict(row))
         ]
         for row in rows:
-            for entry in _record_entries(row):
+            _require_secret_resource_access(conn, row, context)
+            for entry in _record_entries(row, strict=True):
                 field = str(entry["field"])
                 env_name = str(row["name"]) if entry["name"] == row["name"] else f"{row['name']}_{field.upper()}"
                 add_selection(row, entry, env_name)

@@ -128,6 +128,28 @@ def test_provision_fulfill_arms_callback(vault):
         assert plan is not None and "provided" in plan.message.lower()
 
 
+def test_field_provision_callback_reports_current_value_free_fields(vault):
+    with vault.begin() as conn:
+        req = vs.create_provision_request(
+            conn, "LOGIN", requester={"session_id": "ses_p"},
+            spec={"fields": ["username", "password", "totp"], "default_field": "password"},
+        )
+        vs.create_secret(
+            conn, name="LOGIN", default_field="password", sealed=_sealed("do-not-show-default"),
+            fields=[{"name": "username", "sealed": _sealed("do-not-show-extra")}],
+        )
+        vs.update_secret_metadata(conn, "LOGIN", default_field="credential")
+        pending = next(row for row in vs.list_pending_request_callbacks(conn) if row["id"] == req["id"])
+        plan = vs.resolve_request_callback(pending)
+        assert plan is not None
+        assert "credential" in plan.message and "username" in plan.message
+        assert "LOGIN.username" in plan.message or "LOGIN.credential" in plan.message
+        assert "--env" in plan.message
+        assert "totp" not in plan.message and "password" not in plan.message
+        assert "do-not-show" not in plan.message
+        assert "ciphertext" not in plan.message
+
+
 def test_expiry_arms_callback(vault):
     past = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
     with vault.begin() as conn:
