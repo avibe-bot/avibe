@@ -4,7 +4,7 @@
 // native and a proxied call draw the same card from the same record.
 import * as React from 'react';
 import { useTranslation } from 'react-i18next';
-import { AtSign, Check, ChevronRight, Download, FileImage, Globe, Image as ImageIcon, TriangleAlert, Waypoints, WandSparkles } from 'lucide-react';
+import { AtSign, Check, ChevronRight, CircleSlash, Download, FileImage, Globe, Image as ImageIcon, TriangleAlert, Waypoints, WandSparkles } from 'lucide-react';
 import clsx from 'clsx';
 
 import { ChatImage } from '../ui/chat-image';
@@ -62,6 +62,15 @@ export const HostedModeChip: React.FC<{ card: HostedActivity }> = ({ card }) => 
       <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-destructive/40 bg-destructive/10 px-2 py-px text-[11px] font-medium text-destructive-ink">
         <TriangleAlert className="size-3" aria-hidden="true" />
         {t(`chat.agentActivity.hosted.status.${card.status}`)}
+      </span>
+    );
+  }
+  if (card.status === 'pending') {
+    // Cut off with its turn: it never finished, so it claims no way of having run.
+    return (
+      <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-gold/40 bg-gold/10 px-2 py-px text-[11px] font-medium text-gold-ink">
+        <CircleSlash className="size-3" aria-hidden="true" />
+        {t('chat.agentActivity.hosted.status.pending')}
       </span>
     );
   }

@@ -99,6 +99,13 @@ describe('hosted tool cards', () => {
     within(figure).getByText(fixture.native_image.revised_prompt);
   });
 
+  it('shows a call cut off with its turn as cut off, never as having run', () => {
+    renderGroup([{ ...fixture.native_web_search, status: 'pending', cost: undefined }]);
+    const pending = row('srvtoolu_01');
+    within(pending).getByText('Cut off');
+    expect(within(pending).queryByText('Native · Anthropic')).toBeNull();
+  });
+
   it('keeps the plain tool line for a row whose card this client cannot read', () => {
     renderGroup([{ ...fixture.native_web_search, version: 2 }]);
     expect(document.querySelector('[data-hosted-call]')).toBeNull();

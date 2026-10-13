@@ -3414,3 +3414,67 @@ async def test_a_proxied_hosted_result_shows_once_its_result_is_committed(engine
 
     assert harness.controller.im_client.sent == ["🔎 X search “from:OpenAI” · via xAI proxy · 1 post · $0.11"]
 
+
+async def test_generated_images_reach_the_user_when_no_final_reply_follows(engine, session, tmp_path, published) -> None:
+    """A paid image is delivered even when the run fails before a final reply could carry it."""
+    from core.agent_core.ai.provider import ProviderError
+
+    image = tmp_path / "image-orphan.png"
+    image.write_bytes(b"\x89PNG\r\n\x1a\nimage")
+    generated = AssistantMessage(
+        (
+            HostedToolBlock(
+                id="ig_1",
+                tool="image_generation",
+                action=HostedAction(type="generate", prompt="a laptop at night"),
+                record=HostedRecord(status="completed", images=(HostedImage(path=str(image), mime="image/png"),)),
+                native=HostedNative(source_id="src_testsrc1", payload=({"type": "image_generation_call"},)),
+            ),
+            ToolCallBlock(id="call_1", name="echo", arguments={}),
+        ),
+        ORIGIN,
+        "tool_use",
+        hosted_summary=HostedSummary(),
+    )
+    harness = _Harness(
+        engine, tmp_path, "telegram",
+        [[Done(generated)], [ProviderError("invalid_request", "the served response broke its protocol", False)]],
+    )
+
+    await harness.agent.handle_message(harness.request("draw it, then summarize"))
+
+    assert harness.controller.im_client.uploads == [str(image)]
+    assert harness.controller.terminals[-1]["is_error"] is True
+
+
+def test_an_image_is_attached_unless_the_reply_already_links_it(tmp_path) -> None:
+    """A prose mention of the path is not a delivered file; a relative path names no file to send."""
+    from modules.agents.vibey.agent import _Run, VibeyAgent
+
+    image = tmp_path / "image-3f2a.png"
+    run = _Run(request=None, session_id=SESSION, turn_id="turn", instance="test")
+    run.hosted_images = [("relative.png", "relative.png"), (str(image), image.name)]
+
+    assert VibeyAgent._hosted_image_links(run, f"Saved it to {image}.") == f"![{image.name}]({image.as_uri()})"
+    assert VibeyAgent._hosted_image_links(run, f"Here: ![night]({image.as_uri()})") == ""
+
+
+async def test_a_hosted_named_call_without_a_record_still_shows_its_tool_line(engine, session, tmp_path, published) -> None:
+    """A hosted tool that failed before producing a record (a plain error result) is not silently dropped."""
+    from modules.agents.vibey.agent import _Run
+
+    harness = _Harness(engine, tmp_path, "telegram", [])
+    request = harness.request("search X")
+    call = ToolCallBlock(id="call_x1", name="x_search", arguments={"query": "from:OpenAI"})
+    entry = await harness.agent.store.append_tool_result(
+        SESSION,
+        ToolResultMessage(tool_call_id="call_x1", tool_name="x_search", content=(text("not available"),), is_error=True),
+        details={},
+    )
+    run = _Run(request=request, session_id=SESSION, turn_id="turn", instance="test")
+    run.tool_calls[call.id] = call
+
+    await harness.agent._on_event(run, ToolFinished("turn", 1, call.id, entry.row_id, True))
+
+    assert harness.controller.im_client.sent == ['🔧 x_search {"query": "from:OpenAI"}']
+

@@ -206,6 +206,11 @@ def _emit_micros(row_id: Optional[str], ts: datetime) -> int:
 
 def _event_emit_micros(event: dict[str, Any], ts: datetime) -> int:
     metadata = event.get("metadata") or {}
+    # A native hosted call is written after the response row that carried it, but
+    # happened before that response's text: it sorts just ahead of that row.
+    precedes = metadata.get("precedes_message_id")
+    if isinstance(precedes, str) and precedes:
+        return _emit_micros(precedes, ts) - 1
     legacy_message_id = metadata.get("legacy_message_id")
     return _emit_micros(
         str(legacy_message_id) if legacy_message_id else event.get("id"),

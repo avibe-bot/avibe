@@ -1676,7 +1676,9 @@ def test_a_hosted_card_rides_on_its_toolcall_row_and_its_image_joins_the_answer(
         platform_specific={"agent_session_id": "ses_hosted"},
     )
 
-    persist_agent_message(ctx, "toolcall", "🖼 Image generation · 1 image", hosted=_hosted_card(str(image)))
+    persist_agent_message(
+        ctx, "toolcall", "🖼 Image generation · 1 image", hosted={**_hosted_card(str(image)), "response_id": "msg_response"}
+    )
     persist_agent_message(ctx, "result", f"Done.\n\n![a laptop]({image.as_uri()})")
 
     with engine.connect() as conn:
@@ -1693,6 +1695,8 @@ def test_a_hosted_card_rides_on_its_toolcall_row_and_its_image_joins_the_answer(
     assert token.startswith("/api/media/")
     assert token in answer["content_text"]
     assert event["content_text"] == "🖼 Image generation · 1 image"
+    # Ordered before the response that carried it (``agent_activity_service``).
+    assert json.loads(event["metadata_json"])["precedes_message_id"] == "msg_response"
 
 
 def test_an_im_hosted_card_keeps_its_file_paths(isolated_state, tmp_path):

@@ -705,6 +705,9 @@ class VibeyAgent(BaseAgent):
                     context, "result", "", level="silent", output=terminal_output_for(request)
                 )
             return
+        # Generated images are paid for and already announced: they reach the user
+        # whether or not a final reply follows.
+        await self._emit_orphan_images(run)
         if run.stop_requested and reason == "aborted":
             # The stop receipt IM shows, as for the other backends.
             await self._remove_ack_reaction(request, terminal_emoji=STOPPED_REACTION_EMOJI)
@@ -1222,16 +1225,45 @@ class VibeyAgent(BaseAgent):
         attachment, and the Web shows it inline from the same media token its card
         registered. An image the reply already links is not attached twice.
         """
+        links = self._hosted_image_links(run, body)
+        if not links:
+            return body
+        return "\n\n".join(part for part in (body.rstrip(), links) if part)
+
+    @staticmethod
+    def _hosted_image_links(run: _Run, body: str) -> str:
+        """File links for the run's images that ``body`` does not already link.
+
+        Only a link counts: the model is given each image's path as text, and a
+        reply that mentions it in prose has still not delivered the file. A path
+        that is not absolute names no file a surface could send, so it is skipped.
+        """
         links = []
         for path, label in run.hosted_images:
+            if not os.path.isabs(path):
+                logger.warning("Vibey skipped a hosted image with a relative path: %s", path)
+                continue
             uri = Path(path).as_uri()
-            if uri in body or path in body:
+            if f"]({uri})" in body:
                 continue
             safe = label.replace("[", "(").replace("]", ")")
             links.append(f"![{safe}]({uri})")
+        return "\n\n".join(links)
+
+    async def _emit_orphan_images(self, run: _Run) -> None:
+        """A run's generated images when it ends with no final reply to carry them."""
+        links = self._hosted_image_links(run, "")
         if not links:
-            return body
-        return "\n\n".join(part for part in (body.rstrip(), "\n\n".join(links)) if part)
+            return
+        try:
+            await self.controller.emit_agent_message(
+                run.request.context,
+                "output",
+                links,
+                output=MessageOutput(completes_turn=False, completes_run=False, records_run_output=False),
+            )
+        except Exception:
+            logger.exception("Vibey could not deliver %d generated image(s)", len(run.hosted_images))
 
     def _source_name(self, source_id: str) -> Optional[str]:
         hub = getattr(self.config, "model_hub", None)
@@ -1256,7 +1288,7 @@ class VibeyAgent(BaseAgent):
         message = run.responses.get(row_id)
         if message is None:
             return
-        for activity in native_activities(message, source_names=self._source_name):
+        for activity in native_activities(message, source_names=self._source_name, response_id=row_id):
             await self._emit_hosted(run, activity)
 
     async def _emit_proxy_hosted(self, run: _Run, event: ToolFinished) -> None:
@@ -1269,8 +1301,11 @@ class VibeyAgent(BaseAgent):
             result = await asyncio.to_thread(self._committed_tool_result, event.event_id)
         except Exception:
             logger.exception("Vibey could not read hosted result %s", event.event_id)
-            return
+            result = None
         if result is None or result.hosted is None:
+            # A hosted-named call that ended without a record (a plain error result):
+            # it still shows, as the tool line its start would have drawn.
+            await self._emit_tool_line(run, call.name, dict(call.arguments))
             return
         duration = int((time.monotonic() - started) * 1000) if started is not None else None
         await self._emit_hosted(
@@ -1291,18 +1326,20 @@ class VibeyAgent(BaseAgent):
             # A proxied hosted call shows once, as its card, when its result lands.
             return
         call = run.tool_calls.get(event.tool_call_id)
-        arguments = dict(call.arguments) if call is not None else {}
+        await self._emit_tool_line(run, event.name, dict(call.arguments) if call is not None else {})
+
+    async def _emit_tool_line(self, run: _Run, name: str, arguments: dict) -> None:
         formatter = self._get_formatter(run.request.context)
         relative = _relative_to(run.cwd)
         try:
             await self.controller.emit_agent_message(
                 run.request.context,
                 "toolcall",
-                formatter.format_toolcall(event.name, arguments, get_relative_path=relative),
-                status_label=formatter.format_toolcall_label(event.name, arguments, get_relative_path=relative),
+                formatter.format_toolcall(name, arguments, get_relative_path=relative),
+                status_label=formatter.format_toolcall_label(name, arguments, get_relative_path=relative),
             )
         except Exception:
-            logger.exception("Vibey could not show tool %s", event.name)
+            logger.exception("Vibey could not show tool %s", name)
 
     def _on_response(self, session_id: str, row_id: str, message: AssistantMessage) -> None:
         """A response committed for the Session's run: keep what its delivery and tool events need."""

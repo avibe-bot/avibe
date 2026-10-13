@@ -438,7 +438,16 @@ def persist_agent_message(
                             else {}
                         ),
                     },
-                    metadata={"canonical_type": canonical_type or "tool_call"},
+                    metadata={
+                        "canonical_type": canonical_type or "tool_call",
+                        # A native hosted call happened before the text of the response that
+                        # carried it, though it is emitted after that row commits.
+                        **(
+                            {"precedes_message_id": hosted["response_id"]}
+                            if hosted and isinstance(hosted.get("response_id"), str)
+                            else {}
+                        ),
+                    },
                     agent_name=agent_name,
                     backend=backend,
                     turn_id=turn_id,

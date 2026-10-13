@@ -72,6 +72,9 @@ class HostedActivity:
     # How many calls ``cost`` covers: a native response's figure is for all its calls.
     cost_calls: int
     duration_ms: Optional[int] = None
+    # The committed response row a native call came in. Its card is ordered just
+    # before that row, as the call happened before the text that reads its result.
+    response_id: Optional[str] = None
 
     def to_payload(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -95,6 +98,7 @@ class HostedActivity:
             "quality": self.quality,
             "revised_prompt": self.revised_prompt,
             "duration_ms": self.duration_ms,
+            "response_id": self.response_id,
         }
         payload.update({key: value for key, value in optional.items() if value is not None})
         if self.extra_queries:
@@ -139,6 +143,7 @@ def native_activities(
     message: AssistantMessage,
     *,
     source_names: SourceNames = _no_names,
+    response_id: Optional[str] = None,
 ) -> list[HostedActivity]:
     """Every native hosted call in a response, in content order.
 
@@ -188,6 +193,7 @@ def native_activities(
                 revised_prompt=block.action.prompt if block.action.type == "generate" else None,
                 cost=summary.cost if last and summary is not None else None,
                 cost_calls=len(blocks),
+                response_id=response_id,
             )
         )
     return activities
