@@ -2895,19 +2895,27 @@ def delete_secret(
     context = resolve_resource_access_context(user_context)
     row = _require_secret_resource_management(conn, _require_row(conn, name), context)
     audit_snapshot = _build_audit_access_snapshot(conn, [name])
-    # A direct delete also satisfies an Agent's outstanding delete request. Claim
-    # these before removing the ACL resource so their audits retain its snapshot.
+    # Claim the rows with a portable SELECT + UPDATE pair. Do not use DML RETURNING:
+    # Avibe supports Python versions whose system SQLite may predate SQLite 3.35.
     fulfilled_ids = conn.execute(
-        vault_requests.update()
+        select(vault_requests.c.id)
         .where(
             vault_requests.c.request_type == "delete",
             vault_requests.c.secret_name == name,
             vault_requests.c.status == "pending",
         )
-        .values(status="fulfilled", decided_at=_now(), callback_status="pending")
-        .returning(vault_requests.c.id)
     ).scalars().all()
+    decided_at = _now()
+    claimed_ids: list[str] = []
     for request_id in fulfilled_ids:
+        result = conn.execute(
+            vault_requests.update()
+            .where(vault_requests.c.id == request_id, vault_requests.c.status == "pending")
+            .values(status="fulfilled", decided_at=decided_at, callback_status="pending")
+        )
+        if result.rowcount == 1:
+            claimed_ids.append(str(request_id))
+    for request_id in claimed_ids:
         audit(conn, "delete-fulfilled", secret_name=name, request_id=request_id, access_snapshot=audit_snapshot)
     _expire_pending_requests_for_secret(conn, name, reason="request-expired-envelope-changed")
     _expire_active_grants_for_secret(conn, name, cache=cache, reason="grant-expired-envelope-changed")

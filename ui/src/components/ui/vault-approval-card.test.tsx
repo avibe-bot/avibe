@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { createInstance } from 'i18next';
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, act, within } from '@testing-library/react';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -79,6 +79,11 @@ const deleteRequest = {
     session_id: 'ses_delete',
     reason: 'rotated',
   },
+} satisfies VaultRequest;
+
+const protectedDeleteRequest = {
+  ...deleteRequest,
+  card: { ...deleteRequest.card, protection: 'protected' },
 } satisfies VaultRequest;
 
 // The batch endpoint's reply for one issue; each issue carries its own approval nonce.
@@ -231,6 +236,25 @@ describe('VaultApprovalCard protected access approval', () => {
 
     await vi.waitFor(() => expect(vault.approveProtectedRelease).toHaveBeenCalledOnce());
     expect(vault.approveProtectedRelease.mock.calls[0][0].map((item: { context: unknown }) => item.context)).toEqual([{ issuedFor: 300 }]);
+  });
+
+  it('keeps the destructive confirmation open and shows an approval failure', async () => {
+    api.approveVaultDeleteRequest.mockResolvedValue({ ok: false, message: 'Delete failed' });
+    render(
+      <I18nextProvider i18n={i18n}>
+        <VaultApprovalCard request={protectedDeleteRequest} onResolved={vi.fn()} onCancel={vi.fn()} />
+      </I18nextProvider>,
+    );
+
+    fireEvent.click(screen.getAllByRole('button', { name: /^delete$/i })[0]);
+    await vi.waitFor(() => expect(screen.getByRole('button', { name: /^delete \(/i })).toBeTruthy());
+    act(() => vi.advanceTimersByTime(5_000));
+    const confirmButton = screen.getByRole('button', { name: /^delete(?: \(\d+\))?$/i });
+    await vi.waitFor(() => expect(confirmButton.disabled).toBe(false));
+    fireEvent.click(confirmButton);
+
+    await vi.waitFor(() => expect(within(screen.getByRole('dialog', { name: /Delete "OLD_TOKEN"/i })).getByText('Delete failed')).toBeTruthy());
+    expect(screen.getByRole('button', { name: /^delete$/i })).toBeTruthy();
   });
 
   it('renders and approves a standard delete request in one click', async () => {

@@ -701,6 +701,11 @@ export const VaultApprovalCard: React.FC<{
         holdSeconds={deleteNeedsHold ? 5 : 0}
         onConfirm={approveDelete}
       >
+        {error ? (
+          <div className="mb-3 rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive-ink">
+            {error}
+          </div>
+        ) : null}
         {isKeypair ? (
           <div className="flex flex-col gap-2 rounded-[10px] border border-destructive/30 bg-destructive/5 px-3 py-2.5 text-[12.5px] leading-snug text-foreground">
             <span className="flex items-start gap-2"><AlertTriangle className="mt-0.5 size-4 shrink-0 text-destructive-ink" /><span>{t('vaults.deleteDialog.keypairIrreversible')}</span></span>
