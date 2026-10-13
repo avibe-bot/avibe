@@ -595,15 +595,36 @@ def bundled_catalog_reasoning_efforts_for_model(
     return bundled_catalog_reasoning_efforts_by_model().get(model_id)
 
 
-def without_client_presets(model_ids: Sequence[str], efforts: Sequence[str]) -> list[str]:
+@functools.lru_cache(maxsize=4)
+def _bundled_client_presets(path: str) -> Mapping[str, tuple[str, ...]]:
+    catalog = _read_catalog(Path(path))
+    # An unreadable bundle has no presets, like a model without a row.
+    return _bundled_catalog_lists_by_model("client_presets", catalog or {})
+
+
+def bundled_client_presets_once() -> Mapping[str, tuple[str, ...]]:
+    """The bundled client-preset index, read once per process.
+
+    The bundled file never changes while a process runs, and config loading and
+    cloning (on the controller loop) consult this index, so it must cost no I/O
+    after the first read. Keyed by path, so a different bundle is its own entry.
+    """
+
+    return _bundled_client_presets(str(get_bundled_catalog_path()))
+
+
+def without_client_presets(
+    model_ids: Sequence[str], efforts: Sequence[str], *, keep: Iterable[str] = ()
+) -> list[str]:
     """Efforts as a wire client may send them: without any listed model's client presets.
 
     Vibey is not the client a preset belongs to, so a preset is never one of its
-    tiers, whatever wrote the list it reads (#2539).
+    tiers (#2539). ``keep`` names efforts a Source itself declares as wire tiers,
+    which stay even when they share a preset's spelling.
     """
 
-    presets = bundled_catalog_client_presets_by_model()
-    dropped = {preset for model_id in model_ids for preset in presets.get(model_id, ())}
+    presets = bundled_client_presets_once()
+    dropped = {preset for model_id in model_ids for preset in presets.get(model_id, ())} - set(keep)
     return [effort for effort in efforts if effort not in dropped]
 
 

@@ -1216,7 +1216,6 @@ class ModelHubService:
         self._runtime_lifecycle_lock = asyncio.Lock()
         self._runtime_resume_task: asyncio.Task[None] | None = None
         self._background_discovery_task: asyncio.Task[None] | None = None
-        self._evidence_load_task: asyncio.Task[Any] | None = None
         self._background_discovery_stop: asyncio.Event | None = None
         # Process-local schedule state: an unchanged listing persists nothing,
         # and a restart rediscovers stale Sources one tick after startup.
@@ -4476,17 +4475,7 @@ class ModelHubService:
             }
 
     def start_background_discovery(self) -> None:
-        """Keep Hub Source inventories current until `stop()` retires the schedule.
-
-        It also loads the capability evidence once, off the loop, so the chain
-        reads and launches that run on the loop afterwards find it in memory.
-        """
-
-        if self._evidence_load_task is None:
-            self._evidence_load_task = asyncio.create_task(
-                asyncio.to_thread(self.capability_evidence.records),
-                name="model-hub-capability-evidence-load",
-            )
+        """Keep Hub Source inventories current until `stop()` retires the schedule."""
 
         task = self._background_discovery_task
         if task is not None and not task.done():
@@ -5823,9 +5812,7 @@ class ModelHubService:
         feature = EvidenceFeature.effort_or_none(wire_effort(request, getattr(request, "protocol", "")))
         if feature is None:
             return False
-        if not self.capability_evidence.loaded:
-            await asyncio.to_thread(self.capability_evidence.records)
-        # Lock-free after the load: published snapshots are immutable.
+        # Memory-only and lock-free: the store read its file at startup.
         view = self.capability_evidence.view(
             source,
             model_id,

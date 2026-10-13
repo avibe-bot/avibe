@@ -156,8 +156,8 @@ def test_image_generation_has_no_replay_evidence():
         EvidenceFeature.hosted("image_generation", "replay")
 
 
-def test_lookups_after_the_first_read_never_touch_the_disk(tmp_path, monkeypatch):
-    """MH-HOSTED-003: the request path reads evidence from memory, never from the file."""
+def test_lookups_after_construction_never_touch_the_disk(tmp_path, monkeypatch):
+    """MH-HOSTED-003: the store reads its file when built at startup; no lookup or write reads it again."""
     path = tmp_path / "model_hub_capability_evidence.json"
     source = _source()
     CapabilityEvidenceStore(path).write(_record(source, CALL), live=[source])

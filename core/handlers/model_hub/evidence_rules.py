@@ -68,7 +68,8 @@ def learn(
     """The one feature this rejection names for this request, if any."""
 
     effort = EvidenceFeature.effort_or_none(wire_effort(request, request_protocol))
-    if effort is not None and (
+    names_effort_field = rejection.param is None or rejection.param in _EFFORT_PARAMS
+    if effort is not None and names_effort_field and (
         rejection.invalid_value == effort.name
         or (
             rejection.invalid_value is None

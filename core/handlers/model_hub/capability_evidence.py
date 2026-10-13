@@ -224,40 +224,33 @@ class CapabilityEvidenceStore:
 
     Small: bounded by Sources x models x features. The controller is the only
     writer (probes and the classifier both run there; other processes reach it
-    over RPC), so the file is read once and memory is authoritative afterwards.
-    Lookups on the request path therefore never touch the disk.
+    over RPC), so the file is read once, when the store is built at controller
+    startup, and memory is authoritative afterwards. No lookup ever touches the
+    disk, so none can block the loop.
     """
 
     def __init__(self, path: Path, *, max_records: int = MAX_RECORDS):
         self.path = path
         self.max_records = max_records
         self._lock = threading.RLock()
-        self._records: dict[tuple, EvidenceRecord] | None = None
+        self._records: dict[tuple, EvidenceRecord] = {}
         self._by_hop: dict[tuple[str, str], list[EvidenceRecord]] = {}
+        self._remember(self._read_file())
 
-    def _loaded(self) -> dict[tuple, EvidenceRecord]:
-        # Published snapshots are never mutated, so a reader that finds one needs
-        # no lock: a write builds the next snapshot and swaps both references.
-        records = self._records
-        if records is not None:
-            return records
-        with self._lock:
-            if self._records is not None:
-                return self._records
+    def _read_file(self) -> dict[tuple, EvidenceRecord]:
+        try:
+            payload = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            payload = []
+        records: dict[tuple, EvidenceRecord] = {}
+        for item in payload if isinstance(payload, list) else []:
             try:
-                payload = json.loads(self.path.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                payload = []
-            records: dict[tuple, EvidenceRecord] = {}
-            for item in payload if isinstance(payload, list) else []:
-                try:
-                    record = EvidenceRecord.from_payload(item)
-                except (TypeError, ValueError):
-                    # An unreadable record is unknown, never negative.
-                    continue
-                records[record.key] = record
-            self._remember(records)
-        return self._records
+                record = EvidenceRecord.from_payload(item)
+            except (TypeError, ValueError):
+                # An unreadable record is unknown, never negative.
+                continue
+            records[record.key] = record
+        return records
 
     def _remember(self, records: dict[tuple, EvidenceRecord]) -> None:
         by_hop: dict[tuple[str, str], list[EvidenceRecord]] = {}
@@ -267,14 +260,10 @@ class CapabilityEvidenceStore:
         self._by_hop = by_hop
         self._records = records
 
-    @property
-    def loaded(self) -> bool:
-        """Whether lookups are memory-only now; until then the first one reads the file."""
-
-        return self._records is not None
-
     def get(self, source_id: str, model_id: str, feature: EvidenceFeature) -> Optional[EvidenceRecord]:
-        return self._loaded().get((source_id, model_id, feature.kind, feature.name, feature.aspect or ""))
+        # Published snapshots are never mutated, so a reader needs no lock: a
+        # write builds the next snapshot and swaps the references.
+        return self._records.get((source_id, model_id, feature.kind, feature.name, feature.aspect or ""))
 
     def view(
         self,
@@ -289,12 +278,11 @@ class CapabilityEvidenceStore:
         return resolve(self.get(source.id, model_id, feature), source=source, engine=engine, shape=shape, now=now)
 
     def records(self) -> list[EvidenceRecord]:
-        return list(self._loaded().values())
+        return list(self._records.values())
 
     def for_hop(self, source_id: str, model_id: str) -> list[EvidenceRecord]:
         """Every record of one (Source, model), without scanning the others."""
 
-        self._loaded()
         return list(self._by_hop.get((source_id, model_id), ()))
 
     def write(self, record: EvidenceRecord, *, live: Iterable[ModelHubSourceConfig]) -> None:
@@ -309,7 +297,7 @@ class CapabilityEvidenceStore:
         with self._lock:
             records = {
                 key: existing
-                for key, existing in self._loaded().items()
+                for key, existing in self._records.items()
                 if identities.get(existing.source_id) == existing.source_identity
             }
             records[record.key] = record

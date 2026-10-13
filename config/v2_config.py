@@ -3016,20 +3016,34 @@ class ModelHubAgentSupplyConfig:
 MODEL_HUB_HOSTED_TOOLS: tuple[str, ...] = HOSTED_TOOLS
 
 
-def _drop_vibey_client_presets(agent: "ModelHubAgentSupplyConfig") -> None:
+def _drop_vibey_client_presets(
+    agent: "ModelHubAgentSupplyConfig", sources: list["ModelHubSourceConfig"]
+) -> None:
     """Keep client presets (Codex ``ultra``) out of Vibey's model rows.
 
     A preset is a name another client maps before sending, never a wire tier,
     and Vibey is not that client. 3.2.0 saved Vibey rows carrying one (#2539),
     so every read drops them here, the single owner of those rows: the catalog
     payload, the picker, the launch and the API then agree, and the next save
-    writes the clean list.
+    writes the clean list. A row has no provenance of its own, so a spelling a
+    Source model of that id declares itself (``user`` or ``upstream``) is a
+    real wire tier and stays. No I/O: the preset index is read once per process.
     """
 
     from vibe.backend_model_catalog import without_client_presets
 
+    declared: dict[str, set[str]] = {}
+    for source in sources:
+        for model in source.models:
+            if model.reasoning_efforts_source in ("user", "upstream"):
+                declared.setdefault(model.id, set()).update(model.reasoning_efforts)
     agent.models = [
-        replace(model, reasoning_efforts=without_client_presets((model.id,), model.reasoning_efforts))
+        replace(
+            model,
+            reasoning_efforts=without_client_presets(
+                (model.id,), model.reasoning_efforts, keep=declared.get(model.id, ())
+            ),
+        )
         if model.reasoning_efforts
         else model
         for model in agent.models
@@ -3237,7 +3251,7 @@ class ModelHubConfig:
             runtime_default_applied=runtime_default_applied,
             hosted_tools=_hosted_tools_from_payload(payload.get("hosted_tools"), sources),
         )
-        _drop_vibey_client_presets(config.agents["vibey"])
+        _drop_vibey_client_presets(config.agents["vibey"], sources)
         agents = config.agents
         for backend in MODEL_HUB_BACKENDS:
             configured_sources = agents[backend].sources
