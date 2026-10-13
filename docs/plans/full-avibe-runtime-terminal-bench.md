@@ -3,7 +3,8 @@
 ## Scope and ownership
 
 Worktree: `feature/vibey-terminal-bench-full-runtime`, base `9a89da41b`.
-Implementation owner: `sesxksgh2gjus`; parent: `sesfpc66af59m`.
+Implementation owner: `sesxksgh2gjus`; original orchestrator: `sesu69aqh5sc7`.
+All earlier fork-parent claims are superseded; this Session is the only writer.
 The paused standalone worktree and its partial changes are out of scope.
 No Docker, paid upstream requests, deployment, push, or PR is authorized here.
 
@@ -29,8 +30,10 @@ A new embedded Controller or a second Agent loop is unnecessary. Existing paths:
 
 ## First implementation contract
 
-Add only source-side benchmark tooling and tests, not product wheel dependencies,
-not a Harbor dependency in the product lock. The wrapper invokes the normal
+Add only source-side tooling under `scripts/terminal_bench/` and focused tests,
+not product wheel dependencies, not a Harbor dependency in the product lock.
+Consolidate the sibling's untracked bridge/profile here; delete only the two
+unused package initializers and the superseded untracked plan after consolidation. The wrapper invokes the normal
 service entrypoint in an owned subprocess. All product imports and CLI operations
 run in child processes with their own environment; the parent environment and
 running user service are never modified.
@@ -80,6 +83,34 @@ with a scripted test double, while keeping production Controller, Model Hub
 service/router/gateway, native providers, AgentService, Vibey and Harness real.
 Report that boundary honestly: it proves local product integration, not real CPA
 installation, credential custody, provider connectivity, or a benchmark score.
+
+## Implemented evidence
+
+- `scripts/terminal_bench/{profile,control,runner}.py` and `README.md` are the
+  single source-only wrapper. The sibling bridge/profile were consolidated;
+  unused benchmark package initializers and the superseded plan were removed.
+- Product `pyproject.toml`, `uv.lock`, service, Agent and storage files are unchanged.
+- The subprocess test uses normal `main.py`, IPC Source/catalog/route APIs and
+  the real CLI Run path. It proves a native Bash tool writes a Unicode note and
+  task SQLite, with no framework files in task cwd; task `config.py` cannot
+  shadow product imports. Provider keys never enter the service/tool environment.
+- A real product Watch creates a delayed note after the initial Run result.
+  The wrapper waits for Harness quiescence instead of prematurely tearing down
+  background work. Missing credentials are explicitly blocked, not fake passes.
+- The deadline case interrupts a continuously writing real tool, closes the
+  runtime, then verifies no later writes. A separate process-lifecycle case
+  covers a setsid child, a stale unrelated pid identity, and clock-shifted
+  identity without signalling the bystander.
+- Exports name the Run/Session, root-Run outcome scope, actual installation,
+  reported usage (completeness explicitly unknown), cleanup and null verifier
+  reward. Raw product state/logs are not copied.
+
+Remaining gates: parent-run **wrapper** acceptance with an installed wheel and
+real CPA engine; Harbor wiring/ATIF; exact-source/benchmark/resource pinning;
+paired scored tasks; current-head review/CI. The original orchestrator separately
+reported successful `avibe-os 3.2.0rc5` + real-engine + loopback upstream acceptance
+(source `98cc70a1c`), which is not evidence for this wrapper or this checkout's
+base `9a89da41b` and is not a benchmark score.
 
 Run only focused tests through `~/.local/bin/hd1-test`; retain product dependency
 files unchanged. Any unproven lifecycle/provider capability remains a named gate.
