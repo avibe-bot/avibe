@@ -171,13 +171,13 @@ async def test_a_continuation_goes_back_verbatim_only_to_the_hop_that_served_it(
         assert '[web_search: \\"avibe release\\"]' in in_place
 
 
-async def test_a_continuation_of_a_model_whose_id_is_not_ascii_is_pinned_to_its_source_alone():
-    """A header carries only ASCII: the continuation still goes out verbatim, pinned to its hop's Source, whose own
-    model the gateway takes."""
+@pytest.mark.parametrize("model", ["grok-4.6-é", "grok-4.6\nvariant", "grok-4.6\x00", " grok-4.6"])
+async def test_a_continuation_of_a_model_whose_id_is_no_header_value_is_pinned_to_its_source_alone(model):
+    """A header carries only printable ASCII: the continuation still goes out verbatim, pinned to its hop's Source,
+    whose own model the gateway takes."""
 
     read = ToolCallBlock(id="toolu_1", name="read", arguments={"path": "a"})
     searched = _searched("openai_responses", stop_reason="tool_use", extra=(read,))
-    model = "grok-4.6-é"
     endpoint = replace(_endpoint("openai_responses", replay=False), model_id=model)
     request = _request(
         endpoint,

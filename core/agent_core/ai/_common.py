@@ -1645,8 +1645,8 @@ def hosted_pin(request: ModelRequest, messages: tuple[Any, ...] = ()) -> dict[st
     ``messages`` are the request's transformed messages; a call goes back verbatim only to the hop's own Source, so
     that is the pin. A continuation whose calls go back verbatim also names the model that served them.
 
-    A header carries only ASCII, so a model id that is not ASCII is left out: the pinned Source is the hop's, and the
-    gateway takes that hop's own model, which served the continued response.
+    A model id that is not a legal header value (printable ASCII, no surrounding space) is left out: the pinned Source
+    is the hop's, and the gateway takes that hop's own model, which served the continued response.
     """
 
     from core.agent_core.ai.transform import in_flight_position
@@ -1661,9 +1661,15 @@ def hosted_pin(request: ModelRequest, messages: tuple[Any, ...] = ()) -> dict[st
     pin = {PIN_SOURCE_HEADER: request.endpoint.source_id}
     live = in_flight_position(messages)
     continued = messages[live] if live is not None else None
-    if replays(continued) and continued.origin.model.isascii():
+    if replays(continued) and _header_value(continued.origin.model):
         pin[PIN_MODEL_HEADER] = continued.origin.model
     return pin
+
+
+def _header_value(value: str) -> bool:
+    """Whether ``value`` can travel as an HTTP header value as it is: printable ASCII, with no surrounding space."""
+
+    return bool(value) and value == value.strip() and all(" " <= char <= "~" for char in value)
 
 
 def forced_tool(request: ModelRequest) -> tuple[str, HostedToolRoute | None] | None:
