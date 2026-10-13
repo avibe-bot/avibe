@@ -1,5 +1,6 @@
 /* @vitest-environment jsdom */
 
+import type { VoiceTranscriptionError as VoiceTranscriptionErrorType } from '@/lib/voiceTranscription';
 import { fireEvent, act, cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -1631,6 +1632,71 @@ describe('desktop mini v2 interaction contract', () => {
     expect(petShell.currentBinding()).toBe('A');
     expect(await screen.findAllByText('Session A')).toHaveLength(2);
     expect(screen.queryByText('Session B')).toBeNull();
+  });
+
+  async function withVoiceEnv(asrAvailable: () => boolean, dictation: unknown, body: () => Promise<void>) {
+    vi.doMock('@/lib/showPageVoiceDictation', () => ({ ShowPageVoiceDictation: dictation }));
+    const locks = Object.getOwnPropertyDescriptor(navigator, 'locks');
+    const media = Object.getOwnPropertyDescriptor(navigator, 'mediaDevices');
+    try {
+      Object.defineProperty(navigator, 'locks', { configurable: true, value: {} });
+      Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: { getUserMedia: vi.fn() } });
+      vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({ available: asrAvailable() }) })));
+      vi.resetModules();
+      ({ PetPage } = await import('./PetPage'));
+      await body();
+    } finally {
+      vi.doUnmock('@/lib/showPageVoiceDictation');
+      vi.unstubAllGlobals();
+      if (locks) Object.defineProperty(navigator, 'locks', locks);
+      else Reflect.deleteProperty(navigator, 'locks');
+      if (media) Object.defineProperty(navigator, 'mediaDevices', media);
+      else Reflect.deleteProperty(navigator, 'mediaDevices');
+    }
+  }
+
+  it.each([
+    ['microphone start', 'pet.voice.startFailed', () => ({ start: Promise.reject(new DOMException('denied', 'NotAllowedError')), done: new Promise<string>(() => {}) })],
+    ['transcription', 'pet.voice.failed', (TranscriptionError: typeof VoiceTranscriptionErrorType) => ({ start: Promise.resolve(), done: Promise.reject(new TranscriptionError('failed')) })],
+  ])('falls back to text with a note when %s fails, keeping the typed draft', async (_label, note, outcome) => {
+    // Resolved after the module reset so PetPage and the test share one class.
+    let TranscriptionError!: typeof VoiceTranscriptionErrorType;
+    class Dictation {
+      private readonly outcome = outcome(TranscriptionError);
+      done = this.outcome.done;
+      start = () => this.outcome.start;
+      finish = () => {};
+      abort = () => {};
+    }
+    await withVoiceEnv(() => true, Dictation, async () => {
+      ({ VoiceTranscriptionError: TranscriptionError } = await import('@/lib/voiceTranscription'));
+      devBind('S'); render(<PetPage />); summon('listen');
+      const input = await screen.findByRole('textbox');
+      await userEvent.type(input, 'typed before voice');
+      await userEvent.click(await screen.findByLabelText('pet.voice.open'));
+      expect(await screen.findByText(note)).toBeTruthy();
+      expect(pose()).not.toBe('listening');
+      expect((screen.getByRole('textbox') as HTMLTextAreaElement).value).toBe('typed before voice');
+      expect(api.sendSessionMessage).not.toHaveBeenCalled();
+    });
+  });
+
+  it('shows the microphone once transcription is turned on elsewhere and the window is reactivated', async () => {
+    let asr = false;
+    class Dictation { done = new Promise<string>(() => {}); start = async () => {}; finish = () => {}; abort = () => {}; }
+    await withVoiceEnv(() => asr, Dictation, async () => {
+      devBind('S'); render(<PetPage />); summon('listen');
+      await screen.findByRole('textbox');
+      await waitFor(() => expect(fetch).toHaveBeenCalled());
+      expect(screen.queryByLabelText('pet.voice.open')).toBeNull();
+      asr = true;
+      const focus = vi.spyOn(document, 'hasFocus').mockReturnValue(false);
+      act(() => { window.dispatchEvent(new Event('blur')); });
+      focus.mockReturnValue(true);
+      act(() => { window.dispatchEvent(new Event('focus')); });
+      expect(await screen.findByLabelText('pet.voice.open')).toBeTruthy();
+      focus.mockRestore();
+    });
   });
 
   it('discards voice preview and final text from the previous authorization epoch', async () => {

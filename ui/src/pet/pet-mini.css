@@ -683,3 +683,10 @@ to {
 @media (prefers-reduced-motion: reduce) {
   .pet-mini-cards:has(.pet-mini-swap.is-switching) { overflow: visible; }
 }
+
+.pet-mini-input-note {
+  margin:0 0 6px;
+  padding:0 14px;
+  color:color-mix(in srgb,var(--pet-ink) 70%,transparent);
+  font-size:12px;
+  line-height:16px}

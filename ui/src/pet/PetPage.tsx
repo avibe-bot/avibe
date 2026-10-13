@@ -13,6 +13,7 @@ import { harnessItemNativeId } from '@/lib/backgroundActivity';
 import { usePageActive } from '@/lib/pageActivity';
 import { usePendingVaultRequests } from '@/lib/usePendingVaultRequests';
 import { ShowPageVoiceDictation } from '@/lib/showPageVoiceDictation';
+import { VoiceTranscriptionError } from '@/lib/voiceTranscription';
 
 import { PetAvatar, type PetPose } from './PetAvatar';
 import { petBridge, sessionLink, vaultRequestLink } from './petBridge';
@@ -392,6 +393,9 @@ const PetSurface: React.FC = () => {
     onOpenComposer: openComposer,
   });
 
+  const clearVoiceError = voice.clearError;
+  useEffect(() => { if (!composing) clearVoiceError(); }, [composing, clearVoiceError]);
+
   const hotkeyHeld = useRef(false);
   const onSummon = useCallback(() => {
     const intent = petShell.takeSummon();
@@ -566,6 +570,8 @@ const PetSurface: React.FC = () => {
         </div>
         <SpeechSlot open={voice.listening || composing}>
           {voice.listening ? <Marquee text={voice.preview} listeningLabel={t('pet.voice.listening')} /> : canChat && !uncertain ? (
+          <>
+          {voice.error && <p className="pet-mini-input-note" role="status">{t(`pet.voice.${voice.error}`)}</p>}
           <form className="pet-mini-input" data-pet-hit onSubmit={(event) => { event.preventDefault(); void submit(); }}>
             <textarea
               ref={inputRef}
@@ -584,6 +590,7 @@ const PetSurface: React.FC = () => {
             {voice.available && <button type="button" className="pet-mini-input-button" onClick={() => voice.start()} aria-label={t('pet.voiceContinue')}><MicIcon /></button>}
             <button type="submit" className="pet-mini-send" disabled={!draft.trim() || sending || uncertain} aria-label={t('pet.send')}><SendIcon /></button>
           </form>
+          </>
           ) : null}
         </SpeechSlot>
       </div>
@@ -711,18 +718,23 @@ function usePetVoice({ enabled, epoch, draft, onOpenComposer }: { enabled: boole
   const [asr, setAsr] = useState<{ available: boolean; checked: boolean; maxFileBytes?: number }>({ available: false, checked: false });
   const [preview, setPreview] = useState('');
   const [listening, setListening] = useState(false);
+  // A failed capture or transcription falls back to text with this note.
+  const [error, setError] = useState<VoiceFailure | null>(null);
+  const pageActive = usePageActive();
   type Capture = { dictation: ShowPageVoiceDictation; ending: boolean; cancelled: boolean };
   const captureRef = useRef<Capture | null>(null);
   const supported = typeof navigator !== 'undefined' && Boolean(navigator.locks && navigator.mediaDevices?.getUserMedia);
   const available = enabled && supported && asr.available;
+  // The pet window outlives settings changes made elsewhere, so ASR status is
+  // re-read whenever the window becomes active again.
   useEffect(() => {
-    if (!enabled) return;
+    if (!enabled || !pageActive) return;
     let alive = true;
     void fetch('/api/asr/status', { credentials: 'same-origin' }).then((response) => response.ok ? response.json() : null).then((value) => {
       if (alive && epoch.isCurrent()) setAsr({ available: Boolean(value?.available), checked: value !== null, maxFileBytes: value?.max_file_bytes });
     }).catch(() => { if (alive && epoch.isCurrent()) setAsr({ available: false, checked: false }); });
     return () => { alive = false; };
-  }, [enabled, epoch]);
+  }, [enabled, epoch, pageActive]);
   const stop = useCallback((commit: boolean) => {
     const capture = captureRef.current;
     if (!capture) return;
@@ -746,6 +758,7 @@ function usePetVoice({ enabled, epoch, draft, onOpenComposer }: { enabled: boole
     };
     captureRef.current = capture;
     setListening(true);
+    setError(null);
     const settle = () => {
       if (captureRef.current !== capture || !epoch.isCurrent()) return false;
       captureRef.current = null;
@@ -753,20 +766,38 @@ function usePetVoice({ enabled, epoch, draft, onOpenComposer }: { enabled: boole
       setPreview('');
       return !capture.cancelled;
     };
+    // Whichever of start/done rejects first settles; the other is a no-op.
+    const fail = (reason: unknown) => {
+      if (!settle()) return;
+      if (reason instanceof VoiceTranscriptionError && reason.code === 'cancelled') return;
+      setError(voiceFailure(reason));
+      onOpenComposer(before);
+    };
     void capture.dictation.done.then((text) => {
       if (!settle()) return;
       const next = text.trim();
       onOpenComposer(next ? [before.trim(), next].filter(Boolean).join(' ') : before);
-    }).catch(settle);
+    }).catch((reason: unknown) => fail(reason));
     void capture.dictation.start().then(() => {
       if (!epoch.isCurrent()) { capture.dictation.abort(); return; }
       // Release may precede microphone permission or pipeline startup.
       if (capture.ending && !capture.cancelled) capture.dictation.finish();
-    }).catch(() => { settle(); capture.dictation.abort(); });
+    }).catch((reason: unknown) => { fail(reason); capture.dictation.abort(); });
   }, [asr.maxFileBytes, available, epoch, draft, onOpenComposer]);
   const cancel = useCallback(() => stop(false), [stop]);
+  const clearError = useCallback(() => setError(null), []);
   useEffect(() => cancel, [epoch, enabled, cancel]);
-  return { available, cloudRequired: asr.checked && !asr.available, listening, preview, start, stop, cancel };
+  useEffect(() => () => setError(null), [epoch, enabled]);
+  return { available, cloudRequired: asr.checked && !asr.available, listening, preview, error, clearError, start, stop, cancel };
+}
+
+type VoiceFailure = 'startFailed' | 'empty' | 'failed';
+
+// Anything that is not a transcription error comes from getting the
+// microphone itself (permission denied, no input device, capture setup).
+function voiceFailure(reason: unknown): VoiceFailure {
+  if (!(reason instanceof VoiceTranscriptionError)) return 'startFailed';
+  return reason.code === 'empty' ? 'empty' : 'failed';
 }
 
 const SpeechSlot: React.FC<{ open: boolean; children: ReactNode }> = ({ open, children }) => (

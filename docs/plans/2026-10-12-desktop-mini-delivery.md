@@ -49,19 +49,25 @@ quick-reply, and pet lifecycle paths. Backend APIs are outside this change.
   wait; its dictation implementation is not refactored. Pet uses the existing
   `ShowPageVoiceDictation` wrapper and thus the same capture/transcription pipeline.
 
-## Voice: enabled, handoff verified on real hardware
+## Voice: enabled; real-hardware handoff pending
 
 Pet voice was first shipped behind a `__AVIBE_PET_VOICE_ENABLED__` window marker
 that no production shell installed, so the microphone controls stayed hidden
 everywhere. The owner has since removed that gate so the captured-speech handoff
 can be verified on a real desktop test prerelease. Pet voice now appears
 whenever Web Locks, `getUserMedia` and ASR are all available; missing Web Locks
-still denies it, and hotkey/hold still falls back to text in that case.
+still denies it, and hotkey/hold still falls back to text in that case. ASR
+status is re-read whenever the pet window becomes active, so enabling or
+disabling transcription in settings takes effect without restarting the pet.
+A microphone or transcription failure reopens the text input with the pre-voice
+draft and a short note; the mini does not keep the failed recording for retry
+(the main Composer does).
 
 Acceptance on the test prerelease: start dictation in the main Composer, then
 claim the microphone from the mini (and the reverse). Each side must keep the
 transcript of the speech it captured before the handoff. If either direction
-loses speech, fix the handoff before the next stable release.
+loses speech, fix the handoff before the next stable release. Until that
+transcript evidence is recorded here, the handoff remains unverified.
 
 In the isolated macOS desktop build, `main` and `pet` both exposed Web Locks and
 reported the same `avibe.voice-capture` owner/client ID. A pet claim changed that
