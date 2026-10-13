@@ -9,11 +9,12 @@ take longer at any of these stages. Retrying discards its work and can exhaust
 the caller's retries without ever allowing the model to finish.
 
 An admitted inference request must remain live until protocol completion, a
-concrete transport failure, or cancellation by its owner. Elapsed model time
-alone is not failure. This property applies to every supported protocol and to
-both streaming and buffered responses. Cancellation must still release the
-connection, temporary storage, and source ownership, and a waiting request must
-not block unrelated requests.
+concrete transport failure, cancellation by its owner, or, for the streams the
+[stream idle bound](#stream-idle-bound-2026-10-13) covers, silence past that
+bound. Elapsed model time alone is not failure. This property applies to every
+supported protocol and to both streaming and buffered responses. Cancellation
+must still release the connection, temporary storage, and source ownership, and
+a waiting request must not block unrelated requests.
 
 ## Scope
 
@@ -262,3 +263,103 @@ already-failed response are unchanged, and production timing is unchanged
 because that budget equals the 60-second transport default. A regression drives
 a projection that outlasts the connection budget and asserts success; the
 projection-budget test asserts the budget is independent of the client timeout.
+
+## Stream idle bound (2026-10-13)
+
+### Problem
+
+The engine sets no timeout once an upstream connection is established, not
+even an opt-in HTTP/2 health check. Its maintainers closed
+router-for-me/CLIProxyAPI#6534 as not planned: timeouts and cancellation belong
+to the downstream client. For the engine that client is this gateway.
+
+Engine patches 4 and 5 (`patches/model-hub-cpa-v8.0.23/README.md`) are carried
+by design and turn a dead network path into an error in about 45 s. They cannot
+see a relay that stays alive while its own upstream is stuck: the relay answers
+PINGs and keeps writing `: keep-alive` comments, and the engine holds
+comment-only frames until the next event. Such a stream sent the gateway nothing
+until the caller gave up: Vibey after 600 s, Codex after 300 s between events,
+and Claude Code after its own byte-silence watchdog. The rc3 turn
+`trn_98d57e9e6ea0` waited the full 600 s on the API-key relay; whether its path
+was dead or its upstream stuck was not recorded.
+
+### Contract
+
+- A streamed request to a Source in the table below ends when the engine sends
+  the gateway no byte for **120 s**. Every byte restarts the bound: data events,
+  pings and comments alike. It runs from the moment the request body is written,
+  so it covers the wait for response headers too. A paused read, while the
+  downstream caller is slower than the engine, does not count.
+- When the bound runs out, the gateway closes the engine connection. The engine
+  cancels its upstream request through its request context; measured on the
+  shipped v8.0.23-3 engine, the upstream saw the disconnect within 0.02 s.
+- The attempt ends as a `timeout` outcome, classified as the `network` fallback
+  reason: Source recovery delays of 1, 2, 4 ... s, and no persisted health write.
+  - **Before model output** the caller has seen nothing. Model Hub retries
+    inside its 120 s recovery window, which opens at this failure, not at the
+    request. The caller receives the retried stream, or recovery exhaustion
+    with cause `network`.
+  - **After model output** nothing is replayed. The stream ends with the
+    protocol's `stream_interrupted` terminal, as for any transport failure after
+    output, and the caller's own policy applies.
+- Buffered responses and every Source outside the table keep the original
+  contract: elapsed time and silence alone are not failure.
+
+| Source vendor | Protocol, untranslated | Bounded | Longest healthy silence measured |
+| --- | --- | --- | --- |
+| `anthropic` | `anthropic` | yes | 10.0 s: a `ping` every 10 s through 336 s of buffered thinking, a 157K-token prompt, and a 12K-token tool input that the relay buffered |
+| `openai` | `openai_responses` | yes | 35.8 s, before the first event of a cold 102K-token prompt; at most 29.2 s between events at `max` effort, with or without a reasoning summary; tool-call arguments streamed as deltas |
+| `xai` | `openai_responses` | no | 188 s: grok-4.6 sent a 15K-token tool call in one delta, and the engine held the relay's comments meanwhile |
+| any | translated by the engine | no | 72.8 s (Responses to Claude) and 141.8 s (Chat to Claude): the translators drop the Anthropic pings |
+| any other | `openai_chat`, `google`, or another vendor | no | not measured |
+
+Measured on 2026-10-13 through the local engine (v8.0.23-3, darwin-arm64) with
+long-reasoning prompts at each model's highest accepted effort. The streams
+were 33 to 900 s long. Only timing metadata was kept, outside this repository.
+The ChatGPT subscription was capped on that day. Its streams,
+measured on 2026-10-12 directly over HTTP/2, had at most 21 s between events,
+which agrees with the `openai` row.
+
+### Why the gateway's engine read
+
+- Every Agent's Hub traffic (Claude Code, Codex, OpenCode, Vibey) reaches the
+  upstream through `EngineClient.invoke`. The bound lives there, on the engine
+  connection's read (`sock_read`), so all of them inherit it.
+- Before model output the gateway holds the response, so only the gateway
+  sees the upstream's bytes, and only the gateway can retry without the caller
+  seeing a failure. Vibey's own bound sees nothing until the gateway releases
+  headers, and it covers only Vibey.
+
+### Interactions
+
+- **Model Hub recovery.** The 120 s window opens at the first failure. A request
+  whose upstream stays stuck therefore makes about two attempts and ends in
+  recovery exhaustion at roughly 241 s. That is before Vibey's 600 s bound, and
+  for Claude Code shortly after the 240 s early commit, which then carries it
+  in-stream.
+- **Vibey's retry budget** (`max_elapsed_s = 120`, measured from the request's
+  first attempt). A stall before output never reaches Vibey's loop. A stall
+  after thinking alone reaches it as `interrupted` with `after_thinking`, and
+  is retried once only if 120 s have not passed since the first attempt
+  started. With the bound at 120 s that does not happen, because the error
+  comes at least 120 s after the last byte. After text or a tool call the error
+  is terminal (C-2). It now comes 120 s after the last byte instead of 600 s.
+- **Vibey's 600 s silence bound** stays as the outer guard. It now fires only
+  for the unbounded Sources above, or if the gateway itself stops.
+- **Native callers.** Their own bounds (Codex 300 s between events, Claude
+  Code's first-byte and idle watchdogs) are longer and remain unchanged.
+- **Engine patches 4 and 5 stay.** They bound a dead path in about 45 s on
+  every path, the unbounded and translated ones included, and they do so
+  without depending on any upstream cadence.
+
+### Known-by-design residuals
+
+- A stuck upstream behind a relay that keeps writing data frames (Anthropic
+  `ping`, or an `event: keepalive` frame) resets the bound and is not caught. For
+  the Anthropic relay measured here, the pings may come from the relay itself.
+- Unbounded Sources keep the caller's bound. Covering them needs the engine to
+  forward the upstream's heartbeat: comment-only frames immediately, and pings
+  across translation. That is an engine change, not a gateway timeout.
+- The vendor is the Source's declared vendor. A relay declared `openai` that
+  serves a model which buffers tool calls, as xAI does, would be cut at 120 s
+  on a tool call longer than that.

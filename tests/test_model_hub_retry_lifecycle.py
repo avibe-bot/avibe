@@ -19,12 +19,14 @@ from config.v2_config import ModelHubConfig, ModelHubRouteConfig, ModelHubRouteH
 from core.handlers.model_hub.adapter import RawOutcomeKind
 from core.handlers.model_hub.retry import RECOVERY_EXHAUSTED_CODE, RECOVERY_EXHAUSTED_MESSAGE
 from core.handlers.model_hub.service import ModelHubError
+from core.handlers.model_hub.stream_wire import ProtocolSSEState
 from core.handlers.model_hub import turn_gateway
 from core.handlers.model_hub.turn_gateway import ModelHubTurnGateway
 from core.run_settlement import SETTLED_BY_TERMINAL_RESULT
 from modules.agents.model_hub import ModelHubRuntimeRouter, bind_launch
 from tests.test_model_hub_l3 import _assert_valid, _canonicalize_fixed_test_routes, _outcome, _source
 from tests.test_model_hub_retry_policy import WIRE, clock_service, fail
+from vibe.model_hub_runtime import client as engine_client_module
 from vibe.model_hub_runtime.adapter import CLIProxyEngineAdapter
 from vibe.model_hub_runtime.client import EngineClient, EngineConnection
 from vibe.model_hub_runtime.state import EngineStateStore
@@ -913,5 +915,114 @@ def test_slow_stream_resolution_keeps_claude_connected(monkeypatch, tmp_path, ba
             release.set()
         assert len(calls) == (1 if ending in {"served", "disconnect"} else 2)
         assert clock.delays == ([] if ending in {"served", "disconnect"} else [30])
+
+    asyncio.run(run())
+
+
+IDLE_BOUNDED_STALLS = ("before_headers", "before_output", "after_output", "heartbeat")
+
+
+@pytest.mark.parametrize(
+    "backend,vendor,source_protocol,stall",
+    [
+        *(
+            (backend, vendor, BACKENDS[backend][1], stall)
+            for backend, vendor in (("codex", "openai"), ("claude", "anthropic"))
+            for stall in IDLE_BOUNDED_STALLS
+        ),
+        # Healthy streams that send nothing for minutes: xAI sends a whole tool
+        # call at once, the engine's translators drop the upstream heartbeat,
+        # and Chat has no measured cadence.
+        ("codex", "xai", "openai_responses", "unbounded"),
+        ("codex", "anthropic", "anthropic", "unbounded"),
+        ("claude", "openai", "openai_responses", "unbounded"),
+        ("opencode", "openai", "openai_chat", "unbounded"),
+    ],
+)
+def test_a_silent_engine_stream_is_cancelled_and_retried_at_its_idle_bound(
+    monkeypatch, tmp_path, backend, vendor, source_protocol, stall,
+):
+    """MH-RUNTIME-013: a stream silent past the idle bound ends there, not at the caller's bound.
+
+    The engine sets no timeout once its upstream is connected, so a relay that
+    stays alive while its own upstream is stuck sends nothing until the caller
+    gives up. The gateway cancels that engine request at its idle bound: before
+    model output it retries without the caller seeing anything; after output it
+    ends the stream inside the protocol. Any byte, such as an Anthropic ping,
+    keeps a slow stream alive.
+    """
+    bound = 0.3
+    monkeypatch.setattr(engine_client_module, "_STREAM_IDLE_TIMEOUT_SECONDS", bound)
+
+    async def run() -> None:
+        _endpoint, protocol = BACKENDS[backend]
+        source = _source("src_silent01", "Silent", vendor=vendor, protocol=source_protocol)
+        service, clock, models = configured_service(tmp_path, sources=[source])
+        metadata, output, terminal, _buffered = WIRE[protocol]
+        calls: list[dict] = []
+        stalled_for: list[float] = []
+
+        async def respond(request: web.Request) -> web.StreamResponse:
+            calls.append(await request.json())
+            stalls = len(calls) == 1 and stall != "heartbeat"
+            started = time.monotonic()
+            try:
+                if stalls and stall == "before_headers":
+                    await asyncio.Event().wait()
+                response = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+                await response.prepare(request)
+                await response.write(metadata)
+                if stall == "heartbeat":
+                    for _ in range(4):
+                        await asyncio.sleep(bound / 2)
+                        await response.write(b": keep-alive\n\n")
+                if stall == "unbounded":
+                    await asyncio.sleep(bound * 3)
+                if stalls and stall == "before_output":
+                    started = time.monotonic()
+                    await asyncio.Event().wait()
+                await response.write(output)
+                if stalls and stall == "after_output":
+                    started = time.monotonic()
+                    await asyncio.Event().wait()
+                await response.write(terminal)
+                await response.write_eof()
+                return response
+            except asyncio.CancelledError:
+                stalled_for.append(time.monotonic() - started)
+                raise
+
+        async with loopback_engine(tmp_path, service, respond) as (adapter, _engine_client):
+            async with gateway_client(service, backend, models[backend]) as (_gateway, client, url, headers):
+
+                async def exchange() -> tuple[int, bytes]:
+                    async with client.post(
+                        url, headers=headers, json={"model": "shared-model", "stream": True},
+                    ) as response:
+                        return response.status, await response.read()
+
+                # Without the idle bound the stalled engine request never ends.
+                status, body = await asyncio.wait_for(exchange(), timeout=5)
+                assert status == 200
+            assert adapter._active_transports == 0
+
+        if stall in {"heartbeat", "unbounded"}:
+            keepalives = b": keep-alive\n\n" * 4 if stall == "heartbeat" else b""
+            assert body == metadata + keepalives + output + terminal
+            assert len(calls) == 1 and stalled_for == []
+            return
+        # The engine request itself was cancelled, once, at the bound.
+        assert len(stalled_for) == 1 and bound * 0.9 <= stalled_for[0] < bound + 2
+        if stall == "after_output":
+            # Output already reached the caller, so the stream ends in-protocol instead of replaying.
+            assert len(calls) == 1
+            assert body.startswith(metadata + output)
+            ending = ProtocolSSEState(protocol)
+            ending.observe(body[len(metadata + output):])
+            assert ending.terminal_outcome == "failed_terminal"
+        else:
+            assert len(calls) == 2
+            assert body == metadata + output + terminal
+            assert clock.delays == [1]
 
     asyncio.run(run())
