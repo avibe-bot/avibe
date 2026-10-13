@@ -300,7 +300,7 @@ def _placed_argv(kind_of_work, placement, scope_id, *, name="p"):
 
 
 def test_permissions_028_the_open_project_binds_the_signed_editor():
-    """The fixture's positive control is the caller the Project actually names."""
+    """PERMISSIONS-028: the fixture's positive control is the caller the Project actually names."""
 
     assert _editor_email_snapshot_matches_open_project()
 

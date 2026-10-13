@@ -3786,7 +3786,7 @@ def test_restart_recovers_delivery_owned_run_without_unrelated_run_arbitration(
     monkeypatch,
     tmp_path,
 ) -> None:
-    """Only the Delivery FIFO can block recovery; an unlinked Run cannot."""
+    """HFR-004: only the Delivery FIFO can block recovery; an unlinked Run cannot."""
 
     from core.session_turns import (
         SCHEDULED_PROVENANCE_KEY,
