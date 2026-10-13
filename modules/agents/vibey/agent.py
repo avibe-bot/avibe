@@ -1228,7 +1228,9 @@ class VibeyAgent(BaseAgent):
         links = self._hosted_image_links(run, body)
         if not links:
             return body
-        return "\n\n".join(part for part in (body.rstrip(), links) if part)
+        # A reply that is only images still says what it carries, as the Codex backend's does.
+        lead = body.rstrip() or i18n_t("info.generatedImagesFallback", self._language())
+        return f"{lead}\n\n{links}"
 
     @staticmethod
     def _hosted_image_links(run: _Run, body: str) -> str:
@@ -1259,7 +1261,7 @@ class VibeyAgent(BaseAgent):
             await self.controller.emit_agent_message(
                 run.request.context,
                 "output",
-                links,
+                f"{i18n_t('info.generatedImagesFallback', self._language())}\n\n{links}",
                 output=MessageOutput(completes_turn=False, completes_run=False, records_run_output=False),
             )
         except Exception:

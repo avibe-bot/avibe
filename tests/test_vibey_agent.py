@@ -3361,7 +3361,7 @@ async def test_a_native_hosted_call_reaches_im_as_one_line_with_its_cited_answer
     # The citation is a Markdown link where its span ends; the image is an upload, not a link.
     assert f"]({CHANGELOG})" in answer
     assert "file://" not in answer
-    assert harness.controller.im_client.uploads == [str(image)]
+    assert harness.controller.im_client.uploads == [str(image.resolve())]
 
 
 async def test_a_native_hosted_call_reaches_the_workbench_as_a_card_and_cited_answer(
@@ -3443,7 +3443,7 @@ async def test_generated_images_reach_the_user_when_no_final_reply_follows(engin
 
     await harness.agent.handle_message(harness.request("draw it, then summarize"))
 
-    assert harness.controller.im_client.uploads == [str(image)]
+    assert harness.controller.im_client.uploads == [str(image.resolve())]
     assert harness.controller.terminals[-1]["is_error"] is True
 
 
@@ -3491,5 +3491,5 @@ async def test_a_final_whose_cited_text_is_all_silent_stays_silent(engine, sessi
     await harness.agent.handle_message(harness.request("anything new?"))
 
     assert not any(CHANGELOG in item for item in harness.controller.im_client.sent)
-    assert harness.controller.terminals[-1]["is_error"] is False
+    assert not any(CHANGELOG in (row["content_text"] or "") for row in harness.rows("result") + harness.rows("assistant"))
 

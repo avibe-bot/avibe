@@ -31,7 +31,7 @@ const renderGroup = (payloads: (Payload | Record<string, unknown>)[], lng: 'en' 
     id: 'turn', anchor_message_id: 'reply', anchor_position: 'before', open: false, status: 'done',
     steps: payloads.length, duration_ms: 38000,
     rows: payloads.map((payload, index) => ({
-      id: `evt_${index}`, kind: 'tool_call', text: 'the IM line', created_at: '2026-10-13T14:02:00Z',
+      id: `evt_${index}`, kind: 'tool_call' as const, text: 'the IM line', created_at: '2026-10-13T14:02:00Z',
       hosted: typeof payload === 'string' ? fixture[payload] : payload,
     })),
   });
