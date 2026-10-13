@@ -1699,6 +1699,27 @@ describe('desktop mini v2 interaction contract', () => {
     });
   });
 
+  it('keeps the stop control while listening even if transcription is turned off meanwhile', async () => {
+    let asr = true;
+    const finish = vi.fn();
+    class Dictation { done = new Promise<string>(() => {}); start = async () => {}; finish = finish; abort = () => {}; }
+    await withVoiceEnv(() => asr, Dictation, async () => {
+      devBind('S'); render(<PetPage />); summon('listen');
+      await screen.findByRole('textbox');
+      await userEvent.click(await screen.findByLabelText('pet.voice.open'));
+      expect(pose()).toBe('listening');
+      asr = false;
+      const focus = vi.spyOn(document, 'hasFocus').mockReturnValue(false);
+      act(() => { window.dispatchEvent(new Event('blur')); });
+      focus.mockReturnValue(true);
+      act(() => { window.dispatchEvent(new Event('focus')); });
+      await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
+      await userEvent.click(await screen.findByLabelText('pet.voice.stop'));
+      expect(finish).toHaveBeenCalled();
+      focus.mockRestore();
+    });
+  });
+
   it('discards voice preview and final text from the previous authorization epoch', async () => {
     const done = deferred<string>();
     let preview!: (text: string) => void;

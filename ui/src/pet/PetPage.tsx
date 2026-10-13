@@ -525,7 +525,8 @@ const PetSurface: React.FC = () => {
         enabled={canChat && Boolean(binding)}
         listening={voice.listening}
         typing={composing}
-        showMic={voice.available}
+        // Availability gates starting a capture; an active one always keeps its stop control.
+        showMic={voice.available || voice.listening}
         onMic={() => (voice.listening ? voice.stop(true) : voice.start())}
         onKeyboard={() => {
           if (uncertain) { void setPanel(true); setDetailOpen(true); return; }
