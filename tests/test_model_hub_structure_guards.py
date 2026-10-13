@@ -1244,6 +1244,10 @@ def test_machine_error_field_access_has_one_extractor() -> None:
             if (history := functions.get(name)) is not None
             for node in ast.walk(history)
         }
+        if path.name == "hosted_admission.py":
+            # Hosted admission discriminates request tools and history items,
+            # never an error envelope; its type reads are exempt too.
+            history_nodes = set(ast.walk(tree))
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
                 continue

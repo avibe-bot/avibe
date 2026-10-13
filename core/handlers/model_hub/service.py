@@ -108,8 +108,10 @@ from .events import (
 )
 from .capability_evidence import CapabilityEvidenceStore, EvidenceFeature, EvidenceRecord, identity_digest
 from .errors import ModelDiscoveryError
+from .evidence_rules import LearnedEvidence
 from .evidence_rules import learn as learn_from_rejection
 from .evidence_rules import wire_effort
+from .hosted_admission import PIN_UNAVAILABLE_CODE, HostedContent, admits, hosted_content
 from .hosted_tools import (
     HOSTED_PROBE_SHAPE,
     HostedToolSettingRefused,
@@ -682,6 +684,18 @@ class _InvocationUnsupported(_InvocationPlanChanged):
     def __init__(self, reason: str) -> None:
         super().__init__(reason)
         self.reason = reason
+
+
+def _pinned_hop(request: Any, backend: str) -> tuple[str, str | None] | None:
+    """The exact (Source, model) a Vibey request is pinned to (``x-avibe-pin-source``), if any."""
+
+    return getattr(request, "pinned_hop", None) if backend == "vibey" else None
+
+
+def _pin_unavailable() -> ModelHubError:
+    """The pinned hop cannot serve this request before output (``vibey-hosted-tools.md`` §3.5)."""
+
+    return ModelHubError(PIN_UNAVAILABLE_CODE, status=409)
 
 
 def _google_admission_skip_reason(
@@ -5844,11 +5858,11 @@ class ModelHubService:
 
     async def _learn_capability_evidence(
         self, source: ModelHubSourceConfig, model_id: str, request: Any, outcome: RawCallOutcome
-    ) -> None:
-        """Record the one feature a 400 before output names, through the narrow rules."""
+    ) -> LearnedEvidence | None:
+        """Record the one feature a 400 before output names, through the narrow rules; return it."""
 
         if outcome.rejection is None:
-            return
+            return None
         learned = learn_from_rejection(
             request,
             outcome.rejection,
@@ -5858,7 +5872,7 @@ class ModelHubService:
             spec_for=hosted_tool_spec,
         )
         if learned is None:
-            return
+            return None
         try:
             await asyncio.to_thread(
                 self.capability_evidence.write,
@@ -5879,6 +5893,21 @@ class ModelHubService:
         except (OSError, ValueError):
             # Evidence is advisory state: losing one record leaves the priors.
             logger.warning("Model Hub could not record capability evidence", exc_info=True)
+        return learned
+
+    def _admits_hosted(self, content: HostedContent, source: ModelHubSourceConfig, model_id: str) -> bool:
+        """Whether this hop has current positive evidence for a request's hosted content; off the loop."""
+
+        return admits(
+            content,
+            source=source,
+            model_id=model_id,
+            spec_for=hosted_tool_spec,
+            evidence=self.capability_evidence,
+            engine=self.engine_stamp,
+            shape=HOSTED_PROBE_SHAPE,
+            now=self.now(),
+        )
 
     def hosted_tools_for_hop(self, config: ModelHubConfig, source: ModelHubSourceConfig, model_id: str) -> dict:
         """``HopResolution.hosted_tools`` for a Vibey launch served by this Source and model."""
@@ -8744,10 +8773,12 @@ class ModelHubService:
             try:
                 config = self.store.load()
                 resolution = self._invocation_resolution(config, backend, requested_model_id, supply_channel)
+                pinned_hop = _pinned_hop(request, backend)
                 candidates = [
                     hop for hop in resolution.candidate_hops
                     if hop.source_id not in excluded_source_ids
                     and (hop.source_id, hop.model_id) not in (excluded_hops or ())
+                    and (pinned_hop is None or (hop.source_id, hop.model_id) == pinned_hop)
                 ]
                 candidate = next(
                     (
@@ -8777,7 +8808,9 @@ class ModelHubService:
                         origin.response_headers()
                     except ServedHopHeaderTooLarge:
                         raise ModelHubError("served_hop_too_large", status=422) from None
-                    if getattr(request, "primary_origin", None) != origin:
+                    # A pinned request was rendered for its pinned Source and is
+                    # never rewritten; only an unpinned one is stripped here.
+                    if pinned_hop is None and getattr(request, "primary_origin", None) != origin:
                         attempt_request = without_opaque_history(request)
                 if self._engine_synced:
                     if recovery_request is not None and recovery_request.expired:
@@ -9068,6 +9101,21 @@ class ModelHubService:
     ) -> ResolvedInvocation:
         if backend not in MODEL_HUB_BACKENDS:
             raise ModelHubError("mapping_target_unavailable")
+        pinned_hop = _pinned_hop(request, backend)
+        hosted = (
+            # A walk of the whole history, so off the controller loop.
+            await asyncio.to_thread(
+                hosted_content, request, getattr(request, "protocol", ""), pinned=pinned_hop is not None,
+            )
+            if backend == "vibey"
+            else HostedContent()
+        )
+        if hosted and pinned_hop is None:
+            # Vibey pins every request carrying Source-specific hosted content,
+            # so unpinned content has no correct hop: refuse it before anything runs.
+            raise ModelHubError(
+                "hosted_content_unpinned", status=422, turn_outcome=REQUEST_NONFALLBACK_TURN_OUTCOME,
+            )
         engine_prepared = False
         # An entirely unsupported Google request must not reconcile the engine
         # or custody. Supported hops drain the journal in demand preparation.
@@ -9087,6 +9135,10 @@ class ModelHubService:
             )
         event_agent = cast(EventAgent, backend)
         candidate_hops = list(resolution.candidate_hops)
+        if pinned_hop is not None and all((hop.source_id, hop.model_id) != pinned_hop for hop in candidate_hops):
+            # Cooling down, removed, or no longer this route's hop: refused
+            # before anything is invoked, and never waited out.
+            raise _pin_unavailable()
         if not candidate_hops:
             projection_config, projection_resolution = config, resolution
             if supply_channel is not None:
@@ -9146,6 +9198,7 @@ class ModelHubService:
                         hop for hop in resolution.candidate_hops
                         if hop.source_id not in globally_blocked_source_ids
                         and (hop.source_id, hop.model_id) not in unsupported_hops
+                        and (pinned_hop is None or (hop.source_id, hop.model_id) == pinned_hop)
                     ),
                     None,
                 )
@@ -9208,6 +9261,12 @@ class ModelHubService:
                 if self._effort_refused(source, target_model, request):
                     effort_rejected_sources.append(source.id)
                     raise _InvocationUnsupported("effort_unsupported")
+                if pinned_hop is not None and getattr(request, "protocol", None) != source.protocol:
+                    # Native content is never translated: the pinned hop must speak the request's protocol.
+                    raise _pin_unavailable()
+                if hosted and not await asyncio.to_thread(self._admits_hosted, hosted, source, target_model):
+                    # The pinned hop has no current positive evidence for this content.
+                    raise _pin_unavailable()
                 await self._prepare_engine_for_demand(already_synced=engine_prepared)
                 engine_prepared = True
                 handle, outcome, cancelled = await self._invoke(
@@ -9224,6 +9283,9 @@ class ModelHubService:
                     recovery_request=recovery_request,
                 )
             except _InvocationUnsupported as skipped:
+                if pinned_hop is not None:
+                    # Normal routing would skip this hop; a pinned request cannot.
+                    raise _pin_unavailable() from None
                 unsupported_reason = skipped.reason
                 unsupported_hops.add((source.id, target_model))
                 logger.info(
@@ -9261,7 +9323,7 @@ class ModelHubService:
                     origin=origin,
                 )
             decision = await self._classify_source_outcome(source, outcome)
-            await self._learn_capability_evidence(source, target_model, request, outcome)
+            learned = await self._learn_capability_evidence(source, target_model, request, outcome)
             if cancelled is not None:
                 await self._settle_cancelled_attempt(
                     source=source,
@@ -9325,7 +9387,7 @@ class ModelHubService:
                         origin=origin,
                     )
                 decision = classify_outcome(outcome, refresh_attempted=True)
-                await self._learn_capability_evidence(source, target_model, request, outcome)
+                learned = await self._learn_capability_evidence(source, target_model, request, outcome)
                 if cancelled is not None:
                     await self._settle_cancelled_attempt(
                         source=source,
@@ -9379,6 +9441,18 @@ class ModelHubService:
                     verification_pending=verification_pending,
                     origin=origin,
                 )
+            if (
+                pinned_hop is not None
+                and decision.action == "surface"
+                and not outcome.stream_started
+                and learned is not None
+                and learned.feature.kind == "hosted_tool"
+            ):
+                # A narrow hosted-content rule named this refusal and recorded
+                # its evidence: the pinned hop cannot take this content, so the
+                # request goes back to Vibey for its portable form.
+                self.recovery.release(source.id, settlement_generation)
+                raise _pin_unavailable()
             if decision.action == "surface":
                 self.recovery.release(source.id, settlement_generation)
                 source_transition_persisted: bool | None = None
@@ -9415,6 +9489,19 @@ class ModelHubService:
                         source_transition_persisted=source_transition_persisted,
                     ),
                 )
+            if decision.action == "fallback" and pinned_hop is not None:
+                # A failure normal routing would fail over from. The Source's
+                # health is settled as usual; the request goes back to Vibey,
+                # which re-renders it in portable form and sends it unpinned.
+                await self._settle_fallback_source(
+                    source,
+                    decision,
+                    backend=cast(BackendName, backend),
+                    model_id=model_id,
+                    settlement_generation=settlement_generation,
+                    outcome=outcome,
+                )
+                raise _pin_unavailable()
             if decision.action == "fallback":
                 non_retryable_failure |= decision.reason not in RETRY_DELAYS
                 if recovery_request is not None and decision.reason in RETRY_DELAYS:
@@ -9445,6 +9532,9 @@ class ModelHubService:
                 turn_outcome=ENGINE_DOWN_TURN_OUTCOME,
                 local_error_detail=format_os_errno(outcome.os_errno),
             )
+        if pinned_hop is not None:
+            # The pinned hop left the route or its recovery window closed.
+            raise _pin_unavailable()
         if (
             unsupported_reason == "effort_unsupported"
             and failed_source is None

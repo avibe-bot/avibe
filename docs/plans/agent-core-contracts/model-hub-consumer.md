@@ -61,6 +61,39 @@ consumer's requirements, and the Model Hub lane lands the change in both places.
      - its attempt ends before model output with a failover-class failure;
      - its attempt ends before model output with an error that a narrow hosted-content evidence rule names.
    - Vibey then renders the same request in portable form and sends it unpinned; it fails over as today.
+   - **The pin names an exact hop.** It is the pinned Source with the model the content was rendered for:
+     - the model in `x-avibe-pin-model`, which a continuation sets to the served-hop `model` of the response it
+       continues;
+     - otherwise the launch's primary hop model, when the pin is the primary Source. The route credential fixes
+       that model.
+     - A pin that is neither matches no hop.
+     - Nothing turn-wide is read, because a turn may have concurrent requests.
+   - **Admission** reads the overlay and the evidence at the current engine and probe shape:
+     - the pinned hop must be a runnable hop of the route;
+     - every hosted declaration in `tools` needs the overlay to still offer that tool on the hop with that
+       declaration `type`, and `call` evidence. A declaration is a tool whose `type` the overlay declares for a
+       catalog tool on this protocol, for any vendor; a function never is one;
+     - every replayed hosted item outside the in-flight response needs the overlay to still offer its tool on the
+       hop, and `replay` evidence. A generated image never has it.
+     - The hosted items are Responses `web_search_call`, `image_generation_call`, and `custom_tool_call` named
+       `x_keyword_search`, `x_semantic_search`, `x_user_search` or `x_thread_fetch`; and Anthropic `server_tool_use`
+       named after a catalog tool, and `web_search_tool_result`.
+     - The **in-flight response** is structural. On Anthropic it is the last assistant message, when the request ends
+       with it or with user messages made only of `tool_result` blocks. On Responses it is the trailing run of model
+       output items (an assistant `message`, `reasoning`, and the known call item types), followed only by
+       `function_call_output` or `custom_tool_call_output` items. Any other item ends the run, so an unknown item
+       never exempts a hosted call from evidence.
+   - A pinned request is forwarded with nothing changed but `model` and `stream`, so Vibey renders all of it, earlier
+     history included, for the pinned Source's origin.
+   - **Unpinned hosted content is refused.** Vibey pins every request carrying Source-specific hosted content:
+     native declarations, replayed native items, and in-flight continuations. An unpinned Vibey request carrying
+     any of it therefore has no correct hop, and the gateway answers 422 `hosted_content_unpinned` before anything
+     runs.
+   - **Native content is never translated.** The pinned hop must speak the request's protocol; otherwise the
+     answer is `pin_unavailable`.
+   - A `pin_unavailable` carries no routing state into the resend. Every failover-class failure that is health
+     evidence settles the Source as normal routing does, so the resend skips it. An unrecognized error frame inside
+     a 2xx is not health evidence, so the resend may try that Source once more.
    - Item 6 (the opaque thinking strip) is unchanged and applies only to unpinned requests.
    - The served-hop report carries `source`, the serving Source id (item 4, Model Hub contract v12), so that a
      hosted block's payload is tagged with the exact Source; two Sources can share an origin. The gateway and the

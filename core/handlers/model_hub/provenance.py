@@ -719,6 +719,9 @@ class TurnTrace:
     # readable; explicit user cancellation suppresses live copy as before.
     outcome_frozen: Literal["backend_failure", "user_cancellation"] | None = None
     recovery_requests: dict[str, dict] = field(default_factory=dict)
+    # The request whose surfaced attempt set ``terminal_error``, and that exact
+    # value: a handed-back request withdraws only its own terminal.
+    terminal_error_by: Optional[tuple[str, dict]] = None
 
     @property
     def pending_attempt(self) -> Optional[AttemptIdentity]:
@@ -861,6 +864,33 @@ class GatewayTurnTerminalizer:
         reason: Literal["invalid_parameter", "protocol_error"],
     ) -> None:
         self._staged_exit = {**(self._staged_exit or {}), "fail_reason": reason}
+
+    def pinned_hop(self, source_id: str, model_id: str | None) -> tuple[str, str | None]:
+        """The exact hop an ``x-avibe-pin-source`` request was rendered for, from explicit or immutable data.
+
+        A continuation names its model (``x-avibe-pin-model``: the served-hop
+        model of the response it continues). Otherwise the pin is the launch's
+        primary hop, whose origin this route credential fixes. A pin that is
+        neither has no model and matches no hop. Nothing turn-wide is read: a
+        turn may have concurrent requests.
+        """
+
+        if model_id is None and self.primary_origin is not None and self.primary_origin.source == source_id:
+            model_id = self.primary_origin.model
+        return source_id, model_id
+
+    def hand_back(self) -> None:
+        """End this request without an exit of its own: its caller re-sends the content.
+
+        A pinned Vibey request the gateway cannot serve (``pin_unavailable``)
+        is re-rendered and sent again in the same turn. Attempts it made stay
+        recorded; the turn settles on the request that follows.
+        """
+
+        self._registry.withdraw_terminal_error(self.turn_id, request_id=self._request_id)
+        self._registry.clear_prepared_attempt(self.turn_id, request_id=self._request_id)
+        self._staged_exit = None
+        self._exit_committed = True
 
     def engine_down(self, *, local_error_detail: str | None = None) -> None:
         self._registry._terminalize_gateway_exit(
@@ -2417,6 +2447,21 @@ class TurnCorrelationRegistry:
                     "upstream_error_code": diagnostic_code,
                     **detail,
                 }
+                trace.terminal_error_by = (request_id, trace.terminal_error)
+
+    def withdraw_terminal_error(self, turn_id: Optional[str], *, request_id: str) -> None:
+        """Drop the terminal a handed-back request surfaced; it did not end the turn."""
+
+        if turn_id is None:
+            return
+        with self._lock:
+            trace = self._traces.get(turn_id)
+            if trace is None or trace.outcome_frozen or trace.terminal_error_by is None:
+                return
+            owner, value = trace.terminal_error_by
+            if owner == request_id and trace.terminal_error is value:
+                trace.terminal_error = None
+                trace.terminal_error_by = None
 
     def close_turn_admission(self, turn_id: str, *, settled_by: Optional[str]) -> None:
         """Latch the FSM boundary without discarding already-owned requests."""

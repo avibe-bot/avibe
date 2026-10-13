@@ -33,6 +33,7 @@ class ModelHubRequest(dict[str, Any]):
         protocol: str,
         headers: Mapping[str, str] | None = None,
         primary_origin: HopOrigin | None = None,
+        pinned_hop: tuple[str, str | None] | None = None,
     ) -> None:
         super().__init__(payload)
         self.protocol = protocol
@@ -40,6 +41,10 @@ class ModelHubRequest(dict[str, Any]):
         # Launch snapshot, not wire JSON. Every retry compares against this
         # origin, even when resolution restarts after cooldown/config changes.
         self.primary_origin = primary_origin
+        # The one (Source, model) a Vibey request carrying Source-specific hosted
+        # content may be served by: no failover, no recovery wait, no rewrite.
+        # A model of None matches no hop.
+        self.pinned_hop = pinned_hop
 
 
 _OPAQUE_FIELDS = frozenset({"signature", "thoughtSignature", "thought_signature", "encrypted_content"})
@@ -104,7 +109,7 @@ def without_opaque_history(request: Mapping[str, Any]) -> Mapping[str, Any]:
     if isinstance(request, ModelHubRequest):
         return ModelHubRequest(
             payload, protocol=request.protocol, headers=request.headers,
-            primary_origin=request.primary_origin,
+            primary_origin=request.primary_origin, pinned_hop=request.pinned_hop,
         )
     return payload
 

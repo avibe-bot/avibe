@@ -60,6 +60,7 @@ capabilities:
       - tests/test_model_hub_evidence_rules.py
       - tests/test_model_hub_admission.py
       - tests/test_model_hub_vibey_consumer.py
+      - tests/test_model_hub_hosted_pinning.py
       - tests/test_model_hub_config.py
       - tests/test_model_hub_legacy_opencode_migration.py
       - tests/test_model_hub_persisted_migration.py
