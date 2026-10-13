@@ -357,9 +357,11 @@ which agrees with the `openai` row.
 - A stuck upstream behind a relay that keeps writing data frames (Anthropic
   `ping`, or an `event: keepalive` frame) resets the bound and is not caught. For
   the Anthropic relay measured here, the pings may come from the relay itself.
-- Unbounded Sources keep the caller's bound. Covering them needs the engine to
-  forward the upstream's heartbeat: comment-only frames immediately, and pings
-  across translation. That is an engine change, not a gateway timeout.
+- Unbounded Sources keep the caller's bound and patches 4 and 5. Where a healthy
+  stream sends no data for minutes, no byte bound can tell a busy upstream from
+  a stuck one. Forwarding the relay's comments would not help either: a stuck
+  upstream behind a live relay sends those comments too. Holding them back is
+  what lets this bound see such a stall on the bounded Sources.
 - The vendor is the Source's declared vendor. A relay declared `openai` that
   serves a model which buffers tool calls, as xAI does, would be cut at 120 s
   on a tool call longer than that.
