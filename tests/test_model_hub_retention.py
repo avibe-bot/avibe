@@ -381,7 +381,7 @@ def test_finalization_preserves_stop_and_backend_failure_before_late_success(tmp
             assert record["outcome"] == expected
             assert record["served"] is None
             if backend_rejection:
-                assert record["terminal_error"]["reason"] == "protocol_error"
+                assert record["terminal_error"]["reason"] == "backend_error"
             elif reason != SETTLED_BY_STOPPED:
                 assert record["terminal_error"]["reason"] == "stream_interrupted"
             else:

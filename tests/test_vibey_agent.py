@@ -540,7 +540,7 @@ async def test_a_setup_failure_after_the_route_resolved_fails_the_turn_and_not_t
 
     reported: list[str] = []
 
-    async def record_native_failure(context, diagnostic) -> bool:
+    async def record_native_failure(context, diagnostic, *, error_kind=None) -> bool:
         reported.append(diagnostic)
         return False
 
@@ -1166,7 +1166,7 @@ async def test_a_failed_run_shows_localized_copy_and_a_refusal_shows_its_explana
     )
     reported: list[str] = []
 
-    async def record_native_failure(context, diagnostic) -> bool:
+    async def record_native_failure(context, diagnostic, *, error_kind=None) -> bool:
         reported.append(diagnostic)
         return False
 
@@ -1240,7 +1240,7 @@ async def test_a_run_failure_is_reported_to_model_hub_like_the_other_backends(en
 
     reported: list[str] = []
 
-    async def record_native_failure(context, diagnostic) -> bool:
+    async def record_native_failure(context, diagnostic, *, error_kind=None) -> bool:
         reported.append(diagnostic)
         return False
 
@@ -1253,6 +1253,49 @@ async def test_a_run_failure_is_reported_to_model_hub_like_the_other_backends(en
 
     # The served attempt is replaced by the backend's terminal failure, so the Hub's copy can apply.
     assert len(reported) == 1 and harness.controller.terminals[-1]["is_error"] is True
+
+
+async def test_model_hub_records_a_source_stall_as_the_backend_reported_it(engine, session, tmp_path, published) -> None:
+    """The Turn's Model Hub record holds what Vibey observed, through the shared failure bridge: the stall's kind and
+    its sanitized diagnostic, never a guessed protocol error, and no claim about when the failing request streamed."""
+    from core.agent_core.ai.provider import ProviderError
+    from core.handlers.model_hub.provenance import BoundedProvenanceStore, TurnCorrelationRegistry
+    from core.run_settlement import SETTLED_BY_TERMINAL_RESULT
+    from modules.agents.model_hub import ModelHubRuntimeRouter
+    from tests.test_model_hub_l3 import _assert_valid
+
+    stall = ProviderError("stalled", "provider sent no data for 600s\n‮上游 key=sk-proj-stall0secret0value", False)
+    harness = _Harness(engine, tmp_path, "telegram", [[stall]])
+    registry = TurnCorrelationRegistry(BoundedProvenanceStore(tmp_path / "provenance.json"))
+    router = ModelHubRuntimeRouter(
+        service=SimpleNamespace(), turn_gateway=SimpleNamespace(correlation=registry), overlay_path=tmp_path / "overlay.json"
+    )
+    # Only the route is the harness's; the failure goes through the shared router into the real registry.
+    router.resolve = harness.controller._resolve
+    harness.controller.model_hub_runtime = router
+    request = harness.request("write the page")
+    turn_id = _turn(request.context)
+    token = registry.credentials("vibey", f"vibey:{harness.session_id}", turn_id)
+    registry.begin_gateway_request(backend="vibey", token=token, requested_model_id="test-model")
+    registry.begin_attempt(
+        turn_id, source_id="src_stalled01", resolved_model_id="test-model", channel="hub", via_mapping=False
+    )
+
+    await harness.agent.handle_message(request)
+    registry.settle(turn_id, settled_by=SETTLED_BY_TERMINAL_RESULT)
+
+    record = registry.store.get(turn_id)
+    assert record["outcome"] == "failed_terminal" and record["served"] is None
+    assert record["terminal_error"] == {
+        "source_id": "src_stalled01",
+        "configured_model_id": "test-model",
+        "channel": "hub",
+        "reason": "backend_error",
+        "stream_started": None,
+        "error_kind": "stalled",
+        "backend_error_detail": "provider sent no data for 600s 上游 key=[redacted]",
+    }
+    _assert_valid("turn-provenance.schema.json", record)
 
 
 async def test_an_unreadable_image_is_listed_by_path_and_the_turn_runs(engine, session, tmp_path, published) -> None:

@@ -75,6 +75,20 @@ describe('recorded turn error', () => {
     await user.click(screen.getByRole('button', { name: 'View error details' }));
     expect(screen.getByRole('dialog').querySelector('pre')?.textContent).toBe(JSON.stringify(historical, null, 2));
   });
+  it('names a backend-reported failure and its kind instead of an upstream or protocol fault', async () => {
+    const user = userEvent.setup();
+    const reported: TurnProvenance = { ...record, terminal_error: {
+      source_id: 'src_historical', configured_model_id: 'historical-model', channel: 'hub', reason: 'backend_error',
+      stream_started: null, error_kind: 'stalled', backend_error_detail: 'provider sent no data for 600s',
+    } };
+    vi.spyOn(modelsApi, 'getAgentProvenance').mockResolvedValue(reported);
+    render(view());
+    expect(await screen.findByText('Latest recorded turn · Agent backend reported a failure')).toBeTruthy();
+    expect(screen.getByText('The model provider stopped sending data')).toBeTruthy();
+    expect(screen.queryByText(/Protocol error|model not found/)).toBeNull();
+    await user.click(screen.getByRole('button', { name: 'View error details' }));
+    expect(screen.getByRole('dialog').querySelector('pre')?.textContent).toBe(JSON.stringify(reported, null, 2));
+  });
   it.each(['served', 'canceled', null] as const)('does not show an old error when latest outcome is %s', async (outcome) => {
     const read = vi.spyOn(modelsApi, 'getAgentProvenance').mockResolvedValue(outcome ? { ...record, outcome, terminal_error: null } : null);
     render(view());

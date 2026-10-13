@@ -213,6 +213,33 @@ describe('failed-turn upstream details', () => {
     expect(screen.queryByText(/由上游供应商的 API 返回/)).toBeNull();
   });
 
+  it.each([
+    ['stalled', '模型服务商停止返回数据'],
+    ['ProviderProtocolViolation', 'ProviderProtocolViolation'],
+  ])('shows a backend-reported %s failure as the backend\'s diagnostic, never an upstream answer', async (kind, shown) => {
+    vi.spyOn(modelsApi, 'getTurnProvenance').mockResolvedValue({
+      ...record,
+      agent: 'vibey',
+      failed_attempts: [],
+      terminal_error: {
+        source_id: 'src_b', configured_model_id: 'grok-4.6-beta', channel: 'hub', reason: 'backend_error',
+        stream_started: null, error_kind: kind, backend_error_detail: 'provider sent no data for 600s',
+      },
+      blockers: [],
+    } as TurnProvenance);
+    mount();
+    fireEvent.click(await screen.findByRole('button', { name: '查看详情' }));
+    expect(screen.getByText('grok-4.6 的请求失败了，原因见下方。')).toBeTruthy();
+    expect(screen.getByText('Agent 后端报告了失败')).toBeTruthy();
+    expect(screen.getByText(/失败类型/)).toBeTruthy();
+    expect(screen.getByText(shown)).toBeTruthy();
+    expect(screen.getByText(/Agent 后端报告:/)).toBeTruthy();
+    expect(screen.getByText('provider sent no data for 600s')).toBeTruthy();
+    expect(screen.queryByText(/上游返回/)).toBeNull();
+    expect(screen.queryByText(/上游 API 拒绝/)).toBeNull();
+    expect(screen.queryByText(/由上游供应商的 API 返回/)).toBeNull();
+  });
+
   it('names Avibe-side terminal failures and localizes every blocker reason', async () => {
     vi.spyOn(modelsApi, 'getTurnProvenance').mockResolvedValue({
       ...record,

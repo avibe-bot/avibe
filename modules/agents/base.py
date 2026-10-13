@@ -262,15 +262,20 @@ class BaseAgent(ABC):
 
         return None
 
-    async def record_model_hub_native_failure(self, context: Any, diagnostic: str) -> bool:
-        """Persist source cooldown state when a terminal turn proves source loss."""
+    async def record_model_hub_native_failure(
+        self, context: Any, diagnostic: str, *, error_kind: str | None = None
+    ) -> bool:
+        """Persist source cooldown state when a terminal turn proves source loss.
+
+        ``error_kind`` is the backend's typed failure kind, for a backend that has one.
+        """
 
         router = getattr(self.controller, "model_hub_runtime", None)
         recorder = getattr(router, "record_native_failure", None)
         if not callable(recorder):
             return False
         try:
-            return bool(await recorder(context, diagnostic))
+            return bool(await recorder(context, diagnostic, error_kind=error_kind))
         except Exception:
             logger.warning("Failed to record Model Hub native cooldown", exc_info=True)
             return False

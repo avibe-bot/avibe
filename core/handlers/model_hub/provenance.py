@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import secrets
 import threading
 from dataclasses import dataclass, field
@@ -36,6 +37,7 @@ from .events import (
     EVENT_REASON_AUTHORITY,
     RETIRED_PERSISTED_REASON_DEGRADATIONS,
     SOURCE_DETAIL_EVENT_REASONS,
+    bounded_diagnostic_detail,
     event_reason_label,
 )
 from .resolver import BackendName, ModelHubTurnResolution, parse_model_hub_timestamp, source_eligible_for_backend
@@ -43,6 +45,9 @@ from .state_file import write_state_document
 
 
 SupplyChannel = Literal["native_cli", "hub"]
+# A backend's typed failure kind is a member of that backend's closed vocabulary
+# (Vibey: ``NAMED_ERROR_KINDS``), never free text: the record keeps only that shape.
+_BACKEND_ERROR_KIND = re.compile(r"[A-Za-z][A-Za-z0-9_]{0,63}")
 SupplyState = Literal["waiting", "interrupted"]
 ScopeKey = tuple[BackendName, str]
 logger = logging.getLogger(__name__)
@@ -2267,12 +2272,24 @@ class TurnCorrelationRegistry:
 
         return any(key != request_id for key in trace.pending_attempts)
 
-    def fail_hub_attempt(self, turn_id: Optional[str]) -> None:
-        """Replace a gateway success rejected by the backend terminal result."""
+    def fail_hub_attempt(
+        self,
+        turn_id: Optional[str],
+        *,
+        error_kind: str | None = None,
+        diagnostic: str | None = None,
+    ) -> None:
+        """Record the backend's terminal failure of a turn the gateway did not end.
+
+        The record holds only what the backend reported: its typed kind and its
+        sanitized diagnostic. The backend cannot see the failing request's
+        phase, so ``stream_started`` stays unknown.
+        """
 
         normalized = str(turn_id or "").strip()
         if not normalized:
             return
+        detail = bounded_diagnostic_detail(diagnostic or "")
         with self._lock:
             trace = self._traces.get(normalized)
             if trace is None or trace.outcome_frozen:
@@ -2282,6 +2299,10 @@ class TurnCorrelationRegistry:
                 # failure, not rejecting content that the gateway served.
                 return
             trace.outcome_frozen = True
+            if trace.terminal_error is not None and not trace.pending_attempts:
+                # The same for a completed failure that has no copy. A request
+                # still open after it would supersede it, but none is.
+                return
             identity = trace.pending_attempt
             payload = (
                 identity.payload()
@@ -2295,8 +2316,14 @@ class TurnCorrelationRegistry:
             trace.served = None
             trace.terminal_error = {
                 **payload,
-                "reason": "protocol_error",
-                "stream_started": True,
+                "reason": "backend_error",
+                "stream_started": None,
+                **(
+                    {"error_kind": error_kind}
+                    if isinstance(error_kind, str) and _BACKEND_ERROR_KIND.fullmatch(error_kind)
+                    else {}
+                ),
+                **({"backend_error_detail": detail} if detail else {}),
             }
 
     def finish_attempt(

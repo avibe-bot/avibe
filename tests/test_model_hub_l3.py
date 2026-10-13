@@ -5457,8 +5457,18 @@ def test_fsm_drop_overrides_a_completed_gateway_attempt(tmp_path: Path) -> None:
     _assert_valid("turn-provenance.schema.json", record)
 
 
+@pytest.mark.parametrize(
+    "error_kind,recorded",
+    [
+        # A backend with no typed kind (Claude, Codex, OpenCode) reports its failure neutrally.
+        (None, {}),
+        ("stalled", {"error_kind": "stalled"}),
+        # Only a kind's shape is ever kept: text in the kind field is dropped, never persisted.
+        ("Authorization: Bearer sk-proj-kind0secret0value", {}),
+    ],
+)
 def test_backend_terminal_failure_overrides_gateway_success(
-    tmp_path: Path,
+    tmp_path: Path, error_kind: str | None, recorded: dict
 ) -> None:
     store = BoundedProvenanceStore(tmp_path / "backend-terminal.json")
     registry = TurnCorrelationRegistry(store)
@@ -5473,7 +5483,11 @@ def test_backend_terminal_failure_overrides_gateway_success(
         decision=classify_outcome(success),
     )
 
-    registry.fail_hub_attempt("turn_backend_terminal")
+    registry.fail_hub_attempt(
+        "turn_backend_terminal",
+        error_kind=error_kind,
+        diagnostic="API Error: 上游连接已关闭\x07 api_key=sk-proj-detail0secret0value",
+    )
     registry.settle(
         "turn_backend_terminal",
         settled_by=SETTLED_BY_TERMINAL_RESULT,
@@ -5484,8 +5498,92 @@ def test_backend_terminal_failure_overrides_gateway_success(
     assert record is not None
     assert record["outcome"] == "failed_terminal"
     assert record["served"] is None
-    assert record["terminal_error"]["reason"] == "protocol_error"
+    # The backend saw its turn fail, not the request's phase or an upstream verdict.
+    assert record["terminal_error"] == {
+        "source_id": "src_primary01",
+        "configured_model_id": "shared-model",
+        "channel": "hub",
+        "reason": "backend_error",
+        "stream_started": None,
+        **recorded,
+        "backend_error_detail": "API Error: 上游连接已关闭 api_key=[redacted]",
+    }
     _assert_valid("turn-provenance.schema.json", record)
+
+
+@pytest.mark.parametrize("later_request", [False, True])
+def test_backend_failure_keeps_the_gateway_terminal_error_no_later_request_superseded(
+    tmp_path: Path, later_request: bool
+) -> None:
+    """A protocol failure has no copy projection; the gateway's exact record of it still outlives the backend's report."""
+    store = BoundedProvenanceStore(tmp_path / "gateway-terminal.json")
+    registry = TurnCorrelationRegistry(store)
+    exact_turn = _begin_hub_attempt(registry, turn_id="turn_gateway_terminal")
+    success = _outcome(RawOutcomeKind.SUCCESS)
+    registry.finish_attempt(exact_turn, outcome=success, decision=classify_outcome(success))
+    registry.begin_attempt(
+        exact_turn, source_id="src_backup01", resolved_model_id="shared-model", channel="hub", via_mapping=False,
+    )
+    failure = _outcome(RawOutcomeKind.PROTOCOL_ERROR, status=200, source_id="src_backup01")
+    registry.finish_attempt(exact_turn, outcome=failure, decision=classify_outcome(failure))
+    gateway_terminal = dict(registry._traces[exact_turn].terminal_error)
+    assert registry.terminal_projection(exact_turn, backend="codex") is None
+    if later_request:
+        registry.begin_attempt(
+            exact_turn, source_id="src_later001", resolved_model_id="shared-model", channel="hub", via_mapping=False,
+        )
+
+    registry.fail_hub_attempt(exact_turn, diagnostic="Codex exited")
+    # Nothing after the backend's report replaces the turn's record, not even a later success.
+    late = _outcome(RawOutcomeKind.SUCCESS, source_id="src_late0001")
+    registry.begin_attempt(
+        exact_turn, source_id="src_late0001", resolved_model_id="shared-model", channel="hub", via_mapping=False,
+        request_id="late",
+    )
+    registry.finish_attempt(exact_turn, outcome=late, decision=classify_outcome(late), request_id="late")
+    registry.settle(exact_turn, settled_by=SETTLED_BY_TERMINAL_RESULT, ts=NOW.isoformat())
+
+    record = store.get(exact_turn)
+    assert record is not None and record["outcome"] == "failed_terminal"
+    if later_request:
+        # The request still open when the backend failed is the one it reports on.
+        assert record["terminal_error"] == {
+            "source_id": "src_later001", "configured_model_id": "shared-model", "channel": "hub",
+            "reason": "backend_error", "stream_started": None, "backend_error_detail": "Codex exited",
+        }
+    else:
+        assert gateway_terminal["reason"] == "protocol_error" and gateway_terminal["stream_started"] is False
+        assert record["terminal_error"] == gateway_terminal
+    _assert_valid("turn-provenance.schema.json", record)
+
+
+def test_released_backend_rejection_records_read_unchanged(tmp_path: Path) -> None:
+    """Records the earlier bridge wrote stay as written: no reason or phase is re-derived on read."""
+    released = {
+        "contract_version": 11,
+        "turn_id": "turn_released_rejection",
+        "ts": NOW.isoformat(),
+        "agent": "vibey",
+        "requested_model_id": "shared-model",
+        "outcome": "failed_terminal",
+        "failed_attempts": [],
+        "served": None,
+        "terminal_error": {
+            "source_id": "src_primary01",
+            "configured_model_id": "shared-model",
+            "channel": "hub",
+            "reason": "protocol_error",
+            "stream_started": True,
+        },
+        "canceled_attempt": None,
+        "model_supply_state": None,
+        "blockers": [],
+    }
+    path = tmp_path / "provenance.json"
+    path.write_text(json.dumps([released]), encoding="utf-8")
+
+    assert BoundedProvenanceStore(path).get("turn_released_rejection") == released
+    _assert_valid("turn-provenance.schema.json", released)
 
 
 def test_lost_terminal_retains_completed_fallback_attempts(

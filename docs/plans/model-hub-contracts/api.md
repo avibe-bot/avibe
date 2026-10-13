@@ -1357,6 +1357,23 @@ of control and bidi characters, whitespace-collapsed, and bounded to 400 charact
 They are omitted when no message was observed and in older records, and are never
 read by classification.
 
+`terminal_error.reason: backend_error` is an agent backend's own report of a failed
+turn that the gateway did not end itself
+(`docs/plans/model-hub-backend-failure-facts.md`). The shared failure bridge records
+it on the request still open, else on the served attempt. A gateway terminal already
+recorded for the turn, a copy projection or a concrete `terminal_error` with or
+without one, is kept instead, unless a later request was still open when the backend
+failed. The record carries only the backend's facts: optional `error_kind`, the
+backend's typed failure kind from its closed vocabulary (Vibey supplies its named
+`AgentError` kind, such as `stalled`, for a failure the served Source produced; other
+backends supply none), and optional `backend_error_detail`, the backend's diagnostic
+under the same redaction and bound as `upstream_detail`, which is never an upstream
+answer. Its `stream_started` is null because the reporter cannot see the failing
+request's phase; every other reason keeps its boolean. It changes no classification,
+retry, Source health or Stop rule. Records written before this reason existed,
+including backend rejections recorded as `protocol_error` with `stream_started: true`,
+are read as written.
+
 The dialog independently reads this projection on demand and labels it "Latest recorded
 turn" / "最近已记录回合". Its error panel and details action use the same structured record,
 recorded timestamp and exact historical Source/model identifiers. Deleted Sources keep

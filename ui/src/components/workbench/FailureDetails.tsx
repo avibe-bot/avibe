@@ -7,8 +7,10 @@
 // user see the refusal came from the upstream API and not from the gateway.
 //
 // The upstream message is kept only as the engine client's credential-redacted,
-// 400-character projection. Local OS reasons are also carried by the notice, so
-// details survive an unavailable provenance read.
+// 400-character projection. A failure the agent backend reported on its own is
+// labeled as the backend's diagnostic, never as an upstream answer. Local OS
+// reasons are also carried by the notice, so details survive an unavailable
+// provenance read.
 import * as React from 'react';
 import { ChevronDown, ChevronRight } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -27,11 +29,20 @@ type Row = {
   model: string | null;
   status: number | null;
   code: string | null;
+  // The agent backend's typed failure kind, for a failure it reported itself.
+  kind: string | null;
   reason: string;
   detail: string | null;
-  // A network attempt's text is the connection failure, not an upstream answer.
-  connection: boolean;
+  // Who said `detail`: a network attempt's text is the connection failure and
+  // a backend-reported failure's is the backend's, neither an upstream answer.
+  said: 'upstream' | 'connection' | 'backend';
 };
+
+const DETAIL_LABEL = {
+  upstream: 'chat.failureDetails.upstreamDetail',
+  connection: 'chat.failureDetails.connectionDetail',
+  backend: 'chat.failureDetails.backendDetail',
+} as const satisfies Record<Row['said'], string>;
 
 const RECORD_RETRIES = 3;
 const RECORD_RETRY_MS = 1_000;
@@ -100,21 +111,24 @@ export function FailureDetails({ message }: { message: WorkbenchMessage }) {
       model: entry.configured_model_id,
       status: entry.http_status ?? null,
       code: null,
+      kind: null,
       reason: t(`chat.failureDetails.reason.${entry.reason}`, { defaultValue: entry.reason }),
       detail: entry.upstream_detail ?? null,
-      connection: entry.reason === 'network',
+      said: entry.reason === 'network' ? 'connection' : 'upstream',
     }));
     const terminal = record.terminal_error;
     if (terminal) {
+      const backend = terminal.reason === 'backend_error';
       attempts.push({
         key: 'terminal',
         source: name(terminal.source_id),
         model: terminal.configured_model_id,
         status: terminal.http_status ?? null,
         code: terminal.upstream_error_code ?? null,
+        kind: terminal.error_kind ?? null,
         reason: t(`settings.models.routing.errorReason.${terminal.reason}`),
-        detail: terminal.upstream_detail ?? null,
-        connection: false,
+        detail: (backend ? terminal.backend_error_detail : terminal.upstream_detail) ?? null,
+        said: backend ? 'backend' : 'upstream',
       });
     }
     return attempts;
@@ -130,7 +144,7 @@ export function FailureDetails({ message }: { message: WorkbenchMessage }) {
       ? 'failed_local'
       : record.outcome;
     const upstreamFacts = attempts.some(
-      (row) => row.status !== null || row.code !== null || (row.detail !== null && !row.connection),
+      (row) => row.status !== null || row.code !== null || (row.detail !== null && row.said === 'upstream'),
     );
     return (
       <div className="flex flex-col gap-2">
@@ -145,11 +159,12 @@ export function FailureDetails({ message }: { message: WorkbenchMessage }) {
                 <span className="flex flex-wrap gap-x-3 gap-y-0.5 text-gold-ink/70">
                   <span>{t('chat.failureDetails.httpStatus')}: <span className="font-mono text-gold-ink">{row.status ?? '—'}</span></span>
                   {row.code && <span>{t('chat.failureDetails.errorCode')}: <span className="font-mono text-gold-ink">{row.code}</span></span>}
+                  {row.kind && <span>{t('chat.failureDetails.errorKind')}: <span className="text-gold-ink">{t(`settings.models.routing.errorKind.${row.kind}`, { defaultValue: row.kind })}</span></span>}
                   <span>{t('chat.failureDetails.reasonLabel')}: <span className="text-gold-ink">{row.reason}</span></span>
                 </span>
                 {row.detail && (
                   <span className="text-gold-ink/70">
-                    {t(row.connection ? 'chat.failureDetails.connectionDetail' : 'chat.failureDetails.upstreamDetail')}:{' '}
+                    {t(DETAIL_LABEL[row.said])}:{' '}
                     <span className="whitespace-pre-wrap break-words font-mono text-gold-ink">{row.detail}</span>
                   </span>
                 )}

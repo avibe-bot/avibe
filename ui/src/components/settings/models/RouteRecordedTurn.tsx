@@ -13,12 +13,13 @@ function useReason(record: RecordedError) {
 }
 
 function RecordedSummary({ record }: { record: RecordedError }) {
-  const { i18n } = useTranslation();
+  const { t, i18n } = useTranslation();
   const error = record.terminal_error;
   return <>
     <time dateTime={record.ts}>{new Date(record.ts).toLocaleString(i18n.language)}</time>
     <span className="font-mono">{error.source_id ?? '—'} · {error.configured_model_id ?? '—'}</span>
     {error.upstream_error_code && <span className="font-mono">{error.upstream_error_code}</span>}
+    {error.error_kind && <span>{t(`settings.models.routing.errorKind.${error.error_kind}`, { defaultValue: error.error_kind })}</span>}
   </>;
 }
 
