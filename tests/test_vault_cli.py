@@ -516,7 +516,21 @@ def test_rm_no_callback_points_to_await(capfd):
     assert "resumes this Session" not in payload["message"]
 
 
-def test_rm_missing_secret_still_reports_not_found(capfd):
+def test_rm_reuses_pending_request_without_repeating_notification(capfd, monkeypatch):
+    _create_standard_secret("REUSED_RM")
+    published: list[dict] = []
+    monkeypatch.setattr(cli, "_publish_cli_vaults_updated", lambda **kwargs: published.append(kwargs))
+
+    assert cli.cmd_vault_rm(_ns(name="REUSED_RM")) == 0
+    first = json.loads(capfd.readouterr().out)
+    assert cli.cmd_vault_rm(_ns(name="REUSED_RM")) == 0
+    second = json.loads(capfd.readouterr().out)
+
+    assert first["request_id"] == second["request_id"]
+    assert [item.get("notify_request", True) for item in published] == [True, False]
+
+
+
     code = cli.cmd_vault_rm(_ns(name="MISSING_RM"))
     captured = capfd.readouterr()
 

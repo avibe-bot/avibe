@@ -3646,7 +3646,8 @@ def create_delete_request(
     requester: Any = None,
     message_id: str | None = None,
     user_context: Any = None,
-) -> dict[str, Any]:
+    return_created: bool = False,
+) -> dict[str, Any] | tuple[dict[str, Any], bool]:
     """Ask for deletion without accessing any secret value or unlock material."""
     context = resolve_resource_access_context(user_context)
     # Acquire SQLite's writer reservation before lookup/dedupe. A no-op write
@@ -3670,7 +3671,8 @@ def create_delete_request(
     for pending in pending_rows:
         existing, _ = _expire_request_if_due(conn, dict(pending))
         if existing["status"] == "pending":
-            return _request_row_payload(existing, conn=conn, audience=audience)
+            payload = _request_row_payload(existing, conn=conn, audience=audience)
+            return (payload, False) if return_created else payload
     request_id = _id("vrq")
     card = {
         "card_type": "approval",
@@ -3700,7 +3702,8 @@ def create_delete_request(
     )
     audit(conn, "delete_requested", secret_name=name, requester=stored_requester, delivery=delivery, request_id=request_id)
     row = conn.execute(select(vault_requests).where(vault_requests.c.id == request_id)).mappings().one()
-    return _request_row_payload(dict(row), conn=conn, audience=audience)
+    payload = _request_row_payload(dict(row), conn=conn, audience=audience)
+    return (payload, True) if return_created else payload
 
 
 def approve_delete_request(

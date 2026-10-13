@@ -8278,12 +8278,13 @@ def _publish_cli_vaults_updated(
     request: dict | None = None,
     grant: dict | None = None,
     secret_name: str | None = None,
+    notify_request: bool = True,
 ) -> None:
     """Best-effort bridge for CLI/agent vault writes into browser SSE."""
 
     if request is None and grant is None and not secret_name:
         return
-    if scope == "request" and isinstance(request, dict):
+    if scope == "request" and isinstance(request, dict) and notify_request:
         _publish_cli_vault_request_notification(request)
     try:
         from core.inbox_events import VAULTS_UPDATED_EVENT, vaults_updated_payload
@@ -8689,8 +8690,8 @@ def cmd_vault_rm(args):
         engine = _open_vault_engine()
         requester = _vault_cli_requester(args)
         with engine.begin() as conn:
-            request = vault_service.create_delete_request(
-                conn, args.name, reason=getattr(args, "reason", None), requester=requester,
+            request, created = vault_service.create_delete_request(
+                conn, args.name, reason=getattr(args, "reason", None), requester=requester, return_created=True,
             )
             stored_requester = request.get("requester") or {}
             session_id = requester.get("session_id")
@@ -8705,7 +8706,7 @@ def cmd_vault_rm(args):
                     )
                 ).first() is not None
             )
-        _publish_cli_vaults_updated(scope="request", request=request)
+        _publish_cli_vaults_updated(scope="request", request=request, notify_request=created)
         followup = (
             "Avibe resumes this Session after the decision; do not rerun rm."
             if callback_enabled else

@@ -609,22 +609,26 @@ def test_delete_request_deduplicates_and_keeps_value_free_card(vault):
     _create(vault, name="DELETE_ME", protection="protected", description="old credential", tags=["prod"])
 
     with vault.begin() as conn:
-        first = vs.create_delete_request(
+        first, first_created = vs.create_delete_request(
             conn,
             "DELETE_ME",
             reason="rotated",
             requester={"source": "agent-cli", "session_id": "ses_delete"},
+            return_created=True,
         )
-        second = vs.create_delete_request(
+        second, second_created = vs.create_delete_request(
             conn,
             "DELETE_ME",
             reason="different reason",
             requester={"source": "agent-cli", "session_id": "ses_other"},
+            return_created=True,
         )
         rows = list(conn.execute(select(vault_requests).where(vault_requests.c.request_type == "delete")).mappings())
         events = vs.list_audit(conn, secret_name="DELETE_ME")
 
     assert second["id"] == first["id"]
+    assert first_created is True
+    assert second_created is False
     assert len(rows) == 1
     assert first["card"] == {
         "card_type": "approval",
