@@ -51,6 +51,8 @@ from vibe.backend_model_catalog import (
     PROTOCOL_REASONING_EFFORT_DEFAULTS,
     builtin_display_name,
     bundled_catalog_wire_efforts_by_model,
+    bundled_client_presets_once,
+    bundled_provider_overlay,
     hosted_tool_spec,
 )
 from vibe.model_hub_runtime.api_key_vendors import (
@@ -1180,6 +1182,11 @@ class ModelHubService:
         self.capability_evidence = capability_evidence or CapabilityEvidenceStore(
             events.path.parent / "model_hub_capability_evidence.json"
         )
+        # Bundled state that never changes while this process runs, resolved once
+        # here at startup so that no request path reads a file on the loop.
+        self.engine_stamp = engine_stamp()
+        bundled_provider_overlay()
+        bundled_client_presets_once()
         self.migration_blocked_backends: set[str] = set()
         self.migration_guard = migration_guard or self._unavailable_migration_guard
         self.migration_reconcile_auth = migration_reconcile_auth
@@ -5782,7 +5789,7 @@ class ModelHubService:
                 self.store.load(),
                 evidence=self.capability_evidence,
                 spec_for=hosted_tool_spec,
-                engine=engine_stamp(),
+                engine=self.engine_stamp,
                 now=self.now(),
             )
         }
@@ -5817,7 +5824,7 @@ class ModelHubService:
             source,
             model_id,
             feature,
-            engine=engine_stamp(),
+            engine=self.engine_stamp,
             shape=HOSTED_PROBE_SHAPE,
             now=self.now(),
         )
@@ -5838,7 +5845,7 @@ class ModelHubService:
             hop.source is not None
             and hop.model_id is not None
             and self.capability_evidence.view(
-                hop.source, hop.model_id, feature, engine=engine_stamp(), shape=HOSTED_PROBE_SHAPE, now=self.now(),
+                hop.source, hop.model_id, feature, engine=self.engine_stamp, shape=HOSTED_PROBE_SHAPE, now=self.now(),
             ).status
             != "unsupported"
             for hop in resolution.self_healing_hops(supply_channel)
@@ -5871,7 +5878,7 @@ class ModelHubService:
                     status="unsupported",
                     basis="observed",
                     observed_at=self.now(),
-                    engine=engine_stamp(),
+                    engine=self.engine_stamp,
                     shape=HOSTED_PROBE_SHAPE,
                     source_identity=identity_digest(source),
                     detail=learned.detail,
@@ -5891,7 +5898,7 @@ class ModelHubService:
             model_id=model_id,
             evidence=self.capability_evidence,
             spec_for=hosted_tool_spec,
-            engine=engine_stamp(),
+            engine=self.engine_stamp,
             now=self.now(),
         )
 
@@ -6941,7 +6948,7 @@ class ModelHubService:
             if record.feature.kind != "effort":
                 continue
             view = self.capability_evidence.view(
-                source, model_id, record.feature, engine=engine_stamp(), shape=HOSTED_PROBE_SHAPE, now=now,
+                source, model_id, record.feature, engine=self.engine_stamp, shape=HOSTED_PROBE_SHAPE, now=now,
             )
             if view.status == "unsupported":
                 refused.append(record)

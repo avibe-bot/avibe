@@ -1538,19 +1538,6 @@ def test_a_released_vibey_row_loads_without_its_client_preset(tmp_path, monkeypa
     assert loaded.model_hub.agents["vibey"].models[0].reasoning_efforts == clean
 
 
-def test_a_vibey_row_keeps_a_preset_spelling_its_source_declares_as_a_wire_tier():
-    """MH-HOSTED-006: only a catalog-derived preset is dropped; a Source's own user or upstream tier stays."""
-    released = json.loads(
-        (Path(__file__).parent / "fixtures/model_hub/released_3_2_0_vibey_client_preset.json").read_text(encoding="utf-8")
-    )
-    declared = copy.deepcopy(released)
-    declared["sources"][0]["models"][0]["reasoning_efforts_source"] = "user"
-
-    config = ModelHubConfig.from_payload(declared, repairing=True)
-
-    assert config.agents["vibey"].models[0].reasoning_efforts == ["low", "medium", "high", "xhigh", "max", "ultra"]
-
-
 def test_loading_and_cloning_model_hub_config_reads_no_catalog_file(monkeypatch):
     """MH-HOSTED-006: config load runs on the controller loop (service clones), so the preset index costs no I/O."""
     from vibe.backend_model_catalog import bundled_client_presets_once, get_bundled_catalog_path

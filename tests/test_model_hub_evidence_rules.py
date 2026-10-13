@@ -267,3 +267,48 @@ async def test_a_refused_effort_still_waits_for_a_capable_hop_that_is_cooling_do
     assert waiting.value.code != "effort_unsupported"
     assert waiting.value.supply_state == "waiting"
     assert service.adapter.invocations == []
+
+
+@pytest.mark.asyncio
+async def test_no_request_path_reads_a_bundled_file_after_startup(tmp_path, monkeypatch):
+    """MH-HOSTED-006: every immutable bundled input is resolved when the service is built, never on a request."""
+    from dataclasses import replace as replaced
+    from pathlib import Path
+
+    from core.handlers.model_hub.adapter import RawOutcomeKind, UpstreamRejection
+    from tests.test_model_hub_l3 import _canonicalize_fixed_test_routes, _outcome, _service
+
+    source = _source("src_startup01", "Startup", vendor="openai", protocol="openai_responses")
+    service = _service(tmp_path, sources=[source])
+    model = _canonicalize_fixed_test_routes(service)["codex"]
+    watched = {"backend_models.json", "cliproxyapi_manifest.json"}
+    reads = []
+    read_text, path_open = Path.read_text, Path.open
+
+    def counted_read(self, *args, **kwargs):
+        if self.name in watched:
+            reads.append(self.name)
+        return read_text(self, *args, **kwargs)
+
+    def counted_open(self, *args, **kwargs):
+        if self.name in watched:
+            reads.append(self.name)
+        return path_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", counted_read)
+    monkeypatch.setattr(Path, "open", counted_open)
+
+    request = ModelHubRequest(
+        {"input": "hi", "reasoning": {"effort": "ultra"}, "tools": [{"type": "web_search"}]}, protocol="openai_responses"
+    )
+    rejected = replaced(
+        _outcome(RawOutcomeKind.HTTP_ERROR, status=400, source_id=source.id),
+        rejection=UpstreamRejection(status=400, unsupported_tool_type="web_search"),
+    )
+    config = service.store.load()
+    assert await service._effort_rejected_on(source, "shared-model", request) is False
+    await service._learn_capability_evidence(source, "shared-model", request, rejected)
+    service.hosted_tools_for_hop(config, source, "shared-model")
+    service.agent_chain("codex", model)
+    service.list_sources()
+    assert reads == []

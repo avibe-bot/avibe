@@ -65,15 +65,23 @@ def _manifest_engine_stamp(path: Optional[str]) -> str:
     return stamp
 
 
+UNKNOWN_ENGINE_STAMP = "unknown-engine"
+
+
 def engine_stamp() -> str:
     """The engine release evidence is stamped with: the shipped manifest's asset release.
 
     Engine upgrades ship as manifest changes, and a patched rebuild of the same
     upstream version gets a new asset release, so this is what a wire change
-    looks like from here.
+    looks like from here. Read once, when Model Hub's service is built; a
+    manifest that cannot be read is the fixed unknown engine, whose evidence
+    never matches a real release and never raises on a request.
     """
 
-    return _manifest_engine_stamp(os.environ.get("VIBE_MODEL_HUB_ENGINE_MANIFEST_PATH") or None)
+    try:
+        return _manifest_engine_stamp(os.environ.get("VIBE_MODEL_HUB_ENGINE_MANIFEST_PATH") or None)
+    except (OSError, ValueError, TypeError, AttributeError):
+        return UNKNOWN_ENGINE_STAMP
 
 
 @dataclass(frozen=True)

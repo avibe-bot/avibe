@@ -613,18 +613,15 @@ def bundled_client_presets_once() -> Mapping[str, tuple[str, ...]]:
     return _bundled_client_presets(str(get_bundled_catalog_path()))
 
 
-def without_client_presets(
-    model_ids: Sequence[str], efforts: Sequence[str], *, keep: Iterable[str] = ()
-) -> list[str]:
+def without_client_presets(model_ids: Sequence[str], efforts: Sequence[str]) -> list[str]:
     """Efforts as a wire client may send them: without any listed model's client presets.
 
     Vibey is not the client a preset belongs to, so a preset is never one of its
-    tiers (#2539). ``keep`` names efforts a Source itself declares as wire tiers,
-    which stay even when they share a preset's spelling.
+    tiers (#2539).
     """
 
     presets = bundled_client_presets_once()
-    dropped = {preset for model_id in model_ids for preset in presets.get(model_id, ())} - set(keep)
+    dropped = {preset for model_id in model_ids for preset in presets.get(model_id, ())}
     return [effort for effort in efforts if effort not in dropped]
 
 
