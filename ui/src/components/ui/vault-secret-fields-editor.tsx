@@ -41,6 +41,8 @@ export function VaultSecretFieldsEditor({
   const defaultField = vaultDefaultField(current);
   const isProtected = current.protection === 'protected';
   const locked = disabled || busy;
+  const fieldsCorrupt = current.fields_state === 'corrupt';
+  const fieldMutationLocked = locked || fieldsCorrupt;
   const canWriteValue = !isProtected || vault.status === 'unlocked';
 
   useEffect(() => {
@@ -91,16 +93,25 @@ export function VaultSecretFieldsEditor({
   const hasErrorCode = (result: unknown, code: string): boolean =>
     typeof result === 'object' && result !== null && 'code' in result && result.code === code;
   const conflict = () => new Error(t('vaults.fields.recordConflict'));
-  const adoptSecret = (next: VaultSecret, ownWrite = false) => {
+  const adoptSecret = (next: VaultSecret, ownWrite = false, renamed = false) => {
+    const previous = currentRef.current;
     if (ownWrite && vaultFieldFingerprint(next) !== vaultFieldFingerprint(currentRef.current)) {
       stalePropFingerprintRef.current = vaultFieldFingerprint(currentRef.current);
     }
     currentRef.current = next;
     setCurrent(next);
-    defaultLabelDirtyRef.current = false;
-    setDefaultLabel(vaultDefaultField(next));
+    const previousDefault = vaultDefaultField(previous);
+    const nextDefault = vaultDefaultField(next);
+    if (renamed || !defaultLabelDirtyRef.current) {
+      setDefaultLabel(nextDefault);
+    }
+    if (renamed) defaultLabelDirtyRef.current = false;
     setDrafts((values) => {
       const remaining = new Map(values);
+      if (previousDefault !== nextDefault && remaining.has(previousDefault) && !remaining.has(nextDefault)) {
+        remaining.set(nextDefault, remaining.get(previousDefault) ?? '');
+        remaining.delete(previousDefault);
+      }
       const names = new Set(vaultFieldNames(next));
       for (const name of remaining.keys()) {
         if (!names.has(name)) remaining.delete(name);
@@ -116,7 +127,10 @@ export function VaultSecretFieldsEditor({
     return next;
   };
 
-  const mutate = async (operation: () => Promise<{ ok: boolean; secret?: VaultSecret; message?: string; code?: string }>) => {
+  const mutate = async (
+    operation: () => Promise<{ ok: boolean; secret?: VaultSecret; message?: string; code?: string }>,
+    renamed = false,
+  ) => {
     if (locked) return;
     setBusy(true);
     onBusyChange(true);
@@ -128,7 +142,7 @@ export function VaultSecretFieldsEditor({
         throw Object.assign(new Error(vaultErrorMessage(t, result, t('vaults.dialog.errors.updateFailed'))), { code: result.code });
       }
       const next = result.secret;
-      adoptSecret(next, true);
+      adoptSecret(next, true, renamed);
       setSaved(true);
     } catch (err) {
       if (hasErrorCode(err, 'secret_conflict')) {
@@ -152,10 +166,10 @@ export function VaultSecretFieldsEditor({
     // persistent input immediately through `clear`, while this copy permits exactly one
     // re-seal if the server reports that its record mapping changed.
     let capturedValue = value;
-    const clear = () =>
+    const clear = (targetField = field) =>
       adding ? setNewValue('') : setDrafts((values) => {
         const next = new Map(values);
-        next.set(field, '');
+        next.set(targetField, '');
         return next;
       });
     const sealAndWrite = async (secret: VaultSecret, targetField: string, wasDefault: boolean) => {
@@ -189,14 +203,16 @@ export function VaultSecretFieldsEditor({
     void mutate(async () => {
       try {
         const wasDefault = field === defaultField;
+        let savedField = field;
         let result = await sealAndWrite(current, field, wasDefault);
         if (hasErrorCode(result, 'record_mismatch')) {
           const next = await freshSecret();
-          result = await sealAndWrite(next, wasDefault ? vaultDefaultField(next) : field, wasDefault);
+          savedField = wasDefault ? vaultDefaultField(next) : field;
+          result = await sealAndWrite(next, savedField, wasDefault);
           if (hasErrorCode(result, 'record_mismatch')) throw conflict();
         }
         if (result.ok && result.secret) {
-          clear();
+          clear(savedField);
           if (adding) setNewField(null);
         }
         return result;
@@ -213,12 +229,15 @@ export function VaultSecretFieldsEditor({
     }}>
       <span className="text-[13px] font-medium">{t('vaults.fields.title')}</span>
       <p className="text-[11px] text-muted-foreground">{t('vaults.fields.editHelp')}</p>
+      {fieldsCorrupt && (
+        <p role="alert" className="text-xs text-destructive-ink">{t('errors.fields_corrupt')}</p>
+      )}
       {fields.map((field) => (
         <div key={field} className="flex flex-col gap-2 rounded-lg border border-border p-3">
           <div className="flex items-center gap-2">
             {field === defaultField ? (
               <>
-                <Input value={defaultLabel} disabled={locked}
+                <Input value={defaultLabel} disabled={fieldMutationLocked}
                   aria-label={t('vaults.fields.defaultName')}
                   onChange={(event) => {
                     defaultLabelDirtyRef.current = true;
@@ -227,15 +246,18 @@ export function VaultSecretFieldsEditor({
                   className="min-w-0 font-mono" />
                 <Badge variant="secondary">{t('vaults.fields.default')}</Badge>
                 <Button type="button" size="sm" variant="ghost"
-                  disabled={locked || defaultLabel === defaultField || !VAULT_FIELD_PATTERN.test(defaultLabel) || fields.includes(defaultLabel)}
-                  onClick={() => void mutate(() => api.updateVaultSecret(current.name, { default_field: defaultLabel }, { handleError: false }))}>
+                  disabled={fieldMutationLocked || defaultLabel === defaultField || !VAULT_FIELD_PATTERN.test(defaultLabel) || fields.includes(defaultLabel)}
+                  onClick={() => void mutate(
+                    () => api.updateVaultSecret(current.name, { default_field: defaultLabel }, { handleError: false }),
+                    true,
+                  )}>
                   {t('vaults.fields.rename')}
                 </Button>
               </>
             ) : (
               <>
                 <span className="min-w-0 flex-1 break-all font-mono text-xs">{field}</span>
-                <Button type="button" size="icon" variant="ghost" disabled={locked}
+                <Button type="button" size="icon" variant="ghost" disabled={fieldMutationLocked}
                   aria-label={t('vaults.fields.remove', { field })} onClick={() => setRemoveField(field)}>
                   <X className="size-4" />
                 </Button>
@@ -243,7 +265,7 @@ export function VaultSecretFieldsEditor({
             )}
           </div>
           <div className="flex items-center gap-2">
-            <Input type="password" value={drafts.get(field) ?? ''} autoComplete="off" disabled={locked}
+            <Input type="password" value={drafts.get(field) ?? ''} autoComplete="off" disabled={fieldMutationLocked}
               aria-label={t('vaults.fields.value', { field })}
               placeholder={t('vaults.fields.replacePlaceholder')}
               onChange={(event) => setDrafts((values) => {
@@ -253,29 +275,29 @@ export function VaultSecretFieldsEditor({
               })} />
             <Button type="button" variant="secondary" size="sm"
               aria-label={t('vaults.fields.saveNamed', { field })}
-              disabled={locked || !canWriteValue || !drafts.get(field)}
+              disabled={fieldMutationLocked || !canWriteValue || !drafts.get(field)}
               onClick={() => saveValue(field, drafts.get(field) ?? '')}>{t('vaults.fields.save')}</Button>
           </div>
         </div>
       ))}
       {newField !== null ? (
         <div className="flex flex-col gap-2 rounded-lg border border-border p-3">
-          <Input value={newField} disabled={locked} aria-label={t('vaults.fields.newName')}
+          <Input value={newField} disabled={fieldMutationLocked} aria-label={t('vaults.fields.newName')}
             placeholder={t('vaults.fields.namePlaceholder')} onChange={(event) => setNewField(event.target.value)} />
-          <Input type="password" value={newValue} autoComplete="off" disabled={locked}
+          <Input type="password" value={newValue} autoComplete="off" disabled={fieldMutationLocked}
             aria-label={t('vaults.fields.newValue')} placeholder={t('vaults.dialog.valuePlaceholder')}
             onChange={(event) => setNewValue(event.target.value)} />
           <div className="flex justify-end gap-2">
             <Button type="button" variant="ghost" size="sm" disabled={locked}
               onClick={() => { setNewField(null); setNewValue(''); }}>{t('vaults.dialog.cancel')}</Button>
             <Button type="button" size="sm"
-              disabled={locked || !canWriteValue || !newValue || !VAULT_FIELD_PATTERN.test(newField) || fields.includes(newField)}
+              disabled={fieldMutationLocked || !canWriteValue || !newValue || !VAULT_FIELD_PATTERN.test(newField) || fields.includes(newField)}
               onClick={() => saveValue(newField, newValue, true)}>{t('vaults.fields.save')}</Button>
           </div>
           <span className="text-[11px] text-muted-foreground">{t('vaults.fields.namesHelp')}</span>
         </div>
       ) : (
-        <Button type="button" variant="ghost" size="sm" className="self-start" disabled={locked || fields.length >= MAX_VAULT_FIELDS}
+        <Button type="button" variant="ghost" size="sm" className="self-start" disabled={fieldMutationLocked || fields.length >= MAX_VAULT_FIELDS}
           onClick={() => setNewField('')}><Plus className="size-3.5" />{t('vaults.fields.add')}</Button>
       )}
       {isProtected && <VaultProtectedUnlock vault={vault} secretName={current.name}
@@ -288,7 +310,7 @@ export function VaultSecretFieldsEditor({
         description={t('vaults.fields.removeConfirm')}
         confirmLabel={t('vaults.delete')} cancelLabel={t('vaults.dialog.cancel')} destructive
         onConfirm={async () => {
-          if (!removeField) return;
+          if (!removeField || fieldsCorrupt) return;
           await mutate(() => api.deleteVaultSecretField(current.name, removeField, { expected_updated_at: current.updated_at }));
           setRemoveField(null);
         }} />

@@ -14,6 +14,7 @@ import { onPageReactivated } from '../../lib/pageActivity';
 import { cn } from '../../lib/utils';
 import { partitionTags } from '../../lib/vaultTags';
 import { vaultDefaultField, vaultFieldFingerprint, vaultFieldNames, vaultRecordName } from '../../lib/vaultFields';
+import { vaultErrorMessage } from '../../lib/vaultErrors';
 import {
   useApi,
   type VaultAuditEvent,
@@ -132,6 +133,9 @@ const SecretRow: React.FC<{
           {s.description ? `${s.description} · ` : ''}
           {s.last_used_at ? t('vaults.used', { count: s.use_count }) : t('vaults.neverUsed')}
         </span>
+        {s.fields_state === 'corrupt' && (
+          <span role="alert" className="text-xs text-destructive-ink">{t('errors.fields_corrupt')}</span>
+        )}
         {isKeypair && s.signing_addresses ? <SigningAddressList addresses={s.signing_addresses} className="mt-1" /> : null}
         {!isKeypair && fields.length > 1 && (
           <div className="flex flex-wrap gap-1">
@@ -809,7 +813,13 @@ export const VaultsPage: React.FC = () => {
       const authorizationWindow = openVaultAuthorizationWindow();
       try {
         const res = await revealContext.claim({ name: secret.name, field, version: vaultFieldFingerprint(secret) });
-        if (!res?.ok || !res.context) throw new Error(res?.message || t('vaults.reveal.errors.contextFailed'));
+        if (!res?.ok || !res.context) {
+          const message = vaultErrorMessage(t, res, t('vaults.reveal.errors.contextFailed'));
+          const code = typeof res === 'object' && res !== null && 'code' in res && typeof res.code === 'string'
+            ? res.code
+            : null;
+          throw Object.assign(new Error(message), code ? { code } : {});
+        }
         // The sandbox needs the sealed record to open it. The daemon returns it alongside the signed
         // reveal context; if it's absent, surface a clear message rather than a cryptic sandbox error.
         if (!res.envelope) throw new Error(t('vaults.reveal.errors.unavailable'));
@@ -821,7 +831,7 @@ export const VaultsPage: React.FC = () => {
           authorizationWindow?.id,
         );
       } catch (err: unknown) {
-        showToast(messageFromError(err), 'warning');
+        showToast(vaultErrorMessage(t, err, t('vaults.reveal.errors.contextFailed')), 'warning');
       } finally {
         authorizationWindow?.close();
       }

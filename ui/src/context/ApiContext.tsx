@@ -85,6 +85,8 @@ export type VaultSecret = {
   /** Absent on legacy servers; the default record is always the bare secret name. */
   default_field?: string;
   fields?: string[];
+  /** Present only when the stored extra-field section could not be read safely. */
+  fields_state?: 'corrupt';
   /** Flat tag list; skill association is a reserved `skill:<name>` tag (see lib/vaultTags). */
   tags: string[];
   kind: string;
@@ -3310,7 +3312,11 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // ``getJson``/``postJson``. New mutating helpers should route through
   // requestJson/postJson/patchJson/deleteJson so successful mutations always
   // invalidate reusable GET promises.
-  const deleteJson = async (path: string, payload?: any) => {
+  const deleteJson = async (
+    path: string,
+    payload?: any,
+    opts?: { handleError?: boolean; expectedCodes?: readonly string[] },
+  ) => {
     const { payloadJson } = await requestJson(path, {
       method: 'DELETE',
       ...(payload === undefined
@@ -3319,7 +3325,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload),
           }),
-    });
+    }, path, opts);
     return payloadJson;
   };
 
@@ -4037,7 +4043,11 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return payloadJson;
     },
     deleteVaultSecretField: (name, field, payload) =>
-      deleteJson(`/api/vault/secrets/${encodeURIComponent(name)}/fields/${encodeURIComponent(field)}`, payload),
+      deleteJson(
+        `/api/vault/secrets/${encodeURIComponent(name)}/fields/${encodeURIComponent(field)}`,
+        payload,
+        { handleError: false },
+      ),
     deleteVaultSecret: (name) => deleteJson(`/api/vault/secrets/${encodeURIComponent(name)}`),
     getVaultProvisionRequest: (name, opts) =>
       getCachedJson(`/api/vault/provision-requests/${encodeURIComponent(name)}`, 1500, opts),

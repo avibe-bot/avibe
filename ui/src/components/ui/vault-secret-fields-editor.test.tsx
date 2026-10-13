@@ -98,6 +98,32 @@ it('updates envelope versions after replacing a field and renaming the default l
   ]);
 });
 
+it('moves a typed default value when its label is renamed', async () => {
+  api.updateVaultSecret.mockResolvedValue({
+    ok: true,
+    secret: { ...secret, default_field: 'credential', fields: ['credential', 'username'], updated_at: 'version-1' },
+  });
+  renderEditor();
+  change('Value for password', 'typed-default');
+  change('Default field name', 'credential');
+  fireEvent.click(screen.getByRole('button', { name: 'Rename' }));
+  await waitFor(() => expect(screen.getByLabelText('Value for credential')).toBeTruthy());
+  expect((screen.getByLabelText('Value for credential') as HTMLInputElement).value).toBe('typed-default');
+});
+
+it('keeps a typed default label when saving another field', async () => {
+  api.updateVaultSecretField.mockResolvedValue({
+    ok: true,
+    secret: { ...secret, updated_at: 'version-2' },
+  });
+  renderEditor();
+  change('Default field name', 'credential');
+  change('Value for username', 'typed-extra');
+  fireEvent.click(screen.getByRole('button', { name: 'Save username' }));
+  await screen.findByRole('status');
+  expect((screen.getByLabelText('Default field name') as HTMLInputElement).value).toBe('credential');
+});
+
 it.each(['constructor', 'tostring', 'valueof'])('treats %s as a normal field key', async (field) => {
   const entry = { ...secret, fields: ['password', field] };
   api.updateVaultSecretField.mockResolvedValue({
@@ -143,6 +169,28 @@ it.each(['version-1', 'version-2'])('adopts current labels at %s while preservin
   expect((screen.getByLabelText('Default field name') as HTMLInputElement).value).toBe('credential');
   expect((screen.getByLabelText('Value for credential') as HTMLInputElement).value).toBe('keep-default-draft');
   expect((screen.getByLabelText('Value for username') as HTMLInputElement).value).toBe('keep-this-draft');
+});
+
+it('warns and disables field mutations when field metadata is corrupt', () => {
+  renderEditor({ ...secret, fields_state: 'corrupt' });
+  expect(screen.getByRole('alert').textContent).toBe(en.errors.fields_corrupt);
+  expect((screen.getByLabelText('Default field name') as HTMLInputElement).disabled).toBe(true);
+  expect((screen.getByLabelText('Value for password') as HTMLInputElement).disabled).toBe(true);
+  expect((screen.getByRole('button', { name: 'Rename' }) as HTMLButtonElement).disabled).toBe(true);
+  expect((screen.getByRole('button', { name: 'Save password' }) as HTMLButtonElement).disabled).toBe(true);
+  expect((screen.getByRole('button', { name: 'Remove username' }) as HTMLButtonElement).disabled).toBe(true);
+  expect((screen.getByRole('button', { name: 'Add field' }) as HTMLButtonElement).disabled).toBe(true);
+});
+
+it('adopts a same-version corruption state from refreshed metadata', () => {
+  const { rerender } = renderEditor();
+  rerender(
+    <I18nextProvider i18n={i18n}>
+      <VaultSecretFieldsEditor secret={{ ...secret, fields_state: 'corrupt' }} disabled={false} onBusyChange={vi.fn()} />
+    </I18nextProvider>,
+  );
+  expect(screen.getByRole('alert').textContent).toBe(en.errors.fields_corrupt);
+  expect((screen.getByRole('button', { name: 'Save password' }) as HTMLButtonElement).disabled).toBe(true);
 });
 
 it('requires a unique populated extra field, saves it under its record name, and confirms removal', async () => {

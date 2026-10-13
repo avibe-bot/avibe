@@ -7,12 +7,15 @@ import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 
 import { InstanceAuthorizationContext } from '../../context/InstanceAuthorizationContext';
+import { ApiError } from '../../context/ApiContext';
 import { OWNER_INSTANCE_CAPABILITIES } from '../../lib/sessionInfo';
+import zh from '../../i18n/zh.json';
 import { VaultsPage } from './VaultsPage';
 
 type WorkbenchEventHandlers = { onVaultsUpdated?: (data: unknown) => void };
 
 const eventHandlers = vi.hoisted(() => [] as WorkbenchEventHandlers[]);
+const testTranslation = vi.hoisted(() => ({ locale: 'keys' as 'keys' | 'zh' }));
 const api = vi.hoisted(() => ({
   connectWorkbenchEvents: vi.fn(() => () => undefined),
   createVaultRevealContext: vi.fn(),
@@ -59,9 +62,18 @@ vi.mock('../../lib/useProtectedVault', () => ({
   useVaultLock: () => ({ unlocked: false, remainingMs: 0, lockNow: vi.fn() }),
 }));
 
-vi.mock('react-i18next', () => ({
-  useTranslation: () => ({ t: (key: string) => key }),
-}));
+vi.mock('react-i18next', async () => {
+  const { default: catalog } = await import('../../i18n/zh.json');
+  const localized: Record<string, string> = {
+    'errors.fields_corrupt': catalog.errors.fields_corrupt,
+    'vaults.reveal.errors.contextFailed': catalog.vaults.reveal.errors.contextFailed,
+  };
+  return {
+    useTranslation: () => ({
+      t: (key: string) => testTranslation.locale === 'zh' ? localized[key] ?? key : key,
+    }),
+  };
+});
 
 vi.mock('./CapabilityTabs', () => ({
   CapabilityTabs: () => <div data-testid="capability-tabs" />,
@@ -115,6 +127,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  testTranslation.locale = 'keys';
   vi.clearAllMocks();
   vi.restoreAllMocks();
 });
@@ -271,6 +284,38 @@ describe('VaultsPage protected reveal', () => {
 
     expect(revealProtectedValue.mock.calls[0][1]).toEqual(revealed);
     expect(api.createVaultRevealContext).toHaveBeenCalledTimes(fetches);
+  });
+
+  it('shows the localized corruption warning on a row while keeping default reveal available', async () => {
+    testTranslation.locale = 'zh';
+    api.listVaultSecrets.mockResolvedValue({
+      secrets: [{ ...protectedSecret('alpha'), fields_state: 'corrupt' }],
+    });
+    api.createVaultRevealContext.mockResolvedValue({ ok: true, context: { secret_name: 'alpha' }, envelope });
+    await openMenu();
+    expect((await screen.findByRole('alert')).textContent).toBe(zh.errors.fields_corrupt);
+    expect(screen.getByRole('menuitem', { name: 'vaults.reveal.show' })).toBeTruthy();
+  });
+
+  it.each(['response', 'exception'] as const)('localizes a reveal context failure from a %s in Chinese', async (failure) => {
+    testTranslation.locale = 'zh';
+    if (failure === 'response') {
+      api.createVaultRevealContext.mockResolvedValue({
+        ok: false,
+        code: 'fields_corrupt',
+        message: 'English service detail',
+      });
+    } else {
+      api.createVaultRevealContext.mockRejectedValue(
+        new ApiError('English service detail', 409, 'fields_corrupt'),
+      );
+    }
+    const popup = { closed: false, close: vi.fn() };
+    vi.spyOn(window, 'open').mockReturnValue(popup as unknown as Window);
+    await openMenu();
+    await vi.waitFor(() => expect(api.createVaultRevealContext).toHaveBeenCalledOnce());
+    fireEvent.click(showValue());
+    await vi.waitFor(() => expect(showToast).toHaveBeenCalledWith(zh.errors.fields_corrupt, 'warning'));
   });
 
   it('keeps Show value waiting while the context or the sandbox client are not ready', async () => {

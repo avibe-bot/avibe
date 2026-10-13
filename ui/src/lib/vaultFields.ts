@@ -12,9 +12,9 @@ export function vaultFieldNames(secret: Pick<VaultSecret, 'default_field' | 'fie
   return [defaultField, ...(secret.fields ?? []).filter((field) => field !== defaultField)];
 }
 
-export function vaultFieldFingerprint(secret: Pick<VaultSecret, 'default_field' | 'fields' | 'updated_at'>): string {
+export function vaultFieldFingerprint(secret: Pick<VaultSecret, 'default_field' | 'fields' | 'fields_state' | 'updated_at'>): string {
   // Default labels are metadata-only and can change without an envelope version.
-  return JSON.stringify([vaultDefaultField(secret), vaultFieldNames(secret), secret.updated_at]);
+  return JSON.stringify([vaultDefaultField(secret), vaultFieldNames(secret), secret.fields_state ?? null, secret.updated_at]);
 }
 
 export function vaultRecordName(name: string, field: string, defaultField: string): string {
