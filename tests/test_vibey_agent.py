@@ -2168,14 +2168,33 @@ async def test_im_narration_is_live_best_effort_output(engine, session, tmp_path
     assert "Third look." not in hidden.controller.im_client.sent
 
 
-@pytest.mark.parametrize("final, row_type", [("answer", "result"), ("empty", "error"), ("refusal", "error")])
+@pytest.mark.parametrize(
+    "final, row_type", [("answer", "result"), ("empty", "error"), ("refusal", "error"), ("image", "result")]
+)
 async def test_a_final_is_stored_with_its_outcome_semantics(
     engine, session, tmp_path, published, final, row_type
 ) -> None:
+    image = tmp_path / "image-final.png"
+    image.write_bytes(b"\x89PNG\r\n\x1a\nimage")
     message = {
         "answer": assistant("here it is"),
         "empty": assistant(""),
         "refusal": AssistantMessage((), ORIGIN, "refusal"),
+        # A generated image is a reply by itself (``has_reply``).
+        "image": AssistantMessage(
+            (
+                HostedToolBlock(
+                    id="ig_1",
+                    tool="image_generation",
+                    action=HostedAction(type="generate", prompt="a laptop at night"),
+                    record=HostedRecord(status="completed", images=(HostedImage(path=str(image), mime="image/png"),)),
+                    native=HostedNative(source_id="src_testsrc1", payload=({"type": "image_generation_call"},)),
+                ),
+            ),
+            ORIGIN,
+            "stop",
+            hosted_summary=HostedSummary(),
+        ),
     }[final]
     harness = _Harness(engine, tmp_path, "avibe", [[Done(message)]])
 
@@ -3496,4 +3515,32 @@ async def test_a_final_whose_cited_text_is_all_silent_stays_silent(engine, sessi
 
     assert not any(CHANGELOG in item for item in harness.controller.im_client.sent)
     assert not any(CHANGELOG in (row["content_text"] or "") for row in harness.rows("result") + harness.rows("assistant"))
+
+
+async def test_an_image_only_final_is_a_reply_and_reaches_the_user(engine, session, tmp_path, published) -> None:
+    """MH-HOSTED-UI-012: a model asked for a picture may answer with the picture alone; that is not an empty reply."""
+    image = tmp_path / "image-only.png"
+    image.write_bytes(b"\x89PNG\r\n\x1a\nimage")
+    final = AssistantMessage(
+        (
+            HostedToolBlock(
+                id="ig_1",
+                tool="image_generation",
+                action=HostedAction(type="generate", prompt="a laptop at night"),
+                record=HostedRecord(status="completed", images=(HostedImage(path=str(image), mime="image/png"),)),
+                native=HostedNative(source_id="src_testsrc1", payload=({"type": "image_generation_call"},)),
+            ),
+        ),
+        ORIGIN,
+        "stop",
+        hosted_summary=HostedSummary(),
+    )
+    harness = _Harness(engine, tmp_path, "telegram", [[Done(final)]])
+
+    await harness.agent.handle_message(harness.request("draw a laptop at night"))
+
+    assert harness.controller.terminals[-1]["is_error"] is False
+    assert harness.controller.im_client.uploads == [str(image.resolve())]
+    assert any(item.startswith(i18n_t("info.generatedImagesFallback", "en")) for item in harness.controller.im_client.sent)
+    assert not any(i18n_t("vibeyAgent.error.emptyResponse", "en") in item for item in harness.controller.im_client.sent)
 

@@ -222,6 +222,14 @@ scenarios:
     test: tests/test_hosted_activity.py::test_the_im_line_states_tool_query_mode_count_and_known_cost
     related_tests:
       - tests/test_hosted_activity.py::test_the_im_line_names_a_subscription_and_a_shared_response_cost
+  - id: MH-HOSTED-UI-012
+    name: A final whose only content is a generated image is a reply, not an empty one, and reaches the user as an attachment
+    status: covered
+    kind: contract
+    layer: contract
+    test: tests/test_vibey_agent.py::test_an_image_only_final_is_a_reply_and_reaches_the_user
+    related_tests:
+      - tests/agent_core/agent/test_loop.py::test_tool_free_final_reply_is_committed_and_empty_success_is_an_error
   - id: MH-HOSTED-UI-011
     name: Vibey delivers a native hosted call as its IM line and Web card, its answer with provider citations as links, and its generated image as an attachment
     status: covered
