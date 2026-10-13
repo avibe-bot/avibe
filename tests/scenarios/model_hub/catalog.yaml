@@ -10,6 +10,7 @@ capability:
     - tests/test_model_hub_capability_evidence.py
     - tests/test_provider_overlay.py
     - tests/agent_core/ai/test_hosted_requests.py
+    - tests/test_vibey_agent.py
     - tests/test_model_hub_config.py
     - tests/test_model_hub_legacy_opencode_migration.py
     - tests/test_member_management_parity.py
