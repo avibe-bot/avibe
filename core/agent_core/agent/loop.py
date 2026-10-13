@@ -67,7 +67,7 @@ from core.agent_core.agent.lifecycle import RunAborted as _Aborted, RunScope
 from core.agent_core.agent.models import ModelRouter, ModelSelection, RetryPolicy
 from core.agent_core.agent.outcome import OutcomeOwner
 from core.agent_core.agent.state import HookStateError, state_representation
-from core.agent_core.ai._common import endpoint_origin
+from core.agent_core.ai._common import endpoint_origin, native_hosted_tools
 from core.agent_core.ai.provider import (
     Done,
     ModelEndpoint,
@@ -1503,7 +1503,7 @@ class Agent:
         last_tokens = unit_tokens(last) if last is not None else 0
         parts = [
             ContextPart("system", text_tokens(request.system)),
-            ContextPart("tools", request_tokens("", request.tools, ())),
+            ContextPart("tools", request_tokens("", request.tools, (), native_hosted_tools(request))),
             ContextPart("history", max(0, messages_tokens(request.messages) - last_tokens)),
         ]
         if last is not None:
@@ -1878,7 +1878,9 @@ class Agent:
         candidate = ContextEntry(self.session_id, seq, "compaction", "uncommitted-compaction", payload=payload)
         after = context_view([*self._rows, candidate])
         # What the next request would carry; it is budgeted for real when it is built.
-        payload["tokens_after_estimate"] = request_tokens(request.system, request.tools, self._carried(after))
+        payload["tokens_after_estimate"] = request_tokens(
+            request.system, request.tools, self._carried(after), native_hosted_tools(request)
+        )
         return payload, after
 
     async def _hosted(self, view: ContextView, cut: int) -> tuple[tuple[str, ...], Optional[str]]:
