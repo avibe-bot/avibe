@@ -10680,6 +10680,7 @@ def _run_claude_auth_status(
                     "%s did not finish during completion grace; requesting graceful termination",
                     _CLAUDE_AUTH_STATUS_LABEL,
                 )
+                termination_requested = True
                 _graceful_stop_claude_auth_status(process)
                 try:
                     stdout, _ = process.communicate(timeout=_CLAUDE_AUTH_STATUS_TERMINATION_GRACE_SECONDS)
@@ -11603,6 +11604,7 @@ def get_claude_auth(
     *,
     connection_observation: bool = False,
     _native_lease: NativeCredentialLease | None = None,
+    _flow_id: str | None = None,
 ) -> dict:
     """Return the user-facing Claude auth state for the Settings UI.
 
@@ -11670,6 +11672,15 @@ def get_claude_auth(
         )
     except Exception:
         claude_status_env = None
+    try:
+        if _native_lease is None and _flow_id:
+            oauth_service = _get_oauth_service()
+            flow_lease = oauth_service.native_lease_for_flow(_flow_id, "claude")
+            if flow_lease is not None:
+                _native_lease = flow_lease
+    except Exception:
+        logger.debug("Unable to reuse the native lease for Claude auth flow %s", _flow_id, exc_info=True)
+
     # Every status probe can refresh and persist native OAuth state. Reuse an
     # existing writer/observation lease when the caller already owns one;
     # otherwise acquire the same cross-process exclusion before starting CLI.

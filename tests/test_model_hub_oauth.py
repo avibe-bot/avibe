@@ -223,7 +223,36 @@ def test_failed_native_login_carries_its_reason_beside_the_key(error, error_key,
     assert state.error_detail == error_detail
 
 
-def test_native_status_trusts_codex_keyring_success_but_not_active_api_keys():
+
+
+def test_native_status_reader_uses_flow_lease_reader_for_completed_flow():
+    calls: list[tuple[str, str]] = []
+
+    class AgentAuth:
+        def get_web_flow_status(self, flow_id):
+            return {
+                "ok": True,
+                "flow_id": flow_id,
+                "state": "success",
+                "source_id": "src_native01",
+                "vendor": "anthropic",
+                "expires_at_iso": "2026-07-23T03:15:00+00:00",
+            }
+
+    def flow_reader(backend: str, flow_id: str):
+        calls.append((backend, flow_id))
+        return {"has_oauth_credentials": True}
+
+    adapter = AgentAuthNativeOAuthAdapter(
+        AgentAuth(),
+        auth_status_reader=lambda _backend: {"has_oauth_credentials": False},
+        auth_status_reader_with_flow=flow_reader,
+    )
+
+    status = asyncio.run(adapter._read_source_status("claude", "flow_native01"))
+
+    assert status.signed_in is True
+    assert calls == [("claude", "flow_native01")]
     assert _signed_in(
         "codex",
         {

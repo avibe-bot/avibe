@@ -121,10 +121,12 @@ class AgentAuthNativeOAuthAdapter:
         agent_auth_service: AgentAuthService,
         *,
         auth_status_reader: Callable[[str], Mapping[str, Any]],
+        auth_status_reader_with_flow: Callable[[str, str], Mapping[str, Any]] | None = None,
         now: Callable[[], datetime] = _utc_now,
     ):
         self._agent_auth_service = agent_auth_service
         self._auth_status_reader = auth_status_reader
+        self._auth_status_reader_with_flow = auth_status_reader_with_flow
         self._now = now
 
     async def start_oauth(self, source_id: str, vendor: str) -> OAuthFlowState:
@@ -268,7 +270,7 @@ class AgentAuthNativeOAuthAdapter:
                 or not isinstance(source_status.get("signed_in"), bool)
             )
         ):
-            resolved = await self._read_source_status(_VENDOR_BACKENDS[vendor])
+            resolved = await self._read_source_status(_VENDOR_BACKENDS[vendor], flow_id)
             self._agent_auth_service.set_flow_source_status(
                 flow_id,
                 signed_in=resolved.signed_in,
@@ -305,9 +307,13 @@ class AgentAuthNativeOAuthAdapter:
             error_detail=error_detail,
         )
 
-    async def _read_source_status(self, backend: str) -> NativeOAuthSourceStatus:
+    async def _read_source_status(self, backend: str, flow_id: str | None = None) -> NativeOAuthSourceStatus:
         try:
-            status = await asyncio.to_thread(self._auth_status_reader, backend)
+            reader = self._auth_status_reader_with_flow if flow_id and self._auth_status_reader_with_flow else self._auth_status_reader
+            if reader is self._auth_status_reader_with_flow:
+                status = await asyncio.to_thread(reader, backend, flow_id)
+            else:
+                status = await asyncio.to_thread(reader, backend)
             if not isinstance(status, Mapping):
                 raise TypeError("invalid auth status")
         except Exception:  # noqa: BLE001
@@ -330,7 +336,15 @@ def create_native_oauth_adapter() -> AgentAuthNativeOAuthAdapter:
             return api.get_codex_auth()
         raise NativeOAuthUnavailableError
 
+    def read_auth_status_with_flow(backend: str, flow_id: str) -> Mapping[str, Any]:
+        if backend == "claude":
+            return api.get_claude_auth(_flow_id=flow_id)
+        if backend == "codex":
+            return api.get_codex_auth()
+        raise NativeOAuthUnavailableError
+
     return AgentAuthNativeOAuthAdapter(
         api._get_oauth_service(),
         auth_status_reader=read_auth_status,
+        auth_status_reader_with_flow=read_auth_status_with_flow,
     )
