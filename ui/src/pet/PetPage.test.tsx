@@ -1684,44 +1684,6 @@ describe('desktop mini v2 interaction contract', () => {
     });
   });
 
-  it('shows the microphone once transcription is turned on elsewhere and the window is reactivated', async () => {
-    let asr = false;
-    class Dictation { done = new Promise<string>(() => {}); start = async () => {}; finish = () => {}; abort = () => {}; }
-    await withVoiceEnv(() => asr, Dictation, async () => {
-      devBind('S'); render(<PetPage />); tapHotkey();
-      await screen.findByRole('textbox');
-      await waitFor(() => expect(fetch).toHaveBeenCalled());
-      expect(screen.queryByLabelText('pet.voice.open')).toBeNull();
-      asr = true;
-      const focus = vi.spyOn(document, 'hasFocus').mockReturnValue(false);
-      act(() => { window.dispatchEvent(new Event('blur')); });
-      focus.mockReturnValue(true);
-      act(() => { window.dispatchEvent(new Event('focus')); });
-      expect(await screen.findByLabelText('pet.voice.open')).toBeTruthy();
-      focus.mockRestore();
-    });
-  });
-
-  it('keeps the stop control while listening even if transcription is turned off meanwhile', async () => {
-    let asr = true;
-    const finish = vi.fn();
-    class Dictation { done = new Promise<string>(() => {}); start = async () => {}; finish = finish; abort = () => {}; }
-    await withVoiceEnv(() => asr, Dictation, async () => {
-      devBind('S'); render(<PetPage />); tapHotkey();
-      await screen.findByRole('textbox');
-      await userEvent.click(await screen.findByLabelText('pet.voice.open'));
-      expect(pose()).toBe('listening');
-      asr = false;
-      const focus = vi.spyOn(document, 'hasFocus').mockReturnValue(false);
-      act(() => { window.dispatchEvent(new Event('blur')); });
-      focus.mockReturnValue(true);
-      act(() => { window.dispatchEvent(new Event('focus')); });
-      await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
-      await userEvent.click(await screen.findByLabelText('pet.voice.stop'));
-      expect(finish).toHaveBeenCalled();
-      focus.mockRestore();
-    });
-  });
 
   it('opens text while the first ASR status read is still pending, and does not start voice when it later succeeds', async () => {
     const status = deferred<{ ok: boolean; json: () => Promise<unknown> }>();

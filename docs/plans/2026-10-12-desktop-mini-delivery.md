@@ -60,10 +60,10 @@ still denies it, and hotkey/hold still falls back to text in that case. ASR
 status is read as soon as voice may be used (the pet window starts unfocused,
 so this read does not wait for focus). A press-and-hold that arrives before
 the first read settles opens text immediately; it does not queue a later
-microphone start. Each window reactivation re-reads it, so a settings change
-takes effect without restarting the pet; a failed re-read keeps the last known
-status. Availability gates only starting a capture; an active capture keeps
-its stop control.
+microphone start. Settings changes made elsewhere take effect on the next
+bind/epoch, not on window focus: a live refresh of a previously-true status
+reopened the pending-vs-available state machine. Availability gates only
+starting a capture; an active capture keeps its stop control.
 A microphone or transcription failure reopens the text input with the pre-voice
 draft and a short note; the mini does not keep the failed recording for retry
 (the main Composer does).
@@ -142,9 +142,8 @@ keeps its page-coloured plate solely to cover the surrounding web-page text.
 
 - Focused pet, voice ownership, dictation-wrapper and bridge suites: 156 tests
   at the original desktop-mini delivery. This PR adds PetPage cases for
-  ungated production voice (failure notes, ASR refresh, stop-while-listening,
-  and text fallback while the first ASR read is pending); `npx vitest run
-  src/pet` is 136 passing. The original parity sweep also ran all 15 existing
+  ungated production voice (failure notes, and text fallback while the first
+  ASR read is pending); `npx vitest run src/pet` is 133 passing. The original parity sweep also ran all 15 existing
   session-action hook tests, including “Show in pet”, and 13 session-action
   component tests: 184 passing UI tests in that baseline.
   The five retained-card regressions were also run against isolated copies of
