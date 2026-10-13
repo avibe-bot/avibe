@@ -657,11 +657,26 @@ far:
   turn is still waiting on (the request's last assistant message, stopped for tools) keeps each call in place as text.
   So does a hosted call that follows a client tool call of the same response, because a split there would separate
   that call from its result.
+- **Native replay and pins.** A response's hosted calls go back verbatim, their `native.payload` in place, only to
+  the hop the request goes to, and only when that hop's Source served them on the same origin. The protocol must be
+  Anthropic or Responses, the hop must still have each tool they called, and `image_generation` never goes back
+  verbatim. Such a request is pinned to the hop's Source.
+  - The response a request continues within its turn needs no replay evidence, and its request also names the
+    model that served it (`x-avibe-pin-model`, when that id is ASCII). That response is the request's last assistant
+    message, stopped for tools, with only tool results after it.
+  - Any earlier response needs the hop's current `replay` for every tool it called, and every one of its calls must
+    have finished.
+  - Otherwise the calls take the portable form above. A continuation whose fresh hop is another Source therefore
+    goes in place as text: one hop builds and serves each request.
+- **`pin_unavailable`.** The gateway's `409` `model_hub_pin_unavailable` / `pin_unavailable` answer to a pinned
+  request is never shown and never reaches the loop's retry: the adapter renders the same request once more in
+  portable form (proxy declarations, synthetic history, in-place text) and sends it unpinned. Whatever answers that
+  request reaches the loop as usual.
 
 - **Proxy.** A hosted tool that a hop does not run natively is its canonical function, and a call to it runs on the
   gateway's executor bound for the Turn. The result keeps the record on `ToolResultMessage.hosted`.
 
-Still to come: native verbatim replay, the `pin_unavailable` re-render, `pause_turn` and images.
+Still to come: `pause_turn` and images.
 Until `pause_turn` lands, the Anthropic stop table above still maps it to `stop`. An Anthropic citation covers its
 whole text block, so it carries no range.
 
@@ -675,7 +690,7 @@ whole text block, so it carries no range.
 | Same-Source replay (target hop is `native.source_id`, same origin, and `hosted_tools[tool].replay` is true now) | `native.payload` blocks verbatim, in place; citations not sent | `native.payload` items verbatim, in place; annotations not sent; never for `image_generation` | — |
 | Images | — | `image_generation_call` → file; history and model context hold the text path record (path, revised prompt, size, mode, cost); `result` base64 never stored; duplicate `result` in `response.completed` not decoded; the image-declaring stream gets a 32 MiB line cap | — |
 | Other-origin replay | assistant `tool_use(name=<tool>, input=<per-action arguments>)` + user `tool_result(record as text)`, splitting the assistant message; a `failed`/`incomplete` record sets `is_error: true` | `function_call(name=<tool>, arguments)` + `function_call_output(record as text)`; a failed record's text starts `[<tool> failed: <error>]` | assistant `tool_calls` + `tool` message, failure as in Responses |
-| Pinning (any protocol) | a request with a native declaration, a `native.payload` or an in-flight continuation carries `x-avibe-pin-source`. A `409` `model_hub_pin_unavailable` / `pin_unavailable` answer is not shown: the same request is rendered again in portable form (proxy declarations, synthetic history, in-place text) and sent unpinned. | same | — |
+| Pinning (any protocol) | a request with a native declaration or a verbatim `native.payload` carries `x-avibe-pin-source: <hop source_id>`. A continuation whose calls go back verbatim also carries `x-avibe-pin-model: <its served model>`, the hop's own model. A `409` `model_hub_pin_unavailable` / `pin_unavailable` answer is not shown: the same request is rendered again in portable form (proxy declarations, synthetic history, in-place text) and sent unpinned, exactly once. | same | — |
 | Citations at delivery | `TextBlock.citations` → `core/citations.py` builder → Markdown links + Web sidecar | same | — |
 | `pause_turn` | not a stop: the adapter re-sends the request with the paused assistant content appended (no new user message), pinned to the paused response's Source (`x-avibe-pin-source`), and keeps streaming as one response, at most 5 continuations. `usage` is the sum of every continuation's counters. | — | — |
-| In-flight replay (same turn, pinned Source) | verbatim. On a narrow rejection or `pin_unavailable`, each server block pair is replaced in place by one text block; signed thinking is kept on the same origin. | verbatim | — |
+| In-flight replay (same turn, pinned Source) | verbatim when the fresh hop is the Source that served it, else in place as text. On `pin_unavailable`, which the gateway also answers for a narrow rejection of the replayed content (§3.5), each server block pair is replaced in place by one text block; signed thinking is kept on the same origin. | same | — |

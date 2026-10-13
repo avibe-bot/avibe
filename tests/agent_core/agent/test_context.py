@@ -124,21 +124,31 @@ def test_the_estimate_counts_utf8_bytes_so_chinese_is_not_undercounted():
     assert message_tokens(reply) == math.ceil(replayed / 4)
 
 
-def test_a_hosted_call_counts_as_the_call_and_result_it_is_replayed_as_never_as_its_opaque_payload():
-    """A hosted call goes back as a synthetic call and its result text, not its native payload (§5), so that is what
-    it costs: an opaque Anthropic search result of 18 KB would otherwise overcount and compact early, and the call's
-    arguments, which repeat its query, would go uncounted."""
+@pytest.mark.parametrize(
+    ("payload", "counted"),
+    [
+        # An OpenAI web_search_call item is smaller than the synthetic call and result it goes back as elsewhere.
+        ({"type": "web_search_call", "id": "ws_1"}, "portable"),
+        # An Anthropic search result is mostly its encrypted pages, which go back verbatim to the Source that served
+        # them (§4.4, §5).
+        ({"type": "web_search_tool_result", "encrypted_content": "x" * 18_000}, "native"),
+    ],
+)
+def test_a_hosted_call_counts_as_the_largest_form_it_can_go_back_in(payload, counted):
+    """Whether a hosted call goes back verbatim depends on the hop each request goes to, so its estimate is its largest
+    form: its native payload, or its synthetic call (whose arguments repeat its query) and result."""
     search = HostedToolBlock(
         id="srvtoolu_1",
         tool="web_search",
         action=HostedAction("search", queries=("q",)),
         record=HostedRecord(status="completed", sources=(HostedSource(url="https://a.test"),)),
-        native=HostedNative(source_id="src_served00001", payload=({"encrypted_content": "x" * 18_000},)),
+        native=HostedNative(source_id="src_served00001", payload=(payload,)),
     )
     reply = AssistantMessage((search,), ORIGIN, "stop", hosted_summary=HostedSummary())
-    arguments = '{"query":"q"}'
-    rendered = '[web_search: "q"]\n1. https://a.test'
-    assert message_tokens(reply) == math.ceil((len("web_search") + len(arguments) + len(rendered)) / 4)
+    portable = len("web_search") + len('{"query":"q"}') + len('[web_search: "q"]\n1. https://a.test')
+    native = len(json.dumps([payload], separators=(",", ":")))
+    assert message_tokens(reply) == math.ceil((portable if counted == "portable" else native) / 4)
+    assert (native > portable) is (counted == "native")
 
 
 def responses_item(reasoning: int, summary: str = "") -> ThinkingBlock:

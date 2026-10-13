@@ -65,6 +65,12 @@ is named, and a native hosted tool is forced with `"required"`, which needs it t
 Anthropic request is never forced: current Claude models and extended thinking refuse a forced `tool` or `any`
 choice.
 
+History follows the same Source rule. A response's hosted calls go back verbatim only to the hop the request goes to,
+when that hop's Source served them on the same origin (`conversion-tables.md`, Hosted tools): within their turn as a
+continuation, later with the hop's current `replay`, and pinned to that Source either way. The gateway answers a pinned request it cannot serve from that Source with
+`409 pin_unavailable`. That answer is not a `ProviderError`: the adapter sends the same request exactly once more in
+portable form and unpinned, so the loop's retry never sees it.
+
 The loop's `ModelRouter` returns the `ModelEndpoint` together with its `ModelCapabilities`. Every capability has a
 defined effect, including when it is unknown:
 

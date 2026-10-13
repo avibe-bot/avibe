@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import Any, Mapping
 
 from core.agent_core.ai.hosted import portable_hosted
+from core.agent_core.ai.provider import ModelEndpoint
 from core.agent_core.messages import (
     AssistantMessage,
     AssistantContent,
@@ -71,16 +72,18 @@ def transform_messages(
     target: Origin,
     supports_images: bool = True,
     protocol: str | None = None,
+    endpoint: ModelEndpoint | None = None,
 ) -> TransformResult:
     """Compile canonical history for one target origin.
 
-    The returned map is per request. The transcript is never mutated.
+    The returned map is per request. The transcript is never mutated. ``endpoint`` is the hop the request goes to; a
+    response's hosted calls go back verbatim only to the Source that served them (``native_replay``).
     """
 
     target_protocol = protocol or target.api
-    # The request's last assistant message still awaits its turn's next response when it stopped for tools: its
-    # hosted calls stay in place as text (§4.4); every earlier one becomes a synthetic call and result (§5).
-    last_assistant = max((i for i, m in enumerate(messages) if isinstance(m, AssistantMessage)), default=-1)
+    # The response the request continues within its turn keeps its hosted calls in place, verbatim or as text (§4.4);
+    # every earlier one goes back verbatim with replay evidence or as a synthetic call and result (§5).
+    live = in_flight_position(messages)
     id_map: dict[str, str] = {}
     used_tool_ids: set[str] = set()
     tool_id_occurrences: dict[str, int] = {}
@@ -123,8 +126,9 @@ def transform_messages(
         same_origin = message.origin == target
         content: list[AssistantContent] = []
         turn_tool_ids: dict[str, list[str]] = {}
-        in_flight = position == last_assistant and message.stop_reason == "tool_use"
-        hosted = portable_hosted(message, in_flight=in_flight, interrupted=SYNTHETIC_TOOL_RESULT)
+        in_flight = position == live
+        verbatim = native_replay(message, in_flight=in_flight, endpoint=endpoint, target=target, protocol=target_protocol)
+        hosted = {} if verbatim else portable_hosted(message, in_flight=in_flight, interrupted=SYNTHETIC_TOOL_RESULT)
         # The synthetic results of the current run of hosted calls, and the assistant parts they split off.
         results: list[ToolResultMessage] = []
         parts: list[Message] = []
@@ -137,6 +141,9 @@ def transform_messages(
                 content, results = [], []
 
         for block in message.content:
+            if isinstance(block, HostedToolBlock) and verbatim:
+                content.append(block)  # its native payload, rendered in place by the protocol's builder
+                continue
             if isinstance(block, HostedToolBlock):
                 portable = hosted[id(block)]
                 if portable.kind == "in_place":
@@ -214,13 +221,62 @@ def transform_messages(
 
 
 def _assistant_part(message: AssistantMessage, content: list[AssistantContent], *, stop_reason: str) -> AssistantMessage:
+    hosted = any(isinstance(block, HostedToolBlock) for block in content)
     return AssistantMessage(
         content=tuple(content),
         origin=message.origin,
         stop_reason=stop_reason,  # type: ignore[arg-type]
         usage=message.usage,
         error_message=message.error_message,
+        hosted_summary=message.hosted_summary if hosted else None,
     )
+
+
+def in_flight_position(messages: list[Message] | tuple[Message, ...]) -> int | None:
+    """The position of the response a request continues within its turn (§4.4), or None.
+
+    It is the request's last assistant message, stopped for tools, with nothing after it but tool results (a
+    ``pause_turn`` continuation has none). A user message after it means its turn ended, as one may right after its
+    tool results, so a later turn never counts as continuing it.
+    """
+
+    last = max((i for i, m in enumerate(messages) if isinstance(m, AssistantMessage)), default=None)
+    if last is None or messages[last].stop_reason != "tool_use":  # type: ignore[union-attr]
+        return None
+    if any(not isinstance(message, ToolResultMessage) for message in messages[last + 1 :]):
+        return None
+    return last
+
+
+def native_replay(
+    message: AssistantMessage, *, in_flight: bool, endpoint: ModelEndpoint | None, target: Origin, protocol: str
+) -> bool:
+    """Whether a response's hosted calls go back verbatim, their native payloads in place (§4.4, §5).
+
+    Only to the hop the request goes to, when that hop's Source served them on the same origin: one hop then builds
+    the request and serves it (§3.5 as implemented; a moved hop gets the in-place form). The hop must still have each
+    tool they called and a Source, which a portable request has not, over a protocol with native hosted content. A
+    generated image never goes back verbatim: its stored item no longer holds the image.
+    * The response its turn continues (``in_flight``) needs no replay evidence: that is the provider's own
+      continuation contract.
+    * Any earlier response needs the hop's current ``replay`` evidence for every tool it called, and every one of its
+      calls finished.
+    """
+
+    blocks = [block for block in message.content if isinstance(block, HostedToolBlock)]
+    if not blocks or endpoint is None or not endpoint.source_id or message.origin != target:
+        return False
+    if protocol not in ("anthropic", "openai_responses"):
+        return False
+    if {block.native.source_id for block in blocks} != {endpoint.source_id}:
+        return False
+    for block in blocks:
+        route = endpoint.hosted_tools.get(block.tool)
+        if route is None or block.tool == "image_generation":
+            return False
+        if not in_flight and (not route.replay or block.record.status == "pending"):
+            return False
+    return True
 
 
 def transform_messages_for_target(

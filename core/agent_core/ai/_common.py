@@ -1579,6 +1579,38 @@ def request_credential_values(endpoint: ModelEndpoint) -> tuple[str, ...]:
 #: Pins a request that carries Source-specific hosted content to one Source (``vibey-hosted-tools.md`` §3.5): the
 #: gateway serves it from that Source only, and answers ``pin_unavailable`` where it would otherwise fail over.
 PIN_SOURCE_HEADER = "x-avibe-pin-source"
+#: With the pin of an in-flight continuation: the served model of the response it continues.
+PIN_MODEL_HEADER = "x-avibe-pin-model"
+
+
+class PinUnavailable:
+    """The gateway's answer to a pinned request it cannot serve from the pinned Source (§3.5): HTTP 409
+    ``pin_unavailable``, before anything reached a model. ``drive_sse_stream`` yields it in place of a terminal."""
+
+
+PIN_UNAVAILABLE = PinUnavailable()
+
+
+def _pin_unavailable(body: str) -> bool:
+    try:
+        value = json.loads(body)
+    except (TypeError, ValueError):
+        return False
+    error = value.get("error") if isinstance(value, Mapping) else None
+    return (
+        isinstance(error, Mapping)
+        and error.get("type") == "model_hub_pin_unavailable"
+        and error.get("code") == "pin_unavailable"
+    )
+
+
+def portable_request(request: ModelRequest) -> ModelRequest:
+    """The same request in portable form (§3.5): no Source to pin to, and every hosted tool as its function, so it
+    carries no native declaration and replays no native payload."""
+
+    endpoint = request.endpoint
+    routes = {name: HostedToolRoute("proxy", route.executor, False) for name, route in endpoint.hosted_tools.items()}
+    return replace(request, endpoint=replace(endpoint, source_id=None, hosted_tools=routes))
 
 
 @dataclass(frozen=True)
@@ -1607,14 +1639,31 @@ def native_declaration(route: HostedToolRoute) -> dict[str, Any]:
     return copy.deepcopy(dict(route.declaration or {}))
 
 
-def hosted_pin(request: ModelRequest) -> dict[str, str]:
-    """The pin header of a request that sends a native hosted declaration, else nothing."""
+def hosted_pin(request: ModelRequest, messages: tuple[Any, ...] = ()) -> dict[str, str]:
+    """The pin of a request that carries Source-specific hosted content (§3.5), else nothing.
 
-    if not native_hosted_tools(request):
+    ``messages`` are the request's transformed messages; a call goes back verbatim only to the hop's own Source, so
+    that is the pin. A continuation whose calls go back verbatim also names the model that served them.
+
+    A header carries only ASCII, so a model id that is not ASCII is left out: the pinned Source is the hop's, and the
+    gateway takes that hop's own model, which served the continued response.
+    """
+
+    from core.agent_core.ai.transform import in_flight_position
+
+    def replays(message: Any) -> bool:
+        return isinstance(message, AssistantMessage) and any(isinstance(b, HostedToolBlock) for b in message.content)
+
+    if not native_hosted_tools(request) and not any(replays(message) for message in messages):
         return {}
     if not request.endpoint.source_id:
-        raise ValueError("a native hosted declaration needs the Source the request is pinned to")
-    return {PIN_SOURCE_HEADER: request.endpoint.source_id}
+        raise ValueError("native hosted content needs the Source the request is pinned to")
+    pin = {PIN_SOURCE_HEADER: request.endpoint.source_id}
+    live = in_flight_position(messages)
+    continued = messages[live] if live is not None else None
+    if replays(continued) and continued.origin.model.isascii():
+        pin[PIN_MODEL_HEADER] = continued.origin.model
+    return pin
 
 
 def forced_tool(request: ModelRequest) -> tuple[str, HostedToolRoute | None] | None:
@@ -1734,6 +1783,11 @@ async def drive_sse_stream(
                     else:
                         if body is None:
                             candidate = assembler.aborted(cancel.reason)
+                        elif gateway and response.status_code == 409 and PIN_SOURCE_HEADER in headers and _pin_unavailable(body):
+                            # The pinned Source cannot serve this content; nothing reached a model. The adapter sends
+                            # the same request once more in portable form (§3.5), so no terminal is committed here.
+                            yield PIN_UNAVAILABLE
+                            return
                         else:
                             candidate = assembler.error(
                                 body or f"provider endpoint returned HTTP {response.status_code}",
@@ -1937,6 +1991,7 @@ async def prepare_messages(
     protocol: str,
     media_loader: MediaLoader | None,
     cancel: CancelToken,
+    endpoint: ModelEndpoint | None = None,
 ) -> tuple[tuple[Any, ...], dict[str, tuple[str, str]]] | ProviderError:
     """Transform history and resolve immutable media snapshots as one safe boundary."""
 
@@ -1948,6 +2003,7 @@ async def prepare_messages(
             target=target,
             supports_images=supports_images,
             protocol=protocol,
+            endpoint=endpoint,
         )
         loaded_images = await load_images(transformed.messages, media_loader, cancel)
     except _CancelledDependency:
