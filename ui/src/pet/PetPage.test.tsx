@@ -120,6 +120,8 @@ const api = {
   setHarnessWatchEnabled: vi.fn(async () => ({ ok: true })),
   setHarnessTaskEnabled: vi.fn(async () => ({ ok: true })),
   getMainSession: vi.fn(() => api.getSessionResult((window as unknown as { __AVIBE_PET_BINDING__: string }).__AVIBE_PET_BINDING__)),
+  // Default: no project to put the Vibey conversation in, so an unbound pet keeps the switcher.
+  ensureDesktopMiniSession: vi.fn(async (): Promise<WorkbenchSession> => { throw new ApiError('no project', 409, 'no_chat_project'); }),
   getConfig: vi.fn(async () => (setupDone
     ? { mode: 'self_host', setup_state: { needs_setup: false } }
     : { mode: 'self_host', setup_state: { needs_setup: true } })),
@@ -231,6 +233,8 @@ beforeEach(async () => {
   inboxVersion = 0;
   api.getSessionResult.mockClear();
   api.listSessions.mockClear();
+  api.ensureDesktopMiniSession.mockReset();
+  api.ensureDesktopMiniSession.mockImplementation(async () => { throw new ApiError('no project', 409, 'no_chat_project'); });
   window.localStorage.clear();
 });
 
@@ -312,6 +316,72 @@ describe('PetPage binding', () => {
     expect(screen.queryByText('Archived')).toBeNull();
     await userEvent.click(screen.getByText('No reply yet'));
     expect(devBinding().binding).toBe('new');
+  });
+});
+
+describe('PetPage Vibey conversation', () => {
+  it('binds the Vibey conversation the server ensures when nothing is bound', async () => {
+    api.ensureDesktopMiniSession.mockResolvedValue(session('V', { agent_name: 'vibey', agent_backend: 'vibey' }));
+    render(<PetPage />);
+    await waitFor(() => expect(devBinding().binding).toBe('V'));
+    expect(api.ensureDesktopMiniSession).toHaveBeenCalledTimes(1);
+  });
+
+  it('leaves an existing binding alone', async () => {
+    devBind('S');
+    render(<PetPage />);
+    await waitFor(() => expect(api.getSessionResult).toHaveBeenCalledWith('S'));
+    expect(api.ensureDesktopMiniSession).not.toHaveBeenCalled();
+  });
+
+  it('never re-binds a conversation that was cleared as invalid', async () => {
+    api.ensureDesktopMiniSession.mockResolvedValue(session('V'));
+    sessionReads.V = async () => ({ status: 404, session: null });
+    render(<PetPage />);
+    await waitFor(() => expect(api.getSessionResult).toHaveBeenCalledWith('V'));
+    await waitFor(() => expect(devBinding().binding).toBeNull());
+    await waitFor(() => expect(api.ensureDesktopMiniSession).toHaveBeenCalledTimes(2));
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 30)));
+    expect(devBinding().binding).toBeNull();
+    expect(api.ensureDesktopMiniSession).toHaveBeenCalledTimes(2);
+  });
+
+  it('offers Vibey in the switcher, and says why when there is no project', async () => {
+    switcherSessions = [session('B', { title: 'Another session' })];
+    render(<PetPage />);
+    summon('show');
+    await userEvent.click(await screen.findByText('pet.talkToVibey'));
+    expect(await screen.findByText('pet.noChatProject')).toBeTruthy();
+    api.ensureDesktopMiniSession.mockResolvedValue(session('V'));
+    await userEvent.click(screen.getByText('pet.talkToVibey'));
+    await waitFor(() => expect(devBinding().binding).toBe('V'));
+  });
+
+  it('does not offer Vibey to someone who cannot chat', async () => {
+    canChat = false;
+    switcherSessions = [session('B', { title: 'Another session' })];
+    render(<PetPage />);
+    summon('show');
+    expect(await screen.findByText('Another session')).toBeTruthy();
+    expect(screen.queryByText('pet.talkToVibey')).toBeNull();
+    expect(api.ensureDesktopMiniSession).not.toHaveBeenCalled();
+  });
+
+  it('shows a turn the agent could not run, with the way to fix it', async () => {
+    tails.S = [
+      message('u', 'S', { author: 'user', type: 'user', text: 'hello' }),
+      message('n', 'S', {
+        type: 'notify',
+        text: 'No model source yet.',
+        metadata: { event: 'backend_failure', failure_id: 'f', turn_id: 't', failure_next_step: 'models' },
+      }),
+    ];
+    devBind('S');
+    render(<PetPage />);
+    expect(await screen.findByText('pet.failedPrefix No model source yet.')).toBeTruthy();
+    await showDetail();
+    expect(await screen.findByText('No model source yet.')).toBeTruthy();
+    expect(screen.getByText('pet.fixInAvibe')).toBeTruthy();
   });
 });
 

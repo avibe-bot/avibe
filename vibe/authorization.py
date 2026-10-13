@@ -671,6 +671,7 @@ _EDITOR_HTTP_RULES = tuple(
         ("GET", r"^/api/asr/status$"),
         ("GET", r"^/api/sessions/[^/]+/(?:archive-preview|queue|draft)$"),
         ("POST", r"^/api/sessions$"),
+        ("POST", r"^/api/desktop-mini/session$"),
         ("POST", r"^/api/sessions/[^/]+/cli-activity$"),
         ("POST", r"^/api/sessions/[^/]+/fork$"),
         ("PATCH", r"^/api/sessions/[^/]+$"),

@@ -726,6 +726,9 @@ export type ApiContextType = {
   /** Main-agent lookup seam. The endpoint is not shipped yet; the pet client
    * currently resolves the session bound to its native window here. */
   getMainSession: () => Promise<WorkbenchSessionReadResult>;
+  /** The caller's desktop mini conversation with Vibey, created on first use
+   * in their most recently active chat Project. */
+  ensureDesktopMiniSession: () => Promise<WorkbenchSession>;
   getSessionResult: (sessionId: string) => Promise<WorkbenchSessionReadResult>;
   getSessionBootstrap: (sessionId: string) => Promise<WorkbenchSessionBootstrap>;
   updateSession: (sessionId: string, payload: Partial<WorkbenchSessionUpdate>) => Promise<WorkbenchSession>;
@@ -3745,6 +3748,21 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         session: sessionRowFromPayload(payload),
         capabilities: sessionCanChatFromPayload(payload),
       };
+    },
+    ensureDesktopMiniSession: async () => {
+      // No global toast: the pet shows its own copy. Errors still reject, with the code.
+      const res = await apiFetch('/api/desktop-mini/session', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      const payload = await res.json().catch(() => null);
+      if (!res.ok || !payload || typeof payload.id !== 'string') {
+        const parsed = selectApiErrorFields(payload, `Request failed: /api/desktop-mini/session (${res.status})`);
+        throw new ApiError(parsed?.fallback ?? `Request failed (${res.status})`, res.status, parsed?.code ?? null);
+      }
+      clearReadCacheMatching((path) => path.startsWith('/api/sessions') || path.startsWith('/api/workbench/projects-bootstrap'));
+      return sessionRowFromPayload(payload);
     },
     getSessionResult: async (sessionId) => {
       const res = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}`);
