@@ -37,6 +37,7 @@ from core.handlers.model_hub.identifiers import (
     persisted_ledger_key,
     usage_ledger_key,
 )
+from core.handlers.model_hub.pricing import PriceTable
 from core.handlers.model_hub.stream_wire import (
     PROTOCOL_STREAM_TAXONOMY,
     USAGE_REPORT_TOKEN_CEILING,
@@ -743,6 +744,56 @@ def test_usage_writer_preserves_daily_owners_inside_one_utc_hour(
         else:
             os.environ["TZ"] = previous_tz
         time.tzset()
+
+
+def test_the_writer_reads_the_price_table_once_off_the_loop_and_tiers_calls_made_before_it(
+    tmp_path: Path,
+) -> None:
+    """MH-USAGE-BACKEND-010: deciding a call's context tier reads no file on the loop and none per call.
+
+    A price table parses the whole models.dev copy, so the writer reads it on its
+    own thread and keeps it. Calls that arrive before that first read wait unfolded
+    for the flush that reads it, so neither lands in the other's tier.
+    """
+
+    catalog = {"openai": {"models": {"gpt-6-astra": {"cost": {
+        "input": 10, "output": 50,
+        "tiers": [{"input": 20, "output": 75, "tier": {"type": "context", "size": 272_000}}],
+    }}}}}
+    vendor_map = {"families": [{"prefix": "gpt-", "vendor_id": "openai"}]}
+    reads: list[int] = []
+
+    def price_table() -> PriceTable:
+        reads.append(threading.get_ident())
+        return PriceTable(catalog=catalog, vendor_map=vendor_map, overrides={}, price_table_date="2026-10-13")
+
+    async def exercise() -> int:
+        writer = UsageWriter(_ledger(tmp_path))
+
+        def record(input_tokens: int) -> None:
+            writer.record(
+                source_id="src_a",
+                model_id="gpt-6-astra",
+                usage=ProtocolUsageReport(input_tokens=input_tokens),
+                at=NOW,
+                price_table=price_table,
+            )
+
+        record(100_000)
+        record(300_000)
+        assert (len(writer._pending), len(writer._undecided)) == (0, 2)
+        assert await writer.drain(timeout=5) == 0
+        for input_tokens in (100_000, 300_000, 300_000):
+            record(input_tokens)
+        assert (len(writer._pending), len(writer._undecided)) == (2, 0)
+        assert await writer.drain(timeout=5) == 0
+        return threading.get_ident()
+
+    loop_thread = asyncio.run(exercise())
+    assert len(reads) == 1
+    assert reads[0] != loop_thread
+    rows = json.loads(_ledger(tmp_path).path.read_text(encoding="utf-8"))
+    assert [(row.get("context_tier", 0), row["requests"]) for row in rows] == [(0, 2), (272_000, 3)]
 
 
 @pytest.mark.parametrize(
@@ -3086,6 +3137,45 @@ def test_a_row_with_unusable_counters_loads_as_zero(tmp_path: Path) -> None:
     assert row["input_tokens"] == 0
     assert row["cached_input_tokens"] == 0
     assert row["output_tokens"] == 0
+
+
+@pytest.mark.parametrize(
+    ("context_tier", "kept"),
+    [
+        pytest.param(0, True, id="base-spelled-out"),
+        pytest.param(272_000, True, id="tier"),
+        pytest.param(-1, False, id="negative"),
+        pytest.param(True, False, id="bool"),
+        pytest.param(1.5, False, id="float"),
+        pytest.param("272000", False, id="text"),
+        pytest.param(None, False, id="null"),
+    ],
+)
+def test_a_row_whose_context_tier_is_not_a_size_is_dropped(
+    tmp_path: Path, context_tier: object, kept: bool,
+) -> None:
+    """MH-USAGE-BACKEND-009: the context tier is part of a row's identity, so an unreadable one drops its row."""
+
+    ledger = _ledger(tmp_path)
+    ledger.path.parent.mkdir(parents=True, exist_ok=True)
+    row = {
+        "day": local_usage_day(NOW).isoformat(),
+        "source_id": "src_a",
+        "model_id": "model-x",
+        "requests": 1,
+        "token_reports": 0,
+        "input_tokens": 0,
+        "cached_input_tokens": 0,
+        "output_tokens": 0,
+        "last_metered_at": NOW.isoformat(),
+    }
+    ledger.path.write_text(
+        json.dumps([{**row, "model_id": "model-y"}, {**row, "context_tier": context_tier}]),
+        encoding="utf-8",
+    )
+
+    held = {row["model_id"]: row.get("context_tier", 0) for row in ledger.window(days=30, now=NOW)}
+    assert held == ({"model-x": context_tier, "model-y": 0} if kept else {"model-y": 0})
 
 
 @pytest.mark.parametrize(

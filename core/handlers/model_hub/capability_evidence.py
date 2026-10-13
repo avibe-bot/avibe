@@ -23,7 +23,7 @@ import json
 import re
 import threading
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable, Literal, Mapping, Optional
 
@@ -185,6 +185,8 @@ class EvidenceView:
     status: RoutingStatus
     stale: Optional[Staleness] = None
     record: Optional[EvidenceRecord] = None
+    changes_at: Optional[datetime] = None
+    """When this record stops reading as it does now (observed expiry, probe re-verify mark); None when nothing is scheduled."""
 
 
 UNKNOWN = EvidenceView("unknown")
@@ -212,18 +214,23 @@ def resolve(
     age = (now - record.observed_at).total_seconds()
     if record.basis == "observed":
         # Relays change; an expired negative record falls back to the priors.
-        return UNKNOWN if age > OBSERVED_TTL_SECONDS else EvidenceView("unsupported", None, record)
+        if age > OBSERVED_TTL_SECONDS:
+            return UNKNOWN
+        return EvidenceView("unsupported", None, record, record.observed_at + timedelta(seconds=OBSERVED_TTL_SECONDS))
     wire_stale = (
         record.engine != engine
         or record.shape != shape
         or UNKNOWN_ENGINE_STAMP in (record.engine, engine)
     )
     stale: Optional[Staleness] = "wire" if wire_stale else "age" if age > PROBE_REVERIFY_AFTER_SECONDS else None
+    changes_at = (
+        record.observed_at + timedelta(seconds=PROBE_REVERIFY_AFTER_SECONDS) if stale is None else None
+    )
     if record.feature.kind == "hosted_tool" and wire_stale:
         # Evidence taken on another wire cannot vouch for this one, and a silent
         # native drop would never trip a narrow rule: route as unknown (proxy).
         return EvidenceView("unknown", stale, record)
-    return EvidenceView(record.status, stale, record)
+    return EvidenceView(record.status, stale, record, changes_at)
 
 
 class CapabilityEvidenceStore:

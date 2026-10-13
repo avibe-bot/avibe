@@ -1390,6 +1390,7 @@ class ModelHubTurnGateway:
             model_id=resolved.model_id,
             usage=usage,
             at=execution.completed_at or self._now(),
+            price_table=getattr(self.service, "price_table", None),
         )
         await self._usage_writer.wait_recorded(execution.usage_write)
 

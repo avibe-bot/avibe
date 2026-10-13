@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from functools import lru_cache
 from importlib import resources
 from pathlib import Path
@@ -160,6 +160,10 @@ def resolve_hosted_tools(
     return resolved
 
 
+def _utc_text(moment: Optional[datetime]) -> Optional[str]:
+    return moment.astimezone(timezone.utc).isoformat().replace("+00:00", "Z") if moment is not None else None
+
+
 def _evidence_payload(view) -> dict[str, Any]:
     record = view.record
     return {
@@ -168,6 +172,21 @@ def _evidence_payload(view) -> dict[str, Any]:
         "basis": record.basis if record is not None else None,
         "observed_at": record.payload()["observed_at"] if record is not None else None,
         "detail": record.detail if record is not None else None,
+        "changes_at": _utc_text(view.changes_at),
+    }
+
+
+def _price_payload(price: Any) -> dict[str, Any] | None:
+    """The overlay's list price for the cost hint; None when no list price is known, never zero."""
+
+    if price is None:
+        return None
+    return {
+        "unit": price.unit,
+        "usd_per_1k": price.usd_per_1k,
+        "extra": [{"unit": part.unit, "usd_per_1k": part.usd_per_1k} for part in price.extra],
+        "as_of": price.as_of.isoformat(),
+        "url": price.url,
     }
 
 
@@ -208,7 +227,8 @@ def hosted_tools_status(
         candidates = []
         for source in _candidate_sources(config):
             for model in source.models:
-                if spec_for(source.vendor, source.protocol, model.id, tool) is None:
+                spec = spec_for(source.vendor, source.protocol, model.id, tool)
+                if spec is None:
                     continue
                 views = {
                     aspect: evidence.view(
@@ -222,13 +242,18 @@ def hosted_tools_status(
                         "model_id": model.id,
                         "call": _evidence_payload(views["call"]),
                         "replay": _evidence_payload(views["replay"]) if "replay" in views else None,
+                        "billing": source.billing,
+                        "price": _price_payload(spec.price),
                     }
                 )
+        chosen = (toggle.executor.source_id, toggle.executor.model_id) if toggle and toggle.executor else None
         tools.append(
             {
                 "name": tool,
                 "enabled": bool(toggle and toggle.enabled),
                 "executor": toggle.executor.to_payload() if toggle and toggle.executor else None,
+                # What a turn would bind now, by the same rule hop resolution uses.
+                "bound": _executor(_Context(evidence, spec_for, engine, shape, now), config, tool, chosen),
                 "candidates": candidates,
             }
         )

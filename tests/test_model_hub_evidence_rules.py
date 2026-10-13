@@ -9,6 +9,7 @@ refused effort gets instead of another provider 400.
 from __future__ import annotations
 
 import json
+from datetime import timedelta
 
 import pytest
 from aiohttp import web
@@ -152,18 +153,22 @@ async def test_a_refused_effort_skips_its_hop_instead_of_another_provider_400(tm
         assert second.value.data == {"effort": "ultra", "source_ids": ["src_evidence1"]}
         assert len(calls) == 1
 
-        # The chain read projects what routing just used, for the effort menu.
+        # The chain read and the Source read project what routing just used.
+        record = service.capability_evidence.records()[0]
+        refusal = {
+            "effort": "ultra",
+            "basis": "observed",
+            "observed_at": record.payload()["observed_at"],
+            "detail": "400 invalid_request_error",
+            "changes_at": (record.observed_at + timedelta(days=7)).isoformat().replace("+00:00", "Z"),
+        }
         chain = service.agent_chain("codex", models["codex"])
         _assert_valid("agent-chain.schema.json", chain)
         [hop] = [hop for hop in chain["chain"] if hop["source_id"] == "src_evidence1"]
-        assert hop["refused_efforts"] == [
-            {
-                "effort": "ultra",
-                "basis": "observed",
-                "observed_at": service.capability_evidence.records()[0].payload()["observed_at"],
-                "detail": "400 invalid_request_error",
-            }
-        ]
+        assert hop["refused_efforts"] == [refusal]
+        [listed] = [item for item in service.list_sources() if item["id"] == "src_evidence1"]
+        assert listed["models"][0]["refused_efforts"] == [refusal]
+        _assert_valid("source.schema.json", listed)
 
         served = await service.resolve_with_recovery(
             backend="codex", model_id=models["codex"], request=request("high"), stream=False
@@ -276,6 +281,7 @@ async def test_no_request_path_reads_a_bundled_file_after_startup(tmp_path, monk
     from pathlib import Path
 
     from core.handlers.model_hub.adapter import RawOutcomeKind, UpstreamRejection
+    from core.handlers.model_hub.stream_wire import ProtocolUsageReport
     from tests.test_model_hub_l3 import _canonicalize_fixed_test_routes, _outcome, _service
 
     source = _source("src_startup01", "Startup", vendor="openai", protocol="openai_responses")
@@ -311,6 +317,14 @@ async def test_no_request_path_reads_a_bundled_file_after_startup(tmp_path, monk
     service.hosted_tools_for_hop(config, source, "shared-model")
     service.agent_chain("codex", model)
     service.list_sources()
+    service.hosted_tools_status()
+    service.hosted_call_cost(
+        source,
+        "shared-model",
+        ("web_search",),
+        usage=ProtocolUsageReport.of(input_tokens=10, cached_input_tokens=0, output_tokens=1),
+        counts={"web_search_calls": 1},
+    )
     assert reads == []
 
 

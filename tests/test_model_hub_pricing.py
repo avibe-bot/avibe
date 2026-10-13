@@ -27,8 +27,8 @@ from core.handlers.model_hub.pricing import (
     quota_values,
     row_cost,
 )
-from core.handlers.model_hub.stream_wire import ProtocolUsageReport
-from core.handlers.model_hub.usage import BoundedUsageLedger, SourceIdentity, UsageCall
+from core.handlers.model_hub.stream_wire import ProtocolUsageReport, extract_protocol_usage
+from core.handlers.model_hub.usage import BoundedUsageLedger, SourceIdentity, UsageCall, UsageWriter
 
 # Shapes as models.dev publishes them (USD per million tokens), at 2026-09 prices.
 CATALOG = {
@@ -65,6 +65,46 @@ FETCHED_AT = datetime(2026, 9, 23, 12, 0).timestamp()
 
 def _table(overrides=None) -> PriceTable:
     return PriceTable(catalog=CATALOG, vendor_map=VENDOR_MAP, overrides=overrides or {}, price_table_date="2026-09-23")
+
+
+def _context(size: int) -> dict:
+    return {"type": "context", "size": size}
+
+
+# Context tiers as models.dev publishes them: one tier, two tiers, a cache-write
+# vendor's tier, and a row that has only the legacy 200K object.
+TIERED_CATALOG = {
+    "openai": {
+        "models": {
+            "gpt-6-astra": {"cost": {
+                "input": 10, "output": 50, "cache_read": 1, "cache_write": 12.5,
+                "tiers": [{"input": 20, "output": 75, "cache_read": 2, "cache_write": 25, "tier": _context(272_000)}],
+            }},
+            "gpt-6-nova": {"cost": {
+                "input": 1, "output": 4, "cache_read": 0.1,
+                "tiers": [
+                    {"input": 2, "output": 8, "cache_read": 0.2, "tier": _context(32_000)},
+                    {"input": 3, "output": 12, "cache_read": 0.3, "tier": _context(128_000)},
+                ],
+            }},
+        }
+    },
+    "anthropic": {
+        "models": {
+            "claude-sonnet-6": {"cost": {
+                "input": 3, "output": 15, "cache_read": 0.3, "cache_write": 3.75,
+                "tiers": [{"input": 6, "output": 22.5, "cache_read": 0.6, "cache_write": 7.5, "tier": _context(200_000)}],
+            }},
+        }
+    },
+    "xai": {"models": {"grok-4.6": {"cost": {
+        "input": 2, "output": 6, "cache_read": 0.5, "context_over_200k": {"input": 4, "output": 12, "cache_read": 1},
+    }}}},
+}
+
+
+def _tiered_table() -> PriceTable:
+    return PriceTable(catalog=TIERED_CATALOG, vendor_map=VENDOR_MAP, overrides={}, price_table_date="2026-10-13")
 
 
 def test_model_price_reads_models_dev_cost_and_fills_missing_cache_prices():
@@ -625,3 +665,261 @@ def test_a_degraded_ledger_read_values_nothing_as_exact(tmp_path):
     assert value["week"]["api_cost_lower_bound"] is True
     assert value["period"]["api_cost_lower_bound"] is True
     assert totals["period"]["api_cost_lower_bound"] is True
+
+
+def test_model_price_reads_context_tiers_by_the_flat_price_rules():
+    """MH-PRICE-015: Context tiers come from `tiers[]`, else the legacy 200K object; a bad tier is ignored alone."""
+
+    rates = {"input": 2, "output": 8}
+    # A missing tier member falls back as the flat price's does, to the tier's own input.
+    tier_rates = ModelPrice(input=2, output=8, cache_read=2, cache_write=2, cache_write_1h=4)
+    assert model_price({"input": 1, "output": 4, "tiers": [{**rates, "tier": _context(32_000)}]}).context_tiers == (
+        (32_000, tier_rates),
+    )
+    assert model_price(TIERED_CATALOG["openai"]["models"]["gpt-6-astra"]["cost"]).context_tiers == ((
+        272_000,
+        ModelPrice(input=20, output=75, cache_read=2, cache_write=25, cache_write_1h=40, charges_cache_writes=True),
+    ),)
+    assert [size for size, _ in model_price(TIERED_CATALOG["openai"]["models"]["gpt-6-nova"]["cost"]).context_tiers] == [
+        32_000, 128_000,
+    ]
+    legacy = {"input": 1, "output": 4, "context_over_200k": rates}
+    assert model_price(legacy).context_tiers == ((200_000, tier_rates),)
+    # Listed tiers replace the legacy object, which repeats one of them at the wrong size.
+    assert model_price({**legacy, "tiers": [{**rates, "tier": _context(272_000)}]}).context_tiers == (
+        (272_000, tier_rates),
+    )
+    unusable = [
+        "not a tier", {**rates}, {**rates, "tier": {"type": "time", "size": 1}}, {**rates, "tier": _context(0)},
+        {**rates, "tier": _context(-1)}, {**rates, "tier": _context(True)}, {**rates, "tier": _context("272000")},
+        {**rates, "tier": _context(2.5e5)}, {"input": 2, "tier": _context(64_000)},
+    ]
+    assert model_price({**legacy, "tiers": unusable}).context_tiers == ((200_000, tier_rates),)
+    assert model_price({**legacy, "tiers": [*unusable, {**rates, "tier": _context(64_000)}]}).context_tiers == (
+        (64_000, tier_rates),
+    )
+    assert model_price({"input": 1, "output": 4, "tiers": {"not": "a list"}}).context_tiers == ()
+    # Tiers never price a model that has no flat price.
+    assert model_price({"tiers": [{**rates, "tier": _context(32_000)}]}) is None
+
+
+@pytest.mark.parametrize(
+    ("recorded", "usd"),
+    [(0, 1.0), (16_000, 1.0), (32_000, 2.0), (64_000, 2.0), (128_000, 3.0), (500_000, 3.0)],
+)
+def test_a_tiered_row_is_valued_at_the_largest_listed_tier_it_exceeded(recorded, usd):
+    """MH-PRICE-019: A row is valued at its tier; a size the table no longer lists takes the largest tier below it."""
+
+    price = model_price(TIERED_CATALOG["openai"]["models"]["gpt-6-nova"]["cost"])
+    row = {"requests": 1, "token_reports": 1, "input_tokens": 1_000_000, "output_tokens": 0, "context_tier": recorded}
+    assert row_cost(row, price).api_cost_usd == pytest.approx(usd)
+
+
+# (model, tier) → (input, output) USD per million tokens, from TIERED_CATALOG.
+_TIER_RATES = {
+    ("gpt-6-astra", 0): (10, 50), ("gpt-6-astra", 272_000): (20, 75),
+    ("gpt-6-nova", 0): (1, 4), ("gpt-6-nova", 32_000): (2, 8), ("gpt-6-nova", 128_000): (3, 12),
+    ("grok-4.6", 0): (2, 6), ("grok-4.6", 200_000): (4, 12),
+}
+
+
+@pytest.mark.parametrize(
+    ("model_id", "input_tokens", "tier"),
+    [
+        ("gpt-6-astra", 271_999, 0),
+        ("gpt-6-astra", 272_000, 0),
+        ("gpt-6-astra", 272_001, 272_000),
+        ("gpt-6-nova", 32_000, 0),
+        ("gpt-6-nova", 32_001, 32_000),
+        ("gpt-6-nova", 128_000, 32_000),
+        ("gpt-6-nova", 128_001, 128_000),
+        ("grok-4.6", 200_000, 0),
+        ("grok-4.6", 200_001, 200_000),
+    ],
+)
+async def test_a_call_is_recorded_in_the_tier_its_context_exceeds_and_valued_at_its_rates(
+    tmp_path, model_id, input_tokens, tier,
+):
+    """MH-PRICE-016: A call past a tier size is recorded in that tier and valued whole at its rates; at the size it is not.
+
+    Both writer paths decide it: the first call, before any price table is read,
+    and the next, from the table the writer then holds.
+    """
+
+    now = datetime(2026, 10, 13, 12, 0, tzinfo=timezone.utc)
+    ledger = BoundedUsageLedger(tmp_path / "usage.json", now=lambda: now)
+    writer = UsageWriter(ledger)
+    usage = ProtocolUsageReport.of(input_tokens=input_tokens, cached_input_tokens=0, output_tokens=1_000)
+    for source_id in ("src_first", "src_held"):
+        writer.record(source_id=source_id, model_id=model_id, usage=usage, at=now, price_table=_tiered_table)
+        assert await writer.drain(timeout=5) == 0
+
+    rows = json.loads(ledger.path.read_text(encoding="utf-8"))
+    assert [row.get("context_tier") for row in rows] == [tier or None] * 2
+    input_rate, output_rate = _TIER_RATES[(model_id, tier)]
+    summary = ledger.summary(days=1, now=now, prices=_tiered_table())
+    for source in summary["sources"]:
+        assert source["api_cost_usd"] == pytest.approx((input_tokens * input_rate + 1_000 * output_rate) / 1e6)
+
+
+async def test_cache_reads_and_writes_count_toward_the_context_tier(tmp_path):
+    """MH-PRICE-016: The tier threshold is the whole context: fresh input plus cache reads and writes."""
+
+    now = datetime(2026, 10, 13, 12, 0, tzinfo=timezone.utc)
+    ledger = BoundedUsageLedger(tmp_path / "usage.json", now=lambda: now)
+    writer = UsageWriter(ledger)
+    # Anthropic reports only the 1,000 fresh tokens as `input_tokens`; the context is 201,000.
+    usage = extract_protocol_usage("anthropic", {"usage": {
+        "input_tokens": 1_000, "cache_read_input_tokens": 180_000, "cache_creation_input_tokens": 20_000,
+        "output_tokens": 1_000,
+    }})
+    for _ in range(2):  # before and after the writer holds a price table
+        writer.record(source_id="src_a", model_id="claude-sonnet-6", usage=usage, at=now, price_table=_tiered_table)
+        assert await writer.drain(timeout=5) == 0
+
+    [row] = json.loads(ledger.path.read_text(encoding="utf-8"))
+    assert (row["context_tier"], row["requests"]) == (200_000, 2)
+    # fresh 1k × 6 + read 180k × 0.6 + write 20k × 7.5 + out 1k × 22.5, twice
+    totals = ledger.summary(days=1, now=now, prices=_tiered_table())["totals"]
+    assert totals["api_cost_usd"] == pytest.approx(2 * 0.2865)
+
+
+# A ledger exactly as the release before context tiers wrote it: two calls of
+# 300K and 50K input in one row, neither recorded in a tier.
+RELEASED_LEDGER = (
+    '[{"day":"2026-09-25","source_id":"src_a","model_id":"gpt-6-astra","requests":2,"token_reports":2,'
+    '"input_tokens":350000,"cached_input_tokens":100000,"output_tokens":1500,"cache_write_input_tokens":0,'
+    '"cache_write_1h_input_tokens":0,"cache_write_uncaptured_reports":0,"last_metered_at":"2026-09-25T11:40:00+00:00",'
+    '"hours":[{"key":"2026-09-25T11:00:00+00:00","requests":2,"token_reports":2,"input_tokens":350000,'
+    '"cached_input_tokens":100000,"output_tokens":1500,"cache_write_input_tokens":0,"cache_write_1h_input_tokens":0,'
+    '"cache_write_uncaptured_reports":0,"last_metered_at":"2026-09-25T11:40:00+00:00"}],"hourly_history_complete":true,'
+    '"hourly_expired_totals":{"requests":0,"token_reports":0,"input_tokens":0,"cached_input_tokens":0,"output_tokens":0,'
+    '"cache_write_input_tokens":0,"cache_write_1h_input_tokens":0,"cache_write_uncaptured_reports":0},'
+    '"hourly_expired_before":null}]'
+)
+
+
+async def test_a_released_ledger_reads_unchanged_and_a_tiered_call_lands_beside_it(tmp_path):
+    """MH-PRICE-017: Released rows read as the base tier, are never rewritten, and take no tiered call into them."""
+
+    now = datetime(2026, 9, 25, 12, 0, tzinfo=timezone.utc)
+    path = tmp_path / "usage.json"
+    path.write_text(RELEASED_LEDGER, encoding="utf-8")
+    ledger = BoundedUsageLedger(path, now=lambda: now)
+    identities = [SourceIdentity("src_a", "A", ["gpt-6-astra"])]
+    # fresh 250k × 10 + read 100k × 1 + out 1.5k × 50, at base rates although the day's input passed 272K
+    released_usd = 2.675
+    documents = [ledger.summary(days=7, now=now, identities=identities, prices=_tiered_table())]
+    documents += [ledger.report(window=w, now=now, identities=identities, prices=_tiered_table()) for w in ("24h", "7d")]
+    for document in documents:
+        assert document["totals"]["requests"] == 2
+        assert document["totals"]["api_cost_usd"] == pytest.approx(released_usd)
+        assert document["totals"]["api_cost_lower_bound"] is False
+    assert path.read_text(encoding="utf-8") == RELEASED_LEDGER
+
+    writer = UsageWriter(ledger)
+    writer.record(
+        source_id="src_a", model_id="gpt-6-astra", at=now, price_table=_tiered_table,
+        usage=ProtocolUsageReport.of(input_tokens=300_000, cached_input_tokens=0, output_tokens=1_000),
+    )
+    assert await writer.drain(timeout=5) == 0
+
+    persisted = path.read_text(encoding="utf-8")
+    assert persisted.startswith(RELEASED_LEDGER[:-1] + ",")
+    tiered = json.loads(persisted)[1]
+    assert (tiered["context_tier"], tiered["requests"], tiered["input_tokens"]) == (272_000, 1, 300_000)
+    # 300k × 20 + 1k × 75 at the tier's rates
+    summary = ledger.summary(days=7, now=now, identities=identities, prices=_tiered_table())
+    assert summary["totals"]["requests"] == 3
+    assert summary["totals"]["api_cost_usd"] == pytest.approx(released_usd + 6.075)
+
+
+async def test_tiers_never_fold_together_and_every_read_sums_them_per_model(tmp_path):
+    """MH-PRICE-018: Calls in different tiers keep separate rows; each read publishes one row per Source and model."""
+
+    now = datetime(2026, 10, 13, 12, 30, tzinfo=timezone.utc)
+    ledger = BoundedUsageLedger(tmp_path / "usage.json", now=lambda: now)
+    writer = UsageWriter(ledger)
+
+    def report(input_tokens: int) -> ProtocolUsageReport:
+        return ProtocolUsageReport.of(input_tokens=input_tokens, cached_input_tokens=0, output_tokens=0)
+
+    writer.record(source_id="src_a", model_id="gpt-6-astra", usage=report(1), at=now, price_table=_tiered_table)
+    assert await writer.drain(timeout=5) == 0
+    for input_tokens in (100_000, 300_000, 100_000):
+        writer.record(
+            source_id="src_a", model_id="gpt-6-astra", usage=report(input_tokens), at=now, price_table=_tiered_table,
+        )
+    assert len(writer._pending) == 2
+    assert await writer.drain(timeout=5) == 0
+
+    rows = json.loads(ledger.path.read_text(encoding="utf-8"))
+    assert [(row.get("context_tier", 0), row["requests"], row["input_tokens"]) for row in rows] == [
+        (0, 3, 200_001), (272_000, 1, 300_000),
+    ]
+    # base 200,001 × 10 + tier 300,000 × 20
+    usd = (200_001 * 10 + 300_000 * 20) / 1e6
+    identities = [SourceIdentity("src_a", "A", ["gpt-6-astra"])]
+    documents = [ledger.summary(days=7, now=now, identities=identities, prices=_tiered_table())]
+    documents += [ledger.report(window=w, now=now, identities=identities, prices=_tiered_table()) for w in ("24h", "7d")]
+    for document in documents:
+        _assert_valid("usage-summary.schema.json", document)
+        [model] = document["sources"][0]["models"]
+        assert (model["requests"], model["api_cost_usd"]) == (4, pytest.approx(usd))
+        assert document["totals"]["api_cost_usd"] == pytest.approx(usd)
+        assert sum(day["api_cost_usd"] for day in document["days"]) == pytest.approx(usd)
+    for document in documents[1:]:
+        [bucket] = [bucket for bucket in document["buckets"] if bucket["rows"]]
+        [row] = bucket["rows"]
+        assert (row["requests"], row["input_tokens"], row["api_cost_usd"]) == (4, 500_001, pytest.approx(usd))
+
+
+def _xai_price():
+    from vibe.backend_model_catalog import hosted_tool_spec
+
+    return hosted_tool_spec("xai", "openai_responses", "grok-4.6", "x_search").price
+
+
+@pytest.mark.parametrize(
+    ("billing", "reported", "tool_prices", "counts", "expected"),
+    [
+        ("monthly", 0.5, {"x_search": None}, {}, ("included", None)),
+        ("metered", 0.0012, {"x_search": None}, {}, ("reported", 0.0012)),
+        # 1,000 fresh input at $2/M + 200 output at $6/M, plus 20 posts at $5/1k and 1 profile at $10/1k.
+        (
+            "metered",
+            None,
+            {"x_search": "xai"},
+            {"x_search_calls": 2, "x_posts_fetched": 20, "x_users_fetched": 1},
+            ("list", 0.002 + 0.0012 + 0.1 + 0.01),
+        ),
+        ("metered", None, {"x_search": "xai"}, {"x_posts_fetched": 20}, None),
+        ("metered", None, {"image_generation": None}, {}, None),
+    ],
+    ids=["subscription-included", "provider-reported", "list-tokens-plus-tool-fee", "missing-counter", "no-tool-price"],
+)
+def test_a_hosted_response_is_priced_by_the_one_pricing_owner(billing, reported, tool_prices, counts, expected):
+    """MH-PRICE-020: included, reported or list; anything unknown makes the whole response unpriced, never zero."""
+    from core.handlers.model_hub.pricing import hosted_response_cost
+
+    prices = {tool: (_xai_price() if price == "xai" else price) for tool, price in tool_prices.items()}
+    result = hosted_response_cost(
+        billing=billing,
+        reported_usd=reported,
+        model_price=_table().price("grok-4.6"),
+        usage=ProtocolUsageReport.of(input_tokens=1000, cached_input_tokens=0, output_tokens=200),
+        tool_prices=prices,
+        counts=counts,
+    )
+    if expected is None or expected[1] is None:
+        assert result == expected
+    else:
+        assert result[0] == expected[0] and result[1] == pytest.approx(expected[1])
+
+
+def test_xai_cost_ticks_are_converted_by_the_pricing_module():
+    """MH-PRICE-020: xAI reports cost in 1e-10 USD ticks."""
+    from core.handlers.model_hub.pricing import usd_from_xai_ticks
+
+    assert usd_from_xai_ticks(1127268800) == pytest.approx(0.11272688)
+    assert usd_from_xai_ticks(-1) is None and usd_from_xai_ticks(True) is None and usd_from_xai_ticks("9") is None

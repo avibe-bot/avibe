@@ -439,6 +439,23 @@
               "null"
             ],
             "format": "date-time"
+          },
+          "refused_efforts": {
+            "type": "array",
+            "minItems": 1,
+            "description": "Server-derived, read-only: the reasoning efforts this Source model currently refuses (capability evidence, model-hub-capability-model.md §3.4), the same shape as an AgentChain hop's. Absent when none. Returned on Source reads only; never persisted on the Source record and never accepted in a write.",
+            "items": {
+              "type": "object",
+              "required": ["effort", "basis", "observed_at", "detail", "changes_at"],
+              "additionalProperties": false,
+              "properties": {
+                "effort": { "type": "string", "minLength": 1 },
+                "basis": { "enum": ["probe", "observed"] },
+                "observed_at": { "type": "string", "format": "date-time" },
+                "detail": { "type": ["string", "null"], "maxLength": 64 },
+                "changes_at": { "type": ["string", "null"], "format": "date-time" }
+              }
+            }
           }
         }
       }

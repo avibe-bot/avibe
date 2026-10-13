@@ -91,6 +91,13 @@ def test_evidence_resolves_for_routing(feature, changes, engine, shape, age, sta
     record = _record(source, feature, **changes)
     view = resolve(record, source=source, engine=engine, shape=shape, now=NOW + age)
     assert (view.status, view.stale) == (status, stale)
+    # When the reading changes on its own: an observed record expires, a fresh probe record ages.
+    if view.status == "unknown" and view.stale is None:
+        assert view.changes_at is None
+    elif record.basis == "observed":
+        assert view.changes_at == record.observed_at + timedelta(days=7)
+    else:
+        assert view.changes_at == (record.observed_at + timedelta(days=30) if stale is None else None)
 
 
 def test_a_changed_source_identity_reads_as_unknown_and_is_pruned(tmp_path):
