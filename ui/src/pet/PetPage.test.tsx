@@ -1685,6 +1685,25 @@ describe('desktop mini v2 interaction contract', () => {
   });
 
 
+  it('clears a previous ASR-available cache when the authorization epoch changes', async () => {
+    const status = deferred<{ ok: boolean; json: () => Promise<unknown> }>();
+    let asrCalls = 0;
+    class Dictation { done = new Promise<string>(() => {}); start = async () => {}; finish = () => {}; abort = () => {}; }
+    await withVoiceEnv(() => true, Dictation, async () => {
+      vi.stubGlobal('fetch', vi.fn(() => {
+        asrCalls += 1;
+        return asrCalls === 1 ? Promise.resolve({ ok: true, json: async () => ({ available: true }) }) : status.promise;
+      }));
+      devBind('S'); render(<PetPage />); tapHotkey();
+      expect(await screen.findByLabelText('pet.voice.open')).toBeTruthy();
+      await emit((h) => h.onAuthorizationChanged?.({}));
+      await waitFor(() => expect(screen.queryByLabelText('pet.voice.open')).toBeNull());
+      await act(async () => status.resolve({ ok: true, json: async () => ({ available: false }) }));
+      await waitFor(() => expect(screen.queryByLabelText('pet.voice.open')).toBeNull());
+      expect(pose()).not.toBe('listening');
+    });
+  });
+
   it('opens text while the first ASR status read is still pending, and does not start voice when it later succeeds', async () => {
     const status = deferred<{ ok: boolean; json: () => Promise<unknown> }>();
     const start = vi.fn(async () => {});

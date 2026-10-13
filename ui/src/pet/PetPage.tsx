@@ -716,7 +716,7 @@ function useHitRegions(rootRef: React.RefObject<HTMLDivElement | null>, epoch?: 
 }
 
 function usePetVoice({ enabled, epoch, draft, onOpenComposer }: { enabled: boolean; epoch: PetSurfaceEpoch; draft: string; onOpenComposer: (text?: string) => void }) {
-  const [asr, setAsr] = useState<{ available: boolean; checked: boolean; maxFileBytes?: number }>({ available: false, checked: false });
+  const [asr, setAsr] = useState<{ epoch: PetSurfaceEpoch; enabled: boolean; available: boolean; checked: boolean; maxFileBytes?: number }>({ epoch, enabled, available: false, checked: false });
   const [preview, setPreview] = useState('');
   const [listening, setListening] = useState(false);
   // A failed capture or transcription falls back to text with this note.
@@ -724,20 +724,20 @@ function usePetVoice({ enabled, epoch, draft, onOpenComposer }: { enabled: boole
   type Capture = { dictation: ShowPageVoiceDictation; ending: boolean; cancelled: boolean };
   const captureRef = useRef<Capture | null>(null);
   const supported = typeof navigator !== 'undefined' && Boolean(navigator.locks && navigator.mediaDevices?.getUserMedia);
-  const available = enabled && supported && asr.available;
+  const asrForEpoch = asr.epoch === epoch && asr.enabled === enabled ? asr : { epoch, enabled, available: false, checked: false };
+  const available = enabled && supported && asrForEpoch.available;
   // Read ASR status as soon as voice may be used. The pet window is created
-  // unfocused, so this read does not wait for activation. Settings changes
-  // made elsewhere take effect on the next bind/epoch, not on window focus:
-  // a live refresh of a previously-true status reopened the pending-vs-
-  // available state machine that leaked across review rounds.
+  // unfocused, so this read does not wait for activation. Status is keyed to
+  // this bind/epoch: a previous available result cannot start a capture on
+  // the next one. Settings changes take effect on that next epoch.
   useEffect(() => {
     if (!enabled) return;
     let alive = true;
     void fetch('/api/asr/status', { credentials: 'same-origin' }).then((response) => response.ok ? response.json() : null).then((value) => {
       if (!alive || !epoch.isCurrent()) return;
-      if (value === null) setAsr({ available: false, checked: false });
-      else setAsr({ available: Boolean(value.available), checked: true, maxFileBytes: value.max_file_bytes });
-    }).catch(() => { if (alive && epoch.isCurrent()) setAsr({ available: false, checked: false }); });
+      if (value === null) setAsr({ epoch, enabled, available: false, checked: false });
+      else setAsr({ epoch, enabled, available: Boolean(value.available), checked: true, maxFileBytes: value.max_file_bytes });
+    }).catch(() => { if (alive && epoch.isCurrent()) setAsr({ epoch, enabled, available: false, checked: false }); });
     return () => { alive = false; };
   }, [enabled, epoch]);
   const stop = useCallback((commit: boolean) => {
@@ -757,7 +757,7 @@ function usePetVoice({ enabled, epoch, draft, onOpenComposer }: { enabled: boole
     if (!epoch.isCurrent() || !available || captureRef.current) return;
     const before = draft;
     const capture: Capture = {
-      dictation: new ShowPageVoiceDictation({ before, after: '', maxFileBytes: asr.maxFileBytes, onPreview: (text) => { if (epoch.isCurrent()) setPreview(text); } }),
+      dictation: new ShowPageVoiceDictation({ before, after: '', maxFileBytes: asrForEpoch.maxFileBytes, onPreview: (text) => { if (epoch.isCurrent()) setPreview(text); } }),
       ending: false,
       cancelled: false,
     };
@@ -788,12 +788,12 @@ function usePetVoice({ enabled, epoch, draft, onOpenComposer }: { enabled: boole
       // Release may precede microphone permission or pipeline startup.
       if (capture.ending && !capture.cancelled) capture.dictation.finish();
     }).catch((reason: unknown) => { fail(reason); capture.dictation.abort(); });
-  }, [asr.maxFileBytes, available, epoch, draft, onOpenComposer]);
+  }, [asrForEpoch.maxFileBytes, available, epoch, draft, onOpenComposer]);
   const cancel = useCallback(() => stop(false), [stop]);
   const clearError = useCallback(() => setError(null), []);
   useEffect(() => cancel, [epoch, enabled, cancel]);
   useEffect(() => () => setError(null), [epoch, enabled]);
-  return { available, cloudRequired: asr.checked && !asr.available, listening, preview, error, clearError, start, stop, cancel };
+  return { available, cloudRequired: asrForEpoch.checked && !asrForEpoch.available, listening, preview, error, clearError, start, stop, cancel };
 }
 
 type VoiceFailure = 'startFailed' | 'empty' | 'failed';
