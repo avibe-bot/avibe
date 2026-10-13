@@ -191,6 +191,8 @@ class _Controller:
         self.hub_protocol = "anthropic"
         # The Model Hub model definition's limits (C-9 takes W, L_in, and O from them).
         self.hub_limits = {"context_window": 32000, "max_output_tokens": 4096}
+        # HopResolution.hosted_tools as Model Hub resolves it for the hop.
+        self.hub_hosted_tools: dict = {}
         self.agent: Optional[VibeyAgent] = None
         self.agent_service = SimpleNamespace(
             mark_runtime_turn_started=self._native_start,
@@ -244,6 +246,7 @@ class _Controller:
             protocol=self.hub_protocol,
             provider="test-provider",
             supports_images=True,
+            hosted_tools=self.hub_hosted_tools,
         )
 
     def _native_start(self, context, *, activation_identity=None) -> None:
@@ -2376,6 +2379,88 @@ async def test_a_turn_runs_through_the_real_provider_registry(engine, session, t
     assert final.content == (TextBlock(text="hi"),)
     assert (final.origin.provider, final.origin.api, final.origin.model) == ("upstream", wire, "served-model")
     assert harness.controller.im_client.sent == ["hi"]
+
+
+@pytest.mark.parametrize(
+    ("hub_protocol", "declaration", "include"),
+    [
+        ("anthropic", {"type": "web_search_20250305", "name": "web_search", "max_uses": 5}, []),
+        ("openai_responses", {"type": "web_search"}, ["web_search_call.action.sources"]),
+    ],
+)
+async def test_a_hop_resolved_native_hosted_tool_reaches_the_gateway_pinned_to_its_source(
+    engine, session, tmp_path, published, hub_protocol, declaration, include
+) -> None:
+    """vibey-hosted-tools.md §3.5, §4.1: Vibey takes each tool's mode from the hop, declares a native tool verbatim
+    with its include values, pins that request to the hop's Source, and declares nothing for a proxied tool here."""
+    import httpx
+
+    from modules.agents.vibey.models import registry_providers
+
+    path, body = _TEXT_STREAMS[hub_protocol]
+    served = json.dumps(
+        {"provider": "upstream", "api": hub_protocol, "model": "served-model", "source": "src_upstream01"},
+        separators=(",", ":"),
+    )
+    seen: list[httpx.Request] = []
+
+    def gateway(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(
+            200, headers={"content-type": "text/event-stream", "x-avibe-served-hop": served}, text=body
+        )
+
+    executor = {"source_id": "src_executor01", "model_id": "grok-4.6"}
+    async with httpx.AsyncClient(transport=httpx.MockTransport(gateway)) as client:
+        harness = _Harness(
+            engine, tmp_path, "telegram", [], providers=registry_providers(media_loader=None, client=client)
+        )
+        harness.controller.hub_protocol = hub_protocol
+        harness.controller.hub_hosted_tools = {
+            "web_search": {
+                "mode": "native", "declaration": declaration, "include": include, "executor": executor, "replay": True
+            },
+            "x_search": {"mode": "proxy", "executor": executor, "replay": False},
+        }
+        await harness.agent.handle_message(harness.request("hello"))
+
+    (request,) = seen
+    sent = json.loads(request.content)
+    assert request.url.path == path
+    assert request.headers["x-avibe-pin-source"] == "src_test"
+    assert sent["tools"][0] == declaration
+    assert all(tool.get("name") != "x_search" and tool.get("type") != "x_search" for tool in sent["tools"])
+    assert set(include) <= set(sent.get("include", []))
+    assert harness.controller.im_client.sent == ["hi"]
+
+
+_NATIVE_SEARCH = {"mode": "native", "declaration": {"type": "web_search"}, "include": [], "executor": None, "replay": False}
+
+
+@pytest.mark.parametrize(
+    "hosted_tools",
+    [
+        None,
+        {"web_fetch": {"mode": "proxy", "executor": None, "replay": False}},
+        {"web_search": {key: value for key, value in _NATIVE_SEARCH.items() if key != "declaration"}},
+        {"web_search": {"mode": "proxy", "declaration": {"type": "web_search"}, "executor": None, "replay": False}},
+        {"web_search": {**_NATIVE_SEARCH, "executor": {"source_id": "src_executor01"}}},
+        {"web_search": {key: value for key, value in _NATIVE_SEARCH.items() if key != "replay"}},
+    ],
+    ids=["absent", "unknown-tool", "native-without-declaration", "proxy-with-declaration", "half-executor", "no-replay"],
+)
+def test_a_hop_with_an_invalid_hosted_tool_entry_is_refused(hosted_tools) -> None:
+    from modules.agents.vibey.models import HopResolutionError, selection_from_hop
+
+    hop = ModelHubLaunch(
+        backend="vibey", channel="hub", requested_model="m", target_model="m", runtime_model="m",
+        source_id="src_test", gateway_base_url="http://hub.invalid/vibey", gateway_token="hub-token",
+        protocol="openai_responses", provider="openai",
+    ).to_hop_resolution()
+    hop["hosted_tools"] = hosted_tools
+
+    with pytest.raises(HopResolutionError, match="hosted"):
+        selection_from_hop(hop)
 
 
 # How a stream breaks off: the connection simply ends, or CLIProxyAPI (Model Hub's engine) reports the upstream

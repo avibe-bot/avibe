@@ -17,15 +17,21 @@ import httpx
 
 from core.agent_core.ai._common import (
     ServedHopResolver,
+    WireRequest,
     auth_headers,
     content_parts,
     drive_sse_stream,
     dispatch_wire_event,
     endpoint_origin,
+    forced_tool,
+    hosted_declarations,
+    hosted_pin,
     join_endpoint_url,
     json_object,
+    native_hosted_tools,
     prepare_messages,
     request_credential_values,
+    required_only_tool,
     StreamAssembler,
     validate_wire_shape,
     WireField,
@@ -325,10 +331,7 @@ class OpenAIResponsesAdapter(ProviderAdapter):
         refusal = False
 
         try:
-            payload = build_responses_payload(request, transformed_messages, loaded_images=loaded_images)
-            headers = auth_headers(request.endpoint, provider="openai", gateway=self._gateway)
-            headers.setdefault("content-type", "application/json")
-            url = join_endpoint_url(request.endpoint.base_url, "/responses")
+            wire = wire_request(request, transformed_messages, gateway=self._gateway, loaded_images=loaded_images)
             async def translate(events: AsyncIterator[Any]) -> AsyncIterator[Any]:
                 nonlocal status, incomplete_reason, refusal
                 async for event in events:
@@ -1272,9 +1275,9 @@ class OpenAIResponsesAdapter(ProviderAdapter):
             driver = drive_sse_stream(
                 self._client,
                 method="POST",
-                url=url,
-                json_body=payload,
-                headers=headers,
+                url=wire.url,
+                json_body=wire.body,
+                headers=wire.headers,
                 cancel=cancel,
                 assembler=assembler,
                 endpoint=request.endpoint,
@@ -1311,8 +1314,9 @@ def build_responses_payload(
         "stream": True,
         "store": False,
     }
-    if request.tools:
-        payload["tools"] = [
+    tools = [
+        *hosted_declarations(request.endpoint),
+        *(
             {
                 "type": "function",
                 "name": tool.name,
@@ -1320,12 +1324,41 @@ def build_responses_payload(
                 "parameters": dict(tool.input_schema),
             }
             for tool in request.tools
-        ]
+        ),
+    ]
+    if tools:
+        payload["tools"] = tools
+    include: list[str] = []
     if request.reasoning_effort and request.reasoning_effort.lower() not in {"off", "disabled"}:
         payload["reasoning"] = {"effort": _openai_effort(request.reasoning_effort), "summary": "auto"}
         if request.reasoning_effort.lower() != "none":
-            payload["include"] = ["reasoning.encrypted_content"]
+            include.append("reasoning.encrypted_content")
+    # A native hosted tool's own include values, e.g. OpenAI's web_search_call.action.sources (§4.1).
+    for route in native_hosted_tools(request.endpoint).values():
+        include.extend(route.include)
+    if include:
+        payload["include"] = list(dict.fromkeys(include))
+    forced = forced_tool(request)
+    if forced is not None:
+        name, route = forced
+        payload["tool_choice"] = required_only_tool(tools) if route is not None else {"type": "function", "name": name}
     return payload
+
+
+def wire_request(
+    request: ModelRequest,
+    messages: tuple[Any, ...],
+    *,
+    gateway: bool,
+    loaded_images: Mapping[str, tuple[str, str]] | None = None,
+) -> WireRequest:
+    """The Responses request for already prepared ``messages``, as the adapter sends it."""
+
+    payload = build_responses_payload(request, messages, loaded_images=loaded_images)
+    headers = auth_headers(request.endpoint, provider="openai", gateway=gateway)
+    headers.setdefault("content-type", "application/json")
+    headers.update(hosted_pin(request.endpoint))
+    return WireRequest(join_endpoint_url(request.endpoint.base_url, "/responses"), headers, payload)
 
 
 def _message_to_response(

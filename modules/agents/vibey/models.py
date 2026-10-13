@@ -10,6 +10,11 @@ A ``google`` hop is called over Chat Completions at the same gateway: Model Hub
 serves every source on its OpenAI-compatible ``/v1`` surface and converts, so
 the agent needs no Gemini transport. The served origin still comes from
 ``x-avibe-served-hop``.
+
+Each enabled hosted tool's route rides on the endpoint as Model Hub resolved it
+(``hosted_tools``): an adapter declares a tool natively exactly where its mode
+is ``native``, and pins that request to the hop's Source
+(``vibey-hosted-tools.md`` §3.5, §4.1). The agent never decides nativity.
 """
 
 from __future__ import annotations
@@ -18,8 +23,14 @@ import logging
 from typing import Any, Awaitable, Callable, Mapping, Optional
 
 from core.agent_core.agent.models import ModelSelection
-from core.agent_core.ai.provider import ModelCapabilities, ModelEndpoint, ProviderAdapter
-from core.agent_core.messages import PROTOCOLS, ProtocolName
+from core.agent_core.ai.provider import (
+    HostedExecutor,
+    HostedToolRoute,
+    ModelCapabilities,
+    ModelEndpoint,
+    ProviderAdapter,
+)
+from core.agent_core.messages import HOSTED_TOOLS, PROTOCOLS, ProtocolName
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +50,34 @@ def _optional(value: Any, kind: type, what: str) -> Any:
     return value
 
 
+def _hosted_routes(raw: Any) -> dict[str, HostedToolRoute]:
+    """``HopResolution.hosted_tools``: each enabled tool's mode, native declaration, executor and replay."""
+    if not isinstance(raw, Mapping):
+        raise HopResolutionError("hop has no hosted_tools")
+    routes: dict[str, HostedToolRoute] = {}
+    for tool, entry in raw.items():
+        try:
+            if tool not in HOSTED_TOOLS or not isinstance(entry, Mapping):
+                raise ValueError("not a hosted tool entry")
+            missing = {"mode", "executor", "replay"} - set(entry)
+            if missing:
+                raise ValueError(f"no {', '.join(sorted(missing))}")
+            executor = entry["executor"]
+            if executor is not None and not isinstance(executor, Mapping):
+                raise ValueError("the executor must be an object or null")
+            include = entry.get("include", [])
+            routes[tool] = HostedToolRoute(
+                mode=entry["mode"],
+                executor=HostedExecutor(executor.get("source_id"), executor.get("model_id")) if executor is not None else None,
+                replay=entry["replay"],
+                declaration=entry.get("declaration"),
+                include=tuple(include) if isinstance(include, list) else include,
+            )
+        except ValueError as error:
+            raise HopResolutionError(f"hop hosted tool {tool!r} is invalid: {error}") from None
+    return routes
+
+
 def selection_from_hop(hop: Mapping[str, Any], *, gateway_base_url: Optional[str] = None) -> ModelSelection:
     """Build the loop's selection from one ``HopResolution`` (hop-resolution.schema.json).
 
@@ -51,7 +90,7 @@ def selection_from_hop(hop: Mapping[str, Any], *, gateway_base_url: Optional[str
     protocol = hop.get("protocol")
     if protocol not in PROTOCOLS:
         raise HopResolutionError(f"hop protocol {protocol!r} is not supported")
-    for name in ("base_url", "token", "runtime_model", "provider"):
+    for name in ("base_url", "token", "runtime_model", "provider", "source_id"):
         if not isinstance(hop.get(name), str) or not hop[name]:
             raise HopResolutionError(f"hop has no {name}")
     headers = hop.get("request_headers")
@@ -59,6 +98,7 @@ def selection_from_hop(hop: Mapping[str, Any], *, gateway_base_url: Optional[str
         isinstance(key, str) and isinstance(value, str) for key, value in headers.items()
     ):
         raise HopResolutionError("hop request_headers must map strings to strings")
+    hosted_tools = _hosted_routes(hop.get("hosted_tools"))
     raw = hop.get("capabilities")
     if not isinstance(raw, Mapping):
         raise HopResolutionError("hop has no capabilities")
@@ -86,6 +126,8 @@ def selection_from_hop(hop: Mapping[str, Any], *, gateway_base_url: Optional[str
         token=hop["token"],
         request_headers=dict(headers),
         provider=hop["provider"],
+        source_id=hop["source_id"],
+        hosted_tools=hosted_tools,
     )
     return ModelSelection(endpoint=endpoint, capabilities=capabilities)
 

@@ -19,6 +19,10 @@ class ModelEndpoint:            # built by the adapter layer from C-6 HopResolut
     request_headers: Mapping[str, str]
     provider: str               # vendor identity of the hop (HopResolution.provider); with protocol and model it
                                 # forms the target origin for the cross-provider rules
+    source_id: str | None       # HopResolution.source_id: the pin of a request with native hosted content
+    hosted_tools: Mapping[str, HostedToolRoute]   # HopResolution.hosted_tools, in Model Hub's order: per enabled
+                                # tool its mode, and for native its declaration and Responses include values,
+                                # plus the turn's executor and replay (vibey-hosted-tools.md §3.5)
 
 
 @dataclass(frozen=True)
@@ -47,7 +51,16 @@ class ModelRequest:
     cache: Literal["default", "none"]    # "default": the protocol's cache breakpoints and their lifetimes
                                          # (conversion-tables.md); "none" for the compaction summarizer
     supports_images: bool                # resolved by the loop; unknown capability counts as False
+    tool_choice: str | None              # the one tool the response must call; set only by a hosted-tool probe
 ```
+
+Every request declares each native hosted route's `declaration` verbatim, ahead of the function tools, merges a
+Responses route's `include` values into `include`, and carries `x-avibe-pin-source: <source_id>`. A proxied route
+declares nothing yet: its same-named function lands with the proxy executor. `registry.build_wire_request` returns
+the URL, headers and body the adapter would send, without sending it; a hosted-tool probe sends exactly that
+request (`vibey-hosted-tools.md` §3.2). A forced tool is `{"type": "tool", "name": …}` on Anthropic; on Responses
+and Chat a function is named, and a native hosted tool is forced with `"required"`, which needs it to be the
+request's only tool.
 
 The loop's `ModelRouter` returns the `ModelEndpoint` together with its `ModelCapabilities`. Every capability has a
 defined effect, including when it is unknown:

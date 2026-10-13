@@ -15,14 +15,19 @@ import httpx
 
 from core.agent_core.ai._common import (
     ServedHopResolver,
+    WireRequest,
     auth_headers,
     content_parts,
     drive_sse_stream,
     endpoint_origin,
+    forced_tool,
+    hosted_declarations,
+    hosted_pin,
     join_endpoint_url,
     json_object,
     prepare_messages,
     request_credential_values,
+    required_only_tool,
     StreamAssembler,
     validate_wire_shape,
     WireField,
@@ -209,10 +214,7 @@ class OpenAIChatAdapter(ProviderAdapter):
         refusal_seen = False
         protocol_terminal = False
         try:
-            payload = build_chat_payload(request, transformed_messages, loaded_images=loaded_images)
-            headers = auth_headers(request.endpoint, provider="openai", gateway=self._gateway)
-            headers.setdefault("content-type", "application/json")
-            url = join_endpoint_url(request.endpoint.base_url, "/chat/completions")
+            wire = wire_request(request, transformed_messages, gateway=self._gateway, loaded_images=loaded_images)
             async def translate(events: AsyncIterator[Any]) -> AsyncIterator[Any]:
                 nonlocal finish_reason, native_finish_reason, refusal_seen, protocol_terminal
                 async for event in events:
@@ -636,9 +638,9 @@ class OpenAIChatAdapter(ProviderAdapter):
             driver = drive_sse_stream(
                 self._client,
                 method="POST",
-                url=url,
-                json_body=payload,
-                headers=headers,
+                url=wire.url,
+                json_body=wire.body,
+                headers=wire.headers,
                 cancel=cancel,
                 assembler=assembler,
                 endpoint=request.endpoint,
@@ -689,8 +691,9 @@ def build_chat_payload(
         payload["max_completion_tokens"] = request.max_tokens
     else:
         payload["max_tokens"] = request.max_tokens
-    if request.tools:
-        payload["tools"] = [
+    tools = [
+        *hosted_declarations(request.endpoint),
+        *(
             {
                 "type": "function",
                 "function": {
@@ -700,10 +703,35 @@ def build_chat_payload(
                 },
             }
             for tool in request.tools
-        ]
+        ),
+    ]
+    if tools:
+        payload["tools"] = tools
+    forced = forced_tool(request)
+    if forced is not None:
+        name, route = forced
+        payload["tool_choice"] = (
+            required_only_tool(tools) if route is not None else {"type": "function", "function": {"name": name}}
+        )
     if request.reasoning_effort and request.reasoning_effort.lower() not in {"off", "disabled"}:
         payload["reasoning_effort"] = _openai_effort(request.reasoning_effort)
     return payload
+
+
+def wire_request(
+    request: ModelRequest,
+    messages: tuple[Any, ...],
+    *,
+    gateway: bool,
+    loaded_images: Mapping[str, tuple[str, str]] | None = None,
+) -> WireRequest:
+    """The Chat Completions request for already prepared ``messages``, as the adapter sends it."""
+
+    payload = build_chat_payload(request, messages, loaded_images=loaded_images)
+    headers = auth_headers(request.endpoint, provider="openai", gateway=gateway)
+    headers.setdefault("content-type", "application/json")
+    headers.update(hosted_pin(request.endpoint))
+    return WireRequest(join_endpoint_url(request.endpoint.base_url, "/chat/completions"), headers, payload)
 
 
 def _message_to_chat(
