@@ -79,8 +79,12 @@ verified for X search.
     the tool, as observed with `image_generation` on an Anthropic route.
   - **Not evidence:** a transient failure (overload, 5xx, timeout). The UI reports "couldn't verify, try again"
     (observed: every OpenAI-relay web search ended with an in-stream "servers overloaded").
-- **The `replay` probe.** One follow-up request that carries the first response's native items verbatim.
-  - **`verified`:** accepted.
+- **The `replay` probe.** One follow-up request that carries the first response's native items verbatim. No tool
+  is declared, and the request asks for something only the first search's results contain ("give the URL of the
+  second result you found, without searching").
+  - **`verified`:** the request is accepted and the answer contains a URL from the first response's results. An
+    accepted request whose answer shows the content did not arrive is `unsupported` (dropped). Transport acceptance
+    alone is never verification.
   - **`unsupported`:** a 400 that names the replayed hosted content. Observed on the Anthropic relay, 3 of 3:
     `Invalid encrypted_content in search_result block`. xAI accepted verbatim replay, 3 of 3.
 - **Cost and when probes run.** A probe pair costs about $0.02–0.15 (spike: xAI $0.01–0.11 per call, Anthropic $0.01
@@ -129,10 +133,19 @@ verified for X search.
 
 ### 3.5 Per-hop selection and failover
 
-- **Hop resolution.** C-6 `HopResolution` gains `hosted_tools`: for each enabled tool, the primary hop's `mode`
-  (`native` | `proxy`) and, for native, the wire declaration.
-  - `native` requires the toggle on, `call: verified` for that (Source, model), and an untranslated path.
-  - Vibey builds the request from it (§4.1).
+- **Hop resolution.** C-6 `HopResolution` gains `hosted_tools`. For each enabled tool it gives three things:
+  - the primary hop's `mode` (`native` | `proxy`);
+  - for `native`, the wire declaration;
+  - `replay`, the **current** `replay` evidence for the primary hop's Source and model.
+
+  `native` requires the toggle on, `call: verified` for that (Source, model), and an untranslated path. Vibey builds
+  the request from these fields (§4.1, §5).
+- **Pinned requests.** A continuation within one turn (§4.3, §4.4) carries the gateway request header
+  `x-avibe-pin-source: <source_id>`. That is the Source the turn's previous response came from, taken from the
+  served-hop report.
+  - The gateway serves a pinned request only from that Source, with no failover.
+  - If that Source cannot serve the request, the gateway answers with the local error `pin_unavailable` before
+    invoking anything. Vibey then re-renders the continuation for an unpinned request (§4.4) and sends it again.
 - **Failover.** On failover to any other hop, the gateway re-applies the rule for that hop before sending:
   - A native declaration the hop is not verified for is replaced by the same-named proxy function.
   - Native hosted history whose recorded Source is not that hop, or whose replay is not verified there, is
@@ -168,15 +181,20 @@ verified for X search.
   | `id` | canonical id |
   | `tool` | catalog name (`web_search`, `x_search`) |
   | `arguments` | canonical arguments, e.g. `{"query": "…"}` |
-  | `record` | `HostedRecord`: `status` (`completed` / `failed` / `incomplete` / `pending`), `queries[]`, `sources[]` (`url`, `title?`, `snippet?`, `page_age?`), `cost?` (`usd`, `basis`: `reported` / `list` / `included`) |
-  | `native` | `{source_id, origin, payload[], replay_verified}`: the provider's own items, verbatim and in order. `replay_verified` is the Source's `replay` evidence at write time. |
+  | `record` | `HostedRecord`: `status` (`completed` / `failed` / `incomplete` / `pending`), `queries[]`, `sources[]` (`url`, `title?`, `snippet?`, `page_age?`), `sources_scope` (`call` / `response`), `cost?` (`usd`, `basis`: `reported` / `list` / `included`) |
+  | `native` | `{source_id, origin, payload[]}`: the provider's own items, verbatim and in order, tagged with the Source that produced them |
+
+  The block stores no replay authorization. Whether `payload` may be replayed is decided at every request from the
+  current evidence (§5), so demoted or expired evidence, or a changed Source identity, takes effect on the next
+  request.
 - **New optional `TextBlock.citations`:** `[{url, title?, cited_text?, start?, end?}]`, offsets in code points into
   `text`.
   - Citations belong to the text that cites them. Every provider attaches them there: OpenAI and xAI `url_citation`
     with offsets, and Anthropic `citations[]` on text blocks.
   - They are presentation only and are never replayed.
-- **New optional `ToolResultMessage.hosted`:** a `HostedRecord` with `mode: "proxy"` and the executor's `origin`, so a
-  proxied call renders like a native one.
+- **New optional `ToolResultMessage.hosted`:** a `HostedRecord` with `mode: "proxy"` and the executor's `origin`,
+  `executor_source_id` and `executor_billing`, so a proxied call renders like a native one. The card names the exact
+  Source even when two Sources share an origin.
 - **Per adapter:**
   - **`openai_responses`:** `web_search_call` items, each a block with `arguments.query` from `action.query`.
     Annotations become citations.
@@ -184,6 +202,13 @@ verified for X search.
       `reasoning` items with id `tco_…` that hold the tool output, encrypted.
     - Those reasoning items stay ThinkingBlocks as today. The `custom_tool_call` becomes the HostedToolBlock, and
       Vibey must not treat it as a local tool call. Today's adapter already ignores `custom_tool_call_input.*`.
+    - **Sources for X search.** xAI returns no readable per-call results; the output exists only inside the
+      encrypted `tco_…` items. Each X-search block's record therefore has `sources_scope: "response"`: its
+      `sources` are the X posts the response cites, the `url_citation` annotations to `x.com` and `twitter.com`.
+      Every X-search block of that response shares them.
+      - The card says "cited in the answer" instead of showing per-search results.
+      - A synthetic replay of such a block lists those posts with that wording, and the canonical record never
+        claims per-search attribution.
   - **`anthropic`:** each `server_tool_use` and its `web_search_tool_result` become one block. Results become
     `sources`; `encrypted_content` is kept only in `native.payload`. Text-block `citations` become `TextBlock`
     citations.
@@ -200,20 +225,29 @@ verified for X search.
 - **Today** `anthropic.py` maps `pause_turn` to `stop`, so that turn would end without its answer.
 - **Rule.** The Anthropic adapter continues internally: it re-issues the request with the paused content appended
   and keeps streaming as one logical response, at most 5 continuations.
+  - Each continuation is pinned to the Source the paused response came from (§3.5). On `pin_unavailable` the
+    paused server blocks are converted in place (§4.4) and the continuation goes out unpinned.
   - C-2 still holds: exactly one `done` or `error`.
   - The paused partial and the continuation merge into one `AssistantMessage`.
+  - Its `usage` is the **sum** of every continuation response's counters: input, output, and cache read and write.
+    Today's parser resets usage at each `message_start`. The gateway already meters each continuation as its own
+    call, so the usage ledger and provenance need no change.
 
 ### 4.4 In-flight turn replay
 
 Within one turn, i.e. `pause_turn` or a client `tool_result` after server tools in the same assistant message, the
-assistant content goes back to the same hop **verbatim**. Observed accepted:
+next request is pinned to the Source the previous response came from (§3.5), and the assistant content goes back
+**verbatim**. This is the provider's own continuation contract, so it needs no `replay` evidence. Observed accepted:
 - a pending `server_tool_use` (the server then ran it);
 - ten `web_search_tool_result` blocks during a `pause_turn` continuation.
 
-If a hop rejects in-flight verbatim replay (a narrow 400), the fallback replaces each server block pair **in place**
-with one text block: `[web_search: <query>]` plus numbered titles and URLs. The signed thinking blocks stay
-untouched; accepted, with no signature error. Dropping the pair is never used: the model then misread its own turn
-("I called read_file before the search") and redid the work.
+**Fallback form.** It applies when the pinned Source rejects in-flight verbatim replay (a narrow 400), or answers
+`pin_unavailable`. Each server block pair is replaced **in place** by one text block: `[web_search: <query>]` plus
+numbered titles and URLs.
+- On the same origin, the signed thinking blocks stay untouched. This was accepted, with no signature error.
+- On a different origin, the C-1 cross-origin rules then apply to the rest of the message as usual.
+- Dropping the pair is never used: the model then misread its own turn ("I called read_file before the search")
+  and redid the work.
 
 ### 4.5 SSE caps
 
@@ -224,7 +258,7 @@ images see §7.
 
 These rules become C-1 rows in `cross-provider.md` and per-protocol rows in `conversion-tables.md`.
 
-| History item | Target is the recorded Source with `replay: verified` | Any other target |
+| History item | Target hop is `native.source_id` and `HopResolution.hosted_tools[tool].replay` is true now | Any other target |
 | --- | --- | --- |
 | `HostedToolBlock` | `native.payload` verbatim, in place | synthetic same-named call plus result: Anthropic `tool_use` / `tool_result`, Responses `function_call` / `function_call_output`, Chat `tool_calls` / `tool` message. The result text is the record's numbered sources (title, URL, snippet). The assistant message is split around it. |
 | `TextBlock.citations` | not sent | not sent |
@@ -242,14 +276,22 @@ These rules become C-1 rows in `cross-provider.md` and per-protocol rows in `con
   - Provider-internal search state (opened pages, follow-up actions) is lost too.
 - **Vibey renders for the primary hop's origin. The gateway rewrites at failover** (§3.5), so a different Source or
   origin never receives `native.payload`.
-- **C-6 change.** `x-avibe-served-hop` gains `source` (the serving Source id) so that `native.source_id` is exact.
-  Two Sources can share an origin, e.g. a subscription and a relay serving the same model.
-  - The served-hop parser and the gateway change in the same release.
-  - The change ships in the deferred Model Hub contract v12 bump, the one #2483's closing spec describes
-    (`terminal_error` for a pending attempt that never streamed). That makes one coordinated bump, not two
-    (orchestrator decision, 2026-10-13).
-  - Until v12, no hosted block is replayed natively across turns; every later turn gets the synthetic form. In-flight
-    replay within one turn (§4.4) does not depend on the tag and is unaffected.
+- **C-6 change: the served-hop report gains `source`**, the serving Source id. Two Sources can share an origin, e.g.
+  a subscription and a relay serving the same model. Native mode depends on this field three times: to tag
+  `native.source_id` (§4.2), to authorize replay (above), and to pin in-flight continuations (§3.5).
+  - It ships in the deferred Model Hub contract v12 bump, the one #2483's closing spec describes (`terminal_error`
+    for a pending attempt that never streamed). That makes one coordinated bump, not two (orchestrator decision,
+    2026-10-13).
+  - The gateway and the served-hop parser change in that same release.
+  - **Phase 1's native mode therefore lands with or after v12.** Proxy mode does not depend on it.
+  - **The v12 bump edits these exact-shape contracts together:**
+    - `model-hub-contracts/hop-origin.schema.json`: add `source` (required);
+    - `model-hub-contracts/vibey-consumer.md`, Response origin;
+    - `agent-core-contracts/provider.md`, the served-hop sentence;
+    - `agent-core-contracts/conversion-tables.md`, the Origin row ("exactly `provider`, `api`, `model`");
+    - `agent-core-contracts/model-hub-consumer.md`, item 4.
+
+    These files are frozen at v11, so this PR states the change and leaves their text alone.
 
 ## 6. User interface
 
@@ -364,11 +406,13 @@ Each has a **Re-verify** action with its cost. Unknown shows nothing.
 
 1. A hop receives a native hosted declaration only with the toggle on and positive `call` evidence for that
    (Source, model) on an untranslated path. Every other hop gets the same-named proxy function.
-2. No hop receives `native.payload` unless it is the recorded Source with positive `replay` evidence.
+2. No hop receives `native.payload` unless it is the recorded Source and its `replay` evidence is positive at
+   request time. The transcript stores no replay authorization.
 3. Every completed hosted call, native or proxy, yields exactly one canonical record. The card, citations and IM line
    render the same for either mode.
 4. Any transcript with hosted calls replays to any supported target without a history-shape error.
-5. `pause_turn` never ends a turn. Continuations are bounded and merge into one message.
+5. `pause_turn` never ends a turn. Continuations are bounded, pinned to the paused response's Source, merged into
+   one message, and their usage is summed.
 6. No probe and no proxy call runs without a user action or a model tool call in a turn the user started. Every
    probe shows its cost first.
 7. A real error creates evidence only through a narrow rule for the named (Source, model, feature).
@@ -381,12 +425,12 @@ shapes. No live upstream and no real credentials.
 
 | Layer | Owner boundary | Cases |
 | --- | --- | --- |
-| Adapter parsing | each adapter against stub SSE | Responses `web_search_call` + annotations; xAI `custom_tool_call` `x_keyword_search` + `tco_` reasoning; Anthropic `server_tool_use` / `web_search_tool_result` / citations; pending `server_tool_use` at `pause_turn`; a hosted call that fails |
+| Adapter parsing | each adapter against stub SSE | Responses `web_search_call` + annotations; xAI `custom_tool_call` `x_keyword_search` + `tco_` reasoning with response-scoped X sources (one and several searches); Anthropic `server_tool_use` / `web_search_tool_result` / citations; pending `server_tool_use` at `pause_turn`; a hosted call that fails |
 | Cross-provider transform | `ai` request builders | each hosted block to each target, verified same Source versus other: native verbatim, synthetic call/result, split assistant message; citations never sent |
-| `pause_turn` | Anthropic adapter, stub returns `pause_turn`, then `end_turn` | one logical response, the bound, the merged message |
+| `pause_turn` | Anthropic adapter, stub returns `pause_turn`, then `end_turn` | one logical response; the bound; the merged message with summed usage; the pin header; `pin_unavailable` falls back to the in-place text form |
 | Gateway selection | real gateway + loopback fake engine | native only with evidence; failover to an unverified hop swaps native for proxy and rewrites history; `x_search` to OpenAI never sent |
 | Evidence | classifier against recorded error bodies | `400 Unsupported tool type`, `invalid_value` effort and `Invalid encrypted_content` each create exactly one record; overload and 5xx create none |
 | Proxy executor | gateway endpoint, stub provider | executor choice, the result text with excerpts, metering on the executor Source, error when no executor is verified, refusal of a Claude subscription |
-| Probes | gateway, stub provider | verified / unsupported / dropped / transient outcomes; probes only from the API action |
+| Probes | gateway, stub provider | verified / unsupported / dropped / transient outcomes; a replay probe whose answer lacks the first search's URL is `unsupported`; probes only from the API action |
 | UI | Models Tools tab, Source chips, tool card | toggle off by default; Verify shows the cost; chips per evidence state; card modes; IM line |
 | E2E, once per release | real engine + stub upstream | a native web search and a proxied X search through the shipped engine on each protocol |

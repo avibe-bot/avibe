@@ -303,6 +303,14 @@
             }
           }
         },
+        "sources_scope": {
+          "enum": [
+            "call",
+            "response"
+          ],
+          "default": "call",
+          "description": "`call`: `sources` are this call's own results. `response`: the provider returns no per-call results (xAI X search), so `sources` are the posts the response cites, shared by every such call in that response."
+        },
         "cost": {
           "type": "object",
           "required": [
@@ -333,6 +341,18 @@
         "executor_origin": {
           "$ref": "#/definitions/Origin",
           "description": "For `mode: proxy`, who ran the call."
+        },
+        "executor_source_id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "For `mode: proxy`, the Source that ran the call."
+        },
+        "executor_billing": {
+          "enum": [
+            "monthly",
+            "metered"
+          ],
+          "description": "For `mode: proxy`, that Source's billing mode when it ran."
         }
       }
     },
@@ -372,11 +392,10 @@
           "required": [
             "source_id",
             "origin",
-            "payload",
-            "replay_verified"
+            "payload"
           ],
           "additionalProperties": false,
-          "description": "Opaque provider payload: the provider's own items, verbatim and in order. Replayed only to the same Source when its replay is verified; never synthesized, never sent to another Source or origin.",
+          "description": "Opaque provider payload: the provider's own items, verbatim and in order, tagged with the Source that produced them. Replayed only to that Source, and only while its current replay evidence is positive (`HopResolution.hosted_tools[tool].replay`); never synthesized, never sent to another Source or origin. Authorization is never stored in the block.",
           "properties": {
             "source_id": {
               "type": "string",
@@ -390,9 +409,6 @@
               "items": {
                 "type": "object"
               }
-            },
-            "replay_verified": {
-              "type": "boolean"
             }
           }
         }

@@ -13,7 +13,7 @@ cross-provider history tests (MIT).
 | Tool call | kept; `id` and `signature` as stored | kept without `signature`; `id` normalized to the target's rules (below) |
 | Tool result | kept | `tool_call_id` rewritten through the same id map |
 | Image in a user or tool-result message | kept | kept if the target model accepts images, else `[image: <name or mime>]` |
-| Hosted tool block (`hosted_tool`) | when the target is the recorded `native.source_id` and `native.replay_verified`: `native.payload` verbatim, in place; otherwise as a different origin | a synthetic call to the same-named tool with the block's `arguments`, plus its result: the `record`'s numbered sources (title, URL, snippet). The assistant message is split around the pair. |
+| Hosted tool block (`hosted_tool`) | when the target hop is `native.source_id` and that hop's current replay evidence is positive (`HopResolution.hosted_tools[tool].replay`): `native.payload` verbatim, in place; otherwise as a different origin | a synthetic call to the same-named tool with the block's `arguments`, plus its result: the `record`'s numbered sources (title, URL, snippet). The assistant message is split around the pair. |
 | Text block `citations` | not sent | not sent |
 | Tool result with `hosted` (a proxied hosted call) | kept, as any tool result | kept, as any tool result |
 
@@ -30,7 +30,8 @@ Invariants:
   first).
 - Responses API requests use `store: false` and never `previous_response_id`.
 - Hosted tool blocks (planned, [`../vibey-hosted-tools.md`](../vibey-hosted-tools.md) §5): `native.payload` is an
-  opaque provider payload under every rule above, and its replay is further limited to the recorded Source. A
-  different origin loses page text: Anthropic returns it only encrypted, and OpenAI and xAI never return it. Within
-  one in-flight turn (`pause_turn`, or a client tool result after server tools in the same message), the assistant
-  content goes back to the same hop verbatim.
+  opaque provider payload under every rule above, and its replay is further limited to the recorded Source while
+  that Source's current replay evidence is positive. The block never stores replay authorization. A different
+  origin loses page text: Anthropic returns it only encrypted, and OpenAI and xAI never return it. Within one
+  in-flight turn (`pause_turn`, or a client tool result after server tools in the same message), the request is
+  pinned to the Source that produced the content, and the content goes back verbatim.

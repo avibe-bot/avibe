@@ -98,10 +98,10 @@ Changing any of those drops the Source's evidence.
 
 | Consumer | Rule |
 | --- | --- |
-| Effort menu for a model on an Agent | overlay `wire` tiers, else models.dev `reasoning_options`. A tier is omitted only if **every** hop that can serve the model has negative evidence for it. A tier with negative evidence on some hops is shown with "not on: <Source>". |
+| Effort menu for a model on an Agent | each hop's declared tiers, then the union across hops. A hop's declared tiers are its Source model's persisted `reasoning_efforts` when their provenance is `user` or `upstream`; otherwise overlay `wire` tiers; otherwise models.dev `reasoning_options`. User-authored lists, including free-form names, are never replaced or filtered by a prior; only an overlay-sourced list drops `client_preset` names. A tier is omitted only if **every** hop that can serve the model has negative evidence for it. A tier with negative evidence on some hops is shown with "not on: <Source>". |
 | Effort at request time | Forwarded unchanged (reasoning-intent). A hop with **negative** evidence for that effort is skipped for this request, as if it were not a candidate. If no candidate remains, the request fails before invocation with `effort_unsupported` naming the effort and the Sources, instead of a provider 400. Never clamped silently. |
 | Hosted tool mode on a hop | `native` only with positive `call` evidence and the user's toggle on; otherwise the gateway proxy (`vibey-hosted-tools.md`). A wrong native declaration is a terminal 400 or a silent drop; the proxy is lossless. So this feature needs positive evidence, unlike efforts. |
-| Native payload replay | only to the same Source with positive `replay` evidence |
+| Native payload replay | only to the same Source, and only while its current `replay` evidence is positive. The decision is made at every request from `HopResolution`; the transcript never stores it. |
 | Display | §5 |
 
 This fixes #2539 in three places:

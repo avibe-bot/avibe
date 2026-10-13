@@ -123,7 +123,8 @@
       "additionalProperties": {
         "type": "object",
         "required": [
-          "mode"
+          "mode",
+          "replay"
         ],
         "additionalProperties": false,
         "properties": {
@@ -135,7 +136,30 @@
           },
           "declaration": {
             "type": "object",
-            "description": "The hosted tool's wire declaration for the primary hop's protocol; present exactly when `mode` is `native`."
+            "description": "The hosted tool's wire declaration for the primary hop's protocol."
+          },
+          "replay": {
+            "type": "boolean",
+            "description": "Current `replay` evidence for the primary hop's Source and model. True only while that evidence is positive; read at every request, never stored in the transcript."
+          }
+        },
+        "if": {
+          "properties": {
+            "mode": {
+              "const": "native"
+            }
+          }
+        },
+        "then": {
+          "required": [
+            "declaration"
+          ]
+        },
+        "else": {
+          "not": {
+            "required": [
+              "declaration"
+            ]
           }
         }
       }
