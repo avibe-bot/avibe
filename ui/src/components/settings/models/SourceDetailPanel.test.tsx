@@ -11,7 +11,7 @@ import { ToastProvider } from '@/context/ToastProvider';
 import i18n from '@/i18n';
 import { classifyModelHubFailure, createPendingWrites } from './asyncLifetime';
 import { MANAGE_DESTINATION, type ManageKind } from './manage';
-import { readyRegion } from './regionRead';
+import { readyRegion, unreadRegion } from './regionRead';
 import { ApiCallError, modelsApi } from './modelsApi';
 import type {
   PresentSourceMutationCommit,
@@ -1436,6 +1436,19 @@ describe('SourceDetailPanel hosted-tool capability chips', () => {
     const detail = await screen.findByRole('dialog');
     within(detail).getByText(/a real request|一次真实请求/);
     within(detail).getByText('400 · unsupported_tool_type');
+  });
+
+  it('says when the capability read failed instead of drawing a Source with no evidence', async () => {
+    const retry = vi.fn();
+    render(
+      <I18nextProvider i18n={i18n}>
+        <CommittedPanel source={twoModels} hostedTools={unreadRegion()} onRetryHostedTools={retry} trackMutation={immediateTrack} onReauth={noReauth} />
+      </I18nextProvider>,
+    );
+    const line = screen.getByRole('status');
+    within(line).getByText(/Couldn't read this Source's tool capabilities|未能读取此供应商的工具能力/);
+    await userEvent.click(within(line).getByRole('button', { name: /^Retry$|^重试$/ }));
+    expect(retry).toHaveBeenCalledTimes(1);
   });
 
   it('adds no capability column when no model has evidence', () => {

@@ -14,29 +14,30 @@ import type {
 /**
  * One call-evidence record as a chip.
  *
- * - `native`: verified on the current engine; the tool runs natively.
- * - `reverify`: verified, but older than 30 days. It still runs natively.
+ * - `native`: verified; the tool runs natively.
+ * - `unsupported`: the Source refused the tool, by probe or by a real error.
  * - `engineUpgraded`: taken on another engine or probe shape. It routes as
  *   unknown, i.e. through the proxy, until the user checks again.
- * - `unsupported`: the Source refused the tool, by probe or by a real error.
+ *
+ * `aged` marks a probe record older than 30 days, whichever way it went: it
+ * still routes as recorded and only asks for a new check.
  *
  * `null` is no record: unchecked, which is the normal state and draws no chip
  * on a Source (§6.2).
  */
-export type HostedEvidenceChip =
-  | { kind: 'native'; at: string | null }
-  | { kind: 'reverify'; at: string | null }
-  | { kind: 'engineUpgraded'; at: string | null }
-  | { kind: 'unsupported'; at: string | null };
+export type HostedEvidenceChip = {
+  kind: 'native' | 'unsupported' | 'engineUpgraded';
+  aged: boolean;
+  at: string | null;
+};
 
 export const evidenceChip = (evidence: HostedEvidence): HostedEvidenceChip | null => {
   // Staleness first: a wire-stale record reads `unknown` but still has a past
   // the user needs to see, whatever it once said.
-  if (evidence.stale === 'wire') return { kind: 'engineUpgraded', at: evidence.observed_at };
-  if (evidence.status === 'verified') {
-    return { kind: evidence.stale === 'age' ? 'reverify' : 'native', at: evidence.observed_at };
-  }
-  if (evidence.status === 'unsupported') return { kind: 'unsupported', at: evidence.observed_at };
+  if (evidence.stale === 'wire') return { kind: 'engineUpgraded', aged: false, at: evidence.observed_at };
+  const aged = evidence.stale === 'age';
+  if (evidence.status === 'verified') return { kind: 'native', aged, at: evidence.observed_at };
+  if (evidence.status === 'unsupported') return { kind: 'unsupported', aged, at: evidence.observed_at };
   return null;
 };
 

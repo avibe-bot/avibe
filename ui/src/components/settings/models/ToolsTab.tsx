@@ -38,19 +38,19 @@ const executorValue = (executor: { source_id: string; model_id: string } | null)
 /** The native-run cell: the call evidence, or 「未检测」 when there is none. */
 export const NativeEvidenceChip: React.FC<{ chip: HostedEvidenceChip | null }> = ({ chip }) => {
   const { t } = useTranslation();
-  const date = chip?.at ? formatMonthDay(chip.at) : '';
-  switch (chip?.kind) {
-    case 'native':
-      return <span className="model-hub-pill gap-1 model-hub-status-mint border"><Check className="size-3" aria-hidden />{t('settings.models.tools.chip.native', { date })}</span>;
-    case 'reverify':
-      return <span className="model-hub-pill gap-1 model-hub-status-gold border"><RotateCw className="size-3" aria-hidden />{t('settings.models.tools.chip.reverify', { date })}</span>;
-    case 'engineUpgraded':
-      return <span className="model-hub-pill gap-1 model-hub-status-gold border"><TriangleAlert className="size-3" aria-hidden />{t('settings.models.tools.chip.engineUpgraded')}</span>;
-    case 'unsupported':
-      return <span className="model-hub-pill gap-1 model-hub-fill-0a border border-border text-muted"><Ban className="size-3" aria-hidden />{t('settings.models.tools.chip.unsupported')}</span>;
-    default:
-      return <span className="model-hub-pill model-hub-fill-0a border border-border text-muted">{t('settings.models.tools.chip.unchecked')}</span>;
+  if (chip === null) {
+    return <span className="model-hub-pill model-hub-fill-0a border border-border text-muted">{t('settings.models.tools.chip.unchecked')}</span>;
   }
+  const date = chip.at ? formatMonthDay(chip.at) : '';
+  if (chip.kind === 'engineUpgraded') {
+    return <span className="model-hub-pill model-hub-status-gold gap-1 border"><TriangleAlert className="size-3" aria-hidden />{t('settings.models.tools.chip.engineUpgraded')}</span>;
+  }
+  if (chip.aged) {
+    return <span className="model-hub-pill model-hub-status-gold gap-1 border"><RotateCw className="size-3" aria-hidden />{t(chip.kind === 'native' ? 'settings.models.tools.chip.reverify' : 'settings.models.tools.chip.unsupportedAged', { date })}</span>;
+  }
+  return chip.kind === 'native'
+    ? <span className="model-hub-pill model-hub-status-mint gap-1 border"><Check className="size-3" aria-hidden />{t('settings.models.tools.chip.native', { date })}</span>
+    : <span className="model-hub-pill model-hub-fill-0a gap-1 border border-border text-muted"><Ban className="size-3" aria-hidden />{t('settings.models.tools.chip.unsupported')}</span>;
 };
 
 /**
@@ -118,6 +118,8 @@ const ToolCard: React.FC<{
   const options = tool.executor && !verified.some((candidate) => sameExecutor(candidate, tool.executor))
     ? [...verified, { ...tool.executor, stale: true as const }]
     : verified;
+  // With nothing verified there is nothing to pick, but a saved choice still reads as itself.
+  const pickable = verified.length > 0;
   return (
     <section className="model-hub-tool-card overflow-hidden rounded-xl border border-border bg-surface" aria-label={name} data-tool={tool.name}>
       <header className="model-hub-tool-card-head flex items-center gap-3 border-b border-border">
@@ -166,8 +168,8 @@ const ToolCard: React.FC<{
           wrapperClassName="sm:w-[260px] shrink-0"
           className="h-8 text-[12px]"
           aria-label={t('settings.models.tools.executor.pick', { name }) as string}
-          disabled={pending || verified.length === 0}
-          value={verified.length === 0 ? AUTOMATIC : executorValue(tool.executor)}
+          disabled={pending || !pickable}
+          value={!pickable && tool.executor === null ? AUTOMATIC : executorValue(tool.executor)}
           onChange={(event) => {
             const picked = options.find((option) => executorValue(option) === event.target.value);
             onChange(tool.name, {
@@ -176,10 +178,10 @@ const ToolCard: React.FC<{
             });
           }}
         >
-          {verified.length === 0
+          {!pickable && tool.executor === null
             ? <option value={AUTOMATIC}>{t('settings.models.tools.executor.unavailable')}</option>
             : <>
-                <option value={AUTOMATIC}>{t('settings.models.tools.executor.automatic')}</option>
+                {pickable && <option value={AUTOMATIC}>{t('settings.models.tools.executor.automatic')}</option>}
                 {options.map((option) => (
                   <option key={executorValue(option)} value={executorValue(option)}>
                     {'stale' in option
@@ -190,7 +192,7 @@ const ToolCard: React.FC<{
               </>}
         </Select>
         <span className="model-hub-tool-note">
-          {verified.length === 0
+          {!pickable
             ? t('settings.models.tools.executor.note.none')
             : chosen
               ? t('settings.models.tools.executor.note.chosen', { source: sourceName(chosen.source_id) })

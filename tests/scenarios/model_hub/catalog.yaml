@@ -64,6 +64,7 @@ capability:
     # Hosted tools: the Tools tab, its evidence projection, and the Source chips.
     - ui/src/components/settings/models/ToolsTab.test.tsx
     - ui/src/components/settings/models/hostedTools.test.ts
+    - ui/src/components/settings/models/useHostedTools.test.tsx
     - ui/src/components/settings/models/SourceDetailPanel.test.tsx
     # Migration: the setup key-import entry and the broader settings dialog it
     # narrows, plus the one predicate that separates them.
@@ -416,6 +417,12 @@ scenarios:
     kind: observation
     layer: unit
     test: ui/src/components/settings/models/SourceDetailPanel.test.tsx::MH-HOSTED-UI-006
+  - id: MH-HOSTED-UI-007
+    name: A hosted-tools read that overlaps a write never paints the pre-write state over the write's answer
+    status: covered
+    kind: concurrency
+    layer: unit
+    test: ui/src/components/settings/models/useHostedTools.test.tsx::MH-HOSTED-UI-007
   - id: MH-VIBEY-007
     name: Vibey starts once with the user's Sources and built-in Agent models, seeded when its first Source exists
     status: covered

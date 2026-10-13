@@ -117,6 +117,7 @@ capabilities:
       - ui/src/components/workbench/HostedToolRow.test.tsx
       - ui/src/components/settings/models/ToolsTab.test.tsx
       - ui/src/components/settings/models/hostedTools.test.ts
+      - ui/src/components/settings/models/useHostedTools.test.tsx
       - ui/src/components/settings/models/SourceDetailPanel.test.tsx
       - ui/src/components/settings/models/MigrationDialog.test.tsx
       - ui/src/components/settings/models/migrationScan.test.ts

@@ -1243,8 +1243,10 @@ export const SettingsModelsPage: React.FC = () => {
     }
   }, [selectSource, showToast, t]);
   const selectedSource = sources.find((source) => source.id === selectedSourceId) ?? null;
-  // Read while the tab is open, or while a Source's detail shows its capability chips.
-  const hostedTools = useHostedTools(tab === 'tools' || selectedSource !== null);
+  // Read while the tab is open, or while a Source's detail shows its capability
+  // chips, and again when that Source changes: an edit can change its identity,
+  // which drops its evidence on the server.
+  const hostedTools = useHostedTools(tab === 'tools' || selectedSource !== null, selectedSource ? JSON.stringify(selectedSource) : null);
   const sourceDetailOpen = selectedSourceId !== null && subscriptionVendor === null;
   const orderAgent = agents.find((agent) => agent.backend === orderBackend && agent.mode === 'hub') ?? null;
   const menuAgent = agents.find((agent) => agent.backend === menuBackend && agent.mode === 'hub') ?? null;
@@ -1770,6 +1772,7 @@ export const SettingsModelsPage: React.FC = () => {
                 key={selectedSource.id}
                 source={selectedSource}
                 hostedTools={hostedTools.read}
+                onRetryHostedTools={() => void hostedTools.refresh()}
                 activeBackends={activeBackends}
                 headingRef={sourceDetailHeadingRef}
                 trackMutation={trackSourceMutation(selectedSource.id)}

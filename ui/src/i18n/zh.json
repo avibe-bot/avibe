@@ -2386,6 +2386,7 @@
           "cost": "每次费用"
         },
         "chip": {
+          "unsupportedAged": "{{date}} 检测为不支持 · 需重新检测",
           "native": "原生 · {{date}} 已验证",
           "reverify": "{{date}} 已验证 · 需重新检测",
           "engineUpgraded": "引擎已升级 · 需重新检测",
@@ -2417,8 +2418,11 @@
         "saveFailed": "{{toolInline}}设置未能保存，请重试。"
       },
       "capability": {
+        "readFailed": "未能读取此供应商的工具能力。",
         "col": "能力",
         "chip": {
+          "viaProxyAged": "{{tool}} · 由代理提供 · 需重新检测",
+          "unsupportedAged": "{{tool}} · {{date}} 检测为不支持 · 需重新检测",
           "native": "{{tool}} · 原生 · {{date}} 已验证",
           "reverify": "{{tool}} · {{date}} 已验证 · 需重新检测",
           "engineUpgraded": "{{tool}} · 引擎已升级 · 需重新检测",
@@ -2426,6 +2430,8 @@
           "unsupported": "{{tool}} · 此供应商不支持"
         },
         "explain": {
+          "viaProxyAged": "{{tool}}已开启。此供应商在超过 30 天前的检测中不支持它，调用交给代理执行者；可重新检测现在是否已能原生运行。",
+          "unsupportedAged": "此供应商在超过 30 天前的检测中不支持{{toolInline}}，可重新检测现在是否已支持。",
           "native": "检测通过：这个模型在此供应商上直接调用厂商自带的工具。",
           "reverify": "检测已超过 30 天，仍按原结果原生运行，可重新检测。",
           "engineUpgraded": "检测之后模型引擎已升级，重新检测前调用交给代理执行者。",

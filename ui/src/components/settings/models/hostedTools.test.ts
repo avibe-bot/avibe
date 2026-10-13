@@ -28,11 +28,14 @@ describe('hosted-tool evidence projection', () => {
   // ever checked, and the engine-upgrade re-check would have no row to point at.
   const cases: [string, HostedEvidence, ReturnType<typeof evidenceChip>][] = [
     ['no record', evidence({}), null],
-    ['verified on the current engine', evidence({ status: 'verified', basis: 'probe', observed_at: AT }), { kind: 'native', at: AT }],
-    ['verified, older than 30 days', evidence({ status: 'verified', stale: 'age', basis: 'probe', observed_at: AT }), { kind: 'reverify', at: AT }],
-    ['taken on another engine', evidence({ status: 'unknown', stale: 'wire', basis: 'probe', observed_at: AT }), { kind: 'engineUpgraded', at: AT }],
-    ['refused by a probe', evidence({ status: 'unsupported', basis: 'probe', observed_at: AT, detail: '400 · unsupported_tool_type' }), { kind: 'unsupported', at: AT }],
-    ['refused by a real request', evidence({ status: 'unsupported', basis: 'observed', observed_at: AT, detail: '400 · unsupported_tool_type' }), { kind: 'unsupported', at: AT }],
+    ['verified on the current engine', evidence({ status: 'verified', basis: 'probe', observed_at: AT }), { kind: 'native', aged: false, at: AT }],
+    ['verified, older than 30 days', evidence({ status: 'verified', stale: 'age', basis: 'probe', observed_at: AT }), { kind: 'native', aged: true, at: AT }],
+    ['taken on another engine', evidence({ status: 'unknown', stale: 'wire', basis: 'probe', observed_at: AT }), { kind: 'engineUpgraded', aged: false, at: AT }],
+    ['refused by a probe', evidence({ status: 'unsupported', basis: 'probe', observed_at: AT, detail: '400 · unsupported_tool_type' }), { kind: 'unsupported', aged: false, at: AT }],
+    // An old refusal still routes, but it is counted in `reverify.aged`, so its
+    // row has to say which record that count is about.
+    ['refused by a probe older than 30 days', evidence({ status: 'unsupported', stale: 'age', basis: 'probe', observed_at: AT, detail: '400 · unsupported_tool_type' }), { kind: 'unsupported', aged: true, at: AT }],
+    ['refused by a real request', evidence({ status: 'unsupported', basis: 'observed', observed_at: AT, detail: '400 · unsupported_tool_type' }), { kind: 'unsupported', aged: false, at: AT }],
   ];
   it('MH-HOSTED-UI-002: gives every evidence shape the chip it owes the user', () => {
     for (const [name, call, chip] of cases) expect(evidenceChip(call), name).toEqual(chip);

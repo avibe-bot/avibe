@@ -53,7 +53,7 @@ import {
   type TrackSourceMutation,
 } from './mutationSettlement';
 import { reconcileUnknownWrite } from './reconcileUnknownWrite';
-import { foldRegionRead, type RegionRead } from './regionRead';
+import { foldRegionRead, regionFailed, type RegionRead } from './regionRead';
 import { REPAIR_DESTINATION, REPAIR_LABEL_KEY, reauthBodyKey, reauthCost, repairAction } from './repair';
 import { activeSourceAdoption, sourceStatePresentation } from './sourceStatePresentation';
 import { useDeadlineClock } from './useDeadlineClock';
@@ -170,9 +170,10 @@ export const SourceDetailPanel: React.FC<{
   headingRef?: React.Ref<HTMLHeadingElement>;
   /** Authoritative backends still using the gateway, when the Agent read is ready. */
   activeBackends?: ReadonlySet<AgentBackend>;
-  /** The hosted-tools read, for each model's capability chips (§6.2). */
+  /** The hosted-tools read, for each model's capability chips (§6.2), and its retry. */
   hostedTools?: RegionRead<HostedToolsStatus>;
-}> = ({ source, trackMutation, onReauth, onMutationCommitted, headingRef, activeBackends, hostedTools }) => {
+  onRetryHostedTools?: () => void;
+}> = ({ source, trackMutation, onReauth, onMutationCommitted, headingRef, activeBackends, hostedTools, onRetryHostedTools }) => {
   const { t, i18n } = useTranslation();
   const detailsHidden = useSourceDetailsHidden();
   const now = useDeadlineClock(source.state.status === 'cooldown' ? source.state.retry_at : null);
@@ -210,6 +211,9 @@ export const SourceDetailPanel: React.FC<{
   ]));
   // The column appears only when a model has evidence: unchecked draws nothing.
   const showCapabilities = [...capabilities.values()].some((list) => list.length > 0);
+  // A failed read is not "nothing checked": say so where chips would be. Only a
+  // hub Source can carry hosted-tool evidence.
+  const capabilitiesFailed = source.supply_channel === 'hub' && hostedTools !== undefined && regionFailed(hostedTools);
   const editDraft = 'draft' in manageStage ? manageStage.draft : null;
   const editAssessment = editDraft
     ? assessSourceEdit(source, editDraft)
@@ -743,6 +747,10 @@ export const SourceDetailPanel: React.FC<{
           <SourceManageMenu source={source} busy={busy || manageStage.kind !== 'idle'} onEdit={beginEdit} onDelete={beginDelete} />
         </div>
       </section>
+      {capabilitiesFailed && <p role="status" className="model-hub-source-capabilities-failure flex shrink-0 items-center justify-between gap-3 border-b border-border px-5 py-2 text-destructive-ink">
+        <span>{t('settings.models.capability.readFailed')}</span>
+        {onRetryHostedTools && <button type="button" onClick={onRetryHostedTools} className="model-hub-action-mint shrink-0 font-semibold">{t('settings.models.upstream.retry')}</button>}
+      </p>}
       <section className={cn('model-hub-source-table flex min-h-0 flex-1 flex-col overflow-hidden bg-surface', showCapabilities && 'model-hub-source-table--capabilities')}>
         <div className="model-hub-source-table-head hidden border-b border-border font-semibold md:grid">
           <span className="truncate">{t('settings.models.sourceDetail.col.id')}</span>{showCapabilities && <span className="truncate">{t('settings.models.capability.col')}</span>}<span />

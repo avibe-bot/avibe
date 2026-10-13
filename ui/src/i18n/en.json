@@ -2386,6 +2386,7 @@
           "cost": "Cost per call"
         },
         "chip": {
+          "unsupportedAged": "Not supported as of {{date}} · check again",
           "native": "Native · verified {{date}}",
           "reverify": "Verified {{date}} · check again",
           "engineUpgraded": "Engine upgraded · check again",
@@ -2417,8 +2418,11 @@
         "saveFailed": "Couldn't save the {{toolInline}} setting. Please retry."
       },
       "capability": {
+        "readFailed": "Couldn't read this Source's tool capabilities.",
         "col": "Capabilities",
         "chip": {
+          "viaProxyAged": "{{tool}} · via proxy · check again",
+          "unsupportedAged": "{{tool}} · not supported as of {{date}} · check again",
           "native": "{{tool}} · native · verified {{date}}",
           "reverify": "{{tool}} · verified {{date}} · check again",
           "engineUpgraded": "{{tool}} · engine upgraded · check again",
@@ -2426,6 +2430,8 @@
           "unsupported": "{{tool}} · not supported on this Source"
         },
         "explain": {
+          "viaProxyAged": "{{tool}} is on. This Source refused it in a check over 30 days old, so calls go to the proxy executor; check again to see whether it runs natively now.",
+          "unsupportedAged": "This Source refused {{toolInline}} in a check over 30 days old. Check again to see whether it supports it now.",
           "native": "Verified: this model runs the vendor's own tool on this Source.",
           "reverify": "This check is over 30 days old. The tool still runs natively; check again when convenient.",
           "engineUpgraded": "The model engine was upgraded after this check, so calls go to the proxy executor until it is checked again.",

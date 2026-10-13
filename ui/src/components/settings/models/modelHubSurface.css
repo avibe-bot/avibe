@@ -1544,6 +1544,7 @@
   }
 }
 .model-hub-capability-detail { font-size: var(--model-hub-usage-cell-size); line-height: 18px; }
+.model-hub-source-capabilities-failure { font-size: var(--model-hub-source-tier-size); }
 .model-hub-capability-explain { color: var(--model-hub-usage-note-ink); }
 .model-hub-capability-facts {
   grid-template-columns: auto minmax(0, 1fr);

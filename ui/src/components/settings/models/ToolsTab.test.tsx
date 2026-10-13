@@ -131,6 +131,21 @@ describe('ToolsTab writes', () => {
     expect(within(card('Web search')).queryByText('Proxy executor', { selector: '.model-hub-pill' })).toBeNull();
   });
 
+  it('keeps a saved executor visible as itself when nothing is verified any more', () => {
+    const executor = { source_id: GROK.id, model_id: 'grok-4.6' };
+    const onChange = renderTab(status([tool('x_search', {
+      enabled: true,
+      executor,
+      candidates: [{ ...executor, call: { ...verified, status: 'unknown', stale: 'wire' }, replay: unknown }],
+    })]));
+
+    const picker = within(card('X search')).getByRole('combobox', { name: 'Proxy executor for X search' }) as HTMLSelectElement;
+    expect(picker.disabled).toBe(true);
+    expect(picker.selectedOptions[0]?.textContent).toBe('Grok · grok-4.6 (not verified)');
+    expect(within(picker).queryByText('Available after a check')).toBeNull();
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
   it('holds a tool\'s controls while its write is in flight', () => {
     renderTab(status([
       tool('web_search', { candidates: [{ source_id: GROK.id, model_id: 'grok-4.6', call: verified, replay: verified }] }),

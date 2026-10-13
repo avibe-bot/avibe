@@ -20,24 +20,36 @@ const TOOL_ICON: Record<HostedToolName, React.ComponentType<{ className?: string
   image_generation: ImageIcon,
 };
 
-/** The chip's state: an unsupported tool that is on reaches this Source through the proxy. */
-const chipState = ({ chip, enabled }: ModelCapability) =>
-  chip.kind === 'unsupported' ? (enabled ? 'viaProxy' : 'unsupported') : chip.kind;
+/**
+ * The chip's state. An unsupported tool that is on reaches this Source through
+ * the proxy; a probe record older than 30 days, either way, asks for a new check.
+ */
+const chipState = ({ chip, enabled }: ModelCapability) => {
+  if (chip.kind === 'engineUpgraded') return 'engineUpgraded' as const;
+  if (chip.kind === 'native') return chip.aged ? 'reverify' as const : 'native' as const;
+  if (enabled) return chip.aged ? 'viaProxyAged' as const : 'viaProxy' as const;
+  return chip.aged ? 'unsupportedAged' as const : 'unsupported' as const;
+};
+type ChipState = ReturnType<typeof chipState>;
 
-const STATE_CLASS: Record<ReturnType<typeof chipState>, string> = {
+const STATE_CLASS: Record<ChipState, string> = {
   native: 'model-hub-status-mint',
   reverify: 'model-hub-status-gold',
   engineUpgraded: 'model-hub-status-gold',
   viaProxy: 'model-hub-accent-pill--cyan',
+  viaProxyAged: 'model-hub-status-gold',
   unsupported: 'model-hub-fill-0a border-border text-muted',
+  unsupportedAged: 'model-hub-status-gold',
 };
 
-const STATE_ICON: Record<ReturnType<typeof chipState>, React.ComponentType<{ className?: string }>> = {
+const STATE_ICON: Record<ChipState, React.ComponentType<{ className?: string }>> = {
   native: Check,
   reverify: RotateCw,
   engineUpgraded: TriangleAlert,
   viaProxy: Waypoints,
+  viaProxyAged: RotateCw,
   unsupported: Ban,
+  unsupportedAged: RotateCw,
 };
 
 const CapabilityChip: React.FC<{ capability: ModelCapability }> = ({ capability }) => {
