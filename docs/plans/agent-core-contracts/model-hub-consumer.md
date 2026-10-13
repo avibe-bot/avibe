@@ -98,6 +98,43 @@ consumer's requirements, and the Model Hub lane lands the change in both places.
    - The served-hop report carries `source`, the serving Source id (item 4, Model Hub contract v12), so that a
      hosted block's payload is tagged with the exact Source; two Sources can share an origin. The gateway and the
      parser in `conversion-tables.md` changed together in that bump. Native hosted mode lands with or after v12.
+   - **The proxy executor.** `POST {base_url}/hosted-tools/{tool}` with the turn's Bearer token and the body
+     `{"arguments": <canonical arguments>, "executor": HopResolution.hosted_tools[tool].executor}`. The executor
+     may be `null`.
+     - The executor must be the one the caller's live turn bound for that tool. The turn's first resolution
+       binds the enabled tools and their executors, with each executor Source's identity. Later resolutions in the
+       turn keep that binding and recompute only `mode`, `declaration`, `include` and `replay` for their hop, so a
+       settings change applies from the next turn.
+       - Any other executor, a tool not enabled this turn, a credential without a live turn, or a turn that no
+         longer admits work (stopping or finalizing) gets 409 `executor_not_bound`, and nothing runs.
+       - The turn owns an admitted call: stopping the turn cancels it, and the call is still metered.
+       - An executor Source whose identity changed since launch (base URL, credential) is "no longer available".
+     - The gateway runs that executor and no other: one native request in the executor Source's own protocol, with
+       the overlay's declaration and no reasoning effort. Search tools ask for a numbered list of results with one
+       or two cited sentences each. `image_generation` renders the prompt at the given size and requests partial
+       images.
+     - Every outcome of a well-formed call is a 200 with `{"record", "execution"?}`, in the
+       `ToolResultMessage.hosted` encoding. `execution` is present exactly when an executor ran. A call that
+       reaches none (no verified executor, or the bound Source was removed or is ineligible) has a `failed` record.
+       Success is an allow-list: a call is `completed` only when the response says it completed (Responses
+       `status: completed`; Anthropic `end_turn` or `stop_sequence`) and nothing failed. A response that stopped
+       early (Responses `incomplete`; Anthropic `max_tokens` or `pause_turn`) is `incomplete`. Any reported failure
+       (a failed call or outcome, an Anthropic search error), or any other or missing ending, is `failed`. Both keep
+       any partial sources. An unreadable response, including one nested past the decoder's limit, is `failed`. The
+       record's `error` is in the user's language.
+     - The record's search `sources` keep the executor's order. A snippet is the answer text its citation belongs
+       to: the list item when that item cites only that source, else its sentence, with the citation markers
+       removed. An Anthropic result keeps its `cited_text`. X search lists the cited posts.
+     - For `image_generation`, the record has no `images` key. `generation` carries the resolved `revised_prompt`,
+       `size` and `quality`, and `images` carries `[{mime, data}]` in base64. Vibey saves the bytes through its
+       session media sink and adds the path records itself. The image must decode, within 24 MiB. The stream may
+       carry only the requested partials and the final image, plus two, within 64 MiB decoded across all of them.
+       Anything else is a `failed` record.
+     - A malformed or unbound call is the only error status: 400 `invalid_request_error` (including a body over
+       1 MiB), 401, 404 for an unknown tool, or 409 `executor_not_bound`, as
+       `{"type": "error", "error": {"type", "code"}}`.
+     - A search call is bounded at 180 s and an image at 300 s. The call is metered on the executor Source and never
+       changes Source health. `execution.cost` is absent until the pricing module values it.
 
 ## 3. Not required
 

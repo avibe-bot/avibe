@@ -722,6 +722,9 @@ class TurnTrace:
     # The request whose surfaced attempt set ``terminal_error``, and that exact
     # value: a handed-back request withdraws only its own terminal.
     terminal_error_by: Optional[tuple[str, dict]] = None
+    # Vibey: the hosted-tool executors the turn's first resolution bound, with
+    # each executor Source's identity. Written once; settings apply next turn.
+    hosted_executors: Optional[tuple[tuple[str, tuple[str, str, str] | None], ...]] = None
 
     @property
     def pending_attempt(self) -> Optional[AttemptIdentity]:
@@ -764,6 +767,10 @@ class PreparedGatewayRoute:
     source_id: str
     gateway_request_model_id: str
     primary_origin: HopOrigin | None = None
+    # Vibey only: the proxy executor bound for each enabled hosted tool, as
+    # ``HopResolution.hosted_tools`` states it, with the executor Source's
+    # identity digest at launch: (tool, (source_id, model_id, identity) | None).
+    hosted_executors: tuple[tuple[str, tuple[str, str, str] | None], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1328,6 +1335,42 @@ class TurnCorrelationRegistry:
                 )
         return token
 
+    def turn_hosted_executors(
+        self, turn_id: Optional[str],
+    ) -> tuple[tuple[str, tuple[str, str, str] | None], ...] | None:
+        """The hosted-tool binding a turn's first resolution froze, or None before it has one."""
+
+        normalized = str(turn_id or "").strip()
+        if not normalized:
+            return None
+        with self._lock:
+            trace = self._traces.get(normalized)
+            return trace.hosted_executors if trace is not None else None
+
+    def hosted_executor_bindings(
+        self, *, backend: str, token: str,
+    ) -> tuple[str, dict[str, tuple[str, str, str] | None]] | None:
+        """The live turn a credential belongs to and the proxy executors it bound, per tool; None without one.
+
+        Only a credential whose route is the current route of an active turn
+        that still admits work has bindings: a superseded or turnless
+        credential, or a turn being stopped or finalized, cannot start a call.
+        """
+
+        with self._lock:
+            credential = self._credential(backend, token)
+            scope = self._scopes.get(credential.scope_key) if credential is not None else None
+            if scope is None or credential.route is None:
+                return None
+            for turn_id in scope.active_turns:
+                trace = self._traces.get(turn_id)
+                if (
+                    scope.prepared_routes.get(turn_id) == credential.route
+                    and (trace is None or not trace.admission_closed)
+                ):
+                    return turn_id, dict(credential.route.hosted_executors)
+            return None
+
     def gateway_primary_origin(self, *, backend: str, token: str) -> HopOrigin | None:
         """Read the immutable launch origin, independent of live turn ownership."""
 
@@ -1557,6 +1600,8 @@ class TurnCorrelationRegistry:
         trace.gateway_source_id = route.source_id
         trace.gateway_request_model_id = route.gateway_request_model_id
         trace.gateway_model_id = route.resolved_model_id
+        if trace.hosted_executors is None:
+            trace.hosted_executors = route.hosted_executors
         return True
 
     def prepare_gateway_turn(
@@ -1571,6 +1616,7 @@ class TurnCorrelationRegistry:
         via_mapping: bool,
         gateway_request_model_id: str | None = None,
         primary_origin: HopOrigin | None = None,
+        hosted_executors: tuple[tuple[str, tuple[str, str, str] | None], ...] = (),
     ) -> str:
         """Register a route and return its legacy credential or explicit handle."""
 
@@ -1590,6 +1636,7 @@ class TurnCorrelationRegistry:
                 source_id=source_id,
                 gateway_request_model_id=request_model_id,
                 primary_origin=primary_origin,
+                hosted_executors=hosted_executors,
             )
 
             if scope.request_scoped:

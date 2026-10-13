@@ -36,6 +36,7 @@ capability:
     - tests/test_model_hub_request_body_budget.py
     - tests/test_model_hub_codex_image_tool.py
     - tests/test_model_hub_l3.py
+    - tests/test_model_hub_hosted_executor.py
     - tests/test_model_hub_usage.py
     - tests/test_ui_server_fastapi.py
     - tests/test_model_hub_quota.py
@@ -2165,6 +2166,25 @@ scenarios:
     kind: runtime_lifecycle
     layer: e2e-auto
     test: tests/e2e/test_model_hub_service_acceptance.py::test_fresh_install_serves_vibey_and_claude_through_the_hub_and_reaps_an_orphaned_engine
+  - id: MH-HOSTED-GATEWAY-004
+    name: A proxied hosted call runs one native request on its bound executor, without an effort, and answers its canonical record and execution
+    status: covered
+    kind: contract
+    layer: contract
+    test: tests/test_model_hub_hosted_executor.py::test_a_proxied_search_runs_one_native_request_and_answers_its_canonical_record
+    related_tests:
+      - tests/test_model_hub_hosted_executor.py::test_an_anthropic_executor_is_buffered_and_keeps_the_providers_results_and_cited_text
+      - tests/test_model_hub_hosted_executor.py::test_a_proxied_image_returns_its_bytes_once_for_vibey_to_save
+      - tests/test_model_hub_hosted_executor.py::test_an_excerpt_is_the_answer_text_its_citation_belongs_to
+  - id: MH-HOSTED-GATEWAY-005
+    name: A proxied hosted call that cannot complete is a failed record, with an execution only when an executor ran; only a malformed call is an error status
+    status: covered
+    kind: boundary
+    layer: contract
+    test: tests/test_model_hub_hosted_executor.py::test_a_proxied_call_that_cannot_complete_is_a_failed_record
+    related_tests:
+      - tests/test_model_hub_hosted_executor.py::test_a_malformed_proxy_call_is_refused_before_anything_runs
+      - tests/test_model_hub_hosted_executor.py::test_a_proxy_call_needs_the_turns_gateway_token
 next_priority:
   - MH-PROTOCOL-004
   - MH-RUNTIME-001

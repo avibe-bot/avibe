@@ -134,22 +134,39 @@ def resolve_hosted_tools(
     engine: str,
     now: datetime,
     shape: int = HOSTED_PROBE_SHAPE,
+    frozen: Mapping[str, Optional[tuple[str, str]]] | None = None,
 ) -> dict[str, dict[str, Any]]:
-    """``HopResolution.hosted_tools`` for a Vibey hop served by ``source``/``model_id``."""
+    """``HopResolution.hosted_tools`` for a Vibey hop served by ``source``/``model_id``.
+
+    ``frozen`` is the turn's binding from its first resolution: which tools are
+    on and the executor bound to each. A later resolution in the same turn
+    keeps it, since settings apply from the next turn, and recomputes only what
+    belongs to the hop (mode, declaration, include, replay).
+    """
 
     context = _Context(evidence, spec_for, engine, shape, now)
     resolved: dict[str, dict[str, Any]] = {}
     for tool in MODEL_HUB_HOSTED_TOOLS:
         toggle = config.hosted_tools.get(tool)
-        if toggle is None or not toggle.enabled:
+        if frozen is not None:
+            if tool not in frozen:
+                continue
+        elif toggle is None or not toggle.enabled:
             continue
         spec = _runnable_spec(context, source, model_id, tool)
         entry: dict[str, Any] = {"mode": "native" if spec is not None else "proxy"}
         if spec is not None:
             entry["declaration"] = spec.declaration
             entry["include"] = list(spec.include)
-        chosen = (toggle.executor.source_id, toggle.executor.model_id) if toggle.executor is not None else None
-        entry["executor"] = _executor(context, config, tool, chosen)
+        if frozen is not None:
+            bound = frozen[tool]
+            entry["executor"] = {"source_id": bound[0], "model_id": bound[1]} if bound is not None else None
+        else:
+            chosen = (
+                (toggle.executor.source_id, toggle.executor.model_id)
+                if toggle is not None and toggle.executor is not None else None
+            )
+            entry["executor"] = _executor(context, config, tool, chosen)
         entry["replay"] = (
             "replay" in HOSTED_TOOL_ASPECTS[tool]
             and credential_eligible(source)

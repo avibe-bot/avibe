@@ -1103,6 +1103,21 @@
       "upstream_unauthorized": "The upstream service rejected authorization after refresh.",
       "upstream_error": "The upstream service returned an error."
     },
+    "hostedTools": {
+      "noExecutor": "No Source is verified to run {tool}. Verify it on a Source in Models.",
+      "executorUnavailable": "The Source bound to run {tool} for this turn is no longer available.",
+      "providerRefused": "The executor's provider refused the call ({detail}).",
+      "timedOut": "The executor call timed out.",
+      "unreachable": "The executor could not be reached.",
+      "unreadable": "The executor's response could not be read.",
+      "tooLarge": "The executor's response was larger than allowed.",
+      "didNotRun": "The executor did not run {tool}.",
+      "responseEnded": "The executor's response ended as {status}.",
+      "callFailed": "The provider's {tool} call failed.",
+      "callEnded": "The provider's {tool} call ended as {status}.",
+      "imageFormat": "The provider returned an unsupported image format: {format}.",
+      "imageUnreadable": "The provider returned an image that could not be used."
+    },
     "events": {
       "sourceFallback": "source",
       "switch": "{from_source}: {reason} -> switched to {to_source}",

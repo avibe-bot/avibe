@@ -1103,6 +1103,21 @@
       "upstream_unauthorized": "刷新后供应商仍拒绝授权。",
       "upstream_error": "供应商返回错误。"
     },
+    "hostedTools": {
+      "noExecutor": "没有已验证可运行 {tool} 的来源。请在「模型」中为某个来源验证它。",
+      "executorUnavailable": "本轮绑定运行 {tool} 的来源已不可用。",
+      "providerRefused": "执行方的供应商拒绝了此次调用（{detail}）。",
+      "timedOut": "执行方调用超时。",
+      "unreachable": "无法连接执行方。",
+      "unreadable": "无法读取执行方的响应。",
+      "tooLarge": "执行方的响应超出了大小上限。",
+      "didNotRun": "执行方没有运行 {tool}。",
+      "responseEnded": "执行方的响应以 {status} 结束。",
+      "callFailed": "供应商的 {tool} 调用失败。",
+      "callEnded": "供应商的 {tool} 调用以 {status} 结束。",
+      "imageFormat": "供应商返回了不支持的图片格式：{format}。",
+      "imageUnreadable": "供应商返回的图片无法使用。"
+    },
     "events": {
       "sourceFallback": "供应商",
       "switch": "{from_source}：{reason}，已自动切换到 {to_source}",
