@@ -4662,6 +4662,9 @@
       "vaultDenied": "Denied",
       "vaultFailed": "Failed",
       "vaultExpired": "Expired",
+      "vaultDeleteApproved": "Deletion approved — secret deleted",
+      "vaultDeleteDenied": "Deletion denied",
+      "vaultDeleteExpired": "Deletion request expired",
       "agentFallback": "agent"
     },
     "citation": {

@@ -4662,6 +4662,9 @@
       "vaultDenied": "已拒绝",
       "vaultFailed": "处理失败",
       "vaultExpired": "已过期",
+      "vaultDeleteApproved": "删除已批准，密钥已删除",
+      "vaultDeleteDenied": "删除已拒绝",
+      "vaultDeleteExpired": "删除申请已过期",
       "agentFallback": "智能体"
     },
     "citation": {
