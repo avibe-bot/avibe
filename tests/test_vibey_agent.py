@@ -3478,3 +3478,18 @@ async def test_a_hosted_named_call_without_a_record_still_shows_its_tool_line(en
 
     assert harness.controller.im_client.sent == ['🔧 x_search {"query": "from:OpenAI"}']
 
+
+async def test_a_final_whose_cited_text_is_all_silent_stays_silent(engine, session, tmp_path, published) -> None:
+    """No citation outlives the text it cited: the reply is the model's silence, not a bare source link."""
+    silent = AssistantMessage(
+        (TextBlock(text="<silent>internal note</silent>", citations=(Citation(url=CHANGELOG, title="Changelog"),)),),
+        ORIGIN,
+        "stop",
+    )
+    harness = _Harness(engine, tmp_path, "telegram", [[Done(silent)]])
+
+    await harness.agent.handle_message(harness.request("anything new?"))
+
+    assert not any(CHANGELOG in item for item in harness.controller.im_client.sent)
+    assert harness.controller.terminals[-1]["is_error"] is False
+

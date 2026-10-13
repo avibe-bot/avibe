@@ -346,6 +346,40 @@ def test_a_native_hosted_card_sorts_before_the_response_that_carried_it(isolated
     assert [row["id"] for row in detail["rows"]] == ["evt_00063f0000000200cccccccc"]
 
 
+def test_a_native_hosted_card_stays_with_its_response_at_the_scan_window_edge(isolated_state, monkeypatch):
+    """The card sorts just ahead of its response, but belongs to the window that response is in.
+
+    When the response is the oldest message the bounded scan keeps, a window cut by
+    the card's sort key would drop the card while its answer stays visible.
+    """
+    monkeypatch.setattr(agent_activity_service, "MESSAGE_SCAN_LIMIT", 1)
+    engine = create_sqlite_engine()
+    sid = "ses_hosted_edge"
+    with engine.begin() as conn:
+        scope = _seed_session(conn, session_id=sid)
+        _msg(conn, scope, sid, mid="msg_00063f0000000000aaaaaaaa", mtype="user", author="user", created_at="2026-06-01T10:00:00.000000+00:00", text="q", source="user")
+        _msg(conn, scope, sid, mid="msg_00063f0000000100bbbbbbbb", mtype="result", author="agent", created_at="2026-06-01T10:00:02.000000+00:00", text="Domain filters shipped.")
+        conn.execute(
+            agent_events.insert().values(
+                id="evt_00063f0000000200cccccccc", scope_id=scope, session_id=sid, platform="avibe", event_type="tool_call",
+                visibility="trace", content_text="🔎 Web search",
+                content_json=json.dumps({"kind": "toolcall", "hosted": {"version": 1, "call_id": "srvtoolu_1"}}),
+                metadata_json=json.dumps({"canonical_type": "toolcall", "precedes_message_id": "msg_00063f0000000100bbbbbbbb"}),
+                source="agent", created_at="2026-06-01T10:00:03.000000+00:00", updated_at="2026-06-01T10:00:03.000000+00:00",
+            )
+        )
+
+    with engine.connect() as conn:
+        groups = agent_activity_service.list_turn_groups(conn, session_id=sid)["groups"]
+        rows = [
+            row["id"]
+            for group in groups
+            for row in (agent_activity_service.get_turn_group(conn, session_id=sid, group_id=group["id"]) or {}).get("rows", [])
+        ]
+
+    assert rows == ["evt_00063f0000000200cccccccc"]
+
+
 def test_narration_the_transcript_draws_is_not_repeated_in_activity(isolated_state):
     """A narration with an ``interim`` transcript copy appears once, as the bubble."""
     engine = create_sqlite_engine()

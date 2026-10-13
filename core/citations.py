@@ -1099,6 +1099,10 @@ def register_text_citations(
     parts: list[str] = []
     for block_index, (text, citations) in enumerate(blocks):
         at: dict[int, list[str]] = {}
+        # A block the display rules remove entirely shows nothing to cite; its
+        # end-of-block citation would otherwise survive past the removed text.
+        if not transform(text).strip():
+            citations = ()
         for citation_index, citation in enumerate(citations or ()):
             ref = f"t{block_index}c{citation_index}"
             sources[ref] = CitationSource(ref_id=ref, title=citation.title or "", url=citation.url)

@@ -1585,6 +1585,15 @@ class TestTextBlockCitations:
         assert body == "Visible.\n\nRun `vibe status` now."
         assert citations == []
 
+    def test_a_block_the_display_rules_remove_takes_its_citations_with_it(self):
+        """An unranged citation sits after its block; when the whole block is silent, nothing is left to cite."""
+        registered, bundle = register_text_citations(
+            [("<silent>internal note</silent>", [self.cite(self.WINDOWS, "The Codex app is now on Windows")])],
+            unresolved_label=UNRESOLVED,
+            transform=strip_silent_blocks,
+        )
+        assert (registered, bundle) == ("", None)
+
     def test_text_without_citations_is_the_plain_display(self):
         registered, bundle = register_text_citations(
             [("One.", []), ("Two.", [])], unresolved_label=UNRESOLVED
