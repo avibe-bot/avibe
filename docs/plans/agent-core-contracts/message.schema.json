@@ -252,17 +252,27 @@
           "type": "integer",
           "minimum": 0
         }
-      }
+      },
+      "dependencies": {
+        "start": [
+          "end"
+        ],
+        "end": [
+          "start"
+        ]
+      },
+      "description": "One cited source on a text block. `start` and `end` come together: a half-open code-point range into the block's `text`."
     },
     "HostedRecord": {
       "type": "object",
       "required": [
         "status",
         "queries",
-        "sources"
+        "sources",
+        "sources_scope"
       ],
       "additionalProperties": false,
-      "description": "Canonical, provider-neutral record of one hosted-tool call. What every surface renders and what a different origin receives (as a synthetic tool result).",
+      "description": "Canonical, provider-neutral record of one hosted-tool call: what every surface renders, and what a different origin receives as a synthetic tool result. One function renders it to model-facing text (`../vibey-hosted-tools.md` §5).",
       "properties": {
         "status": {
           "enum": [
@@ -271,6 +281,11 @@
             "incomplete",
             "pending"
           ]
+        },
+        "error": {
+          "type": "string",
+          "maxLength": 1000,
+          "description": "Why the call did not complete; bounded and redacted like a provider error."
         },
         "queries": {
           "type": "array",
@@ -308,16 +323,15 @@
             "call",
             "response"
           ],
-          "default": "call",
           "description": "`call`: `sources` are this call's own results. `response`: the provider returns no per-call results (xAI X search), so `sources` are the posts the response cites, shared by every such call in that response."
         },
         "cost": {
           "type": "object",
           "required": [
-            "usd",
             "basis"
           ],
           "additionalProperties": false,
+          "description": "Computed only by Model Hub's pricing module. `included` (a subscription) carries no amount.",
           "properties": {
             "usd": {
               "type": "number",
@@ -330,29 +344,78 @@
                 "included"
               ]
             }
+          },
+          "if": {
+            "properties": {
+              "basis": {
+                "const": "included"
+              }
+            }
+          },
+          "then": {
+            "not": {
+              "required": [
+                "usd"
+              ]
+            }
+          },
+          "else": {
+            "required": [
+              "usd"
+            ]
           }
-        },
-        "mode": {
-          "enum": [
-            "native",
-            "proxy"
+        }
+      },
+      "if": {
+        "properties": {
+          "status": {
+            "enum": [
+              "failed",
+              "incomplete"
+            ]
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "error"
+        ]
+      },
+      "else": {
+        "not": {
+          "required": [
+            "error"
           ]
+        }
+      }
+    },
+    "ProxyExecution": {
+      "type": "object",
+      "required": [
+        "mode",
+        "executor_origin",
+        "executor_source_id",
+        "executor_billing"
+      ],
+      "additionalProperties": false,
+      "description": "How a proxied hosted call ran: the gateway's executor, on one exact Source.",
+      "properties": {
+        "mode": {
+          "const": "proxy"
         },
         "executor_origin": {
-          "$ref": "#/definitions/Origin",
-          "description": "For `mode: proxy`, who ran the call."
+          "$ref": "#/definitions/Origin"
         },
         "executor_source_id": {
           "type": "string",
-          "minLength": 1,
-          "description": "For `mode: proxy`, the Source that ran the call."
+          "minLength": 1
         },
         "executor_billing": {
           "enum": [
             "monthly",
             "metered"
           ],
-          "description": "For `mode: proxy`, that Source's billing mode when it ran."
+          "description": "The executor Source's billing mode when it ran."
         }
       }
     },
@@ -376,13 +439,15 @@
           "minLength": 1
         },
         "tool": {
-          "type": "string",
-          "minLength": 1,
-          "description": "Catalog name, e.g. `web_search`, `x_search`."
+          "enum": [
+            "web_search",
+            "x_search"
+          ],
+          "description": "Catalog name. Phase 2 adds `image_generation` with its own record fields."
         },
         "arguments": {
           "type": "object",
-          "description": "Canonical arguments, e.g. `{\"query\": \"...\"}`."
+          "description": "Canonical arguments; their shape is fixed per `tool` below."
         },
         "record": {
           "$ref": "#/definitions/HostedRecord"
@@ -391,28 +456,89 @@
           "type": "object",
           "required": [
             "source_id",
-            "origin",
             "payload"
           ],
           "additionalProperties": false,
-          "description": "Opaque provider payload: the provider's own items, verbatim and in order, tagged with the Source that produced them. Replayed only to that Source, and only while its current replay evidence is positive (`HopResolution.hosted_tools[tool].replay`); never synthesized, never sent to another Source or origin. Authorization is never stored in the block.",
+          "description": "Opaque provider payload: the provider's own items, verbatim and in order, tagged with the Source that produced them. Its origin is the message's `origin`. Replayed only to that Source while its current replay evidence is positive (`HopResolution.hosted_tools[tool].replay`); never synthesized, never sent to another Source or origin, and never rewritten by the gateway. Authorization is never stored in the block.",
           "properties": {
             "source_id": {
               "type": "string",
               "minLength": 1
             },
-            "origin": {
-              "$ref": "#/definitions/Origin"
-            },
             "payload": {
               "type": "array",
+              "minItems": 1,
               "items": {
                 "type": "object"
               }
             }
           }
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "tool": {
+                "const": "web_search"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "arguments": {
+                "type": "object",
+                "required": [
+                  "query"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "query": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "tool": {
+                "const": "x_search"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "arguments": {
+                "type": "object",
+                "required": [
+                  "query"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "query": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "limit": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "mode": {
+                    "enum": [
+                      "Latest",
+                      "Top"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
     },
     "Usage": {
       "type": "object",
@@ -575,8 +701,21 @@
           "type": "boolean"
         },
         "hosted": {
-          "$ref": "#/definitions/HostedRecord",
-          "description": "Set when the result came from the gateway's hosted-tool proxy executor (`mode: proxy`)."
+          "type": "object",
+          "required": [
+            "record",
+            "execution"
+          ],
+          "additionalProperties": false,
+          "description": "Set exactly when the result came from the gateway's hosted-tool proxy executor.",
+          "properties": {
+            "record": {
+              "$ref": "#/definitions/HostedRecord"
+            },
+            "execution": {
+              "$ref": "#/definitions/ProxyExecution"
+            }
+          }
         }
       }
     }

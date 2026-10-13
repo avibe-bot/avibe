@@ -43,13 +43,20 @@ consumer's requirements, and the Model Hub lane lands the change in both places.
      - the primary hop's `mode` (`native` or `proxy`);
      - for `native`, the wire declaration, which is required exactly then;
      - `replay`, the current replay evidence for the primary hop's Source.
-   - A request carrying `x-avibe-pin-source` is served only by that Source, with no failover. If that Source cannot
-     serve it, the gateway answers the local error `pin_unavailable` before invoking anything.
-   - `native` requires positive `call` evidence for that (Source, model) on an untranslated path
-     ([`../model-hub-capability-model.md`](../model-hub-capability-model.md) §3).
-   - At failover the gateway re-applies the rule for the new hop. A native declaration that hop is not verified for
-     becomes the same-named proxy function. Native hosted payloads that hop may not replay become the synthetic call
-     and result. Item 6's owner and timing apply.
+   - `native` requires all of these ([`../model-hub-capability-model.md`](../model-hub-capability-model.md) §3):
+     - an eligible credential (never a Claude subscription);
+     - positive `call` evidence for that (Source, model);
+     - an untranslated path.
+   - **The gateway never rewrites hosted content.** Vibey pins every request that carries a native declaration, a
+     native hosted payload or an in-flight continuation, with `x-avibe-pin-source`.
+   - A pinned request is served only by that Source, with no failover and no recovery wait. The gateway answers HTTP
+     409 `{"type": "error", "error": {"type": "model_hub_pin_unavailable", "code": "pin_unavailable"}}` in three
+     cases:
+     - the Source cannot be admitted, checked before invoking anything;
+     - its attempt ends before model output with a failover-class failure;
+     - its attempt ends before model output with an error that a narrow hosted-content evidence rule names.
+   - Vibey then renders the same request in portable form and sends it unpinned; it fails over as today.
+   - Item 6 (the opaque thinking strip) is unchanged and applies only to unpinned requests.
    - The served-hop report gains `source`, the serving Source id, so that a hosted block's payload is tagged with
      the exact Source; two Sources can share an origin. The parser in `conversion-tables.md` (exactly `provider`,
      `api`, `model` today) changes in the same release, within the deferred Model Hub contract v12 bump that #2483's

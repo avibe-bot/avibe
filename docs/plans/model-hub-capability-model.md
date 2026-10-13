@@ -27,7 +27,7 @@ fact apart and gives each one owner.
 | Layer | Scope | Owner and location | Holds | Never holds |
 | --- | --- | --- | --- | --- |
 | **Base** | (provider, model) | models.dev, cached by `vibe/models_dev_catalog.py` | context and output limits, modalities, `tool_call`, `reasoning`, `reasoning_options` (wire effort values), token prices including context tiers (§6) | anything about a specific Source or relay |
-| **Overlay** | model id, per protocol | Avibe. `vibe/data/backend_models.json` becomes the one overlay | corrections and additions to the base: wire effort tiers where models.dev is wrong or late; **client presets** that never go on the wire (Codex `ultra`); **hosted tools** the provider offers for the model on that protocol (§4); hosted-tool prices (§6) | per-Source truth; an allowlist |
+| **Overlay** | provider model family, per protocol | Avibe. `vibe/data/backend_models.json` becomes the one overlay: its backend rows plus a new provider-neutral `providers` section (§4) | corrections and additions to the base: wire effort tiers where models.dev is wrong or late; **client presets** that never go on the wire (Codex `ultra`); **hosted tools** the provider offers for the model on that protocol; hosted-tool prices (§6) | per-Source truth; an allowlist |
 | **Evidence** | (Source, model, feature) | Model Hub state, next to Source health | the outcome of a live probe, or negative evidence learned from a real upstream error, with time, basis and scope | priors |
 
 Rules:
@@ -40,25 +40,59 @@ Rules:
    only positive evidence enables a feature whose failure is terminal.
 4. **One overlay.**
    - `backend_models.json` already overlays efforts for native backends.
-   - It gains per-entry `wire` versus `client_preset` effort marking and a `hosted_tools` map.
-   - No second catalog file is introduced for Vibey.
-   - Native backends keep reading their menu from the same rows; Vibey reads only wire values.
+   - Its backend rows gain `client_presets`, effort names a client maps before sending (Codex `ultra`). These are
+     never wire tiers.
+   - A new provider-neutral `providers` section holds what the backend rows cannot: per-provider wire effort
+     corrections, hosted tools and prices (§4). Today the loader admits only `claude` and `codex` rows and no
+     provider, so the section needs its own loader and schema.
+   - No second file is introduced for Vibey.
+   - Native backends keep reading their menu from their rows. Vibey and the gateway read wire values and the
+     `providers` section.
+5. **One owner per derived fact.** Model Hub resolves the layers once, for both the effort menu and hosted-tool
+   modes. Vibey only reads `HopResolution`. Only the gateway's classifier writes evidence, and only Model Hub's
+   pricing module turns usage into money. No other component re-derives any of these.
 
 ## 3. Evidence
 
 ### 3.1 Record
 
-One record per (`source_id`, `model_id`, `feature`). `feature` is `{"kind": "effort", "name": "ultra"}` or
-`{"kind": "hosted_tool", "name": "web_search", "aspect": "call" | "replay"}`.
+One record per (`source_id`, `model_id`, `feature`). Absence of a record is `unknown`. The persisted shape, which
+lands as `model-hub-contracts/capability-evidence.schema.json` with Phase 0:
 
-| Field | Meaning |
-| --- | --- |
-| `status` | `verified` or `unsupported`. Absence of a record is `unknown`. |
-| `basis` | `probe` (a live probe the user started), or `observed` (learned from a real request's error) |
-| `observed_at` | when the evidence was produced |
-| `engine` | engine release at that time; an engine upgrade makes `probe` evidence stale (§3.3) |
-| `shape` | version of the request shape that produced it; a probe-shape change makes it stale |
-| `detail` | bounded machine summary: HTTP status and upstream machine code, e.g. `400 invalid_value`, `400 unsupported_tool_type`. Never upstream text beyond a code. |
+```json
+{
+  "type": "object",
+  "required": ["version", "source_id", "model_id", "feature", "status", "basis", "observed_at", "engine", "shape"],
+  "additionalProperties": false,
+  "properties": {
+    "version": {"const": 1},
+    "source_id": {"type": "string", "minLength": 1},
+    "model_id": {"type": "string", "minLength": 1},
+    "feature": {
+      "oneOf": [
+        {"type": "object", "required": ["kind", "name"], "additionalProperties": false,
+         "properties": {"kind": {"const": "effort"}, "name": {"type": "string", "minLength": 1}}},
+        {"type": "object", "required": ["kind", "name", "aspect"], "additionalProperties": false,
+         "properties": {"kind": {"const": "hosted_tool"}, "name": {"enum": ["web_search", "x_search"]},
+                        "aspect": {"enum": ["call", "replay"]}}}
+      ]
+    },
+    "status": {"enum": ["verified", "unsupported"]},
+    "basis": {"enum": ["probe", "observed"]},
+    "observed_at": {"type": "string", "format": "date-time"},
+    "engine": {"type": "string", "minLength": 1},
+    "shape": {"type": "integer", "minimum": 1},
+    "detail": {"type": "string", "maxLength": 64, "pattern": "^[0-9]{3} [a-z_]+$"}
+  },
+  "if": {"properties": {"basis": {"const": "observed"}}},
+  "then": {"required": ["detail"], "properties": {"status": {"const": "unsupported"}}}
+}
+```
+
+- `observed` evidence is always negative, and always says which error produced it: `detail` holds the HTTP status
+  and the upstream machine code, e.g. `400 invalid_value`. It never holds upstream text beyond a code.
+- `engine` is the engine release at that time, and `shape` the version of the request shape that produced the
+  record. A change to either makes `probe` evidence stale (§3.3).
 
 Records live with the Source's runtime state (`model_hub` state dir). They follow Source identity:
 `retry.source_identity` covers kind, vendor, protocol, channel, base URL, credential and verification marker.
@@ -66,21 +100,26 @@ Changing any of those drops the Source's evidence.
 
 ### 3.2 Learning from real errors (negative evidence)
 
-- **Narrow rules, one per feature.** A classifier rule maps an upstream error to exactly one (Source, model,
-  feature) only when the error names that feature:
+- **Narrow rules, one per feature, in one place:** the gateway's classifier. It sees every upstream error, and
+  nothing else writes evidence. A rule maps an upstream error to exactly one (Source, model, feature) only when the
+  error names that feature:
   - `invalid_request_error` / `invalid_value` whose message names the request's `reasoning.effort` value → effort;
   - `Unsupported tool type: <type>` for a type the request declared → hosted tool `call`;
   - `Invalid encrypted_content` inside a hosted result block the request replayed → hosted tool `replay`.
 - **Generic errors never create evidence.** That covers 5xx, overload, rate limit, auth, and any 400 that does not
   name the feature.
-- **The request still fails as it does today.** Evidence changes the next request: the same mistake is not repeated.
+- **What happens to the request.**
+  - An effort rule match fails the request as it does today. The next request skips that hop (§3.4).
+  - A hosted-content rule match on a pinned request becomes `pin_unavailable`. Vibey re-sends the same request in
+    portable form at once (`vibey-hosted-tools.md` §3.5).
 - Negative `observed` evidence expires after 7 days. Relays change, and an expired record falls back to the priors.
   A user's re-verify replaces it at once.
 
 ### 3.3 Probes and re-verification
 
-- **A probe is a real upstream call.** It costs money (about $0.01–0.05; the 2026-10-13 spike measured it), so it runs only on an
-  explicit user action:
+- **A probe is a real upstream call.** It costs money (about $0.01–0.05; the 2026-10-13 spike measured it). It
+  runs only on an eligible credential, and a Claude subscription Source is never eligible
+  (`vibey-hosted-tools.md` §3.4). It runs only on an explicit user action:
   - enabling a hosted tool for a Source (or choosing it as the proxy executor);
   - the Source card's *Re-verify*;
   - confirming one pending re-verification that the UI lists (below).
@@ -98,37 +137,77 @@ Changing any of those drops the Source's evidence.
 
 | Consumer | Rule |
 | --- | --- |
-| Effort menu for a model on an Agent | each hop's declared tiers, then the union across hops. A hop's declared tiers are its Source model's persisted `reasoning_efforts` when their provenance is `user` or `upstream`; otherwise overlay `wire` tiers; otherwise models.dev `reasoning_options`. User-authored lists, including free-form names, are never replaced or filtered by a prior; only an overlay-sourced list drops `client_preset` names. A tier is omitted only if **every** hop that can serve the model has negative evidence for it. A tier with negative evidence on some hops is shown with "not on: <Source>". |
+| Effort menu for a model on an Agent | each hop's declared tiers, then the union across hops. A hop's declared tiers are its Source model's persisted `reasoning_efforts` when their provenance is `user` or `upstream`; otherwise the overlay's `providers` `wire_efforts`; otherwise the backend row's efforts minus its `client_presets` (provenance `catalog`); otherwise models.dev `reasoning_options`. User-authored lists, including free-form names, are never replaced or filtered by a prior; only a catalog-sourced list drops `client_presets`. A tier is omitted only if **every** hop that can serve the model has negative evidence for it. A tier with negative evidence on some hops is shown with "not on: <Source>". |
 | Effort at request time | Forwarded unchanged (reasoning-intent). A hop with **negative** evidence for that effort is skipped for this request, as if it were not a candidate. If no candidate remains, the request fails before invocation with `effort_unsupported` naming the effort and the Sources, instead of a provider 400. Never clamped silently. |
 | Hosted tool mode on a hop | `native` only with positive `call` evidence and the user's toggle on; otherwise the gateway proxy (`vibey-hosted-tools.md`). A wrong native declaration is a terminal 400 or a silent drop; the proxy is lossless. So this feature needs positive evidence, unlike efforts. |
 | Native payload replay | only to the same Source, and only while its current `replay` evidence is positive. The decision is made at every request from `HopResolution`; the transcript never stores it. |
 | Display | §5 |
 
 This fixes #2539 in three places:
-- the overlay marks `ultra` a Codex `client_preset`, so it is not a Vibey wire tier;
+- the overlay lists `ultra` in Codex's `client_presets`, so it is not a wire tier for Vibey;
 - models.dev's wire list (`low … max`) is the base;
 - the relay's real `400 invalid_value` records `ultra: unsupported` for that Source.
 
 Even without the overlay fix, the next request would skip that hop or fail clearly.
 
-## 4. Hosted tools in the overlay
+## 4. The overlay's `providers` section
 
-`hosted_tools` per model row, per protocol. The value is the wire declaration the provider trains on and the
-catalog's tool name (`vibey-hosted-tools.md` §2):
+The section is keyed by Source vendor (`openai`, `anthropic`, `xai`, …). Each vendor holds a list of model
+families, matched by the existing model-id normalization, the first matching prefix winning. A new model of a
+family inherits its row. Shape (`vibe/data/backend_models.json`, `providers`; the loader validates it):
 
 ```json
-"hosted_tools": {
-  "openai_responses": {"web_search": {"type": "web_search"}},
-  "anthropic": {"web_search": {"type": "web_search_20250305", "name": "web_search"}}
+"providers": {
+  "xai": {"models": [
+    {"match": {"prefix": "grok-4"},
+     "wire_efforts": null,
+     "hosted_tools": {"openai_responses": {
+       "web_search": {"declaration": {"type": "web_search"},
+                      "price": {"unit": "call", "usd_per_1k": 5, "as_of": "2026-10-13", "url": "https://docs.x.ai/developers/pricing"}},
+       "x_search": {"declaration": {"type": "x_search"},
+                    "price": {"unit": "post", "usd_per_1k": 5, "extra": [{"unit": "profile", "usd_per_1k": 10}], "as_of": "2026-10-13", "url": "https://docs.x.ai/developers/pricing"}}}}}
+  ]},
+  "anthropic": {"models": [
+    {"match": {"prefix": "claude-"},
+     "hosted_tools": {"anthropic": {
+       "web_search": {"declaration": {"type": "web_search_20250305", "name": "web_search"},
+                      "price": {"unit": "search", "usd_per_1k": 10, "as_of": "2026-10-13", "url": "https://platform.claude.com/docs/en/about-claude/pricing"}}}}}
+  ]}
 }
 ```
 
-- Rows are keyed by model family through the existing model-id normalization, so a new model of a family inherits
-  them.
-- For xAI the row adds `{"x_search": {"type": "x_search"}}` under `openai_responses`.
-- A provider that offers a tool only on some models lists it only on those.
+The loader validates each vendor entry against this schema:
+
+```json
+{"type": "object", "required": ["models"], "additionalProperties": false,
+ "properties": {"models": {"type": "array", "items": {
+   "type": "object", "required": ["match"], "additionalProperties": false,
+   "properties": {
+     "match": {"oneOf": [
+       {"type": "object", "required": ["prefix"], "additionalProperties": false, "properties": {"prefix": {"type": "string", "minLength": 1}}},
+       {"type": "object", "required": ["id"], "additionalProperties": false, "properties": {"id": {"type": "string", "minLength": 1}}}]},
+     "wire_efforts": {"type": ["array", "null"], "items": {"type": "string", "minLength": 1}},
+     "hosted_tools": {"type": "object",
+       "propertyNames": {"enum": ["anthropic", "openai_responses", "openai_chat", "google"]},
+       "additionalProperties": {"type": "object",
+         "propertyNames": {"enum": ["web_search", "x_search"]},
+         "additionalProperties": {"type": "object", "required": ["declaration", "price"], "additionalProperties": false,
+           "properties": {
+             "declaration": {"type": "object", "required": ["type"]},
+             "price": {"$ref": "#/definitions/price"}}}}}}}}},
+ "definitions": {"price": {"type": "object", "required": ["unit", "usd_per_1k", "as_of", "url"], "additionalProperties": false,
+   "properties": {"unit": {"enum": ["call", "search", "post", "profile"]},
+                  "usd_per_1k": {"type": "number", "minimum": 0},
+                  "as_of": {"type": "string", "format": "date"},
+                  "url": {"type": "string", "format": "uri"},
+                  "extra": {"type": "array", "items": {"type": "object", "required": ["unit", "usd_per_1k"], "additionalProperties": false,
+                    "properties": {"unit": {"enum": ["call", "search", "post", "profile"]}, "usd_per_1k": {"type": "number", "minimum": 0}}}}}}}}
+```
+
+`wire_efforts: null` defers to models.dev.
 - The overlay records what the **provider** offers. Whether a Source (a relay, a subscription) carries it is
   evidence.
+- An invalid vendor entry disables that entry with a warning; startup never fails.
 
 ## 5. What Models shows per Source
 
@@ -169,7 +248,7 @@ and the existing tone vocabulary (`TimeHint` for dates):
 | Token prices: input, output, cache read, cache write | models.dev base `cost.*`; the user's override file | used |
 | One-hour cache write | override file, or 2× input by default (`pricing.py`) | used; models.dev has no field |
 | **Context-tier prices** (a higher rate past a context size) | models.dev `cost.tiers[]` with `{"tier": {"type": "context", "size": N}}`, plus the legacy `cost.context_over_200k`. On 2026-10-13: 630 and 517 models (e.g. `gpt-6-astra` above 272K: $20/$75; `grok-4.6` above 200K: $4/$12) | **not used.** `model_price` reads only the flat fields, so valuation understates long-context use. Fix: when a call's input tokens exceed `size`, the tier's rates apply to the whole call, as the vendors bill. The ledger already has per-call input tokens. |
-| **Hosted-tool call prices** | overlay `hosted_tools.<protocol>.<tool>.price`: unit and USD per 1,000 units | new. models.dev has none; the open proposal anomalyco/models.dev#8707 adds `cost.web_search = {search, prompt}` (no maintainer response yet) |
+| **Hosted-tool call prices** | overlay `providers.<vendor>.models[].hosted_tools.<protocol>.<tool>.price` (§4): unit, USD per 1,000 units, date and source URL | new. models.dev has none; the open proposal anomalyco/models.dev#8707 adds `cost.web_search = {search, prompt}` (no maintainer response yet) |
 | Search-result tokens | the provider's usage (input tokens), priced by the token rows | already counted as input |
 | Provider-reported cost | per-call usage, when present: xAI `cost_in_usd_ticks` (USD × 10¹⁰), `server_side_tool_usage_details`; Anthropic `server_tool_use.web_search_requests` | not read today; hosted tools read it (§6.4) |
 | Per-Source billing mode | Source config `billing` | used |
@@ -199,6 +278,9 @@ and the existing tone vocabulary (`TimeHint` for dates):
 1. **A per-call cost hint** in Models (the Tools tab and the probe confirm) and on the use-time card:
    - native: the tool fee per call plus a token estimate;
    - proxy: the same plus the executor model's call.
+
+   All of it is computed by the one pricing owner, `pricing.py`, and stored as the record's `cost`. Neither the
+   executor nor an adapter prices anything itself.
 2. **Executor choice.** The Tools tab lists the verified executor candidates with their cost hints and billing mode.
    The user picks one; the default is the first verified candidate in Vibey's Source order. Avibe does not
    auto-optimize cost in Phase 1, because relay prices are unknowable.
