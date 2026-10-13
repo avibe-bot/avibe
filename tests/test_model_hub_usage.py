@@ -746,14 +746,15 @@ def test_usage_writer_preserves_daily_owners_inside_one_utc_hour(
         time.tzset()
 
 
-def test_the_writer_reads_the_price_table_once_off_the_loop_and_tiers_calls_made_before_it(
+def test_the_writer_reads_the_price_table_before_serving_and_tiers_every_call_at_record(
     tmp_path: Path,
 ) -> None:
-    """MH-USAGE-BACKEND-010: deciding a call's context tier reads no file on the loop and none per call.
+    """MH-USAGE-BACKEND-010: the writer reads the price table once when built, before the loop serves.
 
-    A price table parses the whole models.dev copy, so the writer reads it on its
-    own thread and keeps it. Calls that arrive before that first read wait unfolded
-    for the flush that reads it, so neither lands in the other's tier.
+    A price table parses the whole models.dev copy, so it is read when Model Hub's
+    service is built at controller startup, never on the loop and never per call.
+    Every call is then tiered when it is recorded, the first one included, and
+    calls of one tier fold together.
     """
 
     catalog = {"openai": {"models": {"gpt-6-astra": {"cost": {
@@ -761,64 +762,31 @@ def test_the_writer_reads_the_price_table_once_off_the_loop_and_tiers_calls_made
         "tiers": [{"input": 20, "output": 75, "tier": {"type": "context", "size": 272_000}}],
     }}}}}
     vendor_map = {"families": [{"prefix": "gpt-", "vendor_id": "openai"}]}
-    reads: list[int] = []
+    reads: list[bool] = []
 
     def price_table() -> PriceTable:
-        reads.append(threading.get_ident())
+        try:
+            asyncio.get_running_loop()
+            reads.append(True)
+        except RuntimeError:
+            reads.append(False)
         return PriceTable(catalog=catalog, vendor_map=vendor_map, overrides={}, price_table_date="2026-10-13")
 
-    async def exercise() -> int:
-        writer = UsageWriter(_ledger(tmp_path))
-
-        def record(input_tokens: int) -> None:
-            writer.record(
-                source_id="src_a",
-                model_id="gpt-6-astra",
-                usage=ProtocolUsageReport(input_tokens=input_tokens),
-                at=NOW,
-                price_table=price_table,
-            )
-
-        record(100_000)
-        record(300_000)
-        assert (len(writer._pending), len(writer._undecided)) == (0, 2)
-        assert await writer.drain(timeout=5) == 0
-        for input_tokens in (100_000, 300_000, 300_000):
-            record(input_tokens)
-        assert (len(writer._pending), len(writer._undecided)) == (2, 0)
-        assert await writer.drain(timeout=5) == 0
-        return threading.get_ident()
-
-    loop_thread = asyncio.run(exercise())
-    assert len(reads) == 1
-    assert reads[0] != loop_thread
-    rows = json.loads(_ledger(tmp_path).path.read_text(encoding="utf-8"))
-    assert [(row.get("context_tier", 0), row["requests"]) for row in rows] == [(0, 2), (272_000, 3)]
-
-
-def test_calls_waiting_for_the_first_price_table_stay_bounded(tmp_path: Path) -> None:
-    """MH-USAGE-BACKEND-010: a first price-table read that hangs cannot grow the backlog past a bound.
-
-    Undecided calls each keep their own row, so past the bound a call is folded
-    in the base tier at once, by identity, like any other.
-    """
-
-    from core.handlers.model_hub.usage import _UNDECIDED_LIMIT
+    writer = UsageWriter(_ledger(tmp_path), price_table=price_table)
+    assert reads == [False]
 
     async def exercise() -> None:
-        writer = UsageWriter(_ledger(tmp_path))
-        for _ in range(_UNDECIDED_LIMIT + 300):
+        for input_tokens in (100_000, 300_000, 100_000, 300_000, 300_000):
             writer.record(
-                source_id="src_a",
-                model_id="gpt-6-astra",
-                usage=ProtocolUsageReport(input_tokens=1_000),
-                at=NOW,
-                price_table=lambda: (_ for _ in ()).throw(AssertionError("read only on the writer thread")),
+                source_id="src_a", model_id="gpt-6-astra", usage=ProtocolUsageReport(input_tokens=input_tokens), at=NOW,
             )
-        assert (len(writer._undecided), len(writer._pending)) == (_UNDECIDED_LIMIT, 1)
-        writer._flush.cancel()
+        assert len(writer._pending) == 2
+        assert await writer.drain(timeout=5) == 0
 
     asyncio.run(exercise())
+    assert reads == [False]
+    rows = json.loads(_ledger(tmp_path).path.read_text(encoding="utf-8"))
+    assert [(row.get("context_tier", 0), row["requests"]) for row in rows] == [(0, 2), (272_000, 3)]
 
 
 @pytest.mark.parametrize(

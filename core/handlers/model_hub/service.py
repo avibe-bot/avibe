@@ -1165,7 +1165,13 @@ class ModelHubService:
         )
         # One writer per ledger, shared with the gateway: both metering populations
         # then have the same owner for the lifetime of what they write.
-        self.usage_writer = UsageWriter(self.usage)
+        # Read per report: the override file is hand-edited and the catalog refreshes itself.
+        self.price_table: Callable[[], PriceTable] = price_table or (
+            lambda: load_price_table(paths.get_state_dir())
+        )
+        # Built here, at controller startup before the loop serves, so the writer's
+        # first price-table read never runs on the loop and every call is tiered.
+        self.usage_writer = UsageWriter(self.usage, price_table=self.price_table)
         self.native_oauth_adapter = native_oauth_adapter or UnavailableNativeOAuthAdapter()
         self.oauth_flows = oauth_flows or OAuthFlowRegistry(
             paths.get_state_dir() / "model_hub_oauth_flows.json",
@@ -1236,10 +1242,6 @@ class ModelHubService:
         self._builtin_snapshot_cache: dict[BackendName, list[dict[str, Any]]] = {}
         self._pending_builtin_catalog_refresh: set[BackendName] = set()
         self.quota = SubscriptionQuotaCache(self._fetch_subscription_quota, now=lambda: self.now())
-        # Read per report: the override file is hand-edited and the catalog refreshes itself.
-        self.price_table: Callable[[], PriceTable] = price_table or (
-            lambda: load_price_table(paths.get_state_dir())
-        )
         # A cached copy only: the picker read must not wait on the network.
         self.models_dev_catalog: Callable[[], Mapping[str, Any]] = models_dev_catalog or (
             lambda: _cached_models_dev_catalog()
@@ -9049,7 +9051,6 @@ class ModelHubService:
                 model_id=model_id,
                 usage=usage,
                 at=self.now(),
-                price_table=self.price_table,
             )
         )
 

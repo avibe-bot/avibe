@@ -742,16 +742,16 @@ async def test_a_call_is_recorded_in_the_tier_its_context_exceeds_and_valued_at_
 ):
     """MH-PRICE-016: A call past a tier size is recorded in that tier and valued whole at its rates; at the size it is not.
 
-    Both writer paths decide it: the first call, before any price table is read,
-    and the next, from the table the writer then holds.
+    The writer holds the price table from construction, so the first call is
+    tiered exactly like the next.
     """
 
     now = datetime(2026, 10, 13, 12, 0, tzinfo=timezone.utc)
     ledger = BoundedUsageLedger(tmp_path / "usage.json", now=lambda: now)
-    writer = UsageWriter(ledger)
+    writer = UsageWriter(ledger, price_table=_tiered_table)
     usage = ProtocolUsageReport.of(input_tokens=input_tokens, cached_input_tokens=0, output_tokens=1_000)
     for source_id in ("src_first", "src_held"):
-        writer.record(source_id=source_id, model_id=model_id, usage=usage, at=now, price_table=_tiered_table)
+        writer.record(source_id=source_id, model_id=model_id, usage=usage, at=now)
         assert await writer.drain(timeout=5) == 0
 
     rows = json.loads(ledger.path.read_text(encoding="utf-8"))
@@ -767,14 +767,14 @@ async def test_cache_reads_and_writes_count_toward_the_context_tier(tmp_path):
 
     now = datetime(2026, 10, 13, 12, 0, tzinfo=timezone.utc)
     ledger = BoundedUsageLedger(tmp_path / "usage.json", now=lambda: now)
-    writer = UsageWriter(ledger)
+    writer = UsageWriter(ledger, price_table=_tiered_table)
     # Anthropic reports only the 1,000 fresh tokens as `input_tokens`; the context is 201,000.
     usage = extract_protocol_usage("anthropic", {"usage": {
         "input_tokens": 1_000, "cache_read_input_tokens": 180_000, "cache_creation_input_tokens": 20_000,
         "output_tokens": 1_000,
     }})
-    for _ in range(2):  # before and after the writer holds a price table
-        writer.record(source_id="src_a", model_id="claude-sonnet-6", usage=usage, at=now, price_table=_tiered_table)
+    for _ in range(2):  # the first call and a later one, from the same held table
+        writer.record(source_id="src_a", model_id="claude-sonnet-6", usage=usage, at=now)
         assert await writer.drain(timeout=5) == 0
 
     [row] = json.loads(ledger.path.read_text(encoding="utf-8"))
@@ -817,9 +817,9 @@ async def test_a_released_ledger_reads_unchanged_and_a_tiered_call_lands_beside_
         assert document["totals"]["api_cost_lower_bound"] is False
     assert path.read_text(encoding="utf-8") == RELEASED_LEDGER
 
-    writer = UsageWriter(ledger)
+    writer = UsageWriter(ledger, price_table=_tiered_table)
     writer.record(
-        source_id="src_a", model_id="gpt-6-astra", at=now, price_table=_tiered_table,
+        source_id="src_a", model_id="gpt-6-astra", at=now,
         usage=ProtocolUsageReport.of(input_tokens=300_000, cached_input_tokens=0, output_tokens=1_000),
     )
     assert await writer.drain(timeout=5) == 0
@@ -839,16 +839,16 @@ async def test_tiers_never_fold_together_and_every_read_sums_them_per_model(tmp_
 
     now = datetime(2026, 10, 13, 12, 30, tzinfo=timezone.utc)
     ledger = BoundedUsageLedger(tmp_path / "usage.json", now=lambda: now)
-    writer = UsageWriter(ledger)
+    writer = UsageWriter(ledger, price_table=_tiered_table)
 
     def report(input_tokens: int) -> ProtocolUsageReport:
         return ProtocolUsageReport.of(input_tokens=input_tokens, cached_input_tokens=0, output_tokens=0)
 
-    writer.record(source_id="src_a", model_id="gpt-6-astra", usage=report(1), at=now, price_table=_tiered_table)
+    writer.record(source_id="src_a", model_id="gpt-6-astra", usage=report(1), at=now)
     assert await writer.drain(timeout=5) == 0
     for input_tokens in (100_000, 300_000, 100_000):
         writer.record(
-            source_id="src_a", model_id="gpt-6-astra", usage=report(input_tokens), at=now, price_table=_tiered_table,
+            source_id="src_a", model_id="gpt-6-astra", usage=report(input_tokens), at=now,
         )
     assert len(writer._pending) == 2
     assert await writer.drain(timeout=5) == 0

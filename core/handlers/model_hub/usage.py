@@ -2047,15 +2047,6 @@ class _QueuedRow:
 
     call: UsageCall
     done: "asyncio.Future[None]"
-    # The call arrived before the writer had read any price table, so its context
-    # tier is decided on the writer's thread, and until then it folds with nothing.
-    undecided: bool = False
-
-
-# Calls that may wait for the first price table, each on its own row because
-# their tier is not known yet. Past this, a call is folded in the base tier at
-# once: the backlog stays bounded by identities even if that first read hangs.
-_UNDECIDED_LIMIT: Final = 256
 
 
 class UsageWriter:
@@ -2080,20 +2071,29 @@ class UsageWriter:
     on a disk that is already failing.
 
     A call's context tier is part of its row, so the writer decides it before the
-    call folds, from a price table it reads on its own thread and keeps. The one
-    exception to folding is a call that arrives before the first read: its tier is
-    unknown, so it waits alone for the flush that reads the table and decides it.
+    call folds, from the price table it holds: read when the writer is built, at
+    controller startup, and refreshed on its own thread.
     """
 
-    def __init__(self, ledger: BoundedUsageLedger, *, durability_wait: float = _DURABILITY_WAIT_SECONDS):
+    def __init__(
+        self,
+        ledger: BoundedUsageLedger,
+        *,
+        durability_wait: float = _DURABILITY_WAIT_SECONDS,
+        price_table: Optional[Callable[[], PriceTable]] = None,
+    ):
         self.ledger = ledger
         self._durability_wait = durability_wait
         self._pending: dict[tuple[str, str, str, str, int, bool], _QueuedRow] = {}
-        self._undecided: list[_QueuedRow] = []
-        # Where context tiers come from: the factory callers name, and the table
-        # last read from it with the monotonic instant it was read.
-        self._price_table: Optional[Callable[[], PriceTable]] = None
+        # Where context tiers come from: the valuation's table factory, and the
+        # table last read from it with the monotonic instant it was read.
+        self._price_table = price_table
         self._prices: Optional[tuple[PriceTable, float]] = None
+        if price_table is not None:
+            # Read here, once: the writer is built with Model Hub's service at
+            # controller startup, before anything is metered or served, so every
+            # call finds a table and is tiered when it is recorded.
+            self._read_prices()
         # The batch on its way to disk, kept visible so a drain that times out
         # can count it: in the executor is not the same as persisted.
         self._writing: tuple[_QueuedRow, ...] = ()
@@ -2116,7 +2116,6 @@ class UsageWriter:
         model_id: str,
         usage: Optional[ProtocolUsageReport],
         at: datetime,
-        price_table: Optional[Callable[[], PriceTable]] = None,
     ) -> "asyncio.Future[None]":
         """Own one call and queue it, handing back what will finish it.
 
@@ -2133,23 +2132,20 @@ class UsageWriter:
         fold together share one future, which is the same promise each would have
         had alone: it completes when their row reaches the disk.
 
-        `price_table` is the valuation's table factory, which the call's context
-        tier is decided from. It is read on the writer's thread and the table kept,
-        so deciding here costs a lookup in memory. Without one, every call is in the
-        base tier.
+        The call's context tier is decided here from the price table the writer
+        holds, a lookup in memory. A writer built without a table, or holding one
+        without tiers (no models.dev copy yet), records the base tier.
         """
 
-        if price_table is not None:
-            self._price_table = price_table
-        context_tier = self._context_tier(model_id, usage)
         call = UsageCall(
-            source_id=source_id, model_id=model_id, usage=usage, at=at, context_tier=context_tier or 0
+            source_id=source_id,
+            model_id=model_id,
+            usage=usage,
+            at=at,
+            context_tier=self._context_tier(model_id, usage),
         )
         done = asyncio.get_running_loop().create_future
-        if context_tier is None and len(self._undecided) < _UNDECIDED_LIMIT:
-            queued = _QueuedRow(call=call, done=done(), undecided=True)
-            self._undecided.append(queued)
-        elif (queued := self._pending.get(call.fold_key)) is None:
+        if (queued := self._pending.get(call.fold_key)) is None:
             queued = _QueuedRow(call=call, done=done())
             self._pending[call.fold_key] = queued
         else:
@@ -2196,7 +2192,7 @@ class UsageWriter:
 
         return sum(
             queued.call.requests
-            for queued in (*self._pending.values(), *self._undecided, *self._writing)
+            for queued in (*self._pending.values(), *self._writing)
         )
 
     async def drain(self, *, timeout: float) -> int:
@@ -2220,15 +2216,15 @@ class UsageWriter:
         """
 
         loop = asyncio.get_running_loop()
-        while self._pending or self._undecided:
-            batch = (*self._pending.values(), *self._undecided)
+        while self._pending:
+            batch = tuple(self._pending.values())
             self._pending = {}
-            self._undecided = []
             self._writing = batch
             try:
                 calls = tuple(queued.call for queued in batch)
-                if self._prices_due() or any(queued.undecided for queued in batch):
-                    calls = await loop.run_in_executor(_ledger_executor(), self._decided, batch)
+                if self._prices_due():
+                    # A refresh for the calls after this batch; these are already tiered.
+                    await loop.run_in_executor(_ledger_executor(), self._read_prices)
                 await loop.run_in_executor(_ledger_executor(), self.ledger.record_many, calls)
             except (OSError, ValueError) as exc:
                 self._report_dropped(batch, exc)
@@ -2240,43 +2236,36 @@ class UsageWriter:
                 if not queued.done.done():
                     queued.done.set_result(None)
 
-    def _context_tier(self, model_id: str, usage: Optional[ProtocolUsageReport]) -> Optional[int]:
-        """The tier the held price table puts one call in, or None before any table is read."""
+    def _context_tier(self, model_id: str, usage: Optional[ProtocolUsageReport]) -> int:
+        """The tier the held price table puts one call in; the base tier without usage or a table."""
 
-        if usage is None or self._price_table is None:
-            return 0
         held = self._prices
-        if held is None:
-            return None
+        if usage is None or held is None:
+            return 0
         return context_tier_size(held[0].price(model_id), usage.input_tokens)
 
     def _prices_due(self) -> bool:
-        """Whether the next flush reads the price table: none read, too old, or still being fetched."""
+        """Whether the next flush re-reads the price table: none held, too old, or still being fetched."""
 
         if self._price_table is None:
             return False
         held = self._prices
         return held is None or held[0].pending or monotonic() - held[1] >= _PRICE_TABLE_TTL_SECONDS
 
-    def _decided(self, batch: Sequence[_QueuedRow]) -> tuple[UsageCall, ...]:
-        """Read the price table when due, then decide each undecided call's tier.
+    def _read_prices(self) -> None:
+        """Read the price table; one that cannot be read leaves the held one (or none).
 
-        Runs on the writer's thread. A table that cannot be read leaves the one
-        held, and a call with none is recorded in the base tier: a valuation must
-        never cost a metered call.
+        Never on the controller loop: at construction, before anything is served,
+        and afterwards on the writer's thread. A valuation must never cost a
+        metered call.
         """
 
-        if self._prices_due() and self._price_table is not None:
-            try:
-                self._prices = (self._price_table(), monotonic())
-            except Exception:  # noqa: BLE001 - valuation is optional; metering is not
-                logger.warning("Model Hub usage metering could not read the price table", exc_info=True)
-        return tuple(
-            replace(queued.call, context_tier=self._context_tier(queued.call.model_id, queued.call.usage) or 0)
-            if queued.undecided
-            else queued.call
-            for queued in batch
-        )
+        if self._price_table is None:
+            return
+        try:
+            self._prices = (self._price_table(), monotonic())
+        except Exception:  # noqa: BLE001 - valuation is optional; metering is not
+            logger.warning("Model Hub usage metering could not read the price table", exc_info=True)
 
     def _report_dropped(self, batch: Sequence[_QueuedRow], exc: BaseException) -> None:
         """Report that metering stopped, once per outage rather than per flush.
