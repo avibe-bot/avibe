@@ -8691,21 +8691,33 @@ def cmd_vault_rm(args):
         requester = _vault_cli_requester(args)
         with engine.begin() as conn:
             request, created = vault_service.create_delete_request(
-                conn, args.name, reason=getattr(args, "reason", None), requester=requester, return_created=True,
+                conn,
+                args.name,
+                reason=getattr(args, "reason", None),
+                requester=requester,
+                user_context=caller_resource_user_context(caller_context_from_env()),
+                return_created=True,
             )
             stored_requester = request.get("requester") or {}
             session_id = requester.get("session_id")
-            callback_enabled = (
-                not _vault_callback_disabled(args)
-                and not stored_requester.get("callback_disabled")
-                and session_id
-                and stored_requester.get("session_id") == session_id
+            stored_callback_enabled = not bool(stored_requester.get("callback_disabled"))
+            callback_target_matches = bool(session_id and stored_requester.get("session_id") == session_id)
+            active_session = bool(
+                session_id
                 and conn.execute(
                     select(agent_sessions.c.id).where(
                         agent_sessions.c.id == session_id, agent_sessions.c.status == "active",
                     )
                 ).first() is not None
             )
+            callback_enabled = stored_callback_enabled and callback_target_matches and active_session
+            if created:
+                callback_enabled = (
+                    not _vault_callback_disabled(args)
+                    and stored_callback_enabled
+                    and callback_target_matches
+                    and active_session
+                )
         _publish_cli_vaults_updated(scope="request", request=request, notify_request=created)
         followup = (
             "Avibe resumes this Session after the decision; do not rerun rm."

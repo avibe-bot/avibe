@@ -2895,19 +2895,23 @@ def delete_secret(
     context = resolve_resource_access_context(user_context)
     row = _require_secret_resource_management(conn, _require_row(conn, name), context)
     audit_snapshot = _build_audit_access_snapshot(conn, [name])
-    # Claim the rows with a portable SELECT + UPDATE pair. Do not use DML RETURNING:
-    # Avibe supports Python versions whose system SQLite may predate SQLite 3.35.
-    fulfilled_ids = conn.execute(
-        select(vault_requests.c.id)
-        .where(
+    pending_delete_ids: list[str] = []
+    pending_rows = conn.execute(
+        select(vault_requests).where(
             vault_requests.c.request_type == "delete",
             vault_requests.c.secret_name == name,
             vault_requests.c.status == "pending",
         )
-    ).scalars().all()
+    ).mappings().all()
+    for pending_row in pending_rows:
+        settled_row, _ = _expire_request_if_due(conn, dict(pending_row))
+        if settled_row.get("status") == "pending":
+            pending_delete_ids.append(str(settled_row["id"]))
+    # Claim the rows with a portable SELECT + UPDATE pair. Do not use DML RETURNING:
+    # Avibe supports Python versions whose system SQLite may predate SQLite 3.35.
     decided_at = _now()
     claimed_ids: list[str] = []
-    for request_id in fulfilled_ids:
+    for request_id in pending_delete_ids:
         result = conn.execute(
             vault_requests.update()
             .where(vault_requests.c.id == request_id, vault_requests.c.status == "pending")

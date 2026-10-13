@@ -682,6 +682,22 @@ def test_delete_request_deleted_elsewhere_is_fulfilled(vault):
     assert callback.message == "The user approved deleting the secret 'DELETE_ELSEWHERE'; it has been deleted. Continue the task."
 
 
+def test_direct_delete_expires_overdue_delete_request(vault):
+    _create(vault, name="DELETE_OVERDUE")
+    past = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+
+    with vault.begin() as conn:
+        request = vs.create_delete_request(conn, "DELETE_OVERDUE", requester={"session_id": "ses_delete"})
+        conn.execute(vault_requests.update().where(vault_requests.c.id == request["id"]).values(expires_at=past))
+        vs.delete_secret(conn, "DELETE_OVERDUE")
+        row = dict(conn.execute(select(vault_requests).where(vault_requests.c.id == request["id"])).mappings().one())
+
+    assert row["status"] == "expired"
+    callback = vs.resolve_request_callback(row)
+    assert callback is not None
+    assert "expired" in callback.message.lower()
+
+
 def test_delete_request_expiry_and_deny_callbacks(vault):
     _create(vault, name="DELETE_EXPIRE")
     past = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()

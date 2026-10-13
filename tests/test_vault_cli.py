@@ -12,13 +12,14 @@ import shutil
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
 from sqlalchemy import select
 
-from storage import vault_service
-from storage.models import vault_audit, vault_grants, vault_requests
+from storage import resource_access_service, vault_service
+from storage.models import agent_sessions, vault_audit, vault_grants, vault_requests
 from storage.vault_crypto import Sealed
 from vibe import cli
 
@@ -528,6 +529,104 @@ def test_rm_reuses_pending_request_without_repeating_notification(capfd, monkeyp
 
     assert first["request_id"] == second["request_id"]
     assert [item.get("notify_request", True) for item in published] == [True, False]
+
+
+def test_rm_reused_callback_enabled_request_keeps_auto_resume_guidance(capfd, monkeypatch):
+    _create_standard_secret("CALLBACK_REUSE_RM")
+    now = "2026-10-14T00:00:00+00:00"
+    with cli._open_vault_engine().begin() as conn:
+        conn.execute(
+            agent_sessions.insert().values(
+                id="ses_rm_callback",
+                scope_id=None,
+                agent_id=None,
+                agent_name="codex",
+                agent_backend="codex",
+                agent_variant="codex",
+                model=None,
+                reasoning_effort=None,
+                session_anchor="ses_rm_callback",
+                workdir="/tmp",
+                native_session_id="native-rm",
+                title=None,
+                status="active",
+                visibility="foreground",
+                agent_status="idle",
+                composer_draft_text=None,
+                composer_draft_updated_at=None,
+                pinned=0,
+                metadata_json="{}",
+                created_at=now,
+                updated_at=now,
+                last_active_at=now,
+            )
+        )
+    monkeypatch.setattr(cli, "_publish_cli_vaults_updated", lambda **kwargs: None)
+
+    assert cli.cmd_vault_rm(_ns(name="CALLBACK_REUSE_RM", session_id="ses_rm_callback")) == 0
+    first = json.loads(capfd.readouterr().out)
+    assert cli.cmd_vault_rm(_ns(name="CALLBACK_REUSE_RM", session_id="ses_rm_callback", no_callback=True)) == 0
+    second = json.loads(capfd.readouterr().out)
+
+    assert first["request_id"] == second["request_id"]
+    assert "Avibe resumes this Session" in second["message"]
+    assert "vibe vault await" not in second["message"]
+
+
+def test_rm_passes_remote_authority_for_acl_and_request_snapshot(capfd, monkeypatch):
+    editor = resource_access_service.ResourceUserContext(
+        subject="remote-editor",
+        email="remote-editor@example.com",
+        organization_id="org-1",
+        organization_member_id="member-editor",
+        organization_role="member",
+        group_ids=frozenset(),
+        instance_role="viewer",
+        instance_access_source="organization_group",
+        is_remote=True,
+    )
+    owner = resource_access_service.ResourceUserContext(
+        subject="remote-owner",
+        email="remote-owner@example.com",
+        organization_id="org-1",
+        organization_member_id="member-owner",
+        organization_role="owner",
+        group_ids=frozenset({"group-allowed"}),
+        instance_role="owner",
+        instance_access_source="owner",
+        is_remote=True,
+    )
+    with cli._open_vault_engine().begin() as conn:
+        vault_service.create_secret(conn, name="PRIVATE_REMOTE_RM", sealed=_sealed("private-remote-rm"))
+        private_id = conn.execute(
+            select(vault_service.vault_secrets.c.id).where(vault_service.vault_secrets.c.name == "PRIVATE_REMOTE_RM")
+        ).scalar_one()
+        resource_access_service.ensure_resource_policy(
+            conn,
+            resource_kind="vault_secret",
+            resource_id=str(private_id),
+            organization_id="org-1",
+            owner_user_id="remote-owner",
+            access_level="scope",
+            group_ids=["group-allowed"],
+        )
+        vault_service.create_secret(conn, name="ALLOWED_REMOTE_RM", sealed=_sealed("allowed-remote-rm"))
+    caller = SimpleNamespace(is_remote=True, to_metadata=lambda: {"session_id": "ses_remote_rm"})
+    monkeypatch.setattr(cli, "caller_context_from_env", lambda: caller)
+    monkeypatch.setattr(cli, "caller_resource_user_context", lambda _context: editor)
+    monkeypatch.setattr(cli, "_publish_cli_vaults_updated", lambda **kwargs: None)
+
+    assert cli.cmd_vault_rm(_ns(name="PRIVATE_REMOTE_RM", session_id="ses_remote_rm")) == 1
+    assert "vault_access_forbidden" in capfd.readouterr().err
+    with cli._open_vault_engine().connect() as conn:
+        assert conn.execute(select(vault_requests.c.id).where(vault_requests.c.secret_name == "PRIVATE_REMOTE_RM")).first() is None
+
+    monkeypatch.setattr(cli, "caller_resource_user_context", lambda _context: owner)
+    assert cli.cmd_vault_rm(_ns(name="ALLOWED_REMOTE_RM", session_id="ses_remote_rm")) == 0
+    capfd.readouterr()
+    with cli._open_vault_engine().connect() as conn:
+        row = conn.execute(select(vault_requests).where(vault_requests.c.secret_name == "ALLOWED_REMOTE_RM")).mappings().one()
+    assert resource_access_service.RESOURCE_USER_CONTEXT_METADATA_KEY in json.loads(row["requester"])
 
 
 def test_rm_missing_secret_still_reports_not_found(capfd):
