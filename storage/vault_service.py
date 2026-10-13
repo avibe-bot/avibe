@@ -173,6 +173,10 @@ class FieldsNotSupportedError(VaultServiceError):
     pass
 
 
+class RecordMismatchError(VaultServiceError):
+    pass
+
+
 class SecretConflictError(VaultServiceError):
     pass
 
@@ -2666,6 +2670,8 @@ def create_secret(
         field_name = _validate_field_name(raw_field.get("name"), field="field name")
         if field_name in field_names_seen:
             raise FieldExistsError(f"field {field_name!r} already exists on {name}")
+        if raw_field.get("record", f"{name}.{field_name}") != f"{name}.{field_name}":
+            raise RecordMismatchError(f"record does not match field {field_name!r} on {name}")
         envelope = raw_field.get("sealed") or raw_field.get("envelope")
         if not isinstance(envelope, Sealed):
             raise VaultServiceError("fields entries require sealed envelopes")
@@ -2863,12 +2869,9 @@ def update_secret_metadata(
     if not values:
         return _meta_payload(row)
 
-    # Display edits preserve approval versions. A default label changes how a
-    # field write maps to its AAD record name, so invalidate pre-seal snapshots
-    # for label changes without expiring grants over unchanged envelopes.
-    if "default_field" in fields:
-        values["updated_at"] = _next_updated_at(row["updated_at"])
-    compared_columns = [key for key in values if key != "updated_at"]
+    # Display metadata does not change the envelopes or their approval versions.
+    # Compare the written columns as well, since those edits share that version.
+    compared_columns = list(values)
     result = conn.execute(
         vault_secrets.update()
         .where(
@@ -3174,12 +3177,19 @@ def _stored_fields_json(fields: list[dict[str, Any]]) -> str | None:
     return json.dumps(fields) if fields else None
 
 
+def _require_field_record(row: dict[str, Any], field_name: str, record: str) -> None:
+    expected = record_name_for_field(str(row["name"]), field_name, default_field=_default_field_name(row))
+    if record != expected:
+        raise RecordMismatchError(f"record does not match field {field_name!r} on {row['name']}")
+
+
 def update_secret_field(
     conn: Connection,
     secret_name: str,
     field_name: str,
     sealed: Sealed,
     *,
+    record: str,
     expected_updated_at: str | None = None,
     cache: VaultGrantRuntimeCache = GRANT_RUNTIME_CACHE,
     release_scopes: list[dict[str, str]] | None = None,
@@ -3193,6 +3203,7 @@ def update_secret_field(
         raise SecretConflictError(f"secret {secret_name!r} changed while the field was being updated")
     if row.get("kind") == "keypair":
         raise FieldsNotSupportedError(f"{secret_name} does not support fields")
+    _require_field_record(row, field_name, record)
     default_field = _default_field_name(row)
     extras = _extra_field_rows(row)
     extra_by_name = {str(item["name"]): item for item in extras}
@@ -3222,9 +3233,15 @@ def update_secret_field(
     stmt = vault_secrets.update().where(
         vault_secrets.c.id == row["id"],
         vault_secrets.c.updated_at == snapshot_updated_at,
+        vault_secrets.c.public_meta == row.get("public_meta"),
     )
     result = conn.execute(stmt.values(**values))
     if result.rowcount != 1:
+        # A rename can race this transaction after its initial read without
+        # changing updated_at. Never store an envelope under the wrong record.
+        current = _require_row(conn, secret_name)
+        if current.get("id") == row.get("id"):
+            _require_field_record(current, field_name, record)
         raise SecretConflictError(f"secret {secret_name!r} changed while the field was being updated")
     _expire_envelope_change(conn, secret_name, cache=cache, release_scopes=release_scopes)
     audit(conn, "updated", secret_name=secret_name, delivery={"field": field_name, "op": op})
@@ -3270,21 +3287,6 @@ def remove_secret_field(
     _expire_envelope_change(conn, secret_name, cache=cache, release_scopes=release_scopes)
     audit(conn, "updated", secret_name=secret_name, delivery={"field": field_name, "op": "remove"})
     return _meta_payload(_require_row(conn, secret_name))
-
-
-def rename_default_field(
-    conn: Connection,
-    secret_name: str,
-    field_name: str,
-    *,
-    user_context: Any = None,
-) -> dict[str, Any]:
-    return update_secret_metadata(conn, secret_name, default_field=field_name, user_context=user_context)
-
-
-def get_secret_field_envelope(conn: Connection, ref: str, *, user_context: Any = None) -> Sealed:
-    _row, entry = _resolve_record_ref(conn, ref, user_context=user_context)
-    return entry["envelope"]
 
 
 def _disable_webauthn_factors_if_vault_deestablished(conn: Connection) -> None:

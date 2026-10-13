@@ -17,6 +17,7 @@ from storage.models import (
     agent_sessions,
     metadata,
     state_meta,
+    vault_audit,
     vault_auth_factors,
     vault_grants,
     vault_requests,
@@ -390,10 +391,12 @@ def test_fields_use_canonical_records_and_default_label_fallback(vault):
         assert vs.get_secret_meta(conn, "lowerSecret")["default_field"] == "value"
 
 
-def test_default_rename_is_metadata_only_and_collision_safe(vault):
+@pytest.mark.parametrize("protection", ["standard", "protected"])
+def test_default_rename_is_metadata_only_and_collision_safe(vault, protection):
     _create(
         vault,
         name="LOGIN",
+        protection=protection,
         default_field="password",
         fields=[{"name": "username", "sealed": _sealed("username")}],
         policy={"always_ask": True},
@@ -402,25 +405,32 @@ def test_default_rename_is_metadata_only_and_collision_safe(vault):
     with vault.begin() as conn:
         request = vs.create_access_request(conn, "LOGIN")
         grant = _grant_from_request(conn, request)
+        pending = vs.create_access_request(conn, "LOGIN")
+        pending_versions = pending["card"]["grant_options"][0]["member_versions"]
         before = vs.get_secret_meta(conn, "LOGIN")
-        default_envelope = vs.get_envelope(conn, "LOGIN")
+        get_envelope = vs.get_protected_envelope if protection == "protected" else vs.get_envelope
+        default_envelope = get_envelope(conn, "LOGIN")
         renamed = vs.update_secret_metadata(conn, "LOGIN", default_field="credential")
         after = vs.get_secret_meta(conn, "LOGIN")
 
         assert renamed["default_field"] == "credential"
         assert renamed["fields"] == ["credential", "username"]
         assert renamed["policy"] == {"always_ask": True}
-        assert after["updated_at"] > before["updated_at"]
+        assert after["updated_at"] == before["updated_at"]
+        hydrated = vs.get_request(conn, pending["id"])
+        assert hydrated["status"] == "pending"
+        assert hydrated["card"]["grant_options"][0]["member_versions"] == pending_versions
+        assert _grant_from_request(conn, pending)["status"] == "active"
         assert vs.get_grant_created_by_request(conn, grant["request_id"])["status"] == "active"
-        assert vs.get_envelope(conn, "LOGIN") == default_envelope
-        with pytest.raises(vs.SecretConflictError):
+        assert get_envelope(conn, "LOGIN") == default_envelope
+        with pytest.raises(vs.RecordMismatchError):
             vs.update_secret_field(
-                conn, "LOGIN", "password", _sealed("stale-default"),
+                conn, "LOGIN", "password", _sealed("stale-default"), record="LOGIN",
                 expected_updated_at=before["updated_at"],
             )
         with pytest.raises(vs.FieldExistsError):
             vs.update_secret_metadata(conn, "LOGIN", default_field="username")
-        assert vs.get_envelope(conn, "LOGIN") == default_envelope
+        assert get_envelope(conn, "LOGIN") == default_envelope
 
 
 def test_ordinary_metadata_preserves_approval_and_policy_edits_expire_it(vault):
@@ -458,9 +468,51 @@ def test_field_write_cas_without_explicit_version_has_no_conflict_side_effects(v
     require_management = vs._require_secret_resource_management
     raced = False
 
-    def rename_after_snapshot(conn, row, context):
+    def write_after_snapshot(conn, row, context):
         nonlocal raced
         snapshot = require_management(conn, row, context)
+        if not raced:
+            raced = True
+            with vault.begin() as winner:
+                vs.update_secret_field(winner, "LOGIN", "other", _sealed("winner"), record="LOGIN.other")
+        return snapshot
+
+    monkeypatch.setattr(vs, "_require_secret_resource_management", write_after_snapshot)
+    release_scopes = []
+    with vault.begin() as conn:
+        with pytest.raises(vs.SecretConflictError):
+            if operation == "remove":
+                vs.remove_secret_field(conn, "LOGIN", "username", release_scopes=release_scopes)
+            else:
+                field = {"add": "totp", "replace_default": "value", "replace_extra": "username"}[operation]
+                record = "LOGIN" if field == "value" else f"LOGIN.{field}"
+                vs.update_secret_field(conn, "LOGIN", field, _sealed("loser"), record=record, release_scopes=release_scopes)
+        assert vs.get_secret_meta(conn, "LOGIN")["fields"] == ["value", "username", "other"]
+        assert vs.get_protected_envelope(conn, "LOGIN") == _sealed("login")
+        assert vs.get_protected_envelope(conn, "LOGIN.username") == _sealed("username")
+        assert vs.get_protected_envelope(conn, "LOGIN.other") == _sealed("winner")
+        # Only the winning write changed authorization and produced a field audit.
+        assert vs.get_grant_created_by_request(conn, grant["request_id"])["status"] == "expired"
+        assert vs.get_request(conn, pending["id"])["status"] == "expired"
+        assert vs.GRANT_RUNTIME_CACHE.covered_names(grant["id"]) == []
+        updates = list(conn.execute(select(vault_audit.c.delivery).where(vault_audit.c.event == "updated")).scalars())
+        assert [json.loads(payload)["field"] for payload in updates] == ["other"]
+        assert release_scopes == []
+
+
+@pytest.mark.parametrize("field,record", [("value", "LOGIN"), ("password", "LOGIN.password")])
+def test_protected_field_write_rejects_rename_after_record_resolution(vault, monkeypatch, field, record):
+    _create(vault, name="LOGIN", protection="protected")
+    with vault.begin() as conn:
+        grant = _grant_from_request(conn, vs.create_access_request(conn, "LOGIN"))
+        pending = vs.create_access_request(conn, "LOGIN")
+        before = vs.get_secret_meta(conn, "LOGIN")
+    original = vs._require_secret_resource_management
+    raced = False
+
+    def rename_after_snapshot(conn, row, context):
+        nonlocal raced
+        snapshot = original(conn, row, context)
         if not raced:
             raced = True
             with vault.begin() as winner:
@@ -470,18 +522,14 @@ def test_field_write_cas_without_explicit_version_has_no_conflict_side_effects(v
     monkeypatch.setattr(vs, "_require_secret_resource_management", rename_after_snapshot)
     release_scopes = []
     with vault.begin() as conn:
-        with pytest.raises(vs.SecretConflictError):
-            if operation == "remove":
-                vs.remove_secret_field(conn, "LOGIN", "username", release_scopes=release_scopes)
-            else:
-                field = {"add": "totp", "replace_default": "value", "replace_extra": "username"}[operation]
-                vs.update_secret_field(conn, "LOGIN", field, _sealed("loser"), release_scopes=release_scopes)
-        assert vs.get_secret_meta(conn, "LOGIN")["fields"] == ["password", "username"]
+        with pytest.raises(vs.RecordMismatchError):
+            vs.update_secret_field(conn, "LOGIN", field, _sealed("loser"), record=record, release_scopes=release_scopes)
         assert vs.get_protected_envelope(conn, "LOGIN") == _sealed("login")
-        assert vs.get_protected_envelope(conn, "LOGIN.username") == _sealed("username")
+        after = vs.get_secret_meta(conn, "LOGIN")
+        assert after["updated_at"] == before["updated_at"]
+        assert after["fields"] == ["password"]
         assert vs.get_grant_created_by_request(conn, grant["request_id"])["status"] == "active"
         assert vs.get_request(conn, pending["id"])["status"] == "pending"
-        assert vs.GRANT_RUNTIME_CACHE.covered_names(grant["id"]) == ["LOGIN"]
         assert release_scopes == []
 
 
@@ -523,6 +571,7 @@ def test_field_writes_replace_add_remove_with_versioned_cas(vault):
             "LOGIN",
             "username",
             _sealed("username"),
+            record="LOGIN.username",
             expected_updated_at=original["updated_at"],
         )
         replaced = vs.update_secret_field(
@@ -530,6 +579,7 @@ def test_field_writes_replace_add_remove_with_versioned_cas(vault):
             "LOGIN",
             "value",
             _sealed("replacement"),
+            record="LOGIN",
             expected_updated_at=added["updated_at"],
         )
 
@@ -541,6 +591,7 @@ def test_field_writes_replace_add_remove_with_versioned_cas(vault):
                 "LOGIN",
                 "username",
                 _sealed("stale"),
+                record="LOGIN.username",
                 expected_updated_at=original["updated_at"],
             )
         assert vs.get_secret_meta(conn, "LOGIN")["fields"] == ["value", "username"]
@@ -587,7 +638,7 @@ def test_field_limits_duplicates_and_version_monotonicity(vault):
             fields=[{"name": f"field{i}", "sealed": _sealed()} for i in range(31)],
         )
         with pytest.raises(vs.TooManyFieldsError):
-            vs.update_secret_field(conn, "LOGIN", "overflow", _sealed())
+            vs.update_secret_field(conn, "LOGIN", "overflow", _sealed(), record="LOGIN.overflow")
         with pytest.raises(vs.InvalidRequestError, match="default field"):
             vs.remove_secret_field(conn, "LOGIN", "value")
         with pytest.raises(vs.FieldNotFoundError, match="fields: value, field0"):
@@ -595,7 +646,7 @@ def test_field_limits_duplicates_and_version_monotonicity(vault):
         # A persisted future timestamp models a clock that moved backwards.
         future = "2100-01-01T00:00:00+00:00"
         conn.execute(vault_secrets.update().where(vault_secrets.c.name == "LOGIN").values(updated_at=future))
-        replaced = vs.update_secret_field(conn, "LOGIN", "field0", _sealed("replacement"))
+        replaced = vs.update_secret_field(conn, "LOGIN", "field0", _sealed("replacement"), record="LOGIN.field0")
         assert replaced["updated_at"] == "2100-01-01T00:00:00.000001+00:00"
         removed = vs.remove_secret_field(conn, "LOGIN", "field0")
         assert removed["updated_at"] == "2100-01-01T00:00:00.000002+00:00"
@@ -609,7 +660,7 @@ def test_keypair_field_refs_and_mutations_are_rejected(vault):
         with pytest.raises(vs.FieldsNotSupportedError):
             vs.get_secret_record_meta(conn, "SIGNING_KEY.value")
         with pytest.raises(vs.FieldsNotSupportedError):
-            vs.update_secret_field(conn, "SIGNING_KEY", "value", _sealed("replacement"))
+            vs.update_secret_field(conn, "SIGNING_KEY", "value", _sealed("replacement"), record="SIGNING_KEY")
         with pytest.raises(vs.FieldsNotSupportedError):
             vs.remove_secret_field(conn, "SIGNING_KEY", "value")
 
@@ -714,7 +765,7 @@ def test_access_request_deduplicates_secret_members_and_exposes_field_metadata(v
         assert resolved["grant"]["member_snapshot"] == ["PROTECTED_LOGIN"]
         assert resolved["envelope"] == _sealed("username")
         scopes = []
-        vs.update_secret_field(conn, "PROTECTED_LOGIN", "username", _sealed("new"), release_scopes=scopes)
+        vs.update_secret_field(conn, "PROTECTED_LOGIN", "username", _sealed("new"), record="PROTECTED_LOGIN.username", release_scopes=scopes)
         assert vs.get_grant_created_by_request(conn, grant["request_id"])["status"] == "expired"
         assert scopes == [{"grant_id": grant["id"]}]
         next_grant = _grant_from_request(conn, vs.create_access_request(conn, "PROTECTED_LOGIN"))

@@ -737,8 +737,8 @@ def test_secret_management_follows_instance_manager_capability(vault, role):
         operations = (
             lambda: vault_service.update_secret_tags(conn, "MANAGED_KEY", ["test"], user_context=context),
             lambda: vault_service.update_secret_metadata(conn, "MANAGED_KEY", description="managed", user_context=context),
-            lambda: vault_service.update_secret_field(conn, "MANAGED_KEY", "username", _sealed("user"), user_context=context),
-            lambda: vault_service.update_secret_field(conn, "MANAGED_KEY", "value", _sealed("default"), user_context=context),
+            lambda: vault_service.update_secret_field(conn, "MANAGED_KEY", "username", _sealed("user"), record="MANAGED_KEY.username", user_context=context),
+            lambda: vault_service.update_secret_field(conn, "MANAGED_KEY", "value", _sealed("default"), record="MANAGED_KEY", user_context=context),
             lambda: vault_service.update_secret_metadata(conn, "MANAGED_KEY", default_field="password", user_context=context),
             lambda: vault_service.remove_secret_field(conn, "MANAGED_KEY", "username", user_context=context),
             lambda: vault_service.update_secret_classification(conn, "MANAGED_KEY", protection="protected", user_context=context),
