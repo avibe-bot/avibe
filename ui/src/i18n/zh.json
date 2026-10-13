@@ -4766,6 +4766,40 @@
       }
     },
     "agentActivity": {
+      "hosted": {
+        "mode": {
+          "native": "原生 · {{provider}}",
+          "proxy": "由 {{provider}} 代理"
+        },
+        "status": {
+          "failed": "失败",
+          "incomplete": "未完成",
+          "pending": "已中断"
+        },
+        "cost": {
+          "included": "订阅内含",
+          "list": "≈ ${{usd}}",
+          "reported": "${{usd}}",
+          "calls_one": "{{cost}}（{{count}} 次调用）",
+          "calls_other": "{{cost}}（{{count}} 次调用）"
+        },
+        "count": {
+          "sources_one": "{{count}} 个来源",
+          "sources_other": "{{count}} 个来源",
+          "posts_one": "{{count}} 条帖子",
+          "posts_other": "{{count}} 条帖子",
+          "images_one": "{{count}} 张",
+          "images_other": "{{count}} 张"
+        },
+        "ranNative": "原生执行：{{where}}",
+        "ranProxy": "代理执行：{{where}}",
+        "duration": "用时 {{seconds}} 秒",
+        "alsoSearched": "还搜索了：{{queries}}",
+        "image": {
+          "revisedPrompt": "修订后的提示词",
+          "download": "下载 {{name}}"
+        }
+      },
       "running": "正在执行",
       "step": "{{count}} 步",
       "steps": "{{count}} 步",

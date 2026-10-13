@@ -4766,6 +4766,40 @@
       }
     },
     "agentActivity": {
+      "hosted": {
+        "mode": {
+          "native": "Native · {{provider}}",
+          "proxy": "Via {{provider}} proxy"
+        },
+        "status": {
+          "failed": "Failed",
+          "incomplete": "Incomplete",
+          "pending": "Cut off"
+        },
+        "cost": {
+          "included": "Included in subscription",
+          "list": "≈ ${{usd}}",
+          "reported": "${{usd}}",
+          "calls_one": "{{cost}} for {{count}} call",
+          "calls_other": "{{cost}} for {{count}} calls"
+        },
+        "count": {
+          "sources_one": "{{count}} source",
+          "sources_other": "{{count}} sources",
+          "posts_one": "{{count}} post",
+          "posts_other": "{{count}} posts",
+          "images_one": "{{count}} image",
+          "images_other": "{{count}} images"
+        },
+        "ranNative": "Ran natively on {{where}}",
+        "ranProxy": "Run by proxy executor {{where}}",
+        "duration": "took {{seconds}} s",
+        "alsoSearched": "Also searched: {{queries}}",
+        "image": {
+          "revisedPrompt": "Revised prompt",
+          "download": "Download {{name}}"
+        }
+      },
       "running": "Running",
       "step": "{{count}} step",
       "steps": "{{count}} steps",
