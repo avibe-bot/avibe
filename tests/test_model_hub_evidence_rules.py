@@ -225,3 +225,42 @@ async def test_a_free_form_effort_is_forwarded_and_never_breaks_the_gateway(tmp_
                 )
             assert error.value.code != "effort_unsupported"
     assert service.capability_evidence.records() == []
+
+
+@pytest.mark.asyncio
+async def test_a_refused_effort_still_waits_for_a_capable_hop_that_is_cooling_down(tmp_path):
+    """MH-HOSTED-006: effort_unsupported only when no hop that could recover accepts the effort."""
+    from datetime import timedelta
+
+    from core.handlers.model_hub.capability_evidence import EvidenceRecord, identity_digest
+    from core.handlers.model_hub.hosted_tools import HOSTED_PROBE_SHAPE, engine_stamp
+    from tests.test_model_hub_l3 import NOW, _canonicalize_fixed_test_routes, _service
+
+    refusing = _source("src_refuses01", "Refuses ultra")
+    cooling = _source(
+        "src_cooling01", "Cooling", status="cooldown", retry_at=(NOW + timedelta(minutes=5)).isoformat()
+    )
+    service = _service(tmp_path, sources=[refusing, cooling])
+    model = _canonicalize_fixed_test_routes(service)["codex"]
+    service.capability_evidence.write(
+        EvidenceRecord(
+            source_id=refusing.id,
+            model_id="shared-model",
+            feature=EvidenceFeature.effort("ultra"),
+            status="unsupported",
+            basis="observed",
+            observed_at=service.now(),
+            engine=engine_stamp(),
+            shape=HOSTED_PROBE_SHAPE,
+            source_identity=identity_digest(refusing),
+            detail="400 invalid_request_error",
+        ),
+        live=[refusing, cooling],
+    )
+    request = ModelHubRequest({"input": "hi", "reasoning": {"effort": "ultra"}}, protocol="openai_responses")
+
+    with pytest.raises(ModelHubError) as waiting:
+        await service.resolve(backend="codex", model_id=model, request=request)
+    assert waiting.value.code != "effort_unsupported"
+    assert waiting.value.supply_state == "waiting"
+    assert service.adapter.invocations == []

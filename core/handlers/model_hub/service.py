@@ -5836,6 +5836,27 @@ class ModelHubService:
         )
         return view.status == "unsupported"
 
+    def _effort_capable_hop_may_recover(
+        self, backend: str, model_id: str, supply_channel: Any, request: Any
+    ) -> bool:
+        """Whether a temporarily blocked hop of this route does not refuse the request's effort."""
+
+        feature = EvidenceFeature.effort_or_none(wire_effort(request, getattr(request, "protocol", "")))
+        if feature is None:
+            return False
+        resolution = self._invocation_resolution(
+            self.store.load(), cast(BackendName, backend), model_id, supply_channel,
+        )
+        return any(
+            hop.source is not None
+            and hop.model_id is not None
+            and self.capability_evidence.view(
+                hop.source, hop.model_id, feature, engine=engine_stamp(), shape=HOSTED_PROBE_SHAPE, now=self.now(),
+            ).status
+            != "unsupported"
+            for hop in resolution.self_healing_hops(supply_channel)
+        )
+
     async def _learn_capability_evidence(
         self, source: ModelHubSourceConfig, model_id: str, request: Any, outcome: RawCallOutcome
     ) -> None:
@@ -9439,6 +9460,14 @@ class ModelHubService:
                 turn_outcome=ENGINE_DOWN_TURN_OUTCOME,
                 local_error_detail=format_os_errno(outcome.os_errno),
             )
+        if (
+            unsupported_reason == "effort_unsupported"
+            and failed_source is None
+            and self._effort_capable_hop_may_recover(backend, model_id, supply_channel, request)
+        ):
+            # A hop that does not refuse this effort is only blocked for now:
+            # the request waits for it like any other, rather than ending here.
+            unsupported_reason = None
         if unsupported_reason is not None and failed_source is None:
             # No upstream attempt exists. Exhaustion would invent a failed
             # attempt (and a retryable supply state) for a local limitation.

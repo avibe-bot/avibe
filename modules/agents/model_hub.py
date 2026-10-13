@@ -63,7 +63,6 @@ from core.services.settings import load_config_or_default
 from core.handlers.model_hub.turn_gateway import ModelHubTurnGateway
 from core.native_dispatch_phase import mark_prewrite_recovery_required
 from modules.agents.catalog import display_name_for_backend
-from vibe.backend_model_catalog import without_client_presets
 from vibe.codex_config import format_toml_basic_string
 from vibe.i18n import t
 from vibe.opencode_config import managed_opencode_runtime_config_content
@@ -1277,12 +1276,6 @@ class ModelHubRuntimeRouter:
             and backend_model.supports_reasoning is not False
             else ()
         )
-        if backend == "vibey":
-            # A client preset (Codex ``ultra``) is never a wire tier, including on
-            # rows an earlier build saved with one (#2539).
-            reasoning_efforts = tuple(
-                without_client_presets((requested_model, resolution.target_model), reasoning_efforts)
-            )
         self._last_supply_state[(backend, requested_model)] = ("ok", None)
         if source.supply_channel == "native_cli":
             if self.service.revocations.list():

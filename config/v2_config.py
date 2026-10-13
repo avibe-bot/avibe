@@ -9,7 +9,7 @@ import shutil
 import tempfile
 import threading
 from contextlib import contextmanager
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field, fields, replace
 from datetime import datetime
 from pathlib import Path
 from typing import (
@@ -3016,6 +3016,26 @@ class ModelHubAgentSupplyConfig:
 MODEL_HUB_HOSTED_TOOLS: tuple[str, ...] = HOSTED_TOOLS
 
 
+def _drop_vibey_client_presets(agent: "ModelHubAgentSupplyConfig") -> None:
+    """Keep client presets (Codex ``ultra``) out of Vibey's model rows.
+
+    A preset is a name another client maps before sending, never a wire tier,
+    and Vibey is not that client. 3.2.0 saved Vibey rows carrying one (#2539),
+    so every read drops them here, the single owner of those rows: the catalog
+    payload, the picker, the launch and the API then agree, and the next save
+    writes the clean list.
+    """
+
+    from vibe.backend_model_catalog import without_client_presets
+
+    agent.models = [
+        replace(model, reasoning_efforts=without_client_presets((model.id,), model.reasoning_efforts))
+        if model.reasoning_efforts
+        else model
+        for model in agent.models
+    ]
+
+
 @dataclass(frozen=True)
 class ModelHubHostedToolConfig:
     """One hosted tool's user toggle (``vibey-hosted-tools.md`` §3.3).
@@ -3217,6 +3237,7 @@ class ModelHubConfig:
             runtime_default_applied=runtime_default_applied,
             hosted_tools=_hosted_tools_from_payload(payload.get("hosted_tools"), sources),
         )
+        _drop_vibey_client_presets(config.agents["vibey"])
         agents = config.agents
         for backend in MODEL_HUB_BACKENDS:
             configured_sources = agents[backend].sources

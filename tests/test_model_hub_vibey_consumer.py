@@ -1507,31 +1507,32 @@ async def test_concurrent_responses_keep_their_own_origin(tmp_path):
         await gateway.close()
 
 
-@pytest.mark.asyncio
-async def test_a_saved_vibey_row_never_offers_a_client_preset(tmp_path, monkeypatch):
-    """MH-HOSTED-006 (#2539): a row saved with Codex's ``ultra`` neither reaches the wire nor the effort menu."""
+
+def test_a_released_vibey_row_loads_without_its_client_preset(tmp_path, monkeypatch):
+    """MH-HOSTED-006 (#2539): 3.2.0 saved Vibey rows with Codex's ``ultra``; every read drops it, once, at load."""
+    from config.v2_config import V2Config
+    from core.services.settings import default_config
     from vibe import api
 
-    source = _source("src_primary01", "Primary", protocol="openai_responses", model_id="gpt-5.6-sol")
-    service = _vibey_service(tmp_path, [source])
-    saved = ["low", "medium", "high", "xhigh", "max", "ultra"]
-    service.store.config.agents["vibey"].models[0] = ModelHubBackendModelConfig(
-        id="menu-alias", supports_reasoning=True, reasoning_efforts=saved,
+    released = json.loads(
+        (Path(__file__).parent / "fixtures/model_hub/released_3_2_0_vibey_client_preset.json").read_text(encoding="utf-8")
     )
-    gateway = ModelHubTurnGateway(service)
-    router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
-    try:
-        hop = await router.resolve_hop("menu-alias", process_scope="vibey:test", turn_id="turn-presets")
-    finally:
-        await gateway.close()
-    assert hop["capabilities"]["reasoning_efforts"] == ["low", "medium", "high", "xhigh", "max"]
+    clean = ["low", "medium", "high", "xhigh", "max"]
 
-    menu_row = ModelHubBackendModelConfig(id="gpt-5.6-sol", supports_reasoning=True, reasoning_efforts=saved)
-    config = SimpleNamespace(
-        model_hub=SimpleNamespace(agents={"vibey": SimpleNamespace(models=[menu_row])})
-    )
-    monkeypatch.setattr(api.V2Config, "load", classmethod(lambda cls, *a, **k: config))
-    [option] = api.agent_model_options("vibey")["models"]
-    assert option["reasoning_efforts"] == ["low", "medium", "high", "xhigh", "max"]
-    # The saved row itself is user data and stays as it was written.
-    assert menu_row.reasoning_efforts == saved
+    config = ModelHubConfig.from_payload(copy.deepcopy(released), repairing=True)
+    assert config.agents["vibey"].models[0].reasoning_efforts == clean
+    written = config.to_payload()
+    assert written["agents"]["vibey"]["models"][0]["reasoning_efforts"] == clean
+    # Only the preset changes: Sources, other Agents and the rest of the row are as 3.2.0 wrote them.
+    expected = copy.deepcopy(released)
+    expected["agents"]["vibey"]["models"][0]["reasoning_efforts"] = clean
+    assert written == expected
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    payload = api.config_to_payload(default_config(), include_secrets=True, include_internal=True)
+    payload["model_hub"] = copy.deepcopy(released)
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+    loaded = V2Config.load(config_path=config_path)
+    assert not loaded.load_warnings
+    assert loaded.model_hub.agents["vibey"].models[0].reasoning_efforts == clean
