@@ -1,8 +1,14 @@
 from __future__ import annotations
 
+import json
+import sqlite3
+from pathlib import Path
+
+from alembic import command
 from sqlalchemy import text
 
 from storage.db import create_sqlite_engine
+from storage import migrations
 from storage.models import metadata
 
 
@@ -20,7 +26,7 @@ def test_vault_metadata_schema_matches_grant_id_tag_model(tmp_path):
         assert "vault_links" not in tables
 
         secret_cols = {row[1] for row in conn.execute(text("pragma table_info(vault_secrets)"))}
-        assert {"name", "tags", "kind", "protection", "ciphertext", "nonce", "wrap_meta"} <= secret_cols
+        assert {"name", "tags", "kind", "protection", "ciphertext", "nonce", "wrap_meta", "fields"} <= secret_cols
         assert "group_name" not in secret_cols
         secret_indexes = {row[1] for row in conn.execute(text("select seq, name from pragma_index_list('vault_secrets')"))}
         assert "uq_vault_secrets_name_folded" in secret_indexes
@@ -47,3 +53,93 @@ def test_vault_metadata_schema_matches_grant_id_tag_model(tmp_path):
         } <= grant_cols
         assert "scope_type" not in grant_cols
         assert "scope_ref" not in grant_cols
+
+
+def test_vault_fields_migration_round_trip_preserves_old_rows(tmp_path: Path):
+    db_path = tmp_path / "vault_migration.sqlite"
+    migrations.run_migrations(db_path, revision="20261012_0064")
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            insert into vault_secrets (
+                id, name, kind, protection, source, ciphertext, nonce, wrap_meta,
+                public_meta, use_count, created_at, updated_at
+            ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "vlt_old",
+                "OLD_SECRET",
+                "static",
+                "standard",
+                "manual",
+                "ct-old",
+                "n-old",
+                "wm-old",
+                json.dumps({"description": "legacy"}),
+                0,
+                "2026-10-13T00:00:00+00:00",
+                "2026-10-13T00:00:00+00:00",
+            ),
+        )
+        conn.commit()
+
+    migrations.run_migrations(db_path)
+    with sqlite3.connect(db_path) as conn:
+        columns = {row[1] for row in conn.execute("pragma table_info(vault_secrets)")}
+        row = conn.execute(
+            "select name, ciphertext, public_meta, fields from vault_secrets where id = ?",
+            ("vlt_old",),
+        ).fetchone()
+        assert "fields" in columns
+        assert row == ("OLD_SECRET", "ct-old", json.dumps({"description": "legacy"}), None)
+
+    command.downgrade(migrations.alembic_config(db_path), "20261012_0064")
+    with sqlite3.connect(db_path) as conn:
+        columns = {row[1] for row in conn.execute("pragma table_info(vault_secrets)")}
+        row = conn.execute(
+            "select name, ciphertext, public_meta from vault_secrets where id = ?",
+            ("vlt_old",),
+        ).fetchone()
+        assert "fields" not in columns
+        assert row == ("OLD_SECRET", "ct-old", json.dumps({"description": "legacy"}))
+
+
+def test_head_repair_adds_missing_fields_column_without_dropping_rows(tmp_path: Path):
+    db_path = tmp_path / "vault_repair.sqlite"
+    engine = create_sqlite_engine(db_path)
+    metadata.create_all(engine)
+    engine.dispose()
+    with sqlite3.connect(db_path) as conn:
+        conn.execute('alter table "vault_secrets" drop column "fields"')
+        conn.execute(
+            """
+            insert into vault_secrets (
+                id, name, kind, protection, source, ciphertext, nonce, wrap_meta,
+                use_count, created_at, updated_at
+            ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "vlt_repair",
+                "REPAIR_SECRET",
+                "static",
+                "standard",
+                "manual",
+                "ct-repair",
+                "n-repair",
+                "wm-repair",
+                0,
+                "2026-10-13T00:00:00+00:00",
+                "2026-10-13T00:00:00+00:00",
+            ),
+        )
+        conn.commit()
+    assert migrations.background_tables_ready(db_path) is False
+    migrations.run_migrations(db_path)
+    assert migrations.background_tables_ready(db_path) is True
+    with sqlite3.connect(db_path) as conn:
+        assert "fields" in {row[1] for row in conn.execute("pragma table_info(vault_secrets)")}
+        assert conn.execute(
+            "select name, ciphertext, fields from vault_secrets where id = ?",
+            ("vlt_repair",),
+        ).fetchone() == ("REPAIR_SECRET", "ct-repair", None)

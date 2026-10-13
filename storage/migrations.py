@@ -711,6 +711,9 @@ def _repair_head_required_columns(conn: sqlite3.Connection, tables: set[str]) ->
         if table in tables and "context_seq" not in _column_names(conn, table):
             conn.execute(f'alter table "{table}" add column "context_seq" INTEGER')
             changed = True
+    if "vault_secrets" in tables and "fields" not in _column_names(conn, "vault_secrets"):
+        conn.execute('alter table "vault_secrets" add column "fields" TEXT')
+        changed = True
 
     _ensure_head_indexes(conn, tables)
     return changed
