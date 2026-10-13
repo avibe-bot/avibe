@@ -13,6 +13,7 @@
         {"id": "claude-sonnet-5-5", "label": "claude-sonnet-5-5 [1M]", "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"]},
         {"id": "claude-sonnet-5", "label": "claude-sonnet-5 [1M]", "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"]},
         {"id": "claude-sonnet-4-6", "label": "claude-sonnet-4-6 [1M]", "reasoning_efforts": ["low", "medium", "high", "max"]},
+        {"id": "claude-haiku-5-5", "reasoning_efforts": ["low", "medium", "high", "xhigh", "max"]},
         {"id": "claude-haiku-4-5", "reasoning_efforts": ["low", "medium", "high"]},
         {"id": "claude-opus-4-5", "reasoning_efforts": ["low", "medium", "high"]},
         {"id": "claude-sonnet-4-5", "reasoning_efforts": ["low", "medium", "high"]},

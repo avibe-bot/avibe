@@ -26,6 +26,21 @@ _WIRE_REQUESTS: dict[ProtocolName, Callable[..., WireRequest]] = {
 }
 
 
+def sent_effort(protocol: str, model_id: str, effort: str) -> str | None:
+    """The effort token a request on ``protocol`` to ``model_id`` carries for ``effort``, exactly as the adapter sends
+    it: at ``output_config.effort`` (Anthropic), ``reasoning.effort`` (Responses) or ``reasoning_effort`` (Chat; a
+    ``google`` hop is reached over Chat). None when the request carries no effort token. Model Hub's effort menu reads
+    the same answer, so the menu and the wire cannot drift."""
+
+    if protocol == "anthropic":
+        return anthropic.sent_effort(model_id, effort)
+    if protocol == "openai_responses":
+        return openai_responses.sent_effort(effort)
+    if protocol in ("openai_chat", "google"):
+        return openai_chat.sent_effort(effort)
+    raise ValueError(f"unsupported provider protocol: {protocol}")
+
+
 def adapter_class(protocol: ProtocolName) -> type[ProviderAdapter]:
     try:
         return ADAPTERS[protocol]

@@ -1373,9 +1373,10 @@ def build_responses_payload(
     if tools:
         payload["tools"] = tools
     include: list[str] = []
-    if request.reasoning_effort and request.reasoning_effort.lower() not in {"off", "disabled"}:
-        payload["reasoning"] = {"effort": _openai_effort(request.reasoning_effort), "summary": "auto"}
-        if request.reasoning_effort.lower() != "none":
+    effort = sent_effort(request.reasoning_effort or "")
+    if effort is not None:
+        payload["reasoning"] = {"effort": effort, "summary": "auto"}
+        if effort != "none":
             include.append("reasoning.encrypted_content")
     # A native hosted tool's own include values, e.g. OpenAI's web_search_call.action.sources (§4.1).
     for route in native.values():
@@ -1762,11 +1763,12 @@ def _reasoning_summary_text(item: Mapping[str, Any]) -> str | None:
     return "\n\n".join(parts) if parts else None
 
 
-def _openai_effort(value: str) -> str:
-    # Pi preserves extended tiers when the resolved model advertises them;
-    # the loop has already filtered ``reasoning_effort`` through
-    # ModelCapabilities.reasoning_efforts.
-    return value.lower()
+def sent_effort(effort: str) -> str | None:
+    """The token a Responses request carries at ``reasoning.effort``: the effort as given, lower-cased, since the loop
+    sends only an effort the hop declares (Pi preserves extended tiers the same way); None when it is off."""
+
+    value = effort.lower()
+    return None if not value or value in {"off", "disabled"} else value
 
 
 def _string(value: Any) -> str:

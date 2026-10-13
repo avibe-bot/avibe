@@ -91,6 +91,25 @@ def test_codex_only_ultra_does_not_become_an_api_reasoning_tier(
     assert api.source == "catalog"
 
 
+@pytest.mark.parametrize(
+    ("model_id", "tiers"),
+    [
+        # Anthropic's effort documentation: every level on Claude Haiku 5.5, no xhigh on Claude Sonnet 4.6.
+        ("claude-haiku-5-5", ("low", "medium", "high", "xhigh", "max")),
+        ("claude-sonnet-4-6", ("low", "medium", "high", "max")),
+    ],
+)
+def test_an_anthropic_model_that_reports_no_parameters_gets_its_documented_tiers(
+    model_id: str, tiers: tuple[str, ...]
+) -> None:
+    """Without upstream parameters, the bundled row is the only source of a hop's efforts: a model missing from it
+    would declare none, and the loop would never send the effort the user picked."""
+    resolution = resolve_reasoning_tiers(protocol="anthropic", model_id=model_id, supported_parameters=())
+
+    assert resolution.efforts == tiers
+    assert resolution.source == "catalog"
+
+
 def test_catalog_row_is_not_filtered_through_the_vocabulary(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
