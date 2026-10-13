@@ -566,7 +566,10 @@ def test_rest_field_put_delete_routes_use_canonical_record_name(monkeypatch):
 
     put = client.put(
         "/api/vault/secrets/REST_LOGIN/fields/username",
-        json={"blind_box": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "username"}},
+        json={
+            "record": "REST_LOGIN.username",
+            "blind_box": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "username"},
+        },
         headers=headers,
     )
     assert put.status_code == 200
@@ -593,6 +596,7 @@ def test_rest_field_routes_reject_plaintext_and_default_delete(monkeypatch):
     rejected = client.put(
         "/api/vault/secrets/REST_LOGIN/fields/password",
         json={
+            "record": "REST_LOGIN.password",
             "blind_box": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "password"},
             "nested": {"value": "plaintext"},
         },

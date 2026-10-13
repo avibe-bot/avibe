@@ -4333,8 +4333,16 @@ def test_create_vault_secret_seals_each_standard_record_name(monkeypatch):
             "default_field": "password",
             "blind_box": _agent_dek_blindbox("default", "default"),
             "fields": [
-                {"name": "username", "blind_box": _agent_dek_blindbox("username", "username")},
-                {"name": "totp", "blind_box": _agent_dek_blindbox("totp", "totp")},
+                {
+                    "name": "username",
+                    "record": "LOGIN.username",
+                    "blind_box": _agent_dek_blindbox("username", "username"),
+                },
+                {
+                    "name": "totp",
+                    "record": "LOGIN.totp",
+                    "blind_box": _agent_dek_blindbox("totp", "totp"),
+                },
             ],
         }
     )
@@ -4359,7 +4367,10 @@ def test_vault_field_update_and_default_rename_are_value_free(monkeypatch):
     updated = api.update_vault_secret_field(
         "LOGIN",
         "username",
-        {"blind_box": _agent_dek_blindbox("username", "username")},
+        {
+            "record": "LOGIN.username",
+            "blind_box": _agent_dek_blindbox("username", "username"),
+        },
     )
 
     assert updated["secret"]["fields"] == ["value", "username"]
@@ -4381,6 +4392,103 @@ def test_vault_field_update_and_default_rename_are_value_free(monkeypatch):
     assert [call.args[0] for call in seal.call_args_list] == ["LOGIN", "LOGIN.username"]
 
 
+@pytest.mark.parametrize(
+    ("field", "code"),
+    [
+        ({"name": "username", "blind_box": _agent_dek_blindbox("username", "username")}, "invalid_request"),
+        (
+            {
+                "name": "username",
+                "record": "LOGIN",
+                "blind_box": _agent_dek_blindbox("username", "username"),
+            },
+            "record_mismatch",
+        ),
+    ],
+)
+def test_create_extra_field_requires_matching_record(monkeypatch, field, code):
+    seal = Mock(return_value=_sealed("default"))
+    monkeypatch.setattr(api, "avault_seal_blind_box", seal)
+
+    with pytest.raises(api.VaultApiError) as exc:
+        api.create_vault_secret(
+            {
+                "name": "LOGIN",
+                "blind_box": _agent_dek_blindbox("default", "default"),
+                "fields": [field],
+            }
+        )
+
+    assert exc.value.code == code
+    seal.assert_not_called()
+    assert api.get_vault_secrets()["secrets"] == []
+
+
+def test_protected_field_put_rejects_stale_default_record_after_rename():
+    api.create_vault_secret(
+        {
+            "name": "LOGIN",
+            "protection": "protected",
+            "sealed": {"ciphertext": "ct-old", "nonce": "n-old", "wrap_meta": "wm-old"},
+        }
+    )
+    api.update_vault_secret("LOGIN", {"default_field": "password"})
+
+    with api._vault_engine().connect() as conn:
+        before = vault_service.get_protected_envelope(conn, "LOGIN")
+
+    with pytest.raises(api.VaultApiError) as exc:
+        api.update_vault_secret_field(
+            "LOGIN",
+            "value",
+            {
+                "record": "LOGIN",
+                "sealed": {"ciphertext": "ct-new", "nonce": "n-new", "wrap_meta": "wm-new"},
+            },
+        )
+
+    assert exc.value.code == "record_mismatch"
+    with api._vault_engine().connect() as conn:
+        assert vault_service.get_protected_envelope(conn, "LOGIN") == before
+
+
+def test_protected_field_put_record_guard_survives_concurrent_default_rename(monkeypatch):
+    api.create_vault_secret(
+        {
+            "name": "LOGIN",
+            "protection": "protected",
+            "sealed": {"ciphertext": "ct-old", "nonce": "n-old", "wrap_meta": "wm-old"},
+        }
+    )
+    original_sealed_from_payload = api._sealed_from_payload
+    raced = False
+
+    def seal_then_rename(payload):
+        nonlocal raced
+        sealed = original_sealed_from_payload(payload)
+        if not raced:
+            raced = True
+            with api._vault_engine().begin() as conn:
+                vault_service.update_secret_metadata(conn, "LOGIN", default_field="password")
+        return sealed
+
+    monkeypatch.setattr(api, "_sealed_from_payload", seal_then_rename)
+
+    with pytest.raises(api.VaultApiError) as exc:
+        api.update_vault_secret_field(
+            "LOGIN",
+            "value",
+            {
+                "record": "LOGIN",
+                "sealed": {"ciphertext": "ct-raced", "nonce": "n-raced", "wrap_meta": "wm-raced"},
+            },
+        )
+
+    assert exc.value.code == "record_mismatch"
+    with api._vault_engine().connect() as conn:
+        assert vault_service.get_protected_envelope(conn, "LOGIN") == _sealed("old")
+
+
 def test_protected_reveal_context_uses_field_record_name(monkeypatch):
     api.create_vault_secret(
         {
@@ -4391,6 +4499,7 @@ def test_protected_reveal_context_uses_field_record_name(monkeypatch):
             "fields": [
                 {
                     "name": "username",
+                    "record": "PROTECTED_LOGIN.username",
                     "sealed": {"ciphertext": "ct-username", "nonce": "n-username", "wrap_meta": "wm-username"},
                 }
             ],
@@ -4421,6 +4530,7 @@ def test_protected_agent_binding_batch_expands_record_names(monkeypatch):
             "fields": [
                 {
                     "name": "username",
+                    "record": "PROTECTED_LOGIN.username",
                     "sealed": {"ciphertext": "ct-username", "nonce": "n-username", "wrap_meta": "wm-username"},
                 }
             ],
@@ -4433,3 +4543,61 @@ def test_protected_agent_binding_batch_expands_record_names(monkeypatch):
     assert [item["name"] for item in result["items"]] == ["PROTECTED_LOGIN", "PROTECTED_LOGIN.username"]
     display_names = [item["name"] for item in _verified_signed_context(result["items"][0]["context"])["display"]["secrets"]]
     assert display_names == ["PROTECTED_LOGIN", "PROTECTED_LOGIN.username"]
+
+
+def test_create_grant_relays_every_protected_record_and_rejects_missing_dek(monkeypatch, avault_p2):
+    """Protect the grant boundary: every released record must reach avault by canonical name."""
+
+    agent_grant = Mock(return_value={"granted": 3, "ttl_secs": 300})
+    monkeypatch.setattr(api, "avault_agent_grant", agent_grant)
+    api.create_vault_secret(
+        {
+            "name": "PROTECTED_LOGIN",
+            "protection": "protected",
+            "default_field": "password",
+            "sealed": {"ciphertext": "ct-password", "nonce": "n-password", "wrap_meta": "wm-password"},
+            "fields": [
+                {
+                    "name": "username",
+                    "record": "PROTECTED_LOGIN.username",
+                    "sealed": {"ciphertext": "ct-username", "nonce": "n-username", "wrap_meta": "wm-username"},
+                },
+                {
+                    "name": "totp",
+                    "record": "PROTECTED_LOGIN.totp",
+                    "sealed": {"ciphertext": "ct-totp", "nonce": "n-totp", "wrap_meta": "wm-totp"},
+                },
+            ],
+        }
+    )
+    requested = api.request_vault_access({"name": "PROTECTED_LOGIN", "session_id": "ses_1"})
+    issued = _issued_agent_dek_payload(requested["request"]["id"])
+
+    with pytest.raises(api.VaultApiError) as exc:
+        api.create_vault_grant(
+            {
+                "session_id": "ses_1",
+                "request_id": requested["request"]["id"],
+                **issued,
+                "deks": issued["deks"][:-1],
+            }
+        )
+
+    assert exc.value.code == "invalid_grant"
+    agent_grant.assert_not_called()
+
+    created = api.create_vault_grant(
+        {
+            "session_id": "ses_1",
+            "request_id": requested["request"]["id"],
+            **issued,
+        }
+    )
+
+    assert created["grant"]["status"] == "active"
+    assert created["grant"]["member_snapshot"] == ["PROTECTED_LOGIN"]
+    assert [item["name"] for item in agent_grant.call_args.kwargs["deks"]] == [
+        "PROTECTED_LOGIN",
+        "PROTECTED_LOGIN.username",
+        "PROTECTED_LOGIN.totp",
+    ]

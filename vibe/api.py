@@ -2373,24 +2373,13 @@ def _vault_api_error_from_avault(exc: "AvaultError", *, prefix: str) -> VaultApi
     return VaultApiError(f"{prefix}: {message}", code="avault_failed")
 
 
-_VAULT_FIELD_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _VAULT_MAX_FIELDS = 32
 
 
 def _vault_validate_field_name(value: Any, *, field: str = "field") -> str:
     from storage import vault_service
 
-    validator = getattr(vault_service, "validate_field_name", None)
-    if callable(validator):
-        try:
-            return str(validator(value))
-        except vault_service.InvalidFieldNameError:
-            raise
-    if not isinstance(value, str) or not _VAULT_FIELD_NAME_RE.fullmatch(value.strip()):
-        raise vault_service.InvalidFieldNameError(
-            f"{field} must match ^[a-z][a-z0-9_]{{0,63}}$"
-        )
-    return value.strip()
+    return vault_service.validate_field_name(value, field=field)
 
 
 def _vault_secret_record_names(meta: dict[str, Any]) -> list[str]:
@@ -2398,20 +2387,7 @@ def _vault_secret_record_names(meta: dict[str, Any]) -> list[str]:
 
     from storage import vault_service
 
-    helper = getattr(vault_service, "secret_record_names", None)
-    if callable(helper):
-        return [str(name) for name in helper(meta)]
-    name = str(meta.get("name") or "")
-    default_field = str(meta.get("default_field") or "value")
-    fields = meta.get("fields")
-    if not isinstance(fields, list):
-        fields = [default_field]
-    result = [name]
-    for raw_field in fields:
-        field = str(raw_field)
-        if field != default_field:
-            result.append(f"{name}.{field}")
-    return result
+    return [str(name) for name in vault_service.secret_record_names(meta)]
 
 
 def _vault_record_meta(
@@ -2420,34 +2396,11 @@ def _vault_record_meta(
     *,
     user_context: Any = None,
 ) -> dict[str, Any]:
-    """Resolve a record ref through the storage public contract.
-
-    The fallback is intentionally value-free and only exists while the storage
-    lane is adding the public helper to this worktree.
-    """
+    """Resolve a record ref through the storage public contract."""
 
     from storage import vault_service
 
-    helper = getattr(vault_service, "get_secret_record_meta", None)
-    if callable(helper):
-        return dict(helper(conn, ref, user_context=user_context))
-
-    parts = str(ref or "").strip().split(".", 1)
-    secret_name = parts[0]
-    meta = dict(vault_service.get_secret_meta(conn, secret_name, user_context=user_context))
-    default_field = str(meta.get("default_field") or "value")
-    field_ref = parts[1] if len(parts) == 2 else default_field
-    if field_ref == default_field:
-        return {**meta, "record_name": secret_name, "field": default_field}
-    if meta.get("kind") == "keypair":
-        raise vault_service.FieldsNotSupportedError(f"{secret_name} does not support fields")
-    field_ref = _vault_validate_field_name(field_ref)
-    fields = meta.get("fields") if isinstance(meta.get("fields"), list) else [default_field]
-    if field_ref not in {str(item) for item in fields}:
-        raise vault_service.FieldNotFoundError(
-            f"field {field_ref!r} not found on {secret_name}; fields: {', '.join(str(item) for item in fields)}"
-        )
-    return {**meta, "record_name": f"{secret_name}.{field_ref}", "field": field_ref}
+    return dict(vault_service.get_secret_record_meta(conn, ref, user_context=user_context))
 
 
 def _vault_secret_management_meta(
@@ -2460,22 +2413,7 @@ def _vault_secret_management_meta(
 
     from storage import vault_service
 
-    helper = getattr(vault_service, "require_secret_management", None)
-    if callable(helper):
-        helper(conn, secret_name, user_context=user_context)
-    else:
-        # Temporary compatibility with the storage lane before its public helper
-        # lands. This still exercises the existing management ACL.
-        private_require = getattr(vault_service, "_require_secret_resource_management", None)
-        private_row = getattr(vault_service, "_require_row", None)
-        if callable(private_require) and callable(private_row):
-            private_require(
-                conn,
-                private_row(conn, secret_name),
-                vault_service.resolve_resource_access_context(user_context),
-            )
-        else:
-            vault_service.get_secret_meta(conn, secret_name, user_context=user_context)
+    vault_service.require_secret_management(conn, secret_name, user_context=user_context)
     return dict(vault_service.get_secret_meta(conn, secret_name, user_context=user_context))
 
 
@@ -2488,6 +2426,7 @@ def _vault_field_service_error(exc: Exception) -> VaultApiError:
         (vault_service.FieldNotFoundError, "field_not_found", 404),
         (vault_service.TooManyFieldsError, "too_many_fields", 409),
         (vault_service.FieldsNotSupportedError, "fields_not_supported", 409),
+        (vault_service.RecordMismatchError, "record_mismatch", 409),
         (vault_service.SecretConflictError, "secret_conflict", 409),
     )
     for error_type, code, status in mappings:
@@ -2505,6 +2444,7 @@ def _vault_field_service_error(exc: Exception) -> VaultApiError:
 def _vault_create_field_specs(
     payload: dict[str, Any],
     *,
+    secret_name: str,
     kind: str,
     default_field: str,
 ) -> list[dict[str, Any]]:
@@ -2547,6 +2487,26 @@ def _vault_create_field_specs(
                 code="field_exists",
                 status=409,
             )
+        if "record" not in item:
+            raise VaultApiError(
+                f"fields[{index}].record is required",
+                code="invalid_request",
+                status=409,
+            )
+        record = item["record"]
+        if not isinstance(record, str):
+            raise VaultApiError(
+                f"fields[{index}].record must be a string",
+                code="record_mismatch",
+                status=409,
+            )
+        expected_record = f"{secret_name}.{field_name}"
+        if record != expected_record:
+            raise VaultApiError(
+                f"fields[{index}].record must be {expected_record!r}",
+                code="record_mismatch",
+                status=409,
+            )
         envelope = item.get(envelope_key)
         if not isinstance(envelope, dict):
             raise VaultApiError(
@@ -2555,7 +2515,7 @@ def _vault_create_field_specs(
                 status=400,
             )
         names.add(field_name)
-        specs.append({"name": field_name, envelope_key: envelope})
+        specs.append({"name": field_name, "record": record, envelope_key: envelope})
     return specs
 
 
@@ -3109,11 +3069,19 @@ def create_vault_agent_binding(payload: dict) -> dict:
         raise VaultApiError("payload must be an object", code="invalid_payload")
     request_id = str(payload.get("request_id") or payload.get("requestId") or "").strip()
     grant_id = str(payload.get("grant_id") or payload.get("grantId") or "").strip()
-    requested_name = str(payload.get("name") or "").strip()
+    raw_name = payload.get("name")
+    requested_name = raw_name if isinstance(raw_name, str) else ""
+    if "." not in requested_name:
+        requested_name = requested_name.strip()
     if not request_id or not grant_id:
         raise VaultApiError("request_id and grant_id are required", code="invalid_request", status=409)
     if not requested_name or not vault_crypto.is_valid_secret_name(requested_name.split(".", 1)[0]):
         raise VaultApiError("invalid secret name (use ^[A-Za-z_][A-Za-z0-9_]*$)", code="invalid_name")
+    if "." in requested_name:
+        try:
+            _vault_validate_field_name(requested_name.split(".", 1)[1], field="field")
+        except vault_service.InvalidFieldNameError as exc:
+            raise _vault_field_service_error(exc) from exc
 
     engine = _vault_engine()
     try:
@@ -3139,7 +3107,11 @@ def create_vault_agent_binding(payload: dict) -> dict:
             if remember_duration:
                 vault_service.save_vault_settings(conn, {"last_grant_ttl": duration["last_grant_ttl"]})
     except vault_service.SecretNotFoundError as exc:
-        raise VaultApiError(f"secret '{name}' not found", code="secret_not_found", status=404) from exc
+        raise VaultApiError(
+            f"secret '{requested_name}' not found",
+            code="secret_not_found",
+            status=404,
+        ) from exc
     except vault_service.VaultSecretAccessError as exc:
         raise _vault_secret_access_forbidden(exc) from exc
     except vault_service.RequestNotFoundError as exc:
@@ -3544,6 +3516,7 @@ def create_vault_secret(
         )
     field_specs = _vault_create_field_specs(
         payload,
+        secret_name=name,
         kind=kind,
         default_field=default_field,
     )
@@ -3570,6 +3543,7 @@ def create_vault_secret(
         vault_service.FieldExistsError,
         vault_service.TooManyFieldsError,
         vault_service.FieldsNotSupportedError,
+        vault_service.RecordMismatchError,
     ) as exc:
         raise _vault_field_service_error(exc) from exc
     except vault_service.SecretNameCaseConflictError as exc:
@@ -3612,7 +3586,7 @@ def create_vault_secret(
     sealed_fields: list[dict[str, Any]] = []
     for spec in field_specs:
         field_name = str(spec["name"])
-        record_name = f"{name}.{field_name}"
+        record_name = str(spec["record"])
         if protection == "standard":
             try:
                 field_sealed = avault_seal_blind_box(record_name, spec["blind_box"])
@@ -3620,7 +3594,7 @@ def create_vault_secret(
                 raise VaultApiError(f"avault blind-box seal failed: {exc}", code="avault_failed") from exc
         else:
             field_sealed = _sealed_from_payload(spec["sealed"])
-        sealed_fields.append({"name": field_name, "sealed": field_sealed})
+        sealed_fields.append({"name": field_name, "record": record_name, "sealed": field_sealed})
     try:
         with engine.begin() as conn:
             meta = vault_service.create_secret(
@@ -3649,6 +3623,7 @@ def create_vault_secret(
         vault_service.FieldExistsError,
         vault_service.TooManyFieldsError,
         vault_service.FieldsNotSupportedError,
+        vault_service.RecordMismatchError,
     ) as exc:
         raise _vault_field_service_error(exc) from exc
     except vault_service.SecretNameCaseConflictError as exc:
@@ -3708,14 +3683,6 @@ def update_vault_secret(name: str, payload: dict, *, user_context: Any = None) -
     engine = _vault_engine()
     release_scopes: list[dict[str, str]] = []
     try:
-        if "default_field" in kwargs and "policy" not in kwargs:
-            # The storage public contract accepts a default-field-only patch. The
-            # fallback storage implementation in this worktree still enters its
-            # policy branch unconditionally, so preserve the value-free policy
-            # while that lane is completing its helper.
-            with engine.connect() as conn:
-                current = vault_service.get_secret_meta(conn, secret_name, user_context=user_context)
-            kwargs["policy"] = current.get("policy") or {}
         with engine.begin() as conn:
             meta = vault_service.update_secret_metadata(
                 conn,
@@ -3759,10 +3726,10 @@ def update_vault_secret_field(
     if not vault_crypto.is_valid_secret_name(secret_name):
         raise VaultApiError("invalid secret name (use ^[A-Za-z_][A-Za-z0-9_]*$)", code="invalid_name")
     try:
-        field_name = _vault_validate_field_name(str(field or "").strip())
+        field_name = _vault_validate_field_name(field)
     except vault_service.InvalidFieldNameError as exc:
         raise VaultApiError(str(exc), code="invalid_field_name", status=400) from exc
-    allowed = {"blind_box", "sealed", "expected_updated_at"}
+    allowed = {"record", "blind_box", "sealed", "expected_updated_at"}
     extra = set(payload) - allowed
     if extra:
         raise VaultApiError(
@@ -3770,6 +3737,11 @@ def update_vault_secret_field(
             code="invalid_request",
             status=409,
         )
+    if "record" not in payload:
+        raise VaultApiError("record is required", code="invalid_request", status=409)
+    record = payload["record"]
+    if not isinstance(record, str):
+        raise VaultApiError("record must be a string", code="record_mismatch", status=409)
     expected_supplied = "expected_updated_at" in payload
     expected_updated_at = payload.get("expected_updated_at")
     if expected_supplied and expected_updated_at is not None and not isinstance(expected_updated_at, str):
@@ -3795,16 +3767,13 @@ def update_vault_secret_field(
             status=409,
         )
     default_field = str(meta.get("default_field") or "value")
-    if field_name == default_field:
-        record_name = secret_name
-    else:
-        fields = meta.get("fields") if isinstance(meta.get("fields"), list) else [default_field]
-        if field_name not in {str(item) for item in fields}:
-            # A missing field is an add operation for PUT. The storage owner
-            # decides whether the field is appended or replaced.
-            record_name = f"{secret_name}.{field_name}"
-        else:
-            record_name = f"{secret_name}.{field_name}"
+    record_name = secret_name if field_name == default_field else f"{secret_name}.{field_name}"
+    if record != record_name:
+        raise VaultApiError(
+            f"record does not match field {field_name!r} on {secret_name}",
+            code="record_mismatch",
+            status=409,
+        )
     snapshot_updated_at = meta.get("updated_at")
     if expected_supplied and expected_updated_at != snapshot_updated_at:
         raise VaultApiError(
@@ -3839,6 +3808,7 @@ def update_vault_secret_field(
                 secret_name,
                 field_name,
                 sealed,
+                record=record,
                 expected_updated_at=snapshot_updated_at,
                 release_scopes=release_scopes,
                 user_context=user_context,
@@ -3862,7 +3832,7 @@ def delete_vault_secret_field(
     if not vault_crypto.is_valid_secret_name(secret_name):
         raise VaultApiError("invalid secret name (use ^[A-Za-z_][A-Za-z0-9_]*$)", code="invalid_name")
     try:
-        field_name = _vault_validate_field_name(str(field or "").strip())
+        field_name = _vault_validate_field_name(field)
     except vault_service.InvalidFieldNameError as exc:
         raise VaultApiError(str(exc), code="invalid_field_name", status=400) from exc
     engine = _vault_engine()
@@ -3948,12 +3918,6 @@ def get_vault_requests(
     engine = _vault_engine()
     with engine.begin() as conn:
         requests = vault_service.list_requests(conn, status=status, request_type=request_type, limit=limit, session=session)
-    requests = [
-        _vault_hydrate_member_fields(item, user_context=user_context)
-        if isinstance(item, dict)
-        else item
-        for item in requests
-    ]
     return {"ok": True, "requests": requests}
 
 
@@ -4049,93 +4013,6 @@ def _vault_request_result(conn, request: dict) -> dict | None:
     return None
 
 
-def _vault_hydrate_member_fields(
-    request_payload: dict,
-    *,
-    user_context: Any = None,
-) -> dict:
-    """Add value-free field grouping for approval-card consumers.
-
-    Storage owns this projection in the final contract. Keeping the small
-    compatibility projection here lets the API remain usable while older
-    storage helpers are present in this worktree.
-    """
-
-    card = request_payload.get("card")
-    if not isinstance(card, dict):
-        return request_payload
-    card = dict(card)
-    legacy_material = card.get("secret_unlock_material")
-    if isinstance(legacy_material, list):
-        secret_name = str(request_payload.get("secret_name") or card.get("secret_name") or "")
-        default_material = next(
-            (
-                item
-                for item in legacy_material
-                if isinstance(item, dict)
-                and (
-                    str(item.get("name") or "") == secret_name
-                    or "." not in str(item.get("name") or "")
-                )
-            ),
-            None,
-        )
-        if default_material is not None:
-            card["secret_unlock_material"] = {
-                key: default_material[key]
-                for key in ("name", "kind", "envelope")
-                if key in default_material
-            }
-    options = card.get("grant_options")
-    if not isinstance(options, list):
-        return {**request_payload, "card": card}
-    missing_options = [option for option in options if isinstance(option, dict) and "member_fields" not in option]
-    if not missing_options:
-        return {**request_payload, "card": card}
-    member_names = [
-        str(name)
-        for option in missing_options
-        for name in (option.get("member_snapshot") if isinstance(option.get("member_snapshot"), list) else [])
-        if isinstance(name, str) and name
-    ]
-    if not member_names:
-        return {**request_payload, "card": card}
-    from storage import vault_service
-
-    engine = _vault_engine()
-    with engine.connect() as conn:
-        metas = {
-            str(name): dict(vault_service.get_secret_meta(conn, str(name), user_context=user_context))
-            for name in dict.fromkeys(member_names)
-        }
-    hydrated_card = card
-    hydrated_options: list[dict[str, Any]] = []
-    for option in options:
-        if not isinstance(option, dict):
-            continue
-        option_payload = dict(option)
-        if "member_fields" not in option_payload:
-            option_payload["member_fields"] = [
-                {
-                    "name": name,
-                    "default_field": str(metas[name].get("default_field") or "value"),
-                    "fields": [
-                        str(field)
-                        for field in (
-                            metas[name].get("fields")
-                            if isinstance(metas[name].get("fields"), list)
-                            else [metas[name].get("default_field") or "value"]
-                        )
-                    ],
-                }
-                for name in (option.get("member_snapshot") if isinstance(option.get("member_snapshot"), list) else [])
-                if isinstance(name, str) and name in metas
-            ]
-        hydrated_options.append(option_payload)
-    hydrated_card["grant_options"] = hydrated_options
-    return {**request_payload, "card": hydrated_card}
-
-
 def get_vault_request(
     request_id: str,
     *,
@@ -4159,7 +4036,6 @@ def get_vault_request(
         raise VaultApiError(f"request '{request_id}' not found", code="request_not_found", status=404) from exc
     except vault_service.VaultSecretAccessError as exc:
         raise _vault_secret_access_forbidden(exc) from exc
-    request = _vault_hydrate_member_fields(request, user_context=user_context)
     payload = {"ok": True, "request": request}
     if result is not None:
         payload["result"] = result
@@ -4259,7 +4135,6 @@ def request_vault_access(payload: dict, *, user_context: Any = None) -> dict:
         raise VaultApiError(str(exc), code="invalid_request", status=409) from exc
     except vault_service.VaultServiceError as exc:
         raise VaultApiError(str(exc), code="invalid_request", status=409) from exc
-    request = _vault_hydrate_member_fields(request, user_context=user_context)
     _publish_vaults_updated(
         scope="request",
         request_id=request.get("id"),
@@ -4322,7 +4197,6 @@ def request_vault_sign(payload: dict, *, user_context: Any = None) -> dict:
         str(request["id"]),
         audience=_sign_request_response_audience(request),
     )
-    request = _vault_hydrate_member_fields(request, user_context=user_context)
     _publish_vaults_updated(
         scope="request",
         request_id=request.get("id"),
