@@ -113,6 +113,12 @@ describe('UI evidence resolution', () => {
     // particular — whatever else cites the file keeps it collected, so the row
     // would read `covered` with nothing tied to itself. Reported, not resolved.
     expect(resolveUiEvidence([row('MH-ROW-E', { cited: null })], collected)).toHaveLength(1);
+    // A pointer identifies no evidence, so it only has to lead to a live case: a
+    // group of cases is fine, and so is a case another row owns, but nothing is not.
+    const pointer = (id, cited) => row(id, { cited, pointer: 'related_tests' });
+    expect(resolveUiEvidence([pointer('MH-ROW-G', 'MH-ROW-C')], collected)).toEqual([]);
+    expect(resolveUiEvidence([pointer('MH-ROW-D', 'MH-ROW-A')], collected, ids)).toEqual([]);
+    expect(resolveUiEvidence([pointer('MH-ROW-G', 'MH-ROW-B')], collected)).toHaveLength(1);
   });
 
   it('resolves a parameterized case through the inputs the citation names', () => {
@@ -158,9 +164,18 @@ describe('UI evidence resolution', () => {
       // row and does not say it does. Unread for the same reason a file-only
       // citation is rejected, rather than as an exception to it.
       { id: 'MH-RELATED', status: 'covered', test: 'tests/test_c.py::test_c', related_tests: ['ui/src/d.test.tsx'] },
+      // A pointer that names a case is asked, in either pointer key: still no
+      // claim, but a renamed case would leave it pointing at nothing.
+      {
+        id: 'MH-POINTER',
+        status: 'covered',
+        test: 'tests/test_d.py::test_d',
+        related_tests: ['ui/src/e.test.tsx::names its neighbour', 'tests/test_e.py::test_e'],
+        supporting_tests: ['ui/src/f.test.tsx::supports it'],
+      },
       { id: 'MH-GAP', status: 'gap', test: null },
     ];
-    const asked = ['MH-UI', 'MH-SCRIPT', 'MH-FILE', 'MH-CONTRACT'];
+    const asked = ['MH-UI', 'MH-SCRIPT', 'MH-FILE', 'MH-CONTRACT', 'MH-POINTER', 'MH-POINTER'];
     const rowsOf = (catalog) => uiEvidenceRows({ ...catalog, scenarios });
 
     expect(rowsOf({ status_legend: { covered: { test_required: true } } }).map((row) => row.id)).toEqual(asked);
@@ -172,6 +187,10 @@ describe('UI evidence resolution', () => {
       file: 'ui/src/c.test.tsx',
       cited: 'holds the frozen contract',
     });
+    expect(rowsOf({}).filter((row) => row.id === 'MH-POINTER')).toEqual([
+      { id: 'MH-POINTER', file: 'ui/src/e.test.tsx', cited: 'names its neighbour', pointer: 'related_tests' },
+      { id: 'MH-POINTER', file: 'ui/src/f.test.tsx', cited: 'supports it', pointer: 'supporting_tests' },
+    ]);
     expect(isUiEvidence('tests/test_a.py::test_a')).toBe(false);
   });
 

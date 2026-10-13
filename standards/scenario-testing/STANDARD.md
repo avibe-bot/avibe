@@ -191,7 +191,9 @@ this row leaves the row reading `covered` with nothing executable tied to it.
 That is not hypothetical — it is how four dead citations survived a test-file
 rewrite unnoticed for five days. A pointer key such as `related_tests` may name
 bare files precisely because it claims no coverage; anything that does claim
-coverage names its case.
+coverage names its case. A pointer that does name a case must still name one
+that exists, or a rename leaves it leading nowhere; it may name a group of cases,
+such as every case tagged with an ID.
 
 ## 5. Harness Design Rules
 
