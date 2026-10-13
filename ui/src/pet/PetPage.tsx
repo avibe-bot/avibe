@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useLayoutEffect, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
-import { ExternalLink, KeyRound } from 'lucide-react';
+import { ArrowLeftRight, ExternalLink, KeyRound } from 'lucide-react';
 
 import { ApiError, useApi, type SessionActivityState, type WorkbenchMessage } from '@/context/ApiContext';
 import { useInstanceAuthorization } from '@/context/InstanceAuthorizationContext';
@@ -600,6 +600,10 @@ const PetSurface: React.FC = () => {
   );
 };
 
+const SwitchSessionButton: React.FC<{ onClick: () => void; label: string }> = ({ onClick, label }) => (
+  <button type="button" className="pet-mini-chip" data-pet-hit aria-label={label} onClick={onClick}><ArrowLeftRight aria-hidden />{label}</button>
+);
+
 const SessionPicker: React.FC<{ onPick: (sessionId: string) => void; canStartVibey: boolean }> = ({ onPick, canStartVibey }) => {
   const { t } = useTranslation();
   const api = useApi();
@@ -625,7 +629,7 @@ const SessionPicker: React.FC<{ onPick: (sessionId: string) => void; canStartVib
     <div className="pet-mini-panel" aria-label={t('pet.chooseSession')}>
       <div className="pet-mini-scroll">
         <div className="pet-mini-session-picker" data-pet-hit>
-          {canStartVibey && <button type="button" onClick={pickVibey} disabled={vibeyPending} className="pet-mini-session-option">{t('pet.talkToVibey')}</button>}
+          {canStartVibey && <button type="button" onClick={pickVibey} disabled={vibeyPending} className="pet-mini-session-option is-vibey">{t('pet.talkToVibey')}</button>}
           {vibeyError && <p className="pet-mini-detail-muted">{vibeyError}</p>}
           {sessions.length === 0 && <p className="pet-mini-detail-muted">{loading ? t('common.loading') : t('pet.noSessions')}</p>}
           {sessions.map((session) => (
@@ -876,7 +880,7 @@ const ExpandedCards: React.FC<{ cards: PetCard[]; leaving: string[]; detailOpen:
   return (
     <div className="pet-mini-panel">
       <div ref={scrollRef} onScroll={measure} className="pet-mini-scroll" style={{ maskImage: mask, WebkitMaskImage: mask }}>
-        {onSwitch && <Button variant="link" size="sm" data-pet-hit onClick={onSwitch}>{t('pet.switchSession')}</Button>}
+        {onSwitch && <div className="pet-mini-action-row"><SwitchSessionButton onClick={onSwitch} label={t('pet.switchSession')} /></div>}
         <ul className="pet-mini-list">
           {cards.map((card) => {
             const phase = stops[card.id];
@@ -942,7 +946,7 @@ const MainDetail: React.FC<{ epoch: PetSurfaceEpoch; voiceNeedsCloud: boolean; c
   usePetMarkRead(props.epoch, props.binding, props.exchange, props.markRead, props.onRead, props.visible && (typeof IntersectionObserver === 'undefined' || (seenResult?.epoch === props.epoch && seenResult.key === resultKey)));
   return (
     <div className="pet-mini-detail-inner">
-      <Button variant="link" size="sm" aria-label={t('pet.switchSession')} onClick={props.onSwitch}>{t('pet.switchSession')}</Button>
+      <div className="pet-mini-action-row"><SwitchSessionButton onClick={props.onSwitch} label={t('pet.switchSession')} /></div>
       {props.exchange.user && <div className="pet-mini-detail-user"><Markdown content={props.exchange.user.text} softBreaks /></div>}
       {props.exchange.results.map((message, index) => <div ref={index === props.exchange.results.length - 1 ? lastResultRef : undefined} key={message.id} className="pet-mini-detail-result"><Markdown content={message.text} softBreaks /></div>)}
       {props.failure && (
