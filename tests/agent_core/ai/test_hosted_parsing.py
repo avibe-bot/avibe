@@ -16,7 +16,7 @@ import pytest
 
 import core.agent_core.ai._common as common_module
 from core.agent_core.ai._common import OutputBudgetExceeded, StreamAssembler
-from core.agent_core.ai.hosted import responses_hosted_block
+from core.agent_core.ai.hosted import reported_counts, responses_hosted_block
 from core.agent_core.ai.provider import Done, HostedToolRoute, ModelEndpoint, ModelRequest
 from core.agent_core.ai.registry import create_adapter
 from core.agent_core.cancel import CancelToken
@@ -509,3 +509,9 @@ def test_hosted_facts_are_charged_as_kept_and_a_summary_keeps_at_most_32_counter
     # About 5,000 characters, but over 12,000 UTF-8 bytes: the charge is in bytes.
     with pytest.raises(OutputBudgetExceeded):
         fresh.set_hosted_facts(cited=(HostedSource(url="https://x.com/" + "é" * 3000, title="中" * 2000),))
+
+
+def test_a_usage_section_of_many_counters_is_read_only_up_to_the_cap():
+    counters = {f"counter_{n}": 1 for n in range(10_000)}
+
+    assert reported_counts(counters) == {f"counter_{n}": 1 for n in range(32)}

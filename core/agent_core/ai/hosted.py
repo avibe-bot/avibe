@@ -35,6 +35,9 @@ _USD_PER_TICK = 1e-10
 _X_HOSTS = frozenset({"x.com", "twitter.com"})
 #: The counter names a summary holds (``message.schema.json``); a provider's other keys are not counters.
 _COUNTER_NAME = re.compile(r"[a-z0-9_]{1,64}")
+#: The most counters a hosted summary keeps, and the most entries of a usage section read to find them.
+MAX_HOSTED_COUNTERS = 32
+_COUNTERS_SCANNED = 256
 _X_SEARCH_VARIANTS = {"x_keyword_search": "keyword", "x_semantic_search": "semantic"}
 #: Where an ``x_thread_fetch`` call names its thread, in the order tried.
 _THREAD_REFS = ("ref", "post_id", "thread_id", "conversation_id", "url", "id")
@@ -234,11 +237,15 @@ def reported_counts(*sections: Any) -> dict[str, int]:
 
     counts: dict[str, int] = {}
     for section in sections:
-        if isinstance(section, Mapping):
-            for name, value in section.items():
-                counted = isinstance(value, int) and not isinstance(value, bool) and value > 0
-                if counted and isinstance(name, str) and _COUNTER_NAME.fullmatch(name):
-                    counts[name] = value
+        if not isinstance(section, Mapping):
+            continue
+        # A summary holds a small fixed set of counters: the cap holds while collecting, over a bounded scan.
+        for scanned, (name, value) in enumerate(section.items()):
+            if len(counts) >= MAX_HOSTED_COUNTERS or scanned >= _COUNTERS_SCANNED:
+                break
+            counted = isinstance(value, int) and not isinstance(value, bool) and value > 0
+            if counted and isinstance(name, str) and _COUNTER_NAME.fullmatch(name):
+                counts[name] = value
     return counts
 
 

@@ -24,6 +24,7 @@ from core.agent_core.ai.errors import (
     redact_provider_error,
     redact_provider_text,
 )
+from core.agent_core.ai.hosted import MAX_HOSTED_COUNTERS
 from core.agent_core.ai.sse import SSEEvent, SSEParseError, SSEParser
 from core.agent_core.cancel import CancelToken
 from core.agent_core.messages import (
@@ -123,8 +124,7 @@ MAX_CUMULATIVE_OUTPUT_CHARS = 32 * 1024 * 1024
 BLOCK_SLOT_OVERHEAD_BYTES = 2048
 #: What one retained citation costs beyond its text fields.
 CITATION_OVERHEAD_BYTES = 256
-#: The most provider counters a hosted summary keeps, and what each costs beyond its name.
-MAX_HOSTED_COUNTERS = 32
+#: What one kept hosted counter costs beyond its name.
 COUNTER_OVERHEAD_BYTES = 64
 TOOL_ALIAS_OVERHEAD_BYTES = 512
 # Only late response closes are detached; retain them until bounded cleanup
