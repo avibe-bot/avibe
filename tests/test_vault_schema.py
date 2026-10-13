@@ -11,6 +11,7 @@ from sqlalchemy import inspect, text
 from storage.db import create_sqlite_engine
 from storage import migrations
 from storage.models import metadata
+from tests.test_sqlite_state_migration import _Pre335Connection
 
 
 _VAULT_TABLES = ("vault_secrets", "vault_requests", "vault_grants", "vault_audit")
@@ -56,7 +57,7 @@ def test_vault_metadata_schema_matches_grant_id_tag_model(tmp_path):
         assert "scope_ref" not in grant_cols
 
 
-def test_vault_fields_migration_round_trip_preserves_old_rows(tmp_path: Path):
+def test_vault_fields_migration_round_trip_preserves_old_rows(tmp_path: Path, monkeypatch):
     db_path = tmp_path / "vault_migration.sqlite"
     migrations.run_migrations(db_path, revision="20261012_0064")
 
@@ -98,6 +99,14 @@ def test_vault_fields_migration_round_trip_preserves_old_rows(tmp_path: Path):
         assert "fields" in columns
         assert row == ("OLD_SECRET", "ct-old", json.dumps({"description": "legacy"}), None)
 
+    real_connect = sqlite3.connect
+
+    def legacy_connect(*args, **kwargs):
+        kwargs["factory"] = _Pre335Connection
+        return real_connect(*args, **kwargs)
+
+    monkeypatch.setattr(sqlite3, "connect", legacy_connect)
+    monkeypatch.setattr(sqlite3.dbapi2, "connect", legacy_connect)
     command.downgrade(migrations.alembic_config(db_path), "20261012_0064")
     with sqlite3.connect(db_path) as conn:
         columns = {row[1] for row in conn.execute("pragma table_info(vault_secrets)")}

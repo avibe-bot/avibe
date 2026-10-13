@@ -5411,6 +5411,8 @@ def store_vault_pubkey_pin(payload: dict) -> dict:
         raise VaultApiError(f"secret '{name}' not found", code="secret_not_found", status=404) from exc
     except vault_service.VaultSecretAccessError as exc:
         raise _vault_secret_access_forbidden(exc) from exc
+    except vault_service.SecretConflictError as exc:
+        raise _vault_field_service_error(exc) from exc
     _publish_vaults_updated(scope="secret", secret_name=meta.get("name") or name)
     return {"ok": True, "secret": meta}
 

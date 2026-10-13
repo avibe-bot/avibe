@@ -4518,6 +4518,21 @@ def test_protected_reveal_context_uses_field_record_name(monkeypatch):
     assert context["display"]["secrets"] == [{"name": "PROTECTED_LOGIN.username", "kind": "static"}]
 
 
+def test_store_vault_pubkey_pin_maps_storage_cas_conflict_to_409(monkeypatch):
+    """A CAS conflict is a retryable API response, not an uncaught storage error."""
+    pin = {"public_key": "test-public-key", "fingerprint": "test-fingerprint"}
+    store = Mock(side_effect=vault_service.SecretConflictError("concurrent metadata update"))
+    monkeypatch.setattr(vault_service, "store_pubkey_pin", store)
+    publish = Mock()
+    monkeypatch.setattr(api, "_publish_vaults_updated", publish)
+    with pytest.raises(api.VaultApiError) as exc:
+        api.store_vault_pubkey_pin({"name": "PINNED_KEY", "pin": pin})
+    assert exc.value.status == 409
+    assert exc.value.code == "secret_conflict"
+    assert store.call_args.args[1:] == ("PINNED_KEY", pin)
+    publish.assert_not_called()
+
+
 def test_protected_agent_binding_batch_expands_record_names(monkeypatch):
     monkeypatch.setattr(api, "_require_avault_grant_delivery_surface", lambda _feature: None)
     monkeypatch.setattr(api, "avault_agent_pubkey", Mock(return_value=TEST_AGENT_PUBKEY))
@@ -4543,6 +4558,9 @@ def test_protected_agent_binding_batch_expands_record_names(monkeypatch):
     assert [item["name"] for item in result["items"]] == ["PROTECTED_LOGIN", "PROTECTED_LOGIN.username"]
     display_names = [item["name"] for item in _verified_signed_context(result["items"][0]["context"])["display"]["secrets"]]
     assert display_names == ["PROTECTED_LOGIN", "PROTECTED_LOGIN.username"]
+    for item in result["items"]:
+        context = _verified_signed_context(item["context"])
+        assert context["release"]["operationHash"] == api._agent_deliver_operation_hash(item["name"], 300)
 
 
 def test_create_grant_relays_every_protected_record_and_rejects_missing_dek(monkeypatch, avault_p2):

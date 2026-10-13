@@ -4970,6 +4970,7 @@
       "saveNamed": "保存 {{field}}",
       "saved": "字段已保存",
       "recordConflict": "保存期间字段记录发生变化。值未写入，请重新加载 Secret 后再试。",
+      "secretConflict": "保存期间此密钥发生变化，字段已刷新。请检查后重新保存；你的值尚未写入。",
       "replacePlaceholder": "输入替换值",
       "revealField": "要显示的字段",
       "namesHelp": "使用小写字母、数字和下划线，以字母开头。每个字段的名称必须唯一且必须填写值。",

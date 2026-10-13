@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Loader2, Plus, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
-import { ApiError, useApi, type VaultFieldValuePayload, type VaultSecret } from '@/context/ApiContext';
+import { useApi, type VaultFieldValuePayload, type VaultSecret } from '@/context/ApiContext';
 import { sealBlindBox, standardCreateBlindBoxContext } from '@/lib/vaultCrypto';
 import { useProtectedVault } from '@/lib/useProtectedVault';
 import { openVaultsInBrowser } from '@/lib/vaultBrowserHandoff';
@@ -84,9 +84,8 @@ export function VaultSecretFieldsEditor({
     let capturedValue = value;
     const clear = () =>
       adding ? setNewValue('') : setDrafts((values) => ({ ...values, [field]: '' }));
-    const isRecordMismatch = (result: { code?: string } | unknown): boolean =>
-      (result instanceof ApiError && result.code === 'record_mismatch') ||
-      (typeof result === 'object' && result !== null && 'code' in result && result.code === 'record_mismatch');
+    const hasErrorCode = (result: unknown, code: string): boolean =>
+      typeof result === 'object' && result !== null && 'code' in result && result.code === code;
     const conflict = () => new Error(t('vaults.fields.recordConflict'));
     const adoptSecret = (next: VaultSecret) => {
       setCurrent(next);
@@ -130,7 +129,8 @@ export function VaultSecretFieldsEditor({
           expected_updated_at: secret.updated_at,
         }, { handleError: false });
       } catch (error) {
-        if (isRecordMismatch(error)) return { ok: false, code: 'record_mismatch' };
+        if (hasErrorCode(error, 'record_mismatch')) return { ok: false, code: 'record_mismatch' };
+        if (hasErrorCode(error, 'secret_conflict')) return { ok: false, code: 'secret_conflict' };
         throw error;
       }
     };
@@ -138,10 +138,14 @@ export function VaultSecretFieldsEditor({
       try {
         const wasDefault = field === defaultField;
         let result = await sealAndWrite(current, field, wasDefault);
-        if (isRecordMismatch(result)) {
+        if (hasErrorCode(result, 'record_mismatch')) {
           const next = await freshSecret();
           result = await sealAndWrite(next, wasDefault ? vaultDefaultField(next) : field, wasDefault);
-          if (isRecordMismatch(result)) throw conflict();
+          if (hasErrorCode(result, 'record_mismatch')) throw conflict();
+        }
+        if (hasErrorCode(result, 'secret_conflict')) {
+          await freshSecret();
+          throw new Error(t('vaults.fields.secretConflict'));
         }
         if (result.ok && result.secret) {
           adoptSecret(result.secret);

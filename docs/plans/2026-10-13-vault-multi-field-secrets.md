@@ -262,3 +262,8 @@ secrets with fields work without it; protected secrets with fields need it.
   deletion is out of scope; browser/REST removal of extra fields is supported.
 - There are no plaintext or non-secret fields; non-secret notes belong in the
   description.
+- VMK-copy discovery (`latest_protected_vmk_wrap_meta`) selects the default
+  envelope on the most recently updated secret. Updating an extra field can
+  move a secret with older VMK copies to the front. This is latent while the
+  sandbox writes the base VMK wrap only at setup; multi-passkey/VMK-copy changes
+  must replace this selection before allowing those copies to diverge.

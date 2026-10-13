@@ -97,14 +97,27 @@ it('requires a unique populated extra field, saves it under its record name, and
   await waitFor(() => expect(screen.queryByLabelText('Value for totp')).toBeNull());
 });
 
-it('shows a stale-write error without claiming a field was saved', async () => {
-  api.updateVaultSecretField.mockResolvedValue({ ok: false, code: 'secret_changed', message: 'Secret changed' });
+it.each(['response', 'exception'])('refreshes a conflicting version without retrying, then permits a new save (%s)', async (failure) => {
+  const fresh = { ...secret, updated_at: 'version-9' };
+  if (failure === 'exception') {
+    api.updateVaultSecretField.mockRejectedValueOnce(new ApiError('stale version', 409, 'secret_conflict'));
+  } else {
+    api.updateVaultSecretField.mockResolvedValueOnce({ ok: false, code: 'secret_conflict' });
+  }
+  api.listVaultSecrets.mockResolvedValueOnce({ ok: true, secrets: [fresh] });
+  api.updateVaultSecretField.mockResolvedValue({ ok: true, secret: { ...fresh, updated_at: 'version-10' } });
   renderEditor();
   change('Value for username', 'new-user');
   fireEvent.click(screen.getByRole('button', { name: 'Save username' }));
-  expect((await screen.findByRole('alert')).textContent).toBe('Secret changed');
+  expect((await screen.findByRole('alert')).textContent).toBe(en.vaults.fields.secretConflict);
+  expect(api.listVaultSecrets).toHaveBeenCalledWith({ cache: false });
+  expect(api.updateVaultSecretField).toHaveBeenCalledOnce();
   expect(screen.queryByRole('status')).toBeNull();
   expect((screen.getByLabelText('Value for username') as HTMLInputElement).value).toBe('new-user');
+  fireEvent.click(screen.getByRole('button', { name: 'Save username' }));
+  await screen.findByRole('status');
+  expect(api.updateVaultSecretField).toHaveBeenCalledTimes(2);
+  expect(api.updateVaultSecretField.mock.calls[1][2].expected_updated_at).toBe('version-9');
 });
 
 it('seals a protected replacement with its field record and drops its entered value', async () => {

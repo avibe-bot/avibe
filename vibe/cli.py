@@ -9049,19 +9049,6 @@ def _vault_cli_delivery_context(args, *, mode: str, **extra) -> tuple[dict, dict
     return requester, delivery, session_id
 
 
-def _preflight_vault_names(engine, names: list[str], *, mixed_message: str, mixed_code: str = "mixed_protection_tiers") -> dict[str, dict]:
-    from storage import vault_service
-
-    metas: dict[str, dict] = {}
-    with engine.connect() as conn:
-        for name in dict.fromkeys(names):
-            metas[name] = vault_service.get_secret_meta(conn, name)
-    tiers = {str(meta.get("protection") or "standard") for meta in metas.values()}
-    if len(tiers) > 1:
-        raise TaskCliError(mixed_message, code=mixed_code)
-    return metas
-
-
 def _preflight_vault_run_batch(engine, mapping: dict[str, str]) -> dict[str, dict]:
     from storage import vault_service
 

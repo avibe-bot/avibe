@@ -4970,6 +4970,7 @@
       "saveNamed": "Save {{field}}",
       "saved": "Field saved",
       "recordConflict": "This field changed while you were saving. The value was not written; reload the secret and try again.",
+      "secretConflict": "This secret changed while you were saving. Its fields are now refreshed; review them and save again. Your value was not written.",
       "replacePlaceholder": "Enter a replacement value",
       "revealField": "Field to reveal",
       "namesHelp": "Use lowercase letters, digits and underscores; start with a letter. Each field needs a unique name and a value.",
