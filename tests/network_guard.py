@@ -26,9 +26,13 @@ Unix sockets and every other address family pass. A refusal raises
 ``NetworkAccessRefused``, an ``OSError``, so the product takes its offline path
 instead of hanging, and is recorded: a refusal the product swallows still
 fails the test that made it (``take_refusals``), and one made outside any
-test fails the run. ``allow_network(reason=...)`` opts out a test that is
-meant to be live; the opt-out spans the test's whole run protocol, including
-the session-scoped fixtures it sets up.
+test fails the run.
+
+``allow_network(reason=...)`` opts out a test that is meant to be live. It is
+honoured only on an ``integration`` test, which the unit shards exclude, because
+the opt-out lifts the guard for the whole process while that test runs: every
+thread, including one an earlier test left behind. The opt-out spans the test's
+whole run protocol, including the session-scoped fixtures it sets up.
 
 Outside the hook: child processes (each loads its own interpreter), a native
 resolver or transport that bypasses CPython's socket module, such as uvloop's
@@ -72,28 +76,34 @@ _current: _Window | None = None
 # Refusals made while no test was running, in order: collection, module import,
 # or a thread that outlived the test that started it.
 refused_outside_tests: list[str] = []
+# Recording a refusal and closing a window are atomic with respect to each other,
+# so a refusal lands either in the window its test still reports or outside any test.
+_lock = threading.Lock()
 
 
 def begin_test(nodeid: str, *, allowed: bool) -> None:
     global _current
-    _current = _Window(nodeid, allowed)
+    with _lock:
+        _current = _Window(nodeid, allowed)
 
 
 def end_test() -> list[str]:
     """Close the running test's window; what it was refused."""
 
     global _current
-    window, _current = _current, None
+    with _lock:
+        window, _current = _current, None
     return window.refusals if window is not None else []
 
 
 def take_refusals() -> list[str]:
     """Return and forget what the running test was refused, for a test that expects refusals."""
 
-    window = _current
-    if window is None:
-        return []
-    taken, window.refusals[:] = list(window.refusals), []
+    with _lock:
+        window = _current
+        if window is None:
+            return []
+        taken, window.refusals[:] = list(window.refusals), []
     return taken
 
 
@@ -170,7 +180,12 @@ def audit(event: str, args: tuple) -> None:
     # A lookup the event loop hands to its executor carries no frame of the code that asked for it.
     origin = _origin() or "no repository frame on this thread"
     message = f"{event} to {target} (thread {threading.current_thread().name}) from {origin}"
-    (window.refusals if window is not None else refused_outside_tests).append(message)
+    with _lock:
+        # Read again: the window seen above may have closed while the stack was rendered.
+        window = _current
+        if window is not None and window.allowed:
+            return
+        (window.refusals if window is not None else refused_outside_tests).append(message)
     raise NetworkAccessRefused(
         errno.ENETUNREACH,
         f"tests may not reach past loopback: {event} to {target}; stub the fetch at the boundary that owns it, "

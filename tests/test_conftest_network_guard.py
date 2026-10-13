@@ -225,7 +225,78 @@ def test_loopback_and_unix_servers_are_reachable() -> None:
         shutil.rmtree(directory)
 
 
-@pytest.mark.allow_network(reason="proves the opt-out; a UDP connect sends nothing")
-def test_an_opted_out_test_reaches_past_loopback() -> None:
+# The opt-out, honoured only on an integration test; and a refusal whose report is
+# still being rendered when its test's window closes, which must not be lost.
+_WINDOW_EDGES = """
+import socket
+import threading
+
+import pytest
+
+from tests import network_guard
+
+
+def _udp_connect(host):
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-        sock.connect(("203.0.113.14", 9))
+        sock.connect((host, 9))
+
+
+@pytest.mark.integration
+@pytest.mark.allow_network(reason="proves the opt-out; a UDP connect sends nothing")
+def test_an_opted_out_integration_test():
+    _udp_connect("203.0.113.14")
+
+
+@pytest.mark.allow_network(reason="not an integration test")
+def test_an_opt_out_outside_integration():
+    pass
+
+
+_render = network_guard._origin
+_rendering = threading.Event()
+_finish_rendering = threading.Event()
+_threads = []
+
+
+def _slow_render():
+    _rendering.set()
+    _finish_rendering.wait(30)
+    return _render()
+
+
+def test_a_refusal_still_rendering_at_teardown():
+    network_guard._origin = _slow_render
+
+    def refuse():
+        try:
+            _udp_connect("203.0.113.15")
+        except OSError:
+            pass
+
+    _threads.append(threading.Thread(target=refuse, daemon=True))
+    _threads[0].start()
+    assert _rendering.wait(30)
+
+
+def test_the_next_test():
+    network_guard._origin = _render
+    _finish_rendering.set()
+    _threads[0].join(30)
+"""
+
+
+def test_the_opt_out_and_a_closing_window_lose_no_refusal(
+    pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PYTHONPATH", str(REPO_ROOT))
+    pytester.makepyfile(test_inner=_WINDOW_EDGES)
+    result = pytester.runpytest_subprocess("-p", "tests.conftest", "-p", "no:cacheprovider", timeout=120)
+
+    output = result.stdout.str()
+    result.assert_outcomes(passed=3, errors=2)
+    assert "203.0.113.14" not in output
+    section = output.partition(" ERROR at setup of test_an_opt_out_outside_integration ")[2]
+    assert "Failed: @pytest.mark.allow_network is honoured only on an integration test" in section, output
+    # Recorded once rendered, against the window open then, rather than into the closed one.
+    section = output.partition(" ERROR at teardown of test_the_next_test ")[2]
+    assert "socket.connect to 203.0.113.15:9 (thread " in section, output

@@ -75,7 +75,7 @@ from core.show_runtime_failures import (
     show_runtime_recovery_action,
 )
 from storage import resource_access_service
-from tests.ui_server_test_helpers import _mock_interface, _remote_peer, _save_config
+from tests.ui_server_test_helpers import _mock_interface, _remote_peer, _save_config, permissions_backend_unreachable
 from tests.ui_server_test_helpers import csrf_headers, remote_session_cookie
 from vibe import remote_access, show_identity, ui_server
 from vibe.ui_compat import TEST_REMOTE_ADDR_HEADER
@@ -7851,6 +7851,7 @@ def test_public_show_page_dispatch_records_the_visitor_that_admitted_it(monkeypa
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_config(tmp_path, paired=True)
+    permissions_backend_unreachable(monkeypatch)
     _create_agent_session("ses123")
     share_id = _create_show_page("ses123", "public")
     published = []
@@ -7937,6 +7938,7 @@ def test_public_show_page_dispatch_fails_closed_without_a_resolved_visitor(monke
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_config(tmp_path, paired=True)
+    permissions_backend_unreachable(monkeypatch)
     _create_agent_session("ses123")
     share_id = _create_show_page("ses123", "public")
     monkeypatch.setattr("vibe.ui_server._show_public_editor_context", lambda: None)
@@ -13951,6 +13953,7 @@ def test_show_runtime_manager_defaults_to_manifest_when_package_manifest_exists(
 def test_remote_instance_manager_can_repair_accessible_show_runtime(monkeypatch, tmp_path, role):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_config(tmp_path, paired=True, instance_kind="organization")
+    permissions_backend_unreachable(monkeypatch)
     _create_show_page("ses-manager-repair", "private")
     manager = _FakeShowRuntimeManager(fail=True, failure_reason="runtime_start_health_timeout")
     set_show_runtime_manager_for_tests(manager)

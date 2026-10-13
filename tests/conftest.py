@@ -214,6 +214,9 @@ def pytest_runtest_setup(item):
     marker = item.get_closest_marker("allow_network")
     if marker is not None and not (marker.kwargs.get("reason") or marker.args):
         pytest.fail("@pytest.mark.allow_network needs a reason")
+    if marker is not None and item.get_closest_marker("integration") is None:
+        # The opt-out lifts the guard process-wide, so it may open only in a run the unit suite is not part of.
+        pytest.fail("@pytest.mark.allow_network is honoured only on an integration test")
     network_guard.begin_test(item.nodeid, allowed=marker is not None)
 
 
