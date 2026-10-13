@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -1226,6 +1227,68 @@ def test_bounded_subprocess_capture_rejects_timeout(tmp_path: Path) -> None:
         timeout=0.01,
         max_bytes=4096,
     ) is None
+
+
+def _wait_until(predicate, *, seconds: float = 10.0) -> bool:
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.02)
+    return predicate()
+
+
+def test_bounded_subprocess_capture_lets_a_timed_out_child_finish(tmp_path: Path) -> None:
+    """The deadline bounds the caller, not the child.
+
+    `claude plugin list` may be rotating the OAuth refresh token when the
+    deadline passes; it must still get to write the new token back.
+    """
+    finished = tmp_path / "finished"
+
+    assert managed_skills._bounded_subprocess_stdout(
+        [
+            sys.executable,
+            "-c",
+            f"import pathlib, time; time.sleep(1); pathlib.Path({str(finished)!r}).write_text('done')",
+        ],
+        cwd=tmp_path,
+        env=dict(os.environ),
+        timeout=0.05,
+        max_bytes=4096,
+    ) is None
+
+    assert not finished.exists()
+    assert _wait_until(finished.exists)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="os.kill(pid, 0) is not a liveness probe on Windows")
+def test_bounded_subprocess_capture_kills_an_abandoned_child_at_the_reap_limit(tmp_path: Path) -> None:
+    pid_file = tmp_path / "pid"
+
+    assert managed_skills._bounded_subprocess_stdout(
+        [
+            sys.executable,
+            "-c",
+            f"import os, pathlib, time; pathlib.Path({str(pid_file)!r}).write_text(str(os.getpid())); time.sleep(60)",
+        ],
+        cwd=tmp_path,
+        env=dict(os.environ),
+        timeout=0.5,
+        max_bytes=4096,
+        reap_timeout=0.2,
+    ) is None
+
+    pid = int(pid_file.read_text())
+
+    def reaped() -> bool:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        return False
+
+    assert _wait_until(reaped)
 
 
 def test_claude_plugin_discovery_fails_closed_when_capture_fails(

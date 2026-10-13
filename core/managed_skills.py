@@ -58,6 +58,7 @@ BUILTIN_TREE_MAX_BYTES = 32 * 1024 * 1024
 CLAUDE_PLUGIN_LIST_MAX_BYTES = 1024 * 1024
 CLAUDE_PLUGIN_LIST_MAX_ENTRIES = 256
 CLAUDE_PLUGIN_LIST_TIMEOUT_SECONDS = 1
+CLAUDE_PLUGIN_LIST_REAP_SECONDS = 60
 
 _SNAPSHOT_DOMAIN = b"avibe-builtin-snapshot-v1\0"
 _SNAPSHOT_ID_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -888,8 +889,14 @@ def _bounded_subprocess_stdout(
     env: dict[str, str],
     timeout: float,
     max_bytes: int,
+    reap_timeout: float = CLAUDE_PLUGIN_LIST_REAP_SECONDS,
 ) -> bytes | None:
-    """Capture stdout while bounding combined stdout and stderr in memory."""
+    """Capture stdout while bounding combined stdout and stderr in memory.
+
+    A child that outlives ``timeout`` is abandoned, not killed: the caller gets
+    ``None`` at the deadline and the child is reaped in the background, with
+    ``reap_timeout`` as its hard limit.
+    """
 
     try:
         process = subprocess.Popen(
@@ -943,7 +950,19 @@ def _bounded_subprocess_stdout(
         if limit_exceeded.wait(min(0.02, remaining)):
             break
 
-    if (timed_out or limit_exceeded.is_set()) and process.poll() is None:
+    if timed_out and not limit_exceeded.is_set() and process.poll() is None:
+        # A `claude` CLI started while its OAuth credentials are due for refresh
+        # posts the single-use refresh token during startup. Killing it before
+        # the rotated token is written back leaves a dead token on disk, and
+        # Claude Code clears the login on the next refresh.
+        threading.Thread(
+            target=_reap_abandoned_subprocess,
+            args=(process, reap_timeout),
+            name="managed-skill-subprocess-reaper",
+            daemon=True,
+        ).start()
+        return None
+    if limit_exceeded.is_set() and process.poll() is None:
         process.kill()
     try:
         process.wait(timeout=1)
@@ -960,6 +979,14 @@ def _bounded_subprocess_stdout(
     if timed_out or limit_exceeded.is_set() or process.returncode != 0:
         return None
     return bytes(stdout)
+
+
+def _reap_abandoned_subprocess(process: subprocess.Popen, timeout: float) -> None:
+    try:
+        process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
 
 
 def resolve_skills(
