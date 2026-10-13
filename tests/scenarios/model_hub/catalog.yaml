@@ -382,7 +382,7 @@ scenarios:
       - tests/test_vibey_agent.py::test_a_proxied_image_that_was_not_saved_is_a_failed_call_with_its_code
       - tests/test_agent_transcript.py::test_the_media_sweep_keeps_every_file_a_row_registers_and_takes_only_stale_orphans
   - id: MH-HOSTED-UI-001
-    name: A Tools-tab toggle or executor pick writes the tool's whole setting, and the picker offers only verified pairs
+    name: A Tools-tab toggle or executor pick writes the tool's whole setting with an executor the server accepts; the picker offers only verified pairs
     status: covered
     kind: contract
     layer: unit
@@ -412,13 +412,13 @@ scenarios:
     layer: unit
     test: ui/src/components/settings/models/SettingsModelsPage.render.test.tsx::MH-HOSTED-UI-005
   - id: MH-HOSTED-UI-006
-    name: A Source model shows one chip per tool with evidence; a refused tool reads via proxy only while it is on, and unchecked draws nothing
+    name: A Source model shows one chip per tool with evidence; a refused tool reads as unsupported whatever its toggle, and unchecked draws nothing
     status: covered
     kind: observation
     layer: unit
     test: ui/src/components/settings/models/SourceDetailPanel.test.tsx::MH-HOSTED-UI-006
   - id: MH-HOSTED-UI-007
-    name: A hosted-tools read that overlaps a write never paints the pre-write state over the write's answer
+    name: Hosted-tool writes run one at a time and a read never overlaps one, so the screen holds the newest committed state
     status: covered
     kind: concurrency
     layer: unit

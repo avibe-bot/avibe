@@ -76,8 +76,8 @@ describe('hosted-tool evidence projection', () => {
       reverify: { engine_upgraded: 0, aged: 0 },
     };
 
-    expect(modelCapabilities(status, 'src_relay001', 'gpt-6-astra').map(({ tool, enabled, chip }) => [tool, enabled, chip.kind]))
-      .toEqual([['web_search', true, 'native'], ['x_search', true, 'unsupported']]);
+    expect(modelCapabilities(status, 'src_relay001', 'gpt-6-astra').map(({ tool, chip }) => [tool, chip.kind]))
+      .toEqual([['web_search', 'native'], ['x_search', 'unsupported']]);
     expect(modelCapabilities(status, 'src_relay001', 'gpt-6-sol')).toEqual([]);
   });
 });

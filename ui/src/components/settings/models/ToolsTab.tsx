@@ -110,16 +110,26 @@ const ToolCard: React.FC<{
   const verified = verifiedCandidates(tool);
   const chosen = chosenExecutor(tool);
   const sourceName = (id: string) => sources.get(id)?.display_name ?? id;
-  // Sources with no native pair for this tool reach it through the proxy.
+  // Sources with no (Source, model) pair that could run this tool natively.
   const offering = new Set(tool.candidates.map((candidate) => candidate.source_id));
-  const proxied = hubSources.filter((source) => !offering.has(source.id)).map((source) => source.display_name);
+  const withoutNative = hubSources.filter((source) => !offering.has(source.id)).map((source) => source.display_name);
+  // The saved executor as the server would accept it back: a pair still among the
+  // candidates. One that left them (its Source or model went away, or the overlay
+  // stopped offering the tool there) is refused on write, and resolution already
+  // skips it, so it reads and writes as Automatic.
+  const savedExecutor = tool.executor && tool.candidates.some((candidate) => sameExecutor(candidate, tool.executor))
+    ? tool.executor
+    : null;
   // A stored choice that is no longer verified still shows, so the picker never
   // silently reads as a different executor than the one saved.
-  const options = tool.executor && !verified.some((candidate) => sameExecutor(candidate, tool.executor))
-    ? [...verified, { ...tool.executor, stale: true as const }]
+  const options = savedExecutor && !verified.some((candidate) => sameExecutor(candidate, savedExecutor))
+    ? [...verified, { ...savedExecutor, stale: true as const }]
     : verified;
   // With nothing verified there is nothing to pick, but a saved choice still reads as itself.
   const pickable = verified.length > 0;
+  // Turning a tool on needs a verified pair to run it: on with none, every call
+  // would fail. Turning it off is always possible.
+  const locked = !tool.enabled && !pickable;
   return (
     <section className="model-hub-tool-card overflow-hidden rounded-xl border border-border bg-surface" aria-label={name} data-tool={tool.name}>
       <header className="model-hub-tool-card-head flex items-center gap-3 border-b border-border">
@@ -132,12 +142,12 @@ const ToolCard: React.FC<{
           <span className="model-hub-tool-description">{t(`settings.models.tools.tool.${tool.name}.description`)}</span>
         </span>
         <span className="flex shrink-0 items-center gap-2.5">
-          <span className={cn('model-hub-tool-state font-semibold', tool.enabled ? 'model-hub-ink-mint' : 'text-muted')}>{t(tool.enabled ? 'settings.models.tools.state.on' : 'settings.models.tools.state.off')}</span>
+          <span className={cn('model-hub-tool-state font-semibold', tool.enabled ? 'model-hub-ink-mint' : 'text-muted')}>{t(tool.enabled ? 'settings.models.tools.state.on' : locked ? 'settings.models.tools.state.needsCheck' : 'settings.models.tools.state.off')}</span>
           <ToggleSwitch
             enabled={tool.enabled}
-            disabled={pending}
+            disabled={pending || locked}
             label={t(tool.enabled ? 'settings.models.tools.toggle.turnOff' : 'settings.models.tools.toggle.turnOn', { name }) as string}
-            onClick={() => onChange(tool.name, { enabled: !tool.enabled, executor: tool.executor })}
+            onClick={() => onChange(tool.name, { enabled: !tool.enabled, executor: savedExecutor })}
           />
         </span>
       </header>
@@ -159,17 +169,17 @@ const ToolCard: React.FC<{
                   executor={sameExecutor(candidate, chosen)}
                 />
               ))}
-              {proxied.length > 0 && <p className="model-hub-tool-note flex items-start gap-2"><Info className="mt-px size-[13px] shrink-0" aria-hidden />{t('settings.models.tools.noNative', { sources: formatNameList(proxied, i18n.language), toolInline })}</p>}
+              {withoutNative.length > 0 && <p className="model-hub-tool-note flex items-start gap-2"><Info className="mt-px size-[13px] shrink-0" aria-hidden />{t('settings.models.tools.noNative', { sources: formatNameList(withoutNative, i18n.language), toolInline })}</p>}
             </>}
       </div>
       <div className="model-hub-tool-executor flex flex-col gap-2 border-t border-border sm:flex-row sm:items-center sm:gap-3">
         <span className="shrink-0 font-semibold text-foreground">{t('settings.models.tools.executor.label')}</span>
         <Select
-          wrapperClassName="sm:w-[260px] shrink-0"
+          wrapperClassName="sm:w-[330px] shrink-0"
           className="h-8 text-[12px]"
           aria-label={t('settings.models.tools.executor.pick', { name }) as string}
           disabled={pending || !pickable}
-          value={!pickable && tool.executor === null ? AUTOMATIC : executorValue(tool.executor)}
+          value={executorValue(savedExecutor)}
           onChange={(event) => {
             const picked = options.find((option) => executorValue(option) === event.target.value);
             onChange(tool.name, {
@@ -178,7 +188,7 @@ const ToolCard: React.FC<{
             });
           }}
         >
-          {!pickable && tool.executor === null
+          {!pickable && savedExecutor === null
             ? <option value={AUTOMATIC}>{t('settings.models.tools.executor.unavailable')}</option>
             : <>
                 {pickable && <option value={AUTOMATIC}>{t('settings.models.tools.executor.automatic')}</option>}

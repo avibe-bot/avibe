@@ -57,12 +57,12 @@ export const verifiedCandidates = (tool: HostedToolStatus): HostedToolCandidate[
 export const chosenExecutor = (tool: HostedToolStatus): HostedToolCandidate | null =>
   verifiedCandidates(tool).find((candidate) => sameExecutor(candidate, tool.executor)) ?? null;
 
-export type ModelCapability = { tool: HostedToolName; enabled: boolean; evidence: HostedEvidence; chip: HostedEvidenceChip };
+export type ModelCapability = { tool: HostedToolName; evidence: HostedEvidence; chip: HostedEvidenceChip };
 
 /** A Source model's evidence for each tool, in catalog order, for its detail chips. */
 export const modelCapabilities = (status: HostedToolsStatus, sourceId: string, modelId: string): ModelCapability[] =>
   status.tools.flatMap((tool) => {
     const candidate = tool.candidates.find((entry) => entry.source_id === sourceId && entry.model_id === modelId);
     const chip = candidate ? evidenceChip(candidate.call) : null;
-    return candidate && chip ? [{ tool: tool.name, enabled: tool.enabled, evidence: candidate.call, chip }] : [];
+    return candidate && chip ? [{ tool: tool.name, evidence: candidate.call, chip }] : [];
   });

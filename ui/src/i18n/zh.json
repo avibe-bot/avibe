@@ -2374,7 +2374,8 @@
         },
         "state": {
           "on": "已开启",
-          "off": "已关闭"
+          "off": "已关闭",
+          "needsCheck": "已关闭 · 需先检测"
         },
         "toggle": {
           "turnOn": "开启{{name}}",
@@ -2400,11 +2401,11 @@
           "imageTokens": "按图像 token 计费 · 暂无单价"
         },
         "empty": "你的供应商都不能原生运行{{toolInline}}。添加提供该工具的供应商后，在这里检测。",
-        "noNative": "{{sources}} 上的模型没有原生{{toolInline}}，由代理执行者代为调用（另计一次模型调用）。",
+        "noNative": "{{sources}} 上的模型没有原生{{toolInline}}。",
         "executor": {
           "label": "代理执行",
           "pick": "{{name}}的代理执行者",
-          "automatic": "自动（第一个已验证的）",
+          "automatic": "自动：Vibey 顺序中第一个已验证的",
           "unavailable": "检测后可选",
           "option": "{{source}} · {{model}}",
           "notVerified": "{{source}} · {{model}}（未验证）",
@@ -2421,21 +2422,17 @@
         "readFailed": "未能读取此供应商的工具能力。",
         "col": "能力",
         "chip": {
-          "viaProxyAged": "{{tool}} · 由代理提供 · 需重新检测",
           "unsupportedAged": "{{tool}} · {{date}} 检测为不支持 · 需重新检测",
           "native": "{{tool}} · 原生 · {{date}} 已验证",
           "reverify": "{{tool}} · {{date}} 已验证 · 需重新检测",
           "engineUpgraded": "{{tool}} · 引擎已升级 · 需重新检测",
-          "viaProxy": "{{tool}} · 由代理提供",
           "unsupported": "{{tool}} · 此供应商不支持"
         },
         "explain": {
-          "viaProxyAged": "{{tool}}已开启。此供应商在超过 30 天前的检测中不支持它，调用交给代理执行者；可重新检测现在是否已能原生运行。",
           "unsupportedAged": "此供应商在超过 30 天前的检测中不支持{{toolInline}}，可重新检测现在是否已支持。",
           "native": "检测通过：这个模型在此供应商上直接调用厂商自带的工具。",
           "reverify": "检测已超过 30 天，仍按原结果原生运行，可重新检测。",
           "engineUpgraded": "检测之后模型引擎已升级，重新检测前调用交给代理执行者。",
-          "viaProxy": "{{tool}}已开启，但此供应商不能原生运行，调用交给代理执行者。",
           "unsupported": "此供应商拒绝过{{toolInline}}，之后不会再发到这里。"
         },
         "recorded": "记录时间",

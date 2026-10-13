@@ -6,7 +6,7 @@
 // toggles it, and the chip's accessible name carries the same facts.
 import * as React from 'react';
 import { useTranslation } from 'react-i18next';
-import { AtSign, Ban, Check, Globe, Image as ImageIcon, RotateCw, TriangleAlert, Waypoints } from 'lucide-react';
+import { AtSign, Ban, Check, Globe, Image as ImageIcon, RotateCw, TriangleAlert } from 'lucide-react';
 
 import { Popover, PopoverAnchor, PopoverContent } from '@/components/ui/popover';
 import { cn } from '@/lib/utils';
@@ -21,13 +21,14 @@ const TOOL_ICON: Record<HostedToolName, React.ComponentType<{ className?: string
 };
 
 /**
- * The chip's state. An unsupported tool that is on reaches this Source through
- * the proxy; a probe record older than 30 days, either way, asks for a new check.
+ * The chip's state; a probe record older than 30 days, either way, asks for a
+ * new check. A refused tool reads as unsupported here whether or not it is on:
+ * whether a proxy executor would serve it instead is the bound executor's
+ * question, which this read does not answer.
  */
-const chipState = ({ chip, enabled }: ModelCapability) => {
+const chipState = ({ chip }: ModelCapability) => {
   if (chip.kind === 'engineUpgraded') return 'engineUpgraded' as const;
   if (chip.kind === 'native') return chip.aged ? 'reverify' as const : 'native' as const;
-  if (enabled) return chip.aged ? 'viaProxyAged' as const : 'viaProxy' as const;
   return chip.aged ? 'unsupportedAged' as const : 'unsupported' as const;
 };
 type ChipState = ReturnType<typeof chipState>;
@@ -36,8 +37,6 @@ const STATE_CLASS: Record<ChipState, string> = {
   native: 'model-hub-status-mint',
   reverify: 'model-hub-status-gold',
   engineUpgraded: 'model-hub-status-gold',
-  viaProxy: 'model-hub-accent-pill--cyan',
-  viaProxyAged: 'model-hub-status-gold',
   unsupported: 'model-hub-fill-0a border-border text-muted',
   unsupportedAged: 'model-hub-status-gold',
 };
@@ -46,8 +45,6 @@ const STATE_ICON: Record<ChipState, React.ComponentType<{ className?: string }>>
   native: Check,
   reverify: RotateCw,
   engineUpgraded: TriangleAlert,
-  viaProxy: Waypoints,
-  viaProxyAged: RotateCw,
   unsupported: Ban,
   unsupportedAged: RotateCw,
 };

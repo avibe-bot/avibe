@@ -2374,7 +2374,8 @@
         },
         "state": {
           "on": "On",
-          "off": "Off"
+          "off": "Off",
+          "needsCheck": "Off · check a Source first"
         },
         "toggle": {
           "turnOn": "Turn on {{name}}",
@@ -2400,11 +2401,11 @@
           "imageTokens": "Billed per image token · no per-image price yet"
         },
         "empty": "None of your Sources can run {{toolInline}} natively. Add a Source that offers it, then check it here.",
-        "noNative": "Models on {{sources}} have no native {{toolInline}}. The proxy executor runs it for them, as one more model call.",
+        "noNative": "Models on {{sources}} have no native {{toolInline}}.",
         "executor": {
           "label": "Proxy executor",
           "pick": "Proxy executor for {{name}}",
-          "automatic": "Automatic (first verified)",
+          "automatic": "Automatic: first verified in Vibey's order",
           "unavailable": "Available after a check",
           "option": "{{source}} · {{model}}",
           "notVerified": "{{source}} · {{model}} (not verified)",
@@ -2421,21 +2422,17 @@
         "readFailed": "Couldn't read this Source's tool capabilities.",
         "col": "Capabilities",
         "chip": {
-          "viaProxyAged": "{{tool}} · via proxy · check again",
           "unsupportedAged": "{{tool}} · not supported as of {{date}} · check again",
           "native": "{{tool}} · native · verified {{date}}",
           "reverify": "{{tool}} · verified {{date}} · check again",
           "engineUpgraded": "{{tool}} · engine upgraded · check again",
-          "viaProxy": "{{tool}} · via proxy",
           "unsupported": "{{tool}} · not supported on this Source"
         },
         "explain": {
-          "viaProxyAged": "{{tool}} is on. This Source refused it in a check over 30 days old, so calls go to the proxy executor; check again to see whether it runs natively now.",
           "unsupportedAged": "This Source refused {{toolInline}} in a check over 30 days old. Check again to see whether it supports it now.",
           "native": "Verified: this model runs the vendor's own tool on this Source.",
           "reverify": "This check is over 30 days old. The tool still runs natively; check again when convenient.",
           "engineUpgraded": "The model engine was upgraded after this check, so calls go to the proxy executor until it is checked again.",
-          "viaProxy": "{{tool}} is on, but this Source can't run it natively, so calls go to the proxy executor.",
           "unsupported": "This Source refused {{toolInline}}, so it is never sent here."
         },
         "recorded": "Recorded",

@@ -76,7 +76,7 @@ describe('ToolsTab writes', () => {
     const executor = { source_id: GROK.id, model_id: 'grok-4.6' };
     const onChange = renderTab(status([
       tool('web_search', { enabled: true, executor, candidates: [{ ...executor, call: verified, replay: verified }] }),
-      tool('x_search'),
+      tool('x_search', { candidates: [{ ...executor, call: verified, replay: verified }] }),
     ]));
 
     await userEvent.click(within(card('Web search')).getByRole('switch', { name: 'Turn off Web search' }));
@@ -86,6 +86,34 @@ describe('ToolsTab writes', () => {
 
     await userEvent.click(within(card('X search')).getByRole('switch', { name: 'Turn on X search' }));
     expect(onChange).toHaveBeenLastCalledWith('x_search', { enabled: true, executor: null });
+  });
+
+  it('cannot turn a tool on until a pair is verified to run it, but can always turn it off', async () => {
+    const onChange = renderTab(status([
+      tool('web_search', { candidates: [{ source_id: GROK.id, model_id: 'grok-4.6', call: unknown, replay: unknown }] }),
+      tool('x_search', { enabled: true, candidates: [{ source_id: GROK.id, model_id: 'grok-4.6', call: unknown, replay: unknown }] }),
+    ]));
+
+    // On with nothing verified, every call would fail with no way to fix it here.
+    const off = within(card('Web search')).getByRole('switch', { name: 'Turn on Web search' }) as HTMLButtonElement;
+    expect(off.disabled).toBe(true);
+    within(card('Web search')).getByText('Off · check a Source first');
+
+    await userEvent.click(within(card('X search')).getByRole('switch', { name: 'Turn off X search' }));
+    expect(onChange).toHaveBeenLastCalledWith('x_search', { enabled: false, executor: null });
+  });
+
+  it('writes a saved executor back only while the server would still accept it', async () => {
+    // The saved pair left the candidates (its model went away): resolution skips
+    // it already, and echoing it would get the whole PUT refused.
+    const onChange = renderTab(status([tool('web_search', {
+      enabled: true,
+      executor: { source_id: RELAY.id, model_id: 'gpt-6-retired' },
+      candidates: [{ source_id: GROK.id, model_id: 'grok-4.6', call: unknown, replay: unknown }],
+    })]));
+
+    await userEvent.click(within(card('Web search')).getByRole('switch', { name: 'Turn off Web search' }));
+    expect(onChange).toHaveBeenLastCalledWith('web_search', { enabled: false, executor: null });
   });
 
   it('the executor picker offers only verified pairs, and a pick keeps the toggle', async () => {
@@ -102,10 +130,10 @@ describe('ToolsTab writes', () => {
 
     const picker = within(card('Web search')).getByRole('combobox', { name: 'Proxy executor for Web search' });
     expect(within(picker).getAllByRole('option').map((option) => option.textContent))
-      .toEqual(['Automatic (first verified)', 'Grok · grok-4.6']);
+      .toEqual(["Automatic: first verified in Vibey's order", 'Grok · grok-4.6']);
     await userEvent.selectOptions(picker, 'Grok · grok-4.6');
     expect(onChange).toHaveBeenLastCalledWith('web_search', { enabled: true, executor: { source_id: GROK.id, model_id: 'grok-4.6' } });
-    await userEvent.selectOptions(picker, 'Automatic (first verified)');
+    await userEvent.selectOptions(picker, "Automatic: first verified in Vibey's order");
     expect(onChange).toHaveBeenLastCalledWith('web_search', { enabled: true, executor: null });
 
     // Nothing verified: nothing to pick, and the control says why.
@@ -201,11 +229,12 @@ describe('ToolsTab claims', () => {
     expect(screen.queryByRole('status')).toBeNull();
   });
 
-  it('names the Sources that reach a tool only through the proxy', () => {
+  it('names the Sources that have no native pair for a tool', () => {
     renderTab(status([tool('x_search', { candidates: [{ source_id: GROK.id, model_id: 'grok-4.6', call: verified, replay: verified }] })]));
 
     const note = within(card('X search')).getByText(/have no native X search/);
-    // Grok offers the tool natively, so it is the one Source not named.
-    expect(note.textContent).toMatch(/^Models on relay-claude, relay-gpt,? (and )?OpenAI subscription have no native X search\./);
+    // Grok offers the tool natively, so it is the one Source not named. Whether
+    // a proxy executor serves the others is not this read's to say.
+    expect(note.textContent).toMatch(/^Models on relay-claude, relay-gpt,? (and )?OpenAI subscription have no native X search\.$/);
   });
 });

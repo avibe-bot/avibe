@@ -64,6 +64,31 @@ describe('useHostedTools ordering', () => {
     expect(shown(result.current.read)).toBe(true);
   });
 
+  it('runs writes one at a time, so each answer lands in the order the server committed them', async () => {
+    vi.spyOn(modelsApi, 'getHostedTools').mockResolvedValue(status(false));
+    const first = deferred<HostedToolsStatus>();
+    const second = deferred<HostedToolsStatus>();
+    const put = vi.spyOn(modelsApi, 'putHostedTool').mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
+    const { result } = renderHook(() => useHostedTools(true), { wrapper });
+    await waitFor(() => expect(shown(result.current.read)).toBe(false));
+
+    let writes!: Promise<void>[];
+    act(() => {
+      writes = [
+        result.current.save('web_search', { enabled: true, executor: null }),
+        result.current.save('x_search', { enabled: true, executor: null }),
+      ];
+    });
+    // The second PUT has not left: had both, the server could commit them in
+    // either order and the client would have no way to tell which answer is newer.
+    await waitFor(() => expect(put).toHaveBeenCalledTimes(1));
+    await act(async () => { first.resolve(status(true)); await writes[0]; });
+    await waitFor(() => expect(put).toHaveBeenCalledTimes(2));
+    await act(async () => { second.resolve(status(false)); await writes[1]; });
+    // The screen holds the answer to the last write the server committed.
+    expect(shown(result.current.read)).toBe(false);
+  });
+
   it('drops a read that was already out when a write started', async () => {
     const first = deferred<HostedToolsStatus>();
     vi.spyOn(modelsApi, 'getHostedTools').mockReturnValueOnce(first.promise);

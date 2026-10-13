@@ -1383,8 +1383,9 @@ describe('SourceDetailPanel', () => {
 
 // What a Source's model rows say about hosted tools (§6.2, frame FB4vC). The
 // projection's states are `hostedTools.test.ts`'s subject; what is proved here is
-// the mapping a Source row adds: a refused tool reads 「via proxy」 only while it is
-// on, unchecked draws nothing, and the detail carries the record's facts.
+// what a Source row adds: a refused tool reads as unsupported whatever its toggle
+// (whether a proxy serves it is the bound executor's question, not this read's),
+// unchecked draws nothing, and the detail carries the record's facts.
 describe('SourceDetailPanel hosted-tool capability chips', () => {
   const twoModels: Source = {
     ...source,
@@ -1416,9 +1417,9 @@ describe('SourceDetailPanel hosted-tool capability chips', () => {
   const chips = (modelId: string) => [...(screen.getByTitle(modelId).closest('.model-hub-source-table-row') as HTMLElement)
     .querySelectorAll('[data-capability]')].map((chip) => chip.getAttribute('data-capability'));
 
-  it('MH-HOSTED-UI-006: draws evidence per model, and a refused tool reads via proxy only while it is on', () => {
+  it('MH-HOSTED-UI-006: draws evidence per model, and a refused tool reads as unsupported whether or not it is on', () => {
     renderChips(status(true));
-    expect(chips('model-a')).toEqual(['web_search:native', 'x_search:viaProxy']);
+    expect(chips('model-a')).toEqual(['web_search:native', 'x_search:unsupported']);
     // Unchecked is the normal state, not a problem: no chip at all.
     expect(chips('model-b')).toEqual([]);
     cleanup();
@@ -1429,7 +1430,7 @@ describe('SourceDetailPanel hosted-tool capability chips', () => {
 
   it('names the record time, how it was learned, and the reason', async () => {
     renderChips(status(true));
-    const chip = screen.getByRole('button', { name: /X search · via proxy|X 搜索 · 由代理提供/ });
+    const chip = screen.getByRole('button', { name: /X search · not supported on this Source|X 搜索 · 此供应商不支持/ });
     // The accessible name carries the same facts as the hover detail.
     expect(chip.getAttribute('aria-label')).toMatch(/400 · unsupported_tool_type/);
     await userEvent.hover(chip);
