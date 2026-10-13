@@ -42,7 +42,7 @@ from core.handlers.model_hub.classification import (
     terminal_outcome_category,
 )
 from core.handlers.model_hub.errors import ModelDiscoveryError
-from core.handlers.model_hub.events import redact_untrusted_text
+from core.handlers.model_hub.events import bounded_diagnostic_detail, redact_untrusted_text
 from core.handlers.model_hub.request import ModelHubRequest
 from core.handlers.model_hub.stream_wire import (
     ProtocolObservation,
@@ -7902,7 +7902,8 @@ def test_engine_upstream_detail_is_bounded_and_keeps_non_ascii_text() -> None:
     detail = client_module._upstream_error_detail(payload, (("error",),))
 
     assert detail is not None
-    assert len(detail) == client_module._UPSTREAM_DETAIL_CHARS
+    # The persisted contract's bound (turn-provenance.schema.json maxLength).
+    assert len(detail) == 400
     assert detail.startswith("模型不可用") and detail.endswith("…")
 
 
@@ -7922,7 +7923,7 @@ def test_engine_upstream_detail_is_bounded_and_keeps_non_ascii_text() -> None:
     ],
 )
 def test_engine_upstream_detail_redacts_labeled_opaque_secrets(message: str, expected: str) -> None:
-    assert client_module._bounded_upstream_detail(message) == expected
+    assert bounded_diagnostic_detail(message) == expected
 
 
 def test_engine_upstream_detail_redaction_stays_linear_on_hostile_labels() -> None:
@@ -7933,7 +7934,7 @@ def test_engine_upstream_detail_redaction_stays_linear_on_hostile_labels() -> No
 
 
 def test_engine_upstream_detail_cannot_ping_the_channel_it_is_rendered_into() -> None:
-    detail = client_module._bounded_upstream_detail(
+    detail = bounded_diagnostic_detail(
         "ask @everyone or @ops_lead, <@123> <@&456> <!here> <#C1>"
     )
 
@@ -7953,7 +7954,7 @@ def test_engine_upstream_detail_cannot_ping_the_channel_it_is_rendered_into() ->
     ],
 )
 def test_engine_upstream_detail_cannot_hide_a_link_behind_trusted_copy(message: str) -> None:
-    detail = client_module._bounded_upstream_detail(message)
+    detail = bounded_diagnostic_detail(message)
 
     assert detail is not None
     assert "](" not in detail.replace(" ", "")
@@ -7963,7 +7964,7 @@ def test_engine_upstream_detail_cannot_hide_a_link_behind_trusted_copy(message: 
 
 
 def test_engine_upstream_detail_keeps_email_addresses_usable() -> None:
-    assert client_module._bounded_upstream_detail("Contact support@example.com, cc @ops or x@everyone") == (
+    assert bounded_diagnostic_detail("Contact support@example.com, cc @ops or x@everyone") == (
         "Contact support@example.com, cc @\u200bops or x@\u200beveryone"
     )
 

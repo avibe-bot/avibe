@@ -172,10 +172,26 @@
             "protocol_error",
             "tool_incompatible",
             "stream_interrupted",
-            "engine_down"
-          ]
+            "engine_down",
+            "backend_error"
+          ],
+          "description": "Who ended the turn and how. backend_error is the backend's own report of a failed turn the gateway did not end itself; it carries only what the backend observed, never an upstream verdict or a guessed gateway reason."
         },
-        "stream_started": { "type": "boolean" },
+        "stream_started": {
+          "type": ["boolean", "null"],
+          "description": "Whether user-visible model output began on the failing request. Null only on backend_error, whose reporter cannot see that request's phase; unknown is neither false nor true."
+        },
+        "error_kind": {
+          "type": "string",
+          "pattern": "^[A-Za-z][A-Za-z0-9_]{0,63}$",
+          "description": "Optional backend_error fact: the reporting backend's typed failure kind from its closed vocabulary (Vibey: its named AgentError kinds, for example stalled). Never free text, an unexpected exception class, or an upstream code. Absent when the backend has no typed kind and in historical records."
+        },
+        "backend_error_detail": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 400,
+          "description": "Optional backend_error fact: the backend's own diagnostic for the failed turn, under the same redaction and bound as upstream_detail. It is not an upstream API answer. Display only; absent when the backend gave none and in historical records."
+        },
         "local_error_detail": {
           "type": "string",
           "description": "Optional local OS errno and system message. Produced from numeric errno only; never contains exception paths, upstream text, credentials, or request bodies. Historical records may omit it."
@@ -231,6 +247,33 @@
         "declared_reasoning_efforts": ["stripped_reasoning_efforts"]
       },
       "allOf": [
+        {
+          "if": {
+            "properties": { "reason": { "const": "backend_error" } },
+            "required": ["reason"]
+          },
+          "then": {
+            "properties": { "stream_started": { "const": null } },
+            "not": {
+              "type": "object",
+              "anyOf": [
+                { "required": ["http_status"] },
+                { "required": ["upstream_error_code"] },
+                { "required": ["upstream_detail"] }
+              ]
+            }
+          },
+          "else": {
+            "properties": { "stream_started": { "type": "boolean" } },
+            "not": {
+              "type": "object",
+              "anyOf": [
+                { "required": ["error_kind"] },
+                { "required": ["backend_error_detail"] }
+              ]
+            }
+          }
+        },
         {
           "if": {
             "properties": { "reason": { "const": "stream_interrupted" } },

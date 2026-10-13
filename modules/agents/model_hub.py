@@ -1424,11 +1424,15 @@ class ModelHubRuntimeRouter:
         self._emit_transition(launch, config)
         return launch
 
-    async def record_native_failure(self, context: Any, diagnostic: str) -> bool:
+    async def record_native_failure(
+        self, context: Any, diagnostic: str, *, error_kind: str | None = None
+    ) -> bool:
         """Record a terminal source failure for the next per-turn resolution.
 
         The method name is retained for existing backend call sites; Hub launches
         use the same cooldown state so the next turn can select a backup source.
+        A Hub turn's record keeps the backend's typed ``error_kind``, when it
+        has one, beside its diagnostic.
         """
 
         launch = launch_for_context(context)
@@ -1443,7 +1447,9 @@ class ModelHubRuntimeRouter:
                 )
                 or ""
             ).strip()
-            self.turn_gateway.correlation.fail_hub_attempt(turn_id)
+            self.turn_gateway.correlation.fail_hub_attempt(
+                turn_id, error_kind=error_kind, diagnostic=diagnostic
+            )
             setattr(context, _CONTEXT_FAILURE_RECORDED_ATTR, True)
             return False
         decision: ResolutionDecision | None

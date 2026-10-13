@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import secrets
 import threading
 from dataclasses import dataclass, field
@@ -12,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Literal, Mapping, Optional
 
+from core.agent_core.ai.errors import redact_provider_text
 from config.v2_config import MODEL_HUB_BACKENDS, ModelHubConfig
 from modules.agents.catalog import display_name_for_backend
 from core.os_errors import format_os_errno
@@ -36,6 +38,7 @@ from .events import (
     EVENT_REASON_AUTHORITY,
     RETIRED_PERSISTED_REASON_DEGRADATIONS,
     SOURCE_DETAIL_EVENT_REASONS,
+    bounded_diagnostic_detail,
     event_reason_label,
 )
 from .resolver import BackendName, ModelHubTurnResolution, parse_model_hub_timestamp, source_eligible_for_backend
@@ -43,6 +46,9 @@ from .state_file import write_state_document
 
 
 SupplyChannel = Literal["native_cli", "hub"]
+# A backend's typed failure kind is a member of that backend's closed vocabulary
+# (Vibey: ``NAMED_ERROR_KINDS``), never free text: the record keeps only that shape.
+_BACKEND_ERROR_KIND = re.compile(r"[A-Za-z][A-Za-z0-9_]{0,63}")
 SupplyState = Literal["waiting", "interrupted"]
 ScopeKey = tuple[BackendName, str]
 logger = logging.getLogger(__name__)
@@ -702,7 +708,9 @@ class TurnTrace:
     ambiguous: bool = False
     terminal_outcome: TurnOutcomeProjectionInput | None = None
     admission_closed: bool = False
-    outcome_frozen: bool = False
+    # Both causes veto mutation. Backend acknowledgments keep terminal copy
+    # readable; explicit user cancellation suppresses live copy as before.
+    outcome_frozen: Literal["backend_failure", "user_cancellation"] | None = None
     recovery_requests: dict[str, dict] = field(default_factory=dict)
 
     @property
@@ -1075,13 +1083,15 @@ class TurnCorrelationRegistry:
         self.on_recovery_changed = on_recovery_changed
 
     def _readable_trace(
-        self, turn_id: str, backend: str | None = None, *, allow_closed: bool = False,
+        self, turn_id: str, backend: str | None = None, *,
+        allow_closed: bool = False, allow_acknowledged: bool = False,
     ) -> TurnTrace | None:
         """Called under the registry lock; attribution is never inferred."""
 
         trace = self._traces.get(turn_id)
         if (
-            trace is None or trace.ambiguous or trace.outcome_frozen
+            trace is None or trace.ambiguous
+            or (trace.outcome_frozen and not (allow_acknowledged and trace.outcome_frozen == "backend_failure"))
             or (trace.admission_closed and not allow_closed)
             or (backend is not None and trace.agent != backend)
         ):
@@ -1098,9 +1108,9 @@ class TurnCorrelationRegistry:
 
     def terminal_projection(self, turn_id: str, *, backend: str) -> TurnOutcomeProjectionInput | None:
         with self._lock:
-            trace = self._readable_trace(turn_id, backend, allow_closed=True)
+            trace = self._readable_trace(turn_id, backend, allow_closed=True, allow_acknowledged=True)
             if (
-                trace is None or trace.pending_attempts or trace.terminal_outcome is None
+                trace is None or (trace.pending_attempts and not trace.outcome_frozen) or trace.terminal_outcome is None
                 or trace.terminal_outcome.outcome in {"served", "canceled"}
             ):
                 return None
@@ -2214,11 +2224,13 @@ class TurnCorrelationRegistry:
                 return
             if trace.agent == "vibey" and channel != "hub":
                 raise ValueError("vibey attempts require the hub channel")
-            # Admission supersedes earlier supply failures, not their attempt history.
+            # A newly admitted attempt supersedes earlier request/supply
+            # terminal facts, not completed fallback history. Otherwise an
+            # interrupted successor would be blamed on the preceding request.
             trace.model_supply_state = None
             trace.blockers = []
-            if trace.terminal_outcome is not None and trace.terminal_outcome.outcome in {"no_candidate", "exhausted"}:
-                trace.terminal_outcome = None
+            trace.terminal_error = None
+            trace.terminal_outcome = None
             trace.pending_attempts[request_id] = AttemptIdentity(
                 source_id=source_id,
                 resolved_model_id=resolved_model_id,
@@ -2267,12 +2279,27 @@ class TurnCorrelationRegistry:
 
         return any(key != request_id for key in trace.pending_attempts)
 
-    def fail_hub_attempt(self, turn_id: Optional[str]) -> None:
-        """Replace a gateway success rejected by the backend terminal result."""
+    def fail_hub_attempt(
+        self,
+        turn_id: Optional[str],
+        *,
+        error_kind: str | None = None,
+        diagnostic: str | None = None,
+    ) -> None:
+        """Record the backend's terminal failure of a turn the gateway did not end.
+
+        The record holds only what the backend reported: its typed kind and its
+        sanitized diagnostic. The backend cannot see the failing request's
+        phase, so ``stream_started`` stays unknown.
+        """
 
         normalized = str(turn_id or "").strip()
         if not normalized:
             return
+        # Native backends may include credentialed URLs or Basic auth in their
+        # transport diagnostic. Redact those before the shared display bound;
+        # redacting only upstream-style labeled keys is insufficient here.
+        detail = bounded_diagnostic_detail(redact_provider_text(diagnostic or ""))
         with self._lock:
             trace = self._traces.get(normalized)
             if trace is None or trace.outcome_frozen:
@@ -2280,8 +2307,15 @@ class TurnCorrelationRegistry:
             if self.terminal_projection(normalized, backend=trace.agent) is not None:
                 # The native failure is reporting the gateway's completed
                 # failure, not rejecting content that the gateway served.
+                # Protect that acknowledged terminal while retaining its copy
+                # for callers that read it after reporting backend failure.
+                trace.outcome_frozen = "backend_failure"
                 return
-            trace.outcome_frozen = True
+            if trace.terminal_error is not None and not trace.pending_attempts:
+                # The same for a completed failure that has no copy. A request
+                # still open after it would supersede it, but none is.
+                trace.outcome_frozen = "backend_failure"
+                return
             identity = trace.pending_attempt
             payload = (
                 identity.payload()
@@ -2291,12 +2325,21 @@ class TurnCorrelationRegistry:
             if payload is None or payload.get("channel") != "hub":
                 return
             # The backend rejected the turn's result, not one request's.
+            # A callback without an attributed payload must not freeze out
+            # gateway evidence that has yet to arrive.
+            trace.outcome_frozen = "backend_failure"
             trace.pending_attempts.clear()
             trace.served = None
             trace.terminal_error = {
                 **payload,
-                "reason": "protocol_error",
-                "stream_started": True,
+                "reason": "backend_error",
+                "stream_started": None,
+                **(
+                    {"error_kind": error_kind}
+                    if isinstance(error_kind, str) and _BACKEND_ERROR_KIND.fullmatch(error_kind)
+                    else {}
+                ),
+                **({"backend_error_detail": detail} if detail else {}),
             }
 
     def finish_attempt(
@@ -2381,7 +2424,7 @@ class TurnCorrelationRegistry:
             if settled_by in _USER_CANCELLATIONS:
                 # Preserve the exact facts present at Stop. Teardown may expose
                 # a later producer success, but cannot change who ended the turn.
-                trace.outcome_frozen = True
+                trace.outcome_frozen = "user_cancellation"
         if had_recovery:
             self._notify_recovery_changed(turn_id)
 

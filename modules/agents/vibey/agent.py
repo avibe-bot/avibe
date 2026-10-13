@@ -40,6 +40,7 @@ from sqlalchemy.engine import Engine
 
 from config import paths
 from core.agent_core.agent.events import (
+    NAMED_ERROR_KINDS,
     AgentError,
     AgentEvent,
     CompactionFinished,
@@ -151,6 +152,11 @@ def _loggable(text: str, limit: int = _LOGGED_DIAGNOSTIC_CHARS) -> str:
 
     line = " ".join(redact_provider_text(text).split())
     return line if len(line) <= limit else line[: limit - 1] + "…"
+
+
+def _hub_error_kind(kind: Optional[str]) -> Optional[str]:
+    """The failure's kind as Model Hub records it: a kind the engine names, never an unexpected exception's class."""
+    return kind if kind in NAMED_ERROR_KINDS else None
 
 
 @dataclass
@@ -655,7 +661,9 @@ class VibeyAgent(BaseAgent):
                 # of its own (``_display_source``), its row carries the explanation.
                 body = error_text(kind or "empty_response", self._language(), reason=reason)
             if failed and source:
-                await self.record_model_hub_native_failure(context, diagnostic or (kind or "failed final"))
+                await self.record_model_hub_native_failure(
+                    context, diagnostic or (kind or "failed final"), error_kind=_hub_error_kind(kind)
+                )
             if body.strip():
                 # The same result path as the other backends; the row is already the message.
                 await self.emit_result_message(
@@ -1217,7 +1225,9 @@ class VibeyAgent(BaseAgent):
         other backends; any other (a context that cannot fit, a Stop, a local error) leaves Model Hub's record as it is.
         """
         if source:
-            await self.record_model_hub_native_failure(request.context, diagnostic or (kind or "error"))
+            await self.record_model_hub_native_failure(
+                request.context, diagnostic or (kind or "error"), error_kind=_hub_error_kind(kind)
+            )
         output = terminal_output_for(request)
         if kind:
             # The kind, never the diagnostic, so a failed Turn can be diagnosed from its notice row.

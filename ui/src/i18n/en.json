@@ -1324,7 +1324,11 @@
           "protocol_error": "Protocol error",
           "tool_incompatible": "Tool incompatible",
           "stream_interrupted": "Stream interrupted",
-          "engine_down": "Gateway unavailable"
+          "engine_down": "Gateway unavailable",
+          "backend_error": "Agent backend reported a failure"
+        },
+        "errorKind": {
+          "stalled": "The model request timed out waiting for data"
         },
         "origin": {
           "automatic": "Automatic",
@@ -4831,10 +4835,12 @@
       "httpStatus": "HTTP status",
       "errorCode": "Error code",
       "reasonLabel": "Reason",
+      "errorKind": "Failure kind",
       "blockers": "Sources that were unavailable",
       "upstreamNote": "These come from the upstream provider's API. Avibe keeps the status, error code, and the provider's error message with credentials removed, up to 400 characters.",
         "upstreamDetail": "Upstream said",
         "connectionDetail": "Connection error",
+      "backendDetail": "Agent backend reported",
       "copyRecord": "Copy record",
       "reason": {
         "quota_exhausted": "Quota exhausted",

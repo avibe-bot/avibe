@@ -2519,7 +2519,7 @@ def test_claude_startup_failure_is_recorded_before_scope_retirement(
                 source_id="src_native01",
             )
 
-        async def record_native_failure(self, context, diagnostic):
+        async def record_native_failure(self, context, diagnostic, *, error_kind=None):
             events.append(("record", diagnostic))
             return False
 

@@ -1324,7 +1324,11 @@
           "protocol_error": "协议错误",
           "tool_incompatible": "工具不兼容",
           "stream_interrupted": "响应中断",
-          "engine_down": "模型网关不可用"
+          "engine_down": "模型网关不可用",
+          "backend_error": "Agent 后端报告了失败"
+        },
+        "errorKind": {
+          "stalled": "模型请求等待数据超时"
         },
         "origin": {
           "automatic": "自动",
@@ -4831,10 +4835,12 @@
       "httpStatus": "HTTP 状态码",
       "errorCode": "错误码",
       "reasonLabel": "原因",
+      "errorKind": "失败类型",
       "blockers": "当时不可用的供应商",
       "upstreamNote": "以上内容均由上游供应商的 API 返回。Avibe 会保留状态码、错误码，以及去除凭据后的上游报错信息（最多 400 字）。",
         "upstreamDetail": "上游返回",
         "connectionDetail": "连接错误",
+      "backendDetail": "Agent 后端报告",
       "copyRecord": "复制记录",
       "reason": {
         "quota_exhausted": "额度用尽",
