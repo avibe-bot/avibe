@@ -1651,7 +1651,6 @@ describe('desktop mini v2 interaction contract', () => {
     try {
       Object.defineProperty(navigator, 'locks', { configurable: true, value: {} });
       Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: { getUserMedia: vi.fn() } });
-      Object.defineProperty(window, '__AVIBE_PET_VOICE_ENABLED__', { configurable: true, value: true });
       vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({ available: true }) })));
       vi.resetModules();
       ({ PetPage } = await import('./PetPage'));
@@ -1674,7 +1673,6 @@ describe('desktop mini v2 interaction contract', () => {
       else Reflect.deleteProperty(navigator, 'locks');
       if (media) Object.defineProperty(navigator, 'mediaDevices', media);
       else Reflect.deleteProperty(navigator, 'mediaDevices');
-      Reflect.deleteProperty(window, '__AVIBE_PET_VOICE_ENABLED__');
     }
   });
 

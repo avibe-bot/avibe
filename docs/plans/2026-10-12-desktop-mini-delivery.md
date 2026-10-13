@@ -49,14 +49,19 @@ quick-reply, and pet lifecycle paths. Backend APIs are outside this change.
   wait; its dictation implementation is not refactored. Pet uses the existing
   `ShowPageVoiceDictation` wrapper and thus the same capture/transcription pipeline.
 
-## Voice gate: deliberately off by default
+## Voice: enabled, handoff verified on real hardware
 
-No production shell currently installs `__AVIBE_PET_VOICE_ENABLED__`. Pet voice
-therefore stays off on every platform, even when Web Locks and ASR are available.
-Hotkey/hold open text, and both microphone controls are hidden. Missing Web Locks
-also denies pet voice regardless of this marker. This follows the owner's
-explicit requirement to withhold default enablement until captured-speech handoff
-has been demonstrated across the desktop webviews.
+Pet voice was first shipped behind a `__AVIBE_PET_VOICE_ENABLED__` window marker
+that no production shell installed, so the microphone controls stayed hidden
+everywhere. The owner has since removed that gate so the captured-speech handoff
+can be verified on a real desktop test prerelease. Pet voice now appears
+whenever Web Locks, `getUserMedia` and ASR are all available; missing Web Locks
+still denies it, and hotkey/hold still falls back to text in that case.
+
+Acceptance on the test prerelease: start dictation in the main Composer, then
+claim the microphone from the mini (and the reverse). Each side must keep the
+transcript of the speech it captured before the handoff. If either direction
+loses speech, fix the handoff before the next stable release.
 
 In the isolated macOS desktop build, `main` and `pet` both exposed Web Locks and
 reported the same `avibe.voice-capture` owner/client ID. A pet claim changed that
@@ -64,8 +69,7 @@ owner and finished the main Composer's pending dictation. **The main capture had
 not produced a transcript**, so this does not prove captured speech survives a
 real cross-webview handoff. Background scripted audio startup was suspended, and
 the native driver refused the main mic's background AX action. No foreground
-activation was requested to bypass that refusal. The release gate remains off;
-no shell arbiter was added.
+activation was requested to bypass that refusal, and no shell arbiter was added.
 
 Independent-module unit tests share one fake lock manager and prove local
 ownership/release semantics, newest-claim ordering, remote-steal finalization,
@@ -105,8 +109,8 @@ Individual captures:
 - [Pause confirmation](desktop-mini-v2-evidence/desktop-stop-confirm.png)
 - [Mid-dismiss](desktop-mini-v2-evidence/desktop-mid-dismiss.png)
 
-The listening screenshot uses the QA-only voice marker and synthetic audio; it
-is UI evidence, not permission to enable production voice. For a reproducible
+The listening screenshot uses synthetic audio; it is UI evidence, not evidence
+of the cross-webview handoff. For a reproducible
 static mid-dismiss image, the actual CSS animations were paused at 100ms using
 Web Animations, and the test harness delayed row removal. Ordinary-timing tests
 separately assert the 500ms removal and 2.5s stop linger. The remaining captures
@@ -150,7 +154,7 @@ keeps its page-coloured plate solely to cover the surrounding web-page text.
 
 The PR's exact-head Codex review, unresolved-thread inventory and CI are separate
 delivery gates. Windows/Linux native visual and voice handoff evidence is not
-claimed by these macOS captures. Production voice stays off pending its gate.
+claimed by these macOS captures.
 
 ## Test preservation
 
@@ -280,7 +284,7 @@ the previous call-site comparisons have been replaced.
 | --- | --- |
 | Typed send / quick reply | Capture the epoch before admission; ignore late rows, optimistic titles and draft clearing after invalidation. |
 | Dismiss / stop | Clear retained cards, phase refs, leaving IDs, ordering and timers before paint. Guard confirmation expiry, pause success/failure, stopped linger and queued removal by their captured epoch. |
-| Voice | Abort on epoch cleanup; fence status reads, capture startup, preview and final text. User-typed draft survives. Production voice remains off. |
+| Voice | Abort on epoch cleanup; fence status reads, capture startup, preview and final text. User-typed draft survives. |
 | Switcher | Close on epoch reset. Gate the UI pick with the full epoch and any queued, unsent native bind with its authorization generation. |
 | Hit regions | Dispose the old reporter, clear regions and fence queued animation callbacks before the new reporter takes ownership. Setup-only reporting is fenced by its mount lifetime because it has no session. |
 | Mark-read | Tag result intersections with the epoch. Ignore old observer/read completions; a new epoch requires a new visible-result observation. |

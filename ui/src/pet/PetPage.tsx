@@ -714,9 +714,7 @@ function usePetVoice({ enabled, epoch, draft, onOpenComposer }: { enabled: boole
   type Capture = { dictation: ShowPageVoiceDictation; ending: boolean; cancelled: boolean };
   const captureRef = useRef<Capture | null>(null);
   const supported = typeof navigator !== 'undefined' && Boolean(navigator.locks && navigator.mediaDevices?.getUserMedia);
-  // Remains off until the desktop main/pet captured-speech handoff has been
-  // verified on the platform. The QA harness alone sets this marker today.
-  const available = enabled && supported && asr.available && (window as unknown as { __AVIBE_PET_VOICE_ENABLED__?: boolean }).__AVIBE_PET_VOICE_ENABLED__ === true;
+  const available = enabled && supported && asr.available;
   useEffect(() => {
     if (!enabled) return;
     let alive = true;
