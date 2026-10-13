@@ -187,7 +187,8 @@ exactly one case the suite collects in the cited file — in whichever key the r
 states its evidence, `test` and any layer-specific key alike. When several cases
 prove a row's contract together, `test` lists each of them, and each entry
 resolves to exactly one case on its own; a class or a file standing in for the
-group is not a citation of any of them. A citation that
+group is not a citation of any of them. Only `test` takes a list:
+`partial_evidence.test` names one case. A citation that
 names only a file is not evidence for the row that makes it: the file stays
 collected for whatever else cites it, so deleting the one case that answered
 this row leaves the row reading `covered` with nothing executable tied to it.

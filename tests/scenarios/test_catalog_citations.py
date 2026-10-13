@@ -15,8 +15,10 @@ cite unittest cases. A helper or a plain class is no case. A parametrized id
 resolves through its function. An evidence key names exactly one case per
 entry (STANDARD.md §4): a bare file or a test class stays collected for
 whatever else cites it, so it evidences no row in particular, and a row whose
-contract several cases prove lists each of them under ``test``. Pointer keys
-may name a bare file, a test class, a function or a method, which must exist.
+contract several cases prove lists each of them under ``test``;
+``partial_evidence.test`` names one. A cited Python file must be one pytest's
+default discovery collects (``test_*.py`` or ``*_test.py``). Pointer keys may
+name a bare file, a test class, a function or a method, which must exist.
 
 This reads source and applies pytest's default naming rules; it does not
 emulate every collection-time exclusion, such as ``__test__ = False``, a class
@@ -30,6 +32,7 @@ UI (vitest) citations are resolved against vitest's own collection by
 from __future__ import annotations
 
 import ast
+import re
 from functools import cache
 from pathlib import Path
 
@@ -40,6 +43,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 SCENARIO_ROOT = REPO_ROOT / "tests" / "scenarios"
 _UI_SUFFIXES = {".ts", ".tsx", ".mts", ".mjs"}
 _POINTER_KEYS = ("related_tests", "supporting_tests")
+# pytest's default ``python_files``, which this repository does not override.
+_DISCOVERED = re.compile(r"(test_.*|.*_test)\.py")
 
 
 @cache
@@ -115,7 +120,9 @@ def _citations(row: dict) -> tuple[list[tuple[str, object]], list[str]]:
         cited.append(("test", evidence))
     if "partial_evidence" in row:
         partial = row["partial_evidence"]
-        if isinstance(partial, dict) and "test" in partial:
+        if isinstance(partial, dict) and isinstance(partial.get("test"), list):
+            malformed.append("partial_evidence lists cases; it names one, and only test may list several")
+        elif isinstance(partial, dict) and "test" in partial:
             cited.append(("partial_evidence", partial["test"]))
         else:
             malformed.append("partial_evidence names no test")
@@ -154,6 +161,9 @@ def test_every_catalog_citation_resolves_to_a_case(catalog: Path) -> None:
                 continue
             if not path.is_file():
                 dead.append(f"{where} (no such file)")
+                continue
+            if path.suffix == ".py" and not _DISCOVERED.fullmatch(path.name):
+                dead.append(f"{where} (pytest's default discovery never collects {path.name})")
                 continue
             if not separator or path.suffix in _UI_SUFFIXES:
                 continue
