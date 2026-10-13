@@ -135,7 +135,15 @@ from core.vibe_agents import (
     resolve_resource_access_context,
     validate_agent_backend,
 )
-from core.process_isolation import isolated_subprocess_kwargs, signal_process_tree, KILL_SIGNAL
+from core.process_isolation import (
+    KILL_SIGNAL,
+    PROCESS_IDENTITY_ENV,
+    capture_spawned_process_identity,
+    isolated_subprocess_kwargs,
+    new_process_identity_marker,
+    signal_process_tree,
+    terminate_process_tree_by_pid,
+)
 from storage.lock import MigrationFileLock, MigrationLockTimeout
 from core.dependency_network import DependencyNetworkError, dependency_error_message, fetch_to_path
 
@@ -10558,16 +10566,28 @@ def _graceful_stop_claude_auth_status(process: subprocess.Popen[str]) -> None:
     signal_process_tree(process, signal.SIGTERM, logger, _CLAUDE_AUTH_STATUS_LABEL)
 
 
-def _force_stop_claude_auth_status(process: subprocess.Popen[str]) -> None:
-    """Stop the isolated status process tree without relying on a soft signal."""
+def _force_stop_claude_auth_status(
+    process: subprocess.Popen[str],
+    identity: Any | None,
+) -> bool:
+    """Stop the entire verified status process tree, then report its state."""
 
-    if os.name == "nt":
+    if identity is not None and isinstance(getattr(process, "pid", None), int):
         try:
-            process.kill()
-        except ProcessLookupError:
-            return
-        return
-    signal_process_tree(process, KILL_SIGNAL, logger, _CLAUDE_AUTH_STATUS_LABEL)
+            return terminate_process_tree_by_pid(
+                process.pid,
+                logger,
+                _CLAUDE_AUTH_STATUS_LABEL,
+                expected_identity=identity,
+                terminate_timeout=_CLAUDE_AUTH_STATUS_TERMINATION_GRACE_SECONDS,
+            )
+        except (OSError, RuntimeError):
+            logger.debug("Failed to terminate the verified %s tree", _CLAUDE_AUTH_STATUS_LABEL, exc_info=True)
+    try:
+        signal_process_tree(process, KILL_SIGNAL, logger, _CLAUDE_AUTH_STATUS_LABEL)
+    except (OSError, RuntimeError):
+        logger.debug("Failed to force-stop %s", _CLAUDE_AUTH_STATUS_LABEL, exc_info=True)
+    return process.poll() is not None
 
 
 def _close_claude_auth_status_pipes(process: subprocess.Popen[str]) -> None:
@@ -10580,21 +10600,48 @@ def _close_claude_auth_status_pipes(process: subprocess.Popen[str]) -> None:
             logger.debug("Failed to close %s output pipe", _CLAUDE_AUTH_STATUS_LABEL, exc_info=True)
 
 
+def _reap_claude_auth_status_after_force(process: subprocess.Popen[str]) -> bool:
+    try:
+        process.communicate(timeout=_CLAUDE_AUTH_STATUS_DRAIN_TIMEOUT_SECONDS)
+        return True
+    except subprocess.TimeoutExpired:
+        _close_claude_auth_status_pipes(process)
+        try:
+            process.wait(timeout=_CLAUDE_AUTH_STATUS_DRAIN_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired:
+            logger.error("%s process did not settle after forceful termination", _CLAUDE_AUTH_STATUS_LABEL)
+            return False
+        return True
+    except (OSError, subprocess.SubprocessError):
+        logger.debug("Failed to reap %s after forceful termination", _CLAUDE_AUTH_STATUS_LABEL, exc_info=True)
+        _close_claude_auth_status_pipes(process)
+        try:
+            process.wait(timeout=_CLAUDE_AUTH_STATUS_DRAIN_TIMEOUT_SECONDS)
+        except (OSError, subprocess.SubprocessError):
+            return False
+        return True
+
+
 def _run_claude_auth_status(
     command: list[str],
     *,
     env: dict[str, str] | None,
     cwd: str | None,
 ) -> subprocess.CompletedProcess[str] | None:
-    """Run Claude's auth status with a completion grace before termination.
+    """Run Claude auth status with a bounded, tree-owned lifecycle.
 
-    Claude may refresh and persist a rotating OAuth credential while handling a
-    read-looking status command. The first deadline is therefore only a soft
-    observation budget: after it expires, let the child finish without sending
-    a signal. Only a longer hard limit starts graceful termination, followed by
-    a final forceful drain for a genuinely stuck process.
+    The result is trusted only when the process exits naturally with code 0.
+    Once termination is requested, buffered JSON is discarded and the caller
+    receives uncertainty instead of a status from a potentially interrupted
+    OAuth write.
     """
 
+    marker = new_process_identity_marker()
+    spawn_env = dict(env) if env is not None else dict(os.environ)
+    spawn_env[PROCESS_IDENTITY_ENV] = marker
+    process: subprocess.Popen[str] | None = None
+    identity: Any | None = None
+    termination_requested = False
     try:
         process = subprocess.Popen(
             command,
@@ -10602,14 +10649,11 @@ def _run_claude_auth_status(
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
-            env=env,
+            env=spawn_env,
             cwd=cwd,
             **isolated_subprocess_kwargs(),
         )
-    except (FileNotFoundError, OSError):
-        return None
-
-    try:
+        identity = capture_spawned_process_identity(process.pid, marker)
         try:
             stdout, _ = process.communicate(timeout=_CLAUDE_AUTH_STATUS_TIMEOUT_SECONDS)
         except subprocess.TimeoutExpired:
@@ -10629,28 +10673,24 @@ def _run_claude_auth_status(
                     stdout, _ = process.communicate(timeout=_CLAUDE_AUTH_STATUS_TERMINATION_GRACE_SECONDS)
                 except subprocess.TimeoutExpired:
                     logger.warning(
-                        "%s ignored graceful termination; forcefully stopping it",
+                        "%s ignored graceful termination; forcefully stopping its process tree",
                         _CLAUDE_AUTH_STATUS_LABEL,
                     )
-                    _force_stop_claude_auth_status(process)
-                    try:
-                        stdout, _ = process.communicate(timeout=_CLAUDE_AUTH_STATUS_DRAIN_TIMEOUT_SECONDS)
-                    except subprocess.TimeoutExpired:
-                        # A descendant may retain the inherited output pipe.
-                        # Close our handles and reap only the direct child with
-                        # a bounded wait; never let a status request wait forever.
-                        _close_claude_auth_status_pipes(process)
-                        try:
-                            process.wait(timeout=_CLAUDE_AUTH_STATUS_DRAIN_TIMEOUT_SECONDS)
-                        except subprocess.TimeoutExpired:
-                            logger.error(
-                                "%s process did not settle after forceful termination",
-                                _CLAUDE_AUTH_STATUS_LABEL,
-                            )
+                    termination_requested = True
+                    _force_stop_claude_auth_status(process, identity)
+                    if not _reap_claude_auth_status_after_force(process):
                         return None
+                    return None
+        if termination_requested or process.returncode != 0:
+            return None
         return subprocess.CompletedProcess(command, process.returncode, stdout, None)
     except (OSError, subprocess.SubprocessError):
         return None
+    finally:
+        if process is not None and process.poll() is None:
+            termination_requested = True
+            _force_stop_claude_auth_status(process, identity)
+            _reap_claude_auth_status_after_force(process)
 
 
 def _read_claude_cli_oauth_signed_in(

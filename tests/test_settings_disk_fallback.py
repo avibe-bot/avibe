@@ -236,7 +236,7 @@ def test_claude_auth_status_terminates_only_after_completion_grace(
 
     result = api._run_claude_auth_status(["claude"], env={}, cwd=None)
 
-    assert result is not None
+    assert result is None
     assert signals == [signal.SIGTERM, api.KILL_SIGNAL]
     assert process.communicate.call_count == 4
 
@@ -294,6 +294,45 @@ def test_claude_auth_status_uses_ctrl_break_before_windows_force_kill(
     assert result is not None
     process.send_signal.assert_called_once_with(21)
     signal_tree.assert_not_called()
+
+
+
+
+def test_claude_auth_status_force_stop_uses_verified_process_tree(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vibe import api
+
+    process = Mock(pid=123)
+    identity = object()
+    terminate_tree = Mock(return_value=True)
+    monkeypatch.setattr(api, "terminate_process_tree_by_pid", terminate_tree)
+
+    assert api._force_stop_claude_auth_status(process, identity) is True
+    terminate_tree.assert_called_once_with(
+        123,
+        api.logger,
+        api._CLAUDE_AUTH_STATUS_LABEL,
+        expected_identity=identity,
+        terminate_timeout=api._CLAUDE_AUTH_STATUS_TERMINATION_GRACE_SECONDS,
+    )
+
+
+def test_claude_auth_status_cleans_up_after_post_spawn_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vibe import api
+
+    process = Mock()
+    process.poll.return_value = None
+    process.communicate.side_effect = [OSError("pipe failed"), ("", None)]
+    monkeypatch.setattr(api.subprocess, "Popen", lambda *_args, **_kwargs: process)
+    signal_tree = Mock()
+    monkeypatch.setattr(api, "signal_process_tree", signal_tree)
+
+    assert api._run_claude_auth_status(["claude"], env={}, cwd=None) is None
+    signal_tree.assert_called_once()
+    assert process.communicate.call_count == 2
 
 
 def test_get_claude_auth_prefers_cli_oauth_status(
