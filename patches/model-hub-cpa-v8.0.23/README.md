@@ -119,13 +119,16 @@ black-holing CONNECT proxy: stock sent no byte and no error for 9 min 38 s,
 until it was killed; patched sent `event: error` (`request_timeout`) at
 45.0 s. A live stream silent for 120 s completed on both.
 
-Upstream: router-for-me/CLIProxyAPI#6535. Upstream made the health check an
-opt-in setting, `streaming.http2-health-check-seconds`
-(`requests.streaming.http2-health-check-seconds` in the v8 layout), which
-defaults to 0, off. This patch stays unconditional. Once a tagged CPA release
-that Avibe adopts contains that setting, drop this patch and render
-`http2-health-check-seconds: 30` in `vibe/model_hub_runtime/config.py`
-alongside the other fixed keys, in the layout that config uses.
+Upstream declined the health check. router-for-me/CLIProxyAPI#6534 was
+closed as not planned: by the project's design policy CPA sets no timeout
+once an upstream connection is established, HTTP/2 health checks and stream
+read deadlines included, not even as an opt-in setting, and leaves timeouts
+and cancellation to the downstream client. The opt-in pull request,
+router-for-me/CLIProxyAPI#6535, was closed unmerged. Avibe therefore carries
+this patch by design as its client-side transport bound for this connection.
+No drop is planned; re-evaluate only if upstream changes its post-connect
+timeout policy. The cost is that every CPA upgrade must rebase this patch and
+`fallback-transport-h2-ping-health-check.patch`.
 
 ## `fallback-transport-h2-ping-health-check.patch`
 
@@ -175,11 +178,12 @@ only by the caller. The patch adds `upstream_transport_test.go`:
 - the shared transport is wired into both clients and the proxy transports;
 - protocol selection is unchanged.
 
-Upstream: the same failure mode as router-for-me/CLIProxyAPI#6535, whose
-opt-in `streaming.http2-health-check-seconds` covers only the uTLS
-connection. The follow-up proposes applying that setting to the standard and
-proxy transports too. Drop this patch once a tagged CPA release Avibe adopts
-applies the setting there, and render it in `vibe/model_hub_runtime/config.py`.
+Upstream: the same failure mode as router-for-me/CLIProxyAPI#6534, declined
+under the same policy (see `codex-utls-h2-ping-health-check.patch`), so no
+upstream follow-up is pending. Avibe carries this patch by design as its
+client-side transport bound for these transports. No drop is planned;
+re-evaluate only if upstream changes its post-connect timeout policy. Every
+CPA upgrade must rebase it together with that patch.
 
 ## `codex-sse-per-event-parsing.patch`
 
