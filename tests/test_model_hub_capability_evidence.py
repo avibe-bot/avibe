@@ -154,3 +154,33 @@ def test_a_record_refuses_what_the_contract_forbids(changes):
 def test_image_generation_has_no_replay_evidence():
     with pytest.raises(ValueError):
         EvidenceFeature.hosted("image_generation", "replay")
+
+
+def test_lookups_after_the_first_read_never_touch_the_disk(tmp_path, monkeypatch):
+    """MH-HOSTED-003: the request path reads evidence from memory, never from the file."""
+    path = tmp_path / "model_hub_capability_evidence.json"
+    source = _source()
+    CapabilityEvidenceStore(path).write(_record(source, CALL), live=[source])
+    store = CapabilityEvidenceStore(path)
+    assert len(store.records()) == 1
+
+    touched = []
+    original_stat, original_read = Path.stat, Path.read_text
+
+    def stat(self, *args, **kwargs):
+        if self == path:
+            touched.append("stat")
+        return original_stat(self, *args, **kwargs)
+
+    def read_text(self, *args, **kwargs):
+        if self == path:
+            touched.append("read")
+        return original_read(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", stat)
+    monkeypatch.setattr(Path, "read_text", read_text)
+    for _ in range(50):
+        assert store.view(source, "grok-4.6", CALL, engine=ENGINE, shape=1, now=NOW).status == "verified"
+    store.write(_record(source, REPLAY), live=[source])
+    assert store.view(source, "grok-4.6", REPLAY, engine=ENGINE, shape=1, now=NOW).status == "verified"
+    assert touched == []

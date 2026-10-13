@@ -214,45 +214,40 @@ def resolve(
 
 
 class CapabilityEvidenceStore:
-    """The persisted evidence records; small, bounded by Sources x models x features."""
+    """The evidence records, held in memory and persisted on every write.
+
+    Small: bounded by Sources x models x features. The controller is the only
+    writer (probes and the classifier both run there; other processes reach it
+    over RPC), so the file is read once and memory is authoritative afterwards.
+    Lookups on the request path therefore never touch the disk.
+    """
 
     def __init__(self, path: Path, *, max_records: int = MAX_RECORDS):
         self.path = path
         self.max_records = max_records
         self._lock = threading.RLock()
-        self._cache: tuple[tuple[int, int], dict[tuple, EvidenceRecord]] | None = None
+        self._records: dict[tuple, EvidenceRecord] | None = None
 
-    def _read(self) -> dict[tuple, EvidenceRecord]:
-        try:
-            stat = self.path.stat()
-        except OSError:
-            return {}
-        stamp = (stat.st_mtime_ns, stat.st_size)
-        if self._cache is not None and self._cache[0] == stamp:
-            return dict(self._cache[1])
-        try:
-            payload = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            payload = []
-        records: dict[tuple, EvidenceRecord] = {}
-        for item in payload if isinstance(payload, list) else []:
+    def _loaded(self) -> dict[tuple, EvidenceRecord]:
+        if self._records is None:
             try:
-                record = EvidenceRecord.from_payload(item)
-            except (TypeError, ValueError):
-                # An unreadable record is unknown, never negative.
-                continue
-            records[record.key] = record
-        self._cache = (stamp, records)
-        return dict(records)
-
-    def _write(self, records: dict[tuple, EvidenceRecord]) -> None:
-        ordered = sorted(records.values(), key=lambda record: record.observed_at)[-self.max_records :]
-        write_state_document(self.path, [record.payload() for record in ordered])
-        self._cache = None
+                payload = json.loads(self.path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                payload = []
+            records: dict[tuple, EvidenceRecord] = {}
+            for item in payload if isinstance(payload, list) else []:
+                try:
+                    record = EvidenceRecord.from_payload(item)
+                except (TypeError, ValueError):
+                    # An unreadable record is unknown, never negative.
+                    continue
+                records[record.key] = record
+            self._records = records
+        return self._records
 
     def get(self, source_id: str, model_id: str, feature: EvidenceFeature) -> Optional[EvidenceRecord]:
         with self._lock:
-            return self._read().get((source_id, model_id, feature.kind, feature.name, feature.aspect or ""))
+            return self._loaded().get((source_id, model_id, feature.kind, feature.name, feature.aspect or ""))
 
     def view(
         self,
@@ -268,10 +263,13 @@ class CapabilityEvidenceStore:
 
     def records(self) -> list[EvidenceRecord]:
         with self._lock:
-            return list(self._read().values())
+            return list(self._loaded().values())
 
     def write(self, record: EvidenceRecord, *, live: Iterable[ModelHubSourceConfig]) -> None:
-        """Replace the record for its key; prune records of removed or re-identified Sources."""
+        """Replace the record for its key; prune records of removed or re-identified Sources.
+
+        Memory changes only once the file holds the new records.
+        """
 
         identities = {source.id: identity_digest(source) for source in live}
         if identities.get(record.source_id) != record.source_identity:
@@ -279,8 +277,10 @@ class CapabilityEvidenceStore:
         with self._lock:
             records = {
                 key: existing
-                for key, existing in self._read().items()
+                for key, existing in self._loaded().items()
                 if identities.get(existing.source_id) == existing.source_identity
             }
             records[record.key] = record
-            self._write(records)
+            kept = sorted(records.values(), key=lambda item: item.observed_at)[-self.max_records :]
+            write_state_document(self.path, [item.payload() for item in kept])
+            self._records = {item.key: item for item in kept}

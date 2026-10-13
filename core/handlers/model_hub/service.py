@@ -5793,7 +5793,7 @@ class ModelHubService:
                 config = self._clone_config(previous)
                 config.hosted_tools[tool] = setting
                 await self._commit_synced(previous, config)
-        return self.hosted_tools_status()
+        return await asyncio.to_thread(self.hosted_tools_status)
 
     def hosted_tools_for_hop(self, config: ModelHubConfig, source: ModelHubSourceConfig, model_id: str) -> dict:
         """``HopResolution.hosted_tools`` for a Vibey launch served by this Source and model."""

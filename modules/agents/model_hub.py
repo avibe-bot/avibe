@@ -1368,7 +1368,10 @@ class ModelHubRuntimeRouter:
                     else None
                 ),
                 hosted_tools=(
-                    self.service.hosted_tools_for_hop(config, source, target_model) if backend == "vibey" else {}
+                    # Off the controller loop: the first resolution loads the evidence file.
+                    await asyncio.to_thread(self.service.hosted_tools_for_hop, config, source, target_model)
+                    if backend == "vibey"
+                    else {}
                 ),
             )
         self._emit_transition(launch, config)

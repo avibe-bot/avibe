@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import threading
 from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
@@ -993,10 +994,20 @@ async def test_hop_resolution_states_each_enabled_hosted_tool(tmp_path):
             ),
             live=[primary],
         )
+    resolving_threads = []
+    resolve_on_worker = service.hosted_tools_for_hop
+
+    def recorded(*args):
+        resolving_threads.append(threading.current_thread())
+        return resolve_on_worker(*args)
+
+    service.hosted_tools_for_hop = recorded
     gateway = ModelHubTurnGateway(service)
     router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
     try:
         hop = await router.resolve_hop("menu-alias", process_scope="vibey:test", turn_id="turn-hosted")
+        # The first resolution may load the evidence file, so it never runs on the controller loop.
+        assert resolving_threads and threading.main_thread() not in resolving_threads
         _validate("hop-resolution.schema.json", hop)
         assert hop["hosted_tools"] == {
             "web_search": {
