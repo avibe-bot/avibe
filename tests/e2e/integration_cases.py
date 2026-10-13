@@ -7,6 +7,7 @@ This avoids duplicating test logic across slack/discord/feishu.
 import pytest
 
 
+@pytest.mark.allow_network(reason="drives the real Slack, Discord and Feishu APIs with platform tokens")
 class PlatformIntegrationTests:
     """Mixin class with shared integration test cases.
 

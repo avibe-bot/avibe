@@ -53,6 +53,18 @@ def _tree_is_not_an_installed_distribution(monkeypatch):
     monkeypatch.setattr("vibe.upgrade._distributions_providing_this_package", lambda: [])
 
 
+@pytest.fixture(autouse=True)
+def _no_latest_release_lookup(monkeypatch):
+    """``do_upgrade`` asks PyPI for the latest release before it builds its plan.
+
+    The tests here drive the upgrade, not that lookup, so they see what an offline
+    machine sees; a test that needs a target names one, and the lookup's own tests
+    call ``get_latest_version_info`` directly.
+    """
+
+    monkeypatch.setattr(api, "get_version_info", lambda: {"latest": None})
+
+
 def test_build_upgrade_plan_stages_custom_legacy_uv_launcher(monkeypatch):
     monkeypatch.setattr("vibe.upgrade.os.path.exists", lambda path: True)
     monkeypatch.setattr("vibe.upgrade.os.access", lambda path, mode: True)
