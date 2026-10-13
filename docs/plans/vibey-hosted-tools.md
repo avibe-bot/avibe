@@ -15,7 +15,8 @@ Status: **design**, 2026-10-13, for owner review.
   selection and filtering. Filtering means a pinned request is refused, never rewritten (§3.5).
 - **The transcript stays portable.** Each hosted call keeps a canonical record, plus the origin-tagged native payload.
   The payload is replayed only to the same verified origin.
-- **Phases.** Phase 1 is web search and X search. Phase 2 is image generation.
+- **Phases.** Phase 1 is web search, X search and image generation (owner decision, 2026-10-13 19:10). There is no
+  Phase 2.
 
 ## 1. Example
 
@@ -53,7 +54,8 @@ verified for X search.
     when the target also declared the native tool under that name. Anthropic accepted a client `tool_use` named
     `web_search` next to `web_search_20250305`, and Responses accepted a `function_call` named `web_search` next to
     `{"type": "web_search"}`.
-- **Phase 2:** `image_generation`, schema `{"prompt": string, "size"?: string}` (§7).
+- `image_generation` is `{"prompt": string, "size"?: string}` (§7). That is the argument surface of OpenAI's
+  image tool calls; `quality` and `background` are declaration configuration.
 
 ## 3. Gateway responsibilities
 
@@ -70,14 +72,19 @@ verified for X search.
 
 - **Live probes are the only way to `verified`.** They run on an explicit user action (capability model §3.3).
 - **A probe is the production request.** It is built by the same Vibey request builder and with the same native
-  declaration as a real turn on that (Source, model). Only the transcript differs: one fixed user message. So a
-  probe cannot pass or fail for a shape that production never sends.
+  declaration as a real turn on that (Source, model). Two things differ:
+  - the transcript, which is one fixed user message;
+  - for the `call` probe, `tool_choice` forcing the hosted tool, where the protocol allows it.
+
+  So a probe cannot pass or fail for a shape that production never sends.
 - **The `call` probe.** The fixed message is "search for 'Avibe local-first agent OS' and reply with the first
   result's URL".
   - **`verified`:** the response completes and carries the provider's own result item for that tool (§4.2).
-  - **`unsupported`:** either an HTTP 400 that names the tool type (observed: `Unsupported tool type: x_search`), or a
-    completed response without that item. The second case is a path that drops the tool silently, as observed with
-    `image_generation` on a translated Anthropic route.
+  - **`unsupported`:** only an HTTP 400 that names the tool type (observed: `Unsupported tool type: x_search`).
+  - **Inconclusive, not evidence:** a completed response without that item. The model may simply not have used the
+    tool, which looks the same as a silent drop. The UI says "the model didn't use the tool; try again".
+    - Silent drops happen on translated paths, as observed with `image_generation` on an Anthropic route. Those
+      paths are never native anyway (§3.5).
   - **Not evidence:** a transient failure (overload, 5xx, timeout). The UI reports "couldn't verify, try again"
     (observed: every OpenAI-relay web search ended with an in-stream "servers overloaded").
 - **The `replay` probe.** A second production request with the native declaration still present. Its history is
@@ -114,7 +121,7 @@ verified for X search.
   }
   ```
 
-  - Fields, keyed by catalog tool name (`web_search`, `x_search`):
+  - Fields, keyed by catalog tool name (`web_search`, `x_search`, `image_generation`):
 
     | Field | Rule |
     | --- | --- |
@@ -131,9 +138,9 @@ verified for X search.
 - **Endpoint:** `POST /vibey/v1/hosted-tools/{tool}` on the gateway, authenticated with the turn's gateway token.
   The body is the canonical arguments and the turn's executor binding (§3.4).
 - **Executor choice, bound per turn.**
-  - Hop resolution picks the executor and returns it in `HopResolution.hosted_tools[tool].executor` (§3.5). The pick
-    is the configured executor if it has `call: verified`, otherwise the first verified (Source, model) in Vibey's
-    Source order.
+  - Hop resolution picks the executor and returns it in `HopResolution.hosted_tools[tool].executor` (§3.5), for
+    every enabled tool and in either mode. The pick is the configured executor if it has `call: verified`, otherwise
+    the first verified (Source, model) in Vibey's Source order.
   - The proxy call sends that binding with the turn token, and the gateway runs that executor and no other.
   - A config change (another executor, a disabled tool, a removed Source) applies from the next turn, as every
     runtime config change does (AGENTS.md).
@@ -149,8 +156,12 @@ verified for X search.
   - It sends **no reasoning effort**. The executor (Source, model) is verified for the tool, not for any effort, and
     an unverified effort could fail a verified tool.
 - **The result is the canonical record only:**
-  - the `HostedRecord`, with the action, `status`, `error` and per-call `sources[]` (`url`, `title`, and, where
-    available, `snippet` and `page_age`);
+  - the `HostedRecord`, with the action, `status`, `error` and `sources[]` (`url`, `title`, and, where available,
+    `snippet` and `page_age`).
+    - A proxied call is exactly one executor response. So when the provider returns no per-call results (xAI X
+      search), the record's `sources` are that response's cited posts. A native response with several calls keeps
+      those in `hosted_summary` instead (§4.2).
+    - Either way the calling model gets numbered posts with links and excerpts;
   - the `ProxyExecution`: executor origin, Source, billing mode, and the call's cost. A proxied call is a whole
     executor response, so its cost is per call.
   - The executor does not write model-facing text. Vibey's tool runtime renders the tool result from the record with
@@ -173,7 +184,9 @@ verified for X search.
 - **Hop resolution.** C-6 `HopResolution` gains `hosted_tools`. For each enabled tool it gives:
   - the primary hop's `mode` (`native` | `proxy`);
   - for `native`, the wire declaration;
-  - for `proxy`, the bound executor `{source_id, model_id}` (§3.4), which may be `null` when none is verified;
+  - the executor bound for this turn, `{source_id, model_id}` or `null` when none is verified (§3.4). It is present
+    for **every** enabled tool, whatever the mode, because a native request that comes back `pin_unavailable` is
+    re-rendered with the proxy function within the same turn;
   - `replay`, the **current** `replay` evidence for the primary hop's Source and model.
 
   `native` requires all of these:
@@ -227,11 +240,12 @@ verified for X search.
 
 | Protocol | Native declaration | Proxy declaration |
 | --- | --- | --- |
-| `openai_responses` (OpenAI, xAI) | `{"type": "web_search"}`, `{"type": "x_search"}` | `{"type": "function", "name": "web_search", "parameters": <canonical>}` |
+| `openai_responses` (OpenAI, xAI) | `{"type": "web_search"}`, `{"type": "x_search"}`, `{"type": "image_generation", "partial_images": 2}`, plus the overlay entry's `include` values. OpenAI's web search requires `include: ["web_search_call.action.sources"]`, merged with Vibey's existing `reasoning.encrypted_content`; without it, `action.sources` is not returned. xAI's `web_search_call` carried `action.sources` without it (spike). | `{"type": "function", "name": "web_search", "parameters": <canonical>}` |
 | `anthropic` | `{"type": "web_search_20250305", "name": "web_search", "max_uses": 5}` | `{"name": "web_search", "input_schema": <canonical>}` |
-| `openai_chat`, `google` | none in Phase 1 | function / functionDeclaration with the canonical schema |
+| `openai_chat`, `google` | none in Phase 1 | a function with the canonical schema. Vibey reaches a `google` hop over Chat Completions at the gateway (C-1 conversion tables), so the Chat form applies, and the engine translates it to Gemini `functionDeclarations`. |
 
 - Vibey takes the mode from `HopResolution.hosted_tools`. It never decides nativity itself.
+- The probe and the proxy executor use these same declarations, `include` values included (§3.2, §3.4).
 - Its four local tools are unchanged (C-7).
 
 ### 4.2 Parsing: the C-1 change
@@ -249,9 +263,10 @@ never dropped.
 | `web_search_call`, `action.type: open_page` | `web_search` | `{type: "open_page", url}` |
 | `web_search_call`, `action.type: find_in_page` | `web_search` | `{type: "find_in_page", url, pattern}` |
 | Anthropic `server_tool_use` (`name: web_search`) plus its `web_search_tool_result` | `web_search` | `{type: "search", queries: [input.query]}` |
-| xAI `custom_tool_call` `x_keyword_search` / `x_semantic_search` | `x_search` | `{type: "x_search", variant: "keyword" \| "semantic", query}` |
+| xAI `custom_tool_call` `x_keyword_search` / `x_semantic_search` | `x_search` | `{type: "x_search", variant: "keyword" \| "semantic", query, limit?, mode?}`; `limit` and `mode` are kept when the call carries them |
 | xAI `custom_tool_call` `x_user_search` | `x_search` | `{type: "x_user_search", query}` |
 | xAI `custom_tool_call` `x_thread_fetch` | `x_search` | `{type: "x_thread_fetch", ref}` |
+| OpenAI `image_generation_call` | `image_generation` | `{type: "generate", prompt: revised_prompt, size?}`; the image is saved to a file (§7.3) |
 | any other item under a declared hosted tool | that tool | `{type: "other", name}`, with the provider's item name |
 
 **`HostedToolBlock`** (assistant content):
@@ -260,7 +275,7 @@ never dropped.
 | --- | --- |
 | `type` | `"hosted_tool"` |
 | `id` | canonical id |
-| `tool` | catalog name: `web_search` or `x_search` (Phase 2 adds `image_generation`) |
+| `tool` | catalog name: `web_search`, `x_search` or `image_generation` |
 | `action` | one of the mapping rule's actions, with its fields required |
 | `record` | the `HostedRecord`, per-call facts only |
 | `native` | required: `{source_id, payload[]}`. `payload` holds the provider's own items, verbatim and in order, and is never empty. The payload's origin is the message's `origin`, not stored twice. No replay authorization is stored; replay is decided at every request from current evidence (§5). |
@@ -274,7 +289,8 @@ A native hosted call always has its native payload. A proxied call is a `ToolCal
 | --- | --- |
 | `status` | `completed` / `failed` / `incomplete` / `pending` |
 | `error` | present exactly when `status` is `failed` or `incomplete`; bounded and redacted |
-| `sources[]` | this call's own results: `url` required; `title`, `snippet`, `page_age` optional. Empty when the provider returns none per call (xAI X search). |
+| `sources[]` | this call's own results: `url` required; `title`, `snippet`, `page_age` optional. Empty when the provider returns none per call (xAI X search), except in a proxied call's record (§3.4). |
+| `images[]` | `image_generation` only: `{path, mime, width?, height?}` for each saved file. Never base64. |
 
 **`AssistantMessage.hosted_summary`** (per response, present when the message has hosted blocks). This is where
 response-scoped facts live, so nothing is copied into calls or split across them:
@@ -325,6 +341,10 @@ as a half-open code-point range into `text`.
   - Each continuation is pinned to the Source the paused response came from (§3.5). On `pin_unavailable`, the
     continuation is re-rendered in portable form, with the paused server blocks converted in place (§4.4), and goes
     out unpinned.
+  - **After the 5th continuation**, if the response is still `pause_turn`, the adapter ends with one terminal
+    `ProviderError(kind="interrupted")`. Its partial keeps all assembled content and the summed usage, and its
+    `error_message` is "the provider paused the turn more than 5 times". C-2's existing rule then applies: terminal
+    after text or a tool call, retried once after thinking alone.
   - C-2 still holds: exactly one `done` or `error`.
   - The paused partial and the continuation merge into one `AssistantMessage`.
   - Its `usage` is the **sum** of every continuation response's counters: input, output, and cache read and write.
@@ -350,22 +370,28 @@ numbered titles and URLs.
 ### 4.5 SSE caps
 
 Phase 1 needs no change: the largest search event was 96 KB, against an 8 MiB line and 32 MiB event cap. For
-images see §7.
+images see §7.5.
 
 ## 5. Replay and conversion
 
 These rules become C-1 rows in `cross-provider.md` and per-protocol rows in `conversion-tables.md`.
 
-| History item | Target hop is `native.source_id` and `HopResolution.hosted_tools[tool].replay` is true now | Any other target |
+| History item | All three hold: the target hop is `native.source_id`; the target's origin (provider, api, model) equals the message's `origin`; and `HopResolution.hosted_tools[tool].replay` is true now | Any other target |
 | --- | --- | --- |
 | `HostedToolBlock` | `native.payload` verbatim, in place | a synthetic same-named call plus result (Anthropic `tool_use` / `tool_result`, Responses `function_call` / `function_call_output`, Chat `tool_calls` / `tool` message), with the assistant message split around it. One record-to-text function (§3.4) renders the result, under the rules below. |
 | `TextBlock.citations` | not sent | not sent |
 | Proxy call (`ToolCallBlock` + `ToolResultMessage.hosted`) | ordinary tool call and result | same |
 
+- **Google targets.** Vibey speaks Chat Completions to a `google` hop (C-1 conversion tables), so the Chat pair
+  applies. The engine translates it to a Gemini `functionCall` part in the model turn and a `functionResponse` part
+  in the next user turn, in the same order. A failed record becomes `response: {error: <text>}`.
 - **Synthetic rendering rules**, by action:
   - A `search` action becomes one call with arguments `{query: queries[0]}`. Its result lists any further queries,
     then the record's numbered sources (title, URL, snippet).
-  - An `x_search` or `x_user_search` action becomes one `x_search` call with `{query}`.
+  - An `x_search` or `x_user_search` action becomes one `x_search` call with `{query}`, plus `limit` and `mode` when
+    the action has them.
+  - An `image_generation` action becomes one `image_generation` call with `{prompt}`. Its result is the **text
+    path record** (§7.3). Image bytes are never resent: no base64 and no image block, even to the same Source.
   - A non-search action (`open_page`, `find_in_page`, `x_thread_fetch`, `other`) becomes a line in the result of the
     preceding synthetic call of the same tool in that response, e.g. "opened <url>" or "fetched thread <ref>".
     Without a preceding call, it becomes its own call with `{query: "<action type> <target>"}`.
@@ -451,46 +477,112 @@ Each has a **Re-verify** action with its cost. Unknown shows nothing.
   the sidecar, which the Web renders as `CitationBadge`.
 - **IM** gets a compact single line, `🔎 Web search "query" · native (xAI) · 6 sources · $0.01`, and the answer
   carries plain Markdown links.
+- **Image generation card:** the prompt, the mode and the cost, with the image rendered inline from its file. IM
+  attaches the file, with the same one-line form. The model sees only the path record (§7.3).
 
-## 7. Phase 2: image generation
+## 7. Image generation (Phase 1)
 
-- **Today:** the engine injects `{"type": "image_generation"}` into every Codex-executor request (CPA
-  `ensureImageGenerationTool`; `disable-image-generation` unset in `vibe/model_hub_runtime/config.py`), xAI included.
-  GPT calls it when asked for a picture from a Vibey-shaped request; the image is billed and then dropped by Vibey.
-- **Size on the wire:**
-  - One image is about 4.1–4.2 MB of base64, sent twice: in `response.output_item.done` and again in the
-    engine-rebuilt `response.completed`.
-  - The relay forced `quality: low` and capped the size (1370×1148 and 1536×1024 against requests for 1024×1536 and
-    3840×2160).
-  - High quality would sit at the 8 MiB line cap.
-- **Storage and display.**
-  - The adapter decodes each image to the session's media store as the event is parsed. History keeps a media
-    reference, never base64, and replays no image bytes to the producing origin.
-  - Cross-origin: the synthetic tool result carries the image as an `ImageBlock`, for vision targets.
-  - The UI and IM show the file.
-- **Caps.** Image events get their own line limit of 32 MiB, decoded straight to the file and never assembled. Other
-  events keep 8 MiB.
-- **Idle bound.**
-  - A failing generation went 35.4 s without a byte after `generating`, and healthy ones took 64–130 s.
-  - Phase 2 acceptance measures successful generations through the gateway. If a gap can exceed 120 s, #2538's bound
-    must treat an open `image_generation_call` as expected silence.
-- **The injected tool, options:**
-  - **(a) `disable-image-generation: passthrough`:** the engine never injects or strips, for every backend.
-    - It stops hidden billed images for OpenCode and for Claude Code on Codex-executor Sources, which cannot show them.
-    - For Codex it must first be verified that Codex's own image tool declaration still works under passthrough.
-  - **(b) A Vibey-only per-request opt-out:** an engine patch Avibe would carry. The only built-in switch, the
-    internal `X-OpenAI-Internal-Codex-Responses-Lite` header, also forces `parallel_tool_calls: false`, so it is
-    rejected.
-  - **Recommendation:** (a), after the Codex check, because it removes a cost leak for every backend. Choose (b) only
-    if Codex depends on injection.
-  - Either way, Vibey declares `image_generation` itself when the user enables it.
+### 7.1 The injected tool moves from the engine to the gateway, per caller
+
+- **Today.** The engine injects `{"type": "image_generation", "output_format": "png"}` into every Codex-executor
+  request: CPA `ensureImageGenerationTool`, with `disable-image-generation` unset in
+  `vibe/model_hub_runtime/config.py`. That covers OpenAI API keys, the ChatGPT subscription and xAI keys, for any
+  caller, Claude Code and OpenCode included. GPT calls it from a Vibey request when asked for a picture; the image is
+  billed and then dropped.
+- **How Codex consumes it today.**
+  - Codex maps a hosted `image_generation_call` item to a `TurnItem::ImageGeneration` (`codex-rs/core/src/event_mapping.rs`)
+    and emits app-server `imageGeneration` thread items.
+  - Avibe's Codex backend persists those items as files: `modules/agents/codex/event_handler.py`
+    `_persist_generated_image`, covered by `tests/test_codex_event_handler.py`.
+  - Codex's own `image_gen` extension tool is gated to OpenAI-auth providers (`codex-rs/core/src/tools/spec_plan.rs`
+    `image_generation_available`). So through Model Hub, the injected hosted tool is Codex's only image path, and it
+    must be preserved exactly.
+- **Decision (orchestrator, 2026-10-13):**
+  1. The engine runs with `disable-image-generation: passthrough`, a fixed key in `config.py`. CPA then forwards
+     requests with exactly the tools the client declared, never injecting and never stripping.
+  2. The gateway reproduces CPA's injection **only for Codex CLI requests** (`backend == "codex"`), byte for byte,
+     under CPA's own conditions:
+     - the hop's Source is served by CPA's Codex executor (an `openai_responses` API key or the ChatGPT subscription);
+     - the model id does not end in `spark`;
+     - the credential is not a ChatGPT free plan, read from the same plan attribute CPA reads;
+     - the body's `client_metadata.ws_request_header_x_openai_internal_codex_responses_lite` is not true. The header
+       form is not forwarded by the gateway today, so it is not consulted.
+
+     It then appends the same tool to `tools`, or sets `tools` to it when absent. It leaves the body unchanged when
+     an `image_generation` tool, or the `image_gen` function or namespace, is already present.
+  3. Vibey declares `image_generation` itself, only when the user's toggle is on.
+- **Effect on other backends.** Claude Code and OpenCode requests routed to a Codex-executor Source stop receiving
+  the hidden image tool. They could not show the result, so this removes billed images that nobody saw.
+- **Rule boundary.** "The gateway never rewrites hosted content" (§3.5) is about Vibey's requests. This injection is
+  a compatibility step for one native caller and adds the tool CPA added.
+- **Regression tests.**
+  - **Gateway, table-driven from CPA's injection cases:** for a Codex request, the fake engine receives exactly the
+    bytes CPA would have produced. One row per condition: no tools, other tools, an existing image tool, the
+    `image_gen` function and namespace, `spark`, free plan, and lite metadata.
+  - **Other backends:** Claude, OpenCode and Vibey requests reach the engine with no image tool unless they declared
+    one.
+  - The existing Codex image persistence tests stay unchanged.
+  - **E2E once per release:** the real engine in passthrough, a stub upstream, a Codex request. The upstream sees
+    exactly one image tool and the Codex backend persists the image.
+
+### 7.2 Native and proxy
+
+- **Native** on verified OpenAI-protocol Sources. The probe is an `image_generation` call probe with a small image.
+- **Proxy** for other models: the executor is a verified image-capable Source. The executor saves the image as a
+  file and returns its path record. A proxied call's result is the same text path record as a native one (§7.3).
+
+### 7.3 Files and a text path record (owner decision, 2026-10-13 19:14)
+
+- **The model is not given the image by default.** Each image is saved as a local file in the session's media
+  store, decoded as the event is parsed.
+- **The model gets a text path record:** the file path, the revised prompt, the size, and the mode and cost, e.g.
+  `[image saved: /…/image-3f2a.png · 1536×1024 · native (OpenAI API key) · ≈ $0.04] prompt: "…"`.
+  - If the model wants to look, it opens the file with its `read` tool, the same as any other file.
+- **The user sees the image.** The Workbench renders it inline from the file, and IM attaches it. That is display,
+  separate from model context.
+- **History and replay never contain base64.**
+  - `HostedRecord.images` holds the path records.
+  - On the native OpenAI path, the transcript's `image_generation_call` item has its `result` replaced by the path
+    record in `native.payload`.
+  - Because a replaced `result` is no longer a valid image result, an `image_generation` block is never replayed
+    verbatim. Every target, the producing Source included, gets the synthetic call plus the text path record (§5).
+    The `replay` aspect is never probed for this tool.
+
+### 7.4 Byte flow and the idle bound
+
+- **Partial images.** Vibey's declaration requests `partial_images: 2`, so `response.image_generation_call.partial_image`
+  events carry bytes during generation.
+  - The gateway counts a partial image as model output (`stream_wire.py`), so response headers are released at the
+    first partial.
+  - Partials are previews for the user's display, written to a temporary file and replaced by the final image.
+    They never enter history or model context.
+- **What was measured.** A failing generation went 35.4 s without a byte after `generating`; healthy generations took
+  64–130 s.
+- **Phase 1 acceptance gate.** Through the gateway, with partials, the largest byte gap of every successful test
+  generation stays under #2538's 120 s bound on `openai/openai_responses`. If it does not, the gateway treats an
+  open `image_generation_call` as expected silence before Phase 1 ships.
+
+### 7.5 SSE caps
+
+- **Sizes on the wire.** One final image is about 4.1–4.2 MB of base64 at the relay's forced `quality: low`, and
+  arrives **twice**: in `response.output_item.done` and in the engine-rebuilt `response.completed`. Each partial is
+  another full image. High quality is plausibly 5.5–8 MB per copy.
+- **Vibey's limits for a Responses stream that declares `image_generation`:**
+  - the line cap is raised from 8 MiB to the 32 MiB event cap;
+  - image base64 is decoded to file as it is parsed and is excluded from the 32 MiB cumulative assembled-output
+    budget;
+  - the adapter takes the image from `output_item.done` and discards the duplicate `result` in `response.completed`
+    without decoding it.
+- Other streams keep the 8 MiB line cap.
 
 ## 8. Cost and limits
 
 - **Per-call prices** live in the overlay with date and source (capability model §6.2):
   - OpenAI web search: $10 / 1k calls plus content tokens;
   - Anthropic: $10 / 1k searches plus result tokens, re-billed while they stay in context;
-  - xAI: web search $5 / 1k calls, X search $5 / 1k posts and $10 / 1k profiles.
+  - xAI: web search $5 / 1k calls, X search $5 / 1k posts and $10 / 1k profiles;
+  - OpenAI image generation: per image, by quality and size. The overlay records the vendor's table with its date
+    and URL, and the card shows the reported or list cost.
 - **Relays** show list price, labelled as such, and may bill differently.
 - **Anthropic OAuth policy:** a Claude subscription Source is never probed and never runs a hosted tool, whether
   natively or as proxy executor. Credential eligibility is checked before the probe, the native mode and the executor
@@ -510,12 +602,13 @@ Each has a **Re-verify** action with its cost. Unknown shows nothing.
    - Source chips for efforts;
    - context-tier valuation.
    This closes #2539.
-2. **Phase 1, web search and X search:**
+2. **Phase 1, web search, X search and image generation:**
    - catalog, probes, the Tools tab, and the proxy executor;
    - `HopResolution.hosted_tools`, request pinning and `pin_unavailable`, and the V2 `hosted_tools` config;
    - the C-1 blocks and adapter parsing;
-   - replay and conversion, `pause_turn` continuation, the tool card, and the IM line.
-3. **Phase 2, image generation:** §7.
+   - replay and conversion, `pause_turn` continuation, the tool card, and the IM line;
+   - image generation (§7): engine passthrough, the gateway's per-caller injection for Codex, files instead of
+     base64, partial images, and the SSE caps.
 
 ## 10. Acceptance properties
 
@@ -531,11 +624,16 @@ Each has a **Re-verify** action with its cost. Unknown shows nothing.
    synthetic replay alike. A failed record never renders as a successful empty result.
 5. Any transcript with hosted calls replays to any supported target without a history-shape error.
 6. `pause_turn` never ends a turn. Continuations are bounded, pinned to the paused response's Source, merged into
-   one message, and their usage is summed.
-7. No probe and no proxy call runs without a user action or a model tool call in a turn the user started. Every
+   one message, and their usage is summed. Past the bound, the turn ends with one `interrupted` error that keeps
+   the partial.
+7. A generated image never enters model context or history as bytes. The model gets the text path record, and the
+   user sees the image.
+8. A Codex CLI request reaches the upstream with exactly the image tool CPA would have injected. No other caller
+   gets one unless it declared it.
+9. No probe and no proxy call runs without a user action or a model tool call in a turn the user started. Every
    probe shows its cost first.
-8. A real error creates evidence only through a narrow rule for the named (Source, model, feature).
-9. A shown cost says whether it is reported, at API price, or included in a subscription.
+10. A real error creates evidence only through a narrow rule for the named (Source, model, feature).
+11. A shown cost says whether it is reported, at API price, or included in a subscription.
 
 ## 11. Test plan
 
@@ -552,6 +650,8 @@ shapes. No live upstream and no real credentials.
 | Proxy executor | gateway endpoint, stub provider | executor choice; no effort sent; the record with excerpts; metering on the executor Source; error when no executor is verified; refusal of a Claude subscription |
 | Record rendering and citations | the record-to-text function; `core/citations.py` builder | completed, failed, incomplete and pending records; every action's synthetic rule; summary cited sources listed once; provider annotations through to the Web sidecar and the IM Markdown link (end to end) |
 | Config | `ModelHubConfig` loader | a released config without `hosted_tools` loads with all tools off; an unknown tool key degrades with a warning |
+| Image injection | gateway + loopback fake engine | the §7.1 table (CPA's conditions, byte for byte); Claude, OpenCode and Vibey requests get no image tool unless declared; the existing Codex image persistence tests unchanged |
+| Images | Responses adapter against stub SSE | partials then a final image twice: one file written, no base64 in history, the duplicate in `response.completed` not decoded, a 9 MiB image line accepted under the image cap, the text path record as model context |
 | Probes | gateway, stub provider | verified / unsupported / dropped / transient outcomes; a replay probe whose answer lacks the first search's URL is `unsupported`; probes only from the API action |
 | UI | Models Tools tab, Source chips, tool card | toggle off by default; Verify shows the cost; chips per evidence state; card modes; IM line |
 | E2E, once per release | real engine + stub upstream | a native web search and a proxied X search through the shipped engine on each protocol |
@@ -570,10 +670,13 @@ encoded either as a schema clause or as a producer test. The PR names which for 
    - `search` with `queries`, at least one;
    - `open_page` with `url`;
    - `find_in_page` with `url` and `pattern`;
-   - `x_search` with `variant` and `query`;
+   - `x_search` with `variant` and `query`, and optional `limit` and `mode`;
    - `x_user_search` with `query`;
    - `x_thread_fetch` with `ref`;
+   - `generate` with `prompt`, and optional `size`;
    - `other` with `name`.
+   - `generate` is valid only when `tool` is `image_generation`, and `images[]` is present exactly then.
+   - No field anywhere holds image base64.
 3. `HostedRecord`: `status` is in its enum. `error` is present exactly for `failed` and `incomplete`. Each
    `sources[]` entry requires `url`.
 4. `AssistantMessage.hosted_summary`:
@@ -585,9 +688,9 @@ encoded either as a schema clause or as a producer test. The PR names which for 
    - `is_error` is `true` exactly when `record.status` is `failed` or `incomplete`.
 
 **C-6 `HopResolution.hosted_tools` (both copies):**
-7. Each entry requires `mode` and `replay`.
-   - `declaration` is present exactly for `native`.
-   - `executor` (`{source_id, model_id}` or `null`) is present exactly for `proxy`.
+7. Each entry requires `mode`, `replay` and `executor`.
+   - `executor` is `{source_id, model_id}` or `null`, and is present for every entry whatever the mode.
+   - `declaration` is present exactly for `native`, and includes the overlay entry's `include` values.
 
 **Model Hub:**
 8. V2 `model_hub.hosted_tools`: keys are catalog tool names, and each entry requires `enabled` and `executor`.
@@ -596,3 +699,8 @@ encoded either as a schema clause or as a producer test. The PR names which for 
 9. Overlay `providers` entries and the evidence record follow the field tables in the capability model (§3.1, §4),
    including: `observed` ⇒ `unsupported` with `detail`.
 10. The `pin_unavailable` answer is exactly the 409 envelope in §3.5.
+11. Native replay requires all three: same Source, same origin, and current `replay` evidence. `image_generation`
+    blocks are never replayed verbatim.
+12. A probe with no tool item is inconclusive and writes no evidence.
+13. The engine config renders `disable-image-generation: passthrough`. The gateway's Codex image injection is a
+    single function covered by the §7.1 table.

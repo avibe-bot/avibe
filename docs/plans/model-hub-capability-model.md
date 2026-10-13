@@ -64,7 +64,7 @@ validates it.
 | --- | --- |
 | `version` | `1` |
 | `source_id`, `model_id` | non-empty |
-| `feature` | `{kind: "effort", name}` or `{kind: "hosted_tool", name: "web_search" \| "x_search", aspect: "call" \| "replay"}` |
+| `feature` | `{kind: "effort", name}` or `{kind: "hosted_tool", name: "web_search" \| "x_search" \| "image_generation", aspect: "call" \| "replay"}`; `image_generation` has `call` only |
 | `status` | `verified` or `unsupported` |
 | `basis` | `probe` (a live probe the user started) or `observed` (learned from a real request's error) |
 | `observed_at` | timestamp |
@@ -163,8 +163,8 @@ Fields of one vendor entry. The loader validates them; their JSON Schema lands w
 | `models[]` | required; ordered, first match wins |
 | `match` | exactly one of `prefix` or `id`, non-empty |
 | `wire_efforts` | a list of effort names, or `null` to defer to models.dev |
-| `hosted_tools` | protocol (`anthropic`, `openai_responses`, `openai_chat`, `google`) → tool (`web_search`, `x_search`) → `{declaration, price}`, both required; `declaration` has a `type` |
-| `price` | `unit` (`call`, `search`, `post`, `profile`), `usd_per_1k` ≥ 0, `as_of` (date) and `url`, all required; optional `extra[]` of `{unit, usd_per_1k}` |
+| `hosted_tools` | protocol (`anthropic`, `openai_responses`, `openai_chat`, `google`) → tool (`web_search`, `x_search`, `image_generation`) → `{declaration, price, include?}`. `declaration` and `price` are required, and `declaration` has a `type`. `include` lists Responses `include` values the tool needs (OpenAI web search: `web_search_call.action.sources`). |
+| `price` | `unit` (`call`, `search`, `post`, `profile`, `image`), `usd_per_1k` ≥ 0, `as_of` (date) and `url`, all required; optional `extra[]` of `{unit, usd_per_1k}`. Image prices vary by quality and size, so they use `extra[]` per variant. |
 - The overlay records what the **provider** offers. Whether a Source (a relay, a subscription) carries it is
   evidence.
 - An invalid vendor entry disables that entry with a warning; startup never fails.

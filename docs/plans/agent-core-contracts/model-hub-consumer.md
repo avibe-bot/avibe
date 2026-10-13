@@ -42,8 +42,9 @@ consumer's requirements, and the Model Hub lane lands the change in both places.
    - `HopResolution.hosted_tools` names, for each tool the user enabled:
      - the primary hop's `mode` (`native` or `proxy`);
      - for `native`, the wire declaration, which is required exactly then;
-     - for `proxy`, the executor bound for this turn (`{source_id, model_id}` or `null`), which is required exactly
-       then. A config change applies from the next turn;
+     - the executor bound for this turn (`{source_id, model_id}` or `null`), present for every entry whatever the
+       mode, because a native request that comes back `pin_unavailable` is re-rendered with the proxy function in the
+       same turn. A config change applies from the next turn;
      - `replay`, the current replay evidence for the primary hop's Source.
    - `native` requires all of these ([`../model-hub-capability-model.md`](../model-hub-capability-model.md) §3):
      - an eligible credential (never a Claude subscription);
