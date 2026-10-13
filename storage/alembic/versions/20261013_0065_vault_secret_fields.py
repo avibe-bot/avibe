@@ -13,6 +13,7 @@ revision = "20261013_0065"
 down_revision = "20261012_0064"
 branch_labels = None
 depends_on = None
+MIGRATION_SAFETY = "additive"
 
 
 def _columns() -> set[str]:
