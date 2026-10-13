@@ -85,8 +85,12 @@ consumer's requirements, and the Model Hub lane lands the change in both places.
        never exempts a hosted call from evidence.
    - A pinned request is forwarded with nothing changed but `model` and `stream`, so Vibey renders all of it, earlier
      history included, for the pinned Source's origin.
-   - An unpinned request never reaches a hop without that evidence either. Such a hop is skipped, and when none
-     remains the gateway answers 422 `hosted_tool_unverified`.
+   - **Unpinned hosted content is refused.** Vibey pins every request carrying Source-specific hosted content:
+     native declarations, replayed native items, and in-flight continuations. An unpinned Vibey request carrying
+     any of it therefore has no correct hop, and the gateway answers 422 `hosted_content_unpinned` before anything
+     runs.
+   - **Native content is never translated.** The pinned hop must speak the request's protocol; otherwise the
+     answer is `pin_unavailable`.
    - A `pin_unavailable` carries no routing state into the resend. Every failover-class failure that is health
      evidence settles the Source as normal routing does, so the resend skips it. An unrecognized error frame inside
      a 2xx is not health evidence, so the resend may try that Source once more.

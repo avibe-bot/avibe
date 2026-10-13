@@ -21,7 +21,7 @@ import pytest
 
 from config.v2_config import ModelHubModelConfig, ModelHubRouteConfig, ModelHubRouteHopConfig
 from core.handlers.model_hub import service as service_module
-from core.handlers.model_hub.adapter import RawOutcomeKind
+from core.handlers.model_hub.adapter import RawOutcomeKind, UpstreamRejection
 from core.handlers.model_hub.capability_evidence import EvidenceFeature, EvidenceRecord, identity_digest
 from core.handlers.model_hub.hosted_admission import hosted_content
 from core.handlers.model_hub.hosted_tools import HOSTED_PROBE_SHAPE, engine_stamp
@@ -275,43 +275,86 @@ async def test_an_ambiguous_pinned_failure_is_no_health_evidence_so_the_resend_m
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("tools", "verified", "status", "invoked"), [
-    # x_search on an OpenAI hop: never sent, even when another hop cannot take it either.
-    ([{"type": "x_search"}], [], 422, []),
-    # Only the hop with call evidence receives the declaration.
-    ([{"type": "web_search"}], [("src_fallback01", "gpt-6-astra")], 200, ["src_fallback01"]),
-    ([{"type": "web_search"}], [("src_primary01", "grok-4.6")], 200, ["src_primary01"]),
-    # Function tools are never hosted content.
-    ([PORTABLE_X_SEARCH], [], 200, ["src_primary01"]),
+@pytest.mark.parametrize(("case", "tools", "history", "status", "invoked"), [
+    # Hosted content is Source-specific, so it travels only pinned; unpinned, no hop is right for it.
+    ("native_declaration", [{"type": "web_search"}], [], 422, []),
+    ("replayed_hosted_item", [SHELL], ["WEB_CALL"], 422, []),
+    # Function tools and plain history are never hosted content.
+    ("portable_request", [PORTABLE_X_SEARCH], [], 200, ["src_primary01"]),
 ])
-async def test_an_unpinned_request_never_reaches_a_hop_unverified_for_its_hosted_content(
-    tmp_path, tools, verified, status, invoked,
-):
-    """MH-HOSTED-GATEWAY-002: per-hop filtering backs the pin up; a hop is skipped, never rewritten."""
+async def test_unpinned_hosted_content_is_refused_before_anything_runs(tmp_path, case, tools, history, status, invoked):
+    """MH-HOSTED-GATEWAY-002: the gateway never chooses a hop for hosted content; Vibey's pin does."""
 
     primary, fallback = _sources()
     service = _vibey_service(tmp_path, [primary, fallback], handles=[
-        LiveInvokeHandle(_outcome(RawOutcomeKind.SUCCESS, source_id=source_id), (b"{}",))
-        for source_id in invoked
+        LiveInvokeHandle(_outcome(RawOutcomeKind.SUCCESS, source_id=primary.id), (b"{}",)),
     ])
-    sources = {source.id: source for source in (primary, fallback)}
-    for source_id, model_id in verified:
-        _verify(service, sources[source_id], model_id, "web_search", "call")
-    if tools == [{"type": "x_search"}]:
-        # Only the OpenAI hop remains, and it has no x_search at all.
-        service.store.config.sources[0].state.status = "cooldown"
-        service.store.config.sources[0].state.retry_at = (NOW + timedelta(minutes=5)).isoformat()
+    # Evidence everywhere does not make unpinned content admissible.
+    _verify(service, primary, "grok-4.6", "web_search", "call")
+    _verify(service, primary, "grok-4.6", "web_search", "replay")
+    _verify(service, fallback, "gpt-6-astra", "web_search", "call")
     gateway = ModelHubTurnGateway(service)
     router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
     try:
         hop = await router.resolve_hop("menu-alias", process_scope="vibey:unpinned", turn_id="turn-unpinned")
-        answer_status, answer = await _post(hop, {**_native(hop), "tools": [*tools, SHELL]})
+        body = {**_native(hop, history=[WEB_CALL, ASSISTANT_TEXT] if history else []), "tools": [*tools, SHELL]}
+        answer_status, answer = await _post(hop, body)
     finally:
         await gateway.close()
     assert answer_status == status
     assert [entry[0] for entry in service.adapter.invocations] == invoked
     if status == 422:
-        assert answer["error"]["code"] == "hosted_tool_unverified"
+        assert answer["error"]["code"] == "hosted_content_unpinned"
+
+
+@pytest.mark.asyncio
+async def test_a_pinned_hop_must_speak_the_requests_protocol(tmp_path):
+    """MH-HOSTED-GATEWAY-002: native content is never translated; a pin across protocols is handed back."""
+
+    primary, fallback = _sources()
+    service = _vibey_service(tmp_path, [primary, fallback])
+    gateway = ModelHubTurnGateway(service)
+    router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
+    try:
+        hop = await router.resolve_hop("menu-alias", process_scope="vibey:protocol", turn_id="turn-protocol")
+        async with aiohttp.ClientSession() as client:
+            async with client.post(
+                f'{hop["base_url"]}/messages',
+                headers={"Authorization": f'Bearer {hop["token"]}', PIN: primary.id},
+                json={"model": hop["runtime_model"], "max_tokens": 64, "messages": [{"role": "user", "content": "q"}]},
+            ) as response:
+                assert (response.status, await response.json()) == (409, PIN_UNAVAILABLE)
+    finally:
+        await gateway.close()
+    assert service.adapter.invocations == []
+
+
+@pytest.mark.asyncio
+async def test_a_refusal_naming_the_pinned_hosted_content_is_handed_back_and_learned(tmp_path):
+    """MH-HOSTED-GATEWAY-002: case 3, a narrow hosted-content rule (#2551) turns the pinned 400 into a handback."""
+
+    primary, fallback = _sources()
+    refusal = replace(
+        _outcome(RawOutcomeKind.HTTP_ERROR, status=400, code="invalid_request_error",
+                 message="Unsupported tool type: x_search"),
+        rejection=UpstreamRejection(status=400, code="invalid_request_error", error_type="invalid_request_error",
+                                    unsupported_tool_type="x_search"),
+    )
+    service = _vibey_service(tmp_path, [primary, fallback], handles=[InvokeHandle(refusal)])
+    _verify(service, primary, "grok-4.6", "x_search", "call")
+    gateway = ModelHubTurnGateway(service)
+    router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
+    try:
+        hop = await router.resolve_hop("menu-alias", process_scope="vibey:learn", turn_id="turn-learn")
+        assert await _post(hop, _native(hop), pin=primary.id) == (409, PIN_UNAVAILABLE)
+    finally:
+        await gateway.close()
+    assert [entry[0] for entry in service.adapter.invocations] == [primary.id]
+    learned = service.capability_evidence.view(
+        primary, "grok-4.6", EvidenceFeature.hosted("x_search", "call"),
+        engine=engine_stamp(), shape=HOSTED_PROBE_SHAPE, now=service.now(),
+    )
+    assert (learned.status, learned.record.basis) == ("unsupported", "observed")
 
 
 # Responses and Anthropic histories: (case, protocol, history, pinned, the tools needing replay evidence).
