@@ -39,6 +39,7 @@ from core.agent_core.ai.provider import Done
 from core.agent_core.harness.projection import project
 from core.agent_core.messages import (
     AssistantMessage,
+    HostedToolBlock,
     ImageBlock,
     TextBlock,
     ThinkingBlock,
@@ -2434,6 +2435,63 @@ async def test_a_hop_resolved_native_hosted_tool_reaches_the_gateway_pinned_to_i
     assert all(tool.get("name") != "x_search" and tool.get("type") != "x_search" for tool in sent["tools"])
     assert set(include) <= set(sent.get("include", []))
     assert harness.controller.im_client.sent == ["hi"]
+
+
+async def test_a_native_search_is_kept_as_one_hosted_call_and_replayed_next_turn_as_a_synthetic_call(
+    engine, session, tmp_path, published
+) -> None:
+    """MH-HOSTED-VIBEY-003 (vibey-hosted-tools.md §4.2, §5): the turn's hosted call is committed as one hosted block
+    with its record, and the next turn's request carries it as a same-named call and result with the sources."""
+    import httpx
+
+    from modules.agents.vibey.models import registry_providers
+
+    served = json.dumps(
+        {"provider": "xai", "api": "openai_responses", "model": "grok-4.6", "source": "src_upstream01"},
+        separators=(",", ":"),
+    )
+    call = {
+        "id": "ws_1",
+        "type": "web_search_call",
+        "status": "completed",
+        "action": {"type": "search", "query": "avibe release", "sources": [{"type": "url", "url": "https://avibe.bot/r"}]},
+    }
+    first = (
+        f'data: {json.dumps({"type": "response.output_item.done", "output_index": 0, "item": call})}\n\n'
+        'data: {"type":"response.output_item.added","output_index":1,"item":{"type":"message","id":"msg_1"}}\n\n'
+        'data: {"type":"response.output_text.delta","output_index":1,"delta":"found it"}\n\n'
+        'data: {"type":"response.completed","response":{"status":"completed","output":null}}\n\n'
+    )
+    replies = [first, _TEXT_STREAMS["openai_responses"][1]]
+    seen: list[dict] = []
+
+    def gateway(request: httpx.Request) -> httpx.Response:
+        seen.append(json.loads(request.content))
+        return httpx.Response(
+            200, headers={"content-type": "text/event-stream", "x-avibe-served-hop": served}, text=replies.pop(0)
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(gateway)) as client:
+        harness = _Harness(
+            engine, tmp_path, "telegram", [], providers=registry_providers(media_loader=None, client=client)
+        )
+        harness.controller.hub_protocol = "openai_responses"
+        harness.controller.hub_hosted_tools = {
+            "web_search": {
+                "mode": "native", "declaration": {"type": "web_search"}, "include": [], "executor": None, "replay": False
+            }
+        }
+        await harness.agent.handle_message(harness.request("search"))
+        committed = (await harness.context_rows())[-1].message
+        await harness.agent.handle_message(harness.request("and then?"))
+
+    (hosted,) = [block for block in committed.content if isinstance(block, HostedToolBlock)]
+    assert (hosted.tool, hosted.record.status, hosted.native.source_id) == ("web_search", "completed", "src_upstream01")
+    assert hosted.native.payload == (call,)
+    replayed = [item for item in seen[1]["input"] if item.get("type") in ("function_call", "function_call_output")]
+    assert [item["type"] for item in replayed] == ["function_call", "function_call_output"]
+    assert json.loads(replayed[0]["arguments"]) == {"query": "avibe release"} and replayed[0]["name"] == "web_search"
+    assert "https://avibe.bot/r" in replayed[1]["output"]
 
 
 _NATIVE_SEARCH = {"mode": "native", "declaration": {"type": "web_search"}, "include": [], "executor": None, "replay": False}

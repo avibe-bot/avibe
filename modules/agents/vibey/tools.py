@@ -113,6 +113,11 @@ class NativeHostedTool:
         return ToolResult(content=(TextBlock(f"{self.spec.name} is not available on this route."),), is_error=True)
 
 
+#: The hosted tools whose native results the adapters parse. A generated image arrives as base64 that history must
+#: never hold (§7.3), so ``image_generation`` joins with its media handling.
+PARSED_HOSTED_TOOLS = ("web_search", "x_search")
+
+
 def native_hosted_tools(selection: Optional[ModelSelection]) -> tuple[Tool, ...]:
     """The hosted tools preflight's hop runs natively, in Model Hub's order. They lead the Turn's tools, so its last
     tool stays a local one whatever a hop renders them as."""
@@ -120,4 +125,8 @@ def native_hosted_tools(selection: Optional[ModelSelection]) -> tuple[Tool, ...]
     if selection is None:
         return ()
     routes = selection.endpoint.hosted_tools
-    return tuple(NativeHostedTool(hosted_tool_spec(name)) for name, route in routes.items() if route.mode == "native")
+    return tuple(
+        NativeHostedTool(hosted_tool_spec(name))
+        for name, route in routes.items()
+        if route.mode == "native" and name in PARSED_HOSTED_TOOLS
+    )

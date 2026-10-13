@@ -645,9 +645,22 @@ Responses terminal states:
 
 Planned by [`../vibey-hosted-tools.md`](../vibey-hosted-tools.md) (Phase 1: `web_search`, `x_search`,
 `image_generation`). These rows describe the wire mapping the `ai` lane implements with that phase. Implemented so
-far: a hosted tool's canonical spec is sent as the native declaration on a hop whose route is native, with its
-Responses `include` values and the pin header on that request. Until the rest lands the adapters ignore hosted items, as the sections above record, and the Anthropic stop
-table above still maps `pause_turn` to `stop`.
+far:
+
+- **Requests.** A hosted tool's canonical spec is sent as the native declaration on a hop whose route is native, with
+  its Responses `include` values and the pin header on that request.
+- **Parsing** for `web_search` and `x_search`: native results become `HostedToolBlock`s, text citations become
+  `TextBlock.citations`, and response-level facts go to `hosted_summary`.
+- **Portable history.** A finished response's hosted calls become synthetic same-named calls and results, split around
+  the assistant message. There is one call per hosted block, and nothing folds. Each result shows its status line
+  first and then every line attached to it. A response its
+  turn is still waiting on (the request's last assistant message, stopped for tools) keeps each call in place as text.
+  So does a hosted call that follows a client tool call of the same response, because a split there would separate
+  that call from its result.
+
+Still to come: native verbatim replay, the `pin_unavailable` re-render, `pause_turn`, the proxy executor and images.
+Until `pause_turn` lands, the Anthropic stop table above still maps it to `stop`. An Anthropic citation covers its
+whole text block, so it carries no range.
 
 | Concern | Anthropic Messages | OpenAI Responses (OpenAI, xAI) | OpenAI Chat Completions |
 | --- | --- | --- | --- |

@@ -15,6 +15,7 @@ from typing import Any
 
 import httpx
 
+from core.agent_core.ai.hosted import anthropic_hosted_block, citation, reported_counts
 from core.agent_core.ai._common import (
     ServedHopResolver,
     WireRequest,
@@ -246,6 +247,10 @@ class AnthropicAdapter(ProviderAdapter):
         stop_reason: str | None = None
         message_started = False
         message_stopped = False
+        # The hosted tools this request declared natively; ``server_tool_use`` blocks of other tools stay unparsed.
+        hosted = frozenset(native_hosted_tools(request))
+        # Each hosted call's ``server_tool_use`` by stream index; its input JSON streams into the assembler.
+        uses: dict[int, dict[str, Any]] = {}
         try:
             async def translate(events: AsyncIterator[Any]) -> AsyncIterator[Any]:
                 nonlocal message_started, message_stopped, stop_reason
@@ -353,6 +358,9 @@ class AnthropicAdapter(ProviderAdapter):
                         assembler.set_usage(
                             _anthropic_usage(message.get("usage"))
                         )
+                        start_usage = message.get("usage")
+                        if isinstance(start_usage, Mapping) and "server_tool_use" in start_usage:
+                            assembler.set_hosted_facts(counts=reported_counts(start_usage.get("server_tool_use")))
                     elif event_type == "content_block_start":
                         index = _stream_index(chunk)
                         if index is None:
@@ -394,9 +402,33 @@ class AnthropicAdapter(ProviderAdapter):
                                     yield terminal
                                 return
                             continue
+                        if kind == "server_tool_use":
+                            hosted_call = block.get("name") in hosted and isinstance(block.get("id"), str) and block["id"]
+                            if hosted_call and assembler.source_id is not None:
+                                # The call keeps its place in the stream; its input streams in and its result follows.
+                                assembler.set_block_kind(index, "hosted_use")
+                                uses[index] = dict(block)
+                                assembler.hosted_block(
+                                    ("hosted", block.get("id")),
+                                    anthropic_hosted_block(block, None, source_id=assembler.source_id),
+                                )
+                            continue
+                        if kind == "web_search_tool_result":
+                            use = next((item for item in uses.values() if item.get("id") == block.get("tool_use_id")), None)
+                            if use is not None and assembler.source_id is not None:
+                                assembler.set_block_kind(index, "hosted_result")
+                                assembler.hosted_block(
+                                    ("hosted", use.get("id")),
+                                    anthropic_hosted_block(use, block, source_id=assembler.source_id),
+                                )
+                            continue
                         if kind == "text":
                             assembler.set_block_kind(index, "text")
                             assembler.ensure_text_slot(index)
+                            for raw in block.get("citations") or ():
+                                cited = citation(raw) if isinstance(raw, Mapping) else None
+                                if cited is not None:
+                                    assembler.add_text_citation(index, cited)
                             initial = block.get("text")
                             if initial is not None and not isinstance(initial, str):
                                 terminal = assembler.terminal(
@@ -595,6 +627,14 @@ class AnthropicAdapter(ProviderAdapter):
                             value = _string(raw_signature)
                             if value:
                                 assembler.append_thinking_signature(index, value)
+                        elif delta_type == "citations_delta":
+                            raw_citation = delta.get("citation")
+                            cited = citation(raw_citation) if isinstance(raw_citation, Mapping) else None
+                            if block_kind == "text" and cited is not None:
+                                assembler.add_text_citation(index, cited)
+                        elif delta_type == "input_json_delta" and block_kind == "hosted_use":
+                            if isinstance(delta.get("partial_json"), str):
+                                assembler.hosted_input_delta(index, delta["partial_json"])
                         elif delta_type == "input_json_delta":
                             if block_kind != "tool":
                                 continue
@@ -624,6 +664,17 @@ class AnthropicAdapter(ProviderAdapter):
                             if terminal is not None:
                                 yield terminal
                             return
+                        streamed_input = assembler.hosted_input(index) if assembler.block_kind(index) == "hosted_use" else ""
+                        if streamed_input:
+                            use = uses[index]
+                            parsed = json_object(streamed_input)
+                            use["input"] = parsed if parsed is not None else use.get("input") or {}
+                            current = assembler.hosted_block_at(("hosted", use.get("id")))
+                            if current is not None and current.record.status == "pending":
+                                assembler.hosted_block(
+                                    ("hosted", use.get("id")),
+                                    anthropic_hosted_block(use, None, source_id=current.native.source_id),
+                                )
                         end = assembler.block_end(index)
                         if end is not None:
                             yield end
@@ -680,6 +731,8 @@ class AnthropicAdapter(ProviderAdapter):
                                     return
                                 stop_reason = _normalize_stop_reason(delta.get("stop_reason"))
                         assembler.set_usage(_anthropic_usage(usage, current=assembler.usage))
+                        if isinstance(usage, Mapping) and "server_tool_use" in usage:
+                            assembler.set_hosted_facts(counts=reported_counts(usage.get("server_tool_use")))
                     elif event_type == "error":
                         shape_error = _error_event_shape_error(chunk)
                         if shape_error is not None:

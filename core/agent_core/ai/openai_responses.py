@@ -15,6 +15,14 @@ from typing import Any
 
 import httpx
 
+from core.agent_core.ai.hosted import (
+    citation,
+    reported_cost,
+    reported_counts,
+    responses_hosted_block,
+    responses_hosted_tool,
+    x_cited_sources,
+)
 from core.agent_core.ai._common import (
     ServedHopResolver,
     WireRequest,
@@ -49,6 +57,7 @@ from core.agent_core.ai.provider import (
 from core.agent_core.cancel import CancelToken
 from core.agent_core.messages import (
     AssistantMessage,
+    HostedToolBlock,
     TextBlock,
     ThinkingBlock,
     ToolCallBlock,
@@ -329,6 +338,8 @@ class OpenAIResponsesAdapter(ProviderAdapter):
         status: str | None = None
         incomplete_reason: str | None = None
         refusal = False
+        # The hosted tools this request declared natively: only their items become hosted calls (§4.2).
+        hosted = frozenset(native_hosted_tools(request))
 
         try:
             wire = wire_request(request, transformed_messages, gateway=self._gateway, loaded_images=loaded_images)
@@ -631,6 +642,9 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                             assembler.merge_reasoning_item(output_index, item)
                         elif item_type == "message":
                             assembler.ensure_text_slot(output_index)
+                        else:
+                            # A hosted call takes its place in the output order now; its done item fills it in.
+                            _add_hosted_call(assembler, item, output_index, hosted, finished=False)
                     elif event_type == "response.reasoning_summary_text.done":
                         continue
                     elif event_type == "response.reasoning_summary_part.done":
@@ -916,9 +930,12 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                                 if emitted is not None:
                                     yield emitted
                                 refusal = refusal or message_refusal
+                                _add_message_citations(assembler, output_index, item)
                                 end = assembler.block_end(output_index)
                                 if end is not None:
                                     yield end
+                            else:
+                                _add_hosted_call(assembler, item, output_index, hosted)
                     elif event_type in {"response.completed", "response.incomplete"}:
                         response_body = chunk.get("response")
                         if not isinstance(response_body, Mapping):
@@ -1019,21 +1036,8 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                                     yield terminal
                                 return
                             response_error = response_value
-                        output = response_body.get("output")
-                        if output is not None and not isinstance(output, list):
-                            terminal = assembler.terminal(
-                                assembler.error(
-                                    f"{event_type} response output must be an array",
-                                    kind="invalid_request",
-                                )
-                            )
-                            if terminal is not None:
-                                yield terminal
-                            return
-                        terminal_output_error, terminal_refusal = _apply_terminal_output_items(
-                            output,
-                            assembler,
-                            reasoning,
+                        terminal_output_error, terminal_refusal = _finish_response(
+                            response_body, event_type, assembler, reasoning, hosted
                         )
                         refusal = refusal or terminal_refusal
                         if terminal_output_error is not None:
@@ -1180,6 +1184,13 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                                     yield terminal
                                 return
                             assembler.set_usage(_responses_usage(response_body.get("usage")))
+                            # The calls it ran before failing were billed: its partial keeps them and what they cost.
+                            finish_error, _ = _finish_response(response_body, event_type, assembler, reasoning, hosted)
+                            if finish_error is not None:
+                                terminal = assembler.terminal(finish_error)
+                                if terminal is not None:
+                                    yield terminal
+                                return
                         elif "error" in chunk and chunk.get("error") is not None and not isinstance(
                             chunk.get("error"), Mapping
                         ):
@@ -1457,6 +1468,7 @@ def _apply_terminal_output_items(
     items: Any,
     assembler: StreamAssembler,
     reasoning: set[int],
+    hosted: frozenset[str] = frozenset(),
 ) -> tuple[ProviderError | None, bool]:
     if not isinstance(items, list):
         return None, False
@@ -1489,7 +1501,93 @@ def _apply_terminal_output_items(
             refusal = refusal or message_refusal
             if message_refusal and assembler.has_text_slot(index):
                 _append_message_refusal(assembler, index, item)
+            if assembler.has_text_slot(index) and not assembler.has_text_citations(index):
+                _add_message_citations(assembler, index, item)
+        else:
+            # A hosted call this stream never finished in ``output_item.done``; one it did keeps its block.
+            _add_hosted_call(assembler, item, index, hosted, backfill=True)
     return None, refusal
+
+
+def _finish_response(
+    response_body: Mapping[str, Any],
+    event_type: str,
+    assembler: StreamAssembler,
+    reasoning: set[int],
+    hosted: frozenset[str],
+) -> tuple[ProviderError | None, bool]:
+    """What every terminal Response carries beyond its status, read once for completed, incomplete and failed alike:
+    the hosted facts in its usage, the output items the stream did not finish, and the posts its answer cites.
+
+    Returns an error for an output that is not an array, or an item that does not parse, and whether a refusal came
+    back.
+    """
+
+    _set_hosted_facts(assembler, response_body.get("usage"))
+    output = response_body.get("output")
+    if output is not None and not isinstance(output, list):
+        return assembler.error(f"{event_type} response output must be an array", kind="invalid_request"), False
+    error, refusal = _apply_terminal_output_items(output, assembler, reasoning, hosted)
+    _cite_x_posts(assembler)
+    return error, refusal
+
+
+def _cite_x_posts(assembler: StreamAssembler) -> None:
+    """An X-search answer's cited posts (§4.2): the response gives none per call, so its summary holds them."""
+
+    if any(isinstance(block, HostedToolBlock) and block.tool == "x_search" for block in assembler.content):
+        assembler.set_hosted_facts(cited=x_cited_sources(assembler.text_citations()))
+
+
+def _add_hosted_call(
+    assembler: StreamAssembler,
+    item: Mapping[str, Any],
+    output_index: int,
+    hosted: frozenset[str],
+    *,
+    finished: bool = True,
+    backfill: bool = False,
+) -> None:
+    """An output item of a hosted tool the request declared natively, as its hosted call at its output index (§4.2):
+    pending when only added, filled in when done. A call the terminal response backfills keeps a block it has.
+
+    A response whose served Source is unknown keeps no hosted call: its native payload could never be replayed.
+    """
+
+    tool = responses_hosted_tool(item)
+    if tool is None or tool not in hosted or assembler.source_id is None:
+        return
+    current = assembler.hosted_block_at(output_index)
+    if backfill and current is not None and current.record.status != "pending":
+        return
+    assembler.hosted_block(
+        output_index,
+        responses_hosted_block(
+            item, source_id=assembler.source_id, call_id=f"hosted_{output_index}", finished=finished
+        ),
+    )
+
+
+def _add_message_citations(assembler: StreamAssembler, index: int, item: Mapping[str, Any]) -> None:
+    """``url_citation`` annotations on a message's text parts, as citations into the text the parts make together."""
+
+    offset = 0
+    for part in item.get("content") or ():
+        if not isinstance(part, Mapping):
+            continue
+        for annotation in part.get("annotations") or ():
+            if isinstance(annotation, Mapping) and annotation.get("type") == "url_citation":
+                cited = citation(annotation, offset=offset)
+                if cited is not None:
+                    assembler.add_text_citation(index, cited)
+        offset += len(_string(part.get("text")) or _string(part.get("refusal")))
+
+
+def _set_hosted_facts(assembler: StreamAssembler, usage: Any) -> None:
+    """What the provider reported about the response's hosted calls: its counters and, from xAI, its cost."""
+
+    details = usage.get("server_side_tool_usage_details") if isinstance(usage, Mapping) else None
+    assembler.set_hosted_facts(counts=reported_counts(details), cost=reported_cost(usage))
 
 
 def _message_has_refusal(item: Mapping[str, Any]) -> bool:

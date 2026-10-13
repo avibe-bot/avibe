@@ -57,6 +57,12 @@ from core.agent_core.tools.base import ToolSpec
 from core.agent_core.tools.hosted import hosted_tool_spec
 from core.agent_core.messages import (
     AssistantMessage,
+    HostedAction,
+    HostedNative,
+    HostedRecord,
+    HostedSource,
+    HostedSummary,
+    HostedToolBlock,
     ImageBlock,
     TextBlock,
     ThinkingBlock,
@@ -116,6 +122,23 @@ def test_the_estimate_counts_utf8_bytes_so_chinese_is_not_undercounted():
     reply = AssistantMessage((ThinkingBlock("ab"), call), ORIGIN, "tool_use")  # unsigned thinking replays as text
     replayed = len("ab") + len("read") + len('{"path":"中"}'.encode())
     assert message_tokens(reply) == math.ceil(replayed / 4)
+
+
+def test_a_hosted_call_counts_as_the_call_and_result_it_is_replayed_as_never_as_its_opaque_payload():
+    """A hosted call goes back as a synthetic call and its result text, not its native payload (§5), so that is what
+    it costs: an opaque Anthropic search result of 18 KB would otherwise overcount and compact early, and the call's
+    arguments, which repeat its query, would go uncounted."""
+    search = HostedToolBlock(
+        id="srvtoolu_1",
+        tool="web_search",
+        action=HostedAction("search", queries=("q",)),
+        record=HostedRecord(status="completed", sources=(HostedSource(url="https://a.test"),)),
+        native=HostedNative(source_id="src_served00001", payload=({"encrypted_content": "x" * 18_000},)),
+    )
+    reply = AssistantMessage((search,), ORIGIN, "stop", hosted_summary=HostedSummary())
+    arguments = '{"query":"q"}'
+    rendered = '[web_search: "q"]\n1. https://a.test'
+    assert message_tokens(reply) == math.ceil((len("web_search") + len(arguments) + len(rendered)) / 4)
 
 
 def responses_item(reasoning: int, summary: str = "") -> ThinkingBlock:

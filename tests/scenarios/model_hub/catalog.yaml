@@ -10,6 +10,8 @@ capability:
     - tests/test_model_hub_capability_evidence.py
     - tests/test_provider_overlay.py
     - tests/agent_core/ai/test_hosted_requests.py
+    - tests/agent_core/ai/test_hosted_parsing.py
+    - tests/agent_core/ai/test_hosted_transform.py
     - tests/test_vibey_agent.py
     - tests/test_model_hub_evidence_rules.py
     - tests/test_model_hub_config.py
@@ -216,6 +218,34 @@ scenarios:
       - tests/test_model_hub_reasoning_tiers.py::test_a_persisted_catalog_list_offers_no_client_preset_to_vibey
       - tests/test_model_hub_vibey_consumer.py::test_a_released_vibey_row_loads_without_its_client_preset
       - tests/test_model_hub_evidence_rules.py::test_a_refused_effort_still_waits_for_a_capable_hop_that_is_cooling_down
+  - id: MH-HOSTED-VIBEY-002
+    name: Every native hosted item becomes one hosted call with a provider-neutral action and its record; citations stay on the text that cites them; the response's counters and reported cost go to its summary
+    status: covered
+    kind: contract
+    layer: contract
+    test: tests/agent_core/ai/test_hosted_parsing.py::test_an_xai_web_search_is_one_hosted_call_with_its_sources_cited_text_and_reported_cost
+    related_tests:
+      - tests/agent_core/ai/test_hosted_parsing.py::test_xai_x_searches_keep_their_variants_and_the_answer_cites_each_post_once
+      - tests/agent_core/ai/test_hosted_parsing.py::test_the_mapping_rule_gives_every_responses_item_a_provider_neutral_action
+      - tests/agent_core/ai/test_hosted_parsing.py::test_no_hosted_call_without_a_native_declaration_or_a_known_serving_source
+      - tests/agent_core/ai/test_hosted_parsing.py::test_an_anthropic_search_and_its_result_are_one_hosted_call_and_the_text_keeps_its_citation
+      - tests/agent_core/ai/test_hosted_parsing.py::test_parallel_anthropic_searches_finalize_by_id_and_a_search_cut_off_stays_pending
+      - tests/agent_core/agent/test_compaction.py::test_a_hosted_call_a_checkpoint_turn_makes_is_recorded_with_its_cost_and_the_checkpoint_holds
+  - id: MH-HOSTED-VIBEY-003
+    name: Each hosted call replays in portable form as exactly one unit, a synthetic same-named call and result or in-place text, written by the one record-to-text function with its own status
+    status: covered
+    kind: contract
+    layer: contract
+    test: tests/test_vibey_agent.py::test_a_native_search_is_kept_as_one_hosted_call_and_replayed_next_turn_as_a_synthetic_call
+    related_tests:
+      - tests/agent_core/ai/test_hosted_transform.py::test_a_replayed_search_is_a_synthetic_same_named_call_and_result_on_every_protocol
+      - tests/agent_core/ai/test_hosted_transform.py::test_every_hosted_call_is_its_own_synthetic_call_and_a_page_action_says_what_it_did
+      - tests/agent_core/ai/test_hosted_transform.py::test_a_failed_or_cut_off_call_never_reads_as_a_successful_empty_result
+      - tests/agent_core/ai/test_hosted_transform.py::test_the_posts_an_x_answer_cites_are_listed_once_in_its_first_x_search_result
+      - tests/agent_core/ai/test_hosted_transform.py::test_a_response_its_turn_still_waits_on_keeps_each_call_in_place_as_text
+      - tests/agent_core/ai/test_hosted_transform.py::test_every_hosted_call_is_one_result_that_shows_its_own_status
+      - tests/agent_core/ai/test_hosted_transform.py::test_the_posts_an_answer_cites_show_on_a_call_kept_in_place
+      - tests/agent_core/agent/test_context.py::test_a_hosted_call_counts_as_the_call_and_result_it_is_replayed_as_never_as_its_opaque_payload
   - id: MH-VIBEY-007
     name: Vibey starts once with the user's Sources and built-in Agent models, seeded when its first Source exists
     status: covered
