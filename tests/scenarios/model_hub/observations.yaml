@@ -1,6 +1,12 @@
 version: 2
 capability: model_hub
 observations:
+  - id: MH-OBS-014
+    source: engine-v8.0.23-3-stream-cadence-and-idle-bound-2026-10-13
+    summary: The engine sets no post-connect timeout (CPA #6534 declined), so a relay that stays alive while its upstream is stuck kept a stream silent until the caller's bound. Through the local engine, untranslated Anthropic streams carried a ping every 10 s and OpenAI Responses streams never paused more than 36 s, while xAI sent a 15K-token tool call after 188 s of silence and translated streams dropped the upstream heartbeat for up to 142 s. The gateway now bounds engine silence at 120 s for the measured Anthropic and OpenAI Sources only; on the shipped engine the upstream saw the cancellation within 0.02 s.
+    affects:
+      - MH-RUNTIME-009
+      - MH-RUNTIME-013
   - id: MH-OBS-013
     source: claude-cli-2.1.288-thinking-display-relay-rejection-2026-10-03
     summary: Claude Code 2.1.288 sends thinking.display "updates" with its beta by default, and a relay that rejects it answers HTTP 400. The CLI drops a rejected beta or display value and retries only on an HTTP 400 naming it, but a Hub resolution slower than 2s had already committed a 200 stream, so the rejection arrived as an in-stream error and ended the turn. Claude streams now keep the real status until shortly before the CLI's default first-byte window, and Claude hub launches pin both pre-output timeouts to the CLI maximum so no shorter native choice aborts that wait.

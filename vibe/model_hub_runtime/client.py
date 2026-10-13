@@ -79,6 +79,18 @@ _ERROR_OBSERVATION_BYTES = 256 * 1024
 # Projecting a response body that has already arrived is local work. It has
 # its own budget so the client's connection budget never limits it.
 _LOCAL_PROJECTION_TIMEOUT_SECONDS = ENGINE_TRANSPORT_TIMEOUT_SECONDS
+# A streamed response that sends the gateway no byte for this long is stalled.
+# The engine sets no timeout once its upstream is connected, so the gateway,
+# its downstream client, bounds it. Only (Source vendor, protocol) pairs whose
+# untranslated streams were measured to keep sending in every phase are
+# bounded: Anthropic sends a ping every 10 s, even while a relay buffers a tool
+# call's input, and OpenAI's Responses events never paused for more than 36 s,
+# including before the first event of a cold 250K-token prompt. The engine
+# holds SSE comments and its translators drop heartbeats, so an xAI tool call
+# or a translated stream can be silent for minutes while healthy
+# (docs/plans/model-hub-inference-deadlines.md, "Stream idle bound").
+_STREAM_IDLE_TIMEOUT_SECONDS = 120.0
+_STREAM_IDLE_BOUNDED_SOURCES = frozenset({("anthropic", "anthropic"), ("openai", "openai_responses")})
 _OFFICIAL_BASE_URLS = official_api_key_base_urls()
 logger = logging.getLogger(__name__)
 _ProjectedJSON = TypeVar("_ProjectedJSON")
@@ -479,11 +491,20 @@ class EngineClient:
             total=None,
             connect=self.timeout,
             sock_connect=self.timeout,
-            sock_read=None,
+            sock_read=(
+                _STREAM_IDLE_TIMEOUT_SECONDS
+                if stream and request_protocol == source.protocol
+                and (source.vendor, source.protocol) in _STREAM_IDLE_BOUNDED_SOURCES
+                else None
+            ),
         )
-        # Connecting to the local engine is bounded. Once connected, headers
-        # and response bytes can wait on upstream inference for any duration;
-        # completion, transport failure, or owner cancellation ends that wait.
+        # Connecting to the local engine is bounded. Once connected, inference
+        # can take any duration; completion, transport failure, or owner
+        # cancellation ends it. A stream whose upstream keeps sending must keep
+        # sending, though: from the request on, every byte restarts its idle
+        # bound, and one that runs out closes the engine connection, which
+        # cancels the upstream request. A buffered response sends nothing until
+        # it is complete, so it has none.
         trace_configs: list[aiohttp.TraceConfig] = []
         if on_request_sent is not None:
             # CPA resolves the route as soon as it reads the body, while a
@@ -714,7 +735,8 @@ class EngineClient:
             if wire_state is not None:
                 raise InvokeCancelledError(wire_state) from cancelled
             raise
-        except asyncio.TimeoutError:
+        except asyncio.TimeoutError as exc:
+            logger.warning("Model Hub engine request for source %s timed out: %s", source.source_id, exc)
             if response is not None:
                 response.close()
             await session.close()
@@ -1599,7 +1621,7 @@ async def _response_stream(
                 message="upstream stream ended before a protocol terminal event",
                 stream_started=wire_state.model_output_started,
             )
-    except asyncio.TimeoutError:
+    except asyncio.TimeoutError as exc:
         outcome = _observed_stream_terminal_outcome(
             wire_state,
             source,
@@ -1607,6 +1629,9 @@ async def _response_stream(
             response.status,
         )
         if outcome is None:
+            logger.warning(
+                "Model Hub engine stream for source %s timed out after model output: %s", source.source_id, exc,
+            )
             outcome = _outcome(
                 kind=RawOutcomeKind.TIMEOUT,
                 source=source,
