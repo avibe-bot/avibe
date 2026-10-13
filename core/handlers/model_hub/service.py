@@ -50,7 +50,9 @@ from storage.models import MESSAGE_TURN_ID_SQL, agent_sessions, messages
 from vibe.backend_model_catalog import (
     PROTOCOL_REASONING_EFFORT_DEFAULTS,
     builtin_display_name,
-    bundled_catalog_reasoning_efforts_by_model,
+    bundled_catalog_wire_efforts_by_model,
+    bundled_client_presets_once,
+    bundled_provider_overlay,
     hosted_tool_spec,
 )
 from vibe.model_hub_runtime.api_key_vendors import (
@@ -104,9 +106,12 @@ from .events import (
     build_resolution_event,
     contains_credential_material,
 )
-from .capability_evidence import CapabilityEvidenceStore
+from .capability_evidence import CapabilityEvidenceStore, EvidenceFeature, EvidenceRecord, identity_digest
 from .errors import ModelDiscoveryError
+from .evidence_rules import learn as learn_from_rejection
+from .evidence_rules import wire_effort
 from .hosted_tools import (
+    HOSTED_PROBE_SHAPE,
     HostedToolSettingRefused,
     engine_stamp,
     hosted_tools_status,
@@ -155,7 +160,7 @@ from .provenance import (
     produce_turn_outcome,
 )
 from .request import ModelHubRequest, without_opaque_history
-from .reasoning_tiers import resolve_reasoning_tiers
+from .reasoning_tiers import catalog_wire_efforts, resolve_reasoning_tiers
 from .stream_wire import ProtocolSSEState
 from .resolver import (
     BackendName,
@@ -1177,6 +1182,11 @@ class ModelHubService:
         self.capability_evidence = capability_evidence or CapabilityEvidenceStore(
             events.path.parent / "model_hub_capability_evidence.json"
         )
+        # Bundled state that never changes while this process runs, resolved once
+        # here at startup so that no request path reads a file on the loop.
+        self.engine_stamp = engine_stamp()
+        bundled_provider_overlay()
+        bundled_client_presets_once()
         self.migration_blocked_backends: set[str] = set()
         self.migration_guard = migration_guard or self._unavailable_migration_guard
         self.migration_reconcile_auth = migration_reconcile_auth
@@ -2477,7 +2487,7 @@ class ModelHubService:
         discovered_by_id = {model.id: model for model in canonical_models}
         overrides: list[tuple[str, Literal["upstream", "catalog"]]] = []
         if catalog_efforts_by_model is None:
-            catalog_efforts_by_model = bundled_catalog_reasoning_efforts_by_model()
+            catalog_efforts_by_model = bundled_catalog_wire_efforts_by_model()
 
         def apply_tiers(
             model: ModelHubModelConfig,
@@ -2953,7 +2963,7 @@ class ModelHubService:
                     )
                 else:
                     catalog_efforts_by_model = (
-                        bundled_catalog_reasoning_efforts_by_model()
+                        bundled_catalog_wire_efforts_by_model()
                     )
                     for model in source.models:
                         resolution = resolve_reasoning_tiers(
@@ -3740,7 +3750,7 @@ class ModelHubService:
                     allow_empty=True,
                 )
             else:
-                catalog_efforts_by_model = bundled_catalog_reasoning_efforts_by_model()
+                catalog_efforts_by_model = bundled_catalog_wire_efforts_by_model()
                 for model in source.models:
                     resolution = resolve_reasoning_tiers(
                         protocol=source.protocol,
@@ -5179,7 +5189,11 @@ class ModelHubService:
             )
             proposed_name, proposed_efforts = _storable_backend_model_metadata(
                 model.display_name,
-                model.reasoning_efforts,
+                (
+                    catalog_wire_efforts(model.id, model.reasoning_efforts)
+                    if model.reasoning_efforts_source == "catalog"
+                    else model.reasoning_efforts
+                ),
             )
             if display_name is None and proposed_name is not None:
                 display_name = proposed_name
@@ -5775,7 +5789,7 @@ class ModelHubService:
                 self.store.load(),
                 evidence=self.capability_evidence,
                 spec_for=hosted_tool_spec,
-                engine=engine_stamp(),
+                engine=self.engine_stamp,
                 now=self.now(),
             )
         }
@@ -5795,6 +5809,77 @@ class ModelHubService:
                 await self._commit_synced(previous, config)
         return await asyncio.to_thread(self.hosted_tools_status)
 
+    def _effort_refused(self, source: ModelHubSourceConfig, model_id: str, request: Any) -> bool:
+        """Whether this hop has negative evidence for the effort the request sends.
+
+        Efforts are forwarded unchanged; a hop known to refuse one is not a
+        candidate for this request (capability model §3.4). Every place that
+        decides on candidates asks this one predicate, so the resolve loop and
+        the recovery loop never disagree. Memory-only and lock-free: the store
+        read its file at startup.
+        """
+
+        feature = EvidenceFeature.effort_or_none(wire_effort(request, getattr(request, "protocol", "")))
+        if feature is None:
+            return False
+        view = self.capability_evidence.view(
+            source, model_id, feature, engine=self.engine_stamp, shape=HOSTED_PROBE_SHAPE, now=self.now(),
+        )
+        return view.status == "unsupported"
+
+    def _effort_capable_hop_may_recover(
+        self, backend: str, model_id: str, supply_channel: Any, request: Any
+    ) -> bool:
+        """Whether a temporarily blocked hop of this route does not refuse the request's effort."""
+
+        resolution = self._invocation_resolution(
+            self.store.load(), cast(BackendName, backend), model_id, supply_channel,
+        )
+        return any(
+            hop.source is not None
+            and hop.model_id is not None
+            and not self._effort_refused(hop.source, hop.model_id, request)
+            for hop in resolution.self_healing_hops(supply_channel)
+        )
+
+    async def _learn_capability_evidence(
+        self, source: ModelHubSourceConfig, model_id: str, request: Any, outcome: RawCallOutcome
+    ) -> None:
+        """Record the one feature a 400 before output names, through the narrow rules."""
+
+        if outcome.rejection is None:
+            return
+        learned = learn_from_rejection(
+            request,
+            outcome.rejection,
+            request_protocol=getattr(request, "protocol", ""),
+            source=source,
+            model_id=model_id,
+            spec_for=hosted_tool_spec,
+        )
+        if learned is None:
+            return
+        try:
+            await asyncio.to_thread(
+                self.capability_evidence.write,
+                EvidenceRecord(
+                    source_id=source.id,
+                    model_id=model_id,
+                    feature=learned.feature,
+                    status="unsupported",
+                    basis="observed",
+                    observed_at=self.now(),
+                    engine=self.engine_stamp,
+                    shape=HOSTED_PROBE_SHAPE,
+                    source_identity=identity_digest(source),
+                    detail=learned.detail,
+                ),
+                live=self.store.load().sources,
+            )
+        except (OSError, ValueError):
+            # Evidence is advisory state: losing one record leaves the priors.
+            logger.warning("Model Hub could not record capability evidence", exc_info=True)
+
     def hosted_tools_for_hop(self, config: ModelHubConfig, source: ModelHubSourceConfig, model_id: str) -> dict:
         """``HopResolution.hosted_tools`` for a Vibey launch served by this Source and model."""
 
@@ -5804,7 +5889,7 @@ class ModelHubService:
             model_id=model_id,
             evidence=self.capability_evidence,
             spec_for=hosted_tool_spec,
-            engine=engine_stamp(),
+            engine=self.engine_stamp,
             now=self.now(),
         )
 
@@ -6809,6 +6894,7 @@ class ModelHubService:
                 if status in {"active", "standby", "cooldown"}
                 else status
             )
+            refused = self._refused_efforts(source, inspection.model_id, observed_at)
             chain.append(
                 {
                     "source_id": source.id,
@@ -6819,6 +6905,7 @@ class ModelHubService:
                     "reason": inspection.reason,
                     "retry_at": inspection.retry_at,
                     **({"recovery": inspection.recovery} if inspection.recovery is not None else {}),
+                    **({"refused_efforts": refused} if refused else {}),
                 }
             )
         current = next(
@@ -6843,6 +6930,28 @@ class ModelHubService:
                 else "interrupted"
             ),
         }
+
+    def _refused_efforts(self, source: ModelHubSourceConfig, model_id: str, now: datetime) -> list[dict]:
+        """The efforts this hop currently refuses, as routing reads the evidence."""
+
+        refused = []
+        for record in self.capability_evidence.for_hop(source.id, model_id):
+            if record.feature.kind != "effort":
+                continue
+            view = self.capability_evidence.view(
+                source, model_id, record.feature, engine=self.engine_stamp, shape=HOSTED_PROBE_SHAPE, now=now,
+            )
+            if view.status == "unsupported":
+                refused.append(record)
+        return [
+            {
+                "effort": record.feature.name,
+                "basis": record.basis,
+                "observed_at": record.payload()["observed_at"],
+                "detail": record.detail,
+            }
+            for record in sorted(refused, key=lambda item: (item.observed_at, item.feature.name))
+        ]
 
     def agent_chain(self, backend: str, model_id: object) -> dict:
         if backend not in MODEL_HUB_BACKENDS or not isinstance(model_id, str) or not model_id:
@@ -9022,6 +9131,7 @@ class ModelHubService:
         globally_blocked_source_ids: set[str] = set()
         unsupported_hops: set[tuple[str, str]] = set()
         unsupported_reason: str | None = None
+        effort_rejected_sources: list[str] = []
         while True:
             async with self._mutation_lock:
                 if recovery_request is not None and recovery_request.expired:
@@ -9095,6 +9205,9 @@ class ModelHubService:
                     )
                     if reason is not None:
                         raise _InvocationUnsupported(reason)
+                if self._effort_refused(source, target_model, request):
+                    effort_rejected_sources.append(source.id)
+                    raise _InvocationUnsupported("effort_unsupported")
                 await self._prepare_engine_for_demand(already_synced=engine_prepared)
                 engine_prepared = True
                 handle, outcome, cancelled = await self._invoke(
@@ -9148,6 +9261,7 @@ class ModelHubService:
                     origin=origin,
                 )
             decision = await self._classify_source_outcome(source, outcome)
+            await self._learn_capability_evidence(source, target_model, request, outcome)
             if cancelled is not None:
                 await self._settle_cancelled_attempt(
                     source=source,
@@ -9211,6 +9325,7 @@ class ModelHubService:
                         origin=origin,
                     )
                 decision = classify_outcome(outcome, refresh_attempted=True)
+                await self._learn_capability_evidence(source, target_model, request, outcome)
                 if cancelled is not None:
                     await self._settle_cancelled_attempt(
                         source=source,
@@ -9330,11 +9445,29 @@ class ModelHubService:
                 turn_outcome=ENGINE_DOWN_TURN_OUTCOME,
                 local_error_detail=format_os_errno(outcome.os_errno),
             )
+        if (
+            unsupported_reason == "effort_unsupported"
+            and failed_source is None
+            and self._effort_capable_hop_may_recover(backend, model_id, supply_channel, request)
+        ):
+            # A hop that does not refuse this effort is only blocked for now:
+            # the request waits for it like any other, rather than ending here.
+            unsupported_reason = None
         if unsupported_reason is not None and failed_source is None:
             # No upstream attempt exists. Exhaustion would invent a failed
             # attempt (and a retryable supply state) for a local limitation.
             raise ModelHubError(
-                unsupported_reason, status=422, turn_outcome=REQUEST_NONFALLBACK_TURN_OUTCOME,
+                unsupported_reason,
+                status=422,
+                turn_outcome=REQUEST_NONFALLBACK_TURN_OUTCOME,
+                data=(
+                    {
+                        "effort": wire_effort(request, getattr(request, "protocol", "")),
+                        "source_ids": list(dict.fromkeys(effort_rejected_sources)),
+                    }
+                    if unsupported_reason == "effort_unsupported"
+                    else None
+                ),
             )
         final_config, final_resolution = self._inspect_terminal_chain(
             backend=cast(BackendName, backend),
@@ -9410,7 +9543,15 @@ class ModelHubService:
                     resolution = self._invocation_resolution(
                         config, kwargs["backend"], kwargs["model_id"], supply_channel,
                     )
-                    if resolution.candidate_hops:
+                    request = kwargs.get("request")
+                    if any(
+                        hop.source is not None
+                        and hop.model_id is not None
+                        and not self._effort_refused(hop.source, hop.model_id, request)
+                        for hop in resolution.candidate_hops
+                    ):
+                        # Retry now only for a hop this request may use: a hop
+                        # that refuses its effort would spin the loop.
                         continue
                     # An action already owed elsewhere in the chain keeps it
                     # `interrupted` for display, but must not end this request

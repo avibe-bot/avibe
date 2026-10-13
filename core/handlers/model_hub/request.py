@@ -107,3 +107,29 @@ def without_opaque_history(request: Mapping[str, Any]) -> Mapping[str, Any]:
             primary_origin=request.primary_origin,
         )
     return payload
+
+
+def declared_tool_types(request: Mapping[str, Any]) -> frozenset[str]:
+    """The ``type`` of every tool the request declares."""
+
+    tools = request.get("tools")
+    if not isinstance(tools, list):
+        return frozenset()
+    return frozenset(
+        kind for tool in tools if isinstance(tool, Mapping) and isinstance(kind := tool.get("type"), str)
+    )
+
+
+def replays_history_items(request: Mapping[str, Any], kinds: frozenset[str]) -> bool:
+    """Whether the request's history carries an item of one of these ``type`` values, at any depth."""
+
+    pending: list[Any] = [request.get("messages", request.get("input"))]
+    while pending:
+        value = pending.pop()
+        if isinstance(value, Mapping):
+            if value.get("type") in kinds:
+                return True
+            pending.extend(value.values())
+        elif isinstance(value, list):
+            pending.extend(value)
+    return False

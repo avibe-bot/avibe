@@ -26,7 +26,7 @@ from typing import Any, Callable, Mapping, Optional
 from config.v2_config import MODEL_HUB_HOSTED_TOOLS, ModelHubConfig, ModelHubHostedToolConfig, ModelHubSourceConfig
 from vibe.backend_model_catalog import HostedToolSpec
 
-from .capability_evidence import HOSTED_TOOL_ASPECTS, CapabilityEvidenceStore, EvidenceFeature
+from .capability_evidence import HOSTED_TOOL_ASPECTS, UNKNOWN_ENGINE_STAMP, CapabilityEvidenceStore, EvidenceFeature
 
 # The request shape a hosted-tool probe sends. Changing the probe or the native
 # request it mirrors bumps this, which makes earlier probe evidence wire-stale.
@@ -70,10 +70,15 @@ def engine_stamp() -> str:
 
     Engine upgrades ship as manifest changes, and a patched rebuild of the same
     upstream version gets a new asset release, so this is what a wire change
-    looks like from here.
+    looks like from here. Read once, when Model Hub's service is built; a
+    manifest that cannot be read is the fixed unknown engine, whose evidence
+    never matches a real release and never raises on a request.
     """
 
-    return _manifest_engine_stamp(os.environ.get("VIBE_MODEL_HUB_ENGINE_MANIFEST_PATH") or None)
+    try:
+        return _manifest_engine_stamp(os.environ.get("VIBE_MODEL_HUB_ENGINE_MANIFEST_PATH") or None)
+    except (OSError, ValueError, TypeError, AttributeError):
+        return UNKNOWN_ENGINE_STAMP
 
 
 @dataclass(frozen=True)

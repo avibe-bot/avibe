@@ -1234,11 +1234,16 @@ def test_machine_error_field_access_has_one_extractor() -> None:
         if path.name == "migration.py":
             continue  # its ``type`` field is an auth-record kind, not an error code
         tree = _tree(path)
-        # Request history discriminates content blocks, not error envelopes.
-        # Exempt only that function's type reads; code reads and the rest of
-        # request.py remain subject to the extraction-owner guard.
-        history = _functions(tree).get("_plain_history") if path.name == "request.py" else None
-        history_nodes = set(ast.walk(history)) if history is not None else set()
+        # Request history and declared tools discriminate request items, not
+        # error envelopes. Exempt only those functions' type reads; code reads
+        # and the rest of request.py remain subject to the extraction-owner guard.
+        functions = _functions(tree) if path.name == "request.py" else {}
+        history_nodes = {
+            node
+            for name in ("_plain_history", "declared_tool_types", "replays_history_items")
+            if (history := functions.get(name)) is not None
+            for node in ast.walk(history)
+        }
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
                 continue

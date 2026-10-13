@@ -82,12 +82,18 @@ and is pruned at the next write.
 
 ### 3.2 Learning from real errors (negative evidence)
 
-- **Narrow rules, one per feature, in one place:** the gateway's classifier. It sees every upstream error, and
-  nothing else writes evidence. A rule maps an upstream error to exactly one (Source, model, feature) only when the
-  error names that feature:
-  - `invalid_request_error` / `invalid_value` whose message names the request's `reasoning.effort` value → effort;
-  - `Unsupported tool type: <type>` for a type the request declared → hosted tool `call`;
-  - `Invalid encrypted_content` inside a hosted result block the request replayed → hosted tool `replay`.
+- **Narrow rules, one per feature, in one place:** `core/handlers/model_hub/evidence_rules.py`, run by the
+  gateway's resolution loop on every upstream outcome. Nothing else writes evidence from real traffic. The engine
+  client (L1) projects a 400 before output into an `UpstreamRejection`: the machine code and type from the one
+  error-field extractor, the envelope's `param`, and the single token each recognized message names. The prose
+  never leaves L1, and the failover decision never reads the rejection. A rule maps it to exactly one (Source,
+  model, feature) only when it names that feature:
+  - `Invalid value: '<v>'` where `<v>` is the effort the request sends on the wire, or `param` naming the effort
+    field on an untranslated path → effort `<v>`;
+  - `Unsupported tool type: <type>` for a type the request declared, matched to a catalog tool through the
+    overlay's declaration for that Source and model → hosted tool `call`;
+  - `Invalid encrypted_content in search_result block` while the request replays a web-search result → hosted
+    tool `web_search` `replay`.
 - **Generic errors never create evidence.** That covers 5xx, overload, rate limit, auth, and any 400 that does not
   name the feature.
 - **What happens to the request.**
@@ -126,15 +132,15 @@ and is pruned at the next write.
 
 | Consumer | Rule |
 | --- | --- |
-| Effort menu for a model on an Agent | each hop's declared tiers, then the union across hops. A hop's declared tiers are its Source model's persisted `reasoning_efforts` when their provenance is `user` or `upstream`; otherwise the overlay's `providers` `wire_efforts`; otherwise the backend row's efforts minus its `client_presets` (provenance `catalog`); otherwise models.dev `reasoning_options`. User-authored lists, including free-form names, are never replaced or filtered by a prior; only a catalog-sourced list drops `client_presets`. A tier is omitted only if **every** hop that can serve the model has negative evidence for it. A tier with negative evidence on some hops is shown with "not on: <Source>". |
+| Effort menu for a model on an Agent | each hop's declared tiers, then the union across hops. A hop's declared tiers follow `model-hub-reasoning-tiers.md`'s ladder: an upstream reasoning signal (the protocol's ladder), else the bundled backend row's efforts minus that row's `client_presets` (provenance `catalog`; it outranks a user list, with a visible override event), else the user's list, else models.dev `reasoning_options` when the catalog row is built. A persisted `catalog` list is also read without `client_presets`, since released builds wrote them, and Vibey's own model rows always drop them at config load (3.2.0 saved rows with Codex's `ultra`; Vibey is never the client a preset belongs to, and no provider documents `ultra` as a wire effort). A user-authored Source list is never filtered. The overlay's `wire_efforts` slots in before the backend row once a vendor needs it; no shipped entry sets it yet. A tier is omitted only if **every** hop that can serve the model has negative evidence for it. A tier with negative evidence on some hops is shown with "not on: <Source>". Model Hub projects this per hop as the chain API's read-only `refused_efforts` (`agent-chain.schema.json`); the UI renders the omission and the hint from it. |
 | Effort at request time | Forwarded unchanged (reasoning-intent). A hop with **negative** evidence for that effort is skipped for this request, as if it were not a candidate. If no candidate remains, the request fails before invocation with `effort_unsupported` naming the effort and the Sources, instead of a provider 400. Never clamped silently. |
 | Hosted tool mode on a hop | `native` only with positive `call` evidence taken on the current engine and probe shape, and the user's toggle on; otherwise the gateway proxy (`vibey-hosted-tools.md`). A wrong native declaration is a terminal 400 or a silent drop; the proxy is lossless. So this feature needs positive evidence, unlike efforts. |
 | Native payload replay | only to the same Source, and only while its `replay` evidence is positive and taken on the current engine and probe shape. The decision is made at every request from `HopResolution`; the transcript never stores it. |
 | Display | §5 |
 
-This fixes #2539 in three places:
+This fixes #2539 in three places (Phase 1 PR 1b):
 - the overlay lists `ultra` in Codex's `client_presets`, so it is not a wire tier for Vibey;
-- models.dev's wire list (`low … max`) is the base;
+- a catalog-sourced tier list is the backend row minus those presets (`low … max`, which matches models.dev's wire list), also when a released build persisted it with `ultra`;
 - the relay's real `400 invalid_value` records `ultra: unsupported` for that Source.
 
 Even without the overlay fix, the next request would skip that hop or fail clearly.
@@ -161,7 +167,7 @@ validates it):
   "anthropic": {"models": [
     {"match": {"prefix": "claude-"},
      "hosted_tools": {"anthropic": {
-       "web_search": {"declaration": {"type": "web_search_20250305", "name": "web_search"},
+       "web_search": {"declaration": {"type": "web_search_20250305", "name": "web_search", "max_uses": 5},
                       "price": {"unit": "search", "usd_per_1k": 10, "as_of": "2026-10-13", "url": "https://platform.claude.com/docs/en/about-claude/pricing"}}}}}
   ]}
 }

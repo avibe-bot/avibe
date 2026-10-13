@@ -11,6 +11,7 @@ capability:
     - tests/test_provider_overlay.py
     - tests/agent_core/ai/test_hosted_requests.py
     - tests/test_vibey_agent.py
+    - tests/test_model_hub_evidence_rules.py
     - tests/test_model_hub_config.py
     - tests/test_model_hub_legacy_opencode_migration.py
     - tests/test_member_management_parity.py
@@ -203,6 +204,18 @@ scenarios:
       - tests/agent_core/ai/test_hosted_requests.py::test_a_hosted_spec_on_a_native_route_is_sent_as_the_declaration_in_its_place_and_pinned
       - tests/agent_core/ai/test_hosted_requests.py::test_the_probe_entry_builds_exactly_the_request_the_adapter_sends
       - tests/agent_core/ai/test_hosted_requests.py::test_tool_choice_forces_the_named_tool_in_each_protocols_form
+  - id: MH-HOSTED-006
+    name: A real upstream 400 teaches only the feature it names, and a refused effort then skips its hop instead of another provider 400
+    status: covered
+    kind: recovery
+    layer: contract
+    test: tests/test_model_hub_evidence_rules.py::test_an_upstream_400_teaches_only_the_feature_it_names
+    related_tests:
+      - tests/test_model_hub_evidence_rules.py::test_a_refused_effort_skips_its_hop_instead_of_another_provider_400
+      - tests/test_model_hub_reasoning_tiers.py::test_catalog_row_outranks_user_and_drops_its_client_presets
+      - tests/test_model_hub_reasoning_tiers.py::test_a_persisted_catalog_list_offers_no_client_preset_to_vibey
+      - tests/test_model_hub_vibey_consumer.py::test_a_released_vibey_row_loads_without_its_client_preset
+      - tests/test_model_hub_evidence_rules.py::test_a_refused_effort_still_waits_for_a_capable_hop_that_is_cooling_down
   - id: MH-VIBEY-007
     name: Vibey starts once with the user's Sources and built-in Agent models, seeded when its first Source exists
     status: covered

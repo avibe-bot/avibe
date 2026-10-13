@@ -37,6 +37,9 @@ MAX_RECORDS = 4000
 OBSERVED_TTL_SECONDS = 7 * 24 * 3600
 PROBE_REVERIFY_AFTER_SECONDS = 30 * 24 * 3600
 DETAIL_MAX_CHARS = 64
+# The engine stamp when the engine manifest cannot be read. It names no release,
+# so probe evidence taken under it, or checked against it, never vouches for a wire.
+UNKNOWN_ENGINE_STAMP = "unknown-engine"
 
 FeatureKind = Literal["effort", "hosted_tool"]
 EvidenceStatus = Literal["verified", "unsupported"]
@@ -72,6 +75,12 @@ class EvidenceFeature:
     @classmethod
     def effort(cls, name: str) -> "EvidenceFeature":
         return cls("effort", name)
+
+    @classmethod
+    def effort_or_none(cls, name: object) -> Optional["EvidenceFeature"]:
+        """The effort feature, or None for a name evidence cannot hold (free-form efforts are allowed)."""
+
+        return cls("effort", name) if isinstance(name, str) and _NAME_RE.fullmatch(name) else None
 
     @classmethod
     def hosted(cls, tool: str, aspect: Literal["call", "replay"]) -> "EvidenceFeature":
@@ -204,7 +213,11 @@ def resolve(
     if record.basis == "observed":
         # Relays change; an expired negative record falls back to the priors.
         return UNKNOWN if age > OBSERVED_TTL_SECONDS else EvidenceView("unsupported", None, record)
-    wire_stale = record.engine != engine or record.shape != shape
+    wire_stale = (
+        record.engine != engine
+        or record.shape != shape
+        or UNKNOWN_ENGINE_STAMP in (record.engine, engine)
+    )
     stale: Optional[Staleness] = "wire" if wire_stale else "age" if age > PROBE_REVERIFY_AFTER_SECONDS else None
     if record.feature.kind == "hosted_tool" and wire_stale:
         # Evidence taken on another wire cannot vouch for this one, and a silent
@@ -218,36 +231,46 @@ class CapabilityEvidenceStore:
 
     Small: bounded by Sources x models x features. The controller is the only
     writer (probes and the classifier both run there; other processes reach it
-    over RPC), so the file is read once and memory is authoritative afterwards.
-    Lookups on the request path therefore never touch the disk.
+    over RPC), so the file is read once, when the store is built at controller
+    startup, and memory is authoritative afterwards. No lookup ever touches the
+    disk, so none can block the loop.
     """
 
     def __init__(self, path: Path, *, max_records: int = MAX_RECORDS):
         self.path = path
         self.max_records = max_records
         self._lock = threading.RLock()
-        self._records: dict[tuple, EvidenceRecord] | None = None
+        self._records: dict[tuple, EvidenceRecord] = {}
+        self._by_hop: dict[tuple[str, str], list[EvidenceRecord]] = {}
+        self._remember(self._read_file())
 
-    def _loaded(self) -> dict[tuple, EvidenceRecord]:
-        if self._records is None:
+    def _read_file(self) -> dict[tuple, EvidenceRecord]:
+        try:
+            payload = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            payload = []
+        records: dict[tuple, EvidenceRecord] = {}
+        for item in payload if isinstance(payload, list) else []:
             try:
-                payload = json.loads(self.path.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                payload = []
-            records: dict[tuple, EvidenceRecord] = {}
-            for item in payload if isinstance(payload, list) else []:
-                try:
-                    record = EvidenceRecord.from_payload(item)
-                except (TypeError, ValueError):
-                    # An unreadable record is unknown, never negative.
-                    continue
-                records[record.key] = record
-            self._records = records
-        return self._records
+                record = EvidenceRecord.from_payload(item)
+            except (TypeError, ValueError):
+                # An unreadable record is unknown, never negative.
+                continue
+            records[record.key] = record
+        return records
+
+    def _remember(self, records: dict[tuple, EvidenceRecord]) -> None:
+        by_hop: dict[tuple[str, str], list[EvidenceRecord]] = {}
+        for record in records.values():
+            by_hop.setdefault((record.source_id, record.model_id), []).append(record)
+        # The index first: a reader that sees the new records also sees their index.
+        self._by_hop = by_hop
+        self._records = records
 
     def get(self, source_id: str, model_id: str, feature: EvidenceFeature) -> Optional[EvidenceRecord]:
-        with self._lock:
-            return self._loaded().get((source_id, model_id, feature.kind, feature.name, feature.aspect or ""))
+        # Published snapshots are never mutated, so a reader needs no lock: a
+        # write builds the next snapshot and swaps the references.
+        return self._records.get((source_id, model_id, feature.kind, feature.name, feature.aspect or ""))
 
     def view(
         self,
@@ -262,8 +285,12 @@ class CapabilityEvidenceStore:
         return resolve(self.get(source.id, model_id, feature), source=source, engine=engine, shape=shape, now=now)
 
     def records(self) -> list[EvidenceRecord]:
-        with self._lock:
-            return list(self._loaded().values())
+        return list(self._records.values())
+
+    def for_hop(self, source_id: str, model_id: str) -> list[EvidenceRecord]:
+        """Every record of one (Source, model), without scanning the others."""
+
+        return list(self._by_hop.get((source_id, model_id), ()))
 
     def write(self, record: EvidenceRecord, *, live: Iterable[ModelHubSourceConfig]) -> None:
         """Replace the record for its key; prune records of removed or re-identified Sources.
@@ -277,10 +304,10 @@ class CapabilityEvidenceStore:
         with self._lock:
             records = {
                 key: existing
-                for key, existing in self._loaded().items()
+                for key, existing in self._records.items()
                 if identities.get(existing.source_id) == existing.source_identity
             }
             records[record.key] = record
             kept = sorted(records.values(), key=lambda item: item.observed_at)[-self.max_records :]
             write_state_document(self.path, [item.payload() for item in kept])
-            self._records = {item.key: item for item in kept}
+            self._remember({item.key: item for item in kept})

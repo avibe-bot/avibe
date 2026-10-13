@@ -7,7 +7,8 @@ from typing import Literal, Mapping, Sequence
 
 from vibe.backend_model_catalog import (
     PROTOCOL_REASONING_EFFORT_DEFAULTS,
-    bundled_catalog_reasoning_efforts_for_model,
+    bundled_catalog_wire_efforts_by_model,
+    without_client_presets,
 )
 
 ReasoningEffortsSource = Literal["upstream", "catalog", "user"] | None
@@ -30,7 +31,13 @@ def resolve_reasoning_tiers(
     existing_source: ReasoningEffortsSource = None,
     catalog_efforts_by_model: Mapping[str, tuple[str, ...]] | None = None,
 ) -> ReasoningTierResolution:
-    """Apply upstream, bundled-catalog, then user provenance in that order."""
+    """Apply upstream, bundled-catalog, then user provenance in that order.
+
+    A catalog row is a client's menu: its ``client_presets`` (Codex ``ultra``)
+    are names the client maps before sending, so a Source's wire tiers never
+    include them (#2539). ``catalog_efforts_by_model`` is therefore the wire
+    index, ``bundled_catalog_wire_efforts_by_model()``.
+    """
 
     if supported_parameters is not None and any(
         parameter.strip().lower() in _UPSTREAM_REASONING_PARAMETERS
@@ -41,13 +48,21 @@ def resolve_reasoning_tiers(
             return ReasoningTierResolution(defaults, "upstream")
 
     catalog_efforts = (
-        bundled_catalog_reasoning_efforts_for_model(model_id)
-        if catalog_efforts_by_model is None
-        else catalog_efforts_by_model.get(model_id)
-    )
+        bundled_catalog_wire_efforts_by_model() if catalog_efforts_by_model is None else catalog_efforts_by_model
+    ).get(model_id)
     if catalog_efforts is not None:
         return ReasoningTierResolution(catalog_efforts, "catalog")
 
     if existing_source == "user" and existing_efforts:
         return ReasoningTierResolution(tuple(existing_efforts), "user")
     return ReasoningTierResolution((), None)
+
+
+def catalog_wire_efforts(model_id: str, efforts: Sequence[str]) -> tuple[str, ...]:
+    """A catalog-sourced tier list without the client presets of that model's row.
+
+    Also applied when reading a persisted ``catalog`` list, which a released
+    build may have written before presets were known.
+    """
+
+    return tuple(without_client_presets((model_id,), efforts))
