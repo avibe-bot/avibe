@@ -2636,6 +2636,7 @@ class ModelHubBackendModelConfig:
             # server-owned policy into persisted state.
             "locked",
             "routeable",
+            "effort_menu",
         }
         if set(payload) - allowed:
             raise ValueError("Config 'model_hub.agents.models' contains unknown fields")

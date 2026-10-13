@@ -43,6 +43,7 @@ from config.v2_config import (
     validate_model_hub_source_client_nonce,
 )
 from core.agent_auth_service import BackendLoginInProgressError
+from core.agent_core.ai.registry import sent_effort
 from core.agent_core.messages import HostedCost
 from core.os_errors import format_os_errno, local_error_detail
 from core.services.settings import default_config
@@ -750,6 +751,19 @@ def _executor_failure(outcome: RawCallOutcome | None, say: Callable[..., str], *
     if outcome.upstream_detail:
         detail = f"{detail}: {outcome.upstream_detail}" if detail else outcome.upstream_detail
     return say("modelHub.hostedTools.providerRefused", detail=detail or outcome.kind.value)
+
+
+def _sent_effort(backend: str, source: ModelHubSourceConfig, model_id: str, effort: str) -> Optional[str]:
+    """The effort token ``backend`` sends a hop for the menu value ``effort``: the key its evidence is held under.
+
+    Vibey's adapter for the hop's protocol says it (``registry.sent_effort``),
+    so the menu and the wire cannot drift; the native CLIs send the value as
+    the menu names it.
+    """
+
+    if backend == "vibey":
+        return sent_effort(source.protocol, model_id, effort)
+    return effort
 
 
 def _google_admission_skip_reason(
@@ -5123,7 +5137,14 @@ class ModelHubService:
             unavailable_source_ids=unavailable_source_ids,
             live_recovery=live_recovery,
         )
-        menu_model_ids = [model.id for model in agent.models if model.id not in hidden]
+        menu_models = [model for model in agent.models if model.id not in hidden]
+        model_resolutions = {
+            model.id: resolve_model_hub_turn(
+                config, backend, model.id, now=now, unavailable_source_ids=unavailable_source_ids,
+                live_recovery=live_recovery,
+            )
+            for model in menu_models
+        }
         model_supply = [
             {
                 "model_id": model_id,
@@ -5131,12 +5152,17 @@ class ModelHubService:
                 "route_origin": model_resolution.route_origin,
                 "has_runnable_hop": bool(model_resolution.candidate_hops),
             }
-            for model_id in menu_model_ids
-            for model_resolution in (resolve_model_hub_turn(
-                config, backend, model_id, now=now, unavailable_source_ids=unavailable_source_ids,
-                live_recovery=live_recovery,
-            ),)
+            for model_id, model_resolution in model_resolutions.items()
         ]
+        # Only Hub turns reach the evidence; a Direct Agent's menu is the backend's own.
+        effort_menus = {
+            model.id: (
+                self._effort_menu(backend, model, model_resolutions[model.id], now)
+                if agent.mode == "hub"
+                else {"omitted": [], "not_on": {}}
+            )
+            for model in menu_models
+        }
         selected_model_id = (
             (resolution.requested_model or None)
             if agent.mode == "hub"
@@ -5228,7 +5254,9 @@ class ModelHubService:
             ),
             "model_supply": model_supply if agent.mode == "hub" else None,
             "named_agents": named_agents,
-            "catalog_models": self._catalog_models_payload(agent),
+            "catalog_models": [
+                {**model, "effort_menu": effort_menus[model["id"]]} for model in self._catalog_models_payload(agent)
+            ],
             "builtin_models": builtin_models,
         }
 
@@ -5893,13 +5921,55 @@ class ModelHubService:
         read its file at startup.
         """
 
-        feature = EvidenceFeature.effort_or_none(wire_effort(request, getattr(request, "protocol", "")))
+        return self._refuses_effort(
+            source, model_id, wire_effort(request, getattr(request, "protocol", "")), self.now(),
+        )
+
+    def _refuses_effort(
+        self, source: ModelHubSourceConfig, model_id: str, token: Optional[str], now: datetime
+    ) -> bool:
+        """Whether this hop has negative evidence for the effort token a request sends; None sends none."""
+
+        feature = EvidenceFeature.effort_or_none(token)
         if feature is None:
             return False
         view = self.capability_evidence.view(
-            source, model_id, feature, engine=self.engine_stamp, shape=HOSTED_PROBE_SHAPE, now=self.now(),
+            source, model_id, feature, engine=self.engine_stamp, shape=HOSTED_PROBE_SHAPE, now=now,
         )
         return view.status == "unsupported"
+
+    def _effort_menu(
+        self, backend: BackendName, model: ModelHubBackendModelConfig, resolution: ModelHubTurnResolution, now: datetime
+    ) -> dict:
+        """Which of this menu model's efforts routing refuses now, in menu vocabulary (capability model §3.4).
+
+        A tier is ``omitted`` when a request at it would end in
+        ``effort_unsupported``: every hop the route would try or wait for refuses
+        the token the backend sends for it, as ``_effort_refused`` decides for a
+        request. A tier refused on some of those hops only is ``not_on`` their
+        Sources.
+        """
+
+        hops = list(
+            {
+                (hop.source.id, hop.model_id): hop
+                for hop in (*resolution.candidate_hops, *resolution.self_healing_hops(None))
+                if hop.source is not None and hop.model_id is not None
+            }.values()
+        )
+        omitted: list[str] = []
+        not_on: dict[str, list[str]] = {}
+        for effort in model.reasoning_efforts:
+            refusing = [
+                hop.source.id
+                for hop in hops
+                if self._refuses_effort(hop.source, hop.model_id, _sent_effort(backend, hop.source, hop.model_id, effort), now)
+            ]
+            if refusing and len(refusing) == len(hops):
+                omitted.append(effort)
+            elif refusing:
+                not_on[effort] = list(dict.fromkeys(refusing))
+        return {"omitted": omitted, "not_on": not_on}
 
     def _effort_capable_hop_may_recover(
         self, backend: str, model_id: str, supply_channel: Any, request: Any
