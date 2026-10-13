@@ -107,6 +107,11 @@ The secret metadata payload (`_meta_payload`, REST, and `vibe vault list/find
 - `fields`: every field name, default field first, then extra fields in stored
   order. An existing secret shows `"default_field": "value", "fields": ["value"]`.
 
+- A corrupt extra-field section adds `"fields_state": "corrupt"` to this
+  value-free metadata, while `fields` exposes only the available default. Web
+  rows/editors warn about the corruption, and tag/skill expansion refuses to
+  deliver a partial field set.
+
 ## 6. Delivery
 
 | Selector | Records | Environment variable |
@@ -204,7 +209,9 @@ vibe vault request GITHUB_LOGIN --reason "Log in to GitHub" \
 ```
 
 The browser form starts with those rows. The user may remove rows, and every
-submitted field needs a value.
+submitted field needs a value. A fulfilled field-aware provision callback lists
+current field labels from the created secret (not the requested spec) and gives
+a field-ref delivery example.
 
 ## 10. UI
 
