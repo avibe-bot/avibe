@@ -2410,6 +2410,7 @@
           "option": "{{source}} · {{model}}",
           "notVerified": "{{source}} · {{model}} (not verified)",
           "note": {
+            "off": "Applies when the tool is on.",
             "none": "When the current model can't run it natively, the proxy executor runs it and the call is billed to that Source. You can pick one once a Source is verified.",
             "chosen": "Verified models run it natively. Other models use {{source}}, and those calls are billed to it.",
             "automatic": "Verified models run it natively. Other models use the first verified Source in Vibey's order, and those calls are billed to it."

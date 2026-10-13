@@ -177,7 +177,7 @@ describe('ToolsTab writes', () => {
   it('holds a tool\'s controls while its write is in flight', () => {
     renderTab(status([
       tool('web_search', { candidates: [{ source_id: GROK.id, model_id: 'grok-4.6', call: verified, replay: verified }] }),
-      tool('x_search'),
+      tool('x_search', { candidates: [{ source_id: GROK.id, model_id: 'grok-4.6', call: verified, replay: verified }] }),
     ]), { pending: new Set(['web_search']) });
 
     expect((within(card('Web search')).getByRole('switch') as HTMLButtonElement | HTMLSelectElement).disabled).toBe(true);
@@ -187,6 +187,26 @@ describe('ToolsTab writes', () => {
 });
 
 describe('ToolsTab claims', () => {
+  it('claims routing only while the tool is on, and shows an off tool\'s executor as a saved preference', () => {
+    const executor = { source_id: GROK.id, model_id: 'grok-4.6' };
+    const candidates = [{ ...executor, call: verified, replay: verified }];
+    renderTab(status([
+      tool('web_search', { enabled: true, executor, candidates }),
+      tool('x_search', { enabled: false, executor, candidates }),
+    ]));
+
+    const on = card('Web search');
+    within(on).getByText('Proxy executor', { selector: '.model-hub-pill' });
+    within(on).getByText(/Other models use Grok/);
+
+    // Off: resolution leaves the tool out entirely, so nothing here runs or bills.
+    const off = card('X search');
+    expect(within(off).queryByText('Proxy executor', { selector: '.model-hub-pill' })).toBeNull();
+    expect(off.textContent).not.toMatch(/Other models use|billed/);
+    within(off).getByText('Applies when the tool is on.');
+    expect((within(off).getByRole('combobox') as HTMLSelectElement).selectedOptions[0]?.textContent).toBe('Grok · grok-4.6');
+  });
+
   it('MH-HOSTED-UI-003: states a cost only where one is known, and never prices an image', () => {
     renderTab(status([
       tool('web_search', { candidates: [

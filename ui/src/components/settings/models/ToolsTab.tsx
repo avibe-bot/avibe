@@ -166,7 +166,7 @@ const ToolCard: React.FC<{
                   tool={tool.name}
                   candidate={candidate}
                   source={sources.get(candidate.source_id)}
-                  executor={sameExecutor(candidate, chosen)}
+                  executor={tool.enabled && sameExecutor(candidate, chosen)}
                 />
               ))}
               {withoutNative.length > 0 && <p className="model-hub-tool-note flex items-start gap-2"><Info className="mt-px size-[13px] shrink-0" aria-hidden />{t('settings.models.tools.noNative', { sources: formatNameList(withoutNative, i18n.language), toolInline })}</p>}
@@ -202,7 +202,11 @@ const ToolCard: React.FC<{
               </>}
         </Select>
         <span className="model-hub-tool-note">
-          {!pickable
+          {/* A routing claim holds only while the tool is on: resolution leaves an
+              off tool out entirely, so its executor is just a saved preference. */}
+          {!tool.enabled
+            ? t('settings.models.tools.executor.note.off')
+            : !pickable
             ? t('settings.models.tools.executor.note.none')
             : chosen
               ? t('settings.models.tools.executor.note.chosen', { source: sourceName(chosen.source_id) })
