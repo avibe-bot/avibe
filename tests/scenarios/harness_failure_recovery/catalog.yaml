@@ -37,7 +37,9 @@ scenarios:
     backend: shared
     test: tests/test_scheduled_tasks.py::test_drain_serializes_executions_per_session
   - id: HFR-004
-    name: restart recovers held run queues without flushing user-owned queue heads
+    name: >-
+      restart recovers a Delivery-owned Run once, and never sends user-owned queue input
+      or a Run queued behind a stopped user head
     status: covered
     kind: restart
     layer: scenario
@@ -208,7 +210,7 @@ scenarios:
     backend: shared
     test: tests/test_scheduled_tasks.py::test_workbench_turn_settles_its_agent_run_when_no_result_arrives
   - id: HFR-028
-    name: a Delivery-owned Run's terminal transition retires its exact queued Delivery in the same transaction
+    name: cancelling a Delivery-owned Run retires its queued Delivery
     status: covered
     kind: failure_recovery
     layer: scenario
@@ -441,7 +443,10 @@ scenarios:
     backend: shared
     test: tests/test_harness_failure_visibility.py::test_complete_does_not_clobber_an_already_terminal_run
   - id: HFR-061
-    name: Turn settlement does not clobber an already-settled success
+    name: >-
+      Turn settlement does not clobber an already-settled success, a Stop that lands under
+      a settlement writer stays canceled with no failure notice, and an uncancelled run
+      still settles failed with its notice
     status: covered
     kind: safety
     layer: contract
@@ -500,7 +505,11 @@ scenarios:
     # They take no ids of their own because PR6's block is full at 099 and 100+ is
     # contracted to PR2 by the merged plan (docs/plans/harness-run-reliability.md
     # §10.7; landed in #1044, PR2 not started per its status header).
-    test: tests/test_harness_failure_visibility.py::test_turn_participant_settlement_does_not_clobber_an_already_succeeded_run
+    test:
+      - tests/test_harness_failure_visibility.py::test_turn_participant_settlement_does_not_clobber_an_already_succeeded_run
+      - tests/test_harness_failure_visibility.py::test_a_cancel_landing_under_the_coalesced_completer_is_not_overwritten
+      - tests/test_harness_failure_visibility.py::test_a_cancel_landing_under_settle_run_terminal_is_not_overwritten
+      - tests/test_harness_failure_visibility.py::test_the_cancel_cas_does_not_leave_an_uncancelled_run_unsettled
   - id: HFR-062
     name: one success does not erase recent failure history in the CLI
     status: covered
@@ -3708,8 +3717,8 @@ scenarios:
     test: tests/test_scheduled_tasks.py::test_an_adopted_reservation_is_dropped_from_the_retry_record_without_being_touched
   - id: HFR-280
     name: >-
-      a Workbench PATCH and an archive of the same session serialize, so the PATCH never
-      lands on an archived row, whether it renames or re-routes
+      a Workbench PATCH and a concurrent archive of the same session serialize: the archive
+      waits for the PATCH, so a rename or re-route never lands on an already-archived row
     status: covered
     kind: safety
     layer: contract
