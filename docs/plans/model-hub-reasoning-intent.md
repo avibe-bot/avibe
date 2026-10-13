@@ -20,6 +20,10 @@ subscription OAuth, credential replacement, or routing policy.
 - Protocol errors keep their existing terminal behavior. No silent fallback or
   synthesized effort is added. Historical stripping telemetry remains readable;
   new resolver attempts do not claim stripping that no longer happens.
+- Amendment (planned, [capability model](model-hub-capability-model.md) §3.4):
+  the effort is still forwarded unchanged, but a hop with explicit negative
+  evidence for that effort is skipped for the request, and a request that no
+  hop can serve fails before invocation with `effort_unsupported`.
 
 ## Proxy engine boundary
 
