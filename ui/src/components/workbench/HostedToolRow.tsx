@@ -41,7 +41,7 @@ const formatBytes = (bytes: number): string =>
   bytes >= 1024 * 1024 ? `${(bytes / (1024 * 1024)).toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1024))} KB`;
 
 /** What a call cost, only when it is known; unknown is never shown as zero. */
-export const useHostedCost = (card: HostedActivity): string | null => {
+const useHostedCost = (card: HostedActivity): string | null => {
   const { t } = useTranslation();
   const cost = card.cost;
   if (!cost) return null;
@@ -89,7 +89,9 @@ export const HostedModeChip: React.FC<{ card: HostedActivity }> = ({ card }) => 
   );
 };
 
-const countLabel = (card: HostedActivity, t: ReturnType<typeof useTranslation>['t']): string | null => {
+/** What the row counts ("1 image · 1536×1024", "2 posts"), when there is anything to count. */
+const useCountLabel = (card: HostedActivity): string | null => {
+  const { t } = useTranslation();
   if (card.tool === 'image_generation') {
     if (card.images.length === 0) return null;
     const [first] = card.images;
@@ -190,7 +192,7 @@ export const HostedToolRow: React.FC<{ card: HostedActivity }> = ({ card }) => {
   const [open, setOpen] = React.useState(false);
   const Icon = TOOL_ICON[card.tool];
   const cost = useHostedCost(card);
-  const count = countLabel(card, t);
+  const count = useCountLabel(card);
   return (
     <div className="flex flex-col" data-hosted-call={card.call_id}>
       <button
