@@ -76,6 +76,16 @@ vi.mock('./WorkbenchPageHeader', () => ({
   ),
 }));
 
+vi.mock('../ui/vault-secret-dialog', () => ({
+  VaultSecretDialog: ({
+    open,
+    editSecret,
+  }: {
+    open: boolean;
+    editSecret?: { name: string; updated_at: string } | null;
+  }) => open ? <div data-testid="vault-edit-dialog">{editSecret?.name}:{editSecret?.updated_at}</div> : null,
+}));
+
 function renderPage(context = remoteOwner, initialEntries = ['/vaults']) {
   return render(
     <InstanceAuthorizationContext.Provider value={context}>
@@ -131,6 +141,39 @@ describe('VaultsPage remote audit history', () => {
 
     expect(await screen.findByRole('button', { name: 'vaults.add' })).toBeTruthy();
     expect(screen.queryByText('vaults.remoteReadOnly')).toBeNull();
+  });
+});
+
+describe('VaultsPage edit metadata freshness', () => {
+  it('passes the refreshed list entry to an already-open edit dialog', async () => {
+    const original = {
+      name: 'LOGIN',
+      default_field: 'password',
+      fields: ['password', 'username'],
+      kind: 'static',
+      protection: 'standard',
+      signer_kind: null,
+      source: 'user',
+      tags: [],
+      policy: {},
+      last_used_at: null,
+      use_count: 0,
+      created_at: 'created',
+      updated_at: 'version-1',
+    };
+    const refreshed = { ...original, updated_at: 'version-2' };
+    api.listVaultSecrets.mockResolvedValue({ secrets: [original] });
+    renderPage();
+    await screen.findByText('LOGIN');
+    fireEvent.click(await screen.findByRole('button', { name: 'vaults.rowActions' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'vaults.editSecret' }));
+    expect((await screen.findByTestId('vault-edit-dialog')).textContent).toBe('LOGIN:version-1');
+
+    api.listVaultSecrets.mockResolvedValue({ secrets: [refreshed] });
+    await act(async () => {
+      for (const handler of [...eventHandlers]) handler.onVaultsUpdated?.({});
+    });
+    expect((await screen.findByTestId('vault-edit-dialog')).textContent).toBe('LOGIN:version-2');
   });
 });
 

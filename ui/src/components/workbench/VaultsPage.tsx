@@ -767,6 +767,9 @@ export const VaultsPage: React.FC = () => {
 
   const [deleteTarget, setDeleteTarget] = useState<VaultSecret | null>(null);
   const [editTarget, setEditTarget] = useState<VaultSecret | null>(null);
+  const activeEditSecret = editTarget
+    ? secrets.find((entry) => entry.name === editTarget.name) ?? editTarget
+    : null;
   useEffect(() => {
     if (!canManage || step?.kind !== 'edit') return;
     const secret = secrets.find((entry) => entry.name === step.secretName);
@@ -1029,8 +1032,8 @@ export const VaultsPage: React.FC = () => {
         }}
       /> : null}
       {canManage ? <VaultSecretDialog
-        open={editTarget != null}
-        editSecret={editTarget}
+        open={activeEditSecret != null}
+        editSecret={activeEditSecret}
         onOpenChange={(o) => {
           if (!o) setEditTarget(null);
         }}

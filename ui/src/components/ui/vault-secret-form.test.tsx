@@ -6,6 +6,7 @@ import { createInstance } from 'i18next';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 import type { ReactElement } from 'react';
 import en from '@/i18n/en.json';
+import type { VaultSecret } from '@/context/ApiContext';
 import { VaultSecretForm } from './vault-secret-form';
 
 const api = vi.hoisted(() => ({
@@ -144,4 +145,30 @@ it('seeds provision rows once, validates duplicate names, and permits removing e
   expect(api.createVaultSecret.mock.calls[0][0].fields).toEqual([
     { name: 'user_name', record: 'LOGIN.user_name', blind_box: blindBox },
   ]);
+});
+
+it('does not overwrite edited metadata when a refreshed secret object arrives', () => {
+  const first: VaultSecret = {
+    name: 'LOGIN',
+    default_field: 'password',
+    fields: ['password', 'username'],
+    kind: 'static',
+    protection: 'standard',
+    signer_kind: null,
+    source: 'user',
+    tags: [],
+    policy: {},
+    description: 'server description',
+    last_used_at: null,
+    use_count: 0,
+    created_at: 'created',
+    updated_at: 'version-1',
+  };
+  const refreshed = { ...first, description: 'new server description', updated_at: 'version-2' };
+  const props = { onCancel: vi.fn(), onCreated: vi.fn(), editSecret: first };
+  const { rerender } = render(form(<VaultSecretForm {...props} />));
+  const description = screen.getByLabelText('Description') as HTMLInputElement;
+  fireEvent.change(description, { target: { value: 'local unsaved description' } });
+  rerender(form(<VaultSecretForm {...props} editSecret={refreshed} />));
+  expect((screen.getByLabelText('Description') as HTMLInputElement).value).toBe('local unsaved description');
 });

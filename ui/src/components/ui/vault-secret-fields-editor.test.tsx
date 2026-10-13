@@ -48,7 +48,7 @@ afterEach(async () => { cleanup(); vi.clearAllMocks(); await i18n.changeLanguage
 // tests cannot catch a second field write reusing the first version, or a default rename
 // accidentally turning its replacement into a dotted record.
 it('updates envelope versions after replacing a field and renaming the default label', async () => {
-  renderEditor();
+  const rendered = renderEditor();
   change('Value for password', 'replacement');
   fireEvent.click(screen.getByRole('button', { name: 'Save password' }));
   await waitFor(() => expect(api.updateVaultSecretField).toHaveBeenCalledWith(
@@ -56,6 +56,14 @@ it('updates envelope versions after replacing a field and renaming the default l
   ));
   await screen.findByRole('status');
   expect((screen.getByLabelText('Value for password') as HTMLInputElement).value).toBe('');
+  // A parent poll can still hand back the old object after the child accepted its own
+  // successful write. That stale envelope must not roll the editor back to version-1.
+  rendered.rerender(
+    <I18nextProvider i18n={i18n}>
+      <VaultSecretFieldsEditor secret={{ ...secret }} disabled={false} onBusyChange={vi.fn()} />
+    </I18nextProvider>,
+  );
+  expect(screen.getByLabelText('Value for username')).toBeTruthy();
   change('Value for username', 'next-user');
   fireEvent.click(screen.getByRole('button', { name: 'Save username' }));
   await waitFor(() => expect(api.updateVaultSecretField).toHaveBeenLastCalledWith(
@@ -76,6 +84,51 @@ it('updates envelope versions after replacing a field and renaming the default l
   expect(sealBlindBox.mock.calls.map((call) => (call as unknown[])[2])).toEqual([
     { purpose: 'seal', name: 'LOGIN' }, { purpose: 'seal', name: 'LOGIN.username' }, { purpose: 'seal', name: 'LOGIN' },
   ]);
+});
+
+it.each(['constructor', 'tostring', 'valueof'])('treats %s as a normal field key', async (field) => {
+  const entry = { ...secret, fields: ['password', field] };
+  api.updateVaultSecretField.mockResolvedValue({
+    ok: true,
+    secret: { ...entry, updated_at: 'version-2' },
+  });
+  renderEditor(entry);
+  const value = screen.getByLabelText(`Value for ${field}`) as HTMLInputElement;
+  const save = screen.getByRole('button', { name: `Save ${field}` }) as HTMLButtonElement;
+  expect(value.value).toBe('');
+  expect(save.disabled).toBe(true);
+  fireEvent.change(value, { target: { value: 'typed-value' } });
+  expect(save.disabled).toBe(false);
+  fireEvent.click(save);
+  await waitFor(() => expect(api.updateVaultSecretField).toHaveBeenCalledWith(
+    'LOGIN',
+    field,
+    { record: `LOGIN.${field}`, blind_box: box, expected_updated_at: 'version-1' },
+    { handleError: false },
+  ));
+  expect(sealBlindBox).toHaveBeenCalledWith(
+    'typed-value',
+    { public_key: 'public' },
+    { purpose: 'seal', name: `LOGIN.${field}` },
+  );
+});
+
+it('adopts newer metadata while preserving an unsaved field draft', () => {
+  const { rerender } = renderEditor();
+  change('Value for username', 'keep-this-draft');
+  const renamed = {
+    ...secret,
+    default_field: 'credential',
+    fields: ['credential', 'username'],
+    updated_at: 'version-2',
+  };
+  rerender(
+    <I18nextProvider i18n={i18n}>
+      <VaultSecretFieldsEditor secret={renamed} disabled={false} onBusyChange={vi.fn()} />
+    </I18nextProvider>,
+  );
+  expect(screen.getByLabelText('Value for credential')).toBeTruthy();
+  expect((screen.getByLabelText('Value for username') as HTMLInputElement).value).toBe('keep-this-draft');
 });
 
 it('requires a unique populated extra field, saves it under its record name, and confirms removal', async () => {

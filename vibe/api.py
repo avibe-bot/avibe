@@ -2425,6 +2425,7 @@ def _vault_field_service_error(exc: Exception) -> VaultApiError:
         (vault_service.FieldExistsError, "field_exists", 409),
         (vault_service.FieldNotFoundError, "field_not_found", 404),
         (vault_service.TooManyFieldsError, "too_many_fields", 409),
+        (vault_service.FieldsCorruptError, "fields_corrupt", 409),
         (vault_service.FieldsNotSupportedError, "fields_not_supported", 409),
         (vault_service.RecordMismatchError, "record_mismatch", 409),
         (vault_service.SecretConflictError, "secret_conflict", 409),

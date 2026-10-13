@@ -307,8 +307,14 @@ export const VaultSecretForm: React.FC<{
   // Edit mode: seed editable metadata from the existing secret. Name / kind / protection are
   // shown read-only (not seeded into editable controls); the value is never loaded; always_ask
   // is neither seeded nor emitted — the backend preserves it (storage.update_secret_metadata).
+  const seededEditSecretRef = useRef<string | null>(null);
   useEffect(() => {
-    if (!editSecret) return;
+    if (!editSecret) {
+      seededEditSecretRef.current = null;
+      return;
+    }
+    if (seededEditSecretRef.current === editSecret.name) return;
+    seededEditSecretRef.current = editSecret.name;
     setKind(editSecret.kind === 'keypair' ? 'keypair' : 'static');
     setProtection(editSecret.protection === 'protected' ? 'protected' : 'standard');
     const parts = partitionTags(editSecret.tags);

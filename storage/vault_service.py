@@ -173,6 +173,10 @@ class FieldsNotSupportedError(VaultServiceError):
     pass
 
 
+class FieldsCorruptError(VaultServiceError):
+    pass
+
+
 class RecordMismatchError(VaultServiceError):
     pass
 
@@ -569,33 +573,41 @@ def _default_field_name(row: dict[str, Any] | None = None, value: Any = None) ->
         return "value"
 
 
-def _extra_field_rows(row: dict[str, Any] | None) -> list[dict[str, Any]]:
-    if not row:
+def _extra_field_rows(row: dict[str, Any] | None, *, strict: bool = False) -> list[dict[str, Any]]:
+    """Read the complete optional section, never a lossy partial projection.
+
+    Default-record reads remain available when extras are corrupt. Any caller
+    that writes fields or needs an extra record must fail closed instead.
+    """
+    if not row or row.get("fields") is None:
         return []
-    raw = _loads(row.get("fields"))
-    if not isinstance(raw, list):
-        return []
-    result: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    default = _default_field_name(row)
-    for item in raw:
-        if not isinstance(item, dict):
-            continue
-        try:
+    try:
+        raw = json.loads(row["fields"])
+        if not isinstance(raw, list) or len(raw) >= MAX_SECRET_FIELDS:
+            raise ValueError("invalid field array")
+        seen = {_default_field_name(row)}
+        if row.get("kind") == "keypair" and raw:
+            raise ValueError("keypair has extra fields")
+        for item in raw:
+            if not isinstance(item, dict):
+                raise ValueError("invalid field entry")
             name = _validate_field_name(item.get("name"))
-        except InvalidFieldNameError:
-            continue
-        if name == default or name in seen:
-            continue
-        if not all(isinstance(item.get(key), str) and item.get(key) for key in ("ciphertext", "nonce", "wrap_meta")):
-            continue
-        seen.add(name)
-        result.append(dict(item) | {"name": name})
-    return result
+            if name in seen:
+                raise ValueError("duplicate field label")
+            if not all(isinstance(item.get(key), str) and item[key] for key in ("ciphertext", "nonce", "wrap_meta", "created_at", "updated_at")):
+                raise ValueError("incomplete field envelope")
+            seen.add(name)
+        return [dict(item) for item in raw]
+    except (TypeError, ValueError, InvalidFieldNameError):
+        # Neither malformed serialized values nor exception details are safe to log.
+        logger.warning("Vault secret %s has corrupt fields; extra records and field mutations are unavailable", row.get("name"))
+        if strict:
+            raise FieldsCorruptError(f"secret {row.get('name')!r} has corrupt fields; existing data was preserved") from None
+        return []
 
 
 def secret_field_names(row: dict[str, Any]) -> list[str]:
-    return [_default_field_name(row), *[str(item["name"]) for item in _extra_field_rows(row)]]
+    return [_default_field_name(row), *[str(item["name"]) for item in _extra_field_rows(row, strict=False)]]
 
 
 def record_name_for_field(secret_name: str, field_name: str, *, default_field: str = "value") -> str:
@@ -613,7 +625,7 @@ def _record_entries(row: dict[str, Any]) -> list[dict[str, Any]]:
             "protection": row.get("protection"),
         }
     ]
-    for field in _extra_field_rows(row):
+    for field in _extra_field_rows(row, strict=False):
         entries.append(
             {
                 "name": record_name_for_field(str(row["name"]), str(field["name"]), default_field=default_field),
@@ -643,7 +655,7 @@ def _resolve_record_ref(conn: Connection, ref: str, *, user_context: Any = None)
         field_name = default_field
     else:
         _validate_field_name(field_ref)
-        if field_ref not in {str(item["name"]) for item in _extra_field_rows(row)}:
+        if field_ref not in {str(item["name"]) for item in _extra_field_rows(row, strict=True)}:
             raise FieldNotFoundError(f"field {field_ref!r} not found on {secret_name}; fields: {', '.join(secret_field_names(row))}")
         field_name = field_ref
     entry = next(item for item in _record_entries(row) if item["field"] == field_name)
@@ -1253,6 +1265,10 @@ def _unique_grant_release_refs(rows: list[dict[str, Any]]) -> list[dict[str, str
     return refs
 
 
+def _field_metadata(row: dict[str, Any]) -> dict[str, Any]:
+    return {"name": str(row["name"]), "default_field": _default_field_name(row), "fields": secret_field_names(row)}
+
+
 def _hydrate_card_unlock_material(conn: Connection, row: dict[str, Any], card: dict[str, Any]) -> dict[str, Any]:
     card = dict(card)
     secret_name = row.get("secret_name")
@@ -1275,6 +1291,17 @@ def _hydrate_card_unlock_material(conn: Connection, row: dict[str, Any], card: d
                 current["name"]: dict(current)
                 for current in conn.execute(select(vault_secrets).where(vault_secrets.c.name.in_(names))).mappings()
             }
+            snapshots = {
+                str(item["name"]): item for item in option_payload.get("member_fields") or []
+                if isinstance(item, dict) and isinstance(item.get("name"), str)
+            }
+            # Labels are display metadata, not the frozen authorization member set.
+            # In particular, a default rename deliberately preserves this request.
+            option_payload["member_fields"] = [
+                _field_metadata(current_rows[name]) if name in current_rows else snapshots[name]
+                for name in option_payload.get("member_snapshot") or names
+                if name in current_rows or name in snapshots
+            ]
             for version in versions:
                 if not isinstance(version, dict):
                     continue
@@ -2826,9 +2853,10 @@ def update_secret_metadata(
         if row.get("kind") == "keypair":
             raise FieldsNotSupportedError("keypair secrets do not support default_field")
         normalized_default = _validate_field_name(default_field, field="default_field")
+        extras = _extra_field_rows(row, strict=True)
         existing_default = _default_field_name(row)
         if normalized_default != existing_default:
-            if normalized_default in {str(item["name"]) for item in _extra_field_rows(row)}:
+            if normalized_default in {str(item["name"]) for item in extras}:
                 raise FieldExistsError(f"field {normalized_default!r} already exists on {secret_name}")
             if public_meta is None:
                 public_meta = _public_meta(row.get("public_meta"))
@@ -3138,6 +3166,7 @@ def rotate_secret(
 ) -> dict[str, Any]:
     context = resolve_resource_access_context(user_context)
     row = _require_secret_resource_management(conn, _require_row(conn, name), context)
+    _extra_field_rows(row, strict=True)
     public_meta = _public_meta(row.get("public_meta"))
     public_meta.pop("preview", None)
     result = conn.execute(
@@ -3209,7 +3238,7 @@ def update_secret_field(
         raise FieldsNotSupportedError(f"{secret_name} does not support fields")
     _require_field_record(row, field_name, record)
     default_field = _default_field_name(row)
-    extras = _extra_field_rows(row)
+    extras = _extra_field_rows(row, strict=True)
     extra_by_name = {str(item["name"]): item for item in extras}
     now = _next_updated_at(snapshot_updated_at)
     if field_name == default_field:
@@ -3272,7 +3301,7 @@ def remove_secret_field(
         raise FieldsNotSupportedError(f"{secret_name} does not support fields")
     if field_name == _default_field_name(row):
         raise InvalidRequestError("the default field cannot be removed")
-    extras = _extra_field_rows(row)
+    extras = _extra_field_rows(row, strict=True)
     if not any(str(item["name"]) == field_name for item in extras):
         raise FieldNotFoundError(f"field {field_name!r} not found on {secret_name}; fields: {', '.join(secret_field_names(row))}")
     extras = [item for item in extras if str(item["name"]) != field_name]
@@ -3871,14 +3900,7 @@ def _grant_option(
         "member_count": len(members),
         "member_snapshot": members,
         "member_versions": [_member_version(row) for row in rows],
-        "member_fields": [
-            {
-                "name": str(row["name"]),
-                "default_field": _default_field_name(row),
-                "fields": secret_field_names(row),
-            }
-            for row in rows
-        ],
+        "member_fields": [_field_metadata(row) for row in rows],
     }
     if one_shot:
         option["one_shot"] = True

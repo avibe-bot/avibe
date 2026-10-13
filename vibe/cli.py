@@ -8969,13 +8969,16 @@ def cmd_vault_access(args):
     except vault_service.InvalidFieldNameError as exc:
         _print_task_error(TaskCliError(str(exc), code="invalid_field_name", help_command=help_command))
         return 1
+    except vault_service.FieldsCorruptError as exc:
+        _print_task_error(TaskCliError(str(exc), code="fields_corrupt", help_command=help_command))
+        return 1
     except vault_service.FieldNotFoundError as exc:
         _print_task_error(TaskCliError(str(exc), code="field_not_found", help_command=help_command))
         return 1
-    except vault_service.FieldsNotSupportedError as exc:
-        _print_task_error(TaskCliError(str(exc), code="fields_not_supported", help_command=help_command))
+    except vault_service.FieldsCorruptError as exc:
+        _print_task_error(TaskCliError(str(exc), code="fields_corrupt", help_command=help_command))
         return 1
-    except vault_service.NotGrantableError as exc:
+    except vault_service.FieldsNotSupportedError as exc:
         _print_task_error(TaskCliError(str(exc), code="not_grantable", help_command=help_command))
         return 1
     except TaskCliError as exc:
@@ -9936,6 +9939,9 @@ def cmd_vault_run(args):
             )
         )
         return 1
+    except vault_service.FieldsCorruptError as exc:
+        _print_task_error(TaskCliError(str(exc), code="fields_corrupt", help_command=help_command))
+        return 1
     except vault_service.FieldNotFoundError as exc:
         _print_task_error(TaskCliError(str(exc), code="field_not_found", help_command=help_command))
         return 1
@@ -10842,6 +10848,9 @@ def cmd_vault_fetch(args):
     except vault_service.InvalidFieldNameError as exc:
         _print_task_error(TaskCliError(str(exc), code="invalid_field_name", help_command=help_command))
         return 1
+    except vault_service.FieldsCorruptError as exc:
+        _print_task_error(TaskCliError(str(exc), code="fields_corrupt", help_command=help_command))
+        return 1
     except vault_service.FieldNotFoundError as exc:
         _print_task_error(TaskCliError(str(exc), code="field_not_found", help_command=help_command))
         return 1
@@ -11022,6 +11031,9 @@ def cmd_vault_inject(args):
         return 1
     except vault_service.InvalidFieldNameError as exc:
         _print_task_error(TaskCliError(str(exc), code="invalid_field_name", help_command=help_command))
+        return 1
+    except vault_service.FieldsCorruptError as exc:
+        _print_task_error(TaskCliError(str(exc), code="fields_corrupt", help_command=help_command))
         return 1
     except vault_service.FieldNotFoundError as exc:
         _print_task_error(TaskCliError(str(exc), code="field_not_found", help_command=help_command))

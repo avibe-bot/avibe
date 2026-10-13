@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Loader2, Plus, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useApi, type VaultFieldValuePayload, type VaultSecret } from '@/context/ApiContext';
@@ -26,8 +26,11 @@ export function VaultSecretFieldsEditor({
   const vault = useProtectedVault();
   const { refresh } = vault;
   const [current, setCurrent] = useState(secret);
-  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const currentRef = useRef(secret);
+  const stalePropVersionRef = useRef<string | null>(null);
+  const [drafts, setDrafts] = useState<Map<string, string>>(() => new Map());
   const [defaultLabel, setDefaultLabel] = useState(vaultDefaultField(secret));
+  const defaultLabelDirtyRef = useRef(false);
   const [newField, setNewField] = useState<string | null>(null);
   const [newValue, setNewValue] = useState('');
   const [busy, setBusy] = useState(false);
@@ -41,20 +44,61 @@ export function VaultSecretFieldsEditor({
   const canWriteValue = !isProtected || vault.status === 'unlocked';
 
   useEffect(() => {
+    currentRef.current = current;
+  }, [current]);
+
+  useEffect(() => {
+    const local = currentRef.current;
+    if (secret.name !== local.name) {
+      currentRef.current = secret;
+      stalePropVersionRef.current = null;
+      defaultLabelDirtyRef.current = false;
+      setCurrent(secret);
+      setDefaultLabel(vaultDefaultField(secret));
+      setDrafts(new Map());
+      return;
+    }
+    if (secret.updated_at === local.updated_at) return;
+    if (secret.updated_at === stalePropVersionRef.current) return;
+    currentRef.current = secret;
+    setCurrent(secret);
+    if (!defaultLabelDirtyRef.current) setDefaultLabel(vaultDefaultField(secret));
+    setDrafts((values) => {
+      const next = new Map(values);
+      const oldDefault = vaultDefaultField(local);
+      const nextDefault = vaultDefaultField(secret);
+      if (oldDefault !== nextDefault && next.has(oldDefault) && !next.has(nextDefault)) {
+        next.set(nextDefault, next.get(oldDefault) ?? '');
+        next.delete(oldDefault);
+      }
+      const names = new Set(vaultFieldNames(secret));
+      for (const name of next.keys()) {
+        if (!names.has(name)) next.delete(name);
+      }
+      return next;
+    });
+  }, [secret]);
+
+  useEffect(() => {
     if (isProtected) void refresh();
   }, [isProtected, refresh]);
 
   const hasErrorCode = (result: unknown, code: string): boolean =>
     typeof result === 'object' && result !== null && 'code' in result && result.code === code;
   const conflict = () => new Error(t('vaults.fields.recordConflict'));
-  const adoptSecret = (next: VaultSecret) => {
+  const adoptSecret = (next: VaultSecret, ownWrite = false) => {
+    if (ownWrite && next.updated_at !== currentRef.current.updated_at) {
+      stalePropVersionRef.current = currentRef.current.updated_at;
+    }
+    currentRef.current = next;
     setCurrent(next);
+    defaultLabelDirtyRef.current = false;
     setDefaultLabel(vaultDefaultField(next));
     setDrafts((values) => {
-      const remaining = { ...values };
+      const remaining = new Map(values);
       const names = new Set(vaultFieldNames(next));
-      for (const name of Object.keys(remaining)) {
-        if (!names.has(name)) delete remaining[name];
+      for (const name of remaining.keys()) {
+        if (!names.has(name)) remaining.delete(name);
       }
       return remaining;
     });
@@ -79,21 +123,7 @@ export function VaultSecretFieldsEditor({
         throw Object.assign(new Error(vaultErrorMessage(t, result, t('vaults.dialog.errors.updateFailed'))), { code: result.code });
       }
       const next = result.secret;
-      const nextDefault = vaultDefaultField(next);
-      setCurrent(next);
-      setDefaultLabel(nextDefault);
-      setDrafts((values) => {
-        const remaining = { ...values };
-        if (nextDefault !== defaultField) {
-          remaining[nextDefault] = remaining[defaultField] ?? '';
-          delete remaining[defaultField];
-        }
-        const names = new Set(vaultFieldNames(next));
-        for (const field of Object.keys(remaining)) {
-          if (!names.has(field)) delete remaining[field];
-        }
-        return remaining;
-      });
+      adoptSecret(next, true);
       setSaved(true);
     } catch (err) {
       if (hasErrorCode(err, 'secret_conflict')) {
@@ -118,7 +148,11 @@ export function VaultSecretFieldsEditor({
     // re-seal if the server reports that its record mapping changed.
     let capturedValue = value;
     const clear = () =>
-      adding ? setNewValue('') : setDrafts((values) => ({ ...values, [field]: '' }));
+      adding ? setNewValue('') : setDrafts((values) => {
+        const next = new Map(values);
+        next.set(field, '');
+        return next;
+      });
     const sealAndWrite = async (secret: VaultSecret, targetField: string, wasDefault: boolean) => {
       const latestDefault = vaultDefaultField(secret);
       if (!wasDefault && latestDefault === targetField) throw conflict();
@@ -157,7 +191,6 @@ export function VaultSecretFieldsEditor({
           if (hasErrorCode(result, 'record_mismatch')) throw conflict();
         }
         if (result.ok && result.secret) {
-          adoptSecret(result.secret);
           clear();
           if (adding) setNewField(null);
         }
@@ -182,7 +215,10 @@ export function VaultSecretFieldsEditor({
               <>
                 <Input value={defaultLabel} disabled={locked}
                   aria-label={t('vaults.fields.defaultName')}
-                  onChange={(event) => setDefaultLabel(event.target.value)}
+                  onChange={(event) => {
+                    defaultLabelDirtyRef.current = true;
+                    setDefaultLabel(event.target.value);
+                  }}
                   className="min-w-0 font-mono" />
                 <Badge variant="secondary">{t('vaults.fields.default')}</Badge>
                 <Button type="button" size="sm" variant="ghost"
@@ -202,14 +238,18 @@ export function VaultSecretFieldsEditor({
             )}
           </div>
           <div className="flex items-center gap-2">
-            <Input type="password" value={drafts[field] ?? ''} autoComplete="off" disabled={locked}
+            <Input type="password" value={drafts.get(field) ?? ''} autoComplete="off" disabled={locked}
               aria-label={t('vaults.fields.value', { field })}
               placeholder={t('vaults.fields.replacePlaceholder')}
-              onChange={(event) => setDrafts((values) => ({ ...values, [field]: event.target.value }))} />
+              onChange={(event) => setDrafts((values) => {
+                const next = new Map(values);
+                next.set(field, event.target.value);
+                return next;
+              })} />
             <Button type="button" variant="secondary" size="sm"
               aria-label={t('vaults.fields.saveNamed', { field })}
-              disabled={locked || !canWriteValue || !drafts[field]}
-              onClick={() => saveValue(field, drafts[field])}>{t('vaults.fields.save')}</Button>
+              disabled={locked || !canWriteValue || !drafts.get(field)}
+              onClick={() => saveValue(field, drafts.get(field) ?? '')}>{t('vaults.fields.save')}</Button>
           </div>
         </div>
       ))}

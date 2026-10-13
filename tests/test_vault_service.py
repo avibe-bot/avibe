@@ -420,6 +420,12 @@ def test_default_rename_is_metadata_only_and_collision_safe(vault, protection):
         hydrated = vs.get_request(conn, pending["id"])
         assert hydrated["status"] == "pending"
         assert hydrated["card"]["grant_options"][0]["member_versions"] == pending_versions
+        assert hydrated["card"]["grant_options"][0]["member_fields"] == [
+            {"name": "LOGIN", "default_field": "credential", "fields": ["credential", "username"]}
+        ]
+        # The persisted authorization snapshot is unchanged; only its UI projection is current.
+        stored = conn.execute(select(vault_requests.c.delivery).where(vault_requests.c.id == pending["id"])).scalar_one()
+        assert json.loads(stored)["card"]["grant_options"][0]["member_fields"][0]["default_field"] == "password"
         assert _grant_from_request(conn, pending)["status"] == "active"
         assert vs.get_grant_created_by_request(conn, grant["request_id"])["status"] == "active"
         assert get_envelope(conn, "LOGIN") == default_envelope
@@ -431,6 +437,49 @@ def test_default_rename_is_metadata_only_and_collision_safe(vault, protection):
         with pytest.raises(vs.FieldExistsError):
             vs.update_secret_metadata(conn, "LOGIN", default_field="username")
         assert get_envelope(conn, "LOGIN") == default_envelope
+
+
+@pytest.mark.parametrize("malformed", ["invalid_json", "non_array", "bad_entry", "duplicate", "default_collision"])
+@pytest.mark.parametrize("protection", ["standard", "protected"])
+def test_corrupt_fields_disable_mutations_without_losing_bytes(vault, caplog, malformed, protection):
+    _create(vault, name="LOGIN", protection=protection, fields=[{"name": "username", "sealed": _sealed("username")}])
+    with vault.begin() as conn:
+        stored = conn.execute(select(vault_secrets.c.fields).where(vault_secrets.c.name == "LOGIN")).scalar_one()
+        valid = json.loads(stored)
+        damaged = {
+            "invalid_json": '{"unparseable":',
+            "non_array": '{"name":"username"}',
+            "bad_entry": json.dumps([*valid, {"name": "password", "ciphertext": "must-not-disappear"}]),
+            "duplicate": json.dumps([*valid, valid[0]]),
+            "default_collision": json.dumps([*valid, {**valid[0], "name": "value"}]),
+        }[malformed]
+        conn.execute(vault_secrets.update().where(vault_secrets.c.name == "LOGIN").values(fields=damaged))
+        caplog.clear()
+        assert vs.get_secret_meta(conn, "LOGIN")["fields"] == ["value"]
+        assert vs.list_secrets(conn)[0]["default_field"] == "value"
+        get_envelope = vs.get_protected_record_envelope if protection == "protected" else vs.get_envelope
+        assert get_envelope(conn, "LOGIN") == _sealed("login")
+        assert get_envelope(conn, "LOGIN.value") == _sealed("login")
+        assert any("corrupt" in entry.message.lower() for entry in caplog.records)
+        assert "must-not-disappear" not in caplog.text
+        before = dict(conn.execute(select(vault_secrets).where(vault_secrets.c.name == "LOGIN")).mappings().one())
+        with pytest.raises(vs.FieldsCorruptError):
+            get_envelope(conn, "LOGIN.username")
+        operations = [
+            lambda: vs.update_secret_field(conn, "LOGIN", "totp", _sealed("new"), record="LOGIN.totp"),
+            lambda: vs.update_secret_field(conn, "LOGIN", "username", _sealed("new"), record="LOGIN.username"),
+            lambda: vs.update_secret_field(conn, "LOGIN", "value", _sealed("new"), record="LOGIN"),
+            lambda: vs.remove_secret_field(conn, "LOGIN", "username"),
+            lambda: vs.update_secret_metadata(conn, "LOGIN", default_field="password"),
+            lambda: vs.rotate_secret(conn, "LOGIN", _sealed("new")),
+        ]
+        for operation in operations:
+            with pytest.raises(vs.FieldsCorruptError):
+                operation()
+            after = dict(conn.execute(select(vault_secrets).where(vault_secrets.c.name == "LOGIN")).mappings().one())
+            assert after == before
+            assert after["fields"] == damaged
+        assert not list(conn.execute(select(vault_audit.c.id).where(vault_audit.c.event == "updated")))
 
 
 def test_ordinary_metadata_preserves_approval_and_policy_edits_expire_it(vault):
