@@ -4688,6 +4688,8 @@
       "agent": "Agent",
       "model": "Model",
       "effort": "Effort",
+      "effortNotOn": "Not on {{sources}}",
+      "effortNotOnSome": "Not on some Sources",
       "newAgent": "New agent",
       "addModel": "Add model",
       "noModels": "No models found",

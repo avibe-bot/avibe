@@ -15,8 +15,15 @@ import { AgentRoutePicker } from './AgentRoutePicker';
 import type { AgentRoutePatch, AgentRouteValue } from './AgentRoutePicker';
 
 vi.mock('react-i18next', () => ({
-  useTranslation: () => ({ t: (key: string) => key }),
+  // The key, plus the Source names a hint interpolates, so a test can read both.
+  useTranslation: () => ({
+    t: (key: string, options?: { sources?: string }) => (options?.sources ? `${key}:${options.sources}` : key),
+  }),
 }));
+
+// What the Sources read answers: names by id, or null when the role may not read them.
+let sourceNames: Record<string, string> | null = null;
+vi.mock('../../lib/useSourceNames', () => ({ useSourceNames: () => sourceNames }));
 
 // One client for every render, as the real context provides: the picker's
 // catalog read keys on it, so a fresh object per render would re-read on its own.
@@ -34,6 +41,7 @@ vi.mock('../../context/ApiContext', async (importOriginal) => ({
 // model, so a test can say "this model has no efforts" the same way the server
 // does — and an empty default keeps the backend fallback in play.
 let catalogReasoning: Record<string, { value: string; label: string }[]> = {};
+let catalogNotOn: Record<string, Record<string, string[]>> = {};
 // How many catalog reads were made, and whether the next ones wait to be answered.
 let catalogReads = 0;
 let deferReads = false;
@@ -50,6 +58,7 @@ vi.mock('../../lib/backendModels', async (importOriginal) => ({
       models: string[];
       modelLabels: Record<string, string>;
       reasoningOptions: Record<string, { value: string; label: string }[]>;
+      effortNotOn: Record<string, Record<string, string[]>>;
       catalogRefreshPending: boolean;
     }) => void,
   ) => {
@@ -58,6 +67,7 @@ vi.mock('../../lib/backendModels', async (importOriginal) => ({
       models: ['sonnet', 'opus'],
       modelLabels: {},
       reasoningOptions: catalogReasoning,
+      effortNotOn: catalogNotOn,
       catalogRefreshPending: false,
     });
     if (deferReads) pendingReads.push(answer);
@@ -165,6 +175,8 @@ describe('AgentRoutePicker', () => {
   afterEach(() => {
     cleanup();
     catalogReasoning = {};
+    catalogNotOn = {};
+    sourceNames = null;
     hubMode = 'direct';
     catalogReads = 0;
     deferReads = false;
@@ -229,6 +241,30 @@ describe('AgentRoutePicker', () => {
     act(() => pendingReads.shift()!());
     expect(screen.getByRole('button', { name: 'opus' })).toBeTruthy();
     expect(screen.getByText('chat.picker.effort')).toBeTruthy();
+  });
+
+  it('MH-EFFORT-MENU-002: names the Sources that refuse an effort, and says some do when it cannot read them', async () => {
+    hubMode = 'hub';
+    catalogReasoning = { sonnet: [{ value: 'low', label: 'low' }, { value: 'high', label: 'high' }] };
+    catalogNotOn = { sonnet: { high: ['src_relaygpt1'] } };
+    sourceNames = { src_relaygpt1: 'relay-gpt' };
+    const user = userEvent.setup();
+    render(<HubPicker role="owner" />);
+    await openMenu(user);
+
+    expect(screen.getByRole('button', { name: /chat\.picker\.effortOptions\.high/ }).textContent)
+      .toContain('chat.picker.effortNotOn:relay-gpt');
+    // An effort every hop serves carries no hint.
+    expect(screen.getByRole('button', { name: /chat\.picker\.effortOptions\.low/ }).textContent)
+      .toBe('chat.picker.effortOptions.low');
+    cleanup();
+
+    // A role that may not read Sources still learns that some refuse it.
+    sourceNames = null;
+    render(<HubPicker role="owner" />);
+    await openMenu(user);
+    expect(screen.getByRole('button', { name: /chat\.picker\.effortOptions\.high/ }).textContent)
+      .toContain('chat.picker.effortNotOnSome');
   });
 
   it('reads the list again for a menu left open while Settings covered it', async () => {

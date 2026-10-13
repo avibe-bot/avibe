@@ -8,6 +8,7 @@ import { useApi } from '../../context/ApiContext';
 import type { VibeAgentBrief } from '../../context/ApiContext';
 import { loadBackendModelsWithRefresh, modelOptionLabel, useAddModelExit } from '../../lib/backendModels';
 import { isEffortSupported, resolveEffortOptions } from '../../lib/effortOptions';
+import { useSourceNames } from '../../lib/useSourceNames';
 import { useRouteSurfaceActive } from '../../lib/routeSurfaceActivity';
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
 import { Button } from '../ui/button';
@@ -103,6 +104,11 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
   const [modelLabelsByBackend, setModelLabelsByBackend] = useState<Record<string, Record<string, string>>>({});
   const [reasoningByBackend, setReasoningByBackend] = useState<
     Record<string, Record<string, ReasoningOption[]>>
+  >({});
+  // Per backend, per model, per effort: the Sources that refuse it (Model Hub's
+  // `effort_menu.not_on`), for the column's "not on: <Source>" hint.
+  const [effortNotOnByBackend, setEffortNotOnByBackend] = useState<
+    Record<string, Record<string, Record<string, string[]>>>
   >({});
   const loadedModelBackendsRef = useRef<Set<string>>(new Set());
   const surfaceActive = useRouteSurfaceActive();
@@ -202,6 +208,7 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
     setModelsByBackend({});
     setModelLabelsByBackend({});
     setReasoningByBackend({});
+    setEffortNotOnByBackend({});
   }, [surfaceActive]);
 
   const grouped = useMemo(() => {
@@ -224,9 +231,10 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
     const cancel = loadBackendModelsWithRefresh(
       api,
       backend,
-      ({ models, modelLabels, reasoningOptions, catalogRefreshPending }) => {
+      ({ models, modelLabels, reasoningOptions, effortNotOn, catalogRefreshPending }) => {
         reloadOnNextOpen = Boolean(catalogRefreshPending);
         setReasoningByBackend((prev) => ({ ...prev, [backend]: reasoningOptions ?? {} }));
+        setEffortNotOnByBackend((prev) => ({ ...prev, [backend]: effortNotOn ?? {} }));
         setModelsByBackend((prev) => ({ ...prev, [backend]: models }));
         setModelLabelsByBackend((prev) => ({ ...prev, [backend]: modelLabels ?? {} }));
         setLoadingModels(false);
@@ -274,6 +282,16 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
     () => (catalogAnswered ? resolveEffortOptions(backend, currentModel, backendReasoning) : []),
     [catalogAnswered, backend, currentModel, backendReasoning],
   );
+  const effortNotOn = (currentModel && effortNotOnByBackend[backend]?.[currentModel]) || null;
+  // Names only when an effort needs one; a role that cannot read Sources gets the
+  // hint without them.
+  const sourceNames = useSourceNames(open && effortNotOn !== null);
+  const notOnLabel = (effort: string): string | null => {
+    const ids = effortNotOn?.[effort];
+    if (!ids || ids.length === 0) return null;
+    if (!sourceNames) return t('chat.picker.effortNotOnSome');
+    return t('chat.picker.effortNotOn', { sources: ids.map((id) => sourceNames[id] ?? id).join(', ') });
+  };
 
   return (
     <Popover open={open} onOpenChange={setOpen} modal={modal}>
@@ -481,17 +499,21 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
           {/* Column 3 — Effort (uses per-model catalog entries when available) */}
           {effortOptions.length > 0 && (
             <RouteColumn title={t('chat.picker.effort')}>
-              {effortOptions.map((opt) => (
-                <RouteItem
-                  key={opt}
-                  active={opt === currentEffort}
-                  onClick={() => applyPatch({ reasoning_effort: opt })}
-                >
-                  <span className="flex-1 capitalize">
-                    {t(`chat.picker.effortOptions.${opt}`, { defaultValue: opt })}
-                  </span>
-                </RouteItem>
-              ))}
+              {effortOptions.map((opt) => {
+                const notOn = notOnLabel(opt);
+                return (
+                  <RouteItem
+                    key={opt}
+                    active={opt === currentEffort}
+                    onClick={() => applyPatch({ reasoning_effort: opt })}
+                  >
+                    <span className="flex min-w-0 flex-1 flex-col">
+                      <span className="capitalize">{t(`chat.picker.effortOptions.${opt}`, { defaultValue: opt })}</span>
+                      {notOn && <span className="text-[10px] leading-snug text-muted">{notOn}</span>}
+                    </span>
+                  </RouteItem>
+                );
+              })}
             </RouteColumn>
           )}
         </div>

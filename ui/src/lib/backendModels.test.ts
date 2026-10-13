@@ -195,6 +195,31 @@ describe('fetchBackendModels in gateway mode', () => {
     });
   });
 
+  it('MH-EFFORT-MENU-001: leaves out an effort every hop refuses and names the Sources that refuse one the others serve', async () => {
+    const api = {
+      readModelHubAgentCatalogForModelPicker: vi.fn().mockResolvedValue(
+        hubAgent('vibey', {
+          catalog_models: [
+            {
+              ...model('gpt-6-astra', { supports_reasoning: true, reasoning_efforts: ['low', 'high', 'xhigh', 'ultra'] }),
+              // Model Hub's answer for this model now: `ultra` would fail on every
+              // hop it routes to; `xhigh` fails only on one of them.
+              effort_menu: { omitted: ['ultra'], not_on: { xhigh: ['src_relaygpt1'] } },
+            },
+            model('grok-4.6', { supports_reasoning: true, reasoning_efforts: ['low', 'high'] }),
+          ],
+        }),
+      ),
+    } as unknown as ApiContextType;
+
+    const result = await fetchBackendModels(api, 'vibey');
+
+    expect(resolveEffortOptions('vibey', 'gpt-6-astra', result.reasoningOptions)).toEqual(['low', 'high', 'xhigh']);
+    expect(result.effortNotOn).toEqual({ 'gpt-6-astra': { xhigh: ['src_relaygpt1'] } });
+    // A model with no evidence is offered exactly what its row declares.
+    expect(resolveEffortOptions('vibey', 'grok-4.6', result.reasoningOptions)).toEqual(['low', 'high']);
+  });
+
   it('states "no efforts" for every routeable model the catalog says does not reason', async () => {
     const api = {
       readModelHubAgentCatalogForModelPicker: vi.fn().mockResolvedValue(

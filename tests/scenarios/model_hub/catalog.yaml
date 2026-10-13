@@ -13,6 +13,8 @@ capability:
     - tests/test_provider_overlay.py
     - tests/test_hosted_activity.py
     - ui/src/components/workbench/HostedToolRow.test.tsx
+    - ui/src/lib/backendModels.test.ts
+    - ui/src/components/workbench/AgentRoutePicker.test.tsx
     - tests/agent_core/ai/test_hosted_requests.py
     - tests/agent_core/ai/test_hosted_parsing.py
     - tests/agent_core/ai/test_hosted_transform.py
@@ -264,6 +266,18 @@ scenarios:
       - tests/test_hosted_activity.py::test_the_im_line_says_a_reason_avibe_worded_in_the_readers_language
       - tests/test_hosted_activity.py::test_every_known_hosted_error_code_has_copy_on_every_surface
       - ui/src/components/workbench/HostedToolRow.test.tsx::MH-HOSTED-UI-015
+  - id: MH-EFFORT-MENU-001
+    name: The model picker leaves out an effort every hop refuses and keeps, with its refusing Sources, one the other hops serve
+    status: covered
+    kind: observation
+    layer: unit
+    test: ui/src/lib/backendModels.test.ts::MH-EFFORT-MENU-001
+  - id: MH-EFFORT-MENU-002
+    name: The Chat route picker names the Sources that refuse an effort, or says some do when the viewer may not read Sources
+    status: covered
+    kind: observation
+    layer: unit
+    test: ui/src/components/workbench/AgentRoutePicker.test.tsx::MH-EFFORT-MENU-002
   - id: MH-HOSTED-VIBEY-001
     name: Vibey declares a hop's native hosted tool verbatim with its include values and pins that request to the hop's Source; the probe builds the same request
     status: covered
