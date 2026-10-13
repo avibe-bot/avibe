@@ -349,13 +349,13 @@ def test_ui_checks_run_once_without_fencing_artifact_consumers() -> None:
     jobs = _jobs()
     checks = jobs["ui-checks"]
     build = jobs["build-linux-artifacts"]
-    assert not checks.get("needs")
-    assert not build.get("needs")
+    assert checks.get("needs") == "changes"
+    assert build.get("needs") == "changes"
     assert "ui-checks" in jobs["unit-tests"]["needs"]
     assert "ui-browser-checks" in jobs["unit-tests"]["needs"]
     assert "unit-test-shards" in jobs["unit-tests"]["needs"]
     browsers = jobs["ui-browser-checks"]
-    assert not browsers.get("needs")
+    assert browsers.get("needs") == "changes"
 
     check_steps = [step for step in checks["steps"] if "run" in step]
     build_steps = [step for step in build["steps"] if step.get("working-directory") == "ui"]
@@ -369,7 +369,7 @@ def test_ui_checks_run_once_without_fencing_artifact_consumers() -> None:
     assert "npm ci" in check_commands
     assert "npm ci" in build_commands
     for job in (checks, browsers, build):
-        assert not job.get("if")
+        assert job["if"] == "needs.changes.outputs.docs_only == 'false'"
         assert not job.get("continue-on-error")
         assert all(not step.get("if") and not step.get("continue-on-error") for step in job["steps"])
     for name in ("install-upgrade-shards", "windows-install-smoke-runners"):
@@ -378,8 +378,11 @@ def test_ui_checks_run_once_without_fencing_artifact_consumers() -> None:
 
 def test_windows_platform_checks_leave_only_latest_installer_smoke_on_prs() -> None:
     jobs = _jobs()
-    for name in ("windows-agent", "windows-model-hub", "windows-control-ipc"):
+    for name in ("windows-model-hub", "windows-control-ipc"):
         assert jobs[name]["if"] == "github.event_name != 'pull_request'"
+    assert jobs["windows-agent"]["if"] == (
+        "needs.changes.outputs.docs_only == 'false' && github.event_name != 'pull_request'"
+    )
 
     smoke = jobs["windows-install-smoke-runners"]
     assert smoke["strategy"]["matrix"]["runner"] == (
@@ -387,7 +390,7 @@ def test_windows_platform_checks_leave_only_latest_installer_smoke_on_prs() -> N
     )
     smoke_steps = {step["name"]: step for step in smoke["steps"] if "name" in step}
     assert "if" not in smoke_steps["Run Windows installer smoke test"]
-    assert jobs["windows-install-smoke"]["needs"] == "windows-install-smoke-runners"
+    assert jobs["windows-install-smoke"]["needs"] == ["changes", "windows-install-smoke-runners"]
     assert jobs["windows-install-smoke"]["if"] == "always()"
 
 
@@ -415,7 +418,7 @@ def test_install_suites_run_independently_without_losing_checks() -> None:
     ):
         assert test_file in test_steps[0]["run"]
     assert "docker info" in test_steps[0]["run"]
-    assert jobs["install-upgrade-regression"]["needs"] == "install-upgrade-shards"
+    assert jobs["install-upgrade-regression"]["needs"] == ["changes", "install-upgrade-shards"]
 
 
 def test_distribution_contracts_consume_same_run_artifacts_without_fencing_other_installers() -> None:
@@ -457,11 +460,11 @@ def test_distribution_contracts_consume_same_run_artifacts_without_fencing_other
     assert 'AVIBE_CORE_SDIST="$(ls dist/avibe_os-*.tar.gz)"' in contracts["run"]
     assert "pytest tests/test_distribution_artifacts.py -v -ra" in contracts["run"]
     assert not contracts.get("continue-on-error")
-    assert jobs["install-upgrade-regression"]["needs"] == "install-upgrade-shards"
+    assert jobs["install-upgrade-regression"]["needs"] == ["changes", "install-upgrade-shards"]
     assert jobs["windows-install-smoke-runners"]["needs"] == "build-linux-artifacts"
     # Branch protection requires `windows-install-smoke`; the per-runner matrix
     # reports under other names, so the required name gates on all of them.
-    assert jobs["windows-install-smoke"]["needs"] == "windows-install-smoke-runners"
+    assert jobs["windows-install-smoke"]["needs"] == ["changes", "windows-install-smoke-runners"]
     assert jobs["windows-install-smoke"]["if"] == "always()"
 
 
@@ -487,41 +490,72 @@ def test_distribution_contract_command_fails_on_errors_and_skips(tmp_path, pytes
     assert (result.returncode == 0) == (pytest_exit == 0 and "skipped" not in summary), result.stdout + result.stderr
 
 
-@pytest.mark.parametrize("result", ["success", "failure", "cancelled", "skipped", ""])
-def test_install_gate_fails_unless_all_suites_succeeded(tmp_path: Path, result: str) -> None:
-    gate = _jobs()["install-upgrade-regression"]
+@pytest.mark.parametrize("gate_name", ["unit-tests", "install-upgrade-regression", "windows-install-smoke"])
+def test_required_gates_accept_skips_only_for_proven_docs_and_fail_closed(tmp_path: Path, gate_name: str) -> None:
+    gate = _jobs()[gate_name]
     assert gate["if"] == "always()"
+    assert "changes" in gate["needs"]
     step, = gate["steps"]
-    assert step["env"] == {"INSTALL_RESULT": "${{ needs['install-upgrade-shards'].result }}"}
-    command = subprocess.run(
-        ["bash", "-e", "-c", step["run"]], cwd=tmp_path,
-        env={**os.environ, "INSTALL_RESULT": result}, capture_output=True, text=True,
-    )
-    assert (command.returncode == 0) == (result == "success"), command.stdout
+    assert step["env"]["SCOPE_RESULT"] == "${{ needs.changes.result }}"
+    assert step["env"]["DOCS_ONLY"] == "${{ needs.changes.outputs.docs_only }}"
+    producer_env = {name: value for name, value in step["env"].items()
+                    if name not in {"SCOPE_RESULT", "DOCS_ONLY"}}
+    producers = set(gate["needs"]) - {"changes"}
+    assert set(producer_env.values()) == {f"${{{{ needs['{name}'].result }}}}" for name in producers}
 
-
-def test_existing_required_gate_fails_unless_every_dependency_succeeded(tmp_path: Path) -> None:
-    gate = _jobs()["unit-tests"]
-    assert gate["if"] == "always()"
-    step, = gate["steps"]
-    assert step["env"] == {
-        "UNIT_RESULT": "${{ needs['unit-test-shards'].result }}",
-        "UI_RESULT": "${{ needs['ui-checks'].result }}",
-        "BROWSER_RESULT": "${{ needs['ui-browser-checks'].result }}",
-    }
-    # The gate checks each dependency independently; a Cartesian product adds
-    # no failure class. Prove all-success and each dependency failing in turn.
-    cases = [dict.fromkeys(step["env"], "success")]
-    for name in step["env"]:
-        for outcome in ("failure", "cancelled", "skipped", ""):
-            cases.append({**cases[0], name: outcome})
-    for results in cases:
+    cases = []
+    for docs_only, expected in (("false", "success"), ("true", "skipped")):
+        good = {"SCOPE_RESULT": "success", "DOCS_ONLY": docs_only,
+                **dict.fromkeys(producer_env, expected)}
+        cases.append((good, True))
+        # Each producer must match the classified scope, independently.
+        for name in producer_env:
+            for outcome in ("success", "failure", "cancelled", "skipped", ""):
+                if outcome != expected:
+                    cases.append(({**good, name: outcome}, False))
+        for scope_result in ("failure", "cancelled", "skipped", ""):
+            cases.append(({**good, "SCOPE_RESULT": scope_result}, False))
+        for invalid in ("", "TRUE", "unknown"):
+            cases.append(({**good, "DOCS_ONLY": invalid}, False))
+    for results, passes in cases:
         result = subprocess.run(
-            ["bash", "-e", "-c", step["run"]],
-            cwd=tmp_path,
-            env={**os.environ, **results},
-            capture_output=True,
-            text=True,
-            check=False,
+            ["bash", "-e", "-c", step["run"]], cwd=tmp_path,
+            env={**os.environ, **results}, capture_output=True, text=True, check=False,
         )
-        assert (result.returncode == 0) == all(value == "success" for value in results.values()), result.stdout
+        assert (result.returncode == 0) == passes, (results, result.stdout, result.stderr)
+
+
+def test_docs_scope_gates_all_work_without_filtering_away_required_checks() -> None:
+    workflow = yaml.safe_load((ROOT / ".github/workflows/lint.yml").read_text())
+    events = workflow[True]  # PyYAML YAML 1.1 reads the Actions `on` key as True.
+    assert events["pull_request"] is None
+    assert not any(key.startswith("paths") for key in events["push"])
+    jobs = workflow["jobs"]
+    required = {"ruff", "unit-tests", "show-router-integration", "memory-insight-contract",
+                "migration-release-guard", "npm-wrapper", "build-linux-artifacts",
+                "install-upgrade-regression", "windows-install-smoke"}
+    assert required <= jobs.keys()
+    gates = {"unit-tests", "install-upgrade-regression", "windows-install-smoke"}
+    for name, job in jobs.items():
+        if name == "changes" or name in gates:
+            continue
+        # Every expensive root depends on scope; artifact consumers may depend
+        # on the gated producer. No new job can silently evade docs selection.
+        needs = job.get("needs", [])
+        needs = [needs] if isinstance(needs, str) else needs
+        if "changes" in needs:
+            assert "needs.changes.outputs.docs_only == 'false'" in job["if"]
+        else:
+            assert needs == ["build-linux-artifacts"], name
+            assert "always()" not in job.get("if", "")
+        assert not job.get("continue-on-error")
+    scope = jobs["changes"]
+    assert scope["outputs"]["docs_only"] == "${{ steps.scope.outputs.docs_only }}"
+    assert not scope.get("if") and not scope.get("continue-on-error")
+    command, = [s for s in scope["steps"] if s.get("id") == "scope"]
+    assert command["run"] == "python3 scripts/ci_docs_only.py"
+    assert not command.get("continue-on-error")
+    guidance, = [s for s in scope["steps"] if "test_repository_guidance.py" in s.get("run", "")]
+    assert guidance["if"] == "steps.scope.outputs.docs_only == 'true'"
+    assert not guidance.get("continue-on-error")
+    assert "--noconftest" in guidance["run"]
