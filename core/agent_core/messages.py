@@ -601,6 +601,21 @@ def text(value: str) -> TextBlock:
     return TextBlock(text=value)
 
 
+def has_reply(message: AssistantMessage) -> bool:
+    """Whether a response says something to the user: non-blank text, or an image a hosted call generated.
+
+    The one rule for "the model replied", read by the loop's empty-reply test and
+    by a final row's outcome. A generated image is a reply on its own: a model
+    asked for a picture may answer with the picture alone.
+    """
+    for block in message.content:
+        if isinstance(block, TextBlock) and block.text and block.text.strip():
+            return True
+        if isinstance(block, HostedToolBlock) and block.record.status == "completed" and block.record.images:
+            return True
+    return False
+
+
 # --- persisted form ---------------------------------------------------------
 #
 # Two owners, so no field can be checked differently from another:

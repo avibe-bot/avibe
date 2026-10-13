@@ -129,11 +129,11 @@ from core.agent_core.messages import (
     AssistantMessage,
     Message,
     Origin,
-    TextBlock,
     ToolCallBlock,
     ToolResultMessage,
     Usage,
     UserMessage,
+    has_reply,
     message_to_dict,
     text,
     usage_to_dict,
@@ -925,9 +925,7 @@ class Agent:
                         cause=decided,
                     )
                 response, final = await self._commit_model_message(message, emit)
-                empty_reply = final and not any(
-                    isinstance(block, TextBlock) and block.text and block.text.strip() for block in message.content
-                )
+                empty_reply = final and not has_reply(message)
                 if empty_reply:
                     decided = self._outcome.primary("error")
                     await self._error(
