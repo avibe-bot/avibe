@@ -140,6 +140,9 @@ The secret metadata payload (`_meta_payload`, REST, and `vibe vault list/find
   `NAME.field` and authorize the secret.
 - Every avault entry carries `name` = record name, that record's `envelope`,
   and `tier` = the secret's protection.
+- Completed delivery bookkeeping uses the secret/field identities captured in
+  the pre-delivery plan, not a second record lookup. Removing or renaming a
+  field while a child runs must not drop its audit or the rest of the batch.
 - Use counts stay per secret. The delivery audit lists the delivered fields.
 
 ## 7. Authorization
@@ -212,7 +215,8 @@ The browser form starts with those rows. The user may remove rows, and every
 submitted field needs a value. Field-aware provision replies (asynchronous
 callbacks, synchronous `--wait`, and already-existing results) list current field
 labels and the default alias from the created secret, not the requested spec,
-and share the same field-ref delivery hint.
+and share the same field-ref delivery hint. A user-created multi-field shape
+also receives this hint when the original request had no field spec.
 
 ## 10. UI
 
@@ -223,7 +227,13 @@ and share the same field-ref delivery hint.
 - A protected create seals every field in the same sandbox session and sends
   one create request. Vault establishment fields are sent once.
 - Edit: replace any field's value, add or remove extra fields, and rename the
-  default field. Name, kind, and protection stay read-only.
+  default field. Name, kind, and protection stay read-only. After mount the
+  editor owns current server metadata and drafts: own-write responses or
+  sequenced authoritative refetches update truth, while changed parent props
+  and Vault events trigger refetches rather than directly replacing it. Only
+  the latest refetch may apply. Draft reconciliation preserves retained labels,
+  moves a renamed default draft, notices removed drafts, and preserves a dirty
+  label input unless its own rename succeeds.
 - List and detail show field names when a secret has more than one field.
 - Protected reveal works per field.
 - The approval card groups records by secret and shows field names.
