@@ -157,22 +157,27 @@ The secret metadata payload (`_meta_payload`, REST, and `vibe vault list/find
 ## 8. API
 
 - `POST /api/vault/secrets` accepts an optional `default_field` and optional
-  `fields`: `[{"name", "blind_box"}]` for standard secrets or
-  `[{"name", "sealed"}]` for protected secrets. The top-level `blind_box` or
+  `fields`: `[{"name", "record", "blind_box"}]` for standard secrets or
+  `[{"name", "record", "sealed"}]` for protected secrets. The top-level `blind_box` or
   `sealed` is still the default field. For standard secrets Python seals each
   field with `avault seal --name <record> --blind-box`. Keypairs reject `fields`.
-- `PUT /api/vault/secrets/{name}/fields/{field}` takes `{"blind_box"}` or
-  `{"sealed"}`. For the default field it replaces the default envelope.
+- `PUT /api/vault/secrets/{name}/fields/{field}` takes `{"record", "blind_box"}`
+  or `{"record", "sealed"}`. For the default field it replaces the default envelope.
   Otherwise it adds the field (appended) or replaces its value. It returns the
   masked metadata.
 - `DELETE /api/vault/secrets/{name}/fields/{field}` removes an extra field. The
   default field cannot be removed (409).
 - `PATCH /api/vault/secrets/{name}` also accepts `default_field` to rename the
-  default field. The name must be valid and unused.
+  default field. The name must be valid and unused; this is pure metadata and
+  leaves envelope versions, pending requests, and active grants unchanged.
 - `POST /api/vault/secrets/{name}/reveal-context` accepts an optional `field`
   and returns the context and envelope of that record.
+- Every extra create field and field PUT declares the `record` name used to
+  seal it; the server rejects a mismatch with its current field resolution as
+  409 `record_mismatch` without storing anything, and the UI re-reads metadata
+  and re-seals once (the top-level create record is implicitly `NAME`).
 - New error codes: `invalid_field_name`, `field_exists`, `field_not_found`,
-  `too_many_fields`, `fields_not_supported`.
+  `too_many_fields`, `fields_not_supported`, `record_mismatch`.
 - Plaintext rejection, resource-access checks, SSE updates, and audit apply to
   every new path. Field changes audit as `updated` with
   `{"field": "<name>", "op": "add" | "replace" | "remove"}`.
