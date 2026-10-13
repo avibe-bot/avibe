@@ -46,7 +46,7 @@ def _stub_runtime_prepare_dependencies(
     tmux_result=None,
     git_result=None,
 ):
-    calls = {"askill": [], "avault": [], "tmux": [], "git": []}
+    calls = {"askill": [], "avault": [], "tmux": [], "git": [], "model_hub_engine": []}
 
     def fake_askill(offline=False, force=False):
         calls["askill"].append({"offline": offline, "force": force})
@@ -64,11 +64,16 @@ def _stub_runtime_prepare_dependencies(
         calls["git"].append({"offline": offline, "force": force})
         return git_result or {"ok": True, "installed": True}
 
+    def fake_model_hub_engine(offline=False, force=False):
+        calls["model_hub_engine"].append({"offline": offline, "force": force})
+        return {"ok": True, "installed": True}
+
     monkeypatch.setattr(cli, "_ensure_askill_during_prepare", fake_askill)
     monkeypatch.setattr(cli, "_ensure_avault_during_prepare", fake_avault)
     monkeypatch.setattr(cli, "_ensure_tmux_during_prepare", fake_tmux)
     monkeypatch.setattr(cli, "_ensure_git_during_prepare", fake_git)
     monkeypatch.setattr(cli, "_ensure_ripgrep_during_prepare", lambda **_kwargs: {"ok": True})
+    monkeypatch.setattr(cli, "_ensure_model_hub_engine_during_prepare", fake_model_hub_engine)
     return calls
 
 

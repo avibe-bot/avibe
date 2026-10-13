@@ -77,6 +77,21 @@ def save_config(tmp_path):
     return _save_config(tmp_path)
 
 
+def permissions_backend_unreachable(monkeypatch) -> None:
+    """Answer every Permissions backend read the way an unreachable backend does.
+
+    A paired ``_save_config`` names ``https://backend.test``, which no DNS answers,
+    and resolving a Show Page's ownership on such an instance asks that backend.
+    """
+
+    from vibe import permissions
+
+    def unreachable(config=None):
+        raise permissions.PermissionsUnavailableError("permissions_backend_unavailable")
+
+    monkeypatch.setattr(permissions, "get_current_permissions", unreachable)
+
+
 def _mock_interface(monkeypatch, ip: str, prefix: int, name: str = "en0") -> None:
     address = ipaddress.ip_address(ip)
     family = socket.AF_INET if address.version == 4 else socket.AF_INET6

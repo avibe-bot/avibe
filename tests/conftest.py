@@ -72,7 +72,7 @@ import psutil
 import pytest
 from sqlalchemy.exc import SAWarning
 
-from tests import process_reaper
+from tests import network_guard, process_reaper
 from tests.fake_pid_helpers import PID_LIMIT
 
 REAL_USER_HOME = Path.home()
@@ -207,9 +207,22 @@ def _record_test_processes(request):
     yield
 
 
+@pytest.hookimpl(tryfirst=True)
+def pytest_runtest_setup(item):
+    """Open the test's network window before any fixture it needs is set up (tests/network_guard.py)."""
+
+    marker = item.get_closest_marker("allow_network")
+    if marker is not None and not (marker.kwargs.get("reason") or marker.args):
+        pytest.fail("@pytest.mark.allow_network needs a reason")
+    network_guard.begin_test(item.nodeid, allowed=marker is not None)
+
+
 @pytest.hookimpl(wrapper=True)
 def pytest_runtest_teardown(item):
-    """Reap after every finalizer of the test has run, so a process a fixture stops is gone first."""
+    """Reap after every finalizer of the test has run, so a process a fixture stops is gone first.
+
+    The network window closes at the same point, so a refusal in any finalizer is the test's too.
+    """
 
     global _active_test_processes
     try:
@@ -219,6 +232,9 @@ def pytest_runtest_teardown(item):
         processes = item.stash.get(_TEST_PROCESSES, None)
         if processes is not None:
             _reaped_processes.extend(f"{item.nodeid}: {each}" for each in processes.reap())
+        refused = network_guard.end_test()
+        if refused:
+            pytest.fail("refused network access past loopback:\n" + "\n".join(refused), pytrace=False)
 
 
 @pytest.fixture
@@ -1063,9 +1079,12 @@ def _real_home_tripwire(event: str, args: tuple) -> None:
 
 
 sys.addaudithook(_real_home_tripwire)
+# Installed here, before any product module is imported, for the same reasons.
+sys.addaudithook(network_guard.audit)
 
 
 _REPORTED_WRITES = pytest.StashKey[int]()
+_REPORTED_NETWORK_REFUSALS = pytest.StashKey[int]()
 _running_session: pytest.Session | None = None
 
 
@@ -1094,6 +1113,12 @@ def pytest_terminal_summary(terminalreporter) -> None:
         terminalreporter.section("writes under the real Avibe home were refused", red=True)
         for message in written:
             terminalreporter.line(message, red=True)
+    refused = list(network_guard.refused_outside_tests)
+    terminalreporter.config.stash[_REPORTED_NETWORK_REFUSALS] = len(refused)
+    if refused:
+        terminalreporter.section("network access past loopback was refused outside any test", red=True)
+        for message in refused:
+            terminalreporter.line(message, red=True)
 
 
 @pytest.hookimpl(trylast=True)
@@ -1107,7 +1132,9 @@ def pytest_unconfigure(config: pytest.Config) -> None:
     shutil.rmtree(_SESSION_HOME, ignore_errors=True)
     for message in _real_home_writes[config.stash.get(_REPORTED_WRITES, 0) :]:
         sys.stderr.write(f"refused a write under the real Avibe home: {message}\n")
-    if _real_home_writes:
+    for message in network_guard.refused_outside_tests[config.stash.get(_REPORTED_NETWORK_REFUSALS, 0) :]:
+        sys.stderr.write(f"refused network access past loopback outside any test: {message}\n")
+    if _real_home_writes or network_guard.refused_outside_tests:
         _fail_running_session()
 
 
