@@ -5515,6 +5515,13 @@ def test_backend_terminal_failure_overrides_gateway_success(
         **({"backend_error_detail": expected_detail} if expected_detail else {}),
     }
     _assert_valid("turn-provenance.schema.json", record)
+    if error_kind == "stalled":
+        # Backend-only callbacks have no phase evidence, so neither boolean is
+        # valid even when the rest of a record is otherwise unchanged.
+        for phase in (False, True):
+            invalid = {**record, "terminal_error": {**record["terminal_error"], "stream_started": phase}}
+            with pytest.raises(AssertionError):
+                _assert_valid("turn-provenance.schema.json", invalid)
 
 
 @pytest.mark.parametrize("later_request", [False, True])

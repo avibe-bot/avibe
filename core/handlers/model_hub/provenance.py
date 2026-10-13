@@ -2220,11 +2220,13 @@ class TurnCorrelationRegistry:
                 return
             if trace.agent == "vibey" and channel != "hub":
                 raise ValueError("vibey attempts require the hub channel")
-            # Admission supersedes earlier supply failures, not their attempt history.
+            # A newly admitted attempt supersedes earlier request/supply
+            # terminal facts, not completed fallback history. Otherwise an
+            # interrupted successor would be blamed on the preceding request.
             trace.model_supply_state = None
             trace.blockers = []
-            if trace.terminal_outcome is not None and trace.terminal_outcome.outcome in {"no_candidate", "exhausted"}:
-                trace.terminal_outcome = None
+            trace.terminal_error = None
+            trace.terminal_outcome = None
             trace.pending_attempts[request_id] = AttemptIdentity(
                 source_id=source_id,
                 resolved_model_id=resolved_model_id,
@@ -2302,10 +2304,10 @@ class TurnCorrelationRegistry:
                 # The native failure is reporting the gateway's completed
                 # failure, not rejecting content that the gateway served.
                 return
-            trace.outcome_frozen = True
             if trace.terminal_error is not None and not trace.pending_attempts:
                 # The same for a completed failure that has no copy. A request
                 # still open after it would supersede it, but none is.
+                trace.outcome_frozen = True
                 return
             identity = trace.pending_attempt
             payload = (
@@ -2316,6 +2318,9 @@ class TurnCorrelationRegistry:
             if payload is None or payload.get("channel") != "hub":
                 return
             # The backend rejected the turn's result, not one request's.
+            # A callback without an attributed payload must not freeze out
+            # gateway evidence that has yet to arrive.
+            trace.outcome_frozen = True
             trace.pending_attempts.clear()
             trace.served = None
             trace.terminal_error = {

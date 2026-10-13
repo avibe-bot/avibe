@@ -72,6 +72,29 @@ service restart, or merge is authorized.
   remain the asynchronous delivery gates. No live provider/Incus regression was
   run; this change introduces no model request or retry behavior.
 
+## Independent audit follow-up
+
+Read-only audit of implementation `53e7da45a` found three boundary defects;
+owner reproduced them on the pushed `22b9342c4` before editing. Four new checks
+failed for their intended reasons (one case has two projection variants):
+
+1. A newly admitted request retained the preceding request's terminal error
+   and copy projection, so an FSM drop could report the wrong Source. New
+   actual attempt admission now atomically retires both terminal artifacts,
+   while retaining fallback history and the existing frozen/Stop veto.
+2. An unattributed backend callback froze the trace before checking for a
+   pending/served payload, hiding subsequent gateway evidence. Such a callback
+   is now a no-op; only a concrete terminal or a recordable backend error freezes.
+3. The schema allowed boolean phase on backend_error despite writing null.
+   Its positive branch now requires null; both boolean counterexamples fail.
+
+The owner chose these local corrections, not a lifecycle or retry redesign.
+The three changed correlation suites pass **889 tests**, and the two Vibey
+adapter/context suites pass **158 tests** after the changes. Ruff and authority
+closure pass. GitHub Codex passed the previous head `22b9342c4`; a new exact-head
+review is still required after this correction. No GitHub findings-bearing head
+has recurred; the independent audit findings were reconciled together once.
+
 ## Known-by-design
 
 - Records remain generation 11 as with earlier additive diagnostic additions;

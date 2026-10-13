@@ -252,6 +252,9 @@
             "properties": { "reason": { "const": "backend_error" } },
             "required": ["reason"]
           },
+          "then": {
+            "properties": { "stream_started": { "const": null } }
+          },
           "else": {
             "properties": { "stream_started": { "type": "boolean" } },
             "not": {

@@ -1363,7 +1363,11 @@ turn that the gateway did not end itself
 it on the request still open, else on the served attempt. A gateway terminal already
 recorded for the turn, a copy projection or a concrete `terminal_error` with or
 without one, is kept instead, unless a later request was still open when the backend
-failed. The record carries only the backend's facts: optional `error_kind`, the
+failed. Admission of a new actual attempt atomically retires the preceding
+request's terminal error and copy projection, keeping its fallback history.
+An unattributed callback with neither a payload nor a concrete gateway terminal
+is a no-op; it must not freeze out later gateway evidence.
+The record carries only the backend's facts: optional `error_kind`, the
 backend's typed failure kind from its closed vocabulary (Vibey supplies its named
 `AgentError` kind, such as `stalled`, for a failure the served Source produced; other
 backends supply none), and optional `backend_error_detail`, the backend's diagnostic

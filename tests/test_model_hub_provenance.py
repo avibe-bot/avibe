@@ -16,7 +16,7 @@ from core.handlers.model_hub.provenance import (
 )
 from core.handlers.model_hub.rpc import dispatch_model_hub_rpc
 from core.handlers.model_hub.service import ModelHubError
-from core.run_settlement import SETTLED_BY_TERMINAL_RESULT, SETTLED_BY_STOPPED
+from core.run_settlement import SETTLED_BY_TERMINAL_RESULT, SETTLED_BY_STOPPED, SETTLED_BY_NO_TERMINAL_RESULT
 from modules.agents.model_hub import ModelHubLaunch, ModelHubRuntimeRouter, bind_launch
 from tests.test_model_hub_resolution import _config, _service, _source
 from tests.test_model_hub_routing_modes import MODEL, _loaded_catalog_config, _sparse_config
@@ -95,6 +95,40 @@ def test_recovery_callbacks_are_material_post_lock_and_snapshots_are_copies(tmp_
     registry.update_recovery("turn-live", backend="codex", request_id="two", snapshot=None)
     assert len(calls) == 4 and calls[-1] == []
     assert not registry.store.path.exists()
+
+
+def test_backend_callback_without_an_attempt_does_not_freeze_gateway_evidence(tmp_path):
+    registry = _live_registry(tmp_path)
+    registry.fail_hub_attempt("turn-live", diagnostic="backend exited before attribution")
+    projection = produce_turn_outcome("turn.engine_down")
+    registry.record_turn_outcome("turn-live", projection)
+    assert registry.terminal_projection("turn-live", backend="codex") == projection
+    assert not registry._traces["turn-live"].outcome_frozen
+
+
+@pytest.mark.parametrize("with_projection", [False, True])
+def test_new_attempt_retires_previous_request_terminal_before_fsm_drop(tmp_path, with_projection):
+    registry = _live_registry(tmp_path)
+    registry.begin_attempt(
+        "turn-live", source_id="src_previous1", resolved_model_id=MODEL, channel="hub", via_mapping=False,
+    )
+    outcome = RawCallOutcome(
+        kind=RawOutcomeKind.HTTP_ERROR if with_projection else RawOutcomeKind.PROTOCOL_ERROR,
+        http_status=400 if with_projection else 200,
+        error_code="invalid_request_error" if with_projection else None,
+        redacted_message=None, stream_started=False, model_id=MODEL, source_id="src_previous1",
+    )
+    registry.finish_attempt("turn-live", outcome=outcome, decision=classify_outcome(outcome))
+    if with_projection:
+        registry.record_turn_outcome("turn-live", produce_turn_outcome("turn.request_nonfallback"))
+    registry.begin_attempt(
+        "turn-live", source_id="src_successor1", resolved_model_id=MODEL, channel="hub", via_mapping=False,
+    )
+    assert registry._traces["turn-live"].terminal_outcome is None
+    registry.settle("turn-live", settled_by=SETTLED_BY_NO_TERMINAL_RESULT)
+    terminal = registry.store.get("turn-live")["terminal_error"]
+    assert terminal["source_id"] == "src_successor1"
+    assert terminal["reason"] == "stream_interrupted"
 
 
 def test_native_hub_failure_keeps_the_gateway_terminal_projection_readable(tmp_path):
