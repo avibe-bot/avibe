@@ -251,7 +251,7 @@ async def test_an_anthropic_executor_is_buffered_and_keeps_the_providers_results
     sent = service.adapter.requests[0]
     assert sent.protocol == "anthropic"
     assert set(sent) == {"model", "max_tokens", "system", "messages", "tools"}
-    assert sent["tools"] == [{"type": "web_search_20250305", "name": "web_search"}]
+    assert sent["tools"] == [{"type": "web_search_20250305", "name": "web_search", "max_uses": 5}]
     assert answer["record"] == {"status": "completed", "sources": [
         {"url": PAGE_A, "title": "Releases", "page_age": "0 days ago"},
         {"url": PAGE_B, "title": "v8.0.27", "snippet": "v8.0.27 released 2026-10-12"},
