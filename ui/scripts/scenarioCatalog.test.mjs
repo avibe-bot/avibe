@@ -119,6 +119,7 @@ describe('UI evidence resolution', () => {
     expect(resolveUiEvidence([pointer('MH-ROW-G', 'MH-ROW-C')], collected)).toEqual([]);
     expect(resolveUiEvidence([pointer('MH-ROW-D', 'MH-ROW-A')], collected, ids)).toEqual([]);
     expect(resolveUiEvidence([pointer('MH-ROW-G', 'MH-ROW-B')], collected)).toHaveLength(1);
+    expect(resolveUiEvidence([pointer('MH-ROW-G', '')], collected)).toHaveLength(1);
   });
 
   it('resolves a parameterized case through the inputs the citation names', () => {
@@ -173,9 +174,15 @@ describe('UI evidence resolution', () => {
         related_tests: ['ui/src/e.test.tsx::names its neighbour', 'tests/test_e.py::test_e'],
         supporting_tests: ['ui/src/f.test.tsx::supports it'],
       },
+      {
+        id: 'MH-PARTIAL',
+        status: 'partial',
+        test: 'tests/test_f.py::test_f',
+        partial_evidence: { covers: 'the UI half', test: 'ui/src/g.test.tsx::MH-PARTIAL' },
+      },
       { id: 'MH-GAP', status: 'gap', test: null },
     ];
-    const asked = ['MH-UI', 'MH-SCRIPT', 'MH-FILE', 'MH-CONTRACT', 'MH-POINTER', 'MH-POINTER'];
+    const asked = ['MH-UI', 'MH-SCRIPT', 'MH-FILE', 'MH-CONTRACT', 'MH-POINTER', 'MH-POINTER', 'MH-PARTIAL'];
     const rowsOf = (catalog) => uiEvidenceRows({ ...catalog, scenarios });
 
     expect(rowsOf({ status_legend: { covered: { test_required: true } } }).map((row) => row.id)).toEqual(asked);

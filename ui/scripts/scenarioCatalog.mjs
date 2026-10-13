@@ -53,7 +53,8 @@ const POINTER_KEYS = ['related_tests', 'supporting_tests'];
  * the UI half of a row owned by a pytest scenario — and reading only the first
  * left five fully-written citations unasked, which is the legend hole again in
  * another key. It cost four of those five: three named cases #1401 deleted on
- * 2026-08-14, unnoticed because nothing read them.
+ * 2026-08-14, unnoticed because nothing read them. `partial_evidence` is a third
+ * such key and is read for the same reason.
  *
  * `canonical_tests` stays unread, and so does a pointer key's bare file, and
  * that is the same rule rather than an exception to it: they name a file and no
@@ -71,6 +72,11 @@ export const uiEvidenceRows = (catalog) =>
     const citations = [];
     if (typeof row.test === 'string' && isUiEvidence(row.test)) {
       const [file, cited = null] = row.test.split('::');
+      citations.push({ id: row.id, file, cited });
+    }
+    const partial = row.partial_evidence;
+    if (partial && typeof partial.test === 'string' && isUiEvidence(partial.test)) {
+      const [file, cited = null] = partial.test.split('::');
       citations.push({ id: row.id, file, cited });
     }
     const contract = row.ui_contract;
@@ -184,7 +190,8 @@ export const resolveUiEvidence = (rows, collected, ids = new Set(rows.map((row) 
     if (row.pointer) {
       // A pointer only has to lead somewhere live: it may name a group of cases,
       // such as every case tagged with an ID, because it identifies no evidence.
-      if (matches.length === 0) {
+      // An empty name is contained in every case's, so it leads nowhere either.
+      if (matches.length === 0 || !row.cited.trim()) {
         problems.push(
           `${where}: its ${row.pointer} entry names \`${terms.join('` + `')}\` in ${row.file}, and vitest collects no `
             + 'case by that name — a renamed or removed case leaves the pointer leading nowhere',

@@ -8,13 +8,16 @@ or deleted tests left dead citations everywhere else: related pointers that
 named nothing, and nine rows across two catalogs reading ``covered`` while the
 case they cited no longer existed.
 
-A pytest citation resolves when its file holds the case: ``file::Class::method``,
-or ``file::name`` naming a module-level test, a test class, or a method of a
-class in that file, which is how several catalogs cite unittest cases. A
-parametrized id resolves through its function. Pointer keys may also name a
-bare file, which must exist. UI (vitest) citations are resolved against
-vitest's own collection by ``ui/scripts/validate-scenario-catalog.mjs``; here
-only their file is checked.
+A pytest citation resolves when its file holds a case pytest collects:
+``file::Class::method``, or ``file::name`` naming a module-level test, a test
+class, or a test method of a class in that file, which is how several catalogs
+cite unittest cases. A helper or a plain class is no case. A parametrized id
+resolves through its function. An evidence key must name a case (STANDARD.md
+§4): a bare file stays collected for whatever else cites it, so it evidences
+no row in particular. Pointer keys may name a bare file, which must exist.
+
+UI (vitest) citations are resolved against vitest's own collection by
+``ui/scripts/validate-scenario-catalog.mjs``; here only their file is checked.
 """
 
 from __future__ import annotations
@@ -33,27 +36,45 @@ _POINTER_KEYS = ("related_tests", "supporting_tests")
 
 
 @cache
-def _test_definitions(path: Path) -> tuple[frozenset[str], dict[str, frozenset[str]]]:
-    """The module-level functions of ``path``, and each class's own methods."""
+def _collectable_cases(path: Path) -> tuple[frozenset[str], dict[str, frozenset[str]]]:
+    """The test functions pytest collects from ``path``, and each test class's test methods.
+
+    pytest's default rules, which this repository does not change: a module-level
+    ``test*`` function, and a ``test*`` method of a ``Test*`` class or of a
+    ``unittest.TestCase`` subclass, directly or through another class in the file.
+    """
 
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-    functions = frozenset(
-        node.name for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-    )
-    classes = {
-        node.name: frozenset(
-            member.name
-            for member in node.body
-            if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef))
+    classes = {node.name: node for node in tree.body if isinstance(node, ast.ClassDef)}
+
+    def base_names(node: ast.ClassDef) -> list[str]:
+        return [base.attr if isinstance(base, ast.Attribute) else getattr(base, "id", "") for base in node.bases]
+
+    def is_test_case(name: str, seen: frozenset[str] = frozenset()) -> bool:
+        node = classes.get(name)
+        if node is None or name in seen:
+            return False
+        return any(
+            base.endswith("TestCase") or is_test_case(base, seen | {name}) for base in base_names(node)
         )
-        for node in tree.body
-        if isinstance(node, ast.ClassDef)
+
+    def test_names(body: list[ast.stmt]) -> frozenset[str]:
+        return frozenset(
+            node.name
+            for node in body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test")
+        )
+
+    test_classes = {
+        name: test_names(node.body)
+        for name, node in classes.items()
+        if name.startswith("Test") or is_test_case(name)
     }
-    return functions, classes
+    return test_names(tree.body), test_classes
 
 
 def _holds_case(path: Path, name: str) -> bool:
-    functions, classes = _test_definitions(path)
+    functions, classes = _collectable_cases(path)
     parts = name.partition("[")[0].split("::")
     if len(parts) == 2:
         return parts[1] in classes.get(parts[0], frozenset())
@@ -84,7 +105,7 @@ def _catalogs() -> list[Path]:
 
 
 @pytest.mark.parametrize("catalog", _catalogs(), ids=lambda path: path.parent.name)
-def test_every_catalog_citation_names_a_case_that_exists(catalog: Path) -> None:
+def test_every_catalog_citation_resolves_to_a_case(catalog: Path) -> None:
     rows = yaml.safe_load(catalog.read_text(encoding="utf-8")).get("scenarios") or []
     dead: list[str] = []
     for row in rows:
@@ -95,8 +116,10 @@ def test_every_catalog_citation_names_a_case_that_exists(catalog: Path) -> None:
                 continue
             path_text, separator, name = reference.partition("::")
             path = REPO_ROOT / path_text
-            if not path.is_file():
+            if key not in _POINTER_KEYS and not name.strip():
+                dead.append(f"{where} (evidence must name a case, not only its file)")
+            elif not path.is_file():
                 dead.append(f"{where} (no such file)")
             elif separator and path.suffix not in _UI_SUFFIXES and not _holds_case(path, name):
                 dead.append(f"{where} (no such case in the file)")
-    assert not dead, f"{catalog.relative_to(REPO_ROOT)} cites tests that do not exist:\n" + "\n".join(dead)
+    assert not dead, f"{catalog.relative_to(REPO_ROOT)} has citations that resolve to no case:\n" + "\n".join(dead)

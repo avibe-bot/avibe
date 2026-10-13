@@ -3740,6 +3740,8 @@ scenarios:
     # halves are proved by test_update_session_serializes_rename_before_archive and
     # test_update_session_serializes_route_change_before_archive.
     test: tests/test_sqlite_sessions_store.py::test_update_session_serializes_rename_before_archive
+    related_tests:
+      - tests/test_sqlite_sessions_store.py::test_update_session_serializes_route_change_before_archive
   - id: HFR-281
     name: >-
       a completion hook queued inside a stamp names an Agent the catalog still has
