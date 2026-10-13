@@ -796,6 +796,31 @@ def test_the_writer_reads_the_price_table_once_off_the_loop_and_tiers_calls_made
     assert [(row.get("context_tier", 0), row["requests"]) for row in rows] == [(0, 2), (272_000, 3)]
 
 
+def test_calls_waiting_for_the_first_price_table_stay_bounded(tmp_path: Path) -> None:
+    """MH-USAGE-BACKEND-010: a first price-table read that hangs cannot grow the backlog past a bound.
+
+    Undecided calls each keep their own row, so past the bound a call is folded
+    in the base tier at once, by identity, like any other.
+    """
+
+    from core.handlers.model_hub.usage import _UNDECIDED_LIMIT
+
+    async def exercise() -> None:
+        writer = UsageWriter(_ledger(tmp_path))
+        for _ in range(_UNDECIDED_LIMIT + 300):
+            writer.record(
+                source_id="src_a",
+                model_id="gpt-6-astra",
+                usage=ProtocolUsageReport(input_tokens=1_000),
+                at=NOW,
+                price_table=lambda: (_ for _ in ()).throw(AssertionError("read only on the writer thread")),
+            )
+        assert (len(writer._undecided), len(writer._pending)) == (_UNDECIDED_LIMIT, 1)
+        writer._flush.cancel()
+
+    asyncio.run(exercise())
+
+
 @pytest.mark.parametrize(
     ("capture_zone", "flush_zone", "switch_between_calls", "expected_days"),
     [

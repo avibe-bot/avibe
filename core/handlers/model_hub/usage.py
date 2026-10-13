@@ -2052,6 +2052,12 @@ class _QueuedRow:
     undecided: bool = False
 
 
+# Calls that may wait for the first price table, each on its own row because
+# their tier is not known yet. Past this, a call is folded in the base tier at
+# once: the backlog stays bounded by identities even if that first read hangs.
+_UNDECIDED_LIMIT: Final = 256
+
+
 class UsageWriter:
     """Async ownership of every ledger write, so nothing can take one along.
 
@@ -2140,7 +2146,7 @@ class UsageWriter:
             source_id=source_id, model_id=model_id, usage=usage, at=at, context_tier=context_tier or 0
         )
         done = asyncio.get_running_loop().create_future
-        if context_tier is None:
+        if context_tier is None and len(self._undecided) < _UNDECIDED_LIMIT:
             queued = _QueuedRow(call=call, done=done(), undecided=True)
             self._undecided.append(queued)
         elif (queued := self._pending.get(call.fold_key)) is None:
