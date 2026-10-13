@@ -672,11 +672,8 @@ def test_direct_claude_keychain_status_restores_readiness_without_secret_read(
     )
     assert not any(path.exists() for path in get_claude_credentials_paths())
 
-    def run(command, **kwargs):
+    def run(command, **_kwargs):
         assert command[1:] == ["auth", "status", "--json"]
-        assert kwargs["timeout"] == 3
-        assert kwargs["stdin"] == subprocess.DEVNULL
-        assert not kwargs["check"]
         # An independent migration owner cannot enter while status is reading.
         with pytest.raises(NativeMigrationBlockedError, match="native_auth_in_progress"):
             NativeCredentialLease(("claude",)).acquire(recovery=True)
@@ -684,7 +681,7 @@ def test_direct_claude_keychain_status_restores_readiness_without_secret_read(
 
     process = Mock(side_effect=run)
     monkeypatch.setattr(api, "_read_claude_cli_oauth_signed_in", _REAL_CLAUDE_STATUS_PROBE)
-    monkeypatch.setattr(subprocess, "run", process)
+    monkeypatch.setattr(api, "_run_claude_auth_status", process)
     state = asyncio.run(api.get_backend_connection("claude"))
     assert state["auth"] == expected
     assert state["ready"] is (expected == "subscription")
@@ -780,7 +777,7 @@ def test_direct_claude_status_failure_is_uncertain_and_releases_lease(
         "found", "fixture-revision",
     )
     monkeypatch.setattr(api, "_read_claude_cli_oauth_signed_in", _REAL_CLAUDE_STATUS_PROBE)
-    monkeypatch.setattr(subprocess, "run", Mock(side_effect=error))
+    monkeypatch.setattr(api, "_run_claude_auth_status", Mock(side_effect=error))
     state = asyncio.run(api.get_backend_connection("claude"))
     assert state["auth"] == "unknown" and not state["entry_eligible"]
     assert "fixture-" not in json.dumps(state)

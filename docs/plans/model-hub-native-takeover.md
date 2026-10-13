@@ -329,8 +329,12 @@ or a promise that every selected model is available.
 Direct Claude retains its existing bounded `auth status --json` observation
 for Keychain-backed sign-in; opaque Keychain metadata cannot distinguish an
 OAuth grant from an unrelated MCP-only container. The native credential lease
-covers that query and its thread completion, with custody checked before
-launch. This is not a login, refresh or inference request. Hub connection
+covers that query and its thread completion, with custody checked before launch.
+The status subprocess uses a 10-second observation budget followed by a
+10-second completion grace before it requests termination, so a slow OAuth
+refresh can finish persisting its rotated credential; forceful termination is
+reserved for a process that also ignores the longer graceful phases. This is
+not a login, refresh or inference request. Hub connection
 observation never launches this query or borrows an unrelated native login.
 
 Only Sources referenced by the backend's effective source order or explicit

@@ -8,6 +8,7 @@ import os
 import platform
 import re
 import shutil
+import signal
 import socket
 import ssl
 import stat
@@ -10512,6 +10513,11 @@ def _restart_backend(name: str, *, metadata: Optional[dict[str, Any]] = None) ->
 
 _VALID_AUTH_MODES = {"oauth", "api_key"}
 _VALID_CLAUDE_CREDENTIAL_TYPES = {"api_key", "auth_token"}
+_CLAUDE_AUTH_STATUS_TIMEOUT_SECONDS = 10.0
+_CLAUDE_AUTH_STATUS_COMPLETION_GRACE_SECONDS = 10.0
+_CLAUDE_AUTH_STATUS_TERMINATION_GRACE_SECONDS = 5.0
+_CLAUDE_AUTH_STATUS_DRAIN_TIMEOUT_SECONDS = 5.0
+_CLAUDE_AUTH_STATUS_LABEL = "Claude auth status"
 
 
 def _mask_api_key(api_key: str | None) -> str | None:
@@ -10538,6 +10544,71 @@ def _mask_api_key(api_key: str | None) -> str | None:
     return f"{'•' * 6}{last4}"
 
 
+def _run_claude_auth_status(
+    command: list[str],
+    *,
+    env: dict[str, str] | None,
+    cwd: str | None,
+) -> subprocess.CompletedProcess[str] | None:
+    """Run Claude's auth status with a completion grace before termination.
+
+    Claude may refresh and persist a rotating OAuth credential while handling a
+    read-looking status command. The first deadline is therefore only a soft
+    observation budget: after it expires, let the child finish without sending
+    a signal. Only a longer hard limit starts graceful termination, followed by
+    a final forceful drain for a genuinely stuck process.
+    """
+
+    try:
+        process = subprocess.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            env=env,
+            cwd=cwd,
+            **isolated_subprocess_kwargs(),
+        )
+    except (FileNotFoundError, OSError):
+        return None
+
+    try:
+        try:
+            stdout, _ = process.communicate(timeout=_CLAUDE_AUTH_STATUS_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired:
+            logger.info(
+                "%s exceeded its soft timeout; allowing completion before termination",
+                _CLAUDE_AUTH_STATUS_LABEL,
+            )
+            try:
+                stdout, _ = process.communicate(timeout=_CLAUDE_AUTH_STATUS_COMPLETION_GRACE_SECONDS)
+            except subprocess.TimeoutExpired:
+                logger.warning(
+                    "%s did not finish during completion grace; requesting graceful termination",
+                    _CLAUDE_AUTH_STATUS_LABEL,
+                )
+                signal_process_tree(process, signal.SIGTERM, logger, _CLAUDE_AUTH_STATUS_LABEL)
+                try:
+                    stdout, _ = process.communicate(timeout=_CLAUDE_AUTH_STATUS_TERMINATION_GRACE_SECONDS)
+                except subprocess.TimeoutExpired:
+                    logger.warning(
+                        "%s ignored graceful termination; forcefully stopping it",
+                        _CLAUDE_AUTH_STATUS_LABEL,
+                    )
+                    signal_process_tree(process, KILL_SIGNAL, logger, _CLAUDE_AUTH_STATUS_LABEL)
+                    try:
+                        stdout, _ = process.communicate(timeout=_CLAUDE_AUTH_STATUS_DRAIN_TIMEOUT_SECONDS)
+                    except subprocess.TimeoutExpired:
+                        # Reap our direct child even if a descendant keeps a
+                        # pipe open after the isolated process group is gone.
+                        process.kill()
+                        stdout, _ = process.communicate()
+        return subprocess.CompletedProcess(command, process.returncode, stdout, None)
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
 def _read_claude_cli_oauth_signed_in(
     cli_path: str | None,
     *,
@@ -10554,18 +10625,14 @@ def _read_claude_cli_oauth_signed_in(
     configured = (cli_path or "claude").strip() or "claude"
     binary = resolve_cli_path(configured) or configured
     try:
-        result = subprocess.run(
+        result = _run_claude_auth_status(
             [binary, "auth", "status", "--json"],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            timeout=3,
-            check=False,
             env=env,
             cwd=cwd,
         )
-    except (FileNotFoundError, OSError, subprocess.SubprocessError):
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result is None:
         return None
     text = (result.stdout or "").strip()
     if not text:

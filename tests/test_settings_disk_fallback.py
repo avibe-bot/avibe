@@ -22,9 +22,11 @@ The fixes:
 from __future__ import annotations
 
 import json
+import signal
 import subprocess
 import threading
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 
@@ -181,6 +183,64 @@ def test_claude_oauth_state_reads_current_dot_credentials_file(tmp_path: Path) -
     assert read_claude_oauth_signed_in(home=tmp_path) is True
 
 
+def test_claude_auth_status_allows_completion_after_soft_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vibe import api
+
+    process = Mock()
+    process.returncode = 0
+    process.communicate.side_effect = [
+        subprocess.TimeoutExpired(["claude", "auth", "status", "--json"], 10),
+        ('{"loggedIn": true, "authMethod": "claude.ai"}', None),
+    ]
+    monkeypatch.setattr(api.subprocess, "Popen", lambda *_args, **_kwargs: process)
+    signal_tree = Mock()
+    monkeypatch.setattr(api, "signal_process_tree", signal_tree)
+
+    result = api._run_claude_auth_status(
+        ["claude", "auth", "status", "--json"],
+        env={},
+        cwd=None,
+    )
+
+    assert result is not None
+    assert json.loads(result.stdout)["loggedIn"] is True
+    assert [call.kwargs["timeout"] for call in process.communicate.call_args_list] == [
+        api._CLAUDE_AUTH_STATUS_TIMEOUT_SECONDS,
+        api._CLAUDE_AUTH_STATUS_COMPLETION_GRACE_SECONDS,
+    ]
+    signal_tree.assert_not_called()
+
+
+def test_claude_auth_status_terminates_only_after_completion_grace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vibe import api
+
+    process = Mock()
+    process.returncode = -signal.SIGTERM
+    process.communicate.side_effect = [
+        subprocess.TimeoutExpired(["claude"], 10),
+        subprocess.TimeoutExpired(["claude"], 10),
+        subprocess.TimeoutExpired(["claude"], 5),
+        ("", None),
+    ]
+    monkeypatch.setattr(api.subprocess, "Popen", lambda *_args, **_kwargs: process)
+    signals: list[int] = []
+    monkeypatch.setattr(
+        api,
+        "signal_process_tree",
+        lambda _process, sig, _logger, _label: signals.append(sig),
+    )
+
+    result = api._run_claude_auth_status(["claude"], env={}, cwd=None)
+
+    assert result is not None
+    assert signals == [signal.SIGTERM, api.KILL_SIGNAL]
+    assert process.communicate.call_count == 4
+
+
 def test_get_claude_auth_prefers_cli_oauth_status(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -228,7 +288,7 @@ def test_get_claude_auth_prefers_cli_oauth_status(
         )
 
     monkeypatch.setattr("vibe.api.load_config", lambda: _FakeConfig())
-    monkeypatch.setattr("vibe.api.subprocess.run", fake_run)
+    monkeypatch.setattr("vibe.api._run_claude_auth_status", fake_run)
 
     from vibe.api import get_claude_auth
 
@@ -276,7 +336,7 @@ def test_get_claude_auth_resolves_default_claude_cli_before_status_probe(
     monkeypatch.setattr("vibe.api.Path.home", lambda: tmp_path)
     monkeypatch.setattr("vibe.api.shutil.which", lambda _binary: None)
     monkeypatch.setattr("vibe.api.load_config", lambda: _FakeConfig())
-    monkeypatch.setattr("vibe.api.subprocess.run", fake_run)
+    monkeypatch.setattr("vibe.api._run_claude_auth_status", fake_run)
 
     from vibe.api import get_claude_auth
 
@@ -315,7 +375,7 @@ def test_get_claude_auth_ignores_cli_api_key_status_for_oauth(
         )
 
     monkeypatch.setattr("vibe.api.load_config", lambda: _FakeConfig())
-    monkeypatch.setattr("vibe.api.subprocess.run", fake_run)
+    monkeypatch.setattr("vibe.api._run_claude_auth_status", fake_run)
 
     from vibe.api import get_claude_auth
 
@@ -368,7 +428,7 @@ def test_get_claude_auth_suppresses_stale_disk_oauth_for_concrete_non_oauth_stat
         )
 
     monkeypatch.setattr("vibe.api.load_config", lambda: _FakeConfig())
-    monkeypatch.setattr("vibe.api.subprocess.run", fake_run)
+    monkeypatch.setattr("vibe.api._run_claude_auth_status", fake_run)
 
     from vibe.api import get_claude_auth
 
@@ -407,7 +467,7 @@ def test_get_claude_auth_treats_setup_token_status_as_oauth(
         )
 
     monkeypatch.setattr("vibe.api.load_config", lambda: _FakeConfig())
-    monkeypatch.setattr("vibe.api.subprocess.run", fake_run)
+    monkeypatch.setattr("vibe.api._run_claude_auth_status", fake_run)
 
     from vibe.api import get_claude_auth
 
