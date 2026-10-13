@@ -1,5 +1,5 @@
 import * as React from 'react';
-import { ArrowDownToLine, Activity, Gauge, LoaderCircle, Power, RefreshCw, Route, ScrollText } from 'lucide-react';
+import { ArrowDownToLine, Activity, Gauge, LoaderCircle, Power, RefreshCw, Route, ScrollText, Wrench } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 
@@ -35,7 +35,9 @@ import {
 } from './suspendedRouteAttempts';
 import { SupplyGraph, SupplyLegend } from './SupplyGraph';
 import { QuotaTab } from './QuotaTab';
+import { ToolsTab } from './ToolsTab';
 import { UsageTab } from './UsageTab';
+import { useHostedTools } from './useHostedTools';
 import './modelHubSurface.css';
 import { agentsWithEcho, createLatestAsyncAuthority, createLatestAsyncAuthorityByKeySet, createLatestEntityAuthorityByKey, createPendingWrites, mapWithConcurrency } from './asyncLifetime';
 import { createAgentCollectionReadAuthority, createSourceCollectionReadAuthority } from './collectionReadAuthority';
@@ -329,15 +331,15 @@ function usePendingRereads(active: boolean, pendingKey: string | null, settled: 
 const focusQuotaOpener = (opener: HTMLElement) =>
   (opener.isConnected ? opener : document.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]'))?.focus();
 
-type HubTab = 'sources' | 'quota' | 'usage' | 'logs';
+type HubTab = 'sources' | 'tools' | 'quota' | 'usage' | 'logs';
 
 const HubTabs: React.FC<{ tab: HubTab; onChange: (tab: HubTab) => void }> = ({ tab, onChange }) => {
   const { t } = useModelsTranslation();
   return (
     <div role="tablist" className="flex h-[39px] items-end gap-1 border-b border-border">
-      {(['sources', 'quota', 'usage', 'logs'] as const).map((id) => (
+      {(['sources', 'tools', 'quota', 'usage', 'logs'] as const).map((id) => (
         <button key={id} type="button" role="tab" aria-selected={tab === id} onClick={() => onChange(id)} className={cn('flex h-[41px] items-center gap-[7px] border-b-2 px-3.5 text-[13px] transition-colors', tab === id ? 'border-mint font-semibold text-foreground' : 'border-transparent font-normal text-muted hover:text-foreground')}>
-          {id === 'sources' ? <Route className="size-3.5" /> : id === 'quota' ? <Gauge className="size-3.5" /> : id === 'usage' ? <Activity className="size-3.5" /> : <ScrollText className="size-3.5" />}
+          {id === 'sources' ? <Route className="size-3.5" /> : id === 'tools' ? <Wrench className="size-3.5" /> : id === 'quota' ? <Gauge className="size-3.5" /> : id === 'usage' ? <Activity className="size-3.5" /> : <ScrollText className="size-3.5" />}
           {t(`settings.models.shell.tab.${id === 'sources' ? 'hub' : id}`)}
         </button>
       ))}
@@ -1241,6 +1243,8 @@ export const SettingsModelsPage: React.FC = () => {
     }
   }, [selectSource, showToast, t]);
   const selectedSource = sources.find((source) => source.id === selectedSourceId) ?? null;
+  // Read while the tab is open, or while a Source's detail shows its capability chips.
+  const hostedTools = useHostedTools(tab === 'tools' || selectedSource !== null);
   const sourceDetailOpen = selectedSourceId !== null && subscriptionVendor === null;
   const orderAgent = agents.find((agent) => agent.backend === orderBackend && agent.mode === 'hub') ?? null;
   const menuAgent = agents.find((agent) => agent.backend === menuBackend && agent.mode === 'hub') ?? null;
@@ -1619,6 +1623,7 @@ export const SettingsModelsPage: React.FC = () => {
                         selectSource({ sourceId, returnFocus: () => opener });
                       }}
                     />
+                    : tab === 'tools' ? <ToolsTab read={hostedTools.read} sources={sources} pending={hostedTools.pending} onChange={(tool, body) => void hostedTools.save(tool, body)} onRetry={() => void hostedTools.refresh()} />
                     : tab === 'usage' ? <UsageTab usage={usageRead} windowKey={usageWindow} onWindowChange={setUsageWindow} onRetry={retryUsage} />
                     : tab === 'logs' ? <RecentSwitchesCard events={eventsRead} sources={sourcesRead} onRetry={retryEvents} loadingMore={loadingEvents} onLoadMore={loadOlderEvents} />
                     : directEmpty ? <DirectHome agents={installedNativeAgents} switchFailures={switchFailures} connectingBackend={adoptAgent?.backend ?? null} onSwitch={switchToGateway} />
@@ -1764,6 +1769,7 @@ export const SettingsModelsPage: React.FC = () => {
             ? <SourceDetailPanel
                 key={selectedSource.id}
                 source={selectedSource}
+                hostedTools={hostedTools.read}
                 activeBackends={activeBackends}
                 headingRef={sourceDetailHeadingRef}
                 trackMutation={trackSourceMutation(selectedSource.id)}

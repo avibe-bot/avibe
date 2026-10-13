@@ -103,6 +103,18 @@ export function formatDayTime(instant: string, locale: string): string {
   return new Intl.DateTimeFormat(locale, { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }).format(ms);
 }
 
+/**
+ * The local calendar day as `MM-DD`, the stamp the capability chips carry
+ * ("verified 10-13"). Both locales use the same numeric form, so the chip reads
+ * the same width in either. An unparseable stamp renders verbatim.
+ */
+export function formatMonthDay(instant: string): string {
+  const ms = Date.parse(instant);
+  if (Number.isNaN(ms)) return instant;
+  const date = new Date(ms);
+  return `${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+}
+
 /** Whole minutes until a cooldown retry_at (never negative). */
 export function cooldownEtaMinutes(retryAt?: string | null): number {
   if (!retryAt) return 0;

@@ -973,6 +973,7 @@
         },
         "tab": {
           "hub": "供应商与路由",
+          "tools": "工具",
           "quota": "订阅额度",
           "usage": "用量",
           "logs": "日志"
@@ -2344,6 +2345,100 @@
         "refreshed": "已更新",
         "unresolved": "仍然不可用",
         "failed": "没能处理，请重试"
+      },
+      "tools": {
+        "title": "托管工具",
+        "subtitle": "Vibey 在对话中可调用的厂商托管工具。默认关闭：开启后每次调用可能产生费用，内容会发给提供该工具的厂商。",
+        "reverify": {
+          "engineUpgraded_one": "引擎已升级 · {{count}} 项需重新检测",
+          "engineUpgraded_other": "引擎已升级 · {{count}} 项需重新检测",
+          "aged_one": "{{count}} 项检测已超过 30 天",
+          "aged_other": "{{count}} 项检测已超过 30 天"
+        },
+        "tool": {
+          "web_search": {
+            "name": "网页搜索",
+            "inline": "网页搜索",
+            "description": "搜索网页，并在回答中注明出处。"
+          },
+          "x_search": {
+            "name": "X 搜索",
+            "inline": "X 搜索",
+            "description": "搜索 X 上的帖子，支持 from:、within_time: 等高级语法。"
+          },
+          "image_generation": {
+            "name": "图片生成",
+            "inline": "图片生成",
+            "description": "生成图片，显示在回答里并保存为文件。"
+          }
+        },
+        "state": {
+          "on": "已开启",
+          "off": "已关闭"
+        },
+        "toggle": {
+          "turnOn": "开启{{name}}",
+          "turnOff": "关闭{{name}}"
+        },
+        "col": {
+          "source": "供应商 · 模型",
+          "native": "原生运行",
+          "cost": "每次费用"
+        },
+        "chip": {
+          "native": "原生 · {{date}} 已验证",
+          "reverify": "{{date}} 已验证 · 需重新检测",
+          "engineUpgraded": "引擎已升级 · 需重新检测",
+          "unsupported": "此供应商不支持",
+          "unchecked": "未检测",
+          "executor": "代理执行者"
+        },
+        "cost": {
+          "included": "订阅内含",
+          "includedNote": "不另计费",
+          "imageTokens": "按图像 token 计费 · 暂无单价"
+        },
+        "empty": "你的供应商都不能原生运行{{toolInline}}。添加提供该工具的供应商后，在这里检测。",
+        "noNative": "{{sources}} 上的模型没有原生{{toolInline}}，由代理执行者代为调用（另计一次模型调用）。",
+        "executor": {
+          "label": "代理执行",
+          "pick": "{{name}}的代理执行者",
+          "automatic": "自动（第一个已验证的）",
+          "unavailable": "检测后可选",
+          "option": "{{source}} · {{model}}",
+          "notVerified": "{{source}} · {{model}}（未验证）",
+          "note": {
+            "none": "当前模型不能原生运行时，由代理执行者代为调用，费用记在该供应商。至少验证一项后可选。",
+            "chosen": "已验证的模型直接原生调用；其他模型由 {{source}} 代为调用，费用记在 {{source}}。",
+            "automatic": "已验证的模型直接原生调用；其他模型由 Vibey 顺序中第一个已验证的供应商代为调用，费用记在该供应商。"
+          }
+        },
+        "footnote": "费用为每次调用的估算：API Key 按厂商 API 标价估算，中转的实际账单可能不同；订阅不另计费。Claude 订阅不能运行托管工具。",
+        "saveFailed": "{{toolInline}}设置未能保存，请重试。"
+      },
+      "capability": {
+        "col": "能力",
+        "chip": {
+          "native": "{{tool}} · 原生 · {{date}} 已验证",
+          "reverify": "{{tool}} · {{date}} 已验证 · 需重新检测",
+          "engineUpgraded": "{{tool}} · 引擎已升级 · 需重新检测",
+          "viaProxy": "{{tool}} · 由代理提供",
+          "unsupported": "{{tool}} · 此供应商不支持"
+        },
+        "explain": {
+          "native": "检测通过：这个模型在此供应商上直接调用厂商自带的工具。",
+          "reverify": "检测已超过 30 天，仍按原结果原生运行，可重新检测。",
+          "engineUpgraded": "检测之后模型引擎已升级，重新检测前调用交给代理执行者。",
+          "viaProxy": "{{tool}}已开启，但此供应商不能原生运行，调用交给代理执行者。",
+          "unsupported": "此供应商拒绝过{{toolInline}}，之后不会再发到这里。"
+        },
+        "recorded": "记录时间",
+        "recordedValue": "{{time}} · {{basis}}",
+        "basis": {
+          "probe": "一次检测",
+          "observed": "一次真实请求"
+        },
+        "reason": "失败原因"
       }
     }
   },

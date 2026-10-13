@@ -973,6 +973,7 @@
         },
         "tab": {
           "hub": "Sources & gateway",
+          "tools": "Tools",
           "quota": "Subscription quota",
           "usage": "Usage",
           "logs": "Logs"
@@ -2344,6 +2345,100 @@
         "refreshed": "Updated",
         "unresolved": "Still not working",
         "failed": "Couldn't do that, please retry"
+      },
+      "tools": {
+        "title": "Hosted tools",
+        "subtitle": "Vendor-hosted tools Vibey can call in a conversation. They are off by default: a call may cost money, and its content goes to the vendor that runs the tool.",
+        "reverify": {
+          "engineUpgraded_one": "Engine upgraded · {{count}} needs a new check",
+          "engineUpgraded_other": "Engine upgraded · {{count}} need a new check",
+          "aged_one": "{{count}} check is over 30 days old",
+          "aged_other": "{{count}} checks are over 30 days old"
+        },
+        "tool": {
+          "web_search": {
+            "name": "Web search",
+            "inline": "web search",
+            "description": "Searches the web and cites its sources in the answer."
+          },
+          "x_search": {
+            "name": "X search",
+            "inline": "X search",
+            "description": "Searches posts on X, with operators such as from: and within_time:."
+          },
+          "image_generation": {
+            "name": "Image generation",
+            "inline": "image generation",
+            "description": "Generates images, shown in the answer and saved as files."
+          }
+        },
+        "state": {
+          "on": "On",
+          "off": "Off"
+        },
+        "toggle": {
+          "turnOn": "Turn on {{name}}",
+          "turnOff": "Turn off {{name}}"
+        },
+        "col": {
+          "source": "Source · model",
+          "native": "Runs natively",
+          "cost": "Cost per call"
+        },
+        "chip": {
+          "native": "Native · verified {{date}}",
+          "reverify": "Verified {{date}} · check again",
+          "engineUpgraded": "Engine upgraded · check again",
+          "unsupported": "Not supported on this Source",
+          "unchecked": "Not checked",
+          "executor": "Proxy executor"
+        },
+        "cost": {
+          "included": "Included in subscription",
+          "includedNote": "No extra charge",
+          "imageTokens": "Billed per image token · no per-image price yet"
+        },
+        "empty": "None of your Sources can run {{toolInline}} natively. Add a Source that offers it, then check it here.",
+        "noNative": "Models on {{sources}} have no native {{toolInline}}. The proxy executor runs it for them, as one more model call.",
+        "executor": {
+          "label": "Proxy executor",
+          "pick": "Proxy executor for {{name}}",
+          "automatic": "Automatic (first verified)",
+          "unavailable": "Available after a check",
+          "option": "{{source}} · {{model}}",
+          "notVerified": "{{source}} · {{model}} (not verified)",
+          "note": {
+            "none": "When the current model can't run it natively, the proxy executor runs it and the call is billed to that Source. You can pick one once a Source is verified.",
+            "chosen": "Verified models run it natively. Other models use {{source}}, and those calls are billed to it.",
+            "automatic": "Verified models run it natively. Other models use the first verified Source in Vibey's order, and those calls are billed to it."
+          }
+        },
+        "footnote": "Costs are estimates per call. API keys are valued at the vendor's list price, and a relay may bill differently. Subscriptions add no charge. A Claude subscription can't run hosted tools.",
+        "saveFailed": "Couldn't save the {{toolInline}} setting. Please retry."
+      },
+      "capability": {
+        "col": "Capabilities",
+        "chip": {
+          "native": "{{tool}} · native · verified {{date}}",
+          "reverify": "{{tool}} · verified {{date}} · check again",
+          "engineUpgraded": "{{tool}} · engine upgraded · check again",
+          "viaProxy": "{{tool}} · via proxy",
+          "unsupported": "{{tool}} · not supported on this Source"
+        },
+        "explain": {
+          "native": "Verified: this model runs the vendor's own tool on this Source.",
+          "reverify": "This check is over 30 days old. The tool still runs natively; check again when convenient.",
+          "engineUpgraded": "The model engine was upgraded after this check, so calls go to the proxy executor until it is checked again.",
+          "viaProxy": "{{tool}} is on, but this Source can't run it natively, so calls go to the proxy executor.",
+          "unsupported": "This Source refused {{toolInline}}, so it is never sent here."
+        },
+        "recorded": "Recorded",
+        "recordedValue": "{{time}} · {{basis}}",
+        "basis": {
+          "probe": "a check",
+          "observed": "a real request"
+        },
+        "reason": "Reason"
       }
     }
   },

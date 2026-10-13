@@ -16,7 +16,7 @@ import type { ModelsSurfaceKind } from './modelHubSurfaceState';
 import { ApiCallError, modelsApi } from './modelsApi';
 import { QUOTA_PENDING_REREADS, QUOTA_PENDING_REREAD_MS, SettingsModelsPage as SettingsModelsRoute } from './SettingsModelsPage';
 import { hasNativeSubscriptionCustody, SUBSCRIPTION_VENDORS } from './subscriptionOptions';
-import { CONTRACT_VERSION, type AgentBackend, type AgentChain, type AgentSupply, type BackendModel, type MigrationItem, type RuntimeDependency, type RuntimeManifest, type QuotaSummary, type Source, type UsageReport } from './types';
+import { CONTRACT_VERSION, type AgentBackend, type AgentChain, type AgentSupply, type BackendModel, type HostedToolsStatus, type MigrationItem, type RuntimeDependency, type RuntimeManifest, type QuotaSummary, type Source, type UsageReport } from './types';
 
 // The page navigates to Agents when the user clicks an Agent that needs
 // attention, so it needs a router in scope. Every render site wants the same
@@ -249,6 +249,15 @@ const routedImpact = {
   interrupted: [{ backend: 'claude' as const, model_id: routedModelId, agents: ['Release bot'] }],
 };
 
+const hostedToolsStatus: HostedToolsStatus = {
+  tools: [
+    { name: 'web_search', enabled: false, executor: null, candidates: [] },
+    { name: 'x_search', enabled: false, executor: null, candidates: [] },
+    { name: 'image_generation', enabled: false, executor: null, candidates: [] },
+  ],
+  reverify: { engine_upgraded: 0, aged: 0 },
+};
+
 const deferred = <T,>() => {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((done) => {
@@ -274,6 +283,7 @@ const renderPage = (
   vi.spyOn(modelsApi, 'getUsageSummary').mockResolvedValue(usageSummary);
   vi.spyOn(modelsApi, 'getQuota').mockResolvedValue(quotaSummary);
   vi.spyOn(modelsApi, 'refreshQuota').mockResolvedValue(quotaSummary);
+  vi.spyOn(modelsApi, 'getHostedTools').mockResolvedValue(hostedToolsStatus);
   return render(
     <ToastProvider>
       <I18nextProvider i18n={i18n}>
@@ -689,7 +699,7 @@ describe('SettingsModelsPage surface branches', () => {
     // Frame 09 is what the `sources` tab shows here — not what the Hub shows
     // instead of its tabs. It is still Frame 09's body: none of the gateway
     // overview leaks in beside it.
-    expect(screen.getAllByRole('tab')).toHaveLength(4);
+    expect(screen.getAllByRole('tab')).toHaveLength(5);
     expect(screen.queryByText(/^Recent switches$|^最近切换$/i)).toBeNull();
   });
 
@@ -839,7 +849,7 @@ describe('SettingsModelsPage surface branches', () => {
     await userEvent.click(toggle);
 
     await waitFor(() => expect(start).toHaveBeenCalledOnce());
-    expect(await screen.findAllByRole('tab')).toHaveLength(4);
+    expect(await screen.findAllByRole('tab')).toHaveLength(5);
   });
 
   it('keeps routing controls available while an enabled gateway process is unavailable', async () => {
@@ -866,7 +876,7 @@ describe('SettingsModelsPage surface branches', () => {
     expect((toggle as HTMLButtonElement).disabled).toBe(true);
     expect(await screen.findByText('Retained source')).toBeTruthy();
     expect(screen.getByRole('button', { name: /Runtime mode:|运行模式[:：]/i })).toBeTruthy();
-    expect(screen.queryAllByRole('tab')).toHaveLength(4);
+    expect(screen.queryAllByRole('tab')).toHaveLength(5);
   });
 
   it('still allows persisted enablement to be turned off on an unsupported host', async () => {
@@ -976,7 +986,7 @@ describe('SettingsModelsPage surface branches', () => {
     renderPage([retainedSource]);
 
     expect(await screen.findByText('Retained source')).toBeTruthy();
-    expect(screen.getAllByRole('tab')).toHaveLength(4);
+    expect(screen.getAllByRole('tab')).toHaveLength(5);
     expect(screen.queryByText(/^Switch to the gateway and you gain three things$|^切换到模型网关，有三大益处$/i)).toBeNull();
   });
 
@@ -2516,7 +2526,7 @@ describe('SettingsModelsPage usage region', () => {
       vi.restoreAllMocks();
       renderPage(sources);
 
-      await waitFor(() => expect(screen.getAllByRole('tab'), landing).toHaveLength(4));
+      await waitFor(() => expect(screen.getAllByRole('tab'), landing).toHaveLength(5));
       await openUsage();
       await waitFor(() => expect(vi.mocked(modelsApi.getUsageSummary), landing).toHaveBeenCalledWith('24h'));
     }
@@ -2831,5 +2841,24 @@ describe('SettingsModelsPage quota region', () => {
     trigger.remove();
     await userEvent.click(await screen.findByRole('button', { name: /^Cancel$|^取消$/ }));
     await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('tab', { name: /^Subscription quota$|^订阅额度$/ })));
+  });
+});
+
+// How the Tools tab is READ. What it says once read is `ToolsTab.test.tsx`'s
+// subject; here the read is the tab's own, off the landing's first paint.
+describe('SettingsModelsPage tools region', () => {
+  it('MH-HOSTED-UI-005: leaves the hosted-tools report unread until its tab opens, then re-reads on every open', async () => {
+    renderPage([retainedSource]);
+    await screen.findByText('Retained source');
+    const read = vi.mocked(modelsApi.getHostedTools);
+    expect(read).not.toHaveBeenCalled();
+
+    await userEvent.click(screen.getByRole('tab', { name: /^Tools$|^工具$/ }));
+    await screen.findByRole('region', { name: /^Web search$|^网页搜索$/ });
+    expect(read).toHaveBeenCalledTimes(1);
+
+    await userEvent.click(screen.getByRole('tab', { name: /^Sources & gateway$|^供应商与路由$/ }));
+    await userEvent.click(screen.getByRole('tab', { name: /^Tools$|^工具$/ }));
+    await waitFor(() => expect(read).toHaveBeenCalledTimes(2));
   });
 });

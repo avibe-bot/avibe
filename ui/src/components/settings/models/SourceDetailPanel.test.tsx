@@ -11,6 +11,7 @@ import { ToastProvider } from '@/context/ToastProvider';
 import i18n from '@/i18n';
 import { classifyModelHubFailure, createPendingWrites } from './asyncLifetime';
 import { MANAGE_DESTINATION, type ManageKind } from './manage';
+import { readyRegion } from './regionRead';
 import { ApiCallError, modelsApi } from './modelsApi';
 import type {
   PresentSourceMutationCommit,
@@ -29,7 +30,7 @@ import {
   NEEDS_ACTION_DETAIL_KEYS,
   SOURCE_STATUSES,
 } from './types';
-import type { Source, SourceDetailKey, SourceKind, SourceProtocol, SupplyChannel } from './types';
+import type { HostedEvidence, HostedToolsStatus, Source, SourceDetailKey, SourceKind, SourceProtocol, SupplyChannel } from './types';
 
 const source: Source = {
   id: 'src_detail',
@@ -1378,4 +1379,68 @@ describe('SourceDetailPanel', () => {
     expect(screen.queryByText(/as soon as you start|旧的登录立即失效/i)).toBeNull();
   });
 
+});
+
+// What a Source's model rows say about hosted tools (§6.2, frame FB4vC). The
+// projection's states are `hostedTools.test.ts`'s subject; what is proved here is
+// the mapping a Source row adds: a refused tool reads 「via proxy」 only while it is
+// on, unchecked draws nothing, and the detail carries the record's facts.
+describe('SourceDetailPanel hosted-tool capability chips', () => {
+  const twoModels: Source = {
+    ...source,
+    models: [
+      { id: 'model-a', display_name: null, origin: 'discovered', reasoning_efforts: [], reasoning_efforts_source: null },
+      { id: 'model-b', display_name: null, origin: 'discovered', reasoning_efforts: [], reasoning_efforts_source: null },
+    ],
+  };
+  const at = '2026-10-13T10:20:00Z';
+  const verified: HostedEvidence = { status: 'verified', stale: null, basis: 'probe', observed_at: at, detail: null };
+  const refused: HostedEvidence = { status: 'unsupported', stale: null, basis: 'observed', observed_at: at, detail: '400 · unsupported_tool_type' };
+  const unknown: HostedEvidence = { status: 'unknown', stale: null, basis: null, observed_at: null, detail: null };
+  const status = (xSearchEnabled: boolean): HostedToolsStatus => ({
+    tools: [
+      { name: 'web_search', enabled: true, executor: null, candidates: [
+        { source_id: source.id, model_id: 'model-a', call: verified, replay: unknown },
+        { source_id: source.id, model_id: 'model-b', call: unknown, replay: unknown },
+      ] },
+      { name: 'x_search', enabled: xSearchEnabled, executor: null, candidates: [{ source_id: source.id, model_id: 'model-a', call: refused, replay: unknown }] },
+      { name: 'image_generation', enabled: false, executor: null, candidates: [] },
+    ],
+    reverify: { engine_upgraded: 0, aged: 0 },
+  });
+  const renderChips = (hostedTools: HostedToolsStatus) => render(
+    <I18nextProvider i18n={i18n}>
+      <CommittedPanel source={twoModels} hostedTools={readyRegion(hostedTools)} trackMutation={immediateTrack} onReauth={noReauth} />
+    </I18nextProvider>,
+  );
+  const chips = (modelId: string) => [...(screen.getByTitle(modelId).closest('.model-hub-source-table-row') as HTMLElement)
+    .querySelectorAll('[data-capability]')].map((chip) => chip.getAttribute('data-capability'));
+
+  it('MH-HOSTED-UI-006: draws evidence per model, and a refused tool reads via proxy only while it is on', () => {
+    renderChips(status(true));
+    expect(chips('model-a')).toEqual(['web_search:native', 'x_search:viaProxy']);
+    // Unchecked is the normal state, not a problem: no chip at all.
+    expect(chips('model-b')).toEqual([]);
+    cleanup();
+
+    renderChips(status(false));
+    expect(chips('model-a')).toEqual(['web_search:native', 'x_search:unsupported']);
+  });
+
+  it('names the record time, how it was learned, and the reason', async () => {
+    renderChips(status(true));
+    const chip = screen.getByRole('button', { name: /X search · via proxy|X 搜索 · 由代理提供/ });
+    // The accessible name carries the same facts as the hover detail.
+    expect(chip.getAttribute('aria-label')).toMatch(/400 · unsupported_tool_type/);
+    await userEvent.hover(chip);
+    const detail = await screen.findByRole('dialog');
+    within(detail).getByText(/a real request|一次真实请求/);
+    within(detail).getByText('400 · unsupported_tool_type');
+  });
+
+  it('adds no capability column when no model has evidence', () => {
+    renderChips({ ...status(true), tools: status(true).tools.map((tool) => ({ ...tool, candidates: [] })) });
+    expect(document.querySelector('.model-hub-source-table--capabilities')).toBeNull();
+    expect(document.querySelector('[data-capability]')).toBeNull();
+  });
 });

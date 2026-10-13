@@ -992,6 +992,49 @@ export type QuotaSummary = {
   value?: QuotaValueTotals;
 };
 
+// ── hosted-tools-status.schema.json ─────────────────────────────────────
+/** The catalog's tools, in catalog order (`vibey-hosted-tools.md` §2). */
+export const HOSTED_TOOL_NAMES = ['web_search', 'x_search', 'image_generation'] as const;
+export type HostedToolName = (typeof HOSTED_TOOL_NAMES)[number];
+
+/** One capability record as routing reads it: `status` already folds in staleness,
+ *  so a wire-stale record reads `unknown` here even though it once verified. */
+export type HostedEvidence = {
+  status: 'verified' | 'unsupported' | 'unknown';
+  /** `wire`: taken on another engine or probe shape, so it routes as unknown.
+   *  `age`: older than 30 days, so it still routes and only asks for a re-check. */
+  stale: null | 'wire' | 'age';
+  basis: null | 'probe' | 'observed';
+  observed_at: string | null;
+  detail: string | null;
+};
+
+export type HostedToolExecutor = { source_id: string; model_id: string };
+
+/** A (Source, model) the overlay offers the tool on, with an eligible credential
+ *  and an untranslated path; Vibey's Source order first. */
+export type HostedToolCandidate = HostedToolExecutor & {
+  call: HostedEvidence;
+  /** Null for image generation, which is never replayed. */
+  replay: HostedEvidence | null;
+};
+
+export type HostedToolStatus = {
+  name: HostedToolName;
+  enabled: boolean;
+  /** The user's choice, or null for the first verified candidate. */
+  executor: HostedToolExecutor | null;
+  candidates: HostedToolCandidate[];
+};
+
+export type HostedToolsStatus = {
+  tools: HostedToolStatus[];
+  reverify: { engine_upgraded: number; aged: number };
+};
+
+/** PUT /api/models/hosted-tools/<tool>: the whole setting, applied from the next turn. */
+export type HostedToolPut = { enabled: boolean; executor: HostedToolExecutor | null };
+
 // ── API envelope + request shapes (api.md) ──────────────────────────────
 export type ApiOk<T> = { ok: true; contract_version: typeof CONTRACT_VERSION } & T;
 export type ApiErr = {

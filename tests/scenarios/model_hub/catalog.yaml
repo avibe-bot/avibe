@@ -61,6 +61,10 @@ capability:
     - ui/src/components/settings/models/RouteChainDialog.test.tsx
     - ui/src/components/settings/models/BackendModelCatalogDialog.test.tsx
     - ui/src/components/settings/models/AgentCard.test.tsx
+    # Hosted tools: the Tools tab, its evidence projection, and the Source chips.
+    - ui/src/components/settings/models/ToolsTab.test.tsx
+    - ui/src/components/settings/models/hostedTools.test.ts
+    - ui/src/components/settings/models/SourceDetailPanel.test.tsx
     # Migration: the setup key-import entry and the broader settings dialog it
     # narrows, plus the one predicate that separates them.
     - ui/src/components/settings/models/MigrationDialog.test.tsx
@@ -376,6 +380,42 @@ scenarios:
       - tests/test_vibey_agent.py::test_a_generated_image_is_kept_as_an_immutable_file_its_bytes_name_and_type
       - tests/test_vibey_agent.py::test_a_proxied_image_that_was_not_saved_is_a_failed_call_with_its_code
       - tests/test_agent_transcript.py::test_the_media_sweep_keeps_every_file_a_row_registers_and_takes_only_stale_orphans
+  - id: MH-HOSTED-UI-001
+    name: A Tools-tab toggle or executor pick writes the tool's whole setting, and the picker offers only verified pairs
+    status: covered
+    kind: contract
+    layer: unit
+    test: ui/src/components/settings/models/ToolsTab.test.tsx::MH-HOSTED-UI-001
+  - id: MH-HOSTED-UI-002
+    name: Every hosted-tool evidence shape maps to the chip it owes the user, including wire-stale records that route as unknown
+    status: covered
+    kind: observation
+    layer: unit
+    test: ui/src/components/settings/models/hostedTools.test.ts::MH-HOSTED-UI-002
+  - id: MH-HOSTED-UI-003
+    name: The Tools tab states a cost only where one is known; an image is never priced and unknown is never shown as zero
+    status: covered
+    kind: observation
+    layer: unit
+    test: ui/src/components/settings/models/ToolsTab.test.tsx::MH-HOSTED-UI-003
+  - id: MH-HOSTED-UI-004
+    name: The Tools tab says how many checks an engine upgrade made stale, and nothing when none did
+    status: covered
+    kind: observation
+    layer: unit
+    test: ui/src/components/settings/models/ToolsTab.test.tsx::MH-HOSTED-UI-004
+  - id: MH-HOSTED-UI-005
+    name: The hosted-tools report stays unread until the Tools tab opens, then re-reads on every open
+    status: covered
+    kind: observation
+    layer: unit
+    test: ui/src/components/settings/models/SettingsModelsPage.render.test.tsx::MH-HOSTED-UI-005
+  - id: MH-HOSTED-UI-006
+    name: A Source model shows one chip per tool with evidence; a refused tool reads via proxy only while it is on, and unchecked draws nothing
+    status: covered
+    kind: observation
+    layer: unit
+    test: ui/src/components/settings/models/SourceDetailPanel.test.tsx::MH-HOSTED-UI-006
   - id: MH-VIBEY-007
     name: Vibey starts once with the user's Sources and built-in Agent models, seeded when its first Source exists
     status: covered
