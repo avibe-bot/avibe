@@ -23,10 +23,11 @@ from core.agent_core.ai._common import (
     drive_sse_stream,
     dispatch_wire_event,
     endpoint_origin,
-    hosted_declarations,
     hosted_pin,
     join_endpoint_url,
     json_object,
+    native_declaration,
+    native_hosted_tools,
     prepare_messages,
     request_credential_values,
     StreamAssembler,
@@ -809,14 +810,18 @@ def build_messages_payload(
         "system": system,
         "messages": payload_messages,
     }
-    functions: list[dict[str, Any]] = [
-        {"name": tool.name, "description": tool.description, "input_schema": dict(tool.input_schema)}
+    # A hosted tool this hop runs natively is sent as the provider's declaration in its spec's place (§4.1). The tools
+    # breakpoint goes on the last function tool, never on a server tool.
+    native = native_hosted_tools(request)
+    tools: list[dict[str, Any]] = [
+        native_declaration(native[tool.name])
+        if tool.name in native
+        else {"name": tool.name, "description": tool.description, "input_schema": dict(tool.input_schema)}
         for tool in request.tools
     ]
+    functions = [index for index, tool in enumerate(request.tools) if tool.name not in native]
     if request.cache == "default" and functions:
-        functions[-1]["cache_control"] = _cache_control(prefix_ttl)
-    # Native hosted declarations lead, so the tools breakpoint stays on the last function tool (§4.1).
-    tools = [*hosted_declarations(request.endpoint), *functions]
+        tools[functions[-1]]["cache_control"] = _cache_control(prefix_ttl)
     if tools:
         payload["tools"] = tools
     if request.tool_choice is not None:
@@ -856,7 +861,7 @@ def wire_request(
     payload = build_messages_payload(request, messages, loaded_images=loaded_images, prefix_ttl=_prefix_ttl(request))
     headers = auth_headers(request.endpoint, provider="anthropic", gateway=gateway)
     headers.update({"anthropic-version": ANTHROPIC_VERSION, "content-type": "application/json"})
-    headers.update(hosted_pin(request.endpoint))
+    headers.update(hosted_pin(request))
     return WireRequest(join_endpoint_url(request.endpoint.base_url, "/messages"), headers, payload)
 
 

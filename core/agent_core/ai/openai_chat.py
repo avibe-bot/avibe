@@ -21,10 +21,11 @@ from core.agent_core.ai._common import (
     drive_sse_stream,
     endpoint_origin,
     forced_tool,
-    hosted_declarations,
     hosted_pin,
     join_endpoint_url,
     json_object,
+    native_declaration,
+    native_hosted_tools,
     prepare_messages,
     request_credential_values,
     required_only_tool,
@@ -691,19 +692,20 @@ def build_chat_payload(
         payload["max_completion_tokens"] = request.max_tokens
     else:
         payload["max_tokens"] = request.max_tokens
+    # A hosted tool this hop runs natively is sent as the provider's declaration in its spec's place (§4.1).
+    native = native_hosted_tools(request)
     tools = [
-        *hosted_declarations(request.endpoint),
-        *(
-            {
-                "type": "function",
-                "function": {
-                    "name": tool.name,
-                    "description": tool.description,
-                    "parameters": dict(tool.input_schema),
-                },
-            }
-            for tool in request.tools
-        ),
+        native_declaration(native[tool.name])
+        if tool.name in native
+        else {
+            "type": "function",
+            "function": {
+                "name": tool.name,
+                "description": tool.description,
+                "parameters": dict(tool.input_schema),
+            },
+        }
+        for tool in request.tools
     ]
     if tools:
         payload["tools"] = tools
@@ -730,7 +732,7 @@ def wire_request(
     payload = build_chat_payload(request, messages, loaded_images=loaded_images)
     headers = auth_headers(request.endpoint, provider="openai", gateway=gateway)
     headers.setdefault("content-type", "application/json")
-    headers.update(hosted_pin(request.endpoint))
+    headers.update(hosted_pin(request))
     return WireRequest(join_endpoint_url(request.endpoint.base_url, "/chat/completions"), headers, payload)
 
 

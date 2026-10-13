@@ -67,7 +67,8 @@ def _hosted_routes(raw: Any) -> dict[str, HostedToolRoute]:
     for tool, entry in raw.items():
         try:
             routes[tool] = _hosted_route(tool, entry)
-        except ValueError as error:
+        except (TypeError, ValueError, KeyError) as error:
+            # Every malformed entry fails here, whatever the parse raised on it.
             raise HopResolutionError(f"hop hosted tool {tool!r} is invalid: {error}") from None
     return routes
 
@@ -76,11 +77,12 @@ def _hosted_route(tool: Any, entry: Any) -> HostedToolRoute:
     """One entry, exactly as the hop schema allows it."""
     if tool not in HOSTED_TOOLS or not isinstance(entry, Mapping):
         raise ValueError("not a hosted tool entry")
-    keys = _HOSTED_ENTRY_KEYS.get(entry.get("mode"))
+    mode = entry.get("mode")
+    keys = _HOSTED_ENTRY_KEYS.get(mode) if isinstance(mode, str) else None
     if keys is None:
-        raise ValueError(f"unknown mode {entry.get('mode')!r}")
+        raise ValueError(f"unknown mode {mode!r}")
     if set(entry) != keys:
-        raise ValueError(f"a {entry['mode']} entry has exactly {', '.join(sorted(keys))}")
+        raise ValueError(f"a {mode} entry has exactly {', '.join(sorted(keys))}")
     executor = entry["executor"]
     if executor is not None:
         if (
@@ -97,7 +99,7 @@ def _hosted_route(tool: Any, entry: Any) -> HostedToolRoute:
     if not isinstance(include, list):
         raise ValueError("include must be a list")
     return HostedToolRoute(
-        mode=entry["mode"],
+        mode=mode,
         executor=executor,
         replay=entry["replay"],
         declaration=entry.get("declaration"),
@@ -177,6 +179,8 @@ class HubModelRouter:
         self._resolve = resolve
         self._providers = providers
         self._first = first
+        #: The route preflight resolved; the Turn's tool list is fixed from it.
+        self.preflight = first
         self._adapters: dict[str, ProviderAdapter] = {}
 
     async def resolve(self) -> ModelSelection:

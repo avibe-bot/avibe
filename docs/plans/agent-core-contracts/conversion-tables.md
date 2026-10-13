@@ -645,8 +645,8 @@ Responses terminal states:
 
 Planned by [`../vibey-hosted-tools.md`](../vibey-hosted-tools.md) (Phase 1: `web_search`, `x_search`,
 `image_generation`). These rows describe the wire mapping the `ai` lane implements with that phase. Implemented so
-far: the native declaration, ahead of the function tools, its Responses `include` values, and the pin header on that
-request. Until the rest lands the adapters ignore hosted items, as the sections above record, and the Anthropic stop
+far: a hosted tool's canonical spec is sent as the native declaration on a hop whose route is native, with its
+Responses `include` values and the pin header on that request. Until the rest lands the adapters ignore hosted items, as the sections above record, and the Anthropic stop
 table above still maps `pause_turn` to `stop`.
 
 | Concern | Anthropic Messages | OpenAI Responses (OpenAI, xAI) | OpenAI Chat Completions |

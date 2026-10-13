@@ -19,8 +19,11 @@ import asyncio
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Mapping, Optional, Sequence
 
+from core.agent_core.agent.models import ModelSelection
 from core.agent_core.agent.recovery import RecoveryRenderer
-from core.agent_core.tools.base import CallInstance, JobHost, Tool
+from core.agent_core.messages import TextBlock
+from core.agent_core.tools.base import CallInstance, JobHost, Tool, ToolContext, ToolResult, ToolSpec
+from core.agent_core.tools.hosted import hosted_tool_spec
 from core.agent_core.tools.shell import default_shell
 
 ImageSink = Callable[[bytes, str, str], Awaitable[str]]
@@ -92,3 +95,29 @@ def local_tool_suite(jobs_dir: Optional[str] = None, *, route: Optional[HandOver
         prune=prune,
         shell=host.shell.describe(),
     )
+
+
+@dataclass(frozen=True)
+class NativeHostedTool:
+    """A hosted tool the Turn's preflight hop runs natively (``vibey-hosted-tools.md`` §4.1).
+
+    Its spec is the canonical one; on a hop whose route is native the adapter sends the provider's declaration in
+    its place, and the provider runs the call. A call reaches ``execute`` only when a later hop of the Turn resolved
+    the tool as proxied, and no proxy executor is wired yet.
+    """
+
+    spec: ToolSpec
+
+    async def execute(self, arguments: Mapping[str, Any], ctx: ToolContext) -> ToolResult:
+        del arguments, ctx
+        return ToolResult(content=(TextBlock(f"{self.spec.name} is not available on this route."),), is_error=True)
+
+
+def native_hosted_tools(selection: Optional[ModelSelection]) -> tuple[Tool, ...]:
+    """The hosted tools preflight's hop runs natively, in Model Hub's order. They lead the Turn's tools, so its last
+    tool stays a local one whatever a hop renders them as."""
+
+    if selection is None:
+        return ()
+    routes = selection.endpoint.hosted_tools
+    return tuple(NativeHostedTool(hosted_tool_spec(name)) for name, route in routes.items() if route.mode == "native")

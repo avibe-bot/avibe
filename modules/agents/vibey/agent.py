@@ -90,7 +90,7 @@ from modules.agents.vibey.media import MediaSnapshots
 from modules.agents.vibey.models import HubModelRouter, ProviderFactory, registry_providers, selection_from_hop
 from modules.agents.vibey.prompt import EnvironmentValue, current_environment, system_prompt
 from modules.agents.vibey.store import AdapterTranscriptStore
-from modules.agents.vibey.tools import ToolSuite, local_tool_suite
+from modules.agents.vibey.tools import ToolSuite, local_tool_suite, native_hosted_tools
 from modules.agents.base import AGENT_RUNTIME_TURN_KEY, AgentRequest, BaseAgent
 from modules.agents.catalog import display_name_for_backend
 from modules.im.base import FileAttachment
@@ -597,7 +597,12 @@ class VibeyAgent(BaseAgent):
             context=ContextConfig(host=self.context_host, scratch_dir=str(self._state_dir / "scratch" / session_id)),
         )
         # Job-backed tools receive the loop's tracking wrapper, so Stop kills foreground commands.
-        tools = mark_skill_loads(tuple(suite.create_tools(agent.jobs, self.media.image_sink(session_id))))
+        tools = mark_skill_loads(
+            (
+                *native_hosted_tools(turn.router.preflight),
+                *suite.create_tools(agent.jobs, self.media.image_sink(session_id)),
+            )
+        )
         agent.set_tools(tools)
         finds_rg = shutil.which("rg", path=environment.get("PATH", "")) is not None
         agent.system = system_prompt(

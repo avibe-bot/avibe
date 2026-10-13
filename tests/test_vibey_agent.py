@@ -2391,9 +2391,9 @@ async def test_a_turn_runs_through_the_real_provider_registry(engine, session, t
 async def test_a_hop_resolved_native_hosted_tool_reaches_the_gateway_pinned_to_its_source(
     engine, session, tmp_path, published, hub_protocol, declaration, include
 ) -> None:
-    """MH-HOSTED-VIBEY-001 (vibey-hosted-tools.md §3.5, §4.1): Vibey takes each tool's mode from the hop, declares a
-    native tool verbatim with its include values, pins that request to the hop's Source, and declares nothing for a
-    proxied tool here."""
+    """MH-HOSTED-VIBEY-001 (vibey-hosted-tools.md §3.5, §4.1): Vibey takes each tool's mode from the hop. A tool the
+    preflight hop runs natively joins the Turn's tools first, and goes out as the provider's declaration, verbatim, with
+    its include values, on a request pinned to the hop's Source. A proxied tool is not offered yet."""
     import httpx
 
     from modules.agents.vibey.models import registry_providers
@@ -2429,6 +2429,7 @@ async def test_a_hop_resolved_native_hosted_tool_reaches_the_gateway_pinned_to_i
     sent = json.loads(request.content)
     assert request.url.path == path
     assert request.headers["x-avibe-pin-source"] == "src_test"
+    # The native tool leads the Turn's tools; the proxied one is not offered until its executor exists.
     assert sent["tools"][0] == declaration
     assert all(tool.get("name") != "x_search" and tool.get("type") != "x_search" for tool in sent["tools"])
     assert set(include) <= set(sent.get("include", []))
@@ -2455,10 +2456,12 @@ def _without(entry: dict, key: str) -> dict:
         {"image_generation": {**_PROXY_IMAGE, "executor": {"source_id": "src_executor01"}}},
         {"image_generation": {**_PROXY_IMAGE, "executor": {"source_id": "openai-main", "model_id": "gpt-image"}}},
         {"image_generation": {**_PROXY_IMAGE, "replay": True}},
+        {"web_search": {**_NATIVE_SEARCH, "mode": []}},
+        {"web_search": {**_NATIVE_SEARCH, "include": "web_search_call.action.sources"}},
     ],
     ids=[
         "absent", "unknown-tool", "native-without-declaration", "proxy-with-include", "extra-field", "no-replay",
-        "half-executor", "executor-not-a-source-id", "image-replay",
+        "half-executor", "executor-not-a-source-id", "image-replay", "unhashable-mode", "include-not-a-list",
     ],
 )
 def test_a_hop_with_an_invalid_hosted_tool_entry_is_refused(hosted_tools) -> None:

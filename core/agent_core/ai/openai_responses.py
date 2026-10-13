@@ -24,10 +24,10 @@ from core.agent_core.ai._common import (
     dispatch_wire_event,
     endpoint_origin,
     forced_tool,
-    hosted_declarations,
     hosted_pin,
     join_endpoint_url,
     json_object,
+    native_declaration,
     native_hosted_tools,
     prepare_messages,
     request_credential_values,
@@ -1314,17 +1314,18 @@ def build_responses_payload(
         "stream": True,
         "store": False,
     }
+    # A hosted tool this hop runs natively is sent as the provider's declaration in its spec's place (§4.1).
+    native = native_hosted_tools(request)
     tools = [
-        *hosted_declarations(request.endpoint),
-        *(
-            {
-                "type": "function",
-                "name": tool.name,
-                "description": tool.description,
-                "parameters": dict(tool.input_schema),
-            }
-            for tool in request.tools
-        ),
+        native_declaration(native[tool.name])
+        if tool.name in native
+        else {
+            "type": "function",
+            "name": tool.name,
+            "description": tool.description,
+            "parameters": dict(tool.input_schema),
+        }
+        for tool in request.tools
     ]
     if tools:
         payload["tools"] = tools
@@ -1334,7 +1335,7 @@ def build_responses_payload(
         if request.reasoning_effort.lower() != "none":
             include.append("reasoning.encrypted_content")
     # A native hosted tool's own include values, e.g. OpenAI's web_search_call.action.sources (§4.1).
-    for route in native_hosted_tools(request.endpoint).values():
+    for route in native.values():
         include.extend(route.include)
     if include:
         payload["include"] = list(dict.fromkeys(include))
@@ -1357,7 +1358,7 @@ def wire_request(
     payload = build_responses_payload(request, messages, loaded_images=loaded_images)
     headers = auth_headers(request.endpoint, provider="openai", gateway=gateway)
     headers.setdefault("content-type", "application/json")
-    headers.update(hosted_pin(request.endpoint))
+    headers.update(hosted_pin(request))
     return WireRequest(join_endpoint_url(request.endpoint.base_url, "/responses"), headers, payload)
 
 

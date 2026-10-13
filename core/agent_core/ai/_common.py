@@ -1429,45 +1429,43 @@ class WireRequest:
     body: dict[str, Any]
 
 
-def native_hosted_tools(endpoint: ModelEndpoint) -> dict[str, HostedToolRoute]:
-    """The hop's hosted tools that Model Hub resolved as native, in its order."""
+def native_hosted_tools(request: ModelRequest) -> dict[str, HostedToolRoute]:
+    """The request's tools that this hop runs natively: a declared tool whose hosted route here is ``native``."""
 
-    return {name: route for name, route in endpoint.hosted_tools.items() if route.mode == "native"}
-
-
-def hosted_declarations(endpoint: ModelEndpoint) -> list[dict[str, Any]]:
-    """The hop's native hosted declarations, verbatim (§4.1).
-
-    They lead the request's ``tools``, so the last entry stays a function tool whatever each hosted tool's mode:
-    Anthropic's tool cache breakpoint never moves onto a server tool.
-    """
-
-    return [copy.deepcopy(dict(route.declaration or {})) for route in native_hosted_tools(endpoint).values()]
+    routes = request.endpoint.hosted_tools
+    return {
+        spec.name: routes[spec.name]
+        for spec in request.tools
+        if spec.name in routes and routes[spec.name].mode == "native"
+    }
 
 
-def hosted_pin(endpoint: ModelEndpoint) -> dict[str, str]:
-    """The pin header of a request that declares a native hosted tool, else nothing."""
+def native_declaration(route: HostedToolRoute) -> dict[str, Any]:
+    """A native route's wire declaration, verbatim (§4.1), as a fresh object the payload may own."""
 
-    if not native_hosted_tools(endpoint):
+    return copy.deepcopy(dict(route.declaration or {}))
+
+
+def hosted_pin(request: ModelRequest) -> dict[str, str]:
+    """The pin header of a request that sends a native hosted declaration, else nothing."""
+
+    if not native_hosted_tools(request):
         return {}
-    if not endpoint.source_id:
+    if not request.endpoint.source_id:
         raise ValueError("a native hosted declaration needs the Source the request is pinned to")
-    return {PIN_SOURCE_HEADER: endpoint.source_id}
+    return {PIN_SOURCE_HEADER: request.endpoint.source_id}
 
 
 def forced_tool(request: ModelRequest) -> tuple[str, HostedToolRoute | None] | None:
-    """``request.tool_choice`` with its native hosted route (None for a function); None when nothing is forced.
-
-    The forced tool must be one the request declares.
-    """
+    """``request.tool_choice`` with its native hosted route (None when it is sent as a function); None when nothing
+    is forced. The forced tool must be one the request declares."""
 
     name = request.tool_choice
     if name is None:
         return None
-    route = native_hosted_tools(request.endpoint).get(name)
-    if route is None and not any(tool.name == name for tool in request.tools):
+    if not any(tool.name == name for tool in request.tools):
         raise ValueError(f"tool_choice names {name!r}, which the request does not declare")
-    return name, route
+    return name, native_hosted_tools(request).get(name)
 
 
 def required_only_tool(tools: list[Any]) -> str:
