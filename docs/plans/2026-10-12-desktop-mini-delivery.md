@@ -58,12 +58,12 @@ can be verified on a real desktop test prerelease. Pet voice now appears
 whenever Web Locks, `getUserMedia` and ASR are all available; missing Web Locks
 still denies it, and hotkey/hold still falls back to text in that case. ASR
 status is read as soon as voice may be used (the pet window starts unfocused,
-so this read does not wait for focus). Every press-and-hold entry (hotkey and
-avatar) goes through one queued decision that waits for that first read while
-held and falls back to text if released first. Each window reactivation re-reads it, so a settings change takes
-effect without restarting the pet; a failed re-read keeps the last known status.
-Availability gates only starting a capture; an active capture keeps its stop
-control.
+so this read does not wait for focus). A press-and-hold that arrives before
+the first read settles opens text immediately; it does not queue a later
+microphone start. Each window reactivation re-reads it, so a settings change
+takes effect without restarting the pet; a failed re-read keeps the last known
+status. Availability gates only starting a capture; an active capture keeps
+its stop control.
 A microphone or transcription failure reopens the text input with the pre-voice
 draft and a short note; the mini does not keep the failed recording for retry
 (the main Composer does).
@@ -140,10 +140,13 @@ keeps its page-coloured plate solely to cover the surrounding web-page text.
 
 ## Validation
 
-- Focused pet, voice ownership, dictation-wrapper and bridge suites: 156 tests.
-  The parity sweep also ran all 15 existing session-action hook tests,
-  including “Show in pet”, and 13 session-action component tests:
-  184 passing UI tests in total.
+- Focused pet, voice ownership, dictation-wrapper and bridge suites: 156 tests
+  at the original desktop-mini delivery. This PR adds PetPage cases for
+  ungated production voice (failure notes, ASR refresh, stop-while-listening,
+  and text fallback while the first ASR read is pending); `npx vitest run
+  src/pet` is 136 passing. The original parity sweep also ran all 15 existing
+  session-action hook tests, including “Show in pet”, and 13 session-action
+  component tests: 184 passing UI tests in that baseline.
   The five retained-card regressions were also run against isolated copies of
   the pre-fix `be8701709` surface: all five fail because the revoked title
   remains visible. They pass with the epoch repair. The temporary copies were
@@ -183,7 +186,7 @@ background work. A failed-first-session-read case verifies that the status event
 performs a second read, restores the validated chat capability and permits a
 send; it no longer uses the removed v1 session-title header as a proxy.
 
-The suite has 92 cases after additions. In particular, the quick-reply tests
+The suite had 92 cases after the original v2 additions; this PR adds the ungated-voice cases on top of that baseline. In particular, the quick-reply tests
 exercise both orders of `message.updated` and the POST response, preserve the
 single-message lock while pending, and verify an older update cannot reclaim a
 newer result's options. A separate uncertain quick-reply case blocks both typed

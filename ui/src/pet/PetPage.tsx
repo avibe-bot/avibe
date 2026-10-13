@@ -421,9 +421,9 @@ const PetSurface: React.FC = () => {
     if (!listenPending || !binding || !canChat || !expanded) return;
     petComposer.takeListen();
     if (uncertain) { setDetailOpen(true); return; }
-    if (hotkeyHeld.current) voice.begin();
+    if (hotkeyHeld.current && voice.available) voice.start();
     else openComposer(draft);
-  }, [listenPending, binding, canChat, expanded, voice.begin, openComposer, draft, uncertain]);
+  }, [listenPending, binding, canChat, expanded, voice.available, voice.start, openComposer, draft, uncertain]);
   useEffect(() => {
     const onBlur = () => { if (!voice.listening && !draft.trim()) void setPanel(false); };
     window.addEventListener('blur', onBlur);
@@ -484,7 +484,8 @@ const PetSurface: React.FC = () => {
             target.setPointerCapture?.(pointerId);
             if (!canChat || !binding) { void setPanel(true); return; }
             if (uncertain) { void setPanel(true); setDetailOpen(true); return; }
-            voice.begin();
+            if (voice.available) voice.start();
+            else openComposer(draft);
           }, HOLD_MS) };
         }}
         onPointerMove={(event) => {
@@ -715,8 +716,7 @@ function useHitRegions(rootRef: React.RefObject<HTMLDivElement | null>, epoch?: 
 }
 
 function usePetVoice({ enabled, epoch, draft, onOpenComposer }: { enabled: boolean; epoch: PetSurfaceEpoch; draft: string; onOpenComposer: (text?: string) => void }) {
-  // `settled` turns true once the first status read has finished either way.
-  const [asr, setAsr] = useState<{ available: boolean; checked: boolean; settled: boolean; maxFileBytes?: number }>({ available: false, checked: false, settled: false });
+  const [asr, setAsr] = useState<{ available: boolean; checked: boolean; maxFileBytes?: number }>({ available: false, checked: false });
   const [preview, setPreview] = useState('');
   const [listening, setListening] = useState(false);
   // A failed capture or transcription falls back to text with this note.
@@ -734,26 +734,15 @@ function usePetVoice({ enabled, epoch, draft, onOpenComposer }: { enabled: boole
     if (!enabled) return;
     let alive = true;
     // A failed re-read keeps the last known status instead of flapping to off.
-    const unknown = () => setAsr((current) => (current.checked ? current : { available: false, checked: false, settled: true }));
+    const unknown = () => setAsr((current) => (current.checked ? current : { available: false, checked: false }));
     void fetch('/api/asr/status', { credentials: 'same-origin' }).then((response) => response.ok ? response.json() : null).then((value) => {
       if (!alive || !epoch.isCurrent()) return;
       if (value === null) unknown();
-      else setAsr({ available: Boolean(value.available), checked: true, settled: true, maxFileBytes: value.max_file_bytes });
+      else setAsr({ available: Boolean(value.available), checked: true, maxFileBytes: value.max_file_bytes });
     }).catch(() => { if (alive && epoch.isCurrent()) unknown(); });
     return () => { alive = false; };
   }, [enabled, epoch, asrReads]);
-  // A press-and-hold is queued here and decided by an effect with the current
-  // render's state, so callers holding a stale closure still decide correctly.
-  // Before the first status read settles a held press waits; releasing it
-  // falls back to text right away.
-  const queuedRef = useRef<'held' | 'released' | null>(null);
-  const [queueTick, setQueueTick] = useState(0);
   const stop = useCallback((commit: boolean) => {
-    if (queuedRef.current) {
-      queuedRef.current = commit ? 'released' : null;
-      setQueueTick((tick) => tick + 1);
-      return;
-    }
     const capture = captureRef.current;
     if (!capture) return;
     capture.ending = true;
@@ -806,24 +795,7 @@ function usePetVoice({ enabled, epoch, draft, onOpenComposer }: { enabled: boole
   const clearError = useCallback(() => setError(null), []);
   useEffect(() => cancel, [epoch, enabled, cancel]);
   useEffect(() => () => setError(null), [epoch, enabled]);
-  // Press-and-hold entry for every surface (hotkey and avatar): voice when it
-  // is available, text otherwise.
-  const pending = enabled && supported && !asr.settled;
-  const begin = useCallback(() => {
-    queuedRef.current = 'held';
-    setQueueTick((tick) => tick + 1);
-  }, []);
-  useEffect(() => {
-    const queued = queuedRef.current;
-    if (!queued || (queued === 'held' && pending)) return;
-    queuedRef.current = null;
-    // A deferred press handler: it acts on a user press once state allows.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    if (queued === 'held' && available) start();
-    else onOpenComposer(draft);
-  }, [queueTick, pending, available, start, onOpenComposer, draft]);
-  useEffect(() => () => { queuedRef.current = null; }, [epoch, enabled]);
-  return { available, begin, cloudRequired: asr.checked && !asr.available, listening, preview, error, clearError, start, stop, cancel };
+  return { available, cloudRequired: asr.checked && !asr.available, listening, preview, error, clearError, start, stop, cancel };
 }
 
 type VoiceFailure = 'startFailed' | 'empty' | 'failed';

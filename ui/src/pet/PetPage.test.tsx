@@ -1723,26 +1723,26 @@ describe('desktop mini v2 interaction contract', () => {
     });
   });
 
-  it('holds a voice summon until the first ASR status read settles', async () => {
+  it('opens text while the first ASR status read is still pending, and does not start voice when it later succeeds', async () => {
     const status = deferred<{ ok: boolean; json: () => Promise<unknown> }>();
-    class Dictation { done = new Promise<string>(() => {}); start = async () => {}; finish = () => {}; abort = () => {}; }
+    const start = vi.fn(async () => {});
+    class Dictation { done = new Promise<string>(() => {}); start = start; finish = () => {}; abort = () => {}; }
     await withVoiceEnv(() => true, Dictation, async () => {
       vi.stubGlobal('fetch', vi.fn(() => status.promise));
       devBind('S'); render(<PetPage />); summon('listen');
-      await act(async () => new Promise((resolve) => setTimeout(resolve, 15)));
-      expect(screen.queryByRole('textbox')).toBeNull();
+      expect(await screen.findByRole('textbox')).toBeTruthy();
       expect(pose()).not.toBe('listening');
       await act(async () => status.resolve({ ok: true, json: async () => ({ available: true }) }));
-      await waitFor(() => expect(pose()).toBe('listening'));
+      await waitFor(() => expect(screen.getByLabelText('pet.voice.open')).toBeTruthy());
+      expect(pose()).not.toBe('listening');
+      expect(start).not.toHaveBeenCalled();
     });
   });
 
-  it.each([
-    ['still held', true],
-    ['released', false],
-  ])('decides an avatar hold that outlives a pending ASR read once it settles (%s)', async (_label, held) => {
+  it('opens text from an avatar hold while ASR status is pending, and does not start voice when it later succeeds', async () => {
     const status = deferred<{ ok: boolean; json: () => Promise<unknown> }>();
-    class Dictation { done = new Promise<string>(() => {}); start = async () => {}; finish = () => {}; abort = () => {}; }
+    const start = vi.fn(async () => {});
+    class Dictation { done = new Promise<string>(() => {}); start = start; finish = () => {}; abort = () => {}; }
     await withVoiceEnv(() => true, Dictation, async () => {
       vi.stubGlobal('fetch', vi.fn(() => status.promise));
       devBind('S'); render(<PetPage />); await screen.findByText('Session S');
@@ -1751,18 +1751,15 @@ describe('desktop mini v2 interaction contract', () => {
       try {
         fireEvent.pointerDown(avatar, { button: 0, pointerId: 1 });
         await act(async () => vi.advanceTimersByTime(400));
-        expect(screen.queryByRole('textbox')).toBeNull();
-        expect(pose()).not.toBe('listening');
-        if (!held) fireEvent.pointerUp(avatar, { pointerId: 1 });
-        await act(async () => status.resolve({ ok: true, json: async () => ({ available: true }) }));
       } finally {
         vi.useRealTimers();
       }
-      if (held) await waitFor(() => expect(pose()).toBe('listening'));
-      else {
-        expect(await screen.findByRole('textbox')).toBeTruthy();
-        expect(pose()).not.toBe('listening');
-      }
+      expect(await screen.findByRole('textbox')).toBeTruthy();
+      expect(pose()).not.toBe('listening');
+      await act(async () => status.resolve({ ok: true, json: async () => ({ available: true }) }));
+      await waitFor(() => expect(screen.getByLabelText('pet.voice.open')).toBeTruthy());
+      expect(pose()).not.toBe('listening');
+      expect(start).not.toHaveBeenCalled();
     });
   });
 
