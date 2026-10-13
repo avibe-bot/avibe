@@ -322,8 +322,8 @@ as a half-open code-point range into `text`.
   `CitationBadge` (numbered sources, UTF-16 ranges, `body_sha256`). Adapters only parse; IM gets the Markdown links.
 
 **`ToolResultMessage.hosted`** (optional): `{record, execution?}`.
-- `execution` is a `ProxyExecution`, every field required: `mode: "proxy"`, `executor_origin`,
-  `executor_source_id`, `executor_billing`, `cost`. It is present exactly when an executor ran. A call that never
+- `execution` is a `ProxyExecution`: `mode: "proxy"`, `executor_origin`, `executor_source_id`,
+  `executor_billing`, and `cost` when the pricing module can value the call. It is present exactly when an executor ran. A call that never
   reached one (none verified, or the bound Source removed) has none, and its `record.status` is `failed`.
 - `is_error` is `true` exactly when `record.status` is `failed` or `incomplete`.
 - So a proxied call renders like a native one, and the card names the exact Source even when two Sources share an

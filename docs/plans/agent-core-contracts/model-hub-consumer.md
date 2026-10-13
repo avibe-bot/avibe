@@ -134,7 +134,11 @@ consumer's requirements, and the Model Hub lane lands the change in both places.
        1 MiB), 401, 404 for an unknown tool, or 409 `executor_not_bound`, as
        `{"type": "error", "error": {"type", "code"}}`.
      - A search call is bounded at 180 s and an image at 300 s. The call is metered on the executor Source and never
-       changes Source health. `execution.cost` is absent until the pricing module values it.
+       changes Source health.
+     - `execution.cost` is the pricing module's value of the executor's response (`hosted_call_cost`): `included`
+       on a monthly Source, the provider's own figure as `reported` (xAI `cost_in_usd_ticks`), else `list` from the
+       call's metered tokens and the provider's hosted counters (`usage.server_tool_use`,
+       `usage.server_side_tool_usage_details`). It is absent when the call cannot be valued, never zero.
 
 ## 3. Not required
 

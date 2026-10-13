@@ -20,15 +20,17 @@ import aiohttp
 import pytest
 
 from config.v2_config import ModelHubHostedToolConfig, ModelHubRouteHopConfig
-from core.agent_core.messages import message_from_dict
+from core.agent_core.messages import HostedCost, message_from_dict
 from core.handlers.model_hub import hosted_executor as executor_module
 from core.handlers.model_hub import service as service_module
 from core.handlers.model_hub.adapter import InvokeCancelledError, RawOutcomeKind
 from core.handlers.model_hub.capability_evidence import EvidenceFeature, EvidenceRecord, identity_digest
 from core.handlers.model_hub.hosted_executor import excerpt
 from core.handlers.model_hub.hosted_tools import HOSTED_PROBE_SHAPE, engine_stamp
+from core.handlers.model_hub.pricing import PriceTable
 from core.handlers.model_hub.stream_wire import ProtocolSSEState, ProtocolUsageReport
 from core.handlers.model_hub.turn_gateway import ModelHubTurnGateway
+from core.handlers.model_hub.usage import UsageWriter
 from modules.agents.model_hub import ModelHubRuntimeRouter
 from core.run_settlement import SETTLED_BY_STOPPED
 from tests.test_model_hub_l3 import (
@@ -259,6 +261,65 @@ async def test_an_anthropic_executor_is_buffered_and_keeps_the_providers_results
     assert answer["execution"]["executor_origin"] == {
         "provider": "anthropic", "api": "anthropic", "model": "claude-haiku-4-5",
     }
+
+
+ANTHROPIC_SEARCH = {
+    "type": "message", "role": "assistant", "stop_reason": "end_turn",
+    "content": [
+        {"type": "server_tool_use", "id": "srvtoolu_1", "name": "web_search", "input": {"query": "q"}},
+        {"type": "web_search_tool_result", "tool_use_id": "srvtoolu_1", "content": [
+            {"type": "web_search_result", "url": PAGE_A, "title": "Releases", "encrypted_content": "opaque"},
+        ]},
+        {"type": "text", "text": "See the releases page."},
+    ],
+    "usage": {"input_tokens": 2000, "output_tokens": 100, "server_tool_use": {"web_search_requests": 2}},
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("tool", "executor", "billing", "response", "cost"), [
+    # xAI's own figure for the whole response, in ticks of 1e-10 USD.
+    (
+        "x_search", (XAI, "grok-4.6"), "metered",
+        _responses(X_CALL, X_ANSWER, usage={"input_tokens": 2000, "output_tokens": 100, "cost_in_usd_ticks": 1_234_000_000}),
+        {"basis": "reported", "usd": 0.1234},
+    ),
+    # The list price: 2,000 input and 100 output tokens at $1 and $5 per million,
+    # plus the two searches Anthropic counted at $10 per thousand.
+    ("web_search", (ANTHROPIC, "claude-haiku-4-5"), "metered", ANTHROPIC_SEARCH, {"basis": "list", "usd": 0.0225}),
+    ("web_search", (ANTHROPIC, "claude-haiku-4-5"), "monthly", ANTHROPIC_SEARCH, {"basis": "included"}),
+    # OpenAI reports no search counter, so its per-call fee, and so the call, cannot be valued.
+    (
+        "web_search", (OPENAI, "gpt-6-astra"), "metered",
+        _responses(WEB_CALL, WEB_ANSWER, usage={"input_tokens": 2000, "output_tokens": 100}),
+        None,
+    ),
+])
+async def test_a_proxied_call_carries_the_pricing_modules_cost(tmp_path, tool, executor, billing, response, cost):
+    """MH-HOSTED-GATEWAY-004: the cost is included, the provider's own figure, or the list price; absent when unknown."""
+
+    sources = [replace(source, billing=billing) if source.id == executor[0] else source for source in _sources()]
+    frames = response if isinstance(response, tuple) else (json.dumps(response).encode(),)
+    tokens = ProtocolUsageReport.of(input_tokens=2000, cached_input_tokens=0, output_tokens=100)
+    service = _vibey_service(tmp_path, sources, handles=[
+        LiveInvokeHandle(_outcome(RawOutcomeKind.SUCCESS, source_id=executor[0], usage=tokens), frames),
+    ])
+    prices = PriceTable(
+        catalog={"anthropic": {"models": {"claude-haiku-4-5": {"cost": {"input": 1, "output": 5}}}},
+                 "openai": {"models": {"gpt-6-astra": {"cost": {"input": 1, "output": 5}}}}},
+        vendor_map={"families": [{"prefix": "claude-", "vendor_id": "anthropic"}, {"prefix": "gpt-", "vendor_id": "openai"}]},
+        overrides={}, price_table_date="2026-10-13",
+    )
+    service.usage_writer = UsageWriter(service.usage, price_table=lambda: prices)
+    _bind(service, tool, executor)
+    status, answer = await _call(service, tool, {
+        "arguments": {"query": "CLIProxyAPI latest release"},
+        "executor": {"source_id": executor[0], "model_id": executor[1]},
+    })
+    assert status == 200, answer
+    assert answer["record"]["status"] == "completed"
+    assert answer["execution"].get("cost") == cost
+    assert _hosted_result(tool, answer).execution.cost == (HostedCost(**cost) if cost else None)
 
 
 @pytest.mark.asyncio
