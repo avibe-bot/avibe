@@ -54,6 +54,8 @@ capabilities:
       - tests/test_model_hub_capability_evidence.py
       - tests/test_provider_overlay.py
       - tests/agent_core/ai/test_hosted_requests.py
+      - tests/agent_core/ai/test_hosted_parsing.py
+      - tests/agent_core/ai/test_hosted_transform.py
       - tests/test_vibey_agent.py
       - tests/test_model_hub_evidence_rules.py
       - tests/test_model_hub_admission.py

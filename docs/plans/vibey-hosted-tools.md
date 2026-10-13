@@ -412,11 +412,14 @@ These rules become C-1 rows in `cross-provider.md` and per-protocol rows in `con
   - An `image_generation` action becomes one `image_generation` call with `{prompt}`, plus `size` when the action
     has it. Its result is the **text path record** (§7.3). Image bytes are never resent: no base64 and no image
     block, even to the same Source.
-  - A non-search action (`open_page`, `find_in_page`, `x_thread_fetch`, `other`) becomes a line in the result of the
-    preceding synthetic call of the same tool in that response, e.g. "opened <url>" or "fetched thread <ref>".
-    Without a preceding call, it becomes its own call with `{query: "<action type> <target>"}`.
-  - The response's `hosted_summary.cited_sources` are listed once, in the first synthetic result of that tool, as
-    "posts cited in the answer".
+  - A non-search action (`open_page`, `find_in_page`, `x_thread_fetch`, `other`) is its own call with
+    `{query: "<action type> <target>"}`. A completed one's result says what it did, e.g. "Opened <url>" or "Fetched
+    thread <ref>".
+    - **Deviation (orchestrator decision, PR #2561 review).** The design first folded such an action into the result
+      of its tool's preceding call. Each rendering defect found in review came from that folding, where a line could
+      land on a result that does not show it. So every hosted block is exactly one call, with its own status.
+  - The response's `hosted_summary.cited_sources` are listed once, as "posts cited in the answer". They go on the
+    first call that was not cut off, whether it is replayed as a synthetic call or in place.
   - A `failed` or `incomplete` record renders as an error result: Anthropic `is_error: true`, or text starting
     `[<tool> failed: <error>]` where the protocol has no error flag.
   - A `pending` record (a call cut off with the turn) renders as the C-1 interrupted-call result.

@@ -12,9 +12,11 @@ import re
 from dataclasses import dataclass
 from typing import Any, Mapping
 
+from core.agent_core.ai.hosted import portable_hosted
 from core.agent_core.messages import (
     AssistantMessage,
     AssistantContent,
+    HostedToolBlock,
     ImageBlock,
     Message,
     Origin,
@@ -76,6 +78,9 @@ def transform_messages(
     """
 
     target_protocol = protocol or target.api
+    # The request's last assistant message still awaits its turn's next response when it stopped for tools: its
+    # hosted calls stay in place as text (§4.4); every earlier one becomes a synthetic call and result (§5).
+    last_assistant = max((i for i, m in enumerate(messages) if isinstance(m, AssistantMessage)), default=-1)
     id_map: dict[str, str] = {}
     used_tool_ids: set[str] = set()
     tool_id_occurrences: dict[str, int] = {}
@@ -83,7 +88,7 @@ def transform_messages(
     suppressed_tool_result_ids: set[str] = set()
     transformed: list[Message] = []
 
-    for message in messages:
+    for position, message in enumerate(messages):
         if isinstance(message, UserMessage):
             pending_tool_ids.clear()
             suppressed_tool_result_ids.clear()
@@ -118,7 +123,41 @@ def transform_messages(
         same_origin = message.origin == target
         content: list[AssistantContent] = []
         turn_tool_ids: dict[str, list[str]] = {}
+        in_flight = position == last_assistant and message.stop_reason == "tool_use"
+        hosted = portable_hosted(message, in_flight=in_flight, interrupted=SYNTHETIC_TOOL_RESULT)
+        # The synthetic results of the current run of hosted calls, and the assistant parts they split off.
+        results: list[ToolResultMessage] = []
+        parts: list[Message] = []
+
+        def split() -> None:
+            nonlocal content, results
+            if results:
+                parts.append(_assistant_part(message, content, stop_reason="tool_use"))
+                parts.extend(results)
+                content, results = [], []
+
         for block in message.content:
+            if isinstance(block, HostedToolBlock):
+                portable = hosted[id(block)]
+                if portable.kind == "in_place":
+                    split()
+                    content.append(TextBlock(text=portable.text))
+                    continue
+                name, arguments, text, is_error = portable.name, dict(portable.arguments), portable.text, portable.is_error
+                call_id = _claim_tool_call_id(
+                    block.id,
+                    normalize_tool_call_id(block.id, target_protocol),
+                    used_tool_ids=used_tool_ids,
+                    occurrences=tool_id_occurrences,
+                )
+                content.append(ToolCallBlock(id=call_id, name=name, arguments=arguments))
+                results.append(
+                    ToolResultMessage(
+                        tool_call_id=call_id, tool_name=name, content=(TextBlock(text=text),), is_error=is_error
+                    )
+                )
+                continue
+            split()
             if isinstance(block, ThinkingBlock):
                 if block.redacted:
                     if same_origin:
@@ -165,18 +204,23 @@ def transform_messages(
             continue
         for source_id, wire_ids in turn_tool_ids.items():
             pending_tool_ids.setdefault(source_id, []).extend(wire_ids)
-        transformed.append(
-            AssistantMessage(
-                content=tuple(content),
-                origin=message.origin,
-                stop_reason=message.stop_reason,
-                usage=message.usage,
-                error_message=message.error_message,
-            )
-        )
+        split()
+        transformed.extend(parts)
+        if content or not parts:
+            transformed.append(_assistant_part(message, content, stop_reason=message.stop_reason))
 
     transformed = _insert_synthetic_results(transformed)
     return TransformResult(messages=tuple(transformed), tool_call_id_map=dict(id_map))
+
+
+def _assistant_part(message: AssistantMessage, content: list[AssistantContent], *, stop_reason: str) -> AssistantMessage:
+    return AssistantMessage(
+        content=tuple(content),
+        origin=message.origin,
+        stop_reason=stop_reason,  # type: ignore[arg-type]
+        usage=message.usage,
+        error_message=message.error_message,
+    )
 
 
 def transform_messages_for_target(

@@ -23,11 +23,14 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Collection, Mapping, Optional, Protocol, Sequence
 
 from core.agent_core.ai._common import endpoint_origin, native_hosted_tools
+from core.agent_core.ai.hosted import portable_sizes
+from core.agent_core.ai.transform import SYNTHETIC_TOOL_RESULT
 from core.agent_core.ai.provider import HostedToolRoute, ModelCapabilities, ModelEndpoint, ModelRequest
 from core.agent_core.harness.projection import ContextView, Unit, context_view
 from core.agent_core.harness.store import ContextEntry
 from core.agent_core.messages import (
     AssistantMessage,
+    HostedToolBlock,
     ImageBlock,
     Message,
     TextBlock,
@@ -243,6 +246,8 @@ def message_tokens(message: Message) -> int:
     images = 0
     signed = 0  # thinking text that rides with a payload: the reported reasoning covers it
     payload: Optional[int] = None  # UTF-8 bytes of its opaque payloads, None without any
+    hosted_bytes = 0  # UTF-8 bytes of its hosted calls as replayed
+    hosted: Optional[dict[int, int]] = None
     for block in message.content:
         if isinstance(block, TextBlock):
             size += _utf8(block.text) if block.text is not None else block.ref.bytes
@@ -259,8 +264,14 @@ def message_tokens(message: Message) -> int:
             size += _utf8(block.name) + _utf8(arguments)
             if block.signature is not None:
                 payload = (payload or 0) + _utf8(block.signature)
+        elif isinstance(block, HostedToolBlock):
+            # Replayed in portable form, never as its native payload (§5): the larger of its synthetic call and
+            # result and its in-place text, so the estimate holds wherever the message sits.
+            if hosted is None:
+                hosted = portable_sizes(message, interrupted=SYNTHETIC_TOOL_RESULT)  # type: ignore[arg-type]
+            hosted_bytes += hosted[id(block)]
     reasoning = 0 if payload is None else max(math.ceil(signed / 4), _reasoning(message, payload))
-    return math.ceil(size / 4) + images * IMAGE_TOKENS + reasoning
+    return math.ceil((size + hosted_bytes) / 4) + images * IMAGE_TOKENS + reasoning
 
 
 def _reasoning(message: Message, payload: int) -> int:
