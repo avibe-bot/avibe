@@ -53,8 +53,9 @@ Built-in 2FA code generation is P2 (section 13).
   name. To rename one, remove it and add it again. The default field's name is
   only a label and can be renamed. Which field is the default is fixed when the
   secret is created.
-- Only `static` secrets can have extra fields. Keypair secrets keep one field,
-  and refs such as `KEY.field` are rejected.
+- Only `static` secrets can have extra fields. Keypair secrets keep one implicit
+  `value` field: create/PATCH reject an explicit `default_field`, and refs such
+  as `KEY.field` are rejected.
 
 Every envelope binds its record name:
 
@@ -166,7 +167,9 @@ The secret metadata payload (`_meta_payload`, REST, and `vibe vault list/find
   Otherwise it adds the field (appended) or replaces its value. It returns the
   masked metadata.
 - `DELETE /api/vault/secrets/{name}/fields/{field}` removes an extra field. The
-  default field cannot be removed (409).
+  browser sends `{"expected_updated_at": "<displayed version>"}` so deleting a
+  field changed in another tab returns 409 `secret_conflict`. The default field
+  cannot be removed (409).
 - `PATCH /api/vault/secrets/{name}` also accepts `default_field` to rename the
   default field. The name must be valid and unused; this is pure metadata and
   leaves envelope versions, pending requests, and active grants unchanged.
@@ -262,6 +265,8 @@ secrets with fields work without it; protected secrets with fields need it.
   deletion is out of scope; browser/REST removal of extra fields is supported.
 - There are no plaintext or non-secret fields; non-secret notes belong in the
   description.
+- Web field errors are localized from stable error codes in English and Chinese;
+  agent-facing CLI/service diagnostic text stays English.
 - VMK-copy discovery (`latest_protected_vmk_wrap_meta`) selects the default
   envelope on the most recently updated secret. Updating an extra field can
   move a secret with older VMK copies to the front. This is latent while the

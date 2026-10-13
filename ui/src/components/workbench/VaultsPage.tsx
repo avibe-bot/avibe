@@ -79,7 +79,10 @@ const SecretRow: React.FC<{
   // shown in-sandbox. Standard values aren't sandbox-sealed, and a keypair has no plaintext value.
   const canReveal = isProtected && !isKeypair;
   const fields = vaultFieldNames(s);
-  const selectedField = revealField && fields.includes(revealField) ? revealField : vaultDefaultField(s);
+  const selectedField = revealField === null
+    ? vaultDefaultField(s)
+    : fields.includes(revealField) ? revealField : null;
+  const staleRevealField = canReveal && selectedField === null;
   // The sandbox reveal needs its authorization window, which only a browser can pair with.
   const revealInBrowser = canReveal && vaultPasskeyNeedsBrowser();
   // Skills are stored as reserved `skill:<name>` tags; render them as their own chips.
@@ -149,18 +152,24 @@ const SecretRow: React.FC<{
             {canReveal && fields.length > 1 && (
               <label className="flex flex-col gap-1 px-2.5 py-2 text-xs text-muted">
                 {t('vaults.fields.revealField')}
-                <select value={selectedField} onChange={(event) => onRevealFieldChange(event.target.value)}
+                <select value={selectedField ?? ''} onChange={(event) => onRevealFieldChange(event.target.value)}
                   className="rounded-md border border-border bg-surface px-2 py-1 font-mono text-foreground">
                   {fields.map((field) => <option key={field} value={field}>{field}</option>)}
                 </select>
               </label>
             )}
-            {revealInBrowser ? (
+            {staleRevealField && (
+              <p role="alert" className="px-2.5 py-2 text-xs text-destructive-ink">
+                {t('vaults.reveal.errors.staleField')}
+              </p>
+            )}
+            {!staleRevealField && revealInBrowser ? (
               <>
                 <button
                   type="button"
                   role="menuitem"
                   onClick={() => {
+                    if (!selectedField) return;
                     setMenuOpen(false);
                     openVaultsInBrowser({ kind: 'reveal', secretName: s.name, field: selectedField });
                   }}
@@ -171,7 +180,7 @@ const SecretRow: React.FC<{
                 </button>
                 <div className="my-1 h-px bg-border" />
               </>
-            ) : canReveal ? (
+            ) : !staleRevealField && canReveal ? (
               <>
                 {/* Reveal opens the value inside the sandbox frame; the plaintext is never returned
                     to Avibe. "Copy value" leads to the same sandbox card, where copying is the
@@ -181,6 +190,7 @@ const SecretRow: React.FC<{
                   role="menuitem"
                   disabled={revealPreparing}
                   onClick={() => {
+                    if (!selectedField) return;
                     setMenuOpen(false);
                     onReveal(s, selectedField);
                   }}
@@ -194,6 +204,7 @@ const SecretRow: React.FC<{
                   role="menuitem"
                   disabled={revealPreparing}
                   onClick={() => {
+                    if (!selectedField) return;
                     setMenuOpen(false);
                     onReveal(s, selectedField);
                   }}
@@ -779,9 +790,10 @@ export const VaultsPage: React.FC = () => {
   const menuRevealKey = useMemo(() => {
     const secret = secrets.find((s) => s.name === menuSecret);
     if (secret?.protection !== 'protected' || secret.kind === 'keypair' || vaultPasskeyNeedsBrowser()) return null;
+    if (menuField !== null && !vaultFieldNames(secret).includes(menuField)) return null;
     return {
       name: secret.name,
-      field: menuField && vaultFieldNames(secret).includes(menuField) ? menuField : vaultDefaultField(secret),
+      field: menuField ?? vaultDefaultField(secret),
       version: secret.updated_at,
     };
   }, [secrets, menuSecret, menuField]);

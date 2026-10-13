@@ -854,7 +854,7 @@ export type ApiContextType = {
   createVaultSecret: (payload: VaultCreatePayload, opts?: { handleError?: boolean }) => Promise<{ ok: boolean; secret?: VaultSecret; code?: string; message?: string }>;
   updateVaultSecret: (name: string, payload: VaultMetadataUpdatePayload, opts?: { handleError?: boolean }) => Promise<{ ok: boolean; secret?: VaultSecret; code?: string; message?: string }>;
   updateVaultSecretField: (name: string, field: string, payload: VaultFieldValuePayload, opts?: { handleError?: boolean }) => Promise<{ ok: boolean; secret?: VaultSecret; code?: string; message?: string }>;
-  deleteVaultSecretField: (name: string, field: string) => Promise<{ ok: boolean; secret?: VaultSecret; code?: string; message?: string }>;
+  deleteVaultSecretField: (name: string, field: string, payload: { expected_updated_at: string }) => Promise<{ ok: boolean; secret?: VaultSecret; code?: string; message?: string }>;
   deleteVaultSecret: (name: string) => Promise<{ ok: boolean; removed?: boolean; code?: string; message?: string }>;
   getVaultProvisionRequest: (
     name: string,
@@ -4036,8 +4036,8 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }, path, opts);
       return payloadJson;
     },
-    deleteVaultSecretField: (name, field) =>
-      deleteJson(`/api/vault/secrets/${encodeURIComponent(name)}/fields/${encodeURIComponent(field)}`),
+    deleteVaultSecretField: (name, field, payload) =>
+      deleteJson(`/api/vault/secrets/${encodeURIComponent(name)}/fields/${encodeURIComponent(field)}`, payload),
     deleteVaultSecret: (name) => deleteJson(`/api/vault/secrets/${encodeURIComponent(name)}`),
     getVaultProvisionRequest: (name, opts) =>
       getCachedJson(`/api/vault/provision-requests/${encodeURIComponent(name)}`, 1500, opts),

@@ -4323,6 +4323,34 @@ def test_vault_sign_rejects_malformed_digest_before_request_or_avault(monkeypatc
     assert api.get_vault_requests()["requests"] == []
 
 
+@pytest.mark.parametrize("default_field", ["value", "password"])
+def test_keypair_create_rejects_explicit_default_field(monkeypatch, default_field):
+    seal = Mock(return_value=_sealed())
+    monkeypatch.setattr(api, "avault_seal_blind_box", seal)
+    with pytest.raises(api.VaultApiError) as exc:
+        api.create_vault_secret({
+            "name": "KEY", "kind": "keypair", "default_field": default_field,
+            "blind_box": _agent_dek_blindbox(),
+        })
+    assert exc.value.code == "fields_not_supported"
+    seal.assert_not_called()
+    assert api.get_vault_secrets()["secrets"] == []
+
+
+def test_keypair_patch_rejects_default_field_and_keeps_implicit_value():
+    created = api.create_vault_secret({
+        "name": "KEY", "kind": "keypair", "protection": "protected",
+        "sealed": {"ciphertext": "ct-key", "nonce": "n-key", "wrap_meta": "wm-key"},
+    })["secret"]
+    with pytest.raises(api.VaultApiError) as exc:
+        api.update_vault_secret("KEY", {"default_field": "private_key"})
+    assert exc.value.code == "fields_not_supported"
+    current = api.get_vault_secrets()["secrets"][0]
+    assert current["default_field"] == "value"
+    assert current["fields"] == ["value"]
+    assert current["updated_at"] == created["updated_at"]
+
+
 def test_create_vault_secret_seals_each_standard_record_name(monkeypatch):
     seal = Mock(side_effect=[_sealed("default"), _sealed("username"), _sealed("totp")])
     monkeypatch.setattr(api, "avault_seal_blind_box", seal)

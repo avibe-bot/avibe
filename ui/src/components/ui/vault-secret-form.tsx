@@ -40,6 +40,7 @@ import {
   type ProtectedRecordEnvelope,
   type SigningKeyMaterial,
 } from '@/lib/vaultCrypto';
+import { vaultErrorMessage } from '@/lib/vaultErrors';
 import { useProtectedVault } from '@/lib/useProtectedVault';
 import { MAX_VAULT_FIELDS, VAULT_FIELD_PATTERN, vaultRecordName } from '@/lib/vaultFields';
 import { openVaultsInBrowser } from '@/lib/vaultBrowserHandoff';
@@ -573,7 +574,7 @@ export const VaultSecretForm: React.FC<{
         });
         const result = await api.updateVaultSecret(editSecret.name, patch, { handleError: false });
         if (!result.ok) {
-          setError(result.message || t('vaults.dialog.errors.updateFailed'));
+          setError(vaultErrorMessage(t, result, t('vaults.dialog.errors.updateFailed')));
           return;
         }
         onSaved?.(editSecret.name);
@@ -725,7 +726,7 @@ export const VaultSecretForm: React.FC<{
           setError(t('vaults.protectedUnlock.errors.alreadyInitialized'));
           return;
         }
-        throw new Error(created.message || created.code || t('vaults.request.saveFailed'));
+        throw new Error(vaultErrorMessage(t, created, t('vaults.request.saveFailed')));
       }
       if (protection === 'protected') protectedVault.afterCreated();
       clearStaticValue();
@@ -749,7 +750,7 @@ export const VaultSecretForm: React.FC<{
       } else if (err instanceof ApiError && err.code === 'secret_name_case_conflict') {
         setError(err.message || t('vaults.dialog.errors.secretNameCaseConflict'));
       } else {
-        setError(err instanceof Error ? err.message : String(err));
+        setError(vaultErrorMessage(t, err, t('vaults.request.saveFailed')));
       }
     } finally {
       fileBytesToWipe?.fill(0);

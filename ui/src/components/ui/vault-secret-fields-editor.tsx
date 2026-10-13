@@ -3,6 +3,7 @@ import { Loader2, Plus, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useApi, type VaultFieldValuePayload, type VaultSecret } from '@/context/ApiContext';
 import { sealBlindBox, standardCreateBlindBoxContext } from '@/lib/vaultCrypto';
+import { vaultErrorMessage } from '@/lib/vaultErrors';
 import { useProtectedVault } from '@/lib/useProtectedVault';
 import { openVaultsInBrowser } from '@/lib/vaultBrowserHandoff';
 import { MAX_VAULT_FIELDS, VAULT_FIELD_PATTERN, vaultDefaultField, vaultFieldNames, vaultRecordName } from '@/lib/vaultFields';
@@ -43,6 +44,29 @@ export function VaultSecretFieldsEditor({
     if (isProtected) void refresh();
   }, [isProtected, refresh]);
 
+  const hasErrorCode = (result: unknown, code: string): boolean =>
+    typeof result === 'object' && result !== null && 'code' in result && result.code === code;
+  const conflict = () => new Error(t('vaults.fields.recordConflict'));
+  const adoptSecret = (next: VaultSecret) => {
+    setCurrent(next);
+    setDefaultLabel(vaultDefaultField(next));
+    setDrafts((values) => {
+      const remaining = { ...values };
+      const names = new Set(vaultFieldNames(next));
+      for (const name of Object.keys(remaining)) {
+        if (!names.has(name)) delete remaining[name];
+      }
+      return remaining;
+    });
+  };
+  const freshSecret = async (): Promise<VaultSecret> => {
+    const result = await api.listVaultSecrets({ cache: false });
+    const next = result.secrets.find((entry) => entry.name === current.name);
+    if (!next) throw conflict();
+    adoptSecret(next);
+    return next;
+  };
+
   const mutate = async (operation: () => Promise<{ ok: boolean; secret?: VaultSecret; message?: string; code?: string }>) => {
     if (locked) return;
     setBusy(true);
@@ -51,7 +75,9 @@ export function VaultSecretFieldsEditor({
     setSaved(false);
     try {
       const result = await operation();
-      if (!result.ok || !result.secret) throw new Error(result.message || result.code || t('vaults.dialog.errors.updateFailed'));
+      if (!result.ok || !result.secret) {
+        throw Object.assign(new Error(vaultErrorMessage(t, result, t('vaults.dialog.errors.updateFailed'))), { code: result.code });
+      }
       const next = result.secret;
       const nextDefault = vaultDefaultField(next);
       setCurrent(next);
@@ -70,7 +96,16 @@ export function VaultSecretFieldsEditor({
       });
       setSaved(true);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      if (hasErrorCode(err, 'secret_conflict')) {
+        try {
+          await freshSecret();
+          setError(t('vaults.fields.secretConflict'));
+        } catch (refreshError) {
+          setError(vaultErrorMessage(t, refreshError, t('vaults.dialog.errors.updateFailed')));
+        }
+      } else {
+        setError(vaultErrorMessage(t, err, t('vaults.dialog.errors.updateFailed')));
+      }
     } finally {
       setBusy(false);
       onBusyChange(false);
@@ -84,28 +119,6 @@ export function VaultSecretFieldsEditor({
     let capturedValue = value;
     const clear = () =>
       adding ? setNewValue('') : setDrafts((values) => ({ ...values, [field]: '' }));
-    const hasErrorCode = (result: unknown, code: string): boolean =>
-      typeof result === 'object' && result !== null && 'code' in result && result.code === code;
-    const conflict = () => new Error(t('vaults.fields.recordConflict'));
-    const adoptSecret = (next: VaultSecret) => {
-      setCurrent(next);
-      setDefaultLabel(vaultDefaultField(next));
-      setDrafts((values) => {
-        const remaining = { ...values };
-        const names = new Set(vaultFieldNames(next));
-        for (const name of Object.keys(remaining)) {
-          if (!names.has(name)) delete remaining[name];
-        }
-        return remaining;
-      });
-    };
-    const freshSecret = async (): Promise<VaultSecret> => {
-      const result = await api.listVaultSecrets({ cache: false });
-      const next = result.secrets.find((entry) => entry.name === current.name);
-      if (!next) throw conflict();
-      adoptSecret(next);
-      return next;
-    };
     const sealAndWrite = async (secret: VaultSecret, targetField: string, wasDefault: boolean) => {
       const latestDefault = vaultDefaultField(secret);
       if (!wasDefault && latestDefault === targetField) throw conflict();
@@ -142,10 +155,6 @@ export function VaultSecretFieldsEditor({
           const next = await freshSecret();
           result = await sealAndWrite(next, wasDefault ? vaultDefaultField(next) : field, wasDefault);
           if (hasErrorCode(result, 'record_mismatch')) throw conflict();
-        }
-        if (hasErrorCode(result, 'secret_conflict')) {
-          await freshSecret();
-          throw new Error(t('vaults.fields.secretConflict'));
         }
         if (result.ok && result.secret) {
           adoptSecret(result.secret);
@@ -235,7 +244,7 @@ export function VaultSecretFieldsEditor({
         confirmLabel={t('vaults.delete')} cancelLabel={t('vaults.dialog.cancel')} destructive
         onConfirm={async () => {
           if (!removeField) return;
-          await mutate(() => api.deleteVaultSecretField(current.name, removeField));
+          await mutate(() => api.deleteVaultSecretField(current.name, removeField, { expected_updated_at: current.updated_at }));
           setRemoveField(null);
         }} />
     </div>

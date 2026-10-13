@@ -553,7 +553,7 @@ def test_rest_sign_errors_are_stable(monkeypatch):
 
 
 def test_rest_field_put_delete_routes_use_canonical_record_name(monkeypatch):
-    seal = Mock(side_effect=[_sealed("default"), _sealed("username")])
+    seal = Mock(side_effect=[_sealed("default"), _sealed("username"), _sealed("newer")])
     monkeypatch.setattr(api, "avault_seal_blind_box", seal)
     api.create_vault_secret(
         {
@@ -576,7 +576,22 @@ def test_rest_field_put_delete_routes_use_canonical_record_name(monkeypatch):
     assert put.get_json()["secret"]["fields"] == ["value", "username"]
     assert seal.call_args_list[1].args[0] == "REST_LOGIN.username"
 
-    removed = client.delete("/api/vault/secrets/REST_LOGIN/fields/username", headers=headers)
+    old_version = put.get_json()["secret"]["updated_at"]
+    newer = api.update_vault_secret_field("REST_LOGIN", "username", {
+        "record": "REST_LOGIN.username",
+        "blind_box": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "newer"},
+    })
+    stale = client.delete(
+        "/api/vault/secrets/REST_LOGIN/fields/username",
+        json={"expected_updated_at": old_version}, headers=headers,
+    )
+    assert stale.status_code == 409
+    assert stale.get_json()["code"] == "secret_conflict"
+    assert api.get_vault_secrets()["secrets"][0]["fields"] == ["value", "username"]
+    removed = client.delete(
+        "/api/vault/secrets/REST_LOGIN/fields/username",
+        json={"expected_updated_at": newer["secret"]["updated_at"]}, headers=headers,
+    )
     assert removed.status_code == 200
     assert removed.get_json()["secret"]["fields"] == ["value"]
 

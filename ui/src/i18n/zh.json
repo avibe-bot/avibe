@@ -2520,6 +2520,13 @@
     "retry": "重试"
   },
   "errors": {
+    "invalid_field_name": "字段名须为 1–64 个小写字母、数字或下划线，且以字母开头。",
+    "field_exists": "此字段名已存在，请使用其他名称。",
+    "field_not_found": "此字段已不存在。请刷新密钥并选择当前字段。",
+    "too_many_fields": "每个密钥最多可包含 32 个字段（含默认字段）。",
+    "fields_not_supported": "签名密钥不支持命名字段或默认字段改名。",
+    "record_mismatch": "保存期间字段记录发生变化，请刷新密钥后重试。",
+    "secret_conflict": "此密钥已在其他位置修改。请检查刷新后的字段再试；你的修改尚未保存。",
     "retry_not_available": "这条通知无法重试，可以发送消息继续。",
     "retry_stale": "会话已经开始了后续任务，如需继续请发送消息。",
     "retry_busy": "上一轮还在结束处理中，请稍后再试。",
@@ -4940,6 +4947,7 @@
       "copy": "复制值",
       "showInBrowser": "在浏览器中查看",
       "errors": {
+        "staleField": "此链接指向的字段已不存在。请打开密钥并选择当前字段。",
         "contextFailed": "无法准备查看，请重试。",
         "unavailable": "此保护档暂不支持查看。"
       }

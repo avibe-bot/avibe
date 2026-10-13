@@ -5,6 +5,7 @@ import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { ApiError, type VaultSecret } from '@/context/ApiContext';
 import en from '@/i18n/en.json';
+import zh from '@/i18n/zh.json';
 import { VaultSecretFieldsEditor } from './vault-secret-fields-editor';
 
 const api = vi.hoisted(() => ({
@@ -26,7 +27,7 @@ vi.mock('@/lib/vaultCrypto', async (original) => ({
 }));
 const i18n = createInstance();
 void i18n.use(initReactI18next).init({
-  lng: 'en', resources: { en: { translation: en } }, interpolation: { escapeValue: false },
+  lng: 'en', resources: { en: { translation: en }, zh: { translation: zh } }, interpolation: { escapeValue: false },
 });
 const secret: VaultSecret = {
   name: 'LOGIN', default_field: 'password', fields: ['password', 'username'],
@@ -41,7 +42,7 @@ beforeEach(() => {
   api.updateVaultSecretField.mockResolvedValue({ ok: true, secret: { ...secret, updated_at: 'version-2' } });
   api.listVaultSecrets.mockResolvedValue({ ok: true, secrets: [secret] });
 });
-afterEach(() => { cleanup(); vi.clearAllMocks(); });
+afterEach(async () => { cleanup(); vi.clearAllMocks(); await i18n.changeLanguage('en'); });
 
 // The editor owns metadata versions between browser encryptions. Form creation and crypto
 // tests cannot catch a second field write reusing the first version, or a default rename
@@ -93,8 +94,36 @@ it('requires a unique populated extra field, saves it under its record name, and
   expect(api.deleteVaultSecretField).not.toHaveBeenCalled();
   api.deleteVaultSecretField.mockResolvedValue({ ok: true, secret: { ...secret, updated_at: 'version-3' } });
   fireEvent.click(screen.getByRole('button', { name: en.vaults.delete }));
-  await waitFor(() => expect(api.deleteVaultSecretField).toHaveBeenCalledWith('LOGIN', 'totp'));
+  await waitFor(() => expect(api.deleteVaultSecretField).toHaveBeenCalledWith('LOGIN', 'totp', { expected_updated_at: 'version-2' }));
   await waitFor(() => expect(screen.queryByLabelText('Value for totp')).toBeNull());
+});
+
+it('refreshes a stale delete version without removing the newer field or retrying', async () => {
+  api.deleteVaultSecretField.mockRejectedValueOnce(new ApiError('stale delete', 409, 'secret_conflict'));
+  api.listVaultSecrets.mockResolvedValueOnce({ ok: true, secrets: [{ ...secret, updated_at: 'version-8' }] });
+  renderEditor();
+  fireEvent.click(screen.getByRole('button', { name: 'Remove username' }));
+  fireEvent.click(screen.getByRole('button', { name: en.vaults.delete }));
+  expect((await screen.findByRole('alert')).textContent).toBe(en.vaults.fields.secretConflict);
+  expect(api.deleteVaultSecretField).toHaveBeenCalledOnce();
+  expect(screen.getByLabelText('Value for username')).toBeTruthy();
+  api.deleteVaultSecretField.mockResolvedValueOnce({ ok: true, secret: { ...secret, fields: ['password'], updated_at: 'version-9' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Remove username' }));
+  fireEvent.click(screen.getByRole('button', { name: en.vaults.delete }));
+  await waitFor(() => expect(screen.queryByLabelText('Value for username')).toBeNull());
+  expect(api.deleteVaultSecretField.mock.calls).toEqual([
+    ['LOGIN', 'username', { expected_updated_at: 'version-1' }],
+    ['LOGIN', 'username', { expected_updated_at: 'version-8' }],
+  ]);
+});
+
+it('renders a Chinese field validation error from the stable code', async () => {
+  await i18n.changeLanguage('zh');
+  api.updateVaultSecretField.mockResolvedValueOnce({ ok: false, code: 'field_not_found', message: 'field not found on LOGIN' });
+  renderEditor();
+  change(i18n.t('vaults.fields.value', { field: 'username' }), 'replacement');
+  fireEvent.click(screen.getByRole('button', { name: i18n.t('vaults.fields.saveNamed', { field: 'username' }) }));
+  expect((await screen.findByRole('alert')).textContent).toBe(zh.errors.field_not_found);
 });
 
 it.each(['response', 'exception'])('refreshes a conflicting version without retrying, then permits a new save (%s)', async (failure) => {

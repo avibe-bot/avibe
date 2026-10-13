@@ -5927,6 +5927,7 @@ async def vault_secret_field_delete(
                     api.delete_vault_secret_field,
                     name,
                     field,
+                    request.json,
                     user_context=getattr(g, "authorization_context", None),
                 )
             )

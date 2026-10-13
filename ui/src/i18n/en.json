@@ -2520,6 +2520,13 @@
     "retry": "Retry"
   },
   "errors": {
+    "invalid_field_name": "Use 1–64 lowercase letters, digits or underscores for field names, starting with a letter.",
+    "field_exists": "A field with this name already exists. Choose a different name.",
+    "field_not_found": "This field no longer exists. Refresh the secret and choose one of its current fields.",
+    "too_many_fields": "A secret can have at most 32 fields, including the default field.",
+    "fields_not_supported": "Signing keys do not support named fields or default-field renaming.",
+    "record_mismatch": "This field changed while you were saving. Refresh the secret and try again.",
+    "secret_conflict": "This secret changed elsewhere. Review the refreshed fields and try again; your change was not saved.",
     "retry_not_available": "This notice cannot be retried. Send a message to continue.",
     "retry_stale": "Newer work has already started. Send a message if you want to continue.",
     "retry_busy": "The previous turn is still settling. Try again after it stops.",
@@ -4940,6 +4947,7 @@
       "copy": "Copy value",
       "showInBrowser": "Show in browser",
       "errors": {
+        "staleField": "This link points to a field that no longer exists. Open the secret and choose a current field.",
         "contextFailed": "Couldn't prepare the reveal. Please try again.",
         "unavailable": "Reveal isn't available for this secret yet."
       }

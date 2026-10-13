@@ -76,10 +76,10 @@ vi.mock('./WorkbenchPageHeader', () => ({
   ),
 }));
 
-function renderPage(context = remoteOwner) {
+function renderPage(context = remoteOwner, initialEntries = ['/vaults']) {
   return render(
     <InstanceAuthorizationContext.Provider value={context}>
-      <MemoryRouter initialEntries={['/vaults']}>
+      <MemoryRouter initialEntries={initialEntries}>
         <VaultsPage />
       </MemoryRouter>
     </InstanceAuthorizationContext.Provider>,
@@ -285,6 +285,40 @@ describe('VaultsPage protected reveal', () => {
     await clickShowValue();
     expect(revealProtectedValue.mock.calls[0][0].name).toBe(record);
     expect(revealProtectedValue.mock.calls[0][1]).toEqual({ field });
+  });
+
+  it('shows a stale handoff field without preparing or revealing the default field', async () => {
+    api.listVaultSecrets.mockResolvedValue({
+      secrets: [{ ...protectedSecret('alpha'), default_field: 'password', fields: ['password'] }],
+    });
+    renderPage(remoteOwner, ['/vaults?reveal=alpha&field=username']);
+
+    expect((await screen.findByRole('alert')).textContent).toBe('vaults.reveal.errors.staleField');
+    expect(api.createVaultRevealContext).not.toHaveBeenCalled();
+    expect(revealProtectedValue).not.toHaveBeenCalled();
+  });
+
+  it('keeps a disappearing active field stale without preparing the default field', async () => {
+    const initial = { ...protectedSecret('alpha'), default_field: 'password', fields: ['password', 'username'] };
+    api.listVaultSecrets.mockResolvedValue({ secrets: [initial] });
+    api.createVaultRevealContext.mockResolvedValue({ ok: true, context: { field: 'ready' }, envelope });
+    renderPage();
+    const user = userEvent.setup();
+    await user.click((await screen.findByRole('button', { name: 'vaults.rowActions' })));
+    await vi.waitFor(() => expect(api.createVaultRevealContext).toHaveBeenCalledOnce());
+    fireEvent.change(screen.getByRole('combobox', { name: 'vaults.fields.revealField' }), { target: { value: 'username' } });
+    await vi.waitFor(() => expect(api.createVaultRevealContext).toHaveBeenCalledTimes(2));
+    const preparedBeforeRefresh = api.createVaultRevealContext.mock.calls.length;
+
+    api.listVaultSecrets.mockResolvedValue({
+      secrets: [{ ...initial, fields: ['password'] }],
+    });
+    await act(async () => {
+      for (const handler of [...eventHandlers]) handler.onVaultsUpdated?.({});
+    });
+
+    expect((await screen.findByRole('alert')).textContent).toBe('vaults.reveal.errors.staleField');
+    expect(api.createVaultRevealContext).toHaveBeenCalledTimes(preparedBeforeRefresh);
   });
 
   it('prepares the replacement envelope when an open secret changes version', async () => {

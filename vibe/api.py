@@ -3501,6 +3501,12 @@ def create_vault_secret(
     if signer_kind is not None:
         signer_kind = str(signer_kind)
     provision_request_id = str(payload.get("provision_request_id") or "") or None
+    if kind == "keypair" and ("fields" in payload or "default_field" in payload or "default_field" in (public_meta or {})):
+        raise VaultApiError(
+            "keypair secrets do not support fields or default_field",
+            code="fields_not_supported",
+            status=409,
+        )
     if "default_field" in payload:
         try:
             default_field = _vault_validate_field_name(payload.get("default_field"), field="default_field")
@@ -3508,12 +3514,6 @@ def create_vault_secret(
             raise VaultApiError(str(exc), code="invalid_field_name", status=400) from exc
     else:
         default_field = "value"
-    if kind == "keypair" and "fields" in payload:
-        raise VaultApiError(
-            "keypair secrets do not support fields",
-            code="fields_not_supported",
-            status=409,
-        )
     field_specs = _vault_create_field_specs(
         payload,
         secret_name=name,
@@ -3602,7 +3602,7 @@ def create_vault_secret(
                 name=name,
                 sealed=sealed,
                 fields=sealed_fields,
-                default_field=default_field,
+                default_field=default_field if kind != "keypair" else None,
                 tags=tags or None,
                 protection=protection,
                 kind=kind,
@@ -3823,11 +3823,22 @@ def update_vault_secret_field(
 def delete_vault_secret_field(
     name: str,
     field: str,
+    payload: dict | None = None,
     *,
     user_context: Any = None,
 ) -> dict:
     from storage import vault_crypto, vault_service
 
+    body = {} if payload is None else payload
+    if not isinstance(body, dict):
+        raise VaultApiError("payload must be an object", code="invalid_payload")
+    _reject_plaintext_value_fields(body)
+    if set(body) - {"expected_updated_at"}:
+        raise VaultApiError("unsupported field delete payload", code="invalid_request", status=409)
+    expected_supplied = "expected_updated_at" in body
+    expected_updated_at = body.get("expected_updated_at")
+    if expected_supplied and not isinstance(expected_updated_at, str):
+        raise VaultApiError("expected_updated_at must be a string", code="invalid_request", status=409)
     secret_name = str(name or "").strip()
     if not vault_crypto.is_valid_secret_name(secret_name):
         raise VaultApiError("invalid secret name (use ^[A-Za-z_][A-Za-z0-9_]*$)", code="invalid_name")
@@ -3854,6 +3865,8 @@ def delete_vault_secret_field(
             status=409,
         )
     snapshot_updated_at = meta.get("updated_at")
+    if expected_supplied and expected_updated_at != snapshot_updated_at:
+        raise _vault_field_service_error(vault_service.SecretConflictError(f"secret '{secret_name}' changed before field removal"))
     release_scopes: list[dict[str, str]] = []
     try:
         with engine.begin() as conn:
@@ -3861,7 +3874,7 @@ def delete_vault_secret_field(
                 conn,
                 secret_name,
                 field_name,
-                expected_updated_at=snapshot_updated_at,
+                expected_updated_at=expected_updated_at if expected_supplied else snapshot_updated_at,
                 release_scopes=release_scopes,
                 user_context=user_context,
             )

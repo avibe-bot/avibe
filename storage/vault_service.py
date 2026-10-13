@@ -558,6 +558,8 @@ def _validate_field_name(name: Any, *, field: str = "field") -> str:
 
 
 def _default_field_name(row: dict[str, Any] | None = None, value: Any = None) -> str:
+    if row is not None and row.get("kind") == "keypair":
+        return "value"
     candidate = value
     if candidate is None and row is not None:
         candidate = _public_meta(row.get("public_meta")).get("default_field")
@@ -2652,11 +2654,11 @@ def create_secret(
     public_meta = dict(public_meta or {})
     if description:
         public_meta["description"] = description
+    if kind == "keypair" and (fields or default_field is not None or "default_field" in public_meta):
+        raise FieldsNotSupportedError("keypair secrets do not support fields or default_field")
     normalized_default_field = _default_field_name(value=default_field or public_meta.get("default_field"))
     if default_field is not None:
         _validate_field_name(default_field, field="default_field")
-    if kind == "keypair" and fields:
-        raise FieldsNotSupportedError("keypair secrets do not support fields")
     raw_fields = [] if fields is None else fields
     if not isinstance(raw_fields, list):
         raise VaultServiceError("fields must be an array")
@@ -2821,6 +2823,8 @@ def update_secret_metadata(
         fields.append("tags")
 
     if default_field is not _UNSET:
+        if row.get("kind") == "keypair":
+            raise FieldsNotSupportedError("keypair secrets do not support default_field")
         normalized_default = _validate_field_name(default_field, field="default_field")
         existing_default = _default_field_name(row)
         if normalized_default != existing_default:
