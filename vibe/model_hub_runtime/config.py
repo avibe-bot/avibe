@@ -96,6 +96,10 @@ def render_engine_config(
         "max-retry-interval": 0,
         "disable-cooling": True,
         "disable-claude-cloak-mode": True,
+        # Forward exactly the tools a client declares: never add the hosted image
+        # tool, never strip one. Codex CLI requests get it from the gateway instead
+        # (codex_image_tool.py), and Vibey declares it only when the user enabled it.
+        "disable-image-generation": "passthrough",
         "save-cooldown-status": False,
         "transient-error-cooldown-seconds": -1,
         "quota-exceeded": {
