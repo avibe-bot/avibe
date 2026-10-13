@@ -251,7 +251,9 @@ describe('VaultApprovalCard protected access approval', () => {
     );
 
     const deleteButton = screen.getByRole('button', { name: /^delete$/i });
+    const denyButton = screen.getByRole('button', { name: /^deny$/i });
     expect(deleteButton.disabled).toBe(true);
+    expect(denyButton.disabled).toBe(false);
     expect(screen.getByText('Only instance managers can delete Vault secrets.')).toBeTruthy();
     expect(api.approveVaultDeleteRequest).not.toHaveBeenCalled();
   });

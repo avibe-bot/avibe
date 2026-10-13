@@ -653,11 +653,11 @@ export const VaultApprovalCard: React.FC<{
           </span>
         ) : null}
         <div className="ml-auto flex items-center gap-2">
-          <Button type="button" variant="outline" onClick={deny} disabled={busy || !canApprove || (isDelete && !canManageDelete)}>
+          <Button type="button" variant="outline" onClick={deny} disabled={busy || !canApprove}>
             {t('vaults.approval.deny')}
           </Button>
           {isDelete && !canManageDelete ? (
-            <span className="text-xs text-muted-foreground">{t('vaults.approval.deleteManagementHint')}</span>
+            <span className="text-xs text-muted">{t('vaults.approval.deleteManagementHint')}</span>
           ) : null}
           {isDelete ? (
             <Button
