@@ -106,8 +106,9 @@ installation, credential custody, provider connectivity, or a benchmark score.
   reward. Raw product state/logs are not copied.
 
 Remaining gates: parent-run **wrapper** acceptance with an installed wheel and
-real CPA engine; Harbor wiring/ATIF; exact-source/benchmark/resource pinning;
-paired scored tasks; current-head review/CI. The original orchestrator separately
+real CPA engine; thin Harbor wiring (honestly `atif=False` until a later converter);
+exact-source/benchmark/resource pinning; paired scored tasks; current-head
+review/CI. ATIF is not a prerequisite to the first honest local scored pilot. The original orchestrator separately
 reported successful `avibe-os 3.2.0rc5` + real-engine + loopback upstream acceptance
 (source `98cc70a1c`), which is not evidence for this wrapper or this checkout's
 base `9a89da41b` and is not a benchmark score.

@@ -1,5 +1,13 @@
 # Full Avibe Runtime trial wrapper
 
+Optional Harbor entrypoint:
+`scripts.terminal_bench.harbor_agent:FullAvibeAgent` — see [HARBOR.md](HARBOR.md).
+It installs a SHA-verified normal wheel, uploads only tracked wrapper files,
+declares `atif=False`, and joins owned shutdown before grading. Its ephemeral
+credential-file transport avoids Harbor Docker's key-bearing exec-env argv;
+the file is consumed/unlinked before service startup. Direct invocation below
+may retain the named-environment input mode.
+
 This source-only tool drives **normal Avibe**, not an extracted agent core:
 
 1. a fresh `AVIBE_HOME`, ordinary V2 config and ordinary service main;

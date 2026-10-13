@@ -35,6 +35,7 @@ class TrialError(RuntimeError):
     _CODES = {
         "owned_process_cleanup_unconfirmed", "service_exited_before_ready",
         "controller_readiness_timeout", "service_not_ready", "harness_quiescence_unconfirmed",
+        "credential_input_refused",
     }
     _HELPER_CODE = re.compile(
         r"(?:initialize|serve|health|configure|usage|versions|cli)_helper_"
@@ -416,16 +417,31 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("workdir", "state", "output", "profile", "instruction"):
         parser.add_argument(f"--{name}", type=Path, required=True)
+    parser.add_argument("--credential-file", type=Path,
+                        help="Private per-trial input; consumed and unlinked before service startup.")
     parser.add_argument("--sandbox-environment", action="store_true",
                         help="Use only inside an externally isolated task container; preserve its HOME/toolchains.")
     args = parser.parse_args(argv)
     profile = Profile.parse(json.loads(args.profile.read_text(encoding="utf-8")))
+    if args.credential_file is not None:
+        from .credential import consume
+        try:
+            key = consume(args.credential_file)
+        except Exception:
+            summary = json.dumps(failure_details(TrialError("credential_input_refused")))
+            print(summary)
+            print(summary, file=sys.stderr)
+            return 2
+    else:
+        # Direct invocation may retain its named env mode. The Harbor Docker
+        # adapter must use credential-file instead: exec env leaks into argv.
+        key = os.environ.get(profile.credential_env)
     trial = FullRuntimeTrial(args.workdir, args.state, args.output, profile,
                              task_environment=os.environ if args.sandbox_environment else None)
     previous_term = signal.signal(signal.SIGTERM, _interrupt_trial)
     try:
         with trial:
-            trial.execute(args.instruction.read_text(encoding="utf-8"), key=os.environ.get(profile.credential_env))
+            trial.execute(args.instruction.read_text(encoding="utf-8"), key=key)
     except (Exception, KeyboardInterrupt) as exc:
         summary = json.dumps(failure_details(exc))
         print(summary)
