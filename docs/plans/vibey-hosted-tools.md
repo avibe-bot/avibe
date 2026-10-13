@@ -243,8 +243,13 @@ These rules become C-1 rows in `cross-provider.md` and per-protocol rows in `con
 - **Vibey renders for the primary hop's origin. The gateway rewrites at failover** (§3.5), so a different Source or
   origin never receives `native.payload`.
 - **C-6 change.** `x-avibe-served-hop` gains `source` (the serving Source id) so that `native.source_id` is exact.
-  Two Sources can share an origin, e.g. a subscription and a relay serving the same model. The served-hop parser and
-  the gateway change in the same release.
+  Two Sources can share an origin, e.g. a subscription and a relay serving the same model.
+  - The served-hop parser and the gateway change in the same release.
+  - The change ships in the deferred Model Hub contract v12 bump, the one #2483's closing spec describes
+    (`terminal_error` for a pending attempt that never streamed). That makes one coordinated bump, not two
+    (orchestrator decision, 2026-10-13).
+  - Until v12, no hosted block is replayed natively across turns; every later turn gets the synthetic form. In-flight
+    replay within one turn (§4.4) does not depend on the tag and is unaffected.
 
 ## 6. User interface
 

@@ -48,7 +48,8 @@ consumer's requirements, and the Model Hub lane lands the change in both places.
      and result. Item 6's owner and timing apply.
    - The served-hop report gains `source`, the serving Source id, so that a hosted block's payload is tagged with
      the exact Source; two Sources can share an origin. The parser in `conversion-tables.md` (exactly `provider`,
-     `api`, `model` today) changes in the same release.
+     `api`, `model` today) changes in the same release, within the deferred Model Hub contract v12 bump that #2483's
+     spec describes. Until then, hosted payloads are never replayed natively across turns.
 
 ## 3. Not required
 
