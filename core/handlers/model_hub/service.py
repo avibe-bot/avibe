@@ -126,6 +126,7 @@ from .hosted_executor import (
     executor_streams,
     failed_record,
     parse_call,
+    provider_charges,
     responses_result,
 )
 from .hosted_tools import (
@@ -714,6 +715,13 @@ def _pin_unavailable() -> ModelHubError:
     """The pinned hop cannot serve this request before output (``vibey-hosted-tools.md`` §3.5)."""
 
     return ModelHubError(PIN_UNAVAILABLE_CODE, status=409)
+
+
+def _call_usage(outcome: RawCallOutcome | None, observed: ProtocolSSEState | None) -> ProtocolUsageReport | None:
+    """The tokens one upstream call reported: its outcome's, else what was observed on the wire."""
+
+    usage = outcome.usage if outcome is not None else None
+    return observed.usage if usage is None and observed is not None else usage
 
 
 def _executor_failure(outcome: RawCallOutcome | None, say: Callable[..., str], *, refused: str | None) -> str | None:
@@ -6174,12 +6182,6 @@ class ModelHubService:
                 raise cancelled
         if not admitted:
             return unavailable
-        execution = {
-            "mode": "proxy",
-            "executor_origin": {"provider": source.vendor, "api": source.protocol, "model": model_id},
-            "executor_source_id": source.id,
-            "executor_billing": source.billing,
-        }
         failure = _executor_failure(outcome, say, refused=refused)
         if reader is not None:
             result = await asyncio.to_thread(responses_result, tool, reader.readout, say, failure=failure)
@@ -6188,6 +6190,21 @@ class ModelHubService:
         else:
             # The bytearray itself goes to the worker: no copy of up to the response budget on the loop.
             result = await asyncio.to_thread(anthropic_result, body, say)
+        execution: dict[str, Any] = {
+            "mode": "proxy",
+            "executor_origin": {"provider": source.vendor, "api": source.protocol, "model": model_id},
+            "executor_source_id": source.id,
+            "executor_billing": source.billing,
+        }
+        # The call's cost is the pricing module's, from what the meter saw and what the provider reported.
+        counts, reported_usd = provider_charges(source.protocol, result.usage if result is not None else None)
+        cost = self.hosted_call_cost(
+            source, model_id, (tool,),
+            usage=_call_usage(outcome, handle.observed if handle is not None else cancelled_observed),
+            counts=counts, reported_usd=reported_usd,
+        )
+        if cost is not None:
+            execution["cost"] = {"basis": cost.basis} if cost.usd is None else {"basis": cost.basis, "usd": cost.usd}
         if result is None:
             return {"record": failed_record(failure or say("modelHub.hostedTools.unreadable")), "execution": execution}
         answer: dict[str, Any] = {"record": result.record, "execution": execution}
@@ -9324,9 +9341,7 @@ class ModelHubService:
         without putting an unresponsive disk in front of the next failover hop.
         """
 
-        usage = outcome.usage if outcome is not None else None
-        if usage is None and observed is not None:
-            usage = observed.usage
+        usage = _call_usage(outcome, observed)
         reached_model = (
             outcome is not None
             and (outcome.kind is RawOutcomeKind.SUCCESS or outcome.stream_started)

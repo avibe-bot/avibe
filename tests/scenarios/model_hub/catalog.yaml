@@ -2216,7 +2216,7 @@ scenarios:
     layer: e2e-auto
     test: tests/e2e/test_model_hub_service_acceptance.py::test_fresh_install_serves_vibey_and_claude_through_the_hub_and_reaps_an_orphaned_engine
   - id: MH-HOSTED-GATEWAY-004
-    name: A proxied hosted call runs one native request on its bound executor, without an effort, and answers its canonical record and execution
+    name: A proxied hosted call runs one native request on its bound executor, without an effort, and answers its canonical record and execution with the pricing module's cost
     status: covered
     kind: contract
     layer: contract
@@ -2225,6 +2225,7 @@ scenarios:
       - tests/test_model_hub_hosted_executor.py::test_an_anthropic_executor_is_buffered_and_keeps_the_providers_results_and_cited_text
       - tests/test_model_hub_hosted_executor.py::test_a_proxied_image_returns_its_bytes_once_for_vibey_to_save
       - tests/test_model_hub_hosted_executor.py::test_an_excerpt_is_the_answer_text_its_citation_belongs_to
+      - tests/test_model_hub_hosted_executor.py::test_a_proxied_call_carries_the_pricing_modules_cost
   - id: MH-HOSTED-GATEWAY-005
     name: A proxied hosted call that cannot complete is a failed record, with an execution only when an executor ran; only a malformed call is an error status
     status: covered

@@ -19,14 +19,16 @@ import base64
 import binascii
 import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Final, Mapping
 
 from config.v2_config import ModelHubSourceConfig
+from core.agent_core.ai.hosted import reported_counts
 from core.agent_core.ai.sse import SSEParser
 from vibe.backend_model_catalog import HostedToolSpec
 
 from .events import bounded_diagnostic_detail
+from .pricing import usd_from_xai_ticks
 from .request import ModelHubRequest
 
 EXECUTOR_TOOLS: Final = ("web_search", "x_search", "image_generation")
@@ -289,11 +291,30 @@ class ResponsesStreamReader:
 
 @dataclass(frozen=True)
 class ExecutorResult:
-    """The record for the call, plus an image's resolved facts and bytes (base64)."""
+    """The record for the call, plus an image's resolved facts and bytes (base64).
+
+    ``usage`` is the response's own ``usage`` section, as the provider sent it,
+    which the call's cost is read from.
+    """
 
     record: dict[str, Any]
     generation: dict[str, str] | None = None
     images: tuple[dict[str, str], ...] = ()
+    usage: Mapping[str, Any] | None = None
+
+
+def provider_charges(protocol: str, usage: Mapping[str, Any] | None) -> tuple[dict[str, int], float | None]:
+    """What a response's provider reported charging for: its hosted counters and, from xAI, its own cost."""
+
+    if usage is None:
+        return {}, None
+    counters = usage.get("server_tool_use") if protocol == "anthropic" else usage.get("server_side_tool_usage_details")
+    return reported_counts(counters), usd_from_xai_ticks(usage.get("cost_in_usd_ticks"))
+
+
+def _usage_section(response: Any) -> Mapping[str, Any] | None:
+    usage = response.get("usage") if isinstance(response, Mapping) else None
+    return usage if isinstance(usage, Mapping) else None
 
 
 def responses_result(tool: str, readout: ResponsesReadout, say: Say, *, failure: str | None = None) -> ExecutorResult:
@@ -304,6 +325,10 @@ def responses_result(tool: str, readout: ResponsesReadout, say: Say, *, failure:
     keeps. A call the provider marked failed is failed too.
     """
 
+    return replace(_responses_record(tool, readout, say, failure), usage=_usage_section(readout.response))
+
+
+def _responses_record(tool: str, readout: ResponsesReadout, say: Say, failure: str | None) -> ExecutorResult:
     response = readout.response or {}
     calls = [item for item in readout.items if _responses_call_tool(item) == tool]
     if tool == "image_generation":
@@ -531,6 +556,10 @@ def anthropic_result(body: bytes | bytearray, say: Say) -> ExecutorResult:
         message = json.loads(body)
     except (ValueError, RecursionError):
         return ExecutorResult(failed_record(say("modelHub.hostedTools.unreadable")))
+    return replace(_anthropic_record(message, say), usage=_usage_section(message))
+
+
+def _anthropic_record(message: Any, say: Say) -> ExecutorResult:
     content = message.get("content") if isinstance(message, dict) else None
     blocks = [block for block in content if isinstance(block, dict)] if isinstance(content, list) else []
     if not any(block.get("type") == "server_tool_use" and block.get("name") == "web_search" for block in blocks):
