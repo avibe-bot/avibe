@@ -45,10 +45,11 @@ consumer's requirements, and the Model Hub lane lands the change in both places.
      - the executor bound for this turn (`{source_id, model_id}` or `null`), present for every entry whatever the
        mode, because a native request that comes back `pin_unavailable` is re-rendered with the proxy function in the
        same turn. A config change applies from the next turn;
-     - `replay`, the current replay evidence for the primary hop's Source.
+     - `replay`, true only for the primary hop Source's positive replay evidence taken on the current engine and
+       probe shape.
    - `native` requires all of these ([`../model-hub-capability-model.md`](../model-hub-capability-model.md) §3):
      - an eligible credential (never a Claude subscription);
-     - positive `call` evidence for that (Source, model);
+     - positive `call` evidence for that (Source, model), taken on the current engine and probe shape;
      - an untranslated path.
    - **The gateway never rewrites hosted content.** Vibey pins every request that carries a native declaration, a
      native hosted payload or an in-flight continuation, with `x-avibe-pin-source`.

@@ -109,8 +109,15 @@ Changing any of those drops the Source's evidence.
   - Hosted tools: [`vibey-hosted-tools.md`](vibey-hosted-tools.md) §3.2.
   - Efforts: one minimal request at that effort. Only the efforts a user actually selects are ever probed.
 - **Probe evidence becomes stale** on an engine upgrade, a probe-shape change, or when it is 30 days old.
-  - Stale evidence still routes as it did.
-  - The Source card marks it "re-verify", and Models lists the stale records with one confirm action.
+  - **Current-wire staleness** (the record's `engine` or `shape` differs from the current one) matters for hosted
+    tools. Their positive evidence is needed because a native failure can be silent (§3.4). Evidence taken on another
+    wire cannot vouch for this one, and a silent drop would never trip a narrow rule. So stale hosted-tool `call` and
+    `replay` evidence counts as unknown for routing: proxy mode and synthetic replay, both lossless.
+  - **Age-only staleness** keeps routing as it did: the wire Avibe sends has not changed.
+  - **Effort evidence is unchanged.** It is negative only, and stale negative evidence still skips the hop until it
+    expires.
+  - The Source card marks stale records "re-verify", and Models lists them with one confirm action. After an engine
+    upgrade the Tools tab says why native turned into proxy (`vibey-hosted-tools.md` §6.1).
 - **Positive evidence is demoted** by a narrow negative rule (§3.2) on a later real request.
 
 ### 3.4 How layers resolve
@@ -119,8 +126,8 @@ Changing any of those drops the Source's evidence.
 | --- | --- |
 | Effort menu for a model on an Agent | each hop's declared tiers, then the union across hops. A hop's declared tiers are its Source model's persisted `reasoning_efforts` when their provenance is `user` or `upstream`; otherwise the overlay's `providers` `wire_efforts`; otherwise the backend row's efforts minus its `client_presets` (provenance `catalog`); otherwise models.dev `reasoning_options`. User-authored lists, including free-form names, are never replaced or filtered by a prior; only a catalog-sourced list drops `client_presets`. A tier is omitted only if **every** hop that can serve the model has negative evidence for it. A tier with negative evidence on some hops is shown with "not on: <Source>". |
 | Effort at request time | Forwarded unchanged (reasoning-intent). A hop with **negative** evidence for that effort is skipped for this request, as if it were not a candidate. If no candidate remains, the request fails before invocation with `effort_unsupported` naming the effort and the Sources, instead of a provider 400. Never clamped silently. |
-| Hosted tool mode on a hop | `native` only with positive `call` evidence and the user's toggle on; otherwise the gateway proxy (`vibey-hosted-tools.md`). A wrong native declaration is a terminal 400 or a silent drop; the proxy is lossless. So this feature needs positive evidence, unlike efforts. |
-| Native payload replay | only to the same Source, and only while its current `replay` evidence is positive. The decision is made at every request from `HopResolution`; the transcript never stores it. |
+| Hosted tool mode on a hop | `native` only with positive `call` evidence taken on the current engine and probe shape, and the user's toggle on; otherwise the gateway proxy (`vibey-hosted-tools.md`). A wrong native declaration is a terminal 400 or a silent drop; the proxy is lossless. So this feature needs positive evidence, unlike efforts. |
+| Native payload replay | only to the same Source, and only while its `replay` evidence is positive and taken on the current engine and probe shape. The decision is made at every request from `HopResolution`; the transcript never stores it. |
 | Display | §5 |
 
 This fixes #2539 in three places:
@@ -164,7 +171,7 @@ Fields of one vendor entry. The loader validates them; their JSON Schema lands w
 | `match` | exactly one of `prefix` or `id`, non-empty |
 | `wire_efforts` | a list of effort names, or `null` to defer to models.dev |
 | `hosted_tools` | protocol (`anthropic`, `openai_responses`, `openai_chat`, `google`) → tool (`web_search`, `x_search`, `image_generation`) → `{declaration, price, include?}`. `declaration` and `price` are required, and `declaration` has a `type`. `include` lists Responses `include` values the tool needs (OpenAI web search: `web_search_call.action.sources`). |
-| `price` | `unit` (`call`, `search`, `post`, `profile`, `image`), `usd_per_1k` ≥ 0, `as_of` (date) and `url`, all required; optional `extra[]` of `{unit, usd_per_1k}`. Image prices vary by quality and size, so they use `extra[]` per variant. |
+| `price` | `unit` (`call`, `search`, `post`, `profile`, `image`), `usd_per_1k` ≥ 0, `as_of` (date) and `url`, all required; optional `extra[]` of `{unit, usd_per_1k}`. Image prices vary by quality and size, so each `image` entry in `extra[]` also carries `quality` and `size`, and pricing selects the entry that matches the declaration that ran. |
 - The overlay records what the **provider** offers. Whether a Source (a relay, a subscription) carries it is
   evidence.
 - An invalid vendor entry disables that entry with a warning; startup never fails.
@@ -180,7 +187,8 @@ and the existing tone vocabulary (`TimeHint` for dates):
 | hosted tool, no evidence or unsupported, while the tool is enabled | via proxy | "X search · via proxy (xAI API key)" |
 | hosted tool, `call` unsupported | not supported, with basis | "X search · not supported on this Source" |
 | effort unsupported | not supported, with basis | "ultra · not supported on this Source (400, 10-13)" |
-| probe evidence stale | re-verify | "Web search · verified 09-02 · re-verify" |
+| probe evidence stale by age | re-verify | "Web search · verified 09-02 · re-verify" |
+| hosted-tool evidence from another engine or probe shape | via proxy, re-verify | "Web search · via proxy · engine upgraded · re-verify" |
 
 - Unknown draws nothing. A healthy unknown is the normal case and must not look like a warning (V6 rule:
   exceptions only).
@@ -268,7 +276,8 @@ No new billing store, budget, or cap.
    error creates none.
 3. No probe runs without a user action, and every probe action shows its cost before it runs.
 4. Changing a Source's identity drops its evidence. An engine upgrade marks probe evidence stale; it does not
-   delete it.
+   delete it. Stale hosted-tool evidence from another engine or probe shape never authorizes native mode or native
+   replay.
 5. #2539: a Source that rejected `ultra` shows "ultra · not supported on this Source". The next request at `ultra`
    either skips that hop or fails before invocation with `effort_unsupported`, never a provider 400.
 6. Valuation applies context tiers when a call's input tokens exceed the tier size. A model with tiers and no flat

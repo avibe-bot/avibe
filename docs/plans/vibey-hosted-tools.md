@@ -77,6 +77,10 @@ verified for X search.
   - for the `call` probe, `tool_choice` forcing the hosted tool, where the protocol allows it.
 
   So a probe cannot pass or fail for a shape that production never sends.
+- **A probe has its own resolution.** Normal resolution gives native mode only after `call: verified` (§3.5), so a
+  first verification could never send a native declaration. Model Hub therefore builds a probe resolution, and only
+  for the user's probe action. It pins the probed (Source, model) with `x-avibe-pin-source`, carries the overlay's
+  native declaration whatever the current evidence, and allows no failover. Normal turns never receive it.
 - **The `call` probe.** The fixed message is "search for 'Avibe local-first agent OS' and reply with the first
   result's URL".
   - **`verified`:** the response completes and carries the provider's own result item for that tool (§4.2).
@@ -98,8 +102,10 @@ verified for X search.
     replay, 3 of 3.
 - **Cost and when probes run.** A probe pair costs about $0.02–0.15 (spike: xAI $0.01–0.11 per call, Anthropic $0.01
   per search plus tokens). The Tools tab shows the estimate before running.
-- **What makes probe results stale** (capability model §3.3): a Source identity change, an engine upgrade, a probe
-  shape change, or age.
+- **What changes probe results** (capability model §3.3). A Source identity change drops them. An engine upgrade or
+  a probe-shape change makes them **current-wire stale**: they no longer describe the request being sent, so for
+  routing they count as unknown (proxy and synthetic replay) until the user re-verifies. Age alone (30 days) only
+  marks them for re-verification and keeps routing.
 - **Failures in real use demote evidence** through the narrow rules in capability model §3.2.
 - **Relation to #2539.** It is the same class (a prior taken as a Source fact), solved by the same evidence store.
   Efforts need only negative evidence. Native hosted tools need positive evidence, because their failure is terminal
@@ -144,15 +150,18 @@ verified for X search.
   - The proxy call sends that binding with the turn token, and the gateway runs that executor and no other.
   - A config change (another executor, a disabled tool, a removed Source) applies from the next turn, as every
     runtime config change does (AGENTS.md).
-  - If the bound executor can no longer run (its Source was removed or disabled mid-turn), the call returns a tool
-    error. It never silently switches Source or billing.
+  - The binding is held for the turn. Ordinary edits to the executor's Source (models, order, name) apply from the
+    next turn. Only removing or disabling that Source, which takes it off every hop at once, makes a bound call
+    return a tool error. The call never silently switches Source or billing.
   - **Only an eligible credential.** A Claude subscription Source is never eligible: not as executor, not for a
     probe, and not for native mode (§3.5). Anthropic restricts OAuth credentials to Claude Code and its own apps
     ([`model-hub-tos-review.md`](model-hub-tos-review.md)).
   - If no executor is verified, the call returns a tool error naming the fix ("verify X search on a Source in
-    Models"). Vibey shows it like any tool error.
-- **The request.** One short native call with the tool forced, a fixed instruction to search and list results, and
-  a small output cap.
+    Models"). Vibey shows it like any tool error. A call that never reached an executor has a `failed` record and no
+    `execution` (§4.2).
+- **The request depends on the tool.** For a search tool, it is one short native call with the tool forced, a fixed
+  instruction to search and list results, and a small output cap. For `image_generation`, it is one call with the
+  tool forced that renders the supplied `prompt` at the supplied `size` (§7.2).
   - It sends **no reasoning effort**. The executor (Source, model) is verified for the tool, not for any effort, and
     an unverified effort could fail a verified tool.
 - **The result is the canonical record only:**
@@ -162,8 +171,8 @@ verified for X search.
       search), the record's `sources` are that response's cited posts. A native response with several calls keeps
       those in `hosted_summary` instead (§4.2).
     - Either way the calling model gets numbered posts with links and excerpts;
-  - the `ProxyExecution`: executor origin, Source, billing mode, and the call's cost. A proxied call is a whole
-    executor response, so its cost is per call.
+  - the `ProxyExecution`, when an executor ran: executor origin, Source, billing mode, and the call's cost. A
+    proxied call is a whole executor response, so its cost is per call.
   - The executor does not write model-facing text. Vibey's tool runtime renders the tool result from the record with
     the **same function** that renders a synthetic replay (§5), so the text a model sees for a proxied call and for a
     replayed native call never diverge.
@@ -192,8 +201,10 @@ verified for X search.
   `native` requires all of these:
   - the toggle on;
   - an eligible credential (§3.4);
-  - `call: verified` for that (Source, model);
+  - `call: verified` for that (Source, model), taken on the current engine and probe shape (§3.2);
   - an untranslated path.
+
+  `replay` is likewise true only for `replay: verified` evidence taken on the current engine and shape.
 
   Vibey builds the request from these fields (§4.1, §5).
 - **One owner for every conversion: Vibey.** Vibey renders every request from its canonical records. The gateway
@@ -310,9 +321,10 @@ as a half-open code-point range into `text`.
   the existing delivered shape: Markdown links written into the text, plus the sidecar the Web renders as
   `CitationBadge` (numbered sources, UTF-16 ranges, `body_sha256`). Adapters only parse; IM gets the Markdown links.
 
-**`ToolResultMessage.hosted`** (optional): `{record, execution}`, both required.
+**`ToolResultMessage.hosted`** (optional): `{record, execution?}`.
 - `execution` is a `ProxyExecution`, every field required: `mode: "proxy"`, `executor_origin`,
-  `executor_source_id`, `executor_billing`, `cost`.
+  `executor_source_id`, `executor_billing`, `cost`. It is present exactly when an executor ran. A call that never
+  reached one (none verified, or the bound Source removed) has none, and its `record.status` is `failed`.
 - `is_error` is `true` exactly when `record.status` is `failed` or `incomplete`.
 - So a proxied call renders like a native one, and the card names the exact Source even when two Sources share an
   origin.
@@ -350,6 +362,13 @@ as a half-open code-point range into `text`.
   - Its `usage` is the **sum** of every continuation response's counters: input, output, and cache read and write.
     Today's parser resets usage at each `message_start`. The gateway already meters each continuation as its own
     call, so the usage ledger and provenance need no change.
+  - **Pending calls carry over by id.** The adapter keeps its hosted blocks keyed by tool-call id across
+    continuations. A result arriving in a continuation for a `pending` block finalizes that block, its `record` and
+    its `native.payload`, so each call stays exactly one block.
+  - **One `hosted_summary` for the merged message.** `counts` and `cost.usd` are summed over the continuation
+    responses. `cost.basis` is `reported` only when every response reported a figure, and stays `included` on a
+    subscription Source; otherwise the pricing module values the whole message at list price. `cited_sources` are
+    deduplicated by URL in first-seen order.
 
 ### 4.4 In-flight turn replay
 
@@ -390,8 +409,9 @@ These rules become C-1 rows in `cross-provider.md` and per-protocol rows in `con
     then the record's numbered sources (title, URL, snippet).
   - An `x_search` or `x_user_search` action becomes one `x_search` call with `{query}`, plus `limit` and `mode` when
     the action has them.
-  - An `image_generation` action becomes one `image_generation` call with `{prompt}`. Its result is the **text
-    path record** (§7.3). Image bytes are never resent: no base64 and no image block, even to the same Source.
+  - An `image_generation` action becomes one `image_generation` call with `{prompt}`, plus `size` when the action
+    has it. Its result is the **text path record** (§7.3). Image bytes are never resent: no base64 and no image
+    block, even to the same Source.
   - A non-search action (`open_page`, `find_in_page`, `x_thread_fetch`, `other`) becomes a line in the result of the
     preceding synthetic call of the same tool in that response, e.g. "opened <url>" or "fetched thread <ref>".
     Without a preceding call, it becomes its own call with `{query: "<action type> <target>"}`.
@@ -435,8 +455,8 @@ These rules become C-1 rows in `cross-provider.md` and per-protocol rows in `con
 
 ### 6.1 Models: the Tools tab
 
-- **One row per tool** (Phase 1: Web search, X search), reusing the Sources tab's row and chip vocabulary
-  (`chips.tsx`, `SourceRow`, `TimeHint`):
+- **One row per tool** (Phase 1: Web search, X search, Image generation), reusing the Sources tab's row and chip
+  vocabulary (`chips.tsx`, `SourceRow`, `TimeHint`):
   - **toggle**, off by default;
   - **runs natively on:** chips per verified (Source, model), e.g. "xAI API key · grok-4.6 · verified 10-13";
   - **proxy executor:** a picker of verified candidates, each with billing mode and cost hint;
@@ -445,6 +465,10 @@ These rules become C-1 rows in `cross-provider.md` and per-protocol rows in `con
 - **Verify on…** lists the Sources whose overlay row offers the tool but that have no evidence. Each entry has an
   explicit **Verify** button showing the probe's estimated cost. Nothing probes on its own.
 - **Turning a tool on with no verified Source** opens that list. It never auto-probes.
+- **After an engine upgrade**, native evidence from the previous engine counts as unknown, so those tools run
+  through the proxy. The tab says why in one header line, "Engine upgraded · N need re-verification" (zh:
+  "引擎已升级 · N 项需重新检测"), with the existing check action listing those entries. Nothing re-probes in the
+  background.
 
 ### 6.2 Source detail chips
 
@@ -538,6 +562,11 @@ Each has a **Re-verify** action with its cost. Unknown shows nothing.
 - **The model gets a text path record:** the file path, the revised prompt, the size, and the mode and cost, e.g.
   `[image saved: /…/image-3f2a.png · 1536×1024 · native (OpenAI API key) · ≈ $0.04] prompt: "…"`.
   - If the model wants to look, it opens the file with its `read` tool, the same as any other file.
+  - The file the record names must fit `read`'s inline image cap. `MAX_INLINE_IMAGE_BYTES` in
+    `core/agent_core/tools/read.py` is about 3.4 MiB, and `read` does not resize. A high-quality PNG of 4–6 MB would
+    come back as "Image omitted". So either the declaration bounds the output (`output_format` and compression), or
+    the store also writes a bounded preview and the record names it. The Phase 1 PR picks one and tests it with a
+    6 MB image.
 - **The user sees the image.** The Workbench renders it inline from the file, and IM attaches it. That is display,
   separate from model context.
 - **History and replay never contain base64.**
@@ -683,7 +712,8 @@ encoded either as a schema clause or as a producer test. The PR names which for 
    - it is present exactly when the message has a `HostedToolBlock`;
    - `cost.usd` is present exactly when `basis` is not `included`.
 5. `TextBlock.citations`: `start` and `end` come together.
-6. `ToolResultMessage.hosted` requires `record` and `execution`.
+6. `ToolResultMessage.hosted` requires `record`. `execution` is present exactly when an executor ran; without it,
+   `record.status` is `failed`.
    - `execution` requires `mode: "proxy"`, `executor_origin`, `executor_source_id`, `executor_billing` and `cost`.
    - `is_error` is `true` exactly when `record.status` is `failed` or `incomplete`.
 
@@ -700,7 +730,26 @@ encoded either as a schema clause or as a producer test. The PR names which for 
    including: `observed` ⇒ `unsupported` with `detail`.
 10. The `pin_unavailable` answer is exactly the 409 envelope in §3.5.
 11. Native replay requires all three: same Source, same origin, and current `replay` evidence. `image_generation`
-    blocks are never replayed verbatim.
+    blocks are never replayed verbatim, and their synthetic call carries `size` when the action has it.
 12. A probe with no tool item is inconclusive and writes no evidence.
 13. The engine config renders `disable-image-generation: passthrough`. The gateway's Codex image injection is a
     single function covered by the §7.1 table.
+
+**Added after review of the final design head (implementation-level, binding on the Phase 1 PR):**
+
+14. A probe resolution exists only for the user's probe action. It pins the probed (Source, model), carries the
+    overlay's native declaration whatever the current evidence, and allows no failover (§3.2).
+15. The executor request depends on the tool: search tools search and list results; `image_generation` renders the
+    supplied `prompt` and `size` (§3.4).
+16. Across `pause_turn` continuations, a result for a `pending` block finalizes that block by tool-call id. The
+    merged message has one `hosted_summary`, with summed `counts` and `cost.usd` and URL-deduplicated
+    `cited_sources` (§4.3).
+17. Image prices in the overlay are keyed variants: each `extra[]` entry for unit `image` carries `quality` and
+    `size`, and pricing selects the entry that matches the declaration that ran (capability model §4).
+18. The image file a path record names fits `read`'s `MAX_INLINE_IMAGE_BYTES`, tested with a 6 MB generated image
+    (§7.3).
+19. The executor binding is held for the turn. Only removal or disablement of the bound Source makes a call fail,
+    with a tool error and no Source switch (§3.4).
+20. Hosted-tool `call` and `replay` evidence whose `engine` or `shape` differs from the current one resolves as
+    unknown: proxy mode and synthetic replay. Age-only staleness keeps routing. Effort evidence is unchanged
+    (capability model §3.3, §3.4).
