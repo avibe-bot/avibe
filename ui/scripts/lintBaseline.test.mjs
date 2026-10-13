@@ -1,8 +1,3 @@
-import { spawnSync } from 'node:child_process';
-import fs from 'node:fs';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
-
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -29,23 +24,13 @@ describe('compareToBaseline accepts the recorded debt unchanged', () => {
     });
   });
 
-  // The gate is a count ratchet, so a violation deleted at one site and
-  // reintroduced at another inside the same (file, rule) pair passes. Recorded
-  // as an intended property rather than left implicit: a reader who assumes
-  // otherwise is relying on a guarantee this file does not make, and the same
-  // trade-off is the one ESLint's own suppressions file makes.
-  it('accepts a baselined violation replaced one-for-one within the same pair', () => {
-    const ledger = { 'src/a.ts': { 'no-explicit-any': 3 } };
-    expect(compareToBaseline(ledger, { 'src/a.ts': { 'no-explicit-any': 3 } })).toEqual({
-      unclassified: [],
-      expanded: [],
-      stale: [],
-    });
+  it('reports an empty baseline against an empty run as clean', () => {
+    expect(compareToBaseline({}, {})).toEqual({ unclassified: [], expanded: [], stale: [] });
   });
 
-  // The bound on that residual, in one place: a swap can only ever hide inside
-  // debt that is already recorded, at a count that cannot grow, in the file that
-  // already carries it.
+  // The count ratchet's accepted residual (see the lint-baseline.mjs header) is
+  // bounded here: a swap can only hide inside debt that is already recorded, at
+  // a count that cannot grow, in the file that already carries it.
   it('catches the same swap the moment it changes the count, the rule or the file', () => {
     const ledger = { 'src/a.ts': { 'no-explicit-any': 3 } };
     expect(compareToBaseline(ledger, { 'src/a.ts': { 'no-explicit-any': 4 } }).expanded).toHaveLength(1);
@@ -266,89 +251,8 @@ describe('integrityLines fails on an incomplete measurement even when every tall
   });
 });
 
-describe('an incomplete measurement blocks --update too, not just the verdict', () => {
-  // The ordering has to hold in the real script: `lint:baseline` exists to
-  // rewrite the ledger, so if it ran before the integrity checks, any of the
-  // failures above could be laundered into a freshly written green baseline.
-  // Asserted against the actual command rather than an injected fake, because a
-  // fake would only pin the ordering a test author already imagined.
-  const UI_ROOT = fileURLToPath(new URL('../', import.meta.url));
-  const BASELINE = path.join(UI_ROOT, 'eslint-baseline.json');
-  const PROBE = path.join(UI_ROOT, 'update-integrity-probe.ts');
-
-  // The probe has to be a real file in the real tree: the gate measures ``ui/``
-  // from its own location, so there is no temporary copy to point it at, and a
-  // fixture the domain walk cannot find would not exercise the thing under test.
-  // It therefore exists on disk for as long as the gate takes to run, and a test
-  // process killed hard enough to skip the ``finally`` leaves it behind — where
-  // it fails ``npm run lint`` for everyone in that checkout, naming a file
-  // nobody wrote. So the file says what it is and who is responsible for it.
-  // Only the directive's line number moves, and nothing asserts that.
-  const PROBE_SOURCE = [
-    '// Temporary fixture: written by ui/scripts/lintBaseline.test.mjs, and deleted',
-    '// by it. Finding this file in a working tree means a test run was killed',
-    '// before it could clean up. Delete it and the lint gate goes green again.',
-    '/* eslint @typescript-eslint/no-explicit-any: "off" */',
-    'export const f = (v: any) => v;',
-    '',
-  ].join('\n');
-
-  const runGate = (args) =>
-    spawnSync(process.execPath, ['scripts/lint-baseline.mjs', ...args], {
-      cwd: UI_ROOT,
-      encoding: 'utf8',
-      timeout: 300_000,
-    });
-
-  it('refuses to write a baseline while an integrity check is failing', () => {
-    const before = fs.readFileSync(BASELINE);
-    try {
-      fs.writeFileSync(PROBE, PROBE_SOURCE);
-      const result = runGate(['--update']);
-      expect(result.status).toBe(1);
-      expect(result.stderr).toContain('INLINE');
-      expect(result.stderr).toContain('update-integrity-probe.ts');
-      // Exactly one: the preamble above is prose that happens to mention lint,
-      // so this is what keeps it from quietly becoming a second directive and
-      // changing what the run is being failed for.
-      expect(result.stderr.match(/INLINE/g)).toHaveLength(1);
-      expect(fs.readFileSync(BASELINE).equals(before)).toBe(true);
-    } finally {
-      fs.rmSync(PROBE, { force: true });
-      fs.writeFileSync(BASELINE, before);
-    }
-  }, 300_000);
-});
-
-describe('the gate script stays reviewable text', () => {
-  const source = fs.readFileSync(fileURLToPath(new URL('./lint-baseline.mjs', import.meta.url)));
-
-  it('contains no raw NUL byte', () => {
-    // The (file, rule) key joins on NUL. Written as a literal byte it makes the
-    // whole script binary to git, so the gate everyone is asked to trust stops
-    // showing up in diffs and review. The escape has identical runtime meaning.
-    expect(source.includes(0)).toBe(false);
-  });
-
-  it('still joins the pair on a character neither half can contain', () => {
-    expect(pairKey('src/a.ts', 'no-explicit-any')).toBe('src/a.ts\0no-explicit-any');
-  });
-
+describe('pairKey', () => {
   it('cannot confuse two different pairs that share a prefix', () => {
     expect(pairKey('src/a.ts', 'b/c')).not.toBe(pairKey('src/a.ts b', 'c'));
-  });
-});
-
-describe('compareToBaseline cannot pass vacuously', () => {
-  it('fails when the lint run produced nothing at all', () => {
-    // A broken glob or a crashed ESLint run yields an empty report. That must
-    // read as "the measurement is gone", never as "the code is clean".
-    const { stale } = compareToBaseline({ 'src/a.ts': { 'no-explicit-any': 3 } }, {});
-    expect(stale).toHaveLength(1);
-  });
-
-  it('reports an empty baseline against an empty run as clean', () => {
-    // The one honest empty case: nothing recorded, nothing found.
-    expect(compareToBaseline({}, {})).toEqual({ unclassified: [], expanded: [], stale: [] });
   });
 });

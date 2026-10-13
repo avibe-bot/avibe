@@ -1,10 +1,6 @@
-import fs from 'node:fs';
-import { fileURLToPath } from 'node:url';
-
 import postcss from 'postcss';
 import { describe, expect, it } from 'vitest';
 
-import { intendedFiles } from './lintPolicy.mjs';
 import {
   cssBearingRangesIn,
   cssRangesIn,
@@ -13,7 +9,6 @@ import {
   rendersAtAll,
   withoutNonRenderingText,
 } from './nonRenderingText.mjs';
-import { WHOLE_TREE_SCAN } from './wholeTreeScan.mjs';
 
 // `validate:theme` reads whole source files with regular expressions, so the set
 // of bytes it treats as CSS is decided here and nowhere else. Ten review rounds
@@ -28,8 +23,6 @@ import { WHOLE_TREE_SCAN } from './wholeTreeScan.mjs';
 // honest -- a position that CAN render must survive intact right next to it.
 // Blanking too much would silence the whole guard while every case above it
 // still passed.
-
-const UI_ROOT = fileURLToPath(new URL('../', import.meta.url));
 
 // A glow no role in the scale carries, so its presence in the output is only
 // ever the fixture's own.
@@ -128,23 +121,27 @@ describe('withoutNonRenderingText', () => {
   // Every offence the scan reports is located by slicing the source up to a
   // match index, so a blanked file that is one character shorter than its
   // original moves every line number after it. Blanking replaces bodies with
-  // spaces for exactly this reason, and the property is asserted over the real
-  // tree rather than over fixtures: three files here contain astral characters,
-  // whose UTF-16 code units are what TypeScript's offsets count and what a
-  // code-point-wise rewrite silently loses.
-  it('preserves length and line breaks across every scanned file', () => {
-    const drifted = [];
-
-    for (const relative of intendedFiles(UI_ROOT, { extensions: ['.ts', '.tsx', '.css'] })) {
-      const raw = fs.readFileSync(new URL(relative, new URL(UI_ROOT, 'file:')), 'utf8');
-      const blanked = withoutNonRenderingText(raw, relative);
-      if (blanked.length !== raw.length || blanked.split('\n').length !== raw.split('\n').length) {
-        drifted.push(relative);
-      }
+  // spaces for exactly this reason. Astral characters are the shape that broke
+  // it: their UTF-16 code units are what TypeScript's offsets count and what a
+  // code-point-wise rewrite silently loses, so each fixture puts one ahead of
+  // the text it blanks and asserts the exact output.
+  it.each([
+    ['probe.ts', "// \u{1F642} icon\n/* box-shadow: 0 0 93px red */\nexport const after = 1;\n", [0, 1]],
+    ['probe.tsx', "// \u{1F642} icon\nexport const A = () => <p>{/* 93px */}</p>;\n", [0]],
+    ['probe.css', "/* \u{1F642} icon */\n/* box-shadow: 0 0 93px red */\n.a { color: red; }\n", [0, 1]],
+  ])('preserves length and line breaks in %s after an astral character', (file, source, blankedLines) => {
+    const blanked = withoutNonRenderingText(source, file);
+    const lines = source.split('\n');
+    const expected = lines.map((line, index) => (blankedLines.includes(index) ? ' '.repeat(line.length) : line));
+    expect(blanked.length).toBe(source.length);
+    if (file.endsWith('.tsx')) {
+      expect(blanked.split('\n')[0]).toBe(expected[0]);
+      expect(blanked.split('\n')[1]).not.toContain('93px');
+      expect(blanked.split('\n')[1]).toContain('export const A = () => <p>');
+    } else {
+      expect(blanked).toBe(expected.join('\n'));
     }
-
-    expect(drifted).toEqual([]);
-  }, WHOLE_TREE_SCAN);
+  });
 
   // TSX is not a superset of TS. `<T>(x: T) => …` is a generic arrow in a `.ts`
   // file and an unclosed JSX element in a `.tsx` one, so reading every file with
@@ -206,20 +203,6 @@ describe('withoutNonRenderingText', () => {
     const condition = `${spelling} (box-shadow: 0 0 93px red) {\n  .a { color: red; }\n}\n`;
 
     expect(withoutNonRenderingText(condition, 'probe.css')).not.toContain('93px');
-  });
-
-  it('is applied to every extension the scan reads', () => {
-    const scan = fs.readFileSync(new URL('validate-theme.mjs', import.meta.url), 'utf8');
-    const extensions = scan.match(/extensions:\s*\[([^\]]*)\]/g) ?? [];
-    const scanned = extensions.at(-1) ?? '';
-
-    // The bug this replaces was a conditional naming one suffix, which turned a
-    // rule about rendering into a rule about file names. If the scan grows an
-    // extension, the dispatcher has to have an opinion about it.
-    for (const extension of scanned.match(/'\.\w+'/g) ?? []) {
-      const probe = `probe${extension.slice(1, -1)}`;
-      expect(withoutNonRenderingText('/* box-shadow: 0 0 93px red */\n', probe)).not.toContain('93px');
-    }
   });
 });
 

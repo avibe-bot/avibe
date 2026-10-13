@@ -14,7 +14,6 @@ from modules.agents.service import AgentService
 from modules.claude_sdk_compat import TextBlock
 from modules.im import MessageContext
 from storage.db import create_sqlite_engine
-from storage.importer import ensure_sqlite_state
 from storage.session_activities import SQLiteSessionActivityStore
 from tests.test_claude_agent_initiated_turn import (
     AssistantMessage,
@@ -234,9 +233,9 @@ async def test_human_phase_and_successor_cannot_overwrite_or_be_released_by_old_
 
 
 @pytest.fixture
-def activity_store(tmp_path):
+def activity_store(tmp_path, sqlite_db_factory):
     db_path = tmp_path / "state" / "vibe.sqlite"
-    ensure_sqlite_state(db_path=db_path, primary_platform="avibe")
+    sqlite_db_factory(db_path)
     engine = create_sqlite_engine(db_path)
     yield SQLiteSessionActivityStore(engine)
     engine.dispose()

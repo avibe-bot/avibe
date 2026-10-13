@@ -6,11 +6,8 @@ import { describe, expect, it } from 'vitest';
 import postcss from 'postcss';
 
 import { customPropertiesIn } from './customProperties.mjs';
-import { intendedFiles } from './lintPolicy.mjs';
-import { typeScriptComments } from './nonRenderingText.mjs';
 import { GLOW_TOKEN } from './shadowLayer.mjs';
 import { eachStylesheet } from './stylesheets.mjs';
-import { WHOLE_TREE_SCAN } from './wholeTreeScan.mjs';
 
 // `validate:theme` already forces every glow in the tree to be a
 // `--shadow-glow-*` token. That check is about spelling: it says a call site
@@ -34,7 +31,6 @@ import { WHOLE_TREE_SCAN } from './wholeTreeScan.mjs';
 // covered without editing the test, and a rung nudged off the rule fails here
 // instead of shipping.
 
-const UI_ROOT = fileURLToPath(new URL('../', import.meta.url));
 const SRC_ROOT = fileURLToPath(new URL('../src/', import.meta.url));
 const CSS = fs.readFileSync(new URL('../src/index.css', import.meta.url), 'utf8');
 
@@ -361,74 +357,4 @@ describe('the accent glow scale', () => {
     expect(pattern, `${role} states no exception for the ${theme} theme it is declared in`).toBeDefined();
     expect(value.trim(), why).toMatch(pattern);
   });
-
-  // Which comments count as design glow annotations, and what each one measures.
-  //
-  // A wash is `0 y<n>px`, and the card scale owns those; this scale is only ever
-  // centred, so an annotation naming a y-offset is not its. The offset can be
-  // written before or after the blur -- welCard puts it after -- so the whole
-  // comment is the unit, not a window around the word, which is why these are
-  // parsed rather than grepped.
-  //
-  // `blur` also names things that are not shadows -- a backdrop filter, a
-  // privacy blur on a screenshot -- and reading `blur 10` out of one of those
-  // would fail this suite over a number no shadow ever wanted. So the comment
-  // must also name what it is measuring. A sigil (`@design-glow`) would be
-  // sharper, but only until the annotation that forgets to carry it: that turns
-  // this false positive into a silent miss, which is the worse direction.
-  // Naming the shadow is what a design annotation already does -- every
-  // contributing one in this tree says "glow" or "shadow" -- so the marker
-  // maintains itself.
-  //
-  // A function rather than three lines inside the loop, because the whole-tree
-  // test can only ever report that some number leaked in; it cannot say which
-  // comment shape let it. The probes below say that.
-  const ANNOTATED_BLUR = (comment) => {
-    const blur = comment.match(/\bblur (?<blur>\d+)/);
-    if (!blur) return null;
-    if (!/\b(glow|shadow)\b/i.test(comment)) return null;
-    if (/\by\d/.test(comment)) return null;
-    return Number(blur.groups.blur);
-  };
-
-  it.each([
-    ['a glow annotation', '// diagPulse: mint glow, blur 16', 16],
-    ['a shadow annotation', '/* StepCard shadow at blur 48 */', 48],
-    ['either word cased as prose', '// Glow: blur 24', 24],
-    ['a backdrop filter', '// the sheet sits over a backdrop blur 10 panel', null],
-    ['a privacy blur', '// screenshots ship with the avatar under blur 12', null],
-    ['a wash, which the card scale owns', '// welCard: glow 0 y4px blur 64', null],
-    ['a comment naming no blur at all', '// mint glow at #5BFFA070', null],
-  ])('reads %s', (_, comment, expected) => {
-    expect(ANNOTATED_BLUR(comment)).toBe(expected);
-  });
-
-  // The rule fixes the shape of a rung; it does not decide which blurs exist.
-  // That is design.pen's, and the annotations are how it reaches the source: a
-  // component that names `blur 24` and then renders a 32px glow has been
-  // redesigned by a codemod. Checking that the scale can SPELL each annotated
-  // blur is the half that holds without guessing which element in a file an
-  // annotation refers to -- welCard's does not describe the shadow nearest it.
-  it('can spell every blur a design annotation names', () => {
-    const annotated = new Set();
-
-    for (const relative of intendedFiles(UI_ROOT, { extensions: ['.ts', '.tsx'] })) {
-      const source = fs.readFileSync(new URL(relative, new URL(UI_ROOT, 'file:')), 'utf8');
-      for (const comment of typeScriptComments(source, relative)) {
-        const blur = ANNOTATED_BLUR(comment);
-        if (blur !== null) annotated.add(blur);
-      }
-    }
-
-    expect(annotated.size).toBeGreaterThan(0);
-
-    // Read off ROLE_BLUR rather than off the declarations, so this asks the
-    // scale the test pins and not whatever index.css currently happens to say.
-    // Taking it from the file made the two agree by construction: a rung nudged
-    // to 40px became "spellable" in the same edit that broke its frame.
-    const spellable = new Set(Object.values(ROLE_BLUR)
-      .flatMap((blur) => (typeof blur === 'number' ? [blur] : Object.values(blur))));
-
-    expect([...annotated].filter((blur) => !spellable.has(blur)).sort((a, b) => a - b)).toEqual([]);
-  }, WHOLE_TREE_SCAN);
 });

@@ -59,7 +59,6 @@ from modules.im import MessageContext
 from storage import message_deliveries
 from storage.agent_transcript import resolve_fork_point
 from storage.db import create_sqlite_engine
-from storage.importer import ensure_sqlite_state
 from storage.models import agent_events, agent_sessions, messages, session_turns
 from storage.settings_service import upsert_scope
 from tests.agent_core.fakes import ORIGIN, FakeJobHost, FakeTool, ScriptedProvider, assistant
@@ -70,9 +69,13 @@ SESSION = "ses_vibey"
 
 
 @pytest.fixture()
-def engine():
-    ensure_sqlite_state()
-    engine = create_sqlite_engine()
+def engine(tmp_path, sqlite_db_factory):
+    from config import paths
+
+    db_path = paths.get_sqlite_state_path()
+    if not db_path.exists():
+        db_path = sqlite_db_factory(db_path)
+    engine = create_sqlite_engine(db_path)
     yield engine
     engine.dispose()
 

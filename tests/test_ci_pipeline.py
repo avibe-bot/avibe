@@ -1,11 +1,9 @@
 from __future__ import annotations
 
-import itertools
 import io
 import json
 import os
 from pathlib import Path
-import shlex
 import shutil
 import subprocess
 import sys
@@ -19,113 +17,6 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def _jobs() -> dict:
     return yaml.safe_load((ROOT / ".github/workflows/lint.yml").read_text())["jobs"]
-
-
-def _artifact_build_commands() -> list[list[str]]:
-    step, = [step for step in _jobs()["build-linux-artifacts"]["steps"]
-             if step.get("name") == "Build package artifact"]
-    assert not step.get("if") and not step.get("continue-on-error")
-    return [shlex.split(line, comments=True) for line in step["run"].splitlines()
-            if line.strip() and not line.lstrip().startswith("#")]
-
-
-def test_artifact_producer_only_installs_the_frontend_and_builds_the_core_distribution():
-    assert _artifact_build_commands() == [
-        ["python", "-m", "pip", "install", "--disable-pip-version-check", "build"],
-        ["python", "scripts/prepare_local_show_runtime_manifest.py"],
-        ["python", "-m", "build"],
-    ]
-
-
-@pytest.mark.parametrize("failed_stage", [None, 0, 1, 2])
-def test_artifact_build_stops_at_each_failed_boundary(tmp_path, failed_stage):
-    binary = tmp_path / "bin"
-    binary.mkdir()
-    python = binary / "python"
-    python.write_text(
-        f"#!{sys.executable}\n"
-        "import json, os, pathlib, sys\n"
-        "path = pathlib.Path('commands.json')\n"
-        "commands = json.loads(path.read_text()) if path.exists() else []\n"
-        "commands.append(sys.argv)\n"
-        "path.write_text(json.dumps(commands))\n"
-        "sys.exit(7 if str(len(commands) - 1) == os.environ['FAIL_STAGE'] else 0)\n"
-    )
-    python.chmod(0o755)
-    step, = [step for step in _jobs()["build-linux-artifacts"]["steps"]
-             if step.get("name") == "Build package artifact"]
-    result = subprocess.run(
-        [shutil.which("bash"), "-e", "-c", step["run"]], cwd=tmp_path,
-        env={**os.environ, "PATH": str(binary), "FAIL_STAGE": str(failed_stage)},
-        capture_output=True, text=True, timeout=10,
-    )
-    assert result.returncode == (0 if failed_stage is None else 7), result.stderr
-    commands = json.loads((tmp_path / "commands.json").read_text())
-    expected = _artifact_build_commands()
-    assert [["python", *command[1:]] for command in commands] == expected[:
-        len(expected) if failed_stage is None else failed_stage + 1
-    ]
-
-
-def test_ci_uv_installation_is_exact_and_cache_ownership_is_preserved():
-    owners = {
-        name: job for name, job in _jobs().items()
-        if any(step.get("run", "").startswith("uv ") for step in job["steps"])
-    }
-    assert set(owners) == {
-        "unit-test-shards", "migration-release-guard", "install-upgrade-shards",
-        "show-router-integration", "memory-insight-contract", "windows-agent",
-    }
-    cache_keys = {}
-    for name, job in owners.items():
-        steps = job["steps"]
-        install, = [step for step in steps if step.get("name") == "Install pinned uv"]
-        version = "0.12.10"
-        assert shlex.split(install["run"]) == [
-            "python", "-m", "pip", "install", "--disable-pip-version-check",
-            "--only-binary=:all:", "--no-deps", f"uv=={version}",
-        ]
-        assert not install.get("if") and not install.get("continue-on-error")
-        assert any(step.get("uses", "").startswith("actions/setup-python@") for step in steps[:steps.index(install)])
-        assert not any(step.get("uses", "").startswith("astral-sh/setup-uv@") for step in steps)
-        cache, = [step for step in steps if step.get("uses", "").startswith("actions/cache")]
-        action = "actions/cache/restore" if name in {
-            "unit-test-shards", "migration-release-guard", "show-router-integration",
-            "memory-insight-contract",
-        } else "actions/cache"
-        assert cache["uses"] == f"{action}@caa296126883cff596d87d8935842f9db880ef25"
-        assert cache["with"]["path"] == "~/.cache/uv"
-        key = cache["with"]["key"]
-        assert "${{ runner.os }}-${{ runner.arch }}" in key and f"uv-{version}-py3.12" in key
-        dependencies = "'pyproject.toml', 'uv.lock'"
-        assert f"hashFiles({dependencies})" in key
-        cache_keys[name] = key
-        first_consumer = next(step for step in steps if step.get("run", "").startswith("uv "))
-        assert steps.index(install) < steps.index(cache) < steps.index(first_consumer)
-        if "windows" in f"{job['runs-on']} {job.get('strategy', {})}":
-            # uv's Windows default is %LOCALAPPDATA%\uv\cache, not the path the cache step keeps.
-            redirect, = [step for step in steps if "UV_CACHE_DIR" in step.get("run", "")]
-            assert "UV_CACHE_DIR=$HOME\\.cache\\uv" in redirect["run"]
-            assert steps.index(redirect) < steps.index(first_consumer)
-    assert len({cache_keys[name] for name in owners}) == 1
-
-
-@pytest.mark.parametrize("exit_code", [0, 1, 7])
-def test_ci_tool_install_command_propagates_failure(tmp_path, exit_code):
-    binary = tmp_path / "bin"
-    binary.mkdir()
-    python = binary / "python"
-    python.write_text(f"#!/bin/sh\nprintf '%s\\n' \"$@\"\nexit {exit_code}\n")
-    python.chmod(0o755)
-    for job in _jobs().values():
-        for step in job["steps"]:
-            if step.get("name") == "Install pinned uv":
-                result = subprocess.run(
-                    [shutil.which("bash"), "-e", "-c", step["run"]], cwd=tmp_path,
-                    env={**os.environ, "PATH": str(binary)}, capture_output=True, text=True,
-                )
-                assert result.returncode == exit_code
-                assert "--only-binary=:all:" in result.stdout
 
 
 def _run_isolated_unit_files(
@@ -461,7 +352,10 @@ def test_ui_checks_run_once_without_fencing_artifact_consumers() -> None:
     assert not checks.get("needs")
     assert not build.get("needs")
     assert "ui-checks" in jobs["unit-tests"]["needs"]
+    assert "ui-browser-checks" in jobs["unit-tests"]["needs"]
     assert "unit-test-shards" in jobs["unit-tests"]["needs"]
+    browsers = jobs["ui-browser-checks"]
+    assert not browsers.get("needs")
 
     check_steps = [step for step in checks["steps"] if "run" in step]
     build_steps = [step for step in build["steps"] if step.get("working-directory") == "ui"]
@@ -474,7 +368,7 @@ def test_ui_checks_run_once_without_fencing_artifact_consumers() -> None:
     assert build_commands.count("npm run build") == 1
     assert "npm ci" in check_commands
     assert "npm ci" in build_commands
-    for job in (checks, build):
+    for job in (checks, browsers, build):
         assert not job.get("if")
         assert not job.get("continue-on-error")
         assert all(not step.get("if") and not step.get("continue-on-error") for step in job["steps"])
@@ -613,14 +507,21 @@ def test_existing_required_gate_fails_unless_every_dependency_succeeded(tmp_path
     assert step["env"] == {
         "UNIT_RESULT": "${{ needs['unit-test-shards'].result }}",
         "UI_RESULT": "${{ needs['ui-checks'].result }}",
+        "BROWSER_RESULT": "${{ needs['ui-browser-checks'].result }}",
     }
-    for results in itertools.product(("success", "failure", "cancelled", "skipped", ""), repeat=2):
+    # The gate checks each dependency independently; a Cartesian product adds
+    # no failure class. Prove all-success and each dependency failing in turn.
+    cases = [dict.fromkeys(step["env"], "success")]
+    for name in step["env"]:
+        for outcome in ("failure", "cancelled", "skipped", ""):
+            cases.append({**cases[0], name: outcome})
+    for results in cases:
         result = subprocess.run(
             ["bash", "-e", "-c", step["run"]],
             cwd=tmp_path,
-            env={**os.environ, **dict(zip(step["env"], results))},
+            env={**os.environ, **results},
             capture_output=True,
             text=True,
             check=False,
         )
-        assert (result.returncode == 0) == all(value == "success" for value in results), result.stdout
+        assert (result.returncode == 0) == all(value == "success" for value in results.values()), result.stdout

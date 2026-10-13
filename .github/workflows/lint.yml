@@ -78,6 +78,22 @@ jobs:
           npm run typecheck:tests
           npm test
 
+  ui-browser-checks:
+    # Browser interactions do not depend on lint, Vitest, or the production
+    # bundle. Run alongside UI validation; the required unit-tests gate waits
+    # for both lanes, including failure/cancellation of either one.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
+        with:
+          node-version: "22.14.0"
+          cache: "npm"
+          cache-dependency-path: ui/package-lock.json
+      - name: Install UI dependencies
+        working-directory: ui
+        run: npm ci
+
       - name: Test browser interactions
         # Model Hub catalog/provider regression runs on the scheduled/manual
         # model-hub-ui-regression workflow instead of blocking every PR.
@@ -202,8 +218,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3, 4, 5]
-        shard-total: [6]
+        # The last complete run still held ~77 minutes of isolated-file work.
+        # Nine balanced lanes bring that work to ~8m30s each before setup,
+        # without changing discovery, watchdogs or test process isolation.
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8]
+        shard-total: [9]
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
 
@@ -241,15 +260,16 @@ jobs:
     runs-on: ubuntu-latest
     # Keep UI validation in the existing required gate while allowing artifact
     # consumers to start as soon as their production bundle is built.
-    needs: [unit-test-shards, ui-checks]
+    needs: [unit-test-shards, ui-checks, ui-browser-checks]
     if: always()
     steps:
       - name: Verify unit test shards and UI checks
         env:
           UNIT_RESULT: ${{ needs['unit-test-shards'].result }}
           UI_RESULT: ${{ needs['ui-checks'].result }}
+          BROWSER_RESULT: ${{ needs['ui-browser-checks'].result }}
         run: |
-          for result in "$UNIT_RESULT" "$UI_RESULT"; do
+          for result in "$UNIT_RESULT" "$UI_RESULT" "$BROWSER_RESULT"; do
             if [ "$result" != "success" ]; then
               echo "Unit/UI checks finished with result: $result"
               exit 1
@@ -447,21 +467,20 @@ jobs:
             throw "Installer output does not point to the uninstall owner"
           }
 
-          # Exercise retirement through the real hardlink/copy launcher on
-          # Windows, not just mocked link fallbacks in the Python unit suite.
-          1..3 | ForEach-Object {
-            & .\install.ps1
-            if ($LASTEXITCODE -ne 0) { throw "Repeated installer failed" }
-            $generations = @(Get-ChildItem "$env:USERPROFILE\.avibe\runtime\install-generations" -Directory)
-            if ($generations.Count -ne 1) {
-              $names = ($generations | ForEach-Object { $_.Name }) -join ", "
-              $logPath = Join-Path $env:USERPROFILE ".avibe\logs\vibe_remote.log"
-              if (Test-Path -LiteralPath $logPath) {
-                Write-Host "Retention log tail:"
-                Get-Content -LiteralPath $logPath -Tail 120
-              }
-              throw "Expected one selected generation, found $($generations.Count): $names"
+          # One replacement exercises retirement through the real Windows
+          # hardlink/copy launcher. Repeating the identical wheel three times
+          # asserts the same selected-generation transition at installation cost.
+          & .\install.ps1
+          if ($LASTEXITCODE -ne 0) { throw "Replacement installer failed" }
+          $generations = @(Get-ChildItem "$env:USERPROFILE\.avibe\runtime\install-generations" -Directory)
+          if ($generations.Count -ne 1) {
+            $names = ($generations | ForEach-Object { $_.Name }) -join ", "
+            $logPath = Join-Path $env:USERPROFILE ".avibe\logs\vibe_remote.log"
+            if (Test-Path -LiteralPath $logPath) {
+              Write-Host "Retention log tail:"
+              Get-Content -LiteralPath $logPath -Tail 120
             }
+            throw "Expected one selected generation, found $($generations.Count): $names"
           }
 
       - name: Verify vibe in fresh PowerShell session
@@ -509,6 +528,11 @@ jobs:
       - name: Uninstall keeps user data and a purge needs confirmation
         shell: pwsh
         run: |
+          # Step-local environment from the first install does not carry over.
+          # Any reinstall below must exercise this PR's wheel, never PyPI.
+          $wheel = (Get-ChildItem dist\*.whl | Select-Object -First 1).FullName
+          if (-not $wheel) { throw "Missing wheel artifact" }
+          $env:AVIBE_INSTALL_PACKAGE_SPEC = $wheel
           $avibeHome = Join-Path $env:USERPROFILE ".avibe"
           $root = Join-Path $avibeHome "runtime\install-generations"
           $stable = Join-Path $env:USERPROFILE ".local\bin\vibe.exe"
@@ -536,10 +560,10 @@ jobs:
             return $status
           }
 
-          function Install-WithPeers {
-            & .\install.ps1 *> reinstall.log
-            if ($LASTEXITCODE -ne 0) { Get-Content reinstall.log; throw "Reinstall failed" }
-            $generation = @(Get-ChildItem -LiteralPath $root -Directory)[0].FullName
+          function Add-LauncherPeers {
+            $generations = @(Get-ChildItem -LiteralPath $root -Directory)
+            if ($generations.Count -ne 1) { throw "Expected the selected installed generation" }
+            $generation = $generations[0].FullName
             # A second managed launcher: the cross-volume copy and its marker.
             New-Item -ItemType Directory -Force -Path $peerBin, $foreignBin | Out-Null
             Copy-Item -LiteralPath (Join-Path $generation "bin\vibe.exe") -Destination $peer -Force
@@ -549,7 +573,8 @@ jobs:
             Set-Content -LiteralPath $userData -Value "keep me"
           }
 
-          Install-WithPeers
+          # Reuse the real installation already verified in the prior steps.
+          Add-LauncherPeers
           if (-not (Test-Path -LiteralPath $markers[1])) { throw "The installer did not record its launcher marker" }
 
           $status = Invoke-Uninstall -Log uninstall.log
@@ -563,7 +588,11 @@ jobs:
             if (-not (Select-String -Path uninstall.log -Pattern $expected -SimpleMatch -Quiet)) { throw "Uninstall output is missing: $expected" }
           }
 
-          Install-WithPeers
+          # Default uninstall removed the installation: recreate it once for
+          # both the refused purge and the subsequent explicitly confirmed purge.
+          & .\install.ps1 *> reinstall.log
+          if ($LASTEXITCODE -ne 0) { Get-Content reinstall.log; throw "Reinstall failed" }
+          Add-LauncherPeers
           $status = Invoke-Uninstall -Log purge-refused.log -Options @("-Purge")
           if ($status -ne 1) { throw "A purge that could not prompt exited with $status" }
           foreach ($path in @($stable, $peer, $root, $userData)) {
