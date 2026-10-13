@@ -8,7 +8,7 @@ import subprocess
 
 import pytest
 
-from scripts.terminal_bench.credential import LIMIT, clean, consume, metadata
+from scripts.terminal_bench.credential import LIMIT, clean, consume, metadata, prepare_upload
 from scripts.terminal_bench.profile import Profile
 from scripts.terminal_bench import runner
 
@@ -25,7 +25,7 @@ def secret_file(tmp_path):
     return path
 
 
-@pytest.mark.parametrize("shape", ["normal", "symlink", "oversized", "public", "fifo", "empty"])
+@pytest.mark.parametrize("shape", ["normal", "symlink", "hardlink", "oversized", "public", "fifo", "empty"])
 def test_input_metadata_and_failure_removal(tmp_path, shape):
     path = secret_file(tmp_path)
     external = tmp_path / "unchanged"
@@ -33,6 +33,10 @@ def test_input_metadata_and_failure_removal(tmp_path, shape):
     if shape == "symlink":
         path.unlink()
         path.symlink_to(external)
+    elif shape == "hardlink":
+        path.unlink()
+        os.link(external, path)
+        path.chmod(0o600)
     elif shape == "oversized":
         path.write_bytes(b"x" * (LIMIT + 1))
     elif shape == "public":
@@ -43,17 +47,36 @@ def test_input_metadata_and_failure_removal(tmp_path, shape):
     elif shape == "empty":
         path.write_text("")
     if shape == "normal":
+        prepared = prepare_upload(path)
         info = metadata(path)
+        assert prepared == info
         assert info == {"regular": True, "mode": "0600", "directory_mode": "0700", "size": len(SENTINEL)}
         assert SENTINEL not in json.dumps(info)
         assert consume(path) == SENTINEL
     else:
+        before = external.stat()
+        with pytest.raises((OSError, ValueError)):
+            prepare_upload(path)
+        assert (external.stat().st_uid, external.stat().st_mode) == (before.st_uid, before.st_mode)
         with pytest.raises((OSError, ValueError)):
             consume(path)
     assert not path.exists() and not path.is_symlink()
     assert external.read_text() == "outside"
     assert clean(path) == {"removed": True}
     assert not path.parent.exists()
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="real uploaded UID adoption needs a root Linux sandbox")
+def test_prepare_adopts_foreign_upload_uid_but_read_stays_strict(tmp_path):
+    """Compose cp preserves UID501; strict consume must work only after setup adopts it."""
+    path = secret_file(tmp_path)
+    os.chown(path, 501, -1)
+    with pytest.raises(ValueError, match="owned by the runner"):
+        metadata(path)
+    assert prepare_upload(path)["mode"] == "0600"
+    assert path.stat().st_uid == os.geteuid()
+    assert consume(path) == SENTINEL
+    assert not path.exists()
 
 
 def test_rejects_symlink_parent_without_touching_other_directory(tmp_path):

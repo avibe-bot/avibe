@@ -83,8 +83,12 @@ a Vault/key-custody replacement or a generic secret-export feature.
 - Claim a unique trial root and its credential subdirectory mode0700. Create one
   host mode0600 `provider.key` under a mode0700 tempfile directory; transfer only
   with Harbor `upload_file`, never a shell literal, echo, heredoc, env value, or
-  JSON configuration. Inspect remote regular-file/type/owner/mode/size metadata
-  without printing or comparing secret content in logs.
+  JSON configuration. Inspect remote regular-file/type/mode/size metadata
+  without printing or comparing secret content in logs. Docker Compose may
+  preserve a host UID during upload. The root-only setup helper adopts that
+  copied inode using `fchown` only after validating the owned 0700 parent,
+  non-symlink 0600 regular file, single link and size bound. Later metadata and
+  consumption still require runner ownership; they never adopt an arbitrary file.
 - The wrapper opens without following links, rejects nonregular/multiply-linked,
   oversized or improperly protected files, reads and unlinks the input **before
   starting the service**, then uses the existing private-stdin bootstrap. Provider

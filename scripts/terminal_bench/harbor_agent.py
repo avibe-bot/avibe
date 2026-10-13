@@ -158,7 +158,7 @@ class FullAvibeAgent(BaseInstalledAgent):
                 handle.write(key)
             await _join_transfer(environment.upload_file(path, str(self.credential_path)))
         checked = await environment.exec(command=shlex.join([
-            str(self.python), "-I", "-m", "scripts.terminal_bench.credential", "metadata", str(self.credential_path),
+            str(self.python), "-I", "-m", "scripts.terminal_bench.credential", "prepare", str(self.credential_path),
         ]), user="root")
         if checked.return_code:
             raise RuntimeError("credential metadata refused")

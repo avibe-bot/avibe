@@ -103,7 +103,7 @@ class Environment:
             return SimpleNamespace(return_code=0, stdout="0\n", stderr="")
         if command == "pwd -P":
             return SimpleNamespace(return_code=0, stdout="/app\n", stderr="")
-        if "scripts.terminal_bench.credential metadata" in command:
+        if "scripts.terminal_bench.credential prepare" in command:
             return SimpleNamespace(return_code=0, stdout=json.dumps({"regular": True, "mode": "0600", "directory_mode": "0700"}), stderr="")
         if "scripts.terminal_bench.credential clean" in command:
             self.key_removed = True
