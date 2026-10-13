@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, Mapping, Optional
 
 from sqlalchemy import Integer, and_, cast, func, or_, select, update
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Connection
 
 from config import paths
@@ -56,6 +57,7 @@ from storage.models import (
     scope_settings,
     scopes,
     show_pages,
+    state_meta,
     agents,
 )
 
@@ -633,6 +635,148 @@ def create_session(
         now=now,
     )
     return get_session(conn, session_id, authorization_context=authorization)
+
+
+# The desktop mini's conversation, until sessions get a built-in ``main`` type
+# (docs/plans/2026-10-12-desktop-mini-main-agent.md §10.1). The association lives in
+# server-owned ``state_meta``, one key per principal, never in client-writable
+# session metadata: a marker any editor can set on their own session (or inherit by
+# forking) would let them hand someone else's mini a conversation they control.
+DESKTOP_MINI_SESSION_META_PREFIX = "desktop_mini_session:"
+
+
+class NoChatProjectError(LookupError):
+    """The caller has no active Project they can chat in, so there is no home for the session."""
+
+    code = "no_chat_project"
+
+
+def _desktop_mini_session_id(conn: Connection, key: str) -> Optional[str]:
+    raw = conn.execute(select(state_meta.c.value_json).where(state_meta.c.key == key)).scalar_one_or_none()
+    try:
+        value = json.loads(raw) if raw else None
+    except (TypeError, json.JSONDecodeError):
+        return None
+    return value if isinstance(value, str) and value else None
+
+
+def desktop_mini_owner_key(context: AuthorizationContext) -> Optional[str]:
+    """The principal a desktop mini conversation belongs to, from the request's authority.
+
+    Same identity the Workbench writes a reader's rows as: ``remote:<sub>`` for a
+    Cloud session, ``local`` otherwise. A remote context without a subject has no
+    identity to own anything, so it gets none rather than falling back to ``local``.
+    """
+
+    if context.is_remote:
+        subject = str(context.subject or "").strip()
+        return f"remote:{subject}" if subject else None
+    return "local"
+
+
+def _usable_desktop_mini_session(
+    conn: Connection,
+    context: AuthorizationContext,
+    session_id: str,
+    agent_id: Optional[str],
+) -> bool:
+    """Whether ``session_id`` is still what ``ensure_desktop_mini_session`` would create.
+
+    One predicate for the whole contract, so reuse cannot drift from creation: an
+    active foreground session, in an enabled Project the caller can chat in, still
+    on the requested Agent (a Workbench route change makes it an ordinary chat that
+    the mini no longer owns), which the caller may still use. The title, model and
+    effort are the user's to change.
+    """
+    row = conn.execute(
+        select(
+            agent_sessions.c.status,
+            agent_sessions.c.visibility,
+            agent_sessions.c.scope_id,
+            agent_sessions.c.agent_name,
+            agent_sessions.c.agent_id,
+            scope_settings.c.enabled,
+        )
+        .select_from(agent_sessions.outerjoin(scope_settings, scope_settings.c.scope_id == agent_sessions.c.scope_id))
+        .where(agent_sessions.c.id == session_id)
+    ).mappings().first()
+    if row is None or row["status"] != "active" or row["visibility"] != "foreground" or row["enabled"] == 0:
+        return False
+    project_id = project_access_service.project_id_from_scope_id(row["scope_id"])
+    if project_id is None or not project_access_service.can_chat_project(conn, context, project_id):
+        return False
+    if not agent_id or row["agent_id"] != agent_id:
+        return False
+    if row["agent_name"] or row["agent_id"]:
+        from core.vibe_agents import (
+            VibeAgentAccessError,
+            ensure_agent_selection_access,
+            resolve_resource_access_context,
+        )
+
+        try:
+            ensure_agent_selection_access(
+                conn,
+                agent_name=row["agent_name"],
+                agent_id=row["agent_id"],
+                user_context=resolve_resource_access_context(None),
+            )
+        except (VibeAgentAccessError, ValueError):
+            return False
+    return True
+
+
+def ensure_desktop_mini_session(
+    conn: Connection,
+    *,
+    agent_name: str,
+    title: Optional[str] = None,
+    authorization_context: AuthorizationContext | Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return the caller's desktop mini session, creating it on first use.
+
+    The recorded session is reused while the caller can still chat in it: active,
+    foreground, in an enabled Project they can chat in. Otherwise a new one is
+    created for ``agent_name`` in the caller's most recently active chat Project,
+    so it has a sidebar home and "Open in Avibe" lands on it, and the record moves
+    to it.
+    """
+
+    context = require_instance_role(authorization_context, "editor")
+    owner_key = desktop_mini_owner_key(context)
+    if owner_key is None:
+        raise ProjectAccessDeniedError
+    reserve_write_lock(conn)
+    key = f"{DESKTOP_MINI_SESSION_META_PREFIX}{owner_key}"
+    recorded = _desktop_mini_session_id(conn, key)
+    agent_id = conn.execute(
+        select(agents.c.id).where(agents.c.name == agent_name, agents.c.archived_at.is_(None))
+    ).scalar_one_or_none()
+    if recorded and _usable_desktop_mini_session(conn, context, recorded, agent_id):
+        return get_session(conn, recorded, authorization_context=context)
+
+    from storage import projects_service
+
+    for project in projects_service.list_projects(conn, authorization_context=context):
+        if project.get("archived") or not (project.get("capabilities") or {}).get("can_chat"):
+            continue
+        session = create_session(
+            conn,
+            scope_id=project["scope_id"],
+            agent_backend="",
+            agent_name=agent_name,
+            title=title,
+            authorization_context=context,
+        )
+        statement = sqlite_insert(state_meta).values(
+            key=key, value_json=json.dumps(session["id"]), updated_at=_utc_now_iso()
+        )
+        conn.execute(statement.on_conflict_do_update(
+            index_elements=[state_meta.c.key],
+            set_={"value_json": statement.excluded.value_json, "updated_at": statement.excluded.updated_at},
+        ))
+        return session
+    raise NoChatProjectError("No project to start the desktop mini conversation in")
 
 
 class ReservedSessionError(PermissionError):

@@ -24,10 +24,11 @@ consumer's requirements, and the Model Hub lane lands the change in both places.
    Hub stores one. The agent treats unknown values conservatively (C-2). It resolves once per run and again after a
    retryable error.
 4. **Served-hop report.** Every gateway response for `vibey` carries `x-avibe-served-hop`: compact, ASCII-escaped JSON
-   with exactly `provider`, `api`, `model`, taken from the winning attempt (Source vendor, Source protocol, upstream
-   target) and sent before the first model byte. The gateway does not commit early keepalive headers for `vibey`;
-   other backends are unchanged. The same origin is recorded on `TurnProvenance.served`. An `api` different from the
-   frontend protocol means the gateway converted. The agent records it as the message `origin` (C-1). The header value is at most 4096 bytes; a hop whose origin cannot be represented within that limit is
+   with exactly `provider`, `api`, `model`, `source` (since Model Hub contract v12), taken from the winning attempt
+   (Source vendor, Source protocol, upstream target, Source id) and sent before the first model byte. The gateway does
+   not commit early keepalive headers for `vibey`; other backends are unchanged. The same origin is recorded on
+   `TurnProvenance.served`, beside its `source_id`. An `api` different from the frontend protocol means the gateway
+   converted. The agent records `provider`, `api`, `model` as the message `origin` (C-1); `source` is not part of it. The header value is at most 4096 bytes; a hop whose origin cannot be represented within that limit is
    refused before invocation with a controlled local error (no model call, no header). Identifiers are never truncated.
 5. **Conversion stays a fallback.** The agent speaks the primary hop's protocol. When failover reaches a hop with
    another protocol, the gateway converts (degraded, not broken) and the served-hop report says so.
@@ -37,6 +38,33 @@ consumer's requirements, and the Model Hub lane lands the change in both places.
    before sending, applying the same rule as `cross-provider.md`, whether or not it converts protocols. Known limit:
    the next request targets the primary origin again, so payloads returned by a fallback origin are not replayed if a
    later request fails over to that same fallback; a provider that then rejects the call surfaces as a provider error.
+
+7. **Hosted tools** (planned, [`../vibey-hosted-tools.md`](../vibey-hosted-tools.md) §3.5).
+   - `HopResolution.hosted_tools` names, for each tool the user enabled:
+     - the primary hop's `mode` (`native` or `proxy`);
+     - for `native`, the wire declaration, which is required exactly then;
+     - the executor bound for this turn (`{source_id, model_id}` or `null`), present for every entry whatever the
+       mode, because a native request that comes back `pin_unavailable` is re-rendered with the proxy function in the
+       same turn. A config change applies from the next turn;
+     - `replay`, true only for the primary hop Source's positive replay evidence taken on the current engine and
+       probe shape.
+   - `native` requires all of these ([`../model-hub-capability-model.md`](../model-hub-capability-model.md) §3):
+     - an eligible credential (never a Claude subscription);
+     - positive `call` evidence for that (Source, model), taken on the current engine and probe shape;
+     - an untranslated path.
+   - **The gateway never rewrites hosted content.** Vibey pins every request that carries a native declaration, a
+     native hosted payload or an in-flight continuation, with `x-avibe-pin-source`.
+   - A pinned request is served only by that Source, with no failover and no recovery wait. The gateway answers HTTP
+     409 `{"type": "error", "error": {"type": "model_hub_pin_unavailable", "code": "pin_unavailable"}}` in three
+     cases:
+     - the Source cannot be admitted, checked before invoking anything;
+     - its attempt ends before model output with a failover-class failure;
+     - its attempt ends before model output with an error that a narrow hosted-content evidence rule names.
+   - Vibey then renders the same request in portable form and sends it unpinned; it fails over as today.
+   - Item 6 (the opaque thinking strip) is unchanged and applies only to unpinned requests.
+   - The served-hop report carries `source`, the serving Source id (item 4, Model Hub contract v12), so that a
+     hosted block's payload is tagged with the exact Source; two Sources can share an origin. The gateway and the
+     parser in `conversion-tables.md` changed together in that bump. Native hosted mode lands with or after v12.
 
 ## 3. Not required
 

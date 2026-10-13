@@ -1,5 +1,6 @@
 /* @vitest-environment jsdom */
 
+import type { VoiceTranscriptionError as VoiceTranscriptionErrorType } from '@/lib/voiceTranscription';
 import { fireEvent, act, cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -120,6 +121,8 @@ const api = {
   setHarnessWatchEnabled: vi.fn(async () => ({ ok: true })),
   setHarnessTaskEnabled: vi.fn(async () => ({ ok: true })),
   getMainSession: vi.fn(() => api.getSessionResult((window as unknown as { __AVIBE_PET_BINDING__: string }).__AVIBE_PET_BINDING__)),
+  // Default: no project to put the Vibey conversation in, so an unbound pet keeps the switcher.
+  ensureDesktopMiniSession: vi.fn(async (): Promise<WorkbenchSession> => { throw new ApiError('no project', 409, 'no_chat_project'); }),
   getConfig: vi.fn(async () => (setupDone
     ? { mode: 'self_host', setup_state: { needs_setup: false } }
     : { mode: 'self_host', setup_state: { needs_setup: true } })),
@@ -231,6 +234,8 @@ beforeEach(async () => {
   inboxVersion = 0;
   api.getSessionResult.mockClear();
   api.listSessions.mockClear();
+  api.ensureDesktopMiniSession.mockReset();
+  api.ensureDesktopMiniSession.mockImplementation(async () => { throw new ApiError('no project', 409, 'no_chat_project'); });
   window.localStorage.clear();
 });
 
@@ -312,6 +317,72 @@ describe('PetPage binding', () => {
     expect(screen.queryByText('Archived')).toBeNull();
     await userEvent.click(screen.getByText('No reply yet'));
     expect(devBinding().binding).toBe('new');
+  });
+});
+
+describe('PetPage Vibey conversation', () => {
+  it('binds the Vibey conversation the server ensures when nothing is bound', async () => {
+    api.ensureDesktopMiniSession.mockResolvedValue(session('V', { agent_name: 'vibey', agent_backend: 'vibey' }));
+    render(<PetPage />);
+    await waitFor(() => expect(devBinding().binding).toBe('V'));
+    expect(api.ensureDesktopMiniSession).toHaveBeenCalledTimes(1);
+  });
+
+  it('leaves an existing binding alone', async () => {
+    devBind('S');
+    render(<PetPage />);
+    await waitFor(() => expect(api.getSessionResult).toHaveBeenCalledWith('S'));
+    expect(api.ensureDesktopMiniSession).not.toHaveBeenCalled();
+  });
+
+  it('never re-binds a conversation that was cleared as invalid', async () => {
+    api.ensureDesktopMiniSession.mockResolvedValue(session('V'));
+    sessionReads.V = async () => ({ status: 404, session: null });
+    render(<PetPage />);
+    await waitFor(() => expect(api.getSessionResult).toHaveBeenCalledWith('V'));
+    await waitFor(() => expect(devBinding().binding).toBeNull());
+    await waitFor(() => expect(api.ensureDesktopMiniSession).toHaveBeenCalledTimes(2));
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 30)));
+    expect(devBinding().binding).toBeNull();
+    expect(api.ensureDesktopMiniSession).toHaveBeenCalledTimes(2);
+  });
+
+  it('offers Vibey in the switcher, and says why when there is no project', async () => {
+    switcherSessions = [session('B', { title: 'Another session' })];
+    render(<PetPage />);
+    summon('show');
+    await userEvent.click(await screen.findByText('pet.talkToVibey'));
+    expect(await screen.findByText('pet.noChatProject')).toBeTruthy();
+    api.ensureDesktopMiniSession.mockResolvedValue(session('V'));
+    await userEvent.click(screen.getByText('pet.talkToVibey'));
+    await waitFor(() => expect(devBinding().binding).toBe('V'));
+  });
+
+  it('does not offer Vibey to someone who cannot chat', async () => {
+    canChat = false;
+    switcherSessions = [session('B', { title: 'Another session' })];
+    render(<PetPage />);
+    summon('show');
+    expect(await screen.findByText('Another session')).toBeTruthy();
+    expect(screen.queryByText('pet.talkToVibey')).toBeNull();
+    expect(api.ensureDesktopMiniSession).not.toHaveBeenCalled();
+  });
+
+  it('shows a turn the agent could not run, with the way to fix it', async () => {
+    tails.S = [
+      message('u', 'S', { author: 'user', type: 'user', text: 'hello' }),
+      message('n', 'S', {
+        type: 'notify',
+        text: 'No model source yet.',
+        metadata: { event: 'backend_failure', failure_id: 'f', turn_id: 't', failure_next_step: 'models' },
+      }),
+    ];
+    devBind('S');
+    render(<PetPage />);
+    expect(await screen.findByText('pet.failedPrefix No model source yet.')).toBeTruthy();
+    await showDetail();
+    expect(await screen.findByText('No model source yet.')).toBeTruthy();
+    expect(screen.getByText('pet.fixInAvibe')).toBeTruthy();
   });
 });
 
@@ -1563,6 +1634,116 @@ describe('desktop mini v2 interaction contract', () => {
     expect(screen.queryByText('Session B')).toBeNull();
   });
 
+  // A tapped (not held) hotkey opens the text input once voice status is known.
+  const tapHotkey = () => { summon('listen'); summon('release'); };
+
+  async function withVoiceEnv(asrAvailable: () => boolean, dictation: unknown, body: () => Promise<void>) {
+    vi.doMock('@/lib/showPageVoiceDictation', () => ({ ShowPageVoiceDictation: dictation }));
+    const locks = Object.getOwnPropertyDescriptor(navigator, 'locks');
+    const media = Object.getOwnPropertyDescriptor(navigator, 'mediaDevices');
+    try {
+      Object.defineProperty(navigator, 'locks', { configurable: true, value: {} });
+      Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: { getUserMedia: vi.fn() } });
+      vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({ available: asrAvailable() }) })));
+      vi.resetModules();
+      ({ PetPage } = await import('./PetPage'));
+      await body();
+    } finally {
+      vi.doUnmock('@/lib/showPageVoiceDictation');
+      vi.unstubAllGlobals();
+      if (locks) Object.defineProperty(navigator, 'locks', locks);
+      else Reflect.deleteProperty(navigator, 'locks');
+      if (media) Object.defineProperty(navigator, 'mediaDevices', media);
+      else Reflect.deleteProperty(navigator, 'mediaDevices');
+    }
+  }
+
+  it.each([
+    ['microphone start', 'pet.voice.startFailed', () => ({ start: Promise.reject(new DOMException('denied', 'NotAllowedError')), done: new Promise<string>(() => {}) })],
+    ['transcription', 'pet.voice.failed', (TranscriptionError: typeof VoiceTranscriptionErrorType) => ({ start: Promise.resolve(), done: Promise.reject(new TranscriptionError('failed')) })],
+  ])('falls back to text with a note when %s fails, keeping the typed draft', async (_label, note, outcome) => {
+    // Resolved after the module reset so PetPage and the test share one class.
+    let TranscriptionError!: typeof VoiceTranscriptionErrorType;
+    class Dictation {
+      private readonly outcome = outcome(TranscriptionError);
+      done = this.outcome.done;
+      start = () => this.outcome.start;
+      finish = () => {};
+      abort = () => {};
+    }
+    await withVoiceEnv(() => true, Dictation, async () => {
+      ({ VoiceTranscriptionError: TranscriptionError } = await import('@/lib/voiceTranscription'));
+      devBind('S'); render(<PetPage />); tapHotkey();
+      const input = await screen.findByRole('textbox');
+      await userEvent.type(input, 'typed before voice');
+      await userEvent.click(await screen.findByLabelText('pet.voice.open'));
+      expect(await screen.findByText(note)).toBeTruthy();
+      expect(pose()).not.toBe('listening');
+      expect((screen.getByRole('textbox') as HTMLTextAreaElement).value).toBe('typed before voice');
+      expect(api.sendSessionMessage).not.toHaveBeenCalled();
+    });
+  });
+
+
+  it('clears a previous ASR-available cache when the authorization epoch changes', async () => {
+    const status = deferred<{ ok: boolean; json: () => Promise<unknown> }>();
+    let asrCalls = 0;
+    class Dictation { done = new Promise<string>(() => {}); start = async () => {}; finish = () => {}; abort = () => {}; }
+    await withVoiceEnv(() => true, Dictation, async () => {
+      vi.stubGlobal('fetch', vi.fn(() => {
+        asrCalls += 1;
+        return asrCalls === 1 ? Promise.resolve({ ok: true, json: async () => ({ available: true }) }) : status.promise;
+      }));
+      devBind('S'); render(<PetPage />); tapHotkey();
+      expect(await screen.findByLabelText('pet.voice.open')).toBeTruthy();
+      await emit((h) => h.onAuthorizationChanged?.({}));
+      await waitFor(() => expect(screen.queryByLabelText('pet.voice.open')).toBeNull());
+      await act(async () => status.resolve({ ok: true, json: async () => ({ available: false }) }));
+      await waitFor(() => expect(screen.queryByLabelText('pet.voice.open')).toBeNull());
+      expect(pose()).not.toBe('listening');
+    });
+  });
+
+  it('opens text while the first ASR status read is still pending, and does not start voice when it later succeeds', async () => {
+    const status = deferred<{ ok: boolean; json: () => Promise<unknown> }>();
+    const start = vi.fn(async () => {});
+    class Dictation { done = new Promise<string>(() => {}); start = start; finish = () => {}; abort = () => {}; }
+    await withVoiceEnv(() => true, Dictation, async () => {
+      vi.stubGlobal('fetch', vi.fn(() => status.promise));
+      devBind('S'); render(<PetPage />); summon('listen');
+      expect(await screen.findByRole('textbox')).toBeTruthy();
+      expect(pose()).not.toBe('listening');
+      await act(async () => status.resolve({ ok: true, json: async () => ({ available: true }) }));
+      await waitFor(() => expect(screen.getByLabelText('pet.voice.open')).toBeTruthy());
+      expect(pose()).not.toBe('listening');
+      expect(start).not.toHaveBeenCalled();
+    });
+  });
+
+  it('opens text from an avatar hold while ASR status is pending, and does not start voice when it later succeeds', async () => {
+    const status = deferred<{ ok: boolean; json: () => Promise<unknown> }>();
+    const start = vi.fn(async () => {});
+    class Dictation { done = new Promise<string>(() => {}); start = start; finish = () => {}; abort = () => {}; }
+    await withVoiceEnv(() => true, Dictation, async () => {
+      vi.stubGlobal('fetch', vi.fn(() => status.promise));
+      devBind('S'); render(<PetPage />); await screen.findByText('Session S');
+      const avatar = screen.getByLabelText('pet.toggle');
+      vi.useFakeTimers();
+      try {
+        fireEvent.pointerDown(avatar, { button: 0, pointerId: 1 });
+        await act(async () => vi.advanceTimersByTime(400));
+      } finally {
+        vi.useRealTimers();
+      }
+      expect(await screen.findByRole('textbox')).toBeTruthy();
+      expect(pose()).not.toBe('listening');
+      await act(async () => status.resolve({ ok: true, json: async () => ({ available: true }) }));
+      await waitFor(() => expect(screen.getByLabelText('pet.voice.open')).toBeTruthy());
+      expect(pose()).not.toBe('listening');
+      expect(start).not.toHaveBeenCalled();
+    });
+  });
+
   it('discards voice preview and final text from the previous authorization epoch', async () => {
     const done = deferred<string>();
     let preview!: (text: string) => void;
@@ -1581,11 +1762,10 @@ describe('desktop mini v2 interaction contract', () => {
     try {
       Object.defineProperty(navigator, 'locks', { configurable: true, value: {} });
       Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: { getUserMedia: vi.fn() } });
-      Object.defineProperty(window, '__AVIBE_PET_VOICE_ENABLED__', { configurable: true, value: true });
       vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({ available: true }) })));
       vi.resetModules();
       ({ PetPage } = await import('./PetPage'));
-      devBind('S'); render(<PetPage />); summon('listen');
+      devBind('S'); render(<PetPage />); tapHotkey();
       const input = await screen.findByRole('textbox');
       await userEvent.type(input, 'typed before voice');
       await userEvent.click(await screen.findByLabelText('pet.voice.open'));
@@ -1604,7 +1784,6 @@ describe('desktop mini v2 interaction contract', () => {
       else Reflect.deleteProperty(navigator, 'locks');
       if (media) Object.defineProperty(navigator, 'mediaDevices', media);
       else Reflect.deleteProperty(navigator, 'mediaDevices');
-      Reflect.deleteProperty(window, '__AVIBE_PET_VOICE_ENABLED__');
     }
   });
 

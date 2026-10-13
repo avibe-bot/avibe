@@ -72,13 +72,20 @@ class HopOrigin:
     provider: str
     api: str
     model: str
+    # The serving Source: two Sources can share an origin. Equality stays the
+    # origin's, since opaque payloads are origin-bound, not Source-bound.
+    source: str = field(compare=False)
 
     def payload(self) -> dict[str, str]:
         return {"provider": self.provider, "api": self.api, "model": self.model}
 
     def response_headers(self) -> dict[str, str]:
         # JSON escapes keep arbitrary Unicode model ids safe in HTTP headers.
-        value = json.dumps(self.payload(), ensure_ascii=True, separators=(",", ":"))
+        value = json.dumps(
+            {**self.payload(), "source": self.source},
+            ensure_ascii=True,
+            separators=(",", ":"),
+        )
         # ensure_ascii makes character count equal to wire byte count.
         if len(value) > SERVED_HOP_HEADER_MAX_BYTES:
             raise ServedHopHeaderTooLarge("Served-hop header exceeds its transport bound")
@@ -2535,7 +2542,7 @@ class TurnCorrelationRegistry:
 
             self.store.put(
                 {
-                    "contract_version": 11,
+                    "contract_version": 12,
                     "turn_id": normalized_turn_id,
                     "ts": ts or _utc_now_iso(),
                     "agent": trace.agent,

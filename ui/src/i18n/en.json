@@ -5610,7 +5610,10 @@
       "cloudRequired": "Voice input needs Avibe Cloud. You can type a message instead.",
       "listening": "Listening…",
       "open": "Voice input",
-      "stop": "Stop voice input"
+      "stop": "Stop voice input",
+      "startFailed": "Couldn't use the microphone. Check microphone access in system settings, or type instead.",
+      "empty": "No speech was heard. Try again, or type instead.",
+      "failed": "Couldn't turn that into text. Try again, or type instead."
     },
     "keyboard": {
       "open": "Type a message",
@@ -5644,6 +5647,11 @@
       "stopped": "Stopped",
       "paused": "Paused",
       "failed": "Could not stop; try again later"
-    }
+    },
+    "failedPrefix": "Didn't run:",
+    "fixInAvibe": "Fix it in Avibe",
+    "talkToVibey": "Talk to Vibey",
+    "noChatProject": "Create a project in Avibe first, so Vibey has a place for this conversation.",
+    "vibeyUnavailable": "Couldn't open the conversation with Vibey. Try again in a moment."
   }
 }

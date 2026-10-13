@@ -294,6 +294,12 @@ class ModelHubRemoteService:
     async def quota_summary(self, *, force: bool = False) -> dict:
         return await _rpc("quota_summary", {"force": force})
 
+    async def hosted_tools_status(self) -> dict:
+        return await _rpc("hosted_tools_status", {})
+
+    async def set_hosted_tool(self, tool: str, setting: object) -> dict:
+        return await _rpc("set_hosted_tool", {"tool": tool, "setting": setting})
+
     def agent_chain(self, backend: str, model_id: str) -> dict:
         return _rpc_sync(
             "get_agent_chain",

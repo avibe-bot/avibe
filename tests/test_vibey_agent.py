@@ -2351,7 +2351,9 @@ async def test_a_turn_runs_through_the_real_provider_registry(engine, session, t
 
     wire = "openai_chat" if hub_protocol == "google" else hub_protocol
     path, body = _TEXT_STREAMS[wire]
-    served = json.dumps({"provider": "upstream", "api": wire, "model": "served-model"}, separators=(",", ":"))
+    served = json.dumps(
+        {"provider": "upstream", "api": wire, "model": "served-model", "source": "src_upstream01"}, separators=(",", ":")
+    )
     seen: list[str] = []
 
     def gateway(request: httpx.Request) -> httpx.Response:
@@ -2400,7 +2402,10 @@ async def test_a_stream_that_drops_after_thinking_alone_gets_one_retry_then_its_
 
     from modules.agents.vibey.models import registry_providers
 
-    served = json.dumps({"provider": "upstream", "api": "openai_responses", "model": "served-model"}, separators=(",", ":"))
+    served = json.dumps(
+        {"provider": "upstream", "api": "openai_responses", "model": "served-model", "source": "src_upstream01"},
+        separators=(",", ":"),
+    )
     ending, copy = _THINKING_DROPS[drop]
     thinking_then_cut = (
         'data: {"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":"rs_1"}}\n\n'

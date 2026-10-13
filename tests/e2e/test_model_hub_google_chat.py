@@ -117,7 +117,7 @@ async def _chat_gateway(tmp_path, monkeypatch, upstream, *, model="gemini-3-pro-
                         }) as response:
                             assert response.status == 200, await response.text()
                             # Observed before the consumer reads any model body.
-                            assert json.loads(response.headers[SERVED_HOP_HEADER]) == origin
+                            assert json.loads(response.headers[SERVED_HOP_HEADER]) == {**origin, "source": source.id}
                             raw = await response.read()
                         if not stream:
                             return [json.loads(raw)]

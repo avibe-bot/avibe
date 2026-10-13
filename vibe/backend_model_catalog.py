@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import stat
@@ -14,12 +16,15 @@ import urllib.error
 import urllib.request
 import weakref
 from contextlib import contextmanager
+from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, Callable, Final, Iterable, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Final, Iterable, Literal, Mapping, Sequence
 
 from config import paths
 from config.atomic_io import write_atomic
+from core.agent_core.messages import HOSTED_TOOLS, PROTOCOLS
 from core.command_runner import run_supervised_command
 from vibe.claude_model_catalog import (
     DEFAULT_CLAUDE_MODEL_ALIASES,
@@ -544,10 +549,24 @@ def load_bundled_catalog(path: Path | None = None) -> dict[str, Any]:
 def bundled_catalog_reasoning_efforts_by_model() -> Mapping[str, tuple[str, ...]]:
     """Index bundled reasoning-effort rows without changing their declarations."""
 
-    efforts_by_model: dict[str, tuple[str, ...]] = {}
+    return _bundled_catalog_lists_by_model("reasoning_efforts")
+
+
+def bundled_catalog_client_presets_by_model() -> Mapping[str, tuple[str, ...]]:
+    """Index bundled client presets: efforts a client maps before sending.
+
+    A preset such as Codex ``ultra`` stays in its row's ``reasoning_efforts``
+    because the client's own menu offers it, but it is never a wire tier.
+    """
+
+    return _bundled_catalog_lists_by_model("client_presets")
+
+
+def _bundled_catalog_lists_by_model(key: str) -> Mapping[str, tuple[str, ...]]:
+    values_by_model: dict[str, tuple[str, ...]] = {}
     backends = load_bundled_catalog().get("backends")
     if not isinstance(backends, dict):
-        return MappingProxyType(efforts_by_model)
+        return MappingProxyType(values_by_model)
     for backend in backends.values():
         models = backend.get("models") if isinstance(backend, dict) else None
         if not isinstance(models, list):
@@ -556,14 +575,14 @@ def bundled_catalog_reasoning_efforts_by_model() -> Mapping[str, tuple[str, ...]
             if not isinstance(model, dict):
                 continue
             model_id = model.get("id")
-            efforts = model.get("reasoning_efforts")
+            values = model.get(key)
             if (
                 isinstance(model_id, str)
-                and model_id not in efforts_by_model
-                and isinstance(efforts, list)
+                and model_id not in values_by_model
+                and isinstance(values, list)
             ):
-                efforts_by_model[model_id] = tuple(efforts)
-    return MappingProxyType(efforts_by_model)
+                values_by_model[model_id] = tuple(values)
+    return MappingProxyType(values_by_model)
 
 
 def bundled_catalog_reasoning_efforts_for_model(
@@ -572,6 +591,253 @@ def bundled_catalog_reasoning_efforts_for_model(
     """Return one bundled catalog row's exact declared effort list."""
 
     return bundled_catalog_reasoning_efforts_by_model().get(model_id)
+
+
+# The ``providers`` section (model-hub-capability-model.md §4,
+# docs/plans/model-hub-contracts/provider-overlay.schema.json): what a provider
+# offers per model family and protocol. Priors only; whether a Source carries a
+# feature is evidence. Read from the bundled file alone, never the remote copy:
+# its declarations go on the wire and must be the ones this build shipped with.
+_HOSTED_TOOL_PRICE_UNITS = ("call", "search", "post", "profile")
+_OVERLAY_TOKEN = re.compile(r"\S(?:.*\S)?")
+_OVERLAY_DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
+_OVERLAY_URL = re.compile(r"https://[^\s/?#]+(?:[/?#]\S*)?")
+
+
+@dataclass(frozen=True)
+class HostedToolPriceComponent:
+    unit: str
+    usd_per_1k: float
+
+
+@dataclass(frozen=True)
+class HostedToolPrice:
+    """A provider's list price for one hosted tool, with the page it was read from."""
+
+    unit: str
+    usd_per_1k: float
+    as_of: date
+    url: str
+    extra: tuple[HostedToolPriceComponent, ...] = ()
+
+
+@dataclass(frozen=True)
+class HostedToolSpec:
+    """One hosted tool as a provider offers it on one protocol.
+
+    ``price`` is None when no list price is known, which is never a price of
+    zero. ``include`` lists the Responses ``include`` values the tool needs.
+    """
+
+    declaration_json: str
+    price: HostedToolPrice | None
+    include: tuple[str, ...]
+
+    @property
+    def declaration(self) -> dict[str, Any]:
+        """A fresh copy of the wire declaration, safe to place in a request body."""
+
+        return json.loads(self.declaration_json)
+
+
+@dataclass(frozen=True)
+class ProviderModelOverlay:
+    """One model family of a provider; ``wire_efforts`` None defers to models.dev."""
+
+    match_kind: Literal["prefix", "id"]
+    match_value: str
+    wire_efforts: tuple[str, ...] | None
+    hosted_tools: Mapping[str, Mapping[str, HostedToolSpec]]
+
+
+@functools.lru_cache(maxsize=1)
+def bundled_provider_overlay() -> Mapping[str, tuple[ProviderModelOverlay, ...]]:
+    """Each vendor's model families from the bundled ``providers`` section.
+
+    An invalid vendor entry is left out with a warning, and a ``providers``
+    value that is not an object disables only the overlay; backend rows never
+    depend on this section.
+    """
+
+    try:
+        payload = json.loads(get_bundled_catalog_path().read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return MappingProxyType({})
+    if not isinstance(payload, dict) or "providers" not in payload:
+        return MappingProxyType({})
+    providers = payload["providers"]
+    if not isinstance(providers, dict):
+        logger.warning("Backend model catalog providers section is not an object; the provider overlay is disabled")
+        return MappingProxyType({})
+    overlay: dict[str, tuple[ProviderModelOverlay, ...]] = {}
+    for vendor, raw_vendor in providers.items():
+        try:
+            overlay[_overlay_vendor_id(vendor)] = _overlay_vendor_models(raw_vendor)
+        except ValueError as exc:
+            logger.warning("Provider overlay entry %r is disabled: %s", vendor, exc)
+    return MappingProxyType(overlay)
+
+
+def provider_overlay_entry(vendor: str, model_id: str) -> ProviderModelOverlay | None:
+    """Return the first model family of ``vendor`` that matches ``model_id``."""
+
+    from core.handlers.model_hub.identifiers import normalized_model_id
+
+    model = normalized_model_id(model_id)
+    for entry in bundled_provider_overlay().get(vendor.strip().lower(), ()):
+        if (entry.match_kind == "id" and model == entry.match_value) or (
+            entry.match_kind == "prefix" and model.startswith(entry.match_value)
+        ):
+            return entry
+    return None
+
+
+def hosted_tool_spec(vendor: str, protocol: str, model_id: str, tool: str) -> HostedToolSpec | None:
+    """Return the matching family's declaration, price and include for one tool."""
+
+    entry = provider_overlay_entry(vendor, model_id)
+    if entry is None:
+        return None
+    return entry.hosted_tools.get(protocol, {}).get(tool)
+
+
+def _overlay_vendor_id(vendor: str) -> str:
+    from config.v2_config import normalize_model_hub_vendor_id
+
+    try:
+        canonical = normalize_model_hub_vendor_id(vendor)
+    except ValueError:
+        canonical = None
+    if canonical != vendor:
+        raise ValueError("the key is not a canonical Source vendor id")
+    return vendor
+
+
+def _overlay_vendor_models(raw: object) -> tuple[ProviderModelOverlay, ...]:
+    vendor = _overlay_object(raw, "vendor entry", required=("models",))
+    models = vendor["models"]
+    if not isinstance(models, list):
+        raise ValueError("models must be a list")
+    return tuple(_overlay_model(item) for item in models)
+
+
+def _overlay_model(raw: object) -> ProviderModelOverlay:
+    model = _overlay_object(raw, "model entry", required=("match",), optional=("wire_efforts", "hosted_tools"))
+    match = _overlay_object(model["match"], "match", optional=("prefix", "id"))
+    if len(match) != 1:
+        raise ValueError("match must name exactly one of prefix or id")
+    ((match_kind, match_value),) = match.items()
+    wire_efforts = model.get("wire_efforts")
+    protocols = _overlay_object(model.get("hosted_tools", {}), "hosted_tools", optional=PROTOCOLS)
+    hosted_tools: dict[str, Mapping[str, HostedToolSpec]] = {}
+    for protocol, raw_tools in protocols.items():
+        tools = _overlay_object(raw_tools, f"hosted_tools.{protocol}", optional=HOSTED_TOOLS)
+        hosted_tools[protocol] = MappingProxyType(
+            {tool: _overlay_hosted_tool(spec, f"{protocol}.{tool}") for tool, spec in tools.items()}
+        )
+    return ProviderModelOverlay(
+        match_kind=match_kind,
+        match_value=_overlay_token(match_value, f"match.{match_kind}"),
+        wire_efforts=None if wire_efforts is None else _overlay_tokens(wire_efforts, "wire_efforts"),
+        hosted_tools=MappingProxyType(hosted_tools),
+    )
+
+
+def _overlay_hosted_tool(raw: object, what: str) -> HostedToolSpec:
+    spec = _overlay_object(raw, what, required=("declaration",), optional=("price", "include"))
+    declaration = spec["declaration"]
+    if not isinstance(declaration, dict):
+        raise ValueError(f"{what}.declaration must be an object")
+    _overlay_token(declaration.get("type"), f"{what}.declaration.type")
+    return HostedToolSpec(
+        declaration_json=json.dumps(declaration, ensure_ascii=False, allow_nan=False),
+        price=_overlay_price(spec["price"], f"{what}.price") if "price" in spec else None,
+        include=_overlay_tokens(spec.get("include", []), f"{what}.include"),
+    )
+
+
+def _overlay_price(raw: object, what: str) -> HostedToolPrice:
+    price = _overlay_object(raw, what, required=("unit", "usd_per_1k", "as_of", "url"), optional=("extra",))
+    as_of = _overlay_date(price["as_of"], f"{what}.as_of")
+    url = price["url"]
+    if not isinstance(url, str) or not _OVERLAY_URL.fullmatch(url):
+        raise ValueError(f"{what}.url must be an https URL")
+    extra = price.get("extra", [])
+    if not isinstance(extra, list):
+        raise ValueError(f"{what}.extra must be a list")
+    unit, usd_per_1k = _overlay_price_component(price, what)
+    return HostedToolPrice(
+        unit=unit,
+        usd_per_1k=usd_per_1k,
+        as_of=as_of,
+        url=url,
+        extra=tuple(
+            HostedToolPriceComponent(
+                *_overlay_price_component(
+                    _overlay_object(item, f"{what}.extra", required=("unit", "usd_per_1k")),
+                    f"{what}.extra",
+                )
+            )
+            for item in extra
+        ),
+    )
+
+
+def _overlay_date(value: object, what: str) -> date:
+    if isinstance(value, str) and _OVERLAY_DATE.fullmatch(value):
+        try:
+            return date.fromisoformat(value)
+        except ValueError:
+            pass
+    raise ValueError(f"{what} must be a YYYY-MM-DD date")
+
+
+def _overlay_price_component(price: Mapping[str, Any], what: str) -> tuple[str, float]:
+    unit = price["unit"]
+    usd_per_1k = price["usd_per_1k"]
+    if not isinstance(unit, str) or unit not in _HOSTED_TOOL_PRICE_UNITS:
+        raise ValueError(f"{what}.unit is not a known price unit")
+    if (
+        not isinstance(usd_per_1k, (int, float))
+        or isinstance(usd_per_1k, bool)
+        or not math.isfinite(usd_per_1k)
+        or usd_per_1k < 0
+    ):
+        raise ValueError(f"{what}.usd_per_1k must be a number of at least 0")
+    return unit, float(usd_per_1k)
+
+
+def _overlay_object(
+    value: object,
+    what: str,
+    *,
+    required: Sequence[str] = (),
+    optional: Sequence[str] = (),
+) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError(f"{what} must be an object")
+    missing = [key for key in required if key not in value]
+    if missing:
+        raise ValueError(f"{what} is missing {', '.join(missing)}")
+    unknown = sorted(key for key in value if key not in required and key not in optional)
+    if unknown:
+        raise ValueError(f"{what} has unknown keys {', '.join(unknown)}")
+    return value
+
+
+def _overlay_tokens(value: object, what: str) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        raise ValueError(f"{what} must be a list")
+    tokens = tuple(_overlay_token(item, what) for item in value)
+    if len(set(tokens)) != len(tokens):
+        raise ValueError(f"{what} repeats a value")
+    return tokens
+
+
+def _overlay_token(value: object, what: str) -> str:
+    if not isinstance(value, str) or not _OVERLAY_TOKEN.fullmatch(value):
+        raise ValueError(f"{what} must be a nonblank string without surrounding whitespace")
+    return value
 
 
 def load_cached_remote_catalog(
@@ -1465,6 +1731,14 @@ def _validate_catalog_model_entry(item: object, backend: str) -> None:
         if not isinstance(efforts, list) or any(not isinstance(value, str) or not value.strip() for value in efforts):
             raise ValueError(f"Backend model catalog contains invalid reasoning efforts: {backend}/{raw_id}")
 
+    presets = item.get("client_presets")
+    if presets is not None and (
+        not isinstance(presets, list)
+        or any(not isinstance(value, str) or not value.strip() for value in presets)
+        or not {value.strip() for value in presets} <= {value.strip() for value in efforts or ()}
+    ):
+        raise ValueError(f"Backend model catalog contains invalid client presets: {backend}/{raw_id}")
+
 
 def _normalize_model_entry(item: object) -> dict[str, Any]:
     if isinstance(item, str):
@@ -1490,6 +1764,16 @@ def _normalize_model_entry(item: object) -> dict[str, Any]:
     efforts = _coerce_reasoning_efforts(raw_efforts)
     if raw_efforts is not None:
         entry["reasoning_efforts"] = efforts
+    # A preset is a menu effort the client maps before sending, so one the row
+    # does not offer is invalid; the strict reader rejects it.
+    raw_presets = item.get("client_presets")
+    presets = [
+        preset
+        for preset in _dedupe_str_values(raw_presets if isinstance(raw_presets, list) else ())
+        if preset in efforts
+    ]
+    if presets:
+        entry["client_presets"] = presets
     return entry
 
 

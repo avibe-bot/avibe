@@ -7,6 +7,7 @@ import {
   derivePetPose,
   derivePetState,
   latestExchange,
+  latestFailureNotice,
   openQuickReplies,
   type PetState,
   type PetStateInputs,
@@ -200,5 +201,36 @@ describe('derivePetPose', () => {
     expect(derivePetPose('idle', { othersWorking: true, asleep: false })).toBe('running');
     expect(derivePetPose('idle', { othersWorking: false, asleep: true })).toBe('sleeping');
     expect(derivePetPose('idle', { othersWorking: false, asleep: false })).toBe('idle');
+  });
+});
+
+describe('latestFailureNotice', () => {
+  const failure = () => row({ type: 'notify', metadata: { event: 'backend_failure', failure_id: 'f', turn_id: 't' } });
+
+  it('is the failure that ended the latest exchange', () => {
+    const notice = failure();
+    expect(latestFailureNotice([user(), notice])).toBe(notice);
+  });
+
+  it('is cleared by a later result or a new user message', () => {
+    expect(latestFailureNotice([user(), failure(), result()])).toBeNull();
+    expect(latestFailureNotice([user(), failure(), user('retry')])).toBeNull();
+  });
+
+  it('ignores detached or replayed failures, which report work outside this exchange', () => {
+    const detached = row({ type: 'notify', metadata: { event: 'backend_failure', failure_id: 'f', turn_id: 't', detached: true } });
+    const replayed = row({ type: 'notify', metadata: { event: 'backend_failure', failure_id: 'f', turn_id: 't', replayed: true } });
+    expect(latestFailureNotice([user(), detached])).toBeNull();
+    expect(latestFailureNotice([user(), replayed])).toBeNull();
+  });
+
+  it('is not hidden by a detached result from background work', () => {
+    const notice = failure();
+    const detachedResult = result({ metadata: { detached: true } });
+    expect(latestFailureNotice([user(), notice, detachedResult])).toBe(notice);
+  });
+
+  it('ignores notices that are not backend failures', () => {
+    expect(latestFailureNotice([user(), row({ type: 'notify', metadata: {} })])).toBeNull();
   });
 });

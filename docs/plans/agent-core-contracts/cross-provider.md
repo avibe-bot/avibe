@@ -13,6 +13,9 @@ cross-provider history tests (MIT).
 | Tool call | kept; `id` and `signature` as stored | kept without `signature`; `id` normalized to the target's rules (below) |
 | Tool result | kept | `tool_call_id` rewritten through the same id map |
 | Image in a user or tool-result message | kept | kept if the target model accepts images, else `[image: <name or mime>]` |
+| Hosted tool block (`hosted_tool`) | when the target hop is `native.source_id`, its origin equals the message's `origin`, and its current replay evidence is positive (`HopResolution.hosted_tools[tool].replay`): `native.payload` verbatim, in place; otherwise as a different origin. `image_generation` blocks always take the different-origin form. | a synthetic call to the same-named tool, plus its result, both rendered from the block's `action` and `record` by the one record-to-text function under the per-action rules of `../vibey-hosted-tools.md` §5. A `failed` or `incomplete` record is an error result (`is_error`, or a leading `[<tool> failed: <error>]` where the protocol has no flag). A `pending` record is the interrupted-call result below. The assistant message is split around the pair. |
+| Text block `citations` | not sent | not sent |
+| Tool result with `hosted` (a proxied hosted call) | kept, as any tool result | kept, as any tool result |
 
 Invariants:
 
@@ -26,3 +29,11 @@ Invariants:
   `[tool call interrupted; no result recorded]`, with `is_error: true` (C-5 settles most such calls from the job handle
   first).
 - Responses API requests use `store: false` and never `previous_response_id`.
+- Hosted tool blocks (planned, [`../vibey-hosted-tools.md`](../vibey-hosted-tools.md) §5): `native.payload` is an
+  opaque provider payload under every rule above, and its replay is further limited to the recorded Source while
+  that Source's current replay evidence is positive. The block never stores replay authorization. A different
+  origin loses page text: Anthropic returns it only encrypted, and OpenAI and xAI never return it. Within one
+  in-flight turn (`pause_turn`, or a client tool result after server tools in the same message), the request is
+  pinned to the Source that produced the content, and the content goes back verbatim. This transform is the only
+  converter of hosted content. The gateway never rewrites it: a pinned request it cannot serve comes back as
+  `pin_unavailable`, and the transform renders the request again in portable form.

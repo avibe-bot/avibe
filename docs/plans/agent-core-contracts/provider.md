@@ -65,7 +65,9 @@ token names an immutable snapshot (`message.schema.json`), so the bytes never ch
 `stream` yields `ProviderEvent`s (`provider-event.schema.json`) and always ends with exactly one `done` or one
 `error`. `done.message` is the complete canonical `AssistantMessage`; its `origin` comes from the served-hop report
 (C-6), which the gateway sends as the `x-avibe-served-hop` response header: compact JSON with exactly `provider`,
-`api`, `model`, before the first model byte. On the direct channel (no gateway) the endpoint is the served hop. When a gateway response carries no
+`api`, `model`, `source` (Model Hub contract v12), before the first model byte. The `origin` is `provider`, `api`,
+`model`; `source` is the serving Source id, which is not part of a message's origin. A report of any other shape
+counts as no report. On the direct channel (no gateway) the endpoint is the served hop. When a gateway response carries no
 served-hop report, the origin is unverified: the adapter commits the message with every opaque provider payload
 removed (the `signature` of every block of any kind, and redacted thinking), keeping the endpoint as `origin`, so no
 opaque payload of an unknown vendor can ever be replayed. A block without a signature is always sent without one
