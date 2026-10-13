@@ -555,3 +555,7 @@ def test_docs_scope_gates_all_work_without_filtering_away_required_checks() -> N
     command, = [s for s in scope["steps"] if s.get("id") == "scope"]
     assert command["run"] == "python3 scripts/ci_docs_only.py"
     assert not command.get("continue-on-error")
+    guidance, = [s for s in scope["steps"] if "test_repository_guidance.py" in s.get("run", "")]
+    assert guidance["if"] == "steps.scope.outputs.docs_only == 'true'"
+    assert not guidance.get("continue-on-error")
+    assert "--noconftest" in guidance["run"]

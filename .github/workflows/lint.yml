@@ -31,6 +31,17 @@ jobs:
       - name: Classify the complete change
         id: scope
         run: python3 scripts/ci_docs_only.py
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
+        if: steps.scope.outputs.docs_only == 'true'
+        with:
+          python-version: "3.12"
+      - name: Check repository guidance without application dependencies
+        if: steps.scope.outputs.docs_only == 'true'
+        env:
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
+        run: |
+          python -m pip install --disable-pip-version-check pytest==9.0.3
+          python -m pytest --noconftest -p no:cacheprovider -c /dev/null -q tests/test_repository_guidance.py
 
   memory-insight-contract:
     needs: changes

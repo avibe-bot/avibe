@@ -16,12 +16,10 @@ ROOT_DOCS = frozenset({
     "AGENTS.md", "CONTRIBUTING.md", "CODE_OF_CONDUCT.md", "SECURITY.md",
     "VISION.md", "VISION_ZH.md", ".github/PULL_REQUEST_TEMPLATE.md",
 })
-# These Markdown documents are inputs to installed-CLI or executable contract
-# tests, not just narrative. README*.md and runtime prompts are not allowlisted.
-CONTRACT_DOCS = frozenset({
-    "docs/INSTALL_FOR_AI.md", "docs/INSTALL_FOR_AI_ZH.md",
-    "docs/plans/model-hub.md", "docs/plans/model-hub-shell-core-coverage.md",
-})
+# Installed CLI documentation is executable contract input. All plans stay
+# full: tests also glob plan prose, so a list of individual exceptions cannot
+# safely describe that boundary. AGENTS.md has a dedicated lightweight check.
+CONTRACT_DOCS = frozenset({"docs/INSTALL_FOR_AI.md", "docs/INSTALL_FOR_AI_ZH.md"})
 
 
 def narrative_path(path: str) -> bool:
@@ -32,8 +30,8 @@ def narrative_path(path: str) -> bool:
         return True
     return (
         parts[0] == "docs" and PurePosixPath(path).suffix == ".md"
-        and path not in CONTRACT_DOCS
-        and not any(part.endswith("-contracts") for part in parts[:-1])
+        and not path.startswith("docs/plans/") and path not in CONTRACT_DOCS
+        and not any(part == "contracts" or part.endswith("-contracts") for part in parts[:-1])
     )
 
 

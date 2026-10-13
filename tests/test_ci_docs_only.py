@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 
@@ -58,13 +59,16 @@ def push(repo: Path, base: str, **overrides) -> tuple[bool, str]:
 @pytest.mark.parametrize(("path", "docs"), [
     ("AGENTS.md", True),
     ("CONTRIBUTING.md", True),
-    ("docs/plans/普通 说明.md", True),
+    ("docs/普通 说明.md", True),
     ("docs/guide\twith\nseparators.md", True),
     (".github/PULL_REQUEST_TEMPLATE.md", True),
     ("README.md", False),
     ("README_ZH.md", False),
     ("core/prompts/agent-instructions.md", False),
     ("skills/use-avibe/SKILL.md", False),
+    ("docs/plans/ordinary-plan.md", False),
+    ("docs/plans/model-hub-implementation.md", False),
+    ("docs/plans/model-hub-routing-modes.md", False),
     ("docs/plans/model-hub-contracts/api.md", False),
     ("docs/plans/agent-core-contracts/context.md", False),
     ("docs/plans/model-hub.md", False),
@@ -203,3 +207,28 @@ def test_cli_exports_explicit_disposition_and_missing_event_defaults_full(repo: 
     assert result.returncode == 0, result.stderr
     assert output.read_text().splitlines() == ["docs_only=true", "docs_only=false"]
     assert "full" in summary.read_text()
+
+
+def test_guidance_remains_enforced_when_an_agents_only_diff_skips_application_tests(repo: Path) -> None:
+    root = SCRIPT.parents[1]
+    paths = (
+        "AGENTS.md", "tests/test_repository_guidance.py", ".agents/skills/pr-delivery-loop/SKILL.md",
+        "skills/background-watch-hook/scripts/wait_pr.py", "skills/background-watch-hook/scripts/wait_action.py",
+    )
+    for relative in paths:
+        target = repo / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(root / relative, target)
+    before = commit(repo)
+    command = [sys.executable, "-m", "pytest", "--noconftest", "-p", "no:cacheprovider", "-c", "/dev/null", "-q",
+               "tests/test_repository_guidance.py"]
+    env = {**os.environ, "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1", "PYTHONDONTWRITEBYTECODE": "1"}
+    valid = subprocess.run(command, cwd=repo, env=env, capture_output=True, text=True)
+    assert valid.returncode == 0, valid.stdout + valid.stderr
+    agents = repo / "AGENTS.md"
+    agents.write_text(agents.read_text().replace("use the `background-watch-hook` skill", "use unmanaged polling"))
+    commit(repo)
+    assert push(repo, before)[0]  # Scope remains docs; the independent check must reject its content.
+    invalid = subprocess.run(command, cwd=repo, env=env, capture_output=True, text=True)
+    assert invalid.returncode == 1, invalid.stdout + invalid.stderr
+    assert "test_pr_delivery_loop_delegates_waiters_to_background_watch_skill" in invalid.stdout
