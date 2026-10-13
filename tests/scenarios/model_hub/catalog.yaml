@@ -1120,6 +1120,18 @@ scenarios:
     kind: recovery
     layer: unit
     test: tests/test_model_hub_usage.py::test_future_hourly_evidence_is_incomplete_on_read_and_after_a_write
+  - id: MH-USAGE-BACKEND-009
+    name: A ledger row whose context tier is not a size is dropped like any unusable row
+    status: covered
+    kind: compatibility
+    layer: unit
+    test: tests/test_model_hub_usage.py::test_a_row_whose_context_tier_is_not_a_size_is_dropped
+  - id: MH-USAGE-BACKEND-010
+    name: The usage writer reads the price table once before the loop serves and tiers every call when it is recorded
+    status: covered
+    kind: recovery
+    layer: unit
+    test: tests/test_model_hub_usage.py::test_the_writer_reads_the_price_table_before_serving_and_tiers_every_call_at_record
   - id: MH-USAGE-E2E-001
     name: Measured hourly and daily reports reconcile through HTTP and IPC after a controller restart
     status: covered
@@ -1450,6 +1462,46 @@ scenarios:
       - ui/src/components/settings/models/SettingsModelsPage.render.test.tsx::MH-PRICE-014
       - ui/src/components/settings/models/UsageTab.test.tsx::MH-PRICE-014
       - ui/src/components/settings/models/QuotaTab.test.tsx::MH-PRICE-014
+  - id: MH-PRICE-015
+    name: A models.dev context tier is parsed by the flat price's rules, with the legacy over-200K price only when no tier is usable
+    status: covered
+    kind: compatibility
+    layer: unit
+    test: tests/test_model_hub_pricing.py::test_model_price_reads_context_tiers_by_the_flat_price_rules
+  - id: MH-PRICE-016
+    name: A call is recorded in the tier its whole context input exceeds and valued at that tier's rates
+    status: covered
+    kind: contract
+    layer: unit
+    test: tests/test_model_hub_pricing.py::test_a_call_is_recorded_in_the_tier_its_context_exceeds_and_valued_at_its_rates
+    related_tests:
+      - tests/test_model_hub_pricing.py::test_cache_reads_and_writes_count_toward_the_context_tier
+  - id: MH-PRICE-017
+    name: A released ledger reads and values unchanged, and a tiered call lands on its own row beside it
+    status: covered
+    kind: compatibility
+    layer: unit
+    test: tests/test_model_hub_pricing.py::test_a_released_ledger_reads_unchanged_and_a_tiered_call_lands_beside_it
+  - id: MH-PRICE-018
+    name: Calls of different tiers never fold together, and every report sums them per model
+    status: covered
+    kind: contract
+    layer: unit
+    test: tests/test_model_hub_pricing.py::test_tiers_never_fold_together_and_every_read_sums_them_per_model
+  - id: MH-PRICE-020
+    name: A hosted response is priced by the one pricing owner as included, reported or list, and is unpriced rather than zero when anything is unknown
+    status: covered
+    kind: contract
+    layer: unit
+    test: tests/test_model_hub_pricing.py::test_a_hosted_response_is_priced_by_the_one_pricing_owner
+    related_tests:
+      - tests/test_model_hub_pricing.py::test_xai_cost_ticks_are_converted_by_the_pricing_module
+  - id: MH-PRICE-019
+    name: A tiered row the current table no longer lists is valued at the largest listed tier it exceeded
+    status: covered
+    kind: recovery
+    layer: unit
+    test: tests/test_model_hub_pricing.py::test_a_tiered_row_is_valued_at_the_largest_listed_tier_it_exceeded
   - id: MH-RES-LIVE-001
     name: Live turn retries an eligible backup before streaming starts
     status: covered

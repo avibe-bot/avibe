@@ -91,6 +91,13 @@ def test_evidence_resolves_for_routing(feature, changes, engine, shape, age, sta
     record = _record(source, feature, **changes)
     view = resolve(record, source=source, engine=engine, shape=shape, now=NOW + age)
     assert (view.status, view.stale) == (status, stale)
+    # When the reading changes on its own: an observed record expires, a fresh probe record ages.
+    if view.status == "unknown" and view.stale is None:
+        assert view.changes_at is None
+    elif record.basis == "observed":
+        assert view.changes_at == record.observed_at + timedelta(days=7)
+    else:
+        assert view.changes_at == (record.observed_at + timedelta(days=30) if stale is None else None)
 
 
 def test_a_changed_source_identity_reads_as_unknown_and_is_pruned(tmp_path):
@@ -144,8 +151,12 @@ def test_persisted_records_match_the_schema_and_unreadable_ones_are_unknown(tmp_
         {"observed_at": datetime(2026, 10, 13)},
         {"shape": -1},
         {"source_identity": ""},
+        {"observed_at": datetime(9999, 12, 31, tzinfo=timezone.utc)},
     ],
-    ids=["observed-without-detail", "observed-positive", "long-detail", "naive-time", "negative-shape", "no-identity"],
+    ids=[
+        "observed-without-detail", "observed-positive", "long-detail", "naive-time", "negative-shape", "no-identity",
+        "expiry-out-of-range",
+    ],
 )
 def test_a_record_refuses_what_the_contract_forbids(changes):
     with pytest.raises(ValueError):

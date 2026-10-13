@@ -104,13 +104,14 @@
             "description": "Reasoning efforts this exact hop is currently known to refuse (capability evidence, model-hub-capability-model.md §3.4), oldest evidence first; absent when none. A request at one of them skips this hop. The effort menu omits a tier only when every hop that can serve the model lists it, and otherwise marks it \"not on: <Source>\". Read-only: routing reads the evidence store itself.",
             "items": {
               "type": "object",
-              "required": ["effort", "basis", "observed_at", "detail"],
+              "required": ["effort", "basis", "observed_at", "detail", "changes_at"],
               "additionalProperties": false,
               "properties": {
                 "effort": { "type": "string", "minLength": 1 },
                 "basis": { "enum": ["probe", "observed"] },
                 "observed_at": { "type": "string", "format": "date-time" },
-                "detail": { "type": ["string", "null"], "maxLength": 64 }
+                "detail": { "type": ["string", "null"], "maxLength": 64 },
+                "changes_at": { "type": ["string", "null"], "format": "date-time", "description": "When this refusal stops reading as it does now (observed expiry, probe re-verify mark); null when nothing is scheduled." }
               }
             }
           }

@@ -230,7 +230,7 @@ and the existing tone vocabulary (`TimeHint` for dates):
 | --- | --- | --- |
 | Token prices: input, output, cache read, cache write | models.dev base `cost.*`; the user's override file | used |
 | One-hour cache write | override file, or 2× input by default (`pricing.py`) | used; models.dev has no field |
-| **Context-tier prices** (a higher rate past a context size) | models.dev `cost.tiers[]` with `{"tier": {"type": "context", "size": N}}`, plus the legacy `cost.context_over_200k`. On 2026-10-13: 630 and 517 models (e.g. `gpt-6-astra` above 272K: $20/$75; `grok-4.6` above 200K: $4/$12) | **not used.** `model_price` reads only the flat fields, so valuation understates long-context use. Fix: when a call's total context input (input plus cache-read and cache-write tokens) exceeds `size`, the tier's rates apply to the whole call, as the vendors bill. The usage ledger aggregates per (day, Source, model) and keeps no per-call rows, so the tier must be applied when a call is recorded (Phase 1 pricing PR). |
+| **Context-tier prices** (a higher rate past a context size) | models.dev `cost.tiers[]` with `{"tier": {"type": "context", "size": N}}`, plus the legacy `cost.context_over_200k` (size 200K, read only when no context tier is usable); an override entry in the same shape. On 2026-10-13: 630 and 517 models (e.g. `gpt-6-astra` above 272K: $20/$75; `grok-4.6` above 200K: $4/$12) | used. `model_price` reads each tier by the flat-price rules and ignores an unusable one. A call whose total context input (input plus cache-read and cache-write tokens, which the ledger's `input_tokens` already counts) exceeds a size is billed whole at that tier's rates; the highest tier exceeded wins. The ledger keeps no per-call rows, so the usage writer decides the tier when it records a call, from a price table it reads off the event loop and holds for five minutes, and the tier is part of the row's identity (`context_tier`, persisted only above the base tier, so released rows read as base). Valuation prices each row at its own tier and sums tiers per Source and model; a tier the table no longer lists is valued at the largest listed tier below it. |
 | **Hosted-tool call prices** | overlay `providers.<vendor>.models[].hosted_tools.<protocol>.<tool>.price` (§4): unit, USD per 1,000 units, date and source URL | new. models.dev has none; the open proposal anomalyco/models.dev#8707 adds `cost.web_search = {search, prompt}` (no maintainer response yet) |
 | Search-result tokens | the provider's usage (input tokens), priced by the token rows | already counted as input |
 | Provider-reported cost | per-call usage, when present: xAI `cost_in_usd_ticks` (USD × 10¹⁰), `server_side_tool_usage_details`; Anthropic `server_tool_use.web_search_requests` | not read today; hosted tools read it (§6.4) |
@@ -262,7 +262,9 @@ and the existing tone vocabulary (`TimeHint` for dates):
    - native: the tool fee per call plus a token estimate;
    - proxy: the same plus the executor model's call.
 
-   All of it is computed by the one pricing owner, `pricing.py`. It is stored once per response: as the message's
+   All of it is computed by the one pricing owner, `pricing.py` (`hosted_response_cost`, reached through
+   `ModelHubService.hosted_call_cost`, which reads only the price table the usage writer already holds, so pricing a
+   response does no I/O). It is stored once per response: as the message's
    `hosted_summary.cost` for native calls, and as `ProxyExecution.cost` for a proxied call, which is its own executor
    response. A provider-reported figure is never copied into individual calls. Neither the
    executor nor an adapter prices anything itself.

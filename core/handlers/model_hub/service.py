@@ -43,6 +43,7 @@ from config.v2_config import (
     validate_model_hub_source_client_nonce,
 )
 from core.agent_auth_service import BackendLoginInProgressError
+from core.agent_core.messages import HostedCost
 from core.os_errors import format_os_errno, local_error_detail
 from core.services.settings import default_config
 from storage.db import get_cached_sqlite_engine
@@ -146,7 +147,7 @@ from .oauth import (
     OAuthFlowRegistry,
     UnavailableNativeOAuthAdapter,
 )
-from .pricing import VALUE_WINDOW_DAYS, PriceTable, load_price_table, quota_values
+from .pricing import VALUE_WINDOW_DAYS, PriceTable, hosted_response_cost, load_price_table, quota_values
 from .quota import QuotaSourceRef, SubscriptionQuotaCache, SubscriptionQuotaError
 from .provenance import (
     REQUEST_NONFALLBACK_TURN_OUTCOME,
@@ -163,7 +164,7 @@ from .provenance import (
 )
 from .request import ModelHubRequest, without_opaque_history
 from .reasoning_tiers import catalog_wire_efforts, resolve_reasoning_tiers
-from .stream_wire import ProtocolSSEState
+from .stream_wire import ProtocolSSEState, ProtocolUsageReport
 from .resolver import (
     BackendName,
     ModelHubTurnResolution,
@@ -1178,7 +1179,13 @@ class ModelHubService:
         )
         # One writer per ledger, shared with the gateway: both metering populations
         # then have the same owner for the lifetime of what they write.
-        self.usage_writer = UsageWriter(self.usage)
+        # Read per report: the override file is hand-edited and the catalog refreshes itself.
+        self.price_table: Callable[[], PriceTable] = price_table or (
+            lambda: load_price_table(paths.get_state_dir())
+        )
+        # Built here, at controller startup before the loop serves, so the writer's
+        # first price-table read never runs on the loop and every call is tiered.
+        self.usage_writer = UsageWriter(self.usage, price_table=self.price_table)
         self.native_oauth_adapter = native_oauth_adapter or UnavailableNativeOAuthAdapter()
         self.oauth_flows = oauth_flows or OAuthFlowRegistry(
             paths.get_state_dir() / "model_hub_oauth_flows.json",
@@ -1249,10 +1256,6 @@ class ModelHubService:
         self._builtin_snapshot_cache: dict[BackendName, list[dict[str, Any]]] = {}
         self._pending_builtin_catalog_refresh: set[BackendName] = set()
         self.quota = SubscriptionQuotaCache(self._fetch_subscription_quota, now=lambda: self.now())
-        # Read per report: the override file is hand-edited and the catalog refreshes itself.
-        self.price_table: Callable[[], PriceTable] = price_table or (
-            lambda: load_price_table(paths.get_state_dir())
-        )
         # A cached copy only: the picker read must not wait on the network.
         self.models_dev_catalog: Callable[[], Mapping[str, Any]] = models_dev_catalog or (
             lambda: _cached_models_dev_catalog()
@@ -2759,8 +2762,12 @@ class ModelHubService:
         config: ModelHubConfig | None = None,
     ) -> dict:
         payload = source.to_payload()
+        observed_at = self.now()
         for model in payload["models"]:
             model.setdefault("retired", False)
+            refused = self._refused_efforts(source, model["id"], observed_at)
+            if refused:
+                model["refused_efforts"] = refused
         payload["adopted_by"] = self._adopted_by(source.id, config)
         return self._source_account_payload(payload)
 
@@ -5909,6 +5916,41 @@ class ModelHubService:
             now=self.now(),
         )
 
+    def hosted_call_cost(
+        self,
+        source: ModelHubSourceConfig,
+        model_id: str,
+        tools: Iterable[str],
+        *,
+        usage: Optional[ProtocolUsageReport],
+        counts: Mapping[str, int],
+        reported_usd: Optional[float] = None,
+    ) -> Optional[HostedCost]:
+        """The cost of one hosted response served by ``source``/``model_id``; None when unknown, never zero.
+
+        Vibey's ``hosted_summary`` and the gateway's ``ProxyExecution`` both ask
+        here, so only the pricing module turns usage into money. Memory-only:
+        the token price comes from the table the usage writer already holds, so
+        a response that ends before the first table is read is simply unpriced.
+        """
+
+        prices = self.usage_writer.held_prices
+        priced = hosted_response_cost(
+            billing=source.billing,
+            reported_usd=reported_usd,
+            model_price=prices.price(model_id) if prices is not None else None,
+            usage=usage,
+            tool_prices={
+                tool: (spec.price if (spec := hosted_tool_spec(source.vendor, source.protocol, model_id, tool)) else None)
+                for tool in tools
+            },
+            counts=counts,
+        )
+        if priced is None:
+            return None
+        basis, usd = priced
+        return HostedCost(basis=basis, usd=None if usd is None else round(usd, 6))
+
     def hosted_tools_for_hop(self, config: ModelHubConfig, source: ModelHubSourceConfig, model_id: str) -> dict:
         """``HopResolution.hosted_tools`` for a Vibey launch served by this Source and model."""
 
@@ -6971,15 +7013,20 @@ class ModelHubService:
                 source, model_id, record.feature, engine=self.engine_stamp, shape=HOSTED_PROBE_SHAPE, now=now,
             )
             if view.status == "unsupported":
-                refused.append(record)
+                refused.append(view)
         return [
             {
-                "effort": record.feature.name,
-                "basis": record.basis,
-                "observed_at": record.payload()["observed_at"],
-                "detail": record.detail,
+                "effort": view.record.feature.name,
+                "basis": view.record.basis,
+                "observed_at": view.record.payload()["observed_at"],
+                "detail": view.record.detail,
+                "changes_at": (
+                    view.changes_at.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+                    if view.changes_at is not None
+                    else None
+                ),
             }
-            for record in sorted(refused, key=lambda item: (item.observed_at, item.feature.name))
+            for view in sorted(refused, key=lambda item: (item.record.observed_at, item.record.feature.name))
         ]
 
     def agent_chain(self, backend: str, model_id: object) -> dict:

@@ -10,6 +10,10 @@ Avibe already caches for the model picker, read from the model's first-party
 provider only. Every day is priced at the current table — the page says which
 table that is — because the table is what we have, not what was in force then.
 
+A call whose context input exceeds one of the model's context tiers is billed
+whole at that tier's rates. A ledger row holds many calls, so the tier is
+decided when a call is recorded and kept in the row; valuation reads it back.
+
 A model with no price is never priced as zero: it is left out and its tokens are
 counted, so a total can say how much it does not cover.
 """
@@ -20,7 +24,7 @@ import json
 import logging
 import math
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Final, Mapping, Optional
@@ -39,6 +43,8 @@ _MAX_INT_DIGITS: Final = 400  # below Python's lowest settable int-to-str digit 
 _MAX_ALIAS_HOPS: Final = 4
 # One-hour cache writes cost twice the input price where the table says nothing.
 _CACHE_WRITE_1H_INPUT_MULTIPLE: Final = 2.0
+# The context size models.dev's legacy `cost.context_over_200k` names.
+_LEGACY_CONTEXT_TIER_SIZE: Final = 200_000
 
 # Model IDs the agents send that models.dev does not list under that name.
 # Keys are already normalized (lowercase, no date or bracket suffix).
@@ -113,6 +119,9 @@ class ModelPrice:
     # counts only when listed: its default is a multiple of input for every
     # model, so a defaulted one says nothing about the vendor.
     charges_cache_writes: bool = False
+    # Higher rates past a context size, as (size, rates) by ascending size. A call
+    # whose context input exceeds a size is billed whole at that tier's rates.
+    context_tiers: tuple[tuple[int, "ModelPrice"], ...] = ()
 
 
 def _bounded(value: object, ceiling: float) -> Optional[float]:
@@ -138,8 +147,60 @@ def model_price(cost: object) -> Optional[ModelPrice]:
 
     Input and output are required. A missing cache member falls back to what the
     tokens are otherwise: a cache read or write is input.
+
+    Context tiers come from `tiers[]` entries of type `context`, each read by the
+    same rules as the flat price, and from the legacy `context_over_200k` only
+    when no such entry is usable. An unusable tier is ignored; tiers never price
+    a model whose flat price is missing.
     """
 
+    if not isinstance(cost, Mapping):
+        return None
+    price = _flat_price(cost)
+    if price is None:
+        return None
+    tiers: dict[int, ModelPrice] = {}
+    entries = cost.get("tiers")
+    for entry in entries if isinstance(entries, list) else ():
+        match entry:
+            case {"tier": {"type": "context", "size": int() as size}} if size > 0 and not isinstance(size, bool):
+                rates = _flat_price(entry)
+                if rates is not None:
+                    tiers.setdefault(size, rates)
+    if not tiers:
+        legacy = _flat_price(cost.get("context_over_200k"))
+        if legacy is not None:
+            tiers[_LEGACY_CONTEXT_TIER_SIZE] = legacy
+    return replace(price, context_tiers=tuple(sorted(tiers.items()))) if tiers else price
+
+
+def context_tier_size(price: Optional[ModelPrice], context_input_tokens: int) -> int:
+    """The context tier one call falls in: the largest tier size its context input exceeds, or 0.
+
+    Context input is the whole prompt — fresh input plus cache reads and writes —
+    which is what a ledger's `input_tokens` already counts.
+    """
+
+    if price is None:
+        return 0
+    return max((size for size, _rates in price.context_tiers if context_input_tokens > size), default=0)
+
+
+def context_tier_price(price: ModelPrice, size: int) -> ModelPrice:
+    """The rates usage recorded in the context tier `size` is valued at.
+
+    That tier's rates; or, once the table no longer lists that size, those of the
+    largest listed tier below it, which the call exceeded too. Tier 0 is the base.
+    """
+
+    rates = price
+    for tier_size, tier_rates in price.context_tiers:
+        if tier_size <= size:
+            rates = tier_rates
+    return rates
+
+
+def _flat_price(cost: object) -> Optional[ModelPrice]:
     if not isinstance(cost, Mapping):
         return None
     input_price = _price(cost.get("input"))
@@ -193,6 +254,24 @@ def _first_party(model_id: str, vendor_map: Mapping[str, Any]) -> Optional[str]:
     return max(matches, key=lambda item: len(item["prefix"]))["vendor_id"]
 
 
+def _first_party_costs(catalog: Mapping[str, Any], vendor_map: Mapping[str, Any]) -> dict[str, dict[str, object]]:
+    """Each first-party provider's `cost` objects by model key: the part of the catalog a price is read from."""
+
+    families = vendor_map.get("families")
+    vendors = {
+        item["vendor_id"]
+        for item in (families if isinstance(families, list) else ())
+        if isinstance(item, Mapping) and isinstance(item.get("vendor_id"), str)
+    }
+    costs: dict[str, dict[str, object]] = {}
+    for vendor in vendors:
+        provider = catalog.get(vendor)
+        models = provider.get("models") if isinstance(provider, Mapping) else None
+        if isinstance(models, Mapping):
+            costs[vendor] = {key: entry.get("cost") for key, entry in models.items() if isinstance(entry, Mapping)}
+    return costs
+
+
 def plan_key(vendor: str, plan: Optional[str]) -> Optional[str]:
     """Resolve a reported plan to a fee-table key, or None when it is not a known plan."""
 
@@ -235,14 +314,26 @@ class PriceTable:
         self.price_table_date = price_table_date
         # No models.dev table yet, and a first fetch is running that should land.
         self.pending = pending
-        self._catalog = catalog
+        # Only first-party prices are ever read, so they are all a table keeps:
+        # held between reads it costs kilobytes, not the parsed models.dev copy.
+        # Every price is parsed here, when the table is built, which is never on the
+        # controller loop (at startup, then on the usage writer's thread), so a
+        # lookup on the loop is a dictionary read however large the catalog is.
+        self._prices: dict[str, dict[str, Optional[ModelPrice]]] = {
+            vendor: {key: model_price(cost) for key, cost in costs.items()}
+            for vendor, costs in _first_party_costs(catalog, vendor_map).items()
+        }
         self._vendor_map = vendor_map
-        self._model_overrides: dict[str, Mapping[str, Any]] = {}
+        self._model_overrides: dict[str, tuple[Optional[str], Optional[ModelPrice]]] = {}
         models = overrides.get("models")
         if isinstance(models, Mapping):
             for key, entry in models.items():
                 if isinstance(key, str) and len(key) <= _MAX_KEY_CHARS and isinstance(entry, Mapping):
-                    self._model_overrides[normalize_model_id(key)] = entry
+                    alias = entry.get("alias")
+                    self._model_overrides[normalize_model_id(key)] = (
+                        normalize_model_id(alias) if isinstance(alias, str) and alias.strip() else None,
+                        model_price(entry),
+                    )
         self._fees = dict(PLAN_FEES_USD)
         plans = overrides.get("plans")
         if isinstance(plans, Mapping):
@@ -282,10 +373,9 @@ class PriceTable:
             return None
         override = self._model_overrides.get(key)
         if override is not None:
-            alias = override.get("alias")
-            if isinstance(alias, str) and alias.strip():
-                return self._resolve(normalize_model_id(alias), hops=hops + 1)
-            price = model_price(override)
+            alias, price = override
+            if alias is not None:
+                return self._resolve(alias, hops=hops + 1)
             if price is not None:
                 return price
         price = self._catalog_price(key)
@@ -300,14 +390,7 @@ class PriceTable:
         vendor = _first_party(key, self._vendor_map)
         if vendor is None:
             return None
-        provider = self._catalog.get(vendor)
-        models = provider.get("models") if isinstance(provider, Mapping) else None
-        if not isinstance(models, Mapping):
-            return None
-        entry = models.get(key)
-        if not isinstance(entry, Mapping):
-            return None
-        return model_price(entry.get("cost"))
+        return self._prices.get(vendor, {}).get(key)
 
     def fields(self) -> dict[str, Any]:
         """The table's own part of every priced block: currency, date, and a first fetch still running."""
@@ -357,7 +440,7 @@ class Cost:
 
 
 def row_cost(row: Mapping[str, Any], price: Optional[ModelPrice]) -> Cost:
-    """Price one ledger row's counters at one model's price."""
+    """Price one ledger row's counters at one model's price, in the row's context tier."""
 
     input_tokens = int(row.get("input_tokens") or 0)
     output_tokens = int(row.get("output_tokens") or 0)
@@ -366,6 +449,7 @@ def row_cost(row: Mapping[str, Any], price: Optional[ModelPrice]) -> Cost:
     unreported = int(row.get("requests") or 0) > int(row.get("token_reports") or 0)
     if price is None:
         return Cost(excluded_tokens=input_tokens + output_tokens, api_cost_lower_bound=unreported)
+    price = context_tier_price(price, int(row.get("context_tier") or 0))
     cache_read = min(int(row.get("cached_input_tokens") or 0), input_tokens)
     cache_write = min(int(row.get("cache_write_input_tokens") or 0), input_tokens - cache_read)
     cache_write_1h = min(int(row.get("cache_write_1h_input_tokens") or 0), cache_write)
@@ -540,3 +624,78 @@ def quota_values(
             else None
         ),
     }
+
+
+# --- hosted tools (model-hub-capability-model.md §6.4) ----------------------
+#
+# One owner turns a hosted response's usage into money: this module. Callers
+# (Vibey's hosted_summary, the gateway's ProxyExecution) only pass what the
+# response reported.
+
+XAI_USD_TICKS_PER_USD: Final = 10_000_000_000
+# Above this (about $100M for one response) a reported figure is not a cost.
+_MAX_XAI_TICKS: Final = 10**18
+
+# The provider counter that counts one unit of a hosted tool's list price.
+_HOSTED_UNIT_COUNTERS: Final[Mapping[tuple[str, str], str]] = {
+    ("web_search", "call"): "web_search_calls",
+    ("web_search", "search"): "web_search_requests",
+    ("x_search", "call"): "x_search_calls",
+    ("x_search", "post"): "x_posts_fetched",
+    ("x_search", "profile"): "x_users_fetched",
+}
+
+
+def usd_from_xai_ticks(ticks: object) -> Optional[float]:
+    """xAI's ``cost_in_usd_ticks`` in USD; None when it is not a non-negative integer."""
+
+    if isinstance(ticks, bool) or not isinstance(ticks, int) or not 0 <= ticks <= _MAX_XAI_TICKS:
+        return None
+    return ticks / XAI_USD_TICKS_PER_USD
+
+
+def hosted_response_cost(
+    *,
+    billing: str,
+    reported_usd: Optional[float],
+    model_price: Optional[ModelPrice],
+    usage: Any,
+    tool_prices: Mapping[str, Any],
+    counts: Mapping[str, int],
+) -> Optional[tuple[str, Optional[float]]]:
+    """``(basis, usd)`` for one hosted response, or None when no price is known (never zero).
+
+    A subscription's call is ``included``. A provider's own figure for the whole
+    response is ``reported``. Otherwise the ``list`` price is the response's
+    tokens at the model's rates (in its context tier) plus each used tool's list
+    fee from the provider's counters; a missing token price, tool price or
+    counter makes the whole response unknown rather than partly priced.
+    ``usage`` is a ``ProtocolUsageReport``: its input already counts cache tokens.
+    """
+
+    if billing == "monthly":
+        return ("included", None)
+    if reported_usd is not None:
+        return ("reported", reported_usd)
+    if model_price is None or usage is None:
+        return None
+    row = {
+        "input_tokens": usage.input_tokens,
+        "output_tokens": usage.output_tokens,
+        "cached_input_tokens": usage.cached_input_tokens,
+        "cache_write_input_tokens": usage.cache_write_input_tokens,
+        "cache_write_1h_input_tokens": usage.cache_write_1h_input_tokens,
+        "requests": 1,
+        "token_reports": 1,
+        "context_tier": context_tier_size(model_price, usage.input_tokens),
+    }
+    usd = row_cost(row, model_price).api_cost_usd or 0.0
+    for tool, price in tool_prices.items():
+        if price is None:
+            return None
+        for unit, usd_per_1k in ((price.unit, price.usd_per_1k), *((part.unit, part.usd_per_1k) for part in price.extra)):
+            counter = _HOSTED_UNIT_COUNTERS.get((tool, unit))
+            if counter is None or counter not in counts:
+                return None
+            usd += counts[counter] * usd_per_1k / 1000
+    return ("list", usd)
