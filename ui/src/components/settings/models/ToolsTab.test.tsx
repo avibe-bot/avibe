@@ -372,6 +372,22 @@ describe('ToolsTab checks', () => {
     expect(onProbe.mock.calls[2][0]).toMatchObject({ candidate: { source_id: SUBSCRIPTION.id } });
   });
 
+  it('says why a failed check failed, and never shows the server\'s key as text', async () => {
+    const failed = (error: string): HostedToolProbeResult => ({ ...result('inconclusive', RELAY.id, 'gpt-6-astra'), call: { outcome: 'transient', error } });
+    const onProbe = vi.fn<RunProbe>()
+      .mockResolvedValueOnce(failed('models.source.cooldown.rate_limited'))
+      // A detail key this bundle has no copy for.
+      .mockResolvedValueOnce(failed('models.source.cooldown.network'));
+    renderTab(searchable(), { onProbe });
+    const row = card('Web search').querySelector('[data-candidate="src_relay001:gpt-6-astra"]') as HTMLElement;
+
+    await userEvent.click(within(row).getByRole('button', { name: 'Check · about $0.02' }));
+    within(row).getByText("Couldn't verify · Rate limited");
+    await userEvent.click(within(row).getByRole('button', { name: 'Retry' }));
+    within(row).getByText("Couldn't verify · try again");
+    expect(row.textContent).not.toContain('models.source');
+  });
+
   it('says an enabled tool with nothing verified fails its calls, instead of naming a proxy', () => {
     renderTab(status([tool('x_search', {
       enabled: true,

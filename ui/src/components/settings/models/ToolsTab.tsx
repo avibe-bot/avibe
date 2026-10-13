@@ -28,6 +28,7 @@ import {
   type ProbeTarget,
 } from './hostedTools';
 import { foldRegionRead, regionFailed, type RegionRead } from './regionRead';
+import { serverText } from './serverCopy';
 import { ACCENT_ICON, ACCENT_PILL, ACCENT_TILE, sourceVisual } from './vendorMeta';
 import type {
   HostedToolCandidate,
@@ -113,6 +114,7 @@ const ProbeCell: React.FC<{
   const estimate = useEstimateLabel()(target.candidate.probe_estimate);
   const checked = target.candidate.call.basis !== null;
   const unanswered = last !== undefined && (last === null || last.call.outcome === 'inconclusive' || last.call.outcome === 'transient');
+  const failure = serverText(t, last?.call.error);
   const label = running
     ? t('settings.models.tools.probe.running')
     : unanswered
@@ -138,10 +140,11 @@ const ProbeCell: React.FC<{
       {unanswered && (
         <span className="model-hub-tool-cost-note flex items-center gap-1 model-hub-ink-gold" role="status">
           <AlertCircle className="size-3 shrink-0" aria-hidden />
-          {last?.call.outcome === 'inconclusive'
-            ? t('settings.models.tools.probe.outcome.inconclusive')
-            : last?.call.error
-              ? t('settings.models.tools.probe.outcome.transientReason', { reason: t(last.call.error, { defaultValue: last.call.error }) })
+          {/* A request that failed says why; one that completed without the tool says that. */}
+          {failure
+            ? t('settings.models.tools.probe.outcome.transientReason', { reason: failure })
+            : last?.call.outcome === 'inconclusive'
+              ? t('settings.models.tools.probe.outcome.inconclusive')
               : t('settings.models.tools.probe.outcome.transient')}
         </span>
       )}

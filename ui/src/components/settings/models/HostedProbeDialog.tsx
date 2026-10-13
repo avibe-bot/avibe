@@ -12,6 +12,7 @@ import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog';
 import { cn } from '@/lib/utils';
 import { probeKey, probeTotal, type ProbeTarget } from './hostedTools';
+import { serverText } from './serverCopy';
 import type { HostedToolName, HostedToolProbeResult, Source } from './types';
 import { useEstimateLabel } from './useEstimateLabel';
 
@@ -127,11 +128,13 @@ export const HostedProbeDialog: React.FC<{
                 {planned.map((target, index) => {
                   const key = probeKey(target);
                   const result = results.get(key);
-                  const reason = outcomes[index] === 'inconclusive'
-                    ? t('settings.models.tools.result.reason.inconclusive')
-                    : outcomes[index] === 'transient' || outcomes[index] === 'failed'
-                      ? t('settings.models.tools.result.reason.transient')
-                      : null;
+                  // A request that failed says why; one that completed without the tool says that.
+                  const failure = serverText(t, result?.call.error);
+                  const reason = outcomes[index] === 'verified' || outcomes[index] === 'unsupported'
+                    ? null
+                    : outcomes[index] === 'inconclusive' && !failure
+                      ? t('settings.models.tools.result.reason.inconclusive')
+                      : `${t('settings.models.tools.result.reason.transient')}${failure ? ` (${failure})` : ''}`;
                   return (
                     <React.Fragment key={key}>
                       <TargetLine
@@ -141,7 +144,7 @@ export const HostedProbeDialog: React.FC<{
                           ? <OutcomeChip outcome={outcomes[index]} />
                           : <Loader2 className="size-3.5 animate-spin text-muted" aria-label={t('settings.models.tools.probe.running') as string} />}
                       />
-                      {results.has(key) && reason && <p className="model-hub-probe-reason">{reason}{result?.call.error ? ` (${t(result.call.error, { defaultValue: result.call.error })})` : ''}</p>}
+                      {results.has(key) && reason && <p className="model-hub-probe-reason">{reason}</p>}
                     </React.Fragment>
                   );
                 })}
