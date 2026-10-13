@@ -16,7 +16,12 @@ resolves through its function. An evidence key names exactly one case per
 entry (STANDARD.md §4): a bare file or a test class stays collected for
 whatever else cites it, so it evidences no row in particular, and a row whose
 contract several cases prove lists each of them under ``test``. Pointer keys
-may name a bare file, a class or a group of cases, which must exist.
+may name a bare file, a test class, a function or a method, which must exist.
+
+This reads source and applies pytest's default naming rules; it does not
+emulate every collection-time exclusion, such as ``__test__ = False``, a class
+with ``__init__``, or deselection in a hook, and it matches exact names only.
+Resolving against pytest's own collection, as the UI side does, is #2565.
 
 UI (vitest) citations are resolved against vitest's own collection by
 ``ui/scripts/validate-scenario-catalog.mjs``; here only their file is checked.
@@ -41,9 +46,10 @@ _POINTER_KEYS = ("related_tests", "supporting_tests")
 def _collectable_cases(path: Path) -> tuple[frozenset[str], dict[str, frozenset[str]]]:
     """The test functions pytest collects from ``path``, and each test class's test methods.
 
-    pytest's default rules, which this repository does not change: a module-level
-    ``test*`` function, and a ``test*`` method of a ``Test*`` class or of a
-    ``unittest.TestCase`` subclass, directly or through another class in the file.
+    pytest's default naming rules, which this repository does not change: a
+    module-level ``test*`` function, and a ``test*`` method of a ``Test*`` class or
+    of a ``unittest.TestCase`` subclass, directly or through another class in the
+    file. Collection-time exclusions are out of its reach (#2565).
     """
 
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
