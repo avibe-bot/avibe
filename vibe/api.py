@@ -141,6 +141,7 @@ from core.process_isolation import (
     capture_spawned_process_identity,
     isolated_subprocess_kwargs,
     new_process_identity_marker,
+    reap_marked_processes,
     signal_process_tree,
     terminate_process_tree_by_pid,
 )
@@ -10173,7 +10174,7 @@ def _direct_claude_connection_auth() -> dict:
         # The caller's config may predate an await or a completed takeover.
         # acquire() checks pending recovery; custody must be reread under lease.
         lease.assert_auth_custody("claude")
-        return get_claude_auth(connection_observation=True)
+        return get_claude_auth(connection_observation=True, _native_lease=lease)
 
 
 async def get_backend_connection(name: str) -> dict:
@@ -10572,9 +10573,10 @@ def _force_stop_claude_auth_status(
 ) -> bool:
     """Stop the entire verified status process tree, then report its state."""
 
+    tree_stopped = False
     if identity is not None and isinstance(getattr(process, "pid", None), int):
         try:
-            return terminate_process_tree_by_pid(
+            tree_stopped = terminate_process_tree_by_pid(
                 process.pid,
                 logger,
                 _CLAUDE_AUTH_STATUS_LABEL,
@@ -10583,6 +10585,16 @@ def _force_stop_claude_auth_status(
             )
         except (OSError, RuntimeError):
             logger.debug("Failed to terminate the verified %s tree", _CLAUDE_AUTH_STATUS_LABEL, exc_info=True)
+        marker_fingerprint = getattr(identity, "worker_fingerprint", None)
+        if isinstance(marker_fingerprint, str):
+            marker_result = reap_marked_processes(
+                logger,
+                _CLAUDE_AUTH_STATUS_LABEL,
+                worker_fingerprint=marker_fingerprint,
+                terminate_timeout=_CLAUDE_AUTH_STATUS_TERMINATION_GRACE_SECONDS,
+            )
+            tree_stopped = tree_stopped and marker_result != "unconfirmed"
+        return tree_stopped
     try:
         signal_process_tree(process, KILL_SIGNAL, logger, _CLAUDE_AUTH_STATUS_LABEL)
     except (OSError, RuntimeError):
@@ -11587,7 +11599,11 @@ def save_codex_auth(payload: dict) -> dict:
     return state
 
 
-def get_claude_auth(*, connection_observation: bool = False) -> dict:
+def get_claude_auth(
+    *,
+    connection_observation: bool = False,
+    _native_lease: NativeCredentialLease | None = None,
+) -> dict:
     """Return the user-facing Claude auth state for the Settings UI.
 
     Claude differs from Codex in two structural ways:
@@ -11654,13 +11670,28 @@ def get_claude_auth(*, connection_observation: bool = False) -> dict:
         )
     except Exception:
         claude_status_env = None
-    # Direct connection observation owns the native lease through this bounded
-    # status query. Hub observations never call this native reader.
-    cli_oauth_signed_in = _read_claude_cli_oauth_signed_in(
-        configured_cli_path if isinstance(configured_cli_path, str) else None,
-        env=claude_status_env,
-        cwd=status_probe_cwd,
-    )
+    # Every status probe can refresh and persist native OAuth state. Reuse an
+    # existing writer/observation lease when the caller already owns one;
+    # otherwise acquire the same cross-process exclusion before starting CLI.
+    try:
+        if _native_lease is not None:
+            _native_lease.assert_owned("claude")
+            cli_oauth_signed_in = _read_claude_cli_oauth_signed_in(
+                configured_cli_path if isinstance(configured_cli_path, str) else None,
+                env=claude_status_env,
+                cwd=status_probe_cwd,
+            )
+        else:
+            with NativeCredentialLease(("claude",)):
+                cli_oauth_signed_in = _read_claude_cli_oauth_signed_in(
+                    configured_cli_path if isinstance(configured_cli_path, str) else None,
+                    env=claude_status_env,
+                    cwd=status_probe_cwd,
+                )
+    except NativeMigrationBlockedError:
+        cli_oauth_signed_in = None
+    except (OSError, subprocess.SubprocessError):
+        cli_oauth_signed_in = None
     if connection_observation:
         if cli_oauth_signed_in is not None:
             return {"ok": True, "active_auth_mode": "oauth" if cli_oauth_signed_in else "none"}
@@ -11927,7 +11958,7 @@ def save_claude_auth(payload: dict, *, _native_lease=None) -> dict:
     except Exception as exc:  # noqa: BLE001
         restart = {"ok": False, "message": str(exc)}
 
-    state = get_claude_auth()
+    state = get_claude_auth(_native_lease=_native_lease)
     state["restart"] = restart
     if isinstance(oauth_cleanup_result, dict) and oauth_cleanup_result.get("partial"):
         state["partial"] = True
