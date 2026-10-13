@@ -1,0 +1,80 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "model-hub/hosted-tools-status.schema.json",
+  "title": "HostedToolsStatus",
+  "description": "The Tools tab read (vibey-hosted-tools.md §6.1): each catalog tool's toggle and chosen executor, where it can run with that evidence, and how many hosted-tool probe records need a re-verify. A report only: hop resolution reads config and evidence itself.",
+  "type": "object",
+  "required": ["tools", "reverify"],
+  "additionalProperties": false,
+  "properties": {
+    "tools": {
+      "type": "array",
+      "description": "Every catalog tool, in catalog order.",
+      "items": {
+        "type": "object",
+        "required": ["name", "enabled", "executor", "candidates"],
+        "additionalProperties": false,
+        "properties": {
+          "name": { "enum": ["web_search", "x_search", "image_generation"] },
+          "enabled": { "type": "boolean" },
+          "executor": {
+            "description": "The executor the user chose, or null for the first verified candidate.",
+            "oneOf": [
+              { "type": "null" },
+              {
+                "type": "object",
+                "required": ["source_id", "model_id"],
+                "additionalProperties": false,
+                "properties": {
+                  "source_id": { "type": "string", "pattern": "^src_[a-z0-9]{8,}$" },
+                  "model_id": { "type": "string", "minLength": 1 }
+                }
+              }
+            ]
+          },
+          "candidates": {
+            "type": "array",
+            "description": "Every (Source, model) the overlay offers the tool on, with an eligible credential and an untranslated path; Vibey's Source order first.",
+            "items": {
+              "type": "object",
+              "required": ["source_id", "model_id", "call", "replay"],
+              "additionalProperties": false,
+              "properties": {
+                "source_id": { "type": "string", "pattern": "^src_[a-z0-9]{8,}$" },
+                "model_id": { "type": "string", "minLength": 1 },
+                "call": { "$ref": "#/definitions/Evidence" },
+                "replay": {
+                  "description": "Null for image_generation, which is never replayed.",
+                  "oneOf": [{ "type": "null" }, { "$ref": "#/definitions/Evidence" }]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "reverify": {
+      "type": "object",
+      "required": ["engine_upgraded", "aged"],
+      "additionalProperties": false,
+      "properties": {
+        "engine_upgraded": { "type": "integer", "minimum": 0, "description": "Probe records taken on another engine or probe shape; they route as unknown." },
+        "aged": { "type": "integer", "minimum": 0, "description": "Probe records older than 30 days; they still route." }
+      }
+    }
+  },
+  "definitions": {
+    "Evidence": {
+      "type": "object",
+      "required": ["status", "stale", "basis", "observed_at", "detail"],
+      "additionalProperties": false,
+      "properties": {
+        "status": { "enum": ["verified", "unsupported", "unknown"], "description": "As routing reads it." },
+        "stale": { "enum": [null, "wire", "age"] },
+        "basis": { "enum": [null, "probe", "observed"] },
+        "observed_at": { "type": ["string", "null"] },
+        "detail": { "type": ["string", "null"], "maxLength": 64 }
+      }
+    }
+  }
+}

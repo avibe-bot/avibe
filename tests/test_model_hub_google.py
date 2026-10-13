@@ -339,6 +339,7 @@ async def test_google_router_gateway_failover_preserves_visible_history_and_orig
                 origin = json.loads(response.headers[SERVED_HOP_HEADER])
                 assert origin == {
                     "provider": "custom", "api": fallback.protocol, "model": fallback.models[0].id,
+                    "source": fallback.id,
                 }
         assert service.adapter.requests[0] == signed
         assert service.adapter.requests[1] == (signed if same_origin else plain)
@@ -350,7 +351,7 @@ async def test_google_router_gateway_failover_preserves_visible_history_and_orig
             await completion
         record = service.provenance.get("turn-google")
         _validate("turn-provenance.schema.json", record)
-        assert record["served"]["origin"] == origin
+        assert {**record["served"]["origin"], "source": record["served"]["source_id"]} == origin
     finally:
         await gateway.close()
 

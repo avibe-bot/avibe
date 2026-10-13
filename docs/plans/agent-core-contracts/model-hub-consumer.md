@@ -24,10 +24,11 @@ consumer's requirements, and the Model Hub lane lands the change in both places.
    Hub stores one. The agent treats unknown values conservatively (C-2). It resolves once per run and again after a
    retryable error.
 4. **Served-hop report.** Every gateway response for `vibey` carries `x-avibe-served-hop`: compact, ASCII-escaped JSON
-   with exactly `provider`, `api`, `model`, taken from the winning attempt (Source vendor, Source protocol, upstream
-   target) and sent before the first model byte. The gateway does not commit early keepalive headers for `vibey`;
-   other backends are unchanged. The same origin is recorded on `TurnProvenance.served`. An `api` different from the
-   frontend protocol means the gateway converted. The agent records it as the message `origin` (C-1). The header value is at most 4096 bytes; a hop whose origin cannot be represented within that limit is
+   with exactly `provider`, `api`, `model`, `source` (since Model Hub contract v12), taken from the winning attempt
+   (Source vendor, Source protocol, upstream target, Source id) and sent before the first model byte. The gateway does
+   not commit early keepalive headers for `vibey`; other backends are unchanged. The same origin is recorded on
+   `TurnProvenance.served`, beside its `source_id`. An `api` different from the frontend protocol means the gateway
+   converted. The agent records `provider`, `api`, `model` as the message `origin` (C-1); `source` is not part of it. The header value is at most 4096 bytes; a hop whose origin cannot be represented within that limit is
    refused before invocation with a controlled local error (no model call, no header). Identifiers are never truncated.
 5. **Conversion stays a fallback.** The agent speaks the primary hop's protocol. When failover reaches a hop with
    another protocol, the gateway converts (degraded, not broken) and the served-hop report says so.
@@ -61,11 +62,9 @@ consumer's requirements, and the Model Hub lane lands the change in both places.
      - its attempt ends before model output with an error that a narrow hosted-content evidence rule names.
    - Vibey then renders the same request in portable form and sends it unpinned; it fails over as today.
    - Item 6 (the opaque thinking strip) is unchanged and applies only to unpinned requests.
-   - The served-hop report gains `source`, the serving Source id, so that a hosted block's payload is tagged with
-     the exact Source; two Sources can share an origin. The parser in `conversion-tables.md` (exactly `provider`,
-     `api`, `model` today) changes in the same release, in a coordinated Model Hub contract bump (v12). Native
-     hosted mode lands with or after v12. `../vibey-hosted-tools.md` §5 lists the frozen exact-shape contracts that
-     the bump edits together.
+   - The served-hop report carries `source`, the serving Source id (item 4, Model Hub contract v12), so that a
+     hosted block's payload is tagged with the exact Source; two Sources can share an origin. The gateway and the
+     parser in `conversion-tables.md` changed together in that bump. Native hosted mode lands with or after v12.
 
 ## 3. Not required
 

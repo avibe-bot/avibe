@@ -57,8 +57,8 @@ Rules:
 ### 3.1 Record
 
 One record per (`source_id`, `model_id`, `feature`). Absence of a record is `unknown`. The persisted shape is
-below. Its JSON Schema (`model-hub-contracts/capability-evidence.schema.json`) lands with Phase 0, where the store
-validates it.
+below, and [`model-hub-contracts/capability-evidence.schema.json`](model-hub-contracts/capability-evidence.schema.json)
+is its JSON Schema. The store is `core/handlers/model_hub/capability_evidence.py`.
 
 | Field | Rule |
 | --- | --- |
@@ -67,16 +67,18 @@ validates it.
 | `feature` | `{kind: "effort", name}` or `{kind: "hosted_tool", name: "web_search" \| "x_search" \| "image_generation", aspect: "call" \| "replay"}`; `image_generation` has `call` only |
 | `status` | `verified` or `unsupported` |
 | `basis` | `probe` (a live probe the user started) or `observed` (learned from a real request's error) |
-| `observed_at` | timestamp |
-| `engine` | engine release at that time; a change makes `probe` evidence stale (§3.3) |
+| `observed_at` | UTC timestamp |
+| `engine` | engine release at that time (the shipped engine manifest's asset release); a change makes `probe` evidence stale (§3.3) |
 | `shape` | version of the request shape that produced the record; a change makes `probe` evidence stale |
 | `detail` | required when `basis` is `observed`: the HTTP status and upstream machine code, e.g. `400 invalid_value`, at most 64 characters, never upstream text |
+| `source_identity` | digest of `retry.source_identity` when the record was written |
 
 `observed` evidence is always `unsupported`.
 
-Records live with the Source's runtime state (`model_hub` state dir). They follow Source identity:
+Records live in the Model Hub state directory (`model_hub_capability_evidence.json`). They follow Source identity:
 `retry.source_identity` covers kind, vendor, protocol, channel, base URL, credential and verification marker.
-Changing any of those drops the Source's evidence.
+Changing any of those drops the Source's evidence: a record whose stored digest no longer matches reads as unknown
+and is pruned at the next write.
 
 ### 3.2 Learning from real errors (negative evidence)
 
@@ -139,9 +141,11 @@ Even without the overlay fix, the next request would skip that hop or fail clear
 
 ## 4. The overlay's `providers` section
 
-The section is keyed by Source vendor (`openai`, `anthropic`, `xai`, …). Each vendor holds a list of model
-families, matched by the existing model-id normalization, the first matching prefix winning. A new model of a
-family inherits its row. Shape (`vibe/data/backend_models.json`, `providers`; the loader validates it):
+The section is keyed by canonical Source vendor id (`openai`, `anthropic`, `xai`, …). Each vendor holds an ordered
+list of model families. A family matches by `prefix` or exact `id` against the model id as Model Hub normalizes it
+for Source models and route hops (`normalized_model_id`), and the first match wins. A new model of a family inherits
+its row. Shape (`vibe/data/backend_models.json`, `providers`; the loader in `vibe/backend_model_catalog.py`
+validates it):
 
 ```json
 "providers": {
@@ -163,18 +167,23 @@ family inherits its row. Shape (`vibe/data/backend_models.json`, `providers`; th
 }
 ```
 
-Fields of one vendor entry. The loader validates them; their JSON Schema lands with Phase 0.
+Fields of one vendor entry, mirrored by
+[`model-hub-contracts/provider-overlay.schema.json`](model-hub-contracts/provider-overlay.schema.json):
 
 | Field | Rule |
 | --- | --- |
 | `models[]` | required; ordered, first match wins |
 | `match` | exactly one of `prefix` or `id`, non-empty |
-| `wire_efforts` | a list of effort names, or `null` to defer to models.dev |
-| `hosted_tools` | protocol (`anthropic`, `openai_responses`, `openai_chat`, `google`) → tool (`web_search`, `x_search`, `image_generation`) → `{declaration, price, include?}`. `declaration` and `price` are required, and `declaration` has a `type`. `include` lists Responses `include` values the tool needs (OpenAI web search: `web_search_call.action.sources`). |
-| `price` | `unit` (`call`, `search`, `post`, `profile`, `image`), `usd_per_1k` ≥ 0, `as_of` (date) and `url`, all required; optional `extra[]` of `{unit, usd_per_1k}`. Image prices vary by quality and size, so each `image` entry in `extra[]` also carries `quality` and `size`, and pricing selects the entry that matches the declaration that ran. |
+| `wire_efforts` | a list of effort names, or `null` (or absent) to defer to models.dev |
+| `hosted_tools` | optional; protocol (`anthropic`, `openai_responses`, `openai_chat`, `google`) → tool (`web_search`, `x_search`, `image_generation`) → `{declaration, price?, include?}`. `declaration` is required, has a `type`, and is sent verbatim. `price` is optional: absent means no list price is known, never zero. OpenAI prices image generation per image token, not per image, so its `image_generation` entry has none. `include` lists Responses `include` values the tool needs (OpenAI web search: `web_search_call.action.sources`). |
+| `price` | `unit` (`call`, `search`, `post`, `profile`), `usd_per_1k` ≥ 0, `as_of` (date) and `url` (https), all required; optional `extra[]` of `{unit, usd_per_1k}`. A per-image unit, whose entries would also carry `quality` and `size`, waits for a vendor that lists a per-image price. |
 - The overlay records what the **provider** offers. Whether a Source (a relay, a subscription) carries it is
   evidence.
-- An invalid vendor entry disables that entry with a warning; startup never fails.
+- An invalid vendor entry disables that entry with a warning; startup never fails. A `providers` value that is not
+  an object disables the whole overlay. Backend rows never depend on the section.
+- The section is read from the bundled file only, never from the remote catalog copy that refreshes backend rows:
+  its declarations go on the wire and must match the code that shipped with them. Released loaders ignore both the
+  section and the rows' `client_presets`.
 
 ## 5. What Models shows per Source
 
@@ -215,7 +224,7 @@ and the existing tone vocabulary (`TimeHint` for dates):
 | --- | --- | --- |
 | Token prices: input, output, cache read, cache write | models.dev base `cost.*`; the user's override file | used |
 | One-hour cache write | override file, or 2× input by default (`pricing.py`) | used; models.dev has no field |
-| **Context-tier prices** (a higher rate past a context size) | models.dev `cost.tiers[]` with `{"tier": {"type": "context", "size": N}}`, plus the legacy `cost.context_over_200k`. On 2026-10-13: 630 and 517 models (e.g. `gpt-6-astra` above 272K: $20/$75; `grok-4.6` above 200K: $4/$12) | **not used.** `model_price` reads only the flat fields, so valuation understates long-context use. Fix: when a call's input tokens exceed `size`, the tier's rates apply to the whole call, as the vendors bill. The ledger already has per-call input tokens. |
+| **Context-tier prices** (a higher rate past a context size) | models.dev `cost.tiers[]` with `{"tier": {"type": "context", "size": N}}`, plus the legacy `cost.context_over_200k`. On 2026-10-13: 630 and 517 models (e.g. `gpt-6-astra` above 272K: $20/$75; `grok-4.6` above 200K: $4/$12) | **not used.** `model_price` reads only the flat fields, so valuation understates long-context use. Fix: when a call's total context input (input plus cache-read and cache-write tokens) exceeds `size`, the tier's rates apply to the whole call, as the vendors bill. The usage ledger aggregates per (day, Source, model) and keeps no per-call rows, so the tier must be applied when a call is recorded (Phase 1 pricing PR). |
 | **Hosted-tool call prices** | overlay `providers.<vendor>.models[].hosted_tools.<protocol>.<tool>.price` (§4): unit, USD per 1,000 units, date and source URL | new. models.dev has none; the open proposal anomalyco/models.dev#8707 adds `cost.web_search = {search, prompt}` (no maintainer response yet) |
 | Search-result tokens | the provider's usage (input tokens), priced by the token rows | already counted as input |
 | Provider-reported cost | per-call usage, when present: xAI `cost_in_usd_ticks` (USD × 10¹⁰), `server_side_tool_usage_details`; Anthropic `server_tool_use.web_search_requests` | not read today; hosted tools read it (§6.4) |

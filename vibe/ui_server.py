@@ -5153,6 +5153,33 @@ async def model_hub_quota_refresh(starlette_request: FastAPIRequest):
     return await _dispatch_native_ui_request(starlette_request, handler)
 
 
+@app.get("/api/models/hosted-tools", include_in_schema=False)
+async def model_hub_hosted_tools_get(starlette_request: FastAPIRequest):
+    async def handler():
+        from core.handlers.model_hub import ModelHubError
+
+        try:
+            return _model_hub_success(**await _model_hub_service().hosted_tools_status())
+        except ModelHubError as exc:
+            return _model_hub_error(exc)
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
+
+
+@app.put("/api/models/hosted-tools/{tool}", include_in_schema=False)
+async def model_hub_hosted_tool_put(tool: str, starlette_request: FastAPIRequest):
+    async def handler():
+        from core.handlers.model_hub import ModelHubError
+
+        try:
+            status = await _model_hub_service().set_hosted_tool(tool, _model_hub_json_object("invalid_parameter"))
+            return _model_hub_success(**status)
+        except ModelHubError as exc:
+            return _model_hub_error(exc)
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
+
+
 @app.route("/api/models/agents/<backend>/chains", methods=["GET"])
 def model_hub_agent_chains_get(backend):
     from core.handlers.model_hub import ModelHubError

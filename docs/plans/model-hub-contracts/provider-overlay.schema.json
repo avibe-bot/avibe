@@ -1,0 +1,112 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "model-hub/provider-overlay.schema.json",
+  "title": "ProviderOverlay",
+  "description": "The providers section of vibe/data/backend_models.json (model-hub-capability-model.md §4): what each provider offers per model family and protocol. Priors only, read from the bundled file and never the remote catalog. Keys are canonical Source vendor ids. An invalid vendor entry is disabled with a warning.",
+  "definitions": {
+    "Token": {
+      "type": "string",
+      "pattern": "^\\S(?:.*\\S)?$",
+      "description": "Nonblank, without surrounding whitespace."
+    },
+    "PriceComponent": {
+      "type": "object",
+      "required": ["unit", "usd_per_1k"],
+      "additionalProperties": false,
+      "properties": {
+        "unit": { "enum": ["call", "search", "post", "profile"] },
+        "usd_per_1k": { "type": "number", "minimum": 0 }
+      }
+    },
+    "Price": {
+      "type": "object",
+      "description": "The provider's list price per 1,000 units, with the date and page it was read from.",
+      "required": ["unit", "usd_per_1k", "as_of", "url"],
+      "additionalProperties": false,
+      "properties": {
+        "unit": { "$ref": "#/definitions/PriceComponent/properties/unit" },
+        "usd_per_1k": { "$ref": "#/definitions/PriceComponent/properties/usd_per_1k" },
+        "as_of": { "type": "string", "format": "date", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" },
+        "url": { "type": "string", "format": "uri", "pattern": "^https://[^\\s/?#]+(?:[/?#]\\S*)?$" },
+        "extra": {
+          "type": "array",
+          "description": "Further units the same call is billed by, e.g. xAI x_search profiles beside posts.",
+          "items": { "$ref": "#/definitions/PriceComponent" }
+        }
+      }
+    },
+    "HostedTool": {
+      "type": "object",
+      "required": ["declaration"],
+      "additionalProperties": false,
+      "properties": {
+        "declaration": {
+          "type": "object",
+          "description": "Sent verbatim as the native tool declaration.",
+          "required": ["type"],
+          "properties": {
+            "type": { "$ref": "#/definitions/Token" }
+          }
+        },
+        "price": {
+          "$ref": "#/definitions/Price",
+          "description": "Absent when no list price is known, which is never a price of zero. OpenAI bills image generation per image token, so it has none."
+        },
+        "include": {
+          "type": "array",
+          "description": "Responses include values the tool needs, e.g. web_search_call.action.sources.",
+          "items": { "$ref": "#/definitions/Token" },
+          "uniqueItems": true
+        }
+      }
+    },
+    "ModelFamily": {
+      "type": "object",
+      "required": ["match"],
+      "additionalProperties": false,
+      "properties": {
+        "match": {
+          "type": "object",
+          "description": "Compared with the normalized model id: prefix by startswith, id by equality.",
+          "minProperties": 1,
+          "maxProperties": 1,
+          "additionalProperties": false,
+          "properties": {
+            "prefix": { "$ref": "#/definitions/Token" },
+            "id": { "$ref": "#/definitions/Token" }
+          }
+        },
+        "wire_efforts": {
+          "type": ["array", "null"],
+          "description": "Effort values the provider accepts on the wire. Null or absent defers to models.dev.",
+          "items": { "$ref": "#/definitions/Token" },
+          "uniqueItems": true
+        },
+        "hosted_tools": {
+          "type": "object",
+          "propertyNames": { "$ref": "source.schema.json#/properties/protocol" },
+          "additionalProperties": {
+            "type": "object",
+            "propertyNames": { "enum": ["web_search", "x_search", "image_generation"] },
+            "additionalProperties": { "$ref": "#/definitions/HostedTool" }
+          }
+        }
+      }
+    },
+    "Vendor": {
+      "type": "object",
+      "required": ["models"],
+      "additionalProperties": false,
+      "properties": {
+        "models": {
+          "type": "array",
+          "description": "Ordered; the first family that matches a model wins.",
+          "items": { "$ref": "#/definitions/ModelFamily" }
+        }
+      }
+    }
+  },
+  "type": "object",
+  "propertyNames": { "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$" },
+  "additionalProperties": { "$ref": "#/definitions/Vendor" }
+}

@@ -36,7 +36,7 @@ verified for X search.
 
 ## 2. Concepts
 
-- **One user-facing tool per capability.** Phase 1 has `web_search` and `x_search`.
+- **One user-facing tool per capability.** Phase 1 has `web_search`, `x_search` and `image_generation`.
 - **Two execution modes behind one name and schema.**
   - **Native:** the provider's hosted declaration on the wire. The provider runs the search.
   - **Proxy:** a function with the canonical schema. Vibey's tool runtime asks the gateway's executor to run it.
@@ -442,14 +442,16 @@ These rules become C-1 rows in `cross-provider.md` and per-protocol rows in `con
       contract change pending at that time joins it.
   - The gateway and the served-hop parser change in that same release.
   - **Phase 1's native mode therefore lands with or after v12.** Proxy mode does not depend on it.
-  - **The v12 bump edits these exact-shape contracts together:**
-    - `model-hub-contracts/hop-origin.schema.json`: add `source` (required);
+  - **The v12 bump edited these exact-shape contracts together** (Phase 1 foundation PR):
+    - `model-hub-contracts/served-hop.schema.json` (new): the header is exactly `provider`, `api`, `model`,
+      `source`. `hop-origin.schema.json` stays the persisted provenance origin (`provider`, `api`, `model`), because
+      provenance attempts already carry `source_id` beside it and records written at v5–11 must keep validating;
     - `model-hub-contracts/vibey-consumer.md`, Response origin;
     - `agent-core-contracts/provider.md`, the served-hop sentence;
-    - `agent-core-contracts/conversion-tables.md`, the Origin row ("exactly `provider`, `api`, `model`");
+    - `agent-core-contracts/conversion-tables.md`, the Origin row;
     - `agent-core-contracts/model-hub-consumer.md`, item 4.
 
-    These files are frozen at v11, so this PR states the change and leaves their text alone.
+    A message's C-1 `origin` stays exactly `provider`, `api`, `model`; the served `source` tags `native.source_id`.
 
 ## 6. User interface
 
@@ -610,8 +612,9 @@ Each has a **Re-verify** action with its cost. Unknown shows nothing.
   - OpenAI web search: $10 / 1k calls plus content tokens;
   - Anthropic: $10 / 1k searches plus result tokens, re-billed while they stay in context;
   - xAI: web search $5 / 1k calls, X search $5 / 1k posts and $10 / 1k profiles;
-  - OpenAI image generation: per image, by quality and size. The overlay records the vendor's table with its date
-    and URL, and the card shows the reported or list cost.
+  - OpenAI image generation: OpenAI lists no per-image price; image generation is billed per image token at the
+    image model's rate (2026-10-13 pricing page). The overlay's `image_generation` entry therefore has no list
+    price, and the cost comes from the call's image-token usage at that rate (Phase 1 pricing PR).
 - **Relays** show list price, labelled as such, and may bill differently.
 - **Anthropic OAuth policy:** a Claude subscription Source is never probed and never runs a hosted tool, whether
   natively or as proxy executor. Credential eligibility is checked before the probe, the native mode and the executor
@@ -710,17 +713,22 @@ encoded either as a schema clause or as a producer test. The PR names which for 
    `sources[]` entry requires `url`.
 4. `AssistantMessage.hosted_summary`:
    - it is present exactly when the message has a `HostedToolBlock`;
+   - `counts` and `cited_sources` are required (possibly empty); `cost` is optional, absent when no price is known,
+     because unknown is never priced as zero;
    - `cost.usd` is present exactly when `basis` is not `included`.
 5. `TextBlock.citations`: `start` and `end` come together.
 6. `ToolResultMessage.hosted` requires `record`. `execution` is present exactly when an executor ran; without it,
    `record.status` is `failed`.
-   - `execution` requires `mode: "proxy"`, `executor_origin`, `executor_source_id`, `executor_billing` and `cost`.
+   - `execution` requires `mode: "proxy"`, `executor_origin`, `executor_source_id` and `executor_billing`; its
+     `cost` is optional on the same rule as item 4.
    - `is_error` is `true` exactly when `record.status` is `failed` or `incomplete`.
 
 **C-6 `HopResolution.hosted_tools` (both copies):**
 7. Each entry requires `mode`, `replay` and `executor`.
    - `executor` is `{source_id, model_id}` or `null`, and is present for every entry whatever the mode.
-   - `declaration` is present exactly for `native`, and includes the overlay entry's `include` values.
+   - `declaration` and `include` (the overlay entry's Responses `include` values, possibly empty) are present exactly
+     for `native`.
+   - `hosted_tools` itself is required, and empty when no tool is enabled.
 
 **Model Hub:**
 8. V2 `model_hub.hosted_tools`: keys are catalog tool names, and each entry requires `enabled` and `executor`.
@@ -744,8 +752,9 @@ encoded either as a schema clause or as a producer test. The PR names which for 
 16. Across `pause_turn` continuations, a result for a `pending` block finalizes that block by tool-call id. The
     merged message has one `hosted_summary`, with summed `counts` and `cost.usd` and URL-deduplicated
     `cited_sources` (§4.3).
-17. Image prices in the overlay are keyed variants: each `extra[]` entry for unit `image` carries `quality` and
-    `size`, and pricing selects the entry that matches the declaration that ran (capability model §4).
+17. Image cost is valued from the call's image-token usage at the image model's per-token rate, because OpenAI
+    lists no per-image price (capability model §4). If a vendor later lists per-image prices, those entries are
+    keyed by the resolved `quality` and `size` (item 22).
 18. The image file a path record names fits `read`'s `MAX_INLINE_IMAGE_BYTES`, tested with a 6 MB generated image
     (§7.3).
 19. The executor binding is held for the turn. Only removal or disablement of the bound Source makes a call fail,
@@ -753,3 +762,28 @@ encoded either as a schema clause or as a producer test. The PR names which for 
 20. Hosted-tool `call` and `replay` evidence whose `engine` or `shape` differs from the current one resolves as
     unknown: proxy mode and synthetic replay. Age-only staleness keeps routing. Effort evidence is unchanged
     (capability model §3.3, §3.4).
+
+**Added after review of the merged design (implementation-level, binding on the Phase 1 PRs):**
+
+21. Continuations merge into one `AssistantMessage` only when the served-hop report shows the same origin. A
+    `pin_unavailable` continuation served by another origin makes the merged message take the serving origin, and
+    the paused part is kept in the portable form that was actually sent (§4.4 fallback, C-1 cross-origin rules), so
+    no payload or signature from the first origin remains.
+22. The `generate` action records the output's resolved `quality` and `size`; pricing uses those output values, not
+    the declaration's.
+23. The replay probe asks for a URL the call probe actually returned (such as the first). An answer with no earlier
+    URL, or a refusal, is inconclusive; `unsupported` comes only from a 400 naming the replayed content or a new call
+    to the tool.
+24. For OpenAI and xAI executors, each source's `snippet` is the answer text its `url_citation` span covers, extended
+    to the enclosing sentence; the executor instruction asks for one or two cited sentences per result so the spans
+    align. A source without a span has no snippet; Anthropic keeps `cited_text`. Tested against a recorded executor
+    response.
+25. Each response has a maximum number of image events (final plus requested partials, plus a small margin) and a
+    cumulative decoded-byte budget; exceeding either ends the stream as a provider error. The terminal duplicate is
+    still discarded undecoded.
+26. Context-tier thresholds use total context input: input plus cache-read and cache-write tokens.
+27. The proxy endpoint returns a generated image's bytes to Vibey's tool runtime over the local hop. Vibey saves them
+    through the same session media sink the native path uses, then builds the `HostedRecord` with the path record.
+    The bytes are never persisted in a transcript, and Vibey stays the only writer of session media.
+28. `generate.prompt` is required only for a `completed` record; a `failed` or `incomplete` record may omit it when
+    the provider's `revised_prompt` is absent or null.
