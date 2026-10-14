@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 
 import { modelsApi } from '../components/settings/models/modelsApi';
 
@@ -16,29 +16,28 @@ import { modelsApi } from '../components/settings/models/modelsApi';
  */
 export function useSourceNames(wanted: boolean, surfaceActive: boolean): Record<string, string> | null {
   const [names, setNames] = useState<Record<string, string> | null>(null);
-  // Whether this activation has its answer.
-  const [answered, setAnswered] = useState(false);
+  // One token per activation (each change of `surfaceActive` starts a new one),
+  // and the activation the last answer belongs to.
+  const activation = useMemo(() => ({ surfaceActive }), [surfaceActive]);
+  const [answeredFor, setAnsweredFor] = useState<object | null>(null);
   useEffect(() => {
-    if (!surfaceActive) setAnswered(false);
-  }, [surfaceActive]);
-  useEffect(() => {
-    if (!wanted || !surfaceActive || answered) return undefined;
+    if (!wanted || !surfaceActive || answeredFor === activation) return undefined;
     let current = true;
     modelsApi.listSources().then(
       (sources) => {
         if (!current) return;
         setNames(Object.fromEntries(sources.map((source) => [source.id, source.display_name])));
-        setAnswered(true);
+        setAnsweredFor(activation);
       },
       () => {
         // Refused (a role that may not read Sources) or unreachable: the hint is
         // generic, never names kept from an earlier read.
         if (!current) return;
         setNames(null);
-        setAnswered(true);
+        setAnsweredFor(activation);
       },
     );
     return () => { current = false; };
-  }, [wanted, surfaceActive, answered]);
+  }, [wanted, surfaceActive, answeredFor, activation]);
   return names;
 }
