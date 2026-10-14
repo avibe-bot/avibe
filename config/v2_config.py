@@ -3071,7 +3071,10 @@ class ModelHubImageModelChoice:
         if (
             not isinstance(payload, dict)
             or set(payload) != {"source_id", "model_id"}
-            or not all(isinstance(payload[key], str) and payload[key].strip() for key in ("source_id", "model_id"))
+            or not isinstance(payload["source_id"], str)
+            or re.fullmatch(r"src_[a-z0-9]{8,}", payload["source_id"]) is None
+            or not isinstance(payload["model_id"], str)
+            or not payload["model_id"].strip()
         ):
             raise ValueError(f"Config 'model_hub.hosted_tools.{tool}.default_model' must name a source_id and model_id")
         return cls(source_id=payload["source_id"], model_id=payload["model_id"])
@@ -3085,13 +3088,13 @@ class ModelHubHostedToolConfig:
     """One hosted tool's user settings (``vibey-hosted-tools.md`` §3.3).
 
     ``enabled`` defaults to on. ``executor_order`` (search tools) is the Source order the user wants executors
-    tried in, None for automatic; ``default_model`` (``image_generate``) is the chosen default image model, None
-    for the catalog default. Both are saved values, never resolved ones.
+    tried in, None for automatic; ``default_image`` (``image_generate``, persisted as ``default_model``) is the
+    chosen default image model, None for the catalog default. Both are saved values, never resolved ones.
     """
 
     enabled: bool = True
     executor_order: Optional[tuple[str, ...]] = None
-    default_model: Optional[ModelHubImageModelChoice] = None
+    default_image: Optional[ModelHubImageModelChoice] = None
 
     @classmethod
     def from_payload(cls, payload: object, *, tool: str) -> "ModelHubHostedToolConfig":
@@ -3110,7 +3113,7 @@ class ModelHubHostedToolConfig:
         order = payload.get("executor_order") if "executor_order" in known else None
         if order is not None and (
             not isinstance(order, list)
-            or not all(isinstance(item, str) and item.strip() for item in order)
+            or not all(isinstance(item, str) and re.fullmatch(r"src_[a-z0-9]{8,}", item) for item in order)
             or len(set(order)) != len(order)
         ):
             raise ValueError(f"Config 'model_hub.hosted_tools.{tool}.executor_order' must be distinct Source ids")
@@ -3118,15 +3121,15 @@ class ModelHubHostedToolConfig:
         return cls(
             enabled=enabled,
             executor_order=tuple(order) if order is not None else None,
-            default_model=ModelHubImageModelChoice.from_payload(default, tool=tool) if default is not None else None,
+            default_image=ModelHubImageModelChoice.from_payload(default, tool=tool) if default is not None else None,
         )
 
     def to_payload(self) -> dict:
         out: dict[str, Any] = {"enabled": self.enabled}
         if self.executor_order is not None:
             out["executor_order"] = list(self.executor_order)
-        if self.default_model is not None:
-            out["default_model"] = self.default_model.to_payload()
+        if self.default_image is not None:
+            out["default_model"] = self.default_image.to_payload()
         return out
 
 
@@ -3134,15 +3137,16 @@ def _hosted_tools_from_payload(payload: object) -> dict[str, ModelHubHostedToolC
     """Read ``model_hub.hosted_tools`` as an optional feature that degrades on its own.
 
     Absent means every tool takes its defaults (on). An unknown tool key, or an unknown field inside an entry, is
-    ignored with a warning, and the fields the loader knows are kept, so a user's opt-out survives. A malformed
-    entry takes its defaults, with a warning; Sources and Agents still load.
+    ignored with a warning, and the fields the loader knows are kept, so a user's opt-out survives. A broken section
+    or entry turns its tools off, with a warning: hosted tools reach third parties and cost money, so damage never
+    turns one on. Sources and Agents still load.
     """
 
     if payload is None:
         return {}
     if not isinstance(payload, dict):
-        logger.warning("Config 'model_hub.hosted_tools' is not an object; hosted tools take their defaults")
-        return {}
+        logger.warning("Config 'model_hub.hosted_tools' is not an object; hosted tools are off")
+        return {tool: ModelHubHostedToolConfig(enabled=False) for tool in MODEL_HUB_HOSTED_TOOLS}
     tools: dict[str, ModelHubHostedToolConfig] = {}
     for tool, raw in payload.items():
         if tool not in MODEL_HUB_HOSTED_TOOLS:
@@ -3151,7 +3155,8 @@ def _hosted_tools_from_payload(payload: object) -> dict[str, ModelHubHostedToolC
         try:
             tools[tool] = ModelHubHostedToolConfig.from_payload(raw, tool=tool)
         except ValueError as exc:
-            logger.warning("%s; hosted tool %r takes its defaults", exc, tool)
+            logger.warning("%s; hosted tool %r is off", exc, tool)
+            tools[tool] = ModelHubHostedToolConfig(enabled=False)
     return tools
 
 

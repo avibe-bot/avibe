@@ -45,7 +45,6 @@ from config.v2_config import (
     validate_model_hub_source_client_nonce,
 )
 from core.agent_auth_service import BackendLoginInProgressError
-from core.agent_core.ai.provider import Done, ModelCapabilities
 from core.agent_core.ai.registry import sent_effort
 from core.agent_core.messages import HostedCost
 from core.os_errors import format_os_errno, local_error_detail
@@ -53,7 +52,6 @@ from core.services.settings import default_config
 from storage.db import get_cached_sqlite_engine
 from storage.models import MESSAGE_TURN_ID_SQL, agent_sessions, messages
 from vibe.backend_model_catalog import (
-    HostedToolSpec,
     ImageModelSpec,
     PROTOCOL_REASONING_EFFORT_DEFAULTS,
     builtin_display_name,
@@ -6100,34 +6098,38 @@ class ModelHubService:
             or (model_id is not None and (not isinstance(model_id, str) or not model_id or source_id is None))
         ):
             raise ModelHubError("invalid_parameter", status=400)
-        await self._clear_evidence(clear_matcher(tool, source_id, model_id))
+        async with self._mutation_lock:
+            await self._clear_evidence(self.store.load(), clear_matcher(tool, source_id, model_id))
         return await asyncio.to_thread(self.hosted_tools_status)
 
     async def clear_source_evidence(self, source_id: str, payload: object) -> dict:
         """Clear one effort refusal of a Source's model (capability model §5); answers the Source."""
 
-        config = self.store.load()
-        source = next((item for item in config.sources if item.id == source_id), None)
-        if source is None:
-            raise ModelHubError("source_not_found", status=404)
-        if not isinstance(payload, dict) or set(payload) != {"model_id", "feature"}:
-            raise ModelHubError("invalid_parameter", status=400)
-        model_id = payload["model_id"]
-        try:
-            feature = EvidenceFeature.from_payload(payload["feature"])
-        except (TypeError, ValueError):
-            raise ModelHubError("invalid_parameter", status=400) from None
-        if not isinstance(model_id, str) or not model_id or feature.kind != "effort":
-            raise ModelHubError("invalid_parameter", status=400)
-        await self._clear_evidence(
-            lambda record: (record.source_id, record.model_id, record.feature) == (source_id, model_id, feature)
-        )
-        return {"source": self._source_payload(source, config)}
+        async with self._mutation_lock:
+            config = self.store.load()
+            source = next((item for item in config.sources if item.id == source_id), None)
+            if source is None:
+                raise ModelHubError("source_not_found", status=404)
+            if not isinstance(payload, dict) or set(payload) != {"model_id", "feature"}:
+                raise ModelHubError("invalid_parameter", status=400)
+            model_id = payload["model_id"]
+            try:
+                feature = EvidenceFeature.from_payload(payload["feature"])
+            except (TypeError, ValueError):
+                raise ModelHubError("invalid_parameter", status=400) from None
+            if not isinstance(model_id, str) or not model_id or feature.kind != "effort":
+                raise ModelHubError("invalid_parameter", status=400)
+            await self._clear_evidence(
+                config,
+                lambda record: (record.source_id, record.model_id, record.feature) == (source_id, model_id, feature),
+            )
+            return {"source": self._source_payload(source, config)}
 
-    async def _clear_evidence(self, matches: Callable[[EvidenceRecord], bool]) -> None:
-        live = self.store.load().sources
+    async def _clear_evidence(self, config: ModelHubConfig, matches: Callable[[EvidenceRecord], bool]) -> None:
+        """Clear under the Source mutation lock, so the identities it keeps are the ones the config holds."""
+
         try:
-            await asyncio.to_thread(self.capability_evidence.clear, matches, live=live)
+            await asyncio.to_thread(self.capability_evidence.clear, matches, live=config.sources)
         except OSError:
             logger.warning("Model Hub could not persist an evidence clear; nothing changed", exc_info=True)
             raise ModelHubError("state_write_failed", status=500) from None

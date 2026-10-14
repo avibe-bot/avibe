@@ -262,7 +262,7 @@ def image_choices(config: ModelHubConfig, *, evidence: HostedEvidence) -> ImageC
     another Source, else the first available model in catalog order.
     """
 
-    saved = hosted_tool_setting(config, "image_generate").default_model
+    saved = hosted_tool_setting(config, "image_generate").default_image
     available: list[ImageChoice] = []
     for source in _vibey_order(config):
         for spec in provider_image_models(source.vendor):
@@ -392,9 +392,14 @@ def _status(
             verified.append(
                 {"source_id": record.source_id, "model_id": record.model_id, "mode": record.mode, "at": utc_text(record.observed_at)}
             )
+    # The projection is current between the throttled file writes; either kind counts only under its Source's
+    # current identity.
     latest = evidence.store.latest_success(tool)
+    candidates = list(verified)
+    if latest is not None and latest.source_id in live and latest.source_identity == identity_digest(live[latest.source_id]):
+        candidates.append(latest.payload())
     return {
-        "latest_ok": latest.payload() if latest is not None and latest.source_id in live else None,
+        "latest_ok": max(candidates, key=lambda item: item["at"], default=None),
         "refused": sorted(refused, key=lambda item: (item["at"], item["source_id"], item["model_id"])),
         "verified": sorted(verified, key=lambda item: (item["source_id"], item["model_id"])),
     }
@@ -480,7 +485,8 @@ def apply_hosted_tool_put(config: ModelHubConfig, tool: str, payload: object) ->
         raise HostedToolSettingRefused("invalid_parameter", 400)
     current = hosted_tool_setting(config, tool)
     merged = {**current.to_payload(), **payload}
-    merged = {key: value for key, value in merged.items() if value is not None}
+    # Only the saved choices reset with null; a null ``enabled`` is invalid, never the default.
+    merged = {key: value for key, value in merged.items() if value is not None or key == "enabled"}
     try:
         setting = ModelHubHostedToolConfig.from_payload(merged, tool=tool)
     except ValueError:

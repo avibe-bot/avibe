@@ -212,6 +212,21 @@ def test_a_clear_is_persisted_before_it_takes_effect(tmp_path, monkeypatch):
     assert reloaded.get(source.id, "grok-4.6", CALL, "verified") is not None
 
 
+def test_the_bound_evicts_display_history_before_any_refusal(tmp_path):
+    """MH-HOSTED-003: a refusal holds until a clear or a change; the record bound never re-enables a feature."""
+    source = _source()
+    store = CapabilityEvidenceStore(tmp_path / "model_hub_capability_evidence.json", max_records=3)
+    store.write_refusal(_refusal(source, CALL, observed_at=NOW - timedelta(days=400)), live=[source])
+    for index, tool in enumerate(("web_search", "x_search", "image_generate")):
+        feature = EvidenceFeature.hosted(tool, "call")
+        store.note_success(_success(source, feature, observed_at=NOW + timedelta(hours=index)), live=[source], now=NOW)
+    store.write_refusal(_refusal(source, ULTRA), live=[source])
+
+    assert store.refusal(source, "grok-4.6", CALL, wire=_wire(source)) is not None
+    assert store.refusal(source, "grok-4.6", ULTRA, wire=_wire(source)) is not None
+    assert [record.feature.name for record in store.records() if record.status == "verified"] == ["image_generate"]
+
+
 @pytest.mark.parametrize(
     "marker,digest",
     [

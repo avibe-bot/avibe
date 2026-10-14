@@ -213,6 +213,10 @@ The evidence store, its record and its owner are the capability model's §3. v2 
     fields it knows. So an rc-era section keeps each tool's `enabled`, and a user's explicit opt-out survives the
     upgrade; its `image_generation` key and v1's `executor` field are ignored. This is one generic loader rule, not
     rc-specific code.
+  - A broken section (not an object) or entry (a value of the wrong type) turns its tools **off** with a warning:
+    hosted tools reach third parties and cost money, so damage never turns one on. Sources and Agents still load
+    (the persisted-shape rule in `AGENTS.md`). `executor_order` holds Source ids (`src_…`), and `default_model`
+    names one.
   - A settings change applies from the next turn, as every runtime config change does.
 - **API.** Saved and effective values are separate fields, and the UI never writes back an effective value: v1's
   toggle echoed the resolved executor and so froze "automatic" into a saved choice.
