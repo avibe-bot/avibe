@@ -14,7 +14,7 @@ response (a ``pause_turn`` continuation, or client tool results after server
 tools in the same response) is the provider's own continuation contract, so
 its hosted items need no replay evidence, only the identity that response was
 served under: a turn's native content on a Source never crosses an identity
-change.
+change (the turn's pin identity claim, made atomically at final admission).
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ from typing import Any, Callable, Final, Mapping, Optional
 from config.v2_config import ModelHubSourceConfig
 from vibe.backend_model_catalog import HostedToolSpec, bundled_provider_overlay
 
-from .capability_evidence import HOSTED_TOOL_ASPECTS, CapabilityEvidenceStore, EvidenceFeature, identity_digest
+from .capability_evidence import HOSTED_TOOL_ASPECTS, CapabilityEvidenceStore, EvidenceFeature
 from .hosted_tools import runs_on
 
 PIN_SOURCE_HEADER: Final = "x-avibe-pin-source"
@@ -214,16 +214,8 @@ def admits(
     engine: str,
     shape: int,
     now: datetime,
-    pinned_identity: str | None = None,
 ) -> bool:
     """Whether this hop runs every piece of hosted content and has current positive evidence for it.
-
-    ``pinned_identity`` is the Source identity the turn's first pinned response
-    from this Source was served under. A turn's native content on a Source
-    stays on that identity: once it changes (a rotated credential, an edited
-    base URL), nothing native goes there for the rest of the turn. An in-flight
-    response is the provider's own continuation, so it needs that identity
-    recorded and unchanged.
 
     Where a tool may run is ``runs_on``, the rule hop resolution uses for
     native mode, so the two agree by construction; a declaration must also
@@ -232,9 +224,6 @@ def admits(
 
     if not content:
         return True
-    current = identity_digest(source)
-    if (pinned_identity is not None and pinned_identity != current) or (pinned_identity is None and content.in_flight):
-        return False
 
     def offered(tool: str) -> HostedToolSpec | None:
         return runs_on(source, model_id, tool, spec_for=spec_for)

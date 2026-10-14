@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import logging
 import math
@@ -1133,8 +1134,10 @@ class ModelHubTurnGateway:
                         pinned_hop=(
                             terminalizer.pinned_hop(pin_source_id, pin_model_id) if pin_source_id else None
                         ),
-                        pinned_identity=(
-                            self.correlation.pinned_identity(terminalizer.turn_id, pin_source_id)
+                        pin_identity_claim=(
+                            functools.partial(
+                                self.correlation.claim_pinned_identity, terminalizer.turn_id, pin_source_id,
+                            )
                             if pin_source_id else None
                         ),
                     ),
@@ -1146,11 +1149,6 @@ class ModelHubTurnGateway:
                 # Owned before the keepalive stops, so a cancellation while it
                 # stops still closes and meters a Source stream already won.
                 execution.resolved = resolved
-                if pin_source_id and resolved.handle is not None and resolved.source_identity is not None:
-                    # The turn's native content on this Source stays on the identity it was first served under.
-                    self.correlation.record_pinned_identity(
-                        terminalizer.turn_id, resolved.source_id, resolved.source_identity,
-                    )
                 if resolved.handle is not None and resolved.handle.stream is not None:
                     execution.handle = resolved.handle
                     resources.push_async_callback(resolved.handle.close_stream)

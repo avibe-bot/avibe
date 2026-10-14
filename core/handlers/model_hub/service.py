@@ -894,8 +894,6 @@ class ResolvedInvocation:
     settlement_generation: Optional[int] = None
     verification_pending: Optional[str] = None
     origin: HopOrigin | None = None
-    # Vibey: the serving Source's identity digest at the call's final snapshot.
-    source_identity: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -6173,9 +6171,7 @@ class ModelHubService:
             logger.warning("Model Hub could not record capability evidence", exc_info=True)
         return learned
 
-    def _admits_hosted(
-        self, content: HostedContent, source: ModelHubSourceConfig, model_id: str, pinned_identity: str | None,
-    ) -> bool:
+    def _admits_hosted(self, content: HostedContent, source: ModelHubSourceConfig, model_id: str) -> bool:
         """Whether this hop runs a request's hosted content with current positive evidence; memory only."""
 
         return admits(
@@ -6187,7 +6183,6 @@ class ModelHubService:
             engine=self.engine_stamp,
             shape=HOSTED_PROBE_SHAPE,
             now=self.now(),
-            pinned_identity=pinned_identity,
         )
 
     def hosted_call_cost(
@@ -9610,9 +9605,13 @@ class ModelHubService:
                         attempt_request = without_opaque_history(request)
                     # Hosted content is admitted on this final snapshot, so evidence
                     # or a Source that changed while the engine was prepared counts.
-                    if hosted and not self._admits_hosted(
-                        hosted, source, model_id, getattr(request, "pinned_identity", None),
-                    ):
+                    if hosted and not self._admits_hosted(hosted, source, model_id):
+                        raise _pin_unavailable()
+                    # Native content stays on one identity of the Source per turn. The
+                    # claim is made here, under the exclusion this call is admitted in,
+                    # so no concurrent request or config change slips between them.
+                    claim = getattr(request, "pin_identity_claim", None)
+                    if hosted and (claim is None or not claim(identity_digest(source), bool(hosted.in_flight))):
                         raise _pin_unavailable()
                 if self._engine_synced:
                     if recovery_request is not None and recovery_request.expired:
@@ -10124,7 +10123,6 @@ class ModelHubService:
                     settlement_generation=settlement_generation,
                     verification_pending=verification_pending,
                     origin=origin,
-                    source_identity=identity_digest(source) if backend == "vibey" else None,
                 )
             decision = await self._classify_source_outcome(source, outcome)
             learned = await self._learn_capability_evidence(source, target_model, request, outcome)
@@ -10190,7 +10188,6 @@ class ModelHubService:
                         settlement_generation=settlement_generation,
                         verification_pending=verification_pending,
                         origin=origin,
-                        source_identity=identity_digest(source) if backend == "vibey" else None,
                     )
                 decision = classify_outcome(outcome, refresh_attempted=True)
                 learned = await self._learn_capability_evidence(source, target_model, request, outcome)
@@ -10246,7 +10243,6 @@ class ModelHubService:
                     settlement_generation=settlement_generation,
                     verification_pending=verification_pending,
                     origin=origin,
-                    source_identity=identity_digest(source) if backend == "vibey" else None,
                 )
             if (
                 pinned_hop is not None

@@ -725,8 +725,8 @@ class TurnTrace:
     # Vibey: the hosted-tool executors the turn's first resolution bound, with
     # each executor Source's identity. Written once; settings apply next turn.
     hosted_executors: Optional[tuple[tuple[str, tuple[str, str, str] | None], ...]] = None
-    # Vibey: per Source, the identity digest the turn's first pinned response
-    # from it was served under. Each entry is written once.
+    # Vibey: per Source, the identity digest the turn's native content is bound
+    # to, claimed by its first admitted pinned request. Each entry is written once.
     pinned_identities: dict[str, str] = field(default_factory=dict)
 
     @property
@@ -1338,20 +1338,28 @@ class TurnCorrelationRegistry:
                 )
         return token
 
-    def pinned_identity(self, turn_id: Optional[str], source_id: str) -> str | None:
-        """The identity a turn's first pinned response from this Source was served under; None before one."""
+    def claim_pinned_identity(
+        self, turn_id: Optional[str], source_id: str, identity: str, continuation: bool,
+    ) -> bool:
+        """Whether a turn's native content may go to this Source under ``identity``; binds the first claim.
+
+        The turn's first claim for a Source binds its identity, and later ones
+        must match it. A continuation carries the native items of a response
+        already served, so it needs an identity already bound. A request without
+        a live turn has none to bind to.
+        """
 
         with self._lock:
             trace = self._traces.get(str(turn_id or "").strip())
-            return trace.pinned_identities.get(source_id) if trace is not None else None
-
-    def record_pinned_identity(self, turn_id: Optional[str], source_id: str, identity: str) -> None:
-        """Record the identity a pinned response was served under, once per turn and Source."""
-
-        with self._lock:
-            trace = self._traces.get(str(turn_id or "").strip())
-            if trace is not None:
-                trace.pinned_identities.setdefault(source_id, identity)
+            if trace is None:
+                return False
+            bound = trace.pinned_identities.get(source_id)
+            if bound is None:
+                if continuation:
+                    return False
+                trace.pinned_identities[source_id] = identity
+                return True
+            return bound == identity
 
     def turn_hosted_executors(
         self, turn_id: Optional[str],

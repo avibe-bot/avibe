@@ -11,6 +11,7 @@ received which body.
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import threading
 from dataclasses import replace
@@ -246,10 +247,10 @@ async def test_a_pin_names_the_exact_hop_it_was_rendered_for(tmp_path, case):
 async def test_a_continuation_stays_on_the_identity_its_response_was_served_under(tmp_path, case, statuses):
     """MH-HOSTED-GATEWAY-002: native content never crosses a Source's identity change within a turn.
 
-    The in-flight response is exempt from replay evidence only on the identity
-    the turn's first pinned response from that Source was served under, and
-    only once one was served. Evidence taken anew at a rotated credential does
-    not carry the earlier response's payload across.
+    The turn's first admitted pinned request binds the Source's identity, and
+    the in-flight response is exempt from replay evidence only on that bound
+    identity. Evidence taken anew at a rotated credential does not carry the
+    earlier response's payload across.
     """
 
     primary, fallback = _sources()
@@ -281,6 +282,48 @@ async def test_a_continuation_stays_on_the_identity_its_response_was_served_unde
     if statuses[-1] == 409:
         assert answers[-1][1] == PIN_UNAVAILABLE
     assert len(service.adapter.invocations) == statuses.count(200)
+
+
+@pytest.mark.asyncio
+async def test_overlapping_first_pinned_requests_bind_one_identity(tmp_path):
+    """MH-HOSTED-GATEWAY-002: the identity is bound at final admission, so a concurrent first request cannot use another.
+
+    The first request is admitted and still opening its call when the key is
+    rotated and re-verified; the second, admitted on the new identity, is handed back.
+    """
+
+    primary, fallback = _sources()
+    service = _vibey_service(tmp_path, [primary, fallback], handles=[
+        LiveInvokeHandle(_outcome(RawOutcomeKind.SUCCESS, source_id=primary.id), (b"{}",)) for _ in range(2)
+    ])
+    _verify(service, primary, "grok-4.6", "x_search", "call")
+    admitted, release = asyncio.Event(), asyncio.Event()
+    invoke = service.adapter.invoke
+
+    async def held_first(*args, **kwargs):
+        handle = await invoke(*args, **kwargs)
+        if not admitted.is_set():
+            admitted.set()
+            await release.wait()
+        return handle
+
+    service.adapter.invoke = held_first
+    gateway = ModelHubTurnGateway(service)
+    router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
+    try:
+        hop = await router.resolve_hop("menu-alias", process_scope="vibey:overlap", turn_id="turn-overlap")
+        first = asyncio.create_task(_post(hop, _native(hop), pin=primary.id))
+        await asyncio.wait_for(admitted.wait(), timeout=5)
+        live = service.store.config.sources[0]
+        live.credential_ref = "cred_rotated0001"
+        _verify(service, live, "grok-4.6", "x_search", "call")
+        assert await _post(hop, _native(hop), pin=primary.id) == (409, PIN_UNAVAILABLE)
+        release.set()
+        assert (await asyncio.wait_for(first, timeout=5))[0] == 200
+    finally:
+        release.set()
+        await gateway.close()
+    assert len(service.adapter.invocations) == 1
 
 
 @pytest.mark.asyncio
