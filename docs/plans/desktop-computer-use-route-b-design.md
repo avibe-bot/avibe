@@ -1,8 +1,7 @@
 # Route B: Bounded Foreground Delivery
 
-Status: owner-facing decision record. This document defines a design boundary
-only. It does not authorize implementation. Owner and source review are
-required before any product change or merge.
+Status: owner-facing decision record. The Route B v1 implementation follows
+this record. Owner and source review are required before merge.
 
 [Route A](desktop-computer-use.md#route-a-raw-single-click-selector-2026-10-10)
 remains the shipped background contract. Route B is a separate, explicit
@@ -84,6 +83,20 @@ broader than the task requires. The per-Session toggle is the selected
 compromise: the owner makes one explicit native decision, while each input
 still requires a separate foreground request and exact target admission.
 
+### Owner amendment: reveal and restore hidden or minimized targets
+
+On 2026-10-14, the owner approved a Route B v1 amendment based on observed
+Codex behavior: a target application that is hidden, or an exact target window
+that is minimized, may be admitted when it is on the current Space. The native
+shell may reveal it for the bounded call and must restore its original
+hidden/minimized state before the call is complete. Missing and off-Space
+targets remain refused, and Route B never switches Spaces.
+
+The first delivery PR stages this amendment behind the existing change-size
+guard: it ships the bounded foreground contract for already-visible targets,
+then follows immediately with native reveal and hidden/minimized restoration.
+The staged delivery does not change the approved end-state contract.
+
 Route B inherits the existing documented same-user local trust boundary. This
 record does not introduce a second authority model for same-user processes.
 Signed shell capabilities, secure-enclave or keychain keys, mutual-authenticated
@@ -98,8 +111,9 @@ implementation records exactly:
 
 1. the prior frontmost application and its frontmost native window, including
    identities that distinguish the current process and native window;
-2. the hardware pointer position; and
-3. the active Space of the affected display.
+2. the hardware pointer position;
+3. the active Space of the affected display; and
+4. the target's original hidden or minimized state.
 
 The target must be one freshly observed application window in the same Session
 and must satisfy the admission preconditions below. The implementation must
@@ -107,13 +121,14 @@ retain the target identity and coordinate context needed to confirm that it is
 still the requested window before posting the foreground input. Numeric PID or
 window identifiers must not be treated as proof of identity after reuse.
 
-After the explicit input call, the implementation restores those three recorded
+After the explicit input call, the implementation restores those four recorded
 values and verifies them against a fresh observation: the prior frontmost
-application and exact window, the hardware pointer position, and the affected
-display's active Space. The previously frontmost window must still be present
-on the current Space in that observation. A transport acknowledgement is not
-effect confirmation; the result must preserve the existing click effect
-vocabulary, including `confirmed` and `unverifiable`.
+application and exact window, the hardware pointer position, the affected
+display's active Space, and the target's original hidden/minimized state. The
+previously frontmost window must still be present on the current Space in that
+observation. A transport acknowledgement is not effect confirmation; the
+result must preserve the existing click effect vocabulary, including
+`confirmed` and `unverifiable`.
 
 If restoration cannot be completed or cannot be verified, the operation stops
 and reports a concrete restoration failure. It does not retry, choose another
@@ -131,8 +146,8 @@ Stop cannot claim to undo an input that was already posted.
 Any other window-system state is not restored in v1 and may differ after the
 call. This includes the target's `z_index` and z-order relative to
 non-frontmost windows, focus or selection inside windows, IME state, and
-fullscreen or tiling arrangements. Because of the admission preconditions, the
-target was already visible beforehand.
+fullscreen or tiling arrangements. The target's hidden/minimized state is
+restored because it is now part of the finite v1 contract.
 
 Owner-input quarantine, suppression, capture, and replay during the
 focus-changing interval are explicitly out of scope for this record. The
@@ -165,13 +180,14 @@ unverifiable result never escalates by itself; a later foreground call must be
 an explicit caller decision with its own admission.
 
 Route B v1 admits a target only when a fresh `list_windows` call in the same
-call's admission finds the exact pid and window with all of these conditions:
-`is_on_screen=true`, `minimized=false`, and `on_current_space=true`. For v1,
-the on-screen condition is also the no-hidden condition: Route B does not
-un-hide, reveal, or un-minimize a target. Any false, null, missing, or
-otherwise non-admissible value fails closed with a stable reason:
-`target_off_active_space` for a missing or off-current-Space target, and
-`target_not_admissible` for visibility, hidden, or minimized targets. Route B
+call's admission finds the exact pid and window with `on_current_space=true`
+and verifiable hidden/minimized state. A target with `is_on_screen=false` or
+`minimized=true` is admitted when it remains on the active Space; the native
+shell may reveal it for the call and must restore that state afterward. Any
+false, null, missing, or otherwise non-admissible value fails closed with a
+stable reason: `target_missing` for an absent exact window,
+`target_off_active_space` for a window outside the current Space, and
+`target_not_admissible` for an unverifiable or otherwise unsafe target. Route B
 never switches Spaces; cross-Space targets are future work.
 
 The CLI should reuse the existing leaf command and argument shape rather than
@@ -185,8 +201,7 @@ vibe computer click --arg pid=97470 --arg window_id=6285 \
   --arg modifier=[] --arg delivery_mode=foreground
 ```
 
-This example documents the future contract; it does not add a product flag in
-this design-only lane. The built-in `computer-use` Skill should teach callers
+The built-in `computer-use` Skill teaches callers
 to use background delivery first, observe the exact target in the same Session,
 carry the observation context, and verify both the application effect and
 restoration. It must tell agents that they cannot grant consent, that
@@ -211,8 +226,8 @@ cannot infer parity from the macOS design.
 
 This record does not include:
 
-- Route B implementation, product flags, persistent state files, schema
-  changes, GUI/TCC changes, credentials, Runtime changes, or packaging work;
+- durable allowlists, persistent consent state, schema changes, GUI/TCC
+  changes, credentials, or Runtime changes;
 - a silent fallback or automatic replay from Route A;
 - per-app allowlists, global permission, session-wide foreground mode, or
   agent-granted consent;
@@ -227,9 +242,6 @@ This record does not include:
   model changes; or
 - Windows foreground delivery before the Q6 machine run.
 
-Before implementation, owner and source must review and approve the first
-supported click shape, native toggle lifecycle, exact restoration and failure
-result, visible indicator behavior, admission/refusal rules, CLI/Skill wording,
-and platform gates. That later implementation decision must also state whether
-any future hardening listed above is required. This PR remains docs-only and
-must not be merged without source review.
+The v1 implementation remains bounded by the finite four-item restoration
+contract above. It must not expand that contract in response to a review
+finding without a new owner decision.

@@ -87,6 +87,8 @@ const LOGIN_MENU_ID: &str = "start-at-login";
 const SETTINGS_MENU_ID: &str = "open-settings";
 #[cfg(target_os = "macos")]
 const COMPUTER_USE_MENU_ID: &str = "computer-use";
+#[cfg(target_os = "macos")]
+const COMPUTER_USE_CONSENT_MENU_ID: &str = "computer-use-foreground-consent";
 /// Where Settings leads: the Workbench deep link, whose destination
 /// `parse_deep_link` owns. It is delivered as a page load only when the window
 /// has no Workbench able to open Settings in place.
@@ -171,6 +173,10 @@ struct NativeComputerUseCatalog {
     unavailable: String,
     initialization_failed: String,
     save_failed: String,
+    foreground_consent: String,
+    foreground_active: String,
+    foreground_attention: String,
+    foreground_allow: String,
 }
 
 #[cfg(feature = "bundled-runtime")]
@@ -226,6 +232,12 @@ fn native_tray_catalog() -> NativeTrayCatalog {
 
 #[cfg(target_os = "macos")]
 fn computer_use_label(catalog: &NativeComputerUseCatalog, view: &computer_use::MenuView) -> String {
+    if let Some(target) = view.foreground_attention.as_deref() {
+        return catalog.foreground_attention.replace("{{target}}", target);
+    }
+    if let Some(target) = view.foreground_active.as_deref() {
+        return catalog.foreground_active.replace("{{target}}", target);
+    }
     if view.save_failed {
         return catalog.save_failed.clone();
     }
@@ -263,6 +275,14 @@ fn computer_use_label(catalog: &NativeComputerUseCatalog, view: &computer_use::M
         avibe_runtime_host::computer_use::ComputerUsePhase::Stopped => catalog.off.clone(),
         avibe_runtime_host::computer_use::ComputerUsePhase::NeedsRuntime => catalog.needs_runtime.clone(),
     }
+}
+
+#[cfg(target_os = "macos")]
+fn computer_use_consent_label(catalog: &NativeComputerUseCatalog, view: &computer_use::MenuView) -> String {
+    view.foreground_pending
+        .as_deref()
+        .map(|title| catalog.foreground_consent.replace("{{sessionTitle}}", title))
+        .unwrap_or_else(|| catalog.foreground_allow.clone())
 }
 
 #[cfg(target_os = "macos")]
@@ -388,6 +408,8 @@ struct NativeMenus {
     notifications: CheckMenuItem<tauri::Wry>,
     #[cfg(target_os = "macos")]
     computer_use: CheckMenuItem<tauri::Wry>,
+    #[cfg(target_os = "macos")]
+    computer_use_consent: MenuItem<tauri::Wry>,
     stop_present: AtomicBool,
     displayed: Mutex<Option<(TrayRuntimeState, bool, bool)>>,
 }
@@ -437,6 +459,16 @@ fn install_native_tray(app: &AppHandle) -> tauri::Result<()> {
         computer_use_checked,
         None::<&str>,
     )?;
+    #[cfg(target_os = "macos")]
+    let computer_use_consent = MenuItem::with_id(
+        app,
+        COMPUTER_USE_CONSENT_MENU_ID,
+        &native_catalog_for_locales(sys_locale::get_locales())
+            .computer_use
+            .foreground_allow,
+        false,
+        None::<&str>,
+    )?;
     let updater = app.state::<updater::Updater>();
     #[cfg(target_os = "macos")]
     let tray = Menu::with_items(
@@ -446,6 +478,7 @@ fn install_native_tray(app: &AppHandle) -> tauri::Result<()> {
             &status,
             &PredefinedMenuItem::separator(app)?,
             &computer_use,
+            &computer_use_consent,
             &settings,
             &updater.menu,
             &updater.channel_menu,
@@ -489,6 +522,8 @@ fn install_native_tray(app: &AppHandle) -> tauri::Result<()> {
         submenu.insert_items(&[&updater.menu, &updater.channel_menu], settings_position + 1)?;
         #[cfg(target_os = "macos")]
         submenu.insert(&computer_use, 0)?;
+        #[cfg(target_os = "macos")]
+        submenu.insert(&computer_use_consent, 1)?;
         submenu.insert_items(&[&open, &status, &login, &PredefinedMenuItem::separator(app)?], 0)?;
     }
     app.set_menu(application_menu)?;
@@ -507,6 +542,8 @@ fn install_native_tray(app: &AppHandle) -> tauri::Result<()> {
         notifications,
         #[cfg(target_os = "macos")]
         computer_use,
+        #[cfg(target_os = "macos")]
+        computer_use_consent,
         stop_present: AtomicBool::new(false),
         displayed: Mutex::new(None),
     });
@@ -663,6 +700,16 @@ fn refresh_computer_use_control(app: &AppHandle) {
             .set_text(computer_use_label(&catalog, &view))
             .and_then(|()| menus.computer_use.set_enabled(enabled))
             .and_then(|()| menus.computer_use.set_checked(checked))
+            .and_then(|()| {
+                menus
+                    .computer_use_consent
+                    .set_text(computer_use_consent_label(&catalog, &view))
+            })
+            .and_then(|()| {
+                menus
+                    .computer_use_consent
+                    .set_enabled(view.foreground_pending.is_some())
+            })
             .is_err()
         {
             eprintln!("failed to refresh native Computer Use control");
@@ -2007,6 +2054,10 @@ pub fn run() {
                 #[cfg(target_os = "macos")]
                 COMPUTER_USE_MENU_ID => {
                     app.state::<computer_use::Controller>().toggle();
+                }
+                #[cfg(target_os = "macos")]
+                COMPUTER_USE_CONSENT_MENU_ID => {
+                    app.state::<computer_use::Controller>().grant_foreground_consent();
                 }
                 _ => {}
             }

@@ -1,5 +1,6 @@
 //! macOS adapter for the desktop-owned computer-use lifecycle.
 
+use std::collections::HashSet;
 use std::ffi::c_void;
 use std::fs::File;
 use std::io::{self, Read};
@@ -23,16 +24,18 @@ use block2::RcBlock;
 use objc2::rc::{Allocated, Retained};
 use objc2::runtime::{AnyClass, AnyObject, NSObjectProtocol, ProtocolObject};
 use objc2::{msg_send, sel, MainThreadMarker};
-use objc2_app_kit::NSApplicationDidBecomeActiveNotification;
+use objc2_app_kit::{NSApplicationActivationOptions, NSApplicationDidBecomeActiveNotification, NSRunningApplication};
 use objc2_foundation::{
     NSArray, NSError, NSNotification, NSNotificationCenter, NSOperationQueue, NSPoint, NSRect, NSSize,
 };
+use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tauri::plugin::{Builder as PluginBuilder, TauriPlugin};
 use tauri::{AppHandle, Manager, RunEvent};
 use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
-use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::io::{split, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::net::{UnixListener, UnixStream};
 use tokio::process::{Child, ChildStderr, ChildStdin, Command};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -55,6 +58,8 @@ const DARWIN_SOCKET_PATH_MAX_BYTES: usize = 103;
 const SOCKET_DIRECTORY_MODE: u32 = 0o700;
 const SOCKET_FLAVOR_HEX_BYTES: usize = 12;
 const DAEMON_STDERR_TAIL_BYTES: usize = 8 * 1024;
+const FOREGROUND_CONTROL_SOCKET_FILE: &str = "foreground-control.sock";
+const FOREGROUND_TITLE_LIMIT: usize = 256;
 
 fn driver_command(driver: &Path) -> Command {
     let mut command = Command::new(driver);
@@ -91,6 +96,7 @@ unsafe extern "C" {
 unsafe extern "C" {
     fn CGPreflightScreenCaptureAccess() -> bool;
     fn CGRequestScreenCaptureAccess() -> bool;
+    fn CGWarpMouseCursorPosition(point: NSPoint) -> i32;
 }
 
 #[link(name = "ScreenCaptureKit", kind = "framework")]
@@ -106,6 +112,9 @@ pub(crate) struct MenuView {
     pub initialization_error: bool,
     pub save_failed: bool,
     pub runtime_refused: bool,
+    pub foreground_pending: Option<String>,
+    pub foreground_active: Option<String>,
+    pub foreground_attention: Option<String>,
 }
 
 impl Default for MenuView {
@@ -119,18 +128,43 @@ impl Default for MenuView {
             initialization_error: false,
             save_failed: false,
             runtime_refused: false,
+            foreground_pending: None,
+            foreground_active: None,
+            foreground_attention: None,
         }
     }
 }
 
+#[derive(Debug, Deserialize)]
+struct ForegroundControlRequest {
+    operation: String,
+    session: String,
+    title: String,
+    target: Option<Value>,
+    restoration: Option<Value>,
+}
+
 enum Event {
     Toggle,
-    RuntimeReady { origin: LoopbackOrigin, adoption: bool },
+    RuntimeReady {
+        origin: LoopbackOrigin,
+        adoption: bool,
+    },
     RuntimeLost,
     RuntimeStopped,
     Activated,
-    RetryStart { id: u64 },
-    PermissionProbeFinished { id: u64, result: PermissionChildRun },
+    RetryStart {
+        id: u64,
+    },
+    PermissionProbeFinished {
+        id: u64,
+        result: PermissionChildRun,
+    },
+    ForegroundControl {
+        request: ForegroundControlRequest,
+        reply: oneshot::Sender<Value>,
+    },
+    GrantForegroundConsent,
     Shutdown(oneshot::Sender<()>),
 }
 
@@ -189,6 +223,10 @@ impl Controller {
         let _ = self.sender.send(Event::Activated);
     }
 
+    pub(crate) fn grant_foreground_consent(&self) {
+        let _ = self.sender.send(Event::GrantForegroundConsent);
+    }
+
     pub(crate) async fn shutdown(&self) {
         if self.shutdown_started.swap(true, Ordering::SeqCst) {
             return;
@@ -208,12 +246,14 @@ struct Paths {
     driver: PathBuf,
     policy: PathBuf,
     snapshot: PathBuf,
+    foreground_control_socket: PathBuf,
 }
 
 impl Paths {
     fn resolve(app: &AppHandle) -> Result<Self, Box<dyn std::error::Error>> {
         let state_dir = configured_path(app.path().app_data_dir()?, STATE_DIR_ENV);
         std::fs::create_dir_all(&state_dir)?;
+        let foreground_control_socket = state_dir.join(FOREGROUND_CONTROL_SOCKET_FILE);
         let owner_uid = std::fs::metadata(&state_dir)?.uid();
         let socket = short_socket_path(&state_dir, owner_uid);
         ensure_private_socket_directory(socket.parent().expect("socket directory"), owner_uid)?;
@@ -229,6 +269,7 @@ impl Paths {
             driver,
             policy,
             snapshot,
+            foreground_control_socket,
         })
     }
 
@@ -326,6 +367,7 @@ struct RuntimeState {
     view: Arc<Mutex<MenuView>>,
     diagnostics: BootstrapLog,
     paths: Paths,
+    foreground_control_listener: UnixListener,
     store: ComputerUseStateStore,
     _shell_lock: ComputerUseShellLock,
     shutdown_requested: Arc<AtomicBool>,
@@ -342,6 +384,9 @@ struct RuntimeState {
     assets_valid: bool,
     pending_write: Option<ComputerUseRecord>,
     started_at: Instant,
+    foreground_consent_sessions: HashSet<String>,
+    pending_foreground: Option<(String, String)>,
+    foreground_active_session: Option<String>,
 }
 
 impl RuntimeState {
@@ -359,12 +404,20 @@ impl RuntimeState {
         let stored = store.read();
         let assets_valid = paths.assets_valid();
         let lifecycle = restored_lifecycle(&stored, assets_valid);
+        match std::fs::remove_file(&paths.foreground_control_socket) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        let foreground_control_listener = UnixListener::bind(&paths.foreground_control_socket)?;
+        std::fs::set_permissions(&paths.foreground_control_socket, std::fs::Permissions::from_mode(0o600))?;
         let mut runtime = Self {
             app,
             events,
             view,
             diagnostics,
             paths,
+            foreground_control_listener,
             store,
             _shell_lock: shell_lock,
             shutdown_requested,
@@ -381,6 +434,9 @@ impl RuntimeState {
             assets_valid,
             pending_write: None,
             started_at: Instant::now(),
+            foreground_consent_sessions: HashSet::new(),
+            pending_foreground: None,
+            foreground_active_session: None,
         };
         runtime.host_bundle_id = runtime.app.config().identifier.clone();
         match stored {
@@ -424,6 +480,10 @@ impl RuntimeState {
                         Event::PermissionProbeFinished { id, result } => {
                             self.permission_probe_finished(id, result);
                         }
+                        Event::ForegroundControl { request, reply } => {
+                            let _ = reply.send(self.handle_foreground_control(request));
+                        }
+                        Event::GrantForegroundConsent => self.grant_pending_foreground_consent(),
                         Event::Shutdown(reply) => {
                             self.shutdown().await;
                             let RuntimeState {
@@ -434,6 +494,12 @@ impl RuntimeState {
                             let _ = reply.send(());
                             return;
                         }
+                    }
+                }
+                accepted = self.foreground_control_listener.accept() => {
+                    if let Ok((stream, _)) = accepted {
+                        let events = self.events.clone();
+                        tauri::async_runtime::spawn(serve_foreground_control(stream, events));
                     }
                 }
             }
@@ -448,6 +514,7 @@ impl RuntimeState {
         if self.lifecycle.enabled() {
             self.invalidate_start_retry();
             let directive = self.lifecycle.toggle_off();
+            self.clear_foreground_state();
             self.apply(directive).await;
             return;
         }
@@ -510,6 +577,7 @@ impl RuntimeState {
             self.origin = None;
         }
         self.capabilities.begin_adoption();
+        self.clear_foreground_state();
         let directive = self.lifecycle.capabilities(RuntimeSupport::Unknown, silent_grants());
         self.apply(directive).await;
     }
@@ -805,12 +873,14 @@ impl RuntimeState {
 
     async fn shutdown(&mut self) {
         self.invalidate_start_retry();
+        self.clear_foreground_state();
         let directive = self.lifecycle.quit();
         if directive.write_state {
             let _ = self.write_current_state();
         }
         self.stop_permission_probe().await;
         self.stop_daemon().await;
+        let _ = std::fs::remove_file(&self.paths.foreground_control_socket);
     }
 
     fn current_record(&self) -> ComputerUseRecord {
@@ -869,6 +939,194 @@ impl RuntimeState {
         });
         crate::refresh_computer_use_control(&self.app);
     }
+
+    fn handle_foreground_control(&mut self, request: ForegroundControlRequest) -> Value {
+        let session = request.session.trim();
+        if session.is_empty() || session.len() > FOREGROUND_TITLE_LIMIT {
+            return json!({"ok": false, "error": "invalid_session"});
+        }
+        let title = request.title.trim();
+        let title = if title.is_empty() { session } else { title };
+        if title.len() > FOREGROUND_TITLE_LIMIT {
+            return json!({"ok": false, "error": "invalid_title"});
+        }
+        match request.operation.as_str() {
+            "request_consent" => {
+                if !self.lifecycle.enabled() || self.lifecycle.phase() != ComputerUsePhase::Ready {
+                    return json!({"ok": false, "error": "computer_use_unavailable"});
+                }
+                if self.foreground_consent_sessions.contains(session) {
+                    return json!({"ok": true, "allowed": true});
+                }
+                self.pending_foreground = Some((session.to_owned(), title.to_owned()));
+                self.update_view(|view| view.foreground_pending = Some(title.to_owned()));
+                self.publish_view();
+                json!({"ok": true, "allowed": false})
+            }
+            "set_active" => {
+                if !self.foreground_consent_sessions.contains(session) {
+                    return json!({"ok": false, "error": "foreground_consent_required"});
+                }
+                let target = request.target.as_ref().and_then(foreground_target_label);
+                self.foreground_active_session = Some(session.to_owned());
+                self.update_view(|view| {
+                    view.foreground_pending = None;
+                    view.foreground_attention = None;
+                    view.foreground_active = Some(
+                        target
+                            .map(|target| format!("{title}: {target}"))
+                            .unwrap_or_else(|| title.to_owned()),
+                    );
+                });
+                self.publish_view();
+                json!({"ok": true})
+            }
+            "restore" => {
+                if !self.foreground_consent_sessions.contains(session) {
+                    return json!({"ok": false, "error": "foreground_consent_required"});
+                }
+                match restore_native_foreground_state(request.restoration.as_ref()) {
+                    Ok(()) => json!({"ok": true}),
+                    Err(error) => json!({"ok": false, "error": error}),
+                }
+            }
+            "clear" => {
+                self.foreground_active_session = None;
+                self.update_view(|view| view.foreground_active = None);
+                self.publish_view();
+                json!({"ok": true})
+            }
+            "attention" => {
+                let detail = request
+                    .restoration
+                    .as_ref()
+                    .and_then(|value| value.get("detail"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("foreground restoration failed");
+                self.foreground_active_session = None;
+                self.update_view(|view| {
+                    view.foreground_active = None;
+                    view.foreground_attention = Some(format!("{title}: {detail}"));
+                });
+                self.publish_view();
+                json!({"ok": true})
+            }
+            "revoke_session" => {
+                self.foreground_consent_sessions.remove(session);
+                if self
+                    .pending_foreground
+                    .as_ref()
+                    .is_some_and(|(pending_session, _)| pending_session == session)
+                {
+                    self.pending_foreground = None;
+                    self.update_view(|view| view.foreground_pending = None);
+                    self.publish_view();
+                }
+                if self.foreground_active_session.as_deref() == Some(session) {
+                    self.foreground_active_session = None;
+                    self.update_view(|view| view.foreground_active = None);
+                    self.publish_view();
+                }
+                json!({"ok": true})
+            }
+            _ => json!({"ok": false, "error": "unknown_operation"}),
+        }
+    }
+
+    fn grant_pending_foreground_consent(&mut self) {
+        if !self.lifecycle.enabled() || self.lifecycle.phase() != ComputerUsePhase::Ready {
+            return;
+        }
+        let Some((session, _title)) = self.pending_foreground.take() else {
+            return;
+        };
+        self.foreground_consent_sessions.insert(session);
+        self.update_view(|view| view.foreground_pending = None);
+        self.publish_view();
+    }
+
+    fn clear_foreground_state(&mut self) {
+        self.foreground_consent_sessions.clear();
+        self.pending_foreground = None;
+        self.foreground_active_session = None;
+        self.update_view(|view| {
+            view.foreground_pending = None;
+            view.foreground_active = None;
+            view.foreground_attention = None;
+        });
+        self.publish_view();
+    }
+}
+
+fn foreground_target_label(target: &Value) -> Option<String> {
+    let object = target.as_object()?;
+    let app = object.get("app_name").and_then(Value::as_str).unwrap_or("");
+    let title = object.get("title").and_then(Value::as_str).unwrap_or("");
+    let label = if app.is_empty() { title } else { app };
+    (!label.is_empty()).then(|| label.to_owned())
+}
+
+fn restore_native_foreground_state(restoration: Option<&Value>) -> Result<(), String> {
+    let restoration = restoration
+        .and_then(Value::as_object)
+        .ok_or_else(|| "missing restoration contract".to_owned())?;
+    let pointer = restoration
+        .get("pointer")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "missing pointer restoration contract".to_owned())?;
+    let x = pointer
+        .get("x")
+        .and_then(Value::as_f64)
+        .ok_or_else(|| "missing pointer x".to_owned())?;
+    let y = pointer
+        .get("y")
+        .and_then(Value::as_f64)
+        .ok_or_else(|| "missing pointer y".to_owned())?;
+    let prior_frontmost = restoration
+        .get("prior_frontmost")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "missing prior frontmost contract".to_owned())?;
+    let pid = prior_frontmost
+        .get("pid")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| "missing prior frontmost pid".to_owned())?;
+    if pid <= 0 {
+        return Err("prior frontmost pid is invalid".to_owned());
+    }
+    let pointer_result = unsafe { CGWarpMouseCursorPosition(NSPoint { x, y }) };
+    if pointer_result != 0 {
+        return Err(format!("could not restore hardware pointer ({pointer_result})"));
+    }
+    let application = NSRunningApplication::runningApplicationWithProcessIdentifier(pid as _)
+        .ok_or_else(|| "prior frontmost application is no longer running".to_owned())?;
+    if !application.activateWithOptions(NSApplicationActivationOptions::ActivateAllWindows) {
+        return Err("could not restore prior frontmost application".to_owned());
+    }
+    Ok(())
+}
+
+async fn serve_foreground_control(stream: UnixStream, events: mpsc::UnboundedSender<Event>) {
+    let (reader, mut writer) = split(stream);
+    let mut reader = BufReader::new(reader);
+    let mut line = String::new();
+    let response = match reader.read_line(&mut line).await {
+        Ok(size) if size > 0 && size <= 32 * 1024 => match serde_json::from_str::<ForegroundControlRequest>(&line) {
+            Ok(request) => {
+                let (reply, result) = oneshot::channel();
+                if events.send(Event::ForegroundControl { request, reply }).is_err() {
+                    json!({"ok": false, "error": "shell_stopped"})
+                } else {
+                    result
+                        .await
+                        .unwrap_or_else(|_| json!({"ok": false, "error": "shell_stopped"}))
+                }
+            }
+            Err(_) => json!({"ok": false, "error": "invalid_request"}),
+        },
+        _ => json!({"ok": false, "error": "invalid_request"}),
+    };
+    let encoded = serde_json::to_string(&response).unwrap_or_else(|_| "{\"ok\":false}".to_owned());
+    let _ = writer.write_all(format!("{encoded}\n").as_bytes()).await;
 }
 
 fn restored_lifecycle(stored: &StoredComputerUseState, assets_valid: bool) -> ComputerUseLifecycle {

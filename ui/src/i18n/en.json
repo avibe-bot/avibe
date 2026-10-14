@@ -76,7 +76,11 @@
       "invalidState": "Computer Use — state file needs repair; toggle to replace it",
       "unavailable": "Computer Use — bundled driver unavailable",
       "initializationFailed": "Computer Use — unavailable; restart Avibe and try again",
-      "saveFailed": "Computer Use — setting was not saved"
+      "saveFailed": "Computer Use — setting was not saved",
+      "foregroundConsent": "{{sessionTitle}} requests foreground control: Allow for this conversation",
+      "foregroundActive": "Foreground control active: {{target}}",
+      "foregroundAttention": "Foreground restoration needs attention: {{target}}",
+      "foregroundAllow": "Allow foreground control for this conversation"
     },
     "notifications": {
       "toggle": "Notifications",

@@ -17,6 +17,7 @@ from core.computer_server import (
     ComputerUseServer,
     DesktopLeaseManager,
     JsonRpcUpstream,
+    Upstream,
     UpstreamUnavailable,
     _fold_tool_result,
     _validate_input,
@@ -131,6 +132,144 @@ class FakeUpstream:
     async def close(self) -> None:
         self.close_calls += 1
         self.alive = False
+
+
+class FakeForegroundControl:
+    def __init__(self, *, allowed: bool = True) -> None:
+        self.allowed = allowed
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+        self.responses: dict[str, dict[str, Any]] = {}
+
+    async def request(
+        self,
+        operation: str,
+        *,
+        session: str,
+        title: str,
+        target: Mapping[str, Any] | None = None,
+        restoration: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        self.calls.append(
+            (
+                operation,
+                {
+                    "session": session,
+                    "title": title,
+                    "target": dict(target or {}),
+                    "restoration": dict(restoration or {}),
+                },
+            )
+        )
+        if operation == "request_consent":
+            return {"ok": True, "allowed": self.allowed}
+        return self.responses.get(operation, {"ok": True})
+
+
+class ForegroundUpstream(FakeUpstream):
+    def __init__(
+        self,
+        *,
+        target: dict[str, Any] | None = None,
+        after_restore: dict[str, Any] | None = None,
+        pointer: tuple[float, float] = (10.0, 20.0),
+        after_pointer: tuple[float, float] | None = None,
+        click_effect: str = "confirmed",
+    ) -> None:
+        super().__init__()
+        self.target = target or {
+            "pid": 7,
+            "window_id": 9,
+            "app_name": "Target",
+            "title": "Target Window",
+            "is_on_screen": True,
+            "minimized": False,
+            "on_current_space": True,
+            "current_space_id": 1,
+            "z_index": 10,
+        }
+        self.after_restore = after_restore
+        self.pointer = pointer
+        self.after_pointer = after_pointer or pointer
+        self.click_effect = click_effect
+        self.list_windows_calls = 0
+        self.cursor_calls = 0
+
+    async def request(self, method: str, params: Mapping[str, Any]) -> dict[str, Any]:
+        tool_name = params.get("name")
+        if tool_name == "list_windows":
+            self.calls.append((method, json.loads(json.dumps(params))))
+            self.list_windows_calls += 1
+            target = (
+                self.after_restore
+                if self.list_windows_calls > 1 and self.after_restore is not None
+                else self.target
+            )
+            prior = {
+                "pid": 3,
+                "window_id": 30,
+                "app_name": "Prior",
+                "title": "Prior Window",
+                "is_on_screen": True,
+                "minimized": False,
+                "on_current_space": True,
+                "current_space_id": 1,
+                "z_index": 20,
+            }
+            return {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {
+                    "content": [],
+                    "structuredContent": {
+                        "current_space_id": 1,
+                        "windows": [target, prior],
+                    },
+                },
+            }
+        if tool_name == "get_cursor_position":
+            self.calls.append((method, json.loads(json.dumps(params))))
+            self.cursor_calls += 1
+            x, y = (
+                self.after_pointer
+                if self.cursor_calls > 1
+                else self.pointer
+            )
+            return {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {
+                    "content": [],
+                    "structuredContent": {"available": True, "x": x, "y": y},
+                },
+            }
+        if tool_name == "click":
+            self.calls.append((method, json.loads(json.dumps(params))))
+            return {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {
+                    "content": [],
+                    "structuredContent": {
+                        "effect": self.click_effect,
+                        "route": "trusted_input",
+                        "delivery": {
+                            "mode": "foreground",
+                            "delivered_count": 1,
+                        },
+                    },
+                },
+            }
+        if tool_name == "get_window_state":
+            self.calls.append((method, json.loads(json.dumps(params))))
+            return {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {
+                    "content": [],
+                    "structuredContent": {"pid": 7, "window_id": 9},
+                },
+            }
+        return await super().request(method, params)
 
 
 class FakeLeaseManager:
@@ -1601,7 +1740,7 @@ async def test_window_input_requires_observation_and_rejects_focus_routes(
             "delivery_mode": "foreground",
         },
     )
-    assert "foreground_forbidden" in foreground["content"][0]["text"]
+    assert "target_missing" in foreground["content"][0]["text"]
 
     shortcut = await server.call_tool(
         "hotkey",
@@ -1613,6 +1752,308 @@ async def test_window_input_requires_observation_and_rejects_focus_routes(
         },
     )
     assert "focus_shortcut_forbidden" in shortcut["content"][0]["text"]
+
+
+def _foreground_server(
+    state_path: Path,
+    state: ComputerUseState,
+    upstream: Upstream,
+    control: FakeForegroundControl,
+    *,
+    platform: str = "darwin",
+) -> ComputerUseServer:
+    return ComputerUseServer(
+        state_path=state_path,
+        status_reader=lambda: ComputerUseStatus("ready", None, state),
+        upstream_factory=lambda _state: asyncio.sleep(0, result=upstream),
+        lease_manager=FakeLeaseManager(),  # type: ignore[arg-type]
+        foreground_control=control,  # type: ignore[arg-type]
+        platform=platform,
+    )
+
+
+@pytest.mark.asyncio
+async def test_foreground_requires_native_consent_and_reports_unattempted(
+    tmp_path: Path,
+) -> None:
+    state_path, state = _state(tmp_path)
+    upstream = ForegroundUpstream()
+    control = FakeForegroundControl(allowed=False)
+    server = _foreground_server(state_path, state, upstream, control)
+    observed = await server.call_tool(
+        "get_window_state",
+        {"session": "ses-a", "pid": 7, "window_id": 9},
+    )
+    assert not observed.get("isError")
+
+    result = await server.call_tool(
+        "click",
+        {
+            "session": "ses-a",
+            "pid": 7,
+            "window_id": 9,
+            "x": 1,
+            "y": 2,
+            "delivery_mode": "foreground",
+        },
+        session_title="QQ conversation",
+    )
+
+    payload = json.loads(result["content"][0]["text"])
+    assert payload["code"] == "foreground_consent_required"
+    assert payload["params"]["foreground_outcome"] == "unattempted"
+    assert [name for name, _ in control.calls] == ["request_consent"]
+    assert not any(
+        params["arguments"].get("name") == "click"
+        for _method, params in upstream.calls
+    )
+
+
+@pytest.mark.asyncio
+async def test_foreground_click_on_visible_target_verifies_restore(
+    tmp_path: Path,
+) -> None:
+    state_path, state = _state(tmp_path)
+    upstream = ForegroundUpstream(
+        target={
+            "pid": 7,
+            "window_id": 9,
+            "app_name": "Target",
+            "title": "Target Window",
+            "is_on_screen": True,
+            "minimized": False,
+            "on_current_space": True,
+            "current_space_id": 1,
+            "z_index": 10,
+        },
+    )
+    control = FakeForegroundControl()
+    server = _foreground_server(state_path, state, upstream, control)
+
+    observed = await server.call_tool(
+        "get_window_state",
+        {
+            "session": "ses-a",
+            "pid": 7,
+            "window_id": 9,
+            "delivery_mode": "foreground",
+        },
+        session_title="QQ conversation",
+    )
+    assert not observed.get("isError")
+    observed_call = next(
+        params["arguments"]
+        for _method, params in upstream.calls
+        if params.get("name") == "get_window_state"
+    )
+    assert "delivery_mode" not in observed_call
+    control.calls.clear()
+    result = await server.call_tool(
+        "click",
+        {
+            "session": "ses-a",
+            "pid": 7,
+            "window_id": 9,
+            "x": 1,
+            "y": 2,
+            "delivery_mode": "foreground",
+        },
+        session_title="QQ conversation",
+    )
+
+    assert not result.get("isError")
+    assert result["structuredContent"]["foreground_outcome"] == (
+        "effect_occurred_restore_verified"
+    )
+    assert result["structuredContent"]["restoration_verified"] is True
+    payloads = [
+        json.loads(item["text"].split("\n", 1)[1])
+        for item in result["content"]
+        if item.get("type") == "text" and item["text"].startswith("Structured content:\n")
+    ]
+    assert payloads[-1]["foreground_outcome"] == "effect_occurred_restore_verified"
+    assert payloads[-1]["restoration_verified"] is True
+    assert [name for name, _ in control.calls] == [
+        "request_consent",
+        "set_active",
+        "restore",
+        "clear",
+    ]
+    click_calls = [
+        params["arguments"]
+        for _method, params in upstream.calls
+        if params.get("name") == "click"
+    ]
+    assert click_calls == [
+        {
+            "session": "ses-a",
+            "pid": 7,
+            "window_id": 9,
+            "x": 1,
+            "y": 2,
+            "delivery_mode": "foreground",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_foreground_restore_failure_reports_effect_without_retry(
+    tmp_path: Path,
+) -> None:
+    state_path, state = _state(tmp_path)
+    upstream = ForegroundUpstream(
+        after_restore={
+            "pid": 7,
+            "window_id": 9,
+            "app_name": "Target",
+            "title": "Target Window",
+            "is_on_screen": True,
+            "minimized": False,
+            "on_current_space": True,
+            "current_space_id": 1,
+            "z_index": 30,
+        },
+    )
+    control = FakeForegroundControl()
+    server = _foreground_server(state_path, state, upstream, control)
+    observed = await server.call_tool(
+        "get_window_state",
+        {"session": "ses-a", "pid": 7, "window_id": 9},
+    )
+    assert not observed.get("isError")
+
+    result = await server.call_tool(
+        "click",
+        {
+            "session": "ses-a",
+            "pid": 7,
+            "window_id": 9,
+            "x": 1,
+            "y": 2,
+            "delivery_mode": "foreground",
+        },
+        session_title="QQ conversation",
+    )
+
+    payload = json.loads(result["content"][0]["text"])
+    assert payload["code"] == "foreground_restore_failed"
+    assert payload["params"]["foreground_outcome"] == "effect_occurred_restore_failed"
+    assert [name for name, _ in control.calls] == [
+        "request_consent",
+        "set_active",
+        "restore",
+        "attention",
+    ]
+    assert len(
+        [
+            params["arguments"]
+            for _method, params in upstream.calls
+            if params.get("name") == "click"
+        ]
+    ) == 1
+
+
+@pytest.mark.asyncio
+async def test_foreground_admission_has_stable_missing_and_space_reasons(
+    tmp_path: Path,
+) -> None:
+    for target, expected in (
+        (
+            {
+                "pid": 7,
+                "window_id": 8,
+                "app_name": "Other",
+                "title": "Other",
+                "is_on_screen": True,
+                "minimized": False,
+                "on_current_space": True,
+                "current_space_id": 1,
+                "z_index": 10,
+            },
+            "target_missing",
+        ),
+        (
+            {
+                "pid": 7,
+                "window_id": 9,
+                "app_name": "Target",
+                "title": "Target",
+                "is_on_screen": True,
+                "minimized": False,
+                "on_current_space": False,
+                "current_space_id": 2,
+                "z_index": 10,
+            },
+            "target_off_active_space",
+        ),
+        (
+            {
+                "pid": 7,
+                "window_id": 9,
+                "app_name": "Target",
+                "title": "Target",
+                "is_on_screen": False,
+                "minimized": False,
+                "on_current_space": True,
+                "current_space_id": 1,
+                "z_index": 10,
+            },
+            "target_not_admissible",
+        ),
+    ):
+        target_dir = tmp_path / expected
+        target_dir.mkdir()
+        state_path, state = _state(target_dir)
+        upstream = ForegroundUpstream(target=target)
+        control = FakeForegroundControl()
+        server = _foreground_server(state_path, state, upstream, control)
+        observed = await server.call_tool(
+            "get_window_state",
+            {"session": "ses-a", "pid": 7, "window_id": 9},
+        )
+        assert not observed.get("isError")
+        result = await server.call_tool(
+            "click",
+            {
+                "session": "ses-a",
+                "pid": 7,
+                "window_id": 9,
+                "x": 1,
+                "y": 2,
+                "delivery_mode": "foreground",
+            },
+        )
+        payload = json.loads(result["content"][0]["text"])
+        assert payload["code"] == expected
+        assert payload["params"]["foreground_outcome"] == "unattempted"
+
+
+def test_foreground_rejects_other_operations_and_windows(
+    tmp_path: Path,
+) -> None:
+    cases = (
+        ("type_text", {"pid": 7, "window_id": 9, "text": "x"}, "darwin", "foreground_forbidden"),
+        ("click", {"pid": 7, "window_id": 9}, "win32", "platform_unsupported"),
+    )
+    for index, (tool, arguments, platform, expected) in enumerate(cases):
+        target_dir = tmp_path / str(index)
+        target_dir.mkdir()
+        state_path, state = _state(target_dir)
+        server = _foreground_server(
+            state_path,
+            state,
+            ForegroundUpstream(),
+            FakeForegroundControl(),
+            platform=platform,
+        )
+        result = asyncio.run(
+            server.call_tool(
+                tool,
+                {"session": "ses-a", **arguments, "delivery_mode": "foreground"},
+            )
+        )
+        payload = json.loads(result["content"][0]["text"])
+        assert payload["code"] == expected
 
 
 def test_raw_click_mode_is_admitted_only_for_exact_background_pixel_click() -> None:
@@ -2239,10 +2680,6 @@ async def test_readiness_blip_keeps_a_renewed_lease_epoch(
         ({"element_token": ""}, "window_target_required"),
         ({"pid": True, "window_id": 9}, "window_target_required"),
         ({"pid": 7, "window_id": True}, "window_target_required"),
-        (
-            {"pid": 7, "window_id": 9, "delivery_mode": "foreground"},
-            "foreground_forbidden",
-        ),
     ],
 )
 def test_input_rejects_non_window_and_unknown_target_shapes(

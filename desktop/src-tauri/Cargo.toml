@@ -76,8 +76,10 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = [
   "NSEvent",
   "NSGraphics",
   "NSResponder",
+  "NSRunningApplication",
   "NSView",
   "NSWindow",
+  "libc",
 ] }
 objc2-web-kit = { version = "0.3.2", default-features = false, features = [
   "std",
