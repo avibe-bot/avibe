@@ -32,6 +32,14 @@ is pending/unavailable, keep that receipt only on the existing pending confirmat
 for Refresh. Settlement, a new login/removal, method changes, or cancellation
 invalidate it; ordinary readiness never receives the receipt. The form owns
 readback/application errors rather than cancelling an already completed login.
+A pending receipt must still own the confirmation when its asynchronous read
+finishes; a new OAuth action invalidates both that owner and the read generation.
+
+Native cleanup capability is separate from OAuth certainty. Opaque native
+containers may offer explicit cleanup without claiming sign-in. Environment- or
+settings-supplied tokens are not removable by native logout: the UI explains
+this, and the Web removal entrypoints refuse before constructing the mutation
+service rather than reporting a false sign-out.
 
 ## Validation contract
 
@@ -67,10 +75,10 @@ from the existing user-settings mutation/backup helpers:
 - Use the merged inputs only for effective auth selection. Editable saved-key
   metadata remains the user-settings/V2 migration projection; project credentials
   must not be copied into user settings or surfaced as a removable saved key.
-- Settings, Direct connection observation, and retained native-Source readiness
-  consume this same resolver. Model Hub completion may trust opaque store
-  metadata only after the owning login succeeds and settings-source exclusion
-  has succeeded; a reader exception or invalid response is not success.
+- Settings and Direct connection observation consume this resolver. Model Hub
+  completion uses the same global readback only after its owning login succeeds
+  and settings-source exclusion succeeds; a reader exception or invalid response
+  is not success. Per-turn routing admission is outside this change.
 - A concrete competing key vetoes subscription completion. Unreadable, malformed
   or unsupported settings are a failed observation, not the opaque-native-store
   uncertainty that a verified OAuth receipt may override. Do not execute helpers
@@ -85,6 +93,24 @@ file locations](https://code.claude.com/docs/en/settings#where-claude-code-keeps
 and [environment precedence](https://code.claude.com/docs/en/env-vars#precedence),
 read on 2026-10-14. No process lifecycle changes or persistent cache are authorized
 by this correction.
+
+## Fourth-round scope correction
+
+Review of `e1cc5f281` exposed scope creep in adding this default-cwd observer to
+per-turn native-Source readiness. That extension is reverted: it did not carry
+the actual turn cwd and added filesystem work on the controller loop. Neither a
+new per-turn admission contract nor controller routing changes belong in this
+status-read fix; the baseline routing behavior is preserved.
+
+The Windows and unowned-repository findings contradict the public local-file
+location rules cited above. Those cases deliberately keep the local file beside
+the cwd's shared file. Keep that behavior and its explicit fixtures, rather than
+reading an inapplicable root file or rejecting supported shared checkouts.
+
+The actionable consumer gaps are handled at their existing owners: native
+cleanup versus external-token capability, removal refusal for external tokens,
+and receipt/read invalidation when a new action races a pending Refresh. No
+credential writer or AgentAuthService lifecycle is redesigned.
 
 ## Non-goals / limitations
 

@@ -316,8 +316,9 @@ export function BackendConnectionForm({ backend, provider, initialMethod = 'oaut
     });
   };
   const confirm = async (submission: Submission, receiptError = '', verifiedOAuth = false) => {
-    pendingConfirmation.current = { ...submission, verifiedOAuth };
-    if (!await observe({ expected: submission, receiptError, verifiedOAuth })) return false;
+    const receipt = { ...submission, verifiedOAuth };
+    pendingConfirmation.current = receipt;
+    if (!await observe({ expected: submission, receiptError, verifiedOAuth }) || pendingConfirmation.current !== receipt) return false;
     pendingConfirmation.current = null;
     consume(submission);
     await onConnectedRef.current?.();
@@ -338,7 +339,10 @@ export function BackendConnectionForm({ backend, provider, initialMethod = 'oaut
     await observe({ receiptError });
   };
   const changeOAuthActive = (value: boolean) => {
-    if (value) pendingConfirmation.current = null; // A new login/removal supersedes the old receipt.
+    if (value) {
+      pendingConfirmation.current = null;
+      observation.current += 1; // A new action also invalidates an in-flight Refresh.
+    }
     setActive(value);
   };
   const oauth = useBackendOAuth({ backend, opencodeProviderId: provider?.id, onSuccess: confirmOAuth,
@@ -473,6 +477,7 @@ export function BackendConnectionForm({ backend, provider, initialMethod = 'oaut
     {!loading && hubOwnedAuth && <HubOwnedAuthNotice onNavigate={compact ? onCancel : undefined} />}
     {!loading && !hubOwnedAuth && <>
     {uncertain && <p className="connection-notice">{t('onboarding.connection.uncertain')}</p>}
+    {native && 'has_oauth_credentials' in native && native.has_oauth_credentials && native.can_remove_oauth_credentials === false && <p className="connection-notice">{t('settings.backends.claudeOAuthExternallyManaged')}</p>}
     {native && 'file_store_active' in native && method === 'api_key' && !native.file_store_active && !uncertain && <p className="connection-notice">{t('settings.backends.codexCredentialsStoreKeyringWarn', { store: native.credentials_store })}</p>}
     {native && 'settings_conflict' in native && native.settings_conflict && <p className="connection-notice">{t('settings.backends.claudeSettingsConflictTitle')}: {t('settings.backends.claudeSettingsConflictBody', { var: native.settings_env_key_var || 'ANTHROPIC_API_KEY', path: native.settings_path })}</p>}
     {applyPending && <Button variant="secondary" disabled={busy} onClick={() => void refresh()}>{t('onboarding.connection.refresh')}</Button>}
@@ -481,7 +486,7 @@ export function BackendConnectionForm({ backend, provider, initialMethod = 'oaut
     {error && <div role="alert" className="connection-error">{error}{!native && !currentProvider && <Button variant="secondary" onClick={() => void observe()}>{t('common.retry')}</Button>}</div>}
     {method === 'oauth' && (!compact ? <BackendOAuthPanel backend={backend} opencodeProviderId={provider?.id} signedIn={signedIn}
       title={title} subtitle={hint} hideRemove={backend === 'opencode'} onSuccess={confirmOAuth} onRemoved={removed} onFailure={observeOAuthFailure} onCancel={() => { pendingConfirmation.current = null; observation.current += 1; }} onActiveChange={changeOAuthActive}
-      canRemoveAuth={authReadable && Boolean(native && ('has_oauth_credentials' in native ? native.has_oauth_credentials : native.has_chatgpt_tokens))}
+      canRemoveAuth={authReadable && Boolean(native && ('has_oauth_credentials' in native ? native.can_remove_oauth_credentials ?? native.has_oauth_credentials : native.has_chatgpt_tokens))}
       signedInDetail={native && 'chatgpt_account' in native && native.chatgpt_account ? [native.chatgpt_account.email, native.chatgpt_account.plan_type, (native.chatgpt_account.organizations?.find((org) => org.is_default) || native.chatgpt_account.organizations?.[0])?.title].filter(Boolean).join(' · ') : undefined} /> : <>
       {oauth.hubOwnedAuth && <HubOwnedAuthNotice onNavigate={onCancel} />}
       {oauth.error && !oauth.hubOwnedAuth && <p className="connection-error" role="alert">{oauth.error}</p>}

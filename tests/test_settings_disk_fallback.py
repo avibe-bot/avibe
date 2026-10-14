@@ -187,27 +187,27 @@ def test_claude_oauth_state_reads_current_dot_credentials_file(tmp_path: Path) -
 
 
 @pytest.mark.parametrize(
-    "store,metadata,credential,expected_mode,uncertain,has_oauth",
+    "store,metadata,credential,expected_mode,uncertain,has_oauth,removable",
     [
-        ("missing", "not_found", None, "none", False, False),
-        ("oauth", "not_found", None, "oauth", False, True),
-        ("invalid", "not_found", None, "none", True, False),
-        ("mcp", "not_found", None, "none", False, False),
-        ("oauth", "found", None, "none", True, False),
-        ("oauth", "permission_needed", None, "none", True, False),
-        ("missing", "found", "api_key", "api_key", False, False),
-        ("oauth", "not_found", "api_key", "api_key", False, True),
-        ("missing", "found", "setup_token", "oauth", False, True),
-        ("missing", "found", "legacy_env_key", "api_key", False, False),
-        ("missing", "found", "masked_env_key", "none", True, False),
-        ("missing", "not_found", "settings_token", "oauth", False, True),
-        ("missing", "found", "settings_token", "oauth", False, True),
-        ("missing", "not_found", "blank_settings_token", "none", False, False),
-        ("missing", "found", "settings_key_token", "api_key", False, True),
+        ("missing", "not_found", None, "none", False, False, False),
+        ("oauth", "not_found", None, "oauth", False, True, True),
+        ("invalid", "not_found", None, "none", True, False, True),
+        ("mcp", "not_found", None, "none", False, False, False),
+        ("oauth", "found", None, "none", True, False, True),
+        ("oauth", "permission_needed", None, "none", True, False, True),
+        ("missing", "found", "api_key", "api_key", False, False, True),
+        ("oauth", "not_found", "api_key", "api_key", False, True, True),
+        ("missing", "found", "setup_token", "oauth", False, True, False),
+        ("missing", "found", "legacy_env_key", "api_key", False, False, True),
+        ("missing", "found", "masked_env_key", "none", True, False, True),
+        ("missing", "not_found", "settings_token", "oauth", False, True, False),
+        ("missing", "found", "settings_token", "oauth", False, True, False),
+        ("missing", "not_found", "blank_settings_token", "none", False, False, False),
+        ("missing", "found", "settings_key_token", "api_key", False, True, False),
     ],
 )
 def test_get_claude_auth_reads_native_store_without_launching_cli(
-    tmp_path, monkeypatch, store, metadata, credential, expected_mode, uncertain, has_oauth,
+    tmp_path, monkeypatch, store, metadata, credential, expected_mode, uncertain, has_oauth, removable,
 ) -> None:
     """GET observes real fixture files/metadata, never refreshes or mutates.
 
@@ -272,6 +272,15 @@ def test_get_claude_auth_reads_native_store_without_launching_cli(
     assert state["active_auth_mode"] == expected_mode
     assert state["auth_mode_uncertain"] is uncertain
     assert state["has_oauth_credentials"] is has_oauth
+    assert state["can_remove_oauth_credentials"] is removable
+    if credential in {"setup_token", "settings_token", "settings_key_token"}:
+        from vibe import api
+
+        monkeypatch.setattr(api, "_get_oauth_service", forbidden)
+        for operation in (lambda: api.remove_backend_auth_async("claude"), api.remove_claude_oauth_credentials_async):
+            removed = asyncio.run(operation())
+            assert removed["ok"] is False and removed["error"] == "external_oauth_token"
+        forbidden.assert_not_called()
     assert state["has_api_key"] is has_key
     assert {p: p.read_bytes() for p in settings.parent.iterdir() if p.is_file()} == before
     assert not unused_cwd.exists()

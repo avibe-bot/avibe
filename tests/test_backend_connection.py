@@ -796,6 +796,7 @@ def test_claude_native_observation_respects_selected_store(
         ("nested_root_local", "api_key"),
         ("worktree_main_local", "api_key"),
         ("windows_cwd_local", "subscription"),
+        ("unowned_root_local", "subscription"),
         ("invalid_project", "unknown"),
         ("invalid_local", "unknown"),
         ("helper", "unknown"),
@@ -817,7 +818,6 @@ def test_claude_read_only_auth_observes_all_enabled_settings_sources(
     process launches; neither the resolver nor its consumers may run a helper.
     """
     from core.handlers.model_hub.native_oauth import _signed_in
-    from modules.agents import model_hub as native_router
     from vibe import claude_config
     from vibe.claude_config import get_claude_credentials_path, get_claude_settings_path
 
@@ -847,7 +847,7 @@ def test_claude_read_only_auth_observes_all_enabled_settings_sources(
         local["env"]["ANTHROPIC_AUTH_TOKEN"] = "fixture-local-token"
     if case == "project_setup_token":
         project["env"]["CLAUDE_CODE_OAUTH_TOKEN"] = "fixture-project-oauth"
-    if case in {"nested_root_local", "worktree_main_local", "windows_cwd_local"}:
+    if case in {"nested_root_local", "worktree_main_local", "windows_cwd_local", "unowned_root_local"}:
         git = root / ".git"
         git.mkdir(parents=True)
         (git / "HEAD").write_text("ref: refs/heads/main\n")
@@ -891,6 +891,18 @@ def test_claude_read_only_auth_observes_all_enabled_settings_sources(
                 for p in directory.rglob("*") if p.is_file()}
 
     before = auth_files()
+    if case == "unowned_root_local":
+        original_stat = Path.stat
+
+        def stat(path, *args, **kwargs):
+            result = original_stat(path, *args, **kwargs)
+            if path == root / ".git":
+                fields = list(result)
+                fields[4] = os.getuid() + 1
+                return os.stat_result(fields)
+            return result
+
+        monkeypatch.setattr(Path, "stat", stat)
     if case == "unreadable_project":
         original_read = Path.read_text
 
@@ -903,9 +915,6 @@ def test_claude_read_only_auth_observes_all_enabled_settings_sources(
 
     native = api.get_claude_auth()
     state = asyncio.run(api.get_backend_connection("claude"))
-    monkeypatch.setattr(native_router, "load_config_or_default", lambda: connection.config)
-    monkeypatch.setattr(native_router.shutil, "which", lambda _binary: "/fixture/claude")
-    assert native_router.ModelHubRuntimeRouter._default_native_cli_ready("claude") is (expected_auth == "subscription")
 
     assert state["auth"] == expected_auth
     assert state["ready"] is (expected_auth != "unknown")

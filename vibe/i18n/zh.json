@@ -462,6 +462,7 @@
     "agentPidsLimitUnavailable": "未知或不限",
     "agentMemoryLimit": "共享 Agent cgroup 记录到内存上限事件；并发 Agent 进程可能受到影响。",
     "claudeCredentialTypeInvalid": "Claude Code 凭据类型只能选择 API Key 或 Auth Token。",
+    "claudeOAuthExternallyManaged": "此 OAuth token 由环境变量或 Claude 设置提供，仍会被选用。请从提供它的位置移除；清理已存账号凭据无法将它退出。",
     "claudeAuthObservationUnavailable": "未运行 CLI，无法确定 Claude 当前选择的认证方式。请检查配置的工作目录及其中的 Claude 设置；仅有已保存的 OAuth 凭据并不能证明它们会选择 OAuth。",
     "claudeSessionNotFound": "Claude Code 在当前工作目录下找不到历史会话 `{sessionId}`：\n`{path}`\n\nClaude Code 的会话和工作目录相关。通常是恢复会话后切换了工作目录，或本地 Claude Code 会话数据发生变化。请在原工作目录恢复原会话，再手动重试待发送的输入；也可以在当前目录开始一个新会话。",
     "claudeInputRuntimeChanged": "这条消息尚未发送，因为 Claude 连接在本地写入前发生了变化。会话和后台任务均已保留，请在准备好后重试待发送的消息。",

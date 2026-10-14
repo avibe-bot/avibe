@@ -817,8 +817,7 @@ class ModelHubRuntimeRouter:
     ) -> bool:
         if backend == "vibey":
             return False
-        config = load_config_or_default()
-        runtime_config = getattr(config.agents, backend)
+        runtime_config = getattr(load_config_or_default().agents, backend)
         cli_path = str(getattr(runtime_config, "cli_path", "") or "").strip()
         if (
             not bool(getattr(runtime_config, "enabled", False))
@@ -827,14 +826,11 @@ class ModelHubRuntimeRouter:
         ):
             return False
         if backend == "claude":
-            from vibe.claude_config import read_claude_launch_auth_env
+            from vibe.claude_config import read_claude_settings_env
 
-            try:
-                env = read_claude_launch_auth_env(config)
-            except (OSError, ValueError, UnicodeError):
-                return False
             conflicts = {"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL"}
-            return not any(env.get(key) for key in conflicts)
+            settings_env = read_claude_settings_env()
+            return not any(key in settings_env or os.environ.get(key) for key in conflicts)
         if backend != "codex":
             return False
 

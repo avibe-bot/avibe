@@ -708,6 +708,7 @@
       "oauthReauthenticate": "重新登录",
       "oauthRemove": "退出登录",
       "oauthCleanStoredCredentials": "清理账号凭据",
+      "claudeOAuthExternallyManaged": "此 OAuth token 由环境变量或 Claude 设置提供。请从提供它的位置移除；清理已存账号凭据无法将它退出。",
       "oauthRemoved": "已移除凭据。",
       "oauthRemoveFailed": "移除凭据失败：{{detail}}",
       "oauthRemovePartial": "已清除 Avibe 内的凭据，但 CLI logout 返回错误：{{detail}}。CLI 自己的凭据文件可能仍在磁盘上。",

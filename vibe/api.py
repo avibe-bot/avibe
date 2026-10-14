@@ -10738,6 +10738,14 @@ def remove_backend_auth(backend: str) -> dict:
     return _submit_oauth_coro(remove_backend_auth_async(backend), timeout=30.0)
 
 
+async def _claude_external_oauth_removal_error() -> dict | None:
+    state = await asyncio.to_thread(get_claude_auth)
+    if state.get("has_oauth_credentials") and state.get("can_remove_oauth_credentials") is False:
+        return {"ok": False, "error": "external_oauth_token",
+                "detail": backend_t("error.claudeOAuthExternallyManaged")}
+    return None
+
+
 async def remove_backend_auth_async(backend: str) -> dict:
     """Clear stored credentials for Claude or Codex (web Settings)."""
     backend = (backend or "").strip().lower()
@@ -10746,6 +10754,10 @@ async def remove_backend_auth_async(backend: str) -> dict:
     recovery_message = _config_recovery_message()
     if recovery_message:
         return {"ok": False, "error": "config_recovery", "message": recovery_message}
+    if backend == "claude":
+        external = await _claude_external_oauth_removal_error()
+        if external:
+            return external
     service = _get_oauth_service()
     try:
         return await service.remove_web_auth(backend)
@@ -10761,6 +10773,9 @@ async def remove_claude_oauth_credentials_async() -> dict:
     recovery_message = _config_recovery_message()
     if recovery_message:
         return {"ok": False, "error": "config_recovery", "message": recovery_message}
+    external = await _claude_external_oauth_removal_error()
+    if external:
+        return external
     service = _get_oauth_service()
     try:
         return await service.clear_claude_oauth_credentials_only()
@@ -11387,8 +11402,8 @@ def get_claude_auth(*, connection_observation: bool = False) -> dict:
     configured_base = configured_base.strip() if isinstance(configured_base, str) else ""
     effective_key = settings_key or configured_key
     effective_base = settings_base or configured_base
-    # The same observer supplies Direct and retained native-Source readiness;
-    # do not duplicate credential-source or precedence rules here.
+    # Settings and Direct observation share this read-only projection; it is
+    # not a per-turn native-Source admission check.
     try:
         launch_env = read_claude_launch_auth_env(config)
     except (OSError, ValueError, UnicodeError):
@@ -11401,11 +11416,15 @@ def get_claude_auth(*, connection_observation: bool = False) -> dict:
         return {"ok": True, "active_auth_mode": "api_key"}
 
     oauth_signed_in: bool | None
+    can_remove_oauth_credentials = False
     if launch_env.get("CLAUDE_CODE_OAUTH_TOKEN"):
         oauth_signed_in = True
     else:
         try:
             snapshot = read_native_oauth("claude", allow_secret=False)
+            # A possible native container is enough to offer explicit cleanup,
+            # not enough to claim OAuth. An external token is not ours to remove.
+            can_remove_oauth_credentials = snapshot is not None
             oauth_signed_in = False if snapshot is None else True if snapshot.exportable else None
         except Exception:
             # Native errors may carry sensitive context. Neither errors nor an
@@ -11457,6 +11476,7 @@ def get_claude_auth(*, connection_observation: bool = False) -> dict:
         "api_key_masked": _mask_api_key(effective_key),
         "api_key_source": api_key_source,
         "has_oauth_credentials": oauth_signed_in is True,
+        "can_remove_oauth_credentials": can_remove_oauth_credentials,
         "base_url": effective_base or None,
         "settings_path": disk_state.get("settings_path"),
         "settings_exists": bool(disk_state.get("settings_exists")),
