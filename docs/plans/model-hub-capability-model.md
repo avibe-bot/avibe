@@ -115,7 +115,11 @@ no marker, and a pending one's marker becomes its generation.
   - A hosted-content rule match on a pinned request becomes `pin_unavailable` with a machine-readable `reason`. Vibey
     re-resolves the hop, whose fresh facts now name that tool as unsupported, and resends with the same-named function
     (`vibey-hosted-tools.md` §3.5).
-- Negative evidence expires after 7 days. Relays change, and an expired record falls back to the priors.
+- **How long negative evidence lasts.**
+  - Hosted-tool evidence has no time limit (owner decision, 2026-10-15). It stays until the user clears it in
+    Models → Tools (`vibey-hosted-tools.md` §3.3, §8.1) or its wire stamp no longer matches (§3.3).
+  - Effort evidence keeps its 7-day expiry for now: it has no clear action, and a relay's effort support changes
+    more often than its tool support.
 
 ### 3.3 No probes; the wire stamp
 
@@ -130,8 +134,8 @@ no marker, and a pending one's marker becomes its generation.
   re-rendered request. A record whose stamp differs from the current one reads as unknown, for
   efforts and hosted tools alike. So a refusal learned under one engine or one rendered config cannot survive a
   change that could reverse it: an engine upgrade, or a rendering change such as the `is-compat` flag for xAI
-  (#2620), which changes what xAI receives for replayed reasoning. The 7-day TTL bounds whatever the stamp does not
-  capture, such as a change on the provider's side.
+  (#2620), which changes what xAI receives for replayed reasoning. A change on the provider's side, which the stamp
+  cannot see, waits for the user's clear (hosted tools) or the 7-day expiry (efforts).
 - **What goes.** v1's `shape` field, probe-shape staleness, age-based re-verification, and the `hosted_wire`
   manifest field (never introduced; `engine_stamp()` loses its `hosted_wire` branch). Positive evidence needed them
   because it vouched for a wire; it no longer vouches for anything.
@@ -303,7 +307,8 @@ No new billing store, budget, or cap.
    error creates none.
 3. Nothing probes. Every evidence record comes from a real request in a turn the user started.
 4. Changing a Source's identity drops its evidence. Negative evidence reads as unknown once its wire stamp differs
-   from the current one or it is 7 days old. Positive evidence never changes routing.
+   from the current one, when the user clears it (hosted tools), or after 7 days (efforts only). Positive evidence
+   never changes routing.
 5. #2539: a Source that rejected `ultra` shows "ultra · not supported on this Source". The next request at `ultra`
    either skips that hop or fails before invocation with `effort_unsupported`, never a provider 400.
 6. Valuation applies context tiers when a call's input tokens exceed the tier size. A model with tiers and no flat

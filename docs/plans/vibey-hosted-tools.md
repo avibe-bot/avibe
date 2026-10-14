@@ -144,16 +144,21 @@ The evidence store, its record and its owner are the capability model's §3. v2 
     `hosted_unsupported` reason.
   - Generic errors never create evidence: 5xx, overload, rate limit, auth, and any 400 that does not name the
     feature.
-- **Lifetime.** Negative evidence expires after 7 days (relays change). It also never outlives the wire it was
-  learned on: every record carries the wire stamp it was observed under, the engine release, the Avibe release (which covers
+- **Lifetime (owner decision, 2026-10-15 01:20).** Negative hosted-tool evidence has no time limit. It stays until
+  one of these clears it:
+  - the user clears it in Models → Tools, for one (Source, tool) or for every Source of a tool (§8.1);
+  - its wire stamp no longer matches, which happens on its own when the Source's config or the engine release
+    changes.
+
+  Every record carries the wire stamp it was observed under, the engine release, the Avibe release (which covers
   the bundled overlay's declarations and the adapters' request shape), and a digest of the Source's rendered engine
   entry (credentials and the model list excluded), and a record whose stamp differs from the current one reads as
   unknown. The stamp is computed when the engine config is rendered (`sync_sources`) and
   held in memory per Source; evidence reads and writes take it from memory and never render on a request path, as
   `engine_stamp()` is never called on one. So a refusal learned under one engine or one rendered config cannot survive a
   change that could reverse it, such as the dependency lane's `is-compat` flip for xAI (#2620), which changes what
-  xAI receives for replayed reasoning. The 7-day TTL bounds whatever the stamp does not catch. A Source identity
-  change drops the Source's evidence as before.
+  xAI receives for replayed reasoning. A change on the provider's side that the stamp cannot see (a relay that starts
+  supporting a tool) waits for the user's clear. A Source identity change drops the Source's evidence as before.
 - **What v1's staleness rules become.** v1 needed `engine` and `shape` to stop positive probe evidence from vouching
   for a wire it was not taken on. v2 routing never reads positive evidence, so `shape` and probe staleness go
   (§11). The wire stamp keeps one job: retiring negative evidence. The `hosted_wire` manifest field is not
@@ -204,6 +209,9 @@ The evidence store, its record and its owner are the capability model's §3. v2 
   - `PUT /api/models/hosted-tools/<tool>` is per field: an absent field is unchanged, and an explicit `null` resets
     `executor_order` to automatic or `default_model` to the default. `enabled` is a boolean. It answers the same
     read.
+  - `POST /api/models/hosted-tools/<tool>/clear` with `{source_id}` clears that Source's negative records for the tool
+    (`call` and `replay`); with `{}` it clears them for every Source of the tool. It answers the same read. It
+    writes nothing else, and the next turn's hop facts assume the tool again on those Sources.
   - The probe endpoint is removed (§11).
 
 ### 3.4 Hop facts
@@ -273,7 +281,7 @@ failover, and is refused unpinned (C-6 item 7). What changes is what happens aft
     evidence is written (§3.2).
 - **The cost is one cold prompt prefix.** Dropping a native declaration changes the tools block, so the resend and
   the next turns start a new cache prefix: once per (Source, tool), when the refusal is first learned, and again only
-  after the negative evidence expires and the tool is tried natively once more. The upstream is not called twice
+  after the record is cleared (by the user or a stamp change) and the tool is tried natively once more. The upstream is not called twice
   for nothing: a refusal before output costs no output tokens.
 - **The gateway never rewrites hosted content.** Vibey renders every request from its canonical records; the gateway
   never swaps declarations or converts history. C-6 item 6's opaque thinking strip still applies to unpinned
@@ -575,6 +583,10 @@ Unchanged from v1 §7.3 (owner decision, 2026-10-13 19:14), with the producer no
     written at most hourly (§3.2);
   - "<Source> 不支持，已改用 <Source>" when a `refused[]` entry is older than `latest_ok` and on another Source;
     "<Source> 不支持" alone otherwise;
+  - **clearing a refusal:** each `refused[]` line has a "清除" action for that (Source, tool), and a card with more
+    than one refusal also has "全部清除" for the tool (the `clear` endpoint, §3.3). A cleared Source is tried
+    natively again from the next turn; if it still refuses, the line comes back after that call. Refusals do not
+    expire on their own (§3.2);
   - nothing before first use. No "unknown", "unverified" or "unchecked" wording anywhere.
 - **Search cards** show an optional **Advanced** section with the executor order over `executor_candidates`: up/down
   buttons (keyboard- and screen-reader-accessible, the route chain editor's pattern), each row with its Source's
@@ -663,6 +675,8 @@ under the freeze protocol (`model-hub-contracts/README.md`).
   `default_model`, `effective_default`, `models[]`, `image_offered_by[]`. `reverify`, `executor`, `bound` and
   `candidates[]` (with `call`, `replay`, `probe_estimate`) go. The PUT body is per field (§3.3).
 - `hosted-tool-probe-result.schema.json` is deleted, with its `api-response.schema.json` branch and `api.md` row.
+- `api.md` gains `POST /api/models/hosted-tools/<tool>/clear` (`{source_id?}` → the read, §3.3), with its
+  `api-response.schema.json` branch.
 - `provider-overlay.schema.json` gains `executor_model` per vendor and `image_models[]`.
 - V2 config: `model_hub.hosted_tools` as §3.3.
 
@@ -695,10 +709,10 @@ phase D's display work; that PR adds the codes' en and zh copy in `vibe/i18n` an
 
 | Phase | Lane | Work | Depends on |
 | --- | --- | --- | --- |
-| A. Evidence and priors | foundation | passive positive rule and the xAI decrypt rule (status per the A/B) in `evidence_rules.py`; `wire` stamp and negative-only routing; drop `probe`, `shape`, the `hosted_wire` branch; overlay `executor_model` and `image_models` with loader and schema; `hosted_tools` config v2 with absence = on; hop facts (§3.4); `hosted-tools-status` v2 read and PUT; remove the probe stack (§11 Model Hub) | — |
+| A. Evidence and priors | foundation | passive positive rule and the xAI decrypt rule (status per the A/B) in `evidence_rules.py`; `wire` stamp and negative-only routing; drop `probe`, `shape`, the `hosted_wire` branch; overlay `executor_model` and `image_models` with loader and schema; `hosted_tools` config v2 with absence = on; hop facts (§3.4); `hosted-tools-status` v2 read, PUT and the `clear` endpoint; negative evidence without a time limit for hosted tools; remove the probe stack (§11 Model Hub) | — |
 | B. Gateway | gateway | the served-stream observer's projection paths for hosted items, streamed and buffered (§3.2), feeding phase A's positive rule; `pin_unavailable.reason`; admission on negative evidence only; the search executor chain at call time with `executor_model`, `executor_order` and failover (§6); `image_generate` direct execution per kind (§7.4), with recorded stub tests; route verification of each shipped image model | A (hop facts, overlay, the in-memory wire stamp and the positive rule the observer writes through) |
 | C. Vibey | Vibey | declarations from facts (§4.1); the turn freeze (§3.4); `pin_unavailable` surfaced to the loop and re-resolve with its bounds (§3.5); in-flight rule; `image_generate` tool with the enum, reference images and the path record; remove native image parsing and the probe-only seams (§11 Vibey) | A; B for the executor body and images |
-| D. UI | UI | the grouped Tools tab, status lines, executor order, image models and default; passive Source chips; removals (§11 UI, i18n); the Tools-tab and chip frames in `avibe-docs/design.pen`, edited through Pencil (the Pencil MCP must be connected on the host that does it) | A (read shape, overlay `image_models`); B for positive records, which "正常" and "已改用" need |
+| D. UI | UI | the grouped Tools tab, status lines with "清除" and "全部清除", executor order, image models and default; passive Source chips; removals (§11 UI, i18n); the Tools-tab and chip frames in `avibe-docs/design.pen`, edited through Pencil (the Pencil MCP must be connected on the host that does it) | A (read shape, overlay `image_models`); B for positive records, which "正常" and "已改用" need |
 | E. Docs | foundation | public docs: what each tool does, default-on, where content goes, cost (§9) | A–D |
 
 ## 13. Acceptance properties
@@ -709,7 +723,8 @@ phase D's display work; that PR adds the codes' en and zh copy in `vibe/i18n` an
 3. A hop declares a search tool natively exactly when it is enabled, `runs_on` holds, and no current negative
    evidence exists; every other hop gets the same-named function.
 4. Positive evidence never changes routing. Negative evidence comes only from a narrow rule, names one (Source,
-   model, feature), and stops applying after 7 days or when the wire stamp it was learned under changes.
+   model, feature), and stops applying only when the user clears it or the wire stamp it was learned under changes
+   (the Source's config, the engine release or the Avibe release). It never expires by age.
 5. A refusal a narrow rule names reaches Vibey as `pin_unavailable` with its reason; Vibey re-resolves and resends
    with that tool as a function, within the bounds of §3.5. The gateway never rewrites hosted content.
 6. No hop receives `native.payload` unless it is the recorded Source under the identity that minted it, on the same
@@ -731,15 +746,15 @@ and no real credentials.
 
 | Layer | Owner boundary | Cases |
 | --- | --- | --- |
-| Evidence | `evidence_rules` against recorded served streams and error bodies | a served native web search writes one positive record; an executor call writes one for the executor; `Unsupported tool type` and `Invalid encrypted_content` each write one negative record; overload, 5xx and other 400s write none; a negative record under another wire stamp reads as unknown; one older than 7 days reads as unknown |
+| Evidence | `evidence_rules` against recorded served streams and error bodies | a served native web search writes one positive record; an executor call writes one for the executor; `Unsupported tool type` and `Invalid encrypted_content` each write one negative record; overload, 5xx and other 400s write none; a negative record under another wire stamp reads as unknown; a negative record does not expire with age; the clear endpoint removes one (Source, tool)'s records, or every Source's for the tool, and nothing else |
 | Hop facts | `hosted_tools` resolution | `assumed` from priors with no evidence; `unsupported` with a current negative; a Claude subscription never `assumed`; a translated path never `assumed`; the image enum and default, deterministic |
-| Config | `ModelHubConfig` loader | a 3.2.0 config without the section has every tool on; an rc-era section is dropped with one warning; `executor_order` and `default_model` round-trip |
+| Config | `ModelHubConfig` loader | a 3.2.0 config without the section has every tool on; an rc-era section keeps each tool's `enabled` and ignores the unknown key and fields with a warning; `executor_order` and `default_model` round-trip |
 | Gateway refusal | real gateway + loopback fake engine | a pinned native request refused with `Unsupported tool type` answers 409 with `reason`, and the evidence is written first; admission refuses a declared tool with current negative evidence; a refusal whose evidence write fails still refuses the next native declaration; an Anthropic `web_search_tool_result_error` writes no positive record |
 | Re-render | Vibey loop with a stub gateway | re-resolve after `hosted_unsupported` resends with the function, other native content still pinned; the per-key and per-turn bounds; same facts go portable; an in-flight continuation whose tool turned proxy uses the in-place form; a decrypt 400 on an unpinned request re-renders once without that identity's opaque payloads; a `pause_turn` continuation's `pin_unavailable` still ends `interrupted` |
 | Executor chain | gateway endpoint, stub providers | order from `executor_order` then Source order; failover on 5xx and on a narrow refusal; a mid-stream failure moves on and is metered; a response that never ran the tool ends the chain; a candidate removed during the chain is skipped; `model_not_found` moves on; no candidate gives a `failed` record naming the fix; metering on the executor Source; a Claude subscription is never a candidate |
 | Images | gateway endpoint + Vibey tool runtime, stub endpoints | a model outside the turn's enum is refused; generations and edits per kind; a buffered call over 120 s is not cut; reference images within the per-tool request bound; JPEG requested where allowed; a failure names the alternatives and no other model is called; bytes saved once through the media sink; the path record; no base64 in history |
 | Parsing and replay | adapters and transforms | v1's mapping and replay cases minus native images; an injected `image_generation_call` is ignored like any undeclared item, without decoding |
-| UI | Tools tab, Source chips, tool card | default on; status lines appear only after use; executor order up/down and reset; image models and default; chips without actions; no probe UI |
+| UI | Tools tab, Source chips, tool card | default on; status lines appear only after use; "清除" and "全部清除" on refusals call the clear endpoint; executor order up/down and reset; image models and default; chips without actions; no probe UI |
 | E2E, once per release | real engine + stub upstream | a native web search, a proxied X search, and one `image_generate` per shipped image kind through the shipped engine |
 
 ## 15. Known by design
@@ -747,15 +762,18 @@ and no real credentials.
 1. **Silent drops are invisible.** A Source that accepts a native declaration but never runs the tool looks like a
    model that chose not to search, and one that accepts a replayed payload but drops it loses the results' page
    content. Passive learning cannot see either. The status line simply never shows that Source executing.
-2. **The first refusal costs one request and one cold prefix** per (Source, tool), and again after the negative
-   evidence expires (§3.5).
-3. **The executor's lightweight model is a catalog choice.** A Source that does not serve it moves the chain on; the
+2. **The first refusal costs one request and one cold prefix** per (Source, tool), and again after the record is
+   cleared (§3.5).
+3. **A refusal stays until cleared.** A relay that later starts supporting a tool keeps getting the proxy function
+   until the user clears the refusal, or its config or the engine or Avibe release changes (owner decision: no
+   time limit).
+4. **The executor's lightweight model is a catalog choice.** A Source that does not serve it moves the chain on; the
    user cannot pick a different executor model in v2.
-4. **A decrypt refusal drops a whole identity's opaque payloads for the turn**, reasoning included, because xAI's
+5. **A decrypt refusal drops a whole identity's opaque payloads for the turn**, reasoning included, because xAI's
    refusal does not say which ciphertext failed (§3.5). The turn continues with portable history for that Source.
-5. **An rc-era image opt-out is not carried over.** v1's tool was `image_generation`; v2's is `image_generate`, and the
+6. **An rc-era image opt-out is not carried over.** v1's tool was `image_generation`; v2's is `image_generate`, and the
    loader treats the old key as unknown rather than mapping it (owner directive: no compatibility code for
    pre-release state). Only rc testers who turned image generation on and then off are affected; rc4 kept it off
    unless enabled.
-6. **rc-era state is dropped**: probe evidence reads as `basis: probe`, which v2's loader does not accept, so those
+7. **rc-era state is dropped**: probe evidence reads as `basis: probe`, which v2's loader does not accept, so those
    records are pruned; an rc-era `hosted_tools` section resets to the defaults.
