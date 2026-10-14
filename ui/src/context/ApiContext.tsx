@@ -1988,7 +1988,8 @@ export type BackendConnectionState = {
   backend: AgentBackendId;
   installed: boolean;
   enabled: boolean;
-  auth: 'subscription' | 'api_key' | 'none' | 'unknown';
+  // external: launch capability only; the native backend owns authentication.
+  auth: 'subscription' | 'api_key' | 'external' | 'none' | 'unknown';
   application: 'applied' | 'draining' | 'failed' | 'stopped' | 'unknown';
   ready: boolean;
   entry_eligible: boolean;
@@ -2110,17 +2111,17 @@ export type ClaudeApiKeySource = 'v2config' | 'settings_json' | null;
 export type ClaudeAuthState = {
   ok: boolean;
   auth_mode: ClaudeAuthMode;
-  // Live source the CLI is actually inheriting at launch (api_key when
-  // V2Config injects ``ANTHROPIC_API_KEY`` and strips OAuth env vars,
-  // oauth when Claude Code reports or stores a usable first-party login).
+  // Legacy field; native authentication is not inferred by this inventory.
   active_auth_mode: ActiveAuthMode;
+  auth_managed_by?: 'claude';
+  auth_mode_uncertain?: boolean;
+  oauth_store_state?: 'present' | 'absent' | 'unknown';
+  can_remove_oauth_credentials?: boolean;
   has_api_key: boolean;
   api_key_length: number;
   api_key_masked: string | null;
   api_key_source?: ClaudeApiKeySource;
-  // Raw Claude Code account-token signal. This may remain true while Avibe
-  // is actively using API-key mode, so UI "signed in" indicators should use
-  // active_auth_mode instead.
+  // Inspectable native material only, not a signed-in or effective-auth claim.
   has_oauth_credentials: boolean;
   base_url: string | null;
   settings_path: string | null;
@@ -2165,6 +2166,8 @@ export type OAuthWebState =
 
 export type OAuthWebStartResult = {
   ok: boolean;
+  // This operation committed authorization, independently of runtime apply.
+  authorization_completed?: boolean;
   flow_id?: string;
   backend?: WebOAuthBackend;
   state?: OAuthWebState;
@@ -2179,6 +2182,7 @@ export type OAuthWebStartResult = {
 
 export type OAuthWebStatus = {
   ok: boolean;
+  authorization_completed?: boolean;
   flow_id?: string;
   backend?: WebOAuthBackend;
   state?: OAuthWebState;

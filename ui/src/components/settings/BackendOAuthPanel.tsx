@@ -41,10 +41,8 @@ export type BackendOAuthPanelProps = {
   /** Hide the Sign out / Remove auth button (e.g. OpenCode providers
    *  expose their own DELETE-credentials affordance inline). */
   hideRemove?: boolean;
-  /** Optional callback fired once after the flow lands on ``state === "success"``.
-   *  The parent typically re-reads ``getClaudeAuth`` / ``getCodexAuth`` here so
-   *  the on-screen "signed in" indicators move. */
-  onSuccess?: () => void | Promise<void>;
+  /** Receives an authorization receipt; application may still have failed. */
+  onSuccess?: (applicationError?: string) => void | Promise<void>;
   onRemoved?: (result: OAuthWebMutationResult) => boolean | void | Promise<boolean | void>;
   onFailure?: (error: string) => void | Promise<void>;
   onCancel?: () => void;
@@ -90,7 +88,7 @@ export const BackendOAuthPanel: React.FC<BackendOAuthPanelProps> = ({
   const api = useApi();
   const { showToast } = useToast();
 
-  const { state, url, deviceCode, callbackKind, code, setCode, submitting, starting, error, setError,
+  const { state, authorizationCompleted, url, deviceCode, callbackKind, code, setCode, submitting, starting, error, setError,
     startFlow, cancelFlow, submitCallback, resetToIdle, isActive, hubOwnedAuth } =
     useBackendOAuth({ backend, opencodeProviderId, onSuccess, onFailure, onCancel, onActiveChange });
   const [removing, setRemoving] = useState(false);
@@ -116,7 +114,7 @@ export const BackendOAuthPanel: React.FC<BackendOAuthPanelProps> = ({
     setError(null);
     try {
       const result =
-        backend === 'claude' && canRemoveAuth && !signedIn
+        backend === 'claude'
           ? await api.removeClaudeOAuthCredentials()
           : await api.removeBackendAuth(backend);
       if (!removalOwner.current.mounted) return;
@@ -145,12 +143,12 @@ export const BackendOAuthPanel: React.FC<BackendOAuthPanelProps> = ({
           detail: result.detail || result.warning || 'logout_failed',
         }), 'warning');
       }
-      const observed = onRemoved ? await onRemoved(result) : await onSuccess?.();
+      const observed = await onRemoved?.(result);
       if (!removalOwner.current.mounted) return;
       if (result.restart?.ok === false) {
         setError(result.restart.message || t('onboarding.connection.applyFailed'));
       } else if (!result.partial && observed !== false) {
-        showToast(t('settings.backends.oauthRemoved'), 'success');
+        showToast(t(backend === 'claude' ? 'settings.backends.claudeNativeCredentialsCleared' : 'settings.backends.oauthRemoved'), 'success');
       }
     } catch (err) {
       if (!removalOwner.current.mounted) return;
@@ -192,7 +190,7 @@ export const BackendOAuthPanel: React.FC<BackendOAuthPanelProps> = ({
       })();
   const showRemoveAuth = canRemoveAuth ?? (signedIn || state === 'success');
   const removeLabel =
-    backend === 'claude' && canRemoveAuth && !signedIn
+    backend === 'claude'
       ? t('settings.backends.oauthCleanStoredCredentials')
       : t('settings.backends.oauthRemove');
 
@@ -203,13 +201,12 @@ export const BackendOAuthPanel: React.FC<BackendOAuthPanelProps> = ({
         <p className="text-[12px] leading-relaxed text-muted">{subtitle}</p>
       </div>
 
-      {signedIn && state === 'idle' && (
+      {backend !== 'claude' && signedIn && state === 'idle' && (
         <div className="flex items-start gap-2 rounded-md border border-mint/30 bg-mint-soft/40 px-3 py-2">
           <CheckCircle2 className="mt-0.5 size-3.5 shrink-0 text-mint-ink" />
           <div className="flex flex-col gap-0.5">
             <p className="text-[12px] text-mint-ink">
               {(() => {
-                if (backend === 'claude') return t('settings.backends.claudeOauthSignedIn');
                 if (backend === 'codex') return t('settings.backends.codexOauthSignedIn');
                 return t('settings.backends.opencodeProviderOauthSignedIn');
               })()}
@@ -221,10 +218,10 @@ export const BackendOAuthPanel: React.FC<BackendOAuthPanelProps> = ({
         </div>
       )}
 
-      {state === 'success' && signedIn && (
+      {(backend === 'claude' ? authorizationCompleted : state === 'success' && signedIn) && (
         <div className="flex items-start gap-2 rounded-md border border-mint/30 bg-mint-soft/40 px-3 py-2">
           <CheckCircle2 className="mt-0.5 size-3.5 shrink-0 text-mint-ink" />
-          <p className="text-[12px] text-mint-ink">{t('settings.backends.oauthSuccess')}</p>
+          <p className="text-[12px] text-mint-ink">{t(backend === 'claude' ? 'settings.backends.claudeAuthorizationCompleted' : 'settings.backends.oauthSuccess')}</p>
         </div>
       )}
 

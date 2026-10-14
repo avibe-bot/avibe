@@ -72,7 +72,7 @@ const unsaved = (draft: Draft) => draft.value !== '' || draft.editing;
  * the question it answers is whether the person has moved on since, and `null`
  * says this write carried no URL to settle.
  */
-type Submission = { method: Method; baseUrl: string | null; credential: Credential | null; sent: Draft | null };
+type Submission = { method: Method; baseUrl: string | null; credential: Credential | null; sent: Draft | null; authorizationCompleted?: boolean };
 const sameDraft = (left: Draft, right: Draft) => left.value === right.value && left.editing === right.editing;
 
 /**
@@ -143,6 +143,7 @@ export function BackendConnectionForm({ backend, provider, initialMethod = 'oaut
   const [active, setActive] = useState(false);
   const [applyPending, setApplyPending] = useState(false);
   const [authReadable, setAuthReadable] = useState(false);
+  const [inventoryError, setInventoryError] = useState('');
   const [hubOwnedAuth, setHubOwnedAuth] = useState(false);
   const observation = useRef(0);
   const touched = useRef(new Set<Editable>());
@@ -199,7 +200,7 @@ export function BackendConnectionForm({ backend, provider, initialMethod = 'oaut
   } = {}) => {
     const token = ++observation.current;
     const current = () => lifetime.current.mounted && token === observation.current;
-    setConnected(false); setSavedDisabled(false); setError(receiptError);
+    setConnected(false); setSavedDisabled(false); setError(receiptError); setInventoryError('');
     const [application] = await Promise.allSettled([api.getBackendConnection(backend)]);
     if (!current()) return false;
     const messages = receiptError ? [receiptError] : [];
@@ -229,7 +230,9 @@ export function BackendConnectionForm({ backend, provider, initialMethod = 'oaut
           if (fresh.native && 'credential_type' in fresh.native) setCredential(fresh.native.credential_type || 'api_key');
         }
         if (!compact && pristine()) {
-          const effective = fresh.native?.active_auth_mode;
+          const effective = backend === 'claude' && fresh.native
+            ? fresh.native.has_api_key ? 'api_key' : fresh.native.auth_mode
+            : fresh.native?.active_auth_mode;
           setMethod(effective && effective !== 'none' ? effective : fresh.provider?.active_auth_type === 'api' ? 'api_key' : backend === 'opencode' && !provider?.oauth_available ? 'api_key' : initialMethod);
         }
       }
@@ -243,14 +246,22 @@ export function BackendConnectionForm({ backend, provider, initialMethod = 'oaut
     setLoading(false);
     let hasAuth = false;
     let keylessSettings = false;
-    if (auth.status === 'rejected') messages.push(errorMessage(auth.reason) || t('onboarding.connection.readFailed'));
-    else {
+    if (auth.status === 'rejected') {
+      const detail = errorMessage(auth.reason) || t('onboarding.connection.readFailed');
+      if (backend === 'claude') setInventoryError(detail);
+      if (backend !== 'claude' || expected?.method === 'api_key') messages.push(detail);
+    } else {
       const fresh = auth.value;
       const effective = fresh.native?.active_auth_mode || (fresh.provider?.active_auth_type === 'oauth' ? 'oauth' : fresh.provider?.active_auth_type === 'api' ? 'api_key' : 'none');
       const uncertain = fresh.native && 'auth_mode_uncertain' in fresh.native && fresh.native.auth_mode_uncertain;
-      hasAuth = ['oauth', 'api_key'].includes(effective) && !uncertain;
+      hasAuth = backend === 'claude'
+        ? Boolean(fresh.native?.has_api_key || expected?.authorizationCompleted)
+        : ['oauth', 'api_key'].includes(effective) && !uncertain;
       keylessSettings = !compact && Boolean(fresh.provider?.custom && fresh.provider.configured && effective === 'none');
-      if (expected && ((!keylessSettings && effective !== expected.method) || uncertain)) messages.push(t('onboarding.connection.unconfirmed'));
+      if (backend === 'claude') {
+        // Only attest the saved fields this editor owns, never CLI selection.
+        if (expected?.method === 'api_key' && !fresh.native?.has_api_key) messages.push(t('onboarding.connection.unconfirmed'));
+      } else if (expected && ((!keylessSettings && effective !== expected.method) || uncertain)) messages.push(t('onboarding.connection.unconfirmed'));
       // Claude's two credential types are one method. `active_auth_mode` reads
       // `api_key` for a token exactly as it does for a key, so the method above
       // cannot tell a token write that landed from one that did not — only the
@@ -267,10 +278,11 @@ export function BackendConnectionForm({ backend, provider, initialMethod = 'oaut
         if (stored !== expected.credential) messages.push(t('onboarding.connection.unconfirmed'));
       }
     }
+    if (backend === 'claude' && expected?.method === 'oauth' && !expected.authorizationCompleted) messages.push(t('onboarding.connection.unconfirmed'));
     setError([...new Set(messages)].join(' '));
     setApplyPending(messages.length > 0);
     const confirmed = messages.length === 0;
-    setConnected(confirmed && hasAuth && Boolean(connection?.ready));
+    setConnected(confirmed && (backend === 'claude' || hasAuth) && Boolean(connection?.ready));
     setSavedDisabled(confirmed && hasAuth && connection?.enabled === false && !keylessSettings);
     return confirmed;
   }, [read, api, backend, compact, provider?.oauth_available, initialMethod, t]);
@@ -309,8 +321,9 @@ export function BackendConnectionForm({ backend, provider, initialMethod = 'oaut
     });
   };
   const confirm = async (submission: Submission, receiptError = '') => {
-    pendingConfirmation.current = submission;
-    if (!await observe({ expected: submission, receiptError })) return false;
+    const receipt = { ...submission };
+    pendingConfirmation.current = receipt;
+    if (!await observe({ expected: receipt, receiptError }) || pendingConfirmation.current !== receipt) return false;
     pendingConfirmation.current = null;
     consume(submission);
     await onConnectedRef.current?.();
@@ -319,15 +332,20 @@ export function BackendConnectionForm({ backend, provider, initialMethod = 'oaut
   // Signing in settles the account, not the key someone was part-way through
   // typing, and not an address they were part-way through changing either.
   const OAUTH: Submission = { method: 'oauth', baseUrl: null, credential: null, sent: null };
-  const confirmOAuth = async () => {
-    if (!await confirm(OAUTH)) throw new Error(t('onboarding.connection.applyPending'));
+  const confirmOAuth = async (applicationError = '') => {
+    const confirmed = await confirm({ ...OAUTH, authorizationCompleted: backend === 'claude' }, applicationError);
+    if (!confirmed && backend !== 'claude') throw new Error(t('onboarding.connection.applyPending'));
   };
   const observeOAuthFailure = async (receiptError: string) => {
-    pendingConfirmation.current = OAUTH;
+    pendingConfirmation.current = backend === 'claude' ? null : OAUTH;
     await observe({ receiptError });
   };
+  const changeOAuthActive = (value: boolean) => {
+    if (value) { pendingConfirmation.current = null; observation.current += 1; }
+    setActive(value);
+  };
   const oauth = useBackendOAuth({ backend, opencodeProviderId: provider?.id, onSuccess: confirmOAuth,
-    onFailure: observeOAuthFailure, onCancel: () => { pendingConfirmation.current = null; observation.current += 1; }, onActiveChange: setActive, onPendingChange: onWriteState });
+    onFailure: observeOAuthFailure, onCancel: () => { pendingConfirmation.current = null; observation.current += 1; }, onActiveChange: changeOAuthActive, onPendingChange: onWriteState });
   const refresh = async () => {
     const expected = pendingConfirmation.current;
     if (expected) await confirm(expected);
@@ -356,7 +374,7 @@ export function BackendConnectionForm({ backend, provider, initialMethod = 'oaut
     : Boolean(native?.has_api_key) && (backend !== 'claude' || storedCredential === credential));
   const mask = native?.api_key_masked || currentProvider?.api_key_masked || '••••••••';
   const uncertain = native && 'auth_mode_uncertain' in native && native.auth_mode_uncertain;
-  const signedIn = authReadable && (native?.active_auth_mode === 'oauth' || currentProvider?.active_auth_type === 'oauth');
+  const signedIn = backend !== 'claude' && authReadable && (native?.active_auth_mode === 'oauth' || currentProvider?.active_auth_type === 'oauth');
   const urlValid = (() => {
     if (!baseUrl.trim()) return !provider?.custom;
     try { const url = new URL(baseUrl.trim()); return ['http:', 'https:'].includes(url.protocol) && Boolean(url.hostname); }
@@ -442,7 +460,7 @@ export function BackendConnectionForm({ backend, provider, initialMethod = 'oaut
   // footer still while the body changes underneath them.
   return <div className="backend-connection-form">
     {!hubOwnedAuth && !(compact && active && backend !== 'codex') && (backend !== 'opencode' || (!compact && provider?.oauth_available)) && <MethodRadio
-      value={method} onChange={(value) => { if (!busy && !loading) { pendingConfirmation.current = null; touched.current.add('method'); setMethod(value); setError(''); setConnected(false); } }} disabled={busy || loading}
+      value={method} onChange={(value) => { if (!busy && !loading) { pendingConfirmation.current = null; observation.current += 1; oauth.resetToIdle(); touched.current.add('method'); setMethod(value); setError(''); setConnected(false); } }} disabled={busy || loading}
       ariaLabel={t('onboarding.connection.method')}
       options={[{ id: 'oauth', label: backend === 'claude' ? t('onboarding.connection.claudeLogin') : backend === 'codex' ? t('onboarding.connection.codexSignIn') : t('onboarding.connection.subscription') },
         { id: 'api_key', label: backend === 'claude' ? t('onboarding.connection.claudeCredentials') : backend === 'codex' ? t('onboarding.connection.openaiKey') : apiKeyLabel }]} />}
@@ -457,20 +475,25 @@ export function BackendConnectionForm({ backend, provider, initialMethod = 'oaut
       : 'onboarding.connection.providerIntro', { name: provider?.name })}</p>}
     {!loading && hubOwnedAuth && <HubOwnedAuthNotice onNavigate={compact ? onCancel : undefined} />}
     {!loading && !hubOwnedAuth && <>
-    {uncertain && <p className="connection-notice">{t('onboarding.connection.uncertain')}</p>}
+    {backend === 'claude' ? <>
+      <p className="connection-notice">{t('onboarding.connection.claudeManagedAuth')}</p>
+      {native && 'oauth_store_state' in native && native.oauth_store_state && <p className="connection-notice">{t(`onboarding.connection.nativeStore.${native.oauth_store_state}`)}</p>}
+      {inventoryError && <p className="connection-notice">{inventoryError}</p>}
+    </> : uncertain && <p className="connection-notice">{t('onboarding.connection.uncertain')}</p>}
     {native && 'file_store_active' in native && method === 'api_key' && !native.file_store_active && !uncertain && <p className="connection-notice">{t('settings.backends.codexCredentialsStoreKeyringWarn', { store: native.credentials_store })}</p>}
     {native && 'settings_conflict' in native && native.settings_conflict && <p className="connection-notice">{t('settings.backends.claudeSettingsConflictTitle')}: {t('settings.backends.claudeSettingsConflictBody', { var: native.settings_env_key_var || 'ANTHROPIC_API_KEY', path: native.settings_path })}</p>}
     {applyPending && <Button variant="secondary" disabled={busy} onClick={() => void refresh()}>{t('onboarding.connection.refresh')}</Button>}
-    {connected && <p className="connection-confirmed" role="status"><CheckCircle2 size={16} />{t('onboarding.connection.connected')}</p>}
+    {connected && <p className="connection-confirmed" role="status"><CheckCircle2 size={16} />{t(backend === 'claude' ? 'onboarding.connection.nativeReady' : 'onboarding.connection.connected')}</p>}
     {savedDisabled && <p className="text-xs text-muted break-words" role="status">{t('onboarding.connection.savedDisabled')}</p>}
     {error && <div role="alert" className="connection-error">{error}{!native && !currentProvider && <Button variant="secondary" onClick={() => void observe()}>{t('common.retry')}</Button>}</div>}
     {method === 'oauth' && (!compact ? <BackendOAuthPanel backend={backend} opencodeProviderId={provider?.id} signedIn={signedIn}
-      title={title} subtitle={hint} hideRemove={backend === 'opencode'} onSuccess={confirmOAuth} onRemoved={removed} onFailure={observeOAuthFailure} onCancel={() => { pendingConfirmation.current = null; observation.current += 1; }} onActiveChange={setActive}
-      canRemoveAuth={authReadable && Boolean(native && ('has_oauth_credentials' in native ? native.has_oauth_credentials : native.has_chatgpt_tokens))}
+      title={title} subtitle={hint} hideRemove={backend === 'opencode'} onSuccess={confirmOAuth} onRemoved={removed} onFailure={observeOAuthFailure} onCancel={() => { pendingConfirmation.current = null; observation.current += 1; }} onActiveChange={changeOAuthActive}
+      canRemoveAuth={authReadable && Boolean(native && ('has_oauth_credentials' in native ? native.can_remove_oauth_credentials ?? native.has_oauth_credentials : native.has_chatgpt_tokens))}
       signedInDetail={native && 'chatgpt_account' in native && native.chatgpt_account ? [native.chatgpt_account.email, native.chatgpt_account.plan_type, (native.chatgpt_account.organizations?.find((org) => org.is_default) || native.chatgpt_account.organizations?.[0])?.title].filter(Boolean).join(' · ') : undefined} /> : <>
       {oauth.hubOwnedAuth && <HubOwnedAuthNotice onNavigate={onCancel} />}
       {oauth.error && !oauth.hubOwnedAuth && <p className="connection-error" role="alert">{oauth.error}</p>}
       {!oauth.isActive ? <div className="connection-account"><h3>{title}</h3><p>{hint}</p>
+        {backend === 'claude' && oauth.authorizationCompleted && <p className="connection-confirmed">{t('settings.backends.claudeAuthorizationCompleted')}</p>}
         {signedIn && <p className="connection-confirmed">{t('onboarding.connection.savedSubscription')}</p>}
         <div><Button variant="brand" onClick={() => void oauth.startFlow()} disabled={oauth.starting}><ExternalLink size={15} />{startLabel}</Button></div>
       </div> : <div className="connection-auth-steps">

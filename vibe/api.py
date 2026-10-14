@@ -10662,17 +10662,20 @@ def _hub_backend_connection_auth(config: V2Config, backend: str) -> str:
     return "none"
 
 
-def _direct_claude_connection_auth() -> dict:
-    """Keep the bounded native status reader inside the takeover exclusion."""
+def _assert_direct_claude_custody() -> None:
+    """Admit Direct Claude only under the takeover exclusion; read no credential."""
     with NativeCredentialLease(("claude",)) as lease:
         # The caller's config may predate an await or a completed takeover.
         # acquire() checks pending recovery; custody must be reread under lease.
         lease.assert_auth_custody("claude")
-        return get_claude_auth(connection_observation=True)
 
 
 async def get_backend_connection(name: str) -> dict:
-    """Observe persisted credential custody and application, without a model call."""
+    """Observe persisted credential custody and application, without a model call.
+
+    Direct Claude reports ``auth: "external"``: Claude authenticates itself,
+    so ``ready`` / ``entry_eligible`` mean an execution may be attempted.
+    """
     from core.backend_restart import pending_native_backends
     from vibe import internal_client, runtime
 
@@ -10744,13 +10747,14 @@ async def get_backend_connection(name: str) -> dict:
             modes.update({pid: "api" for pid in key_ids})
             effective = next((mode for mode in modes.values() if mode in {"api", "oauth"}), None)
             result["auth"] = {"api": "api_key", "oauth": "subscription"}.get(effective, "none")
+        elif name == "claude":
+            # Claude owns authentication: Direct capability never depends on
+            # passive credential evidence. Join the worker so the custody
+            # check's lease is released before this observation settles.
+            await finish_native_operation(asyncio.to_thread(_assert_direct_claude_custody))
+            result["auth"] = "external"
         else:
-            if name == "claude":
-                # Cancelling to_thread does not stop its native status process.
-                # Join the worker and retain its lease through the entire tail.
-                auth = await finish_native_operation(asyncio.to_thread(_direct_claude_connection_auth))
-            else:
-                auth = await asyncio.to_thread(get_codex_auth)
+            auth = await asyncio.to_thread(get_codex_auth)
             if not auth.get("ok") or auth.get("auth_mode_uncertain"):
                 return result
             result["auth"] = {"oauth": "subscription", "api_key": "api_key", "none": "none"}.get(auth.get("active_auth_mode"), "unknown")
@@ -10766,7 +10770,9 @@ async def get_backend_connection(name: str) -> dict:
     # IPC or native read-only checks. Do not admit against a pending journal.
     if native and name in await asyncio.to_thread(pending_native_backends, paths.get_state_dir() / "native-takeover"):
         return result
-    credential_ready = enabled and result["auth"] in {"subscription", "api_key"} and not result.get("permission_required")
+    # ``external`` is launch capability with Claude-owned authentication; it
+    # asserts no login. Every other gate above still applies to it.
+    credential_ready = enabled and result["auth"] in {"subscription", "api_key", "external"} and not result.get("permission_required")
     result["ready"] = credential_ready and result["application"] == "applied"
     result["entry_eligible"] = credential_ready and result["application"] in {"applied", "stopped"}
     return result
@@ -11042,103 +11048,6 @@ def _mask_api_key(api_key: str | None) -> str | None:
     return f"{'•' * 6}{last4}"
 
 
-def _read_claude_cli_oauth_signed_in(
-    cli_path: str | None,
-    *,
-    env: dict[str, str] | None = None,
-    cwd: str | None = None,
-) -> bool | None:
-    """Ask Claude Code whether a first-party OAuth account is signed in.
-
-    This is the most accurate Settings signal because it covers both
-    keychain-backed installs and Linux/Docker's on-disk credentials file.
-    Keep it best-effort and quiet: if Claude is missing, slow, or emits an
-    unexpected shape, callers fall back to disk inspection.
-    """
-    configured = (cli_path or "claude").strip() or "claude"
-    binary = resolve_cli_path(configured) or configured
-    try:
-        result = subprocess.run(
-            [binary, "auth", "status", "--json"],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            timeout=3,
-            check=False,
-            env=env,
-            cwd=cwd,
-        )
-    except (FileNotFoundError, OSError, subprocess.SubprocessError):
-        return None
-    text = (result.stdout or "").strip()
-    if not text:
-        return None
-    try:
-        payload = json.loads(text)
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(payload, dict):
-        return None
-    logged_in = payload.get("loggedIn")
-    if logged_in is False:
-        return False
-    if logged_in is not True:
-        return None
-
-    # ``auth status`` reports Claude Code's overall auth state. API-key
-    # sources can also be "logged in", so only treat it as OAuth when the
-    # CLI identifies the source as Claude.ai / first-party OAuth.
-    saw_concrete_source = False
-    for key in ("authMethod", "authProvider", "provider", "source"):
-        raw = payload.get(key)
-        if isinstance(raw, str):
-            normalized = re.sub(r"[\s_]+", "-", raw.strip().lower())
-            if not normalized:
-                continue
-            saw_concrete_source = True
-            if normalized in {
-                "claude.ai",
-                "claude-ai",
-                "oauth",
-                "oauth-token",
-                "setup-token",
-                "claude-code-oauth-token",
-                "subscription",
-                "claude-subscription",
-            }:
-                return True
-            if any(token in normalized for token in ("api-key", "apikey", "api key", "auth-token", "apihelper", "api-helper")):
-                return False
-    if saw_concrete_source:
-        return False
-    return None
-
-
-def _resolve_claude_status_probe_cwd(config: Any | None) -> str | None:
-    candidates = (
-        getattr(getattr(config, "claude", None), "cwd", None),
-        getattr(getattr(config, "runtime", None), "default_cwd", None),
-    )
-    for raw in candidates:
-        if isinstance(raw, str) and raw.strip():
-            path = os.path.abspath(os.path.expanduser(raw.strip()))
-            try:
-                os.makedirs(path, exist_ok=True)
-                return path
-            except OSError as exc:
-                logger.warning("Failed to prepare Claude auth status cwd=%s: %s", path, exc)
-    return None
-
-
-def _build_claude_status_probe_env(claude_env: dict[str, str] | None) -> dict[str, str] | None:
-    if claude_env is None:
-        return None
-    from vibe.claude_config import materialize_claude_subprocess_env
-
-    return materialize_claude_subprocess_env(claude_env)
-
-
 # ---------------------------------------------------------------------------
 # Web Settings → Backends OAuth flow plumbing.
 #
@@ -11294,6 +11203,8 @@ async def start_oauth_web_async(
             "ok": False,
             "error": flow.error or "start_failed",
             "flow_id": flow.flow_id,
+            "state": flow.state,
+            "authorization_completed": flow.authorization_completed,
         }
     return {
         "ok": True,
@@ -11305,6 +11216,7 @@ async def start_oauth_web_async(
         "awaiting_code": flow.awaiting_code,
         "callback_kind": flow.callback_kind,
         "provider": flow.provider,
+        "authorization_completed": flow.authorization_completed,
     }
 
 
@@ -11940,35 +11852,45 @@ def save_codex_auth(payload: dict) -> dict:
     return state
 
 
-def get_claude_auth(*, connection_observation: bool = False) -> dict:
-    """Return the user-facing Claude auth state for the Settings UI.
+def _claude_oauth_store_state() -> str:
+    """Classify safe native-store inventory without reading a secret value.
 
-    Claude differs from Codex in two structural ways:
-
-    1. ``~/.claude/settings.json`` is the source of truth for API-key
-       env overrides because Claude Code layers that file on top of the
-       inherited process env at launch.
-    2. OAuth state is owned by Claude Code, so we first ask
-       ``claude auth status --json``. If that probe is unavailable, fall
-       back to the Linux/Docker credentials file signal.
-
-    Legacy V2Config keys are read only as a migration fallback so old
-    installs still render their current state before the next save moves
-    the key into Claude's own settings file.
-
-    ``connection_observation`` is the leased Direct connection projection:
-    use actual launch-key precedence and explicit uncertainty if neither the
-    bounded status query nor the selected native store proves OAuth.
+    ``present`` is inspectable Claude OAuth material, not a login. A Keychain
+    container, denied/unreadable/invalid evidence or a failed read is
+    ``unknown``: it proves neither a usable account nor its absence.
     """
-    from vibe.claude_config import (
-        read_claude_auth_state,
-        read_claude_oauth_signed_in,
-        read_claude_settings_env,
-        build_claude_subprocess_env,
-    )
+    from vibe.native_oauth_store import read_native_oauth
+
+    try:
+        snapshot = read_native_oauth("claude", allow_secret=False)
+    except Exception:
+        logger.debug("Claude native OAuth inventory could not be observed")
+        return "unknown"
+    if snapshot is None:
+        return "absent"
+    return "present" if snapshot.exportable else "unknown"
+
+
+def get_claude_auth() -> dict:
+    """Return the Claude Settings inventory: saved configuration and native evidence.
+
+    Claude owns authentication. This passive read never launches Claude,
+    never predicts which credential Claude will select at launch, and never
+    creates a working directory. It reports two local facts:
+
+    1. The configuration this editor manages: the API-key / token /
+       Base URL ``env`` in ``~/.claude/settings.json`` (Claude's own file),
+       with legacy V2Config keys read only as a migration fallback.
+    2. Native OAuth store inventory (``oauth_store_state``), which is not
+       effective authentication or token validity.
+
+    ``active_auth_mode`` is a legacy wire field kept conservatively at
+    ``"none"`` with ``auth_mode_uncertain``; ``auth_mode`` is the saved
+    editing choice, not runtime truth.
+    """
+    from vibe.claude_config import read_claude_auth_state, read_claude_settings_env
 
     disk_state = read_claude_auth_state()
-    disk_oauth_signed_in = False if connection_observation else read_claude_oauth_signed_in()
     settings_env = read_claude_settings_env()
     settings_key = settings_env.get("ANTHROPIC_API_KEY") or settings_env.get("ANTHROPIC_AUTH_TOKEN") or ""
     settings_base = settings_env.get("ANTHROPIC_BASE_URL") or ""
@@ -11979,62 +11901,13 @@ def get_claude_auth(*, connection_observation: bool = False) -> dict:
         configured_mode = getattr(cfg, "auth_mode", None)
         configured_key = getattr(cfg, "api_key", None) or ""
         configured_base = getattr(cfg, "base_url", None) or ""
-        configured_cli_path = getattr(cfg, "cli_path", None)
-        status_probe_cwd = _resolve_claude_status_probe_cwd(config)
     except Exception:
         configured_mode = None
         configured_key = ""
         configured_base = ""
-        configured_cli_path = None
-        status_probe_cwd = None
 
     configured_key = configured_key.strip() if isinstance(configured_key, str) else ""
     configured_base = configured_base.strip() if isinstance(configured_base, str) else ""
-    if connection_observation:
-        # Settings are applied by Claude after Avibe's launch environment.
-        # Reuse its composition so explicit OAuth masks inherited keys while
-        # legacy environment keys and persisted settings still take precedence.
-        launch_env = build_claude_subprocess_env(cfg if "cfg" in locals() else None)
-        launch_env.update(settings_env)
-        if launch_env.get("ANTHROPIC_API_KEY") or launch_env.get("ANTHROPIC_AUTH_TOKEN"):
-            return {"ok": True, "active_auth_mode": "api_key"}
-    try:
-        claude_status_env = _build_claude_status_probe_env(
-            build_claude_subprocess_env(
-                cfg if "cfg" in locals() else None,
-                force_oauth=True,
-            )
-        )
-    except Exception:
-        claude_status_env = None
-    # Direct connection observation owns the native lease through this bounded
-    # status query. Hub observations never call this native reader.
-    cli_oauth_signed_in = _read_claude_cli_oauth_signed_in(
-        configured_cli_path if isinstance(configured_cli_path, str) else None,
-        env=claude_status_env,
-        cwd=status_probe_cwd,
-    )
-    if connection_observation:
-        if cli_oauth_signed_in is not None:
-            return {"ok": True, "active_auth_mode": "oauth" if cli_oauth_signed_in else "none"}
-        from vibe.native_oauth_store import read_native_oauth
-
-        try:
-            snapshot = read_native_oauth("claude", allow_secret=False)
-        except Exception:
-            # An unavailable observer is not proof of logout. Do not expose
-            # native errors or metadata in the public connection response.
-            return {"ok": True, "auth_mode_uncertain": True}
-        if snapshot is None:
-            return {"ok": True, "active_auth_mode": "none"}
-        if snapshot.exportable:
-            return {"ok": True, "active_auth_mode": "oauth"}
-        # Keychain attributes describe a container, which may hold only MCP
-        # credentials. Neither that presence nor denied access proves OAuth.
-        return {"ok": True, "auth_mode_uncertain": True}
-    oauth_signed_in = (
-        cli_oauth_signed_in if cli_oauth_signed_in is not None else disk_oauth_signed_in
-    )
 
     # settings.json wins: it is the file Claude Code itself layers on top
     # of inherited env. V2Config is a legacy fallback only.
@@ -12049,22 +11922,7 @@ def get_claude_auth(*, connection_observation: bool = False) -> dict:
     else:
         auth_mode = "oauth"
 
-    settings_conflict = False
-
-    # ``active_auth_mode`` reflects what the running CLI is actually using
-    # at launch.
-    if effective_key and auth_mode == "api_key":
-        active_auth_mode = "api_key"
-    elif oauth_signed_in and auth_mode == "oauth":
-        active_auth_mode = "oauth"
-    elif effective_key:
-        active_auth_mode = "api_key"
-    elif oauth_signed_in:
-        active_auth_mode = "oauth"
-    else:
-        active_auth_mode = "none"
-
-    # Which storage the live API key came from — helps the UI explain the
+    # Which storage the saved API key came from — helps the UI explain the
     # state ("Key configured in settings.json"). Plaintext never leaves
     # the server; only the mask is forwarded.
     if settings_key:
@@ -12074,15 +11932,21 @@ def get_claude_auth(*, connection_observation: bool = False) -> dict:
     else:
         api_key_source = None
 
+    oauth_store_state = _claude_oauth_store_state()
+
     return {
         "ok": True,
         "auth_mode": auth_mode,
-        "active_auth_mode": active_auth_mode,
+        "auth_managed_by": "claude",
+        "active_auth_mode": "none",
+        "auth_mode_uncertain": True,
+        "oauth_store_state": oauth_store_state,
         "has_api_key": has_api_key,
         "api_key_length": len(effective_key),
         "api_key_masked": _mask_api_key(effective_key),
         "api_key_source": api_key_source,
-        "has_oauth_credentials": oauth_signed_in,
+        "has_oauth_credentials": oauth_store_state == "present",
+        "can_remove_oauth_credentials": oauth_store_state != "absent",
         "base_url": effective_base or None,
         "settings_path": disk_state.get("settings_path"),
         "settings_exists": bool(disk_state.get("settings_exists")),
@@ -12095,7 +11959,7 @@ def get_claude_auth(*, connection_observation: bool = False) -> dict:
             else ("api_key" if configured_key else None)
         ),
         "settings_env_base_url": disk_state.get("settings_env_base_url"),
-        "settings_conflict": settings_conflict,
+        "settings_conflict": False,
     }
 
 

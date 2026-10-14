@@ -87,6 +87,20 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe('assistant installation presentation', () => {
+  it('renders Direct Claude capability as external authentication, not an API key', async () => {
+    const saved = data();
+    for (const agent of Object.values(saved.agents)) agent.status = 'ok';
+    mock.api.getConfig.mockResolvedValue(saved);
+    mock.api.getBackendConnection.mockImplementation(async (backend) => ({
+      ok: true, backend, installed: true, enabled: true, supply_mode: 'direct',
+      auth: backend === 'claude' ? 'external' : 'api_key', application: 'applied', ready: true, entry_eligible: true,
+    }));
+    render(wrap(<AgentDetection data={saved} onNext={vi.fn()} />));
+    await row('Claude Code').findByRole('button', { name: en.onboarding.setup.externalConnected });
+    expect(row('Claude Code').queryByRole('button', { name: en.onboarding.setup.api_keyConnected })).toBeNull();
+    expect(row('Claude Code').queryByRole('button', { name: en.onboarding.setup.subscriptionConnected })).toBeNull();
+    expect(row('Claude Code').getByText(en.onboarding.setup.externalConnectedHint)).toBeTruthy();
+  });
   it('enables a Hub assistant after a successful install', async () => {
     const saved = data();
     saved.agents.codex.enabled = false;

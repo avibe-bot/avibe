@@ -701,6 +701,8 @@
       "oauthStarting": "Starting OAuth flow…",
       "oauthVerifying": "Verifying credentials…",
       "oauthSuccess": "Signed in successfully.",
+      "claudeAuthorizationCompleted": "Authorization completed and saved. Runtime application is a separate step.",
+      "claudeNativeCredentialsCleared": "Saved native account credentials cleared. Environment and project authentication settings are unchanged.",
       "oauthFailed": "OAuth flow failed: {{detail}}",
       "oauthPollTimedOut": "Login did not complete within the allowed time. Please retry.",
       "oauthUrlCopied": "URL copied to clipboard.",
@@ -1969,7 +1971,7 @@
           "native": {
             "label": "Use natively",
             "desc": {
-              "claude": "Claude Code uses this subscription directly; the credential stays on this machine."
+              "claude": "Claude Code manages this native sign-in on this machine; the gateway does not hold its credentials."
             }
           },
           "hub": {
@@ -2039,6 +2041,7 @@
           "timeout": "Authorization timed out, please reconnect",
           "generic": "Connection failed, please retry",
           "finalize": "Authorized, but couldn't create the source — please retry",
+          "nativeApply": "Authorization was saved, but backend configuration was not applied. Retry application in backend settings before connecting this source again.",
           "finalizeReauth": "Signed in, but this source still isn't working — please retry",
           "details": {
             "show": "Show details",
@@ -5470,6 +5473,8 @@
       "api_key": "API Key",
       "subscriptionConnected": "Subscription connected",
       "api_keyConnected": "API Key connected",
+      "externalConnected": "Ready to start",
+      "externalConnectedHint": "Claude Code manages authentication when you run it. This is not a sign-in check.",
       "claudeGuide": "Sign in with Claude or enter an API key",
       "codexGuide": "Sign in with ChatGPT or use an OpenAI API key",
       "opencodeGuide": "Choose either way to connect",
@@ -5534,6 +5539,13 @@
       "showKey": "Show credential",
       "hideKey": "Hide credential",
       "connected": "Connected",
+      "nativeReady": "Ready to start · authentication is managed by Claude Code",
+      "claudeManagedAuth": "These are saved native settings, not a prediction of which credentials a session will use. Claude Code manages authentication when it runs.",
+      "nativeStore": {
+        "present": "Native OAuth material detected. This does not verify the account or token.",
+        "absent": "No native OAuth material observed. Claude Code may use other authentication sources.",
+        "unknown": "The native credential store could not be inspected. This does not mean you are signed out."
+      },
       "savedSubscription": "Subscription credentials detected",
       "savedDisabled": "Credentials saved. This assistant is currently disabled.",
       "readFailed": "Unable to read connection state. Try again.",
