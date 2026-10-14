@@ -27,6 +27,7 @@ from modules.agents.model_hub import ModelHubRuntimeRouter
 from tests.e2e.test_model_hub_runtime import _isolated_engine_adapter
 from tests.scenario_harness.model_hub import MemoryModelHubStore, service_for
 from tests.test_model_hub_google import _server
+from tests.test_model_hub_hosted_evidence import latest_ok
 from tests.test_model_hub_l3 import _source
 from tests.test_model_hub_vibey_consumer import _vibey_service
 from vibe import backend_model_catalog
@@ -124,8 +125,7 @@ async def test_each_offered_image_path_reaches_the_vendors_images_endpoint(
         "executor_billing": "metered",
         **({"cost": answer["execution"]["cost"]} if "cost" in answer["execution"] else {}),
     }
-    latest = service.capability_evidence.latest_success("image_generate")
-    assert (latest.source_id, latest.model_id, latest.mode) == (source.id, arguments["model"], "direct")
+    assert latest_ok(service, "image_generate") == (source.id, arguments["model"], "direct")
 
 
 @pytest.mark.asyncio

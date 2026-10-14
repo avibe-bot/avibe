@@ -11,10 +11,11 @@ from __future__ import annotations
 import base64
 import binascii
 import json
-import re
 from dataclasses import dataclass
 from typing import Any, Final, Mapping
 
+# The one size grammar: Vibey checks a call with it before sending, so nothing it sends is refused here.
+from core.agent_core.tools.hosted import size_form
 from core.agent_core.tools.read import MAX_INLINE_IMAGE_BYTES, detect_supported_image_mime_type
 from vibe.backend_model_catalog import ImageModelSpec
 
@@ -30,8 +31,6 @@ IMAGE_MAX_BYTES: Final = 24 * 1024 * 1024
 IMAGES_TOTAL_MAX_BYTES: Final = 64 * 1024 * 1024
 # The endpoint's answer as base64 JSON: the decoded budget, inflated, plus a margin for the rest.
 IMAGE_RESPONSE_MAX_BYTES: Final = IMAGES_TOTAL_MAX_BYTES * 4 // 3 + 1024 * 1024
-_PIXELS: Final = re.compile(r"[1-9][0-9]{1,4}x[1-9][0-9]{1,4}")
-_RATIO: Final = re.compile(r"[1-9][0-9]?:[1-9][0-9]?")
 # Where each size form goes on the images endpoints.
 _SIZE_FIELDS: Final = {"pixels": "size", "ratio": "aspect_ratio"}
 
@@ -67,7 +66,7 @@ def parse_image_call(payload: object) -> ImageCall:
     if (
         not isinstance(model, str) or not model
         or not isinstance(prompt, str) or not prompt.strip()
-        or (size is not None and (not isinstance(size, str) or not (_PIXELS.fullmatch(size) or _RATIO.fullmatch(size))))
+        or (size is not None and size_form(size) is None)
         or (n is not None and (isinstance(n, bool) or not isinstance(n, int) or not 1 <= n <= MAX_IMAGES_PER_CALL))
         or (images is not None and (not isinstance(images, list) or not 1 <= len(images) <= MAX_REFERENCE_IMAGES))
     ):
@@ -84,10 +83,6 @@ def parse_image_call(payload: object) -> ImageCall:
             raise ExecutorCallRefused("invalid_request_error", 400)
         references.append((mime, encoded))
     return ImageCall(model, prompt, size, n, tuple(references))
-
-
-def size_form(size: str) -> str:
-    return "pixels" if _PIXELS.fullmatch(size) else "ratio"
 
 
 def unsupported_argument(call: ImageCall, spec: ImageModelSpec) -> str | None:

@@ -23,6 +23,7 @@ from core.handlers.model_hub.capability_evidence import EvidenceFeature
 from core.handlers.model_hub.stream_wire import ProtocolUsageReport
 from core.handlers.model_hub.turn_gateway import ModelHubTurnGateway
 from modules.agents.model_hub import ModelHubRuntimeRouter
+from tests.test_model_hub_hosted_evidence import latest_ok
 from tests.test_model_hub_l3 import InvokeHandle, LiveInvokeHandle, _outcome, _source, _usage_of
 from tests.test_model_hub_vibey_consumer import _vibey_service
 from vibe.backend_model_catalog import HostedToolPrice, ImageModelPrice, ImageModelSpec
@@ -103,8 +104,7 @@ async def test_an_image_call_runs_directly_on_the_named_models_source(tmp_path):
         "generation": {"size": "1536x1024", "quality": "medium"},
     }
     assert _usage_of(service, OPENAI)
-    latest = service.capability_evidence.latest_success(IMAGE)
-    assert (latest.source_id, latest.model_id, latest.mode) == (OPENAI, "gpt-image-2", "direct")
+    assert latest_ok(service, IMAGE) == (OPENAI, "gpt-image-2", "direct")
 
 
 async def test_a_ratio_and_reference_images_map_to_the_endpoints_fields(tmp_path):
@@ -196,7 +196,7 @@ async def test_only_usable_images_complete_the_call(tmp_path, monkeypatch, answe
     assert answer["record"]["status"] == "failed" and error in answer["record"]["error"]
     assert "images" not in answer and answer["execution"]["executor_source_id"] == OPENAI
     assert _usage_of(service, OPENAI)
-    assert service.capability_evidence.latest_success(IMAGE) is None
+    assert latest_ok(service, IMAGE) is None
 
 
 @pytest.mark.parametrize(("outcome", "refused"), [
