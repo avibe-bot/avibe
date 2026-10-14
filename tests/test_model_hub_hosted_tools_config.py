@@ -69,7 +69,7 @@ def test_hosted_tool_settings_round_trip_in_canonical_order():
         "web_search": ModelHubHostedToolConfig(True, ("src_gone0001", "src_xai00001")),
         "x_search": ModelHubHostedToolConfig(False),
         "image_generate": ModelHubHostedToolConfig(
-            True, default_model=ModelHubImageModelChoice("src_xai00001", "grok-imagine-image"),
+            True, default_image=ModelHubImageModelChoice("src_xai00001", "grok-imagine-image"),
         ),
     }
     assert list(config.to_payload()["hosted_tools"]) == list(ALL_TOOLS)
@@ -77,8 +77,10 @@ def test_hosted_tool_settings_round_trip_in_canonical_order():
 
 
 # (case, raw section, tools that survive as (enabled, executor_order, default_model), whether a warning is logged)
+OFF = (False, None, None)
 DEGRADED = [
-    ("not-an-object", ["web_search"], {}, True),
+    # Damage never turns a cost-bearing tool on: a broken section or entry is off (AGENTS persisted-shape rule).
+    ("not-an-object", ["web_search"], dict.fromkeys(ALL_TOOLS, OFF), True),
     # An rc build's section: its keys and fields are unknown to v2, but each tool's opt-out survives.
     (
         "rc-era-section",
@@ -86,28 +88,29 @@ DEGRADED = [
             "web_search": {"enabled": False, "executor": {"source_id": "src_xai00001", "model_id": "grok-4.6"}},
             "image_generation": {"enabled": False, "executor": None},
         },
-        {"web_search": (False, None, None)},
+        {"web_search": OFF},
         True,
     ),
-    ("unknown-tool", {"code_interpreter": {"enabled": False}, "x_search": {"enabled": False}}, {"x_search": (False, None, None)}, True),
-    ("field-of-another-tool", {"image_generate": {"enabled": False, "executor_order": ["src_xai00001"]}}, {"image_generate": (False, None, None)}, True),
-    ("non-boolean-enabled", {"web_search": {"enabled": "no"}, "x_search": {"enabled": False}}, {"x_search": (False, None, None)}, True),
-    ("repeated-order", {"web_search": {"executor_order": ["src_xai00001", "src_xai00001"]}}, {}, True),
-    ("blank-order-id", {"web_search": {"executor_order": [" "]}}, {}, True),
-    ("bad-default-shape", {"image_generate": {"default_model": {"source_id": "src_xai00001"}}}, {}, True),
+    ("unknown-tool", {"code_interpreter": {"enabled": False}, "x_search": {"enabled": False}}, {"x_search": OFF}, True),
+    ("field-of-another-tool", {"image_generate": {"enabled": False, "executor_order": ["src_xai00001"]}}, {"image_generate": OFF}, True),
+    ("non-boolean-enabled", {"web_search": {"enabled": "yes"}}, {"web_search": OFF}, True),
+    ("repeated-order", {"web_search": {"executor_order": ["src_xai00001", "src_xai00001"]}}, {"web_search": OFF}, True),
+    ("order-not-a-source-id", {"web_search": {"executor_order": [" src_xai00001"]}}, {"web_search": OFF}, True),
+    ("bad-default-shape", {"image_generate": {"default_model": {"source_id": "src_xai00001"}}}, {"image_generate": OFF}, True),
     # Saved values are never resolved: an order naming a Source that is gone is kept and skipped when read.
     ("order-source-gone", {"web_search": {"executor_order": ["src_gone0001"]}}, {"web_search": (True, ("src_gone0001",), None)}, False),
+    ("entry-not-an-object", {"x_search": None}, {"x_search": OFF}, True),
 ]
 
 
 @pytest.mark.parametrize("raw,expected,warns", [case[1:] for case in DEGRADED], ids=[case[0] for case in DEGRADED])
-def test_a_broken_hosted_tool_entry_takes_only_its_own_defaults(raw, expected, warns, caplog):
-    """MH-HOSTED-002: a broken entry or unknown field degrades alone; Sources and Agents still load."""
+def test_a_broken_hosted_tool_entry_turns_off_only_its_tool(raw, expected, warns, caplog):
+    """MH-HOSTED-002: a broken entry turns its tool off and an unknown field is ignored; Sources and Agents load."""
     with caplog.at_level(logging.WARNING, logger="config.v2_config"):
         config = ModelHubConfig.from_payload(_section(raw))
     assert [source.id for source in config.sources] == ["src_xai00001"]
     assert {
-        tool: (entry.enabled, entry.executor_order, entry.default_model) for tool, entry in config.hosted_tools.items()
+        tool: (entry.enabled, entry.executor_order, entry.default_image) for tool, entry in config.hosted_tools.items()
     } == expected
     assert bool(caplog.records) == warns
 
@@ -124,7 +127,7 @@ def test_disk_load_with_a_broken_hosted_tools_section_keeps_model_hub(monkeypatc
 
     assert not loaded.load_warnings
     assert [source.id for source in loaded.model_hub.sources] == ["src_xai00001"]
-    assert enabled_tools(loaded.model_hub) == ("web_search", "image_generate")
+    assert enabled_tools(loaded.model_hub) == ("image_generate",)
     assert config_path.read_text(encoding="utf-8") == original
     assert not list(tmp_path.glob("config.json.bak-recovery-*"))
 
@@ -267,3 +270,24 @@ async def test_a_clear_that_cannot_be_saved_changes_nothing(tmp_path, monkeypatc
         await service.clear_hosted_refusals("x_search", {})
     assert (refusal.value.code, refusal.value.status) == ("state_write_failed", 500)
     assert service.hosted_evidence().unsupported(source, "grok-4.6", feature)
+
+
+@pytest.mark.asyncio
+async def test_a_clear_waits_for_a_source_change_in_flight(tmp_path):
+    """MH-HOSTED-003: a clear runs after a concurrent Source change commits, so it keeps evidence under the identity
+    the config now holds and answers the Source as it now is."""
+    import asyncio
+    from dataclasses import replace
+
+    service, store = _api_service(tmp_path)
+    (source,) = store.config.sources
+    _refuse(service, source, "grok-4.6", EvidenceFeature.effort("max"))
+    body = {"model_id": "grok-4.6", "feature": {"kind": "effort", "name": "max"}}
+
+    async with service._mutation_lock:
+        clearing = asyncio.create_task(service.clear_source_evidence(source.id, body))
+        await asyncio.sleep(0.05)
+        assert not clearing.done()
+        store.config.sources = [replace(source, display_name="xAI 工作密钥")]
+    answer = await clearing
+    assert answer["source"]["display_name"] == "xAI 工作密钥"

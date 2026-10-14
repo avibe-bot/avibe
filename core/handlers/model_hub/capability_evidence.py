@@ -230,6 +230,7 @@ class LatestSuccess:
     model_id: str
     mode: ExecutionMode
     at: datetime
+    source_identity: str
 
     def payload(self) -> dict[str, str]:
         return {"source_id": self.source_id, "model_id": self.model_id, "mode": self.mode, "at": utc_text(self.at)}
@@ -296,7 +297,9 @@ class CapabilityEvidenceStore:
         if current is None or record.observed_at > current.at:
             self._latest = {
                 **self._latest,
-                record.feature.name: LatestSuccess(record.source_id, record.model_id, record.mode, record.observed_at),
+                record.feature.name: LatestSuccess(
+                    record.source_id, record.model_id, record.mode, record.observed_at, record.source_identity
+                ),
             }
 
     def get(
@@ -326,10 +329,27 @@ class CapabilityEvidenceStore:
         return self._latest.get(tool)
 
     def _write_locked(self, records: dict[tuple, EvidenceRecord], identities: Mapping[str, str]) -> list[EvidenceRecord]:
+        """The records to keep: current identities only, within the bound, successes evicted before refusals.
+
+        A refusal is routing state, so the bound takes display history first; only refusals beyond the bound on
+        their own, which no real installation reaches, drop their oldest, with a warning.
+        """
+
+        def by_age(items: Iterable[EvidenceRecord]) -> list[EvidenceRecord]:
+            return sorted(items, key=lambda item: item.observed_at)
+
         kept = [
             record for record in records.values() if identities.get(record.source_id) == record.source_identity
         ]
-        return sorted(kept, key=lambda item: item.observed_at)[-self.max_records :]
+        if len(kept) <= self.max_records:
+            return by_age(kept)
+        refusals = by_age(record for record in kept if record.status == "unsupported")
+        if len(refusals) > self.max_records:
+            logger.warning("Model Hub capability evidence holds more refusals than its bound; the oldest are dropped")
+            refusals = refusals[-self.max_records :]
+        room = self.max_records - len(refusals)
+        successes = by_age(record for record in kept if record.status == "verified")[-room:] if room else []
+        return by_age([*refusals, *successes])
 
     def write_refusal(self, record: EvidenceRecord, *, live: Iterable[ModelHubSourceConfig]) -> None:
         """Record a refusal: memory first, then the file; a failed write is logged, not raised."""

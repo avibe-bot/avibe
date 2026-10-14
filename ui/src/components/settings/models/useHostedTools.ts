@@ -60,12 +60,13 @@ export function useHostedTools(active: boolean, revision: string | null = null) 
     void refresh({ forget });
   }, [active, revision, refresh]);
 
-  // Tools whose write ended without an answer: they stay pending until the read
-  // that reconciles them lands, so no control writes a body built on the status
-  // that write may already have changed.
+  // A tool stays pending while any write for it is queued or out, and while a
+  // write that ended without an answer awaits the read that reconciles it: no
+  // control may build a body on a status that a write may still be changing.
+  const queuedFor = React.useRef<Map<HostedToolName, number>>(new Map());
   const unsettled = React.useRef<Set<HostedToolName>>(new Set());
   const release = React.useCallback((tools: Iterable<HostedToolName>) => {
-    const done = [...tools];
+    const done = [...tools].filter((tool) => !queuedFor.current.get(tool) && !unsettled.current.has(tool));
     if (!alive.current || done.length === 0) return;
     setPending((previous) => {
       const next = new Set(previous);
@@ -84,6 +85,7 @@ export function useHostedTools(active: boolean, revision: string | null = null) 
     clock.queued += 1;
     // An answer is for the Source identity it was asked under (see `shownRevision`).
     const revisionAtStart = shownRevision.current;
+    queuedFor.current.set(tool, (queuedFor.current.get(tool) ?? 0) + 1);
     setPending((previous) => new Set(previous).add(tool));
     const turn = writeQueue.current.then(async () => {
       try {
@@ -104,8 +106,9 @@ export function useHostedTools(active: boolean, revision: string | null = null) 
     writeQueue.current = turn;
     await turn;
     clock.queued -= 1;
+    queuedFor.current.set(tool, (queuedFor.current.get(tool) ?? 1) - 1);
     if (!alive.current) return;
-    if (!unsettled.current.has(tool)) release([tool]);
+    release([tool]);
     if (clock.queued === 0 && clock.rereadAfterWrites) {
       clock.rereadAfterWrites = false;
       const reconciling = [...unsettled.current];

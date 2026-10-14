@@ -182,7 +182,7 @@ def test_the_image_enum_is_deterministic_with_the_default_first(tmp_path):
     choices = image_choices(_config(), evidence=evidence)
     assert [choice.model_id for choice in choices.models] == ["grok-imagine-image", "gpt-image-2"]
     saved = _config({"image_generate": ModelHubHostedToolConfig(
-        default_model=ModelHubImageModelChoice("src_oai00001", "gpt-image-2"),
+        default_image=ModelHubImageModelChoice("src_oai00001", "gpt-image-2"),
     )})
     choices = image_choices(saved, evidence=evidence)
     assert [choice.model_id for choice in choices.models] == ["gpt-image-2", "grok-imagine-image"]
@@ -264,6 +264,15 @@ def test_the_tools_read_states_saved_and_effective_values_and_what_real_use_show
     assert (image["default_model"], image["effective_default"]["model_id"]) == (None, "grok-imagine-image")
     assert image["image_offered_by"] == ["openai", "xai"]
 
+    # The same Source id under a new credential is another Source: what the old one showed is not claimed for it.
+    rotated = replace(XAI, credential_ref="cred_rotated")
+    status = hosted_tools_status(
+        _config(sources=[CLAUDE_SUB, rotated, OPENAI, GEMINI]), evidence=evidence, spec_for=_spec_for,
+        image_price=lambda _source, _spec: None,
+    )
+    web = next(tool for tool in status["tools"] if tool["name"] == "web_search")
+    assert (web["status"]["latest_ok"], web["status"]["verified"]) == (None, [])
+
 
 @pytest.mark.parametrize(
     "tool,payload,expected",
@@ -288,6 +297,10 @@ def test_a_put_changes_only_the_fields_it_names(tool, payload, expected):
         ("web_search", {"default_model": None}, "invalid_parameter"),
         ("image_generate", {"executor_order": None}, "invalid_parameter"),
         ("web_search", {"enabled": "yes"}, "invalid_parameter"),
+        # Only the saved choices reset with null; a null switch must not turn a cost-bearing tool back on.
+        ("web_search", {"enabled": None}, "invalid_parameter"),
+        ("web_search", {"executor_order": ["not-a-source"]}, "invalid_parameter"),
+        ("image_generate", {"default_model": {"source_id": "openai", "model_id": "gpt-image-2"}}, "invalid_parameter"),
         ("web_search", {"executor_order": ["src_a00000001", "src_a00000001"]}, "invalid_parameter"),
     ],
 )

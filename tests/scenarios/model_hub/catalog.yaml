@@ -177,11 +177,11 @@ scenarios:
       - tests/test_model_hub_hosted_tools_resolution.py::test_the_image_enum_is_deterministic_with_the_default_first
       - tests/test_model_hub_hosted_tools_resolution.py::test_a_turn_freezes_its_tools_executors_and_image_enum_and_each_hop_states_its_own_facts
   - id: MH-HOSTED-002
-    name: Absent hosted-tools config means every tool is on; an rc-era section keeps each tool's enabled, and a broken entry takes only its own defaults without the whole-section Model Hub reset
+    name: Absent hosted-tools config means every tool is on; an rc-era section keeps each tool's enabled, and a broken section or entry turns only its tools off without the whole-section Model Hub reset
     status: covered
     kind: compatibility
     layer: contract
-    test: tests/test_model_hub_hosted_tools_config.py::test_a_broken_hosted_tool_entry_takes_only_its_own_defaults
+    test: tests/test_model_hub_hosted_tools_config.py::test_a_broken_hosted_tool_entry_turns_off_only_its_tool
     related_tests:
       - tests/test_model_hub_hosted_tools_config.py::test_disk_load_with_a_broken_hosted_tools_section_keeps_model_hub
       - tests/test_model_hub_hosted_tools_config.py::test_released_configs_load_with_every_tool_on_and_stay_without_the_section
@@ -456,6 +456,7 @@ scenarios:
       - 'ui/src/components/settings/models/useHostedTools.test.tsx::MH-HOSTED-UI-007: shows no status of the previous Source identity while the new identity''s read fails'
       - 'ui/src/components/settings/models/useHostedTools.test.tsx::MH-HOSTED-UI-007: keeps a tool pending until the read reconciling its lost write lands'
       - 'ui/src/components/settings/models/useHostedTools.test.tsx::MH-HOSTED-UI-007: drops a write answer asked under another Source identity'
+      - 'ui/src/components/settings/models/useHostedTools.test.tsx::MH-HOSTED-UI-007: keeps a tool pending until every write queued for it has settled'
       - 'ui/src/components/settings/models/useHostedTools.test.tsx::MH-HOSTED-UI-007: queues a clear behind a write like any write, so its answer lands last'
   - id: MH-HOSTED-UI-018
     name: Every hosted tool is on by default under its capability group, and nothing locks its switch
