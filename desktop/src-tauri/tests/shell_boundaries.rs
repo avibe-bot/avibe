@@ -48,6 +48,16 @@ fn shipping_text(source: &str) -> String {
     }
 }
 
+fn source_slice<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
+    let body = source
+        .split_once(start)
+        .unwrap_or_else(|| panic!("source is missing {start}"))
+        .1;
+    body.split_once(end)
+        .unwrap_or_else(|| panic!("source is missing {end}"))
+        .0
+}
+
 #[test]
 fn source_checks_read_a_windows_checkout_as_the_same_text() {
     let checkout = read_to_string(&crate_dir().join("src/lib.rs")).replace("\r\n", "\n");
@@ -834,6 +844,168 @@ fn every_quit_boundary_reuses_one_bounded_computer_use_cleanup() {
         computer_use.find("drop(shell_lock);") < computer_use.find("let _ = reply.send(());"),
         "the controller must release its lock before acknowledging shutdown"
     );
+}
+
+#[test]
+fn foreground_lifecycle_and_identity_inventories_are_exhaustive() {
+    let shell = shipping_source("src/lib.rs");
+    let native = shipping_source("src/computer_use.rs");
+    let server = read_to_string(&crate_dir().join("../../core/computer_server.py"));
+
+    let exit_routes = [
+        (
+            "toggle off",
+            source_slice(&native, "async fn toggle(&mut self)", "async fn runtime_ready"),
+            &["ForegroundExitReason::ToggleOff", "defer_foreground_finish("][..],
+        ),
+        (
+            "Computer Use stop",
+            source_slice(&native, "async fn runtime_stopped(&mut self", "async fn activated"),
+            &[
+                "ForegroundExitReason::ComputerUseStop",
+                "set_runtime_lost(",
+                "defer_foreground_finish(",
+            ][..],
+        ),
+        (
+            "session end or archive",
+            source_slice(
+                &native,
+                "async fn dispatch_foreground_control",
+                "fn defer_foreground_finish",
+            ),
+            &["ForegroundExitReason::SessionEndOrArchive", "defer_foreground_finish("][..],
+        ),
+        (
+            "consent revoke",
+            source_slice(&native, "fn toggle_foreground_consent", "fn refresh_granted_view"),
+            &["ForegroundExitReason::ConsentRevoke", "defer_foreground_finish("][..],
+        ),
+        (
+            "cancellation",
+            source_slice(&server, "async def _call_foreground", "    async def call_tool"),
+            &[
+                "_finish_foreground_transaction(",
+                "reason=\"cancelled\"",
+                "_settle_without_cancelling(",
+            ][..],
+        ),
+        (
+            "app quit",
+            source_slice(&shell, "fn exit_shell", "fn claim_exit_cleanup"),
+            &["shutdown_computer_use(&app).await"][..],
+        ),
+        (
+            "macOS session end",
+            source_slice(&shell, "fn stop_for_session_end", "fn request_runtime_lifecycle"),
+            &[
+                "ForegroundExitReason::MacOsSessionEnd",
+                ".shutdown(computer_use::ForegroundExitReason::MacOsSessionEnd)",
+            ][..],
+        ),
+        (
+            "controller disconnect",
+            source_slice(
+                &native,
+                "async fn shutdown_after_controller_disconnect",
+                "fn current_record",
+            ),
+            &[
+                "finish_and_await_terminal(",
+                "ForegroundExitReason::ControllerDisconnect",
+                "complete_foreground_finish(",
+            ][..],
+        ),
+        (
+            "driver disconnect",
+            source_slice(&native, "async fn runtime_lost", "async fn runtime_stopped"),
+            &["ForegroundExitReason::DriverDisconnect", "set_runtime_lost("][..],
+        ),
+        (
+            "foreground watchdog",
+            source_slice(
+                &native,
+                "fn start_foreground_controller_watchdog",
+                "async fn complete_foreground_finish",
+            ),
+            &[
+                "finish_and_await_terminal(",
+                "ForegroundFinishTrigger::ControllerWatchdog",
+            ][..],
+        ),
+        (
+            "runtime stop before daemon teardown",
+            source_slice(&shell, "fn stop_runtime", "fn start_runtime_monitor"),
+            &["controller.runtime_stopped().await", "host.stop_owned_runtime().await"][..],
+        ),
+    ];
+    for (label, body, markers) in exit_routes {
+        for marker in markers {
+            assert!(body.contains(marker), "{label} route is missing {marker}");
+        }
+    }
+
+    let identity_sites = [
+        (
+            "observed window record and verify",
+            source_slice(
+                &server,
+                "    def _record_observation",
+                "    @staticmethod\n    def _require_foreground_observation",
+            ),
+            &["_WindowIdentity", "_verify_window_identity("][..],
+        ),
+        (
+            "foreground target admission",
+            source_slice(
+                &server,
+                "    async def _foreground_contract",
+                "    async def _restore_and_verify_foreground",
+            ),
+            &[
+                "_record_window_identity(",
+                "_verify_window_identity(",
+                "_window_by_identity(",
+            ][..],
+        ),
+        (
+            "prior frontmost restore verification",
+            source_slice(
+                &server,
+                "    async def _restore_and_verify_foreground",
+                "    async def _finish_foreground_transaction",
+            ),
+            &["_verify_window_identity(", "_window_by_identity("][..],
+        ),
+        (
+            "native action target",
+            source_slice(
+                &native,
+                "    async fn handle_foreground_control",
+                "    fn toggle_foreground_consent",
+            ),
+            &[
+                "parse_window_identity(",
+                "verify_process_identity(",
+                "ForegroundTransaction::new(",
+            ][..],
+        ),
+        (
+            "native exact window operations",
+            source_slice(&native, "fn with_exact_ax_window", "fn set_exact_window_minimized"),
+            &["&WindowIdentity", "verify_process_identity(", "_AXUIElementGetWindow"][..],
+        ),
+        (
+            "native prior frontmost restore",
+            source_slice(&native, "fn restore_prior_frontmost", "fn restore_pointer"),
+            &["&WindowIdentity", "running_application(", "raise_exact_window("][..],
+        ),
+    ];
+    for (label, body, markers) in identity_sites {
+        for marker in markers {
+            assert!(body.contains(marker), "{label} site is missing {marker}");
+        }
+    }
 }
 
 #[test]

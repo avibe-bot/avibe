@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 import hashlib
 import json
 import logging
+import math
 import os
 from pathlib import Path
 import sys
@@ -48,6 +49,7 @@ from core.computer_script_handles import (
     parse_handle_descriptor,
     validate_handle_is_current,
 )
+from vibe.runtime import process_start_token
 
 _LEASE_TTL_SECONDS = 60.0
 _LEASE_HEARTBEAT_SECONDS = 10.0
@@ -139,6 +141,7 @@ class ForegroundControl(Protocol):
         title: str,
         target: Mapping[str, Any] | None = None,
         restoration: Mapping[str, Any] | None = None,
+        reason: str | None = None,
     ) -> dict[str, Any]: ...
 
 
@@ -156,6 +159,7 @@ class UnixForegroundControl:
         title: str,
         target: Mapping[str, Any] | None = None,
         restoration: Mapping[str, Any] | None = None,
+        reason: str | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "operation": operation,
@@ -166,6 +170,8 @@ class UnixForegroundControl:
             payload["target"] = dict(target)
         if restoration is not None:
             payload["restoration"] = dict(restoration)
+        if reason is not None:
+            payload["reason"] = reason
         reader, writer = await asyncio.open_unix_connection(str(self._socket_path))
         try:
             writer.write(
@@ -665,17 +671,37 @@ class _SessionState:
 
 @dataclass(frozen=True)
 class _WindowObservation:
+    identity: "_WindowIdentity"
     snapshot_id: str | None
     capture_id: str | None
     element_tokens: frozenset[str]
 
 
 @dataclass(frozen=True)
+class _WindowIdentity:
+    pid: int
+    process_start_stamp: str
+    window_id: int
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "pid": self.pid,
+            "process_start_stamp": self.process_start_stamp,
+            "window_id": self.window_id,
+        }
+
+
+@dataclass(frozen=True)
 class _ForegroundContract:
-    target: dict[str, Any]
-    prior_frontmost: dict[str, Any]
+    target_identity: _WindowIdentity
+    target_label: dict[str, str]
+    prior_frontmost: _WindowIdentity
     pointer: dict[str, float]
     active_space_id: int
+
+    @property
+    def target(self) -> dict[str, Any]:
+        return {**self.target_identity.as_dict(), **self.target_label}
 
 
 @dataclass
@@ -716,10 +742,7 @@ class _ForegroundRestoration:
     ) -> "_ForegroundRestoration":
         return cls(
             prior_frontmost=_RestorationComponent(
-                recorded={
-                    "pid": contract.prior_frontmost["pid"],
-                    "window_id": contract.prior_frontmost["window_id"],
-                }
+                recorded=contract.prior_frontmost.as_dict()
             ),
             pointer=_RestorationComponent(recorded=deepcopy(contract.pointer)),
             active_space=_RestorationComponent(
@@ -844,7 +867,7 @@ def _frontmost_window(payload: Mapping[str, Any]) -> dict[str, Any] | None:
     }
 
 
-def _window_identity(window: Mapping[str, Any]) -> tuple[int, int] | None:
+def _window_key_from_record(window: Mapping[str, Any]) -> tuple[int, int] | None:
     pid = window.get("pid")
     window_id = window.get("window_id")
     if (
@@ -855,6 +878,48 @@ def _window_identity(window: Mapping[str, Any]) -> tuple[int, int] | None:
     ):
         return None
     return (pid, window_id)
+
+
+def _process_start_stamp(pid: int) -> str | None:
+    token = process_start_token(pid)
+    if not isinstance(token, str):
+        return None
+    try:
+        started_at = float(token)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not math.isfinite(started_at) or started_at <= 0:
+        return None
+    return str(round(started_at * 1_000_000))
+
+
+def _record_window_identity(
+    window: Mapping[str, Any],
+    process_start_stamp_reader: Callable[[int], str | None],
+) -> _WindowIdentity | None:
+    key = _window_key_from_record(window)
+    if key is None:
+        return None
+    process_stamp = process_start_stamp_reader(key[0])
+    if not isinstance(process_stamp, str) or not process_stamp:
+        return None
+    return _WindowIdentity(
+        pid=key[0],
+        process_start_stamp=process_stamp,
+        window_id=key[1],
+    )
+
+
+def _verify_window_identity(
+    identity: _WindowIdentity,
+    window: Mapping[str, Any],
+    process_start_stamp_reader: Callable[[int], str | None],
+) -> bool:
+    return (
+        _window_key_from_record(window) == (identity.pid, identity.window_id)
+        and process_start_stamp_reader(identity.pid)
+        == identity.process_start_stamp
+    )
 
 
 def _window_by_key(
@@ -872,6 +937,21 @@ def _window_by_key(
         ):
             return dict(window)
     return None
+
+
+def _window_by_identity(
+    payload: Mapping[str, Any],
+    identity: _WindowIdentity,
+    process_start_stamp_reader: Callable[[int], str | None],
+) -> dict[str, Any] | None:
+    window = _window_by_key(payload, (identity.pid, identity.window_id))
+    if window is None or not _verify_window_identity(
+        identity,
+        window,
+        process_start_stamp_reader,
+    ):
+        return None
+    return window
 
 
 def _float_value(value: Any) -> float | None:
@@ -1444,6 +1524,9 @@ class ComputerUseServer:
         lease_manager: DesktopLeaseManager | None = None,
         foreground_control: ForegroundControl | None = None,
         platform: str | None = None,
+        process_start_stamp_reader: Callable[[int], str | None] = (
+            _process_start_stamp
+        ),
     ) -> None:
         self._state_path = state_path or computer_use_state_path()
         self._tools, self._upstream_accepts_session = _load_snapshot(self._state_path)
@@ -1463,6 +1546,7 @@ class ComputerUseServer:
             _foreground_control_socket_path(self._state_path)
         )
         self._platform = platform or sys.platform
+        self._process_start_stamp_reader = process_start_stamp_reader
 
     @property
     def tools(self) -> list[dict[str, Any]]:
@@ -1664,11 +1748,12 @@ class ComputerUseServer:
                 "Observe this exact window with get_window_state or zoom before sending input.",
             )
 
-    @staticmethod
     def _record_observation(
+        self,
         result: Mapping[str, Any],
         arguments: Mapping[str, Any],
         session_state: _SessionState,
+        identity_before: _WindowIdentity | None,
     ) -> None:
         key = _window_key(arguments)
         if key is None:
@@ -1677,7 +1762,15 @@ class ComputerUseServer:
         if key[0] is None:
             return
         payload = _structured_content(result)
-        if payload is None or _window_identity(payload) != key:
+        if (
+            payload is None
+            or identity_before is None
+            or not _verify_window_identity(
+                identity_before,
+                payload,
+                self._process_start_stamp_reader,
+            )
+        ):
             session_state.window_observations.pop((key[0], key[1]), None)
             return
         snapshot_id = payload.get("snapshot_id")
@@ -1699,6 +1792,7 @@ class ComputerUseServer:
             else frozenset()
         )
         session_state.window_observations[(key[0], key[1])] = _WindowObservation(
+            identity=identity_before,
             snapshot_id=snapshot_id,
             capture_id=capture_id,
             element_tokens=element_tokens,
@@ -1708,10 +1802,10 @@ class ComputerUseServer:
     def _require_foreground_observation(
         arguments: Mapping[str, Any],
         session_state: _SessionState,
-    ) -> None:
+    ) -> _WindowIdentity | None:
         key = _window_key(arguments)
         if key is None or key[0] is None:
-            return
+            return None
         observation = session_state.window_observations.get((key[0], key[1]))
         if observation is None:
             raise ComputerServerError(
@@ -1725,7 +1819,7 @@ class ComputerUseServer:
                     "target_not_admissible",
                     "The foreground element does not belong to the current target observation.",
                 )
-            return
+            return observation.identity
         capture_id = arguments.get("capture_id")
         if (
             not isinstance(capture_id, str)
@@ -1736,6 +1830,7 @@ class ComputerUseServer:
                 "target_not_admissible",
                 "The foreground coordinates are not bound to the current target capture.",
             )
+        return observation.identity
 
     async def _foreground_contract(
         self,
@@ -1745,6 +1840,7 @@ class ComputerUseServer:
         session: str,
         title: str,
         heartbeat: asyncio.Task[None],
+        expected_target_identity: _WindowIdentity | None,
     ) -> _ForegroundContract:
         key = _window_key(arguments)
         if key is None or key[0] is None:
@@ -1772,6 +1868,24 @@ class ComputerUseServer:
             raise ComputerServerError(
                 "target_missing",
                 "The exact target window is no longer present.",
+            )
+        if expected_target_identity is None:
+            target_identity = _record_window_identity(
+                target,
+                self._process_start_stamp_reader,
+            )
+        elif _verify_window_identity(
+            expected_target_identity,
+            target,
+            self._process_start_stamp_reader,
+        ):
+            target_identity = expected_target_identity
+        else:
+            target_identity = None
+        if target_identity is None:
+            raise ComputerServerError(
+                "target_not_admissible",
+                "The exact target window identity changed or could not be verified.",
             )
         if target.get("on_current_space") is not True:
             raise ComputerServerError(
@@ -1801,11 +1915,19 @@ class ComputerUseServer:
                 "target_not_admissible",
                 "The prior frontmost window could not be verified.",
             )
-        prior_key = _window_identity(prior_frontmost)
-        assert prior_key is not None
-        prior_window = _window_by_key(
+        prior_identity = _record_window_identity(
+            prior_frontmost,
+            self._process_start_stamp_reader,
+        )
+        if prior_identity is None:
+            raise ComputerServerError(
+                "target_not_admissible",
+                "The prior frontmost window identity could not be verified.",
+            )
+        prior_window = _window_by_identity(
             windows_payload,
-            prior_key,
+            prior_identity,
+            self._process_start_stamp_reader,
         )
         if (
             prior_window is None
@@ -1839,13 +1961,12 @@ class ComputerUseServer:
                 "The hardware pointer position was not verifiable.",
             )
         return _ForegroundContract(
-            target={
-                "pid": key[0],
-                "window_id": key[1],
+            target_identity=target_identity,
+            target_label={
                 "app_name": str(target.get("app_name") or ""),
                 "title": str(target.get("title") or ""),
             },
-            prior_frontmost=prior_frontmost,
+            prior_frontmost=prior_identity,
             pointer={"x": pointer_x, "y": pointer_y},
             active_space_id=int(active_space_id),
         )
@@ -1934,21 +2055,29 @@ class ComputerUseServer:
             prior_frontmost = _frontmost_window(windows_payload)
             if (
                 prior_frontmost is not None
-                and _window_identity(prior_frontmost)
-                == _window_identity(contract.prior_frontmost)
+                and _verify_window_identity(
+                    contract.prior_frontmost,
+                    prior_frontmost,
+                    self._process_start_stamp_reader,
+                )
             ):
                 restoration.prior_frontmost.verified = True
             else:
-                restoration.prior_frontmost.fail(
-                    "prior frontmost application or exact window was not restored"
-                )
+                if prior_frontmost is None:
+                    detail = "prior frontmost application or exact window was not restored"
+                elif _window_key_from_record(prior_frontmost) != (
+                    contract.prior_frontmost.pid,
+                    contract.prior_frontmost.window_id,
+                ):
+                    detail = "prior frontmost exact window identity was not restored"
+                else:
+                    detail = "prior frontmost process identity changed before verification"
+                restoration.prior_frontmost.fail(detail)
 
-            prior_window = _window_by_key(
+            prior_window = _window_by_identity(
                 windows_payload,
-                (
-                    contract.prior_frontmost["pid"],
-                    contract.prior_frontmost["window_id"],
-                ),
+                contract.prior_frontmost,
+                self._process_start_stamp_reader,
             )
             if (
                 prior_window is not None
@@ -1993,6 +2122,7 @@ class ComputerUseServer:
         session: str,
         title: str,
         heartbeat: asyncio.Task[None],
+        reason: str,
     ) -> tuple[_ForegroundRestoration, str | None]:
         async def attention(restoration: _ForegroundRestoration) -> None:
             with suppress(Exception):
@@ -2002,6 +2132,7 @@ class ComputerUseServer:
                     title=title,
                     target=contract.target,
                     restoration=restoration.as_dict(),
+                    reason=reason,
                 )
 
         restoration = await self._restore_and_verify_foreground(
@@ -2021,6 +2152,8 @@ class ComputerUseServer:
                 session=session,
                 title=title,
                 target=contract.target,
+                restoration=restoration.as_dict(),
+                reason=reason,
             )
         except Exception as exc:
             clear_error = (
@@ -2045,6 +2178,7 @@ class ComputerUseServer:
         session: str,
         title: str,
         heartbeat: asyncio.Task[None],
+        expected_target_identity: _WindowIdentity | None,
     ) -> dict[str, Any]:
         try:
             contract = await self._foreground_contract(
@@ -2053,6 +2187,7 @@ class ComputerUseServer:
                 session=session,
                 title=title,
                 heartbeat=heartbeat,
+                expected_target_identity=expected_target_identity,
             )
         except ComputerServerError as exc:
             return _foreground_error(exc.code, str(exc))
@@ -2089,6 +2224,9 @@ class ComputerUseServer:
                 session=session,
                 title=title,
                 target=contract.target,
+                restoration=_ForegroundRestoration.from_contract(
+                    contract
+                ).as_dict(),
             )
         )
         if active_error is not None:
@@ -2118,6 +2256,7 @@ class ComputerUseServer:
                         session=session,
                         title=title,
                         heartbeat=heartbeat,
+                        reason="cancelled",
                     )
                 )
             )
@@ -2167,6 +2306,11 @@ class ComputerUseServer:
                     session=session,
                     title=title,
                     heartbeat=heartbeat,
+                    reason=(
+                        "cancelled"
+                        if operation_cancellation is not None
+                        else "completed"
+                    ),
                 )
             )
         )
@@ -2371,14 +2515,33 @@ class ComputerUseServer:
                         if validation_error is not None:
                             return _not_dispatched_error_result(validation_error)
                     self._require_observation(name, arguments, session_state)
+                    foreground_target_identity: _WindowIdentity | None = None
                     if (
                         arguments.get("delivery_mode") == "foreground"
                         and name == "click"
                     ):
-                        self._require_foreground_observation(
-                            arguments,
-                            session_state,
+                        foreground_target_identity = (
+                            self._require_foreground_observation(
+                                arguments,
+                                session_state,
+                            )
                         )
+                    observation_identity_before: _WindowIdentity | None = None
+                    if name in _OBSERVE_TOOLS:
+                        observation_key = _window_key(arguments)
+                        if (
+                            observation_key is not None
+                            and observation_key[0] is not None
+                        ):
+                            observation_identity_before = (
+                                _record_window_identity(
+                                    {
+                                        "pid": observation_key[0],
+                                        "window_id": observation_key[1],
+                                    },
+                                    self._process_start_stamp_reader,
+                                )
+                            )
                     await self._run_while_lease_owned(
                         heartbeat,
                         asyncio.sleep(0),
@@ -2393,6 +2556,7 @@ class ComputerUseServer:
                             session=session,
                             title=session_title or session,
                             heartbeat=heartbeat,
+                            expected_target_identity=foreground_target_identity,
                         )
                     else:
                         forwarded = dict(arguments)
@@ -2413,6 +2577,7 @@ class ComputerUseServer:
                             result,
                             arguments,
                             session_state,
+                            observation_identity_before,
                         )
                     if name == "start_session":
                         if result.get("isError"):

@@ -8,7 +8,7 @@ import os
 from pathlib import Path
 import shutil
 import time
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 import pytest
 
@@ -22,8 +22,10 @@ from core.computer_server import (
     _fold_tool_result,
     _foreground_control_socket_path,
     _frontmost_window,
+    _record_window_identity,
     _validate_foreground_input,
     _validate_input,
+    _verify_window_identity,
 )
 from core.computer_use import (
     COMPUTER_USE_TOOL_NAMES,
@@ -171,6 +173,7 @@ class FakeForegroundControl:
         title: str,
         target: Mapping[str, Any] | None = None,
         restoration: Mapping[str, Any] | None = None,
+        reason: str | None = None,
     ) -> dict[str, Any]:
         self.calls.append(
             (
@@ -180,6 +183,7 @@ class FakeForegroundControl:
                     "title": title,
                     "target": dict(target or {}),
                     "restoration": dict(restoration or {}),
+                    "reason": reason,
                 },
             )
         )
@@ -380,6 +384,7 @@ class FailingRestoreControl(FakeForegroundControl):
         title: str,
         target: Mapping[str, Any] | None = None,
         restoration: Mapping[str, Any] | None = None,
+        reason: str | None = None,
     ) -> dict[str, Any]:
         result = await super().request(
             operation,
@@ -387,6 +392,7 @@ class FailingRestoreControl(FakeForegroundControl):
             title=title,
             target=target,
             restoration=restoration,
+            reason=reason,
         )
         if operation == "restore":
             raise RuntimeError("unexpected native restore failure")
@@ -1884,6 +1890,7 @@ def _foreground_server(
     control: FakeForegroundControl,
     *,
     platform: str = "darwin",
+    process_start_stamp_reader: Callable[[int], str | None] | None = None,
 ) -> ComputerUseServer:
     return ComputerUseServer(
         state_path=state_path,
@@ -1892,6 +1899,9 @@ def _foreground_server(
         lease_manager=FakeLeaseManager(),  # type: ignore[arg-type]
         foreground_control=control,  # type: ignore[arg-type]
         platform=platform,
+        process_start_stamp_reader=(
+            process_start_stamp_reader or (lambda pid: f"start-{pid}")
+        ),
     )
 
 
@@ -2037,6 +2047,7 @@ async def test_foreground_click_on_visible_target_verifies_restore(
             "prior_frontmost": {
                 "recorded": {
                     "pid": 3,
+                    "process_start_stamp": "start-3",
                     "window_id": 30,
                 },
                 "attempted": False,
@@ -2202,6 +2213,103 @@ async def test_foreground_refuses_reused_or_noncurrent_observation_identity(
     assert control.calls == []
 
 
+@pytest.mark.asyncio
+async def test_foreground_admission_refuses_process_identity_reuse(
+    tmp_path: Path,
+) -> None:
+    state_path, state = _state(tmp_path)
+    upstream = ForegroundUpstream()
+    control = FakeForegroundControl()
+    reads = 0
+
+    def process_start_stamp_reader(_pid: int) -> str:
+        nonlocal reads
+        reads += 1
+        return "start-7" if reads <= 2 else "replacement-7"
+
+    server = _foreground_server(
+        state_path,
+        state,
+        upstream,
+        control,
+        process_start_stamp_reader=process_start_stamp_reader,
+    )
+    observed = await server.call_tool(
+        "get_window_state",
+        {"session": "ses-a", "pid": 7, "window_id": 9},
+    )
+    assert not observed.get("isError")
+
+    result = await server.call_tool(
+        "click",
+        {
+            "session": "ses-a",
+            "pid": 7,
+            "window_id": 9,
+            "x": 1,
+            "y": 2,
+            "capture_id": "capture-7-9",
+            "delivery_mode": "foreground",
+        },
+    )
+
+    assert result["structuredContent"]["code"] == "target_not_admissible"
+    assert result["structuredContent"]["params"]["foreground_outcome"] == "unattempted"
+    assert control.calls == []
+
+
+@pytest.mark.asyncio
+async def test_foreground_restore_rejects_reused_prior_frontmost_process(
+    tmp_path: Path,
+) -> None:
+    state_path, state = _state(tmp_path)
+    upstream = ForegroundUpstream()
+    control = FakeForegroundControl()
+    reads: dict[int, int] = {}
+
+    def process_start_stamp_reader(pid: int) -> str:
+        reads[pid] = reads.get(pid, 0) + 1
+        if pid == 3 and reads[pid] > 2:
+            return "replacement-3"
+        return f"start-{pid}"
+
+    server = _foreground_server(
+        state_path,
+        state,
+        upstream,
+        control,
+        process_start_stamp_reader=process_start_stamp_reader,
+    )
+    await server.call_tool(
+        "get_window_state",
+        {"session": "ses-a", "pid": 7, "window_id": 9},
+    )
+
+    result = await server.call_tool(
+        "click",
+        {
+            "session": "ses-a",
+            "pid": 7,
+            "window_id": 9,
+            "x": 1,
+            "y": 2,
+            "capture_id": "capture-7-9",
+            "delivery_mode": "foreground",
+        },
+    )
+
+    restoration = result["structuredContent"]["params"]["restoration"]
+    assert result["structuredContent"]["code"] == "foreground_restore_failed"
+    assert restoration["components"]["prior_frontmost"]["verified"] is False
+    assert "identity" in restoration["components"]["prior_frontmost"]["failure_detail"]
+    assert [name for name, _ in control.calls] == [
+        "request_consent",
+        "set_active",
+        "restore",
+        "attention",
+    ]
+
+
 def test_foreground_click_shape_is_one_exact_press() -> None:
     base = {
         "pid": 7,
@@ -2328,7 +2436,7 @@ async def test_foreground_restore_failure_reports_effect_without_retry(
     assert restoration["restoration_ok"] is False
     assert (
         restoration["components"]["prior_frontmost"]["failure_detail"]
-        == "prior frontmost application or exact window was not restored"
+        == "prior frontmost exact window identity was not restored"
     )
     assert restoration["components"]["pointer"]["verified"] is True
     assert restoration["components"]["active_space"]["verified"] is True

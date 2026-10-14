@@ -868,7 +868,7 @@ fn authorize_exit(app: &AppHandle) {
 #[cfg(target_os = "macos")]
 pub(crate) async fn shutdown_computer_use(app: &AppHandle) {
     if let Some(controller) = app.try_state::<computer_use::Controller>() {
-        controller.shutdown().await;
+        controller.shutdown(computer_use::ForegroundExitReason::AppQuit).await;
     }
 }
 
@@ -916,7 +916,11 @@ fn stop_for_session_end(app: &AppHandle) -> Option<impl std::future::Future<Outp
     Some(async move {
         let _ = tokio::time::timeout(SESSION_END_STOP_LIMIT, async {
             if cleanup {
-                shutdown_computer_use(&app).await;
+                if let Some(controller) = app.try_state::<computer_use::Controller>() {
+                    controller
+                        .shutdown(computer_use::ForegroundExitReason::MacOsSessionEnd)
+                        .await;
+                }
             }
             if stop {
                 let _ = host.stop_owned_runtime().await;
@@ -1013,11 +1017,11 @@ fn stop_runtime(app: AppHandle, quit: bool) {
     }
     refresh_runtime_tray(&app, TrayRuntimeState::Stopping);
     notifications::stop(&app);
-    #[cfg(target_os = "macos")]
-    if let Some(controller) = app.try_state::<computer_use::Controller>() {
-        controller.runtime_stopped();
-    }
     tauri::async_runtime::spawn(async move {
+        #[cfg(target_os = "macos")]
+        if let Some(controller) = app.try_state::<computer_use::Controller>() {
+            controller.runtime_stopped().await;
+        }
         let outcome = host.stop_owned_runtime().await;
         if quit && outcome == CliOutcome::Completed {
             exit_shell(&app);
