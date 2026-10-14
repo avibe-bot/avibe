@@ -13,7 +13,11 @@ and tags visible at narrow widths. Metadata includes relative last use.
 
 Boundaries: the Vaults hub, small list/search helpers, existing UI primitives,
 and English/Chinese copy. No API, custody, approval or pending-request change.
-Multi-field metadata is integrated only once its owning lane's contract lands.
+Multi-field metadata is integrated after master `20664d45b`: named field labels,
+  `NAME.field` references and the `NAME.<default>` alias are searchable, while
+  envelopes/field values remain excluded. Field rows, corruption warnings,
+  reveal selectors, stale-field handoffs, and refreshed field identity are kept
+  alongside this lane's layout and URL filters.
 
 ## Reuse decisions
 
@@ -46,11 +50,10 @@ lint; CI owns the broad suite. Never restart or probe the live local runtime.
 
 ## Validation evidence
 
-- Focused Vitest: 47 passing cases across the matcher, Vaults page and existing
-  browser-handoff suite. Includes unchanged audit/reveal behavior and a clock
-  regression (red on `dd655fb823`): connected SSE with no grants still advances
-  last-use labels without refetching. One page clock ticks each second for
-  grants, otherwise each minute when the inventory has last-use labels.
+- Focused Vitest: 113 passing cases across the matcher, Vaults page, browser
+  handoff, and multi-field UI suites. Includes unchanged audit/reveal behavior,
+  field-label/reference search, corrupt-field rendering, selected-field canonical
+  reveal records and stale-field handoff checks.
 - `npm run build`, `npm run typecheck:tests`, and baseline-aware `npm run lint`
   pass. No Python changes and no full local test-suite run.
 - Hermetic Chromium sanity check: real page/components and CSS with 26 synthetic
