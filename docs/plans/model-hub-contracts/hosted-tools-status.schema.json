@@ -68,7 +68,7 @@
                   "oneOf": [{ "type": "null" }, { "$ref": "#/definitions/ListPrice" }]
                 },
                 "probe_estimate": {
-                  "description": "What one call probe here is estimated to cost before it runs, in the shape of hosted_summary.cost: list (the tool fee plus a nominal token estimate), included on a monthly Source, or null when unknown (never zero) and for a tool that cannot be probed yet.",
+                  "description": "What probing here is estimated to cost at most before it runs, in the shape of hosted_summary.cost: the call probe (its tool fee plus a nominal token estimate) and, for a tool with a replay aspect on a protocol that replays natively, the replay probe that may follow (tokens only). list, included on a monthly Source, or null when unknown (never zero), which is always so for image_generation (no list price).",
                   "oneOf": [
                     { "type": "null" },
                     {

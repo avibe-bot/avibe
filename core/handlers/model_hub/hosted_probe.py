@@ -1,4 +1,4 @@
-"""The hosted-tool call probe (``vibey-hosted-tools.md`` §3.2, capability model §3.3).
+"""The hosted-tool probes (``vibey-hosted-tools.md`` §3.2, capability model §3.3).
 
 A probe is the production request. Vibey's own builder makes it, from a probe
 resolution that pins the probed (Source, model) and carries the overlay's native
@@ -7,6 +7,11 @@ the transcript is one fixed user message, and on protocols that allow it the
 hosted tool is forced. Vibey's adapter reads the response, so a result is
 recognized only as the ``HostedToolBlock`` a real turn would keep. Nothing here
 parses a provider's wire format.
+
+The ``call`` probe asks the model to use the tool. When it verifies, the
+``replay`` probe sends that turn back with the tool's native payload in place,
+as Vibey replays history to the Source that produced it, and asks for a result
+without using the tool again.
 
 Every request the adapter sends runs on exactly one Source through Model Hub's
 own invocation, with no route and no failover. This module only builds the
@@ -17,9 +22,12 @@ service owns the calls themselves.
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import json
-from dataclasses import dataclass
-from typing import Any, AsyncIterator, Awaitable, Callable, Literal, Optional, Protocol
+import re
+from dataclasses import dataclass, replace
+from typing import Any, AsyncIterator, Awaitable, Callable, Final, Literal, Optional, Protocol
 
 import httpx
 
@@ -34,8 +42,17 @@ from core.agent_core.ai.provider import (
 )
 from core.agent_core.ai.registry import create_adapter
 from core.agent_core.cancel import CancelToken
-from core.agent_core.messages import HostedToolBlock, TextBlock, UserMessage
+from core.agent_core.messages import (
+    IMAGE_MIME_TYPES,
+    AssistantMessage,
+    HostedImage,
+    HostedToolBlock,
+    TextBlock,
+    ThinkingBlock,
+    UserMessage,
+)
 from core.agent_core.tools.hosted import hosted_tool_spec as canonical_tool_spec
+from core.agent_core.tools.read import detect_supported_image_mime_type
 from vibe.backend_model_catalog import HostedToolSpec
 
 from .adapter import InvokeHandle, RawCallOutcome, RawOutcomeKind
@@ -45,16 +62,25 @@ from .stream_wire import ProtocolUsageReport
 
 ProbeOutcome = Literal["verified", "unsupported", "inconclusive", "transient"]
 
-# The tools whose results Vibey's adapters parse today. ``image_generation``
-# joins when its results are parsed: until then a probe could never see one,
-# and every image probe would read as the model not using the tool.
-PROBED_TOOLS: tuple[str, ...] = ("web_search", "x_search")
+# Every catalog tool: Vibey's adapters parse each one's results.
+PROBED_TOOLS: tuple[str, ...] = ("web_search", "x_search", "image_generation")
 
+# The web search asks for fresh articles: the replay probe asks about the other results, and a model given only the
+# first could infer the rest of a fixed topic's results (its site's other pages), but not a page published after it
+# was trained.
 _MESSAGES = {
-    "web_search": "Search the web for 'Avibe local-first agent OS' and reply with the first result's URL.",
+    "web_search": "Search the web for a news article published today about technology and reply with its URL.",
     "x_search": "Search X for posts about 'Avibe local-first agent OS' and reply with the first post's URL.",
+    "image_generation": "Generate a small, simple image: a blue circle on a white background.",
 }
+# The replay probe's question: one a model can answer only from the results the replayed payload holds, since the
+# answer it already gave shows just the first.
+_REPLAY_MESSAGE = (
+    "Without using any tool again, list the URLs of the other results you found, beyond the one you already gave."
+)
 _SYSTEM = "You check that a tool works: use it, then answer in one line."
+# The replay's own instructions: the call's would ask for the very call the replay checks the model does not need.
+_REPLAY_SYSTEM = "You check that a tool's earlier results can be read back: answer from them in one line, without using any tool."
 # Room for a reasoning model to think, call the tool and answer in one line; a hop whose Vibey turns ask for less
 # gets that instead.
 PROBE_MAX_OUTPUT_TOKENS = 4096
@@ -66,7 +92,13 @@ ESTIMATED_USAGE = ProtocolUsageReport.of(input_tokens=8000, cached_input_tokens=
 ESTIMATED_COUNTS: dict[str, dict[str, int]] = {
     "web_search": {"web_search_calls": 1, "web_search_requests": 1},
     "x_search": {"x_search_calls": 1, "x_posts_fetched": 10, "x_users_fetched": 0},
+    "image_generation": {},
 }
+# What the replay probe is estimated to use: the call probe's turn with its results, a question, and a one-line
+# answer, with no tool fee (the answer uses no tool).
+ESTIMATED_REPLAY_USAGE = ProtocolUsageReport.of(input_tokens=12000, cached_input_tokens=0, output_tokens=300)
+# The protocols whose adapters send a hosted call's native payload back in place (``transform.native_replay``).
+NATIVE_REPLAY_PROTOCOLS: frozenset[str] = frozenset({"anthropic", "openai_responses"})
 # The adapter's requests never leave this process: the transport serves each
 # with a Model Hub call pinned to the probed Source.
 _IN_PROCESS_URL = "http://model-hub-probe.invalid"
@@ -112,6 +144,112 @@ def probe_request(
         tool_choice=None if source.protocol == "anthropic" else tool,
     )
 
+
+def replay_request(call: ModelRequest, tool: str, answered: AssistantMessage) -> ModelRequest:
+    """The replay probe after a verified ``call`` probe: its turn sent back, with the native declaration still
+    present and the hop allowed to take the tool's native payload, and a question only those results answer.
+
+    The answer goes back without its reasoning, which may restate the results, readably or encrypted: a Source that
+    dropped the payload could read a result there. A provider that wants a completed turn's reasoning back refuses
+    the request, which no narrow rule learns from, so the replay reads as inconclusive, never as unsupported.
+    """
+
+    route = call.endpoint.hosted_tools[tool]
+    answered = replace(answered, content=tuple(block for block in answered.content if not isinstance(block, ThinkingBlock)))
+    return replace(
+        call,
+        endpoint=replace(
+            call.endpoint, hosted_tools={tool: HostedToolRoute("native", None, True, route.declaration, route.include)}
+        ),
+        system=_REPLAY_SYSTEM,
+        messages=(*call.messages, answered, UserMessage(content=(TextBlock(text=_REPLAY_MESSAGE),))),
+        # A forced choice would ask for the very call the replay checks the model does not need.
+        tool_choice=None,
+    )
+
+
+def hidden_result_urls(message: AssistantMessage) -> frozenset[str]:
+    """The result URLs a response's hosted calls returned that its visible answer does not show.
+
+    Only these prove a replay: a model that names one read the replayed native
+    payload, since nothing else it was sent holds it. A URL the answer wrote or
+    cited is visible text, which any request carries.
+    """
+
+    returned = {source.url for block in message.content if isinstance(block, HostedToolBlock) for source in block.record.sources}
+    # Read generously, a trailing slash aside: a result the answer shows but the probe takes for hidden is what could
+    # verify a replay falsely.
+    shown = {key.rstrip("/") for key in written_urls(message)}
+    return frozenset(url for url in returned if url and not {key.rstrip("/") for key in _readings(url)} & shown)
+
+
+def written_urls(message: AssistantMessage) -> frozenset[str]:
+    """Every URL a response's answer shows, as comparison keys: each reading of a URL its text writes
+    (``_readings``) and each URL it cites, as given."""
+
+    text = " ".join(block.text for block in message.content if isinstance(block, TextBlock) and block.text)
+    keys = {key for url in _URL.findall(text) for key in _readings(url)}
+    cited = [
+        citation.url
+        for block in message.content
+        if isinstance(block, TextBlock) and block.citations
+        for citation in block.citations
+    ]
+    if message.hosted_summary is not None:
+        cited.extend(source.url for source in message.hosted_summary.cited_sources)
+    keys.update(_same_url(url) for url in cited if url)
+    return frozenset(keys)
+
+
+def carries_native_payload(body: Any, message: AssistantMessage) -> bool:
+    """Whether a request body sends every hosted call of ``message`` back verbatim, its provider items in place."""
+
+    def canonical(value: Any) -> str:
+        return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+    # Every object the body holds, once, then a lookup per item: one walk, whatever the payload's size.
+    held: set[str] = set()
+    pending = [body]
+    while pending:
+        node = pending.pop()
+        if isinstance(node, dict):
+            held.add(canonical(node))
+            pending.extend(node.values())
+        elif isinstance(node, list):
+            pending.extend(node)
+    items = [item for block in message.content if isinstance(block, HostedToolBlock) for item in block.native.payload]
+    return bool(items) and all(canonical(item) in held for item in items)
+
+
+class ProbeImageCheck:
+    """The image probe's media sink: it checks a generated image is one Vibey can keep, and keeps nothing.
+
+    A probe asks whether the tool works, so its image is decoded and recognized
+    exactly as a turn's would be, and then discarded.
+    """
+
+    async def save_image(self, encoded: str) -> HostedImage:
+        return await asyncio.to_thread(self._check, encoded)
+
+    @staticmethod
+    def _check(encoded: str) -> HostedImage:
+        try:
+            data = base64.b64decode(encoded, validate=True)
+        except (binascii.Error, ValueError):
+            raise ValueError("the image is not valid base64") from None
+        mime_type = detect_supported_image_mime_type(data)
+        # The kinds a turn's sink keeps (``IMAGE_MIME_TYPES``, which ``MediaSnapshots`` stores); any other is refused there.
+        if mime_type not in IMAGE_MIME_TYPES:
+            raise ValueError("the image is not a PNG, JPEG, GIF or WebP")
+        return HostedImage(path="probe:discarded", mime=mime_type, bytes=len(data))
+
+
+# How long the UI process waits for any Model Hub RPC (``vibe/model_hub_client.py`` reads it from here). A probe
+# answers inside it, with room for the RPC's own overhead.
+MODEL_HUB_RPC_TIMEOUT_SECONDS: Final = 300.0
+PROBE_BUDGET_SECONDS: Final = MODEL_HUB_RPC_TIMEOUT_SECONDS - 20.0
+# The replay probe runs only with at least this long left; otherwise it reports a transient failure, sending nothing.
+REPLAY_MIN_SECONDS: Final = 60.0
 
 # A probe sends at most this many requests: its own, and the one resend an adapter makes when an endpoint refuses
 # a field before answering (Anthropic's one-hour cache lifetime). Only an answered request runs the model.
@@ -261,14 +399,22 @@ class PinnedCallTransport(httpx.AsyncBaseTransport):
                 raise result
 
 
-async def run_probe(request: ModelRequest, call: PinnedCall) -> tuple[Done | ProviderError | None, list[ProbeCall]]:
+async def run_probe(
+    request: ModelRequest, call: PinnedCall, *, media_sink: Optional[ProbeImageCheck] = None
+) -> tuple[Done | ProviderError | None, list[ProbeCall]]:
     """Run Vibey's adapter for ``request`` over pinned calls; its terminal event and the calls it made."""
 
     transport = PinnedCallTransport(call)
     terminal: Done | ProviderError | None = None
     try:
         async with httpx.AsyncClient(transport=transport) as client:
-            adapter = create_adapter(request.endpoint.protocol, client=client, gateway=False)
+            # Only the image probe has an image to keep, and only the Responses adapter produces one.
+            adapter = create_adapter(
+                request.endpoint.protocol,
+                client=client,
+                gateway=False,
+                **({"media_sink": media_sink} if media_sink is not None else {}),
+            )
             async for event in adapter.stream(request, CancelToken()):
                 if isinstance(event, (Done, ProviderError)):
                     terminal = event
@@ -302,10 +448,94 @@ def call_outcome(
         return "unsupported"
     if isinstance(terminal, Done):
         used = any(
-            isinstance(block, HostedToolBlock) and block.tool == tool and block.record.status == "completed"
+            isinstance(block, HostedToolBlock)
+            and block.tool == tool
+            and block.record.status == "completed"
+            # A generated image counts only once Vibey could keep it.
+            and (block.record.images is None or bool(block.record.images))
             for block in terminal.message.content
         )
         return "verified" if used else "inconclusive"
+    return _failure(terminal, outcome)
+
+
+def replay_outcome(
+    tool: str,
+    terminal: Done | ProviderError | None,
+    outcome: RawCallOutcome,
+    learned: Optional[LearnedEvidence],
+    *,
+    asked: frozenset[str],
+    carried: bool,
+) -> ProbeOutcome:
+    """What one replay probe shows about sending ``tool``'s native payload back to its Source (§12 item 23).
+
+    * ``unsupported``: a 400 naming the replayed content, through the narrow rule real requests learn from, or an
+      answer that calls the tool again instead of using the results it holds;
+    * ``verified``: an answer that names a URL only those results hold (``asked``, ``hidden_result_urls``) without
+      calling the tool;
+    * ``inconclusive``: an answer that names none, or a refusal, and any request that did not carry the native
+      payload verbatim (``carried``), since it tested nothing;
+    * ``transient``: as for the call probe.
+    """
+
+    if not carried:
+        # A request that did not send the payload verbatim tested nothing, whatever the provider said about it.
+        return "inconclusive"
+    if learned is not None and (learned.feature.kind, learned.feature.name, learned.feature.aspect) == (
+        "hosted_tool", tool, "replay"
+    ):
+        return "unsupported"
+    if isinstance(terminal, Done):
+        message = terminal.message
+        if any(isinstance(block, HostedToolBlock) and block.tool == tool for block in message.content):
+            return "unsupported"
+        if message.stop_reason in ("refusal", "safety"):
+            # A refused or blocked answer proves nothing, whatever it quotes.
+            return "inconclusive"
+        named = written_urls(message) & {_same_url(url) for url in asked}
+        return "verified" if named else "inconclusive"
+    return _failure(terminal, outcome)
+
+
+# A URL as an answer writes it: up to the whitespace, quote or bracket that ends it. Parentheses stay, since a URL
+# may hold them; one that closes the prose around it is trailing text.
+_URL = re.compile(r"https?://[^\s<>\[\]{}\"'`]+", re.IGNORECASE)
+# What prose and Markdown can leave right after a URL, and a URL can also end in.
+_TRAILING = ".,;:!?)*_"
+
+
+def _readings(written: str) -> frozenset[str]:
+    """The comparison keys a URL written in prose can stand for: as written, and without each run of the trailing
+    text a sentence may leave on it. A provider's URL is exact; only where prose ends a URL is ambiguous."""
+
+    readings = {_same_url(written)}
+    while written and written[-1] in _TRAILING:
+        written = written[:-1]
+        readings.add(_same_url(written))
+    return frozenset(readings)
+
+
+def _same_url(url: str) -> str:
+    """A URL as a comparison key: exactly as given but for what RFC 3986 makes equivalent, the case of its scheme and
+    host and an empty path, which is ``/``. Anything else, such as a trailing slash or the case of its user
+    information, names another URL."""
+
+    scheme, separator, rest = url.partition("://")
+    if not separator:
+        return url
+    authority = _AUTHORITY.match(rest)[0]
+    path = rest[len(authority):]
+    userinfo, at, host = authority.rpartition("@")
+    return f"{scheme.lower()}://{userinfo}{at}{host.lower()}{path if path.startswith('/') else '/' + path}"
+
+
+_AUTHORITY = re.compile(r"[^/?#]*")
+
+
+def _failure(terminal: ProviderError | None, outcome: RawCallOutcome) -> ProbeOutcome:
+    """A probe request that failed: ``transient`` when a later try may not meet the same failure."""
+
     if terminal is not None:
         # By what failed, not by ``retryable``: an adapter never retries a response that already streamed output,
         # but a dropped connection or an overload is just as transient for a probe the user can run again.
