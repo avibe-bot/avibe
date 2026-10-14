@@ -128,11 +128,12 @@ def test_provision_fulfill_arms_callback(vault):
         assert plan is not None and "provided" in plan.message.lower()
 
 
-def test_field_provision_callback_reports_current_value_free_fields(vault):
+@pytest.mark.parametrize("with_spec", [False, True])
+def test_field_provision_callback_reports_current_value_free_fields(vault, with_spec):
     with vault.begin() as conn:
         req = vs.create_provision_request(
             conn, "LOGIN", requester={"session_id": "ses_p"},
-            spec={"fields": ["username", "password", "totp"], "default_field": "password"},
+            spec={"fields": ["username", "password", "totp"], "default_field": "password"} if with_spec else None,
         )
         vs.create_secret(
             conn, name="LOGIN", default_field="password", sealed=_sealed("do-not-show-default"),

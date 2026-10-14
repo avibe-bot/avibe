@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { createInstance } from 'i18next';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
@@ -11,6 +11,7 @@ import { VaultSecretFieldsEditor } from './vault-secret-fields-editor';
 const api = vi.hoisted(() => ({
   updateVaultSecret: vi.fn(), updateVaultSecretField: vi.fn(), deleteVaultSecretField: vi.fn(),
   listVaultSecrets: vi.fn(),
+  connectWorkbenchEvents: vi.fn(() => vi.fn()),
   getVaultPubkey: vi.fn(async () => ({ public_key: 'public' })),
 }));
 const box = vi.hoisted(() => ({ scheme: 'test', enc: 'enc', ct: 'ciphertext' }));
@@ -34,15 +35,41 @@ const secret: VaultSecret = {
   kind: 'static', protection: 'standard', signer_kind: null, source: 'user', tags: [],
   policy: {}, last_used_at: null, use_count: 0, created_at: 'created', updated_at: 'version-1',
 };
+type EventHandlers = {
+  onConnected?: () => void;
+  onVaultsUpdated?: (data: { scope: string; secret_name?: string }) => void;
+};
+let eventHandlers: EventHandlers | null = null;
 const change = (label: string, value: string) => fireEvent.change(screen.getByLabelText(label), { target: { value } });
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((nextResolve, nextReject) => {
+    resolve = nextResolve;
+    reject = nextReject;
+  });
+  return { promise, resolve, reject };
+}
 const renderEditor = (entry = secret) => render(
   <I18nextProvider i18n={i18n}><VaultSecretFieldsEditor secret={entry} disabled={false} onBusyChange={vi.fn()} /></I18nextProvider>,
 );
 beforeEach(() => {
+  api.updateVaultSecret.mockReset();
+  api.updateVaultSecretField.mockReset();
+  api.deleteVaultSecretField.mockReset();
+  api.listVaultSecrets.mockReset();
+  api.connectWorkbenchEvents.mockReset();
+  api.connectWorkbenchEvents.mockImplementation((handlers: EventHandlers) => {
+    eventHandlers = handlers;
+    return vi.fn();
+  });
+  api.updateVaultSecret.mockReset();
   api.updateVaultSecretField.mockResolvedValue({ ok: true, secret: { ...secret, updated_at: 'version-2' } });
+  api.deleteVaultSecretField.mockReset();
   api.listVaultSecrets.mockResolvedValue({ ok: true, secrets: [secret] });
+
 });
-afterEach(async () => { cleanup(); vi.clearAllMocks(); await i18n.changeLanguage('en'); });
+afterEach(async () => { cleanup(); eventHandlers = null; vi.clearAllMocks(); await i18n.changeLanguage('en'); });
 
 // The editor owns metadata versions between browser encryptions. Form creation and crypto
 // tests cannot catch a second field write reusing the first version, or a default rename
@@ -57,7 +84,11 @@ it('updates envelope versions after replacing a field and renaming the default l
   await screen.findByRole('status');
   expect((screen.getByLabelText('Value for password') as HTMLInputElement).value).toBe('');
   // A parent poll can still hand back the old object after the child accepted its own
-  // successful write. That stale envelope must not roll the editor back to version-1.
+  // successful write. The editor re-reads authoritative metadata instead of adopting it.
+  api.listVaultSecrets.mockResolvedValue({
+    ok: true,
+    secrets: [{ ...secret, updated_at: 'version-2' }],
+  });
   rendered.rerender(
     <I18nextProvider i18n={i18n}>
       <VaultSecretFieldsEditor secret={{ ...secret }} disabled={false} onBusyChange={vi.fn()} />
@@ -71,6 +102,10 @@ it('updates envelope versions after replacing a field and renaming the default l
   ));
   await waitFor(() => expect((screen.getByLabelText('Value for username') as HTMLInputElement).value).toBe(''));
   const beforeRename = { ...secret, updated_at: 'version-2' };
+  api.listVaultSecrets.mockResolvedValue({
+    ok: true,
+    secrets: [{ ...secret, default_field: 'credential', fields: ['credential', 'username'], updated_at: 'version-2' }],
+  });
   rendered.rerender(
     <I18nextProvider i18n={i18n}>
       <VaultSecretFieldsEditor secret={beforeRename} disabled={false} onBusyChange={vi.fn()} />
@@ -124,6 +159,109 @@ it('keeps a typed default label when saving another field', async () => {
   expect((screen.getByLabelText('Default field name') as HTMLInputElement).value).toBe('credential');
 });
 
+it('accepts a server refetch after a legitimate quick rename back before parent acknowledgement', async () => {
+  const renamedByUser = { ...secret, default_field: 'password', fields: ['password', 'username'] };
+  const renamedBackExternally = { ...secret, default_field: 'value', fields: ['value', 'username'] };
+  api.updateVaultSecret.mockResolvedValueOnce({ ok: true, secret: renamedByUser });
+  const rendered = renderEditor();
+  change('Default field name', 'password');
+  fireEvent.click(screen.getByRole('button', { name: 'Rename' }));
+  await waitFor(() => expect((screen.getByLabelText('Default field name') as HTMLInputElement).value).toBe('password'));
+
+  api.listVaultSecrets.mockResolvedValueOnce({ ok: true, secrets: [renamedBackExternally] });
+  rendered.rerender(
+    <I18nextProvider i18n={i18n}>
+      <VaultSecretFieldsEditor secret={renamedBackExternally} disabled={false} onBusyChange={vi.fn()} />
+    </I18nextProvider>,
+  );
+  await waitFor(() => expect(api.listVaultSecrets).toHaveBeenCalledWith({ cache: false }));
+  expect((screen.getAllByLabelText('Default field name').at(-1) as HTMLInputElement).value).toBe('value');
+});
+
+it('ignores an older refetch when a newer authoritative read finishes first', async () => {
+  const older = deferred<{ ok: boolean; secrets: VaultSecret[] }>();
+  const newer = deferred<{ ok: boolean; secrets: VaultSecret[] }>();
+  api.listVaultSecrets.mockReturnValueOnce(older.promise).mockReturnValueOnce(newer.promise);
+  renderEditor();
+  const olderShape = { ...secret, default_field: 'old', fields: ['old', 'username'], updated_at: 'version-2' };
+  const newerShape = { ...secret, default_field: 'new', fields: ['new', 'username'], updated_at: 'version-3' };
+  await act(async () => {
+    eventHandlers?.onVaultsUpdated?.({ scope: 'secret', secret_name: 'LOGIN' });
+    eventHandlers?.onVaultsUpdated?.({ scope: 'secret', secret_name: 'LOGIN' });
+  });
+  await act(async () => { newer.resolve({ ok: true, secrets: [newerShape] }); await newer.promise; });
+  await waitFor(() => expect((screen.getByLabelText('Default field name') as HTMLInputElement).value).toBe('new'));
+  await act(async () => { older.reject(new Error('older read failed')); await older.promise.catch(() => undefined); });
+  expect((screen.getByLabelText('Default field name') as HTMLInputElement).value).toBe('new');
+  expect(screen.queryByLabelText('Value for old')).toBeNull();
+  expect(screen.queryByRole('alert')).toBeNull();
+});
+
+it('invalidates an older read when its own write becomes authoritative', async () => {
+  const older = deferred<{ ok: boolean; secrets: VaultSecret[] }>();
+  api.listVaultSecrets.mockReturnValueOnce(older.promise);
+  renderEditor();
+  await act(async () => {
+    eventHandlers?.onVaultsUpdated?.({ scope: 'secret', secret_name: 'LOGIN' });
+  });
+
+  const ownWrite = { ...secret, updated_at: 'version-2' };
+  api.updateVaultSecretField.mockResolvedValueOnce({ ok: true, secret: ownWrite });
+  change('Value for password', 'replacement');
+  fireEvent.click(screen.getByRole('button', { name: 'Save password' }));
+  await screen.findByRole('status');
+  await act(async () => { older.resolve({ ok: true, secrets: [secret] }); await older.promise; });
+
+  api.updateVaultSecretField.mockResolvedValueOnce({ ok: true, secret: { ...ownWrite, updated_at: 'version-3' } });
+  change('Value for username', 'next-user');
+  fireEvent.click(screen.getByRole('button', { name: 'Save username' }));
+  await waitFor(() => expect(api.updateVaultSecretField).toHaveBeenLastCalledWith(
+    'LOGIN', 'username', { record: 'LOGIN.username', blind_box: box, expected_updated_at: 'version-2' }, { handleError: false },
+  ));
+});
+
+it('catches up after an authoritative read lands while a write is in flight', async () => {
+  const read = deferred<{ ok: boolean; secrets: VaultSecret[] }>();
+  const write = deferred<{ ok: boolean; secret: VaultSecret }>();
+  const newerTruth = { ...secret, default_field: 'credential', fields: ['credential', 'username'], updated_at: 'version-2' };
+  api.listVaultSecrets.mockReturnValueOnce(read.promise).mockResolvedValueOnce({ ok: true, secrets: [newerTruth] });
+  api.updateVaultSecretField.mockReturnValueOnce(write.promise);
+  renderEditor();
+  await act(async () => { eventHandlers?.onVaultsUpdated?.({ scope: 'secret', secret_name: 'LOGIN' }); });
+  change('Value for password', 'replacement');
+  fireEvent.click(screen.getByRole('button', { name: 'Save password' }));
+  await waitFor(() => expect(api.updateVaultSecretField).toHaveBeenCalledOnce());
+  await act(async () => { read.resolve({ ok: true, secrets: [newerTruth] }); await read.promise; });
+  await waitFor(() => expect((screen.getByLabelText('Default field name') as HTMLInputElement).value).toBe('credential'));
+  write.resolve({ ok: true, secret: { ...secret, updated_at: 'version-2' } });
+  await waitFor(() => expect(api.listVaultSecrets).toHaveBeenCalledTimes(2));
+  expect((screen.getByLabelText('Default field name') as HTMLInputElement).value).toBe('credential');
+});
+
+it.each(['connected', 'updated'] as const)('refetches authoritative truth on vaults.%s', async (event) => {
+  const refreshed = { ...secret, default_field: 'credential', fields: ['credential', 'username'], updated_at: 'version-2' };
+  api.listVaultSecrets.mockResolvedValueOnce({ ok: true, secrets: [refreshed] });
+  renderEditor();
+  await act(async () => {
+    if (event === 'connected') eventHandlers?.onConnected?.();
+    else eventHandlers?.onVaultsUpdated?.({ scope: 'secret', secret_name: 'LOGIN' });
+  });
+  await waitFor(() => expect((screen.getByLabelText('Default field name') as HTMLInputElement).value).toBe('credential'));
+  expect(api.listVaultSecrets).toHaveBeenCalledWith({ cache: false });
+});
+
+it('drops removed drafts and shows a localized notice', async () => {
+  api.listVaultSecrets.mockResolvedValueOnce({
+    ok: true,
+    secrets: [{ ...secret, fields: ['password'], updated_at: 'version-2' }],
+  });
+  renderEditor();
+  change('Value for username', 'draft-user');
+  await act(async () => { eventHandlers?.onVaultsUpdated?.({ scope: 'secret', secret_name: 'LOGIN' }); });
+  await waitFor(() => expect(screen.getByRole('status').textContent).toContain('username'));
+  expect(screen.queryByLabelText('Value for username')).toBeNull();
+});
+
 it.each(['constructor', 'tostring', 'valueof'])('treats %s as a normal field key', async (field) => {
   const entry = { ...secret, fields: ['password', field] };
   api.updateVaultSecretField.mockResolvedValue({
@@ -151,7 +289,7 @@ it.each(['constructor', 'tostring', 'valueof'])('treats %s as a normal field key
   );
 });
 
-it.each(['version-1', 'version-2'])('adopts current labels at %s while preserving default and extra drafts', (updated_at) => {
+it.each(['version-1', 'version-2'])('adopts current labels at %s while preserving default and extra drafts', async (updated_at) => {
   const { rerender } = renderEditor();
   change('Value for password', 'keep-default-draft');
   change('Value for username', 'keep-this-draft');
@@ -161,12 +299,13 @@ it.each(['version-1', 'version-2'])('adopts current labels at %s while preservin
     fields: ['credential', 'username'],
     updated_at,
   };
+  api.listVaultSecrets.mockResolvedValue({ ok: true, secrets: [renamed] });
   rerender(
     <I18nextProvider i18n={i18n}>
       <VaultSecretFieldsEditor secret={renamed} disabled={false} onBusyChange={vi.fn()} />
     </I18nextProvider>,
   );
-  expect((screen.getByLabelText('Default field name') as HTMLInputElement).value).toBe('credential');
+  await waitFor(() => expect((screen.getByLabelText('Default field name') as HTMLInputElement).value).toBe('credential'));
   expect((screen.getByLabelText('Value for credential') as HTMLInputElement).value).toBe('keep-default-draft');
   expect((screen.getByLabelText('Value for username') as HTMLInputElement).value).toBe('keep-this-draft');
 });
@@ -182,14 +321,18 @@ it('warns and disables field mutations when field metadata is corrupt', () => {
   expect((screen.getByRole('button', { name: 'Add field' }) as HTMLButtonElement).disabled).toBe(true);
 });
 
-it('adopts a same-version corruption state from refreshed metadata', () => {
+it('adopts a same-version corruption state from refreshed metadata', async () => {
+  api.listVaultSecrets.mockResolvedValueOnce({
+    ok: true,
+    secrets: [{ ...secret, fields_state: 'corrupt' }],
+  });
   const { rerender } = renderEditor();
   rerender(
     <I18nextProvider i18n={i18n}>
       <VaultSecretFieldsEditor secret={{ ...secret, fields_state: 'corrupt' }} disabled={false} onBusyChange={vi.fn()} />
     </I18nextProvider>,
   );
-  expect(screen.getByRole('alert').textContent).toBe(en.errors.fields_corrupt);
+  await waitFor(() => expect(screen.getByRole('alert').textContent).toBe(en.errors.fields_corrupt));
   expect((screen.getByRole('button', { name: 'Save password' }) as HTMLButtonElement).disabled).toBe(true);
 });
 

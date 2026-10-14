@@ -946,6 +946,32 @@ def test_run_canonicalizes_default_alias_and_delivers_extra_field(tmp_path, capf
     ]
 
 
+def test_completed_run_audits_snapshot_fields_removed_or_renamed_during_child(capfd, monkeypatch):
+    from vibe import api
+
+    _create_standard_secret("LOGIN", default_field="password", fields=[{"name": "username", "sealed": _sealed("user")}])
+    _create_standard_secret("OTHER", fields=[{"name": "token", "sealed": _sealed("token")}])
+
+    def finish_run(secrets, command):
+        assert {entry["name"] for entry in secrets} == {"LOGIN", "LOGIN.username", "OTHER.token"}
+        with cli._open_vault_engine().begin() as conn:
+            vault_service.remove_secret_field(conn, "LOGIN", "username")
+            vault_service.update_secret_metadata(conn, "LOGIN", default_field="credential")
+        return {"exit_code": 0, "delivered": True}
+
+    monkeypatch.setattr(api, "avault_deliver_run", finish_run)
+    assert cli.cmd_vault_run(_ns(env=["LOGIN", "LOGIN.username", "OTHER.token"], command_argv=["python3", "-c", "pass"])) == 0
+    with cli._open_vault_engine().connect() as conn:
+        assert vault_service.get_secret_meta(conn, "LOGIN")["use_count"] == 1
+        assert vault_service.get_secret_meta(conn, "OTHER")["use_count"] == 1
+        delivered = {
+            event["secret_name"]: json.loads(event["delivery"])["fields"]
+            for event in vault_service.list_audit(conn)
+            if event["event"] == "delivered"
+        }
+        assert delivered == {"LOGIN": ["password", "username"], "OTHER": ["token"]}
+
+
 def test_run_rejects_alias_collision_after_record_canonicalization(capfd, monkeypatch):
     from vibe import api
 
@@ -2537,7 +2563,8 @@ def test_request_for_existing_secret_returns_fulfilled(tmp_path, capfd, monkeypa
 
 
 @pytest.mark.parametrize("already_exists", [False, True])
-def test_field_provision_success_hints_use_current_subset(capfd, monkeypatch, already_exists):
+@pytest.mark.parametrize("with_spec", [False, True])
+def test_field_provision_success_hints_use_current_subset(capfd, monkeypatch, already_exists, with_spec):
     def provide_subset():
         _create_standard_secret(
             "LOGIN", default_field="credential", sealed=_sealed("do-not-expose"),
@@ -2553,10 +2580,10 @@ def test_field_provision_success_hints_use_current_subset(capfd, monkeypatch, al
     monkeypatch.setattr(cli, "_wait_for_provision", wait)
     if already_exists:
         provide_subset()
-    args = cli.build_parser().parse_args([
-        "vault", "request", "LOGIN", "--spec-json",
-        '{"fields":["username","password","totp"],"default_field":"password"}', "--wait", "30",
-    ])
+    request_args = ["vault", "request", "LOGIN", "--wait", "30"]
+    if with_spec:
+        request_args.extend(["--spec-json", '{"fields":["username","password","totp"],"default_field":"password"}'])
+    args = cli.build_parser().parse_args(request_args)
     assert cli.cmd_vault_request(args) == 0
     payload = json.loads(capfd.readouterr().out)
     assert payload["status"] == "fulfilled"

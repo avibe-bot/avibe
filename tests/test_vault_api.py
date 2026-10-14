@@ -2124,6 +2124,20 @@ def test_access_request_preserves_record_error_codes(selector, status, code):
         assert list(conn.execute(select(vault_service.vault_requests))) == []
 
 
+def test_direct_access_request_resolves_fields_and_keeps_secret_authorization():
+    with api._vault_engine().begin() as conn:
+        vault_service.create_secret(
+            conn, name="LOGIN", protection="protected", default_field="password", sealed=_sealed("password"),
+            fields=[{"name": "username", "sealed": _sealed("username")}],
+        )
+    requested = api.request_vault_access({"name": "LOGIN.username"})["request"]
+    assert requested["secret_name"] == "LOGIN"
+    assert requested["card"]["grant_options"][0]["member_snapshot"] == ["LOGIN"]
+    with pytest.raises(api.VaultApiError) as exc:
+        api.request_vault_access({"name": "LOGIN.nope"})
+    assert (exc.value.status, exc.value.code) == (404, "field_not_found")
+
+
 def test_request_vault_access_reports_missing_selector_member_name():
     with pytest.raises(api.VaultApiError) as exc:
         api.request_vault_access({"source_selector": {"env": ["MISSING_KEY"]}, "session_id": "ses_1"})

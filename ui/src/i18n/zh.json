@@ -4978,6 +4978,7 @@
       "save": "保存字段",
       "saveNamed": "保存 {{field}}",
       "saved": "字段已保存",
+      "draftsDropped": "其他位置已移除字段，已丢弃这些草稿：{{fields}}。",
       "recordConflict": "保存期间字段记录发生变化。值未写入，请重新加载 Secret 后再试。",
       "secretConflict": "保存期间此密钥发生变化，字段已刷新。请检查后重新保存；你的值尚未写入。",
       "replacePlaceholder": "输入替换值",

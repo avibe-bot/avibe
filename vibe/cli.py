@@ -9458,6 +9458,17 @@ def _finish_one_shot_after_avault_error(
         _consume_after_possible_use(grants, reason=reason)
 
 
+def _capture_vault_delivery_identities(engine, names: list[str], grants):
+    from storage import vault_service
+
+    try:
+        with engine.connect() as conn:
+            return vault_service.capture_delivery_identities(conn, names)
+    except Exception:
+        _release_one_shot_reservations(engine, grants)
+        raise
+
+
 def _resolve_vault_run_delivery(
     engine,
     mapping: dict[str, str],
@@ -9972,6 +9983,7 @@ def cmd_vault_run(args):
 
     handoff_started = False
     try:
+        audit_identities = _capture_vault_delivery_identities(engine, [str(secret["name"]) for secret in secrets], one_shot_grants)
         if grant is not None:
             secret_env_names = {str(secret["env"]) for secret in secrets if secret.get("env")}
             with _AgentRunOutputBridge(
@@ -10047,7 +10059,7 @@ def cmd_vault_run(args):
         try:
             with engine.begin() as conn:
                 vault_service.record_deliveries(
-                    conn, sorted(set(mapping.values())), requester={"source": "cli", "pid": os.getpid()}, mode="run"
+                    conn, audit_identities, requester={"source": "cli", "pid": os.getpid()}, mode="run"
                 )
         except Exception:
             pass
@@ -10214,12 +10226,15 @@ def _wait_for_vault_delivery_approval(args, exc: TaskCliError, *, timeout: float
         raise terminal_error
 
 
-def _vault_provision_success_usage(engine, name: str, spec: dict | None) -> str:
+def _vault_provision_success_usage(engine, name: str) -> str:
     from storage import vault_service
 
-    if spec and spec.get("fields"):
+    try:
         with engine.connect() as conn:
             metadata = vault_service.get_secret_meta(conn, name)
+    except vault_service.SecretNotFoundError:
+        return " — check `vibe vault list` for its current availability."
+    if len(metadata.get("fields") or []) > 1:
         return vault_service.provision_field_hint(metadata)
     return f" — use it via: vibe vault run --env {name} -- <command>"
 
@@ -10253,7 +10268,7 @@ def cmd_vault_request(args):
                 secret_name=name,
                 status="fulfilled",
                 request=req,
-                message=f"'{name}' is already in the vault{_vault_provision_success_usage(engine, name, spec)}",
+                message=f"'{name}' is already in the vault{_vault_provision_success_usage(engine, name)}",
             )
             return 0
         wait_seconds = getattr(args, "wait", None)
@@ -10306,7 +10321,7 @@ def cmd_vault_request(args):
                     secret_name=name,
                     status="fulfilled",
                     request=waited,
-                    message=f"'{name}' is now available{_vault_provision_success_usage(engine, name, spec)}",
+                    message=f"'{name}' is now available{_vault_provision_success_usage(engine, name)}",
                 )
                 return 0
             _print_task_error(
@@ -10825,6 +10840,7 @@ def cmd_vault_fetch(args):
                 body=body,
                 help_command=help_command,
             )
+        audit_identity = _capture_vault_delivery_identities(engine, [name], [one_shot_grant] if one_shot_grant else [])[0]
         handoff_started = True
         if grant is not None:
             result = api.avault_agent_deliver_fetch(
@@ -10844,7 +10860,7 @@ def cmd_vault_fetch(args):
             with engine.begin() as conn:
                 vault_service.record_proxy_use(
                     conn,
-                    name,
+                    audit_identity,
                     requester={"source": "cli", "pid": os.getpid()},
                     delivery={"host": host, "method": method, "status": status},
                 )
@@ -11004,6 +11020,7 @@ def cmd_vault_inject(args):
             args=args,
             source_selector=source_selector,
         )
+        audit_identities = _capture_vault_delivery_identities(engine, [str(item["name"]) for item in secrets], one_shot_grants)
         # avault writes the 0600 file atomically; if the path is unwritable it raises and no
         # delivery is recorded.
         handoff_started = True
@@ -11023,7 +11040,7 @@ def cmd_vault_inject(args):
             with engine.begin() as conn:
                 vault_service.record_deliveries(
                     conn,
-                    [str(item["name"]) for item in secrets],
+                    audit_identities,
                     requester={"source": "cli", "pid": os.getpid()},
                     mode=f"inject:{fmt}",
                 )

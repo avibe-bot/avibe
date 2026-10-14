@@ -4129,19 +4129,24 @@ def request_vault_access(payload: dict, *, user_context: Any = None) -> dict:
 
     if not isinstance(payload, dict):
         raise VaultApiError("payload must be an object", code="invalid_payload")
-    name = str(payload.get("name") or "").strip()
+    raw_name = payload.get("name")
+    name = raw_name if isinstance(raw_name, str) else ""
+    if "." not in name:
+        name = name.strip()
     raw_selector = payload.get("source_selector")
     source_selector = dict(raw_selector) if isinstance(raw_selector, dict) else None
     if not name and source_selector is None:
         raise VaultApiError("name or source_selector is required", code="invalid_request", status=409)
-    if name and not vault_crypto.is_valid_secret_name(name):
-        raise VaultApiError("invalid secret name (use ^[A-Za-z_][A-Za-z0-9_]*$)", code="invalid_name")
+    if name and not vault_crypto.is_valid_secret_name(name.split(".", 1)[0]):
+        raise VaultApiError("invalid secret reference", code="invalid_name")
     purpose = str(payload.get("purpose") or "run")
     engine = _vault_engine()
     try:
         with engine.begin() as conn:
             if name:
-                vault_service.get_secret_meta(conn, name, user_context=user_context)
+                if "." in name:
+                    vault_service.validate_field_name(name.split(".", 1)[1])
+                vault_service.get_secret_record_meta(conn, name, user_context=user_context)
             request = vault_service.create_access_request(
                 conn,
                 name or None,

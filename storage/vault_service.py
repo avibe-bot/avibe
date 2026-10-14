@@ -106,6 +106,16 @@ _UNSET = object()
 
 
 @dataclass(frozen=True)
+class DeliveryIdentity:
+    """Value-free pre-handoff identity retained for post-delivery bookkeeping."""
+
+    secret_id: str
+    name: str
+    field: str
+    access_snapshot: dict[str, Any] | None
+
+
+@dataclass(frozen=True)
 class GrantApproval:
     grant_id: str
     members: list[str]
@@ -1853,10 +1863,6 @@ def list_pending_request_callbacks(
     for row in rows:
         if row.get("request_type") != "provision" or row.get("status") != "fulfilled":
             continue
-        _, delivery = _request_json_payloads(row)
-        spec = delivery.get("spec") if isinstance(delivery, dict) else None
-        if not isinstance(spec, dict) or not spec.get("fields"):
-            continue
         # Transient callback projection: use the user's actual current fields,
         # never the requested hints and never any envelope/value material.
         secret = conn.execute(
@@ -1865,7 +1871,9 @@ def list_pending_request_callbacks(
             .where(vault_secrets.c.name == row.get("secret_name"))
         ).mappings().first()
         if secret is not None:
-            row["provision_secret"] = _field_metadata(dict(secret))
+            current = _field_metadata(dict(secret))
+            if len(current["fields"]) > 1:
+                row["provision_secret"] = current
     return rows
 
 
@@ -3436,18 +3444,16 @@ def get_protected_record_envelope(conn: Connection, name: str, *, user_context: 
     return get_protected_envelope(conn, name, user_context=user_context)
 
 
-def record_proxy_use(conn: Connection, name: str, *, requester: Any = None, delivery: Any = None) -> None:
-    """Bump usage + write a value-free ``proxied`` audit row after a brokered request."""
-    row, entry = _resolve_record_ref(conn, name)
-    secret_name = str(row["name"])
+def record_proxy_use(conn: Connection, identity: DeliveryIdentity, *, requester: Any = None, delivery: Any = None) -> None:
+    """Record an actual egress from its pre-handoff identity, even after deletion."""
     conn.execute(
         vault_secrets.update()
-        .where(vault_secrets.c.name == secret_name)
+        .where(vault_secrets.c.id == identity.secret_id)
         .values(last_used_at=_now(), use_count=vault_secrets.c.use_count + 1)
     )
     delivery_payload = dict(delivery) if isinstance(delivery, dict) else {}
-    delivery_payload["field"] = str(entry["field"])
-    audit(conn, "proxied", secret_name=secret_name, requester=requester, delivery=delivery_payload)
+    delivery_payload["field"] = identity.field
+    audit(conn, "proxied", secret_name=identity.name, requester=requester, delivery=delivery_payload, access_snapshot=identity.access_snapshot)
 
 
 def record_signing_use(
@@ -3537,32 +3543,39 @@ def get_signing_envelope(conn: Connection, name: str, *, user_context: Any = Non
     return get_key_envelope(conn, name, user_context=user_context)
 
 
-def record_deliveries(conn: Connection, names: list[str], *, requester: Any = None, mode: str | None = None) -> None:
-    """Bump usage once per secret and audit all delivered fields.
+def capture_delivery_identities(conn: Connection, refs: list[str], *, user_context: Any = None) -> list[DeliveryIdentity]:
+    """Capture labels and ACL identity while the selected records still exist."""
+    identities: list[DeliveryIdentity] = []
+    snapshots: dict[str, dict[str, Any] | None] = {}
+    for ref in refs:
+        row, entry = _resolve_record_ref(conn, ref, user_context=user_context)
+        name = str(row["name"])
+        if name not in snapshots:
+            snapshots[name] = _build_audit_access_snapshot(conn, [name])
+        identities.append(DeliveryIdentity(str(row["id"]), name, str(entry["field"]), snapshots[name]))
+    return identities
 
-    Call this only AFTER the delivery action (child spawn / file write / stream) succeeds,
-    so the audit trail and usage counts never record a delivery that didn't happen.
-    """
-    delivered_fields: dict[str, list[str]] = {}
-    for ref in names:
-        row, entry = _resolve_record_ref(conn, ref)
-        secret_name = str(row["name"])
-        fields = delivered_fields.setdefault(secret_name, [])
-        field = str(entry["field"])
-        if field not in fields:
-            fields.append(field)
-    for secret_name, fields in delivered_fields.items():
+
+def record_deliveries(conn: Connection, identities: list[DeliveryIdentity], *, requester: Any = None, mode: str | None = None) -> None:
+    """Bookkeep a completed handoff without resolving records a second time."""
+    delivered: dict[str, tuple[DeliveryIdentity, list[str]]] = {}
+    for identity in identities:
+        _, fields = delivered.setdefault(identity.secret_id, (identity, []))
+        if identity.field not in fields:
+            fields.append(identity.field)
+    for identity, fields in delivered.values():
         conn.execute(
             vault_secrets.update()
-            .where(vault_secrets.c.name == secret_name)
+            .where(vault_secrets.c.id == identity.secret_id)
             .values(last_used_at=_now(), use_count=vault_secrets.c.use_count + 1)
         )
         audit(
             conn,
             "delivered",
-            secret_name=secret_name,
+            secret_name=identity.name,
             requester=requester,
             delivery={"mode": mode, "fields": fields},
+            access_snapshot=identity.access_snapshot,
         )
 
 
