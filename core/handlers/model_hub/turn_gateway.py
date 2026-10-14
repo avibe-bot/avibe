@@ -160,6 +160,23 @@ def _codex_request_metadata(raw: str | None) -> dict | None:
     return {key: metadata[key] for key in _CODEX_ROUTE_FIELDS}
 
 
+# The turn a Vibey gateway request belongs to. Vibey sends it on every request
+# from ``HopResolution.request_headers``: its credential answers for a route
+# that the session's later turns reuse, so ownership is named, never inferred.
+VIBEY_TURN_HEADER: Final = "x-avibe-turn-id"
+
+
+def _request_metadata(backend: str, request: web.Request) -> dict | None:
+    """The request identity a client carries beside its credential, if its backend carries one."""
+
+    if backend == "codex":
+        return _codex_request_metadata(request.headers.get(_CODEX_TURN_METADATA))
+    if backend == "vibey":
+        turn_id = request.headers.get(VIBEY_TURN_HEADER)
+        return {"avibe_turn_id": turn_id} if turn_id else None
+    return None
+
+
 def _consume_codex_request_metadata(payload: dict, header: dict | None) -> bool:
     """Verify duplicate identity and keep private routing fields local."""
 
@@ -706,7 +723,9 @@ class ModelHubTurnGateway:
             return refused(400, "invalid_request_error")
         # Checked and owned with no await between them: once admitted, the
         # call belongs to its turn, and stopping or finalizing the turn ends it.
-        live = self.correlation.hosted_executor_bindings(backend="vibey", token=token)
+        live = self.correlation.hosted_executor_bindings(
+            backend="vibey", token=token, request_metadata=_request_metadata("vibey", request),
+        )
         try:
             with self._own_turn_call(live[0]) if live is not None else nullcontext():
                 result = await self.service.run_hosted_tool(
@@ -787,10 +806,7 @@ class ModelHubTurnGateway:
         terminalizer = self.correlation.gateway_terminalizer(
             backend=backend,
             token=token,
-            request_metadata=(
-                _codex_request_metadata(request.headers.get(_CODEX_TURN_METADATA))
-                if backend == "codex" else None
-            ),
+            request_metadata=_request_metadata(backend, request),
         )
         execution = _TurnExecution()
         with self._own_turn_request(terminalizer, execution), terminalizer:

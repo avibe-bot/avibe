@@ -1295,8 +1295,15 @@ async def test_model_hub_records_a_source_stall_as_the_backend_reported_it(engin
     harness.controller.model_hub_runtime = router
     request = harness.request("write the page")
     turn_id = _turn(request.context)
-    token = registry.credentials("vibey", f"vibey:{harness.session_id}", turn_id)
-    registry.begin_gateway_request(backend="vibey", token=token, requested_model_id="test-model")
+    token = registry.prepare_gateway_turn(
+        backend="vibey", token=registry.credentials("vibey", f"vibey:{harness.session_id}", turn_id),
+        turn_id=turn_id, requested_model_id="test-model", resolved_model_id="test-model",
+        source_id="src_stalled01", via_mapping=False,
+    )
+    # A Vibey gateway request names its Turn.
+    registry.begin_gateway_request(
+        backend="vibey", token=token, requested_model_id="test-model", request_metadata={"avibe_turn_id": turn_id},
+    )
     registry.begin_attempt(
         turn_id, source_id="src_stalled01", resolved_model_id="test-model", channel="hub", via_mapping=False
     )

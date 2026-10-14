@@ -54,7 +54,7 @@
       "additionalProperties": {
         "type": "string"
       },
-      "description": "Correlation metadata the gateway needs; always present, empty when there is none."
+      "description": "Correlation metadata the gateway needs, sent on every gateway request; always present, empty when there is none. A Turn's resolution carries `x-avibe-turn-id`."
     },
     "capabilities": {
       "type": "object",

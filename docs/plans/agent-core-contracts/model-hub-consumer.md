@@ -23,6 +23,12 @@ consumer's requirements, and the Model Hub lane lands the change in both places.
    and capabilities. A capability Model Hub does not know is `null`, never guessed; `input_limit` is `null` until Model
    Hub stores one. The agent treats unknown values conservatively (C-2). It resolves once per run and again after a
    retryable error.
+   - `request_headers` carries `x-avibe-turn-id`, the Turn the resolution was made for, and the agent sends it on
+     every gateway request: model calls and proxied hosted calls.
+   - The token answers for the route, which later Turns of the Session reuse. The gateway credits a request only
+     to the Turn it names, and only while that Turn holds the token's route and still admits work.
+   - A model request from a finished Turn still routes but is credited to no Turn. A hosted call from one is
+     `executor_not_bound`.
 4. **Served-hop report.** Every gateway response for `vibey` carries `x-avibe-served-hop`: compact, ASCII-escaped JSON
    with exactly `provider`, `api`, `model`, `source` (since Model Hub contract v12), taken from the winning attempt
    (Source vendor, Source protocol, upstream target, Source id) and sent before the first model byte. The gateway does
@@ -98,7 +104,8 @@ consumer's requirements, and the Model Hub lane lands the change in both places.
    - The served-hop report carries `source`, the serving Source id (item 4, Model Hub contract v12), so that a
      hosted block's payload is tagged with the exact Source; two Sources can share an origin. The gateway and the
      parser in `conversion-tables.md` changed together in that bump. Native hosted mode lands with or after v12.
-   - **The proxy executor.** `POST {base_url}/hosted-tools/{tool}` with the turn's Bearer token and the body
+   - **The proxy executor.** `POST {base_url}/hosted-tools/{tool}` with the turn's Bearer token, its
+     `request_headers` (item 3), and the body
      `{"arguments": <canonical arguments>, "executor": HopResolution.hosted_tools[tool].executor}`. The executor
      may be `null`.
      - The executor must be the one the caller's live turn bound for that tool. The turn's first resolution

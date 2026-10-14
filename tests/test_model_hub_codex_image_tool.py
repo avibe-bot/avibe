@@ -238,6 +238,7 @@ async def test_other_callers_reach_the_engine_with_exactly_their_declared_tools(
                 router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
                 hop = await router.resolve_hop("menu-alias", process_scope="vibey:image", turn_id="turn-image")
                 url, token, model = f'{hop["base_url"]}/{path}', hop["token"], hop["runtime_model"]
+                pin = {**hop["request_headers"], **(pin or {})}
             else:
                 base_url, token = await gateway.endpoint(
                     backend, process_scope="/repo", turn_id="turn_image_tool",
