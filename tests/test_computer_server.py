@@ -523,7 +523,7 @@ def test_result_folding_preserves_images_and_moves_structured_content() -> None:
     assert result["content"][0]["type"] == "image"
     assert result["content"][-1]["type"] == "text"
     assert '"answer":42' in result["content"][-1]["text"]
-    assert "structuredContent" not in result
+    assert result["structuredContent"] == {"answer": 42}
     assert "outputSchema" not in result
 
 
@@ -548,6 +548,7 @@ def test_result_folding_preserves_driver_error_code_params_and_detail() -> None:
         "detail": "ScreenCaptureKit window was unavailable",
         "params": {"scope": "window"},
     }
+    assert result["structuredContent"] == payload
 
 
 def test_result_folding_preserves_bounded_detail_inside_driver_params() -> None:
@@ -577,6 +578,7 @@ def test_result_folding_preserves_bounded_detail_inside_driver_params() -> None:
         },
     }
     assert "supersecretvalue123456" not in result["content"][0]["text"]
+    assert result["structuredContent"] == payload
 
 
 def test_result_folding_preserves_real_driver_exit_code_and_content_detail() -> None:
@@ -604,6 +606,7 @@ def test_result_folding_preserves_real_driver_exit_code_and_content_detail() -> 
         "detail": "window ownership lookup failed in the driver",
         "params": {"exit_code": 1},
     }
+    assert result["structuredContent"] == payload
 
 
 def test_result_folding_uses_bounded_content_text_for_unstructured_driver_errors() -> None:
@@ -625,6 +628,7 @@ def test_result_folding_uses_bounded_content_text_for_unstructured_driver_errors
         "detail": "driver detail with controls",
         "params": {"tool": "get_window_state"},
     }
+    assert result["structuredContent"] == payload
 
 
 def test_result_folding_preserves_json_rpc_error_code_and_detail() -> None:
@@ -644,6 +648,7 @@ def test_result_folding_preserves_json_rpc_error_code_and_detail() -> None:
         "detail": "driver rejected request",
         "params": {"rpc_code": -32001},
     }
+    assert result["structuredContent"] == payload
 
 
 def test_diagnostic_text_is_bounded_and_single_line() -> None:
@@ -691,6 +696,7 @@ def test_driver_error_detail_redacts_credential_material() -> None:
         "detail": "capture failed with api_key=[redacted]",
         "params": {"scope": "window"},
     }
+    assert result["structuredContent"] == payload
     assert "supersecretvalue123456" not in result["content"][0]["text"]
 
 
@@ -866,13 +872,7 @@ async def test_real_stdio_proxy_preserves_large_window_state_response(
     assert result.get("isError") is not True
     image = next(item for item in result["content"] if item.get("type") == "image")
     assert len(image["data"]) == 1_200_000
-    structured_text = next(
-        item["text"]
-        for item in result["content"]
-        if item.get("type") == "text"
-        and item.get("text", "").startswith("Structured content:\n")
-    )
-    payload = json.loads(structured_text.split("\n", 1)[1])
+    payload = result["structuredContent"]
     assert payload["pid"] == 97470
     assert payload["window_id"] == 6286
     assert payload["element_count"] == 330

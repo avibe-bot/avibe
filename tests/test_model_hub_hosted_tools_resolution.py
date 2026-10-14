@@ -223,7 +223,8 @@ def test_status_lists_where_each_tool_can_run_and_counts_re_verifications(tmp_pa
         live=ALL,
     )
     status = hosted_tools_status(
-        _config({"x_search": ON}), evidence=store, spec_for=_spec_for, engine=ENGINE, now=NOW
+        _config({"x_search": ON}), evidence=store, spec_for=_spec_for, engine=ENGINE, now=NOW,
+        probe_estimate=lambda _source, _model_id, _tool: None,
     )
     by_name = {tool["name"]: tool for tool in status["tools"]}
     assert [tool["name"] for tool in status["tools"]] == ["web_search", "x_search", "image_generation"]

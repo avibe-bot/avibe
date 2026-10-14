@@ -283,7 +283,7 @@ def test_claude_key_and_bearer_are_both_retained(home):
     assert len({row.id for row in rows}) == 2
 
 
-def test_bearer_scheme_reaches_proof_and_custody_and_prevents_wrong_reuse(home, tmp_path):
+def test_bearer_scheme_reaches_custody_and_prevents_wrong_reuse(home, tmp_path):
     path = home / ".claude/settings.json"
     _write(path, json.dumps({"env": {
         "ANTHROPIC_AUTH_TOKEN": "fixture-same-bytes",
@@ -291,10 +291,8 @@ def test_bearer_scheme_reaches_proof_and_custody_and_prevents_wrong_reuse(home, 
     }}))
     service, store, adapter = _service(tmp_path, migration_home=home)
     provision = adapter.provision_credential
-    transient = adapter.provision_transient_credential
     matches = adapter.matches_api_key_credential
     schemes = {}
-    proof_schemes = []
 
     async def provision_with_scheme(*args, **kwargs):
         scheme = kwargs.pop("auth_scheme", None)
@@ -302,15 +300,10 @@ def test_bearer_scheme_reaches_proof_and_custody_and_prevents_wrong_reuse(home, 
         schemes[ref] = scheme
         return ref
 
-    async def transient_with_scheme(*args, **kwargs):
-        proof_schemes.append(kwargs.pop("auth_scheme", None))
-        return await transient(*args, **kwargs)
-
     async def matches_with_scheme(ref, *args, auth_scheme=None):
         return schemes.get(ref) == auth_scheme and await matches(ref, *args)
 
     adapter.provision_credential = provision_with_scheme
-    adapter.provision_transient_credential = transient_with_scheme
     adapter.matches_api_key_credential = matches_with_scheme
     # A pre-existing legacy Source has the same bytes/target but a different
     # header scheme. It must not be reused for the new saved Bearer token.
@@ -328,7 +321,7 @@ def test_bearer_scheme_reaches_proof_and_custody_and_prevents_wrong_reuse(home, 
     rows = service.migration_scan()["items"]
     ids = [row["id"] for row in rows]
     assert asyncio.run(service.migration_apply(ids, clean_api_keys=True))["applied"] == 1
-    assert proof_schemes == ["bearer"]
+    assert not adapter.transient_refs
     assert set(schemes.values()) == {None, "bearer"}
     assert len(store.config.sources) == len(adapter.provisioned) == 2
     assert "auth_scheme" not in json.dumps(store.config.to_payload())

@@ -710,10 +710,13 @@ def test_usage_metering_has_one_owner_per_call_population() -> None:
     meter_calls = [
         node for node in ast.walk(service_tree) if _call_name(node) == "_meter_call"
     ]
-    # Explicit Source tests and proxied hosted-tool calls consume their own
+    # Calls a user asked for (the Source test and hosted-tool probes, both
+    # through `_user_test_call`) and proxied hosted-tool calls consume their own
     # response rather than forwarding a Turn to the gateway. They reuse the same
     # metering owner, exactly once.
-    consumers = (invoke, _functions(service_tree)["probe_source"], _functions(service_tree)["run_hosted_tool"])
+    consumers = (
+        invoke, _functions(service_tree)["_user_test_call"], _functions(service_tree)["run_hosted_tool"],
+    )
     assert len(meter_calls) == len(consumers)
     assert all(
         sum(call in set(ast.walk(consumer)) for call in meter_calls) == 1
@@ -1278,12 +1281,14 @@ def test_machine_error_extractor_reads_only_declared_envelope_paths() -> None:
 
 
 def test_reasoning_tier_resolver_call_inventory_requires_batch_indexes() -> None:
+    # owner -> (needs the batch index, call sites)
     expected = {
-        ("service.py", "apply_tiers"): True,
-        ("service.py", "_create_oauth_source"): True,
-        ("service.py", "create_source"): True,
-        ("service.py", "_apply_reasoning_tier_ladder"): False,
-        ("migration.py", "_validated_source"): True,
+        ("service.py", "apply_tiers"): (True, 1),
+        ("service.py", "_create_oauth_source"): (True, 1),
+        ("service.py", "create_source"): (True, 1),
+        ("service.py", "_apply_reasoning_tier_ladder"): (False, 1),
+        # A fixed subscription catalog and an API key's saved manual models.
+        ("migration.py", "_validated_source"): (True, 2),
     }
     calls_by_owner: dict[tuple[str, str | None], list[ast.Call]] = {}
     for path in (SERVICE, MIGRATION):
@@ -1296,22 +1301,23 @@ def test_reasoning_tier_resolver_call_inventory_requires_batch_indexes() -> None
             calls_by_owner.setdefault(key, []).append(node)
 
     assert set(calls_by_owner) == set(expected)
-    assert all(len(calls) == 1 for calls in calls_by_owner.values())
-    for key, needs_batch_index in expected.items():
-        [call] = calls_by_owner[key]
-        injected = next(
-            (
-                keyword.value
-                for keyword in call.keywords
-                if keyword.arg == "catalog_efforts_by_model"
-            ),
-            None,
-        )
-        if needs_batch_index:
-            assert isinstance(injected, ast.Name)
-            assert injected.id == "catalog_efforts_by_model"
-        else:
-            assert injected is None
+    for key, (needs_batch_index, call_sites) in expected.items():
+        calls = calls_by_owner[key]
+        assert len(calls) == call_sites
+        for call in calls:
+            injected = next(
+                (
+                    keyword.value
+                    for keyword in call.keywords
+                    if keyword.arg == "catalog_efforts_by_model"
+                ),
+                None,
+            )
+            if needs_batch_index:
+                assert isinstance(injected, ast.Name)
+                assert injected.id == "catalog_efforts_by_model"
+            else:
+                assert injected is None
 
 
 def test_settlement_abandonment_cannot_overwrite_a_committed_terminal_fact() -> None:

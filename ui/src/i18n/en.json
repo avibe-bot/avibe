@@ -2084,7 +2084,7 @@
       "migration": {
         "open": "Migrate configuration",
         "title": "Migrate to the Model Hub",
-        "subtitle": "Import authentication saved in configuration files, shell startup files, or supported credential stores. After migration, assistants authenticate through Model Hub: subscription sign-ins move into Model Hub, and API keys are copied while the originals stay in place.",
+        "subtitle": "Import authentication saved in configuration files, shell startup files, or supported credential stores. Subscription sign-ins move into Model Hub. API keys are copied as saved, with the originals kept by default; migration does not test keys online or fetch model lists. Later model requests establish whether a key works.",
         "cleanApiKeys": "Also remove the API keys from the native CLI configuration",
         "cleanApiKeysHint": "Includes shell startup files and each CLI’s config files. Left unchecked, those keys stay as they are; assistants launched through Model Hub don’t use them.",
         "empty": "No configuration found to migrate.",
@@ -2112,7 +2112,7 @@
           "runtimeStopping": "The task these assistants were running in Avibe is still stopping. Try again in a moment.",
           "permissionNeeded": "Allow credential access, then retry.",
           "recoveryPending": "Migration is unfinished. Retry to continue.",
-          "itemConflict": "Migration could not verify the saved configuration or its credentials. Check the files and authentication before retrying, or add the source manually in Model Hub.",
+          "itemConflict": "The selected configuration could not be migrated safely. Reopen the migration dialog to scan the latest configuration. If it still fails, check the file format and access permissions.",
           "configurationBlocked": "Adjust the native configuration, then scan again.",
           "credentialsInvalid": "Authentication has expired. Sign in again in Model Hub.",
           "reauthorizationRequired": "This backend was already migrated, and the changed native login cannot be verified as a new authorization. The original files are unchanged. Sign in again for the existing source in Model Hub instead of importing this login."
@@ -4779,6 +4779,17 @@
     },
     "agentActivity": {
       "hosted": {
+        "errorCode": {
+          "provider_no_reason": "The provider gave no reason.",
+          "provider_no_image": "The provider returned no image.",
+          "image_not_streamed": "The image did not arrive before the response ended.",
+          "image_not_saved": "The image could not be saved.",
+          "image_no_store": "Nothing here can keep a generated image.",
+          "executor_no_image": "The proxy executor returned no image.",
+          "gateway_unreachable": "Couldn't reach the model gateway.",
+          "gateway_refused": "The model gateway refused the call.",
+          "gateway_no_result": "The model gateway returned no result."
+        },
         "mode": {
           "native": "Native · {{provider}}",
           "proxy": "Via {{provider}} proxy"
@@ -4936,9 +4947,41 @@
     "chat": {
       "floatApprovals": "Waiting for your approval · {{count}}"
     },
+    "search": {
+      "label": "Search secrets",
+      "placeholder": "Search names, descriptions, tags, hosts…",
+      "clear": "Clear search",
+      "count_one": "{{count}} secret",
+      "count_other": "{{count}} secrets",
+      "filtered": "{{visible}} / {{total}} secrets"
+    },
     "filter": {
-      "clear": "Clear filters",
-      "empty": "No secrets match the selected tags."
+      "clear": "Clear",
+      "clearAll": "Clear all",
+      "empty": "No matching secrets",
+      "reset": "Clear search and filters",
+      "tags": "Tags",
+      "skills": "Skills",
+      "tagsByUsage": "Tags · by usage",
+      "selectedTags": "Tags ({{count}})",
+      "entry": "{{name}} · {{count}}",
+      "searchTags": "Search tags",
+      "searchTagsPlaceholder": "Search {{count}} tags",
+      "noTags": "No matching tags",
+      "intersection": "Select multiple; all must match",
+      "remove": "Remove filter: {{name}}",
+      "moreTags": "Show {{count}} more tags",
+      "quick": "Quick filters",
+      "all": "All",
+      "protected": "Protected",
+      "signing": "Signing keys",
+      "unused": "Never used"
+    },
+    "sort": {
+      "label": "Sort",
+      "name": "Name",
+      "recent": "Recently used",
+      "added": "Recently added"
     },
     "grants": {
       "title": "Active access",

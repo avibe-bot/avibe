@@ -51,6 +51,7 @@ capabilities:
       - tests/test_model_hub_api.py
       - tests/test_model_hub_hosted_tools_resolution.py
       - tests/test_model_hub_hosted_tools_config.py
+      - tests/test_model_hub_hosted_probe.py
       - tests/test_model_hub_capability_evidence.py
       - tests/test_provider_overlay.py
       - tests/test_hosted_activity.py

@@ -743,6 +743,7 @@ def _error_result(
                 "text": json.dumps(payload, ensure_ascii=False, sort_keys=True),
             }
         ],
+        "structuredContent": payload,
         "isError": True,
     }
 
@@ -789,6 +790,8 @@ def _fold_tool_result(
             tool=tool_name or "",
         )
     if structured is not None:
+        if isinstance(structured, dict):
+            result["structuredContent"] = structured
         content = result.get("content")
         if not isinstance(content, list):
             content = []

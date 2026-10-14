@@ -2,20 +2,25 @@
 
 import type { ReactNode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter, useLocation, useNavigate, useNavigationType } from 'react-router-dom';
+import { createInstance } from 'i18next';
+import en from '../../i18n/en.json';
+import zh from '../../i18n/zh.json';
+import type { VaultSecret } from '../../context/ApiContext';
+import { RouteSurfaceActiveContext } from '../../lib/routeSurfaceActivity';
 
 import { InstanceAuthorizationContext } from '../../context/InstanceAuthorizationContext';
-import { ApiError } from '../../context/ApiContext';
 import { OWNER_INSTANCE_CAPABILITIES } from '../../lib/sessionInfo';
-import zh from '../../i18n/zh.json';
 import { VaultsPage } from './VaultsPage';
 
-type WorkbenchEventHandlers = { onVaultsUpdated?: (data: unknown) => void };
+type WorkbenchEventHandlers = {
+  onVaultsUpdated?: (data: unknown) => void;
+  onEventBridgeStatus?: (data: { connected: boolean }) => void;
+};
 
 const eventHandlers = vi.hoisted(() => [] as WorkbenchEventHandlers[]);
-const testTranslation = vi.hoisted(() => ({ locale: 'keys' as 'keys' | 'zh' }));
 const api = vi.hoisted(() => ({
   connectWorkbenchEvents: vi.fn(() => () => undefined),
   createVaultRevealContext: vi.fn(),
@@ -62,18 +67,11 @@ vi.mock('../../lib/useProtectedVault', () => ({
   useVaultLock: () => ({ unlocked: false, remainingMs: 0, lockNow: vi.fn() }),
 }));
 
-vi.mock('react-i18next', async () => {
-  const { default: catalog } = await import('../../i18n/zh.json');
-  const localized: Record<string, string> = {
-    'errors.fields_corrupt': catalog.errors.fields_corrupt,
-    'vaults.reveal.errors.contextFailed': catalog.vaults.reveal.errors.contextFailed,
-  };
-  return {
-    useTranslation: () => ({
-      t: (key: string) => testTranslation.locale === 'zh' ? localized[key] ?? key : key,
-    }),
-  };
-});
+const testI18n = createInstance();
+void testI18n.init({ lng: 'en', resources: { en: { translation: en }, zh: { translation: zh } }, initAsync: false });
+vi.mock('react-i18next', () => ({
+  useTranslation: () => ({ t: testI18n.t }),
+}));
 
 vi.mock('./CapabilityTabs', () => ({
   CapabilityTabs: () => <div data-testid="capability-tabs" />,
@@ -88,27 +86,30 @@ vi.mock('./WorkbenchPageHeader', () => ({
   ),
 }));
 
-vi.mock('../ui/vault-secret-dialog', () => ({
-  VaultSecretDialog: ({
-    open,
-    editSecret,
-  }: {
-    open: boolean;
-    editSecret?: { name: string; updated_at: string } | null;
-  }) => open ? <div data-testid="vault-edit-dialog">{editSecret?.name}:{editSecret?.updated_at}</div> : null,
-}));
+function LocationProbe() {
+  const location = useLocation();
+  const navigation = useNavigationType();
+  const navigate = useNavigate();
+  return <>
+    <output data-testid="location">{location.search}</output>
+    <output data-testid="navigation">{navigation}</output>
+    <button onClick={() => navigate('/vaults?q=beta&tag=shared&sort=added')}>Follow saved view</button>
+  </>;
+}
 
-function renderPage(context = remoteOwner, initialEntries = ['/vaults']) {
+function renderPage(context = remoteOwner, entry = '/vaults', active = true) {
   return render(
     <InstanceAuthorizationContext.Provider value={context}>
-      <MemoryRouter initialEntries={initialEntries}>
-        <VaultsPage />
+      <MemoryRouter initialEntries={[entry]}>
+        <RouteSurfaceActiveContext.Provider value={active}><VaultsPage /></RouteSurfaceActiveContext.Provider>
+        <LocationProbe />
       </MemoryRouter>
     </InstanceAuthorizationContext.Provider>,
   );
 }
 
-beforeEach(() => {
+beforeEach(async () => {
+  await testI18n.changeLanguage('en');
   eventHandlers.length = 0;
   api.connectWorkbenchEvents.mockImplementation((handlers: WorkbenchEventHandlers) => {
     eventHandlers.push(handlers);
@@ -125,9 +126,9 @@ beforeEach(() => {
   });
 });
 
-afterEach(() => {
+afterEach(async () => {
+  await testI18n.changeLanguage('en');
   cleanup();
-  testTranslation.locale = 'keys';
   vi.clearAllMocks();
   vi.restoreAllMocks();
 });
@@ -138,68 +139,253 @@ describe('VaultsPage remote audit history', () => {
 
     renderPage();
 
-    const history = await screen.findByRole('button', { name: 'vaults.history' });
-    expect(screen.getByRole('button', { name: 'vaults.add' })).toBeTruthy();
+    const history = await screen.findByRole('button', { name: 'History' });
+    expect(screen.getByRole('button', { name: 'Add secret' })).toBeTruthy();
 
     await user.click(history);
 
     await waitFor(() => expect(api.getVaultAudit).toHaveBeenCalledWith({ limit: 50 }));
-    expect(await screen.findByText('vaults.audit.title')).toBeTruthy();
+    expect(await screen.findByText('Recent activity')).toBeTruthy();
     expect(await screen.findByText('grant_created')).toBeTruthy();
     expect(await screen.findByText('alpha')).toBeTruthy();
-  });
-
-  it('shows a single custom field label without offering a field selector', async () => {
-    api.listVaultSecrets.mockResolvedValue({
-      secrets: [{
-        name: 'LOGIN', default_field: 'password', fields: ['password'], kind: 'static', protection: 'standard',
-        signer_kind: null, source: 'user', tags: [], policy: {}, last_used_at: null, use_count: 0,
-        created_at: 'created', updated_at: 'version-1',
-      }],
-    });
-    renderPage();
-    expect(await screen.findByText(/password/)).toBeTruthy();
-    expect(screen.queryByRole('combobox')).toBeNull();
   });
 
   it('shows Vault management controls to an Editor', async () => {
     renderPage(activeOrgMember);
 
-    expect(await screen.findByRole('button', { name: 'vaults.add' })).toBeTruthy();
-    expect(screen.queryByText('vaults.remoteReadOnly')).toBeNull();
+    expect(await screen.findByRole('button', { name: 'Add secret' })).toBeTruthy();
+    expect(screen.queryByText('Read-only')).toBeNull();
   });
 });
 
-describe('VaultsPage edit metadata freshness', () => {
-  it('passes the refreshed list entry to an already-open edit dialog', async () => {
-    const original = {
-      name: 'LOGIN',
-      default_field: 'password',
-      fields: ['password', 'username'],
-      kind: 'static',
-      protection: 'standard',
-      signer_kind: null,
-      source: 'user',
-      tags: [],
-      policy: {},
-      last_used_at: null,
-      use_count: 0,
-      created_at: 'created',
-      updated_at: 'version-1',
-    };
-    const refreshed = { ...original, updated_at: 'version-2' };
-    api.listVaultSecrets.mockResolvedValue({ secrets: [original] });
-    renderPage();
-    await screen.findByText('LOGIN');
-    fireEvent.click(await screen.findByRole('button', { name: 'vaults.rowActions' }));
-    fireEvent.click(screen.getByRole('menuitem', { name: 'vaults.editSecret' }));
-    expect((await screen.findByTestId('vault-edit-dialog')).textContent).toBe('LOGIN:version-1');
+describe('VaultsPage list discovery', () => {
+  const makeSecret = (name: string, overrides: Partial<VaultSecret> = {}): VaultSecret => ({
+    name, description: `${name} deployment`, tags: [], kind: 'static', protection: 'standard',
+    signer_kind: null, source: 'user', policy: {}, last_used_at: null, use_count: 0,
+    created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', ...overrides,
+  });
+  const inventory = [
+    makeSecret('beta', { kind: 'keypair', protection: 'protected', tags: ['shared', 'prod', 'skill:sign'], last_used_at: '2026-10-13T11:00:00Z', created_at: '2026-05-01T00:00:00Z' }),
+    makeSecret('zeta', { tags: ['shared', 'z-only', 'skill:release', 'third'], created_at: '2026-09-01T00:00:00Z', policy: { allowed_hosts: ['api.example.test'] } }),
+    makeSecret('alpha', { description: 'Alpha 支付 [prod]', protection: 'protected', tags: ['shared', 'shared', 'prod', 'skill:release'], last_used_at: '2026-10-10T12:00:00Z', use_count: 7 }),
+  ];
+  const rows = () => within(screen.getByRole('list', { name: 'Vaults' })).getAllByRole('listitem');
+  const names = () => rows().map((row) => row.querySelector('.font-mono')?.textContent);
+  const params = () => new URLSearchParams(screen.getByTestId('location').textContent ?? '');
+  const count = () => screen.getAllByRole('status').find((element) => element.tagName === 'SPAN')?.textContent;
 
-    api.listVaultSecrets.mockResolvedValue({ secrets: [refreshed] });
-    await act(async () => {
-      for (const handler of [...eventHandlers]) handler.onVaultsUpdated?.({});
-    });
-    expect((await screen.findByTestId('vault-edit-dialog')).textContent).toBe('LOGIN:version-2');
+  beforeEach(() => {
+    api.listVaultSecrets.mockResolvedValue({ secrets: inventory });
+    vi.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-10-13T12:00:00Z'));
+  });
+
+  // Existing tests cover audit and reveal, not any of the list's discovery controls.
+  // These assert the page's actual rendered rows rather than duplicating the matcher.
+  it('searches and highlights literal name/description terms, reports counts, and clears from keyboard and button', async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText('alpha');
+    const search = screen.getByRole('textbox', { name: 'Search secrets' });
+    expect(count()).toBe('3 secrets');
+    await user.keyboard('/');
+    expect(document.activeElement).toBe(search);
+    await user.type(search, 'ALPHA 支付');
+    expect(names()).toEqual(['alpha']);
+    expect(count()).toBe('1 / 3 secrets');
+    expect([...rows()[0].querySelectorAll('mark')].map((mark) => mark.textContent)).toEqual(['alpha', 'Alpha', '支付']);
+    expect(rows()[0].textContent).toContain('used 7× · 3d ago');
+    await user.keyboard('{Escape}');
+    expect(count()).toBe('3 secrets');
+    await user.paste('[prod]');
+    expect(rows()[0].querySelector('mark')?.textContent).toBe('[prod]');
+    await user.click(screen.getByRole('button', { name: 'Clear search' }));
+    expect(params().has('q')).toBe(false);
+    expect(names()).toEqual(['alpha', 'beta', 'zeta']);
+  });
+
+  it('pluralizes the unfiltered singular count in English', async () => {
+    api.listVaultSecrets.mockResolvedValue({ secrets: [inventory[0]] });
+    renderPage();
+    await screen.findByText('beta');
+    expect(count()).toBe('1 secret');
+  });
+
+  it('renders unit-bearing counts in Chinese for both unfiltered and filtered states', async () => {
+    await testI18n.changeLanguage('zh');
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText('alpha');
+    expect(count()).toBe('3 个密钥');
+    await user.type(screen.getByRole('textbox', { name: '搜索密钥' }), 'alpha');
+    expect(count()).toBe('1 / 3 个密钥');
+  });
+  it('leaves slash in editable controls and does not steal focus from a hidden route', async () => {
+    const user = userEvent.setup();
+    const view = renderPage();
+    await screen.findByText('alpha');
+    await user.click(screen.getByRole('button', { name: 'Tags' }));
+    const tagSearch = screen.getByRole('textbox', { name: 'Search tags' });
+    await user.type(tagSearch, '/');
+    expect(document.activeElement).toBe(tagSearch);
+    expect((tagSearch as HTMLInputElement).value).toBe('/');
+    view.unmount();
+    renderPage(remoteOwner, '/vaults', false);
+    await screen.findByText('alpha');
+    await user.keyboard('/');
+    expect(document.activeElement).not.toBe(screen.getByRole('textbox', { name: 'Search secrets' }));
+  });
+
+  it('groups and sorts dropdown inventory counts, searches tags, and intersects multi-selection without closing', async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText('alpha');
+    await user.click(screen.getByRole('button', { name: 'Tags' }));
+    expect(screen.getAllByRole('checkbox').map((item) => item.textContent)).toEqual(['release2', 'sign1', 'shared3', 'prod2', 'third1', 'z-only1']);
+    await user.click(screen.getByRole('checkbox', { name: 'release · 2' }));
+    await user.click(screen.getByRole('checkbox', { name: 'prod · 2' }));
+    expect(names()).toEqual(['alpha']);
+    expect(screen.getByRole('checkbox', { name: 'release · 2' }).getAttribute('aria-checked')).toBe('true');
+    expect(count()).toBe('1 / 3 secrets');
+    const tagSearch = screen.getByRole('textbox', { name: 'Search tags' });
+    await user.type(tagSearch, 'SHAR');
+    expect(screen.getAllByRole('checkbox').map((item) => item.textContent)).toEqual(['shared3']);
+    await user.clear(tagSearch);
+    await user.type(tagSearch, 'no-such-tag');
+    expect(screen.getByText('No matching tags')).toBeTruthy();
+    await user.keyboard('{Escape}');
+    expect(screen.getByRole('button', { name: 'Tags (2)' })).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: 'Remove filter: prod' }));
+    expect(names()).toEqual(['alpha', 'zeta']);
+    await user.click(screen.getByRole('button', { name: 'Clear all' }));
+    expect(count()).toBe('3 secrets');
+  });
+
+  it.each(['hover', 'click', 'focus'] as const)('caps inline tags at two with skills first and reveals actionable overflow on %s', async (method) => {
+    api.listVaultSecrets.mockResolvedValue({ secrets: [inventory[1]] });
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText('zeta');
+    const row = rows()[0];
+    expect(within(row).getAllByRole('button').map((button) => button.textContent)).toEqual(['release', 'shared', '+2', '']);
+    expect(screen.queryByRole('button', { name: 'z-only' })).toBeNull();
+    const more = within(row).getByRole('button', { name: 'Show 2 more tags' });
+    if (method === 'hover') await user.hover(more);
+    if (method === 'click') await user.click(more);
+    if (method === 'focus') {
+      act(() => more.focus());
+      await user.keyboard('{Tab}');
+      expect(document.activeElement).toBe(screen.getByRole('button', { name: 'z-only' }));
+    }
+    await user.click(screen.getByRole('button', { name: 'z-only' }));
+    expect(params().getAll('tag')).toEqual(['z-only']);
+    await user.keyboard('{Escape}');
+    expect(document.activeElement).toBe(more);
+    expect(screen.queryByRole('button', { name: 'z-only' })).toBeNull();
+    await user.click(within(row).getByRole('button', { name: 'release' }));
+    expect(params().getAll('skill')).toEqual(['release']);
+    expect(count()).toBe('1 / 1 secrets');
+  });
+
+  it('composes quick filters and sorting, keeping unused last and dates relative even beyond a week', async () => {
+    api.listVaultSecrets.mockResolvedValue({ secrets: [...inventory, makeSecret('aardvark', { last_used_at: '2026-09-30T12:00:00Z' })] });
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText('alpha');
+    expect(names()).toEqual(['aardvark', 'alpha', 'beta', 'zeta']);
+    expect(rows()[0].textContent).toContain('13d ago');
+    const sort = screen.getByRole('combobox', { name: 'Sort' });
+    await user.selectOptions(sort, 'recent');
+    expect(names()).toEqual(['beta', 'alpha', 'aardvark', 'zeta']);
+    await user.selectOptions(sort, 'added');
+    expect(names()).toEqual(['zeta', 'beta', 'aardvark', 'alpha']);
+    await user.click(screen.getByRole('radio', { name: 'Protected' }));
+    expect(names()).toEqual(['beta', 'alpha']);
+    await user.click(screen.getByRole('radio', { name: 'Signing keys' }));
+    expect(names()).toEqual(['beta']);
+    await user.click(screen.getByRole('radio', { name: 'Never used' }));
+    expect(names()).toEqual(['zeta']);
+    expect(count()).toBe('1 / 4 secrets');
+    await user.click(screen.getByRole('radio', { name: 'All', exact: true }));
+    expect(count()).toBe('4 secrets');
+  });
+
+  // With SSE connected there is no fallback polling, and an inventory without
+  // grants has no countdown. Relative labels still need to advance: the earlier
+  // static-label tests could not detect coupling the clock to grant lifetime.
+  it('advances last-use labels with a connected bridge and no grants, without refetching', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    try {
+      api.listVaultSecrets.mockResolvedValue({ secrets: [makeSecret('alpha', { last_used_at: '2026-10-13T11:55:00Z' })] });
+      renderPage();
+      await screen.findByText('alpha');
+      await act(async () => {
+        for (const handler of eventHandlers) handler.onEventBridgeStatus?.({ connected: true });
+      });
+      expect(rows()[0].textContent).toContain('5m ago');
+      const fetches = api.listVaultSecrets.mock.calls.length;
+      vi.mocked(Date.now).mockReturnValue(Date.parse('2026-10-13T12:01:00Z'));
+      act(() => vi.advanceTimersByTime(60_000));
+      expect(rows()[0].textContent).toContain('6m ago');
+      expect(api.listVaultSecrets).toHaveBeenCalledTimes(fetches);
+    } finally {
+      cleanup();
+      vi.useRealTimers();
+    }
+  });
+
+  it('round-trips repeatable URL filters with replace, preserving pending handoff and unrelated parameters', async () => {
+    const user = userEvent.setup();
+    const entry = '/vaults?q=ALPHA&tag=shared&tag=prod&skill=release&filter=protected&sort=added&request_id=waiting&protection=protected&other=keep';
+    const view = renderPage(remoteOwner, entry);
+    await screen.findByText('alpha');
+    expect(names()).toEqual(['alpha']);
+    expect((screen.getByRole('textbox', { name: 'Search secrets' }) as HTMLInputElement).value).toBe('ALPHA');
+    expect((screen.getByRole('combobox', { name: 'Sort' }) as HTMLSelectElement).value).toBe('added');
+    await user.click(screen.getByRole('button', { name: 'Remove filter: prod' }));
+    expect(params().getAll('tag')).toEqual(['shared']);
+    expect(params().get('request_id')).toBe('waiting');
+    expect(screen.getByTestId('navigation').textContent).toBe('REPLACE');
+    const saved = `/vaults${screen.getByTestId('location').textContent}`;
+    view.unmount();
+    renderPage(remoteOwner, saved);
+    await screen.findByText('alpha');
+    expect(names()).toEqual(['alpha']);
+    await user.click(screen.getByRole('button', { name: 'Clear all' }));
+    expect(Object.fromEntries(params())).toEqual({ sort: 'added', request_id: 'waiting', protection: 'protected', other: 'keep' });
+    await user.click(screen.getByRole('button', { name: 'Follow saved view' }));
+    expect(names()).toEqual(['beta']);
+    expect((screen.getByRole('textbox', { name: 'Search secrets' }) as HTMLInputElement).value).toBe('beta');
+  });
+
+  it('consumes a reveal handoff without dropping the saved view', async () => {
+    api.createVaultRevealContext.mockResolvedValue({ ok: true, context: {} });
+    renderPage(remoteOwner, '/vaults?q=alpha&tag=shared&skill=release&filter=protected&sort=recent&reveal=alpha&other=keep');
+    await screen.findByRole('menuitem', { name: 'Show value' });
+    await waitFor(() => expect(Object.fromEntries(params())).toEqual({ q: 'alpha', tag: 'shared', skill: 'release', filter: 'protected', sort: 'recent', other: 'keep' }));
+    expect(names()).toEqual(['alpha']);
+  });
+
+  it('opens a reveal target hidden by saved filters, clearing those filters but keeping sort', async () => {
+    api.createVaultRevealContext.mockResolvedValue({ ok: true, context: {} });
+    renderPage(remoteOwner, '/vaults?q=zeta&tag=z-only&skill=missing&filter=unused&sort=added&reveal=alpha&other=keep');
+    await screen.findByRole('menuitem', { name: 'Show value' });
+    await waitFor(() => expect(Object.fromEntries(params())).toEqual({ sort: 'added', other: 'keep' }));
+    expect(names()).toEqual(['zeta', 'beta', 'alpha']);
+  });
+
+  it('distinguishes no matches from empty inventory and resets search/filters but not sorting', async () => {
+    const user = userEvent.setup();
+    const view = renderPage(remoteOwner, '/vaults?q=not-found&tag=shared&filter=protected&sort=added');
+    await screen.findByText('No matching secrets');
+    expect(count()).toBe('0 / 3 secrets');
+    await user.click(screen.getByRole('button', { name: 'Clear search and filters' }));
+    expect(names()).toEqual(['zeta', 'beta', 'alpha']);
+    expect(Object.fromEntries(params())).toEqual({ sort: 'added' });
+    view.unmount();
+    api.listVaultSecrets.mockResolvedValue({ secrets: [] });
+    renderPage();
+    await screen.findByText(en.vaults.empty);
+    expect(screen.queryByText('No matching secrets')).toBeNull();
   });
 });
 
@@ -260,12 +446,12 @@ describe('VaultsPage protected reveal', () => {
     vi.useRealTimers();
   });
 
-  const showValue = () => screen.getByRole('menuitem', { name: 'vaults.reveal.show' }) as HTMLButtonElement;
+  const showValue = () => screen.getByRole('menuitem', { name: 'Show value' }) as HTMLButtonElement;
 
   const openMenu = async (index = 0) => {
     const user = userEvent.setup();
     if (index === 0) renderPage();
-    const [button] = (await screen.findAllByRole('button', { name: 'vaults.rowActions' })).slice(index);
+    const [button] = (await screen.findAllByRole('button', { name: 'More actions' })).slice(index);
     await user.click(button);
   };
 
@@ -299,38 +485,41 @@ describe('VaultsPage protected reveal', () => {
     expect(api.createVaultRevealContext).toHaveBeenCalledTimes(fetches);
   });
 
-  it('shows the localized corruption warning on a row while keeping default reveal available', async () => {
-    testTranslation.locale = 'zh';
+  it('keeps the fields warning visible and exposes the current named field line', async () => {
     api.listVaultSecrets.mockResolvedValue({
-      secrets: [{ ...protectedSecret('alpha'), fields_state: 'corrupt' }],
+      secrets: [{ ...protectedSecret('alpha'), default_field: 'password', fields: ['password', 'username'], fields_state: 'corrupt' }],
     });
-    api.createVaultRevealContext.mockResolvedValue({ ok: true, context: { secret_name: 'alpha' }, envelope });
+    renderPage();
+    expect(await screen.findByText(/password/)).toBeTruthy();
+    expect(screen.getByRole('alert')).toBeTruthy();
     await openMenu();
-    expect((await screen.findByRole('alert')).textContent).toBe(zh.errors.fields_corrupt);
-    expect(screen.getByRole('menuitem', { name: 'vaults.reveal.show' })).toBeTruthy();
+    expect(screen.getByRole('combobox', { name: 'Field to reveal' })).toBeTruthy();
+    expect(screen.getByRole('menuitem', { name: 'Show value' })).toBeTruthy();
   });
 
-  it.each(['response', 'exception'] as const)('localizes a reveal context failure from a %s in Chinese', async (failure) => {
-    testTranslation.locale = 'zh';
-    if (failure === 'response') {
-      api.createVaultRevealContext.mockResolvedValue({
-        ok: false,
-        code: 'fields_corrupt',
-        message: 'English service detail',
-      });
-    } else {
-      api.createVaultRevealContext.mockRejectedValue(
-        new ApiError('English service detail', 409, 'fields_corrupt'),
-      );
-    }
-    const popup = { closed: false, close: vi.fn() };
-    vi.spyOn(window, 'open').mockReturnValue(popup as unknown as Window);
+  it('reveals a selected field using its canonical record name', async () => {
+    api.listVaultSecrets.mockResolvedValue({
+      secrets: [{ ...protectedSecret('alpha'), default_field: 'password', fields: ['password', 'username'] }],
+    });
+    api.createVaultRevealContext.mockImplementation(async (_name, payload) => ({ ok: true, context: { field: payload.field }, envelope }));
     await openMenu();
-    await vi.waitFor(() => expect(api.createVaultRevealContext).toHaveBeenCalledOnce());
-    fireEvent.click(showValue());
-    await vi.waitFor(() => expect(showToast).toHaveBeenCalledWith(zh.errors.fields_corrupt, 'warning'));
+    fireEvent.change(screen.getByRole('combobox', { name: 'Field to reveal' }), { target: { value: 'username' } });
+    await vi.waitFor(() => expect(api.createVaultRevealContext).toHaveBeenLastCalledWith('alpha', { session_label: 'Vaults', field: 'username' }));
+    await clickShowValue();
+    expect(revealProtectedValue.mock.calls[0][0].name).toBe('alpha.username');
+    expect(revealProtectedValue.mock.calls[0][1]).toEqual({ field: 'username' });
   });
 
+  it('keeps a stale field handoff visible without preparing a default field', async () => {
+    api.listVaultSecrets.mockResolvedValue({
+      secrets: [{ ...protectedSecret('alpha'), default_field: 'password', fields: ['password'] }],
+    });
+    renderPage(remoteOwner, '/vaults?reveal=alpha&field=username&sort=recent');
+    expect((await screen.findByRole('alert')).textContent).toBe('This link points to a field that no longer exists. Open the secret and choose a current field.');
+    expect(api.createVaultRevealContext).not.toHaveBeenCalled();
+    expect(revealProtectedValue).not.toHaveBeenCalled();
+    await waitFor(() => expect(screen.getByTestId('location').textContent).toContain('sort=recent'));
+  });
   it('keeps Show value waiting while the context or the sandbox client are not ready', async () => {
     let answer: () => void = () => undefined;
     api.createVaultRevealContext.mockImplementation(
@@ -364,97 +553,6 @@ describe('VaultsPage protected reveal', () => {
     await clickShowValue();
 
     expect(revealProtectedValue.mock.calls[0][1]).toEqual({ secret_name: 'beta' });
-  });
-
-  // A field switch needs its own prepared context. The single-secret cases above cannot detect
-  // displaying the default envelope for an extra field, or using NAME.password as a default record.
-  it.each([
-    { field: 'password', record: 'alpha' },
-    { field: 'username', record: 'alpha.username' },
-  ])('reveals $field with its own context and canonical record', async ({ field, record }) => {
-    api.listVaultSecrets.mockResolvedValue({
-      secrets: [{ ...protectedSecret('alpha'), default_field: 'password', fields: ['password', 'username'] }],
-    });
-    api.createVaultRevealContext.mockImplementation(async (_name, payload) => ({
-      ok: true, context: { field: payload.field }, envelope,
-    }));
-    await openMenu();
-    fireEvent.change(screen.getByRole('combobox', { name: 'vaults.fields.revealField' }), { target: { value: field } });
-    await vi.waitFor(() => expect(api.createVaultRevealContext).toHaveBeenLastCalledWith(
-      'alpha', { session_label: 'vaults.title', field },
-    ));
-    await clickShowValue();
-    expect(revealProtectedValue.mock.calls[0][0].name).toBe(record);
-    expect(revealProtectedValue.mock.calls[0][1]).toEqual({ field });
-  });
-
-  it('shows a stale handoff field without preparing or revealing the default field', async () => {
-    api.listVaultSecrets.mockResolvedValue({
-      secrets: [{ ...protectedSecret('alpha'), default_field: 'password', fields: ['password'] }],
-    });
-    renderPage(remoteOwner, ['/vaults?reveal=alpha&field=username']);
-
-    expect((await screen.findByRole('alert')).textContent).toBe('vaults.reveal.errors.staleField');
-    expect(api.createVaultRevealContext).not.toHaveBeenCalled();
-    expect(revealProtectedValue).not.toHaveBeenCalled();
-  });
-
-  it('keeps a disappearing active field stale without preparing the default field', async () => {
-    const initial = { ...protectedSecret('alpha'), default_field: 'password', fields: ['password', 'username'] };
-    api.listVaultSecrets.mockResolvedValue({ secrets: [initial] });
-    api.createVaultRevealContext.mockResolvedValue({ ok: true, context: { field: 'ready' }, envelope });
-    renderPage();
-    const user = userEvent.setup();
-    await user.click((await screen.findByRole('button', { name: 'vaults.rowActions' })));
-    await vi.waitFor(() => expect(api.createVaultRevealContext).toHaveBeenCalledOnce());
-    fireEvent.change(screen.getByRole('combobox', { name: 'vaults.fields.revealField' }), { target: { value: 'username' } });
-    await vi.waitFor(() => expect(api.createVaultRevealContext).toHaveBeenCalledTimes(2));
-    const preparedBeforeRefresh = api.createVaultRevealContext.mock.calls.length;
-
-    api.listVaultSecrets.mockResolvedValue({
-      secrets: [{ ...initial, fields: ['password'] }],
-    });
-    await act(async () => {
-      for (const handler of [...eventHandlers]) handler.onVaultsUpdated?.({});
-    });
-
-    expect((await screen.findByRole('alert')).textContent).toBe('vaults.reveal.errors.staleField');
-    expect(api.createVaultRevealContext).toHaveBeenCalledTimes(preparedBeforeRefresh);
-  });
-
-  it('refreshes a prepared extra-field context when only the default label changes', async () => {
-    const entry = { ...protectedSecret('alpha'), default_field: 'password', fields: ['password', 'username'] };
-    api.listVaultSecrets.mockResolvedValue({ secrets: [entry] });
-    api.createVaultRevealContext.mockResolvedValue({ ok: true, context: { label: 'password' }, envelope });
-    await openMenu();
-    await vi.waitFor(() => expect(api.createVaultRevealContext).toHaveBeenCalledOnce());
-    fireEvent.change(screen.getByRole('combobox', { name: 'vaults.fields.revealField' }), { target: { value: 'username' } });
-    await vi.waitFor(() => expect(api.createVaultRevealContext).toHaveBeenCalledTimes(2));
-    api.listVaultSecrets.mockResolvedValue({ secrets: [{ ...entry, default_field: 'credential', fields: ['credential', 'username'] }] });
-    api.createVaultRevealContext.mockResolvedValue({ ok: true, context: { label: 'credential' }, envelope });
-    await act(async () => {
-      for (const handler of eventHandlers) handler.onVaultsUpdated?.({ scope: 'secret', secret_name: 'alpha' });
-    });
-    await vi.waitFor(() => expect(api.createVaultRevealContext).toHaveBeenCalledTimes(3));
-    await clickShowValue();
-    expect(revealProtectedValue.mock.calls[0][1]).toEqual({ label: 'credential' });
-  });
-
-  it('prepares the replacement envelope when an open secret changes version', async () => {
-    let version = 'old';
-    api.createVaultRevealContext.mockImplementation(async () => ({ ok: true, context: { version }, envelope }));
-    await openMenu();
-    await vi.waitFor(() => expect(api.createVaultRevealContext).toHaveBeenCalledOnce());
-    version = 'new';
-    api.listVaultSecrets.mockResolvedValue({
-      secrets: [{ ...protectedSecret('alpha'), updated_at: '2026-10-13T12:00:00Z' }],
-    });
-    await act(async () => {
-      for (const handler of eventHandlers) handler.onVaultsUpdated?.({ scope: 'secret', secret_name: 'alpha' });
-    });
-    await vi.waitFor(() => expect(api.createVaultRevealContext).toHaveBeenCalledTimes(2));
-    await clickShowValue();
-    expect(revealProtectedValue.mock.calls[0][1]).toEqual({ version: 'new' });
   });
 
   it('refreshes the context while the menu stays open, so the click fetches nothing', async () => {

@@ -52,7 +52,7 @@
             "description": "Every (Source, model) the overlay offers the tool on, with an eligible credential and an untranslated path; Vibey's Source order first.",
             "items": {
               "type": "object",
-              "required": ["source_id", "model_id", "call", "replay", "billing", "price"],
+              "required": ["source_id", "model_id", "call", "replay", "billing", "price", "probe_estimate"],
               "additionalProperties": false,
               "properties": {
                 "source_id": { "type": "string", "pattern": "^src_[a-z0-9]{8,}$" },
@@ -66,6 +66,24 @@
                 "price": {
                   "description": "The overlay's list price for this tool on this provider, or null when no list price is known (never zero). OpenAI lists no per-image price, so image_generation has none.",
                   "oneOf": [{ "type": "null" }, { "$ref": "#/definitions/ListPrice" }]
+                },
+                "probe_estimate": {
+                  "description": "What one call probe here is estimated to cost before it runs, in the shape of hosted_summary.cost: list (the tool fee plus a nominal token estimate), included on a monthly Source, or null when unknown (never zero) and for a tool that cannot be probed yet.",
+                  "oneOf": [
+                    { "type": "null" },
+                    {
+                      "type": "object",
+                      "required": ["basis", "usd"],
+                      "additionalProperties": false,
+                      "properties": { "basis": { "const": "list" }, "usd": { "type": "number", "minimum": 0 } }
+                    },
+                    {
+                      "type": "object",
+                      "required": ["basis"],
+                      "additionalProperties": false,
+                      "properties": { "basis": { "const": "included" } }
+                    }
+                  ]
                 }
               }
             }

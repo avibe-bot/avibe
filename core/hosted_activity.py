@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Literal, Optional
 
 from core.agent_core.messages import (
+    HOSTED_ERROR_CODES,
     AssistantMessage,
     HostedAction,
     HostedCost,
@@ -51,6 +52,7 @@ class HostedActivity:
     tool: str
     mode: Literal["native", "proxy"]
     status: str
+    # Model-facing English; ``error_code`` names the reasons Avibe worded itself.
     error: Optional[str]
     # What the call was about: the query, prompt, page or thread it named.
     subject: Optional[str]
@@ -72,6 +74,9 @@ class HostedActivity:
     # How many calls ``cost`` covers: a native response's figure is for all its calls.
     cost_calls: int
     duration_ms: Optional[int] = None
+    # The stable code of a reason Avibe worded itself (``HOSTED_ERROR_CODES``), by
+    # which each surface says it in its reader's language; None for a provider's own.
+    error_code: Optional[str] = None
     # The committed response row a native call came in. Its card is ordered just
     # before that row, as the call happened before the text that reads its result.
     response_id: Optional[str] = None
@@ -101,6 +106,7 @@ class HostedActivity:
         }
         optional = {
             "error": self.error,
+            "error_code": self.error_code,
             "subject": self.subject,
             "action": self.action,
             "provider": self.provider,
@@ -193,6 +199,7 @@ def native_activities(
                 mode="native",
                 status=block.record.status,
                 error=block.record.error,
+                error_code=block.record.error_code,
                 subject=subject,
                 action=block.action.type,
                 extra_queries=extra,
@@ -239,6 +246,7 @@ def proxy_activity(
         mode="proxy",
         status=result.record.status,
         error=result.record.error,
+        error_code=result.record.error_code,
         subject=subject,
         action=None,
         extra_queries=(),
@@ -306,6 +314,18 @@ def _cost(activity: HostedActivity, lang: str) -> Optional[str]:
     return text
 
 
+def _error_text(activity: HostedActivity, lang: str) -> str:
+    """Why the call did not complete: in the reader's language when Avibe worded it, else as the provider said it.
+
+    Only a known code is localized. One from a newer producer reads as its raw
+    ``error``, as a provider's own reason does.
+    """
+
+    if activity.error_code in HOSTED_ERROR_CODES:
+        return i18n_t(f"hostedTools.errorCode.{activity.error_code}", lang)
+    return activity.error or ""
+
+
 def hosted_line(activity: HostedActivity, lang: str, *, escape: Callable[[str], str] = lambda text: text) -> str:
     """The one-line form IM shows per hosted call.
 
@@ -325,6 +345,6 @@ def hosted_line(activity: HostedActivity, lang: str, *, escape: Callable[[str], 
             parts.append(i18n_t(f"hostedTools.mode.{activity.mode}", lang, provider=vendor))
         parts.append(_count(activity, lang))
     else:
-        parts.append(i18n_t(f"hostedTools.status.{activity.status}", lang, error=escape(activity.error or "")))
+        parts.append(i18n_t(f"hostedTools.status.{activity.status}", lang, error=escape(_error_text(activity, lang))))
     parts.append(_cost(activity, lang))
     return " · ".join(part for part in parts if part)

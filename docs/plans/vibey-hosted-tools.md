@@ -79,10 +79,15 @@ verified for X search.
   So a probe cannot pass or fail for a shape that production never sends.
 - **A probe has its own resolution.** Normal resolution gives native mode only after `call: verified` (§3.5), so a
   first verification could never send a native declaration. Model Hub therefore builds a probe resolution, and only
-  for the user's probe action. It pins the probed (Source, model) with `x-avibe-pin-source`, carries the overlay's
-  native declaration whatever the current evidence, and allows no failover. Normal turns never receive it.
-- **The `call` probe.** The fixed message is "search for 'Avibe local-first agent OS' and reply with the first
-  result's URL".
+  for the user's probe action. It names the probed (Source, model) and carries the overlay's native declaration
+  whatever the current evidence, with the endpoint built as the Vibey launch builds it (the Source's vendor as its
+  provider). Vibey's adapter runs unchanged, and Model Hub serves every request it sends with its own invocation
+  of exactly that Source, never the turn gateway, so there is no route and no failover. A resend the adapter makes
+  for a field the endpoint refused before answering (Anthropic's one-hour cache lifetime) is one more such call;
+  a probe sends at most two, and only one runs the model. A result is recognized only as the hosted call a real
+  turn would keep. Normal turns never receive a probe resolution.
+- **The `call` probe.** The fixed message is "search the web for 'Avibe local-first agent OS' and reply with the
+  first result's URL" (X search: "search X for posts about …, and reply with the first post's URL").
   - **`verified`:** the response completes and carries the provider's own result item for that tool (§4.2).
   - **`unsupported`:** only an HTTP 400 that names the tool type (observed: `Unsupported tool type: x_search`).
   - **Inconclusive, not evidence:** a completed response without that item. The model may simply not have used the
@@ -91,6 +96,10 @@ verified for X search.
       paths are never native anyway (§3.5).
   - **Not evidence:** a transient failure (overload, 5xx, timeout). The UI reports "couldn't verify, try again"
     (observed: every OpenAI-relay web search ended with an in-stream "servers overloaded").
+- **Delivery order.** The `call` probe for `web_search` and `x_search` ships first
+  (`POST /api/models/hosted-tools/<tool>/probe`). The `replay` probe follows Vibey's verbatim native replay, and the
+  `image_generation` call probe follows Vibey's parsing of image results. Until then a probe reports `replay: null`
+  and the API refuses an image probe, because no response could show its result.
 - **The `replay` probe.** A second production request with the native declaration still present. Its history is
   the call probe's turn, with the native payload verbatim, followed by "give the URL of the second result you found,
   without searching again".
@@ -596,10 +605,18 @@ Each has a **Re-verify** action with its cost. Unknown shows nothing.
     still over the cap gets a record saying it is too large to view inline.
   - Known limitation: no transparent backgrounds in Phase 1. A later per-call format choice (an
     `output_format`/`background` argument on the tool) restores them.
-  - Known limitation (orchestrator decision, 2026-10-14): a file is saved before the row that names it commits. A
-    cancel, crash or kill in between leaves a file no row references. Such files are content-addressed, so they never
-    duplicate, and the per-response image budget bounds them. A startup sweep of the agent media root removes them
-    (#2588, before the 3.2.1 RC).
+  - A file is saved before the row that names it commits, and a cancel, crash or kill in between leaves a file no
+    row references (orchestrator decision, 2026-10-14). One owner covers every such window (#2588):
+    - the committed row registers each image it names in `media_objects`, in its own transaction, as an input
+      snapshot is registered;
+    - once per process, off the loop, Vibey's first recovery pass sweeps the agent media root;
+    - the sweep removes a content-addressed file that no row registers, and a leftover temporary file, once either is
+      older than 24 hours, longer than any Turn holds an uncommitted save;
+    - each file costs one indexed lookup, and links and foreign names are never touched;
+    - a save that reuses an old file makes it new again, so the sweep never takes a file a save is about to register.
+
+    Generated images that pre-release builds committed without registering them are not kept (owner directive: no
+    compatibility for pre-release states).
   - Avibe-authored failure reasons in a record's `error` are English model-facing text. Each carries a stable
     `error_code` (C-1 `HostedRecord.error_code`, one of `HOSTED_ERROR_CODES`), by which the display boundary localizes
     it; a provider's own reason carries none and shows as it is (#2589).

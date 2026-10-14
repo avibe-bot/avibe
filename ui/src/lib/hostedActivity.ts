@@ -28,7 +28,10 @@ export type HostedActivity = {
   tool: HostedToolName;
   mode: 'native' | 'proxy';
   status: 'completed' | 'failed' | 'incomplete' | 'pending';
+  /** Model-facing English, shown as is only for a provider's own reason. */
   error?: string;
+  /** The stable code of a reason Avibe worded itself, shown in the reader's language. */
+  error_code?: string;
   /** The query, prompt, page or thread the call named. */
   subject?: string;
   action?: string;

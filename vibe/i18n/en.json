@@ -875,7 +875,7 @@
         "drag": "Drag an observed target",
         "setValue": "Set an observed control value",
         "launch": "Launch an application or URL",
-        "quit": "Quit an application",
+        "forceQuit": "Force-terminate an application; unsaved state is lost.",
         "clipboard": "Read or write the system clipboard",
         "clipboardRead": "Read the system clipboard",
         "clipboardWrite": "Write the system clipboard"
@@ -888,7 +888,7 @@
         "sessionArgumentForbidden": "The Computer Use session is bound to the caller's Avibe Session and cannot be supplied through --args-json or --arg.",
         "outputArgumentConflict": "Use --output or screenshot_out_file in --args-json, not both.",
         "unsupportedCommand": "Unsupported Computer Use command: {command}",
-        "screenshotMissing": "{tool} did not return an image that could be written to --output.",
+        "screenshotMissing": "No screenshot is available for this result. The window may be hidden or minimized, or capture may be unavailable.",
         "outputUnsupported": "--output is supported only by observe window or zoom.",
         "missingCallerSession": "Computer Use requires an Avibe Agent caller Session.",
         "missingCallerTurn": "Computer Use requires the caller's Avibe Session to have an active Turn.",
@@ -1735,6 +1735,17 @@
     "builtinAgentUnavailable": "The built-in Agent is not available, so the desktop mini has no one to talk to."
   },
   "hostedTools": {
+    "errorCode": {
+      "provider_no_reason": "the provider gave no reason",
+      "provider_no_image": "the provider returned no image",
+      "image_not_streamed": "the image did not arrive before the response ended",
+      "image_not_saved": "the image could not be saved",
+      "image_no_store": "nothing here can keep a generated image",
+      "executor_no_image": "the proxy executor returned no image",
+      "gateway_unreachable": "couldn't reach the model gateway",
+      "gateway_refused": "the model gateway refused the call",
+      "gateway_no_result": "the model gateway returned no result"
+    },
     "tool": {
       "web_search": "Web search",
       "x_search": "X search",

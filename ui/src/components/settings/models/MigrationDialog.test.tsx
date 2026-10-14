@@ -317,7 +317,7 @@ describe('MigrationDialog — the settings default', () => {
     ['migration_runtime_stopping', 'The task these assistants were running in Avibe is still stopping. Try again in a moment.'],
     ['migration_permission_needed', 'Allow credential access, then retry.'],
     ['migration_recovery_pending', 'Migration is unfinished. Retry to continue.'],
-    ['migration_item_conflict', 'Migration could not verify the saved configuration or its credentials. Check the files and authentication before retrying, or add the source manually in Model Hub.'],
+    ['migration_item_conflict', 'The selected configuration could not be migrated safely. Reopen the migration dialog to scan the latest configuration. If it still fails, check the file format and access permissions.'],
     ['migration_configuration_blocked', 'Adjust the native configuration, then scan again.'],
     ['migration_reauthorization_required', 'This backend was already migrated, and the changed native login cannot be verified as a new authorization. The original files are unchanged. Sign in again for the existing source in Model Hub instead of importing this login.'],
   ] as const)('explains a batch refused as %s inside the dialog', async (code, message) => {
@@ -336,7 +336,7 @@ describe('MigrationDialog — the settings default', () => {
     expect(showToast).not.toHaveBeenCalledWith(message, 'error');
   });
 
-  it('keeps selection and explains configuration or credential verification failure in Chinese', async () => {
+  it('keeps selection and explains a local migration conflict in Chinese', async () => {
     await i18n.changeLanguage('zh');
     const onClose = vi.fn();
     vi.spyOn(modelsApi, 'scanMigration').mockResolvedValue({ items: [{ ...CODEX_KEY }] });
@@ -349,7 +349,7 @@ describe('MigrationDialog — the settings default', () => {
     await user.click(within(dialog).getByRole('button', { name: '开始迁移' }));
 
     expect((await within(dialog).findByRole('alert')).textContent).toBe(
-      '无法验证已保存的配置或凭据。请检查配置文件和认证是否有效后重试，或在模型网关中手动添加供应商。',
+      '无法安全迁移所选配置。请重新打开迁移窗口以扫描最新配置；若仍然失败，请检查配置文件格式和访问权限。',
     );
     expect(onClose).not.toHaveBeenCalled();
     expect(rowCheckboxes(dialog)[0].getAttribute('aria-checked')).toBe('true');
@@ -425,8 +425,8 @@ describe('MigrationDialog — the settings default', () => {
 
 describe('MigrationDialog — persisted authentication', () => {
   it.each([
-    ['en', 'Import authentication saved in configuration files, shell startup files, or supported credential stores. After migration, assistants authenticate through Model Hub: subscription sign-ins move into Model Hub, and API keys are copied while the originals stay in place.'],
-    ['zh', '导入配置文件、Shell 启动文件或受支持凭据库中已保存的认证。迁移后，助手统一通过模型网关认证：订阅登录转交模型网关托管，API Key 复制导入，原配置默认保留。'],
+    ['en', 'Import authentication saved in configuration files, shell startup files, or supported credential stores. Subscription sign-ins move into Model Hub. API keys are copied as saved, with the originals kept by default; migration does not test keys online or fetch model lists. Later model requests establish whether a key works.'],
+    ['zh', '导入配置文件、Shell 启动文件或受支持凭据库中已保存的认证。订阅登录转交模型网关托管；API Key 直接复制导入，原配置默认保留，迁移时不联网校验 Key 或拉取模型列表。Key 是否可用由后续模型调用确认。'],
   ] as const)('explains the saved source boundary and consequence in %s', async (language, sentence) => {
     await i18n.changeLanguage(language);
     serve([CODEX_KEY]);
@@ -768,7 +768,7 @@ describe('MigrationDialog — the Settings surface the setup scope must not dist
 
     expect(visibleText(dialog)).toEqual([
       'Migrate to the Model Hub',
-      'Import authentication saved in configuration files, shell startup files, or supported credential stores. After migration, assistants authenticate through Model Hub: subscription sign-ins move into Model Hub, and API keys are copied while the originals stay in place.',
+      'Import authentication saved in configuration files, shell startup files, or supported credential stores. Subscription sign-ins move into Model Hub. API keys are copied as saved, with the originals kept by default; migration does not test keys online or fetch model lists. Later model requests establish whether a key works.',
       'Claude Code',
       'Anthropic',
       'Claude 账号登录（OAuth） · Claude Code configuration',

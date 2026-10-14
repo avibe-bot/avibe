@@ -2084,7 +2084,7 @@
       "migration": {
         "open": "迁移配置",
         "title": "迁移到模型网关",
-        "subtitle": "导入配置文件、Shell 启动文件或受支持凭据库中已保存的认证。迁移后，助手统一通过模型网关认证：订阅登录转交模型网关托管，API Key 复制导入，原配置默认保留。",
+        "subtitle": "导入配置文件、Shell 启动文件或受支持凭据库中已保存的认证。订阅登录转交模型网关托管；API Key 直接复制导入，原配置默认保留，迁移时不联网校验 Key 或拉取模型列表。Key 是否可用由后续模型调用确认。",
         "cleanApiKeys": "同时清理原生 CLI 中的 API Key 配置",
         "cleanApiKeysHint": "包括 Shell 启动文件和各 CLI 的配置文件。不勾选时这些 Key 保持原样，经模型网关启动的助手不会使用它们。",
         "empty": "没有检测到可迁移的配置。",
@@ -2112,7 +2112,7 @@
           "runtimeStopping": "这些助手刚才在 Avibe 中运行的任务还在停止中，请稍后重试。",
           "permissionNeeded": "请允许访问凭据，再重试。",
           "recoveryPending": "迁移尚未完成，请重试以继续。",
-          "itemConflict": "无法验证已保存的配置或凭据。请检查配置文件和认证是否有效后重试，或在模型网关中手动添加供应商。",
+          "itemConflict": "无法安全迁移所选配置。请重新打开迁移窗口以扫描最新配置；若仍然失败，请检查配置文件格式和访问权限。",
           "configurationBlocked": "请先调整原生配置，再重新扫描。",
           "credentialsInvalid": "认证已过期，请在模型网关中重新登录。",
           "reauthorizationRequired": "此后端已迁移过，无法确认改动后的原生登录是否是新授权。原配置文件未改动，请在模型网关中为已有供应商重新登录，不要再次导入这份登录。"
@@ -4779,6 +4779,17 @@
     },
     "agentActivity": {
       "hosted": {
+        "errorCode": {
+          "provider_no_reason": "供应商未说明原因。",
+          "provider_no_image": "供应商没有返回图片。",
+          "image_not_streamed": "回复结束前图片未传完。",
+          "image_not_saved": "图片未能保存。",
+          "image_no_store": "当前环境无法保存生成的图片。",
+          "executor_no_image": "代理执行者没有返回图片。",
+          "gateway_unreachable": "无法连接模型网关。",
+          "gateway_refused": "模型网关拒绝了这次调用。",
+          "gateway_no_result": "模型网关没有返回结果。"
+        },
         "mode": {
           "native": "原生 · {{provider}}",
           "proxy": "由 {{provider}} 代理"
@@ -4936,9 +4947,41 @@
     "chat": {
       "floatApprovals": "等你授权 · {{count}}"
     },
+    "search": {
+      "label": "搜索密钥",
+      "placeholder": "搜索名称、描述、标签、域名…",
+      "clear": "清空搜索",
+      "count_one": "{{count}} 个密钥",
+      "count_other": "{{count}} 个密钥",
+      "filtered": "{{visible}} / {{total}} 个密钥"
+    },
     "filter": {
-      "clear": "清除筛选",
-      "empty": "没有匹配所选标签的密钥。"
+      "clear": "清除",
+      "clearAll": "清除全部",
+      "empty": "没有匹配的密钥",
+      "reset": "清除搜索和筛选",
+      "tags": "标签",
+      "skills": "Skills",
+      "tagsByUsage": "标签 · 按使用次数",
+      "selectedTags": "标签（{{count}}）",
+      "entry": "{{name}} · {{count}}",
+      "searchTags": "搜索标签",
+      "searchTagsPlaceholder": "在 {{count}} 个标签里查找",
+      "noTags": "没有这个标签",
+      "intersection": "可多选，需同时满足",
+      "remove": "移除筛选：{{name}}",
+      "moreTags": "显示其余 {{count}} 个标签",
+      "quick": "快捷筛选",
+      "all": "全部",
+      "protected": "保护档",
+      "signing": "签名密钥",
+      "unused": "从未使用"
+    },
+    "sort": {
+      "label": "排序",
+      "name": "名称",
+      "recent": "最近使用",
+      "added": "最近添加"
     },
     "grants": {
       "title": "活跃授权",

@@ -875,7 +875,7 @@
         "drag": "拖动已观察的目标",
         "setValue": "设置已观察控件的值",
         "launch": "启动应用或 URL",
-        "quit": "退出应用",
+        "forceQuit": "强制终止应用；未保存的数据会丢失。",
         "clipboard": "读取或写入系统剪贴板",
         "clipboardRead": "读取系统剪贴板",
         "clipboardWrite": "写入系统剪贴板"
@@ -888,7 +888,7 @@
         "sessionArgumentForbidden": "Computer Use session 已绑定调用方 Avibe Session，不能通过 --args-json 或 --arg 提供。",
         "outputArgumentConflict": "请在 --output 和 --args-json 中的 screenshot_out_file 之间二选一，不能同时提供。",
         "unsupportedCommand": "不支持的 Computer Use 命令：{command}",
-        "screenshotMissing": "{tool} 没有返回可写入 --output 的图像。",
+        "screenshotMissing": "此结果没有可用的截图。窗口可能已隐藏或最小化，也可能是截图不可用。",
         "outputUnsupported": "--output 只支持 observe window 或 zoom。",
         "missingCallerSession": "Computer Use 需要 Avibe Agent 调用方 Session。",
         "missingCallerTurn": "Computer Use 要求调用方 Avibe Session 当前有活动 Turn。",
@@ -1735,6 +1735,17 @@
     "builtinAgentUnavailable": "内置 Agent 当前不可用，桌宠暂时没有对话对象。"
   },
   "hostedTools": {
+    "errorCode": {
+      "provider_no_reason": "供应商未说明原因",
+      "provider_no_image": "供应商没有返回图片",
+      "image_not_streamed": "回复结束前图片未传完",
+      "image_not_saved": "图片未能保存",
+      "image_no_store": "当前环境无法保存生成的图片",
+      "executor_no_image": "代理执行者没有返回图片",
+      "gateway_unreachable": "无法连接模型网关",
+      "gateway_refused": "模型网关拒绝了这次调用",
+      "gateway_no_result": "模型网关没有返回结果"
+    },
     "tool": {
       "web_search": "网页搜索",
       "x_search": "X 搜索",

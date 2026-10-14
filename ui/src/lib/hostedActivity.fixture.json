@@ -71,5 +71,17 @@
     "subject": "from:OpenAI",
     "sources": [],
     "images": []
+  },
+  "proxy_unreachable": {
+    "version": 1,
+    "call_id": "call_x5",
+    "tool": "x_search",
+    "mode": "proxy",
+    "status": "failed",
+    "error": "the gateway could not run the call (ConnectError)",
+    "error_code": "gateway_unreachable",
+    "subject": "from:xai",
+    "sources": [],
+    "images": []
   }
 }

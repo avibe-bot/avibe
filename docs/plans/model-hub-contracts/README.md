@@ -242,6 +242,7 @@ revision; the discovering lane does not reinterpret or edit the contract in plac
 | `turn-provenance.schema.json` | Exactly attributed turn attempts and terminal outcome; no policy or mapping discriminator. The one versioned object persisted to disk, so it accepts every released version. |
 | `usage-summary.schema.json` | Metered token usage over a trailing local-day window, aggregated from proxied turns, with its list-API-price valuation. A report only: no consumer may feed it back into resolution, admission, or cooldown. |
 | `quota-summary.schema.json` | Rate-limit windows of hub-held subscriptions, parsed from each vendor's own usage report, and the API-price value of each subscription's metered usage against its monthly fee. A report only; carries no grant or raw body. |
+| `hosted-tool-probe-result.schema.json` | One user-started hosted-tool probe: per aspect, whether it verified the tool, showed it unsupported, or was inconclusive or transient (which write no evidence), with the Source test's failure detail for a request that failed. |
 | `hosted-tools-status.schema.json` | The Tools tab read: each hosted tool's toggle and chosen executor, every eligible (Source, model) the overlay offers it on with its `call` and `replay` evidence, and re-verify counts. A report only; hop resolution reads config and evidence itself. |
 | `resolution-event.schema.json` | Pull-feed Source/resolution records and their closed reason/detail vocabulary. |
 | `oauth-flow.schema.json` | Subscription creation and re-auth presentation without secret material. |

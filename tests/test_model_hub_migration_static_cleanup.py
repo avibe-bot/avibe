@@ -91,25 +91,18 @@ def _selected(items):
 
 @pytest.mark.parametrize("shape", SHAPES)
 @pytest.mark.parametrize("raw", [KEY, RAW, f"\u00a0{KEY}\u2003"])
-def test_static_proof_and_custody_use_canonical_value(home, tmp_path, shape, raw):
+def test_static_custody_holds_the_canonical_value(home, tmp_path, shape, raw):
     path, roots = _seed(home, shape, raw)
     service, store, adapter = _service(tmp_path, migration_home=home)
     service.migration_project_roots = lambda: roots
-    proof_values = []
-    transient = adapter.provision_transient_credential
-
-    async def capture(vendor, secret, base_url, **kwargs):
-        proof_values.append(secret)
-        return await transient(vendor, secret, base_url, **kwargs)
-
-    adapter.provision_transient_credential = capture
     item = _selected(_items(service, roots))
     assert item.secret == KEY
     assert raw not in json.dumps(item.to_payload()) and KEY not in repr(item)
     result = asyncio.run(service.migration_apply([item.id], clean_api_keys=True))
     assert result["applied"] == 1
     [source] = store.config.sources
-    assert proof_values == [adapter.keys[source.credential_ref][2]] == [KEY]
+    assert adapter.keys[source.credential_ref][2] == KEY
+    assert not adapter.transient_refs and not adapter.observed
     assert adapter.auth_schemes[source.credential_ref] == item.auth_scheme
     assert KEY.encode() not in path.read_bytes()
     if shape == "opencode-auth":
@@ -154,7 +147,7 @@ def test_static_canonical_value_reuses_existing_ref(home, tmp_path, shape):
     asyncio.run(service.migration_apply([item.id], clean_api_keys=True))
     assert len(adapter.provisioned) == len(store.config.sources) == 1
     assert store.config.sources[0].credential_ref == ref
-    assert adapter.observed and not adapter.transient_refs
+    assert not adapter.observed and not adapter.transient_refs
     assert KEY.encode() not in path.read_bytes()
 
 
@@ -171,7 +164,7 @@ def test_other_canonical_credential_is_left_in_place(home, tmp_path, shape):
 
 
 @pytest.mark.parametrize("shape", CONFIG_SHAPES)
-@pytest.mark.parametrize("when", ["after-scan", "during-proof"])
+@pytest.mark.parametrize("when", ["after-scan", "during-custody"])
 def test_padding_only_change_never_bypasses_exact_consent(home, tmp_path, shape, when):
     path, roots = _seed(home, shape)
     service, store, adapter = _service(tmp_path, migration_home=home)
@@ -187,13 +180,13 @@ def test_padding_only_change_never_bypasses_exact_consent(home, tmp_path, shape,
     if when == "after-scan":
         change()
     else:
-        observe = adapter.observe_source
+        provision = adapter.provision_credential
 
         async def mutate(*args, **kwargs):
             change()
-            return await observe(*args, **kwargs)
+            return await provision(*args, **kwargs)
 
-        adapter.observe_source = mutate
+        adapter.provision_credential = mutate
     with pytest.raises(ModelHubError):
         asyncio.run(service.migration_apply([item.id], clean_api_keys=True))
     assert changed is not None and path.read_bytes() == changed

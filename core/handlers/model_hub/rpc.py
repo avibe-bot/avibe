@@ -219,6 +219,8 @@ async def dispatch_model_hub_rpc(
         return await asyncio.to_thread(service.hosted_tools_status)
     if operation == "set_hosted_tool":
         return await service.set_hosted_tool(payload.get("tool"), payload.get("setting"))
+    if operation == "probe_hosted_tool":
+        return await service.probe_hosted_tool(payload.get("tool"), payload.get("target"))
     if operation == "get_agent_chain":
         return service.agent_chain(payload.get("backend"), payload.get("model_id"))
     if operation == "get_agent_chains":
