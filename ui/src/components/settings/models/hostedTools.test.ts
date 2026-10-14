@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { modelCapabilities, pairEvidence, refusalSummary } from './hostedTools';
+import { executorOrderAfterMove, modelCapabilities, pairEvidence, refusalSummary } from './hostedTools';
 import type { HostedRefusal, HostedSuccess, HostedToolRunStatus, HostedToolsStatus } from './types';
 
 const RELAY = 'src_relay001';
@@ -79,5 +79,13 @@ describe('hosted-tool status projection', () => {
     expect(modelCapabilities(status, RELAY, 'gpt-6-astra').map(({ tool, evidence }) => [tool, evidence.kind]))
       .toEqual([['web_search', 'ok'], ['x_search', 'refused']]);
     expect(modelCapabilities(status, RELAY, 'gpt-6-sol')).toEqual([]);
+  });
+
+  it('MH-HOSTED-UI-021: moves only the shown executors within the saved order, keeping hidden ones in place', () => {
+    // H is saved but not shown now (refused, or gone for a while); C is shown but not saved.
+    expect(executorOrderAfterMove(['A', 'H', 'B'], ['A', 'B', 'C'], 2, -1)).toEqual(['A', 'H', 'C', 'B']);
+    expect(executorOrderAfterMove(['H', 'A', 'B'], ['A', 'B'], 1, -1)).toEqual(['H', 'B', 'A']);
+    // Automatic: the shown order is the whole order.
+    expect(executorOrderAfterMove(null, ['A', 'B'], 0, 1)).toEqual(['B', 'A']);
   });
 });

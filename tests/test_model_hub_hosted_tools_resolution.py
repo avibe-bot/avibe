@@ -293,6 +293,37 @@ def test_the_latest_success_is_the_newest_in_time_not_in_text(tmp_path):
     assert web["status"]["latest_ok"]["source_id"] == "src_oai00001"
 
 
+def test_the_latest_success_is_the_newest_one_whose_source_is_still_the_same(tmp_path):
+    """MH-HOSTED-004: once the newest success's Source changes identity, the latest is the newest other success, as
+    fresh as memory holds it, not as old as the hourly file write."""
+    from datetime import timedelta
+
+    evidence = _evidence(tmp_path)
+
+    def succeed(source, model_id, at):
+        evidence.store.note_success(
+            EvidenceRecord(
+                source_id=source.id, model_id=model_id, feature=EvidenceFeature.hosted("web_search", "call"),
+                status="verified", observed_at=at, wire=evidence.wire_for(source, model_id),
+                source_identity=identity_digest(source), mode="executor",
+            ),
+            live=ALL, now=at,
+        )
+
+    succeed(XAI, "grok-fast", NOW)
+    succeed(XAI, "grok-fast", NOW + timedelta(minutes=10))
+    succeed(OPENAI, "gpt-mini", NOW + timedelta(minutes=20))
+    rotated = replace(OPENAI, credential_ref="cred_rotated")
+    status = hosted_tools_status(
+        _config(sources=[CLAUDE_SUB, XAI, rotated, GEMINI]), evidence=evidence, spec_for=_spec_for,
+        image_price=lambda _s, _m: None,
+    )
+    web = next(tool for tool in status["tools"] if tool["name"] == "web_search")
+    assert web["status"]["latest_ok"] == {
+        "source_id": "src_xai00001", "model_id": "grok-fast", "mode": "executor", "at": "2026-10-15T12:10:00Z",
+    }
+
+
 @pytest.mark.parametrize(
     "tool,payload,expected",
     [
