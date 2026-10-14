@@ -2450,10 +2450,6 @@
           "included": "订阅内含",
           "unknown": "费用未知",
           "notRecorded": "结果未能记录",
-          "plusIncluded_one": "，另 {{count}} 项订阅内含",
-          "plusIncluded_other": "，另 {{count}} 项订阅内含",
-          "plusUnpriced_one": "，另 {{count}} 项暂无单价",
-          "plusUnpriced_other": "，另 {{count}} 项暂无单价",
           "replay": {
             "unverified": "回放未验证 · 请重试",
             "unsupported": "此供应商不支持回放"
@@ -2463,57 +2459,6 @@
             "transient": "未能检测 · 请重试",
             "transientReason": "未能检测 · {{reason}}"
           }
-        },
-        "header": {
-          "pending_one": "{{count}} 项可检测",
-          "pending_other": "{{count}} 项可检测",
-          "total": "共{{cost}}",
-          "totalIncluded": "均为订阅内含",
-          "totalUnknown": "费用未知",
-          "summary": "{{pending}} · {{cost}}",
-          "none": "均已检测",
-          "action": "检测可用工具"
-        },
-        "dialog": {
-          "title": "检测可用工具",
-          "subtitle": "托管工具 · Vibey",
-          "body_one": "检测会向下面的供应商发送 {{count}} 次真实请求，确认它们能否原生运行这些工具。",
-          "body_other": "检测会向下面的供应商发送 {{count}} 次真实请求，确认它们能否原生运行这些工具。",
-          "privacy": "请求只带一条固定的测试查询，不含你的对话。检测不会开启任何工具，也不会改动路由。",
-          "listTitle": "将检测",
-          "pair": "<tool>{{tool}}</tool><muted>·</muted><source>{{source}}</source><model>{{model}}</model>",
-          "total": "合计",
-          "totalNote": "按 API 标价估算；中转的实际账单可能不同",
-          "cancel": "取消",
-          "start": "开始检测",
-          "startCost": "开始检测 · {{cost}}",
-          "running_one": "正在检测 {{done}}/{{count}}…",
-          "running_other": "正在检测 {{done}}/{{count}}…"
-        },
-        "result": {
-          "title": "检测完成",
-          "verified_one": "{{count}} 项原生可用",
-          "verified_other": "{{count}} 项原生可用",
-          "unsupported_one": "{{count}} 项不支持",
-          "unsupported_other": "{{count}} 项不支持",
-          "unverified_one": "{{count}} 项未能检测",
-          "unverified_other": "{{count}} 项未能检测",
-          "outcome": {
-            "verified": "原生可用",
-            "unsupported": "不支持",
-            "unverified": "未能检测"
-          },
-          "reason": {
-            "inconclusive": "模型没有调用工具。可重试，不会记为“不支持”。",
-            "transient": "这次未能检测。可重试，不会记为“不支持”。",
-            "transientReason": "这次未能检测（{{reason}}）。可重试，不会记为“不支持”。"
-          },
-          "note": "已验证的模型会直接原生调用；其他模型由代理执行者代为调用。工具开关在“工具”页，默认仍是关闭。",
-          "retry_one": "重试 {{count}} 项",
-          "retry_other": "重试 {{count}} 项",
-          "retryCost_one": "重试 {{count}} 项 · {{cost}}",
-          "retryCost_other": "重试 {{count}} 项 · {{cost}}",
-          "done": "完成"
         }
       },
       "capability": {

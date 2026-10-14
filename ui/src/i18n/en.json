@@ -2450,10 +2450,6 @@
           "included": "included in subscription",
           "unknown": "cost unknown",
           "notRecorded": "the result couldn't be recorded",
-          "plusIncluded_one": "+ {{count}} included",
-          "plusIncluded_other": "+ {{count}} included",
-          "plusUnpriced_one": "+ {{count}} without a price",
-          "plusUnpriced_other": "+ {{count}} without a price",
           "replay": {
             "unverified": "Replay not verified · try again",
             "unsupported": "Replay not supported on this Source"
@@ -2463,57 +2459,6 @@
             "transient": "Couldn't verify · try again",
             "transientReason": "Couldn't verify · {{reason}}"
           }
-        },
-        "header": {
-          "pending_one": "{{count}} pair to check",
-          "pending_other": "{{count}} pairs to check",
-          "total": "{{cost}} in total",
-          "totalIncluded": "included in subscriptions",
-          "totalUnknown": "cost unknown",
-          "summary": "{{pending}} · {{cost}}",
-          "none": "Everything is checked",
-          "action": "Check available tools"
-        },
-        "dialog": {
-          "title": "Check available tools",
-          "subtitle": "Hosted tools · Vibey",
-          "body_one": "This sends {{count}} real request to the Source below to confirm it can run the tool natively.",
-          "body_other": "This sends {{count}} real requests to the Sources below to confirm they can run these tools natively.",
-          "privacy": "Each request carries one fixed test query and none of your conversation. Checking turns no tool on and changes no route.",
-          "listTitle": "To check",
-          "pair": "<tool>{{tool}}</tool><muted>·</muted><source>{{source}}</source><model>{{model}}</model>",
-          "total": "Total",
-          "totalNote": "Estimated at API price; a relay may bill differently",
-          "cancel": "Cancel",
-          "start": "Start check",
-          "startCost": "Start check · {{cost}}",
-          "running_one": "Checking {{done}} of {{count}}…",
-          "running_other": "Checking {{done}} of {{count}}…"
-        },
-        "result": {
-          "title": "Check finished",
-          "verified_one": "{{count}} runs natively",
-          "verified_other": "{{count}} run natively",
-          "unsupported_one": "{{count}} not supported",
-          "unsupported_other": "{{count}} not supported",
-          "unverified_one": "{{count}} not verified",
-          "unverified_other": "{{count}} not verified",
-          "outcome": {
-            "verified": "Runs natively",
-            "unsupported": "Not supported",
-            "unverified": "Not verified"
-          },
-          "reason": {
-            "inconclusive": "The model didn't use the tool. Try again; this is not recorded as unsupported.",
-            "transient": "Couldn't verify this time. Try again; this is not recorded as unsupported.",
-            "transientReason": "Couldn't verify this time ({{reason}}). Try again; this is not recorded as unsupported."
-          },
-          "note": "Verified models call the tool natively; other models use the proxy executor. Tools stay off until you turn them on.",
-          "retry_one": "Retry {{count}}",
-          "retry_other": "Retry {{count}}",
-          "retryCost_one": "Retry {{count}} · {{cost}}",
-          "retryCost_other": "Retry {{count}} · {{cost}}",
-          "done": "Done"
         }
       },
       "capability": {

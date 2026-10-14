@@ -16,7 +16,7 @@ import { cn } from '@/lib/utils';
 import { formatDayTime, formatMonthDay, formatSentences } from './format';
 import { probeKey, type ModelCapability, type ProbeTarget } from './hostedTools';
 import type { HostedToolName, HostedToolProbeResult, RefusedEffort } from './types';
-import { ProbeAnswerNote } from './HostedProbeDialog';
+import { ProbeAnswerNote } from './ProbeAnswerNote';
 import { useEstimateLabel } from './useEstimateLabel';
 
 const TOOL_ICON: Record<HostedToolName, React.ComponentType<{ className?: string }>> = {

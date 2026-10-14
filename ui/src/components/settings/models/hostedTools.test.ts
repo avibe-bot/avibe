@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { evidenceChip, modelCapabilities, pendingChecks, probeCostSummary, type ProbeTarget } from './hostedTools';
+import { evidenceChip, modelCapabilities } from './hostedTools';
 import type { HostedEvidence, HostedToolCandidate } from './types';
 
 const evidence = (overrides: Partial<HostedEvidence>): HostedEvidence => ({
@@ -43,38 +43,6 @@ describe('hosted-tool evidence projection', () => {
   ];
   it('MH-HOSTED-UI-002: gives every evidence shape the chip it owes the user', () => {
     for (const [name, call, chip] of cases) expect(evidenceChip(call), name).toEqual(chip);
-  });
-
-  it('MH-HOSTED-UI-003: totals a check only from what the server estimates, and never counts unknown as zero', () => {
-    const at = (estimate: HostedToolCandidate['probe_estimate']): ProbeTarget => ({
-      tool: 'web_search',
-      candidate: { ...candidate('src_relay001', 'gpt-6-astra', evidence({})), probe_estimate: estimate },
-    });
-
-    expect(probeCostSummary([at({ basis: 'list', usd: 0.02 }), at({ basis: 'included' }), at({ basis: 'list', usd: 0.03 })]))
-      .toEqual({ usd: 0.05, priced: 2, included: 1, unpriced: 0 });
-    // An unknown estimate is counted, never added as zero.
-    expect(probeCostSummary([at({ basis: 'list', usd: 0.02 }), at(null)])).toEqual({ usd: 0.02, priced: 1, included: 0, unpriced: 1 });
-    expect(probeCostSummary([at({ basis: 'included' })])).toEqual({ usd: 0, priced: 0, included: 1, unpriced: 0 });
-  });
-
-  it('MH-HOSTED-UI-013: offers to check every pair with no current answer, images included', () => {
-    const verified = evidence({ status: 'verified', basis: 'probe', observed_at: AT });
-    const status = {
-      tools: [
-        { name: 'web_search' as const, enabled: false, executor: null, bound: null, candidates: [
-          candidate('src_relay001', 'gpt-6-astra', evidence({})),
-          candidate('src_relay001', 'gpt-6-sol', verified),
-          candidate('src_relay001', 'gpt-6-luna', evidence({ status: 'unknown', stale: 'wire', basis: 'probe', observed_at: AT })),
-          candidate('src_relay001', 'gpt-6-terra', evidence({ status: 'verified', stale: 'age', basis: 'probe', observed_at: AT })),
-        ] },
-        { name: 'image_generation' as const, enabled: false, executor: null, bound: null, candidates: [candidate('src_relay001', 'gpt-6.1-sol', evidence({}))] },
-      ],
-      reverify: { engine_upgraded: 1, aged: 1 },
-    };
-
-    expect(pendingChecks(status).map(({ tool, candidate: c }) => `${tool}:${c.model_id}`))
-      .toEqual(['web_search:gpt-6-astra', 'web_search:gpt-6-luna', 'web_search:gpt-6-terra', 'image_generation:gpt-6.1-sol']);
   });
 
   it('MH-HOSTED-UI-006: gives a Source model one capability per tool with evidence, in catalog order', () => {

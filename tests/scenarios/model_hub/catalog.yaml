@@ -445,9 +445,7 @@ scenarios:
       - 'ui/src/components/settings/models/ToolsTab.test.tsx::MH-HOSTED-UI-003: lets the locale compose a price with its extras'
       - 'ui/src/components/settings/models/ToolsTab.test.tsx::MH-HOSTED-UI-003: says a check''s cost is unknown before it runs, when no estimate is known'
       - 'ui/src/components/settings/models/SourceDetailPanel.test.tsx::MH-HOSTED-UI-003: says a re-check''s cost is unknown when no estimate is known'
-      - 'ui/src/components/settings/models/hostedTools.test.ts::MH-HOSTED-UI-003: totals a check only from what the server estimates, and never counts unknown as zero'
       - 'ui/src/components/settings/models/format.test.ts::MH-HOSTED-UI-003: keeps the first significant digits of a per-call price, and never shows a nonzero price as zero'
-      - 'ui/src/components/settings/models/ToolsTab.test.tsx::MH-HOSTED-UI-003: lets the locale compose a set''s cost with its unpriced checks'
   - id: MH-HOSTED-UI-004
     name: The Tools tab says how many checks an engine upgrade made stale, and nothing when none did
     status: covered
@@ -491,18 +489,17 @@ scenarios:
       - 'ui/src/components/settings/models/useHostedTools.test.tsx::MH-HOSTED-UI-007: keeps a tool pending until the read reconciling its lost write lands'
       - 'ui/src/components/settings/models/useHostedTools.test.tsx::MH-HOSTED-UI-007: drops a write answer asked under another Source identity'
   - id: MH-HOSTED-UI-013
-    name: A hosted-tool check runs only on the user's ask with its estimated cost shown first, and an answer that is not evidence reads as not verified with a retry
+    name: A hosted-tool check runs only on the user's ask, one pair at a time, with its estimated cost shown first, and an answer that is not evidence reads as not verified with a retry
     status: covered
     kind: contract
     layer: unit
     test:
       - 'ui/src/components/settings/models/ToolsTab.test.tsx::MH-HOSTED-UI-013: checks one row with its cost on the button, and says when the answer was not evidence'
-      - 'ui/src/components/settings/models/ToolsTab.test.tsx::MH-HOSTED-UI-013: runs the header check only after the dialog shows what it sends and costs'
+      - 'ui/src/components/settings/models/ToolsTab.test.tsx::MH-HOSTED-UI-013: offers a check one pair at a time, never all pairs at once'
       - 'ui/src/components/settings/models/ToolsTab.test.tsx::MH-HOSTED-UI-013: says why a failed check failed, and never shows the server''s key as text'
       - 'ui/src/components/settings/models/SourceDetailPanel.test.tsx::MH-HOSTED-UI-013: checks a tool again from its chip, with the cost on the action, and answers there when the check is not evidence'
       - 'ui/src/components/settings/models/useHostedTools.test.tsx::MH-HOSTED-UI-013: reads the record before calling a probe unanswered when its answer was lost'
       - 'ui/src/components/settings/models/useHostedTools.test.tsx::MH-HOSTED-UI-013: reads a verdict the status does not carry as not verified, with why'
-      - 'ui/src/components/settings/models/hostedTools.test.ts::MH-HOSTED-UI-013: offers to check every pair with no current answer, images included'
   - id: MH-HOSTED-UI-016
     name: A hosted-tool check is a real call on exactly one Source, so the Models page reads its Sources again after one, and a Source the probe verified shows as verified
     status: covered

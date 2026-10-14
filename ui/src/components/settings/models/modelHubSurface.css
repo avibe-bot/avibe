@@ -2157,26 +2157,6 @@
   font-size: var(--model-hub-usage-note-size);
   line-height: 16px;
 }
-/* Check dialogs (frame vQPXo). */
-.model-hub-probe-head { padding: 16px 20px 12px; font-size: var(--model-hub-usage-cell-size); }
-.model-hub-probe-body { padding: 14px 20px; font-size: var(--model-hub-usage-cell-size); line-height: 18px; }
-.model-hub-probe-foot { padding: 12px 20px; }
-.model-hub-probe-row { padding: 9px 12px; font-size: var(--model-hub-usage-cell-size); }
-.model-hub-probe-privacy {
-  padding: 9px 12px;
-  background: var(--model-hub-mint-14);
-  color: var(--foreground);
-}
-.model-hub-probe-label {
-  color: var(--model-hub-ink-73);
-  font-size: var(--model-hub-usage-label-size);
-}
-.model-hub-probe-total { padding: 6px 12px 0; }
-.model-hub-probe-reason {
-  padding: 0 12px;
-  color: var(--model-hub-usage-note-ink);
-  font-size: var(--model-hub-usage-note-size);
-}
 .model-hub-tool-executor {
   padding: 12px var(--model-hub-tool-pad-x);
   font-size: var(--model-hub-usage-cell-size);

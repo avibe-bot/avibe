@@ -73,30 +73,6 @@ export type ProbeTarget = { tool: HostedToolName; candidate: HostedToolCandidate
 
 export const probeKey = ({ tool, candidate }: ProbeTarget): string => `${tool}:${candidate.source_id}:${candidate.model_id}`;
 
-/**
- * What the header check offers to run: every pair with no current answer, i.e.
- * no record, or one an engine upgrade or age made stale.
- */
-export const pendingChecks = (status: HostedToolsStatus): ProbeTarget[] =>
-  status.tools.flatMap((tool) => tool.candidates
-    .filter((candidate) => candidate.call.status === 'unknown' || candidate.call.stale !== null)
-    .map((candidate) => ({ tool: tool.name, candidate })));
-
 /** Whether a probe's answer became no evidence: inconclusive, transient, or a request that failed (null). */
 export const probeUnanswered = (result: HostedToolProbeResult | null): boolean =>
   result === null || result.call.outcome === 'inconclusive' || result.call.outcome === 'transient';
-
-/**
- * What running these probes costs, as the server estimates each one: the sum of
- * the priced ones, and how many are included in a subscription or have no price
- * (an image, say). Unknown is never added as zero; it is counted.
- */
-export type ProbeCostSummary = { usd: number; priced: number; included: number; unpriced: number };
-
-export const probeCostSummary = (targets: readonly ProbeTarget[]): ProbeCostSummary =>
-  targets.reduce<ProbeCostSummary>((summary, { candidate }) => {
-    const estimate = candidate.probe_estimate;
-    if (!estimate) return { ...summary, unpriced: summary.unpriced + 1 };
-    if (estimate.basis === 'included') return { ...summary, included: summary.included + 1 };
-    return { ...summary, usd: summary.usd + estimate.usd, priced: summary.priced + 1 };
-  }, { usd: 0, priced: 0, included: 0, unpriced: 0 });
