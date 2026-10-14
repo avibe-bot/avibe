@@ -291,7 +291,6 @@ describe('ToolsTab executor order', () => {
 
     await user.click(within(rows[1]).getByRole('button', { name: 'Move relay-claude up' }));
     expect(onSave).toHaveBeenCalledWith('web_search', { executor_order: [CLAUDE.id, GROK.id, SUBSCRIPTION.id] });
-    expect(screen.getByRole('status').textContent).toBe('Moved relay-claude to position 1 of 3.');
   });
 
   it('MH-HOSTED-UI-021: a move keeps a saved executor the read does not show', async () => {
@@ -319,6 +318,50 @@ describe('ToolsTab executor order', () => {
     await openAdvanced(user, 'X search');
     await user.click(within(card('X search')).getByRole('button', { name: 'Reset to automatic' }));
     expect(onSave).toHaveBeenCalledWith('x_search', { executor_order: null });
+  });
+
+  it('MH-HOSTED-UI-021: announces a move and moves focus only once the server order shows it, and drops one that did not land', async () => {
+    const user = userEvent.setup();
+    const i18n = translator('en');
+    let asked: string[] | null = null;
+    const view = (order: string[], pending: ReadonlySet<HostedToolName> = new Set()) => (
+      <I18nextProvider i18n={i18n}>
+        <ToolsTab
+          read={readyRegion({ tools: [search('web_search', { executor_order: order, executor_candidates: order.map((id) => candidate(id, `${id}-mini`)) })] })}
+          sources={SOURCES}
+          pending={pending}
+          onSave={(_tool, body: HostedToolPut) => { asked = body.executor_order ?? null; }}
+          onClear={() => {}}
+          onRetry={() => {}}
+        />
+      </I18nextProvider>
+    );
+    const before = [GROK.id, CLAUDE.id, RELAY.id];
+    const writing = new Set<HostedToolName>(['web_search']);
+    const { rerender } = render(view(before));
+    await openAdvanced(user, 'Web search');
+    const status = screen.getByRole('status');
+
+    // Refused: nothing moved, so nothing is announced and nothing waits to take focus.
+    await user.click(screen.getByRole('button', { name: 'Move relay-gpt up' }));
+    rerender(view(before, writing));
+    expect(status.textContent).toBe('');
+    rerender(view(before));
+    expect(status.textContent).toBe('');
+    const elsewhere = screen.getByRole('switch');
+    elsewhere.focus();
+    rerender(view([GROK.id, RELAY.id, CLAUDE.id]));
+    expect(status.textContent).toBe('');
+    expect(document.activeElement).toBe(elsewhere);
+
+    // Landed: the server's order shows it, so it is announced and focus follows the row.
+    await user.click(screen.getByRole('button', { name: 'Move relay-gpt up' }));
+    rerender(view([GROK.id, RELAY.id, CLAUDE.id], writing));
+    expect(status.textContent).toBe('');
+    rerender(view(asked ?? []));
+    expect(screen.getAllByRole('listitem').map((row) => row.getAttribute('data-executor'))).toEqual([RELAY.id, GROK.id, CLAUDE.id]);
+    expect(status.textContent).toBe('Moved relay-gpt to position 1 of 3.');
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Move relay-gpt down' }));
   });
 
   it('MH-HOSTED-UI-021: keeps focus on the moved row once the answer lands, on its other arrow at an end', async () => {

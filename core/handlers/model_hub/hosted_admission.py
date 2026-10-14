@@ -26,9 +26,9 @@ from typing import Any, Callable, Final, Mapping, Optional
 from config.v2_config import ModelHubSourceConfig
 from vibe.backend_model_catalog import HostedToolSpec, bundled_provider_overlay
 
-from .capability_evidence import HOSTED_TOOL_ASPECTS, EvidenceFeature
+from .capability_evidence import HOSTED_TOOL_ASPECTS
 from .hosted_items import responses_item_tool
-from .hosted_tools import HostedEvidence, runs_on
+from .hosted_tools import HostedEvidence, hosted_tool_facts
 
 PIN_SOURCE_HEADER: Final = "x-avibe-pin-source"
 # The served-hop model a continuation was rendered for; without it a pin is the launch's primary hop.
@@ -205,28 +205,27 @@ def admits(
     spec_for: SpecLookup,
     evidence: HostedEvidence,
 ) -> bool:
-    """Whether this hop runs every piece of hosted content: offered there, with no current refusal.
+    """Whether this hop runs every piece of hosted content, by the hop's own facts (``hosted_tool_facts``).
 
-    Where a tool may run is ``runs_on``, the rule a hop's facts use, so the two
-    agree by construction; a declaration must also carry the type the overlay
-    declares there. Evidence is read from memory, and only refusals count: a
-    tool the priors offer is assumed until a real request refuses it.
+    Admission asks the one function that states a hop's facts, so the two agree
+    by construction: a declaration needs ``native`` assumed and the type the
+    overlay declares there, and a replayed item needs ``replay`` assumed, which
+    a current ``call`` refusal also withdraws. Evidence is read from memory, and
+    only refusals count: a tool the priors offer is assumed until a real request
+    refuses it.
     """
 
     if not content:
         return True
 
-    def offered(tool: str) -> HostedToolSpec | None:
-        return runs_on(source, model_id, tool, spec_for=spec_for)
-
-    def refused(tool: str, aspect: str) -> bool:
-        if aspect not in HOSTED_TOOL_ASPECTS.get(tool, ()):
+    def facts(tool: str):
+        if tool not in HOSTED_TOOL_ASPECTS:
             # A generated image is never replayed verbatim, so nothing can admit it.
-            return True
-        return evidence.unsupported(source, model_id, EvidenceFeature.hosted(tool, aspect))
+            return None
+        return hosted_tool_facts(source, model_id, tool, evidence=evidence, spec_for=spec_for)
 
     for tool, kind in content.calls:
-        spec = offered(tool)
-        if spec is None or spec.declaration["type"] != kind or refused(tool, "call"):
+        stated = facts(tool)
+        if stated is None or stated.native != "assumed" or (stated.declaration or {}).get("type") != kind:
             return False
-    return all(offered(tool) is not None and not refused(tool, "replay") for tool in content.replays)
+    return all((stated := facts(tool)) is not None and stated.replay == "assumed" for tool in content.replays)

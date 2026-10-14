@@ -255,9 +255,9 @@ class CapabilityEvidenceStore:
         self._records: dict[tuple, EvidenceRecord] = {}
         self._by_hop: dict[tuple[str, str], list[EvidenceRecord]] = {}
         records = self._read_file()
-        # When each success key last reached the file, which throttles its next write.
-        self._persisted: dict[tuple, datetime] = {
-            key: record.observed_at for key, record in records.items() if record.status == "verified"
+        # The file's copy of each success, which throttles the next write of that key.
+        self._persisted: dict[tuple, EvidenceRecord] = {
+            key: record for key, record in records.items() if record.status == "verified"
         }
         self._remember(records)
 
@@ -336,7 +336,7 @@ class CapabilityEvidenceStore:
 
         kept = list(kept)
         write_state_document(self.path, [item.payload() for item in kept])
-        self._persisted = {item.key: item.observed_at for item in kept if item.status == "verified"}
+        self._persisted = {item.key: item for item in kept if item.status == "verified"}
 
     def write_refusal(self, record: EvidenceRecord, *, live: Iterable[ModelHubSourceConfig]) -> None:
         """Record a refusal: memory first, then the file; a failed write is logged, not raised."""
@@ -382,12 +382,26 @@ class CapabilityEvidenceStore:
         if identities.get(record.source_id) != record.source_identity:
             return
         with self._lock:
+            existing = self._records.get(record.key)
+            if (
+                existing is not None
+                and existing.source_identity == record.source_identity
+                and existing.observed_at >= record.observed_at
+            ):
+                # Settlements race to the lock; the newest success of an identity is kept, whatever order they land.
+                return
             updated = dict(self._records)
             updated[record.key] = record
             kept = {item.key: item for item in self._write_locked(updated, identities)}
             self._remember(kept)
             persisted = self._persisted.get(record.key)
-            if persisted is not None and (now - persisted) < timedelta(seconds=POSITIVE_REFRESH_SECONDS):
+            # Throttled only while the file holds a recent success of this same Source identity: the first success
+            # after an identity change is written at once, since the file's copy no longer counts.
+            if (
+                persisted is not None
+                and persisted.source_identity == record.source_identity
+                and (now - persisted.observed_at) < timedelta(seconds=POSITIVE_REFRESH_SECONDS)
+            ):
                 return
             try:
                 self._persist_locked(kept.values())

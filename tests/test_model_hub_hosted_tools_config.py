@@ -99,6 +99,7 @@ DEGRADED = [
     ("repeated-order", {"web_search": {"executor_order": ["src_xai00001", "src_xai00001"]}}, {"web_search": OFF}, True),
     ("order-not-a-source-id", {"web_search": {"executor_order": [" src_xai00001"]}}, {"web_search": OFF}, True),
     ("bad-default-shape", {"image_generate": {"default_model": {"source_id": "src_xai00001"}}}, {"image_generate": OFF}, True),
+    ("default-not-encodable", {"image_generate": {"default_model": {"source_id": "src_xai00001", "model_id": "x\ud800"}}}, {"image_generate": OFF}, True),
     # Saved values are never resolved: an order naming a Source that is gone is kept and skipped when read.
     ("order-source-gone", {"web_search": {"executor_order": ["src_gone0001"]}}, {"web_search": (True, ("src_gone0001",), None)}, False),
     ("entry-not-an-object", {"x_search": None}, {"x_search": OFF}, True),
@@ -300,3 +301,35 @@ async def test_a_clear_waits_for_a_source_change_in_flight(tmp_path):
         store.config.sources = [replace(source, display_name="xAI 工作密钥")]
     answer = await clearing
     assert answer["source"]["display_name"] == "xAI 工作密钥"
+
+
+@pytest.mark.parametrize(
+    "prices,expected",
+    [
+        ((), None),
+        # A price for one size or quality is not every image's: the card shows no unit price rather than a wrong one.
+        ((("1024x1024", "low", 11),), None),
+        ((("1024x1024", "low", 11), (None, None, 20)), {"usd": 0.02, "basis": "list"}),
+    ],
+    ids=["unpriced", "conditional-only", "unqualified"],
+)
+def test_an_image_models_card_price_is_only_an_unqualified_list_price(tmp_path, monkeypatch, prices, expected):
+    """MH-HOSTED-004: gpt-image-2's prices vary by size and quality, so its card reads "no unit price" (owner rule)."""
+    from datetime import date
+
+    from core.handlers.model_hub import hosted_tools as hosted_tools_module
+    from vibe.backend_model_catalog import HostedToolPrice, ImageModelPrice, ImageModelSpec
+
+    spec = ImageModelSpec(
+        "gpt-image-2", "OpenAI image model", "images", ("images", "size"), ("pixels",),
+        tuple(
+            ImageModelPrice(HostedToolPrice("image", usd, date(2026, 10, 15), "https://openai.com/api/pricing"), size, quality)
+            for size, quality, usd in prices
+        ),
+    )
+    monkeypatch.setattr(hosted_tools_module, "provider_image_models", lambda vendor: (spec,) if vendor == "xai" else ())
+    service, _store = _api_service(tmp_path)
+    status = service.hosted_tools_status()["hosted_tools"]
+    _validate_status(status)
+    image = next(tool for tool in status["tools"] if tool["name"] == "image_generate")
+    assert [model["price"] for model in image["models"]] == [expected]

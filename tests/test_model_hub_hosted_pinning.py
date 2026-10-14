@@ -26,7 +26,7 @@ from core.handlers.model_hub.adapter import RawOutcomeKind, UpstreamRejection
 from core.handlers.model_hub.capability_evidence import (
     CapabilityEvidenceStore, EvidenceFeature, EvidenceRecord, identity_digest,
 )
-from core.handlers.model_hub.hosted_admission import admits, hosted_content
+from core.handlers.model_hub.hosted_admission import HostedContent, admits, hosted_content
 from core.handlers.model_hub.capability_evidence import wire_stamp
 from core.handlers.model_hub.hosted_tools import HostedEvidence
 from core.handlers.model_hub.turn_gateway import ModelHubTurnGateway
@@ -613,6 +613,31 @@ def test_admission_runs_a_tool_only_where_hop_resolution_would(tmp_path, case, k
     evidence = HostedEvidence(CapabilityEvidenceStore(tmp_path / "evidence.json"), "engine", "avibe")
     content = hosted_content({"tools": [{"type": "web_search"}]}, "openai_responses", pinned=True)
     assert admits(content, source=source, model_id=model_id, spec_for=hosted_tool_spec, evidence=evidence) is admitted
+
+
+@pytest.mark.parametrize(("refused", "admitted"), [
+    ((), True),
+    (("replay",), False),
+    # A call refusal withdraws replay too, as the hop's facts state; a concurrent refusal must not be outrun.
+    (("call",), False),
+])
+def test_a_replay_is_admitted_exactly_where_the_hops_facts_assume_it(tmp_path, refused, admitted):
+    """MH-HOSTED-GATEWAY-002: admission and hop resolution read one rule, so they never disagree about a replay."""
+
+    source = _source("src_xai000001", "xAI", vendor="xai", model_id="grok-4.6")
+    store = CapabilityEvidenceStore(tmp_path / "evidence.json")
+    evidence = HostedEvidence(store, "engine", "avibe")
+    for aspect in refused:
+        store.write_refusal(
+            EvidenceRecord(
+                source_id=source.id, model_id="grok-4.6", feature=EvidenceFeature.hosted("web_search", aspect),
+                status="unsupported", observed_at=NOW, wire=evidence.wire_for(source, "grok-4.6"),
+                source_identity=identity_digest(source), detail="400 invalid_request_error",
+            ),
+            live=[source],
+        )
+    content = HostedContent(replays=frozenset({"web_search"}))
+    assert admits(content, source=source, model_id="grok-4.6", spec_for=hosted_tool_spec, evidence=evidence) is admitted
 
 
 def test_declarations_are_recognized_by_every_vendors_type():

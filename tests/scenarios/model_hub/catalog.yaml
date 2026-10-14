@@ -195,6 +195,7 @@ scenarios:
     related_tests:
       - tests/test_model_hub_capability_evidence.py::test_a_success_never_replaces_a_refusal_and_never_routes
       - tests/test_model_hub_capability_evidence.py::test_successes_reach_memory_at_once_and_the_file_at_most_hourly
+      - tests/test_model_hub_capability_evidence.py::test_the_newest_success_is_kept_whatever_order_settlements_land_in
       - tests/test_model_hub_capability_evidence.py::test_a_refusal_holds_in_memory_when_its_write_fails
       - tests/test_model_hub_capability_evidence.py::test_a_clear_is_persisted_before_it_takes_effect
       - tests/test_model_hub_capability_evidence.py::test_a_changed_source_identity_is_pruned_at_the_next_write
@@ -210,6 +211,7 @@ scenarios:
     layer: contract
     test: tests/test_model_hub_hosted_tools_config.py::test_the_tools_api_writes_one_field_of_one_tool_at_a_time
     related_tests:
+      - tests/test_model_hub_hosted_tools_config.py::test_an_image_models_card_price_is_only_an_unqualified_list_price
       - tests/test_model_hub_hosted_tools_resolution.py::test_the_tools_read_states_saved_and_effective_values_and_what_real_use_showed
       - tests/test_model_hub_hosted_tools_resolution.py::test_a_put_changes_only_the_fields_it_names
       - tests/test_model_hub_hosted_tools_resolution.py::test_a_put_refuses_what_the_contract_forbids
@@ -495,7 +497,7 @@ scenarios:
       - 'ui/src/components/settings/models/SourceDetailPanel.test.tsx::MH-HOSTED-UI-020: clears a refused effort and shows the Source the clear answered'
       - 'ui/src/components/settings/models/SettingsModelsPage.render.test.tsx::MH-HOSTED-UI-020: clears a refusal from its Source chip and shows the status the clear answered'
   - id: MH-HOSTED-UI-021
-    name: A search tool's executor order lists every eligible executor in effective order; a move rearranges the shown executors within the saved order and keeps hidden ones, Reset saves automatic, and focus follows the moved row
+    name: A search tool's executor order lists every eligible executor in effective order; a move rearranges the shown executors within the saved order and keeps hidden ones, Reset saves automatic, and a move is announced and followed by focus only once the server order shows it
     status: covered
     kind: contract
     layer: unit
@@ -504,6 +506,7 @@ scenarios:
       - 'ui/src/components/settings/models/ToolsTab.test.tsx::MH-HOSTED-UI-021: a move keeps a saved executor the read does not show'
       - 'ui/src/components/settings/models/hostedTools.test.ts::MH-HOSTED-UI-021: moves only the shown executors within the saved order, keeping hidden ones in place'
       - 'ui/src/components/settings/models/ToolsTab.test.tsx::MH-HOSTED-UI-021: a customized order offers Reset, which saves automatic'
+      - 'ui/src/components/settings/models/ToolsTab.test.tsx::MH-HOSTED-UI-021: announces a move and moves focus only once the server order shows it, and drops one that did not land'
       - 'ui/src/components/settings/models/ToolsTab.test.tsx::MH-HOSTED-UI-021: keeps focus on the moved row once the answer lands, on its other arrow at an end'
   - id: MH-VIBEY-007
     name: Vibey starts once with the user's Sources and built-in Agent models, seeded when its first Source exists
@@ -529,6 +532,7 @@ scenarios:
       - tests/test_model_hub_hosted_pinning.py::test_the_portable_resend_fails_over_and_the_turn_settles_on_it
       - tests/test_model_hub_hosted_pinning.py::test_unpinned_hosted_content_is_refused_before_anything_runs
       - tests/test_model_hub_hosted_pinning.py::test_a_refusal_naming_the_pinned_hosted_content_is_handed_back_and_learned
+      - tests/test_model_hub_hosted_pinning.py::test_a_replay_is_admitted_exactly_where_the_hops_facts_assume_it
   - id: MH-HOSTED-GATEWAY-003
     name: Hosted declarations are recognized by any vendor's type, and only replayed items outside the in-flight response need replay evidence
     status: covered
