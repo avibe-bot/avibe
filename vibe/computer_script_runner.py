@@ -371,10 +371,13 @@ def _prune_retained_artifact_runs(parent: Path) -> None:
 def _runtime_context(read: _CappedJsonRead) -> dict[str, Any]:
     payload = read.value if isinstance(read.value, dict) else {}
     step = payload.get("step")
+    last_completed_step = payload.get("last_completed_step")
     screenshot_path = payload.get("screenshot_path")
     diagnostics = payload.get("diagnostics")
     if not isinstance(step, str) or not step:
         step = "script"
+    if not isinstance(last_completed_step, str) or not last_completed_step:
+        last_completed_step = None
     if not isinstance(screenshot_path, str) or not screenshot_path:
         screenshot_path = None
     if not isinstance(diagnostics, str):
@@ -386,6 +389,7 @@ def _runtime_context(read: _CappedJsonRead) -> dict[str, Any]:
     )
     return {
         "step": step,
+        "last_completed_step": last_completed_step,
         "screenshot_path": screenshot_path,
         "diagnostics": diagnostics,
         "read_error": read.error,
@@ -424,6 +428,7 @@ def _protocol_failure_envelope(
         message=message,
         params=_failure_params(context, params),
         step=context["step"],
+        last_completed_step=context["last_completed_step"],
         screenshot_path=context["screenshot_path"],
         ambiguous=True,
     )
@@ -436,6 +441,8 @@ def _merge_failure_context(
     merged = dict(error)
     if context["step"] != "script" or not merged.get("step"):
         merged["step"] = context["step"]
+    if context["last_completed_step"] is not None:
+        merged["last_completed_step"] = context["last_completed_step"]
     if context["screenshot_path"] is not None:
         merged["screenshot_path"] = context["screenshot_path"]
     error_params = merged.get("params")
@@ -478,6 +485,7 @@ def _finalize_run(
             message="The script deadline expired.",
             params=_failure_params(context),
             step=context["step"],
+            last_completed_step=context["last_completed_step"],
             screenshot_path=context["screenshot_path"],
             ambiguous=True,
         )
@@ -489,6 +497,7 @@ def _finalize_run(
             message="The script runtime failed.",
             params=_failure_params(context, {"error": str(pending_error)}),
             step=context["step"],
+            last_completed_step=context["last_completed_step"],
             screenshot_path=context["screenshot_path"],
             ambiguous=True,
         )

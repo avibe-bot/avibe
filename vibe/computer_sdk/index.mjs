@@ -533,6 +533,14 @@ function callHandleTool(handle, tool, argumentsValue, deadline) {
   });
 }
 
+function shouldRetryElementAction(error) {
+  return (
+    error instanceof ControllerFault &&
+    error.dispatched === false &&
+    STALE_ELEMENT_CODES.has(error.code)
+  );
+}
+
 function windowArguments(handle, options = {}) {
   return { ...options, pid: handle.pid, window_id: handle.windowId };
 }
@@ -792,10 +800,7 @@ async function runElementAction(handle, selector, label, tool, options = {}) {
     try {
       return effectResult(await invoke());
     } catch (error) {
-      if (
-        !(error instanceof ControllerFault) ||
-        !STALE_ELEMENT_CODES.has(error.code)
-      ) {
+      if (!shouldRetryElementAction(error)) {
         throw error;
       }
       element = await resolveWindowElement(handle, selector, true);

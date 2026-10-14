@@ -63,6 +63,7 @@ def _result(payload: dict, *, is_error: bool = False, image: bool = False) -> di
 def _fake_controller(
     *,
     click_error: str | None = None,
+    initial_click_error: str = "observe_first",
     duplicate_within: bool = False,
     dynamic_elements_after_action: bool = False,
     response_delay_by_tool: dict[str, float] | None = None,
@@ -278,7 +279,11 @@ def _fake_controller(
                         )
                     elif clicks == 1:
                         body = _result(
-                            {"code": "observe_first", "params": {}},
+                            {
+                                "code": initial_click_error,
+                                "params": {},
+                                "dispatched": False,
+                            },
                             is_error=True,
                         )
                     else:
@@ -347,6 +352,7 @@ def _run_node_script(
     source: str,
     *,
     click_error: str | None = None,
+    initial_click_error: str = "observe_first",
     duplicate_within: bool = False,
     dynamic_elements_after_action: bool = False,
     response_delay_by_tool: dict[str, float] | None = None,
@@ -375,6 +381,7 @@ def _run_node_script(
 
     with _fake_controller(
         click_error=click_error,
+        initial_click_error=initial_click_error,
         duplicate_within=duplicate_within,
         dynamic_elements_after_action=dynamic_elements_after_action,
         response_delay_by_tool=response_delay_by_tool,
@@ -683,6 +690,7 @@ export default async ({ subject }) => {
   };
 };
 """,
+        initial_click_error="stale_element_token",
     )
 
     assert payload == {
@@ -736,6 +744,28 @@ export default async () => {
     assert screenshot.read_bytes() == b"png-fixture"
 
 
+def test_plain_script_error_keeps_last_completed_step_separate(
+    tmp_path: Path,
+) -> None:
+    payload, _server, _requests = _run_node_script(
+        tmp_path,
+        """
+import { computer } from "@avibe/computer";
+
+export default async () => {
+  await computer.app({ bundleId: "com.apple.mail" });
+  throw new Error("plain script failure");
+};
+""",
+    )
+
+    assert payload["ok"] is False
+    assert payload["error"]["code"] == "computer_script_failed"
+    assert payload["error"]["step"] == "script"
+    assert payload["error"]["last_completed_step"] == "computer.app"
+    assert payload["error"]["ambiguous"] is False
+
+
 def test_failure_envelope_survives_runner_python_and_cli(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -749,6 +779,7 @@ def test_failure_envelope_survives_runner_python_and_cli(
         "message": "Application selector contains unknown field 'text'.",
         "params": {"field": "text"},
         "step": "computer.app",
+        "last_completed_step": "computer.app",
         "screenshot_path": str(screenshot_path),
         "ambiguous": True,
     }
@@ -757,7 +788,10 @@ def test_failure_envelope_survives_runner_python_and_cli(
     payload, _server, _requests = _run_node_script(
         tmp_path,
         f"""
+import {{ computer }} from "@avibe/computer";
+
 export default async () => {{
+  await computer.app({{ bundleId: "com.apple.mail" }});
   const error = new Error({json.dumps(expected["message"])});
   error.name = {json.dumps(expected["name"])};
   error.code = {json.dumps(expected["code"])};
@@ -805,6 +839,7 @@ export default async () => {{
             json.dumps(
                 {
                     "step": expected["step"],
+                    "last_completed_step": expected["last_completed_step"],
                     "screenshot_path": expected["screenshot_path"],
                     "diagnostics": "",
                 }
@@ -974,7 +1009,58 @@ def test_sdk_controller_error_ambiguity_table(tmp_path: Path) -> None:
 
     runtime_source = (SDK_DIRECTORY / "runtime.mjs").read_text(encoding="utf-8")
     assert runtime_source.count("new ControllerFault(") == 1
+    assert runtime_source.count("controllerPayload.dispatched === false") == 1
     assert "hasAmbiguousInFlightRequest" not in runtime_source
+
+
+@pytest.mark.parametrize(
+    "controller_code",
+    ["stale_element_token", "upstream_unavailable"],
+)
+def test_sdk_never_retries_a_mutation_without_explicit_not_dispatched(
+    tmp_path: Path,
+    controller_code: str,
+) -> None:
+    payload, _server, requests = _run_node_script(
+        tmp_path,
+        f"""
+import {{ computer }} from "@avibe/computer";
+
+export default async () => {{
+  const mail = await computer.app({{ bundleId: "com.apple.mail" }});
+  const window = await mail.window({{ labelContains: "New Message" }});
+  try {{
+    await window
+      .element({{ role: "button", label: "Send", index: 0 }})
+      .click();
+  }} catch (error) {{
+    return {{ code: error.code, ambiguous: error.ambiguous }};
+  }}
+  throw new Error("Controller failure was not raised");
+}};
+""",
+        click_error=controller_code,
+    )
+
+    assert payload == {
+        "ok": True,
+        "result": {"code": controller_code, "ambiguous": True},
+    }
+    assert [
+        request["payload"]["tool"]
+        for request in requests
+        if request["path"].endswith("/request")
+        and request["payload"].get("tool") == "click"
+    ] == ["click"]
+
+
+def test_sdk_has_one_mutating_action_retry_gate() -> None:
+    source = (SDK_DIRECTORY / "index.mjs").read_text(encoding="utf-8")
+
+    assert source.count("function shouldRetryElementAction(error)") == 1
+    assert source.count("shouldRetryElementAction(error)") == 2
+    assert source.count("STALE_ELEMENT_CODES.has(error.code)") == 1
+    assert source.count("return effectResult(await invoke());") == 2
 
 
 def test_sdk_marks_post_forward_upstream_failure_as_ambiguous(
@@ -1770,6 +1856,7 @@ export default async () => "x".repeat(
             "limit_bytes": computer_script_runner._SCRIPT_RESULT_MAX_BYTES,
         },
         "step": "script",
+        "last_completed_step": None,
         "screenshot_path": None,
         "ambiguous": True,
     }
@@ -1826,6 +1913,7 @@ export default async () => {
         "message": "The script deadline expired.",
         "params": {},
         "step": "script",
+        "last_completed_step": None,
         "screenshot_path": None,
         "ambiguous": True,
     }
@@ -1894,6 +1982,7 @@ def test_python_parent_owns_the_canonical_total_deadline(
         "message": "The script deadline expired.",
         "params": {},
         "step": expected_step,
+        "last_completed_step": None,
         "screenshot_path": None,
         "ambiguous": True,
     }
@@ -1935,6 +2024,7 @@ export default async () => {
     try:
         assert screenshot.read_bytes() == b"png-fixture"
         assert error.details["step"] == "element.click"
+        assert error.details["last_completed_step"] == "app.window"
         assert error.details["ambiguous"] is True
         assert any(
             request["payload"].get("tool") == "click"
@@ -1985,7 +2075,8 @@ export default async () => {{
     )
 
     assert error.details["code"] == "computer_script_protocol_error"
-    assert error.details["step"] == "window.observe"
+    assert error.details["step"] == "script"
+    assert error.details["last_completed_step"] == "window.observe"
     assert error.details["params"]["reason"] == expected_reason
     screenshot_path = error.details["screenshot_path"]
     assert isinstance(screenshot_path, str)

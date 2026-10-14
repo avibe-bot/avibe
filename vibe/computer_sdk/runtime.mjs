@@ -27,7 +27,7 @@ export const FAILURE_ENVELOPE_FIELDS = Object.freeze(
 let state;
 let agent;
 let currentStep = "script";
-let lastStep = "script";
+let lastCompletedStep;
 let lastScreenshotPath;
 let lastOwnedScreenshotPath;
 let screenshotSequence = 0;
@@ -41,21 +41,26 @@ export class ControllerFault extends Error {
     this.code = code;
     this.params = params;
     this.ambiguous = options.ambiguous === true;
+    this.dispatched = options.dispatched === false ? false : undefined;
   }
+}
+
+function controllerFailureState(requestWasSent, controllerPayload) {
+  const explicitlyNotDispatched =
+    controllerPayload &&
+    typeof controllerPayload === "object" &&
+    controllerPayload.dispatched === false;
+  return {
+    ambiguous: requestWasSent === true && !explicitlyNotDispatched,
+    dispatched: explicitlyNotDispatched ? false : undefined,
+  };
 }
 
 export function controllerFailureAmbiguous(
   requestWasSent,
   controllerPayload,
 ) {
-  return (
-    requestWasSent === true &&
-    !(
-      controllerPayload &&
-      typeof controllerPayload === "object" &&
-      controllerPayload.dispatched === false
-    )
-  );
+  return controllerFailureState(requestWasSent, controllerPayload).ambiguous;
 }
 
 function controllerFault(
@@ -64,11 +69,12 @@ function controllerFault(
   params = {},
   { requestWasSent = false, controllerPayload } = {},
 ) {
+  const failureState = controllerFailureState(
+    requestWasSent,
+    controllerPayload,
+  );
   return new ControllerFault(code, message, params, {
-    ambiguous: controllerFailureAmbiguous(
-      requestWasSent,
-      controllerPayload,
-    ),
+    ...failureState,
   });
 }
 
@@ -136,10 +142,11 @@ export async function sleepWithinDeadline(milliseconds) {
 
 export async function runStep(label, operation) {
   currentStep = label;
-  lastStep = label;
   persistRuntimeState();
   try {
-    return await operation();
+    const result = await operation();
+    lastCompletedStep = label;
+    return result;
   } catch (error) {
     if (error && typeof error === "object" && !error.step) {
       error.step = label;
@@ -485,12 +492,6 @@ function formatDiagnosticValue(value) {
   }
 }
 
-function diagnosticStep() {
-  return currentStep && currentStep !== "script"
-    ? currentStep
-    : lastStep || "script";
-}
-
 export class ProtocolFileTooLargeError extends Error {
   constructor(limitBytes) {
     super("Computer Use protocol file exceeded its size limit.");
@@ -539,7 +540,8 @@ function persistRuntimeState() {
     writeCappedJsonFile(
       state.runtimeStatePath,
       {
-        step: diagnosticStep(),
+        step: currentStep || "script",
+        last_completed_step: lastCompletedStep ?? null,
         screenshot_path: lastScreenshotPath ?? null,
         diagnostics: diagnosticTail.toString("utf8"),
       },
@@ -555,7 +557,8 @@ export function failureContext(error) {
     step:
       error && typeof error === "object" && typeof error.step === "string"
         ? error.step
-        : diagnosticStep(),
+        : currentStep || "script",
+    last_completed_step: lastCompletedStep ?? null,
     screenshot_path:
       error &&
       typeof error === "object" &&
@@ -591,6 +594,7 @@ export function failureEnvelope(error, options = {}) {
         : String(error),
     params,
     step: context.step,
+    last_completed_step: context.last_completed_step,
     screenshot_path: context.screenshot_path ?? null,
     ambiguous:
       error && typeof error === "object" && error.ambiguous === true,
