@@ -18,6 +18,14 @@ from tests.test_model_hub_retry_advice import _engine, _invoke
 from tests.test_model_hub_vibey_consumer import _vibey_service
 
 
+def latest_ok(service, tool):
+    """The Tools read's latest success for a tool, as (Source, model, mode); None without one."""
+
+    entry = next(item for item in service.hosted_tools_status()["hosted_tools"]["tools"] if item["name"] == tool)
+    latest = entry["status"]["latest_ok"]
+    return None if latest is None else (latest["source_id"], latest["model_id"], latest["mode"])
+
+
 def _responses_stream(item: dict, terminal: str) -> bytes:
     done = {"type": "response.output_item.done", "output_index": 0, "item": item}
     return (
@@ -124,8 +132,4 @@ async def test_a_native_success_is_recorded_at_settlement_for_a_tool_the_request
         assert (await _post(hop, body, pin=primary.id if native else None))[0] == 200
     finally:
         await gateway.close()
-    latest = service.capability_evidence.latest_success("x_search")
-    if recorded:
-        assert (latest.source_id, latest.model_id, latest.mode) == (primary.id, "grok-4.6", "native")
-    else:
-        assert latest is None
+    assert latest_ok(service, "x_search") == ((primary.id, "grok-4.6", "native") if recorded else None)

@@ -40,6 +40,7 @@ from tests.test_model_hub_l3 import (
     _source,
     _usage_of,
 )
+from tests.test_model_hub_hosted_evidence import latest_ok
 from tests.test_model_hub_vibey_consumer import _vibey_service
 
 XAI = "src_xaikey0001"
@@ -226,8 +227,7 @@ async def test_a_proxied_search_runs_one_native_request_and_answers_its_canonica
     assert _hosted_result(tool, answer).execution.executor_source_id == executor[0]
     # Metered on the executor Source, like any gateway call.
     assert _usage_of(service, executor[0])
-    latest = service.capability_evidence.latest_success(tool)
-    assert (latest.source_id, latest.model_id, latest.mode) == (executor[0], executor[1], "executor")
+    assert latest_ok(service, tool) == (executor[0], executor[1], "executor")
 
 
 @pytest.mark.asyncio
