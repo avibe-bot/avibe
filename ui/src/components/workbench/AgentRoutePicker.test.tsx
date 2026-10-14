@@ -2,7 +2,7 @@
 
 import { useState } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { act, cleanup, render, screen } from '@testing-library/react';
+import { act, cleanup, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, useLocation } from 'react-router-dom';
 
@@ -75,6 +75,9 @@ vi.mock('../../lib/backendModels', async (importOriginal) => ({
     return () => {};
   },
 }));
+
+/** The open menu's effort column: the trigger also names the current effort. */
+const effortColumn = () => within(screen.getByText('chat.picker.effort').parentElement as HTMLElement);
 
 const agent = (over: Partial<VibeAgentBrief> = {}): VibeAgentBrief =>
   ({
@@ -252,10 +255,10 @@ describe('AgentRoutePicker', () => {
     render(<HubPicker role="owner" />);
     await openMenu(user);
 
-    expect(screen.getByRole('button', { name: /chat\.picker\.effortOptions\.high/ }).textContent)
+    expect(effortColumn().getByRole('button', { name: /chat\.picker\.effortOptions\.high/ }).textContent)
       .toContain('chat.picker.effortNotOn:relay-gpt');
     // An effort every hop serves carries no hint.
-    expect(screen.getByRole('button', { name: /chat\.picker\.effortOptions\.low/ }).textContent)
+    expect(effortColumn().getByRole('button', { name: /chat\.picker\.effortOptions\.low/ }).textContent)
       .toBe('chat.picker.effortOptions.low');
     cleanup();
 
@@ -263,7 +266,7 @@ describe('AgentRoutePicker', () => {
     sourceNames = null;
     render(<HubPicker role="owner" />);
     await openMenu(user);
-    expect(screen.getByRole('button', { name: /chat\.picker\.effortOptions\.high/ }).textContent)
+    expect(effortColumn().getByRole('button', { name: /chat\.picker\.effortOptions\.high/ }).textContent)
       .toContain('chat.picker.effortNotOnSome');
   });
 
@@ -276,11 +279,11 @@ describe('AgentRoutePicker', () => {
     render(<HubPicker role="owner" />);
     await openMenu(user);
 
-    const saved = screen.getByRole('button', { name: /chat\.picker\.effortOptions\.low/ });
+    const saved = effortColumn().getByRole('button', { name: /chat\.picker\.effortOptions\.low/ });
     expect(saved.textContent).toContain('chat.picker.effortRefused');
     expect(saved.className).toContain('text-cyan-ink');
     // What routing serves is still offered, without the mark.
-    expect(screen.getByRole('button', { name: /chat\.picker\.effortOptions\.high/ }).textContent)
+    expect(effortColumn().getByRole('button', { name: /chat\.picker\.effortOptions\.high/ }).textContent)
       .toBe('chat.picker.effortOptions.high');
   });
 

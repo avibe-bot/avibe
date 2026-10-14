@@ -145,7 +145,7 @@ describe('fetchBackendModels in gateway mode', () => {
     const readOpencodeOptionsForModelPicker = vi.fn();
     const api = { readModelHubAgentCatalogForModelPicker, claudeModels, codexModels, readOpencodeOptionsForModelPicker } as unknown as ApiContextType;
     expect(await fetchBackendModels(api, 'vibey')).toEqual({
-      models: ['local-model'], modelLabels: { 'local-model': 'Local model' }, reasoningOptions: { 'local-model': [] },
+      models: ['local-model'], modelLabels: { 'local-model': 'Local model' }, reasoningOptions: { 'local-model': [] }, effortMenus: {},
     });
     expect(readModelHubAgentCatalogForModelPicker).toHaveBeenCalledWith('vibey');
     readModelHubAgentCatalogForModelPicker.mockResolvedValue(null);
@@ -192,6 +192,8 @@ describe('fetchBackendModels in gateway mode', () => {
         // the catalog never wrote may fall back to the generic ladder.
         beta: [],
       },
+      // No row states an effort menu, so nothing is left out or marked.
+      effortMenus: {},
     });
   });
 
@@ -343,6 +345,7 @@ describe('fetchBackendModels in gateway mode', () => {
       models: [],
       modelLabels: {},
       reasoningOptions: {},
+      effortMenus: {},
     });
     expect(codexModels).not.toHaveBeenCalled();
   });
