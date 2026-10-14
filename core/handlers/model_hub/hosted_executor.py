@@ -244,14 +244,11 @@ class ExecutorResult:
     """The record for the call.
 
     ``usage`` is the response's own ``usage`` section, as the provider sent it,
-    which the call's cost is read from. ``ran`` says whether the response ran
-    the tool at all: one that never did is a model's choice, which ends the
-    chain rather than moving on (§6).
+    which the call's cost is read from.
     """
 
     record: dict[str, Any]
     usage: Mapping[str, Any] | None = None
-    ran: bool = True
 
 
 def provider_charges(protocol: str, usage: Mapping[str, Any] | None) -> tuple[dict[str, int], float | None]:
@@ -283,7 +280,7 @@ def _responses_record(tool: str, readout: ResponsesReadout, say: Say, failure: s
     response = readout.response or {}
     calls = [item for item in readout.items if _responses_call_tool(item) == tool]
     if not calls:
-        return ExecutorResult(failed_record(failure or _ended_without(tool, response, say)), ran=False)
+        return ExecutorResult(failed_record(failure or _ended_without(tool, response, say)))
     texts = [
         part
         for item in readout.items
@@ -477,7 +474,7 @@ def _anthropic_record(message: Any, say: Say) -> ExecutorResult:
     content = message.get("content") if isinstance(message, dict) else None
     blocks = [block for block in content if isinstance(block, dict)] if isinstance(content, list) else []
     if not any(block.get("type") == "server_tool_use" and block.get("name") == "web_search" for block in blocks):
-        return ExecutorResult(failed_record(say("modelHub.hostedTools.didNotRun", tool="web_search")), ran=False)
+        return ExecutorResult(failed_record(say("modelHub.hostedTools.didNotRun", tool="web_search")))
     results: list[dict[str, Any]] = []
     errors: list[str] = []
     for block in blocks:

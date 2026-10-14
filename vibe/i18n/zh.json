@@ -1113,7 +1113,8 @@
       "tooLarge": "执行方的响应超出了大小上限。",
       "didNotRun": "执行方没有运行 {tool}。",
       "responseEnded": "执行方的响应以 {status} 结束。",
-      "callFailed": "供应商的 {tool} 调用失败。"
+      "callFailed": "供应商的 {tool} 调用失败。",
+      "triedSources": "已尝试：{sources}。"
     },
     "events": {
       "sourceFallback": "供应商",

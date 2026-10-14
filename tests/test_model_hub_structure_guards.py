@@ -703,12 +703,12 @@ def test_usage_metering_has_one_owner_per_call_population() -> None:
     meter_calls = [
         node for node in ast.walk(service_tree) if _call_name(node) == "_meter_call"
     ]
-    # Calls a user asked for (the Source test and hosted-tool probes, both
-    # through `_user_test_call`) and proxied hosted-tool calls consume their own
-    # response rather than forwarding a Turn to the gateway. They reuse the same
-    # metering owner, exactly once.
+    # Calls a user asked for (the Source test, through `_user_test_call`) and
+    # each executor call of a proxied search consume their own response rather
+    # than forwarding a Turn to the gateway. They reuse the same metering owner,
+    # exactly once.
     consumers = (
-        invoke, _functions(service_tree)["_user_test_call"], _functions(service_tree)["run_hosted_tool"],
+        invoke, _functions(service_tree)["_user_test_call"], _functions(service_tree)["_executor_attempt"],
     )
     assert len(meter_calls) == len(consumers)
     assert all(

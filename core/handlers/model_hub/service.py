@@ -142,15 +142,18 @@ from .hosted_executor import (
     provider_charges,
     responses_result,
 )
-from .hosted_turn import ExecutorSlot, TurnHostedTools, freeze_turn_tools, hop_hosted_tools
+from .hosted_turn import ExecutorSlot, TurnHostedTools
 from .hosted_tools import (
     ExecutorCandidate,
     HostedEvidence,
     HostedToolSettingRefused,
     apply_hosted_tool_put,
     clear_matcher,
-    executor_candidates,
     engine_stamp,
+    executor_candidates,
+    executor_vendors,
+    freeze_turn_tools,
+    hop_hosted_tools,
     hosted_tools_status,
 )
 from .identifiers import (
@@ -6396,7 +6399,9 @@ class ModelHubService:
         return next(
             (
                 candidate
-                for candidate in executor_candidates(config, tool, evidence=self.hosted_evidence())
+                for candidate in executor_candidates(
+                    config, tool, evidence=self.hosted_evidence(), spec_for=hosted_tool_spec,
+                )
                 if (candidate.source.id, candidate.model_id) == (slot.source_id, slot.model_id)
                 and identity_digest(candidate.source) == slot.identity
             ),
@@ -6446,14 +6451,23 @@ class ModelHubService:
             if not attempt.moves_on:
                 break
         if not attempts:
-            return {"record": failed_record(say("modelHub.hostedTools.noExecutor", tool=tool))}
+            vendors = ", ".join(catalog_api_key_vendor_label(vendor) or vendor for vendor in executor_vendors(tool))
+            return {"record": failed_record(say("modelHub.hostedTools.noExecutor", tool=tool, vendors=vendors))}
         # The record is the last attempt's; earlier billable ones are listed, each with its own billing.
         last = attempts[-1]
+        record = last.record
+        if last.moves_on:
+            # Every candidate was tried and failed: say which, so the user sees whether retrying or those Sources is the issue.
+            tried = ", ".join(dict.fromkeys(attempt.source.display_name for attempt in attempts))
+            record = failed_record(
+                f"{record.get('error') or ''} {say('modelHub.hostedTools.triedSources', sources=tried)}".strip(),
+                record.get("sources"),
+            )
         execution = last.execution()
         failed_attempts = [attempt.failed_attempt() for attempt in attempts[:-1] if attempt.billable]
         if failed_attempts:
             execution["failed_attempts"] = failed_attempts
-        return {"record": last.record, "execution": execution}
+        return {"record": record, "execution": execution}
 
     async def _executor_attempt(
         self,
@@ -6654,14 +6668,14 @@ class ModelHubService:
     def freeze_turn_hosted_tools(self, config: ModelHubConfig) -> TurnHostedTools:
         """What a Vibey turn's first resolution freezes: its tools, executor orders and image models (§3.4)."""
 
-        return freeze_turn_tools(config, evidence=self.hosted_evidence())
+        return freeze_turn_tools(config, evidence=self.hosted_evidence(), spec_for=hosted_tool_spec)
 
     def hosted_tools_for_hop(
         self, source: ModelHubSourceConfig, model_id: str, turn: TurnHostedTools,
     ) -> dict:
         """``HopResolution.hosted_tools`` for a hop of a Vibey turn served by this Source and model."""
 
-        return hop_hosted_tools(turn, source, model_id, evidence=self.hosted_evidence())
+        return hop_hosted_tools(turn, source, model_id, evidence=self.hosted_evidence(), spec_for=hosted_tool_spec)
 
     async def set_agent_mode(self, backend: str, mode: object) -> dict:
         if mode not in {"hub", "direct"} or (backend == "vibey" and mode != "hub"):

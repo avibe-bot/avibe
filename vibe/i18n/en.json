@@ -1113,7 +1113,8 @@
       "tooLarge": "The executor's response was larger than allowed.",
       "didNotRun": "The executor did not run {tool}.",
       "responseEnded": "The executor's response ended as {status}.",
-      "callFailed": "The provider's {tool} call failed."
+      "callFailed": "The provider's {tool} call failed.",
+      "triedSources": "Tried: {sources}."
     },
     "events": {
       "sourceFallback": "source",
