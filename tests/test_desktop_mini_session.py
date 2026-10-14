@@ -165,9 +165,13 @@ def test_main_session_is_created_reused_and_recreated_without_a_project(state):
     assert first["agent_name"] == vibey.name
     assert first["agent_backend"] == "vibey"
     assert first["metadata"]["kind"] == "main"
-    assert first["workdir"] == str(paths.get_vibe_remote_dir() / "main" / "local")
-    assert (tmp_path / "main" / "local").is_dir()
+    expected_workdir = str(paths.get_vibe_remote_dir() / "main" / "owner")
+    assert first["workdir"] == expected_workdir
+    assert (tmp_path / "main" / "owner").is_dir()
     assert _ensure_main("local", vibey.name)["id"] == first["id"]
+    remote = _ensure_main("remote:3c6111ab", vibey.name)
+    assert remote["id"] == first["id"]
+    assert remote["workdir"] == expected_workdir
 
     with create_sqlite_engine().begin() as conn:
         conn.execute(delete(agent_sessions).where(agent_sessions.c.id == MAIN_SESSION_ID))
@@ -273,6 +277,45 @@ def test_main_session_is_owner_only(state):
             )
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("model", "vibey-model"),
+        ("reasoning_effort", "high"),
+        ("title", "Renamed main"),
+        ("pinned", True),
+    ],
+)
+def test_main_session_allows_user_settings_updates(state, field, value):
+    from storage.workbench_sessions_service import MAIN_SESSION_ID
+
+    _tmp_path, vibey = state
+    _ensure_main("local", vibey.name)
+    client = app.test_client()
+    response = client.patch(
+        f"/api/sessions/{MAIN_SESSION_ID}",
+        json={field: value},
+        headers=csrf_headers(client),
+    )
+    assert response.status_code == 200, response.get_json()
+    assert response.get_json()[field] == value
+
+
+def test_main_session_rejects_protected_patch_fields_with_403(state):
+    from storage.workbench_sessions_service import MAIN_SESSION_ID
+
+    _tmp_path, vibey = state
+    _ensure_main("local", vibey.name)
+    client = app.test_client()
+    response = client.patch(
+        f"/api/sessions/{MAIN_SESSION_ID}",
+        json={"visibility": "background"},
+        headers=csrf_headers(client),
+    )
+    assert response.status_code == 403
+    assert response.get_json()["error"]["code"] == "reserved_session"
+
+
 def test_main_workdir_is_prepared_before_writer_lock(state, monkeypatch):
     from storage import workbench_sessions_service
 
@@ -305,16 +348,6 @@ def test_main_route_returns_the_stable_session_and_can_chat_without_a_project(st
     assert body["session"]["id"] == MAIN_SESSION_ID
     assert body["session"]["scope_id"] is None
     assert body["capabilities"] == {"can_chat": True}
-
-
-def test_main_workdir_keeps_a_remote_principal_inside_avibe_home(state):
-    from config import paths
-
-    _tmp_path, vibey = state
-    session = _ensure_main("remote:../outside", vibey.name)
-    workdir = Path(session["workdir"])
-    assert workdir.parent == paths.get_vibe_remote_dir() / "main"
-    assert workdir.name == "remote_.._outside"
 
 
 def test_route_is_an_editor_write():

@@ -10194,7 +10194,7 @@ def _publish_session_update_activity(
 @app.route("/api/sessions/<session_id>", methods=["PATCH"])
 async def sessions_update(session_id: str):
     from core.services import sessions as workbench_sessions_service
-    from storage.workbench_sessions_service import MAIN_SESSION_ID
+    from storage.workbench_sessions_service import MAIN_SESSION_ID, MAIN_SESSION_UPDATABLE_FIELDS
     from vibe import internal_client
     from vibe.sse_broker import broker
 
@@ -10217,6 +10217,13 @@ async def sessions_update(session_id: str):
     }
     if not updatable:
         return jsonify({"error": "no updatable fields supplied"}), 400
+    if str(session_id) == MAIN_SESSION_ID and not set(updatable).issubset(
+        MAIN_SESSION_UPDATABLE_FIELDS
+    ):
+        return _reserved_session_response(
+            MAIN_SESSION_PROTECTED_I18N_KEY,
+            code="reserved_session",
+        )
 
     engine = _projects_engine()
     # Archive is TERMINAL, so it outranks every transient conflict below — most

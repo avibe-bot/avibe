@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Optional
@@ -649,6 +648,8 @@ MAIN_SESSION_ID = "ses_main"
 MAIN_SESSION_METADATA_KEY = "kind"
 MAIN_SESSION_METADATA_VALUE = "main"
 MAIN_SESSION_WORKDIR_DIRNAME = "main"
+MAIN_SESSION_WORKDIR_COMPONENT = "owner"
+MAIN_SESSION_UPDATABLE_FIELDS = frozenset({"model", "reasoning_effort", "title", "pinned"})
 
 
 class MainSessionArchivedError(PermissionError):
@@ -670,22 +671,10 @@ class MainSessionInvariantError(RuntimeError):
         super().__init__(self.code)
 
 
-def _safe_main_principal_component(principal: str) -> str:
-    """Map the authorization principal to one safe, stable directory component."""
+def main_session_workdir() -> str:
+    """Return the fixed singleton main-session workdir."""
 
-    component = re.sub(r"[^A-Za-z0-9._-]+", "_", str(principal or "").strip())
-    component = component.strip("._")
-    return component or "principal"
-
-
-def main_session_workdir(principal: str) -> str:
-    """Return the caller-owned main-session workdir without leaving Avibe home."""
-
-    root = (paths.get_vibe_remote_dir() / MAIN_SESSION_WORKDIR_DIRNAME).resolve()
-    candidate = (root / _safe_main_principal_component(principal)).resolve()
-    if candidate.parent != root:
-        raise ValueError("unsafe main session principal path")
-    return str(candidate)
+    return str(paths.get_vibe_remote_dir() / MAIN_SESSION_WORKDIR_DIRNAME / MAIN_SESSION_WORKDIR_COMPONENT)
 
 
 def _main_builtin_agent(conn: Connection, agent_name: str) -> dict[str, Any]:
@@ -745,10 +734,9 @@ def ensure_main_session(
     """Resolve the stable built-in main session, creating it on first use."""
 
     context = require_instance_role(authorization_context, "owner")
-    principal = desktop_mini_owner_key(context)
-    if principal is None:
+    if desktop_mini_owner_key(context) is None:
         raise ProjectAccessDeniedError
-    workdir = main_session_workdir(principal)
+    workdir = main_session_workdir()
     row = conn.execute(
         select(agent_sessions).where(agent_sessions.c.id == MAIN_SESSION_ID)
     ).mappings().first()
@@ -1014,13 +1002,37 @@ def update_session(
     machine-owned chat in every user's session list — and also ``scope_id``, which would
     mint a fake project row and put the session inside a scoped clear's reach. Each of
     those is silent until the next notice's heal, so an ack could be earned against a
-    surface showing nothing in between.
+    surface showing nothing in between. The fixed main session has a narrower exception:
+    its title, model, reasoning effort and pin state remain user-editable, while identity,
+    placement and lifecycle fields stay reserved.
 
     ``system`` itself is not assignable in the other direction either: see the
     ``visibility`` branch below.
     """
-    authorization = require_instance_role(authorization_context, "editor")
-    if str(session_id) in {WORKSPACE_NOTICE_SESSION_ID, MAIN_SESSION_ID}:
+    is_main_session = str(session_id) == MAIN_SESSION_ID
+    authorization = require_instance_role(
+        authorization_context,
+        "owner" if is_main_session else "editor",
+    )
+    requested_fields = {
+        name
+        for name, value in (
+            ("title", title),
+            ("agent_id", agent_id),
+            ("agent_name", agent_name),
+            ("agent_backend", agent_backend),
+            ("agent_variant", agent_variant),
+            ("model", model),
+            ("reasoning_effort", reasoning_effort),
+            ("visibility", visibility),
+            ("pinned", pinned),
+            ("scope_id", scope_id),
+        )
+        if value is not _UNSET
+    }
+    if str(session_id) == WORKSPACE_NOTICE_SESSION_ID or (
+        is_main_session and not requested_fields.issubset(MAIN_SESSION_UPDATABLE_FIELDS)
+    ):
         raise ReservedSessionError(str(session_id))
     reserve_write_lock(conn)
     existing = conn.execute(
