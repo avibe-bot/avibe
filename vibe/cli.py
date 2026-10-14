@@ -8285,12 +8285,13 @@ def _publish_cli_vaults_updated(
     request: dict | None = None,
     grant: dict | None = None,
     secret_name: str | None = None,
+    notify_request: bool = True,
 ) -> None:
     """Best-effort bridge for CLI/agent vault writes into browser SSE."""
 
     if request is None and grant is None and not secret_name:
         return
-    if scope == "request" and isinstance(request, dict):
+    if scope == "request" and isinstance(request, dict) and notify_request:
         _publish_cli_vault_request_notification(request)
     try:
         from core.inbox_events import VAULTS_UPDATED_EVENT, vaults_updated_payload
@@ -8728,30 +8729,63 @@ def cmd_vault_tags(args):
 
 def cmd_vault_rm(args):
     from storage import vault_service
-    from vibe import api
+    from storage.models import agent_sessions
 
     help_command = "vibe vault rm --help"
     try:
+        if "." in str(getattr(args, "name", "")):
+            raise TaskCliError(
+                "vibe vault rm deletes whole secrets; remove single fields in the Vaults page.",
+                code="vault_field_delete_forbidden",
+                help_command=help_command,
+            )
         engine = _open_vault_engine()
-        release_scopes: list[dict[str, str]] = []
+        requester = _vault_cli_requester(args)
         with engine.begin() as conn:
-            meta = vault_service.get_secret_meta(conn, args.name)
-            if meta.get("protection") == "protected":
-                raise TaskCliError(
-                    f"'{args.name}' is a protected secret — delete it in the browser (Vaults), where it's "
-                    f"confirmed by the signed-in user. The CLI can't delete protected secrets.",
-                    code="protected_delete_forbidden",
-                    help_command=help_command,
+            request, created = vault_service.create_delete_request(
+                conn,
+                args.name,
+                reason=getattr(args, "reason", None),
+                requester=requester,
+                user_context=caller_resource_user_context(caller_context_from_env()),
+                return_created=True,
+            )
+            stored_requester = request.get("requester") or {}
+            session_id = requester.get("session_id")
+            stored_callback_enabled = not bool(stored_requester.get("callback_disabled"))
+            callback_target_matches = bool(session_id and stored_requester.get("session_id") == session_id)
+            active_session = bool(
+                session_id
+                and conn.execute(
+                    select(agent_sessions.c.id).where(
+                        agent_sessions.c.id == session_id, agent_sessions.c.status == "active",
+                    )
+                ).first() is not None
+            )
+            callback_enabled = stored_callback_enabled and callback_target_matches and active_session
+            if created:
+                callback_enabled = (
+                    not _vault_callback_disabled(args)
+                    and stored_callback_enabled
+                    and callback_target_matches
+                    and active_session
                 )
-            grant_rows = vault_service.active_grant_rows_for_secret(conn, args.name)
-            vault_service.delete_secret(conn, args.name)
-            release_scopes = vault_service.agent_release_scopes_after_rows(conn, grant_rows)
-        api.release_vault_agent_scopes(release_scopes, reason="vault_rm")
-        _publish_cli_vaults_updated(scope="secret", secret_name=args.name)
-        _print_cli_payload("vault_secret", removed=True, name=args.name)
+        _publish_cli_vaults_updated(scope="request", request=request, notify_request=created)
+        followup = (
+            "Avibe resumes this Session after the decision; do not rerun rm."
+            if callback_enabled else
+            f"Check the decision with: vibe vault await {request['id']}; do not rerun rm."
+        )
+        _print_cli_payload(
+            "vault_delete_request", request_id=request["id"], request=request,
+            message=f"Waiting for the user to approve deleting {args.name} in Avibe. {followup}",
+        )
         return 0
     except vault_service.SecretNotFoundError:
         _print_task_error(TaskCliError(f"secret '{args.name}' not found", code="secret_not_found", help_command=help_command))
+        return 1
+    except vault_service.VaultSecretAccessError as exc:
+        _print_task_error(TaskCliError(str(exc), code="vault_access_forbidden", help_command=help_command))
         return 1
     except Exception as exc:
         _print_task_error(exc, help_command=help_command)
@@ -10500,7 +10534,7 @@ def cmd_vault_await(args):
                 help_command=help_command,
                 details={"request_id": request_id},
             )
-        if request.get("status") != "approved":
+        if request.get("status") not in {"approved", "fulfilled"}:
             _print_cli_payload("vault_request_status", request_id=request_id, status=request.get("status"), request=request)
             return 0
         _print_cli_payload("vault_request_result", request_id=request_id, status=request.get("status"), request=request, result=result)
@@ -18094,12 +18128,17 @@ def build_parser():
 
     vault_rm_parser = vault_subparsers.add_parser(
         "rm",
-        help="Delete a secret",
-        description="Delete a secret by name.",
+        help="Request user approval to delete a secret",
+        description="Ask the user to delete a secret by name. Returns a request ID; never deletes without approval.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         error_help_command="vibe vault rm --help",
     )
     vault_rm_parser.add_argument("name", help="Secret name to delete")
+    vault_rm_parser.add_argument("--reason", help="Why the secret should be deleted (shown to the user)")
+    vault_rm_parser.add_argument(
+        "--no-callback", action="store_true",
+        help="Don't auto-resume this Session after the decision; check it with 'vibe vault await'",
+    )
     _add_json_noop(vault_rm_parser)
 
     vault_edit_parser = vault_subparsers.add_parser(
@@ -18239,7 +18278,7 @@ def build_parser():
 
     vault_await_parser = vault_subparsers.add_parser(
         "await",
-        help="Read or wait for an access/sign request result",
+        help="Read or wait for a Vault request result",
         description="Return the request status/result. With --wait, poll until approved, denied, expired, or timeout.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         error_help_command="vibe vault await --help",

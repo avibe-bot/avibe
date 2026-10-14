@@ -4,17 +4,17 @@ import { chatRowKind } from '@/lib/chatRowKind';
 import { specFor } from '@/lib/messageTypes';
 import { messageOrderTimeMs, timestampOrderTimeMs, transcriptOrderTimeMs } from '@/lib/transcriptOrder';
 
-export type VaultRequestType = 'access' | 'sign' | 'provision' | 'other';
+export type VaultRequestType = 'access' | 'sign' | 'provision' | 'delete' | 'other';
 
 export function vaultRequestType(request: VaultRequest): VaultRequestType {
   const cardType = (request.card as { request_type?: unknown } | null)?.request_type;
   const type = typeof cardType === 'string' ? cardType : request.request_type;
-  return type === 'access' || type === 'sign' || type === 'provision' ? type : 'other';
+  return type === 'access' || type === 'sign' || type === 'provision' || type === 'delete' ? type : 'other';
 }
 
 export function isVaultApprovalRequest(request: VaultRequest): boolean {
   const type = vaultRequestType(request);
-  return type === 'access' || type === 'sign';
+  return type === 'access' || type === 'sign' || type === 'delete';
 }
 
 /**
@@ -23,7 +23,7 @@ export function isVaultApprovalRequest(request: VaultRequest): boolean {
  */
 export function vaultApprovalNeedsPasskey(request: VaultRequest): boolean {
   const type = vaultRequestType(request);
-  if (type === 'provision') return false;
+  if (type === 'provision' || type === 'delete') return false;
   const card = (request.card ?? {}) as {
     protection?: string | null;
     protected_secret_names?: string[];

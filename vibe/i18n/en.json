@@ -311,6 +311,7 @@
       "type": {
         "access": "Access request",
         "sign": "Signature request",
+        "delete": "Delete request",
         "provision": "A secret to fill in"
       },
       "secretSet": "selected secrets",

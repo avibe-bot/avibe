@@ -1100,6 +1100,41 @@ def test_avault_failure_maps_to_api_error(monkeypatch):
     assert exc.value.code == "avault_failed"
 
 
+def test_approve_delete_request_api_deletes_and_returns_request(monkeypatch):
+    with api._vault_engine().begin() as conn:
+        vault_service.create_secret(conn, name="API_DELETE", sealed=_sealed("api-delete"))
+        request = vault_service.create_delete_request(
+            conn,
+            "API_DELETE",
+            reason="cleanup",
+            requester={"source": "agent-cli", "session_id": "ses_api_delete"},
+        )
+
+    released: list[dict] = []
+    monkeypatch.setattr(api, "release_vault_agent_scopes", lambda scopes, *, reason: released.extend(scopes))
+    approved = api.approve_vault_delete_request(request["id"])
+
+    assert approved["ok"] is True
+    assert approved["removed"] is True
+    assert approved["name"] == "API_DELETE"
+    assert approved["request"]["status"] == "approved"
+    with api._vault_engine().connect() as conn:
+        with pytest.raises(vault_service.SecretNotFoundError):
+            vault_service.get_secret_meta(conn, "API_DELETE")
+
+
+def test_approve_delete_request_api_rejects_decided_request():
+    with api._vault_engine().begin() as conn:
+        vault_service.create_secret(conn, name="API_DELETE_STATE", sealed=_sealed("api-delete-state"))
+        request = vault_service.create_delete_request(conn, "API_DELETE_STATE")
+        vault_service.deny_request(conn, request["id"])
+
+    with pytest.raises(api.VaultApiError) as exc:
+        api.approve_vault_delete_request(request["id"])
+    assert exc.value.code == "invalid_request"
+    assert exc.value.status == 409
+
+
 def test_delete_missing_is_404():
     with pytest.raises(api.VaultApiError) as exc:
         api.delete_vault_secret("NOPE")
@@ -4414,6 +4449,46 @@ def test_create_vault_secret_seals_each_standard_record_name(monkeypatch):
     with api._vault_engine().connect() as conn:
         assert vault_service.get_envelope(conn, "LOGIN.username") == _sealed("username")
         assert vault_service.get_envelope(conn, "LOGIN.totp") == _sealed("totp")
+
+
+def test_delete_request_read_hydrates_current_field_metadata(monkeypatch):
+    seal = Mock(side_effect=[_sealed("default"), _sealed("username"), _sealed("totp")])
+    monkeypatch.setattr(api, "avault_seal_blind_box", seal)
+    api.create_vault_secret(
+        {
+            "name": "LOGIN",
+            "default_field": "password",
+            "blind_box": _agent_dek_blindbox("default", "default"),
+            "fields": [{"name": "username", "record": "LOGIN.username", "blind_box": _agent_dek_blindbox("username", "username")}],
+        }
+    )
+    with api._vault_engine().begin() as conn:
+        request = vault_service.create_delete_request(conn, "LOGIN", requester={"source": "agent-cli"})
+    assert request["card"]["default_field"] == "password"
+    assert request["card"]["fields"] == ["password", "username"]
+    assert "grant_options" not in request["card"]
+    api.update_vault_secret_field(
+        "LOGIN",
+        "totp",
+        {"record": "LOGIN.totp", "blind_box": _agent_dek_blindbox("totp", "totp")},
+    )
+    api.update_vault_secret("LOGIN", {"default_field": "passphrase"})
+
+    payload = api.get_vault_request(request["id"], audience=vault_service.REQUEST_AUDIENCE_UI)
+    card = payload["request"]["card"]
+    assert card["default_field"] == "passphrase"
+    assert card["fields"] == ["passphrase", "username", "totp"]
+    assert card["kind"] == "static"
+    assert "grant_options" not in card
+    assert "ciphertext" not in json.dumps(card)
+    inbox = api.get_vault_requests()
+    assert inbox["requests"][0]["card"] == card
+    # Removal keeps the creation snapshot, rather than inventing grant options or
+    # looking up a different same-name secret for this now-terminal request.
+    api.delete_vault_secret("LOGIN")
+    removed = api.get_vault_request(request["id"], audience=vault_service.REQUEST_AUDIENCE_UI)
+    assert removed["request"]["status"] == "fulfilled"
+    assert removed["request"]["card"]["fields"] == ["password", "username"]
 
 
 def test_vault_field_update_and_default_rename_are_value_free(monkeypatch):

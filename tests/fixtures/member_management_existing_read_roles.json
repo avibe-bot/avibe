@@ -128,6 +128,7 @@
   "POST /api/vault/requests/access": "editor",
   "POST /api/vault/requests/example/deny": "editor",
   "POST /api/vault/requests/example/fulfill-access": "editor",
+  "POST /api/vault/requests/example/approve-delete": "editor",
   "POST /api/vault/requests/sign": "editor",
   "POST /api/vault/secrets": "editor",
   "POST /api/vault/secrets/example/reveal-context": "editor",
