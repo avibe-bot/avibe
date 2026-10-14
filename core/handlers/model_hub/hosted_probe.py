@@ -256,12 +256,10 @@ REPLAY_MIN_SECONDS: Final = 60.0
 MAX_PROBE_REQUESTS = 2
 
 class CallResult(Protocol):
-    """How one pinned call settled: the Source it ran on, its outcome, and whether it retired that Source's own
-    pending verification marker (``ModelHubService._user_test_call``)."""
+    """How one pinned call settled: the Source it ran on and its outcome (``ModelHubService._user_test_call``)."""
 
     source: ModelHubSourceConfig
     outcome: RawCallOutcome
-    retired_own_marker: bool
 
 
 # Model Hub's one pinned call for a request body: it opens the call on the probed Source, hands it to the reader,
@@ -276,8 +274,6 @@ class ProbeCall:
     body: dict[str, Any]
     source: ModelHubSourceConfig
     outcome: RawCallOutcome
-    # Proof that this call's own success retired the Source's pending verification.
-    retired_own_marker: bool = False
 
 
 class _CallStream(httpx.AsyncByteStream):
@@ -364,7 +360,7 @@ class PinnedCallTransport(httpx.AsyncBaseTransport):
 
         async def run() -> None:
             settled = await self._call(body, read)
-            self._slots[slot] = ProbeCall(body, settled.source, settled.outcome, settled.retired_own_marker)
+            self._slots[slot] = ProbeCall(body, settled.source, settled.outcome)
 
         task = asyncio.create_task(run())
         self._tasks.append(task)

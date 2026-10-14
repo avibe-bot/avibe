@@ -12,7 +12,7 @@ import pytest
 from config.v2_config import ModelHubModelConfig, ModelHubSourceStateConfig
 from core.handlers.model_hub.errors import ModelDiscoveryError
 from core.handlers.model_hub.rpc import dispatch_model_hub_rpc
-from core.handlers.model_hub.service import UnavailableEngineAdapter
+from core.handlers.model_hub.service import ModelHubService, UnavailableEngineAdapter
 from tests.test_model_hub_resolution import FakeAdapter, _config, _service, _source
 from tests.test_model_hub_retry_policy import Clock
 
@@ -236,7 +236,7 @@ def _switch_protocol(source):
 
 
 def _await_verification(source):
-    source.verification_pending = "vp_" + "0" * 32
+    ModelHubService._mark_source_unverified(source)
 
 
 def _land_manual_refresh(source):

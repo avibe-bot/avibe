@@ -2341,6 +2341,16 @@ class ModelHubSourceConfig:
     account_label: Optional[str] = None
     masked_credential: Optional[str] = None
     verification_pending: Optional[str] = None
+    # The verification marker minted at the latest credential or endpoint change, kept when verification clears the
+    # marker: the Source's identity follows it, so an identity never returns to one an earlier credential had, even
+    # when OAuth reauthentication keeps the credential's handle. Absent until the first such change.
+    credential_generation: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        if self.credential_generation is None and self.verification_pending:
+            # A release before the generation left a pending Source with only its marker, which named the change that
+            # minted it: that marker is the change's generation, so the identity stays what it was.
+            self.credential_generation = self.verification_pending
 
     @classmethod
     def from_payload(cls, payload: dict, *, repairing: bool = False) -> "ModelHubSourceConfig":
@@ -2365,6 +2375,7 @@ class ModelHubSourceConfig:
             "account_label",
             "masked_credential",
             "verification_pending",
+            "credential_generation",
         }
         if set(payload) - allowed_fields:
             raise ValueError("Config 'model_hub.sources' contains unknown fields")
@@ -2420,6 +2431,12 @@ class ModelHubSourceConfig:
             or re.fullmatch(r"vp_[0-9a-f]{32}", verification_pending) is None
         ):
             raise ValueError("Config 'model_hub.sources.verification_pending' must be a verification marker")
+        credential_generation = payload.get("credential_generation")
+        if credential_generation is not None and (
+            not isinstance(credential_generation, str)
+            or re.fullmatch(r"vp_[0-9a-f]{32}", credential_generation) is None
+        ):
+            raise ValueError("Config 'model_hub.sources.credential_generation' must be a verification marker")
         created_at = payload.get("created_at")
         client_nonce = (
             validate_model_hub_source_client_nonce(payload.get("client_nonce"))
@@ -2474,6 +2491,7 @@ class ModelHubSourceConfig:
             account_label=account_label,
             masked_credential=masked_credential,
             verification_pending=verification_pending,
+            credential_generation=credential_generation,
         )
 
     def to_payload(self) -> dict:
@@ -2498,6 +2516,8 @@ class ModelHubSourceConfig:
             payload["client_nonce"] = self.client_nonce
         if self.verification_pending:
             payload["verification_pending"] = self.verification_pending
+        if self.credential_generation:
+            payload["credential_generation"] = self.credential_generation
         if self.usage is not None:
             payload["usage"] = self.usage.to_payload()
         return payload

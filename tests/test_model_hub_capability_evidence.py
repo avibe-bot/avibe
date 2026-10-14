@@ -124,6 +124,25 @@ def test_hosted_evidence_is_stamped_with_the_engines_hosted_wire(tmp_path, monke
     assert engine_stamp() == stamp
 
 
+@pytest.mark.parametrize(
+    "marker,digest",
+    [
+        (None, "sha256:b682a96ef48e2f2834ed22ba2d42cdae568e5768f3fc3a1334a24728ffdb7166"),
+        ("vp_" + "7" * 32, "sha256:d0b054e8827133cbeb6b4427af5ea696e2d29ab8f08de21d079336155bed8333"),
+    ],
+    ids=["verified", "pending"],
+)
+def test_a_released_sources_identity_digest_is_unchanged(marker, digest):
+    """MH-HOSTED-003: evidence a released build recorded still follows the Source it loads. The digests are the ones
+    released builds computed, whose identity held the verification marker; a pending Source's marker seeds its
+    generation, so a reauthentication it was pending on never collides with the identity before it."""
+    released = _source().to_payload()
+    if marker is not None:
+        released["verification_pending"] = marker
+    assert "credential_generation" not in released
+    assert identity_digest(ModelHubSourceConfig.from_payload(released)) == digest
+
+
 def test_a_changed_source_identity_reads_as_unknown_and_is_pruned(tmp_path):
     store = CapabilityEvidenceStore(tmp_path / "model_hub_capability_evidence.json")
     keep, rekeyed = _source("src_keep0001"), _source("src_swap0001")

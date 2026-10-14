@@ -87,7 +87,7 @@ consumer's requirements, and the Model Hub lane lands the change in both places.
      - every replayed hosted item outside the in-flight response needs its tool to run on the hop, and `replay`
        evidence. A generated image never has it.
      - **One identity per turn and Source.** Native content goes to a Source only under one identity (credential,
-       base URL, protocol, vendor, kind, verification) per turn. The turn's first pinned request admitted to the
+       base URL, protocol, vendor, kind, credential generation) per turn. The turn's first pinned request admitted to the
        Source binds it, atomically with that request's final admission, and every later one must match it. After a
        mid-turn change, such as a rotated key or an edited relay URL, every pinned request to that Source is
        `pin_unavailable` for the rest of the turn, even with evidence taken anew, including one overlapping the

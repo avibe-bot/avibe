@@ -76,9 +76,13 @@ is its JSON Schema. The store is `core/handlers/model_hub/capability_evidence.py
 `observed` evidence is always `unsupported`.
 
 Records live in the Model Hub state directory (`model_hub_capability_evidence.json`). They follow Source identity:
-`retry.source_identity` covers kind, vendor, protocol, channel, base URL, credential and verification marker.
+`retry.source_identity` covers kind, vendor, protocol, channel, base URL, credential and credential generation.
 Changing any of those drops the Source's evidence: a record whose stored digest no longer matches reads as unknown
-and is pruned at the next write.
+and is pruned at the next write. The credential generation is the verification marker the latest credential or
+endpoint change minted, kept after verification clears the marker. So verifying a credential changes no identity,
+and a later change never returns the Source to an earlier identity, even when OAuth reauthentication keeps the
+credential's handle. Released Sources keep their digests: a verified one has no generation, where the identity held
+no marker, and a pending one's marker becomes its generation.
 
 ### 3.2 Learning from real errors (negative evidence)
 

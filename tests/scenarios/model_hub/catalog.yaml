@@ -194,6 +194,8 @@ scenarios:
     related_tests:
       - tests/test_model_hub_capability_evidence.py::test_a_changed_source_identity_reads_as_unknown_and_is_pruned
       - tests/test_model_hub_capability_evidence.py::test_hosted_evidence_is_stamped_with_the_engines_hosted_wire
+      - tests/test_model_hub_capability_evidence.py::test_a_released_sources_identity_digest_is_unchanged
+      - tests/test_model_hub_unverified.py::test_a_verified_reauthentication_never_returns_the_source_to_its_earlier_identity
       - tests/test_model_hub_capability_evidence.py::test_persisted_records_match_the_schema_and_unreadable_ones_are_unknown
   - id: MH-HOSTED-004
     name: The Tools API reads every tool's candidates and evidence and writes one toggle without touching other Model Hub state
@@ -330,12 +332,11 @@ scenarios:
       - tests/test_model_hub_hosted_probe.py::test_each_candidate_states_what_probing_it_would_cost
       - tests/test_model_hub_hosted_probe.py::test_each_request_the_adapter_sends_is_its_own_pinned_call
       - tests/test_model_hub_hosted_probe.py::test_a_probe_that_verifies_its_source_records_evidence_for_the_source_as_it_now_is
-      - tests/test_model_hub_hosted_probe.py::test_a_probe_records_no_evidence_for_a_grant_that_replaced_its_own_mid_probe
+      - tests/test_model_hub_hosted_probe.py::test_a_probe_records_no_evidence_for_a_source_reauthenticated_mid_probe
       - tests/test_model_hub_hosted_probe.py::test_the_probe_reads_its_calls_in_the_order_the_adapter_sent_them
       - tests/test_model_hub_hosted_probe.py::test_the_probe_asks_for_no_more_output_than_a_turn_on_its_hop_would
       - tests/test_model_hub_hosted_probe.py::test_an_api_key_source_is_probed_on_a_passthrough_model_it_does_not_list
       - tests/test_model_hub_hosted_probe.py::test_a_probe_that_times_out_before_its_handle_is_still_metered
-      - tests/test_model_hub_hosted_probe.py::test_a_probe_attributes_nothing_when_another_grant_retired_the_marker
       - tests/test_model_hub_hosted_probe.py::test_a_deadline_mid_stream_ends_the_probe_as_transient
       - tests/test_model_hub_hosted_probe.py::test_a_probe_settles_when_the_adapter_is_done_even_if_the_body_stays_open
       - tests/test_model_hub_hosted_probe.py::test_an_image_probe_verifies_only_an_image_vibey_could_keep

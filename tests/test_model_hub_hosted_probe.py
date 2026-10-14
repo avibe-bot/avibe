@@ -378,9 +378,10 @@ async def test_each_request_the_adapter_sends_is_its_own_pinned_call(tmp_path, m
 
 @pytest.mark.asyncio
 async def test_a_probe_that_verifies_its_source_records_evidence_for_the_source_as_it_now_is(tmp_path):
-    """MH-HOSTED-007: a new Source's first successful call retires its pending verification, which changes the
-    identity evidence follows; the probe's record follows the Source as it reads after that call."""
-    pending = replace(XAI, verification_pending="vp_" + "0" * 32)
+    """MH-HOSTED-007: a new Source's first successful call retires its pending verification, which changes no
+    identity; the probe's record follows the Source as it reads after that call."""
+    marker = "vp_" + "0" * 32
+    pending = replace(XAI, verification_pending=marker, credential_generation=marker)
     service, _clock, _models = configured_service(tmp_path, sources=[pending])
 
     async def respond(_request):
@@ -399,23 +400,32 @@ async def test_a_probe_that_verifies_its_source_records_evidence_for_the_source_
 
 
 @pytest.mark.asyncio
-async def test_a_probe_records_no_evidence_for_a_grant_that_replaced_its_own_mid_probe(tmp_path):
-    """MH-HOSTED-007: only the probe's own settlement may change the identity it vouches for. A reauthentication that
-    lands mid-probe (same credential ref, a new pending marker) leaves the old grant's result without a record."""
-    first, second = "vp_" + "1" * 32, "vp_" + "2" * 32
-    service, _clock, _models = configured_service(tmp_path, sources=[replace(XAI, verification_pending=first)])
+@pytest.mark.parametrize("verified_after", [False, True], ids=["pending", "then-verified-by-another-call"])
+async def test_a_probe_records_no_evidence_for_a_source_reauthenticated_mid_probe(tmp_path, verified_after):
+    """MH-HOSTED-007: a reauthentication that lands mid-probe (same credential ref, a new credential generation)
+    leaves the old grant's result without a record, also once another call has verified the new grant."""
+    from core.handlers.model_hub.service import ModelHubService
+
+    first = "vp_" + "1" * 32
+    service, _clock, _models = configured_service(
+        tmp_path, sources=[replace(XAI, verification_pending=first, credential_generation=first)],
+    )
 
     async def respond(_request):
         config = service.store.load()
-        config.sources[0].verification_pending = second
+        ModelHubService._mark_source_unverified(config.sources[0])
         service.store.save(config)
+        if verified_after:
+            config = service.store.load()
+            config.sources[0].verification_pending = None
+            service.store.save(config)
         return web.Response(body=_responses(SEARCH, ANSWER).encode(), content_type="text/event-stream")
 
     async with loopback_engine(tmp_path, service, respond):
         result = await service.probe_hosted_tool("web_search", {"source_id": XAI.id, "model_id": "grok-4.6"})
 
     assert result["probe"]["call"]["outcome"] == "verified"
-    assert service.store.load().sources[0].verification_pending == second
+    assert service.store.load().sources[0].credential_generation not in (None, first)
     assert service.capability_evidence.records() == []
 
 
@@ -441,7 +451,7 @@ async def test_the_probe_reads_its_calls_in_the_order_the_adapter_sent_them():
             first_may_settle.set()
         status = 400 if body["n"] == 1 else 503
         outcome = RawCallOutcome(RawOutcomeKind.HTTP_ERROR, status, None, None, False, "grok-4.6", XAI.id)
-        return UserTestCall(XAI, outcome, 0, False)
+        return UserTestCall(XAI, outcome, 0)
 
     transport = PinnedCallTransport(call)
     async with httpx.AsyncClient(transport=transport) as client:
@@ -534,30 +544,6 @@ async def test_a_probe_that_times_out_before_its_handle_is_still_metered(tmp_pat
 
     assert result["probe"]["call"]["outcome"] == "transient"
     assert _usage_of(service, XAI.id)
-
-
-@pytest.mark.asyncio
-async def test_a_probe_attributes_nothing_when_another_grant_retired_the_marker(tmp_path):
-    """MH-HOSTED-007: only proof that the probe's own call retired its marker lets the record follow the Source. A
-    reauth mid-probe whose new marker another call then retires reads the same, and gets no record."""
-    first, second = "vp_" + "3" * 32, "vp_" + "4" * 32
-    service, _clock, _models = configured_service(tmp_path, sources=[replace(XAI, verification_pending=first)])
-
-    async def respond(_request):
-        config = service.store.load()
-        config.sources[0].verification_pending = second
-        service.store.save(config)
-        config = service.store.load()
-        config.sources[0].verification_pending = None
-        service.store.save(config)
-        return web.Response(body=_responses(SEARCH, ANSWER).encode(), content_type="text/event-stream")
-
-    async with loopback_engine(tmp_path, service, respond):
-        result = await service.probe_hosted_tool("web_search", {"source_id": XAI.id, "model_id": "grok-4.6"})
-
-    assert result["probe"]["call"]["outcome"] == "verified"
-    assert service.store.load().sources[0].verification_pending is None
-    assert service.capability_evidence.records() == []
 
 
 @pytest.mark.asyncio

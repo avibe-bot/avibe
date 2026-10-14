@@ -147,6 +147,8 @@ export type Source = {
   state: SourceState;
   /** Opaque pending-verification identity; presence means no successful model call yet. */
   verification_pending?: string | null;
+  /** Opaque identity of the latest credential or endpoint change; kept after verification. Not for display. */
+  credential_generation?: string | null;
   usage?: SourceUsage;
   /** Subscription identity for the row's mono sub-line (e.g. "me@gmail.com").
    *  Never secret material; may be null. */
