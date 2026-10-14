@@ -17,16 +17,12 @@ from typing import Any, Awaitable, Callable, Collection, Literal, Mapping, Optio
 from config.v2_config import (
     MODEL_HUB_BACKENDS,
     ModelHubConfig,
-    ModelHubModelConfig,
     ModelHubSourceConfig,
     ModelHubSourceStateConfig,
 )
 from core.handlers.model_hub.adapter import (
     DiscoveredModel,
-    ObservationDiscovery,
-    ObservationOutcome,
     OAuthCredentialRejectedError,
-    SourceObservation,
 )
 from core.handlers.model_hub.events import contains_credential_material
 from core.handlers.model_hub.identifiers import canonical_model_id
@@ -144,7 +140,7 @@ class MigrationHost(Protocol):
 
     def _save_config(self, config: ModelHubConfig) -> ModelHubConfig: ...
 
-    async def _seed_vibey(self, config: ModelHubConfig) -> bool: ...
+    async def _seed_vibey(self, config: ModelHubConfig, *, fetch_catalog: bool = True) -> bool: ...
 
     async def _announce_vibey_seed(self) -> None: ...
 
@@ -167,28 +163,6 @@ class MigrationHost(Protocol):
         material: Mapping[str, object],
         *, on_reserved: Callable[[str], None] | None = None,
     ) -> str: ...
-
-    async def _require_proven_source_payload(
-        self,
-        payload: dict[str, object],
-        *, on_reserved: Callable[[str], None] | None = None,
-        auth_scheme: str | None = None,
-    ) -> SourceObservation: ...
-
-    async def _require_proven_observation(
-        self, vendor: str, base_url: str | None, credential_ref: str,
-        protocol_order: tuple[str, ...],
-    ) -> SourceObservation: ...
-
-    def _apply_discovered_models(
-        self,
-        source: ModelHubSourceConfig,
-        manual_models: list[ModelHubModelConfig],
-        discovered: list[DiscoveredModel],
-        *,
-        allow_empty: bool = False,
-        catalog_efforts_by_model: Mapping[str, tuple[str, ...]] | None = None,
-    ) -> list[tuple[str, Literal["upstream", "catalog"]]]: ...
 
     def _apply_source_placement(
         self,
@@ -1444,20 +1418,13 @@ def _deduplicate_opencode_items(
     return [replacements.get(item.id, item) for item in items if item.id not in duplicates]
 
 
-def _require_native_api_key_transport(
-    item: NativeMigrationItem, *, observed_protocol: str | None = None,
-) -> None:
+def _require_native_api_key_transport(item: NativeMigrationItem) -> None:
     if item.kind == "oauth_native":
         return
-    protocol = observed_protocol if observed_protocol is not None else item.protocol
     try:
         validate_migration_api_key_transport(
-            item.vendor, protocol, item.base_url, item.secret, item.auth_scheme,
+            item.vendor, item.protocol, item.base_url, item.secret, item.auth_scheme,
         )
-        if (protocol == "anthropic") != (item.protocol == "anthropic"):
-            # None is legacy protocol-auth, not permission to replace a native
-            # x-api-key with Bearer (or vice versa) after observation.
-            raise ValueError
     except ValueError:
         raise MigrationConflictError from None
 
@@ -1466,8 +1433,8 @@ def _bearer_transport(item: NativeMigrationItem) -> NativeMigrationItem | None:
     """Carry a custom-endpoint Anthropic key over as the Bearer the engine sends.
 
     The pinned engine sends ``x-api-key`` only to the official origin. Custom
-    endpoints get Bearer, so migration proves and provisions exactly that header;
-    an endpoint that refuses it fails proof and the native files stay untouched.
+    endpoints get Bearer. Migration records that transport without contacting the
+    endpoint; normal Gateway requests report whether it accepts the credential.
     """
     if item.kind == "oauth_native" or item.protocol != "anthropic" or item.auth_scheme is not None:
         return None
@@ -1654,10 +1621,27 @@ def _validated_source(
                     "discovered_at": discovered_at,
                 }
             )
+    else:
+        # Configured model entries remain manual; migration never invents an
+        # upstream inventory or a last-discovered timestamp for them.
+        for model in item.manual_models:
+            resolution = resolve_reasoning_tiers(
+                protocol=protocol,
+                model_id=model.id,
+                catalog_efforts_by_model=catalog_efforts_by_model,
+            )
+            models.append({
+                "id": model.id,
+                "display_name": model.display_name,
+                "origin": "manual",
+                "reasoning_efforts": list(resolution.efforts),
+                "reasoning_efforts_source": resolution.source,
+                "discovered_at": None,
+            })
     payload: dict[str, object] = {
         "id": item.source_id,
         "created_at": discovered_at,
-        "last_discovered_at": discovered_at if models else None,
+        "last_discovered_at": discovered_at if models and (keep_native or imported_oauth) else None,
         "kind": "subscription" if keep_native or controlled or imported_oauth else "api_key",
         "vendor": item.vendor,
         "display_name": item.display_name,
@@ -1724,7 +1708,7 @@ async def _prepare_takeover(
     cleanup batch withdraws them natively without provisioning them again.
     """
     for item in selected:
-        # Recheck before cleanup planning, reuse, proof or credential custody.
+        # Recheck local representability before cleanup, reuse or credential custody.
         _require_native_api_key_transport(item)
     clean_native_stores = dict(clean_native_stores or {})
     cleanup_items = [
@@ -1755,7 +1739,7 @@ async def _prepare_takeover(
                 continue
             protocol = item.protocol
             auth_options = {"auth_scheme": item.auth_scheme} if item.auth_scheme is not None else {}
-            observation: SourceObservation | None = None
+            reused = False
             existing = next((source for source in updated.sources if source.id == item.source_id), None)
             if item.kind != "oauth_native":
                 if not item.secret:
@@ -1775,14 +1759,10 @@ async def _prepare_takeover(
                             **auth_options,
                         ))
                     ):
-                        # Identity reuse is not current authentication proof.
-                        # Observe the exact existing target/ref without changing
-                        # its inventory, state, or user-owned routes.
-                        reuse_observation = await host._require_proven_observation(
-                            candidate.vendor, candidate.base_url,
-                            candidate.credential_ref, (candidate.protocol,),
-                        )
-                        _require_native_api_key_transport(item, observed_protocol=reuse_observation.protocol)
+                        # Matching custody is sufficient for identity reuse.
+                        # Migration neither re-tests the key nor rewrites the
+                        # existing Source's inventory, evidence or health.
+                        reused = True
                         _ensure_takeover_placement(updated, candidate, item.backend)
                         source_ids.append(candidate.id)
                         item_sources[_retained_key_identity(item)] = {
@@ -1793,17 +1773,7 @@ async def _prepare_takeover(
                     } if item.native_store_revision else {}),
                         }
                         break
-                else:
-                    observation = await host._require_proven_source_payload({
-                        "vendor": item.vendor,
-                        "base_url": validate_base_url(item.base_url),
-                        "key": item.secret,
-                        # Bearer exists only on the Anthropic interface.
-                        **({"protocol": "anthropic"} if item.auth_scheme == "bearer" else {}),
-                    }, on_reserved=lambda ref: host.revocations.add("observation", ref), **auth_options)
-                    protocol = cast(Any, observation.protocol)
-                    _require_native_api_key_transport(item, observed_protocol=protocol)
-                if observation is None:
+                if reused:
                     continue
             if existing is not None and not (
                 existing.kind == "subscription"
@@ -1844,17 +1814,11 @@ async def _prepare_takeover(
                 masked_credential=mask_credential(item.secret) if item.secret else None,
                 catalog_efforts_by_model=catalog,
             )
-            if observation is not None:
-                manual = [ModelHubModelConfig.from_payload({
-                    "id": model.id, "display_name": model.display_name,
-                    "origin": "manual", "reasoning_efforts": [], "discovered_at": None,
-                }) for model in item.manual_models]
-                host._apply_discovered_models(
-                    source, manual, list(observation.models),
-                    allow_empty=True, catalog_efforts_by_model=catalog,
-                )
-                if observation.discovery is not ObservationDiscovery.SUCCEEDED:
-                    host._mark_source_unverified(source)
+            if item.kind != "oauth_native":
+                # A migration is a local configuration transfer, not proof that
+                # the upstream accepts the saved key. Use the existing Saved
+                # marker until a real Gateway call verifies it.
+                host._mark_source_unverified(source)
             if existing is not None:
                 # Custody changes, not the identity/menu/orders the user owns.
                 replacement = existing.to_payload()
@@ -1890,7 +1854,8 @@ async def _prepare_takeover(
                 }
         if updated.vibey_supply_pending:
             # Once every Source of the batch is in place, reused identities too.
-            await host._seed_vibey(updated)
+            # Optional catalog enrichment must not add a network wait to migration.
+            await host._seed_vibey(updated, fetch_catalog=False)
         backends = sorted({item.backend for item in [*(consented or selected), *retained_keys]})
         native_before = _native_auth_snapshot(host, tuple(backends))
         # Copy-only keeps the Avibe-saved native key; Hub launches shadow it.

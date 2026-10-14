@@ -5633,7 +5633,7 @@ class ModelHubService:
                 checked=[model.id for model in agent.models],
             )
 
-    async def _seed_vibey(self, config: ModelHubConfig) -> bool:
+    async def _seed_vibey(self, config: ModelHubConfig, *, fetch_catalog: bool = True) -> bool:
         """Give a pending Vibey entry its starting supply, in place; whether it took.
 
         Its Sources are every existing one this backend may use, placed as a
@@ -5652,10 +5652,11 @@ class ModelHubService:
         agent = config.agents["vibey"]
         if not any(self._eligible_for_agent(source, "vibey") for source in config.sources):
             return False
-        # Seeded rows keep the models.dev metadata they are written with, so a
-        # seed with no copy cached fetches one in the foreground, bounded; a
-        # foreground fetch already running (the startup warm-up) is shared.
-        await asyncio.to_thread(self._ensure_models_dev_copy)
+        # Seeded rows keep the models.dev metadata they are written with.
+        # Migration uses only the cached copy so moving a saved key never waits
+        # on optional network metadata; ordinary background backfill still runs.
+        if fetch_catalog:
+            await asyncio.to_thread(self._ensure_models_dev_copy)
         config.vibey_supply_pending = False
         for source in config.sources:
             self._apply_source_placement(config, source, ("vibey",))
