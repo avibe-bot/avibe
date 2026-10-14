@@ -206,6 +206,11 @@ def test_f2_apply_takes_over_selected_key_and_preserves_blocked_native_material(
         body = applied.json()
         assert applied.status == 200, body
         assert body["applied"] == 1
+        # Check migration before the Sources page read below schedules its
+        # own independent background inventory refresh.
+        assert mock_llm_upstream.requests() == []
+        assert body["sources"][0]["verification_pending"]
+        assert body["sources"][0]["last_discovered_at"] is None
         assert [
             (source["vendor"], source["kind"], source["supply_channel"])
             for source in body["sources"]
@@ -230,10 +235,6 @@ def test_f2_apply_takes_over_selected_key_and_preserves_blocked_native_material(
         assert "sk-ant-e2e-claude-independent-123456" not in serialized
         assert "codex-oauth-e2e-123456" not in serialized
 
-        # Migration moves configuration, not upstream authentication evidence.
-        assert mock_llm_upstream.requests() == []
-        assert body["sources"][0]["verification_pending"]
-        assert body["sources"][0]["last_discovered_at"] is None
 
 
 @pytest.mark.parametrize("clean_api_keys", [False, True])
