@@ -142,7 +142,7 @@ from .hosted_executor import (
     provider_charges,
     responses_result,
 )
-from .hosted_turn import ExecutorSlot, TurnHostedTools
+from .hosted_turn import ExecutorSlot, TurnHostedTools, freeze_turn_tools, hop_hosted_tools
 from .hosted_probe import ESTIMATED_COUNTS as ESTIMATED_PROBE_COUNTS
 from .hosted_probe import ESTIMATED_REPLAY_USAGE as ESTIMATED_REPLAY_PROBE_USAGE
 from .hosted_probe import ESTIMATED_USAGE as ESTIMATED_PROBE_USAGE
@@ -163,14 +163,13 @@ from .hosted_probe import replay_request as hosted_replay_request
 from .hosted_probe import run_probe as run_hosted_probe
 from .hosted_tools import (
     HOSTED_PROBE_SHAPE,
+    ExecutorCandidate,
     HostedToolSettingRefused,
-    credential_eligible,
-    untranslated,
+    executor_candidates,
     engine_stamp,
     hosted_tool_target,
     hosted_tools_status,
     parse_hosted_tool_setting,
-    resolve_hosted_tools,
 )
 from .identifiers import (
     OPENCODE_PROVIDER_BY_NATIVE_PROTOCOL,
@@ -6305,28 +6304,24 @@ class ModelHubService:
         basis, usd = priced
         return HostedCost(basis=basis, usd=None if usd is None else round(usd, 6))
 
-    @staticmethod
-    def _admitted_executor(config: ModelHubConfig, slot: ExecutorSlot, tool: str):
+    def _admitted_executor(self, config: ModelHubConfig, slot: ExecutorSlot, tool: str) -> ExecutorCandidate | None:
         """The chain's candidate as this snapshot admits it, else None (``vibey-hosted-tools.md`` §6).
 
-        The turn froze the order, not the Sources' runtime: a removed or
-        ineligible Source is passed over, and so is one whose identity (base
-        URL, credential, ...) changed since the chain was built. A Claude
-        subscription never runs a hosted tool.
+        The turn froze the order, not the Sources' runtime: a Source that is
+        removed, no longer runs the tool on its executor model, or has refused
+        it since is passed over, and so is one whose identity (base URL,
+        credential, ...) changed since the chain was built.
         """
 
-        source = next((item for item in config.sources if item.id == slot.source_id), None)
-        if (
-            source is None
-            or identity_digest(source) != slot.identity
-            or source.supply_channel != "hub"
-            or not source.credential_ref
-            or not credential_eligible(source)
-            or not untranslated(source)
-        ):
-            return None
-        spec = hosted_tool_spec(source.vendor, source.protocol, slot.model_id, tool)
-        return (source, spec) if spec is not None else None
+        return next(
+            (
+                candidate
+                for candidate in executor_candidates(config, tool, evidence=self.hosted_evidence())
+                if (candidate.source.id, candidate.model_id) == (slot.source_id, slot.model_id)
+                and identity_digest(candidate.source) == slot.identity
+            ),
+            None,
+        )
 
     async def run_hosted_tool(
         self,
@@ -6391,11 +6386,11 @@ class ModelHubService:
         """Call one executor candidate; None when this snapshot does not admit it, so nothing ran."""
 
         tool, model_id = call.tool, slot.model_id
-        admitted_executor = self._admitted_executor(self.store.load(), slot, tool)
-        if admitted_executor is None:
+        candidate = self._admitted_executor(self.store.load(), slot, tool)
+        if candidate is None:
             return None
-        source, spec = admitted_executor
-        request = executor_request(call, source, model_id, spec)
+        source = candidate.source
+        request = executor_request(call, source, model_id, candidate.declaration, candidate.include)
         stream = executor_streams(source)
         reader = ResponsesStreamReader() if stream else None
         body = bytearray()
@@ -6576,28 +6571,17 @@ class ModelHubService:
         decision = classify_outcome(replace(outcome, stream_started=False))
         return decision.action in {"fallback", "refresh"}
 
+    def freeze_turn_hosted_tools(self, config: ModelHubConfig) -> TurnHostedTools:
+        """What a Vibey turn's first resolution freezes: its tools, executor orders and image models (§3.4)."""
+
+        return freeze_turn_tools(config, evidence=self.hosted_evidence())
+
     def hosted_tools_for_hop(
-        self,
-        config: ModelHubConfig,
-        source: ModelHubSourceConfig,
-        model_id: str,
-        frozen: Mapping[str, tuple[str, str] | None] | None = None,
+        self, source: ModelHubSourceConfig, model_id: str, turn: TurnHostedTools,
     ) -> dict:
-        """``HopResolution.hosted_tools`` for a Vibey launch served by this Source and model.
+        """``HopResolution.hosted_tools`` for a hop of a Vibey turn served by this Source and model."""
 
-        ``frozen`` is the turn's tool set and executors from its first resolution.
-        """
-
-        return resolve_hosted_tools(
-            config,
-            source=source,
-            model_id=model_id,
-            evidence=self.capability_evidence,
-            spec_for=hosted_tool_spec,
-            engine=self.engine_stamp,
-            now=self.now(),
-            frozen=frozen,
-        )
+        return hop_hosted_tools(turn, source, model_id, evidence=self.hosted_evidence())
 
     async def set_agent_mode(self, backend: str, mode: object) -> dict:
         if mode not in {"hub", "direct"} or (backend == "vibey" and mode != "hub"):

@@ -21,7 +21,6 @@ from typing import Any, Callable, Final, Mapping
 from config.v2_config import ModelHubSourceConfig
 from core.agent_core.ai.hosted import reported_counts
 from core.agent_core.ai.sse import SSEParser
-from vibe.backend_model_catalog import HostedToolSpec
 
 from .events import bounded_diagnostic_detail
 from .hosted_items import responses_item_tool
@@ -116,10 +115,16 @@ def call_timeout(tool: str) -> float:
     return SEARCH_TIMEOUT_SECONDS
 
 
-def executor_request(call: ExecutorCall, source: ModelHubSourceConfig, model_id: str, spec: HostedToolSpec) -> ModelHubRequest:
+def executor_request(
+    call: ExecutorCall,
+    source: ModelHubSourceConfig,
+    model_id: str,
+    declaration: Mapping[str, Any],
+    include: tuple[str, ...],
+) -> ModelHubRequest:
     """The one native request this call sends, in the executor Source's own protocol."""
 
-    declaration = spec.declaration
+    declaration = dict(declaration)
     query = call.arguments["query"]
     if call.tool == "x_search":
         settings = [f"limit {call.arguments['limit']}" if "limit" in call.arguments else None,
@@ -147,8 +152,8 @@ def executor_request(call: ExecutorCall, source: ModelHubSourceConfig, model_id:
             "store": False,
             "max_output_tokens": _RESPONSES_OUTPUT_TOKENS,
         }
-        if spec.include:
-            payload["include"] = list(spec.include)
+        if include:
+            payload["include"] = list(include)
     return ModelHubRequest(payload, protocol=source.protocol)
 
 
