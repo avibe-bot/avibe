@@ -81,9 +81,7 @@ from vibe.i18n import t as i18n_t
 
 NOW = "2026-10-02T00:00:00.000000Z"
 SESSION = "ses_vibey"
-RG_HINT = (
-    "rg (ripgrep) is available on PATH for text search; call it directly without hard-coding its installation path."
-)
+RG_HINT = "Prefer rg (ripgrep) for file searches. Run the `rg` command directly."
 
 
 @pytest.fixture()
@@ -1768,7 +1766,6 @@ def test_rg_path_hint_is_once_and_only_with_an_available_command_tool(tool_names
     assert system.count(RG_HINT) == int(finds_rg and bool({"bash", "powershell"} & set(tool_names)))
     # Search options and exhaustive discovery are not part of this PATH hint.
     assert "rg --files" not in system
-    assert "hard-coding" not in system or RG_HINT in system
 
 
 async def test_the_system_prompt_lists_every_tool_the_run_offers(engine, session, tmp_path, published) -> None:

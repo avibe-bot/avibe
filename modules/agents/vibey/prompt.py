@@ -98,9 +98,7 @@ def coding_prompt(tool_names: Iterable[str], *, builtin_agent: bool, rg: bool) -
     if "powershell" in names:
         rules.append(f"Use powershell for file operations like Get-ChildItem, {'rg' if rg else 'Select-String'}")
     if rg and ("bash" in names or "powershell" in names):
-        rules.append(
-            "rg (ripgrep) is available on PATH for text search; call it directly without hard-coding its installation path."
-        )
+        rules.append("Prefer rg (ripgrep) for file searches. Run the `rg` command directly.")
     for name in names:
         rules.extend(TOOL_GUIDELINES.get(name, ()))
     if names:

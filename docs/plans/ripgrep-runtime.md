@@ -26,11 +26,11 @@ The prompt had stated a tool that did not exist.
   effective PATH has no `rg`, so a user's own ripgrep keeps precedence, as for
   Git. An absent or unverifiable install leaves PATH unchanged.
 - Vibey's command guidance names `rg` only when the Turn's composed PATH finds
-  it. With a Bash or PowerShell tool available, one shared sentence explains that
-  ripgrep is on PATH for text search and can be invoked directly without fixing
-  its installation path. Without `rg`, the existing `grep` / `Select-String`
-  guidance remains; without a command tool, no PATH capability is advertised.
-  This is an availability fact, not a file-discovery tutorial: it introduces no
+  it. With a Bash or PowerShell tool available, one shared hint recommends
+  ripgrep for file searches and direct invocation of the `rg` command. Without
+  `rg`, the existing `grep` / `Select-String` guidance remains; without a command
+  tool, no search command is recommended.
+  This is a short recommendation, not a file-discovery tutorial: it introduces no
   CLI option examples or claim to include hidden/ignored files. Existing file
   discovery guidance remains unchanged. That PATH changes only when the service's
   PATH or installed tools change, so the system prompt stays byte-stable between
