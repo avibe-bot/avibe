@@ -8,6 +8,7 @@ from pathlib import Path
 import shutil
 import socket
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -63,6 +64,7 @@ def _fake_controller(
     duplicate_within: bool = False,
     dynamic_elements_after_action: bool = False,
     response_delay_by_tool: dict[str, float] | None = None,
+    apps: list[dict] | None = None,
     windows: list[dict] | None = None,
 ) -> Iterator[tuple[ThreadingHTTPServer, list[dict]]]:
     requests: list[dict] = []
@@ -95,7 +97,9 @@ def _fake_controller(
                 if tool == "list_apps":
                     body = _result(
                         {
-                            "apps": [
+                            "apps": apps
+                            if apps is not None
+                            else [
                                 {
                                     "pid": 41,
                                     "name": "Mail",
@@ -312,6 +316,7 @@ def _run_node_script(
     duplicate_within: bool = False,
     dynamic_elements_after_action: bool = False,
     response_delay_by_tool: dict[str, float] | None = None,
+    apps: list[dict] | None = None,
     windows: list[dict] | None = None,
 ) -> tuple[dict, ThreadingHTTPServer, list[dict]]:
     if NODE is None:
@@ -336,6 +341,7 @@ def _run_node_script(
         duplicate_within=duplicate_within,
         dynamic_elements_after_action=dynamic_elements_after_action,
         response_delay_by_tool=response_delay_by_tool,
+        apps=apps,
         windows=windows,
     ) as (server, requests):
         request = {
@@ -905,6 +911,97 @@ export default async () => {
     assert payload["error"]["step"] == "expect.toExist"
 
 
+def test_sdk_zero_timeout_checks_each_current_state_once(tmp_path: Path) -> None:
+    payload, _server, requests = _run_node_script(
+        tmp_path,
+        """
+import { computer } from "@avibe/computer";
+
+export default async () => {
+  const mail = await computer.waitFor(
+    { bundleId: "com.apple.mail" },
+    { timeout: 0 },
+  );
+  const window = await mail.waitFor(
+    { labelContains: "New Message" },
+    { timeout: 0 },
+  );
+  await window
+    .expect({ role: "textbox", label: "Subject" })
+    .toHaveValue("Quarterly report", { timeout: 0 });
+  return { pid: mail.pid, windowId: window.windowId };
+};
+""",
+    )
+
+    assert payload == {
+        "ok": True,
+        "result": {"pid": 41, "windowId": 9},
+    }
+    tools = [
+        request["payload"].get("tool")
+        for request in requests
+        if request["path"].endswith("/request")
+    ]
+    assert tools.count("list_apps") == 2
+    assert tools.count("list_windows") == 2
+    assert tools.count("get_window_state") == 1
+
+
+def test_sdk_selected_app_refreshes_by_positive_pid(tmp_path: Path) -> None:
+    apps = [
+        {
+            "pid": pid,
+            "name": "Mail",
+            "bundle_id": "com.apple.mail",
+            "running": True,
+            "active": pid == 42,
+        }
+        for pid in (41, 42)
+    ]
+    windows = [
+        {
+            "pid": 42,
+            "window_id": 10,
+            "app_name": "Mail",
+            "title": "Selected Process",
+            "bounds": {"x": 0, "y": 0, "width": 800, "height": 600},
+            "is_on_screen": True,
+            "z_index": 1,
+        }
+    ]
+    payload, _server, requests = _run_node_script(
+        tmp_path,
+        """
+import { computer } from "@avibe/computer";
+
+export default async () => {
+  const mail = await computer.app({
+    bundleId: "com.apple.mail",
+    index: 1,
+  });
+  const window = await mail.window({ label: "Selected Process" });
+  return { appPid: mail.pid, windowPid: window.pid };
+};
+""",
+        apps=apps,
+        windows=windows,
+    )
+
+    assert payload == {
+        "ok": True,
+        "result": {"appPid": 42, "windowPid": 42},
+    }
+    list_window_requests = [
+        request
+        for request in requests
+        if request["payload"].get("tool") == "list_windows"
+    ]
+    assert [request["payload"]["arguments"] for request in list_window_requests] == [
+        {"pid": 42}
+    ]
+
+
 def test_sdk_window_index_uses_descending_z_order(tmp_path: Path) -> None:
     windows = [
         {
@@ -991,6 +1088,40 @@ export default async () => {
 
     assert payload == {"ok": True, "result": None}
     assert server.subprocess_elapsed < 1.0  # type: ignore[attr-defined]
+
+
+def test_python_runner_retains_only_a_bounded_diagnostic_tail(
+    tmp_path: Path,
+) -> None:
+    fixture = tmp_path / "diagnostic_fixture.py"
+    fixture.write_text(
+        """
+import json
+import sys
+
+json.loads(sys.stdin.read())
+sys.stderr.write("discarded-marker\\n")
+sys.stderr.write("x" * (128 * 1024))
+sys.stderr.write("\\nretained-tail\\n")
+sys.stdout.write('{"ok":true,"result":null}')
+""",
+        encoding="utf-8",
+    )
+
+    completed = computer_script_runner._run_node_process(
+        Path(sys.executable),
+        fixture,
+        {},
+        5,
+    )
+
+    assert completed.returncode == 0
+    assert completed.stdout == '{"ok":true,"result":null}'
+    assert len(completed.stderr.encode("utf-8")) <= (
+        computer_script_runner._SCRIPT_DIAGNOSTIC_TAIL_BYTES
+    )
+    assert "discarded-marker" not in completed.stderr
+    assert completed.stderr.endswith("\nretained-tail\n")
 
 
 @pytest.mark.parametrize(

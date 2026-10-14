@@ -24,6 +24,7 @@ from vibe.internal_client import (
 
 
 DEFAULT_SCRIPT_TIMEOUT_SECONDS = 300.0
+_SCRIPT_DIAGNOSTIC_TAIL_BYTES = 64 * 1024
 _FAILURE_ENVELOPE_FIELDS: tuple[str, ...] | None = None
 
 _SCRIPT_OPEN_ERROR_KEYS = {
@@ -161,43 +162,52 @@ def _kill_process_group(process: subprocess.Popen[str]) -> None:
         pass
 
 
+def _read_diagnostic_tail(stream: Any) -> str:
+    stream.flush()
+    stream.seek(0, os.SEEK_END)
+    end = stream.tell()
+    stream.seek(max(0, end - _SCRIPT_DIAGNOSTIC_TAIL_BYTES))
+    return stream.read().decode("utf-8", errors="replace")
+
+
 def _run_node_process(
     node: Path,
     runner: Path,
     request: dict[str, Any],
     timeout_seconds: float,
 ) -> subprocess.CompletedProcess[str]:
-    process = subprocess.Popen(
-        [str(node), str(runner)],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        start_new_session=os.name == "posix",
-    )
     command = [str(node), str(runner)]
-    try:
-        stdout, stderr = process.communicate(
-            input=json.dumps(request, ensure_ascii=False),
-            timeout=timeout_seconds,
-        )
-    except subprocess.TimeoutExpired as exc:
-        _kill_process_group(process)
-        stdout, stderr = process.communicate()
-        raise subprocess.TimeoutExpired(
+    with tempfile.TemporaryFile(mode="w+b") as diagnostic_output:
+        process = subprocess.Popen(
             command,
-            timeout_seconds,
-            output=stdout,
-            stderr=stderr,
-        ) from exc
-    return subprocess.CompletedProcess(
-        command,
-        process.returncode,
-        stdout,
-        stderr,
-    )
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=diagnostic_output,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            start_new_session=os.name == "posix",
+        )
+        try:
+            stdout, _ = process.communicate(
+                input=json.dumps(request, ensure_ascii=False),
+                timeout=timeout_seconds,
+            )
+        except subprocess.TimeoutExpired as exc:
+            _kill_process_group(process)
+            stdout, _ = process.communicate()
+            raise subprocess.TimeoutExpired(
+                command,
+                timeout_seconds,
+                output=stdout,
+                stderr=_read_diagnostic_tail(diagnostic_output),
+            ) from exc
+        return subprocess.CompletedProcess(
+            command,
+            process.returncode,
+            stdout,
+            _read_diagnostic_tail(diagnostic_output),
+        )
 
 
 def _decode_runner_output(

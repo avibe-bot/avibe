@@ -440,15 +440,19 @@ function timeoutMs(value) {
 async function poll(label, timeoutValue, attempt) {
   const duration = timeoutMs(timeoutValue);
   const deadline = performance.now() + duration;
+  let firstAttempt = true;
   while (true) {
     const localRemaining = deadline - performance.now();
-    if (localRemaining <= 0) {
+    if (!firstAttempt && localRemaining <= 0) {
       throw new Timeout(`${label} timed out after ${duration} ms.`, {
         params: { timeout: duration },
       });
     }
+    const attemptDeadline =
+      firstAttempt && duration === 0 ? undefined : deadline;
+    firstAttempt = false;
     try {
-      return await attempt(deadline);
+      return await attempt(attemptDeadline);
     } catch (error) {
       if (!(error instanceof NotFound)) {
         throw error;
@@ -566,11 +570,11 @@ class AppHandle {
     const records = Array.isArray(apps) ? apps : [];
     const current = this._record;
     const matches = records.filter((item) => {
-      if (typeof current.bundle_id === "string" && current.bundle_id) {
-        return item.bundle_id === current.bundle_id;
-      }
       if (Number.isInteger(current.pid) && current.pid > 0) {
         return item.pid === current.pid;
+      }
+      if (typeof current.bundle_id === "string" && current.bundle_id) {
+        return item.bundle_id === current.bundle_id;
       }
       return item.name === current.name;
     });
