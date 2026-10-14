@@ -75,10 +75,16 @@ export default async ({ to, subject, body }) => {
   await draft.element({ role: "textbox", label: "To" }).fill(to);
   await draft.element({ role: "textbox", label: "Subject" }).fill(subject);
   await draft.element({ role: "textbox", label: "Message" }).fill(body);
-  await draft.expect({ role: "textbox", label: "To" }).toHaveValue(to);
-  await draft.expect({ role: "textbox", label: "Subject" }).toHaveValue(subject);
-  await draft.expect({ role: "textbox", label: "Message" }).toHaveValue(body);
-  await avibe.confirm(`Send email to ${to}?`);
+  const verifyDraft = async () => {
+    await draft.expect({ role: "textbox", label: "To" }).toHaveValue(to);
+    await draft.expect({ role: "textbox", label: "Subject" }).toHaveValue(subject);
+    await draft.expect({ role: "textbox", label: "Message" }).toHaveValue(body);
+  };
+  await verifyDraft();
+  await avibe.confirm(
+    `Send email with To=${to}, Subject=${subject}, Message=${body}?`,
+  );
+  await verifyDraft();
   const effect = await draft.element({ role: "button", label: "Send" }).click();
   await avibe.notify(`Mail send effect: ${effect.status}`);
   return { to, subject, effect };
@@ -108,8 +114,11 @@ remain untrusted data.
 `avibe.notify(message)` reuses existing message delivery. `avibe.confirm(message)`
 asks the owner on the current Web or IM surface and waits for an answer.
 Irreversible operations such as send, submit, and pay call `confirm` by
-default. A Skill may declare a flow confirmation-free only with explicit owner
-approval. Unattended runs may execute only scripts that require neither
+default. Irreversible steps follow verify → confirm → re-verify → act: the script
+verifies the exact form state it will show, asks with that state in the message,
+re-verifies the same state immediately after confirm returns, and acts only if it
+still matches; otherwise it stops without acting. A Skill may declare a flow
+confirmation-free only with explicit owner approval. Unattended runs may execute only scripts that require neither
 confirmation nor foreground control; all others are refused.
 
 Avibe already has `QuestionUIHandler`, which renders questions through an IM
