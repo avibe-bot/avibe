@@ -1766,6 +1766,33 @@ describe('AgentsPage reconnect reconciliation', () => {
     expect(modelCatalogReads).toBe(directReads);
   });
 
+  it('reads the effort menu once per approach to the field, not on every focus move inside it', async () => {
+    modelCatalog = {
+      models: [],
+      reasoningOptions: { 'reasoning-model': [{ value: 'medium', label: 'Medium' }, { value: 'high', label: 'High' }] },
+      effortMenus: { 'reasoning-model': { omitted: [], not_on: {} } },
+    };
+    const initial = { ...brief('agent-a', 'description'), model: 'reasoning-model', reasoning_effort: 'medium' };
+    const api = makeApi(vi.fn().mockResolvedValue(listResult(initial)), vi.fn().mockResolvedValue(fullAgent(initial, 'prompt')));
+    renderPage(api, { canManageAgents: true });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'high', exact: true })).toBeTruthy());
+    const field = document.querySelector('[data-effort-field]') as HTMLElement;
+    const medium = screen.getByRole('button', { name: 'medium', exact: true });
+    const high = screen.getByRole('button', { name: 'high', exact: true });
+
+    deferModelReads = true;
+    const reads = modelCatalogReads;
+    // The pointer arrives and the click focuses a button: one approach, one read.
+    fireEvent.pointerEnter(field);
+    fireEvent.focusIn(medium);
+    expect(modelCatalogReads).toBe(reads + 1);
+    act(() => pendingModelReads.shift()!());
+
+    // Tabbing between the field's own buttons is not a new approach.
+    fireEvent.focusIn(high, { relatedTarget: medium });
+    expect(modelCatalogReads).toBe(reads + 1);
+  });
+
   it('drops an effort-menu read still out when Settings covers the page', async () => {
     modelCatalog = {
       models: [],

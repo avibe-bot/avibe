@@ -2154,17 +2154,30 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, ca
   // reads it as its menu opens, read it again as the user turns to the effort
   // field, the moment it is chosen from; the last answer shows until it lands.
   const effortRefreshRef = useRef<(() => void) | null>(null);
+  // One read per approach: a read still out answers for this one too. Dropping a
+  // read does not stop its request, so restarting would only add requests.
+  const effortRefreshOutRef = useRef(false);
   const refreshEffortMenus = useCallback(() => {
-    if (!surfaceActive || !hubKnownRef.current) return;
-    effortRefreshRef.current?.();
+    if (!surfaceActive || !hubKnownRef.current || effortRefreshOutRef.current) return;
+    effortRefreshOutRef.current = true;
     const backend = agent.backend;
-    effortRefreshRef.current = loadBackendModelsWithRefresh(api, backend, (result) => takeModelCatalog(backend, result));
+    const settle = () => { effortRefreshOutRef.current = false; };
+    effortRefreshRef.current = loadBackendModelsWithRefresh(
+      api,
+      backend,
+      (result) => {
+        settle();
+        takeModelCatalog(backend, result);
+      },
+      settle,
+    );
   }, [agent.backend, api, surfaceActive, takeModelCatalog]);
   // A refresh still out when the page is covered or its backend changes answers
   // for a catalog this page no longer shows, so it is dropped.
   useEffect(() => () => {
     effortRefreshRef.current?.();
     effortRefreshRef.current = null;
+    effortRefreshOutRef.current = false;
     // A new activation or backend starts without knowing which catalog serves it.
     hubKnownRef.current = false;
   }, [agent.backend, api, surfaceActive]);
@@ -2511,7 +2524,10 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, ca
           style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(3.25rem, 1fr))' }}
           data-effort-field
           onPointerEnter={refreshEffortMenus}
-          onFocusCapture={refreshEffortMenus}
+          // Focus coming into the field, not moving between its buttons.
+          onFocusCapture={(event) => {
+            if (!event.currentTarget.contains(event.relatedTarget as Node | null)) refreshEffortMenus();
+          }}
         >
           {refusedEffort && (
             <span
