@@ -28,7 +28,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Literal, Mapping, Optional
 
-from config.v2_config import ModelHubSourceConfig
+from config.v2_config import ModelHubSourceConfig, is_model_hub_model_id, is_model_hub_source_id
 
 from .retry import source_identity
 from .state_file import write_state_document
@@ -54,6 +54,15 @@ HOSTED_TOOL_ASPECTS: Mapping[str, tuple[str, ...]] = {
 }
 EXECUTION_MODES: frozenset[str] = frozenset({"native", "executor", "direct"})
 _NAME_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
+_DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}")
+
+
+def _encodable(text: str) -> bool:
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
 
 
 @dataclass(frozen=True)
@@ -119,15 +128,16 @@ class EvidenceRecord:
     """``verified`` only: how the call ran."""
 
     def __post_init__(self) -> None:
-        for name in ("source_id", "model_id", "wire", "source_identity"):
-            value = getattr(self, name)
-            if not isinstance(value, str) or not value:
-                raise ValueError(f"evidence {name} must be a non-empty string")
+        # The shared identifier rules, so a damaged state file's record is unknown, never echoed by a read.
+        if not is_model_hub_source_id(self.source_id) or not is_model_hub_model_id(self.model_id):
+            raise ValueError("evidence names a Source id and a canonical model id")
+        if not all(isinstance(value, str) and _DIGEST_RE.fullmatch(value) for value in (self.wire, self.source_identity)):
+            raise ValueError("evidence wire and source identity are sha256 digests")
         if self.status == "unsupported":
             if self.mode is not None or not isinstance(self.detail, str):
                 raise ValueError("a refusal carries its detail and no mode")
-            if not 0 < len(self.detail) <= DETAIL_MAX_CHARS:
-                raise ValueError(f"evidence detail is at most {DETAIL_MAX_CHARS} characters")
+            if not 0 < len(self.detail) <= DETAIL_MAX_CHARS or not _encodable(self.detail):
+                raise ValueError(f"evidence detail is encodable text of at most {DETAIL_MAX_CHARS} characters")
         elif self.status == "verified":
             if self.detail is not None or self.mode not in EXECUTION_MODES:
                 raise ValueError("a success carries its mode and no detail")
@@ -339,36 +349,71 @@ class CapabilityEvidenceStore:
         self._persisted = {item.key: item for item in kept if item.status == "verified"}
 
     @staticmethod
-    def _supersedes(record: EvidenceRecord, existing: Optional[EvidenceRecord]) -> bool:
-        """The one ordering rule every write follows: per key, the newest record of the current wire wins.
+    def _supersedes(record: EvidenceRecord, existing: Optional[EvidenceRecord], current: Mapping[str, str]) -> bool:
+        """The one ordering rule every write follows: per key, the newest current record wins.
 
-        Writes settle concurrently, so arrival order is not time order. A record replaces one of another identity
-        (or, for a refusal, another wire) at once; within the same one, only a newer record replaces it.
+        Writes settle concurrently, so arrival order is not time order. ``record`` is always current: the writers
+        drop one of a superseded identity or wire before they get here. It replaces a stored record that is no
+        longer current at once (another identity, or for a refusal another wire, the one ``record`` proves
+        current), and a current one only if it is newer.
         """
 
-        if existing is None or existing.source_identity != record.source_identity:
-            return True
-        if record.status == "unsupported" and existing.wire != record.wire:
-            return True
-        return record.observed_at > existing.observed_at
+        return (
+            existing is None
+            or current.get(existing.source_id) != existing.source_identity
+            or (record.status == "unsupported" and existing.wire != record.wire)
+            or record.observed_at > existing.observed_at
+        )
 
-    def write_refusal(self, record: EvidenceRecord, *, live: Iterable[ModelHubSourceConfig]) -> None:
+    @staticmethod
+    def _live_locked(
+        live: Callable[[], Iterable[ModelHubSourceConfig]],
+    ) -> tuple[dict[str, ModelHubSourceConfig], dict[str, str]]:
+        """The Sources as they are now, read under the store lock so no write prunes against an older snapshot."""
+
+        sources = {source.id: source for source in live()}
+        return sources, {source_id: identity_digest(source) for source_id, source in sources.items()}
+
+    def write_refusal(
+        self,
+        record: EvidenceRecord,
+        *,
+        live: Callable[[], Iterable[ModelHubSourceConfig]],
+        wire_for: Callable[[ModelHubSourceConfig, str], str],
+    ) -> None:
         """Record a refusal: memory first, then the file; a failed write is logged, not raised."""
 
-        self.write_refusals([record], live=live)
+        self.write_refusals([record], live=live, wire_for=wire_for)
 
-    def write_refusals(self, records: Iterable[EvidenceRecord], *, live: Iterable[ModelHubSourceConfig]) -> None:
+    def write_refusals(
+        self,
+        records: Iterable[EvidenceRecord],
+        *,
+        live: Callable[[], Iterable[ModelHubSourceConfig]],
+        wire_for: Callable[[ModelHubSourceConfig, str], str],
+    ) -> None:
+        """Record refusals learned on requests that may have been admitted before a Source or model changed.
+
+        Only a refusal of the Source as it is now, under the wire it renders now, is written: one learned under a
+        superseded identity or wire describes nothing that routes, and must not replace a current one.
+        """
+
         records = list(records)
-        identities = {source.id: identity_digest(source) for source in live}
-        for record in records:
-            if record.status != "unsupported":
-                raise ValueError("write_refusals writes refusals only")
-            if identities.get(record.source_id) != record.source_identity:
-                raise ValueError("evidence must be written for a live Source's current identity")
+        if any(record.status != "unsupported" for record in records):
+            raise ValueError("write_refusals writes refusals only")
         with self._lock:
+            sources, identities = self._live_locked(live)
             updated = dict(self._records)
             for record in records:
-                if self._supersedes(record, updated.get(record.key)):
+                source = sources.get(record.source_id)
+                if (
+                    source is None
+                    or identities[record.source_id] != record.source_identity
+                    or wire_for(source, record.model_id) != record.wire
+                ):
+                    logger.info("Model Hub dropped a refusal learned under a superseded Source identity or wire")
+                    continue
+                if self._supersedes(record, updated.get(record.key), identities):
                     updated[record.key] = record
             kept = self._write_locked(updated, identities)
             self._remember({item.key: item for item in kept})
@@ -382,7 +427,7 @@ class CapabilityEvidenceStore:
         self,
         record: EvidenceRecord,
         *,
-        live: Iterable[ModelHubSourceConfig],
+        live: Callable[[], Iterable[ModelHubSourceConfig]],
         now: datetime,
     ) -> None:
         """Record a real success: memory at once, the file at most hourly per key.
@@ -393,11 +438,11 @@ class CapabilityEvidenceStore:
 
         if record.status != "verified":
             raise ValueError("note_success writes successes only")
-        identities = {source.id: identity_digest(source) for source in live}
-        if identities.get(record.source_id) != record.source_identity:
-            return
         with self._lock:
-            if not self._supersedes(record, self._records.get(record.key)):
+            _sources, identities = self._live_locked(live)
+            if identities.get(record.source_id) != record.source_identity or not self._supersedes(
+                record, self._records.get(record.key), identities
+            ):
                 return
             updated = dict(self._records)
             updated[record.key] = record
@@ -421,15 +466,15 @@ class CapabilityEvidenceStore:
         self,
         matches: Callable[[EvidenceRecord], bool],
         *,
-        live: Iterable[ModelHubSourceConfig],
+        live: Callable[[], Iterable[ModelHubSourceConfig]],
     ) -> int:
         """Remove the refusals ``matches`` selects: the file first, then memory; a failed write raises.
 
         Returns how many were removed; zero writes nothing.
         """
 
-        identities = {source.id: identity_digest(source) for source in live}
         with self._lock:
+            _sources, identities = self._live_locked(live)
             removed = [
                 key for key, record in self._records.items() if record.status == "unsupported" and matches(record)
             ]
