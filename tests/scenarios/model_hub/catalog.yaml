@@ -103,6 +103,7 @@ capability:
     - tests/e2e/test_model_hub_sources.py
     - tests/e2e/test_model_hub_usage_events.py
     - tests/e2e/test_model_hub_service_acceptance.py
+    - tests/e2e/test_model_hub_codex_image.py
 status_legend:
   covered:
     description: closed-loop coverage exists at the declared layer

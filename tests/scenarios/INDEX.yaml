@@ -45,6 +45,7 @@ capabilities:
       - tests/e2e/test_model_hub_sources.py
       - tests/e2e/test_model_hub_usage_events.py
       - tests/e2e/test_model_hub_service_acceptance.py
+      - tests/e2e/test_model_hub_codex_image.py
     harness:
       - tests/scenario_harness/model_hub.py
     unit_or_contract_tests:

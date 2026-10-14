@@ -719,8 +719,7 @@ Each has a **Re-verify** action with its cost. Unknown shows nothing.
    `interrupted` error that keeps the partial.
 7. A generated image never enters model context or history as bytes. The model gets the text path record, and the
    user sees the image.
-8. A Codex CLI request reaches the upstream with exactly the image tool CPA would have injected. No other caller
-   gets one unless it declared it.
+8. No caller, Codex CLI included, reaches the upstream with an image tool it did not declare (§7.1).
 9. No probe and no proxy call runs without a user action or a model tool call in a turn the user started. Every
    probe shows its cost first.
 10. A real error creates evidence only through a narrow rule for the named (Source, model, feature).
