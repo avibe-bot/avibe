@@ -246,4 +246,27 @@ describe('useHostedTools ordering', () => {
     // That answer described the old identity; the new one's read failed, so nothing shows.
     expect(shown(result.current.read)).toBeNull();
   });
+
+  it('reads a verdict the status does not carry as not verified, with why', async () => {
+    const unknown = { status: 'unknown' as const, stale: null, basis: null, observed_at: null, detail: null, changes_at: null };
+    const candidate = {
+      source_id: 'src_relay001', model_id: 'gpt-6-astra', billing: 'metered' as const, price: null, probe_estimate: null, call: unknown, replay: null,
+    };
+    const unrecorded: HostedToolsStatus = {
+      tools: [{ name: 'web_search', enabled: false, executor: null, bound: null, candidates: [candidate] }],
+      reverify: { engine_upgraded: 0, aged: 0 },
+    };
+    vi.spyOn(modelsApi, 'getHostedTools').mockResolvedValue(unrecorded);
+    // The probe verified the tool, but the server could not write the record.
+    vi.spyOn(modelsApi, 'probeHostedTool').mockResolvedValue({
+      probe: { tool: 'web_search', source_id: 'src_relay001', model_id: 'gpt-6-astra', call: { outcome: 'verified', error: null }, replay: null },
+      hosted_tools: unrecorded,
+    });
+    const { result } = renderHook(() => useHostedTools(true), { wrapper });
+    await waitFor(() => expect(result.current.read.kind).toBe('ready'));
+
+    let outcome: Awaited<ReturnType<typeof result.current.probe>> = null;
+    await act(async () => { outcome = await result.current.probe({ tool: 'web_search', candidate }); });
+    expect(outcome).toMatchObject({ call: { outcome: 'transient', error: 'settings.models.tools.probe.notRecorded' } });
+  });
 });

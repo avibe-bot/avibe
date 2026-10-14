@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { atLeast, cooldownEtaMinutes, formatCost, formatCount, formatDayTime, formatNameList, formatPercent, formatTokensCompact, formatUsd } from './format';
+import { atLeast, cooldownEtaMinutes, formatCost, formatCount, formatDayTime, formatNameList, formatPercent, formatSmallUsd, formatTokensCompact, formatUsd } from './format';
 
 describe('formatCount', () => {
   it('groups so a figure can be read against a vendor console', () => {
@@ -117,5 +117,17 @@ describe('formatCost', () => {
     expect(formatCost(12.5, undefined, 'en-US')).toBe('$12.50');
     expect(atLeast('2.0×', true)).toBe('≥ 2.0×');
     expect(atLeast('2.0×', false)).toBe('2.0×');
+  });
+});
+
+describe('formatSmallUsd', () => {
+  it('keeps the first significant digits of a per-call price, and never shows a nonzero price as zero', () => {
+    expect(formatSmallUsd(0.5)).toBe('0.50');
+    expect(formatSmallUsd(0.005)).toBe('0.005');
+    expect(formatSmallUsd(0.00005)).toBe('0.00005');
+    // Below a hundredth of a cent: two significant digits, not 0.
+    expect(formatSmallUsd(0.0000123)).toBe('0.000012');
+    expect(formatSmallUsd(0.00000001)).toBe('0.00000001');
+    expect(formatSmallUsd(0)).toBe('0');
   });
 });

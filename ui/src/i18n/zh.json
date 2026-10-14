@@ -2353,7 +2353,10 @@
           "engineUpgraded_one": "引擎已升级 · {{count}} 项需重新检测",
           "engineUpgraded_other": "引擎已升级 · {{count}} 项需重新检测",
           "aged_one": "{{count}} 项检测已超过 30 天",
-          "aged_other": "{{count}} 项检测已超过 30 天"
+          "aged_other": "{{count}} 项检测已超过 30 天",
+          "both": "<upgraded>{{engineUpgraded}}</upgraded> · {{aged}}",
+          "upgradedOnly": "<upgraded>{{engineUpgraded}}</upgraded>",
+          "agedOnly": "{{aged}}"
         },
         "tool": {
           "web_search": {
@@ -2443,6 +2446,7 @@
           "about": "约 ${{usd}}",
           "included": "订阅内含",
           "unknown": "费用未知",
+          "notRecorded": "结果未能记录",
           "outcome": {
             "inconclusive": "未能检测 · 模型没有调用工具，请重试",
             "transient": "未能检测 · 请重试",
@@ -2466,6 +2470,7 @@
           "body_other": "检测会向下面的供应商发送 {{count}} 次真实请求，确认它们能否原生运行这些工具。",
           "privacy": "请求只带一条固定的测试查询，不含你的对话。检测不会开启任何工具，也不会改动路由。",
           "listTitle": "将检测",
+          "pair": "<tool>{{tool}}</tool><muted>·</muted><source>{{source}}</source><model>{{model}}</model>",
           "total": "合计",
           "totalNote": "按 API 标价估算；中转的实际账单可能不同",
           "cancel": "取消",

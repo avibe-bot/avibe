@@ -7,7 +7,7 @@
 // hop resolution reads config and evidence itself, so nothing on this tab decides
 // a route, and every claim about one comes from `bound`, the server's answer.
 import * as React from 'react';
-import { useTranslation } from 'react-i18next';
+import { Trans, useTranslation } from 'react-i18next';
 import { AtSign, Ban, Check, Globe, Image as ImageIcon, Info, Loader2, Radar, RotateCw, TriangleAlert, Waypoints } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
@@ -384,9 +384,17 @@ export const ToolsTab: React.FC<{
           </span>
           {reverify && (reverify.engine_upgraded > 0 || reverify.aged > 0) && (
             <p className="model-hub-tools-reverify flex flex-wrap items-center gap-x-2" role="status">
-              {reverify.engine_upgraded > 0 && <span className="model-hub-ink-gold font-semibold">{t('settings.models.tools.reverify.engineUpgraded', { count: reverify.engine_upgraded })}</span>}
-              {reverify.engine_upgraded > 0 && reverify.aged > 0 && <span aria-hidden>·</span>}
-              {reverify.aged > 0 && <span>{t('settings.models.tools.reverify.aged', { count: reverify.aged })}</span>}
+              {/* Both counts read as one sentence the locale composes. */}
+              <Trans
+                i18nKey={reverify.engine_upgraded > 0
+                  ? reverify.aged > 0 ? 'settings.models.tools.reverify.both' : 'settings.models.tools.reverify.upgradedOnly'
+                  : 'settings.models.tools.reverify.agedOnly'}
+                values={{
+                  engineUpgraded: t('settings.models.tools.reverify.engineUpgraded', { count: reverify.engine_upgraded }),
+                  aged: t('settings.models.tools.reverify.aged', { count: reverify.aged }),
+                }}
+                components={{ upgraded: <span className="model-hub-ink-gold font-semibold" /> }}
+              />
             </p>
           )}
         </div>

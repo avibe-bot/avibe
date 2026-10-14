@@ -316,8 +316,9 @@ describe('ToolsTab claims', () => {
   it('MH-HOSTED-UI-004: says how many checks an engine upgrade made stale, and nothing when none did', () => {
     renderTab(status([tool('web_search')], { engine_upgraded: 2, aged: 1 }));
     const line = screen.getByRole('status');
-    within(line).getByText('Engine upgraded · 2 need a new check');
-    within(line).getByText('1 check is over 30 days old');
+    // One sentence the locale composes, its first part marked.
+    expect(line.textContent).toBe('Engine upgraded · 2 need a new check · 1 check is over 30 days old');
+    expect(within(line).getByText('Engine upgraded · 2 need a new check').className).toContain('model-hub-ink-gold');
     cleanup();
 
     renderTab(status([tool('web_search')]));

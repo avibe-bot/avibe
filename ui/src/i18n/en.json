@@ -2353,7 +2353,10 @@
           "engineUpgraded_one": "Engine upgraded · {{count}} needs a new check",
           "engineUpgraded_other": "Engine upgraded · {{count}} need a new check",
           "aged_one": "{{count}} check is over 30 days old",
-          "aged_other": "{{count}} checks are over 30 days old"
+          "aged_other": "{{count}} checks are over 30 days old",
+          "both": "<upgraded>{{engineUpgraded}}</upgraded> · {{aged}}",
+          "upgradedOnly": "<upgraded>{{engineUpgraded}}</upgraded>",
+          "agedOnly": "{{aged}}"
         },
         "tool": {
           "web_search": {
@@ -2443,6 +2446,7 @@
           "about": "about ${{usd}}",
           "included": "included in subscription",
           "unknown": "cost unknown",
+          "notRecorded": "the result couldn't be recorded",
           "outcome": {
             "inconclusive": "Not verified · the model didn't use the tool; try again",
             "transient": "Couldn't verify · try again",
@@ -2466,6 +2470,7 @@
           "body_other": "This sends {{count}} real requests to the Sources below to confirm they can run these tools natively.",
           "privacy": "Each request carries one fixed test query and none of your conversation. Checking turns no tool on and changes no route.",
           "listTitle": "To check",
+          "pair": "<tool>{{tool}}</tool><muted>·</muted><source>{{source}}</source><model>{{model}}</model>",
           "total": "Total",
           "totalNote": "Estimated at API price; a relay may bill differently",
           "cancel": "Cancel",

@@ -5,7 +5,7 @@
 // time; only verified and unsupported become evidence, so a probe that did not
 // get an answer is reported as "not verified", never as "not supported".
 import * as React from 'react';
-import { useTranslation } from 'react-i18next';
+import { Trans, useTranslation } from 'react-i18next';
 import { AlertCircle, AtSign, Check, Globe, Image as ImageIcon, Loader2, RotateCw, ShieldCheck } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
@@ -32,10 +32,21 @@ const TargetLine: React.FC<{ target: ProbeTarget; sources: ReadonlyMap<string, S
   return (
     <li className="model-hub-probe-row flex items-center gap-2.5 rounded-lg border border-border bg-background" data-probe={probeKey(target)}>
       <Icon className="model-hub-ink-mint size-[14px] shrink-0" aria-hidden />
-      <span className="shrink-0 font-semibold text-foreground">{t(`settings.models.tools.tool.${target.tool}.name`)}</span>
-      <span aria-hidden className="text-muted">·</span>
-      <span className="min-w-0 truncate text-foreground">{sources.get(target.candidate.source_id)?.display_name ?? target.candidate.source_id}</span>
-      <span className="min-w-0 truncate font-mono text-muted">{target.candidate.model_id}</span>
+      {/* The pair reads as the locale composes it; each part keeps its own style. */}
+      <Trans
+        i18nKey="settings.models.tools.dialog.pair"
+        values={{
+          tool: t(`settings.models.tools.tool.${target.tool}.name`),
+          source: sources.get(target.candidate.source_id)?.display_name ?? target.candidate.source_id,
+          model: target.candidate.model_id,
+        }}
+        components={{
+          tool: <span className="shrink-0 font-semibold text-foreground" />,
+          source: <span className="min-w-0 truncate text-foreground" />,
+          model: <span className="min-w-0 truncate font-mono text-muted" />,
+          muted: <span className="text-muted" />,
+        }}
+      />
       <span className="ml-auto shrink-0">{trailing}</span>
     </li>
   );

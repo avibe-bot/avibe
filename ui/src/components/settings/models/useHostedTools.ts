@@ -128,10 +128,11 @@ export function useHostedTools(active: boolean, revision: string | null = null) 
     const revisionAtStart = shownRevision.current;
     setProbing((previous) => new Set(previous).add(key));
     try {
-      const { probe: result, hosted_tools: status } = await modelsApi.probeHostedTool(target.tool, {
+      const { probe: answered, hosted_tools: status } = await modelsApi.probeHostedTool(target.tool, {
         source_id: target.candidate.source_id,
         model_id: target.candidate.model_id,
       });
+      const result = recordedOutcome(answered, status, target, recordBefore);
       if (alive.current && clock.writes === writesAtStart && clock.queued === 0 && shownRevision.current === revisionAtStart) {
         // Newer than any read still out, which must not overwrite it.
         clock.reads += 1;
@@ -163,6 +164,31 @@ export function useHostedTools(active: boolean, revision: string | null = null) 
 
   return { read, pending, probing, refresh, save, probe };
 }
+
+/**
+ * A probe's outcome as far as it was recorded. Only a verified or unsupported
+ * record routes, so an answer the status does not carry as a new probe record
+ * for the pair (the record could not be written, or the Source's identity
+ * changed while it ran) reads as not verified, with that reason, rather than as
+ * a verdict routing never sees.
+ */
+function recordedOutcome(
+  result: HostedToolProbeResult,
+  status: HostedToolsStatus,
+  target: ProbeTarget,
+  recordBefore: string | null,
+): HostedToolProbeResult {
+  const { outcome } = result.call;
+  if (outcome !== 'verified' && outcome !== 'unsupported') return result;
+  const call = status.tools
+    .find((tool) => tool.name === target.tool)?.candidates
+    .find((candidate) => sameExecutor(candidate, target.candidate))?.call;
+  if (call && call.basis === 'probe' && call.observed_at !== recordBefore && call.status === outcome) return result;
+  return { ...result, call: { outcome: 'transient', error: PROBE_NOT_RECORDED } };
+}
+
+/** The reason a probe's verdict did not become a record (a UI key, read as the server's error keys are). */
+const PROBE_NOT_RECORDED = 'settings.models.tools.probe.notRecorded';
 
 /**
  * What a probe whose answer was lost left behind: a new probe record for its

@@ -114,12 +114,16 @@ export function formatDayTime(instant: string, locale: string): string {
 /**
  * A small per-call dollar figure with its first significant digits: $0.005, not
  * $0.01, since a hosted tool's price is often under a cent. A figure of a dime or
- * more keeps two decimals.
+ * more keeps two decimals; one below a hundredth of a cent keeps two significant
+ * digits ($0.000012), so a nonzero price never reads as $0.
  */
 export function formatSmallUsd(value: number): string {
   if (value >= 0.1) return value.toFixed(2);
-  const digits = value >= 0.001 ? 3 : 4;
-  return value.toFixed(digits).replace(/0+$/, '').replace(/\.$/, '');
+  const fixed = value >= 0.001 ? value.toFixed(3)
+    : value === 0 || value >= 0.0001 ? value.toFixed(4)
+    // Below a hundredth of a cent, two significant digits, so no listed price reads as $0.
+    : Number(value.toPrecision(2)).toFixed(20);
+  return fixed.replace(/0+$/, '').replace(/\.$/, '');
 }
 
 /**
