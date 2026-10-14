@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import subprocess
 import threading
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -43,15 +45,10 @@ def native_safety(monkeypatch, _isolate_vibe_remote_home):
     # credentials. Keep the fixture independent from the coding agent's own
     # process environment so direct native-store cases exercise their stated
     # source and do not accidentally select an ambient API key.
-    for name in (
-        "ANTHROPIC_API_KEY",
-        "ANTHROPIC_AUTH_TOKEN",
-        "ANTHROPIC_BASE_URL",
-        "CLAUDE_CODE_OAUTH_TOKEN",
-        "CLAUDE_SECURESTORAGE_CONFIG_DIR",
-        "OPENAI_API_KEY",
-        "OPENAI_BASE_URL",
-    ):
+    for name in tuple(os.environ):
+        if name.startswith(("ANTHROPIC_", "CLAUDE_")) and name != "CLAUDE_CONFIG_DIR":
+            monkeypatch.delenv(name, raising=False)
+    for name in ("OPENAI_API_KEY", "OPENAI_BASE_URL"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(native_oauth_store, "_KEYCHAIN_STORE", native_oauth_store._FixtureKeychainStore())
 
@@ -786,6 +783,143 @@ def test_claude_native_observation_respects_selected_store(
     assert state["ready"] is (expected_auth == "subscription")
     assert state["entry_eligible"] is state["ready"]
     assert "fixture-file-secret" not in json.dumps(state)
+
+
+@pytest.mark.parametrize(
+    "case,expected_auth",
+    [
+        ("project_key", "api_key"),
+        ("local_auth_token", "api_key"),
+        ("project_setup_token", "subscription"),
+        ("local_masks_project_key", "subscription"),
+        ("project_masks_user_key", "subscription"),
+        ("nested_root_local", "api_key"),
+        ("worktree_main_local", "api_key"),
+        ("windows_cwd_local", "subscription"),
+        ("invalid_project", "unknown"),
+        ("invalid_local", "unknown"),
+        ("helper", "unknown"),
+        ("helper_with_key", "api_key"),
+        ("helper_cleared", "subscription"),
+        ("provider", "unknown"),
+        ("provider_masked", "subscription"),
+        ("invalid_env", "unknown"),
+        ("unreadable_project", "unknown"),
+        ("invalid_git_pointer", "unknown"),
+    ],
+)
+def test_claude_read_only_auth_observes_all_enabled_settings_sources(
+    connection, claude_native_observation, tmp_path, monkeypatch, case, expected_auth,
+):
+    """Settings/Direct/completion must not infer OAuth behind another source.
+
+    Real files exercise native source precedence. Existing native_safety traps
+    process launches; neither the resolver nor its consumers may run a helper.
+    """
+    from core.handlers.model_hub.native_oauth import _signed_in
+    from modules.agents import model_hub as native_router
+    from vibe import claude_config
+    from vibe.claude_config import get_claude_credentials_path, get_claude_settings_path
+
+    monkeypatch.setattr(claude_config, "sys", SimpleNamespace(platform="win32" if case == "windows_cwd_local" else "linux"))
+    if not hasattr(os, "getuid"):
+        monkeypatch.setattr(os, "getuid", lambda: 0, raising=False)  # Unix-location fixture on Windows.
+
+    root = tmp_path / "工作 目录"
+    cwd = root
+    settings = get_claude_settings_path()
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.write_text(json.dumps({"env": {"ANTHROPIC_API_KEY": "fixture-user-key"}
+                                         if case == "project_masks_user_key" else {}}))
+    if case != "project_setup_token":
+        get_claude_credentials_path().write_text(json.dumps({
+            "claudeAiOauth": {"accessToken": "fixture-native-oauth"},
+        }))
+    project = {"env": {}}
+    local = {"env": {}}
+    if case in {"project_key", "local_masks_project_key"}:
+        project["env"]["ANTHROPIC_API_KEY"] = "fixture-project-key"
+    if case == "local_masks_project_key":
+        local["env"]["ANTHROPIC_API_KEY"] = ""
+    if case == "project_masks_user_key":
+        project["env"]["ANTHROPIC_API_KEY"] = ""
+    if case == "local_auth_token":
+        local["env"]["ANTHROPIC_AUTH_TOKEN"] = "fixture-local-token"
+    if case == "project_setup_token":
+        project["env"]["CLAUDE_CODE_OAUTH_TOKEN"] = "fixture-project-oauth"
+    if case in {"nested_root_local", "worktree_main_local", "windows_cwd_local"}:
+        git = root / ".git"
+        git.mkdir(parents=True)
+        (git / "HEAD").write_text("ref: refs/heads/main\n")
+        local["env"]["ANTHROPIC_API_KEY"] = "fixture-root-key"
+        if case != "worktree_main_local":
+            cwd = root / "nested"
+        else:
+            cwd = tmp_path / "worktree"
+            cwd.mkdir()
+            gitdir = git / "worktrees" / "fixture"
+            gitdir.mkdir(parents=True)
+            (gitdir / "HEAD").write_text("fixture-commit\n")
+            (gitdir / "commondir").write_text("../..\n")
+            (cwd / ".git").write_text(f"gitdir: {gitdir}\n")
+        # A legacy cwd-local value is lower priority than the root-local one.
+        (cwd / ".claude").mkdir(parents=True)
+        (cwd / ".claude" / "settings.local.json").write_text(json.dumps({"env": {"ANTHROPIC_API_KEY": ""}}))
+    if case in {"helper", "helper_with_key", "helper_cleared"}:
+        project["apiKeyHelper"] = "must-not-execute-fixture-helper"
+    if case == "helper_with_key":
+        project["env"]["ANTHROPIC_API_KEY"] = "fixture-project-key"
+    if case == "helper_cleared":
+        local["apiKeyHelper"] = ""
+    if case in {"provider", "provider_masked"}:
+        project["env"]["CLAUDE_CODE_USE_BEDROCK"] = "1"
+    if case == "provider_masked":
+        local["env"]["CLAUDE_CODE_USE_BEDROCK"] = ""
+    if case == "invalid_env":
+        project["env"] = []
+    if case == "invalid_git_pointer":
+        root.mkdir(parents=True)
+        (root / ".git").write_text("not a gitdir pointer\n")
+    (root / ".claude").mkdir(parents=True, exist_ok=True)
+    (root / ".claude" / "settings.json").write_text("{invalid" if case == "invalid_project" else json.dumps(project))
+    (root / ".claude" / "settings.local.json").write_text("{invalid" if case == "invalid_local" else json.dumps(local))
+    cwd.mkdir(parents=True, exist_ok=True)
+    connection.config.runtime.default_cwd = str(cwd)
+    connection.config.save()
+    def auth_files():
+        return {p: p.read_bytes() for directory in {root, cwd, settings.parent}
+                for p in directory.rglob("*") if p.is_file()}
+
+    before = auth_files()
+    if case == "unreadable_project":
+        original_read = Path.read_text
+
+        def read(path, *args, **kwargs):
+            if path == root / ".claude" / "settings.json":
+                raise PermissionError("fixture permission denied")
+            return original_read(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", read)
+
+    native = api.get_claude_auth()
+    state = asyncio.run(api.get_backend_connection("claude"))
+    monkeypatch.setattr(native_router, "load_config_or_default", lambda: connection.config)
+    monkeypatch.setattr(native_router.shutil, "which", lambda _binary: "/fixture/claude")
+    assert native_router.ModelHubRuntimeRouter._default_native_cli_ready("claude") is (expected_auth == "subscription")
+
+    assert state["auth"] == expected_auth
+    assert state["ready"] is (expected_auth != "unknown")
+    assert _signed_in("claude", native) is (expected_auth == "subscription")
+    if expected_auth == "unknown":
+        assert native["ok"] is False  # Not opaque-Keychain evidence a receipt can override.
+    else:
+        assert native["active_auth_mode"] == ("oauth" if expected_auth == "subscription" else "api_key")
+        # Saving/removing a user key must never take ownership of a project key.
+        assert native["has_api_key"] is (case == "project_masks_user_key")
+    assert auth_files() == before
+    public = json.dumps([native, state])
+    for secret in ("fixture-user-key", "fixture-project-key", "fixture-local-token", "fixture-native-oauth", "fixture-root-key"):
+        assert secret not in public
 
 
 @pytest.mark.parametrize("key_var", ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"])

@@ -2077,6 +2077,47 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(harness.account["active_auth_mode"], "none")
         self.assertTrue(harness.account["auth_mode_uncertain"])
 
+    async def test_verified_native_login_does_not_override_project_auth_inputs(self):
+        """Scenario: AUTH-SETUP-910 — real readback must veto a competing source."""
+        from vibe.claude_config import get_claude_credentials_path
+
+        for case, project_input in (
+            ("project_key", json.dumps({"env": {"ANTHROPIC_API_KEY": "fixture-project-key"}})),
+            ("invalid_project", "{invalid"),
+            ("reader_failure", "{}"),
+            ("invalid_payload", "{}"),
+        ):
+            with self.subTest(case=case):
+                state_dir = tempfile.TemporaryDirectory()
+                self.addCleanup(state_dir.cleanup)
+                harness = CustodiedNativeOAuthScenarioHarness(Path(state_dir.name))
+                project = Path(state_dir.name) / "项目"
+                (project / ".claude").mkdir(parents=True)
+                (project / ".claude" / "settings.local.json").write_text(project_input)
+                harness.agent_auth.controller.config.runtime.default_cwd = str(project)
+                harness.agent_auth.controller.config.save()
+                harness.service.native_oauth_adapter._auth_status_reader = (
+                    Mock(side_effect=OSError("fixture observer unavailable")) if case == "reader_failure"
+                    else Mock(return_value=None) if case == "invalid_payload"
+                    else lambda _backend: get_claude_auth()
+                )
+                started = await harness.service.oauth_start({"vendor": "anthropic", "channel": "native_cli"})
+                flow_id = started["flow"]["flow_id"]
+                await harness.service.oauth_submit({"flow_id": flow_id, "value": "auth-code#oauth-state"})
+                await harness.login_settled(flow_id)
+                # The fake CLI's persisted result, observed by the real reader.
+                path = get_claude_credentials_path()
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(json.dumps({"claudeAiOauth": {"accessToken": "fixture-verified-oauth"}}))
+
+                completed = await harness.service.oauth_status(flow_id)
+
+                harness.agent_auth._verify_login.assert_awaited_once()
+                self.assertEqual(completed["source"]["state"]["status"], "needs_action")
+                self.assertFalse(harness.agent_auth.get_web_flow_status(flow_id)["source_status"]["signed_in"])
+                self.assertEqual((project / ".claude" / "settings.local.json").read_text(), project_input)
+                self.assertNotIn("fixture-verified-oauth", json.dumps(completed))
+
     async def test_hub_reauth_requires_acknowledgement_and_reaches_consistent_terminal(self):
         """Scenario: AUTH-SETUP-109.
 

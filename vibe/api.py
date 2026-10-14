@@ -11344,9 +11344,9 @@ def get_claude_auth(*, connection_observation: bool = False) -> dict:
 
     Claude differs from Codex in two structural ways:
 
-    1. ``~/.claude/settings.json`` is the source of truth for API-key
-       env overrides because Claude Code layers that file on top of the
-       inherited process env at launch.
+    1. Claude's user, project and local settings override inherited auth env
+       for the configured default workdir. Saved-key metadata remains owned
+       by the user settings file, not by project credentials.
     2. Native OAuth presence is read without launching Claude. An opaque or
        unreadable Keychain container is uncertain, not evidence of logout.
 
@@ -11359,10 +11359,9 @@ def get_claude_auth(*, connection_observation: bool = False) -> dict:
     store cannot prove OAuth.
     """
     from vibe.claude_config import (
-        build_claude_subprocess_env,
+        read_claude_launch_auth_env,
         read_claude_auth_state,
         read_claude_settings_env,
-        read_claude_settings_oauth_token,
     )
     from vibe.native_oauth_store import read_native_oauth
 
@@ -11370,6 +11369,7 @@ def get_claude_auth(*, connection_observation: bool = False) -> dict:
     settings_env = read_claude_settings_env()
     settings_key = settings_env.get("ANTHROPIC_API_KEY") or settings_env.get("ANTHROPIC_AUTH_TOKEN") or ""
     settings_base = settings_env.get("ANTHROPIC_BASE_URL") or ""
+    config = None
     cfg = None
 
     try:
@@ -11387,18 +11387,21 @@ def get_claude_auth(*, connection_observation: bool = False) -> dict:
     configured_base = configured_base.strip() if isinstance(configured_base, str) else ""
     effective_key = settings_key or configured_key
     effective_base = settings_base or configured_base
-    # Use the runtime's auth precedence, rather than duplicating the rules for
-    # legacy shell keys, explicit OAuth masking, and native settings.
-    launch_env = build_claude_subprocess_env(cfg)
-    launch_env.update(settings_env)
+    # The same observer supplies Direct and retained native-Source readiness;
+    # do not duplicate credential-source or precedence rules here.
+    try:
+        launch_env = read_claude_launch_auth_env(config)
+    except (OSError, ValueError, UnicodeError):
+        # A failed settings observation must not be treated like an opaque
+        # Keychain item that a verified login receipt can vouch for.
+        return {"ok": False, "error": "claude_auth_observation_unavailable",
+                "message": backend_t("error.claudeAuthObservationUnavailable")}
     launch_key = launch_env.get("ANTHROPIC_API_KEY") or launch_env.get("ANTHROPIC_AUTH_TOKEN")
     if connection_observation and launch_key:
         return {"ok": True, "active_auth_mode": "api_key"}
 
     oauth_signed_in: bool | None
-    settings_oauth_token = read_claude_settings_oauth_token()
-    oauth_token = settings_oauth_token if settings_oauth_token is not None else launch_env.get("CLAUDE_CODE_OAUTH_TOKEN")
-    if oauth_token:
+    if launch_env.get("CLAUDE_CODE_OAUTH_TOKEN"):
         oauth_signed_in = True
     else:
         try:

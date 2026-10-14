@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sys
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -336,16 +337,109 @@ def read_claude_settings_env(home: Path | None = None) -> Dict[str, str]:
     return out
 
 
-def read_claude_settings_oauth_token(home: Path | None = None) -> str | None:
-    """Read the user-settings setup token for observation, never mutation.
+def _claude_auth_settings_paths(cwd: Path | None) -> tuple[Path, ...]:
+    """User/project/local sources, without invoking git or creating a directory.
 
-    ``None`` means no settings override; an empty string masks an inherited
-    token. Keep this separate from RELEVANT_ENV_KEYS: auth saves/backups must
-    continue preserving this Claude-owned field rather than clearing it.
+    Since Claude 2.1.211 the local file may live at the owned repository's
+    main checkout, above the legacy cwd-local file. Shared project settings
+    remain cwd-relative. Unsupported Git metadata must not silently hide auth.
     """
-    env_block = _load_settings(get_claude_settings_path(home)).get("env")
-    raw = env_block.get("CLAUDE_CODE_OAUTH_TOKEN") if isinstance(env_block, dict) else None
-    return raw.strip() if isinstance(raw, str) else None
+    paths = [get_claude_settings_path()]
+    if cwd is None:
+        return tuple(paths)
+    paths.extend(cwd / ".claude" / name for name in ("settings.json", "settings.local.json"))
+    if sys.platform == "win32":
+        return tuple(dict.fromkeys(paths))
+
+    def owned(root: Path) -> bool:
+        return root != Path.home().resolve() and all(
+            path.stat().st_uid == os.getuid()
+            for path in (root, root / ".git", root / ".claude") if path.exists()
+        )
+
+    def git_line(path: Path) -> str:
+        with path.open(encoding="utf-8") as handle:
+            value = handle.read(8193).strip()
+        if not value or len(value) > 8192 or "\n" in value:
+            raise ValueError("unsupported Git metadata")
+        return value
+
+    for root in (cwd, *cwd.parents):
+        marker = root / ".git"
+        if not marker.exists():
+            continue
+        if not owned(root):
+            break
+        if marker.is_file():
+            pointer = git_line(marker)
+            if not pointer.startswith("gitdir: "):
+                raise ValueError("unsupported Git metadata")
+            gitdir = (root / pointer.removeprefix("gitdir: ").strip()).resolve()
+            if not (gitdir / "HEAD").is_file():
+                raise ValueError("unreadable Git directory")
+            common = gitdir / "commondir"
+            if common.exists():
+                common_dir = (gitdir / git_line(common)).resolve()
+                root = common_dir.parent
+                if not common_dir.is_dir() or (root / ".git").resolve() != common_dir:
+                    raise ValueError("unsupported Git common directory")
+                if not owned(root):
+                    break
+        elif not marker.is_dir() or not (marker / "HEAD").is_file():
+            raise ValueError("unsupported Git metadata")
+        paths.append(root / ".claude" / "settings.local.json")
+        break
+    return tuple(dict.fromkeys(paths))
+
+
+def read_claude_launch_auth_env(config: Any | None) -> Dict[str, str]:
+    """Observe static launch auth separately from user-settings mutations.
+
+    Merge the runtime env with user/project/local settings, preserving blank
+    overrides. Unreadable/invalid or dynamic authentication is not inferable
+    from native OAuth presence; raise rather than execute helpers or guess.
+    The configured default cwd is not a claim about every Session's workdir.
+    """
+    cfg = getattr(getattr(config, "agents", None), "claude", None)
+    candidates = (
+        getattr(cfg, "cwd", None),
+        getattr(getattr(config, "runtime", None), "default_cwd", None),
+        getattr(config, "default_cwd", None),
+    )
+    raw_cwd = next((raw.strip() for raw in candidates if isinstance(raw, str) and raw.strip()), None)
+    cwd = Path(raw_cwd).expanduser().resolve() if raw_cwd is not None else None
+    env = build_claude_subprocess_env(cfg)
+    helper = False
+    for path in _claude_auth_settings_paths(cwd):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            continue
+        if not isinstance(payload, dict) or not isinstance(payload.get("env", {}), dict):
+            raise ValueError("invalid Claude settings")
+        for key, value in payload.get("env", {}).items():
+            if not isinstance(value, str):
+                raise ValueError("invalid Claude settings env")
+            if key.startswith(("ANTHROPIC_", "CLAUDE_")):
+                env[key] = value.strip()
+        if "apiKeyHelper" in payload:
+            value = payload["apiKeyHelper"]
+            if not isinstance(value, str):
+                raise ValueError("invalid Claude settings helper")
+            helper = bool(value.strip())
+    unsupported_selection = any(
+        env.get(name, "").lower() not in {"", "0", "false", "no", "off"}
+        for name in ("CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY",
+                     "CLAUDE_CODE_USE_ANTHROPIC_AWS", "CLAUDE_CODE_USE_MANTLE", "CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST",
+                     "CLAUDE_CODE_SIMPLE")
+    )
+    if unsupported_selection or any(env.get(name) for name in (
+        "ANTHROPIC_PROFILE", "ANTHROPIC_FEDERATION_RULE_ID", "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR",
+    )):
+        raise ValueError("external Claude authentication is not locally observable")
+    if helper and not (env.get("ANTHROPIC_API_KEY") or env.get("ANTHROPIC_AUTH_TOKEN")):
+        raise ValueError("Claude credential helper is not locally observable")
+    return env
 
 
 def restore_claude_settings_env(env_values: Dict[str, str], home: Path | None = None) -> None:

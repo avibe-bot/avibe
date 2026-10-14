@@ -22,6 +22,7 @@ The fixes:
 from __future__ import annotations
 
 import json
+import os
 import threading
 from pathlib import Path
 
@@ -45,7 +46,9 @@ def direct_native_auth(monkeypatch):
 
     _direct_config().save()
     monkeypatch.setattr(native_oauth_store, "_KEYCHAIN_STORE", native_oauth_store._FixtureKeychainStore())
-    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    for name in tuple(os.environ):
+        if name.startswith(("ANTHROPIC_", "CLAUDE_")) and name != "CLAUDE_CONFIG_DIR":
+            monkeypatch.delenv(name, raising=False)
 
 
 def test_codex_reads_base_url_from_user_titlecase_provider(tmp_path: Path) -> None:

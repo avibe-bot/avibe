@@ -96,6 +96,8 @@ def _account_label(status: Mapping[str, Any]) -> str | None:
 
 
 def _signed_in(backend: str, status: Mapping[str, Any]) -> bool:
+    if backend == "claude" and status.get("ok") is False:
+        return False
     active_auth_mode = status.get("active_auth_mode")
     if active_auth_mode == "oauth":
         return True
@@ -317,7 +319,10 @@ class AgentAuthNativeOAuthAdapter:
             if not isinstance(status, Mapping):
                 raise TypeError("invalid auth status")
         except Exception:  # noqa: BLE001
-            return NativeOAuthSourceStatus(signed_in=True, account_label=None)
+            # Claude must first exclude competing user/project/local inputs.
+            # A failed reader cannot stand in for that check. Preserve Codex's
+            # existing verified-flow/keyring contract independently.
+            return NativeOAuthSourceStatus(signed_in=backend == "codex", account_label=None)
         return NativeOAuthSourceStatus(
             signed_in=_signed_in(backend, status),
             account_label=_account_label(status),
