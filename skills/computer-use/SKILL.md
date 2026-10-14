@@ -24,7 +24,7 @@ vibe computer set-value --arg pid=123 --arg value=enabled --arg element_token=el
 vibe computer clipboard read --arg include_text=true
 vibe computer clipboard write --arg text="copied text"
 vibe computer launch --arg bundle_id=com.example.App
-vibe computer quit --arg pid=123
+vibe computer force-quit --arg pid=123
 ```
 
 Every leaf accepts `--args-json OBJECT`, `--args-json @FILE`, repeatable
@@ -33,6 +33,37 @@ Every leaf accepts `--args-json OBJECT`, `--args-json @FILE`, repeatable
 the resulting path. `observe window` and `zoom` are the observation operations
 that establish the exact window state required before input.
 
+`--json` keeps the structured driver object at `result.structuredContent`.
+The legacy `content` text block remains available for existing callers.
+
+During one Agent Turn, consecutive `vibe computer` calls in the same Avibe
+Session share the driver session. Element tokens from one observation stay
+valid for following calls until a newer observation replaces that snapshot, so
+a short script can observe once, click several times, and observe once at the
+end:
+
+```text
+vibe computer observe window --arg pid=123 --arg window_id=456
+vibe computer click --arg pid=123 --arg window_id=456 --arg element_token=el_1
+vibe computer click --arg pid=123 --arg window_id=456 --arg element_token=el_2
+vibe computer observe window --arg pid=123 --arg window_id=456
+```
+
+Each call still passes the Controller's safety checks. A later observation
+replaces the earlier element tokens. At the start of every later Agent Turn,
+observe the target again before input and do not reuse tokens from the prior
+Turn.
+
+QQ, WeChat, and similar Electron applications may return only window chrome and
+menus on the first observation after launch. The driver enables the
+accessibility tree and waits up to 4 seconds; after a timeout it backs off for
+30 seconds. Wait about 30 seconds and observe again before concluding that the
+application text is unreadable.
+
+`force-quit` maps to the driver's `kill_app` operation and sends SIGKILL. It
+can lose unsaved work; use the application's cooperative close flow first and
+reserve this command for an explicit forced termination.
+
 Argument contract:
 
 - Window-targeted operations use `pid` and `window_id` for the exact target.
@@ -40,9 +71,10 @@ Argument contract:
   operation's documented `x`/`y` or drag fields.
 - `observe window` and `zoom` accept the exact window fields; `zoom` also
   accepts its rectangle fields such as `x1`, `y1`, `x2`, and `y2`.
-- `type`, `key`, `hotkey`, `scroll`, `set-value`, `launch`, `quit`, and
-  clipboard write use their named driver fields, for example `text`, `key`,
-  `keys`, `direction`, `value`, `bundle_id` or `urls`, `pid`, and `text`.
+- `type`, `key`, `hotkey`, `scroll`, `set-value`, `launch`, and clipboard
+  write use their named driver fields, for example `text`, `key`, `keys`,
+  `direction`, `value`, `bundle_id` or `urls`, and `text`.
+  `vibe computer force-quit --arg pid=123` uses the target `pid`.
 - Use `--args-json` for nested values such as `keys` arrays or `urls`; repeated
   `--arg` values are parsed as JSON when valid. The exact allowlisted field
   validation remains in the Controller-owned driver boundary.

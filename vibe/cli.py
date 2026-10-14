@@ -826,7 +826,14 @@ def cmd_computer(args) -> int:
             print(format_human_result(tool, result, translate=translate))
         return 1
 
-    screenshot_path = write_screenshot(tool, result, args.output)
+    try:
+        screenshot_path = write_screenshot(tool, result, args.output)
+    except ComputerCliError as exc:
+        raise TaskCliError(
+            i18n_t(exc.key, language, **exc.params),
+            code="computer_use_screenshot_missing",
+            help_command="vibe computer --help",
+        ) from exc
     if screenshot_path:
         body["screenshot_path"] = screenshot_path
     if args.json:
@@ -17349,7 +17356,7 @@ def build_parser():
     )
     computer_subparsers = computer_parser.add_subparsers(
         dest="computer_command",
-        metavar="{observe,zoom,click,type,key,hotkey,scroll,drag,set-value,clipboard,launch,quit}",
+        metavar="{observe,zoom,click,type,key,hotkey,scroll,drag,set-value,clipboard,launch,force-quit}",
     )
     computer_subparsers.required = True
 
@@ -17432,7 +17439,7 @@ def build_parser():
         ("drag", "drag"),
         ("set-value", "setValue"),
         ("launch", "launch"),
-        ("quit", "quit"),
+        ("force-quit", "forceQuit"),
     ):
         leaf = computer_subparsers.add_parser(
             name,
@@ -19355,7 +19362,7 @@ _CLI_COMMAND_FLOORS: dict[tuple[str, ...], Optional[str]] = {
     ("computer", "clipboard", "read"): "member",
     ("computer", "clipboard", "write"): "member",
     ("computer", "launch"): "member",
-    ("computer", "quit"): "member",
+    ("computer", "force-quit"): "member",
     # Host scope, not instance scope: these act on this machine's screen and on
     # authored files, and have no role contract to repair here.
     ("screenshot",): None,

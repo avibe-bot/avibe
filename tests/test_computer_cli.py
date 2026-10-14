@@ -17,6 +17,7 @@ import pytest
 
 from core import internal_server, session_turns
 from core.computer_cli import (
+    _COMPUTER_ERROR_I18N_KEYS,
     COMPUTER_CLI_TOOLS,
     build_driver_arguments,
     format_human_result,
@@ -33,6 +34,7 @@ from vibe.i18n import t as i18n_t
 def _structured(payload: dict) -> dict:
     return {
         "isError": False,
+        "structuredContent": payload,
         "content": [
             {
                 "type": "text",
@@ -70,7 +72,7 @@ def test_parser_covers_the_allowlisted_driver_operations_without_session_id() ->
         (["computer", "clipboard", "read"], ("clipboard", "read")),
         (["computer", "clipboard", "write"], ("clipboard", "write")),
         (["computer", "launch"], ("launch",)),
-        (["computer", "quit"], ("quit",)),
+        (["computer", "force-quit"], ("force-quit",)),
     ]
 
     parser = cli.build_parser()
@@ -87,6 +89,8 @@ def test_parser_covers_the_allowlisted_driver_operations_without_session_id() ->
 
     with pytest.raises(SystemExit):
         parser.parse_args(["computer", "click", "--session-id", "manual"])
+    with pytest.raises(SystemExit):
+        parser.parse_args(["computer", "quit"])
 
 
 def test_packaged_skill_examples_parse_and_match_the_pinned_driver_schema() -> None:
@@ -96,6 +100,8 @@ def test_packaged_skill_examples_parse_and_match_the_pinned_driver_schema() -> N
         for line in skill.splitlines()
         if line.strip().startswith("vibe computer ")
     ]
+    commands.extend(re.findall(r"`(vibe computer [^`]+)`", skill))
+    commands = list(dict.fromkeys(commands))
     snapshot = json.loads(
         Path("desktop/cua-driver/tools-v0.31.0.json").read_text(encoding="utf-8")
     )
@@ -128,7 +134,6 @@ def test_packaged_skill_examples_parse_and_match_the_pinned_driver_schema() -> N
         covered_tools.add(tool)
 
     assert covered_tools == set(COMPUTER_CLI_TOOLS.values())
-    assert len(commands) == len(COMPUTER_CLI_TOOLS)
     assert re.findall(
         r"vibe computer clipboard read[^\n]*",
         skill,
@@ -249,7 +254,74 @@ def test_cmd_computer_binds_the_caller_session_and_prints_structured_result(
     }
     payload = json.loads(capsys.readouterr().out)
     assert payload["session_id"] == "ses-cli"
+    assert payload["result"]["structuredContent"]["apps"][0]["name"] == "Fixture"
     assert payload["result"]["content"][0]["type"] == "text"
+
+
+def test_computer_cli_error_translations_exist_in_all_supported_languages() -> None:
+    keys = {*_COMPUTER_ERROR_I18N_KEYS.values(), "computer.cli.error.screenshotMissing"}
+    for catalog_path in sorted(Path("vibe/i18n").glob("*.json")):
+        catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
+        for key in keys:
+            value: object = catalog
+            for part in key.split("."):
+                assert isinstance(value, dict) and part in value, (
+                    f"{catalog_path.stem} is missing {key}"
+                )
+                value = value[part]
+            assert isinstance(value, str) and value.strip(), (
+                f"{catalog_path.stem} has an empty translation for {key}"
+            )
+
+
+@pytest.mark.parametrize(
+    ("language", "expected"),
+    [
+        (
+            "en",
+            "No screenshot is available for this result. The window may be hidden or "
+            "minimized, or capture may be unavailable.",
+        ),
+        (
+            "zh",
+            "此结果没有可用的截图。窗口可能已隐藏或最小化，也可能是截图不可用。",
+        ),
+    ],
+)
+def test_cmd_computer_localizes_missing_screenshot_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    language: str,
+    expected: str,
+) -> None:
+    monkeypatch.setenv("AVIBE_SESSION_ID", "ses-cli")
+    monkeypatch.setattr(cli, "_configured_cli_language", lambda: language)
+
+    with patch(
+        "vibe.internal_client.computer_use_sync",
+        return_value={
+            "status_code": 200,
+            "body": {
+                "ok": True,
+                "tool": "get_window_state",
+                "result": _structured({"pid": 7, "window_id": 9}),
+            },
+        },
+    ):
+        args = cli.build_parser().parse_args(
+            [
+                "computer",
+                "observe",
+                "window",
+                "--output",
+                str(tmp_path / "window.png"),
+            ]
+        )
+        with pytest.raises(cli.TaskCliError) as exc_info:
+            cli.cmd_computer(args)
+
+    assert str(exc_info.value) == expected
+    assert "computer.cli.error.screenshotMissing" not in str(exc_info.value)
 
 
 @pytest.mark.parametrize(
@@ -312,6 +384,10 @@ def test_cmd_computer_reports_driver_error_before_writing_screenshot(
                 "tool": expected_tool,
                 "result": {
                     "isError": True,
+                    "structuredContent": {
+                        "code": "desktop_busy",
+                        "params": {},
+                    },
                     "content": [
                         {
                             "type": "text",
@@ -398,6 +474,13 @@ def test_json_unavailable_error_keeps_code_and_params(
         "tool": "list_apps",
         "result": {
             "isError": True,
+            "structuredContent": {
+                "code": "computer_use_unavailable",
+                "params": {
+                    "status": "needs_permission",
+                    "reason": "screen_recording",
+                },
+            },
             "content": [
                 {
                     "type": "text",
@@ -424,7 +507,11 @@ def test_json_unavailable_error_keeps_code_and_params(
         )
         assert cli.cmd_computer(args) == 1
 
-    assert json.loads(capsys.readouterr().out) == body
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["result"]["structuredContent"]["params"]["reason"] == (
+        "screen_recording"
+    )
+    assert payload == body
 
 
 def test_cmd_computer_localizes_controller_error_in_zh(
