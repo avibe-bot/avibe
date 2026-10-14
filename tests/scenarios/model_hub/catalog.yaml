@@ -175,7 +175,7 @@ scenarios:
       - tests/test_model_hub_hosted_tools_resolution.py::test_a_hops_facts_come_from_priors_and_refusals
       - tests/test_model_hub_hosted_tools_resolution.py::test_the_executor_chain_follows_the_users_order_then_vibeys
       - tests/test_model_hub_hosted_tools_resolution.py::test_the_image_enum_is_deterministic_with_the_default_first
-      - tests/test_model_hub_hosted_tools_resolution.py::test_resolution_states_v2_facts_in_todays_hop_shape
+      - tests/test_model_hub_hosted_tools_resolution.py::test_a_turn_freezes_its_tools_executors_and_image_enum_and_each_hop_states_its_own_facts
   - id: MH-HOSTED-002
     name: Absent hosted-tools config means every tool is on; an rc-era section keeps each tool's enabled, and a broken entry takes only its own defaults without the whole-section Model Hub reset
     status: covered
@@ -509,7 +509,7 @@ scenarios:
       - tests/test_vibey_backend_registration.py::test_a_lost_vibey_model_hand_off_heals_on_the_next_start
       - tests/test_controller_im_ready.py::test_runtime_services_start_when_post_update_notification_fails
   - id: MH-HOSTED-GATEWAY-002
-    name: A pinned Vibey request is served only by its Source and unchanged; every refusal or pre-output failure there is pin_unavailable, and unpinned hosted content is refused before anything runs
+    name: A pinned Vibey request is served only by its Source and unchanged; every refusal or pre-output failure there is pin_unavailable, which names the refused feature only when a narrow hosted rule fired, and unpinned hosted content is refused before anything runs
     status: covered
     kind: contract
     layer: contract
@@ -517,6 +517,7 @@ scenarios:
     related_tests:
       - tests/test_model_hub_hosted_pinning.py::test_the_portable_resend_fails_over_and_the_turn_settles_on_it
       - tests/test_model_hub_hosted_pinning.py::test_unpinned_hosted_content_is_refused_before_anything_runs
+      - tests/test_model_hub_hosted_pinning.py::test_a_refusal_naming_the_pinned_hosted_content_is_handed_back_and_learned
   - id: MH-HOSTED-GATEWAY-003
     name: Hosted declarations are recognized by any vendor's type, and only replayed items outside the in-flight response need replay evidence
     status: covered
@@ -2429,7 +2430,7 @@ scenarios:
     layer: e2e-auto
     test: tests/e2e/test_model_hub_service_acceptance.py::test_fresh_install_serves_vibey_and_claude_through_the_hub_and_reaps_an_orphaned_engine
   - id: MH-HOSTED-GATEWAY-004
-    name: A proxied hosted call runs one native request on its bound executor, without an effort, and answers its canonical record and execution with the pricing module's cost
+    name: A proxied search runs one native request on the turn's first admitted executor, without an effort, and answers its canonical record and execution with the pricing module's cost and the same positive evidence a native call writes
     status: covered
     kind: contract
     layer: contract
@@ -2439,14 +2440,25 @@ scenarios:
       - tests/test_model_hub_hosted_executor.py::test_an_excerpt_is_the_answer_text_its_citation_belongs_to
       - tests/test_model_hub_hosted_executor.py::test_a_proxied_call_carries_the_pricing_modules_cost
   - id: MH-HOSTED-GATEWAY-005
-    name: A proxied hosted call that cannot complete is a failed record, with an execution only when an executor ran; only a malformed call is an error status
+    name: A proxied search moves down the turn's frozen executor chain only past a Source failure, within one deadline, listing billed attempts; a call that cannot complete is a failed record, with an execution only when an executor ran; only a malformed call, or one its turn cannot make, is an error status
     status: covered
     kind: boundary
     layer: contract
     test: tests/test_model_hub_hosted_executor.py::test_a_proxied_call_that_cannot_complete_is_a_failed_record
     related_tests:
+      - tests/test_model_hub_hosted_executor.py::test_the_chain_moves_on_only_past_a_source_failure
+      - tests/test_model_hub_hosted_executor.py::test_a_call_runs_only_a_tool_its_live_turn_froze
+      - tests/test_model_hub_hosted_executor.py::test_a_turn_keeps_its_tools_and_executor_order_until_the_next_turn
       - tests/test_model_hub_hosted_executor.py::test_a_malformed_proxy_call_is_refused_before_anything_runs
       - tests/test_model_hub_hosted_executor.py::test_a_proxy_call_needs_the_turns_gateway_token
+  - id: MH-HOSTED-GATEWAY-006
+    name: A served response proves only the provider's own completed search item, streamed or buffered, and its positive evidence is written at settlement for a tool the request declared natively
+    status: covered
+    kind: contract
+    layer: contract
+    test: tests/test_model_hub_hosted_evidence.py::test_a_served_response_proves_only_its_own_completed_search_item
+    related_tests:
+      - tests/test_model_hub_hosted_evidence.py::test_a_native_success_is_recorded_at_settlement_for_a_tool_the_request_declared
 next_priority:
   - MH-PROTOCOL-004
   - MH-RUNTIME-001

@@ -3,11 +3,19 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 
 from aiohttp import web
 import pytest
 
+from core.handlers.model_hub.adapter import RawOutcomeKind
+from core.handlers.model_hub.turn_gateway import ModelHubTurnGateway
+from modules.agents.model_hub import ModelHubRuntimeRouter
+from tests.test_model_hub_hosted_pinning import SHELL, _native, _post
+from tests.test_model_hub_hosted_pinning import _sources as _pinned_sources
+from tests.test_model_hub_l3 import LiveInvokeHandle, _outcome
 from tests.test_model_hub_retry_advice import _engine, _invoke
+from tests.test_model_hub_vibey_consumer import _vibey_service
 
 
 def _responses_stream(item: dict, terminal: str) -> bytes:
@@ -90,3 +98,34 @@ async def test_a_served_response_proves_only_its_own_completed_search_item(
         outcome, _forwarded = await _invoke(client, protocol, stream)
 
     assert outcome.hosted_tools == (frozenset({tool}) if tool is not None and terminal == "completed" else frozenset())
+
+
+@pytest.mark.parametrize(("tools", "proven", "recorded"), [
+    # A served response that ran the tool the request declared natively is that tool's success.
+    ([{"type": "x_search"}, SHELL], {"x_search"}, True),
+    # It proves nothing about a tool the request did not declare natively.
+    ([SHELL], {"x_search"}, False),
+    ([{"type": "x_search"}, SHELL], set(), False),
+])
+async def test_a_native_success_is_recorded_at_settlement_for_a_tool_the_request_declared(
+    tmp_path, tools, proven, recorded,
+):
+    """MH-HOSTED-GATEWAY-006: positive evidence is display history, written once the served response settles."""
+
+    primary, fallback = _pinned_sources()
+    served = replace(_outcome(RawOutcomeKind.SUCCESS, source_id=primary.id), hosted_tools=frozenset(proven))
+    service = _vibey_service(tmp_path, [primary, fallback], handles=[LiveInvokeHandle(served, (b"{}",))])
+    gateway = ModelHubTurnGateway(service)
+    router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
+    try:
+        hop = await router.resolve_hop("menu-alias", process_scope="vibey:proof", turn_id="turn-proof")
+        body = {**_native(hop), "tools": tools}
+        native = any(tool.get("type") == "x_search" for tool in tools)
+        assert (await _post(hop, body, pin=primary.id if native else None))[0] == 200
+    finally:
+        await gateway.close()
+    latest = service.capability_evidence.latest_success("x_search")
+    if recorded:
+        assert (latest.source_id, latest.model_id, latest.mode) == (primary.id, "grok-4.6", "native")
+    else:
+        assert latest is None

@@ -9535,8 +9535,8 @@ class ModelHubService:
         """Positive evidence for each natively declared tool the served response proves ran (§3.2).
 
         Display-only history, written after the response completed. It is
-        keyed on the identity that served the response: a Source changed since
-        is not vouched for.
+        keyed on the identity the hop was resolved under: a Source changed
+        since is not vouched for.
         """
 
         proven = resolved.hosted_calls & outcome.hosted_tools
@@ -10107,7 +10107,10 @@ class ModelHubService:
             if source is None or target_model is None:
                 raise AssertionError("runnable hop must have an exact identity")
             verification_pending = source.verification_pending
-            origin = HopOrigin(source.vendor, source.protocol, target_model, source.id) if backend == "vibey" else None
+            origin = (
+                HopOrigin(source.vendor, source.protocol, target_model, source.id, identity_digest(source))
+                if backend == "vibey" else None
+            )
             if source.supply_channel == "native_cli":
                 self._emit_switch(
                     agent=event_agent,
