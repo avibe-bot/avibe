@@ -1760,6 +1760,10 @@ describe('AgentsPage reconnect reconciliation', () => {
     modelCatalog = native;
     fireEvent.pointerEnter(field());
     expect(screen.getByRole('button', { name: 'xhigh', exact: true })).toBeTruthy();
+    // And the Hub-only re-reads end with it: a native read may start a CLI.
+    const directReads = modelCatalogReads;
+    fireEvent.pointerEnter(field());
+    expect(modelCatalogReads).toBe(directReads);
   });
 
   it('drops an effort-menu read still out when Settings covers the page', async () => {

@@ -61,4 +61,19 @@ describe('useSourceNames', () => {
     act(() => rerender({ wanted: true, active: true, viewer: 'editor' }));
     await waitFor(() => expect(result.current).toBeNull());
   });
+
+  it('hides names read for another viewer at once, before the new viewer\'s read answers', async () => {
+    let answer!: (sources: Source[]) => void;
+    vi.spyOn(modelsApi, 'listSources')
+      .mockResolvedValueOnce(named('relay-gpt'))
+      .mockImplementationOnce(() => new Promise<Source[]>((resolve) => { answer = resolve; }));
+    const { result, rerender } = mount();
+    await waitFor(() => expect(result.current).toEqual({ src_relaygpt1: 'relay-gpt' }));
+
+    act(() => rerender({ wanted: true, active: true, viewer: 'editor' }));
+    // The Editor's read is still out: nothing the Member read shows meanwhile.
+    expect(result.current).toBeNull();
+    await act(async () => { answer(named('relay-gpt')); });
+    expect(result.current).toEqual({ src_relaygpt1: 'relay-gpt' });
+  });
 });

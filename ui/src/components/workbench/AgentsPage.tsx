@@ -2121,7 +2121,9 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, ca
   const hubKnownRef = useRef(false);
   const takeModelCatalog = useCallback((backend: string, result: BackendModels) => {
     if (!supersedesHubAnswer(result, hubKnownRef.current)) return;
+    // A confirmed Direct answer ends the Hub-only re-reads; an unread Hub got here only if none was known.
     if (result.effortMenus !== undefined) hubKnownRef.current = true;
+    else if (!result.hubUnread) hubKnownRef.current = false;
     applyModelCatalog(backend, result);
   }, [applyModelCatalog]);
   useEffect(() => {

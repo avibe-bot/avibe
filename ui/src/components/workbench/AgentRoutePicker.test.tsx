@@ -379,6 +379,13 @@ describe('AgentRoutePicker', () => {
     await openMenu(user);
     expect(effortColumn().getByRole('button', { name: /chat\.picker\.effortOptions\.low/ }).textContent)
       .toBe('chat.picker.effortOptions.low');
+    await user.keyboard('{Escape}');
+
+    // And it is cached like any Direct list again: reopening reads nothing (a native
+    // read may start a CLI).
+    const reads = catalogReads;
+    await openMenu(user);
+    expect(catalogReads).toBe(reads);
   });
 
   it('keeps a refused saved effort when the current model is chosen again', async () => {

@@ -16,7 +16,9 @@ import { modelsApi } from '../components/settings/models/modelsApi';
  * caller says what it can without the names.
  */
 export function useSourceNames(wanted: boolean, surfaceActive: boolean, viewer: string): Record<string, string> | null {
-  const [names, setNames] = useState<Record<string, string> | null>(null);
+  // The names and the viewer they were read for: they show to that viewer only,
+  // so a role change hides them at once, before its own read answers.
+  const [names, setNames] = useState<{ viewer: string; byId: Record<string, string> } | null>(null);
   // One token per activation and viewer: each change of `surfaceActive` starts a
   // new activation, and a change of who is looking (a role change) may change
   // whether the names may be read at all. The last answer belongs to one token.
@@ -28,7 +30,7 @@ export function useSourceNames(wanted: boolean, surfaceActive: boolean, viewer: 
     modelsApi.listSources().then(
       (sources) => {
         if (!current) return;
-        setNames(Object.fromEntries(sources.map((source) => [source.id, source.display_name])));
+        setNames({ viewer, byId: Object.fromEntries(sources.map((source) => [source.id, source.display_name])) });
         setAnsweredFor(activation);
       },
       () => {
@@ -40,6 +42,6 @@ export function useSourceNames(wanted: boolean, surfaceActive: boolean, viewer: 
       },
     );
     return () => { current = false; };
-  }, [wanted, surfaceActive, answeredFor, activation]);
-  return names;
+  }, [wanted, surfaceActive, answeredFor, activation, viewer]);
+  return names !== null && names.viewer === viewer ? names.byId : null;
 }

@@ -245,7 +245,10 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
       (result) => {
         const { models, modelLabels, reasoningOptions, effortMenus, catalogRefreshPending } = result;
         const knownHub = hubBackendsRef.current.has(backend);
+        // A Hub answer marks the backend as Hub, a confirmed Direct one unmarks it
+        // (back to the per-mount Direct cache); an unread Hub changes neither.
         if (effortMenus !== undefined) hubBackendsRef.current.add(backend);
+        else if (!result.hubUnread) hubBackendsRef.current.delete(backend);
         reloadOnNextOpen = Boolean(catalogRefreshPending) || hubBackendsRef.current.has(backend);
         setLoadingModels(false);
         // A transient Hub failure answers with the native list: the last Hub answer stands.
