@@ -80,7 +80,8 @@
       "foregroundConsent": "{{sessionTitle}} 请求前台控制：允许此对话使用",
       "foregroundActive": "前台控制进行中：{{target}}",
       "foregroundAttention": "前台恢复需要处理：{{target}}",
-      "foregroundAllow": "允许此对话使用前台控制"
+      "foregroundAllow": "允许此对话使用前台控制",
+      "foregroundRevoke": "{{sessionTitle}} 前台控制：关闭此对话授权"
     },
     "notifications": {
       "toggle": "通知",

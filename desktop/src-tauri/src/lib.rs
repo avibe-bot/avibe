@@ -177,6 +177,7 @@ struct NativeComputerUseCatalog {
     foreground_active: String,
     foreground_attention: String,
     foreground_allow: String,
+    foreground_revoke: String,
 }
 
 #[cfg(feature = "bundled-runtime")]
@@ -279,15 +280,23 @@ fn computer_use_label(catalog: &NativeComputerUseCatalog, view: &computer_use::M
 
 #[cfg(target_os = "macos")]
 fn computer_use_consent_label(catalog: &NativeComputerUseCatalog, view: &computer_use::MenuView) -> String {
-    view.foreground_pending
+    if let Some(title) = view.foreground_pending.as_deref() {
+        return catalog.foreground_consent.replace("{{sessionTitle}}", title);
+    }
+    view.foreground_granted
         .as_deref()
-        .map(|title| catalog.foreground_consent.replace("{{sessionTitle}}", title))
+        .map(|title| catalog.foreground_revoke.replace("{{sessionTitle}}", title))
         .unwrap_or_else(|| catalog.foreground_allow.clone())
 }
 
 #[cfg(target_os = "macos")]
 fn computer_use_control_enabled(view: &computer_use::MenuView) -> bool {
     !view.initialization_error
+}
+
+#[cfg(target_os = "macos")]
+fn computer_use_consent_control_enabled(view: &computer_use::MenuView) -> bool {
+    view.foreground_pending.is_some() || view.foreground_granted.is_some()
 }
 
 #[cfg(target_os = "macos")]
@@ -683,38 +692,55 @@ fn refresh_native_controls(app: &AppHandle, requested: Option<TrayRuntimeState>)
 }
 
 #[cfg(target_os = "macos")]
+fn apply_computer_use_control(handle: &AppHandle) -> Result<(), String> {
+    let menus = handle
+        .try_state::<NativeMenus>()
+        .ok_or_else(|| "native menus are unavailable".to_owned())?;
+    let controller = handle
+        .try_state::<computer_use::Controller>()
+        .ok_or_else(|| "Computer Use controller is unavailable".to_owned())?;
+    let view = controller.view();
+    let (enabled, checked) = computer_use_menu_state(&view);
+    let catalog = native_catalog_for_locales(sys_locale::get_locales()).computer_use;
+    menus
+        .computer_use
+        .set_text(computer_use_label(&catalog, &view))
+        .and_then(|()| menus.computer_use.set_enabled(enabled))
+        .and_then(|()| menus.computer_use.set_checked(checked))
+        .and_then(|()| {
+            menus
+                .computer_use_consent
+                .set_text(computer_use_consent_label(&catalog, &view))
+        })
+        .and_then(|()| {
+            menus
+                .computer_use_consent
+                .set_enabled(computer_use_consent_control_enabled(&view))
+        })
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(target_os = "macos")]
 fn refresh_computer_use_control(app: &AppHandle) {
     let handle = app.clone();
     let _ = app.run_on_main_thread(move || {
-        let Some(menus) = handle.try_state::<NativeMenus>() else {
-            return;
-        };
-        let Some(controller) = handle.try_state::<computer_use::Controller>() else {
-            return;
-        };
-        let view = controller.view();
-        let (enabled, checked) = computer_use_menu_state(&view);
-        let catalog = native_catalog_for_locales(sys_locale::get_locales()).computer_use;
-        if menus
-            .computer_use
-            .set_text(computer_use_label(&catalog, &view))
-            .and_then(|()| menus.computer_use.set_enabled(enabled))
-            .and_then(|()| menus.computer_use.set_checked(checked))
-            .and_then(|()| {
-                menus
-                    .computer_use_consent
-                    .set_text(computer_use_consent_label(&catalog, &view))
-            })
-            .and_then(|()| {
-                menus
-                    .computer_use_consent
-                    .set_enabled(view.foreground_pending.is_some())
-            })
-            .is_err()
-        {
+        if apply_computer_use_control(&handle).is_err() {
             eprintln!("failed to refresh native Computer Use control");
         }
     });
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) async fn refresh_computer_use_control_and_wait(app: &AppHandle) -> Result<(), String> {
+    let handle = app.clone();
+    let (reply, result) = tokio::sync::oneshot::channel();
+    app.run_on_main_thread(move || {
+        let _ = reply.send(apply_computer_use_control(&handle));
+    })
+    .map_err(|error| error.to_string())?;
+    result
+        .await
+        .map_err(|_| "native Computer Use indicator acknowledgement closed".to_owned())?
 }
 
 fn refresh_latest_tray(app: &AppHandle) {
@@ -2057,7 +2083,7 @@ pub fn run() {
                 }
                 #[cfg(target_os = "macos")]
                 COMPUTER_USE_CONSENT_MENU_ID => {
-                    app.state::<computer_use::Controller>().grant_foreground_consent();
+                    app.state::<computer_use::Controller>().toggle_foreground_consent();
                 }
                 _ => {}
             }
@@ -2430,6 +2456,27 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(computer_use_menu_state(&failed_on), (false, true));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn foreground_consent_control_toggles_between_pending_granted_and_off() {
+        let catalog = native_catalog_for_locales(["en-US".to_owned()]).computer_use;
+        let pending = computer_use::MenuView {
+            foreground_pending: Some("QQ conversation".to_owned()),
+            ..Default::default()
+        };
+        assert!(computer_use_consent_control_enabled(&pending));
+        assert!(computer_use_consent_label(&catalog, &pending).contains("Allow"));
+
+        let granted = computer_use::MenuView {
+            foreground_granted: Some("QQ conversation".to_owned()),
+            ..Default::default()
+        };
+        assert!(computer_use_consent_control_enabled(&granted));
+        assert!(computer_use_consent_label(&catalog, &granted).contains("Turn off"));
+
+        assert!(!computer_use_consent_control_enabled(&computer_use::MenuView::default()));
     }
 
     #[test]

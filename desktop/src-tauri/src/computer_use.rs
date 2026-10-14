@@ -1,7 +1,7 @@
 //! macOS adapter for the desktop-owned computer-use lifecycle.
 
-use std::collections::HashSet;
-use std::ffi::c_void;
+use std::collections::HashMap;
+use std::ffi::{c_char, c_void, CString};
 use std::fs::File;
 use std::io::{self, Read};
 use std::os::unix::ffi::OsStrExt;
@@ -60,6 +60,11 @@ const SOCKET_FLAVOR_HEX_BYTES: usize = 12;
 const DAEMON_STDERR_TAIL_BYTES: usize = 8 * 1024;
 const FOREGROUND_CONTROL_SOCKET_FILE: &str = "foreground-control.sock";
 const FOREGROUND_TITLE_LIMIT: usize = 256;
+const AX_MESSAGING_TIMEOUT_SECONDS: f32 = 1.0;
+const K_AX_ERROR_SUCCESS: i32 = 0;
+const K_CF_STRING_ENCODING_UTF8: u32 = 0x0800_0100;
+
+type AXUIElementRef = *mut c_void;
 
 fn driver_command(driver: &Path) -> Command {
     let mut command = Command::new(driver);
@@ -75,6 +80,16 @@ fn driver_command(driver: &Path) -> Command {
 unsafe extern "C" {
     fn AXIsProcessTrusted() -> u8;
     fn AXIsProcessTrustedWithOptions(options: *const c_void) -> u8;
+    fn AXUIElementCreateApplication(pid: i32) -> AXUIElementRef;
+    fn AXUIElementCopyAttributeValue(
+        element: AXUIElementRef,
+        attribute: *const c_void,
+        value: *mut *const c_void,
+    ) -> i32;
+    fn AXUIElementPerformAction(element: AXUIElementRef, action: *const c_void) -> i32;
+    fn AXUIElementSetAttributeValue(element: AXUIElementRef, attribute: *const c_void, value: *const c_void) -> i32;
+    fn AXUIElementSetMessagingTimeout(element: AXUIElementRef, timeout_in_seconds: f32) -> i32;
+    fn _AXUIElementGetWindow(element: AXUIElementRef, window_id: *mut u32) -> i32;
     static kAXTrustedCheckOptionPrompt: *const c_void;
 }
 
@@ -89,6 +104,10 @@ unsafe extern "C" {
         value_callbacks: *const c_void,
     ) -> *const c_void;
     fn CFRelease(value: *const c_void);
+    fn CFStringCreateWithCString(allocator: *const c_void, c_string: *const c_char, encoding: u32) -> *const c_void;
+    fn CFArrayGetCount(array: *const c_void) -> isize;
+    fn CFArrayGetValueAtIndex(array: *const c_void, index: isize) -> *const c_void;
+    static kCFBooleanFalse: *const c_void;
     static kCFBooleanTrue: *const c_void;
 }
 
@@ -113,6 +132,7 @@ pub(crate) struct MenuView {
     pub save_failed: bool,
     pub runtime_refused: bool,
     pub foreground_pending: Option<String>,
+    pub foreground_granted: Option<String>,
     pub foreground_active: Option<String>,
     pub foreground_attention: Option<String>,
 }
@@ -129,6 +149,7 @@ impl Default for MenuView {
             save_failed: false,
             runtime_refused: false,
             foreground_pending: None,
+            foreground_granted: None,
             foreground_active: None,
             foreground_attention: None,
         }
@@ -164,7 +185,7 @@ enum Event {
         request: ForegroundControlRequest,
         reply: oneshot::Sender<Value>,
     },
-    GrantForegroundConsent,
+    ToggleForegroundConsent,
     Shutdown(oneshot::Sender<()>),
 }
 
@@ -223,8 +244,8 @@ impl Controller {
         let _ = self.sender.send(Event::Activated);
     }
 
-    pub(crate) fn grant_foreground_consent(&self) {
-        let _ = self.sender.send(Event::GrantForegroundConsent);
+    pub(crate) fn toggle_foreground_consent(&self) {
+        let _ = self.sender.send(Event::ToggleForegroundConsent);
     }
 
     pub(crate) async fn shutdown(&self) {
@@ -253,10 +274,12 @@ impl Paths {
     fn resolve(app: &AppHandle) -> Result<Self, Box<dyn std::error::Error>> {
         let state_dir = configured_path(app.path().app_data_dir()?, STATE_DIR_ENV);
         std::fs::create_dir_all(&state_dir)?;
-        let foreground_control_socket = state_dir.join(FOREGROUND_CONTROL_SOCKET_FILE);
         let owner_uid = std::fs::metadata(&state_dir)?.uid();
         let socket = short_socket_path(&state_dir, owner_uid);
-        ensure_private_socket_directory(socket.parent().expect("socket directory"), owner_uid)?;
+        let socket_directory = socket.parent().expect("socket directory");
+        ensure_private_socket_directory(socket_directory, owner_uid)?;
+        let foreground_control_socket = short_foreground_control_socket_path(&state_dir, owner_uid);
+        socket_path_preflight(&foreground_control_socket).map_err(io::Error::other)?;
         let executable = std::env::current_exe()?;
         let resource_dir = app.path().resource_dir()?;
         let driver = configured_path(bundled_driver_path(&executable), DRIVER_PATH_ENV);
@@ -288,6 +311,13 @@ fn short_socket_path(state_dir: &Path, owner_uid: u32) -> PathBuf {
     PathBuf::from("/tmp")
         .join(format!("avibe-cua-{owner_uid}-{flavor}"))
         .join(COMPUTER_USE_SOCKET_FILE)
+}
+
+fn short_foreground_control_socket_path(state_dir: &Path, owner_uid: u32) -> PathBuf {
+    short_socket_path(state_dir, owner_uid)
+        .parent()
+        .expect("short Computer Use socket directory")
+        .join(FOREGROUND_CONTROL_SOCKET_FILE)
 }
 
 fn ensure_private_socket_directory(path: &Path, owner_uid: u32) -> io::Result<()> {
@@ -384,9 +414,10 @@ struct RuntimeState {
     assets_valid: bool,
     pending_write: Option<ComputerUseRecord>,
     started_at: Instant,
-    foreground_consent_sessions: HashSet<String>,
+    foreground_consent_sessions: HashMap<String, String>,
     pending_foreground: Option<(String, String)>,
     foreground_active_session: Option<String>,
+    deferred_foreground_stop: Option<LifecycleDirective>,
 }
 
 impl RuntimeState {
@@ -434,9 +465,10 @@ impl RuntimeState {
             assets_valid,
             pending_write: None,
             started_at: Instant::now(),
-            foreground_consent_sessions: HashSet::new(),
+            foreground_consent_sessions: HashMap::new(),
             pending_foreground: None,
             foreground_active_session: None,
+            deferred_foreground_stop: None,
         };
         runtime.host_bundle_id = runtime.app.config().identifier.clone();
         match stored {
@@ -481,9 +513,9 @@ impl RuntimeState {
                             self.permission_probe_finished(id, result);
                         }
                         Event::ForegroundControl { request, reply } => {
-                            let _ = reply.send(self.handle_foreground_control(request));
+                            let _ = reply.send(self.handle_foreground_control(request).await);
                         }
-                        Event::GrantForegroundConsent => self.grant_pending_foreground_consent(),
+                        Event::ToggleForegroundConsent => self.toggle_foreground_consent(),
                         Event::Shutdown(reply) => {
                             self.shutdown().await;
                             let RuntimeState {
@@ -514,6 +546,12 @@ impl RuntimeState {
         if self.lifecycle.enabled() {
             self.invalidate_start_retry();
             let directive = self.lifecycle.toggle_off();
+            if self.foreground_active_session.is_some() {
+                self.expire_foreground_grants(true);
+                self.deferred_foreground_stop = Some(directive);
+                self.publish_view();
+                return;
+            }
             self.clear_foreground_state();
             self.apply(directive).await;
             return;
@@ -577,7 +615,11 @@ impl RuntimeState {
             self.origin = None;
         }
         self.capabilities.begin_adoption();
-        self.clear_foreground_state();
+        if self.foreground_active_session.is_some() {
+            self.expire_foreground_grants(true);
+        } else {
+            self.clear_foreground_state();
+        }
         let directive = self.lifecycle.capabilities(RuntimeSupport::Unknown, silent_grants());
         self.apply(directive).await;
     }
@@ -605,8 +647,13 @@ impl RuntimeState {
             return;
         }
         if self.lifecycle.phase() == ComputerUsePhase::NeedsRuntime {
-            if let Some(directive) =
-                runtime_reprobe_directive(&mut self.lifecycle, &mut self.capabilities, self.origin.as_ref()).await
+            if let Some(directive) = runtime_reprobe_directive(
+                &mut self.lifecycle,
+                &mut self.capabilities,
+                self.origin.as_ref(),
+                silent_grants(),
+            )
+            .await
             {
                 self.apply(directive).await;
             }
@@ -940,7 +987,17 @@ impl RuntimeState {
         crate::refresh_computer_use_control(&self.app);
     }
 
-    fn handle_foreground_control(&mut self, request: ForegroundControlRequest) -> Value {
+    async fn publish_view_and_wait(&self) -> Result<(), String> {
+        self.update_view(|view| {
+            view.enabled = self.lifecycle.enabled();
+            view.phase = self.lifecycle.phase();
+            view.reason = self.lifecycle.reason().map(str::to_owned);
+            view.asset_error = !self.assets_valid;
+        });
+        crate::refresh_computer_use_control_and_wait(&self.app).await
+    }
+
+    async fn handle_foreground_control(&mut self, request: ForegroundControlRequest) -> Value {
         let session = request.session.trim();
         if session.is_empty() || session.len() > FOREGROUND_TITLE_LIMIT {
             return json!({"ok": false, "error": "invalid_session"});
@@ -955,7 +1012,9 @@ impl RuntimeState {
                 if !self.lifecycle.enabled() || self.lifecycle.phase() != ComputerUsePhase::Ready {
                     return json!({"ok": false, "error": "computer_use_unavailable"});
                 }
-                if self.foreground_consent_sessions.contains(session) {
+                if self.foreground_consent_sessions.contains_key(session) {
+                    self.update_view(|view| view.foreground_granted = Some(title.to_owned()));
+                    self.publish_view();
                     return json!({"ok": true, "allowed": true});
                 }
                 self.pending_foreground = Some((session.to_owned(), title.to_owned()));
@@ -964,7 +1023,10 @@ impl RuntimeState {
                 json!({"ok": true, "allowed": false})
             }
             "set_active" => {
-                if !self.foreground_consent_sessions.contains(session) {
+                if !self.lifecycle.enabled() || self.lifecycle.phase() != ComputerUsePhase::Ready {
+                    return json!({"ok": false, "error": "computer_use_unavailable"});
+                }
+                if !self.foreground_consent_sessions.contains_key(session) {
                     return json!({"ok": false, "error": "foreground_consent_required"});
                 }
                 let target = request.target.as_ref().and_then(foreground_target_label);
@@ -978,25 +1040,39 @@ impl RuntimeState {
                             .unwrap_or_else(|| title.to_owned()),
                     );
                 });
-                self.publish_view();
+                if let Err(error) = self.publish_view_and_wait().await {
+                    self.foreground_active_session = None;
+                    self.update_view(|view| view.foreground_active = None);
+                    self.publish_view();
+                    return json!({"ok": false, "error": error});
+                }
                 json!({"ok": true})
             }
             "restore" => {
-                if !self.foreground_consent_sessions.contains(session) {
+                if self.foreground_active_session.as_deref() != Some(session) {
                     return json!({"ok": false, "error": "foreground_consent_required"});
                 }
-                match restore_native_foreground_state(request.restoration.as_ref()) {
-                    Ok(()) => json!({"ok": true}),
-                    Err(error) => json!({"ok": false, "error": error}),
+                let restoration = request.restoration.clone();
+                match tokio::task::spawn_blocking(move || restore_native_foreground_state(restoration.as_ref())).await {
+                    Ok(Ok(())) => json!({"ok": true}),
+                    Ok(Err(error)) => json!({"ok": false, "error": error}),
+                    Err(_) => json!({"ok": false, "error": "foreground restoration task failed"}),
                 }
             }
             "clear" => {
+                if self.foreground_active_session.as_deref() != Some(session) {
+                    return json!({"ok": false, "error": "foreground_transaction_mismatch"});
+                }
                 self.foreground_active_session = None;
                 self.update_view(|view| view.foreground_active = None);
                 self.publish_view();
+                self.apply_deferred_foreground_stop().await;
                 json!({"ok": true})
             }
             "attention" => {
+                if self.foreground_active_session.as_deref() != Some(session) {
+                    return json!({"ok": false, "error": "foreground_transaction_mismatch"});
+                }
                 let detail = request
                     .restoration
                     .as_ref()
@@ -1009,6 +1085,7 @@ impl RuntimeState {
                     view.foreground_attention = Some(format!("{title}: {detail}"));
                 });
                 self.publish_view();
+                self.apply_deferred_foreground_stop().await;
                 json!({"ok": true})
             }
             "revoke_session" => {
@@ -1020,38 +1097,77 @@ impl RuntimeState {
                 {
                     self.pending_foreground = None;
                     self.update_view(|view| view.foreground_pending = None);
-                    self.publish_view();
                 }
-                if self.foreground_active_session.as_deref() == Some(session) {
-                    self.foreground_active_session = None;
-                    self.update_view(|view| view.foreground_active = None);
-                    self.publish_view();
-                }
+                self.refresh_granted_view();
+                self.publish_view();
                 json!({"ok": true})
             }
             _ => json!({"ok": false, "error": "unknown_operation"}),
         }
     }
 
-    fn grant_pending_foreground_consent(&mut self) {
+    fn toggle_foreground_consent(&mut self) {
         if !self.lifecycle.enabled() || self.lifecycle.phase() != ComputerUsePhase::Ready {
             return;
         }
-        let Some((session, _title)) = self.pending_foreground.take() else {
+        if let Some((session, title)) = self.pending_foreground.take() {
+            self.foreground_consent_sessions.insert(session, title.clone());
+            self.update_view(|view| {
+                view.foreground_pending = None;
+                view.foreground_granted = Some(title);
+            });
+            self.publish_view();
+            return;
+        }
+        let selected = self
+            .foreground_active_session
+            .as_ref()
+            .filter(|session| self.foreground_consent_sessions.contains_key(*session))
+            .cloned()
+            .or_else(|| self.foreground_consent_sessions.keys().min().cloned());
+        if let Some(session) = selected {
+            self.foreground_consent_sessions.remove(&session);
+            self.refresh_granted_view();
+            self.publish_view();
+        }
+    }
+
+    fn refresh_granted_view(&self) {
+        let title = self
+            .foreground_consent_sessions
+            .iter()
+            .min_by_key(|(session, _)| *session)
+            .map(|(_, title)| title.clone());
+        self.update_view(|view| view.foreground_granted = title);
+    }
+
+    fn expire_foreground_grants(&mut self, preserve_active: bool) {
+        self.foreground_consent_sessions.clear();
+        self.pending_foreground = None;
+        if !preserve_active {
+            self.foreground_active_session = None;
+        }
+        self.update_view(|view| {
+            view.foreground_pending = None;
+            view.foreground_granted = None;
+            if !preserve_active {
+                view.foreground_active = None;
+            }
+        });
+    }
+
+    async fn apply_deferred_foreground_stop(&mut self) {
+        let Some(directive) = self.deferred_foreground_stop.take() else {
             return;
         };
-        self.foreground_consent_sessions.insert(session);
-        self.update_view(|view| view.foreground_pending = None);
-        self.publish_view();
+        self.expire_foreground_grants(false);
+        self.apply(directive).await;
     }
 
     fn clear_foreground_state(&mut self) {
-        self.foreground_consent_sessions.clear();
-        self.pending_foreground = None;
-        self.foreground_active_session = None;
+        self.deferred_foreground_stop = None;
+        self.expire_foreground_grants(false);
         self.update_view(|view| {
-            view.foreground_pending = None;
-            view.foreground_active = None;
             view.foreground_attention = None;
         });
         self.publish_view();
@@ -1066,41 +1182,180 @@ fn foreground_target_label(target: &Value) -> Option<String> {
     (!label.is_empty()).then(|| label.to_owned())
 }
 
-fn restore_native_foreground_state(restoration: Option<&Value>) -> Result<(), String> {
-    let restoration = restoration
-        .and_then(Value::as_object)
-        .ok_or_else(|| "missing restoration contract".to_owned())?;
-    let pointer = restoration
-        .get("pointer")
-        .and_then(Value::as_object)
-        .ok_or_else(|| "missing pointer restoration contract".to_owned())?;
-    let x = pointer
-        .get("x")
-        .and_then(Value::as_f64)
-        .ok_or_else(|| "missing pointer x".to_owned())?;
-    let y = pointer
-        .get("y")
-        .and_then(Value::as_f64)
-        .ok_or_else(|| "missing pointer y".to_owned())?;
-    let prior_frontmost = restoration
-        .get("prior_frontmost")
-        .and_then(Value::as_object)
-        .ok_or_else(|| "missing prior frontmost contract".to_owned())?;
-    let pid = prior_frontmost
-        .get("pid")
-        .and_then(Value::as_i64)
-        .ok_or_else(|| "missing prior frontmost pid".to_owned())?;
-    if pid <= 0 {
-        return Err("prior frontmost pid is invalid".to_owned());
+#[derive(Deserialize)]
+struct ForegroundWindowReference {
+    pid: i32,
+    window_id: u32,
+}
+
+#[derive(Deserialize)]
+struct ForegroundPointer {
+    x: f64,
+    y: f64,
+}
+
+#[derive(Deserialize)]
+struct ForegroundTargetOriginalState {
+    hidden: bool,
+    minimized: bool,
+}
+
+#[derive(Deserialize)]
+struct ForegroundRestoration {
+    target: ForegroundWindowReference,
+    prior_frontmost: ForegroundWindowReference,
+    pointer: ForegroundPointer,
+    active_space_id: u64,
+    target_original_state: ForegroundTargetOriginalState,
+}
+
+fn cf_string(value: &str) -> Result<*const c_void, String> {
+    let value = CString::new(value).map_err(|_| "invalid AX string".to_owned())?;
+    let string = unsafe { CFStringCreateWithCString(ptr::null(), value.as_ptr(), K_CF_STRING_ENCODING_UTF8) };
+    if string.is_null() {
+        Err("could not allocate AX string".to_owned())
+    } else {
+        Ok(string)
     }
-    let pointer_result = unsafe { CGWarpMouseCursorPosition(NSPoint { x, y }) };
+}
+
+fn with_exact_ax_window(
+    target: &ForegroundWindowReference,
+    operation: impl FnOnce(AXUIElementRef) -> Result<(), String>,
+) -> Result<(), String> {
+    if target.pid <= 0 || target.window_id == 0 {
+        return Err("foreground window identity is invalid".to_owned());
+    }
+    unsafe {
+        let windows_attribute = cf_string("AXWindows")?;
+        let application = AXUIElementCreateApplication(target.pid);
+        if application.is_null() {
+            CFRelease(windows_attribute);
+            return Err(format!("application {} has no accessibility object", target.pid));
+        }
+        let _ = AXUIElementSetMessagingTimeout(application, AX_MESSAGING_TIMEOUT_SECONDS);
+        let mut windows: *const c_void = ptr::null();
+        let copy_result = AXUIElementCopyAttributeValue(application, windows_attribute, &mut windows);
+        CFRelease(windows_attribute);
+        if copy_result != K_AX_ERROR_SUCCESS || windows.is_null() {
+            CFRelease(application);
+            return Err(format!("could not enumerate windows for application {}", target.pid));
+        }
+        let mut matching_window = ptr::null_mut();
+        for index in 0..CFArrayGetCount(windows) {
+            let window = CFArrayGetValueAtIndex(windows, index) as AXUIElementRef;
+            if window.is_null() {
+                continue;
+            }
+            let mut window_id = 0_u32;
+            if _AXUIElementGetWindow(window, &mut window_id) == K_AX_ERROR_SUCCESS && window_id == target.window_id {
+                matching_window = window;
+                break;
+            }
+        }
+        let result = if matching_window.is_null() {
+            Err(format!(
+                "exact window {}:{} is no longer accessible",
+                target.pid, target.window_id
+            ))
+        } else {
+            let _ = AXUIElementSetMessagingTimeout(matching_window, AX_MESSAGING_TIMEOUT_SECONDS);
+            operation(matching_window)
+        };
+        CFRelease(windows);
+        CFRelease(application);
+        result
+    }
+}
+
+fn set_exact_window_minimized(target: &ForegroundWindowReference, minimized: bool) -> Result<(), String> {
+    with_exact_ax_window(target, |window| {
+        let attribute = cf_string("AXMinimized")?;
+        let value = unsafe {
+            if minimized {
+                kCFBooleanTrue
+            } else {
+                kCFBooleanFalse
+            }
+        };
+        let result = unsafe { AXUIElementSetAttributeValue(window, attribute, value) };
+        unsafe { CFRelease(attribute) };
+        if result == K_AX_ERROR_SUCCESS {
+            Ok(())
+        } else {
+            Err(format!(
+                "could not restore minimized state for {}:{} ({result})",
+                target.pid, target.window_id
+            ))
+        }
+    })
+}
+
+fn raise_exact_window(target: &ForegroundWindowReference) -> Result<(), String> {
+    with_exact_ax_window(target, |window| {
+        let action = cf_string("AXRaise")?;
+        let result = unsafe { AXUIElementPerformAction(window, action) };
+        unsafe { CFRelease(action) };
+        if result == K_AX_ERROR_SUCCESS {
+            Ok(())
+        } else {
+            Err(format!(
+                "could not restore exact frontmost window {}:{} ({result})",
+                target.pid, target.window_id
+            ))
+        }
+    })
+}
+
+fn running_application(target: &ForegroundWindowReference) -> Result<Retained<NSRunningApplication>, String> {
+    NSRunningApplication::runningApplicationWithProcessIdentifier(target.pid)
+        .ok_or_else(|| format!("application {} is no longer running", target.pid))
+}
+
+fn parse_foreground_restoration(restoration: Option<&Value>) -> Result<ForegroundRestoration, String> {
+    restoration
+        .cloned()
+        .ok_or_else(|| "missing restoration contract".to_owned())
+        .and_then(|value| {
+            serde_json::from_value::<ForegroundRestoration>(value)
+                .map_err(|_| "invalid restoration contract".to_owned())
+        })
+}
+
+fn restore_native_foreground_state(restoration: Option<&Value>) -> Result<(), String> {
+    let restoration = parse_foreground_restoration(restoration)?;
+    if !restoration.pointer.x.is_finite() || !restoration.pointer.y.is_finite() {
+        return Err("hardware pointer contract is invalid".to_owned());
+    }
+    let _recorded_active_space = restoration.active_space_id;
+
+    let target_application = running_application(&restoration.target)?;
+    set_exact_window_minimized(&restoration.target, restoration.target_original_state.minimized)?;
+    if !restoration.target_original_state.hidden && !target_application.unhide() {
+        return Err("could not restore target application visibility".to_owned());
+    }
+    if restoration.target_original_state.hidden && !target_application.hide() {
+        return Err("could not restore target application hidden state".to_owned());
+    }
+
+    let prior_application = running_application(&restoration.prior_frontmost)?;
+    set_exact_window_minimized(&restoration.prior_frontmost, false)?;
+    if !prior_application.unhide() {
+        return Err("could not reveal the prior frontmost application".to_owned());
+    }
+    if !prior_application.activateWithOptions(NSApplicationActivationOptions::empty()) {
+        return Err("could not restore prior frontmost application".to_owned());
+    }
+    raise_exact_window(&restoration.prior_frontmost)?;
+
+    let pointer_result = unsafe {
+        CGWarpMouseCursorPosition(NSPoint {
+            x: restoration.pointer.x,
+            y: restoration.pointer.y,
+        })
+    };
     if pointer_result != 0 {
         return Err(format!("could not restore hardware pointer ({pointer_result})"));
-    }
-    let application = NSRunningApplication::runningApplicationWithProcessIdentifier(pid as _)
-        .ok_or_else(|| "prior frontmost application is no longer running".to_owned())?;
-    if !application.activateWithOptions(NSApplicationActivationOptions::ActivateAllWindows) {
-        return Err("could not restore prior frontmost application".to_owned());
     }
     Ok(())
 }
@@ -1147,6 +1402,7 @@ async fn runtime_reprobe_directive(
     lifecycle: &mut ComputerUseLifecycle,
     capabilities: &mut CapabilityCache,
     origin: Option<&LoopbackOrigin>,
+    grants: Grants,
 ) -> Option<LifecycleDirective> {
     if !lifecycle.enabled() || lifecycle.phase() != ComputerUsePhase::NeedsRuntime {
         return None;
@@ -1154,7 +1410,7 @@ async fn runtime_reprobe_directive(
     let origin = origin?;
     let support = capabilities.observe(probe_capabilities(origin).await);
     let grants = if support == RuntimeSupport::Supported {
-        silent_grants()
+        grants
     } else {
         Grants {
             accessibility: false,
@@ -2834,6 +3090,7 @@ done
     fn socket_path_is_short_and_isolated_by_state_directory_flavor() {
         let first = short_socket_path(Path::new("/tmp/first-computer-use-state"), 501);
         let second = short_socket_path(Path::new("/tmp/second-computer-use-state"), 501);
+        let foreground = short_foreground_control_socket_path(Path::new("/tmp/first-computer-use-state"), 501);
 
         assert_ne!(first, second);
         assert_eq!(
@@ -2846,6 +3103,12 @@ done
             .and_then(Path::to_str)
             .unwrap()
             .starts_with("/tmp/avibe-cua-"));
+        assert_eq!(foreground.parent(), first.parent());
+        assert_eq!(
+            foreground.file_name().and_then(|name| name.to_str()),
+            Some(FOREGROUND_CONTROL_SOCKET_FILE)
+        );
+        assert!(foreground.as_os_str().as_bytes().len() <= DARWIN_SOCKET_PATH_MAX_BYTES);
     }
 
     #[test]
@@ -2872,6 +3135,36 @@ done
     fn over_limit_socket_paths_are_classified_before_spawn() {
         let path = PathBuf::from("/tmp").join("x".repeat(DARWIN_SOCKET_PATH_MAX_BYTES));
         assert_eq!(socket_path_preflight(&path), Err("socket_path_too_long"));
+    }
+
+    #[test]
+    fn foreground_restoration_contract_requires_all_four_recorded_items() {
+        let contract = json!({
+            "target": {"pid": 7, "window_id": 9},
+            "prior_frontmost": {"pid": 3, "window_id": 30},
+            "pointer": {"x": 10.0, "y": 20.0},
+            "active_space_id": 42,
+            "target_original_state": {"hidden": false, "minimized": false}
+        });
+        let parsed = parse_foreground_restoration(Some(&contract)).expect("complete restoration contract");
+        assert_eq!((parsed.target.pid, parsed.target.window_id), (7, 9));
+        assert_eq!((parsed.prior_frontmost.pid, parsed.prior_frontmost.window_id), (3, 30));
+        assert_eq!((parsed.pointer.x, parsed.pointer.y), (10.0, 20.0));
+        assert_eq!(parsed.active_space_id, 42);
+        assert!(!parsed.target_original_state.hidden);
+        assert!(!parsed.target_original_state.minimized);
+
+        for missing in [
+            "target",
+            "prior_frontmost",
+            "pointer",
+            "active_space_id",
+            "target_original_state",
+        ] {
+            let mut incomplete = contract.clone();
+            incomplete.as_object_mut().expect("contract object").remove(missing);
+            assert!(parse_foreground_restoration(Some(&incomplete)).is_err());
+        }
     }
 
     #[tokio::test]
@@ -3001,7 +3294,7 @@ done
                 .await
                 .expect("capability response");
         });
-        let directive = runtime_reprobe_directive(&mut lifecycle, &mut capabilities, Some(&origin))
+        let directive = runtime_reprobe_directive(&mut lifecycle, &mut capabilities, Some(&origin), Grants::all())
             .await
             .expect("normal tick reprobe");
         server.await.expect("capability server");
@@ -3011,7 +3304,7 @@ done
         assert_eq!(capabilities.controller_id(), Some("restarted-runtime"));
         assert_eq!(lifecycle.phase(), ComputerUsePhase::Starting);
         assert_eq!(
-            runtime_reprobe_directive(&mut lifecycle, &mut capabilities, Some(&origin)).await,
+            runtime_reprobe_directive(&mut lifecycle, &mut capabilities, Some(&origin), Grants::all(),).await,
             None
         );
     }

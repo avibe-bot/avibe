@@ -20,6 +20,9 @@ from core.computer_server import (
     Upstream,
     UpstreamUnavailable,
     _fold_tool_result,
+    _foreground_control_socket_path,
+    _frontmost_window,
+    _validate_foreground_input,
     _validate_input,
 )
 from core.computer_use import (
@@ -115,12 +118,32 @@ class FakeUpstream:
                         "isError": True,
                     },
                 }
+            structured: dict[str, Any] = {"tool": params.get("name")}
+            if tool_name == "get_window_state":
+                arguments = params.get("arguments") or {}
+                pid = arguments.get("pid")
+                window_id = arguments.get("window_id")
+                structured.update(
+                    {
+                        "pid": pid,
+                        "window_id": window_id,
+                        "snapshot_id": f"snapshot-{pid}-{window_id}",
+                        "capture_id": f"capture-{pid}-{window_id}",
+                        "elements": [
+                            {
+                                "element_token": (
+                                    f"snapshot-{pid}-{window_id}:element-0"
+                                )
+                            }
+                        ],
+                    }
+                )
             return {
                 "jsonrpc": "2.0",
                 "id": 1,
                 "result": {
                     "content": [{"type": "image", "data": "png", "mimeType": "image/png"}],
-                    "structuredContent": {"tool": params.get("name")},
+                    "structuredContent": structured,
                 },
             }
         finally:
@@ -174,6 +197,8 @@ class ForegroundUpstream(FakeUpstream):
         pointer: tuple[float, float] = (10.0, 20.0),
         after_pointer: tuple[float, float] | None = None,
         click_effect: str = "confirmed",
+        after_prior_title: str | None = None,
+        extra_windows: list[dict[str, Any]] | None = None,
     ) -> None:
         super().__init__()
         self.target = target or {
@@ -191,6 +216,8 @@ class ForegroundUpstream(FakeUpstream):
         self.pointer = pointer
         self.after_pointer = after_pointer or pointer
         self.click_effect = click_effect
+        self.after_prior_title = after_prior_title
+        self.extra_windows = extra_windows or []
         self.list_windows_calls = 0
         self.cursor_calls = 0
 
@@ -208,7 +235,12 @@ class ForegroundUpstream(FakeUpstream):
                 "pid": 3,
                 "window_id": 30,
                 "app_name": "Prior",
-                "title": "Prior Window",
+                "title": (
+                    self.after_prior_title
+                    if self.list_windows_calls > 1
+                    and self.after_prior_title is not None
+                    else "Prior Window"
+                ),
                 "is_on_screen": True,
                 "minimized": False,
                 "on_current_space": True,
@@ -222,7 +254,7 @@ class ForegroundUpstream(FakeUpstream):
                     "content": [],
                     "structuredContent": {
                         "current_space_id": 1,
-                        "windows": [target, prior],
+                        "windows": [target, prior, *self.extra_windows],
                     },
                 },
             }
@@ -266,10 +298,54 @@ class ForegroundUpstream(FakeUpstream):
                 "id": 1,
                 "result": {
                     "content": [],
-                    "structuredContent": {"pid": 7, "window_id": 9},
+                    "structuredContent": {
+                        "pid": 7,
+                        "window_id": 9,
+                        "snapshot_id": "snapshot-7-9",
+                        "capture_id": "capture-7-9",
+                        "elements": [
+                            {"element_token": "snapshot-7-9:element-0"}
+                        ],
+                    },
                 },
             }
         return await super().request(method, params)
+
+
+class CancellableForegroundUpstream(ForegroundUpstream):
+    def __init__(self) -> None:
+        super().__init__()
+        self.click_started = asyncio.Event()
+
+    async def request(self, method: str, params: Mapping[str, Any]) -> dict[str, Any]:
+        if params.get("name") == "click":
+            self.calls.append((method, json.loads(json.dumps(params))))
+            self.click_started.set()
+            await asyncio.Event().wait()
+            raise AssertionError("cancelled foreground click unexpectedly resumed")
+        return await super().request(method, params)
+
+
+class FailingRestoreControl(FakeForegroundControl):
+    async def request(
+        self,
+        operation: str,
+        *,
+        session: str,
+        title: str,
+        target: Mapping[str, Any] | None = None,
+        restoration: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        result = await super().request(
+            operation,
+            session=session,
+            title=title,
+            target=target,
+            restoration=restoration,
+        )
+        if operation == "restore":
+            raise RuntimeError("unexpected native restore failure")
+        return result
 
 
 class FakeLeaseManager:
@@ -1679,6 +1755,7 @@ async def test_window_input_requires_observation_and_rejects_focus_routes(
         status_reader=lambda: ComputerUseStatus("ready", None, state),
         upstream_factory=lambda _state: asyncio.sleep(0, result=upstream),
         lease_manager=FakeLeaseManager(),  # type: ignore[arg-type]
+        platform="darwin",
     )
 
     first = await server.call_tool(
@@ -1737,6 +1814,7 @@ async def test_window_input_requires_observation_and_rejects_focus_routes(
             "window_id": 9,
             "x": 1,
             "y": 2,
+            "capture_id": "capture-7-9",
             "delivery_mode": "foreground",
         },
     )
@@ -1794,6 +1872,7 @@ async def test_foreground_requires_native_consent_and_reports_unattempted(
             "window_id": 9,
             "x": 1,
             "y": 2,
+            "capture_id": "capture-7-9",
             "delivery_mode": "foreground",
         },
         session_title="QQ conversation",
@@ -1856,6 +1935,7 @@ async def test_foreground_click_on_visible_target_verifies_restore(
             "window_id": 9,
             "x": 1,
             "y": 2,
+            "capture_id": "capture-7-9",
             "delivery_mode": "foreground",
         },
         session_title="QQ conversation",
@@ -1891,9 +1971,223 @@ async def test_foreground_click_on_visible_target_verifies_restore(
             "window_id": 9,
             "x": 1,
             "y": 2,
+            "capture_id": "capture-7-9",
             "delivery_mode": "foreground",
         }
     ]
+    restore_request = next(
+        payload
+        for operation, payload in control.calls
+        if operation == "restore"
+    )
+    assert restore_request["restoration"] == {
+        "target": {
+            "pid": 7,
+            "window_id": 9,
+            "app_name": "Target",
+            "title": "Target Window",
+        },
+        "prior_frontmost": {
+            "pid": 3,
+            "window_id": 30,
+            "app_name": "Prior",
+            "title": "Prior Window",
+        },
+        "pointer": {"x": 10.0, "y": 20.0},
+        "active_space_id": 1,
+        "target_original_state": {"hidden": False, "minimized": False},
+    }
+
+
+@pytest.mark.asyncio
+async def test_foreground_cancellation_waits_for_restore_before_propagating(
+    tmp_path: Path,
+) -> None:
+    state_path, state = _state(tmp_path)
+    upstream = CancellableForegroundUpstream()
+    control = FakeForegroundControl()
+    server = _foreground_server(state_path, state, upstream, control)
+    observed = await server.call_tool(
+        "get_window_state",
+        {"session": "ses-a", "pid": 7, "window_id": 9},
+    )
+    assert not observed.get("isError")
+
+    call = asyncio.create_task(
+        server.call_tool(
+            "click",
+            {
+                "session": "ses-a",
+                "pid": 7,
+                "window_id": 9,
+                "x": 1,
+                "y": 2,
+                "capture_id": "capture-7-9",
+                "delivery_mode": "foreground",
+            },
+        )
+    )
+    await upstream.click_started.wait()
+    call.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await call
+    assert [name for name, _ in control.calls] == [
+        "request_consent",
+        "set_active",
+        "restore",
+        "clear",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_foreground_restore_ignores_mutable_window_titles(
+    tmp_path: Path,
+) -> None:
+    state_path, state = _state(tmp_path)
+    upstream = ForegroundUpstream(after_prior_title="Renamed Prior Window")
+    control = FakeForegroundControl()
+    server = _foreground_server(state_path, state, upstream, control)
+    await server.call_tool(
+        "get_window_state",
+        {"session": "ses-a", "pid": 7, "window_id": 9},
+    )
+
+    result = await server.call_tool(
+        "click",
+        {
+            "session": "ses-a",
+            "pid": 7,
+            "window_id": 9,
+            "x": 1,
+            "y": 2,
+            "capture_id": "capture-7-9",
+            "delivery_mode": "foreground",
+        },
+    )
+
+    assert not result.get("isError")
+    assert result["structuredContent"]["restoration_verified"] is True
+
+
+@pytest.mark.asyncio
+async def test_foreground_refuses_reused_or_noncurrent_observation_identity(
+    tmp_path: Path,
+) -> None:
+    state_path, state = _state(tmp_path)
+    upstream = ForegroundUpstream()
+    control = FakeForegroundControl()
+    server = _foreground_server(state_path, state, upstream, control)
+    await server.call_tool(
+        "get_window_state",
+        {"session": "ses-a", "pid": 7, "window_id": 9},
+    )
+
+    stale_capture = await server.call_tool(
+        "click",
+        {
+            "session": "ses-a",
+            "pid": 7,
+            "window_id": 9,
+            "x": 1,
+            "y": 2,
+            "capture_id": "capture-from-replaced-window",
+            "delivery_mode": "foreground",
+        },
+    )
+    stale_element = await server.call_tool(
+        "click",
+        {
+            "session": "ses-a",
+            "pid": 7,
+            "window_id": 9,
+            "element_token": "replaced-snapshot:element-0",
+            "delivery_mode": "foreground",
+        },
+    )
+
+    assert stale_capture["structuredContent"]["code"] == "target_not_admissible"
+    assert stale_element["structuredContent"]["code"] == "target_not_admissible"
+    assert control.calls == []
+
+
+def test_foreground_click_shape_is_one_exact_press() -> None:
+    base = {
+        "pid": 7,
+        "window_id": 9,
+        "delivery_mode": "foreground",
+    }
+    _validate_foreground_input(
+        "click",
+        {
+            **base,
+            "element_token": "snapshot-7-9:element-0",
+            "action": "press",
+        },
+        platform="darwin",
+    )
+    _validate_foreground_input(
+        "click",
+        {
+            **base,
+            "x": 1,
+            "y": 2,
+            "capture_id": "capture-7-9",
+        },
+        platform="darwin",
+    )
+    for arguments in (
+        {**base, "element_token": "snapshot-7-9:element-0", "action": "open"},
+        {**base, "x": 1, "y": 2},
+        {
+            **base,
+            "x": 1,
+            "y": 2,
+            "capture_id": "capture-7-9",
+            "element_token": "snapshot-7-9:element-0",
+        },
+    ):
+        with pytest.raises(ComputerServerError):
+            _validate_foreground_input("click", arguments, platform="darwin")
+
+
+def test_prior_frontmost_requires_a_visible_current_space_window() -> None:
+    frontmost = _frontmost_window(
+        {
+            "windows": [
+                {
+                    "pid": 8,
+                    "window_id": 80,
+                    "is_on_screen": False,
+                    "minimized": True,
+                    "on_current_space": True,
+                    "z_index": 30,
+                },
+                {
+                    "pid": 3,
+                    "window_id": 30,
+                    "is_on_screen": True,
+                    "on_current_space": True,
+                    "z_index": 20,
+                },
+            ]
+        }
+    )
+
+    assert frontmost is not None
+    assert (frontmost["pid"], frontmost["window_id"]) == (3, 30)
+
+
+def test_foreground_control_socket_uses_the_private_short_directory(
+    tmp_path: Path,
+) -> None:
+    state_directory = tmp_path / ("long-state-directory-" * 8)
+    state_directory.mkdir()
+    path = _foreground_control_socket_path(state_directory / "computer-use.json")
+
+    assert path.name == "foreground-control.sock"
+    assert path.parent.name.startswith(f"avibe-cua-{state_directory.stat().st_uid}-")
+    assert len(os.fsencode(path)) <= 103
 
 
 @pytest.mark.asyncio
@@ -1930,6 +2224,7 @@ async def test_foreground_restore_failure_reports_effect_without_retry(
             "window_id": 9,
             "x": 1,
             "y": 2,
+            "capture_id": "capture-7-9",
             "delivery_mode": "foreground",
         },
         session_title="QQ conversation",
@@ -1951,6 +2246,43 @@ async def test_foreground_restore_failure_reports_effect_without_retry(
             if params.get("name") == "click"
         ]
     ) == 1
+
+
+@pytest.mark.asyncio
+async def test_unexpected_restore_failure_leaves_native_attention(
+    tmp_path: Path,
+) -> None:
+    state_path, state = _state(tmp_path)
+    upstream = ForegroundUpstream()
+    control = FailingRestoreControl()
+    server = _foreground_server(state_path, state, upstream, control)
+    await server.call_tool(
+        "get_window_state",
+        {"session": "ses-a", "pid": 7, "window_id": 9},
+    )
+
+    result = await server.call_tool(
+        "click",
+        {
+            "session": "ses-a",
+            "pid": 7,
+            "window_id": 9,
+            "x": 1,
+            "y": 2,
+            "capture_id": "capture-7-9",
+            "delivery_mode": "foreground",
+        },
+    )
+
+    assert result["structuredContent"]["code"] == "foreground_restore_failed"
+    assert [name for name, _payload in control.calls] == [
+        "request_consent",
+        "set_active",
+        "restore",
+        "attention",
+    ]
+    attention = control.calls[-1][1]["restoration"]
+    assert attention["detail"] == "unexpected native restore failure"
 
 
 @pytest.mark.asyncio
@@ -2020,6 +2352,7 @@ async def test_foreground_admission_has_stable_missing_and_space_reasons(
                 "window_id": 9,
                 "x": 1,
                 "y": 2,
+                "capture_id": "capture-7-9",
                 "delivery_mode": "foreground",
             },
         )

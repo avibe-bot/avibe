@@ -80,7 +80,8 @@
       "foregroundConsent": "{{sessionTitle}} requests foreground control: Allow for this conversation",
       "foregroundActive": "Foreground control active: {{target}}",
       "foregroundAttention": "Foreground restoration needs attention: {{target}}",
-      "foregroundAllow": "Allow foreground control for this conversation"
+      "foregroundAllow": "Allow foreground control for this conversation",
+      "foregroundRevoke": "{{sessionTitle}} foreground control: Turn off for this conversation"
     },
     "notifications": {
       "toggle": "Notifications",
