@@ -28,6 +28,7 @@ from core.agent_core.ai.sse import SSEParser
 from vibe.backend_model_catalog import HostedToolSpec
 
 from .events import bounded_diagnostic_detail
+from .hosted_items import responses_item_tool
 from .pricing import usd_from_xai_ticks
 from .request import ModelHubRequest
 
@@ -50,7 +51,6 @@ _SNIPPET_CHARS: Final = 500
 # The url_citation annotations one response's record reads; an executor's answer cites tens.
 _MAX_CITATIONS: Final = 256
 _X_POST_HOSTS: Final = ("x.com", "twitter.com", "www.x.com", "www.twitter.com", "mobile.twitter.com")
-_X_SEARCH_CALLS: Final = frozenset({"x_keyword_search", "x_semantic_search", "x_user_search", "x_thread_fetch"})
 _IMAGE_MIME: Final = {"png": "image/png", "jpeg": "image/jpeg", "jpg": "image/jpeg", "webp": "image/webp"}
 _X_SEARCH_MODES: Final = ("Latest", "Top")
 
@@ -381,14 +381,7 @@ def _text_field(item: Mapping[str, Any], key: str) -> str | None:
 
 
 def _responses_call_tool(item: Mapping[str, Any]) -> str | None:
-    kind = item.get("type")
-    if kind == "web_search_call":
-        return "web_search"
-    if kind == "image_generation_call":
-        return "image_generation"
-    if kind == "custom_tool_call" and _text_field(item, "name") in _X_SEARCH_CALLS:
-        return "x_search"
-    return None
+    return responses_item_tool(_text_field(item, "type"), _text_field(item, "name"))
 
 
 def _ended_without(tool: str, response: Mapping[str, Any], say: Say) -> str:

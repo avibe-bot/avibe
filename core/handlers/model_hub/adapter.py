@@ -196,6 +196,9 @@ class RawCallOutcome:
     os_errno: int | None = None
     # A 400 before output, as closed tokens for the capability-evidence rules.
     rejection: UpstreamRejection | None = None
+    # The search tools whose own completed item a served response carried, for
+    # the positive evidence written at settlement (``vibey-hosted-tools.md`` §3.2).
+    hosted_tools: frozenset[str] = frozenset()
 
 
 class ObservationOutcome(str, Enum):

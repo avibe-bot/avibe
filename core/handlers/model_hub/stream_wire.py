@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import AbstractSet, BinaryIO, Callable, Final, Literal, Mapping
 
 from .async_owner import run_owned_in_thread
+from .hosted_items import responses_item_succeeded
 from .json_wire import JSONEvent, JSONPath, JSONScope, SelectiveJSONParser
 
 
@@ -467,6 +468,24 @@ class ProtocolObservation:
     recovery_verified: bool = False
     # Raw upstream text, for bounded redacted display only; never in reprs.
     error_message: str | None = field(default=None, repr=False)
+    # Search tools whose own completed hosted item this response carried (§3.2).
+    hosted_tools: frozenset[str] = frozenset()
+
+
+@dataclass(frozen=True)
+class HostedItemPaths:
+    """Where a protocol carries its own hosted-tool items (``vibey-hosted-tools.md`` §3.2).
+
+    A streamed response carries one item per ``event_type`` event, at
+    ``event_item``; a buffered one carries them in the ``buffered_items`` array.
+    ``leaves`` are the item fields that say which tool ran and whether it
+    completed, relative to the item.
+    """
+
+    event_type: str
+    event_item: JSONPath
+    buffered_items: JSONPath
+    leaves: tuple[JSONPath, ...]
 
 
 @dataclass(frozen=True)
@@ -524,6 +543,7 @@ class ProtocolStreamTaxonomy:
     buffered_success_selectors: tuple[tuple[JSONPath, tuple[str, ...]], ...] = ()
     buffered_output_array_path: JSONPath | None = None
     buffered_terminal_string_paths: tuple[JSONPath, ...] = ()
+    hosted_items: HostedItemPaths | None = None
 
 
 PROTOCOL_STREAM_TAXONOMY: Final[Mapping[str, ProtocolStreamTaxonomy]] = {
@@ -596,6 +616,11 @@ PROTOCOL_STREAM_TAXONOMY: Final[Mapping[str, ProtocolStreamTaxonomy]] = {
         buffered_error_envelope_paths=(("error",),),
         buffered_success_selectors=((("type",), ("message",)),),
         buffered_output_array_path=("content",),
+        # A server tool's result block arrives whole in its start event; its
+        # ``content`` is the result list, or the error object on a failed search.
+        hosted_items=HostedItemPaths(
+            "content_block_start", ("content_block",), ("content",), (("type",), ("content",), ("content", "type")),
+        ),
         terminal_event_name="error",
         render_terminal_event=_anthropic_terminal_event,
         usage=ProtocolUsageTaxonomy(
@@ -725,6 +750,9 @@ PROTOCOL_STREAM_TAXONOMY: Final[Mapping[str, ProtocolStreamTaxonomy]] = {
             (("status",), ("completed", "incomplete")),
         ),
         buffered_output_array_path=("output",),
+        hosted_items=HostedItemPaths(
+            "response.output_item.done", ("item",), ("output",), (("type",), ("name",), ("status",)),
+        ),
         terminal_event_name="error",
         render_terminal_event=_responses_terminal_event,
         usage=ProtocolUsageTaxonomy(
@@ -939,6 +967,30 @@ def _usage_from_scalar_paths(
     return report
 
 
+# Container markers for a hosted item's fields; scalars keep their value.
+_ARRAY: Final = object()
+_MAP: Final = object()
+# The buffered response items whose fields are kept; a response carries a few.
+_MAX_HOSTED_MEMBERS: Final = 256
+
+
+def _hosted_item_tool(protocol: str, fields: Mapping[JSONPath, object]) -> str | None:
+    """The search tool one hosted item proves ran to completion, or None (``vibey-hosted-tools.md`` §3.2)."""
+
+    def text(leaf: JSONPath) -> str | None:
+        value = fields.get(leaf)
+        return value if isinstance(value, str) else None
+
+    if protocol == "openai_responses":
+        return responses_item_succeeded(text(("type",)), text(("name",)), text(("status",)))
+    if protocol == "anthropic":
+        # A failed search arrives under the same block type with an error object as
+        # its content; only a result list proves the search ran.
+        if text(("type",)) == "web_search_tool_result" and fields.get(("content",)) is _ARRAY:
+            return "web_search"
+    return None
+
+
 def _protocol_projection_paths(protocol: str) -> frozenset[JSONPath]:
     taxonomy = PROTOCOL_STREAM_TAXONOMY[protocol]
     paths: set[JSONPath] = {()}
@@ -959,6 +1011,10 @@ def _protocol_projection_paths(protocol: str) -> frozenset[JSONPath]:
         )
     if taxonomy.sequence_number_path is not None:
         paths.add(taxonomy.sequence_number_path)
+    if taxonomy.hosted_items is not None:
+        items = taxonomy.hosted_items
+        paths.update((*items.event_item, *leaf) for leaf in items.leaves)
+        paths.update((*items.buffered_items, "*", *leaf) for leaf in items.leaves)
     for container_path in taxonomy.usage.container_paths:
         for leaf_paths in (
             taxonomy.usage.input_paths,
@@ -1021,6 +1077,15 @@ class ProtocolFactProjector:
         self._scalars: dict[JSONPath, object] = {}
         self._literal = bytearray()
         self._literal_too_long = False
+        items = self.taxonomy.hosted_items
+        # A buffered response's hosted items are array members: their fields are
+        # kept per member, a few short values each, for a bounded number of members.
+        self._member_leaves: dict[JSONPath, JSONPath] = (
+            {(*items.buffered_items, "*", *leaf): leaf for leaf in items.leaves} if items is not None else {}
+        )
+        self._member_path: JSONPath | None = (*items.buffered_items, "*") if items is not None else None
+        self._member_values: dict[JSONScope, dict[JSONPath, object]] = {}
+        self._members: list[dict[JSONPath, object]] = []
         self._parser = SelectiveJSONParser(
             _protocol_projection_paths(protocol),
             self._visit,
@@ -1062,6 +1127,7 @@ class ProtocolFactProjector:
             return ProtocolObservation(outcome="served" if not streamed else None)
 
         usage = _usage_from_scalar_paths(self.taxonomy.usage, self._scalars)
+        hosted_tools = self._hosted_tools(streamed=streamed)
         model_output_started = any(
             envelope.event_name == event_name and self._selector_matches(envelope)
             for envelope in self.taxonomy.model_output_envelopes
@@ -1082,6 +1148,7 @@ class ProtocolFactProjector:
             code_candidates = self._machine_candidates("code", matched_paths)
             return ProtocolObservation(
                 outcome="failed_terminal" if matched_paths else "served",
+                hosted_tools=frozenset() if matched_paths else hosted_tools,
                 error_envelope_paths=matched_paths,
                 error_message=self._error_message(matched_paths),
                 usage=usage,
@@ -1139,13 +1206,38 @@ class ProtocolFactProjector:
                     else ()
                 ),
                 recovery_verified=model_output_started or envelope.terminal_outcome == "served",
+                hosted_tools=hosted_tools,
             )
         return ProtocolObservation(
             model_output_started=model_output_started,
             sequence_number=sequence_number,
             usage=usage,
             recovery_verified=model_output_started,
+            hosted_tools=hosted_tools,
         )
+
+    def _hosted_tools(self, *, streamed: bool) -> frozenset[str]:
+        """The search tools whose own completed item this event or buffered response carries."""
+
+        items = self.taxonomy.hosted_items
+        if items is None:
+            return frozenset()
+        if streamed:
+            if self._scalars.get(("type",)) != items.event_type:
+                return frozenset()
+            members = [{leaf: self._field((*items.event_item, *leaf)) for leaf in items.leaves}]
+        else:
+            members = self._members
+        return frozenset(
+            tool for fields in members if (tool := _hosted_item_tool(self.protocol, fields)) is not None
+        )
+
+    def _field(self, path: JSONPath) -> object:
+        if path in self._arrays:
+            return _ARRAY
+        if path in self._maps:
+            return _MAP
+        return self._scalars.get(path)
 
     def _visit(
         self,
@@ -1154,6 +1246,13 @@ class ProtocolFactProjector:
         value: object | None,
         scope: JSONScope,
     ) -> None:
+        if scope and path in self._member_leaves and len(self._members) < _MAX_HOSTED_MEMBERS:
+            value_of = {"scalar": value, "start_array": _ARRAY, "start_map": _MAP}
+            if event in value_of:
+                self._member_values.setdefault(scope, {})[self._member_leaves[path]] = value_of[event]
+        if event == "scope_end" and path == self._member_path:
+            if (member := self._member_values.pop(scope, None)) is not None and len(self._members) < _MAX_HOSTED_MEMBERS:
+                self._members.append(member)
         if event == "replace":
             self._clear_path(path, scope)
         elif event == "start_map" and not scope:
@@ -1410,6 +1509,7 @@ class ProtocolSSEState:
     error_type_candidates: tuple[str, ...] = ()
     error_code_candidates: tuple[str, ...] = ()
     error_message: str | None = field(default=None, repr=False)
+    hosted_tools: frozenset[str] = frozenset()
 
     def __post_init__(self) -> None:
         self.tokenizer = SSEObservationTokenizer(self.protocol)
@@ -1464,6 +1564,8 @@ class ProtocolSSEState:
             return
         if observation.model_output_started:
             self.model_output_started = True
+        if observation.hosted_tools:
+            self.hosted_tools |= observation.hosted_tools
         if observation.usage is not None:
             self.usage = (
                 observation.usage if self.usage is None else self.usage.merge(observation.usage)
@@ -1507,6 +1609,7 @@ class ProtocolSSEState:
                 error_code_candidates=self.error_code_candidates,
                 recovery_verified=self.reached_model,
                 error_message=self.error_message,
+                hosted_tools=self.hosted_tools if self.terminal_outcome == "served" else frozenset(),
             )
         return None
 

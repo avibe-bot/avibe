@@ -28,6 +28,7 @@ from config.v2_config import ModelHubSourceConfig
 from vibe.backend_model_catalog import HostedToolSpec, bundled_provider_overlay
 
 from .capability_evidence import HOSTED_TOOL_ASPECTS, CapabilityEvidenceStore, EvidenceFeature
+from .hosted_items import responses_item_tool
 from .hosted_tools import runs_on
 
 PIN_SOURCE_HEADER: Final = "x-avibe-pin-source"
@@ -35,10 +36,6 @@ PIN_SOURCE_HEADER: Final = "x-avibe-pin-source"
 PIN_MODEL_HEADER: Final = "x-avibe-pin-model"
 PIN_UNAVAILABLE_CODE: Final = "pin_unavailable"
 
-# Responses items that carry a hosted call's native result, by catalog tool.
-_RESPONSES_HOSTED_ITEMS: Final = {"web_search_call": "web_search", "image_generation_call": "image_generation"}
-# xAI runs X search as custom tool calls; their names are the provider's.
-_X_SEARCH_CALLS: Final = frozenset({"x_keyword_search", "x_semantic_search", "x_user_search", "x_thread_fetch"})
 # Client items that may follow an in-flight response.
 _RESPONSES_TOOL_OUTPUTS: Final = frozenset({"function_call_output", "custom_tool_call_output"})
 # Items a Responses model emits. Only these form an in-flight response: anything
@@ -117,10 +114,7 @@ def _text(item: Any, key: str) -> str | None:
 
 
 def _responses_hosted_tool(item: Any) -> str | None:
-    kind = _text(item, "type")
-    if kind == "custom_tool_call" and _text(item, "name") in _X_SEARCH_CALLS:
-        return "x_search"
-    return _RESPONSES_HOSTED_ITEMS.get(kind) if kind is not None else None
+    return responses_item_tool(_text(item, "type"), _text(item, "name"))
 
 
 def _responses_output_item(item: Any) -> bool:
