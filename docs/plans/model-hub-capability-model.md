@@ -115,11 +115,12 @@ no marker, and a pending one's marker becomes its generation.
   - A hosted-content rule match on a pinned request becomes `pin_unavailable` with a machine-readable `reason`. Vibey
     re-resolves the hop, whose fresh facts now name that tool as unsupported, and resends with the same-named function
     (`vibey-hosted-tools.md` §3.5).
-- **How long negative evidence lasts.**
-  - Hosted-tool evidence has no time limit (owner decision, 2026-10-15). It stays until the user clears it in
-    Models → Tools (`vibey-hosted-tools.md` §3.3, §8.1) or its wire stamp no longer matches (§3.3).
-  - Effort evidence keeps its 7-day expiry for now: it has no clear action, and a relay's effort support changes
-    more often than its tool support.
+- **How long negative evidence lasts** (owner decision, 2026-10-15): one rule for efforts and hosted tools. There is
+  no time limit. A record stays until one of these clears it:
+  - the user clears it: a hosted-tool refusal in Models → Tools (`vibey-hosted-tools.md` §3.3, §8.1), an effort
+    refusal on its Source chip (§5);
+  - its wire stamp no longer matches (§3.3), which happens on its own when the Source's config, the engine release
+    or the Avibe release changes.
 
 ### 3.3 No probes; the wire stamp
 
@@ -135,7 +136,7 @@ no marker, and a pending one's marker becomes its generation.
   efforts and hosted tools alike. So a refusal learned under one engine or one rendered config cannot survive a
   change that could reverse it: an engine upgrade, or a rendering change such as the `is-compat` flag for xAI
   (#2620), which changes what xAI receives for replayed reasoning. A change on the provider's side, which the stamp
-  cannot see, waits for the user's clear (hosted tools) or the 7-day expiry (efforts).
+  cannot see, waits for the user's clear.
 - **What goes.** v1's `shape` field, probe-shape staleness, age-based re-verification, and the `hosted_wire`
   manifest field (never introduced; `engine_stamp()` loses its `hosted_wire` branch). Positive evidence needed them
   because it vouched for a wire; it no longer vouches for anything.
@@ -219,8 +220,11 @@ and the existing tone vocabulary (`TimeHint` for dates):
 
 - Unknown draws nothing. A healthy unknown is the normal case and must not look like a warning (V6 rule:
   exceptions only).
-- A chip opens a detail popover (time, basis, the refusal's HTTP status and code) and has no action: there is
-  nothing to re-check (`vibey-hosted-tools.md` §8.2).
+- A chip opens a detail popover (time, basis, the refusal's HTTP status and code). An effort refusal's popover has a
+  "清除" action, which clears that (Source, model, effort) record, so the next request at that effort tries the
+  Source again (`DELETE /api/models/sources/<source_id>/evidence` with `{model_id, feature}`). Hosted-tool chips have
+  no action; their refusals are cleared in Models → Tools (`vibey-hosted-tools.md` §8.2). Nothing re-checks: a
+  cleared record comes back only if a real request is refused again.
 
 ## 6. Pricing
 
@@ -306,9 +310,9 @@ No new billing store, budget, or cap.
 2. Only a narrow rule creates negative evidence. The rule names the (Source, model, feature) it learned. A generic
    error creates none.
 3. Nothing probes. Every evidence record comes from a real request in a turn the user started.
-4. Changing a Source's identity drops its evidence. Negative evidence reads as unknown once its wire stamp differs
-   from the current one, when the user clears it (hosted tools), or after 7 days (efforts only). Positive evidence
-   never changes routing.
+4. Changing a Source's identity drops its evidence. Negative evidence, for efforts and hosted tools alike, has no time
+   limit: it reads as unknown once its wire stamp differs from the current one or the user clears it. Positive
+   evidence never changes routing.
 5. #2539: a Source that rejected `ultra` shows "ultra · not supported on this Source". The next request at `ultra`
    either skips that hop or fails before invocation with `effort_unsupported`, never a provider 400.
 6. Valuation applies context tiers when a call's input tokens exceed the tier size. A model with tiers and no flat
