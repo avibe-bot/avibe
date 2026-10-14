@@ -48,6 +48,7 @@ from core.agent_core.messages import (
     HostedImage,
     HostedToolBlock,
     TextBlock,
+    ThinkingBlock,
     UserMessage,
 )
 from core.agent_core.tools.hosted import hosted_tool_spec as canonical_tool_spec
@@ -146,9 +147,15 @@ def probe_request(
 
 def replay_request(call: ModelRequest, tool: str, answered: AssistantMessage) -> ModelRequest:
     """The replay probe after a verified ``call`` probe: its turn sent back, with the native declaration still
-    present and the hop allowed to take the tool's native payload, and a question only those results answer."""
+    present and the hop allowed to take the tool's native payload, and a question only those results answer.
+
+    The answer goes back without its reasoning, which may restate the results, readably or encrypted: a Source that
+    dropped the payload could read a result there. A provider that wants a completed turn's reasoning back refuses
+    the request, which no narrow rule learns from, so the replay reads as inconclusive, never as unsupported.
+    """
 
     route = call.endpoint.hosted_tools[tool]
+    answered = replace(answered, content=tuple(block for block in answered.content if not isinstance(block, ThinkingBlock)))
     return replace(
         call,
         endpoint=replace(

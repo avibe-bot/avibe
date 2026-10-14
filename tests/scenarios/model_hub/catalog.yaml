@@ -302,6 +302,7 @@ scenarios:
       - tests/test_model_hub_hosted_probe.py::test_a_probe_settles_when_the_adapter_is_done_even_if_the_body_stays_open
       - tests/test_model_hub_hosted_probe.py::test_an_image_probe_verifies_only_an_image_vibey_could_keep
       - tests/test_model_hub_hosted_probe.py::test_a_verified_call_is_followed_by_the_replay_probe
+      - tests/test_model_hub_hosted_probe.py::test_a_replay_sends_the_results_only_in_their_native_payload
       - tests/test_model_hub_hosted_probe.py::test_a_replay_goes_only_to_the_source_identity_the_call_was_recorded_for
       - tests/test_model_hub_hosted_probe.py::test_a_re_probe_restores_replay_a_narrow_rule_demoted
       - tests/test_model_hub_hosted_probe.py::test_a_replay_answer_counts_only_when_it_completed_and_names_a_hidden_result

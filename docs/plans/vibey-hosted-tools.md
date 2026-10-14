@@ -105,7 +105,8 @@ verified for X search.
   parsing, which keeps it only when it is an image; the probe keeps no file. The Tools tab's estimate covers both
   requests.
 - **The `replay` probe.** A second production request with the native declaration still present. Its history is
-  the call probe's turn, with the native payload verbatim, followed by "list the URLs of the other results you
+  the call probe's turn, with the native payload verbatim and without the answer's reasoning (which may restate the
+  results, readably or encrypted), followed by "list the URLs of the other results you
   found, without using any tool again", under instructions that ask for an answer from those results without a
   tool (the call's would ask for the tool). Nothing is forced.
   - **`verified`:** the answer names a result URL the call returned that its visible answer does not show (only the

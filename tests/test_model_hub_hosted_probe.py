@@ -746,6 +746,32 @@ async def test_a_verified_call_is_followed_by_the_replay_probe(tmp_path, source,
 
 
 @pytest.mark.asyncio
+async def test_a_replay_sends_the_results_only_in_their_native_payload(tmp_path):
+    """MH-HOSTED-007: the call's reasoning, readable or encrypted, can restate a result; it never goes back with the
+    replay, so a Source that drops the payload has nowhere else to read the result from."""
+    reasoning = {
+        "id": "rs_1",
+        "type": "reasoning",
+        "summary": [{"type": "summary_text", "text": f"The results were https://avibe.bot/ and {HIDDEN}."}],
+        "encrypted_content": "opaque-reasoning",
+    }
+    service, _clock, _models = configured_service(tmp_path, sources=[XAI])
+    sent = []
+
+    async def respond(request):
+        sent.append(await request.json())
+        return _stream(_responses(reasoning, SEARCH, ANSWER) if len(sent) == 1 else _replay_reply("openai_responses", sent[-1]))
+
+    async with loopback_engine(tmp_path, service, respond):
+        await service.probe_hosted_tool("web_search", {"source_id": XAI.id, "model_id": "grok-4.6"})
+
+    replay = sent[1]
+    elsewhere = [item for item in replay["input"] if item.get("type") != "web_search_call"]
+    assert any(item.get("type") == "web_search_call" for item in replay["input"])
+    assert HIDDEN not in json.dumps(elsewhere) and "reasoning" not in json.dumps(elsewhere)
+
+
+@pytest.mark.asyncio
 async def test_no_replay_runs_when_the_visible_answer_shows_every_result(tmp_path):
     """MH-HOSTED-007: a replay is proved only by a result the visible answer does not show; with none, no replay is
     spent, and the replay stays unknown, so turns replay synthetically."""
