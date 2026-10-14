@@ -49,11 +49,19 @@ class TranscriptStore(Protocol):
         ...
 
     async def append_response(
-        self, session_id: str, message: AssistantMessage, *, final: bool, request: Optional[Mapping[str, Any]] = None
+        self,
+        session_id: str,
+        message: AssistantMessage,
+        *,
+        final: bool,
+        request: Optional[Mapping[str, Any]] = None,
+        replied: Optional[bool] = None,
     ) -> ContextEntry:
         """Commit a response; ``request`` (C-9 ``ModelResponse.request``) is stored with it and read back in ``payload``.
 
-        The loop passes ``request`` only when context management is on.
+        The loop passes ``request`` only when context management is on. ``replied`` is the loop's decision whether the
+        response replies (``has_reply``), which a final's row type takes as given; without one, the response alone
+        decides.
         """
         ...
 

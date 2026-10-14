@@ -249,10 +249,13 @@ scenarios:
     related_tests:
       - tests/test_hosted_activity.py::test_the_im_line_names_a_subscription_and_a_shared_response_cost
   - id: MH-HOSTED-UI-012
-    name: A turn whose image_generate call completed reaches the user with the image as an attachment, even when the model says nothing after it (hosted tools v2 C2)
-    status: gap
+    name: A turn whose image_generate call completed reaches the user with the image as an attachment, and a final that says nothing after it is still a reply, never the empty-reply error; the turn keeps its first hop's image models
+    status: covered
     kind: contract
     layer: contract
+    test: tests/test_vibey_agent.py::test_a_generated_image_reaches_the_user_with_the_turns_reply_even_when_the_model_says_nothing
+    related_tests:
+      - tests/test_agent_transcript.py::test_a_final_commits_as_the_loops_reply_decision_says
   - id: MH-HOSTED-UI-011
     name: Vibey delivers a native hosted call as its IM line and Web card, and its answer with provider citations as links
     status: covered
@@ -385,12 +388,14 @@ scenarios:
       - tests/agent_core/ai/test_hosted_pause_turn.py::test_a_paused_response_its_source_cannot_continue_ends_interrupted_and_keeps_what_it_has
       - tests/agent_core/ai/test_hosted_pause_turn.py::test_a_continued_response_is_verified_only_when_every_response_in_it_was_from_one_origin
   - id: MH-HOSTED-VIBEY-007
-    name: A generated image the endpoint returns is saved through the media sink and its record names that file; no base64 enters history, and a call that saved no file is a failed record with its code
+    name: An image_generate call goes to the gateway's image endpoint with its arguments alone, after the turn's frozen models accept every argument and its reference images are read as read reads them; the images it returns are saved through the media sink and its record names those files; no base64 enters history, and a call that saved no file is a failed record with its code
     status: covered
     kind: contract
     layer: contract
     test: tests/test_vibey_agent.py::test_an_image_the_endpoint_returns_is_saved_through_the_media_sink_and_its_record_names_the_file
     related_tests:
+      - tests/test_vibey_agent.py::test_an_image_call_is_checked_against_the_turns_models_and_its_references_read_before_it_runs
+      - tests/test_vibey_agent.py::test_vibeys_image_tool_runs_on_the_gateways_image_endpoint_from_the_hop_it_resolves
       - tests/test_vibey_agent.py::test_a_generated_image_is_kept_as_an_immutable_file_its_bytes_name_and_type
       - tests/test_agent_transcript.py::test_the_media_sweep_keeps_every_file_a_row_registers_and_takes_only_stale_orphans
   - id: MH-HOSTED-UI-001

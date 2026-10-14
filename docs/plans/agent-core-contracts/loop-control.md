@@ -47,10 +47,16 @@ commit input → loop:
 
 Finality is decided before the response row is inserted, so a final (`result` or `error`) row is always the run's last
 response. A final response with `stop_reason=length` is incomplete, even when it
-contains partial text or an image: commit it as `error`, preserve usable content,
+contains partial text: commit it as `error`, preserve usable content,
 and end with an error of kind `length`. A no-answer length stop is not an
 `empty_response`; the upstream already supplied the cause. Ordinary empty or
-reasoning-only `stop` responses still fail as `empty_response`. This does not
+reasoning-only `stop` responses still fail as `empty_response`, unless the run's
+calls generated images (a completed `image_generate` result): a final that ends
+normally then replies with them, delivered under their heading
+(`vibey-hosted-tools.md` §7.3). A refusal, safety or length stop stays a failure,
+its images still delivered. The loop decides whether a response replies once
+(`has_reply`) and passes the decision to `append_response` as `replied`; the
+row's type at commit, its display and live settlement take it as given. This does not
 add a model call, increase an output limit, or replay a task. Non-final responses
 with pending steer/follow-up keep continuing normally; truncated tool calls keep
 the existing bounded reissue path without executing their partial arguments.

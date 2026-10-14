@@ -61,7 +61,7 @@ from core.agent_core.harness.store import ContextEntry
 from core.agent_core.tools.base import CallInstance
 from core.agent_core.tools.jobs import call_instance
 from core.agent_core.messages import (
-    HOSTED_TOOLS,
+    HOSTED_RESULT_TOOLS,
     IMAGE_MIME_TYPES,
     AssistantMessage,
     TextBlock,
@@ -192,6 +192,8 @@ class _Run:
     tool_calls: dict[str, ToolCallBlock] = field(default_factory=dict)
     # This run's committed responses by row id, for delivering them; released with the run.
     responses: dict[str, AssistantMessage] = field(default_factory=dict)
+    # The loop's decision for each response whether it replies (``has_reply``), committed with its row.
+    replied: dict[str, bool] = field(default_factory=dict)
     # Steer attempts ``Agent.steer`` accepted into this run: reconcile's in-process evidence.
     accepted_steers: set[str] = field(default_factory=set)
     stop_requested: bool = False
@@ -694,10 +696,12 @@ class VibeyAgent(BaseAgent):
             if run.stop_requested and reason == "aborted":
                 reason = "completed"
             run_failed_after_commit = reason not in _COMPLETED
-            failed = final_outcome(final) == "failed" or run_failed_after_commit
+            # Whether the final replies is the run's decision, committed with its row (``final_outcome``).
+            replied = run.replied.get(run.final_row)
+            failed = final_outcome(final, replied=replied) == "failed" or run_failed_after_commit
             if failed:
                 self._log_failure(run, reason, kind, origin, diagnostic)
-            body, citations = self._display_with_citations(final, final=True)
+            body, citations = self._display_with_citations(final, final=True, replied=bool(replied))
             body = self._with_hosted_images(run, body)
             if failed and not body.strip():
                 # A silent final whose run failed after the commit: like a final without text
@@ -1070,7 +1074,7 @@ class VibeyAgent(BaseAgent):
         content = ([text_block(rendered)] if rendered or not images else []) + images
         return UserMessage(content=tuple(content))
 
-    def _display_source(self, message: AssistantMessage, *, final: bool) -> str:
+    def _display_source(self, message: AssistantMessage, *, final: bool, replied: bool = False) -> str:
         """The text a surface renders a response from: its text blocks without silent blocks.
 
         Also the row's commit-time display (the store's renderer). A final without
@@ -1079,9 +1083,9 @@ class VibeyAgent(BaseAgent):
         never shows nothing for a failed Turn (loop-control.md section 2).
         """
         value = render_text(message)
-        # A final whose reply is a generated image has no text to show; its image
-        # is attached on delivery (``_with_hosted_images``), so there is nothing to explain.
-        if final and not value.strip() and not has_reply(message):
+        # A final that replies without text replies with its Turn's images: they are
+        # attached on delivery (``_with_hosted_images``), so there is nothing to explain.
+        if final and not value.strip() and not replied:
             kind = message.stop_reason if message.stop_reason in _EXPLAINED_STOPS else "empty_response"
             return error_text(kind, self._language())
         return strip_silent_blocks(value)
@@ -1219,7 +1223,7 @@ class VibeyAgent(BaseAgent):
             logger.exception("Vibey could not show narration %s", row_id)
 
     def _display_with_citations(
-        self, message: AssistantMessage, *, final: bool
+        self, message: AssistantMessage, *, final: bool, replied: bool = False
     ) -> tuple[str, Optional[CitationBundle]]:
         """The display text and, when the provider cited sources, the bundle that links them.
 
@@ -1229,14 +1233,14 @@ class VibeyAgent(BaseAgent):
         """
         blocks = [(block.text, block.citations or ()) for block in message.content if isinstance(block, TextBlock) and block.text]
         if not any(citations for _, citations in blocks):
-            return self._display_source(message, final=final), None
+            return self._display_source(message, final=final, replied=replied), None
         body, bundle = register_text_citations(
             blocks,
             unresolved_label=i18n_t("message.citationUnresolved", self._language()),
             transform=strip_silent_blocks,
         )
         if final and not body.strip():
-            return self._display_source(message, final=True), None
+            return self._display_source(message, final=True, replied=replied), None
         return body, bundle
 
     def _with_hosted_images(self, run: _Run, body: str) -> str:
@@ -1320,7 +1324,7 @@ class VibeyAgent(BaseAgent):
         """A proxied hosted call, once its result is committed: the record its executor returned."""
         call = run.tool_calls.get(event.tool_call_id)
         started = run.tool_started.pop(event.tool_call_id, None)
-        if call is None or call.name not in HOSTED_TOOLS:
+        if call is None or call.name not in HOSTED_RESULT_TOOLS:
             return
         try:
             result = await asyncio.to_thread(self._committed_tool_result, event.event_id)
@@ -1347,7 +1351,7 @@ class VibeyAgent(BaseAgent):
         return message if isinstance(message, ToolResultMessage) else None
 
     async def _emit_tool_started(self, run: _Run, event: ToolStarted) -> None:
-        if event.name in HOSTED_TOOLS:
+        if event.name in HOSTED_RESULT_TOOLS:
             # A proxied hosted call shows once, as its card, when its result lands.
             return
         call = run.tool_calls.get(event.tool_call_id)
@@ -1366,12 +1370,14 @@ class VibeyAgent(BaseAgent):
         except Exception:
             logger.exception("Vibey could not show tool %s", name)
 
-    def _on_response(self, session_id: str, row_id: str, message: AssistantMessage) -> None:
+    def _on_response(self, session_id: str, row_id: str, message: AssistantMessage, replied: Optional[bool]) -> None:
         """A response committed for the Session's run: keep what its delivery and tool events need."""
         run = self._run_for(session_id, None)
         if run is None:
             return
         run.responses[row_id] = message
+        if replied is not None:
+            run.replied[row_id] = replied
         run.tool_calls.update({call.id: call for call in message.tool_calls})
         self._note_tokens(run, message)
 

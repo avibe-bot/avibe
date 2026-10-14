@@ -13,8 +13,9 @@ Two adapter rules live at this boundary, where the loop consumes an input:
   after the backend accepts the steer. The loop can reach that input first, so
   consumption waits, bounded, for the row to exist.
 
-Each committed response is handed to ``on_response`` once, for the run that
-owns it; nothing here keeps responses after that.
+Each committed response is handed to ``on_response`` once, with the loop's
+decision whether it replies, for the run that owns it; nothing here keeps
+responses after that.
 """
 
 from __future__ import annotations
@@ -43,7 +44,7 @@ from storage.agent_transcript import SQLiteTranscriptStore, fork_link
 from storage.models import agent_sessions, messages
 
 EnvironmentSource = Callable[[str], Mapping[str, EnvironmentValue]]
-ResponseObserver = Callable[[str, str, AssistantMessage], None]
+ResponseObserver = Callable[[str, str, AssistantMessage, Optional[bool]], None]
 
 #: How long consumption waits for an accepted steer's row before failing the run.
 INPUT_ROW_TIMEOUT_S = 10.0
@@ -122,12 +123,18 @@ class AdapterTranscriptStore:
         return entry
 
     async def append_response(
-        self, session_id: str, message: AssistantMessage, *, final: bool, request: Optional[Mapping[str, Any]] = None
+        self,
+        session_id: str,
+        message: AssistantMessage,
+        *,
+        final: bool,
+        request: Optional[Mapping[str, Any]] = None,
+        replied: Optional[bool] = None,
     ) -> ContextEntry:
         entry = await self._store.append_response(
-            session_id, message, final=final, request=request, agent_name=self._agents.get(session_id)
+            session_id, message, final=final, request=request, replied=replied, agent_name=self._agents.get(session_id)
         )
-        self._on_response(session_id, entry.row_id, message)
+        self._on_response(session_id, entry.row_id, message, replied)
         return entry
 
     async def append_tool_result(

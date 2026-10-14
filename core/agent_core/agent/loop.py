@@ -346,6 +346,8 @@ class Agent:
         # The run's attempt ledger (C-9): every model attempt, in order.
         self._attempts: list[_Attempt] = []
         self._refusals = _Refusals()
+        # The run's calls generated images, which its final delivers: a reply even without text (``has_reply``).
+        self._generated_images = False
         # When each upstream prompt cache was last used in this Agent: the end of its latest model call, by the provider
         # and model that served it (``_cache_of``, C-9 section 3).
         self._last_model_at: dict[tuple[str, str], float] = {}
@@ -526,14 +528,14 @@ class Agent:
         except ProjectionError as error:
             raise ProviderProtocolViolation(f"Provider protocol violation: {error}") from error
 
-    async def _response(self, message: AssistantMessage, *, final: bool) -> ContextEntry:
+    async def _response(self, message: AssistantMessage, *, final: bool, replied: Optional[bool] = None) -> ContextEntry:
         self._validate_response(message)
         await self._save_state()
         # The attempt this response answered: the ledger's latest conversation attempt (the C-9 anchor).
         attempt = next((item for item in reversed(self._attempts) if item.purpose == "conversation"), None)
         facts = {"request": request_facts(attempt.request)} if self.context is not None and attempt else {}
         row = await self._scope.call(
-            lambda: self.store.append_response(self.session_id, deepcopy(message), final=final, **facts),
+            lambda: self.store.append_response(self.session_id, deepcopy(message), final=final, replied=replied, **facts),
             interruptible=False,
         )
         if attempt is not None:
@@ -560,6 +562,7 @@ class Agent:
                 self._turn_inputs = set()
                 self._attempts = []
                 self._refusals = _Refusals()
+                self._generated_images = False
                 loaded = True
                 system = self.system
                 self._run_tools = dict(self._tools)
@@ -931,10 +934,10 @@ class Agent:
             await self._audit("attempt", payload)
 
     async def _commit_model_message(
-        self, message: AssistantMessage, emit: Callable[..., Awaitable[None]]
+        self, message: AssistantMessage, emit: Callable[..., Awaitable[None]], *, replied: bool
     ) -> tuple[ContextEntry, bool]:
         """Commit the response: its row, and whether it is final. Finality and queued-input admission share one lock
-        with the commit."""
+        with the commit. ``replied`` is the run's decision whether it replies, which the store takes as given."""
         pending: list[tuple[AgentInput, bool]] = []
         consumed: list[tuple[AgentInput, bool]] = []
         failed = message.stop_reason in {"error", "aborted"}
@@ -948,7 +951,7 @@ class Agent:
                 final = not message.tool_calls and not pending and not failed
                 if final or failed:
                     self._open = False
-                row = await self._response(message, final=final)
+                row = await self._response(message, final=final, replied=replied)
                 for item, is_steer in pending:
                     await self._consume(item)
                     (self._steers if is_steer else self._follow_ups).popleft()
@@ -1001,8 +1004,10 @@ class Agent:
                         "local" if aborted else "source",
                         cause=decided,
                     )
-                response, final = await self._commit_model_message(message, emit)
-                empty_reply = final and not has_reply(message)
+                # Decided once: the empty-reply test, the row's type and settlement all take it (``has_reply``).
+                replied = has_reply(message, generated_images=self._generated_images)
+                response, final = await self._commit_model_message(message, emit, replied=replied)
+                empty_reply = final and not replied
                 truncated_reply = final and message.stop_reason == "length"
                 if empty_reply or truncated_reply:
                     decided = self._outcome.primary("error")
@@ -1207,6 +1212,8 @@ class Agent:
             interruptible=False,
         )
         self._rows.append(row)
+        if result.hosted is not None and result.hosted.record.status == "completed" and result.hosted.record.images:
+            self._generated_images = True
         await emit(
             ToolFinished,
             tool_call_id=call.id,

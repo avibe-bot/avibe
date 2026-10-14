@@ -2673,58 +2673,79 @@ async def test_a_proxied_hosted_call_runs_on_the_turns_executor_chain_and_keeps_
     assert sent["type"] == "tool_result" and seen in json.dumps(sent)
 
 
-_IMAGE_SPEC = ToolSpec(
-    "image_generate",
-    "Generate an image.",
-    {"type": "object", "properties": {"model": {"type": "string"}, "prompt": {"type": "string"}}},
-)
 _JPEG = b"\xff\xd8\xff\xe0" + bytes(range(256)) * 8
 _DIRECT = {
     "mode": "direct",
     "executor_origin": {"provider": "openai", "api": "openai_responses", "model": "gpt-image-2"},
     "executor_source_id": "src_executor01",
     "executor_billing": "metered",
+    "cost": {"basis": "list", "usd": 0.04},
 }
+# The turn's image models as HopResolution freezes them (§3.4): the default first, then by id.
+_IMAGE_MODELS = (
+    ("gpt-image-2", "OpenAI's image model", ("images", "n", "size"), ("pixels",)),
+    ("gemini-3.1-flash-image", "Google's fast image model", ("size",), ("ratio",)),
+)
+
+
+def _image_tool(client, *, media=None):
+    from core.agent_core.ai.provider import ImageModel, ImageModels, ModelEndpoint
+    from core.agent_core.tools.hosted import image_generate_spec
+    from modules.agents.vibey.tools import ImageGenerateTool
+
+    models = ImageModels(tuple(ImageModel("src_executor01", *entry) for entry in _IMAGE_MODELS))
+    endpoint = ModelEndpoint("anthropic", "http://hub.invalid/vibey/v1", "claude-opus-5-5", "hub-token")
+    return ImageGenerateTool(image_generate_spec(models), models, endpoint, client, media)
+
+
+def _tool_context(cwd: Path):
+    from core.agent_core.cancel import CancelToken
+    from core.agent_core.tools.base import ToolContext
+
+    return ToolContext("session", "call_1", None, str(cwd), {}, CancelToken())
 
 
 @pytest.mark.parametrize(
     ("images", "stored", "error", "code"),
     [
-        ([{"mime": "image/jpeg", "data": base64.b64encode(_JPEG).decode()}], True, None, None),
-        ([], True, "the executor returned no image", "executor_no_image"),
-        ([{"mime": "image/jpeg", "data": "@@@ not base64 @@@"}], True, "the image could not be saved: ", "image_not_saved"),
-        ([{"mime": "image/jpeg", "data": "/9j/4AAQ"}], False, "nothing here can keep a generated image", "image_no_store"),
+        ([{"data": base64.b64encode(_JPEG).decode()}], True, None, None),
+        ([], True, "the endpoint returned no image", "executor_no_image"),
+        ([{"data": "@@@ not base64 @@@"}], True, "the image could not be saved: ", "image_not_saved"),
+        ([{"data": "/9j/4AAQ"}], False, "nothing here can keep a generated image", "image_no_store"),
     ],
     ids=["saved", "no-image", "unreadable", "no-store"],
 )
 async def test_an_image_the_endpoint_returns_is_saved_through_the_media_sink_and_its_record_names_the_file(
     tmp_path, images, stored, error, code
 ):
-    """MH-HOSTED-VIBEY-007 (vibey-hosted-tools.md §7.3): the gateway answers an ``image_generate`` call's bytes beside
-    its record; Vibey saves them through the session media sink, the record lists the file, the result keeps the
-    model and what the endpoint rendered, and no base64 reaches the transcript. A completed call that saved no file is
-    a failed record whose reason carries its code (#2589), never a completed one listing nothing."""
+    """MH-HOSTED-VIBEY-007 (vibey-hosted-tools.md §7.3, §7.4): Vibey calls the gateway's image endpoint with the call's
+    arguments alone, and the gateway answers the images' bytes beside the record. Vibey saves them through the session
+    media sink and the record lists the files. The result keeps the model the call ran on and what the endpoint
+    reported, and the model reads the path, the model and the cost, never the bytes. A completed call that saved no
+    file is a failed record whose reason carries its code (#2589), never a completed one listing nothing."""
     import httpx
-
-    from core.agent_core.ai.provider import ModelEndpoint
-    from modules.agents.vibey.tools import HostedTool
 
     answer = {
         "record": {"status": "completed", "sources": []},
         "execution": _DIRECT,
-        "generation": {"model": "gpt-image-2", "revised_prompt": "A lighthouse at dusk", "size": "1536x1024", "quality": "high"},
+        "generation": {"revised_prompt": "A lighthouse at dusk", "size": "1536x1024", "quality": "high"},
         "images": images,
     }
-    endpoint = ModelEndpoint("anthropic", "http://hub.invalid/vibey/v1", "claude-opus-5-5", "hub-token")
-    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(200, json=answer))) as client:
-        tool = HostedTool(
-            _IMAGE_SPEC,
-            endpoint,
-            client,
-            media=MediaSnapshots(None, tmp_path / "media") if stored else None,  # type: ignore[arg-type]
-        )
-        result = await tool.execute({"model": "gpt-image-2", "prompt": "a lighthouse"}, None)  # type: ignore[arg-type]
+    sent: list[httpx.Request] = []
 
+    def gateway(request: httpx.Request) -> httpx.Response:
+        sent.append(request)
+        return httpx.Response(200, json=answer)
+
+    media = MediaSnapshots(None, tmp_path / "media") if stored else None  # type: ignore[arg-type]
+    async with httpx.AsyncClient(transport=httpx.MockTransport(gateway)) as client:
+        result = await _image_tool(client, media=media).execute(
+            {"model": "gpt-image-2", "prompt": "a lighthouse"}, _tool_context(tmp_path)
+        )
+
+    (request,) = sent
+    assert request.url.path == "/vibey/v1/hosted-tools/image_generate"
+    assert json.loads(request.content) == {"arguments": {"model": "gpt-image-2", "prompt": "a lighthouse"}}
     record = result.hosted.record
     if error is None:
         (image,) = record.images
@@ -2735,15 +2756,200 @@ async def test_an_image_the_endpoint_returns_is_saved_through_the_media_sink_and
         assert result.hosted.action == HostedAction(
             "generate", prompt="A lighthouse at dusk", size="1536x1024", quality="high", model="gpt-image-2"
         )
-        assert result.content[0].text.startswith('[image_generate: "A lighthouse at dusk"]')
-        assert f"Image saved: {image.path}" in result.content[0].text
+        text = result.content[0].text
+        assert text.startswith('[image_generate: "a lighthouse"]\nModel: gpt-image-2 via openai · cost: ≈ $0.04\n')
+        assert f"Image saved: {image.path}" in text
         assert images[0]["data"] not in json.dumps(message_to_dict(
             ToolResultMessage("call_1", "image_generate", result.content, hosted=result.hosted)
         ))
     else:
         assert result.is_error and record.status == "failed" and record.images == ()
         assert record.error.startswith(error) and record.error_code == code
+        assert result.hosted.action == HostedAction("generate", model="gpt-image-2")
         assert not (tmp_path / "media").exists() or not any((tmp_path / "media").iterdir())
+
+
+@pytest.mark.parametrize(
+    ("arguments", "error", "code"),
+    [
+        ({"model": "dall-e-3", "prompt": "a cat"}, "'dall-e-3' is not an image model of this turn. Available: "
+         "gpt-image-2, gemini-3.1-flash-image.", "image_model_unavailable"),
+        ({"model": "gemini-3.1-flash-image", "prompt": "a cat", "images": ["cat.jpg"]},
+         "gemini-3.1-flash-image does not take images. Models that take it: gpt-image-2.", "image_param_unsupported"),
+        ({"model": "gpt-image-2", "prompt": "a cat", "size": "16:9"},
+         "gpt-image-2 does not take size 16:9: it takes WIDTHxHEIGHT, such as 1024x1024. Models that take it: "
+         "gemini-3.1-flash-image.", "image_param_unsupported"),
+        # No model takes both: no alternative is named.
+        ({"model": "gemini-3.1-flash-image", "prompt": "a cat", "size": "16:9", "n": 2},
+         "gemini-3.1-flash-image does not take n.", "image_param_unsupported"),
+        # The forms the image endpoint accepts, no wider.
+        ({"model": "gpt-image-2", "prompt": "a cat", "size": "8x8"}, "size must be WIDTHxHEIGHT", None),
+        ({"model": "gpt-image-2", "prompt": "a cat", "quality": "high"},
+         "image_generate takes only model, prompt, size, images, n; it was given quality", None),
+        ({"model": "gpt-image-2", "prompt": "a cat", "images": ["missing.jpg"]},
+         "cannot read the reference image missing.jpg: ", None),
+        ({"model": "gpt-image-2", "prompt": "a cat", "images": ["notes.txt"]},
+         "cannot read the reference image notes.txt: it is not an image", None),
+        ({"model": "gpt-image-2", "prompt": "make it blue", "images": ["cat.jpg"], "n": 2}, None, None),
+        # An empty list is no reference image: the call goes out without it.
+        ({"model": "gemini-3.1-flash-image", "prompt": "a cat", "images": [], "size": "16:9"}, None, None),
+    ],
+    ids=["model-outside-the-turn", "param-the-model-does-not-take", "size-form-the-model-does-not-take",
+         "no-model-takes-the-call", "size-in-no-form", "unknown-argument", "reference-missing",
+         "reference-not-an-image", "reference-sent", "no-reference"],
+)
+async def test_an_image_call_is_checked_against_the_turns_models_and_its_references_read_before_it_runs(
+    tmp_path, arguments, error, code
+):
+    """§7.2, §7.4: Vibey refuses an argument the turn's frozen models do not take before anything runs, and names
+    what does take it; a reference image is read as ``read`` reads it, relative to the session's directory, and sent
+    as base64. A path the agent could not read fails the call before it is sent."""
+    import httpx
+
+    (tmp_path / "cat.jpg").write_bytes(_JPEG)
+    (tmp_path / "notes.txt").write_text("not an image")
+    sent: list[httpx.Request] = []
+
+    def gateway(request: httpx.Request) -> httpx.Response:
+        sent.append(request)
+        return httpx.Response(200, json={"record": {"status": "failed", "error": "upstream refused"}})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(gateway)) as client:
+        result = await _image_tool(client).execute(arguments, _tool_context(tmp_path))
+
+    if error is None:
+        (request,) = sent
+        expected = {key: value for key, value in arguments.items() if value != []}
+        if "images" in expected:
+            expected["images"] = [base64.b64encode(_JPEG).decode()]
+        assert json.loads(request.content) == {"arguments": expected}
+    else:
+        assert sent == [] and result.is_error
+        record = result.hosted.record
+        assert record.error.startswith(error) and record.error_code == code and result.hosted.execution is None
+
+
+async def test_vibeys_image_tool_runs_on_the_gateways_image_endpoint_from_the_hop_it_resolves(tmp_path):
+    """MH-HOSTED-VIBEY-007, closed loop at the seam: Vibey builds ``image_generate`` from the hop the real gateway
+    resolves, reads a reference image from the session's directory, and calls the gateway's real image endpoint,
+    whose recording engine answers as the images endpoint does. What Vibey sends is what the endpoint accepts, and
+    what it answers is what Vibey saves."""
+    import httpx
+
+    from core.handlers.model_hub.turn_gateway import ModelHubTurnGateway
+    from modules.agents.model_hub import ModelHubRuntimeRouter
+    from modules.agents.vibey.models import selection_from_hop
+    from modules.agents.vibey.tools import hosted_tools
+    from tests.test_model_hub_hosted_images import GEMINI, OPENAI, PNG, _served, _sources
+    from tests.test_model_hub_vibey_consumer import _vibey_service
+
+    (tmp_path / "cat.png").write_bytes(base64.b64decode(PNG))
+    service = _vibey_service(tmp_path, _sources(), handles=[_served(PNG, source_id=GEMINI), _served(PNG, size="1536x1024")])
+    gateway = ModelHubTurnGateway(service)
+    router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
+    try:
+        hop = await router.resolve_hop("menu-alias", process_scope="vibey:image", turn_id="turn-image")
+        async with httpx.AsyncClient(trust_env=False) as client:
+            tools = hosted_tools(selection_from_hop(hop), client, MediaSnapshots(None, tmp_path / "media"))
+            (tool,) = [tool for tool in tools if tool.spec.name == "image_generate"]
+            drawn = await tool.execute(
+                {"model": "gemini-2.5-flash-image", "prompt": "a cat", "size": "16:9"}, _tool_context(tmp_path)
+            )
+            edited = await tool.execute(
+                {"model": "gpt-image-2", "prompt": "make it blue", "images": ["cat.png"]}, _tool_context(tmp_path)
+            )
+    finally:
+        await gateway.close()
+
+    assert service.adapter.invocations == [(GEMINI, "gemini-2.5-flash-image", "vibey"), (OPENAI, "gpt-image-2", "vibey")]
+    assert service.adapter.requests[1]["images"] == [{"image_url": f"data:image/png;base64,{PNG}"}]
+    for result, model in ((drawn, "gemini-2.5-flash-image"), (edited, "gpt-image-2")):
+        assert not result.is_error, result.content[0].text
+        (image,) = result.hosted.record.images
+        assert Path(image.path).read_bytes() == base64.b64decode(PNG) and image.mime == "image/png"
+        assert result.hosted.execution.mode == "direct" and result.hosted.action.model == model
+    assert (edited.hosted.record.images[0].width, edited.hosted.record.images[0].height) == (1536, 1024)
+
+
+def _image_entry(*model_ids: str) -> dict:
+    """``HopResolution.hosted_tools.image_generate`` for ``model_ids``, the first the default."""
+    entries = {model_id: (description, list(params), list(forms)) for model_id, description, params, forms in _IMAGE_MODELS}
+    models = [
+        {"source_id": "src_executor01", "model_id": model_id, "description": entries[model_id][0],
+         "params": sorted(entries[model_id][1]), "size_forms": entries[model_id][2]}
+        for model_id in model_ids
+    ]
+    return {"models": models, "default": {"source_id": "src_executor01", "model_id": model_ids[0]}}
+
+
+@pytest.mark.parametrize(
+    ("said", "stop", "status", "replied"),
+    [
+        ("Here is your lighthouse.", "stop", "completed", True),
+        (None, "stop", "completed", True),
+        # A refusal is the turn's outcome even after an image: the image is still delivered.
+        (None, "refusal", "completed", False),
+        # Only a completed call's images count: a final that says nothing after a failed one is an empty reply.
+        (None, "stop", "failed", False),
+    ],
+    ids=["with-text", "image-only", "refusal-after-an-image", "after-a-failed-call"],
+)
+async def test_a_generated_image_reaches_the_user_with_the_turns_reply_even_when_the_model_says_nothing(
+    engine, session, tmp_path, published, said, stop, status, replied
+) -> None:
+    """MH-HOSTED-UI-012 (vibey-hosted-tools.md §3.4, §7.3): the turn declares ``image_generate`` with the image models
+    its first hop offers, and keeps that enum for the whole turn even when a later hop offers others. A completed
+    image is delivered with the turn's reply as an attachment. A final that ends normally without text after it is
+    still a reply, the image under its heading, never the empty-reply error; a refusal stays the turn's failure."""
+    import httpx
+
+    completed = {
+        "record": {"status": "completed", "sources": []},
+        "execution": _DIRECT,
+        "generation": {"size": "1024x1024"},
+        "images": [{"data": base64.b64encode(_JPEG).decode()}],
+    }
+    answer = completed if status == "completed" else {"record": {"status": "failed", "error": "upstream refused"}}
+    harness: Optional[_Harness] = None
+
+    def gateway(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/vibey/v1/hosted-tools/image_generate"
+        # An image refusal recorded mid-turn changes later hops' image models, never this turn's tools.
+        harness.controller.hub_hosted_tools = {"image_generate": _image_entry("gemini-3.1-flash-image")}
+        return httpx.Response(200, json=answer)
+
+    call = ToolCallBlock(id="call_img", name="image_generate", arguments={"model": "gpt-image-2", "prompt": "a lighthouse"})
+    final = AssistantMessage((TextBlock(text=said),) if said else (), ORIGIN, stop)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(gateway)) as client:
+        harness = _Harness(
+            engine,
+            tmp_path,
+            "telegram",
+            [[Done(AssistantMessage((call,), ORIGIN, "tool_use"))], [Done(final)]],
+            gateway_client=client,
+        )
+        harness.controller.hub_hosted_tools = {"image_generate": _image_entry("gpt-image-2", "gemini-3.1-flash-image")}
+        await harness.agent.handle_message(harness.request("draw a lighthouse"))
+
+    first, second = (
+        next(tool for tool in request.tools if tool.name == "image_generate") for request in harness.provider.requests
+    )
+    assert first == second
+    assert first.input_schema["properties"]["model"]["enum"] == ["gpt-image-2", "gemini-3.1-flash-image"]
+    assert harness.controller.terminals[-1]["is_error"] is not replied
+    result = next(row.message for row in await harness.context_rows() if isinstance(row.message, ToolResultMessage))
+    images = result.hosted.record.images
+    assert harness.controller.im_client.uploads == [str(Path(image.path).resolve()) for image in images]
+    assert len(images) == (1 if status == "completed" else 0)
+    empty = i18n_t("vibeyAgent.error.emptyResponse", "en")
+    if replied:
+        [row] = harness.rows("result")
+        assert row["content_text"].startswith(said or i18n_t("info.generatedImagesFallback", "en"))
+        assert not any(empty in item for item in harness.controller.im_client.sent)
+    else:
+        [row] = harness.rows("error")
+        assert harness.rows("result") == []
+        assert (empty in row["content_text"]) is (stop == "stop")
 
 
 _NATIVE_SEARCH = {"native": "assumed", "declaration": {"type": "web_search"}, "include": [], "replay": "assumed"}

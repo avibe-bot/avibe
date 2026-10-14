@@ -669,14 +669,18 @@ def text(value: str) -> TextBlock:
     return TextBlock(text=value)
 
 
-def has_reply(message: AssistantMessage) -> bool:
-    """Whether a response says something to the user: non-blank text.
+def has_reply(message: AssistantMessage, *, generated_images: bool = False) -> bool:
+    """Whether a turn's final response gives the user something: non-blank text, or, when it ended normally, the images
+    the turn's calls generated (``generated_images``), which are delivered with it. A refusal, safety or length stop
+    without text stays a failure, whatever the turn generated.
 
-    The one rule for "the model replied", read by the loop's empty-reply test and
-    by a final row's outcome. A generated image is an ``image_generate`` tool
-    result, delivered with the turn, never part of the response itself.
+    The one rule for "the model replied". The loop decides it once for each response it commits, and the store's row
+    type and live settlement take that decision. A generated image is an ``image_generate`` tool result, never part of
+    the response itself, so only the turn knows of it.
     """
-    return any(isinstance(block, TextBlock) and block.text and block.text.strip() for block in message.content)
+    if any(isinstance(block, TextBlock) and block.text and block.text.strip() for block in message.content):
+        return True
+    return generated_images and message.stop_reason == "stop"
 
 
 # --- persisted form ---------------------------------------------------------
