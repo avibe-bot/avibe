@@ -31,7 +31,7 @@ from core.handlers.model_hub.hosted_tools import HOSTED_PROBE_SHAPE, engine_stam
 from core.handlers.model_hub.pricing import PriceTable
 from core.handlers.model_hub.stream_wire import ProtocolSSEState, ProtocolUsageReport
 from core.handlers.model_hub.turn_gateway import ModelHubTurnGateway
-from core.handlers.model_hub.usage import UsageWriter
+from core.handlers.model_hub.usage import BoundedUsageLedger, UsageWriter
 from modules.agents.model_hub import ModelHubRuntimeRouter
 from core.run_settlement import SETTLED_BY_STOPPED
 from tests.test_model_hub_l3 import (
@@ -548,7 +548,10 @@ async def test_a_call_is_metered_in_the_slice_it_ended_in(tmp_path):
     service = _vibey_service(tmp_path, _sources(), handles=[
         SlowClose(_outcome(RawOutcomeKind.SUCCESS, source_id=XAI, usage=usage), _responses(WEB_CALL, WEB_ANSWER)),
     ])
+    # One clock for the call and the ledger, as in production.
     service.now = lambda: clock[0]
+    service.usage = BoundedUsageLedger(tmp_path / "usage-clocked.json", now=lambda: clock[0])
+    service.usage_writer = UsageWriter(service.usage)
     _bind(service, "web_search", (XAI, "grok-4.6"))
     status, _answer = await _call(service, "web_search", {
         "arguments": {"query": "q"}, "executor": {"source_id": XAI, "model_id": "grok-4.6"},
