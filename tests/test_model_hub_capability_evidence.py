@@ -189,6 +189,21 @@ def test_the_newest_success_is_kept_whatever_order_settlements_land_in(tmp_path)
     assert CapabilityEvidenceStore(path).get(source.id, "grok-4.6", CALL, "verified").observed_at == later
 
 
+def test_the_newest_refusal_is_kept_whatever_order_settlements_land_in(tmp_path):
+    """MH-HOSTED-003: one ordering rule for every write; an older refusal landing second keeps the newer one."""
+    source = _source()
+    store = _store(tmp_path)
+    later = NOW + timedelta(seconds=2)
+    store.write_refusal(_refusal(source, CALL, observed_at=later, detail="400 newer"), live=[source])
+    store.write_refusal(_refusal(source, CALL, detail="400 older"), live=[source])
+    kept = store.refusal(source, "grok-4.6", CALL, wire=_wire(source))
+    assert (kept.observed_at, kept.detail) == (later, "400 newer")
+    # Learned under another engine, the older-in-time record still replaces it: the stored one no longer applies.
+    moved = _wire(source, engine="model-hub-engine-v8.0.28-1")
+    store.write_refusal(_refusal(source, CALL, wire=moved), live=[source])
+    assert store.refusal(source, "grok-4.6", CALL, wire=moved) is not None
+
+
 def test_a_refusal_holds_in_memory_when_its_write_fails(tmp_path, monkeypatch, caplog):
     """MH-HOSTED-003: a refusal is routing state; the re-render that follows must not declare the feature again."""
     from core.handlers.model_hub import capability_evidence

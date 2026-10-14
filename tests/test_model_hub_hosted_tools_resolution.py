@@ -325,6 +325,26 @@ def test_the_latest_success_is_the_newest_one_whose_source_is_still_the_same(tmp
 
 
 @pytest.mark.parametrize(
+    "base_url,relay",
+    [
+        (None, False),
+        ("https://api.openai.com/v1", False),
+        # Spellings of the official endpoint the engine treats as the same one.
+        ("https://API.OpenAI.com:443/v1/", False),
+        ("https://api.openai.com", False),
+        ("https://relay.example/v1", True),
+        ("https://api.openai.com:8443/v1", True),
+    ],
+)
+def test_a_relay_is_any_endpoint_but_the_vendors_own_by_the_engines_endpoint_identity(base_url, relay):
+    """MH-HOSTED-004: an executor candidate is marked relay, whose bill Avibe cannot know, only off the official
+    endpoint."""
+    from core.handlers.model_hub.hosted_tools import is_relay
+
+    assert is_relay(replace(OPENAI, base_url=base_url)) is relay
+
+
+@pytest.mark.parametrize(
     "tool,payload,expected",
     [
         ("web_search", {"enabled": False}, {"enabled": False, "executor_order": ("src_oai00001",)}),

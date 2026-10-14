@@ -338,6 +338,20 @@ class CapabilityEvidenceStore:
         write_state_document(self.path, [item.payload() for item in kept])
         self._persisted = {item.key: item for item in kept if item.status == "verified"}
 
+    @staticmethod
+    def _supersedes(record: EvidenceRecord, existing: Optional[EvidenceRecord]) -> bool:
+        """The one ordering rule every write follows: per key, the newest record of the current wire wins.
+
+        Writes settle concurrently, so arrival order is not time order. A record replaces one of another identity
+        (or, for a refusal, another wire) at once; within the same one, only a newer record replaces it.
+        """
+
+        if existing is None or existing.source_identity != record.source_identity:
+            return True
+        if record.status == "unsupported" and existing.wire != record.wire:
+            return True
+        return record.observed_at > existing.observed_at
+
     def write_refusal(self, record: EvidenceRecord, *, live: Iterable[ModelHubSourceConfig]) -> None:
         """Record a refusal: memory first, then the file; a failed write is logged, not raised."""
 
@@ -354,7 +368,8 @@ class CapabilityEvidenceStore:
         with self._lock:
             updated = dict(self._records)
             for record in records:
-                updated[record.key] = record
+                if self._supersedes(record, updated.get(record.key)):
+                    updated[record.key] = record
             kept = self._write_locked(updated, identities)
             self._remember({item.key: item for item in kept})
             try:
@@ -382,13 +397,7 @@ class CapabilityEvidenceStore:
         if identities.get(record.source_id) != record.source_identity:
             return
         with self._lock:
-            existing = self._records.get(record.key)
-            if (
-                existing is not None
-                and existing.source_identity == record.source_identity
-                and existing.observed_at >= record.observed_at
-            ):
-                # Settlements race to the lock; the newest success of an identity is kept, whatever order they land.
+            if not self._supersedes(record, self._records.get(record.key)):
                 return
             updated = dict(self._records)
             updated[record.key] = record

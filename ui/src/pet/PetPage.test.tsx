@@ -120,9 +120,12 @@ const markRead = vi.fn(async (): Promise<boolean> => {
 const api = {
   setHarnessWatchEnabled: vi.fn(async () => ({ ok: true })),
   setHarnessTaskEnabled: vi.fn(async () => ({ ok: true })),
-  getMainSession: vi.fn(() => api.getSessionResult((window as unknown as { __AVIBE_PET_BINDING__: string }).__AVIBE_PET_BINDING__)),
-  // Default: no project to put the Vibey conversation in, so an unbound pet keeps the switcher.
-  ensureDesktopMiniSession: vi.fn(async (): Promise<WorkbenchSession> => { throw new ApiError('no project', 409, 'no_chat_project'); }),
+  getMainSession: vi.fn(() => {
+    const binding = (window as unknown as { __AVIBE_PET_BINDING__?: unknown }).__AVIBE_PET_BINDING__;
+    return typeof binding === 'string' && binding
+      ? api.getSessionResult(binding)
+      : Promise.resolve({ status: 404, session: null });
+  }),
   getConfig: vi.fn(async () => (setupDone
     ? { mode: 'self_host', setup_state: { needs_setup: false } }
     : { mode: 'self_host', setup_state: { needs_setup: true } })),
@@ -234,8 +237,13 @@ beforeEach(async () => {
   inboxVersion = 0;
   api.getSessionResult.mockClear();
   api.listSessions.mockClear();
-  api.ensureDesktopMiniSession.mockReset();
-  api.ensureDesktopMiniSession.mockImplementation(async () => { throw new ApiError('no project', 409, 'no_chat_project'); });
+  api.getMainSession.mockReset();
+  api.getMainSession.mockImplementation(() => {
+    const binding = (window as unknown as { __AVIBE_PET_BINDING__?: unknown }).__AVIBE_PET_BINDING__;
+    return typeof binding === 'string' && binding
+      ? api.getSessionResult(binding)
+      : Promise.resolve({ status: 404, session: null });
+  });
   window.localStorage.clear();
 });
 
@@ -321,41 +329,51 @@ describe('PetPage binding', () => {
 });
 
 describe('PetPage Vibey conversation', () => {
-  it('binds the Vibey conversation the server ensures when nothing is bound', async () => {
-    api.ensureDesktopMiniSession.mockResolvedValue(session('V', { agent_name: 'vibey', agent_backend: 'vibey' }));
+  const mainResult = (id = 'V'): WorkbenchSessionReadResult => ({
+    status: 200,
+    session: session(id, { agent_name: 'vibey', agent_backend: 'vibey' }),
+    capabilities: { can_chat: true },
+  });
+
+  it('binds the stable main session when nothing is bound', async () => {
+    api.getMainSession.mockResolvedValue(mainResult());
     render(<PetPage />);
     await waitFor(() => expect(devBinding().binding).toBe('V'));
-    expect(api.ensureDesktopMiniSession).toHaveBeenCalledTimes(1);
+    expect(api.getMainSession).toHaveBeenCalled();
   });
 
   it('leaves an existing binding alone', async () => {
     devBind('S');
     render(<PetPage />);
     await waitFor(() => expect(api.getSessionResult).toHaveBeenCalledWith('S'));
-    expect(api.ensureDesktopMiniSession).not.toHaveBeenCalled();
   });
 
   it('never re-binds a conversation that was cleared as invalid', async () => {
-    api.ensureDesktopMiniSession.mockResolvedValue(session('V'));
+    api.getMainSession.mockResolvedValueOnce(mainResult());
     sessionReads.V = async () => ({ status: 404, session: null });
     render(<PetPage />);
     await waitFor(() => expect(api.getSessionResult).toHaveBeenCalledWith('V'));
     await waitFor(() => expect(devBinding().binding).toBeNull());
-    await waitFor(() => expect(api.ensureDesktopMiniSession).toHaveBeenCalledTimes(2));
     await act(async () => new Promise((resolve) => setTimeout(resolve, 30)));
     expect(devBinding().binding).toBeNull();
-    expect(api.ensureDesktopMiniSession).toHaveBeenCalledTimes(2);
   });
 
-  it('offers Vibey in the switcher, and says why when there is no project', async () => {
+  it('offers the stable main session in the switcher without requiring a project', async () => {
     switcherSessions = [session('B', { title: 'Another session' })];
+    api.getMainSession.mockResolvedValueOnce({ status: 404, session: null });
+    api.getMainSession.mockResolvedValue(mainResult());
     render(<PetPage />);
     summon('show');
     await userEvent.click(await screen.findByText('pet.talkToVibey'));
-    expect(await screen.findByText('pet.noChatProject')).toBeTruthy();
-    api.ensureDesktopMiniSession.mockResolvedValue(session('V'));
-    await userEvent.click(screen.getByText('pet.talkToVibey'));
     await waitFor(() => expect(devBinding().binding).toBe('V'));
+  });
+
+  it('shows an error when the main-session endpoint resolves without a session', async () => {
+    api.getMainSession.mockResolvedValue({ status: 409, session: null });
+    render(<PetPage />);
+    summon('show');
+    await userEvent.click(await screen.findByText('pet.talkToVibey'));
+    expect(await screen.findByText('pet.vibeyUnavailable')).toBeTruthy();
   });
 
   it('does not offer Vibey to someone who cannot chat', async () => {
@@ -365,7 +383,7 @@ describe('PetPage Vibey conversation', () => {
     summon('show');
     expect(await screen.findByText('Another session')).toBeTruthy();
     expect(screen.queryByText('pet.talkToVibey')).toBeNull();
-    expect(api.ensureDesktopMiniSession).not.toHaveBeenCalled();
+    expect(api.getMainSession).not.toHaveBeenCalled();
   });
 
   it('shows a turn the agent could not run, with the way to fix it', async () => {

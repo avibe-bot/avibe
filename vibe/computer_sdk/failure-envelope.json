@@ -1,0 +1,12 @@
+{
+  "fields": [
+    "name",
+    "code",
+    "message",
+    "params",
+    "step",
+    "last_completed_step",
+    "screenshot_path",
+    "ambiguous"
+  ]
+}
