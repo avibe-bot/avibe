@@ -313,6 +313,24 @@ def image_choices(config: ModelHubConfig, *, evidence: HostedEvidence) -> ImageC
     return ImageChoices((default, *rest), default, saved, saved_choice is not None)
 
 
+def admitted_image(config: ModelHubConfig, choice: ImageChoice, *, evidence: HostedEvidence) -> ModelHubSourceConfig | None:
+    """The Source a frozen enum entry runs on, if this snapshot still admits it (§7.4): None otherwise.
+
+    The same Source under the same identity, still serving the model on a verified credential kind, with no
+    current refusal of the pair.
+    """
+
+    source = next((item for item in config.sources if item.id == choice.source_id), None)
+    if (
+        source is None
+        or identity_digest(source) != choice.identity
+        or not _serves_image(source, choice.spec)
+        or evidence.unsupported(source, choice.model_id, EvidenceFeature.hosted("image_generate", "call"))
+    ):
+        return None
+    return source
+
+
 def freeze_turn_tools(config: ModelHubConfig, *, evidence: HostedEvidence, spec_for: SpecLookup) -> TurnHostedTools:
     """What a Vibey turn's first resolution freezes (§3.4). With no image model, ``image_generate`` is not declared."""
 

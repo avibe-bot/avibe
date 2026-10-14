@@ -46,7 +46,8 @@ from .provenance import (
     render_turn_outcome_copy,
 )
 from .hosted_admission import PIN_MODEL_HEADER, PIN_SOURCE_HEADER, PIN_UNAVAILABLE_CODE
-from .hosted_turn import TurnHostedTools
+from .hosted_images import IMAGE_CALL_MAX_BYTES
+from .hosted_turn import IMAGE_TOOL, TurnHostedTools
 from .request import FORWARDED_CALLER_HEADERS, ModelHubRequest
 from .retry import RECOVERY_EXHAUSTED_CODE, RECOVERY_EXHAUSTED_MESSAGE
 from .resolver import parse_model_hub_timestamp
@@ -710,14 +711,17 @@ class ModelHubTurnGateway:
         token = self._authorized_token(request, "vibey")
         if token is None:
             return refused(401, "authentication_error")
+        tool = request.match_info["tool"]
+        image = tool == IMAGE_TOOL
         # Every step proportional to the request or the answer runs off the
-        # controller loop; the call's arguments are small, so the body is bounded.
-        # The bound is on the bytes parsed: an encoded body would be inflated
-        # past it, and on the loop, before the check could see it.
+        # controller loop. A search call's arguments are small; an image call
+        # adds its reference images, each within read's inline limit. The bound
+        # is on the bytes parsed: an encoded body would be inflated past it, and
+        # on the loop, before the check could see it.
         if (
             request.headers.get("Content-Encoding", "identity").strip().lower() not in {"", "identity"}
             or request.content_length is None
-            or request.content_length > _HOSTED_TOOL_REQUEST_MAX_BYTES
+            or request.content_length > (IMAGE_CALL_MAX_BYTES if image else _HOSTED_TOOL_REQUEST_MAX_BYTES)
         ):
             return refused(400, "invalid_request_error")
         raw = await request.read()
@@ -734,15 +738,15 @@ class ModelHubTurnGateway:
             return refused(409, "turn_not_live")
         try:
             with self._own_turn_call(live[0]):
-                result = await self.service.run_hosted_tool(
-                    request.match_info["tool"],
-                    payload,
-                    # Only what the caller's live turn froze may run.
-                    turn=live[1],
-                    language=self._language_provider() or "en",
+                # Only what the caller's live turn froze may run.
+                language = self._language_provider() or "en"
+                result = await (
+                    self.service.run_image_tool(payload, turn=live[1], language=language) if image
+                    else self.service.run_hosted_tool(tool, payload, turn=live[1], language=language)
                 )
         except ModelHubError as exc:
             return refused(exc.status, exc.code)
+        # An image answer carries megabytes of base64: encode it off the loop.
         body = await asyncio.to_thread(lambda: json.dumps(result).encode("utf-8"))
         return web.Response(
             body=body,

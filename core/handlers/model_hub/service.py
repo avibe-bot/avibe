@@ -59,6 +59,7 @@ from vibe.backend_model_catalog import (
     bundled_client_presets_once,
     bundled_provider_overlay,
     hosted_tool_spec,
+    provider_image_models,
 )
 from vibe.i18n import t as i18n_t
 from vibe.model_hub_runtime.api_key_vendors import (
@@ -102,6 +103,7 @@ from .catalog_admission import (
 from .classification import (
     ResolutionDecision,
     classify_outcome,
+    machine_codes_name_model,
     names_model_refusal,
     source_settlement_allowed,
     source_settlement_rule,
@@ -140,11 +142,20 @@ from .hosted_executor import (
     provider_charges,
     responses_result,
 )
-from .hosted_turn import ExecutorSlot, TurnHostedTools
+from .hosted_images import (
+    IMAGE_RESPONSE_MAX_BYTES,
+    IMAGE_TIMEOUT_SECONDS,
+    image_request,
+    image_result,
+    parse_image_call,
+    unsupported_argument,
+)
+from .hosted_turn import IMAGE_TOOL, ExecutorSlot, TurnHostedTools
 from .hosted_tools import (
     ExecutorCandidate,
     HostedEvidence,
     HostedToolSettingRefused,
+    admitted_image,
     apply_hosted_tool_put,
     clear_matcher,
     engine_stamp,
@@ -6483,6 +6494,140 @@ class ModelHubService:
         if failed_attempts:
             execution["failed_attempts"] = failed_attempts
         return {"record": record, "execution": execution}
+
+    async def run_image_tool(self, payload: object, *, turn: TurnHostedTools | None, language: str = "en") -> dict:
+        """Run one ``image_generate`` call directly on the images endpoint of the model it names (§7.4).
+
+        ``turn`` is what the caller's live turn froze: a model outside its enum
+        is refused, unrun. There is no chain and no fallback: a failed call says
+        which other models the turn offers, and the model may call again with
+        one. The call is metered on its Source and never changes Source health.
+        """
+
+        def say(key: str, **params: str) -> str:
+            return i18n_t(key, language, **params)
+
+        try:
+            # Reference images are megabytes of base64: validated off the controller loop.
+            call = await asyncio.to_thread(parse_image_call, payload)
+        except ExecutorCallRefused as refused:
+            raise ModelHubError(refused.code, status=refused.status) from None
+        choice = next((item for item in (turn.images if turn is not None else ()) if item.model_id == call.model), None)
+        if turn is None or IMAGE_TOOL not in turn.tools or choice is None:
+            raise ModelHubError("tool_not_enabled", status=409)
+        others = [item.model_id for item in turn.images if item.model_id != call.model]
+
+        def failed(error: str, code: str | None = None) -> dict:
+            if others:
+                error = f"{error} {say('modelHub.hostedTools.imageAlternatives', models=', '.join(others))}"
+            record = failed_record(error)
+            return {"record": {**record, "error_code": code} if code else record}
+
+        unsupported = unsupported_argument(call, choice.spec)
+        if unsupported is not None:
+            takers = [item.model_id for item in turn.images if unsupported_argument(call, item.spec) is None]
+            text = say("modelHub.hostedTools.imageParamUnsupported", model=call.model, param=unsupported)
+            if takers:
+                text = f"{text} {say('modelHub.hostedTools.imageParamTakers', models=', '.join(takers))}"
+            return {"record": {**failed_record(text), "error_code": "image_param_unsupported"}}
+
+        def admitted() -> ModelHubSourceConfig | None:
+            return admitted_image(self.store.load(), choice, evidence=self.hosted_evidence())
+
+        source = admitted()
+        if source is None:
+            return failed(say("modelHub.hostedTools.imageModelUnavailable", model=call.model), "image_model_unavailable")
+        request = ModelHubRequest(image_request(call, choice.spec), protocol="openai_images")
+        body = bytearray()
+
+        async def feed(chunk: bytes) -> None:
+            if len(body) + len(chunk) > IMAGE_RESPONSE_MAX_BYTES:
+                raise ExecutorResponseRefused("modelHub.hostedTools.tooLarge")
+            body.extend(chunk)
+
+        called = await self._hosted_upstream_call(
+            source, call.model, request, stream=False,
+            deadline=asyncio.get_running_loop().time() + IMAGE_TIMEOUT_SECONDS, feed=feed,
+            admitted_now=lambda: admitted() is not None,
+        )
+        if called is None:
+            return failed(say("modelHub.hostedTools.imageModelUnavailable", model=call.model), "image_model_unavailable")
+        outcome = called.outcome
+        failure = _executor_failure(outcome, say, refused=called.refused)
+        # The bytearray itself goes to the worker: no copy of the answer on the loop.
+        result = await asyncio.to_thread(image_result, body, say) if failure is None else None
+        execution: dict[str, Any] = {
+            "mode": "direct",
+            "executor_origin": {"provider": source.vendor, "api": source.protocol, "model": call.model},
+            "executor_source_id": source.id,
+            "executor_billing": source.billing,
+        }
+        cost = self._image_call_cost(
+            source, choice.spec, usage=called.usage, images=len(result.images) if result is not None else 0,
+            generation=result.generation if result is not None else None,
+        )
+        if cost is not None:
+            execution["cost"] = _cost_payload(cost)
+        if result is None or result.record["status"] != "completed":
+            if outcome is not None and outcome.kind is not RawOutcomeKind.SUCCESS:
+                await self._learn_image_refusal(source, call.model, outcome)
+            answer = failed(failure or (result.record["error"] if result is not None else say("modelHub.hostedTools.unreadable")))
+            return {**answer, "execution": execution}
+        await self.record_hosted_success(source, call.model, IMAGE_TOOL, "direct")
+        answer: dict[str, Any] = {"record": result.record, "execution": execution, "images": [
+            {"data": data} for data in result.images
+        ]}
+        if result.generation is not None:
+            answer["generation"] = dict(result.generation)
+        return answer
+
+    async def _learn_image_refusal(self, source: ModelHubSourceConfig, model_id: str, outcome: RawCallOutcome) -> None:
+        """The image narrow rule (§3.2): an upstream refusal of the model or of the endpoint, before any output.
+
+        The engine's own refusals reach here as local failures, never as an
+        upstream status, so they never teach. A refusal of the endpoint itself
+        (a 404: the path is not served) holds for every image model the Source
+        registers there, so sibling models do not each fail once.
+        """
+
+        if outcome.kind is not RawOutcomeKind.HTTP_ERROR or outcome.stream_started:
+            return
+        detail = f"{outcome.http_status} {outcome.error_code or outcome.error_type or 'error'}"[:64]
+        feature = EvidenceFeature.hosted(IMAGE_TOOL, "call")
+        if outcome.http_status in {400, 404} and machine_codes_name_model(outcome):
+            refused = [model_id]
+        elif outcome.http_status == 404:
+            refused = [
+                spec.id for spec in provider_image_models(source.vendor) if source.kind in spec.kinds
+            ] or [model_id]
+        else:
+            return
+        await self.record_hosted_refusals(source, [(refused_id, feature, detail) for refused_id in refused])
+
+    def _image_call_cost(
+        self,
+        source: ModelHubSourceConfig,
+        spec: ImageModelSpec,
+        *,
+        usage: Optional[ProtocolUsageReport],
+        images: int,
+        generation: Mapping[str, str] | None,
+    ) -> Optional[HostedCost]:
+        """One image call's cost: included, the list price per delivered image, else its tokens; None when unknown."""
+
+        if source.billing == "monthly":
+            return HostedCost(basis="included", usd=None)
+        size = (generation or {}).get("size")
+        quality = (generation or {}).get("quality")
+        matching = [
+            entry for entry in spec.prices
+            if entry.size in {None, size} and entry.quality in {None, quality}
+        ]
+        if matching and images:
+            # The most specific price that applies to what was delivered.
+            price = max(matching, key=lambda entry: (entry.size is not None) + (entry.quality is not None)).price
+            return HostedCost(basis="list", usd=round(price.usd_per_1k / 1000 * images, 6))
+        return self.hosted_call_cost(source, spec.id, (), usage=usage, counts={})
 
     async def _executor_attempt(
         self,
