@@ -73,8 +73,13 @@ class HopOrigin:
     api: str
     model: str
     # The serving Source: two Sources can share an origin. Equality stays the
-    # origin's, since opaque payloads are origin-bound, not Source-bound.
+    # origin's; opaque payloads are also bound to the Source's account (C-6 item
+    # 6), which the failover strip compares on its own.
     source: str = field(compare=False)
+    # The launch Source's credential-free identity (``identity_digest``), taken
+    # from the snapshot the origin came from. In memory only: never in
+    # ``payload()``, the served-hop header, or persisted provenance.
+    identity: str = field(default="", compare=False, repr=False)
 
     def payload(self) -> dict[str, str]:
         return {"provider": self.provider, "api": self.api, "model": self.model}
@@ -770,6 +775,10 @@ class PreparedGatewayRoute:
     source_id: str
     gateway_request_model_id: str
     primary_origin: HopOrigin | None = None
+    # Vibey only: the primary Source's identity at launch. ``HopOrigin`` compares
+    # without it, but a route under another identity is another route, so its
+    # credential carries the launch identity the gateway compares against.
+    primary_identity: str = ""
     # Vibey only: the proxy executor bound for each enabled hosted tool, as
     # ``HopResolution.hosted_tools`` states it, with the executor Source's
     # identity digest at launch: (tool, (source_id, model_id, identity) | None).
@@ -1703,6 +1712,7 @@ class TurnCorrelationRegistry:
                 source_id=source_id,
                 gateway_request_model_id=request_model_id,
                 primary_origin=primary_origin,
+                primary_identity=primary_origin.identity if primary_origin is not None else "",
                 hosted_executors=hosted_executors,
             )
 
@@ -2702,7 +2712,7 @@ class TurnCorrelationRegistry:
 
             self.store.put(
                 {
-                    "contract_version": 13,
+                    "contract_version": 14,
                     "turn_id": normalized_turn_id,
                     "ts": ts or _utc_now_iso(),
                     "agent": trace.agent,

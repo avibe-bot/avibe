@@ -240,7 +240,7 @@ from .usage import (
     local_usage_day,
 )
 
-CONTRACT_VERSION = 13
+CONTRACT_VERSION = 14
 
 
 def seeded_source_name(vendor: str) -> str:
@@ -363,8 +363,8 @@ def _described_as_unfit_for_agent_turns(match: Mapping[str, Any]) -> bool:
     )
 
 
-AGENT_CHAIN_CONTRACT_VERSION = 13
-PROBE_RESULT_CONTRACT_VERSION = 13
+AGENT_CHAIN_CONTRACT_VERSION = 14
+PROBE_RESULT_CONTRACT_VERSION = 14
 _SOURCE_DISCOVERY_TIMEOUT_SECONDS = 15
 _SOURCE_PROBE_TIMEOUT_SECONDS = 60
 # Background inventory refresh. The first tick doubles as the startup delay, so
@@ -1226,7 +1226,7 @@ def _runtime_payload(status: EngineStatus, *, enabled: bool) -> dict:
 
     manager = EngineRuntimeManager()
     return {
-        "contract_version": 13,
+        "contract_version": 14,
         "enabled": enabled,
         "host_platform": status.host_platform or manager.host_platform(),
         "manifest": manager.contract_manifest(),
@@ -9740,10 +9740,28 @@ class ModelHubService:
                         origin.response_headers()
                     except ServedHopHeaderTooLarge:
                         raise ModelHubError("served_hop_too_large", status=422) from None
-                    # A pinned request was rendered for its pinned Source and is
-                    # never rewritten; only an unpinned one is stripped here.
-                    if pinned_hop is None and getattr(request, "primary_origin", None) != origin:
+                    # Opaque payloads are bound to the account that issued them,
+                    # the Source identity, not only to the origin (C-6 item 6). The
+                    # request was rendered for the launch primary's identity; the
+                    # serving one is read on this final snapshot, so a key rotated
+                    # while the engine was prepared counts.
+                    primary = getattr(request, "primary_origin", None)
+                    identity = identity_digest(source)
+                    other_account = (
+                        primary != origin or primary.source != origin.source or primary.identity != identity
+                    )
+                    if pinned_hop is None and other_account:
+                        # An unpinned request is stripped for any other account.
                         attempt_request = without_opaque_history(request)
+                    elif (
+                        other_account
+                        and primary is not None
+                        and pinned_hop == (primary.source, primary.model)
+                    ):
+                        # A pinned request is never rewritten: rendered for the
+                        # primary's identity, it cannot go to the primary under
+                        # another, so Vibey renders it again portably.
+                        raise _pin_unavailable()
                     # Hosted content is admitted on this final snapshot, so evidence
                     # or a Source that changed while the engine was prepared counts.
                     if hosted and not self._admits_hosted(hosted, source, model_id):
@@ -9752,7 +9770,7 @@ class ModelHubService:
                     # claim is made here, under the exclusion this call is admitted in,
                     # so no concurrent request or config change slips between them.
                     claim = getattr(request, "pin_identity_claim", None)
-                    if hosted and (claim is None or not claim(identity_digest(source), bool(hosted.in_flight))):
+                    if hosted and (claim is None or not claim(identity, bool(hosted.in_flight))):
                         raise _pin_unavailable()
                 if self._engine_synced:
                     if recovery_request is not None and recovery_request.expired:

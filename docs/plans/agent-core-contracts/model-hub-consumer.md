@@ -25,6 +25,17 @@ consumer's requirements, and the Model Hub lane lands the change in both places.
    retryable error.
    - `request_headers` carries `x-avibe-turn-id`, the Turn the resolution was made for, and the agent sends it on
      every gateway request: model calls and proxied hosted calls.
+   - `source_identity` is the primary hop Source's credential-free identity (`identity_digest`: kind, vendor,
+     protocol, supply channel, base URL, credential reference, credential generation), taken from the snapshot its origin
+     came from. The agent records it on each response its own Source served (C-1 `AssistantMessage.source_identity`)
+     and replays opaque payloads only to a hop of the same identity (`cross-provider.md`). Its inputs are therefore
+     a persisted comparison key: changing them later sends every stored message once in the different-origin form,
+     which is safe degradation and needs no migration, but should be deliberate.
+   - The agent infers the serving identity from the launch's: the served-hop report names the Source, never its
+     identity. A key changed between resolution and admission therefore labels the response with the launch
+     identity, although the new account served it. That label errs only toward dropping: an identity never recurs
+     after a credential change, so it matches no later hop, and the response's payloads go once in the
+     different-origin form. They never go to another account.
    - The token answers for the route, which later Turns of the Session reuse. The gateway credits a request only
      to the Turn it names, and only while that Turn holds the token's route and still admits work.
    - A model request from a finished Turn still routes but is credited to no Turn. A hosted call from one is
@@ -40,8 +51,13 @@ consumer's requirements, and the Model Hub lane lands the change in both places.
    another protocol, the gateway converts (degraded, not broken) and the served-hop report says so.
 6. **No opaque payload crosses origins at failover.** The agent builds the request for the primary hop's origin, so it
    may carry that origin's opaque payloads (C-1: any block's signature, redacted thinking). When the gateway fails
-   over to a hop whose origin `(provider, api, model)` differs from the primary's, it removes every such payload
-   before sending, applying the same rule as `cross-provider.md`, whether or not it converts protocols. Known limit:
+   over to a hop whose origin `(provider, api, model)`, Source, or Source identity differs from the primary's, it
+   removes every such payload before sending, applying the same rule as `cross-provider.md`, whether or not it
+   converts protocols. Opaque payloads are bound to the account that issued them, the Source identity, as well as
+   the origin: a provider refuses another account's ciphertext. The serving identity is read on the final admission
+   snapshot, so a key rotated mid-turn counts. A pinned request is never rewritten: one pinned to the primary hop
+   whose identity has changed since the launch answers `pin_unavailable`, and the agent renders it again portably.
+   The identity stays in memory: it is never in the served-hop report or persisted provenance. Known limit:
    the next request targets the primary origin again, so payloads returned by a fallback origin are not replayed if a
    later request fails over to that same fallback; a provider that then rejects the call surfaces as a provider error.
 

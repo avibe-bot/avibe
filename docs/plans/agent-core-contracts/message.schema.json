@@ -353,6 +353,11 @@
         },
         "hosted_summary": {
           "$ref": "#/definitions/HostedSummary"
+        },
+        "source_identity": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The credential-free identity of the Source that served the message (HopResolution `source_identity`), when known: recorded when the served-hop report names the hop's own Source. Its opaque payloads go back only to a hop of the same identity (`cross-provider.md`). Absent when unknown, as after a failover to another Source or for a message written before this field: its opaque payloads then go back only to a hop that names no identity either."
         }
       },
       "if": {

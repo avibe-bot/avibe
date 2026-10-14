@@ -12,6 +12,7 @@
     "token",
     "runtime_model",
     "source_id",
+    "source_identity",
     "provider",
     "capabilities",
     "request_headers",
@@ -44,6 +45,11 @@
     },
     "source_id": {
       "type": "string"
+    },
+    "source_identity": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The primary hop Source's credential-free identity (`identity_digest`), from the snapshot its origin came from. The agent records it on each response its own Source served and replays opaque payloads only to a hop of the same identity (C-1, cross-provider.md)."
     },
     "provider": {
       "type": "string",
@@ -338,6 +344,7 @@
       "token": "<in-memory>",
       "runtime_model": "claude-opus-5-5",
       "source_id": "src_anthropic_main",
+      "source_identity": "sha256:9f2c4e1a7b3d5c6e8f0a1b2c3d4e5f60718293a4b5c6d7e8f9a0b1c2d3e4f5a6",
       "provider": "anthropic",
       "request_headers": {},
       "capabilities": {

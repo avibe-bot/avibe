@@ -119,7 +119,7 @@ def selection_from_hop(hop: Mapping[str, Any], *, gateway_base_url: Optional[str
     protocol = hop.get("protocol")
     if protocol not in PROTOCOLS:
         raise HopResolutionError(f"hop protocol {protocol!r} is not supported")
-    for name in ("base_url", "token", "runtime_model", "provider", "source_id"):
+    for name in ("base_url", "token", "runtime_model", "provider", "source_id", "source_identity"):
         if not isinstance(hop.get(name), str) or not hop[name]:
             raise HopResolutionError(f"hop has no {name}")
     headers = hop.get("request_headers")
@@ -156,6 +156,7 @@ def selection_from_hop(hop: Mapping[str, Any], *, gateway_base_url: Optional[str
         request_headers=dict(headers),
         provider=hop["provider"],
         source_id=hop["source_id"],
+        source_identity=hop["source_identity"],
         hosted_tools=hosted_tools,
     )
     return ModelSelection(endpoint=endpoint, capabilities=capabilities)

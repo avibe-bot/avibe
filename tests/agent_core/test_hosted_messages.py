@@ -128,6 +128,7 @@ def _produced() -> list:
         content=(ToolCallBlock(id="call_7", name="x_search", arguments={"query": "from:avibe", "limit": 5}),),
         origin=Origin(provider="anthropic", api="anthropic", model="claude-opus-5-5"),
         stop_reason="tool_use",
+        source_identity="sha256:" + "a1" * 32,
     )
     proxied = ToolResultMessage(
         tool_call_id="call_7",

@@ -2871,7 +2871,10 @@ def test_served_hop_report_is_exactly_origin_and_source(report: str, expected: S
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("served_hop", [
-    None, "invalid", '{"provider":"anthropic","api":"anthropic","model":"model-x","source":"src_fixture01"}',
+    None,
+    "invalid",
+    '{"provider":"anthropic","api":"anthropic","model":"model-x","source":"src_fixture01"}',
+    '{"provider":"anthropic","api":"anthropic","model":"model-x","source":"src_fixture02"}',
 ])
 async def test_gateway_origin_sanitization_preserves_streamed_block_indexes(served_hop: str | None) -> None:
     body = (
@@ -2893,10 +2896,9 @@ async def test_gateway_origin_sanitization_preserves_streamed_block_indexes(serv
         return httpx.Response(200, headers=headers, text=body)
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        events = await _events(
-            AnthropicAdapter(client, gateway=True),
-            _request("anthropic"),
-        )
+        request = _request("anthropic")
+        hop = replace(request.endpoint, source_id="src_fixture01", source_identity="sha256:fixture-account")
+        events = await _events(AnthropicAdapter(client, gateway=True), replace(request, endpoint=hop))
 
     final = events[-1]
     assert isinstance(final, Done)
@@ -2915,6 +2917,10 @@ async def test_gateway_origin_sanitization_preserves_streamed_block_indexes(serv
     if not verified:
         assert all(not isinstance(block, ThinkingBlock) or block.signature is None for block in final.message.content)
     assert all(not isinstance(block, ToolCallBlock) or block.signature is None for block in final.message.content)
+    # The message records the identity its opaque payloads go back to (cross-provider.md): the hop's, when the hop's
+    # own Source served it; none when another Source did, whose identity is unknown here.
+    own = verified and "src_fixture01" in served_hop
+    assert final.message.source_identity == ("sha256:fixture-account" if own else None)
 
 
 class _Loader(MediaLoader):

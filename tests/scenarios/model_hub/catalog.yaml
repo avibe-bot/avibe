@@ -590,11 +590,11 @@ scenarios:
       - tests/test_model_hub_api.py::test_runtime_stop_protects_configured_vibey_models
       - tests/test_model_hub_api.py::test_runtime_stop_returns_explicit_not_started_state
   - id: MH-VIBEY-005
-    name: Vibey failover strips opaque history only for a different or unverified origin
+    name: Vibey failover strips opaque history for a different or unverified origin, or another Source of the same origin
     status: covered
     kind: compatibility
     layer: contract
-    test: tests/test_model_hub_vibey_consumer.py::test_failover_strips_opaque_history_only_when_origin_changes
+    test: tests/test_model_hub_vibey_consumer.py::test_failover_strips_opaque_history_for_another_origin_or_source
     related_tests:
       - tests/test_model_hub_vibey_consumer.py::test_opaque_history_uses_launch_snapshot_without_requiring_turn_attribution
       - tests/test_model_hub_vibey_consumer.py::test_opaque_history_origin_survives_recovery_walks

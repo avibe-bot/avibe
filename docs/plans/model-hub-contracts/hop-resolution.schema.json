@@ -4,7 +4,7 @@
   "title": "HopResolution",
   "description": "C-6 runtime consumer projection of ModelHubLaunch. Unknown planning metadata remains null; credentials are in-memory only.",
   "type": "object",
-  "required": ["backend", "requested_model", "protocol", "base_url", "token", "runtime_model", "source_id", "provider", "request_headers", "capabilities", "hosted_tools"],
+  "required": ["backend", "requested_model", "protocol", "base_url", "token", "runtime_model", "source_id", "source_identity", "provider", "request_headers", "capabilities", "hosted_tools"],
   "additionalProperties": false,
   "properties": {
     "backend": { "const": "vibey" },
@@ -14,6 +14,11 @@
     "token": { "type": "string" },
     "runtime_model": { "type": "string" },
     "source_id": { "type": "string" },
+    "source_identity": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The primary hop Source's credential-free identity (identity_digest), from the snapshot its origin came from. The consumer replays opaque payloads only to a hop of the identity that served them."
+    },
     "provider": { "type": "string" },
     "request_headers": { "type": "object", "additionalProperties": { "type": "string" } },
     "capabilities": {

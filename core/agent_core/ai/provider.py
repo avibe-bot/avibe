@@ -93,6 +93,12 @@ class ModelEndpoint:
     provider: str = ""
     #: The hop's Source (``HopResolution.source_id``): the pin of a request that carries native hosted content.
     source_id: Optional[str] = None
+    #: That Source's credential-free identity (``HopResolution.source_identity``): the account a response's opaque
+    #: payloads are bound to (``cross-provider.md``).
+    source_identity: Optional[str] = None
+    #: A portable request (§3.5, ``portable_request``): never pinned, and no native hosted content. Its Source and
+    #: identity stay, so a response its own Source serves is still attributed to them.
+    portable: bool = False
     #: Each enabled hosted tool's route on this hop, in Model Hub's order; empty when none is enabled.
     hosted_tools: Mapping[str, HostedToolRoute] = field(default_factory=dict)
 

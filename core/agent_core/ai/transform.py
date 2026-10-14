@@ -76,8 +76,10 @@ def transform_messages(
 ) -> TransformResult:
     """Compile canonical history for one target origin.
 
-    The returned map is per request. The transcript is never mutated. ``endpoint`` is the hop the request goes to; a
-    response's hosted calls go back verbatim only to the Source that served them (``native_replay``).
+    The returned map is per request. The transcript is never mutated. ``endpoint`` is the hop the request goes to: a
+    response's opaque payloads (signatures, redacted thinking) go back only to a hop of the Source identity that served
+    it, and its hosted calls verbatim only to the Source that served them (``native_replay``). Without an
+    ``endpoint``, the origin alone decides.
     """
 
     target_protocol = protocol or target.api
@@ -123,7 +125,12 @@ def transform_messages(
             continue
 
         pending_tool_ids.clear()
-        same_origin = message.origin == target
+        # Opaque payloads are bound to the account that issued them, the Source identity: another account's ciphertext
+        # is refused (xAI, OpenAI). A message another identity served, or one no known identity did, is sent as a
+        # different origin's.
+        same_origin = message.origin == target and (
+            endpoint is None or message.source_identity == endpoint.source_identity
+        )
         content: list[AssistantContent] = []
         turn_tool_ids: dict[str, list[str]] = {}
         in_flight = position == live
@@ -264,7 +271,10 @@ def native_replay(
     """
 
     blocks = [block for block in message.content if isinstance(block, HostedToolBlock)]
-    if not blocks or endpoint is None or not endpoint.source_id or message.origin != target:
+    if not blocks or endpoint is None or not endpoint.source_id or endpoint.portable or message.origin != target:
+        return False
+    # A native payload is opaque provider content too: it goes back only to the account that issued it.
+    if message.source_identity != endpoint.source_identity:
         return False
     if protocol not in ("anthropic", "openai_responses"):
         return False

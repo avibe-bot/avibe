@@ -191,13 +191,15 @@ class ModelHubLaunch:
     supports_images: Optional[bool] = None
     # Vibey only: each enabled hosted tool's mode, declaration, executor and replay.
     hosted_tools: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
+    # Vibey only: the Source's credential-free identity, from the snapshot its origin came from (C-6).
+    source_identity: Optional[str] = None
 
     def to_hop_resolution(self) -> dict[str, Any]:
         """Project C-6 from the same launch that owns routing and credentials."""
 
         if (
             self.backend != "vibey" or self.channel != "hub"
-            or not self.protocol or not self.provider or not self.source_id
+            or not self.protocol or not self.provider or not self.source_id or not self.source_identity
             or not self.gateway_base_url or not self.gateway_token
         ):
             raise ModelHubError("mapping_target_unavailable", status=409)
@@ -209,6 +211,7 @@ class ModelHubLaunch:
             "token": self.gateway_token,
             "runtime_model": self.runtime_model,
             "source_id": self.source_id,
+            "source_identity": self.source_identity,
             "provider": self.provider,
             "request_headers": dict(self.gateway_request_metadata),
             "capabilities": {
@@ -1336,6 +1339,7 @@ class ModelHubRuntimeRouter:
                 if self.turn_gateway is not None and backend == "codex"
                 else target_model
             )
+            identity = identity_digest(source) if backend == "vibey" else None
             # A turn's first resolution binds its hosted tools and executors;
             # later attempts of the turn keep that binding (settings apply from
             # the next turn) and recompute only what belongs to their hop.
@@ -1363,9 +1367,10 @@ class ModelHubRuntimeRouter:
                 source_id=source.id,
                 via_mapping=False,
                 gateway_request_model_id=runtime_model,
+                # The origin and the identity come from one snapshot of the Source.
                 primary_origin=(
-                    HopOrigin(source.vendor, source.protocol, target_model, source.id)
-                    if backend == "vibey" else None
+                    HopOrigin(source.vendor, source.protocol, target_model, source.id, identity)
+                    if identity is not None else None
                 ),
                 # The proxy endpoint runs only the executor this launch bound per
                 # tool, and only while its Source keeps the identity it had now.
@@ -1413,6 +1418,7 @@ class ModelHubRuntimeRouter:
                     else None
                 ),
                 hosted_tools=hosted_tools,
+                source_identity=identity,
             )
         self._emit_transition(launch, config)
         return launch

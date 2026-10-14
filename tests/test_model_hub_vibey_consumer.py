@@ -227,12 +227,15 @@ def _signed_history(protocol):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("protocol", PROTOCOL_ENDPOINTS)
-@pytest.mark.parametrize("change", ["same_origin", "provider", "api", "model"])
-async def test_failover_strips_opaque_history_only_when_origin_changes(tmp_path, protocol, change):
-    """MH-VIBEY-005: the engine must never receive primary-signed history at another origin.
+@pytest.mark.parametrize("change", ["source", "provider", "api", "model"])
+async def test_failover_strips_opaque_history_for_another_origin_or_source(tmp_path, protocol, change):
+    """MH-VIBEY-005: the engine must never receive primary-signed history at another origin or Source.
 
     Origin-report tests alone do not inspect the outgoing history at admission.
-    Source identity alone is not origin identity; preserve ordinary tool data.
+    Opaque payloads are bound to the Source as well (an account refuses another
+    account's ciphertext), so a fallback Source of the same origin gets the
+    plain history too; ordinary tool data is preserved. A retry on the primary
+    Source keeps it (the recovery-walk test below).
     """
     primary = _source("src_primary01", "Primary", vendor="anthropic", protocol=protocol)
     fallback_protocol = "anthropic" if protocol != "anthropic" else "openai_responses"
@@ -272,7 +275,7 @@ async def test_failover_strips_opaque_history_only_when_origin_changes(tmp_path,
                 }
         assert [entry[0] for entry in service.adapter.invocations] == [primary.id, fallback.id]
         assert service.adapter.requests[0] == {**common, **original}
-        assert service.adapter.requests[1] == {**common, **(original if change == "same_origin" else plain)}
+        assert service.adapter.requests[1] == {**common, **plain}
         assert all(request.protocol == protocol for request in service.adapter.requests)
         assert all(request.headers == {
             "anthropic-beta": "fixture-beta", "user-agent": "fixture-agent",
@@ -284,12 +287,14 @@ async def test_failover_strips_opaque_history_only_when_origin_changes(tmp_path,
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("turn_id", ["turn-snapshot", None])
-@pytest.mark.parametrize("origin_state", ["unchanged", "changed", "unverified"])
+@pytest.mark.parametrize("origin_state", ["unchanged", "changed", "rotated", "unverified"])
 async def test_opaque_history_uses_launch_snapshot_without_requiring_turn_attribution(tmp_path, turn_id, origin_state):
     """MH-VIBEY-005: config reload and untracked calls cannot invent primary provenance.
 
     A fallback-only case cannot catch snapshot recomputation at HTTP arrival or
-    loss of the route credential when no dispatched turn is being tracked.
+    loss of the route credential when no dispatched turn is being tracked. A key
+    rotated after the launch makes the primary another account, whose history
+    was signed under the launch identity (C-6 item 6).
     """
     primary = _source("src_primary01", "Primary", vendor="anthropic", protocol="anthropic")
     service = _vibey_service(tmp_path, [primary], handles=[
@@ -308,6 +313,8 @@ async def test_opaque_history_uses_launch_snapshot_without_requiring_turn_attrib
             request_headers = hop["request_headers"]
         if origin_state == "changed":
             service.store.config.sources[0].vendor = "custom"
+        if origin_state == "rotated":
+            service.store.config.sources[0].credential_ref = "cred_rotated0001"
         async with aiohttp.ClientSession() as client:
             async with client.post(
                 f"{base_url}/messages",
@@ -321,6 +328,39 @@ async def test_opaque_history_uses_launch_snapshot_without_requiring_turn_attrib
         )["messages"]
     finally:
         await gateway.close()
+
+
+@pytest.mark.asyncio
+async def test_a_later_turn_after_a_key_rotation_gets_a_route_under_the_new_identity(tmp_path):
+    """MH-VIBEY-005: a route credential carries the launch identity the gateway compares against, so a turn launched
+    after the key changed gets a route under the new identity. Its own Source's signed history, rendered for that
+    identity, is kept; the earlier route still answers for the identity it was launched under."""
+
+    primary = _source("src_primary01", "Primary", vendor="anthropic", protocol="anthropic")
+    service = _vibey_service(tmp_path, [primary], handles=[
+        LiveInvokeHandle(_outcome(RawOutcomeKind.SUCCESS), (b"{}",)),
+    ])
+    signed, _plain = _signed_history("anthropic")
+    gateway = ModelHubTurnGateway(service)
+    router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
+    try:
+        before = await router.resolve_hop("menu-alias", process_scope="vibey:rotation", turn_id="turn-before")
+        completion = router.settle_turn("turn-before", settled_by=SETTLED_BY_TERMINAL_RESULT, ts="2026-10-02T08:00:00Z")
+        if completion:
+            await completion
+        service.store.config.sources[0].credential_ref = "cred_rotated0001"
+        after = await router.resolve_hop("menu-alias", process_scope="vibey:rotation", turn_id="turn-after")
+        async with aiohttp.ClientSession() as client:
+            async with client.post(
+                f'{after["base_url"]}/messages',
+                headers={"Authorization": f'Bearer {after["token"]}', **after["request_headers"]},
+                json={"model": after["runtime_model"], **signed},
+            ) as response:
+                assert response.status == 200
+    finally:
+        await gateway.close()
+    assert after["source_identity"] != before["source_identity"] and after["token"] != before["token"]
+    assert service.adapter.requests[0]["messages"] == signed["messages"]
 
 
 @pytest.mark.asyncio

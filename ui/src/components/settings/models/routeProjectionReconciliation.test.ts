@@ -24,7 +24,7 @@ const source: Source = {
 };
 const report: RouteReport = {
   chain: {
-    contract_version: 13,
+    contract_version: 14,
     backend: "claude",
     model_id: "模型/opus",
     manual_override: null,

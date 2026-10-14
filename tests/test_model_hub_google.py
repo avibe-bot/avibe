@@ -22,6 +22,7 @@ from jsonschema import ValidationError
 
 from config.v2_config import ModelHubModelConfig, ModelHubRouteConfig, ModelHubRouteHopConfig, ModelHubSourceConfig
 from core.handlers.model_hub.adapter import ObservationOutcome, RawOutcomeKind, SourceBinding
+from core.handlers.model_hub.capability_evidence import identity_digest
 from core.handlers.model_hub.provenance import SERVED_HOP_HEADER
 from core.run_settlement import SETTLED_BY_TERMINAL_RESULT
 from core.handlers.model_hub.stream_wire import (
@@ -342,7 +343,8 @@ async def test_google_router_gateway_failover_preserves_visible_history_and_orig
                     "source": fallback.id,
                 }
         assert service.adapter.requests[0] == signed
-        assert service.adapter.requests[1] == (signed if same_origin else plain)
+        # The fallback is another Source, so its history is plain even at the same origin (C-6 item 6).
+        assert service.adapter.requests[1] == plain
         assert all(request.protocol == "google" for request in service.adapter.requests)
         completion = router.settle_turn(
             "turn-google", settled_by=SETTLED_BY_TERMINAL_RESULT, ts="2026-10-02T08:00:00Z",
@@ -352,6 +354,10 @@ async def test_google_router_gateway_failover_preserves_visible_history_and_orig
         record = service.provenance.get("turn-google")
         _validate("turn-provenance.schema.json", record)
         assert {**record["served"]["origin"], "source": record["served"]["source_id"]} == origin
+        # The Source identity opaque payloads are bound to stays in memory (C-6 item 6): the hop resolution names it,
+        # but neither the served-hop report nor persisted provenance carries it.
+        assert hop["source_identity"] == identity_digest(primary)
+        assert identity_digest(primary) not in json.dumps(record) + response.headers[SERVED_HOP_HEADER]
     finally:
         await gateway.close()
 
