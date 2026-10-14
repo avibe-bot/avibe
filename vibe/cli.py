@@ -8726,6 +8726,12 @@ def cmd_vault_rm(args):
 
     help_command = "vibe vault rm --help"
     try:
+        if "." in str(getattr(args, "name", "")):
+            raise TaskCliError(
+                "vibe vault rm deletes whole secrets; remove single fields in the Vaults page.",
+                code="vault_field_delete_forbidden",
+                help_command=help_command,
+            )
         engine = _open_vault_engine()
         requester = _vault_cli_requester(args)
         with engine.begin() as conn:

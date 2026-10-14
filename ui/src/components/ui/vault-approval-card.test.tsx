@@ -293,7 +293,24 @@ describe('VaultApprovalCard protected access approval', () => {
     expect(vault.approveProtectedRelease.mock.calls[0][0].map((item: { context: unknown }) => item.context)).toEqual([{ issuedFor: 300 }]);
   });
 
-  it('disables delete approval for editors without instance management', async () => {
+  it('shows that deleting a named-field secret removes every field', () => {
+    const request: VaultRequest = {
+      ...deleteRequest,
+      card: {
+        ...deleteRequest.card,
+        request_type: 'delete',
+        kind: 'static',
+        protection: 'standard',
+        secret_name: 'LOGIN',
+        secret_names: ['LOGIN'],
+        grant_options: [{ grant_id: 'grant_1', member_snapshot: ['LOGIN'], member_fields: [{ name: 'LOGIN', default_field: 'password', fields: ['password', 'username'] }] }],
+      },
+    };
+    render(<I18nextProvider i18n={i18n}><VaultApprovalCard request={request} onResolved={vi.fn()} onCancel={vi.fn()} /></I18nextProvider>);
+    expect(screen.getByText('Deleting removes all fields: password, username')).toBeTruthy();
+  });
+
+
     authorization.capabilities.can_manage_instance = false;
     const onResolved = vi.fn();
     render(

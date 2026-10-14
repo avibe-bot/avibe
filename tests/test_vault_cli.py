@@ -744,7 +744,16 @@ def test_rm_passes_remote_authority_for_acl_and_request_snapshot(capfd, monkeypa
     assert resource_access_service.RESOURCE_USER_CONTEXT_METADATA_KEY in json.loads(row["requester"])
 
 
-def test_rm_missing_secret_still_reports_not_found(capfd):
+def test_rm_rejects_single_field_delete(capfd):
+    code = cli.cmd_vault_rm(_ns(name="LOGIN.password"))
+    payload = json.loads(capfd.readouterr().err)
+
+    assert code == 1
+    assert payload["code"] == "vault_field_delete_forbidden"
+    assert payload["message"] == "vibe vault rm deletes whole secrets; remove single fields in the Vaults page."
+
+
+
     code = cli.cmd_vault_rm(_ns(name="MISSING_RM"))
     captured = capfd.readouterr()
 
