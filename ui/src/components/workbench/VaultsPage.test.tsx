@@ -7,6 +7,7 @@ import userEvent from '@testing-library/user-event';
 import { MemoryRouter, useLocation, useNavigate, useNavigationType } from 'react-router-dom';
 import { createInstance } from 'i18next';
 import en from '../../i18n/en.json';
+import zh from '../../i18n/zh.json';
 import type { VaultSecret } from '../../context/ApiContext';
 import { RouteSurfaceActiveContext } from '../../lib/routeSurfaceActivity';
 
@@ -67,7 +68,7 @@ vi.mock('../../lib/useProtectedVault', () => ({
 }));
 
 const testI18n = createInstance();
-void testI18n.init({ lng: 'en', resources: { en: { translation: en } }, initAsync: false });
+void testI18n.init({ lng: 'en', resources: { en: { translation: en }, zh: { translation: zh } }, initAsync: false });
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({ t: testI18n.t }),
 }));
@@ -107,7 +108,8 @@ function renderPage(context = remoteOwner, entry = '/vaults', active = true) {
   );
 }
 
-beforeEach(() => {
+beforeEach(async () => {
+  await testI18n.changeLanguage('en');
   eventHandlers.length = 0;
   api.connectWorkbenchEvents.mockImplementation((handlers: WorkbenchEventHandlers) => {
     eventHandlers.push(handlers);
@@ -124,7 +126,8 @@ beforeEach(() => {
   });
 });
 
-afterEach(() => {
+afterEach(async () => {
+  await testI18n.changeLanguage('en');
   cleanup();
   vi.clearAllMocks();
   vi.restoreAllMocks();
@@ -169,7 +172,7 @@ describe('VaultsPage list discovery', () => {
   const rows = () => within(screen.getByRole('list', { name: 'Vaults' })).getAllByRole('listitem');
   const names = () => rows().map((row) => row.querySelector('.font-mono')?.textContent);
   const params = () => new URLSearchParams(screen.getByTestId('location').textContent ?? '');
-  const count = () => screen.getByRole('status', { name: 'Secret count' }).textContent;
+  const count = () => screen.getAllByRole('status').find((element) => element.tagName === 'SPAN')?.textContent;
 
   beforeEach(() => {
     api.listVaultSecrets.mockResolvedValue({ secrets: inventory });
@@ -183,16 +186,16 @@ describe('VaultsPage list discovery', () => {
     renderPage();
     await screen.findByText('alpha');
     const search = screen.getByRole('textbox', { name: 'Search secrets' });
-    expect(count()).toBe('3');
+    expect(count()).toBe('3 secrets');
     await user.keyboard('/');
     expect(document.activeElement).toBe(search);
     await user.type(search, 'ALPHA 支付');
     expect(names()).toEqual(['alpha']);
-    expect(count()).toBe('1 / 3');
+    expect(count()).toBe('1 / 3 secrets');
     expect([...rows()[0].querySelectorAll('mark')].map((mark) => mark.textContent)).toEqual(['alpha', 'Alpha', '支付']);
     expect(rows()[0].textContent).toContain('used 7× · 3d ago');
     await user.keyboard('{Escape}');
-    expect(count()).toBe('3');
+    expect(count()).toBe('3 secrets');
     await user.paste('[prod]');
     expect(rows()[0].querySelector('mark')?.textContent).toBe('[prod]');
     await user.click(screen.getByRole('button', { name: 'Clear search' }));
@@ -200,6 +203,22 @@ describe('VaultsPage list discovery', () => {
     expect(names()).toEqual(['alpha', 'beta', 'zeta']);
   });
 
+  it('pluralizes the unfiltered singular count in English', async () => {
+    api.listVaultSecrets.mockResolvedValue({ secrets: [inventory[0]] });
+    renderPage();
+    await screen.findByText('beta');
+    expect(count()).toBe('1 secret');
+  });
+
+  it('renders unit-bearing counts in Chinese for both unfiltered and filtered states', async () => {
+    await testI18n.changeLanguage('zh');
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByText('alpha');
+    expect(count()).toBe('3 个密钥');
+    await user.type(screen.getByRole('textbox', { name: '搜索密钥' }), 'alpha');
+    expect(count()).toBe('1 / 3 个密钥');
+  });
   it('leaves slash in editable controls and does not steal focus from a hidden route', async () => {
     const user = userEvent.setup();
     const view = renderPage();
@@ -226,7 +245,7 @@ describe('VaultsPage list discovery', () => {
     await user.click(screen.getByRole('checkbox', { name: 'prod · 2' }));
     expect(names()).toEqual(['alpha']);
     expect(screen.getByRole('checkbox', { name: 'release · 2' }).getAttribute('aria-checked')).toBe('true');
-    expect(count()).toBe('1 / 3');
+    expect(count()).toBe('1 / 3 secrets');
     const tagSearch = screen.getByRole('textbox', { name: 'Search tags' });
     await user.type(tagSearch, 'SHAR');
     expect(screen.getAllByRole('checkbox').map((item) => item.textContent)).toEqual(['shared3']);
@@ -238,7 +257,7 @@ describe('VaultsPage list discovery', () => {
     await user.click(screen.getByRole('button', { name: 'Remove filter: prod' }));
     expect(names()).toEqual(['alpha', 'zeta']);
     await user.click(screen.getByRole('button', { name: 'Clear all' }));
-    expect(count()).toBe('3');
+    expect(count()).toBe('3 secrets');
   });
 
   it.each(['hover', 'click', 'focus'] as const)('caps inline tags at two with skills first and reveals actionable overflow on %s', async (method) => {
@@ -264,7 +283,7 @@ describe('VaultsPage list discovery', () => {
     expect(screen.queryByRole('button', { name: 'z-only' })).toBeNull();
     await user.click(within(row).getByRole('button', { name: 'release' }));
     expect(params().getAll('skill')).toEqual(['release']);
-    expect(count()).toBe('1 / 1');
+    expect(count()).toBe('1 / 1 secrets');
   });
 
   it('composes quick filters and sorting, keeping unused last and dates relative even beyond a week', async () => {
@@ -285,9 +304,9 @@ describe('VaultsPage list discovery', () => {
     expect(names()).toEqual(['beta']);
     await user.click(screen.getByRole('radio', { name: 'Never used' }));
     expect(names()).toEqual(['zeta']);
-    expect(count()).toBe('1 / 4');
+    expect(count()).toBe('1 / 4 secrets');
     await user.click(screen.getByRole('radio', { name: 'All', exact: true }));
-    expect(count()).toBe('4');
+    expect(count()).toBe('4 secrets');
   });
 
   // With SSE connected there is no fallback polling, and an inventory without
@@ -358,7 +377,7 @@ describe('VaultsPage list discovery', () => {
     const user = userEvent.setup();
     const view = renderPage(remoteOwner, '/vaults?q=not-found&tag=shared&filter=protected&sort=added');
     await screen.findByText('No matching secrets');
-    expect(count()).toBe('0 / 3');
+    expect(count()).toBe('0 / 3 secrets');
     await user.click(screen.getByRole('button', { name: 'Clear search and filters' }));
     expect(names()).toEqual(['zeta', 'beta', 'alpha']);
     expect(Object.fromEntries(params())).toEqual({ sort: 'added' });

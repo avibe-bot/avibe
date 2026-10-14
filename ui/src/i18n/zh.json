@@ -4937,7 +4937,9 @@
       "label": "搜索密钥",
       "placeholder": "搜索名称、描述、标签、域名…",
       "clear": "清空搜索",
-      "count": "密钥数量"
+      "count_one": "{{count}} 个密钥",
+      "count_other": "{{count}} 个密钥",
+      "filtered": "{{visible}} / {{total}} 个密钥"
     },
     "filter": {
       "clear": "清除",

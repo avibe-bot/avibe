@@ -4937,7 +4937,9 @@
       "label": "Search secrets",
       "placeholder": "Search names, descriptions, tags, hosts…",
       "clear": "Clear search",
-      "count": "Secret count"
+      "count_one": "{{count}} secret",
+      "count_other": "{{count}} secrets",
+      "filtered": "{{visible}} / {{total}} secrets"
     },
     "filter": {
       "clear": "Clear",

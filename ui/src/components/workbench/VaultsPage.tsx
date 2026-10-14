@@ -1015,8 +1015,10 @@ export const VaultsPage: React.FC = () => {
           </Select>
         </div>
         <div className="flex min-h-6 flex-wrap items-center gap-1.5 text-xs text-muted">
-          <span role="status" aria-label={t('vaults.search.count')} className="tabular-nums">
-            {hasActiveFilter ? `${visibleSecrets.length} / ${secrets.length}` : secrets.length}
+          <span role="status" className="tabular-nums">
+            {hasActiveFilter
+              ? t('vaults.search.filtered', { visible: visibleSecrets.length, total: secrets.length })
+              : t('vaults.search.count', { count: secrets.length })}
           </span>
           {selected.map((tag) => <VaultFilterTag key={tag} tag={tag} active onToggle={toggleTag} removable />)}
           {hasActiveFilter ? <Button variant="ghost" size="sm" onClick={clearFilters}>{t('vaults.filter.clearAll')}</Button> : null}
