@@ -31,6 +31,11 @@ consumer's requirements, and the Model Hub lane lands the change in both places.
      and replays opaque payloads only to a hop of the same identity (`cross-provider.md`). Its inputs are therefore
      a persisted comparison key: changing them later sends every stored message once in the different-origin form,
      which is safe degradation and needs no migration, but should be deliberate.
+   - The agent infers the serving identity from the launch's: the served-hop report names the Source, never its
+     identity. A key changed between resolution and admission therefore labels the response with the launch
+     identity, although the new account served it. That label errs only toward dropping: an identity never recurs
+     after a credential change, so it matches no later hop, and the response's payloads go once in the
+     different-origin form. They never go to another account.
    - The token answers for the route, which later Turns of the Session reuse. The gateway credits a request only
      to the Turn it names, and only while that Turn holds the token's route and still admits work.
    - A model request from a finished Turn still routes but is credited to no Turn. A hosted call from one is
