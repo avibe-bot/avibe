@@ -9613,6 +9613,45 @@ def desktop_mini_session_ensure():
     return jsonify({**session, "capabilities": {"can_chat": can_chat}})
 
 
+@app.route("/api/sessions/main", methods=["GET"])
+def sessions_main():
+    """Return the caller's stable built-in main session, creating it on first use."""
+
+    from core.services import sessions as workbench_sessions_service
+    from core.vibe_agents import VibeAgentAccessError, VibeAgentStore
+    from storage.workbench_sessions_service import ensure_main_session
+
+    store = VibeAgentStore()
+    try:
+        vibey = store.get_builtin_default_agent_for_backend("vibey")
+    finally:
+        store.close()
+    lang = _request_ui_language()
+    if vibey is None:
+        return _coded_error_response("builtin_agent_unavailable", t("desktopMini.builtinAgentUnavailable", lang), 409)
+
+    authorization_context = getattr(g, "authorization_context", None)
+    engine = _projects_engine()
+    try:
+        with engine.begin() as conn:
+            session = ensure_main_session(
+                conn,
+                agent_name=vibey.name,
+                title=t("desktopMini.sessionTitle", lang),
+                authorization_context=authorization_context,
+            )
+    except (VibeAgentAccessError, workbench_sessions_service.ProjectAccessDeniedError):
+        return _coded_error_response("project_access_denied", t("error.projectAccessDenied", lang), 403)
+    return jsonify(
+        {
+            "session": session,
+            "capabilities": {
+                "can_chat": bool(getattr(authorization_context, "can_chat", False)),
+            },
+        }
+    )
+
+
 def _session_fork_error_response(err: Exception):
     """Map a ``SessionForkError`` to its machine code, in the STRUCTURED body.
 

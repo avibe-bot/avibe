@@ -1,10 +1,8 @@
-"""The desktop mini's Vibey conversation: created on first use, then reused.
-
-Interim rule until sessions get a built-in ``main`` type
-(docs/plans/2026-10-12-desktop-mini-main-agent.md §10.1).
-"""
+"""The desktop mini's legacy and stable main-session contracts."""
 
 from __future__ import annotations
+
+from pathlib import Path
 
 import pytest
 
@@ -53,6 +51,19 @@ def _ensure(principal: str, agent_name: str):
 
     with create_sqlite_engine().begin() as conn:
         return ensure_desktop_mini_session(
+            conn,
+            agent_name=agent_name,
+            title="Vibey",
+            authorization_context=_context(principal),
+        )
+
+
+def _ensure_main(principal: str, agent_name: str):
+    from storage.db import create_sqlite_engine
+    from storage.workbench_sessions_service import ensure_main_session
+
+    with create_sqlite_engine().begin() as conn:
+        return ensure_main_session(
             conn,
             agent_name=agent_name,
             title="Vibey",
@@ -137,6 +148,54 @@ def test_route_explains_a_missing_project(state):
     response = client.post("/api/desktop-mini/session", json={}, headers=csrf_headers(client))
     assert response.status_code == 409
     assert response.get_json()["error"]["code"] == "no_chat_project"
+
+
+def test_main_session_is_created_reused_and_recreated_without_a_project(state):
+    from sqlalchemy import delete
+
+    from config import paths
+    from storage.db import create_sqlite_engine
+    from storage.models import agent_sessions
+    from storage.workbench_sessions_service import MAIN_SESSION_ID
+
+    tmp_path, vibey = state
+    first = _ensure_main("local", vibey.name)
+    assert first["id"] == MAIN_SESSION_ID
+    assert first["scope_id"] is None
+    assert first["agent_name"] == vibey.name
+    assert first["agent_backend"] == "vibey"
+    assert first["metadata"]["kind"] == "main"
+    assert first["workdir"] == str(paths.get_vibe_remote_dir() / "main" / "local")
+    assert (tmp_path / "main" / "local").is_dir()
+    assert _ensure_main("local", vibey.name)["id"] == first["id"]
+
+    with create_sqlite_engine().begin() as conn:
+        conn.execute(delete(agent_sessions).where(agent_sessions.c.id == MAIN_SESSION_ID))
+    rebuilt = _ensure_main("local", vibey.name)
+    assert rebuilt["id"] == MAIN_SESSION_ID
+    assert rebuilt["workdir"] == first["workdir"]
+
+
+def test_main_route_returns_the_stable_session_and_can_chat_without_a_project(state):
+    from storage.workbench_sessions_service import MAIN_SESSION_ID
+
+    client = app.test_client()
+    response = client.get("/api/sessions/main")
+    assert response.status_code == 200, response.get_json()
+    body = response.get_json()
+    assert body["session"]["id"] == MAIN_SESSION_ID
+    assert body["session"]["scope_id"] is None
+    assert body["capabilities"] == {"can_chat": True}
+
+
+def test_main_workdir_keeps_a_remote_principal_inside_avibe_home(state):
+    from config import paths
+
+    _tmp_path, vibey = state
+    session = _ensure_main("remote:../outside", vibey.name)
+    workdir = Path(session["workdir"])
+    assert workdir.parent == paths.get_vibe_remote_dir() / "main"
+    assert workdir.name == "remote_.._outside"
 
 
 def test_route_is_an_editor_write():

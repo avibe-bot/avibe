@@ -749,8 +749,7 @@ export type ApiContextType = {
   createSession: (payload: WorkbenchSessionCreate) => Promise<WorkbenchSession>;
   forkSession: (sessionId: string) => Promise<WorkbenchSession>;
   getSession: (sessionId: string, params?: { cache?: boolean; handleError?: boolean }) => Promise<WorkbenchSession>;
-  /** Main-agent lookup seam. The endpoint is not shipped yet; the pet client
-   * currently resolves the session bound to its native window here. */
+  /** Resolve the stable main session for the current authorization context. */
   getMainSession: () => Promise<WorkbenchSessionReadResult>;
   /** The caller's desktop mini conversation with Vibey, created on first use
    * in their most recently active chat Project. */
@@ -3773,16 +3772,17 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return sessionRowFromPayload(payload);
     },
     getMainSession: async () => {
-      const binding = (window as unknown as { __AVIBE_PET_BINDING__?: unknown }).__AVIBE_PET_BINDING__;
-      if (typeof binding !== 'string' || !binding) return { status: 404, session: null };
-      const res = await apiFetch(`/api/sessions/${encodeURIComponent(binding)}`);
+      const res = await apiFetch('/api/sessions/main');
       const payload = await res.json().catch(() => null);
-      if (!(res.ok && payload && typeof payload.id === 'string')) {
+      const sessionPayload = payload && typeof payload === 'object' && 'session' in payload
+        ? (payload as { session?: unknown }).session
+        : payload;
+      if (!(res.ok && sessionPayload && typeof sessionPayload === 'object' && typeof (sessionPayload as { id?: unknown }).id === 'string')) {
         return { status: res.status, session: null };
       }
       return {
         status: res.status,
-        session: sessionRowFromPayload(payload),
+        session: sessionRowFromPayload(sessionPayload as WorkbenchSession & { capabilities?: unknown }),
         capabilities: sessionCanChatFromPayload(payload),
       };
     },

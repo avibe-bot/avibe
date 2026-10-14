@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Optional
@@ -36,6 +37,7 @@ from storage.agent_session_rows import (
     WORKSPACE_NOTICE_SESSION_ID,
     create_agent_session_row,
     new_session_id,
+    normalize_workdir,
     normalize_session_project_base,
     reserve_write_lock,
     snapshot_scope_workdir,
@@ -448,6 +450,7 @@ def create_session(
     conn: Connection,
     *,
     scope_id: Optional[str],
+    session_id: Optional[str] = None,
     agent_backend: str,
     agent_name: Optional[str] = None,
     agent_id: Optional[str] = None,
@@ -455,6 +458,7 @@ def create_session(
     model: Optional[str] = None,
     reasoning_effort: Optional[str] = None,
     title: Optional[str] = None,
+    workdir: Optional[str] = None,
     visibility: str = "foreground",
     metadata: Optional[dict[str, Any]] = None,
     authorization_context: AuthorizationContext | Mapping[str, Any] | None = None,
@@ -611,11 +615,12 @@ def create_session(
     if metadata:
         metadata_payload.update(metadata)
 
-    session_id = new_session_id(conn)
-    workdir = scope_row.get("workdir") or os.getcwd()
+    session_id = str(session_id or new_session_id(conn))
     if scope_id is None:
-        workdir = str(paths.get_show_page_dir(session_id))
+        workdir = normalize_workdir(workdir) or str(paths.get_show_page_dir(session_id))
         Path(workdir).mkdir(parents=True, exist_ok=True)
+    else:
+        workdir = scope_row.get("workdir") or os.getcwd()
     create_agent_session_row(
         conn,
         session_id=session_id,
@@ -637,11 +642,89 @@ def create_session(
     return get_session(conn, session_id, authorization_context=authorization)
 
 
-# The desktop mini's conversation, until sessions get a built-in ``main`` type
-# (docs/plans/2026-10-12-desktop-mini-main-agent.md §10.1). The association lives in
-# server-owned ``state_meta``, one key per principal, never in client-writable
-# session metadata: a marker any editor can set on their own session (or inherit by
-# forking) would let them hand someone else's mini a conversation they control.
+MAIN_SESSION_ID = "ses_main"
+MAIN_SESSION_METADATA_KEY = "kind"
+MAIN_SESSION_METADATA_VALUE = "main"
+MAIN_SESSION_WORKDIR_DIRNAME = "main"
+
+
+def _safe_main_principal_component(principal: str) -> str:
+    """Map the authorization principal to one safe, stable directory component."""
+
+    component = re.sub(r"[^A-Za-z0-9._-]+", "_", str(principal or "").strip())
+    component = component.strip("._")
+    return component or "principal"
+
+
+def main_session_workdir(principal: str) -> str:
+    """Return the caller-owned main-session workdir without leaving Avibe home."""
+
+    root = (paths.get_vibe_remote_dir() / MAIN_SESSION_WORKDIR_DIRNAME).resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    candidate = (root / _safe_main_principal_component(principal)).resolve()
+    if candidate.parent != root:
+        raise ValueError("unsafe main session principal path")
+    return str(candidate)
+
+
+def ensure_main_session(
+    conn: Connection,
+    *,
+    agent_name: str,
+    title: Optional[str] = None,
+    authorization_context: AuthorizationContext | Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Resolve the stable built-in main session, creating it on first use."""
+
+    context = require_instance_role(authorization_context, "editor")
+    principal = desktop_mini_owner_key(context)
+    if principal is None:
+        raise ProjectAccessDeniedError
+
+    row = conn.execute(
+        select(agent_sessions.c.status).where(agent_sessions.c.id == MAIN_SESSION_ID)
+    ).scalar_one_or_none()
+    if row is not None and row != "archived":
+        return get_session(conn, MAIN_SESSION_ID, authorization_context=context)
+
+    # The fixed primary key makes deletion idempotent, while the write lock closes
+    # the read/insert race when two first turns arrive together.
+    reserve_write_lock(conn)
+    row = conn.execute(
+        select(agent_sessions.c.status).where(agent_sessions.c.id == MAIN_SESSION_ID)
+    ).scalar_one_or_none()
+    if row is not None:
+        if row == "archived":
+            conn.execute(
+                update(agent_sessions)
+                .where(agent_sessions.c.id == MAIN_SESSION_ID)
+                .values(
+                    status="active",
+                    visibility="foreground",
+                    session_anchor=MAIN_SESSION_ID,
+                    agent_status="idle",
+                    updated_at=_utc_now_iso(),
+                )
+            )
+        return get_session(conn, MAIN_SESSION_ID, authorization_context=context)
+
+    return create_session(
+        conn,
+        scope_id=None,
+        session_id=MAIN_SESSION_ID,
+        agent_backend="",
+        agent_name=agent_name,
+        title=title,
+        workdir=main_session_workdir(principal),
+        metadata={MAIN_SESSION_METADATA_KEY: MAIN_SESSION_METADATA_VALUE},
+        authorization_context=context,
+    )
+
+
+# Legacy desktop mini conversation support. The association lives in server-owned
+# ``state_meta``, one key per principal, never in client-writable session metadata:
+# a marker any editor can set on their own session (or inherit by forking) would let
+# them hand someone else's mini a conversation they control.
 DESKTOP_MINI_SESSION_META_PREFIX = "desktop_mini_session:"
 
 
