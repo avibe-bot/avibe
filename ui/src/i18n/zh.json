@@ -4933,9 +4933,41 @@
     "chat": {
       "floatApprovals": "等你授权 · {{count}}"
     },
+    "search": {
+      "label": "搜索密钥",
+      "placeholder": "搜索名称、描述、标签、域名…",
+      "clear": "清空搜索",
+      "count_one": "{{count}} 个密钥",
+      "count_other": "{{count}} 个密钥",
+      "filtered": "{{visible}} / {{total}} 个密钥"
+    },
     "filter": {
-      "clear": "清除筛选",
-      "empty": "没有匹配所选标签的密钥。"
+      "clear": "清除",
+      "clearAll": "清除全部",
+      "empty": "没有匹配的密钥",
+      "reset": "清除搜索和筛选",
+      "tags": "标签",
+      "skills": "Skills",
+      "tagsByUsage": "标签 · 按使用次数",
+      "selectedTags": "标签（{{count}}）",
+      "entry": "{{name}} · {{count}}",
+      "searchTags": "搜索标签",
+      "searchTagsPlaceholder": "在 {{count}} 个标签里查找",
+      "noTags": "没有这个标签",
+      "intersection": "可多选，需同时满足",
+      "remove": "移除筛选：{{name}}",
+      "moreTags": "显示其余 {{count}} 个标签",
+      "quick": "快捷筛选",
+      "all": "全部",
+      "protected": "保护档",
+      "signing": "签名密钥",
+      "unused": "从未使用"
+    },
+    "sort": {
+      "label": "排序",
+      "name": "名称",
+      "recent": "最近使用",
+      "added": "最近添加"
     },
     "grants": {
       "title": "活跃授权",

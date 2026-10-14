@@ -4933,9 +4933,41 @@
     "chat": {
       "floatApprovals": "Waiting for your approval · {{count}}"
     },
+    "search": {
+      "label": "Search secrets",
+      "placeholder": "Search names, descriptions, tags, hosts…",
+      "clear": "Clear search",
+      "count_one": "{{count}} secret",
+      "count_other": "{{count}} secrets",
+      "filtered": "{{visible}} / {{total}} secrets"
+    },
     "filter": {
-      "clear": "Clear filters",
-      "empty": "No secrets match the selected tags."
+      "clear": "Clear",
+      "clearAll": "Clear all",
+      "empty": "No matching secrets",
+      "reset": "Clear search and filters",
+      "tags": "Tags",
+      "skills": "Skills",
+      "tagsByUsage": "Tags · by usage",
+      "selectedTags": "Tags ({{count}})",
+      "entry": "{{name}} · {{count}}",
+      "searchTags": "Search tags",
+      "searchTagsPlaceholder": "Search {{count}} tags",
+      "noTags": "No matching tags",
+      "intersection": "Select multiple; all must match",
+      "remove": "Remove filter: {{name}}",
+      "moreTags": "Show {{count}} more tags",
+      "quick": "Quick filters",
+      "all": "All",
+      "protected": "Protected",
+      "signing": "Signing keys",
+      "unused": "Never used"
+    },
+    "sort": {
+      "label": "Sort",
+      "name": "Name",
+      "recent": "Recently used",
+      "added": "Recently added"
     },
     "grants": {
       "title": "Active access",

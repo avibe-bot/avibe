@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { AlertTriangle, Clock, Copy, ExternalLink, Eye, Globe, History, Inbox, KeyRound, Link2, Loader2, Lock, MoreHorizontal, Pencil, Plus, Puzzle, RefreshCw, Settings, ShieldCheck, Tag, Trash2, Wallet, X } from 'lucide-react';
+import { AlertTriangle, Clock, Copy, ExternalLink, Eye, Globe, History, Inbox, KeyRound, Link2, Loader2, Lock, MoreHorizontal, Pencil, Plus, Puzzle, RefreshCw, Search, Settings, ShieldCheck, Tag, Trash2, Wallet, X } from 'lucide-react';
 import type { TFunction } from 'i18next';
 import { useTranslation } from 'react-i18next';
 import { CapabilityTabs } from './CapabilityTabs';
@@ -12,9 +12,16 @@ import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
 import { VaultLockIndicator } from '../ui/vault-lock-indicator';
 import { onPageReactivated } from '../../lib/pageActivity';
 import { cn } from '../../lib/utils';
-import { partitionTags } from '../../lib/vaultTags';
+import { isSkillTag, partitionTags, skillName, toSkillTag } from '../../lib/vaultTags';
 import { vaultDefaultField, vaultFieldFingerprint, vaultFieldNames, vaultHasNamedFieldShape, vaultRecordName } from '../../lib/vaultFields';
 import { vaultErrorMessage } from '../../lib/vaultErrors';
+import { matchesVaultQuery, vaultSearchTerms } from '../../lib/vaultSearch';
+import { formatRelativeTime } from '../../lib/relativeTime';
+import { useRouteSurfaceWindowEvent } from '../../lib/routeSurfaceActivity';
+import { Input } from '../ui/input';
+import { Select } from '../ui/select';
+import { SegmentedRadio } from '../ui/segmented';
+import { VaultFilterTag, VaultRowTags, VaultTagDropdown } from './VaultListTags';
 import {
   useApi,
   type VaultAuditEvent,
@@ -60,8 +67,20 @@ const proxyHosts = (s: VaultSecret): string[] => {
   return Array.isArray(hosts) ? hosts : [];
 };
 
+function SearchHighlight({ text, terms }: { text: string; terms: string[] }) {
+  if (!terms.length) return <>{text}</>;
+  const escaped = [...terms].sort((a, b) => b.length - a.length).map((term) => term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  return <>{text.split(new RegExp(`(${escaped.join('|')})`, 'ig')).map((part, index) =>
+    index % 2 ? <mark key={index} className="rounded-sm bg-gold/20 text-inherit">{part}</mark> : part,
+  )}</>;
+}
+
 const SecretRow: React.FC<{
   secret: VaultSecret;
+  terms: string[];
+  now: number;
+  selected: string[];
+  onToggleTag: (tag: string) => void;
   onEdit: (secret: VaultSecret) => void;
   onDelete: (secret: VaultSecret) => void;
   onReveal: (secret: VaultSecret, field: string) => void;
@@ -72,7 +91,7 @@ const SecretRow: React.FC<{
   onMenuOpenChange: (open: boolean) => void;
   /** The open menu's reveal context or sandbox client is not ready yet. */
   revealPreparing: boolean;
-}> = ({ secret: s, onEdit, onDelete, onReveal, revealField, onRevealFieldChange, canManage, menuOpen, onMenuOpenChange: setMenuOpen, revealPreparing }) => {
+}> = ({ secret: s, terms, now, selected, onToggleTag, onEdit, onDelete, onReveal, revealField, onRevealFieldChange, canManage, menuOpen, onMenuOpenChange: setMenuOpen, revealPreparing }) => {
   const { t } = useTranslation();
   const isKeypair = s.kind === 'keypair';
   const isProtected = s.protection === 'protected';
@@ -86,10 +105,8 @@ const SecretRow: React.FC<{
   const staleRevealField = canReveal && selectedField === null;
   // The sandbox reveal needs its authorization window, which only a browser can pair with.
   const revealInBrowser = canReveal && vaultPasskeyNeedsBrowser();
-  // Skills are stored as reserved `skill:<name>` tags; render them as their own chips.
-  const { tags, skills } = useMemo(() => partitionTags(s.tags), [s.tags]);
   return (
-    <div className="flex items-center gap-3.5 rounded-xl border border-border bg-surface px-4 py-3">
+    <li className="flex flex-wrap items-center gap-x-3.5 gap-y-2 rounded-xl border border-border bg-surface px-4 py-3 md:flex-nowrap">
       <div
         className={`flex size-9 shrink-0 items-center justify-center rounded-lg ${
           isKeypair ? 'bg-violet/10 text-violet-ink' : 'bg-accent/10 text-accent-ink'
@@ -97,9 +114,9 @@ const SecretRow: React.FC<{
       >
         {isKeypair ? <Wallet className="size-4" /> : <KeyRound className="size-4" />}
       </div>
-      <div className="flex min-w-0 flex-col gap-1">
+      <div className="flex min-w-0 flex-1 flex-col gap-1">
         <div className="flex flex-wrap items-center gap-2">
-          <span className="truncate font-mono text-sm font-semibold">{s.name}</span>
+          <span className="truncate font-mono text-sm font-semibold"><SearchHighlight text={s.name} terms={terms} /></span>
           {isProtected ? (
             <Badge variant="warning">{t('vaults.protected')}</Badge>
           ) : (
@@ -111,63 +128,56 @@ const SecretRow: React.FC<{
               {t('vaults.signing')}
             </Badge>
           ) : null}
-          {proxyHosts(s).length > 0 ? (
-            <Badge variant="info">
-              {t('vaults.proxyHost', { host: proxyHosts(s)[0] })}
-              {proxyHosts(s).length > 1 ? ` +${proxyHosts(s).length - 1}` : ''}
-            </Badge>
-          ) : null}
-          {skills.map((skill) => (
-            <Badge key={`skill:${skill}`} variant="outline" className="gap-1 border-violet/40 bg-violet-soft text-violet-ink">
-              <Puzzle className="size-3" />
-              {skill}
-            </Badge>
-          ))}
-          {tags.map((tag) => (
-            <Badge key={tag} variant="outline" className="text-muted">
-              {tag}
-            </Badge>
-          ))}
         </div>
         <span className="truncate text-xs text-muted">
-          {s.description ? `${s.description} · ` : ''}
-          {s.last_used_at ? t('vaults.used', { count: s.use_count }) : t('vaults.neverUsed')}
+          {s.description ? <><SearchHighlight text={s.description} terms={terms} /> · </> : null}
+          {s.last_used_at ? <>{t('vaults.used', { count: s.use_count })} · {formatRelativeTime(s.last_used_at, t, now, { alwaysRelative: true })}</> : t('vaults.neverUsed')}
         </span>
-        {s.fields_state === 'corrupt' && (
+        {s.fields_state === 'corrupt' ? (
           <span role="alert" className="text-xs text-destructive-ink">{t('errors.fields_corrupt')}</span>
-        )}
+        ) : null}
         {isKeypair && s.signing_addresses ? <SigningAddressList addresses={s.signing_addresses} className="mt-1" /> : null}
-        {!isKeypair && vaultHasNamedFieldShape(s) && (
+        {!isKeypair && vaultHasNamedFieldShape(s) ? (
           <div className="flex flex-wrap gap-1">
             {fields.map((field) => <Badge key={field} variant="outline" className="font-mono">
               {field}{field === vaultDefaultField(s) ? ` · ${t('vaults.fields.default')}` : ''}
             </Badge>)}
           </div>
-        )}
+        ) : null}
       </div>
-      {canManage ? <div className="ml-auto">
+      <div className="order-last flex w-full min-w-0 flex-wrap items-center gap-1.5 md:order-none md:w-auto md:max-w-sm md:flex-col md:items-end">
+        <VaultRowTags secret={s} selected={selected} onToggle={onToggleTag} />
+        {proxyHosts(s).length > 0 ? (
+          <Badge variant="info" className="max-w-full" title={proxyHosts(s).join(', ')}>
+            <span className="truncate">{t('vaults.proxyHost', { host: proxyHosts(s)[0] })}</span>
+            {proxyHosts(s).length > 1 ? ` +${proxyHosts(s).length - 1}` : ''}
+          </Badge>
+        ) : null}
+      </div>
+      {canManage ? <div className="shrink-0">
         <Popover open={menuOpen} onOpenChange={setMenuOpen}>
           <PopoverTrigger asChild>
             <Button variant="ghost" size="icon" aria-label={t('vaults.rowActions')} aria-haspopup="menu">
               <MoreHorizontal className="size-4" />
             </Button>
           </PopoverTrigger>
-          <PopoverContent align="end" className="w-44 p-1" role="menu">
-            {/* Choice-only: a single custom field is displayed above but needs no selector. */}
-            {canReveal && fields.length > 1 && (
+          <PopoverContent align="end" className="w-52 p-1" role="menu">
+            {canReveal && fields.length > 1 ? (
               <label className="flex flex-col gap-1 px-2.5 py-2 text-xs text-muted">
                 {t('vaults.fields.revealField')}
-                <select value={selectedField ?? ''} onChange={(event) => onRevealFieldChange(event.target.value)}
-                  className="rounded-md border border-border bg-surface px-2 py-1 font-mono text-foreground">
+                <select
+                  aria-label={t('vaults.fields.revealField')}
+                  value={selectedField ?? ''}
+                  onChange={(event) => onRevealFieldChange(event.target.value)}
+                  className="rounded-md border border-border bg-surface px-2 py-1 font-mono text-foreground"
+                >
                   {fields.map((field) => <option key={field} value={field}>{field}</option>)}
                 </select>
               </label>
-            )}
-            {staleRevealField && (
-              <p role="alert" className="px-2.5 py-2 text-xs text-destructive-ink">
-                {t('vaults.reveal.errors.staleField')}
-              </p>
-            )}
+            ) : null}
+            {staleRevealField ? (
+              <p role="alert" className="px-2.5 py-2 text-xs text-destructive-ink">{t('vaults.reveal.errors.staleField')}</p>
+            ) : null}
             {!staleRevealField && revealInBrowser ? (
               <>
                 <button
@@ -218,7 +228,7 @@ const SecretRow: React.FC<{
                   {revealPreparing ? <Loader2 className="size-4 animate-spin text-muted" /> : <Copy className="size-4 text-muted" />}
                   {t('vaults.reveal.copy')}
                 </button>
-                <div className="my-1 h-px bg-border" />
+              <div className="my-1 h-px bg-border" />
               </>
             ) : null}
             <button
@@ -248,7 +258,7 @@ const SecretRow: React.FC<{
           </PopoverContent>
         </Popover>
       </div> : null}
-    </div>
+    </li>
   );
 };
 
@@ -564,20 +574,9 @@ const PendingRequestsSection: React.FC<{
   );
 };
 
-/** A toggleable tag/skill filter pill. */
-const FilterChip: React.FC<{ active: boolean; onClick: () => void; children: React.ReactNode }> = ({ active, onClick, children }) => (
-  <button
-    type="button"
-    aria-pressed={active}
-    onClick={onClick}
-    className={cn(
-      'inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-xs transition-colors',
-      active ? 'border-accent bg-accent/10 text-accent-ink' : 'border-border bg-surface text-muted hover:bg-surface-2',
-    )}
-  >
-    {children}
-  </button>
-);
+const QUICK_FILTERS = ['all', 'protected', 'signing', 'unused'] as const;
+const SORT_ORDERS = ['name', 'recent', 'added'] as const;
+const timestamp = (value: string | null) => value ? Date.parse(value) || 0 : 0;
 
 export const VaultsPage: React.FC = () => {
   const { t } = useTranslation();
@@ -597,8 +596,29 @@ export const VaultsPage: React.FC = () => {
   const [showSettings, setShowSettings] = useState(false);
   const [showAudit, setShowAudit] = useState(false);
   const [audit, setAudit] = useState<VaultAuditEvent[]>([]);
-  const [activeTags, setActiveTags] = useState<string[]>([]);
-  const [activeSkills, setActiveSkills] = useState<string[]>([]);
+  // URL state has one owner; handoff and unrelated parameters are never rebuilt from scratch.
+  const query = searchParams.get('q') ?? '';
+  const activeTags = useMemo(() => [...new Set(searchParams.getAll('tag').filter(Boolean))], [searchParams]);
+  const activeSkills = useMemo(() => [...new Set(searchParams.getAll('skill').filter(Boolean))], [searchParams]);
+  const quick = QUICK_FILTERS.find((value) => value === searchParams.get('filter')) ?? 'all';
+  const sort = SORT_ORDERS.find((value) => value === searchParams.get('sort')) ?? 'name';
+  const searchRef = useRef<HTMLInputElement>(null);
+  const updateView = (changes: Record<string, string[]>) => setSearchParams((prev) => {
+    const next = new URLSearchParams(prev);
+    for (const [key, values] of Object.entries(changes)) {
+      next.delete(key);
+      for (const value of values) if (value) next.append(key, value);
+    }
+    return next;
+  }, { replace: true });
+  useRouteSurfaceWindowEvent('keydown', (event) => {
+    const target = document.activeElement;
+    const editing = target instanceof HTMLElement && (target.matches('input, textarea, select') || target.isContentEditable || target.closest('[contenteditable]:not([contenteditable="false"])'));
+    if (event.key === '/' && !editing && !event.defaultPrevented && !event.ctrlKey && !event.metaKey && !event.altKey) {
+      event.preventDefault();
+      searchRef.current?.focus();
+    }
+  });
   const [now, setNow] = useState(() => Date.now());
   const [eventBridgeConnected, setEventBridgeConnected] = useState(false);
   // A request linked from IM, or a step the desktop app handed to this browser (`openVaultsInBrowser`),
@@ -618,21 +638,13 @@ export const VaultsPage: React.FC = () => {
     clearStep();
   }, [canManage, step, clearStep]);
 
-  // A reveal continues from its row's menu once the list holds the secret: the sandbox window it
-  // opens needs a click in this browser.
-  useEffect(() => {
-    if (!canManage || step?.kind !== 'reveal' || !secrets.some((s) => s.name === step.secretName)) return;
-    setMenuSecret(step.secretName);
-    setMenuField(step.field ?? null);
-    clearStep();
-  }, [canManage, step, secrets, clearStep]);
-
   const refresh = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
       const res = await api.listVaultSecrets();
       setSecrets(res.secrets ?? []);
+      setNow(Date.now());
     } catch (err: unknown) {
       setError(messageFromError(err));
     } finally {
@@ -712,14 +724,13 @@ export const VaultsPage: React.FC = () => {
     };
   }, [eventBridgeConnected, refresh]);
 
-  // Tick once a second while there are live grants: advance the countdown and
-  // drop any grant that has reached its expiry. The backend's status=active
-  // filter only applies at fetch time, so without this the "Active access"
-  // strip and its count would linger on a dead grant and the timer would run
-  // forever; when the last grant expires the interval tears down on its own.
+  // One page clock serves both grant countdowns and relative last-use labels.
+  // Live grants need seconds; an otherwise idle, SSE-connected inventory still
+  // needs minutes even though it has neither countdowns nor fallback polling.
   const hasGrants = grants.length > 0;
+  const hasLastUse = secrets.some((secret) => Boolean(secret.last_used_at));
   useEffect(() => {
-    if (!hasGrants) return;
+    if (!hasGrants && !hasLastUse) return;
     const id = setInterval(() => {
       const t = Date.now();
       setNow(t);
@@ -727,35 +738,69 @@ export const VaultsPage: React.FC = () => {
         const live = prev.filter((g) => !isExpired(g.expires_at, t));
         return live.length === prev.length ? prev : live;
       });
-    }, 1000);
+    }, hasGrants ? 1000 : 60_000);
     return () => clearInterval(id);
-  }, [hasGrants]);
+  }, [hasGrants, hasLastUse]);
 
-  // Every distinct tag and skill across the inventory, for the filter bar.
-  const { allTags, allSkills } = useMemo(() => {
-    const tagSet = new Set<string>();
-    const skillSet = new Set<string>();
-    for (const s of secrets) {
-      const parts = partitionTags(s.tags);
-      parts.tags.forEach((tag) => tagSet.add(tag));
-      parts.skills.forEach((skill) => skillSet.add(skill));
-    }
-    return { allTags: [...tagSet].sort(), allSkills: [...skillSet].sort() };
-  }, [secrets]);
-
-  // A secret is visible when it carries every active tag and skill filter (intersection).
+  const terms = useMemo(() => vaultSearchTerms(query), [query]);
+  const selected = [...activeSkills.map(toSkillTag), ...activeTags];
   const visibleSecrets = useMemo(() => {
-    if (activeTags.length === 0 && activeSkills.length === 0) return secrets;
-    return secrets.filter((s) => {
-      const parts = partitionTags(s.tags);
-      return activeTags.every((tag) => parts.tags.includes(tag)) && activeSkills.every((skill) => parts.skills.includes(skill));
+    const matches = secrets.filter((secret) => {
+      const parts = partitionTags(secret.tags);
+      if (!activeTags.every((tag) => parts.tags.includes(tag)) || !activeSkills.every((skill) => parts.skills.includes(skill))) return false;
+      if (quick === 'protected' && secret.protection !== 'protected') return false;
+      if (quick === 'signing' && secret.kind !== 'keypair') return false;
+      if (quick === 'unused' && secret.last_used_at) return false;
+      return matchesVaultQuery(secret, terms, [
+        t(secret.protection === 'protected' ? 'vaults.protected' : 'vaults.standard'),
+        t(secret.kind === 'keypair' ? 'vaults.dialog.kindKeypair' : 'vaults.dialog.kindStatic'),
+        ...(secret.kind === 'keypair' ? [t('vaults.signing')] : []),
+      ]);
     });
-  }, [secrets, activeTags, activeSkills]);
+    return matches.sort((a, b) => {
+      if (sort === 'recent') {
+        // Null means never used, independent of timestamp parsing or epoch.
+        const used = Number(Boolean(b.last_used_at)) - Number(Boolean(a.last_used_at));
+        if (used) return used;
+        const delta = timestamp(b.last_used_at) - timestamp(a.last_used_at);
+        if (delta) return delta;
+      }
+      if (sort === 'added') {
+        const delta = timestamp(b.created_at) - timestamp(a.created_at);
+        if (delta) return delta;
+      }
+      return a.name.localeCompare(b.name);
+    });
+  }, [secrets, activeTags, activeSkills, quick, sort, terms, t]);
 
-  const toggleFilter = (list: string[], setList: (next: string[]) => void, value: string) =>
-    setList(list.includes(value) ? list.filter((v) => v !== value) : [...list, value]);
+  // Explicit row handoffs win over a hiding view. Clear only the view filters,
+  // preserve sort/unrelated params, and consume reveal/edit atomically.
+  useEffect(() => {
+    if (!canManage || (step?.kind !== 'reveal' && step?.kind !== 'edit')) return;
+    const secret = secrets.find((entry) => entry.name === step.secretName);
+    if (!secret) return;
+    const hidden = !visibleSecrets.some((entry) => entry.name === secret.name);
+    if (step.kind === 'reveal') {
+      setMenuSecret(secret.name);
+      setMenuField(step.field ?? null);
+    } else {
+      setEditTarget(secret);
+    }
+    setSearchParams((prev) => {
+      const next = withoutVaultBrowserStep(prev);
+      if (hidden) for (const key of ['q', 'tag', 'skill', 'filter']) next.delete(key);
+      return next;
+    }, { replace: true });
+  }, [canManage, step, secrets, visibleSecrets, setSearchParams]);
 
-  const hasActiveFilter = activeTags.length > 0 || activeSkills.length > 0;
+  const toggleTag = (tag: string) => {
+    const key = isSkillTag(tag) ? 'skill' : 'tag';
+    const values = key === 'skill' ? activeSkills : activeTags;
+    const value = skillName(tag);
+    updateView({ [key]: values.includes(value) ? values.filter((item) => item !== value) : [...values, value] });
+  };
+  const clearFilters = () => updateView({ q: [], tag: [], skill: [], filter: [] });
+  const hasActiveFilter = terms.length > 0 || selected.length > 0 || quick !== 'all';
 
   const toggleAudit = useCallback(async () => {
     const next = !showAudit;
@@ -775,13 +820,6 @@ export const VaultsPage: React.FC = () => {
   const activeEditSecret = editTarget
     ? secrets.find((entry) => entry.name === editTarget.name) ?? editTarget
     : null;
-  useEffect(() => {
-    if (!canManage || step?.kind !== 'edit') return;
-    const secret = secrets.find((entry) => entry.name === step.secretName);
-    if (!secret) return;
-    setEditTarget(secret);
-    clearStep();
-  }, [canManage, step, secrets, clearStep]);
   const onDelete = (secret: VaultSecret) => setDeleteTarget(secret);
   const onEdit = (secret: VaultSecret) => setEditTarget(secret);
 
@@ -796,7 +834,7 @@ export const VaultsPage: React.FC = () => {
     [api, t],
   );
   const menuRevealKey = useMemo(() => {
-    const secret = secrets.find((s) => s.name === menuSecret);
+    const secret = secrets.find((entry) => entry.name === menuSecret);
     if (secret?.protection !== 'protected' || secret.kind === 'keypair' || vaultPasskeyNeedsBrowser()) return null;
     if (menuField !== null && !vaultFieldNames(secret).includes(menuField)) return null;
     return {
@@ -816,9 +854,7 @@ export const VaultsPage: React.FC = () => {
         const res = await revealContext.claim({ name: secret.name, field, version: vaultFieldFingerprint(secret) });
         if (!res?.ok || !res.context) {
           const message = vaultErrorMessage(t, res, t('vaults.reveal.errors.contextFailed'));
-          const code = typeof res === 'object' && res !== null && 'code' in res && typeof res.code === 'string'
-            ? res.code
-            : null;
+          const code = typeof res === 'object' && res !== null && 'code' in res && typeof res.code === 'string' ? res.code : null;
           throw Object.assign(new Error(message), code ? { code } : {});
         }
         // The sandbox needs the sealed record to open it. The daemon returns it alongside the signed
@@ -946,38 +982,48 @@ export const VaultsPage: React.FC = () => {
           </div>
         </div>
       )}
-      {allTags.length > 0 || allSkills.length > 0 || hasActiveFilter ? (
+      <div className="flex flex-col gap-2">
         <div className="flex flex-wrap items-center gap-2">
-          {allSkills.map((skill) => (
-            <FilterChip
-              key={`skill:${skill}`}
-              active={activeSkills.includes(skill)}
-              onClick={() => toggleFilter(activeSkills, setActiveSkills, skill)}
-            >
-              <Puzzle className="size-3" />
-              {skill}
-            </FilterChip>
-          ))}
-          {allTags.map((tag) => (
-            <FilterChip key={tag} active={activeTags.includes(tag)} onClick={() => toggleFilter(activeTags, setActiveTags, tag)}>
-              <Tag className="size-3" />
-              {tag}
-            </FilterChip>
-          ))}
-          {hasActiveFilter ? (
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => {
-                setActiveTags([]);
-                setActiveSkills([]);
-              }}
-            >
-              {t('vaults.filter.clear')}
-            </Button>
-          ) : null}
+          <div className="relative min-w-48 flex-1">
+            <Search className="pointer-events-none absolute left-3 top-2.5 size-4 text-muted" />
+            <Input
+              ref={searchRef}
+              value={query}
+              onChange={(event) => updateView({ q: [event.target.value] })}
+              onKeyDown={(event) => { if (event.key === 'Escape') updateView({ q: [] }); }}
+              aria-label={t('vaults.search.label')}
+              placeholder={t('vaults.search.placeholder')}
+              className="h-9 pl-9 pr-16"
+            />
+            {query ? (
+              <Button variant="ghost" size="icon" className="absolute right-8 top-0.5 size-8" aria-label={t('vaults.search.clear')} onClick={() => updateView({ q: [] })}>
+                <X className="size-3.5" />
+              </Button>
+            ) : null}
+            <kbd aria-hidden className="pointer-events-none absolute right-3 top-2 rounded border border-border px-1 text-xs text-muted">/</kbd>
+          </div>
+          <VaultTagDropdown secrets={secrets} selected={selected} onToggle={toggleTag} onClear={() => updateView({ tag: [], skill: [] })} />
+          <SegmentedRadio
+            value={quick}
+            options={QUICK_FILTERS.map((id) => ({ id, label: t(`vaults.filter.${id}`) }))}
+            ariaLabel={t('vaults.filter.quick')}
+            onChange={(value) => updateView({ filter: value === 'all' ? [] : [value] })}
+            className="h-auto min-h-9 max-w-full flex-wrap"
+          />
+          <Select aria-label={t('vaults.sort.label')} value={sort} onChange={(event) => updateView({ sort: event.target.value === 'name' ? [] : [event.target.value] })} wrapperClassName="w-auto">
+            {SORT_ORDERS.map((value) => <option key={value} value={value}>{t(`vaults.sort.${value}`)}</option>)}
+          </Select>
         </div>
-      ) : null}
+        <div className="flex min-h-6 flex-wrap items-center gap-1.5 text-xs text-muted">
+          <span role="status" className="tabular-nums">
+            {hasActiveFilter
+              ? t('vaults.search.filtered', { visible: visibleSecrets.length, total: secrets.length })
+              : t('vaults.search.count', { count: secrets.length })}
+          </span>
+          {selected.map((tag) => <VaultFilterTag key={tag} tag={tag} active onToggle={toggleTag} removable />)}
+          {hasActiveFilter ? <Button variant="ghost" size="sm" onClick={clearFilters}>{t('vaults.filter.clearAll')}</Button> : null}
+        </div>
+      </div>
       {loading && secrets.length === 0 ? (
         <div className="flex items-center gap-2 px-1 text-sm text-muted">
           <Loader2 className="size-4 animate-spin" />
@@ -986,13 +1032,20 @@ export const VaultsPage: React.FC = () => {
       ) : secrets.length === 0 ? (
         <div className="rounded-2xl border border-border bg-surface p-8 text-center text-sm text-muted">{t('vaults.empty')}</div>
       ) : visibleSecrets.length === 0 ? (
-        <div className="rounded-2xl border border-border bg-surface p-8 text-center text-sm text-muted">{t('vaults.filter.empty')}</div>
+        <div className="flex flex-col items-center gap-2 rounded-2xl border border-border bg-surface p-8 text-center text-sm text-muted">
+          {t('vaults.filter.empty')}
+          <Button variant="ghost" size="sm" onClick={clearFilters}>{t('vaults.filter.reset')}</Button>
+        </div>
       ) : (
-        <div className="flex flex-col gap-2">
+        <ul aria-label={t('vaults.title')} className="flex flex-col gap-2">
           {visibleSecrets.map((s) => (
             <SecretRow
               key={s.name}
               secret={s}
+              terms={terms}
+              now={now}
+              selected={selected}
+              onToggleTag={toggleTag}
               onEdit={onEdit}
               onDelete={onDelete}
               onReveal={revealSecret}
@@ -1007,7 +1060,7 @@ export const VaultsPage: React.FC = () => {
               }}
             />
           ))}
-        </div>
+        </ul>
       )}
       {canReadVaultState && showAudit && (
         <div className="rounded-2xl border border-border bg-surface p-4">
@@ -1043,7 +1096,7 @@ export const VaultsPage: React.FC = () => {
         }}
       /> : null}
       {canManage ? <VaultSecretDialog
-        open={activeEditSecret != null}
+        open={editTarget != null}
         editSecret={activeEditSecret}
         onOpenChange={(o) => {
           if (!o) setEditTarget(null);
