@@ -229,8 +229,8 @@ The evidence store, its record and its owner are the capability model's §3. v2 
     - `status: {latest_ok, refused[]}` (§8.1): `latest_ok` is `{source_id, model_id, mode: "native" | "executor" |
       "direct", at}` or null (`direct` for an image call), the latest positive record; `refused[]` is `[{source_id, model_id, aspect, at, reason}]`, the
       current negative records, with `aspect` `call` or `replay` and `reason` the record's detail (HTTP status and
-      upstream machine code, never provider prose); `verified[]` is `[{source_id, model_id, mode, at}]`, the persisted
-      positive records, one per pair, from which the Source chips derive (hosted evidence lives on this read, which
+      upstream machine code, never provider prose); `verified[]` is `[{source_id, model_id, mode, at}]`, the positive
+      records in memory (current, not as of the last hourly file write), one per pair, from which the Source chips derive (hosted evidence lives on this read, which
       the clears answer; the Source read keeps effort evidence);
     - `latest_ok` is the newest identity-valid success in memory (§3.2), not the newest file record;
     - search tools: `executor_order` (saved, null when automatic), `effective_order` (as the gateway would try now),

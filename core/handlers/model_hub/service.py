@@ -6111,7 +6111,8 @@ class ModelHubService:
             usage=ProtocolUsageReport.of(input_tokens=0, cached_input_tokens=0, output_tokens=spec.tokens_per_image),
             counts={},
         )
-        if cost is None or cost.usd is None:
+        if cost is None or not cost.usd:
+            # An estimate of zero means the model's rate is unknown, never that an image is free.
             return None
         return {"usd": cost.usd, "basis": "estimated"}
 
@@ -6172,7 +6173,7 @@ class ModelHubService:
         """Clear under the Source mutation lock, so the identities it keeps are the ones the config holds."""
 
         try:
-            await asyncio.to_thread(self.capability_evidence.clear, matches, live=config.sources)
+            await asyncio.to_thread(self.capability_evidence.clear, matches, live=lambda: config.sources)
         except OSError:
             logger.warning("Model Hub could not persist an evidence clear; nothing changed", exc_info=True)
             raise ModelHubError("state_write_failed", status=500) from None
@@ -6201,7 +6202,12 @@ class ModelHubService:
             for model_id, feature, detail in refusals
         ]
         if records:
-            await asyncio.to_thread(self.capability_evidence.write_refusals, records, live=self.store.load().sources)
+            await asyncio.to_thread(
+                self.capability_evidence.write_refusals,
+                records,
+                live=lambda: self.store.load().sources,
+                wire_for=evidence.wire_for,
+            )
 
     async def record_hosted_success(
         self, source: ModelHubSourceConfig, model_id: str, tool: str, mode: str,
@@ -6219,7 +6225,7 @@ class ModelHubService:
             mode=mode,  # type: ignore[arg-type]
         )
         await asyncio.to_thread(
-            self.capability_evidence.note_success, record, live=self.store.load().sources, now=record.observed_at,
+            self.capability_evidence.note_success, record, live=lambda: self.store.load().sources, now=record.observed_at,
         )
 
     def _effort_refused(self, source: ModelHubSourceConfig, model_id: str, request: Any) -> bool:
@@ -6313,25 +6319,24 @@ class ModelHubService:
         )
         if learned is None:
             return None
-        try:
-            # Routing state: memory takes it before the re-render that follows, even if the file write fails.
-            await asyncio.to_thread(
-                self.capability_evidence.write_refusal,
-                EvidenceRecord(
-                    source_id=source.id,
-                    model_id=model_id,
-                    feature=learned.feature,
-                    status="unsupported",
-                    observed_at=self.now(),
-                    wire=self.hosted_evidence().wire_for(source, model_id),
-                    source_identity=identity_digest(source),
-                    detail=learned.detail,
-                ),
-                live=self.store.load().sources,
-            )
-        except ValueError:
-            # The Source changed identity while the request ran: the refusal describes nothing that exists now.
-            logger.info("Model Hub dropped capability evidence for a Source that changed identity")
+        evidence = self.hosted_evidence()
+        # Routing state: memory takes it before the re-render that follows, even if the file write fails. The store
+        # drops it if the Source or the model's rendering changed while the request ran.
+        await asyncio.to_thread(
+            self.capability_evidence.write_refusal,
+            EvidenceRecord(
+                source_id=source.id,
+                model_id=model_id,
+                feature=learned.feature,
+                status="unsupported",
+                observed_at=self.now(),
+                wire=evidence.wire_for(source, model_id),
+                source_identity=identity_digest(source),
+                detail=learned.detail,
+            ),
+            live=lambda: self.store.load().sources,
+            wire_for=evidence.wire_for,
+        )
         return learned
 
     def _admits_hosted(self, content: HostedContent, source: ModelHubSourceConfig, model_id: str) -> bool:

@@ -130,7 +130,8 @@ def _evidence(tmp_path, *refused) -> HostedEvidence:
                 status="unsupported", observed_at=NOW, wire=evidence.wire_for(source, model_id),
                 source_identity=identity_digest(source), detail="400 invalid_request_error",
             ),
-            live=ALL,
+            live=lambda: ALL,
+            wire_for=evidence.wire_for,
         )
     return evidence
 
@@ -241,7 +242,7 @@ def test_the_tools_read_states_saved_and_effective_values_and_what_real_use_show
             status="verified", observed_at=NOW, wire=evidence.wire_for(XAI, "grok-fast"),
             source_identity=identity_digest(XAI), mode="executor",
         ),
-        live=ALL, now=NOW,
+        live=lambda: ALL, now=NOW,
     )
     config = _config({"web_search": ModelHubHostedToolConfig(executor_order=("src_oai00001",))})
     status = hosted_tools_status(config, evidence=evidence, spec_for=_spec_for, image_price=lambda _source, _spec: None)
@@ -286,7 +287,7 @@ def test_the_latest_success_is_the_newest_in_time_not_in_text(tmp_path):
                 status="verified", observed_at=at, wire=evidence.wire_for(source, model_id),
                 source_identity=identity_digest(source), mode="executor",
             ),
-            live=ALL, now=at,
+            live=lambda: ALL, now=at,
         )
     status = hosted_tools_status(_config(), evidence=evidence, spec_for=_spec_for, image_price=lambda _s, _m: None)
     web = next(tool for tool in status["tools"] if tool["name"] == "web_search")
@@ -307,7 +308,7 @@ def test_the_latest_success_is_the_newest_one_whose_source_is_still_the_same(tmp
                 status="verified", observed_at=at, wire=evidence.wire_for(source, model_id),
                 source_identity=identity_digest(source), mode="executor",
             ),
-            live=ALL, now=at,
+            live=lambda: ALL, now=at,
         )
 
     succeed(XAI, "grok-fast", NOW)
@@ -370,6 +371,7 @@ def test_a_put_changes_only_the_fields_it_names(tool, payload, expected):
         # Only the saved choices reset with null; a null switch must not turn a cost-bearing tool back on.
         ("web_search", {"enabled": None}, "invalid_parameter"),
         ("web_search", {"executor_order": ["not-a-source"]}, "invalid_parameter"),
+        ("web_search", {"executor_order": []}, "invalid_parameter"),
         ("image_generate", {"default_model": {"source_id": "openai", "model_id": "gpt-image-2"}}, "invalid_parameter"),
         # A padded id would be saved and then never match the catalog id it names.
         ("image_generate", {"default_model": {"source_id": "src_oai00001", "model_id": " gpt-image-2 "}}, "invalid_parameter"),
