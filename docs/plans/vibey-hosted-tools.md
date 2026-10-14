@@ -130,6 +130,13 @@ The evidence store, its record and its owner are the capability model's §3. v2 
     the serving Source's identity from the final admission snapshot.
   - `resolve()` reads a record by its `status`, no longer by its `basis`: today it reads every `observed` record as
     a refusal.
+  - **A positive record carries the observed `mode`** (`native`, `executor` or `direct`) and is never retired by the
+    wire stamp: it is display-only history, so an upgrade does not hide it. The stamp retires `unsupported` records
+    only.
+  - **The latest execution is a projection, not a file write.** Model Hub keeps, per tool, the latest success
+    (`{source_id, model_id, mode, at}`) in memory, updated on every success and seeded at startup from the persisted
+    positive records. The read's `latest_ok` comes from it, so the status line is current even while file writes are
+    throttled.
   - Positive evidence never changes routing. It feeds the "最近一次 … 正常" lines (§8) and nothing else.
   - A `google` hop has no native hosted tools, and the Chat route Vibey uses gives no hosted item to observe.
 - **Negative (`unsupported`) is routing state.** When the file write fails, the narrow rule still updates the
@@ -138,6 +145,10 @@ The evidence store, its record and its owner are the capability model's §3. v2 
   - `Unsupported tool type: <type>` for a declared type → hosted tool `call`;
   - `Invalid encrypted_content in search_result block` while the request replays a web-search result → `web_search`
     `replay`;
+  - **new:** an image endpoint that refuses the model or the endpoint before producing anything (404, or a 400 naming
+    the model or endpoint as unsupported, as a relay without the vendor's image endpoint answers) → `image_generate`
+    `call` for that (Source, model). The enum drops that pair from the next turn (§7.2), and the refusal shows and
+    clears on the image card like a search refusal (§8.1);
   - **new:** xAI's plain-text refusal of a replayed payload, `Could not decrypt the provided encrypted_content`,
     which carries no code. It does not say which ciphertext failed, and a stale or foreign blob draws it as well as
     an unsupported replay, so it writes no evidence unless the Vibey lane's xAI A/B shows that xAI refuses fresh
@@ -147,8 +158,8 @@ The evidence store, its record and its owner are the capability model's §3. v2 
     `hosted_unsupported` reason.
   - Generic errors never create evidence: 5xx, overload, rate limit, auth, and any 400 that does not name the
     feature.
-- **Lifetime (owner decision, 2026-10-15 01:20).** Negative evidence, for hosted tools and efforts alike (capability
-  model §3.2), has no time limit. It stays until
+- **Lifetime of negative evidence (owner decision, 2026-10-15 01:20).** Negative evidence, for hosted tools and
+  efforts alike (capability model §3.2), has no time limit. It stays until
   one of these clears it:
   - the user clears it in Models → Tools, for one (Source, tool) or for every Source of a tool (§8.1);
   - its wire stamp no longer matches, which happens on its own when the Source's config or the engine release
@@ -204,6 +215,7 @@ The evidence store, its record and its owner are the capability model's §3. v2 
     - `status: {latest_ok, refused[]}` (§8.1): `latest_ok` is `{source_id, model_id, mode: "native" | "executor" |
       "direct", at}` or null (`direct` for an image call), the latest positive record; `refused[]` is `[{source_id, model_id, at, reason}]`, the current
       negative records;
+    - `latest_ok` is the in-memory latest-execution projection (§3.2), not the newest file record;
     - search tools: `executor_order` (saved, null when automatic), `effective_order` (as the gateway would try now),
       and `executor_candidates: [{source_id, price}]` in effective order, every eligible executor Source (a Claude
       subscription never is) with its per-call price, so the order can be edited over the full list;
@@ -444,7 +456,9 @@ These rules are C-1 rows in `cross-provider.md` and per-protocol rows in `conver
      from the next turn.
   3. The gateway admits each candidate on the final snapshot, under the mutation lock, at the moment it calls it
      (`runs_on`, identity, no negative `call` evidence), so a config change during the chain moves on instead of
-     calling a removed or re-identified Source. It calls the first admitted candidate: one short native request on
+     calling a removed or re-identified Source. This is the same per-request admission every model request of the
+     turn already gets (C-6 item 3, #2616's identity rule): the turn freezes the order, not the Sources' runtime, and a
+     removed Source cannot be served at all. It calls the first admitted candidate: one short native request on
      that Source's `executor_model`, with the
      overlay's declaration, the tool forced where the protocol allows it (`tool_choice: "required"` on Responses;
      Anthropic is asked in the message alone), a fixed instruction to search and list numbered results with one or
@@ -501,12 +515,13 @@ E2E stay.
                "description": "gpt-image-2: … (default) · grok-imagine-image: … · gemini-3.1-flash-image: …"},
      "prompt": {"type": "string"},
      "size": {"type": "string", "description": "e.g. 1024x1024, 1536x1024; or an aspect ratio such as 16:9"},
-     "images": {"type": "array", "items": {"type": "string"}, "description": "paths of reference images to edit"},
+     "images": {"type": "array", "items": {"type": "string"}, "maxItems": 4, "description": "paths of reference images to edit"},
      "n": {"type": "integer", "minimum": 1, "maximum": 4}}}}
   ```
 
   - **The enum is the image models actually available**: the overlay's `image_models` (§3.1) for each Source where
-    `runs_on` holds for that model, deduplicated by model id (the first Source in Vibey's order serves an id that
+    `runs_on` holds for that model and no current negative `image_generate` evidence exists for the pair (§3.2: a
+    relay without the vendor's image endpoint refuses once and is then left out), deduplicated by model id (the first Source in Vibey's order serves an id that
     two Sources offer, unless `default_model` names the other). Each entry's one-line description goes into the
     `model` description; every line stays short, because the tool block is in every request's prefix. The default is listed first and marked "(default)"; the rest follow sorted by id. So the
     enum is a pure function of configuration and changes only on a config event, and the turn freezes it (§3.4).
@@ -618,8 +633,8 @@ Unchanged from v1 §7.3 (owner decision, 2026-10-13 19:14), with the producer no
   automatic" (a `null` PUT). The price shows per row because it depends on who runs the search.
 - **The image card** lists the available image models with their one-line descriptions and prices, and a
   default-model picker over `default_model` / `effective_default`; a saved default that is no longer available
-  shows as itself, "(unavailable)". There is no failure line: a failed image call shows on its tool card in chat,
-  and passive evidence keeps no image failures. With no image model available, the card names the vendors from
+  shows as itself, "(unavailable)". Image-endpoint refusals (§3.2) show and clear like search refusals; any other
+  failed image call shows only on its tool card in chat, since passive evidence keeps no other image failures. With no image model available, the card names the vendors from
   `image_offered_by` ("Add an OpenAI or Google API key").
 - **Removed:** check and check-all, the confirm and result dialogs, Re-verify, the probe estimate, the executor
   picker, and "engine upgraded" headers (§11).
