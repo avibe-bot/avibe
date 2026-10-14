@@ -688,7 +688,10 @@ under the freeze protocol (`model-hub-contracts/README.md`).
 ## 12. Implementation split
 
 Each phase is one or more PRs under the normal gates. The contract version event (§10) rides the first PR that
-edits a frozen file, and later phases join it if it has not shipped.
+edits a frozen file, and later phases join it if it has not shipped. The C-1 additions the display reads (`execution.mode: "direct"`
+and the codes `image_param_unsupported` and `image_model_unavailable`) land in the producer PR (phase C), before
+phase D's display work; that PR adds the codes' en and zh copy in `vibe/i18n` and `ui/src/i18n`, because
+`test_every_known_hosted_error_code_has_copy_on_every_surface` requires copy for every known code.
 
 | Phase | Lane | Work | Depends on |
 | --- | --- | --- | --- |
