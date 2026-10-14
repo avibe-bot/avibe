@@ -2,7 +2,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 import * as ts from 'typescript';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import {
   internalPwaLinkTarget,
@@ -18,15 +18,32 @@ function sourceFiles(directory: URL): URL[] {
   });
 }
 
-function directWindowOpenCount(url: URL): number {
-  const path = fileURLToPath(url);
-  const source = ts.createSourceFile(
-    path,
-    readFileSync(url, 'utf8'),
-    ts.ScriptTarget.Latest,
-    true,
-    path.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
-  );
+type ParsedSource = { path: string; source: ts.SourceFile };
+
+/**
+ * Every non-test UI source that could hold a `window.open` call, each parsed
+ * once, with its path relative to `src/`. A call needs both identifiers in the
+ * file's text, so a file without them is skipped unparsed: it can hold no call
+ * either scan below looks for.
+ */
+function parseSources(root: URL): ParsedSource[] {
+  const rootPath = fileURLToPath(root);
+  return sourceFiles(root).flatMap((url) => {
+    const text = readFileSync(url, 'utf8');
+    if (!text.includes('window') || !text.includes('open')) return [];
+    const path = fileURLToPath(url);
+    const source = ts.createSourceFile(
+      path,
+      text,
+      ts.ScriptTarget.Latest,
+      true,
+      path.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
+    );
+    return [{ path: path.slice(rootPath.length), source }];
+  });
+}
+
+function directWindowOpenCount(source: ts.SourceFile): number {
   let count = 0;
   const visit = (node: ts.Node) => {
     if (
@@ -67,15 +84,7 @@ function seversOpener(node: ts.Node): boolean {
  * whatever is navigated into them later can drive this window. Report each
  * such tab with whether the function that opened it severs the reference.
  */
-function blankTabOpeners(url: URL): { line: number; severed: boolean }[] {
-  const path = fileURLToPath(url);
-  const source = ts.createSourceFile(
-    path,
-    readFileSync(url, 'utf8'),
-    ts.ScriptTarget.Latest,
-    true,
-    path.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
-  );
+function blankTabOpeners(source: ts.SourceFile): { line: number; severed: boolean }[] {
   const found: { line: number; severed: boolean }[] = [];
   const visit = (node: ts.Node) => {
     if (
@@ -204,6 +213,12 @@ describe('internalPwaLinkTarget', () => {
 });
 
 describe('programmatic PWA navigation', () => {
+  // Both source scans read one parse of the UI, made once for this block.
+  let sources: ParsedSource[] = [];
+  beforeAll(() => {
+    sources = parseSources(new URL('../', import.meta.url));
+  });
+
   it('uses the installed-PWA bridge before opening a new context', () => {
     const bridge = vi.fn((href: string) => href.startsWith('/chat/'));
     const popup = {} as Window;
@@ -225,12 +240,8 @@ describe('programmatic PWA navigation', () => {
   });
 
   it('keeps direct window.open calls confined to the shared helper and the preallocated desktop tab', () => {
-    const sourceRoot = new URL('../', import.meta.url);
-    const directCalls = sourceFiles(sourceRoot)
-      .map((url) => ({
-        path: fileURLToPath(url).slice(fileURLToPath(sourceRoot).length),
-        count: directWindowOpenCount(url),
-      }))
+    const directCalls = sources
+      .map(({ path, source }) => ({ path, count: directWindowOpenCount(source) }))
       .filter(({ count }) => count > 0)
       .sort((left, right) => left.path.localeCompare(right.path));
 
@@ -242,13 +253,8 @@ describe('programmatic PWA navigation', () => {
   });
 
   it('severs the opener of every preallocated blank tab', () => {
-    const sourceRoot = new URL('../', import.meta.url);
-    const rootPath = fileURLToPath(sourceRoot);
-    const tabs = sourceFiles(sourceRoot).flatMap((url) =>
-      blankTabOpeners(url).map(({ line, severed }) => ({
-        site: `${fileURLToPath(url).slice(rootPath.length)}:${line}`,
-        severed,
-      })),
+    const tabs = sources.flatMap(({ path, source }) =>
+      blankTabOpeners(source).map(({ line, severed }) => ({ site: `${path}:${line}`, severed })),
     );
 
     // The pattern must exist somewhere, or this asserts nothing at all.
