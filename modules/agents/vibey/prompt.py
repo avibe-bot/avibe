@@ -94,9 +94,17 @@ def coding_prompt(tool_names: Iterable[str], *, builtin_agent: bool, rg: bool) -
     tools = "\n".join(f"- {name}: {TOOL_SNIPPETS[name]}" for name in names) or "(none)"
     rules: list[str] = []
     if "bash" in names:
-        rules.append(f"Use bash for file operations like ls, {'rg' if rg else 'grep'}, find")
+        if rg:
+            rules.append("Use bash for file operations like ls, rg, find")
+            rules.append("Use rg directly for content search and `rg --files` for file discovery; it is on PATH, so do not hardcode its installation path.")
+        else:
+            rules.append("Use bash for file operations like ls, grep, find")
     if "powershell" in names:
-        rules.append(f"Use powershell for file operations like Get-ChildItem, {'rg' if rg else 'Select-String'}")
+        if rg:
+            rules.append("Use powershell for file operations like Get-ChildItem, rg")
+            rules.append("Use rg directly for content search and `rg --files` for file discovery; it is on PATH, so do not hardcode its installation path.")
+        else:
+            rules.append("Use powershell for file operations like Get-ChildItem, Select-String")
     for name in names:
         rules.extend(TOOL_GUIDELINES.get(name, ()))
     if names:

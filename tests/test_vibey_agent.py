@@ -1749,6 +1749,7 @@ def test_on_windows_the_command_tool_is_powershell_with_its_own_rule() -> None:
 
     assert "- powershell: Execute PowerShell commands (Get-ChildItem, Select-String, etc.)" in text
     assert "Use powershell for file operations like Get-ChildItem, rg" in text
+    assert "Use rg directly for content search and `rg --files` for file discovery; it is on PATH, so do not hardcode its installation path." in text
     assert "bash" not in text
 
 
@@ -1785,6 +1786,7 @@ async def test_the_bash_rule_names_rg_only_when_the_turns_commands_find_it(
     system = harness.provider.requests[0].system
     assert ("- Use bash for file operations like ls, rg, find" in system) is finds_rg
     assert ("- Use bash for file operations like ls, grep, find" in system) is not finds_rg
+    assert ("Use rg directly for content search and `rg --files` for file discovery; it is on PATH, so do not hardcode its installation path." in system) is finds_rg
 
 
 def _agent_store(engine):
