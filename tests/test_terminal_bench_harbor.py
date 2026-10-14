@@ -13,6 +13,7 @@ from importlib.metadata import version
 import json
 from pathlib import Path
 from types import SimpleNamespace
+import subprocess
 import zipfile
 
 import pytest
@@ -22,7 +23,9 @@ if version("harbor") != "0.24.0":
     pytest.skip("optional boundary requires pinned Harbor 0.24.0", allow_module_level=True)
 
 from harbor.models.agent.context import AgentContext
+from scripts.terminal_bench import runner
 from scripts.terminal_bench.harbor_agent import FullAvibeAgent
+from scripts.terminal_bench.runner import FullRuntimeTrial
 
 
 # These are fixture coordination bounds, not Agent/product timeouts. Cold HD1
@@ -249,6 +252,31 @@ async def test_upload_failure_or_cancel_joins_then_removes_staged_key(tmp_path, 
     assert not env.downloaded
     assert not any("not-real-credential".encode() in data for data in env.files.values())
     assert all("not-real-credential" not in cmd + json.dumps(opts) for cmd, opts in env.commands)
+
+
+
+
+def test_runs_show_nonzero_valid_json_is_a_product_failure_not_helper_failure(tmp_path, monkeypatch):
+    trial = object.__new__(FullRuntimeTrial)
+    trial.state = tmp_path
+    trial.env = {"AVIBE_HOME": str(tmp_path / "home")}
+    trial._command = lambda operation, *args: ["vibe", operation, *args]
+    sentinel = "provider-secret-text-not-for-export"
+
+    def show(argv, **kwargs):
+        return subprocess.CompletedProcess(
+            argv, 1,
+            json.dumps({"run": {"id": "run-1", "status": "failed",
+                                 "error": f"Automatic recovery has ended: {sentinel}",
+                                 "result_text": "safe failure"}}),
+            "",
+        )
+
+    monkeypatch.setattr(subprocess, "run", show)
+    payload = trial._call_run_show("run-1")
+    assert payload["run"]["status"] == "failed"
+    assert payload["run"]["error"].endswith(sentinel)
+    scrubbed = runner.scrub(payload, sentinel)
 
 
 def test_explicit_model_must_match_profile(tmp_path, wheel):

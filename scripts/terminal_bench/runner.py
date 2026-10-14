@@ -35,7 +35,7 @@ class TrialError(RuntimeError):
     _CODES = {
         "owned_process_cleanup_unconfirmed", "service_exited_before_ready",
         "controller_readiness_timeout", "service_not_ready", "harness_quiescence_unconfirmed",
-        "credential_input_refused",
+        "credential_input_refused", "cli_helper_invalid_run_payload",
     }
     _HELPER_CODE = re.compile(
         r"(?:initialize|serve|health|configure|usage|versions|cli)_helper_"
@@ -269,6 +269,30 @@ class FullRuntimeTrial:
         except ValueError:
             raise TrialError(f"{operation}_helper_invalid_json") from None
 
+    def _call_run_show(self, run_id: str, *, timeout: float = 15):
+        """Accept a valid durable Run payload even when CLI exits nonzero.
+
+        ``vibe runs show`` returns a meaningful failed Run alongside a nonzero
+        exit code. That is a product outcome, not helper infrastructure.
+        """
+        argv = self._command("cli", "runs", "show", run_id)
+        try:
+            proc = subprocess.run(argv, cwd=self.state, env=self.env,
+                                  text=True, encoding="utf-8", capture_output=True,
+                                  timeout=timeout)
+        except subprocess.TimeoutExpired:
+            raise TrialError("cli_helper_timeout") from None
+        try:
+            payload = json.loads(proc.stdout)
+            row = payload.get("run") if isinstance(payload, dict) else None
+            if not isinstance(row, dict) or row.get("id") not in {None, run_id}:
+                raise ValueError
+            return payload
+        except (TypeError, ValueError, json.JSONDecodeError):
+            if proc.returncode:
+                raise TrialError(f"cli_helper_failed_{proc.returncode}") from None
+            raise TrialError("cli_helper_invalid_run_payload") from None
+
     def start(self):
         if os.name != "nt":
             # UNIX socket names have a ~104-byte bound on macOS. Follow the
@@ -321,7 +345,7 @@ class FullRuntimeTrial:
         terminal_row = None
         quiet_observations = 0
         while time.monotonic() < deadline:
-            row = self._call("cli", "runs", "show", run_id, timeout=15)["run"]
+            row = self._call_run_show(run_id)["run"]
             if row["status"] in _TERMINAL:
                 terminal_row = row
                 # A Run's final reply can hand over to a Watch, scheduled Task
@@ -354,7 +378,7 @@ class FullRuntimeTrial:
             self._result["run_settled_after_cancel"] = False
             while time.monotonic() < cancel_deadline:
                 try:
-                    row = self._call("cli", "runs", "show", run_id, timeout=15)["run"]
+                    row = self._call_run_show(run_id)["run"]
                 except TrialError:
                     break
                 if row["status"] in _TERMINAL:
