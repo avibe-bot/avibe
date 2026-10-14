@@ -8116,9 +8116,9 @@ def test_engine_client_preserves_large_valid_responses(
             b'{"output":[{"content":"' + large_value + b'"}]}'
             if not case["stream"]
             else (
-                b"event: response.image_generation_call.partial_image\n"
-                b'data: {"type":"response.image_generation_call.partial_image",'
-                b'"partial_image_b64":"'
+                b"event: response.output_text.delta\n"
+                b'data: {"type":"response.output_text.delta",'
+                b'"delta":"'
                 + large_value
                 + b'"}\n\nevent: response.completed\ndata: {"type":"response.completed"}\n\n'
             )

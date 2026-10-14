@@ -238,13 +238,6 @@ MODEL_OUTPUT_ENVELOPE_FIXTURES = (
         "response.function_call_arguments.delta",
         False,
     ),
-    (
-        "openai_responses",
-        "response.image_generation_call.partial_image",
-        ("type",),
-        "response.image_generation_call.partial_image",
-        False,
-    ),
     ("openai_chat", None, ("choices", "*", "delta", "content"), None, True),
     ("openai_chat", None, ("choices", "*", "delta", "reasoning_content"), None, True),
     ("openai_chat", None, ("choices", "*", "delta", "refusal"), None, True),
@@ -1760,11 +1753,11 @@ def test_exact_sse_tokenizer_accepts_large_protocol_frames() -> None:
     assert tokenizer.feed(b"data: " + data + b"\n\n") == (b"data: " + data,)
 
 
-def test_large_image_event_is_observed_without_retaining_its_base64_body() -> None:
+def test_large_output_event_is_observed_without_retaining_its_body() -> None:
     state = ProtocolSSEState("openai_responses")
-    event_type = b"response.image_generation_call.partial_image"
+    event_type = b"response.output_text.delta"
     state.observe(
-        b"event: " + event_type + b'\ndata: {"type":"' + event_type + b'","partial_image_b64":"'
+        b"event: " + event_type + b'\ndata: {"type":"' + event_type + b'","delta":"'
     )
 
     assert state.model_output_started is False

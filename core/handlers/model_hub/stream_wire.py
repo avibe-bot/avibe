@@ -735,12 +735,6 @@ PROTOCOL_STREAM_TAXONOMY: Final[Mapping[str, ProtocolStreamTaxonomy]] = {
                 ("type",),
                 "response.function_call_arguments.delta",
             ),
-            ProtocolModelOutputEnvelope(
-                # https://platform.openai.com/docs/api-reference/responses-streaming/response/image-generation-call/partial-image
-                "response.image_generation_call.partial_image",
-                ("type",),
-                "response.image_generation_call.partial_image",
-            ),
         ),
         success_literal=None,
         sequence_number_path=("sequence_number",),

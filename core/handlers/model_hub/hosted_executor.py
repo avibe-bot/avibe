@@ -1,22 +1,18 @@
-"""The gateway's hosted-tool proxy executor (``vibey-hosted-tools.md`` §3.4).
+"""The gateway's hosted search executor (``vibey-hosted-tools.md`` §6).
 
-When Vibey's hop runs a hosted tool as a proxy function, Vibey's tool runtime
-asks the gateway to run it on the executor bound for the turn. This module owns
-what that executor call sends and how its response becomes the canonical
-record; the service owns the call itself, and Vibey renders the record and
-writes any image into session media.
+When Vibey's hop runs a search tool as a proxy function, Vibey's tool runtime
+asks the gateway to run it; the gateway tries the turn's executor chain. This
+module owns what one executor request sends and how its response becomes the
+canonical record; the service owns the chain and the calls, and Vibey renders
+the record.
 
-The executor request depends on the tool: a search tool sends one short native
-request that searches and lists results, and ``image_generation`` renders the
-supplied prompt at the supplied size. Neither sends a reasoning effort: the
-executor is verified for the tool, not for any effort. The declaration is the
-overlay's, exactly as a native turn sends it.
+An executor request is one short native request on the vendor's executor
+model that searches and lists results. It sends no reasoning effort, and the
+declaration is the overlay's, exactly as a native turn sends it.
 """
 
 from __future__ import annotations
 
-import base64
-import binascii
 import json
 import re
 from dataclasses import dataclass, field, replace
@@ -32,26 +28,18 @@ from .hosted_items import responses_item_tool
 from .pricing import usd_from_xai_ticks
 from .request import ModelHubRequest
 
-EXECUTOR_TOOLS: Final = ("web_search", "x_search", "image_generation")
+EXECUTOR_TOOLS: Final = ("web_search", "x_search")
+# One deadline for a search call's whole executor chain, not one per candidate.
 SEARCH_TIMEOUT_SECONDS: Final = 180.0
-IMAGE_TIMEOUT_SECONDS: Final = 300.0
 # Responses counts reasoning against this cap, so it leaves room beyond the list itself.
 _RESPONSES_OUTPUT_TOKENS: Final = 4096
 _ANTHROPIC_OUTPUT_TOKENS: Final = 2048
-# An image stream carries a full image per partial and the final image twice.
-_IMAGE_LINE_BYTES: Final = 32 * 1024 * 1024
-EXECUTOR_RESPONSE_MAX_BYTES: Final = 128 * 1024 * 1024
-# One final image, decoded: what a base64 event under the line cap can carry.
-_IMAGE_MAX_BYTES: Final = 24 * 1024 * 1024
-# Every image a response carries, partials and the final, decoded (vibey-hosted-tools.md §12 item 25).
-_IMAGES_TOTAL_MAX_BYTES: Final = 64 * 1024 * 1024
-# Image events per response: the requested partials and the final, with a small margin.
-_IMAGE_EVENT_MARGIN: Final = 2
+# A search answer is a short cited list; this bounds a misbehaving response.
+EXECUTOR_RESPONSE_MAX_BYTES: Final = 16 * 1024 * 1024
 _SNIPPET_CHARS: Final = 500
 # The url_citation annotations one response's record reads; an executor's answer cites tens.
 _MAX_CITATIONS: Final = 256
 _X_POST_HOSTS: Final = ("x.com", "twitter.com", "www.x.com", "www.twitter.com", "mobile.twitter.com")
-_IMAGE_MIME: Final = {"png": "image/png", "jpeg": "image/jpeg", "jpg": "image/jpeg", "webp": "image/webp"}
 _X_SEARCH_MODES: Final = ("Latest", "Top")
 
 _SEARCH_INSTRUCTIONS: Final = {
@@ -68,9 +56,6 @@ _SEARCH_INSTRUCTIONS: Final = {
         "Write nothing else."
     ),
 }
-_IMAGE_INSTRUCTIONS: Final = (
-    "Generate exactly one image for the user's prompt with the image_generation tool. Write no text."
-)
 
 
 class ExecutorResponseRefused(ValueError):
@@ -94,68 +79,47 @@ class ExecutorCallRefused(ValueError):
 class ExecutorCall:
     tool: str
     arguments: Mapping[str, Any]
-    executor: tuple[str, str] | None
 
 
 def parse_call(tool: str, payload: object) -> ExecutorCall:
-    """Validate one ``POST /vibey/v1/hosted-tools/{tool}`` body against the canonical schema."""
+    """Validate one ``POST /vibey/v1/hosted-tools/{tool}`` body, ``{"arguments": ...}``, against the canonical schema."""
 
     if tool not in EXECUTOR_TOOLS:
         raise ExecutorCallRefused("not_found_error", 404)
-    if not isinstance(payload, dict) or set(payload) != {"arguments", "executor"}:
+    if not isinstance(payload, dict) or set(payload) != {"arguments"}:
         raise ExecutorCallRefused("invalid_request_error", 400)
-    arguments, executor = payload["arguments"], payload["executor"]
+    arguments = payload["arguments"]
     if not isinstance(arguments, dict):
         raise ExecutorCallRefused("invalid_request_error", 400)
-    required = "prompt" if tool == "image_generation" else "query"
-    optional = {"web_search": set(), "x_search": {"limit", "mode"}, "image_generation": {"size"}}[tool]
-    text = arguments.get(required)
-    if set(arguments) - {required} - optional or not isinstance(text, str) or not text.strip():
+    optional = {"web_search": set(), "x_search": {"limit", "mode"}}[tool]
+    text = arguments.get("query")
+    if set(arguments) - {"query"} - optional or not isinstance(text, str) or not text.strip():
         raise ExecutorCallRefused("invalid_request_error", 400)
-    limit, mode, size = arguments.get("limit"), arguments.get("mode"), arguments.get("size")
+    limit, mode = arguments.get("limit"), arguments.get("mode")
     if (
         (limit is not None and (isinstance(limit, bool) or not isinstance(limit, int) or limit < 1))
         or (mode is not None and mode not in _X_SEARCH_MODES)
-        or (size is not None and (not isinstance(size, str) or not size.strip()))
     ):
         raise ExecutorCallRefused("invalid_request_error", 400)
-    if executor is None:
-        return ExecutorCall(tool, dict(arguments), None)
-    if (
-        not isinstance(executor, dict)
-        or set(executor) != {"source_id", "model_id"}
-        or not all(isinstance(executor[key], str) and executor[key] for key in ("source_id", "model_id"))
-    ):
-        raise ExecutorCallRefused("invalid_request_error", 400)
-    return ExecutorCall(tool, dict(arguments), (executor["source_id"], executor["model_id"]))
+    return ExecutorCall(tool, dict(arguments))
 
 
 def executor_streams(source: ModelHubSourceConfig) -> bool:
-    """A Responses executor streams, so an image's partials keep the idle bound fed; Anthropic is buffered."""
+    """A Responses executor streams, so the idle bound stays fed; Anthropic is buffered."""
 
     return source.protocol == "openai_responses"
 
 
 def call_timeout(tool: str) -> float:
-    return IMAGE_TIMEOUT_SECONDS if tool == "image_generation" else SEARCH_TIMEOUT_SECONDS
+    """The deadline of one call's whole executor chain."""
+
+    return SEARCH_TIMEOUT_SECONDS
 
 
 def executor_request(call: ExecutorCall, source: ModelHubSourceConfig, model_id: str, spec: HostedToolSpec) -> ModelHubRequest:
     """The one native request this call sends, in the executor Source's own protocol."""
 
     declaration = spec.declaration
-    if call.tool == "image_generation":
-        if call.arguments.get("size") is not None:
-            declaration["size"] = call.arguments["size"]
-        payload: dict[str, Any] = {
-            "model": model_id,
-            "instructions": _IMAGE_INSTRUCTIONS,
-            "input": [{"role": "user", "content": call.arguments["prompt"]}],
-            "tools": [declaration],
-            "tool_choice": {"type": "image_generation"},
-            "store": False,
-        }
-        return ModelHubRequest(payload, protocol=source.protocol)
     query = call.arguments["query"]
     if call.tool == "x_search":
         settings = [f"limit {call.arguments['limit']}" if "limit" in call.arguments else None,
@@ -209,22 +173,15 @@ class ResponsesReadout:
 
 
 class ResponsesStreamReader:
-    """Read a Responses event stream into its output items, without keeping image partials.
+    """Read a Responses event stream into its output items.
 
-    Each line is bounded (32 MiB for an image stream, the same as Vibey's), and
-    so is the whole stream. Partial images are counted, never kept, and an
-    image stream may carry only the requested partials and the final image,
-    with a small margin. Parsing a large event is CPU work: feed it off the
-    controller loop.
+    Each line and event keeps the SSE parser's default bound, and so is the
+    whole stream.
     """
 
-    def __init__(self, *, partial_images: int | None) -> None:
-        limit = _IMAGE_LINE_BYTES if partial_images is not None else None
-        self._parser = SSEParser(max_line_size=limit, max_event_size=limit)
+    def __init__(self) -> None:
+        self._parser = SSEParser()
         self._read = 0
-        self._image_events = 0
-        self._image_bytes = 0
-        self._max_image_events = (partial_images or 0) + 1 + _IMAGE_EVENT_MARGIN
         self.readout = ResponsesReadout()
 
     def feed(self, chunk: bytes) -> None:
@@ -252,20 +209,15 @@ class ResponsesStreamReader:
         if not isinstance(kind, str):
             return
         item = payload.get("item")
-        if kind == "response.image_generation_call.partial_image":
-            self._count_image(payload.get("partial_image_b64"))
         if kind == "response.output_item.done" and isinstance(item, dict):
-            if item.get("type") == "image_generation_call":
-                self._count_image(item.get("result"))
             self.readout.items.append(item)
         elif kind in {"response.completed", "response.incomplete", "response.failed"} and isinstance(
             payload.get("response"), dict
         ):
             response = dict(payload["response"])
             output = response.pop("output", None)
-            # The terminal output repeats the streamed items (the image included);
-            # only the items the stream did not carry are taken from it, and only
-            # their images count toward the budget.
+            # The terminal output repeats the streamed items; only the items the
+            # stream did not carry are taken from it.
             seen = {item.get("id") for item in self.readout.items if isinstance(item.get("id"), str)}
             streamed = bool(self.readout.items)
             for adopted in output if isinstance(output, list) else ():
@@ -275,19 +227,8 @@ class ResponsesStreamReader:
                 if (ident in seen) if isinstance(ident, str) else streamed:
                     # A repeat, or an item without an id the stream may already hold.
                     continue
-                if adopted.get("type") == "image_generation_call":
-                    self._count_image(adopted.get("result"))
                 self.readout.items.append(adopted)
             self.readout.response = response
-
-    def _count_image(self, encoded: Any) -> None:
-        """Bound the response's image events and their decoded bytes, without decoding them."""
-
-        self._image_events += 1
-        self._image_bytes += len(encoded) * 3 // 4 if isinstance(encoded, str) else 0
-        if self._image_events > self._max_image_events or self._image_bytes > _IMAGES_TOTAL_MAX_BYTES:
-            raise ExecutorResponseRefused("modelHub.hostedTools.tooLarge")
-
 
 
 # --- results ---------------------------------------------------------------
@@ -295,16 +236,17 @@ class ResponsesStreamReader:
 
 @dataclass(frozen=True)
 class ExecutorResult:
-    """The record for the call, plus an image's resolved facts and bytes (base64).
+    """The record for the call.
 
     ``usage`` is the response's own ``usage`` section, as the provider sent it,
-    which the call's cost is read from.
+    which the call's cost is read from. ``ran`` says whether the response ran
+    the tool at all: one that never did is a model's choice, which ends the
+    chain rather than moving on (§6).
     """
 
     record: dict[str, Any]
-    generation: dict[str, str] | None = None
-    images: tuple[dict[str, str], ...] = ()
     usage: Mapping[str, Any] | None = None
+    ran: bool = True
 
 
 def provider_charges(protocol: str, usage: Mapping[str, Any] | None) -> tuple[dict[str, int], float | None]:
@@ -335,10 +277,8 @@ def responses_result(tool: str, readout: ResponsesReadout, say: Say, *, failure:
 def _responses_record(tool: str, readout: ResponsesReadout, say: Say, failure: str | None) -> ExecutorResult:
     response = readout.response or {}
     calls = [item for item in readout.items if _responses_call_tool(item) == tool]
-    if tool == "image_generation":
-        return _image_result(calls, readout, say, failure)
     if not calls:
-        return ExecutorResult(failed_record(failure or _ended_without(tool, response, say)))
+        return ExecutorResult(failed_record(failure or _ended_without(tool, response, say)), ran=False)
     texts = [
         part
         for item in readout.items
@@ -518,47 +458,6 @@ def _sentence(text: str, start: int, end: int, line_start: int, line_end: int) -
     return sentence_start, found.end() if found is not None else line_end
 
 
-def _image_result(
-    calls: list[Mapping[str, Any]], readout: ResponsesReadout, say: Say, failure: str | None,
-) -> ExecutorResult:
-    if failure is None and any(call.get("status") == "failed" for call in calls):
-        # The one failure-precedence rule: a provider-marked failed call fails the call.
-        return ExecutorResult(failed_record(say("modelHub.hostedTools.callFailed", tool="image_generation")))
-    done = [call for call in calls if call.get("status") == "completed" and isinstance(call.get("result"), str)]
-    image = done[-1] if done and done[-1]["result"] else None
-    status = _text_field(readout.response or {}, "status")
-    if failure is None and (status == "incomplete" or (image is not None and status != "completed")):
-        # Success is the allow-list: a response that stopped early, before or after its image, is not completed.
-        settled = _settled(readout.response or {}, [], say)
-        return ExecutorResult({**settled, "sources": []})
-    if failure is not None or image is None:
-        error = failure or (
-            say("modelHub.hostedTools.callEnded", tool="image_generation", status=str(calls[-1].get("status")))
-            if calls else _ended_without("image_generation", readout.response or {}, say)
-        )
-        return ExecutorResult(failed_record(error))
-    output_format = str(image.get("output_format") or "png").lower()
-    mime = _IMAGE_MIME.get(output_format)
-    if mime is None:
-        return ExecutorResult(failed_record(say("modelHub.hostedTools.imageFormat", format=output_format)))
-    try:
-        size = len(base64.b64decode(image["result"], validate=True))
-    except (binascii.Error, ValueError):
-        return ExecutorResult(failed_record(say("modelHub.hostedTools.imageUnreadable")))
-    if not size or size > _IMAGE_MAX_BYTES:
-        return ExecutorResult(failed_record(say("modelHub.hostedTools.imageUnreadable")))
-    generation = {
-        name: image[name]
-        for name in ("revised_prompt", "size", "quality")
-        if isinstance(image.get(name), str) and image[name]
-    }
-    return ExecutorResult(
-        {"status": "completed", "sources": []},
-        generation=generation,
-        images=({"mime": mime, "data": image["result"]},),
-    )
-
-
 def anthropic_result(body: bytes | bytearray, say: Say) -> ExecutorResult:
     """The canonical record of one buffered Anthropic web search executor call; parse it off the loop."""
 
@@ -573,7 +472,7 @@ def _anthropic_record(message: Any, say: Say) -> ExecutorResult:
     content = message.get("content") if isinstance(message, dict) else None
     blocks = [block for block in content if isinstance(block, dict)] if isinstance(content, list) else []
     if not any(block.get("type") == "server_tool_use" and block.get("name") == "web_search" for block in blocks):
-        return ExecutorResult(failed_record(say("modelHub.hostedTools.didNotRun", tool="web_search")))
+        return ExecutorResult(failed_record(say("modelHub.hostedTools.didNotRun", tool="web_search")), ran=False)
     results: list[dict[str, Any]] = []
     errors: list[str] = []
     for block in blocks:

@@ -498,7 +498,7 @@ async def test_a_pinned_hop_must_speak_the_requests_protocol(tmp_path):
 
 @pytest.mark.asyncio
 async def test_a_refusal_naming_the_pinned_hosted_content_is_handed_back_and_learned(tmp_path):
-    """MH-HOSTED-GATEWAY-002: case 3, a narrow hosted-content rule (#2551) turns the pinned 400 into a handback."""
+    """MH-HOSTED-GATEWAY-002: case 3, a narrow hosted-content rule (#2551) turns the pinned 400 into a handback with its reason."""
 
     primary, fallback = _sources()
     refusal = replace(
@@ -513,7 +513,11 @@ async def test_a_refusal_naming_the_pinned_hosted_content_is_handed_back_and_lea
     router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
     try:
         hop = await router.resolve_hop("menu-alias", process_scope="vibey:learn", turn_id="turn-learn")
-        assert await _post(hop, _native(hop), pin=primary.id) == (409, PIN_UNAVAILABLE)
+        reason = {"kind": "hosted_unsupported", "tool": "x_search", "aspect": "call", "source_id": primary.id}
+        # The 409 names the refused feature; only a narrow rule's handback carries a reason.
+        assert await _post(hop, _native(hop), pin=primary.id) == (
+            409, {"type": "error", "error": {**PIN_UNAVAILABLE["error"], "reason": reason}},
+        )
     finally:
         await gateway.close()
     assert [entry[0] for entry in service.adapter.invocations] == [primary.id]
