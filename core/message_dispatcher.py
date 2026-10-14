@@ -3192,6 +3192,9 @@ class ConsolidatedMessageDispatcher:
                 primary_message_id: Optional[str] = None
                 scheduled_anchor_message_id: Optional[str] = None
                 delivered_as_attachment = False
+                # Set once the result has been split-sent, whether or not it fully
+                # arrived: the fallback must not split-send the same content again.
+                split_attempted = False
 
                 # Concise status bubble (Slack/Discord): the live process bubble for
                 # this turn. The result is ALWAYS delivered as a NEW message (never
@@ -3287,6 +3290,7 @@ class ConsolidatedMessageDispatcher:
                         else:
                             logger.error("Failed to send result message: %s", err)
                 elif self._should_split_long_result(context):
+                    split_attempted = True
                     try:
                         primary_message_id = await self._send_split_result_messages(
                             im_client,
@@ -3353,8 +3357,10 @@ class ConsolidatedMessageDispatcher:
                             scheduled_anchor_message_id = primary_message_id
                         logger.info("Result delivered as .md file attachment (fallback)")
 
-                    # Fallback 2: split into multiple messages.
-                    if not file_uploaded:
+                    # Fallback 2: split into multiple messages, unless the split
+                    # path already ran; repeating it would resend the chunks the
+                    # user has already received.
+                    if not file_uploaded and not split_attempted:
                         try:
                             primary_message_id = await self._send_split_result_messages(
                                 im_client,
@@ -3365,7 +3371,8 @@ class ConsolidatedMessageDispatcher:
                                 subtext=done_footer,
                             )
                             scheduled_anchor_message_id = primary_message_id
-                            logger.info("Result delivered via split messages (fallback)")
+                            if primary_message_id is not None:
+                                logger.info("Result delivered via split messages (fallback)")
                         except Exception as split_err:
                             logger.error("Split message fallback also failed: %s", split_err)
 
@@ -3941,7 +3948,10 @@ class ConsolidatedMessageDispatcher:
 
         Quick-reply buttons and the ``subtext`` done-footer both ride on the LAST
         chunk (a mid-stream footer would read wrong); every chunk is a new send so
-        the result notifies. Returns the first chunk's id (the delivery anchor).
+        the result notifies. Returns the first chunk's id (the delivery anchor)
+        only when EVERY chunk was delivered, and ``None`` otherwise: the caller
+        reads a non-empty id as "the whole result reached the user", so a partial
+        split must hand the complete content to the caller's fallback instead.
         """
         plan = self._plan_result_split_for_context(context, text)
         if not plan.links_whole:
@@ -3971,8 +3981,7 @@ class ConsolidatedMessageDispatcher:
                     logger.warning("Failed to send split result chunk with quick replies, falling back: %s", err)
 
             if message_id is None:
-                # A later-chunk failure must NOT propagate so an earlier delivered
-                # chunk isn't lost — best-effort, log, continue.
+                # Keep the send error local; the missing id is handled below.
                 try:
                     message_id = await self._send_result_inline(
                         im_client, context, chunk, [], parse_mode, subtext=chunk_subtext
@@ -3981,15 +3990,16 @@ class ConsolidatedMessageDispatcher:
                     logger.warning("Failed to send split result chunk %d: %s", index, err)
                     message_id = None
 
-            if index == 0 and message_id is None:
-                # The HEAD chunk failed: abandon the split and return None so the
-                # caller's fallback delivers the COMPLETE content (e.g. as a .md
-                # upload). Returning a later chunk's id here would mark a head-less
-                # partial — the user seeing only the tail — as a successful delivery.
-                logger.warning("Split result head chunk failed to send; abandoning partial split")
+            if message_id is None:
+                # Any missing chunk means the user did not get the whole result:
+                # head-less, tail-less, or with a hole in the middle. Stop sending
+                # and return None so the caller's fallback delivers the COMPLETE
+                # content (e.g. as a .md upload) rather than recording a partial
+                # as a successful delivery.
+                logger.warning("Split result chunk %d of %d failed to send; abandoning partial split", index, len(chunks))
                 return None
 
-            if first_message_id is None and message_id is not None:
+            if first_message_id is None:
                 first_message_id = message_id
 
         return first_message_id
