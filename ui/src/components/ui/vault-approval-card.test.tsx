@@ -309,8 +309,7 @@ describe('VaultApprovalCard protected access approval', () => {
     render(<I18nextProvider i18n={i18n}><VaultApprovalCard request={request} onResolved={vi.fn()} onCancel={vi.fn()} /></I18nextProvider>);
     expect(screen.getByText('Deleting removes all fields: password, username')).toBeTruthy();
   });
-
-
+  it('disables delete approval for editors without instance management', async () => {
     authorization.capabilities.can_manage_instance = false;
     const onResolved = vi.fn();
     render(

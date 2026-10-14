@@ -174,7 +174,7 @@ export const VaultApprovalCard: React.FC<{
       vaultHasNamedFieldShape(member) ? member.fields : []
     )))];
   }, [isDelete, option]);
-
+  const protectedNames = useMemo(() => {
     const materialNames = [...new Set(materials.map((m) => m.name.split('.')[0]))];
     return materialNames.length ? materialNames : (card?.protected_secret_names ?? []);
   }, [card, materials]);
@@ -498,7 +498,7 @@ export const VaultApprovalCard: React.FC<{
             {t('vaults.approval.deleteFields', { fields: namedDeleteFields.join(', ') })}
           </span>
         ) : null}
-
+        {isDelete && card.description ? (
           <DetailRow label={t('vaults.approval.description')}><span className="text-[13px] text-foreground">{card.description}</span></DetailRow>
         ) : null}
         {isDelete && (card.reason || (request.delivery as { reason?: string } | null)?.reason) ? (
