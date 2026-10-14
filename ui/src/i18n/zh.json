@@ -2433,12 +2433,18 @@
           "defaultPick": "默认图片模型",
           "automatic": "自动",
           "automaticNamed": "自动（{{pair}}）",
+          "automaticRule": "自动（按目录顺序的第一个可用模型）",
           "unavailable": "{{pair}}（不可用）",
           "defaultNote": "Vibey 没有指定模型时使用。Vibey 也可以按需改用列表里的其他模型。",
           "unavailableNote": "已保存的默认模型暂不可用，当前使用 {{pair}}。",
           "unavailableNoteNone": "已保存的默认模型暂不可用。",
           "empty": "图片生成需要 {{vendors}} 的 API Key。",
           "emptyNoVendor": "你的供应商目前都没有图片模型。",
+          "description": {
+            "gpt-image-2": "写实照片、图中文字准确，支持按参考图编辑",
+            "gemini-2_5-flash-image": "出图快，人物和风格前后一致，适合多图合成与局部修改",
+            "gemini-3-pro-image-preview": "高保真，图中文字渲染准确"
+          },
           "vendor": {
             "openai": "OpenAI",
             "gemini": "Google",

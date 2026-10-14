@@ -14,7 +14,7 @@ import { Select } from '@/components/ui/select';
 import { cn } from '@/lib/utils';
 import { ToggleSwitch } from '../SettingsPrimitives';
 import { formatMonthDay, formatNameList, formatSmallUsd } from './format';
-import { executorOrderAfterMove, pairEvidence, refusalSummary, type PairEvidence, type RefusalSummary } from './hostedTools';
+import { executorOrderAfterMove, imageModelCopyKey, pairEvidence, refusalSummary, type PairEvidence, type RefusalSummary } from './hostedTools';
 import { foldRegionRead, regionFailed, type RegionRead } from './regionRead';
 import { ACCENT_ICON, ACCENT_PILL, ACCENT_TILE, sourceVisual } from './vendorMeta';
 import type {
@@ -382,8 +382,15 @@ const Advanced: React.FC<{ tool: HostedToolStatus; summary: RefusalSummary; look
 };
 
 /** One image's price: the vendor's list price, an estimate from token pricing (≈), or none known. */
-const ImagePrice: React.FC<{ price: HostedImagePrice | null }> = ({ price }) => {
+/**
+ * One image's price: included on a subscription Source, else the vendor's list
+ * price, an estimate from token pricing (≈), or none known; unknown is never zero.
+ */
+const ImagePrice: React.FC<{ price: HostedImagePrice | null; source: Source | undefined }> = ({ price, source }) => {
   const { t } = useTranslation();
+  if (source?.billing === 'monthly') {
+    return <span className="flex flex-col"><span className="font-semibold text-foreground">{t('settings.models.tools.cost.included')}</span><span className="model-hub-tool-cost-note">{t('settings.models.tools.cost.includedNote')}</span></span>;
+  }
   if (!price) return <span className="model-hub-tool-cost-note">{t('settings.models.tools.image.noUnitPrice')}</span>;
   const usd = formatSmallUsd(price.usd);
   return (
@@ -402,77 +409,88 @@ const AUTOMATIC = '';
 /**
  * The image models `image_generate` offers now, with the default Vibey names when
  * it does not pick one. The saved default is shown as saved, even when it is no
- * longer offered; the default in use is the server's `effective_default`.
+ * longer offered, and can always be reset; the default in use is the server's
+ * `effective_default`. Automatic is named only while it is what is in use: with a
+ * model saved, the read does not say what automatic would pick, so the option
+ * says how it picks instead.
  */
 const ImageModels: React.FC<{ tool: HostedImageToolStatus; lookup: SourceLookup; pending: boolean; onSave: Save }> = ({ tool, lookup, pending, onSave }) => {
   const { t, i18n } = useTranslation();
   const pairLabel = (pair: HostedModelRef) => t('settings.models.tools.image.pair', { model: pair.model_id, source: lookup.name(pair.source_id) }) as string;
-  if (tool.models.length === 0) {
-    const vendors = tool.image_offered_by.map((vendor) => t(`settings.models.tools.image.vendor.${vendor}`, { defaultValue: vendor }) as string);
-    return (
-      <p className="model-hub-tool-status flex items-start gap-2 border-t border-border text-muted">
-        <Info className="mt-0.5 size-[14px] shrink-0" aria-hidden />
-        <span>{vendors.length > 0
-          ? t('settings.models.tools.image.empty', { vendors: new Intl.ListFormat(i18n.language, { style: 'long', type: 'disjunction' }).format(vendors) })
-          : t('settings.models.tools.image.emptyNoVendor')}</span>
-      </p>
-    );
-  }
   const saved = tool.default_model;
   const inUse = tool.effective_default;
+  const vendors = tool.image_offered_by.map((vendor) => t(`settings.models.tools.image.vendor.${vendor}`, { defaultValue: vendor }) as string);
   return (
     <div className="model-hub-tool-image flex flex-col gap-3 border-t border-border">
-      <div className="flex flex-col gap-1.5">
-        <h4 className="font-semibold text-foreground">{t('settings.models.tools.image.title')}</h4>
-        <ul className="flex flex-col gap-1.5">
-          {tool.models.map((model) => {
-            const source = lookup.source(model.source_id);
-            const name = lookup.name(model.source_id);
-            return (
-              <li key={pairValue(model)} className="model-hub-tool-image-row grid items-center rounded-lg border border-border bg-background" data-image-model={`${model.source_id}:${model.model_id}`}>
-                <span className="flex min-w-0 flex-col gap-0.5">
-                  <span className="flex min-w-0 flex-wrap items-center gap-2">
-                    <span className="truncate font-mono font-semibold text-foreground" title={model.model_id}>{model.model_id}</span>
-                    {samePair(model, inUse) && <span className="model-hub-pill model-hub-status-mint border">{t('settings.models.tools.image.defaultBadge')}</span>}
-                  </span>
-                  <span className="model-hub-tool-note">{model.description}</span>
-                </span>
-                <span className="flex min-w-0 items-center gap-2">
-                  <SourceGlyph source={source} />
-                  <span className="truncate font-semibold text-foreground" title={name}>{name}</span>
-                  {source && <span className={cn('model-hub-pill border', ACCENT_PILL[source.kind === 'api_key' ? 'cyan' : sourceVisual(source).accent])}>{t(`settings.models.upstream.kind.${source.kind === 'subscription' ? 'subscription' : 'apiKey'}`)}</span>}
-                </span>
-                <ImagePrice price={model.price} />
-              </li>
-            );
-          })}
-        </ul>
-      </div>
-      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
-        <span className="shrink-0 font-semibold text-foreground">{t('settings.models.tools.image.defaultLabel')}</span>
-        <Select
-          wrapperClassName="sm:w-[300px] shrink-0"
-          className="h-8 text-[12px]"
-          aria-label={t('settings.models.tools.image.defaultPick') as string}
-          disabled={pending}
-          value={saved ? pairValue(saved) : AUTOMATIC}
-          onChange={(event) => {
-            const picked = tool.models.find((model) => pairValue(model) === event.target.value);
-            onSave(tool.name, { default_model: picked ? { source_id: picked.source_id, model_id: picked.model_id } : null });
-          }}
-        >
-          <option value={AUTOMATIC}>{inUse && !saved ? t('settings.models.tools.image.automaticNamed', { pair: pairLabel(inUse) }) : t('settings.models.tools.image.automatic')}</option>
-          {saved && !saved.available && <option value={pairValue(saved)}>{t('settings.models.tools.image.unavailable', { pair: pairLabel(saved) })}</option>}
-          {tool.models.map((model) => <option key={pairValue(model)} value={pairValue(model)}>{pairLabel(model)}</option>)}
-        </Select>
-        <span className="model-hub-tool-note">
-          {saved && !saved.available
-            ? inUse
-              ? t('settings.models.tools.image.unavailableNote', { pair: pairLabel(inUse) })
-              : t('settings.models.tools.image.unavailableNoteNone')
-            : t('settings.models.tools.image.defaultNote')}
-        </span>
-      </div>
+      {tool.models.length === 0
+        ? (
+            <p className="flex items-start gap-2 text-muted">
+              <Info className="mt-0.5 size-[14px] shrink-0" aria-hidden />
+              <span>{vendors.length > 0
+                ? t('settings.models.tools.image.empty', { vendors: new Intl.ListFormat(i18n.language, { style: 'long', type: 'disjunction' }).format(vendors) })
+                : t('settings.models.tools.image.emptyNoVendor')}</span>
+            </p>
+          )
+        : (
+            <div className="flex flex-col gap-1.5">
+              <h4 className="font-semibold text-foreground">{t('settings.models.tools.image.title')}</h4>
+              <ul className="flex flex-col gap-1.5">
+                {tool.models.map((model) => {
+                  const source = lookup.source(model.source_id);
+                  const name = lookup.name(model.source_id);
+                  return (
+                    <li key={pairValue(model)} className="model-hub-tool-image-row grid items-center rounded-lg border border-border bg-background" data-image-model={`${model.source_id}:${model.model_id}`}>
+                      <span className="flex min-w-0 flex-col gap-0.5">
+                        <span className="flex min-w-0 flex-wrap items-center gap-2">
+                          <span className="truncate font-mono font-semibold text-foreground" title={model.model_id}>{model.model_id}</span>
+                          {samePair(model, inUse) && <span className="model-hub-pill model-hub-status-mint border">{t('settings.models.tools.image.defaultBadge')}</span>}
+                        </span>
+                        {/* A shipped model has its own copy in each locale; one without (a user's own) shows the overlay's line. */}
+                        <span className="model-hub-tool-note">{t(`settings.models.tools.image.description.${imageModelCopyKey(model.model_id)}`, { defaultValue: model.description })}</span>
+                      </span>
+                      <span className="flex min-w-0 items-center gap-2">
+                        <SourceGlyph source={source} />
+                        <span className="truncate font-semibold text-foreground" title={name}>{name}</span>
+                        {source && <span className={cn('model-hub-pill border', ACCENT_PILL[source.kind === 'api_key' ? 'cyan' : sourceVisual(source).accent])}>{t(`settings.models.upstream.kind.${source.kind === 'subscription' ? 'subscription' : 'apiKey'}`)}</span>}
+                      </span>
+                      <ImagePrice price={model.price} source={source} />
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+          )}
+      {(tool.models.length > 0 || saved !== null) && (
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
+          <span className="shrink-0 font-semibold text-foreground">{t('settings.models.tools.image.defaultLabel')}</span>
+          <Select
+            wrapperClassName="sm:w-[300px] shrink-0"
+            className="h-8 text-[12px]"
+            aria-label={t('settings.models.tools.image.defaultPick') as string}
+            disabled={pending}
+            value={saved ? pairValue(saved) : AUTOMATIC}
+            onChange={(event) => {
+              const picked = tool.models.find((model) => pairValue(model) === event.target.value);
+              onSave(tool.name, { default_model: picked ? { source_id: picked.source_id, model_id: picked.model_id } : null });
+            }}
+          >
+            <option value={AUTOMATIC}>{saved
+              ? t('settings.models.tools.image.automaticRule')
+              : inUse
+                ? t('settings.models.tools.image.automaticNamed', { pair: pairLabel(inUse) })
+                : t('settings.models.tools.image.automatic')}</option>
+            {saved && !saved.available && <option value={pairValue(saved)}>{t('settings.models.tools.image.unavailable', { pair: pairLabel(saved) })}</option>}
+            {tool.models.map((model) => <option key={pairValue(model)} value={pairValue(model)}>{pairLabel(model)}</option>)}
+          </Select>
+          <span className="model-hub-tool-note">
+            {saved && !saved.available
+              ? inUse
+                ? t('settings.models.tools.image.unavailableNote', { pair: pairLabel(inUse) })
+                : t('settings.models.tools.image.unavailableNoteNone')
+              : t('settings.models.tools.image.defaultNote')}
+          </span>
+        </div>
+      )}
     </div>
   );
 };
