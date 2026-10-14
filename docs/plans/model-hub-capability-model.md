@@ -58,7 +58,8 @@ Rules:
 
 ### 3.1 Record
 
-One record per (`source_id`, `model_id`, `feature`). Absence of a record is `unknown`. The persisted shape is
+At most one record per (`source_id`, `model_id`, `feature`, `status`): a `verified` (display) and an `unsupported`
+(routing) record for the same feature coexist. Absence of a record is `unknown`. The persisted shape is
 below, and [`model-hub-contracts/capability-evidence.schema.json`](model-hub-contracts/capability-evidence.schema.json)
 is its JSON Schema. The store is `core/handlers/model_hub/capability_evidence.py`.
 
