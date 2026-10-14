@@ -4,7 +4,7 @@
     "version": "0.31.0",
     "tag": "cua-driver-rs-v0.31.0",
     "source_commit": "5272e492d61b96caf08e3bf434d91126c1f3dccc",
-    "tool_snapshot_sha256": "9ece8e3e95b394853f670880fcc9d5532c125ba7f9392bb9389de628fd169f5b",
+    "tool_snapshot_sha256": "49c147d902a19aab638458d12b8349e52acf29545693f6b3e5ed080da78a64e2",
     "license": "MIT",
     "release_base_url": "https://github.com/trycua/cua/releases/download/cua-driver-rs-v0.31.0",
     "release_checksums_asset": "checksums.txt",
@@ -22,7 +22,7 @@
     "patch": {
       "variant": "avibe-raw-single-click-v1",
       "file": "patches/0001-macos-raw-single-click.patch",
-      "sha256": "632b74998f8cf03cf5087575a327e5653ead0363a4a909460b2117507b726508",
+      "sha256": "69416108985b6219d15c674b12d2c2497e4d0911362355f4603e84bdeabf7eb0",
       "contract": "click.click_mode=raw; embedded parent-liveness cleanup",
       "upstream_refs": [
         "https://github.com/trycua/cua/pull/3922",

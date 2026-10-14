@@ -32,10 +32,11 @@ terminal: stdin EOF removes only the socket bound by that process, removes its
 PID file, aborts accepted connection tasks, and drops the Tokio runtime without
 waiting for non-cancellable platform work. After that cleanup,
 `std::process::exit(0)` terminates the helper even when the macOS cursor
-overlay owns the main AppKit run loop. The terminal path leaves process
-globals intact because abandoned tasks may still reference them until process
-exit. Explicit daemon shutdown keeps the existing graceful drain and global
-teardown.
+overlay owns the main AppKit run loop. Its shutdown diagnostic is best-effort
+because parent death also closes the shell-owned stderr pipe. The terminal path
+leaves process globals intact because abandoned tasks may still reference them
+until process exit. Explicit daemon shutdown keeps the existing graceful drain
+and global teardown.
 
 The upstream investigation found no consumable maintainer-accepted contract
 with these semantics. The relevant discussions are:

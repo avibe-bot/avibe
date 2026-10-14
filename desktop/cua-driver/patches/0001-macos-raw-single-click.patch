@@ -432,8 +432,12 @@ index b9637489..51b62d4c 100644
 -                break;
 +                break ServeShutdown::Requested;
              }
-@@ -1385,5 +1391,18 @@ pub async fn run_serve(
-                 eprintln!("Cua Driver embedded host closed its lifetime pipe; shutting down.");
+@@ -1385,5 +1391,21 @@ pub async fn run_serve(
+-                eprintln!("Cua Driver embedded host closed its lifetime pipe; shutting down.");
++                let _ = std::io::Write::write_all(
++                    &mut std::io::stderr(),
++                    b"Cua Driver embedded host closed its lifetime pipe; shutting down.\n",
++                );
 -                break;
 +                break ServeShutdown::ParentLiveness;
              }
@@ -491,7 +495,7 @@ index b9637489..51b62d4c 100644
 +        cua_driver_core::session::release_process_state_for_shutdown();
 +    }
      if let Err(e) = result {
-@@ -2571,2 +2595,169 @@ mod socket_tests {
+@@ -2571,2 +2598,170 @@ mod socket_tests {
 -
 +#[cfg(all(test, unix))]
 +mod parent_liveness_tests {
@@ -611,7 +615,7 @@ index b9637489..51b62d4c 100644
 +            .env("CUA_DRIVER_RS_UPDATE_CHECK", "0")
 +            .stdin(Stdio::piped())
 +            .stdout(Stdio::null())
-+            .stderr(Stdio::inherit())
++            .stderr(Stdio::piped())
 +            .spawn()
 +            .expect("spawn test daemon");
 +
@@ -634,6 +638,7 @@ index b9637489..51b62d4c 100644
 +        });
 +        wait_for_path(&started, Duration::from_secs(10));
 +
++        drop(child.stderr.take());
 +        drop(child.stdin.take());
 +        let deadline = Instant::now() + Duration::from_secs(5);
 +        let status = loop {
