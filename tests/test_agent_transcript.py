@@ -493,23 +493,15 @@ async def test_a_call_instance_is_settled_once_whoever_writes(engine) -> None:
 
 async def test_the_media_sweep_keeps_every_file_a_row_registers_and_takes_only_stale_orphans(engine, tmp_path) -> None:
     """MH-HOSTED-VIBEY-007, #2588 (``vibey-hosted-tools.md`` §7.3): a generated image is saved before the row that
-    names it commits, so an interruption in between leaves a file no row names. A committed row registers each image
-    it names, native or proxied, as an input snapshot is registered; the sweep removes only a file nothing registers
-    that is older than any Turn holds an uncommitted save, and never a link or a name of someone else's."""
+    names it commits, so an interruption in between leaves a file no row names. A committed ``image_generate`` result
+    registers each image its record names, as an input snapshot is registered; the sweep removes only a file nothing
+    registers that is older than any Turn holds an uncommitted save, and never a link or a name of someone else's."""
     import base64
     import os
     import time
     from pathlib import Path
 
-    from core.agent_core.messages import (
-        HostedAction,
-        HostedNative,
-        HostedRecord,
-        HostedResult,
-        HostedSummary,
-        HostedToolBlock,
-        ProxyExecution,
-    )
+    from core.agent_core.messages import HostedRecord, HostedResult, ProxyExecution
     from modules.agents.vibey.media import SWEEP_GRACE_S, MediaSnapshots
 
     with engine.begin() as conn:
@@ -525,26 +517,17 @@ async def test_the_media_sweep_keeps_every_file_a_row_registers_and_takes_only_s
 
     await store.consume_input("ses_main", first, _user("paint two lighthouses"))
     await media.snapshot(b"\x89PNG\r\n\x1a\n" + bytes(64), "image/png", session_id="ses_main")
-    native, proxied = await media.save_image(jpeg(1)), await media.save_image(jpeg(2))
-    call = HostedToolBlock(
-        id="ig_1",
-        tool="image_generation",
-        action=HostedAction("generate", prompt="a lighthouse"),
-        record=HostedRecord(status="completed", images=(native,)),
-        native=HostedNative(source_id="src_served00001", payload=({"type": "image_generation_call", "result": native.path},)),
+    first, second = await media.save_image(jpeg(1)), await media.save_image(jpeg(2))
+    execution = ProxyExecution(
+        executor_origin=ORIGIN, executor_source_id="src_executor01", executor_billing="metered", mode="direct"
     )
-    summary = HostedSummary(counts={}, cited_sources=())
-    await store.append_response(
-        "ses_main", AssistantMessage((call,), ORIGIN, "stop", hosted_summary=summary), final=False
-    )
-    execution = ProxyExecution(executor_origin=ORIGIN, executor_source_id="src_executor01", executor_billing="metered")
     await store.append_tool_result(
         "ses_main",
         ToolResultMessage(
             tool_call_id="call_2",
-            tool_name="image_generation",
+            tool_name="image_generate",
             content=(text("[image saved]"),),
-            hosted=HostedResult(record=HostedRecord(status="completed", images=(proxied,)), execution=execution),
+            hosted=HostedResult(record=HostedRecord(status="completed", images=(first, second)), execution=execution),
         ),
         details={},
     )
@@ -569,7 +552,7 @@ async def test_the_media_sweep_keeps_every_file_a_row_registers_and_takes_only_s
     assert media.sweep() == (2, gone)
     kept = {entry.name for entry in root.iterdir()}
     assert Path(stale.path).name not in kept and temporary.name not in kept
-    assert {Path(image.path).name for image in (native, proxied, fresh, reused)} <= kept
+    assert {Path(image.path).name for image in (first, second, fresh, reused)} <= kept
     assert {foreign.name, link.name} <= kept and secret.read_bytes() == b"key"
     assert len([name for name in kept if name.endswith(".png")]) == 2  # the input snapshot and the link
 
