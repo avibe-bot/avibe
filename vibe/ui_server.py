@@ -15161,7 +15161,14 @@ async def show_runtime_vendor_asset(vendor_path: str):
     `/show/<id>/` surface and the anonymous public `/p/<share>/` surface. We forward
     this prefix verbatim (never under a per-session base) and, because the content
     hash is in the path, mark successful responses immutable for a year.
+
+    This route is reachable without authentication, so its path must never leave the
+    vendor prefix. Dot segments survive `quote()` and the HTTP client normalizes them
+    before sending, which would rebase the request onto the runtime's unauthenticated
+    session routes. Vendor files never use dot-prefixed segments, so reject them all.
     """
+    if _is_show_page_dot_path(vendor_path):
+        return FastAPIResponse(status_code=404)
     runtime_path = f"{_SHOW_RUNTIME_VENDOR_PREFIX}/{quote(vendor_path, safe='/@:-._~')}"
     if request._request.url.query:
         runtime_path = f"{runtime_path}?{request._request.url.query}"
