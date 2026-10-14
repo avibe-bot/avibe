@@ -122,6 +122,9 @@ def _responses_output_item(item: Any) -> bool:
         return False
     if item.get("type") in (None, "message"):
         return item.get("role") == "assistant"
+    if "name" in item and _text(item, "name") is None:
+        # A call whose name is not text is malformed, so it ends the run like any unknown item.
+        return False
     return _text(item, "type") in _RESPONSES_MODEL_OUTPUTS
 
 

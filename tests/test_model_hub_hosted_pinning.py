@@ -463,8 +463,7 @@ IN_FLIGHT_CASES = [
      [USER, {"role": "assistant", "content": [SERVER_USE, SERVER_RESULT]}], False, {"web_search"}),
     # A field that is not text is absent: an item with one is no hosted item and ends the in-flight run.
     ("responses_custom_call_name_not_text", "openai_responses",
-     [USER, WEB_CALL, ASSISTANT_TEXT, USER, {**X_CALL, "name": {"x": 1}}, LOCAL_CALL, LOCAL_OUTPUT], True,
-     {"web_search"}),
+     [USER, WEB_CALL, {**X_CALL, "name": {"x": 1}}, LOCAL_CALL, LOCAL_OUTPUT], True, {"web_search"}),
     ("responses_item_type_not_text", "openai_responses",
      [USER, WEB_CALL, LOCAL_CALL, {"type": ["function_call_output"], "call_id": "fc_1"}], True, {"web_search"}),
     ("anthropic_server_tool_name_not_text", "anthropic",
