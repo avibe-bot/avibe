@@ -158,6 +158,7 @@ HEAD_REQUIRED_COLUMNS = PRE_SHOW_SESSION_EVENTS_REQUIRED_COLUMNS | {
     },
 }
 HEAD_ONLY_REQUIRED_COLUMNS = {
+    "vault_secrets": {"fields"},
     "show_pages": {"access_mode", "access_revision", "share_id", "offline_at"},
     "show_page_access_entries": {
         "page_id",
@@ -710,6 +711,9 @@ def _repair_head_required_columns(conn: sqlite3.Connection, tables: set[str]) ->
         if table in tables and "context_seq" not in _column_names(conn, table):
             conn.execute(f'alter table "{table}" add column "context_seq" INTEGER')
             changed = True
+    if "vault_secrets" in tables and "fields" not in _column_names(conn, "vault_secrets"):
+        conn.execute('alter table "vault_secrets" add column "fields" TEXT')
+        changed = True
 
     _ensure_head_indexes(conn, tables)
     return changed

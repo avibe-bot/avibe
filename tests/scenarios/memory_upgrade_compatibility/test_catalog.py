@@ -23,11 +23,15 @@ def test_memory_upgrade_scenario_ids_resolve_to_executable_evidence():
     ids = {item["id"] for item in scenarios}
     assert len(ids) == len(scenarios)
     for scenario in scenarios:
-        path, name = scenario["test"].split("::")
-        assert path in catalog["capability"]["canonical_tests"]
-        assert path in entry["scenario_tests"] or path in entry["unit_or_contract_tests"]
-        functions = [node for node in ast.parse((ROOT / path).read_text()).body if isinstance(node, ast.FunctionDef)]
-        function, = [node for node in functions if node.name == name]
-        assert scenario["id"] in (ast.get_docstring(function) or "")
+        # A row whose contract several cases prove lists each of them.
+        references = scenario["test"] if isinstance(scenario["test"], list) else [scenario["test"]]
+        assert references
+        for reference in references:
+            path, name = reference.split("::")
+            assert path in catalog["capability"]["canonical_tests"]
+            assert path in entry["scenario_tests"] or path in entry["unit_or_contract_tests"]
+            functions = [node for node in ast.parse((ROOT / path).read_text()).body if isinstance(node, ast.FunctionDef)]
+            function, = [node for node in functions if node.name == name]
+            assert scenario["id"] in (ast.get_docstring(function) or "")
     for observation in observations["observations"]:
         assert set(observation["affects"]) <= ids

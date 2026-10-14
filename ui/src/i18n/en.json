@@ -2084,7 +2084,7 @@
       "migration": {
         "open": "Migrate configuration",
         "title": "Migrate to the Model Hub",
-        "subtitle": "Import authentication saved in configuration files, shell startup files, or supported credential stores. After migration, assistants authenticate through Model Hub: subscription sign-ins move into Model Hub, and API keys are copied while the originals stay in place.",
+        "subtitle": "Import authentication saved in configuration files, shell startup files, or supported credential stores. Subscription sign-ins move into Model Hub. API keys are copied as saved, with the originals kept by default; migration does not test keys online or fetch model lists. Later model requests establish whether a key works.",
         "cleanApiKeys": "Also remove the API keys from the native CLI configuration",
         "cleanApiKeysHint": "Includes shell startup files and each CLI’s config files. Left unchecked, those keys stay as they are; assistants launched through Model Hub don’t use them.",
         "empty": "No configuration found to migrate.",
@@ -2112,7 +2112,7 @@
           "runtimeStopping": "The task these assistants were running in Avibe is still stopping. Try again in a moment.",
           "permissionNeeded": "Allow credential access, then retry.",
           "recoveryPending": "Migration is unfinished. Retry to continue.",
-          "itemConflict": "Migration could not verify the saved configuration or its credentials. Check the files and authentication before retrying, or add the source manually in Model Hub.",
+          "itemConflict": "The selected configuration could not be migrated safely. Reopen the migration dialog to scan the latest configuration. If it still fails, check the file format and access permissions.",
           "configurationBlocked": "Adjust the native configuration, then scan again.",
           "credentialsInvalid": "Authentication has expired. Sign in again in Model Hub.",
           "reauthorizationRequired": "This backend was already migrated, and the changed native login cannot be verified as a new authorization. The original files are unchanged. Sign in again for the existing source in Model Hub instead of importing this login."
@@ -2520,6 +2520,15 @@
     "retry": "Retry"
   },
   "errors": {
+    "invalid_field_name": "Use 1–64 lowercase letters, digits or underscores for field names, starting with a letter.",
+    "field_exists": "A field with this name already exists. Choose a different name.",
+    "field_not_found": "This field no longer exists. Refresh the secret and choose one of its current fields.",
+    "too_many_fields": "A secret can have at most 32 fields, including the default field.",
+    "fields_corrupt": "This secret's stored field data is damaged. The default value remains available; field changes are disabled to preserve existing data.",
+    "fields_not_supported": "Signing keys do not support named fields or default-field renaming.",
+    "record_mismatch": "This field changed while you were saving. Refresh the secret and try again.",
+    "secret_conflict": "This secret changed elsewhere. Review the refreshed fields and try again; your change was not saved.",
+    "secret_not_found": "This secret no longer exists. Refresh the vault and choose another secret.",
     "retry_not_available": "This notice cannot be retried. Send a message to continue.",
     "retry_stale": "Newer work has already started. Send a message if you want to continue.",
     "retry_busy": "The previous turn is still settling. Try again after it stops.",
@@ -4766,6 +4775,51 @@
       }
     },
     "agentActivity": {
+      "hosted": {
+        "errorCode": {
+          "provider_no_reason": "The provider gave no reason.",
+          "provider_no_image": "The provider returned no image.",
+          "image_not_streamed": "The image did not arrive before the response ended.",
+          "image_not_saved": "The image could not be saved.",
+          "image_no_store": "Nothing here can keep a generated image.",
+          "executor_no_image": "The proxy executor returned no image.",
+          "gateway_unreachable": "Couldn't reach the model gateway.",
+          "gateway_refused": "The model gateway refused the call.",
+          "gateway_no_result": "The model gateway returned no result."
+        },
+        "mode": {
+          "native": "Native · {{provider}}",
+          "proxy": "Via {{provider}} proxy"
+        },
+        "status": {
+          "failed": "Failed",
+          "incomplete": "Incomplete",
+          "pending": "Cut off"
+        },
+        "cost": {
+          "included": "Included in subscription",
+          "list": "≈ ${{usd}}",
+          "reported": "${{usd}}",
+          "calls_one": "{{cost}} for {{count}} call",
+          "calls_other": "{{cost}} for {{count}} calls"
+        },
+        "count": {
+          "sources_one": "{{count}} source",
+          "sources_other": "{{count}} sources",
+          "posts_one": "{{count}} post",
+          "posts_other": "{{count}} posts",
+          "images_one": "{{count}} image",
+          "images_other": "{{count}} images"
+        },
+        "ranNative": "Ran natively on {{where}}",
+        "ranProxy": "Run by proxy executor {{where}}",
+        "duration": "took {{seconds}} s",
+        "alsoSearched": "Also searched: {{queries}}",
+        "image": {
+          "revisedPrompt": "Revised prompt",
+          "download": "Download {{name}}"
+        }
+      },
       "running": "Running",
       "step": "{{count}} step",
       "steps": "{{count}} steps",
@@ -4890,9 +4944,41 @@
     "chat": {
       "floatApprovals": "Waiting for your approval · {{count}}"
     },
+    "search": {
+      "label": "Search secrets",
+      "placeholder": "Search names, descriptions, tags, hosts…",
+      "clear": "Clear search",
+      "count_one": "{{count}} secret",
+      "count_other": "{{count}} secrets",
+      "filtered": "{{visible}} / {{total}} secrets"
+    },
     "filter": {
-      "clear": "Clear filters",
-      "empty": "No secrets match the selected tags."
+      "clear": "Clear",
+      "clearAll": "Clear all",
+      "empty": "No matching secrets",
+      "reset": "Clear search and filters",
+      "tags": "Tags",
+      "skills": "Skills",
+      "tagsByUsage": "Tags · by usage",
+      "selectedTags": "Tags ({{count}})",
+      "entry": "{{name}} · {{count}}",
+      "searchTags": "Search tags",
+      "searchTagsPlaceholder": "Search {{count}} tags",
+      "noTags": "No matching tags",
+      "intersection": "Select multiple; all must match",
+      "remove": "Remove filter: {{name}}",
+      "moreTags": "Show {{count}} more tags",
+      "quick": "Quick filters",
+      "all": "All",
+      "protected": "Protected",
+      "signing": "Signing keys",
+      "unused": "Never used"
+    },
+    "sort": {
+      "label": "Sort",
+      "name": "Name",
+      "recent": "Recently used",
+      "added": "Recently added"
     },
     "grants": {
       "title": "Active access",
@@ -4940,17 +5026,44 @@
       "copy": "Copy value",
       "showInBrowser": "Show in browser",
       "errors": {
+        "staleField": "This link points to a field that no longer exists. Open the secret and choose a current field.",
         "contextFailed": "Couldn't prepare the reveal. Please try again.",
         "unavailable": "Reveal isn't available for this secret yet."
       }
     },
     "saved": "Updated {{name}}",
-    "editSecret": "Edit info",
+    "editSecret": "Edit secret",
     "rowActions": "More actions",
     "edit": {
-      "title": "Edit info",
-      "subtitle": "Info edits keep grants; fetch policy changes require new approval",
+      "title": "Edit secret",
+      "subtitle": "Value or fetch policy changes require new approval",
       "lockedHint": "Name, kind and protection can't be changed"
+    },
+    "fields": {
+      "title": "Fields",
+      "name": "Field {{index}} name",
+      "namePlaceholder": "field_name",
+      "value": "Value for {{field}}",
+      "default": "Default",
+      "defaultName": "Default field name",
+      "newName": "New field name",
+      "newValue": "New field value",
+      "add": "Add field",
+      "loginTemplate": "Login template",
+      "remove": "Remove {{field}}",
+      "removeConfirm": "Remove this field and its value? Existing grants will expire.",
+      "rename": "Rename",
+      "save": "Save field",
+      "saveNamed": "Save {{field}}",
+      "saved": "Field saved",
+      "draftsDropped": "Drafts for fields removed elsewhere were dropped: {{fields}}.",
+      "recordConflict": "This field changed while you were saving. The value was not written; reload the secret and try again.",
+      "secretConflict": "This secret changed while you were saving. Its fields are now refreshed; review them and save again. Your value was not written.",
+      "replacePlaceholder": "Enter a replacement value",
+      "revealField": "Field to reveal",
+      "namesHelp": "Use lowercase letters, digits and underscores; start with a letter. Each field needs a unique name and a value.",
+      "singleFile": "File upload supports one value. Switch to Text before adding fields.",
+      "editHelp": "Changes save immediately. Adding, replacing or removing values expires grants; renaming the default field does not. Leave a value blank to keep it. Extra field names cannot be changed."
     },
     "protectedUnlock": {
       "checking": "Checking your protected vault…",
@@ -5591,15 +5704,15 @@
     "chooseSession": "Choose a session",
     "switchSession": "Switch session",
     "openInAvibe": "Open in Avibe",
-    "inputPlaceholder": "Message the main agent…",
+    "inputPlaceholder": "Message Vibey…",
     "send": "Send",
     "queued": "Queued — it will run after the current turn.",
     "moreInAvibe": "More replies in Avibe",
     "empty": "No messages yet. Say something to get started.",
     "vaultRequest": "Approval needed — open in Avibe",
     "noSessions": "No active sessions yet. Start one in Avibe.",
-    "mainAgent": "Main agent",
-    "mainAgentTitle": "Main agent",
+    "mainAgent": "Vibey",
+    "mainAgentTitle": "Vibey",
     "thinking": "Thinking",
     "waiting": "Waiting",
     "repliedPrefix": "Replied:",

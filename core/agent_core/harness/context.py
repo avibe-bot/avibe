@@ -22,12 +22,15 @@ from itertools import accumulate
 from dataclasses import dataclass, field
 from typing import Any, Callable, Collection, Mapping, Optional, Protocol, Sequence
 
-from core.agent_core.ai._common import endpoint_origin
-from core.agent_core.ai.provider import ModelCapabilities, ModelEndpoint, ModelRequest
+from core.agent_core.ai._common import endpoint_origin, native_hosted_tools
+from core.agent_core.ai.hosted import portable_sizes
+from core.agent_core.ai.transform import SYNTHETIC_TOOL_RESULT
+from core.agent_core.ai.provider import HostedToolRoute, ModelCapabilities, ModelEndpoint, ModelRequest
 from core.agent_core.harness.projection import ContextView, Unit, context_view
 from core.agent_core.harness.store import ContextEntry
 from core.agent_core.messages import (
     AssistantMessage,
+    HostedToolBlock,
     ImageBlock,
     Message,
     TextBlock,
@@ -243,6 +246,8 @@ def message_tokens(message: Message) -> int:
     images = 0
     signed = 0  # thinking text that rides with a payload: the reported reasoning covers it
     payload: Optional[int] = None  # UTF-8 bytes of its opaque payloads, None without any
+    hosted_bytes = 0  # UTF-8 bytes of its hosted calls as replayed
+    hosted: Optional[dict[int, int]] = None
     for block in message.content:
         if isinstance(block, TextBlock):
             size += _utf8(block.text) if block.text is not None else block.ref.bytes
@@ -259,8 +264,15 @@ def message_tokens(message: Message) -> int:
             size += _utf8(block.name) + _utf8(arguments)
             if block.signature is not None:
                 payload = (payload or 0) + _utf8(block.signature)
+        elif isinstance(block, HostedToolBlock):
+            # The largest form it can go back in (§5), so the estimate holds wherever the message sits and whatever
+            # hop it goes to: its synthetic call and result, its in-place text, or its native payload verbatim.
+            if hosted is None:
+                hosted = portable_sizes(message, interrupted=SYNTHETIC_TOOL_RESULT)  # type: ignore[arg-type]
+            native = json.dumps(list(block.native.payload), ensure_ascii=False, separators=(",", ":"))
+            hosted_bytes += max(hosted[id(block)], _utf8(native))
     reasoning = 0 if payload is None else max(math.ceil(signed / 4), _reasoning(message, payload))
-    return math.ceil(size / 4) + images * IMAGE_TOKENS + reasoning
+    return math.ceil((size + hosted_bytes) / 4) + images * IMAGE_TOKENS + reasoning
 
 
 def _reasoning(message: Message, payload: int) -> int:
@@ -279,10 +291,27 @@ def messages_tokens(messages: Sequence[Message]) -> int:
     return sum(message_tokens(message) for message in messages)
 
 
-def request_tokens(system: str, tools: Sequence[ToolSpec], messages: Sequence[Message]) -> int:
-    """The whole request: system prompt, tool definitions, and messages."""
+def request_tokens(
+    system: str,
+    tools: Sequence[ToolSpec],
+    messages: Sequence[Message],
+    native: Optional[Mapping[str, HostedToolRoute]] = None,
+) -> int:
+    """The whole request: system prompt, tool definitions, and messages.
+
+    ``native`` holds the request's hosted tools that its hop runs natively (``native_hosted_tools``): such a tool is
+    sent as the provider's declaration in its spec's place, so that is what it counts as.
+    """
+    native = native or {}
     definitions = sum(
-        _utf8(json.dumps([spec.name, spec.description, dict(spec.input_schema)], ensure_ascii=False))
+        _utf8(
+            json.dumps(
+                dict(native[spec.name].declaration or {})
+                if spec.name in native
+                else [spec.name, spec.description, dict(spec.input_schema)],
+                ensure_ascii=False,
+            )
+        )
         for spec in tools
     )
     return math.ceil((_utf8(system) + definitions) / 4) + messages_tokens(messages)
@@ -340,7 +369,7 @@ def _valid_usage(message: Optional[Message]) -> bool:
 
 def sent_tokens(request: ModelRequest) -> int:
     """``tokens()`` of a whole request (section 2): system prompt, tool definitions, and messages."""
-    return request_tokens(request.system, request.tools, request.messages)
+    return request_tokens(request.system, request.tools, request.messages, native_hosted_tools(request))
 
 
 def request_facts(request: ModelRequest) -> dict[str, int]:

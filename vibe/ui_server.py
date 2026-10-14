@@ -5180,6 +5180,20 @@ async def model_hub_hosted_tool_put(tool: str, starlette_request: FastAPIRequest
     return await _dispatch_native_ui_request(starlette_request, handler)
 
 
+@app.post("/api/models/hosted-tools/{tool}/probe", include_in_schema=False)
+async def model_hub_hosted_tool_probe(tool: str, starlette_request: FastAPIRequest):
+    async def handler():
+        from core.handlers.model_hub import ModelHubError
+
+        try:
+            result = await _model_hub_service().probe_hosted_tool(tool, _model_hub_json_object("invalid_parameter"))
+            return _model_hub_success(**result)
+        except ModelHubError as exc:
+            return _model_hub_error(exc)
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
+
+
 @app.route("/api/models/agents/<backend>/chains", methods=["GET"])
 def model_hub_agent_chains_get(backend):
     from core.handlers.model_hub import ModelHubError
@@ -5859,7 +5873,13 @@ def vault_secrets_post():
     from vibe import api
 
     try:
-        return jsonify(api.create_vault_secret(request.json or {}, origin=_vault_sandbox_webauthn_origin()))
+        return jsonify(
+            api.create_vault_secret(
+                request.json or {},
+                origin=_vault_sandbox_webauthn_origin(),
+                user_context=getattr(g, "authorization_context", None),
+            )
+        )
     except ValueError as exc:
         return _vault_error_response(exc)
 
@@ -5869,9 +5889,66 @@ def vault_secret_patch(name):
     from vibe import api
 
     try:
-        return jsonify(api.update_vault_secret(name, request.json or {}))
+        return jsonify(
+            api.update_vault_secret(
+                name,
+                request.json or {},
+                user_context=getattr(g, "authorization_context", None),
+            )
+        )
     except ValueError as exc:
         return _vault_error_response(exc)
+
+
+@app.put("/api/vault/secrets/{name}/fields/{field}", include_in_schema=False)
+async def vault_secret_field_put(
+    name: str,
+    field: str,
+    starlette_request: FastAPIRequest,
+):
+    async def handler():
+        from vibe import api
+
+        try:
+            payload = request.json if isinstance(request.json, dict) else {}
+            return jsonify(
+                await asyncio.to_thread(
+                    api.update_vault_secret_field,
+                    name,
+                    field,
+                    payload,
+                    user_context=getattr(g, "authorization_context", None),
+                )
+            )
+        except ValueError as exc:
+            return _vault_error_response(exc)
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
+
+
+@app.delete("/api/vault/secrets/{name}/fields/{field}", include_in_schema=False)
+async def vault_secret_field_delete(
+    name: str,
+    field: str,
+    starlette_request: FastAPIRequest,
+):
+    async def handler():
+        from vibe import api
+
+        try:
+            return jsonify(
+                await asyncio.to_thread(
+                    api.delete_vault_secret_field,
+                    name,
+                    field,
+                    request.json,
+                    user_context=getattr(g, "authorization_context", None),
+                )
+            )
+        except ValueError as exc:
+            return _vault_error_response(exc)
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
 
 
 @app.route("/api/vault/secrets/<name>", methods=["DELETE"])
@@ -5889,7 +5966,13 @@ def vault_secret_reveal_context_post(name):
     from vibe import api
 
     try:
-        return jsonify(api.create_vault_reveal_context(name, request.json or {}))
+        return jsonify(
+            api.create_vault_reveal_context(
+                name,
+                request.json or {},
+                user_context=getattr(g, "authorization_context", None),
+            )
+        )
     except ValueError as exc:
         return _vault_error_response(exc)
 
@@ -5906,7 +5989,15 @@ def vault_requests_get():
         limit = int(request.args.get("limit") or 100)
     except ValueError:
         limit = 100
-    return jsonify(api.get_vault_requests(status=status, request_type=req_type, limit=limit, session=session))
+    return jsonify(
+        api.get_vault_requests(
+            status=status,
+            request_type=req_type,
+            limit=limit,
+            session=session,
+            user_context=getattr(g, "authorization_context", None),
+        )
+    )
 
 
 @app.route("/api/vault/requests/<request_id>", methods=["GET"])
@@ -5915,7 +6006,13 @@ def vault_request_get(request_id):
     from storage import vault_service
 
     try:
-        return jsonify(api.get_vault_request(request_id, audience=vault_service.REQUEST_AUDIENCE_UI))
+        return jsonify(
+            api.get_vault_request(
+                request_id,
+                audience=vault_service.REQUEST_AUDIENCE_UI,
+                user_context=getattr(g, "authorization_context", None),
+            )
+        )
     except ValueError as exc:
         return _vault_error_response(exc)
 
@@ -5945,7 +6042,12 @@ def vault_access_request_post():
     from vibe import api
 
     try:
-        return jsonify(api.request_vault_access(request.json or {}))
+        return jsonify(
+            api.request_vault_access(
+                request.json or {},
+                user_context=getattr(g, "authorization_context", None),
+            )
+        )
     except ValueError as exc:
         return _vault_error_response(exc)
 
@@ -5955,7 +6057,12 @@ def vault_sign_request_post():
     from vibe import api
 
     try:
-        return jsonify(api.request_vault_sign(request.json or {}))
+        return jsonify(
+            api.request_vault_sign(
+                request.json or {},
+                user_context=getattr(g, "authorization_context", None),
+            )
+        )
     except ValueError as exc:
         return _vault_error_response(exc)
 
@@ -15161,7 +15268,14 @@ async def show_runtime_vendor_asset(vendor_path: str):
     `/show/<id>/` surface and the anonymous public `/p/<share>/` surface. We forward
     this prefix verbatim (never under a per-session base) and, because the content
     hash is in the path, mark successful responses immutable for a year.
+
+    This route is reachable without authentication, so its path must never leave the
+    vendor prefix. Dot segments survive `quote()` and the HTTP client normalizes them
+    before sending, which would rebase the request onto the runtime's unauthenticated
+    session routes. Vendor files never use dot-prefixed segments, so reject them all.
     """
+    if _is_show_page_dot_path(vendor_path):
+        return FastAPIResponse(status_code=404)
     runtime_path = f"{_SHOW_RUNTIME_VENDOR_PREFIX}/{quote(vendor_path, safe='/@:-._~')}"
     if request._request.url.query:
         runtime_path = f"{runtime_path}?{request._request.url.query}"

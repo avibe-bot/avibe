@@ -120,6 +120,15 @@ def test_hosted_tools_never_hold_credential_material():
     assert "web_search" not in config.hosted_tools
 
 
+def _validate_status(status):
+    from jsonschema import Draft7Validator
+
+    schema = json.loads(
+        (Path(__file__).parents[1] / "docs/plans/model-hub-contracts/hosted-tools-status.schema.json").read_text()
+    )
+    Draft7Validator(schema).validate(status)
+
+
 def _api_service(tmp_path):
     from config.v2_config import ModelHubSourceConfig
     from tests.test_model_hub_api import _service
@@ -153,6 +162,17 @@ async def test_the_tools_api_reads_and_writes_one_tool_at_a_time(tmp_path):
     assert [(c["source_id"], c["model_id"], c["call"]["status"]) for c in x_search["candidates"]] == [
         ("src_xai00001", "grok-4.6", "unknown")
     ]
+    # The cost hint: the overlay's dated list price and the Source's billing, never a computed zero.
+    assert x_search["bound"] is None
+    assert x_search["candidates"][0]["billing"] == "metered"
+    assert x_search["candidates"][0]["price"] == {
+        "unit": "post",
+        "usd_per_1k": 5,
+        "extra": [{"unit": "profile", "usd_per_1k": 10}],
+        "as_of": "2026-10-13",
+        "url": "https://docs.x.ai/developers/pricing",
+    }
+    _validate_status(status)
     assert status["reverify"] == {"engine_upgraded": 0, "aged": 0}
 
     executor = {"source_id": "src_xai00001", "model_id": "grok-4.6"}

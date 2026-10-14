@@ -300,6 +300,9 @@ class ModelHubRemoteService:
     async def set_hosted_tool(self, tool: str, setting: object) -> dict:
         return await _rpc("set_hosted_tool", {"tool": tool, "setting": setting})
 
+    async def probe_hosted_tool(self, tool: str, target: object) -> dict:
+        return await _rpc("probe_hosted_tool", {"tool": tool, "target": target})
+
     def agent_chain(self, backend: str, model_id: str) -> dict:
         return _rpc_sync(
             "get_agent_chain",

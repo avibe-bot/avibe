@@ -15,7 +15,7 @@ import type {
 
 import { ApiError } from '@/context/ApiContext';
 
-import { PET_BOUND_EVENT, PET_SUMMON_EVENT } from './petBridge';
+import { PET_BOUND_EVENT, PET_HOVER_EVENT, PET_SUMMON_EVENT } from './petBridge';
 
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({ t: (key: string) => key }),
@@ -1947,13 +1947,70 @@ describe('desktop mini v2 interaction contract', () => {
     devBind('S'); render(<PetPage />);
     await waitFor(() => expect(api.listSessionMessages).toHaveBeenCalledWith('S', expect.anything()));
     summon('show');
-    if (hasBackgroundWork) {
-      expect(await screen.findByText('watch:w1')).toBeTruthy();
-      fireEvent.click(await screen.findByText('pet.switchSession'));
-    }
+    if (hasBackgroundWork) expect(await screen.findByText('watch:w1')).toBeTruthy();
+    // An empty bound session is not the picker: it shows the switch control.
+    expect(screen.queryByText('Another session')).toBeNull();
+    fireEvent.click(await screen.findByText('pet.switchSession'));
     fireEvent.click(await screen.findByText('Another session'));
     await waitFor(() => expect(devBinding().binding).toBe('B'));
     expect(await screen.findAllByText('Session B')).toHaveLength(2);
+  });
+
+  it('picking a session with nothing to show leaves the switcher instead of reopening it', async () => {
+    tails.S = [message('u', 'S', { author: 'user', type: 'user' }), message('r', 'S')];
+    tails.B = [];
+    switcherSessions = [session('B', { title: 'Another session' })];
+    devBind('S'); render(<PetPage />);
+    await showDetail();
+    fireEvent.click(await screen.findByText('pet.switchSession'));
+    fireEvent.click(await screen.findByText('Another session'));
+    await waitFor(() => expect(devBinding().binding).toBe('B'));
+    await waitFor(() => expect(api.listSessionMessages).toHaveBeenCalledWith('B', expect.anything()));
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 20)));
+    expect(screen.queryByText('Another session')).toBeNull();
+    expect(screen.getByText('pet.switchSession')).toBeTruthy();
+  });
+
+  it('goes back from the switcher with the back control, and a collapse leaves it', async () => {
+    tails.S = [message('u', 'S', { author: 'user', type: 'user' }), message('r', 'S')];
+    switcherSessions = [session('B', { title: 'Another session' })];
+    devBind('S'); render(<PetPage />);
+    await showDetail();
+    fireEvent.click(await screen.findByText('pet.switchSession'));
+    expect(await screen.findByText('Another session')).toBeTruthy();
+    fireEvent.click(screen.getByText('common.back'));
+    await waitFor(() => expect(screen.queryByText('Another session')).toBeNull());
+    expect(document.querySelector('.pet-mini-card.is-main')).toBeTruthy();
+    expect(devBinding().binding).toBe('S');
+
+    fireEvent.click(screen.getByText('pet.switchSession'));
+    expect(await screen.findByText('Another session')).toBeTruthy();
+    fireEvent.click(screen.getByLabelText('pet.toggle'));
+    await waitFor(() => expect(screen.getByLabelText('pet.toggle').getAttribute('aria-expanded')).toBe('false'));
+    fireEvent.click(screen.getByLabelText('pet.toggle'));
+    await waitFor(() => expect(screen.getByLabelText('pet.toggle').getAttribute('aria-expanded')).toBe('true'));
+    expect(screen.queryByText('Another session')).toBeNull();
+    expect(document.querySelector('.pet-mini-card.is-main')).toBeTruthy();
+  });
+
+  it('offers no back control when nothing is bound', async () => {
+    canChat = false;
+    switcherSessions = [session('B', { title: 'Another session' })];
+    render(<PetPage />);
+    summon('show');
+    expect(await screen.findByText('Another session')).toBeTruthy();
+    expect(screen.queryByText('common.back')).toBeNull();
+  });
+
+  it('shows the dock while the shell reports hover over Vibey, and reports that zone', async () => {
+    devBind('S'); render(<PetPage />);
+    const wrap = (await screen.findByLabelText('pet.toggle')).closest('.pet-mini-avatar-wrap')!;
+    expect(wrap.hasAttribute('data-pet-hover')).toBe(true);
+    expect(wrap.classList.contains('is-hovered')).toBe(false);
+    act(() => { window.dispatchEvent(new CustomEvent(PET_HOVER_EVENT, { detail: { hover: true } })); });
+    expect(wrap.classList.contains('is-hovered')).toBe(true);
+    act(() => { window.dispatchEvent(new CustomEvent(PET_HOVER_EVENT, { detail: { hover: false } })); });
+    expect(wrap.classList.contains('is-hovered')).toBe(false);
   });
 
   it('keeps the unread count visible until the inbox confirms the result was read', async () => {

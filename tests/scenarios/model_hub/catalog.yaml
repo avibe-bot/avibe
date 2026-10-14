@@ -5,10 +5,22 @@ capability:
   canonical_tests:
     - tests/test_model_hub_api.py
     - tests/test_model_hub_vibey_consumer.py
+    - tests/test_model_hub_hosted_pinning.py
     - tests/test_model_hub_hosted_tools_resolution.py
     - tests/test_model_hub_hosted_tools_config.py
+    - tests/test_model_hub_hosted_probe.py
     - tests/test_model_hub_capability_evidence.py
     - tests/test_provider_overlay.py
+    - tests/test_hosted_activity.py
+    - ui/src/components/workbench/HostedToolRow.test.tsx
+    - tests/agent_core/ai/test_hosted_requests.py
+    - tests/agent_core/ai/test_hosted_parsing.py
+    - tests/agent_core/ai/test_hosted_transform.py
+    - tests/agent_core/ai/test_hosted_replay.py
+    - tests/agent_core/ai/test_hosted_images.py
+    - tests/agent_core/ai/test_hosted_pause_turn.py
+    - tests/test_vibey_agent.py
+    - tests/test_model_hub_evidence_rules.py
     - tests/test_model_hub_config.py
     - tests/test_model_hub_legacy_opencode_migration.py
     - tests/test_member_management_parity.py
@@ -28,7 +40,9 @@ capability:
     - tests/test_opencode_model_hub_retry.py
     - ui/src/lib/modelHubRecovery.test.ts
     - tests/test_model_hub_request_body_budget.py
+    - tests/test_model_hub_codex_image_tool.py
     - tests/test_model_hub_l3.py
+    - tests/test_model_hub_hosted_executor.py
     - tests/test_model_hub_usage.py
     - tests/test_ui_server_fastapi.py
     - tests/test_model_hub_quota.py
@@ -189,6 +203,179 @@ scenarios:
     related_tests:
       - tests/test_provider_overlay.py::test_bundled_providers_section_satisfies_its_schema
       - tests/test_provider_overlay.py::test_an_invalid_vendor_entry_disables_only_that_vendor
+  - id: MH-HOSTED-UI-008
+    name: The execution-process group draws a native and a proxied hosted call as one card, with how it ran, its known cost and its sources or image
+    status: covered
+    kind: observation
+    layer: unit
+    test: ui/src/components/workbench/HostedToolRow.test.tsx::MH-HOSTED-UI-008
+  - id: MH-HOSTED-UI-009
+    name: A hosted call's card payload is projected from the canonical C-1 records in the shape the Web renders
+    status: covered
+    kind: contract
+    layer: contract
+    test: tests/test_hosted_activity.py::test_payloads_match_the_shape_the_web_card_renders
+    related_tests:
+      - tests/test_hosted_activity.py::test_a_response_scoped_summary_is_shown_once
+      - tests/test_agent_activity_service.py::test_a_hosted_tool_row_carries_its_card
+      - tests/test_message_mirror.py::test_a_hosted_card_rides_on_its_toolcall_row_and_its_image_joins_the_answer
+  - id: MH-HOSTED-UI-010
+    name: IM shows one line per hosted call with tool, query, mode, count and a cost only when known
+    status: covered
+    kind: observation
+    layer: unit
+    test: tests/test_hosted_activity.py::test_the_im_line_states_tool_query_mode_count_and_known_cost
+    related_tests:
+      - tests/test_hosted_activity.py::test_the_im_line_names_a_subscription_and_a_shared_response_cost
+  - id: MH-HOSTED-UI-012
+    name: A final whose only content is a generated image is a reply, not an empty one, and reaches the user as an attachment
+    status: covered
+    kind: contract
+    layer: contract
+    test: tests/test_vibey_agent.py::test_an_image_only_final_is_a_reply_and_reaches_the_user
+    related_tests:
+      - tests/agent_core/agent/test_loop.py::test_tool_free_final_reply_is_committed_and_empty_success_is_an_error
+  - id: MH-HOSTED-UI-011
+    name: Vibey delivers a native hosted call as its IM line and Web card, its answer with provider citations as links, and its generated image as an attachment
+    status: covered
+    kind: contract
+    layer: contract
+    test: tests/test_vibey_agent.py::test_a_native_hosted_call_reaches_im_as_one_line_with_its_cited_answer_and_image
+    related_tests:
+      - tests/test_vibey_agent.py::test_a_native_hosted_call_reaches_the_workbench_as_a_card_and_cited_answer
+      - tests/test_vibey_agent.py::test_a_proxied_hosted_result_shows_once_its_result_is_committed
+  - id: MH-HOSTED-UI-014
+    name: A hosted call that did not complete shows its status and any known charge, and claims neither how it ran nor what it found, on the IM line, the Web card (collapsed or expanded) and image delivery alike
+    status: covered
+    kind: contract
+    layer: unit
+    test:
+      - tests/test_hosted_activity.py::test_the_im_line_claims_how_a_call_ran_and_what_it_found_only_once_it_completed
+      - tests/test_vibey_agent.py::test_an_image_from_a_call_that_did_not_complete_is_not_delivered
+      - ui/src/components/workbench/HostedToolRow.test.tsx::MH-HOSTED-UI-014 (pending)
+      - ui/src/components/workbench/HostedToolRow.test.tsx::MH-HOSTED-UI-014 (failed)
+      - ui/src/components/workbench/HostedToolRow.test.tsx::MH-HOSTED-UI-014 (incomplete)
+  - id: MH-HOSTED-UI-015
+    name: A failure reason Avibe worded itself shows in the reader's language by its error code, on the IM line and on the Web card; a provider's reason or an unknown code shows as written, and every known code has copy in both bundles and languages
+    status: covered
+    kind: contract
+    layer: unit
+    test:
+      - tests/test_hosted_activity.py::test_the_im_line_says_a_reason_avibe_worded_in_the_readers_language
+      - tests/test_hosted_activity.py::test_every_known_hosted_error_code_has_copy_on_every_surface
+      - ui/src/components/workbench/HostedToolRow.test.tsx::MH-HOSTED-UI-015
+  - id: MH-HOSTED-VIBEY-001
+    name: Vibey declares a hop's native hosted tool verbatim with its include values and pins that request to the hop's Source; the probe builds the same request
+    status: covered
+    kind: contract
+    layer: contract
+    test: tests/test_vibey_agent.py::test_a_hop_resolved_native_hosted_tool_reaches_the_gateway_pinned_to_its_source
+    related_tests:
+      - tests/test_vibey_agent.py::test_a_hop_with_an_invalid_hosted_tool_entry_is_refused
+      - tests/agent_core/ai/test_hosted_requests.py::test_a_hosted_spec_on_a_native_route_is_sent_as_the_declaration_in_its_place_and_pinned
+      - tests/agent_core/ai/test_hosted_requests.py::test_the_probe_entry_builds_exactly_the_request_the_adapter_sends
+      - tests/agent_core/ai/test_hosted_requests.py::test_tool_choice_forces_the_named_tool_in_each_protocols_form
+  - id: MH-HOSTED-006
+    name: A real upstream 400 teaches only the feature it names, and a refused effort then skips its hop instead of another provider 400
+    status: covered
+    kind: recovery
+    layer: contract
+    test: tests/test_model_hub_evidence_rules.py::test_an_upstream_400_teaches_only_the_feature_it_names
+    related_tests:
+      - tests/test_model_hub_evidence_rules.py::test_a_refused_effort_skips_its_hop_instead_of_another_provider_400
+      - tests/test_model_hub_reasoning_tiers.py::test_catalog_row_outranks_user_and_drops_its_client_presets
+      - tests/test_model_hub_reasoning_tiers.py::test_a_persisted_catalog_list_offers_no_client_preset_to_vibey
+      - tests/test_model_hub_vibey_consumer.py::test_a_released_vibey_row_loads_without_its_client_preset
+      - tests/test_model_hub_evidence_rules.py::test_a_refused_effort_still_waits_for_a_capable_hop_that_is_cooling_down
+      - tests/test_model_hub_reasoning_tiers.py::test_the_hop_declares_exactly_its_models_levels
+      - tests/test_model_hub_reasoning_tiers.py::test_rows_saved_by_3_2_0_are_derived_again_once_at_startup
+      - tests/test_model_hub_evidence_rules.py::test_the_picker_menu_states_which_efforts_routing_refuses_in_menu_values
+  - id: MH-HOSTED-007
+    name: A user-started call probe sends Vibey's native request pinned to the probed Source, and records only a result or a refusal naming the tool
+    status: covered
+    kind: contract
+    layer: contract
+    test: tests/test_model_hub_hosted_probe.py::test_a_call_probe_sends_the_production_request_and_records_only_what_it_shows
+    related_tests:
+      - tests/test_model_hub_hosted_probe.py::test_a_probe_runs_only_on_a_target_the_tool_can_run_on
+      - tests/test_model_hub_hosted_probe.py::test_each_candidate_states_what_probing_it_would_cost
+      - tests/test_model_hub_hosted_probe.py::test_each_request_the_adapter_sends_is_its_own_pinned_call
+      - tests/test_model_hub_hosted_probe.py::test_a_probe_that_verifies_its_source_records_evidence_for_the_source_as_it_now_is
+      - tests/test_model_hub_hosted_probe.py::test_a_probe_records_no_evidence_for_a_grant_that_replaced_its_own_mid_probe
+      - tests/test_model_hub_hosted_probe.py::test_the_probe_reads_its_calls_in_the_order_the_adapter_sent_them
+      - tests/test_model_hub_hosted_probe.py::test_the_probe_asks_for_no_more_output_than_a_turn_on_its_hop_would
+      - tests/test_model_hub_hosted_probe.py::test_an_api_key_source_is_probed_on_a_passthrough_model_it_does_not_list
+      - tests/test_model_hub_hosted_probe.py::test_a_probe_that_times_out_before_its_handle_is_still_metered
+      - tests/test_model_hub_hosted_probe.py::test_a_probe_attributes_nothing_when_another_grant_retired_the_marker
+      - tests/test_model_hub_hosted_probe.py::test_a_deadline_mid_stream_ends_the_probe_as_transient
+      - tests/test_model_hub_hosted_probe.py::test_a_probe_settles_when_the_adapter_is_done_even_if_the_body_stays_open
+  - id: MH-HOSTED-VIBEY-002
+    name: Every native hosted item becomes one hosted call with a provider-neutral action and its record; citations stay on the text that cites them; the response's counters and reported cost go to its summary
+    status: covered
+    kind: contract
+    layer: contract
+    test: tests/agent_core/ai/test_hosted_parsing.py::test_an_xai_web_search_is_one_hosted_call_with_its_sources_cited_text_and_reported_cost
+    related_tests:
+      - tests/agent_core/ai/test_hosted_parsing.py::test_xai_x_searches_keep_their_variants_and_the_answer_cites_each_post_once
+      - tests/agent_core/ai/test_hosted_parsing.py::test_the_mapping_rule_gives_every_responses_item_a_provider_neutral_action
+      - tests/agent_core/ai/test_hosted_parsing.py::test_no_hosted_call_without_a_native_declaration_or_a_known_serving_source
+      - tests/agent_core/ai/test_hosted_parsing.py::test_an_anthropic_search_and_its_result_are_one_hosted_call_and_the_text_keeps_its_citation
+      - tests/agent_core/ai/test_hosted_parsing.py::test_parallel_anthropic_searches_finalize_by_id_and_a_search_cut_off_stays_pending
+      - tests/agent_core/ai/test_hosted_parsing.py::test_a_failed_call_keeps_the_providers_reason_uncoded_and_codes_the_one_avibe_writes_for_none
+      - tests/agent_core/agent/test_compaction.py::test_a_hosted_call_a_checkpoint_turn_makes_is_recorded_with_its_cost_and_the_checkpoint_holds
+  - id: MH-HOSTED-VIBEY-003
+    name: Each hosted call replays in portable form as exactly one unit, a synthetic same-named call and result or in-place text, written by the one record-to-text function with its own status
+    status: covered
+    kind: contract
+    layer: contract
+    test: tests/test_vibey_agent.py::test_a_native_search_is_kept_as_one_hosted_call_and_replayed_next_turn_as_a_synthetic_call
+    related_tests:
+      - tests/agent_core/ai/test_hosted_transform.py::test_a_replayed_search_is_a_synthetic_same_named_call_and_result_on_every_protocol
+      - tests/agent_core/ai/test_hosted_transform.py::test_every_hosted_call_is_its_own_synthetic_call_and_a_page_action_says_what_it_did
+      - tests/agent_core/ai/test_hosted_transform.py::test_a_failed_or_cut_off_call_never_reads_as_a_successful_empty_result
+      - tests/agent_core/ai/test_hosted_transform.py::test_the_posts_an_x_answer_cites_are_listed_once_in_its_first_x_search_result
+      - tests/agent_core/ai/test_hosted_transform.py::test_a_response_its_turn_still_waits_on_keeps_each_call_in_place_as_text
+      - tests/agent_core/ai/test_hosted_transform.py::test_every_hosted_call_is_one_result_that_shows_its_own_status
+      - tests/agent_core/ai/test_hosted_transform.py::test_the_posts_an_answer_cites_show_on_a_call_kept_in_place
+      - tests/agent_core/agent/test_context.py::test_a_hosted_call_counts_as_the_largest_form_it_can_go_back_in
+  - id: MH-HOSTED-VIBEY-004
+    name: A proxied hosted call runs on the executor bound for the Turn, every gateway request naming that Turn; its record and execution stay on the tool result and the model reads the record as text, a call that reached no executor as a failure whose reason carries its code
+    status: covered
+    kind: contract
+    layer: contract
+    test: tests/test_vibey_agent.py::test_a_proxied_hosted_call_runs_on_the_bound_executor_and_keeps_its_record
+  - id: MH-HOSTED-VIBEY-005
+    name: A hosted call goes back verbatim and pinned only to the Source that served it, within its turn or with current replay evidence; pin_unavailable gets exactly one portable, unpinned resend
+    status: covered
+    kind: contract
+    layer: contract
+    test: tests/agent_core/ai/test_hosted_replay.py::test_pin_unavailable_gets_exactly_one_portable_resend_and_never_the_generic_retry
+    related_tests:
+      - tests/agent_core/ai/test_hosted_replay.py::test_a_hosted_call_goes_back_verbatim_and_pinned_only_to_its_own_source_with_replay_evidence
+      - tests/agent_core/ai/test_hosted_replay.py::test_a_continuation_goes_back_verbatim_only_to_the_hop_that_served_it
+  - id: MH-HOSTED-VIBEY-006
+    name: An Anthropic pause_turn continues as one response pinned to its Source and model, with the final request's usage and summed hosted counters, pending calls finalized by id, at most five continuations, ending interrupted when its Source cannot continue it, and verified only when every response was from one origin
+    status: covered
+    kind: contract
+    layer: contract
+    test: tests/agent_core/ai/test_hosted_pause_turn.py::test_a_paused_response_continues_as_one_response_pinned_to_its_source_with_summed_counters
+    related_tests:
+      - tests/agent_core/ai/test_hosted_pause_turn.py::test_a_response_paused_past_the_bound_ends_interrupted_and_keeps_everything_it_assembled
+      - tests/agent_core/ai/test_hosted_pause_turn.py::test_a_paused_response_its_source_cannot_continue_ends_interrupted_and_keeps_what_it_has
+      - tests/agent_core/ai/test_hosted_pause_turn.py::test_a_continued_response_is_verified_only_when_every_response_in_it_was_from_one_origin
+  - id: MH-HOSTED-VIBEY-007
+    name: A native generated image is saved to a file as its done item is parsed and its record names that file; no base64 enters history, partial and terminal copies are never decoded, and an image over read's inline limit says so
+    status: covered
+    kind: contract
+    layer: contract
+    test: tests/agent_core/ai/test_hosted_images.py::test_a_native_image_is_saved_once_from_its_done_item_and_history_holds_only_its_path
+    related_tests:
+      - tests/agent_core/ai/test_hosted_images.py::test_an_image_that_was_not_saved_is_a_failed_call_never_a_completed_one
+      - tests/agent_core/ai/test_hosted_images.py::test_a_six_megabyte_image_streams_under_the_image_line_cap_and_its_record_says_read_cannot_show_it
+      - tests/agent_core/ai/test_hosted_images.py::test_a_response_that_streams_images_past_its_budget_ends_as_an_error
+      - tests/test_vibey_agent.py::test_a_generated_image_is_kept_as_an_immutable_file_its_bytes_name_and_type
+      - tests/test_vibey_agent.py::test_a_proxied_image_that_was_not_saved_is_a_failed_call_with_its_code
+      - tests/test_agent_transcript.py::test_the_media_sweep_keeps_every_file_a_row_registers_and_takes_only_stale_orphans
   - id: MH-VIBEY-007
     name: Vibey starts once with the user's Sources and built-in Agent models, seeded when its first Source exists
     status: covered
@@ -203,6 +390,23 @@ scenarios:
       - tests/test_vibey_backend_registration.py::test_vibey_agent_runs_its_catalogs_first_model_until_it_has_one
       - tests/test_vibey_backend_registration.py::test_a_lost_vibey_model_hand_off_heals_on_the_next_start
       - tests/test_controller_im_ready.py::test_runtime_services_start_when_post_update_notification_fails
+  - id: MH-HOSTED-GATEWAY-002
+    name: A pinned Vibey request is served only by its Source and unchanged; every refusal or pre-output failure there is pin_unavailable, and unpinned hosted content is refused before anything runs
+    status: covered
+    kind: contract
+    layer: contract
+    test: tests/test_model_hub_hosted_pinning.py::test_a_pinned_request_is_served_only_by_its_source_or_handed_back
+    related_tests:
+      - tests/test_model_hub_hosted_pinning.py::test_the_portable_resend_fails_over_and_the_turn_settles_on_it
+      - tests/test_model_hub_hosted_pinning.py::test_unpinned_hosted_content_is_refused_before_anything_runs
+  - id: MH-HOSTED-GATEWAY-003
+    name: Hosted declarations are recognized by any vendor's type, and only replayed items outside the in-flight response need replay evidence
+    status: covered
+    kind: contract
+    layer: unit
+    test: tests/test_model_hub_hosted_pinning.py::test_only_items_outside_the_in_flight_response_need_replay_evidence
+    related_tests:
+      - tests/test_model_hub_hosted_pinning.py::test_declarations_are_recognized_by_every_vendors_type
   - id: MH-LIMITS-001
     name: Provider rows written before any models.dev copy was cached take its limits once one arrives, keeping every limit already set
     status: covered
@@ -251,6 +455,14 @@ scenarios:
     test: tests/test_model_hub_vibey_consumer.py::test_a_vibey_sessions_turns_share_its_scope_and_each_keeps_its_provenance
     related_tests:
       - tests/test_vibey_agent.py::test_every_model_hub_resolution_names_its_turn
+  - id: MH-VIBEY-009
+    name: A Vibey request names its Turn, so a finished Turn's late model or hosted-tool request is never credited to the next Turn on the same route
+    status: covered
+    kind: lifecycle
+    layer: contract
+    test: tests/test_model_hub_vibey_consumer.py::test_a_finished_turns_request_is_never_credited_to_the_next_turn_on_its_route
+    related_tests:
+      - tests/test_model_hub_vibey_consumer.py::test_a_vibey_sessions_turns_share_its_scope_and_each_keeps_its_provenance
   - id: MH-CODEX-ROUTING-001
     name: Shared Codex authentication stays stable while concurrent aliases route and settle independently
     status: covered
@@ -604,6 +816,15 @@ scenarios:
     kind: security
     layer: unit
     test: tests/test_model_hub_request_body_budget.py::test_bad_auth_does_not_parse_or_admit
+  - id: MH-HOSTED-GATEWAY-001
+    name: The engine forwards declared tools unchanged; only Codex CLI gets the engine's hosted image tool, byte for byte under its skip conditions
+    status: covered
+    kind: contract
+    layer: contract
+    test: tests/test_model_hub_codex_image_tool.py::test_codex_requests_reach_the_engine_with_the_engines_own_image_tool
+    related_tests:
+      - tests/test_model_hub_codex_image_tool.py::test_other_callers_reach_the_engine_with_exactly_their_declared_tools
+      - tests/test_model_hub_runtime.py::test_mixed_anthropic_credentials_disable_cloak_only_for_api_key_entry
   - id: MH-PROTOCOL-001
     name: Source protocol is response-observed before persistence with no transient residue
     status: covered
@@ -1036,6 +1257,18 @@ scenarios:
     kind: recovery
     layer: unit
     test: tests/test_model_hub_usage.py::test_future_hourly_evidence_is_incomplete_on_read_and_after_a_write
+  - id: MH-USAGE-BACKEND-009
+    name: A ledger row whose context tier is not a size is dropped like any unusable row
+    status: covered
+    kind: compatibility
+    layer: unit
+    test: tests/test_model_hub_usage.py::test_a_row_whose_context_tier_is_not_a_size_is_dropped
+  - id: MH-USAGE-BACKEND-010
+    name: The usage writer reads the price table once before the loop serves and tiers every call when it is recorded
+    status: covered
+    kind: recovery
+    layer: unit
+    test: tests/test_model_hub_usage.py::test_the_writer_reads_the_price_table_before_serving_and_tiers_every_call_at_record
   - id: MH-USAGE-E2E-001
     name: Measured hourly and daily reports reconcile through HTTP and IPC after a controller restart
     status: covered
@@ -1089,7 +1322,7 @@ scenarios:
       - tests/test_model_hub_background_discovery.py::test_schedule_covers_hub_sources_and_skips_native_and_waiting_credentials
       - tests/test_model_hub_background_discovery.py::test_stale_sources_catch_up_together_then_refresh_at_different_times
       - tests/test_model_hub_background_discovery.py::test_listing_that_would_strand_a_menu_model_is_left_to_manual_refresh
-      - tests/test_model_hub_background_discovery.py::test_stop_retires_the_background_schedule
+      - tests/test_model_hub_background_discovery.py::test_stop_retires_the_background_schedule_without_waiting_for_a_listing
   - id: MH-QUOTA-005
     name: Each subscription's quota is re-read at most every five minutes and concurrent reads share one fetch
     status: covered
@@ -1366,6 +1599,46 @@ scenarios:
       - ui/src/components/settings/models/SettingsModelsPage.render.test.tsx::MH-PRICE-014
       - ui/src/components/settings/models/UsageTab.test.tsx::MH-PRICE-014
       - ui/src/components/settings/models/QuotaTab.test.tsx::MH-PRICE-014
+  - id: MH-PRICE-015
+    name: A models.dev context tier is parsed by the flat price's rules, with the legacy over-200K price only when no tier is usable
+    status: covered
+    kind: compatibility
+    layer: unit
+    test: tests/test_model_hub_pricing.py::test_model_price_reads_context_tiers_by_the_flat_price_rules
+  - id: MH-PRICE-016
+    name: A call is recorded in the tier its whole context input exceeds and valued at that tier's rates
+    status: covered
+    kind: contract
+    layer: unit
+    test: tests/test_model_hub_pricing.py::test_a_call_is_recorded_in_the_tier_its_context_exceeds_and_valued_at_its_rates
+    related_tests:
+      - tests/test_model_hub_pricing.py::test_cache_reads_and_writes_count_toward_the_context_tier
+  - id: MH-PRICE-017
+    name: A released ledger reads and values unchanged, and a tiered call lands on its own row beside it
+    status: covered
+    kind: compatibility
+    layer: unit
+    test: tests/test_model_hub_pricing.py::test_a_released_ledger_reads_unchanged_and_a_tiered_call_lands_beside_it
+  - id: MH-PRICE-018
+    name: Calls of different tiers never fold together, and every report sums them per model
+    status: covered
+    kind: contract
+    layer: unit
+    test: tests/test_model_hub_pricing.py::test_tiers_never_fold_together_and_every_read_sums_them_per_model
+  - id: MH-PRICE-020
+    name: A hosted response is priced by the one pricing owner as included, reported or list, and is unpriced rather than zero when anything is unknown
+    status: covered
+    kind: contract
+    layer: unit
+    test: tests/test_model_hub_pricing.py::test_a_hosted_response_is_priced_by_the_one_pricing_owner
+    related_tests:
+      - tests/test_model_hub_pricing.py::test_xai_cost_ticks_are_converted_by_the_pricing_module
+  - id: MH-PRICE-019
+    name: A tiered row the current table no longer lists is valued at the largest listed tier it exceeded
+    status: covered
+    kind: recovery
+    layer: unit
+    test: tests/test_model_hub_pricing.py::test_a_tiered_row_is_valued_at_the_largest_listed_tier_it_exceeded
   - id: MH-RES-LIVE-001
     name: Live turn retries an eligible backup before streaming starts
     status: covered
@@ -1441,7 +1714,7 @@ scenarios:
     layer: scenario
     test: tests/scenarios/model_hub/test_model_hub_live_resolution_scenarios.py::test_mh_unlisted_001_removed_model_fails_its_next_turn_with_one_clear_reason
     related_tests:
-      - tests/scenarios/model_hub/test_model_hub_live_resolution_scenarios.py::test_only_an_unlisted_model_holds_its_input_for_an_explicit_retry
+      - tests/scenarios/model_hub/test_model_hub_live_resolution_scenarios.py::test_a_refusal_only_models_can_clear_holds_its_input_for_an_explicit_retry
       - tests/scenarios/model_hub/test_model_hub_live_resolution_scenarios.py::test_opencode_refuses_an_unlisted_model_its_retained_route_cannot_address
       - tests/test_claude_cli_path.py::test_claude_launch_on_an_unlisted_model_holds_the_input
       - tests/test_claude_session_recovery.py::test_unlisted_hub_model_shows_the_shared_refusal_once
@@ -1490,7 +1763,7 @@ scenarios:
     related_tests:
       - ui/src/components/onboarding/providers/ProvidersScreen.test.tsx::counts the takeable group beside it, and only that one
       - ui/src/components/settings/models/migrationScan.test.ts::counts an OpenCode key, which never arrives as kind api_key
-      - ui/src/components/settings/models/MigrationDialog.test.tsx::applies only complete backend groups with one migration action
+      - ui/src/components/settings/models/MigrationDialog.test.tsx::applies every carried row with one migration action, leaving the rest native
   - id: MH-MIG-005
     name: Persisted migration ignores runtime authentication and preserves shared-file custody
     status: covered
@@ -1539,7 +1812,7 @@ scenarios:
       - tests/test_model_hub_native_takeover.py::test_mode_only_adoption_refuses_a_native_config_the_cli_cannot_parse
       - tests/test_model_hub_native_takeover.py::test_mode_switch_refuses_an_unreadable_completed_receipt_before_interrupting
       - tests/test_opencode_restore_polls.py::test_forced_refresh_neither_waits_on_nor_strands_a_stuck_restored_poll
-      - tests/test_agent_auth_service.py::AgentAuthServiceTests::test_opencode_agent_force_refresh_restarts_after_global_config_change
+      - tests/test_opencode_generations.py::test_strict_retirement_retries_a_stop_that_declined_while_a_request_ran
   - id: MH-MIG-010
     name: A refused switch to the gateway is reported where it was made and retried in place
     status: covered
@@ -1579,6 +1852,14 @@ scenarios:
     test: tests/test_model_hub_native_takeover.py::test_refused_migration_says_whether_avibe_or_an_outside_cli_holds_the_backend
     related_tests:
       - ui/src/components/settings/models/MigrationDialog.test.tsx
+  - id: MH-MIG-015
+    name: Migration saves static API keys from their native configuration without contacting the provider, so rejected keys and offline endpoints import alike
+    status: covered
+    kind: migration
+    layer: scenario
+    test: tests/scenarios/model_hub/test_model_hub_migration_scenarios.py::test_mh_mig_015_static_keys_migrate_from_saved_configuration_without_upstream_contact
+    related_tests:
+      - tests/e2e/test_model_hub_migration.py::test_mh_mig_015_keys_migrate_over_http_without_any_upstream_request
   - id: MH-TAKEOVER-001
     name: Recoverable failures walk the configured route and exhaust only at its end
     status: covered
@@ -1965,8 +2246,8 @@ scenarios:
     layer: e2e-auto
     test: tests/e2e/test_model_hub_migration_persisted.py::test_f4_persisted_configuration_migrates_with_runtime_auth_present
     related_tests:
-      - tests/e2e/test_model_hub_migration_persisted.py::test_f4_unproven_shell_key_is_not_removed
-      - tests/e2e/test_model_hub_migration_persisted.py::test_f4_custom_api_key_transport_is_refused_without_cleanup
+      - tests/e2e/test_model_hub_migration_persisted.py::test_f4_unproven_shell_key_is_copied_without_validation
+      - tests/e2e/test_model_hub_migration_persisted.py::test_f4_custom_api_key_refusing_bearer_is_copied_without_validation
       - tests/e2e/test_model_hub_migration_persisted.py::test_f4_explicit_dynamic_writer_refuses_http_apply_without_proof
       - tests/e2e/test_model_hub_migration_persisted.py::test_f4_replace_migrated_bearer_without_old_secret_retains_cpa_transport
       - tests/e2e/test_model_hub_migration_persisted.py::test_f4_oauth_history_fence_survives_later_api_batch_over_http
@@ -2029,6 +2310,26 @@ scenarios:
     kind: runtime_lifecycle
     layer: e2e-auto
     test: tests/e2e/test_model_hub_service_acceptance.py::test_fresh_install_serves_vibey_and_claude_through_the_hub_and_reaps_an_orphaned_engine
+  - id: MH-HOSTED-GATEWAY-004
+    name: A proxied hosted call runs one native request on its bound executor, without an effort, and answers its canonical record and execution with the pricing module's cost
+    status: covered
+    kind: contract
+    layer: contract
+    test: tests/test_model_hub_hosted_executor.py::test_a_proxied_search_runs_one_native_request_and_answers_its_canonical_record
+    related_tests:
+      - tests/test_model_hub_hosted_executor.py::test_an_anthropic_executor_is_buffered_and_keeps_the_providers_results_and_cited_text
+      - tests/test_model_hub_hosted_executor.py::test_a_proxied_image_returns_its_bytes_once_for_vibey_to_save
+      - tests/test_model_hub_hosted_executor.py::test_an_excerpt_is_the_answer_text_its_citation_belongs_to
+      - tests/test_model_hub_hosted_executor.py::test_a_proxied_call_carries_the_pricing_modules_cost
+  - id: MH-HOSTED-GATEWAY-005
+    name: A proxied hosted call that cannot complete is a failed record, with an execution only when an executor ran; only a malformed call is an error status
+    status: covered
+    kind: boundary
+    layer: contract
+    test: tests/test_model_hub_hosted_executor.py::test_a_proxied_call_that_cannot_complete_is_a_failed_record
+    related_tests:
+      - tests/test_model_hub_hosted_executor.py::test_a_malformed_proxy_call_is_refused_before_anything_runs
+      - tests/test_model_hub_hosted_executor.py::test_a_proxy_call_needs_the_turns_gateway_token
 next_priority:
   - MH-PROTOCOL-004
   - MH-RUNTIME-001

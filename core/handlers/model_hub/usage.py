@@ -6,8 +6,8 @@ over populations that ``InvokeHandle.stream is not None`` keeps disjoint: the
 resolver reports every call it consumed itself, including a failover hop that
 billed us before the turn moved on, and the turn gateway reports every call whose
 body it forwarded. This module owns what happens to those counts afterwards: one
-bounded daily aggregate per source and model, and the read shape the settings page
-consumes.
+bounded daily aggregate per source, model, and context tier, and the read shape the
+settings page consumes.
 
 Two properties are deliberate. `requests` is self-measured by our own code and is
 always available; token counts are vendor-reported and may be absent, which is
@@ -37,10 +37,11 @@ from concurrent.futures import Future as CFuture
 from dataclasses import dataclass, replace
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
+from time import monotonic
 from typing import Callable, Final, Mapping, Optional, Sequence
 
 from .identifiers import persisted_ledger_key, usage_ledger_key
-from .pricing import Cost, ModelPrice, PriceTable, row_cost
+from .pricing import Cost, ModelPrice, PriceTable, context_tier_size, row_cost
 from .state_file import write_state_document
 from .stream_wire import ProtocolUsageReport
 
@@ -639,6 +640,11 @@ def _normalize_row(row: object) -> Optional[dict]:
     calendar_day = _calendar_day(day)
     if calendar_day is None:
         return None
+    # Part of the row's identity, so a value that is not a tier size leaves no
+    # row to fold it into. Absent on every row a released version wrote.
+    context_tier = row.get("context_tier", 0)
+    if not isinstance(context_tier, int) or isinstance(context_tier, bool) or context_tier < 0:
+        return None
     if all(key not in row for key in _CACHE_WRITE_KEYS):
         row = {**_released_cache_write_counters(row), **row}
     counters: dict[str, int] = {}
@@ -651,6 +657,8 @@ def _normalize_row(row: object) -> Optional[dict]:
         "day": calendar_day.isoformat(),
         "source_id": source_id,
         "model_id": model_id,
+        # Written only past the base tier, so a base row keeps the released shape.
+        **({"context_tier": context_tier} if context_tier else {}),
         **counters,
     }
     if row.get("history_degraded") is True:
@@ -794,19 +802,38 @@ def _row_price(
     return prices.price(keyed_model_labels.get((row["source_id"], row["model_id"]), row["model_id"]))
 
 
-def _priced_bucket_row(
-    row: dict,
+def _bucket_rows(
+    rows: Sequence[dict],
     prices: Optional[PriceTable],
     keyed_model_labels: Mapping[tuple[str, str], str],
     *,
     degraded: bool = False,
-) -> dict:
+) -> list[dict]:
+    """Publish one bucket's rows: one per Source and model, summed across context tiers.
+
+    Each row is valued at its own tier before the sum, because a tier's rates
+    apply only to the calls recorded in it.
+    """
+
+    published: dict[tuple[str, str], dict] = {}
+    costs: dict[tuple[str, str], Cost] = {}
+    for row in rows:
+        key = (row["source_id"], row["model_id"])
+        target = published.setdefault(
+            key, {"source_id": row["source_id"], "model_id": row["model_id"], **_empty_totals()}
+        )
+        _accumulate(target, row)
+        if prices is not None:
+            costs.setdefault(key, Cost()).add(row_cost(row, _row_price(row, prices, keyed_model_labels)))
     if prices is None:
-        return row
-    cost = row_cost(row, _row_price(row, prices, keyed_model_labels))
-    # A degraded read lost rows of unknown size, so no figure from it is exact.
-    cost.api_cost_lower_bound = cost.api_cost_lower_bound or degraded
-    return {**row, **cost.fields()}
+        return [published[key] for key in sorted(published)]
+    priced = []
+    for key in sorted(published):
+        cost = costs[key]
+        # A degraded read lost rows of unknown size, so no figure from it is exact.
+        cost.api_cost_lower_bound = cost.api_cost_lower_bound or degraded
+        priced.append({**published[key], **cost.fields()})
+    return priced
 
 
 def _recency(
@@ -873,8 +900,10 @@ def _cache_write_increment(usage: Optional[ProtocolUsageReport]) -> dict[str, in
     }
 
 
-def _row_key(row: dict) -> tuple[str, str, str]:
-    return (row["day"], row["source_id"], row["model_id"])
+def _row_key(row: dict) -> tuple[str, str, str, int]:
+    """A row is one day of one model on one Source, in one context tier."""
+
+    return (row["day"], row["source_id"], row["model_id"], row.get("context_tier", 0))
 
 
 def _empty_totals() -> dict:
@@ -1104,7 +1133,7 @@ class BoundedUsageLedger:
         if not isinstance(payload, list):
             logger.warning("Model Hub usage ledger %s is not a list of rows", self.path)
             return _LedgerRead([], True)
-        rows: dict[tuple[str, str, str], dict] = {}
+        rows: dict[tuple[str, str, str, int], dict] = {}
         dropped = 0
         for item in payload:
             row = _normalize_row(item)
@@ -1275,6 +1304,7 @@ class BoundedUsageLedger:
                             "day": owner_day,
                             "source_id": source_key,
                             "model_id": model_key,
+                            "context_tier": call.context_tier,
                             "requests": call.requests,
                             "token_reports": call.requests if usage is not None else 0,
                             "input_tokens": usage.input_tokens if usage else 0,
@@ -1681,18 +1711,7 @@ class BoundedUsageLedger:
         }
         for row in rows:
             if row["day"] in by_day:
-                by_day[row["day"]].append(
-                    _priced_bucket_row(
-                        {
-                            "source_id": row["source_id"],
-                            "model_id": row["model_id"],
-                            **{key: row[key] for key in _COUNTER_KEYS},
-                        },
-                        prices,
-                        keyed_model_labels,
-                        degraded=read_degraded,
-                    )
-                )
+                by_day[row["day"]].append(row)
         buckets = []
         for index in range(bounded_days):
             bucket_day = from_day + timedelta(days=index)
@@ -1708,9 +1727,11 @@ class BoundedUsageLedger:
                     "start_at": start.isoformat(),
                     "end_at": end.isoformat(),
                     "history_complete": not read_degraded,
-                    "rows": sorted(
+                    "rows": _bucket_rows(
                         by_day.get(bucket_day.isoformat(), []),
-                        key=lambda row: (row["source_id"], row["model_id"]),
+                        prices,
+                        keyed_model_labels,
+                        degraded=read_degraded,
                     ),
                 }
             )
@@ -1747,7 +1768,7 @@ class BoundedUsageLedger:
         # three local dates. Select rows from their durable UTC-hour evidence
         # before applying the current host timezone to their local presentation.
         rows, read_degraded = self._hourly_rows(starts=starts, now=report_instant)
-        measured_by_bucket: list[dict[tuple[str, str], dict]] = [
+        measured_by_bucket: list[dict[tuple[str, str, int], dict]] = [
             {} for _ in starts
         ]
         incomplete: set[int] = set(range(len(starts))) if read_degraded else set()
@@ -1793,7 +1814,7 @@ class BoundedUsageLedger:
                 if bucket is None:
                     continue
                 _start_utc, index = bucket
-                key = (row["source_id"], row["model_id"])
+                key = _row_key(row)[1:]
                 projected = measured_by_bucket[index].get(key)
                 if projected is None:
                     start_local = start.astimezone()
@@ -1801,6 +1822,7 @@ class BoundedUsageLedger:
                         "day": start_local.date().isoformat(),
                         "source_id": row["source_id"],
                         "model_id": row["model_id"],
+                        **({"context_tier": row["context_tier"]} if "context_tier" in row else {}),
                         **{counter: 0 for counter in _COUNTER_KEYS},
                         "last_metered_at": None,
                     }
@@ -1817,23 +1839,13 @@ class BoundedUsageLedger:
             end = starts[index + 1] if index + 1 < len(starts) else report_instant
             start_local = start.astimezone()
             end_local = end.astimezone()
-            projected_rows = [
-                _priced_bucket_row(
-                    {
-                        "source_id": row["source_id"],
-                        "model_id": row["model_id"],
-                        **{counter: row[counter] for counter in _COUNTER_KEYS},
-                    },
-                    prices,
-                    keyed_model_labels,
-                    # An incomplete hour holds usage it cannot place, so its cost is a floor.
-                    degraded=index in incomplete,
-                )
-                for row in sorted(
-                    measured_by_bucket[index].values(),
-                    key=lambda row: (row["source_id"], row["model_id"]),
-                )
-            ]
+            projected_rows = _bucket_rows(
+                list(measured_by_bucket[index].values()),
+                prices,
+                keyed_model_labels,
+                # An incomplete hour holds usage it cannot place, so its cost is a floor.
+                degraded=index in incomplete,
+            )
             bucket_rows.append(
                 {
                     "key": start_local.isoformat(timespec="seconds"),
@@ -1919,6 +1931,11 @@ _LEDGER_EXECUTOR: Optional[_AbandonableWriter] = None
 # local read-modify-write and an fsync plus scheduling slack, which is orders of
 # magnitude under it, so nothing but a disk that has stopped answering gets here.
 _DURABILITY_WAIT_SECONDS: Final = 2.0
+# How long a price table the writer read decides context tiers before a flush reads
+# it again. A read parses the whole models.dev copy, megabytes, so it happens on the
+# writer's thread rather than once per call; the override file is hand-edited, and
+# minutes are soon enough for an edit to reach new calls.
+_PRICE_TABLE_TTL_SECONDS: Final = 300.0
 
 
 def _ledger_executor() -> _AbandonableWriter:
@@ -1961,6 +1978,9 @@ class UsageCall:
     at: datetime
     requests: int = 1
     owner_day: str = ""
+    # The context tier the call was billed in (`pricing.context_tier_size`), 0 for
+    # the base rates. Decided per call, since a folded row can no longer tell.
+    context_tier: int = 0
 
     def __post_init__(self) -> None:
         # An init field intentionally survives dataclasses.replace during a fold.
@@ -1969,11 +1989,13 @@ class UsageCall:
             object.__setattr__(self, "owner_day", local_usage_day(self.at).isoformat())
 
     @property
-    def fold_key(self) -> tuple[str, str, str, str, bool]:
+    def fold_key(self) -> tuple[str, str, str, str, int, bool]:
         """What makes two calls one daily row and one hourly slice.
 
         The ledger's own row key plus whether tokens were reported, which is the
         part that keeps a fold arithmetically identical to the calls it replaces.
+        The row key includes the context tier, so calls billed at different rates
+        never fold: one call's tier would otherwise price the other's tokens.
         The hour is part of the queue key so a flush cannot merge calls from
         different hours before the ledger sees their temporal identity. The local
         date must also remain: a UTC hour can cross local midnight, and folding
@@ -1985,6 +2007,7 @@ class UsageCall:
             _hour_key(self.at),
             self.source_id,
             self.model_id,
+            self.context_tier,
             self.usage is not None,
         )
 
@@ -2046,12 +2069,31 @@ class UsageWriter:
     something this module exists to prevent: a capacity means choosing rows to
     drop, which loses billed usage, and blocking the caller stalls a served turn
     on a disk that is already failing.
+
+    A call's context tier is part of its row, so the writer decides it before the
+    call folds, from the price table it holds: read when the writer is built, at
+    controller startup, and refreshed on its own thread.
     """
 
-    def __init__(self, ledger: BoundedUsageLedger, *, durability_wait: float = _DURABILITY_WAIT_SECONDS):
+    def __init__(
+        self,
+        ledger: BoundedUsageLedger,
+        *,
+        durability_wait: float = _DURABILITY_WAIT_SECONDS,
+        price_table: Optional[Callable[[], PriceTable]] = None,
+    ):
         self.ledger = ledger
         self._durability_wait = durability_wait
-        self._pending: dict[tuple[str, str, str, str, bool], _QueuedRow] = {}
+        self._pending: dict[tuple[str, str, str, str, int, bool], _QueuedRow] = {}
+        # Where context tiers come from: the valuation's table factory, and the
+        # table last read from it with the monotonic instant it was read.
+        self._price_table = price_table
+        self._prices: Optional[tuple[PriceTable, float]] = None
+        if price_table is not None:
+            # Read here, once: the writer is built with Model Hub's service at
+            # controller startup, before anything is metered or served, so every
+            # call finds a table and is tiered when it is recorded.
+            self._read_prices()
         # The batch on its way to disk, kept visible so a drain that times out
         # can count it: in the executor is not the same as persisted.
         self._writing: tuple[_QueuedRow, ...] = ()
@@ -2059,6 +2101,13 @@ class UsageWriter:
         # Whether the last flush lost its batch, so an outage is reported when it
         # starts and ends rather than once per failed write.
         self._dropping = False
+
+    @property
+    def held_prices(self) -> Optional[PriceTable]:
+        """The price table this writer last read, without any I/O; None before its first read."""
+
+        held = self._prices
+        return held[0] if held is not None else None
 
     def record(
         self,
@@ -2082,12 +2131,22 @@ class UsageWriter:
         `wait_recorded`; one that does not can simply drop it. Callers whose calls
         fold together share one future, which is the same promise each would have
         had alone: it completes when their row reaches the disk.
+
+        The call's context tier is decided here from the price table the writer
+        holds, a lookup in memory. A writer built without a table, or holding one
+        without tiers (no models.dev copy yet), records the base tier.
         """
 
-        call = UsageCall(source_id=source_id, model_id=model_id, usage=usage, at=at)
-        queued = self._pending.get(call.fold_key)
-        if queued is None:
-            queued = _QueuedRow(call=call, done=asyncio.get_running_loop().create_future())
+        call = UsageCall(
+            source_id=source_id,
+            model_id=model_id,
+            usage=usage,
+            at=at,
+            context_tier=self._context_tier(model_id, usage),
+        )
+        done = asyncio.get_running_loop().create_future
+        if (queued := self._pending.get(call.fold_key)) is None:
+            queued = _QueuedRow(call=call, done=done())
             self._pending[call.fold_key] = queued
         else:
             queued.call = queued.call.folded_with(call)
@@ -2131,7 +2190,10 @@ class UsageWriter:
         because the hub got busier.
         """
 
-        return sum(queued.call.requests for queued in (*self._pending.values(), *self._writing))
+        return sum(
+            queued.call.requests
+            for queued in (*self._pending.values(), *self._writing)
+        )
 
     async def drain(self, *, timeout: float) -> int:
         """Wait out the calls still queued; answers how many did not reach disk.
@@ -2159,11 +2221,11 @@ class UsageWriter:
             self._pending = {}
             self._writing = batch
             try:
-                await loop.run_in_executor(
-                    _ledger_executor(),
-                    self.ledger.record_many,
-                    tuple(queued.call for queued in batch),
-                )
+                calls = tuple(queued.call for queued in batch)
+                if self._prices_due():
+                    # A refresh for the calls after this batch; these are already tiered.
+                    await loop.run_in_executor(_ledger_executor(), self._read_prices)
+                await loop.run_in_executor(_ledger_executor(), self.ledger.record_many, calls)
             except (OSError, ValueError) as exc:
                 self._report_dropped(batch, exc)
             else:
@@ -2173,6 +2235,37 @@ class UsageWriter:
             for queued in batch:
                 if not queued.done.done():
                     queued.done.set_result(None)
+
+    def _context_tier(self, model_id: str, usage: Optional[ProtocolUsageReport]) -> int:
+        """The tier the held price table puts one call in; the base tier without usage or a table."""
+
+        held = self._prices
+        if usage is None or held is None:
+            return 0
+        return context_tier_size(held[0].price(model_id), usage.input_tokens)
+
+    def _prices_due(self) -> bool:
+        """Whether the next flush re-reads the price table: none held, too old, or still being fetched."""
+
+        if self._price_table is None:
+            return False
+        held = self._prices
+        return held is None or held[0].pending or monotonic() - held[1] >= _PRICE_TABLE_TTL_SECONDS
+
+    def _read_prices(self) -> None:
+        """Read the price table; one that cannot be read leaves the held one (or none).
+
+        Never on the controller loop: at construction, before anything is served,
+        and afterwards on the writer's thread. A valuation must never cost a
+        metered call.
+        """
+
+        if self._price_table is None:
+            return
+        try:
+            self._prices = (self._price_table(), monotonic())
+        except Exception:  # noqa: BLE001 - valuation is optional; metering is not
+            logger.warning("Model Hub usage metering could not read the price table", exc_info=True)
 
     def _report_dropped(self, batch: Sequence[_QueuedRow], exc: BaseException) -> None:
         """Report that metering stopped, once per outage rather than per flush.

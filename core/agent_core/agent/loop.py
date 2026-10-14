@@ -67,7 +67,7 @@ from core.agent_core.agent.lifecycle import RunAborted as _Aborted, RunScope
 from core.agent_core.agent.models import ModelRouter, ModelSelection, RetryPolicy
 from core.agent_core.agent.outcome import OutcomeOwner
 from core.agent_core.agent.state import HookStateError, state_representation
-from core.agent_core.ai._common import endpoint_origin
+from core.agent_core.ai._common import endpoint_origin, native_hosted_tools
 from core.agent_core.ai.provider import (
     Done,
     ModelEndpoint,
@@ -129,11 +129,11 @@ from core.agent_core.messages import (
     AssistantMessage,
     Message,
     Origin,
-    TextBlock,
     ToolCallBlock,
     ToolResultMessage,
     Usage,
     UserMessage,
+    has_reply,
     message_to_dict,
     text,
     usage_to_dict,
@@ -925,9 +925,7 @@ class Agent:
                         cause=decided,
                     )
                 response, final = await self._commit_model_message(message, emit)
-                empty_reply = final and not any(
-                    isinstance(block, TextBlock) and block.text and block.text.strip() for block in message.content
-                )
+                empty_reply = final and not has_reply(message)
                 if empty_reply:
                     decided = self._outcome.primary("error")
                     await self._error(
@@ -1120,7 +1118,7 @@ class Agent:
     async def _commit_result(
         self, call: ToolCallBlock, result: ToolResult, emit: Callable[..., Awaitable[None]]
     ) -> None:
-        message = ToolResultMessage(call.id, call.name, result.content, result.is_error)
+        message = ToolResultMessage(call.id, call.name, result.content, result.is_error, hosted=result.hosted)
         validate_message_append(self._rows, session_id=self.session_id, kind="tool_result", message=message)
         await self._save_state()
         row = await self._scope.call(
@@ -1503,7 +1501,7 @@ class Agent:
         last_tokens = unit_tokens(last) if last is not None else 0
         parts = [
             ContextPart("system", text_tokens(request.system)),
-            ContextPart("tools", request_tokens("", request.tools, ())),
+            ContextPart("tools", request_tokens("", request.tools, (), native_hosted_tools(request))),
             ContextPart("history", max(0, messages_tokens(request.messages) - last_tokens)),
         ]
         if last is not None:
@@ -1810,7 +1808,9 @@ class Agent:
             # A side turn's call has no committed response, so no instance: it starts no job (F4).
             result = await self._execute(tool, call, None, _silent)
         # Every other result that enters the turn is bounded to the room the window leaves (C-9 section 6).
-        return ToolResultMessage(call.id, call.name, fit_result(result.content, limit), result.is_error)
+        return ToolResultMessage(
+            call.id, call.name, fit_result(result.content, limit), result.is_error, hosted=result.hosted
+        )
 
     async def _drop(
         self,
@@ -1878,7 +1878,9 @@ class Agent:
         candidate = ContextEntry(self.session_id, seq, "compaction", "uncommitted-compaction", payload=payload)
         after = context_view([*self._rows, candidate])
         # What the next request would carry; it is budgeted for real when it is built.
-        payload["tokens_after_estimate"] = request_tokens(request.system, request.tools, self._carried(after))
+        payload["tokens_after_estimate"] = request_tokens(
+            request.system, request.tools, self._carried(after), native_hosted_tools(request)
+        )
         return payload, after
 
     async def _hosted(self, view: ContextView, cut: int) -> tuple[tuple[str, ...], Optional[str]]:

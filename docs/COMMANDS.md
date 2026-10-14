@@ -714,13 +714,17 @@ vibe computer set-value --arg pid=123 --arg value=enabled --arg element_token=el
 vibe computer clipboard read
 vibe computer clipboard write --arg text="copied text"
 vibe computer launch --arg bundle_id=com.example.App
-vibe computer quit --arg pid=123
+vibe computer force-quit --arg pid=123
 ```
 
 Each leaf accepts `--args-json`, repeatable `--arg`, and `--json`. `observe
 window` and `zoom` accept `--output PATH` for a caller-selected screenshot
 file. The CLI has no `--session-id` or Turn-ID option and rejects a manually
 supplied driver `session` argument.
+
+The `--json` result exposes the structured driver object at
+`result.structuredContent` and retains the legacy text content for compatibility.
+`force-quit` sends SIGKILL through the driver and can lose unsaved work.
 
 Computer Use guidance is a built-in managed Skill named `computer-use`, loaded
 on demand. It tells Agents to treat screen and clipboard data as untrusted,

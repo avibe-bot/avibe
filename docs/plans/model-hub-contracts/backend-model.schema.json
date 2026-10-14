@@ -90,6 +90,24 @@
     "routeable": {
       "type": "boolean",
       "description": "Server-derived. False only for a backend-owned selector such as Claude Code Default that never names a Route key."
+    },
+    "effort_menu": {
+      "type": "object",
+      "description": "Server-derived on Agent reads, accepted and dropped on write like locked and routeable. Which of reasoning_efforts routing refuses now, in the values the menu offers (capability model §3.4): omitted when every hop the route would try or wait for has negative evidence for the token the backend sends for it, so a request there would end in effort_unsupported; not_on names the Sources of the hops that refuse a tier the others accept. Empty for an Agent in Direct mode.",
+      "required": ["omitted", "not_on"],
+      "additionalProperties": false,
+      "properties": {
+        "omitted": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+        "not_on": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": { "type": "string", "pattern": "^src_[a-z0-9]{8,}$" },
+            "minItems": 1,
+            "uniqueItems": true
+          }
+        }
+      }
     }
   }
 }

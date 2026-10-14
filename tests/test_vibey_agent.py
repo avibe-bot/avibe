@@ -20,6 +20,7 @@ dispatcher), with a scripted provider and test-owned tools:
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import os
@@ -33,25 +34,39 @@ from typing import Any, Optional
 import pytest
 from sqlalchemy import select, update
 
-from core.agent_core.agent.events import NAMED_ERROR_KINDS
+from core.agent_core.agent.events import NAMED_ERROR_KINDS, ToolFinished
 from core.agent_core.agent.recovery import UNRECORDED_EFFECT
 from core.agent_core.ai.provider import Done
 from core.agent_core.harness.projection import project
 from core.agent_core.messages import (
     AssistantMessage,
+    Citation,
+    HostedAction,
+    HostedCost,
+    HostedImage,
+    HostedNative,
+    HostedRecord,
+    HostedResult,
+    HostedSource,
+    HostedSummary,
+    HostedToolBlock,
     ImageBlock,
+    Origin,
+    ProxyExecution,
     TextBlock,
     ThinkingBlock,
     ToolCallBlock,
     ToolResultMessage,
     UserMessage,
     text,
+    message_to_dict,
 )
 from core.agent_core.tools.base import CallInstance, JobStatus, ToolResult
 from core.message_dispatcher import ConsolidatedMessageDispatcher
 from core.services.agent_steering import ActiveSteerTarget, SteerOutcome, SteerRequest
 from modules.agents.vibey import VibeyAgent
 from modules.agents.vibey.errors import _KIND_KEYS, error_key
+from modules.agents.vibey.media import MediaSnapshots
 from modules.agents.vibey.tools import ToolSuite, local_tool_suite
 from modules.agents.base import AgentRequest
 from modules.agents.model_hub import ModelHubLaunch
@@ -98,6 +113,9 @@ class _Formatter:
 
     def format_result_footer(self, subtype: str, *_args: Any, **_kwargs: Any) -> str:
         return "❌ failed" if subtype == "error" else "✅ done"
+
+    def escape_special_chars(self, text: str) -> str:
+        return text.replace("*", "\\*")
 
 
 class _IMClient:
@@ -191,6 +209,8 @@ class _Controller:
         self.hub_protocol = "anthropic"
         # The Model Hub model definition's limits (C-9 takes W, L_in, and O from them).
         self.hub_limits = {"context_window": 32000, "max_output_tokens": 4096}
+        # HopResolution.hosted_tools as Model Hub resolves it for the hop.
+        self.hub_hosted_tools: dict = {}
         self.agent: Optional[VibeyAgent] = None
         self.agent_service = SimpleNamespace(
             mark_runtime_turn_started=self._native_start,
@@ -244,6 +264,8 @@ class _Controller:
             protocol=self.hub_protocol,
             provider="test-provider",
             supports_images=True,
+            hosted_tools=self.hub_hosted_tools,
+            gateway_request_metadata={"x-avibe-turn-id": turn_id} if turn_id else {},
         )
 
     def _native_start(self, context, *, activation_identity=None) -> None:
@@ -293,7 +315,7 @@ async def _unused_renderer(*_args) -> ToolResult:
 class _Harness:
     def __init__(
         self, engine, tmp_path: Path, platform: str, scripts, *, tools=None, suite=None, language="en", session_id=SESSION,
-        providers=None,
+        providers=None, gateway_client=None,
     ):
         self.session_id = session_id
         self.engine = engine
@@ -302,6 +324,7 @@ class _Harness:
         self.controller = _Controller(engine, platform, language=language)
         self.provider = ScriptedProvider(scripts)
         self.providers = providers or (lambda protocol: self.provider)
+        self.gateway_client = gateway_client
         self.jobs = FakeJobHost()
         self.tools = list(tools or [FakeTool("echo")])
         self.suite = suite or ToolSuite(
@@ -321,6 +344,7 @@ class _Harness:
             providers=self.providers,
             tool_suite=self.suite,
             state_dir=self.tmp_path / "agent_core",
+            gateway_client=self.gateway_client,
         )
         self.controller.agent = agent
         self.agent = agent
@@ -1275,8 +1299,15 @@ async def test_model_hub_records_a_source_stall_as_the_backend_reported_it(engin
     harness.controller.model_hub_runtime = router
     request = harness.request("write the page")
     turn_id = _turn(request.context)
-    token = registry.credentials("vibey", f"vibey:{harness.session_id}", turn_id)
-    registry.begin_gateway_request(backend="vibey", token=token, requested_model_id="test-model")
+    token = registry.prepare_gateway_turn(
+        backend="vibey", token=registry.credentials("vibey", f"vibey:{harness.session_id}", turn_id),
+        turn_id=turn_id, requested_model_id="test-model", resolved_model_id="test-model",
+        source_id="src_stalled01", via_mapping=False,
+    )
+    # A Vibey gateway request names its Turn.
+    registry.begin_gateway_request(
+        backend="vibey", token=token, requested_model_id="test-model", request_metadata={"avibe_turn_id": turn_id},
+    )
     registry.begin_attempt(
         turn_id, source_id="src_stalled01", resolved_model_id="test-model", channel="hub", via_mapping=False
     )
@@ -2150,14 +2181,33 @@ async def test_im_narration_is_live_best_effort_output(engine, session, tmp_path
     assert "Third look." not in hidden.controller.im_client.sent
 
 
-@pytest.mark.parametrize("final, row_type", [("answer", "result"), ("empty", "error"), ("refusal", "error")])
+@pytest.mark.parametrize(
+    "final, row_type", [("answer", "result"), ("empty", "error"), ("refusal", "error"), ("image", "result")]
+)
 async def test_a_final_is_stored_with_its_outcome_semantics(
     engine, session, tmp_path, published, final, row_type
 ) -> None:
+    image = tmp_path / "image-final.png"
+    image.write_bytes(b"\x89PNG\r\n\x1a\nimage")
     message = {
         "answer": assistant("here it is"),
         "empty": assistant(""),
         "refusal": AssistantMessage((), ORIGIN, "refusal"),
+        # A generated image is a reply by itself (``has_reply``).
+        "image": AssistantMessage(
+            (
+                HostedToolBlock(
+                    id="ig_1",
+                    tool="image_generation",
+                    action=HostedAction(type="generate", prompt="a laptop at night"),
+                    record=HostedRecord(status="completed", images=(HostedImage(path=str(image), mime="image/png"),)),
+                    native=HostedNative(source_id="src_testsrc1", payload=({"type": "image_generation_call"},)),
+                ),
+            ),
+            ORIGIN,
+            "stop",
+            hosted_summary=HostedSummary(),
+        ),
     }[final]
     harness = _Harness(engine, tmp_path, "avibe", [[Done(message)]])
 
@@ -2376,6 +2426,390 @@ async def test_a_turn_runs_through_the_real_provider_registry(engine, session, t
     assert final.content == (TextBlock(text="hi"),)
     assert (final.origin.provider, final.origin.api, final.origin.model) == ("upstream", wire, "served-model")
     assert harness.controller.im_client.sent == ["hi"]
+
+
+@pytest.mark.parametrize(
+    ("hub_protocol", "declaration", "include"),
+    [
+        ("anthropic", {"type": "web_search_20250305", "name": "web_search", "max_uses": 5}, []),
+        ("openai_responses", {"type": "web_search"}, ["web_search_call.action.sources"]),
+    ],
+)
+async def test_a_hop_resolved_native_hosted_tool_reaches_the_gateway_pinned_to_its_source(
+    engine, session, tmp_path, published, hub_protocol, declaration, include
+) -> None:
+    """MH-HOSTED-VIBEY-001 (vibey-hosted-tools.md §3.5, §4.1): Vibey takes each tool's mode from the hop. A tool the
+    preflight hop runs natively joins the Turn's tools first, and goes out as the provider's declaration, verbatim, with
+    its include values, on a request pinned to the hop's Source; a proxied tool goes out as its function."""
+    import httpx
+
+    from modules.agents.vibey.models import registry_providers
+
+    path, body = _TEXT_STREAMS[hub_protocol]
+    served = json.dumps(
+        {"provider": "upstream", "api": hub_protocol, "model": "served-model", "source": "src_upstream01"},
+        separators=(",", ":"),
+    )
+    seen: list[httpx.Request] = []
+
+    def gateway(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(
+            200, headers={"content-type": "text/event-stream", "x-avibe-served-hop": served}, text=body
+        )
+
+    executor = {"source_id": "src_executor01", "model_id": "grok-4.6"}
+    async with httpx.AsyncClient(transport=httpx.MockTransport(gateway)) as client:
+        harness = _Harness(
+            engine, tmp_path, "telegram", [], providers=registry_providers(media_loader=None, client=client)
+        )
+        harness.controller.hub_protocol = hub_protocol
+        harness.controller.hub_hosted_tools = {
+            "web_search": {
+                "mode": "native", "declaration": declaration, "include": include, "executor": executor, "replay": True
+            },
+            "x_search": {"mode": "proxy", "executor": executor, "replay": False},
+        }
+        await harness.agent.handle_message(harness.request("hello"))
+
+    (request,) = seen
+    sent = json.loads(request.content)
+    assert request.url.path == path
+    assert request.headers["x-avibe-pin-source"] == "src_test"
+    # The hosted tools lead the Turn's tools: the native one as the provider's declaration, the proxied one as its
+    # canonical function.
+    assert sent["tools"][0] == declaration
+    assert sent["tools"][1]["name"] == "x_search" and sent["tools"][1].get("type", "function") == "function"
+    assert set(include) <= set(sent.get("include", []))
+    assert harness.controller.im_client.sent == ["hi"]
+
+
+async def test_a_native_search_is_kept_as_one_hosted_call_and_replayed_next_turn_as_a_synthetic_call(
+    engine, session, tmp_path, published
+) -> None:
+    """MH-HOSTED-VIBEY-003 (vibey-hosted-tools.md §4.2, §5): the turn's hosted call is committed as one hosted block
+    with its record, and the next turn's request carries it as a same-named call and result with the sources."""
+    import httpx
+
+    from modules.agents.vibey.models import registry_providers
+
+    served = json.dumps(
+        {"provider": "xai", "api": "openai_responses", "model": "grok-4.6", "source": "src_upstream01"},
+        separators=(",", ":"),
+    )
+    call = {
+        "id": "ws_1",
+        "type": "web_search_call",
+        "status": "completed",
+        "action": {"type": "search", "query": "avibe release", "sources": [{"type": "url", "url": "https://avibe.bot/r"}]},
+    }
+    first = (
+        f'data: {json.dumps({"type": "response.output_item.done", "output_index": 0, "item": call})}\n\n'
+        'data: {"type":"response.output_item.added","output_index":1,"item":{"type":"message","id":"msg_1"}}\n\n'
+        'data: {"type":"response.output_text.delta","output_index":1,"delta":"found it"}\n\n'
+        'data: {"type":"response.completed","response":{"status":"completed","output":null}}\n\n'
+    )
+    replies = [first, _TEXT_STREAMS["openai_responses"][1]]
+    seen: list[dict] = []
+
+    def gateway(request: httpx.Request) -> httpx.Response:
+        seen.append(json.loads(request.content))
+        return httpx.Response(
+            200, headers={"content-type": "text/event-stream", "x-avibe-served-hop": served}, text=replies.pop(0)
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(gateway)) as client:
+        harness = _Harness(
+            engine, tmp_path, "telegram", [], providers=registry_providers(media_loader=None, client=client)
+        )
+        harness.controller.hub_protocol = "openai_responses"
+        harness.controller.hub_hosted_tools = {
+            "web_search": {
+                "mode": "native", "declaration": {"type": "web_search"}, "include": [], "executor": None, "replay": False
+            }
+        }
+        await harness.agent.handle_message(harness.request("search"))
+        committed = (await harness.context_rows())[-1].message
+        await harness.agent.handle_message(harness.request("and then?"))
+
+    (hosted,) = [block for block in committed.content if isinstance(block, HostedToolBlock)]
+    assert (hosted.tool, hosted.record.status, hosted.native.source_id) == ("web_search", "completed", "src_upstream01")
+    assert hosted.native.payload == (call,)
+    replayed = [item for item in seen[1]["input"] if item.get("type") in ("function_call", "function_call_output")]
+    assert [item["type"] for item in replayed] == ["function_call", "function_call_output"]
+    assert json.loads(replayed[0]["arguments"]) == {"query": "avibe release"} and replayed[0]["name"] == "web_search"
+    assert "https://avibe.bot/r" in replayed[1]["output"]
+
+
+_EXECUTOR = {"source_id": "src_executor01", "model_id": "grok-4.6"}
+
+
+def _anthropic_reply(*blocks: str, stop_reason: str) -> str:
+    """An Anthropic stream of whole content blocks, each given as its ``content_block_start`` JSON."""
+    events = ['data: {"type":"message_start","message":{"usage":{}}}\n\n']
+    for index, block in enumerate(blocks):
+        events.append(f'data: {{"type":"content_block_start","index":{index},"content_block":{block}}}\n\n')
+        events.append(f'data: {{"type":"content_block_stop","index":{index}}}\n\n')
+    events.append(f'data: {{"type":"message_delta","delta":{{"stop_reason":"{stop_reason}"}}}}\n\n')
+    events.append('data: {"type":"message_stop"}\n\n')
+    return "".join(events)
+
+
+@pytest.mark.parametrize(
+    ("status", "answer", "is_error", "seen", "code"),
+    [
+        (
+            200,
+            {
+                "record": {"status": "completed", "sources": [{"url": "https://avibe.bot/r", "title": "Release", "snippet": "v3.2"}]},
+                "execution": {
+                    "mode": "proxy",
+                    "executor_origin": {"provider": "xai", "api": "openai_responses", "model": "grok-4.6"},
+                    "executor_source_id": "src_executor01",
+                    "executor_billing": "metered",
+                },
+            },
+            False,
+            "https://avibe.bot/r",
+            None,
+        ),
+        # The gateway's own reason: localized where it was written, so it carries no code.
+        (
+            200,
+            {"record": {"status": "failed", "error": "no Source is verified for web search", "sources": []}},
+            True,
+            "[web_search failed: no Source is verified",
+            None,
+        ),
+        (
+            404,
+            {"type": "error", "error": {"type": "not_found", "code": "unknown_tool"}},
+            True,
+            "HTTP 404 unknown_tool",
+            "gateway_refused",
+        ),
+        (None, None, True, "the gateway could not run the call (ConnectError)", "gateway_unreachable"),
+        (200, {"answer": "no record"}, True, "the gateway answered with no hosted result", "gateway_no_result"),
+    ],
+    ids=["executed", "no-executor", "refused", "unreachable", "no-result"],
+)
+async def test_a_proxied_hosted_call_runs_on_the_bound_executor_and_keeps_its_record(
+    engine, session, tmp_path, published, status, answer, is_error, seen, code
+) -> None:
+    """MH-HOSTED-VIBEY-004 (vibey-hosted-tools.md §3.4): on a hop that does not run the tool natively, the model calls
+    the same-named function; Vibey asks the gateway's executor bound for the Turn, keeps the record and execution on
+    the tool result, and the model reads the record as text. A call that never reached an executor is a failed
+    record, never an empty success, and the reason Vibey writes for it carries its code (#2589). Every gateway
+    request, the model's and the executor's, names the Turn (``x-avibe-turn-id``), which binds the executor."""
+    import httpx
+
+    from modules.agents.vibey.models import registry_providers
+
+    served = json.dumps(
+        {"provider": "anthropic", "api": "anthropic", "model": "claude-opus-5-5", "source": "src_upstream01"},
+        separators=(",", ":"),
+    )
+    call = '{"type":"tool_use","id":"toolu_1","name":"web_search","input":{"query":"avibe release"}}'
+    replies = [
+        _anthropic_reply(call, stop_reason="tool_use"),
+        _anthropic_reply('{"type":"text","text":"done"}', stop_reason="end_turn"),
+    ]
+    models: list[dict] = []
+    executed: list[httpx.Request] = []
+    named: list[str | None] = []
+
+    def gateway(request: httpx.Request) -> httpx.Response:
+        named.append(request.headers.get("x-avibe-turn-id"))
+        if request.url.path == "/vibey/v1/hosted-tools/web_search":
+            executed.append(request)
+            if status is None:
+                raise httpx.ConnectError("connection refused", request=request)
+            return httpx.Response(status, json=answer)
+        models.append(json.loads(request.content))
+        return httpx.Response(
+            200, headers={"content-type": "text/event-stream", "x-avibe-served-hop": served}, text=replies.pop(0)
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(gateway)) as client:
+        harness = _Harness(
+            engine,
+            tmp_path,
+            "telegram",
+            [],
+            providers=registry_providers(media_loader=None, client=client),
+            gateway_client=client,
+        )
+        harness.controller.hub_hosted_tools = {"web_search": {"mode": "proxy", "executor": _EXECUTOR, "replay": False}}
+        message = harness.request("search")
+        await harness.agent.handle_message(message)
+
+    assert len(named) == 3 and set(named) == {_turn(message.context)}
+    (request,) = executed
+    assert json.loads(request.content) == {"arguments": {"query": "avibe release"}, "executor": _EXECUTOR}
+    assert request.headers["authorization"] == "Bearer hub-token"
+    # The proxied tool is the canonical function, first among the Turn's tools.
+    assert models[0]["tools"][0]["name"] == "web_search" and "input_schema" in models[0]["tools"][0]
+    result = next(row.message for row in await harness.context_rows() if isinstance(row.message, ToolResultMessage))
+    assert result.is_error is is_error and result.hosted is not None
+    assert (result.hosted.execution is not None) == (not is_error)
+    assert result.hosted.record.error_code == code
+    sent = models[1]["messages"][-1]["content"][0]
+    assert sent["type"] == "tool_result" and seen in json.dumps(sent)
+
+
+async def test_a_proxied_image_is_saved_through_the_media_sink_and_its_record_names_the_file(
+    engine, session, tmp_path, published
+) -> None:
+    """MH-HOSTED-VIBEY-007 (vibey-hosted-tools.md §7.3, item 27): the executor answers a proxied image's bytes beside
+    its record; Vibey saves them through the same sink as a native image, the record lists the file, and no base64
+    reaches the transcript or the model."""
+    import httpx
+
+    from modules.agents.vibey.models import registry_providers
+
+    served = json.dumps(
+        {"provider": "anthropic", "api": "anthropic", "model": "claude-opus-5-5", "source": "src_upstream01"},
+        separators=(",", ":"),
+    )
+    call = '{"type":"tool_use","id":"toolu_1","name":"image_generation","input":{"prompt":"a lighthouse"}}'
+    replies = [
+        _anthropic_reply(call, stop_reason="tool_use"),
+        _anthropic_reply('{"type":"text","text":"here it is"}', stop_reason="end_turn"),
+    ]
+    jpeg = b"\xff\xd8\xff\xe0" + bytes(range(256)) * 8
+    encoded = base64.b64encode(jpeg).decode()
+    answer = {
+        "record": {"status": "completed", "sources": []},
+        "execution": {
+            "mode": "proxy",
+            "executor_origin": {"provider": "openai", "api": "openai_responses", "model": "gpt-image"},
+            "executor_source_id": "src_executor01",
+            "executor_billing": "metered",
+        },
+        "generation": {"revised_prompt": "A lighthouse at dusk", "size": "1536x1024", "quality": "high"},
+        "images": [{"mime": "image/jpeg", "data": encoded}],
+    }
+    models: list[dict] = []
+
+    def gateway(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/vibey/v1/hosted-tools/image_generation":
+            return httpx.Response(200, json=answer)
+        models.append(json.loads(request.content))
+        return httpx.Response(
+            200, headers={"content-type": "text/event-stream", "x-avibe-served-hop": served}, text=replies.pop(0)
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(gateway)) as client:
+        harness = _Harness(
+            engine,
+            tmp_path,
+            "telegram",
+            [],
+            providers=registry_providers(media_loader=None, client=client),
+            gateway_client=client,
+        )
+        harness.controller.hub_hosted_tools = {"image_generation": _PROXY_IMAGE}
+        await harness.agent.handle_message(harness.request("paint a lighthouse"))
+
+    result = next(row.message for row in await harness.context_rows() if isinstance(row.message, ToolResultMessage))
+    (image,) = result.hosted.record.images
+    assert not result.is_error and result.hosted.record.status == "completed"
+    assert Path(image.path).read_bytes() == jpeg
+    assert (image.mime, image.width, image.height, image.bytes) == ("image/jpeg", 1536, 1024, len(jpeg))
+    assert f"Image saved: {image.path}" in result.content[0].text
+    assert encoded not in json.dumps(models) and encoded not in json.dumps(message_to_dict(result))
+    # The executor's rendered prompt and resolved size and quality, kept as a native call's block keeps them.
+    assert result.hosted.action == HostedAction(
+        "generate", prompt="A lighthouse at dusk", size="1536x1024", quality="high"
+    )
+    assert result.content[0].text.startswith('[image_generation: "A lighthouse at dusk"]')
+
+
+@pytest.mark.parametrize(
+    ("images", "stored", "error", "code"),
+    [
+        ([], True, "the executor returned no image", "executor_no_image"),
+        ([{"mime": "image/jpeg", "data": "@@@ not base64 @@@"}], True, "the image could not be saved: ", "image_not_saved"),
+        ([{"mime": "image/jpeg", "data": "/9j/4AAQ"}], False, "nothing here can keep a generated image", "image_no_store"),
+    ],
+    ids=["no-image", "unreadable", "no-store"],
+)
+async def test_a_proxied_image_that_was_not_saved_is_a_failed_call_with_its_code(tmp_path, images, stored, error, code):
+    """§7.3, #2589: an executor's completed image call that saved no file is a failed record, never a completed one
+    listing nothing, and the reason Vibey writes for it carries its code, by which a display localizes it."""
+    import httpx
+
+    from core.agent_core.ai.provider import HostedExecutor, ModelEndpoint
+    from core.agent_core.tools.hosted import hosted_tool_spec
+    from modules.agents.vibey.tools import HostedTool
+
+    answer = {
+        "record": {"status": "completed", "sources": []},
+        "execution": {
+            "mode": "proxy",
+            "executor_origin": {"provider": "openai", "api": "openai_responses", "model": "gpt-image"},
+            "executor_source_id": "src_executor01",
+            "executor_billing": "metered",
+        },
+        "images": images,
+    }
+    endpoint = ModelEndpoint("anthropic", "http://hub.invalid/vibey/v1", "claude-opus-5-5", "hub-token")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(200, json=answer))) as client:
+        tool = HostedTool(
+            hosted_tool_spec("image_generation"),
+            HostedExecutor("src_executor01", "gpt-image"),
+            endpoint,
+            client,
+            media=MediaSnapshots(None, tmp_path / "media") if stored else None,  # type: ignore[arg-type]
+        )
+        result = await tool.execute({"prompt": "a lighthouse"}, None)  # type: ignore[arg-type]
+
+    record = result.hosted.record
+    assert result.is_error and record.status == "failed" and record.images == ()
+    assert record.error.startswith(error) and record.error_code == code
+    assert not (tmp_path / "media").exists() or not any((tmp_path / "media").iterdir())
+
+
+_NATIVE_SEARCH = {"mode": "native", "declaration": {"type": "web_search"}, "include": [], "executor": None, "replay": False}
+_PROXY_IMAGE = {"mode": "proxy", "executor": {"source_id": "src_executor01", "model_id": "gpt-image"}, "replay": False}
+
+
+def _without(entry: dict, key: str) -> dict:
+    return {name: value for name, value in entry.items() if name != key}
+
+
+@pytest.mark.parametrize(
+    "hosted_tools",
+    [
+        None,
+        {"web_fetch": _PROXY_IMAGE},
+        {"web_search": _without(_NATIVE_SEARCH, "declaration")},
+        {"web_search": {**_without(_NATIVE_SEARCH, "declaration"), "mode": "proxy"}},
+        {"web_search": {**_NATIVE_SEARCH, "note": "extra"}},
+        {"web_search": _without(_NATIVE_SEARCH, "replay")},
+        {"image_generation": {**_PROXY_IMAGE, "executor": {"source_id": "src_executor01"}}},
+        {"image_generation": {**_PROXY_IMAGE, "executor": {"source_id": "openai-main", "model_id": "gpt-image"}}},
+        {"image_generation": {**_PROXY_IMAGE, "replay": True}},
+        {"web_search": {**_NATIVE_SEARCH, "mode": []}},
+        {"web_search": {**_NATIVE_SEARCH, "include": "web_search_call.action.sources"}},
+    ],
+    ids=[
+        "absent", "unknown-tool", "native-without-declaration", "proxy-with-include", "extra-field", "no-replay",
+        "half-executor", "executor-not-a-source-id", "image-replay", "unhashable-mode", "include-not-a-list",
+    ],
+)
+def test_a_hop_with_an_invalid_hosted_tool_entry_is_refused(hosted_tools) -> None:
+    from modules.agents.vibey.models import HopResolutionError, selection_from_hop
+
+    hop = ModelHubLaunch(
+        backend="vibey", channel="hub", requested_model="m", target_model="m", runtime_model="m",
+        source_id="src_test", gateway_base_url="http://hub.invalid/vibey", gateway_token="hub-token",
+        protocol="openai_responses", provider="openai",
+    ).to_hop_resolution()
+    hop["hosted_tools"] = hosted_tools
+
+    with pytest.raises(HopResolutionError, match="hosted"):
+        selection_from_hop(hop)
 
 
 # How a stream breaks off: the connection simply ends, or CLIProxyAPI (Model Hub's engine) reports the upstream
@@ -2625,6 +3059,36 @@ async def test_images_read_together_reach_the_model_with_their_own_calls_in_call
         (image,) = [block for block in message.content if isinstance(block, ImageBlock)]
         assert image.name == f"{name}.png"
         assert (await harness.agent.media.load(image.media_token))[0] == pictures[name]
+
+
+async def test_a_generated_image_is_kept_as_an_immutable_file_its_bytes_name_and_type(tmp_path):
+    """MH-HOSTED-VIBEY-007, §7.3: the media sink keeps a generated image as a content-addressed file, typed by what its
+    bytes are, reused only while it still holds them, and refuses anything that is not a supported image."""
+
+    media = MediaSnapshots(None, tmp_path / "media")  # type: ignore[arg-type]
+    jpeg = b"\xff\xd8\xff\xe0" + bytes(range(256)) * 8
+
+    image = await media.save_image(base64.b64encode(jpeg).decode())
+    again = await media.save_image(base64.b64encode(jpeg).decode())
+
+    assert image == again and image.mime == "image/jpeg" and image.bytes == len(jpeg)
+    path = Path(image.path)
+    assert path.is_absolute() and path.parent == tmp_path / "media" and path.read_bytes() == jpeg
+    # Its owner can change it: a changed file is written again, never reused.
+    path.write_bytes(b"changed by an agent's shell")
+    assert await media.save_image(base64.b64encode(jpeg).decode()) == image and path.read_bytes() == jpeg
+    # A link put in its place is replaced by one rename, never followed: its target keeps its bytes and its mode.
+    secret = tmp_path / "secret.key"
+    secret.write_bytes(b"key")
+    os.chmod(secret, 0o600)
+    path.unlink()
+    path.symlink_to(secret)
+    assert await media.save_image(base64.b64encode(jpeg).decode()) == image
+    assert not path.is_symlink() and path.read_bytes() == jpeg
+    assert secret.read_bytes() == b"key" and secret.stat().st_mode & 0o777 == 0o600
+    for encoded in ("@@@ not base64 @@@", base64.b64encode(b"plain text, not an image").decode()):
+        with pytest.raises(ValueError):
+            await media.save_image(encoded)
 
 
 @pytest.mark.parametrize("state", ["exited", "running"])
@@ -3125,3 +3589,264 @@ async def test_a_running_service_prunes_settled_jobs_after_its_runs(engine, sess
     await harness.agent.handle_message(harness.request("anything else?"))
 
     await _until(lambda: not job_dir.exists(), "a settled job outlived its retention while the service ran")
+
+
+CHANGELOG = "https://platform.openai.com/docs/changelog"
+
+
+def _cited_search_turn(image: Optional[Path] = None) -> list:
+    """One response with a native web search, an answer that cites it, and optionally a generated image."""
+    blocks: list = [
+        HostedToolBlock(
+            id="srvtoolu_1",
+            tool="web_search",
+            action=HostedAction(type="search", queries=("responses api *domain* filters",)),
+            record=HostedRecord(status="completed", sources=(HostedSource(url=CHANGELOG, title="Changelog"),)),
+            native=HostedNative(source_id="src_testsrc1", payload=({"type": "server_tool_use"},)),
+        )
+    ]
+    if image is not None:
+        blocks.append(
+            HostedToolBlock(
+                id="ig_1",
+                tool="image_generation",
+                action=HostedAction(type="generate", prompt="a laptop at night", size="1536x1024"),
+                record=HostedRecord(status="completed", images=(HostedImage(path=str(image), mime="image/png"),)),
+                native=HostedNative(source_id="src_testsrc1", payload=({"type": "image_generation_call"},)),
+            )
+        )
+    answer = "Domain filters shipped."
+    blocks.append(TextBlock(text=answer, citations=(Citation(url=CHANGELOG, title="Changelog", start=0, end=len(answer)),)))
+    message = AssistantMessage(
+        tuple(blocks), ORIGIN, "stop", hosted_summary=HostedSummary(cost=HostedCost(basis="list", usd=0.01))
+    )
+    return [[Done(message)]]
+
+
+async def test_a_native_hosted_call_reaches_im_as_one_line_with_its_cited_answer_and_image(
+    engine, session, tmp_path, published
+) -> None:
+    """MH-HOSTED-UI-011: the line, the cited answer and the generated image, as an IM channel gets them."""
+    image = tmp_path / "image-3f2a.png"
+    image.write_bytes(b"\x89PNG\r\n\x1a\nimage")
+    harness = _Harness(engine, tmp_path, "telegram", _cited_search_turn(image))
+
+    await harness.agent.handle_message(harness.request("what shipped?"))
+
+    search = "🔎 Web search “responses api \\*domain\\* filters” · native (test-provider) · 1 source"
+    image_line = "🖼 Image generation “a laptop at night” · native (test-provider) · 1 image · ≈ $0.01 for 2 calls"
+    with engine.connect() as conn:
+        lines = [
+            row["content_text"]
+            for row in conn.execute(
+                select(agent_events)
+                .where(agent_events.c.session_id == SESSION, agent_events.c.event_type == "tool_call")
+                .order_by(agent_events.c.created_at, agent_events.c.id)
+            ).mappings()
+        ]
+    # One line per hosted call, escaped for the destination; the response's cost is
+    # shown once, on its last call. The process log opens with the first of them.
+    assert lines == [search, image_line]
+    sent = harness.controller.im_client.sent
+    assert sent[0] == search
+    [answer] = [item for item in sent if item.startswith("Domain filters shipped.")]
+    # The citation is a Markdown link where its span ends; the image is an upload, not a link.
+    assert f"]({CHANGELOG})" in answer
+    assert "file://" not in answer
+    assert harness.controller.im_client.uploads == [str(image.resolve())]
+
+
+async def test_a_native_hosted_call_reaches_the_workbench_as_a_card_and_cited_answer(
+    engine, session, tmp_path, published
+) -> None:
+    harness = _Harness(engine, tmp_path, "avibe", _cited_search_turn())
+
+    await harness.agent.handle_message(harness.request("what shipped?"))
+
+    with engine.connect() as conn:
+        [event] = conn.execute(
+            select(agent_events).where(agent_events.c.session_id == SESSION, agent_events.c.event_type == "tool_call")
+        ).mappings().all()
+    card = json.loads(event["content_json"])["hosted"]
+    assert (card["call_id"], card["mode"], card["subject"], card["cost"]) == (
+        "srvtoolu_1", "native", "responses api *domain* filters", {"basis": "list", "usd": 0.01, "calls": 1}
+    )
+    [result] = harness.rows("result")
+    [citation] = json.loads(result["content_json"])["citations"]
+    assert citation["url"] == CHANGELOG
+    assert result["content_text"].startswith("Domain filters shipped.") and f"]({CHANGELOG})" in result["content_text"]
+
+
+async def test_a_proxied_hosted_result_shows_once_its_result_is_committed(engine, session, tmp_path, published) -> None:
+    """The record the executor returned, read back from the committed tool-result row."""
+    from modules.agents.vibey.agent import _Run
+
+    harness = _Harness(engine, tmp_path, "telegram", [[Done(assistant("ok"))]])
+    # A tool result answers a Turn, so the Session has consumed an input first.
+    await harness.agent.handle_message(harness.request("hello"))
+    request = harness.request("what did OpenAI post?")
+    call = ToolCallBlock(id="call_x1", name="x_search", arguments={"query": "from:OpenAI"})
+    result = ToolResultMessage(
+        tool_call_id="call_x1",
+        tool_name="x_search",
+        content=(text("1. DevDay 2026 recap"),),
+        hosted=HostedResult(
+            record=HostedRecord(status="completed", sources=(HostedSource(url="https://x.com/OpenAI/status/1"),)),
+            execution=ProxyExecution(
+                executor_origin=Origin(provider="xai", api="openai_responses", model="grok-4.6"),
+                executor_source_id="src_grok0001",
+                executor_billing="metered",
+                cost=HostedCost(basis="reported", usd=0.11),
+            ),
+        ),
+    )
+    entry = await harness.agent.store.append_tool_result(SESSION, result, details={})
+    run = _Run(request=request, session_id=SESSION, turn_id="turn", instance="test")
+    run.tool_calls[call.id] = call
+
+    await harness.agent._on_event(run, ToolFinished("turn", 1, call.id, entry.row_id, False))
+
+    assert harness.controller.im_client.sent[-1:] == ["🔎 X search “from:OpenAI” · via xAI proxy · 1 post · $0.11"]
+
+
+async def test_generated_images_reach_the_user_when_no_final_reply_follows(engine, session, tmp_path, published) -> None:
+    """A paid image is delivered even when the run fails before a final reply could carry it."""
+    from core.agent_core.ai.provider import ProviderError
+
+    image = tmp_path / "image-orphan.png"
+    image.write_bytes(b"\x89PNG\r\n\x1a\nimage")
+    generated = AssistantMessage(
+        (
+            HostedToolBlock(
+                id="ig_1",
+                tool="image_generation",
+                action=HostedAction(type="generate", prompt="a laptop at night"),
+                record=HostedRecord(status="completed", images=(HostedImage(path=str(image), mime="image/png"),)),
+                native=HostedNative(source_id="src_testsrc1", payload=({"type": "image_generation_call"},)),
+            ),
+            ToolCallBlock(id="call_1", name="echo", arguments={}),
+        ),
+        ORIGIN,
+        "tool_use",
+        hosted_summary=HostedSummary(),
+    )
+    harness = _Harness(
+        engine, tmp_path, "telegram",
+        [[Done(generated)], [ProviderError("invalid_request", "the served response broke its protocol", False)]],
+    )
+
+    await harness.agent.handle_message(harness.request("draw it, then summarize"))
+
+    assert harness.controller.im_client.uploads == [str(image.resolve())]
+    assert harness.controller.terminals[-1]["is_error"] is True
+
+
+def test_an_image_is_attached_unless_the_reply_already_links_it(tmp_path) -> None:
+    """A prose mention of the path is not a delivered file; a relative path names no file to send."""
+    from modules.agents.vibey.agent import _Run, VibeyAgent
+
+    image = tmp_path / "image-3f2a.png"
+    run = _Run(request=None, session_id=SESSION, turn_id="turn", instance="test")
+    run.hosted_images = [("relative.png", "relative.png"), (str(image), image.name)]
+
+    assert VibeyAgent._hosted_image_links(run, f"Saved it to {image}.") == f"![{image.name}]({image.as_uri()})"
+    assert VibeyAgent._hosted_image_links(run, f"Here: ![night]({image.as_uri()})") == ""
+
+
+async def test_a_hosted_named_call_without_a_record_still_shows_its_tool_line(engine, session, tmp_path, published) -> None:
+    """A hosted tool that failed before producing a record (a plain error result) is not silently dropped."""
+    from modules.agents.vibey.agent import _Run
+
+    harness = _Harness(engine, tmp_path, "telegram", [[Done(assistant("ok"))]])
+    # A tool result answers a Turn, so the Session has consumed an input first.
+    await harness.agent.handle_message(harness.request("hello"))
+    request = harness.request("search X")
+    call = ToolCallBlock(id="call_x1", name="x_search", arguments={"query": "from:OpenAI"})
+    entry = await harness.agent.store.append_tool_result(
+        SESSION,
+        ToolResultMessage(tool_call_id="call_x1", tool_name="x_search", content=(text("not available"),), is_error=True),
+        details={},
+    )
+    run = _Run(request=request, session_id=SESSION, turn_id="turn", instance="test")
+    run.tool_calls[call.id] = call
+
+    await harness.agent._on_event(run, ToolFinished("turn", 1, call.id, entry.row_id, True))
+
+    assert harness.controller.im_client.sent[-1:] == ['🔧 x_search {"query": "from:OpenAI"}']
+
+
+async def test_a_final_whose_cited_text_is_all_silent_stays_silent(engine, session, tmp_path, published) -> None:
+    """No citation outlives the text it cited: the reply is the model's silence, not a bare source link."""
+    silent = AssistantMessage(
+        (TextBlock(text="<silent>internal note</silent>", citations=(Citation(url=CHANGELOG, title="Changelog"),)),),
+        ORIGIN,
+        "stop",
+    )
+    harness = _Harness(engine, tmp_path, "telegram", [[Done(silent)]])
+
+    await harness.agent.handle_message(harness.request("anything new?"))
+
+    assert not any(CHANGELOG in item for item in harness.controller.im_client.sent)
+    assert not any(CHANGELOG in (row["content_text"] or "") for row in harness.rows("result") + harness.rows("assistant"))
+
+
+async def test_an_image_only_final_is_a_reply_and_reaches_the_user(engine, session, tmp_path, published) -> None:
+    """MH-HOSTED-UI-012: a model asked for a picture may answer with the picture alone; that is not an empty reply."""
+    image = tmp_path / "image-only.png"
+    image.write_bytes(b"\x89PNG\r\n\x1a\nimage")
+    final = AssistantMessage(
+        (
+            HostedToolBlock(
+                id="ig_1",
+                tool="image_generation",
+                action=HostedAction(type="generate", prompt="a laptop at night"),
+                record=HostedRecord(status="completed", images=(HostedImage(path=str(image), mime="image/png"),)),
+                native=HostedNative(source_id="src_testsrc1", payload=({"type": "image_generation_call"},)),
+            ),
+        ),
+        ORIGIN,
+        "stop",
+        hosted_summary=HostedSummary(),
+    )
+    harness = _Harness(engine, tmp_path, "telegram", [[Done(final)]])
+
+    await harness.agent.handle_message(harness.request("draw a laptop at night"))
+
+    assert harness.controller.terminals[-1]["is_error"] is False
+    assert harness.controller.im_client.uploads == [str(image.resolve())]
+    # The reply is the image under its heading, never the empty-reply error.
+    [result] = harness.rows("result")
+    assert result["content_text"].startswith(i18n_t("info.generatedImagesFallback", "en"))
+    assert not any(i18n_t("vibeyAgent.error.emptyResponse", "en") in item for item in harness.controller.im_client.sent)
+
+
+async def test_an_image_from_a_call_that_did_not_complete_is_not_delivered(engine, session, tmp_path, published) -> None:
+    """MH-HOSTED-UI-014: delivery follows the card and ``has_reply``: a call that did not complete shows no image."""
+    image = tmp_path / "partial.png"
+    image.write_bytes(b"\x89PNG\r\n\x1a\npartial")
+    final = AssistantMessage(
+        (
+            HostedToolBlock(
+                id="ig_2",
+                tool="image_generation",
+                action=HostedAction(type="generate", prompt="a laptop at night"),
+                record=HostedRecord(
+                    status="incomplete",
+                    error="the provider stopped the image",
+                    images=(HostedImage(path=str(image), mime="image/png"),),
+                ),
+                native=HostedNative(source_id="src_testsrc1", payload=({"type": "image_generation_call"},)),
+            ),
+            TextBlock(text="The image could not be finished."),
+        ),
+        ORIGIN,
+        "stop",
+        hosted_summary=HostedSummary(),
+    )
+    harness = _Harness(engine, tmp_path, "telegram", [[Done(final)]])
+
+    await harness.agent.handle_message(harness.request("draw a laptop at night"))
+
+    assert harness.controller.terminals[-1]["is_error"] is False
+    assert harness.controller.im_client.uploads == []
+

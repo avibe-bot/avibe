@@ -9,23 +9,43 @@ Payload and stream rules are ported from tau's ``tau_ai/openai_compatible.py``
 
 from __future__ import annotations
 
+import asyncio
+import copy
 import json
 from collections.abc import AsyncIterator, Mapping
+from dataclasses import replace
 from typing import Any
 
 import httpx
 
+from core.agent_core.ai.hosted import (
+    citation,
+    image_dimensions,
+    reported_cost,
+    reported_counts,
+    responses_hosted_block,
+    responses_hosted_tool,
+    x_cited_sources,
+)
 from core.agent_core.ai._common import (
     ServedHopResolver,
+    WireRequest,
     auth_headers,
     content_parts,
     drive_sse_stream,
     dispatch_wire_event,
     endpoint_origin,
+    forced_tool,
+    hosted_pin,
+    PIN_UNAVAILABLE,
+    portable_request,
     join_endpoint_url,
     json_object,
+    native_declaration,
+    native_hosted_tools,
     prepare_messages,
     request_credential_values,
+    required_only_tool,
     StreamAssembler,
     validate_wire_shape,
     WireField,
@@ -34,21 +54,39 @@ from core.agent_core.ai._common import (
 )
 from core.agent_core.ai.provider import (
     Done,
+    HostedToolRoute,
     MediaLoader,
+    MediaSink,
     ModelRequest,
     ProviderAdapter,
     ProviderError,
     TextDelta,
 )
 from core.agent_core.cancel import CancelToken
+from core.agent_core.ai.sse import DEFAULT_MAX_PENDING_EVENT_SIZE
 from core.agent_core.messages import (
     AssistantMessage,
+    HostedImage,
+    HostedToolBlock,
     TextBlock,
     ThinkingBlock,
     ToolCallBlock,
     ToolResultMessage,
     UserMessage,
 )
+
+#: A preview OpenAI streams while an image is drawn (``partial_images``); only the done item's image is kept.
+_PARTIAL_IMAGE_EVENT = "response.image_generation_call.partial_image"
+#: Every image one response streams, previews and finals, decoded (plan item 25). The terminal response repeats every
+#: final image in one event, so the budget is what one event can carry as base64, less a margin for the rest of it.
+IMAGE_BYTES_PER_RESPONSE = (DEFAULT_MAX_PENDING_EVENT_SIZE - 1024 * 1024) * 3 // 4
+#: Image events beyond the declared previews and the final, per image call (plan item 25).
+_IMAGE_EVENT_MARGIN = 2
+#: An event longer than this (a generated image's) is parsed off the controller loop.
+_INLINE_PARSE_CHARS = 1024 * 1024
+#: The line cap of a stream that may carry a generated image: the whole event cap, as one image line can be several
+#: MiB of base64 (§7.5). Other streams keep the default line cap.
+IMAGE_STREAM_LINE_BYTES = DEFAULT_MAX_PENDING_EVENT_SIZE
 
 _KNOWN_RESPONSE_EVENTS = frozenset(
     {
@@ -269,6 +307,7 @@ class OpenAIResponsesAdapter(ProviderAdapter):
         client: httpx.AsyncClient | None = None,
         *,
         media_loader: MediaLoader | None = None,
+        media_sink: MediaSink | None = None,
         served_hop_resolver: ServedHopResolver | None = None,
         gateway: bool = False,
     ) -> None:
@@ -276,6 +315,7 @@ class OpenAIResponsesAdapter(ProviderAdapter):
         self._client = client or httpx.AsyncClient(timeout=None, trust_env=not gateway)
         self._owns_client = client is None
         self._media_loader = media_loader
+        self._media_sink = media_sink
         self._served_hop_resolver = served_hop_resolver
         self._gateway = gateway
 
@@ -307,6 +347,7 @@ class OpenAIResponsesAdapter(ProviderAdapter):
             protocol=self.protocol,
             media_loader=self._media_loader,
             cancel=cancel,
+            endpoint=request.endpoint,
         )
         if isinstance(prepared, ProviderError):
             terminal = assembler.terminal(prepared)
@@ -323,12 +364,12 @@ class OpenAIResponsesAdapter(ProviderAdapter):
         status: str | None = None
         incomplete_reason: str | None = None
         refusal = False
+        # The hosted tools this request declared natively: only their items become hosted calls (§4.2).
+        hosted = frozenset(native_hosted_tools(request))
+        images = _ImageBudget(native_hosted_tools(request).get("image_generation"))
 
         try:
-            payload = build_responses_payload(request, transformed_messages, loaded_images=loaded_images)
-            headers = auth_headers(request.endpoint, provider="openai", gateway=self._gateway)
-            headers.setdefault("content-type", "application/json")
-            url = join_endpoint_url(request.endpoint.base_url, "/responses")
+            wire = wire_request(request, transformed_messages, gateway=self._gateway, loaded_images=loaded_images)
             async def translate(events: AsyncIterator[Any]) -> AsyncIterator[Any]:
                 nonlocal status, incomplete_reason, refusal
                 async for event in events:
@@ -339,7 +380,24 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                         return
                     if not event.data or event.data == "[DONE]":
                         continue
-                    chunk = json_object(event.data)
+                    # A preview of an image still being drawn is never kept: named as one, its base64 is not even
+                    # parsed. Named or known by its JSON type, it counts against the response's image budget.
+                    named_preview = event.event == _PARTIAL_IMAGE_EVENT
+                    if named_preview:
+                        chunk = None
+                    elif len(event.data) > _INLINE_PARSE_CHARS:
+                        # A generated image's event is many MiB: parsed off the controller loop.
+                        chunk = await asyncio.to_thread(json_object, event.data)
+                    else:
+                        chunk = json_object(event.data)
+                    if named_preview or (chunk is not None and chunk.get("type") == _PARTIAL_IMAGE_EVENT):
+                        exceeded = images.charge(len(event.data))
+                        if exceeded is not None:
+                            terminal = assembler.terminal(assembler.error(exceeded, kind="invalid_request"))
+                            if terminal is not None:
+                                yield terminal
+                            return
+                        continue
                     if chunk is None:
                         terminal = assembler.terminal(
                             assembler.error(
@@ -628,6 +686,11 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                             assembler.merge_reasoning_item(output_index, item)
                         elif item_type == "message":
                             assembler.ensure_text_slot(output_index)
+                        else:
+                            # A hosted call takes its place in the output order now; its done item fills it in.
+                            if responses_hosted_tool(item) == "image_generation":
+                                images.started()
+                            _add_hosted_call(assembler, item, output_index, hosted, finished=False)
                     elif event_type == "response.reasoning_summary_text.done":
                         continue
                     elif event_type == "response.reasoning_summary_part.done":
@@ -913,9 +976,28 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                                 if emitted is not None:
                                     yield emitted
                                 refusal = refusal or message_refusal
+                                _add_message_citations(assembler, output_index, item)
                                 end = assembler.block_end(output_index)
                                 if end is not None:
                                     yield end
+                            elif (
+                                responses_hosted_tool(item) == "image_generation"
+                                and "image_generation" in hosted
+                                and assembler.source_id is not None
+                            ):
+                                encoded = item.get("result")
+                                exceeded = images.charge(len(encoded) if isinstance(encoded, str) else 0)
+                                if exceeded is not None:
+                                    terminal = assembler.terminal(assembler.error(exceeded, kind="invalid_request"))
+                                    if terminal is not None:
+                                        yield terminal
+                                    return
+                                image, failure = await _saved_image(self._media_sink, item)
+                                _add_hosted_call(
+                                    assembler, item, output_index, hosted, image=image, image_error=failure
+                                )
+                            else:
+                                _add_hosted_call(assembler, item, output_index, hosted)
                     elif event_type in {"response.completed", "response.incomplete"}:
                         response_body = chunk.get("response")
                         if not isinstance(response_body, Mapping):
@@ -1016,21 +1098,8 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                                     yield terminal
                                 return
                             response_error = response_value
-                        output = response_body.get("output")
-                        if output is not None and not isinstance(output, list):
-                            terminal = assembler.terminal(
-                                assembler.error(
-                                    f"{event_type} response output must be an array",
-                                    kind="invalid_request",
-                                )
-                            )
-                            if terminal is not None:
-                                yield terminal
-                            return
-                        terminal_output_error, terminal_refusal = _apply_terminal_output_items(
-                            output,
-                            assembler,
-                            reasoning,
+                        terminal_output_error, terminal_refusal = _finish_response(
+                            response_body, event_type, assembler, reasoning, hosted
                         )
                         refusal = refusal or terminal_refusal
                         if terminal_output_error is not None:
@@ -1177,6 +1246,13 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                                     yield terminal
                                 return
                             assembler.set_usage(_responses_usage(response_body.get("usage")))
+                            # The calls it ran before failing were billed: its partial keeps them and what they cost.
+                            finish_error, _ = _finish_response(response_body, event_type, assembler, reasoning, hosted)
+                            if finish_error is not None:
+                                terminal = assembler.terminal(finish_error)
+                                if terminal is not None:
+                                    yield terminal
+                                return
                         elif "error" in chunk and chunk.get("error") is not None and not isinstance(
                             chunk.get("error"), Mapping
                         ):
@@ -1269,24 +1345,54 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                 terminal = assembler.terminal(assembler.incomplete())
                 if terminal is not None:
                     yield terminal
-            driver = drive_sse_stream(
-                self._client,
-                method="POST",
-                url=url,
-                json_body=payload,
-                headers=headers,
-                cancel=cancel,
-                assembler=assembler,
-                endpoint=request.endpoint,
-                resolver=self._served_hop_resolver,
-                gateway=self._gateway,
-                translate=translate,
-            )
-            try:
-                async for event in driver:
-                    yield event
-            finally:
-                await driver.aclose()
+            sending = request
+            while True:
+                driver = drive_sse_stream(
+                    self._client,
+                    method="POST",
+                    url=wire.url,
+                    json_body=wire.body,
+                    headers=wire.headers,
+                    cancel=cancel,
+                    assembler=assembler,
+                    endpoint=sending.endpoint,
+                    resolver=self._served_hop_resolver,
+                    gateway=self._gateway,
+                    translate=translate,
+                    # A generated image arrives as one base64 line of several MiB (§7.5).
+                    max_line_size=IMAGE_STREAM_LINE_BYTES if "image_generation" in hosted else None,
+                )
+                unavailable = False
+                try:
+                    async for event in driver:
+                        if event is PIN_UNAVAILABLE:
+                            unavailable = True
+                            break
+                        yield event
+                finally:
+                    await driver.aclose()
+                if not unavailable or sending is not request:
+                    return
+                # The pinned Source cannot serve this content: the same request once more, in portable form and
+                # unpinned, which the gateway fails over as any other (§3.5). Never the generic retry.
+                sending = portable_request(request)
+                hosted = frozenset()
+                prepared = await prepare_messages(
+                    sending.messages,
+                    target=endpoint_origin(sending.endpoint),
+                    supports_images=sending.supports_images,
+                    protocol=self.protocol,
+                    media_loader=self._media_loader,
+                    cancel=cancel,
+                    endpoint=sending.endpoint,
+                )
+                if isinstance(prepared, ProviderError):
+                    terminal = assembler.terminal(prepared)
+                    if terminal is not None:
+                        yield terminal
+                    return
+                transformed_messages, loaded_images = prepared
+                wire = wire_request(sending, transformed_messages, gateway=self._gateway, loaded_images=loaded_images)
         except Exception as exc:
             terminal = assembler.terminal(assembler.exception(exc))
             if terminal is not None:
@@ -1311,21 +1417,53 @@ def build_responses_payload(
         "stream": True,
         "store": False,
     }
-    if request.tools:
-        payload["tools"] = [
-            {
-                "type": "function",
-                "name": tool.name,
-                "description": tool.description,
-                "parameters": dict(tool.input_schema),
-            }
-            for tool in request.tools
-        ]
-    if request.reasoning_effort and request.reasoning_effort.lower() not in {"off", "disabled"}:
-        payload["reasoning"] = {"effort": _openai_effort(request.reasoning_effort), "summary": "auto"}
-        if request.reasoning_effort.lower() != "none":
-            payload["include"] = ["reasoning.encrypted_content"]
+    # A hosted tool this hop runs natively is sent as the provider's declaration in its spec's place (§4.1).
+    native = native_hosted_tools(request)
+    tools = [
+        native_declaration(native[tool.name])
+        if tool.name in native
+        else {
+            "type": "function",
+            "name": tool.name,
+            "description": tool.description,
+            "parameters": dict(tool.input_schema),
+        }
+        for tool in request.tools
+    ]
+    if tools:
+        payload["tools"] = tools
+    include: list[str] = []
+    effort = sent_effort(request.reasoning_effort or "")
+    if effort is not None:
+        payload["reasoning"] = {"effort": effort, "summary": "auto"}
+        if effort != "none":
+            include.append("reasoning.encrypted_content")
+    # A native hosted tool's own include values, e.g. OpenAI's web_search_call.action.sources (§4.1).
+    for route in native.values():
+        include.extend(route.include)
+    if include:
+        payload["include"] = list(dict.fromkeys(include))
+    forced = forced_tool(request)
+    if forced is not None:
+        name, route = forced
+        payload["tool_choice"] = required_only_tool(tools) if route is not None else {"type": "function", "name": name}
     return payload
+
+
+def wire_request(
+    request: ModelRequest,
+    messages: tuple[Any, ...],
+    *,
+    gateway: bool,
+    loaded_images: Mapping[str, tuple[str, str]] | None = None,
+) -> WireRequest:
+    """The Responses request for already prepared ``messages``, as the adapter sends it."""
+
+    payload = build_responses_payload(request, messages, loaded_images=loaded_images)
+    headers = auth_headers(request.endpoint, provider="openai", gateway=gateway)
+    headers.setdefault("content-type", "application/json")
+    headers.update(hosted_pin(request, messages))
+    return WireRequest(join_endpoint_url(request.endpoint.base_url, "/responses"), headers, payload)
 
 
 def _message_to_response(
@@ -1367,6 +1505,9 @@ def _message_to_response(
                         "arguments": json.dumps(dict(block.arguments), ensure_ascii=False),
                     }
                 )
+            elif isinstance(block, HostedToolBlock):
+                # Its output items, verbatim (transform allowed it for this Source).
+                items.extend(copy.deepcopy(list(block.native.payload)))
         return items or [{"role": "assistant", "content": ""}]
     if isinstance(message, ToolResultMessage):
         values = content_parts(message.content, include_images=supports_images, loaded_images=loaded_images)
@@ -1423,6 +1564,7 @@ def _apply_terminal_output_items(
     items: Any,
     assembler: StreamAssembler,
     reasoning: set[int],
+    hosted: frozenset[str] = frozenset(),
 ) -> tuple[ProviderError | None, bool]:
     if not isinstance(items, list):
         return None, False
@@ -1455,7 +1597,154 @@ def _apply_terminal_output_items(
             refusal = refusal or message_refusal
             if message_refusal and assembler.has_text_slot(index):
                 _append_message_refusal(assembler, index, item)
+            if assembler.has_text_slot(index) and not assembler.has_text_citations(index):
+                _add_message_citations(assembler, index, item)
+        else:
+            # A hosted call this stream never finished in ``output_item.done``; one it did keeps its block.
+            _add_hosted_call(assembler, item, index, hosted, backfill=True)
     return None, refusal
+
+
+def _finish_response(
+    response_body: Mapping[str, Any],
+    event_type: str,
+    assembler: StreamAssembler,
+    reasoning: set[int],
+    hosted: frozenset[str],
+) -> tuple[ProviderError | None, bool]:
+    """What every terminal Response carries beyond its status, read once for completed, incomplete and failed alike:
+    the hosted facts in its usage, the output items the stream did not finish, and the posts its answer cites.
+
+    Returns an error for an output that is not an array, or an item that does not parse, and whether a refusal came
+    back.
+    """
+
+    _set_hosted_facts(assembler, response_body.get("usage"))
+    output = response_body.get("output")
+    if output is not None and not isinstance(output, list):
+        return assembler.error(f"{event_type} response output must be an array", kind="invalid_request"), False
+    error, refusal = _apply_terminal_output_items(output, assembler, reasoning, hosted)
+    _cite_x_posts(assembler)
+    return error, refusal
+
+
+def _cite_x_posts(assembler: StreamAssembler) -> None:
+    """An X-search answer's cited posts (§4.2): the response gives none per call, so its summary holds them."""
+
+    if any(isinstance(block, HostedToolBlock) and block.tool == "x_search" for block in assembler.content):
+        assembler.set_hosted_facts(cited=x_cited_sources(assembler.text_citations()))
+
+
+def _add_hosted_call(
+    assembler: StreamAssembler,
+    item: Mapping[str, Any],
+    output_index: int,
+    hosted: frozenset[str],
+    *,
+    finished: bool = True,
+    backfill: bool = False,
+    image: HostedImage | None = None,
+    image_error: tuple[str, str] | None = None,
+) -> None:
+    """An output item of a hosted tool the request declared natively, as its hosted call at its output index (§4.2):
+    pending when only added, filled in when done. A call the terminal response backfills keeps a block it has.
+
+    A response whose served Source is unknown keeps no hosted call: its native payload could never be replayed.
+    A generated image is ``image``, the file its done item was saved to. The terminal response repeats that image,
+    and its copy is never decoded (§7.5), so a call it alone finishes saved none.
+    """
+
+    tool = responses_hosted_tool(item)
+    if tool is None or tool not in hosted or assembler.source_id is None:
+        return
+    current = assembler.hosted_block_at(output_index)
+    if backfill and current is not None and current.record.status != "pending":
+        return
+    if backfill and tool == "image_generation":
+        image_error = ("the image was not streamed before the response ended", "image_not_streamed")
+    assembler.hosted_block(
+        output_index,
+        responses_hosted_block(
+            item,
+            source_id=assembler.source_id,
+            call_id=f"hosted_{output_index}",
+            finished=finished,
+            image=image,
+            image_error=image_error,
+        ),
+    )
+
+
+class _ImageBudget:
+    """The image data one response may stream (plan item 25): per image call, the previews its declaration asks for
+    and the final, plus a small margin; and a cumulative decoded size. Exceeding either ends the stream as an error,
+    so a misbehaving provider cannot stream images without bound. The terminal response's duplicate is not counted:
+    it is never decoded."""
+
+    def __init__(self, route: HostedToolRoute | None) -> None:
+        partials = (route.declaration or {}).get("partial_images") if route is not None else None
+        self._per_call = (partials if isinstance(partials, int) and partials > 0 else 0) + 1
+        self._calls = 0
+        self._events = 0
+        self._bytes = 0
+
+    def started(self) -> None:
+        self._calls += 1
+
+    def charge(self, encoded_length: int) -> str | None:
+        """Count one preview or final of ``encoded_length`` base64 characters; why the stream must end, if it must."""
+
+        self._events += 1
+        self._bytes += encoded_length * 3 // 4
+        if self._events > self._per_call * self._calls + _IMAGE_EVENT_MARGIN:
+            return "the provider streamed more images than the response asked for"
+        if self._bytes > IMAGE_BYTES_PER_RESPONSE:
+            return "the provider streamed more image data than one response may carry"
+        return None
+
+
+async def _saved_image(
+    sink: MediaSink | None, item: Mapping[str, Any]
+) -> tuple[HostedImage | None, tuple[str, str] | None]:
+    """The file a done ``image_generation_call`` was saved to, with its output size, or why there is none and its code
+    (§7.3).
+
+    Only a completed call's image is saved: that is the only record that lists one, so no file is written that no
+    record names."""
+
+    encoded = item.get("result")
+    if item.get("status") != "completed" or not isinstance(encoded, str) or not encoded:
+        return None, None
+    if sink is None:
+        return None, ("nothing here can keep a generated image", "image_no_store")
+    try:
+        image = await sink.save_image(encoded)
+    except (ValueError, OSError) as error:
+        return None, (f"the image could not be saved: {error}", "image_not_saved")
+    width, height = image_dimensions(item.get("size"))
+    return replace(image, width=width, height=height), None
+
+
+def _add_message_citations(assembler: StreamAssembler, index: int, item: Mapping[str, Any]) -> None:
+    """``url_citation`` annotations on a message's text parts, as citations into the text the parts make together."""
+
+    offset = 0
+    for part in item.get("content") or ():
+        if not isinstance(part, Mapping):
+            continue
+        for annotation in part.get("annotations") or ():
+            if isinstance(annotation, Mapping) and annotation.get("type") == "url_citation":
+                cited = citation(annotation, offset=offset)
+                if cited is not None:
+                    assembler.add_text_citation(index, cited)
+        offset += len(_string(part.get("text")) or _string(part.get("refusal")))
+
+
+def _set_hosted_facts(assembler: StreamAssembler, usage: Any) -> None:
+    """What the provider reported about the response's hosted calls: its counters and, from xAI, its cost."""
+
+    details = usage.get("server_side_tool_usage_details") if isinstance(usage, Mapping) else None
+    assembler.set_hosted_facts(counts=reported_counts(details), cost=reported_cost(usage))
 
 
 def _message_has_refusal(item: Mapping[str, Any]) -> bool:
@@ -1595,11 +1884,12 @@ def _reasoning_summary_text(item: Mapping[str, Any]) -> str | None:
     return "\n\n".join(parts) if parts else None
 
 
-def _openai_effort(value: str) -> str:
-    # Pi preserves extended tiers when the resolved model advertises them;
-    # the loop has already filtered ``reasoning_effort`` through
-    # ModelCapabilities.reasoning_efforts.
-    return value.lower()
+def sent_effort(effort: str) -> str | None:
+    """The token a Responses request carries at ``reasoning.effort``: the effort as given, lower-cased, since the loop
+    sends only an effort the hop declares (Pi preserves extended tiers the same way); None when it is off."""
+
+    value = effort.lower()
+    return None if not value or value in {"off", "disabled"} else value
 
 
 def _string(value: Any) -> str:

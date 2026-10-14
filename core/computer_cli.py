@@ -24,7 +24,7 @@ COMPUTER_CLI_TOOLS: dict[tuple[str, ...], str] = {
     ("clipboard", "read"): "clipboard_read",
     ("clipboard", "write"): "clipboard_write",
     ("launch",): "launch_app",
-    ("quit",): "kill_app",
+    ("force-quit",): "kill_app",
 }
 
 OBSERVATION_TOOLS = frozenset(
@@ -124,6 +124,10 @@ def tool_for_command(path: tuple[str, ...]) -> str:
 
 
 def _structured_payloads(result: Mapping[str, Any]) -> list[dict[str, Any]]:
+    structured = result.get("structuredContent")
+    if isinstance(structured, dict):
+        return [structured]
+
     payloads: list[dict[str, Any]] = []
     content = result.get("content")
     if not isinstance(content, list):

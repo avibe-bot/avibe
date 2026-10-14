@@ -48,7 +48,22 @@ from core.agent_core.ai.provider import (
 from core.agent_core.agent.models import ModelSelection
 from core.agent_core.harness.context import ContextConfig, budget
 from core.agent_core.harness.projection import project
-from core.agent_core.messages import AssistantMessage, ThinkingBlock, ToolCallBlock, ToolResultMessage, Usage, UserMessage, text
+from core.agent_core.messages import (
+    AssistantMessage,
+    HostedAction,
+    HostedImage,
+    HostedNative,
+    HostedRecord,
+    HostedSource,
+    HostedSummary,
+    HostedToolBlock,
+    ThinkingBlock,
+    ToolCallBlock,
+    ToolResultMessage,
+    Usage,
+    UserMessage,
+    text,
+)
 from core.agent_core.tools.base import CallInstance, ToolResult
 from tests.agent_core.fakes import (
     FakeJobHost,
@@ -1191,18 +1206,41 @@ async def test_reasoning_effort_must_be_declared_by_the_route():
 
 
 @pytest.mark.parametrize("stop_reason", ["stop", "length", "refusal", "safety"])
-@pytest.mark.parametrize("shape", ["empty", "whitespace", "thinking", "visible"])
+@pytest.mark.parametrize("shape", ["empty", "whitespace", "thinking", "visible", "image", "search"])
 @pytest.mark.parametrize("continuation", ["final", "steer", "follow_up"])
 async def test_tool_free_final_reply_is_committed_and_empty_success_is_an_error(stop_reason, shape, continuation):
     # The old refusal/safety-only table missed empty successful finals.
     # Pending-input responses are non-final and must still be allowed to continue.
+    # A generated image is a reply on its own; a search with no answer is not.
+    native = HostedNative(source_id="src_testsrc1", payload=({"type": "provider_item"},))
     content = {
         "empty": (),
         "whitespace": (text(" \n"),),
         "thinking": (ThinkingBlock("private reasoning"),),
         "visible": (ThinkingBlock("private reasoning"), text("visible reply")),
+        "image": (
+            HostedToolBlock(
+                id="ig_1",
+                tool="image_generation",
+                action=HostedAction(type="generate", prompt="a laptop at night"),
+                record=HostedRecord(status="completed", images=(HostedImage(path="/media/ig_1.png", mime="image/png"),)),
+                native=native,
+            ),
+        ),
+        "search": (
+            HostedToolBlock(
+                id="ws_1",
+                tool="web_search",
+                action=HostedAction(type="search", queries=("avibe",)),
+                record=HostedRecord(status="completed", sources=(HostedSource(url="https://avibe.bot"),)),
+                native=native,
+            ),
+        ),
     }[shape]
-    message = replace(assistant(stop_reason=stop_reason), content=content)
+    hosted = shape in ("image", "search")
+    message = replace(
+        assistant(stop_reason=stop_reason), content=content, hosted_summary=HostedSummary() if hosted else None
+    )
 
     async def first(request, cancel):
         if continuation != "final":
@@ -1225,7 +1263,7 @@ async def test_tool_free_final_reply_is_committed_and_empty_success_is_an_error(
         ["input"] if continuation == "final" else ["input", "pending"]
     )
     errors = [event for event in events if isinstance(event, AgentError)]
-    if shape == "visible" or continuation != "final":
+    if shape in ("visible", "image") or continuation != "final":
         assert errors == []
         assert events[-1].reason == "completed"
     else:

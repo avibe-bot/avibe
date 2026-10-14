@@ -16,9 +16,9 @@ use std::time::Duration;
 
 use avibe_runtime_host::deep_link::parse_deep_link;
 use avibe_runtime_host::pet::{
-    anchor_from_window, area_for, clamp_anchor, default_anchor, rescale, restored_window_origin, shortcut_label,
-    valid_session_id, window_size, HitRect, LogicalRect, PetAnchor, PetBinding, PetIntent, PetLayout, PetReady,
-    PetStore, WorkArea, SHORTCUT_PRESETS,
+    anchor_from_window, area_for, clamp_anchor, default_anchor, hovering, rescale, restored_window_origin,
+    shortcut_label, valid_session_id, window_size, HitRect, LogicalRect, PetAnchor, PetBinding, PetIntent, PetLayout,
+    PetReady, PetStore, WorkArea, SHORTCUT_PRESETS,
 };
 use avibe_runtime_host::LoopbackOrigin;
 use serde::{Deserialize, Serialize};
@@ -35,6 +35,7 @@ pub const SHORTCUT_MENU_PREFIX: &str = "pet-shortcut:";
 const PET_PATH: &str = "/pet";
 const SUMMON_EVENT: &str = "avibe:pet-summon";
 const BOUND_EVENT: &str = "avibe:pet-bound";
+const HOVER_EVENT: &str = "avibe:pet-hover";
 /// A drag settles before its anchor is saved, as the main window's frame does.
 const MOVE_SETTLE: Duration = Duration::from_millis(400);
 
@@ -661,6 +662,9 @@ fn start_cursor_poll(app: &AppHandle) {
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         let mut ignoring = true;
+        // Hover the page cannot see itself: a webview in a window that is
+        // not key gets no hover on macOS. Reported only when it changes.
+        let mut hovered = false;
         loop {
             let handle = app.clone();
             let (send, receive) = tokio::sync::oneshot::channel();
@@ -674,7 +678,10 @@ fn start_cursor_poll(app: &AppHandle) {
                         return;
                     };
                     if !window.is_visible().unwrap_or(false) {
-                        let _ = send.send((None, ignoring));
+                        if hovered {
+                            dispatch(&window, HOVER_EVENT, &serde_json::json!({ "hover": false }));
+                        }
+                        let _ = send.send((None, ignoring, false));
                         return;
                     }
                     let (Ok(cursor), Ok(origin), Ok(scale), Ok(size)) = (
@@ -683,27 +690,37 @@ fn start_cursor_poll(app: &AppHandle) {
                         window.scale_factor(),
                         window.inner_size(),
                     ) else {
-                        let _ = send.send((Some(100), ignoring));
+                        let _ = send.send((Some(100), ignoring, hovered));
                         return;
                     };
                     let x = (cursor.x - origin.x as f64) / scale;
                     let y = (cursor.y - origin.y as f64) / scale;
                     let in_window =
                         x >= 0.0 && y >= 0.0 && x < size.width as f64 / scale && y < size.height as f64 / scale;
-                    let next = !lock(&pet.hit_regions).iter().any(|rect| rect.contains(x, y));
+                    let (next, hover) = {
+                        let regions = lock(&pet.hit_regions);
+                        (
+                            !regions.iter().any(|rect| rect.contains(x, y)),
+                            in_window && hovering(&regions, x, y),
+                        )
+                    };
                     if next != ignoring && window.set_ignore_cursor_events(next).is_ok() {
                         ignoring = next;
                     }
-                    let _ = send.send((Some(if in_window { 16 } else { 100 }), ignoring));
+                    if hover != hovered {
+                        dispatch(&window, HOVER_EVENT, &serde_json::json!({ "hover": hover }));
+                    }
+                    let _ = send.send((Some(if in_window { 16 } else { 100 }), ignoring, hover));
                 })
                 .is_err()
             {
                 break;
             }
-            let Ok((delay, applied)) = receive.await else {
+            let Ok((delay, applied, hover)) = receive.await else {
                 break;
             };
             ignoring = applied;
+            hovered = hover;
             if let Some(delay) = delay {
                 tokio::time::sleep(Duration::from_millis(delay)).await;
             } else {
@@ -900,6 +917,7 @@ mod tests {
                 y: 20.0,
                 width: 100.0,
                 height: 50.0,
+                hover: false,
             });
         };
         seed();

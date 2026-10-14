@@ -2105,6 +2105,39 @@ def test_request_vault_access_malformed_selector_returns_vault_api_error():
     assert exc.value.status == 409
 
 
+@pytest.mark.parametrize("selector,status,code", [
+    ({"env": ["LOGIN.nope"]}, 404, "field_not_found"),
+    ({"env": ["LOGIN.UPPER"]}, 400, "invalid_field_name"),
+    ({"env": ["KEY.value"]}, 409, "fields_not_supported"),
+    ({"tags": ["broken"]}, 409, "fields_corrupt"),
+])
+def test_access_request_preserves_record_error_codes(selector, status, code):
+    with api._vault_engine().begin() as conn:
+        vault_service.create_secret(conn, name="LOGIN", protection="protected", sealed=_sealed("default"))
+        vault_service.create_secret(conn, name="KEY", kind="keypair", protection="protected", sealed=_sealed("key"))
+        vault_service.create_secret(conn, name="BROKEN", protection="protected", tags=["broken"], sealed=_sealed("broken"))
+        conn.execute(vault_secrets.update().where(vault_secrets.c.name == "BROKEN").values(fields="corrupt"))
+    with pytest.raises(api.VaultApiError) as exc:
+        api.request_vault_access({"source_selector": selector})
+    assert (exc.value.status, exc.value.code) == (status, code)
+    with api._vault_engine().connect() as conn:
+        assert list(conn.execute(select(vault_service.vault_requests))) == []
+
+
+def test_direct_access_request_resolves_fields_and_keeps_secret_authorization():
+    with api._vault_engine().begin() as conn:
+        vault_service.create_secret(
+            conn, name="LOGIN", protection="protected", default_field="password", sealed=_sealed("password"),
+            fields=[{"name": "username", "sealed": _sealed("username")}],
+        )
+    requested = api.request_vault_access({"name": "LOGIN.username"})["request"]
+    assert requested["secret_name"] == "LOGIN"
+    assert requested["card"]["grant_options"][0]["member_snapshot"] == ["LOGIN"]
+    with pytest.raises(api.VaultApiError) as exc:
+        api.request_vault_access({"name": "LOGIN.nope"})
+    assert (exc.value.status, exc.value.code) == (404, "field_not_found")
+
+
 def test_request_vault_access_reports_missing_selector_member_name():
     with pytest.raises(api.VaultApiError) as exc:
         api.request_vault_access({"source_selector": {"env": ["MISSING_KEY"]}, "session_id": "ses_1"})
@@ -4321,3 +4354,397 @@ def test_vault_sign_rejects_malformed_digest_before_request_or_avault(monkeypatc
     assert exc.value.code == "invalid_digest"
     sign.assert_not_called()
     assert api.get_vault_requests()["requests"] == []
+
+
+@pytest.mark.parametrize("default_field", ["value", "password"])
+def test_keypair_create_rejects_explicit_default_field(monkeypatch, default_field):
+    seal = Mock(return_value=_sealed())
+    monkeypatch.setattr(api, "avault_seal_blind_box", seal)
+    with pytest.raises(api.VaultApiError) as exc:
+        api.create_vault_secret({
+            "name": "KEY", "kind": "keypair", "default_field": default_field,
+            "blind_box": _agent_dek_blindbox(),
+        })
+    assert exc.value.code == "fields_not_supported"
+    seal.assert_not_called()
+    assert api.get_vault_secrets()["secrets"] == []
+
+
+def test_keypair_patch_rejects_default_field_and_keeps_implicit_value():
+    created = api.create_vault_secret({
+        "name": "KEY", "kind": "keypair", "protection": "protected",
+        "sealed": {"ciphertext": "ct-key", "nonce": "n-key", "wrap_meta": "wm-key"},
+    })["secret"]
+    with pytest.raises(api.VaultApiError) as exc:
+        api.update_vault_secret("KEY", {"default_field": "private_key"})
+    assert exc.value.code == "fields_not_supported"
+    current = api.get_vault_secrets()["secrets"][0]
+    assert current["default_field"] == "value"
+    assert current["fields"] == ["value"]
+    assert current["updated_at"] == created["updated_at"]
+
+
+def test_create_vault_secret_seals_each_standard_record_name(monkeypatch):
+    seal = Mock(side_effect=[_sealed("default"), _sealed("username"), _sealed("totp")])
+    monkeypatch.setattr(api, "avault_seal_blind_box", seal)
+
+    result = api.create_vault_secret(
+        {
+            "name": "LOGIN",
+            "default_field": "password",
+            "blind_box": _agent_dek_blindbox("default", "default"),
+            "fields": [
+                {
+                    "name": "username",
+                    "record": "LOGIN.username",
+                    "blind_box": _agent_dek_blindbox("username", "username"),
+                },
+                {
+                    "name": "totp",
+                    "record": "LOGIN.totp",
+                    "blind_box": _agent_dek_blindbox("totp", "totp"),
+                },
+            ],
+        }
+    )
+
+    assert result["secret"]["default_field"] == "password"
+    assert result["secret"]["fields"] == ["password", "username", "totp"]
+    assert [call.args[0] for call in seal.call_args_list] == ["LOGIN", "LOGIN.username", "LOGIN.totp"]
+    with api._vault_engine().connect() as conn:
+        assert vault_service.get_envelope(conn, "LOGIN.username") == _sealed("username")
+        assert vault_service.get_envelope(conn, "LOGIN.totp") == _sealed("totp")
+
+
+def test_vault_field_update_and_default_rename_are_value_free(monkeypatch):
+    seal = Mock(side_effect=[_sealed("default"), _sealed("username")])
+    monkeypatch.setattr(api, "avault_seal_blind_box", seal)
+    api.create_vault_secret(
+        {
+            "name": "LOGIN",
+            "blind_box": _agent_dek_blindbox("default", "default"),
+        }
+    )
+    updated = api.update_vault_secret_field(
+        "LOGIN",
+        "username",
+        {
+            "record": "LOGIN.username",
+            "blind_box": _agent_dek_blindbox("username", "username"),
+        },
+    )
+
+    assert updated["secret"]["fields"] == ["value", "username"]
+    assert [call.args[0] for call in seal.call_args_list] == ["LOGIN", "LOGIN.username"]
+    renamed = api.update_vault_secret("LOGIN", {"default_field": "password"})
+    assert renamed["secret"]["default_field"] == "password"
+    assert renamed["secret"]["fields"] == ["password", "username"]
+
+    with pytest.raises(api.VaultApiError) as exc:
+        api.update_vault_secret_field(
+            "LOGIN",
+            "totp",
+            {
+                "blind_box": _agent_dek_blindbox("totp", "totp"),
+                "value": "plaintext",
+            },
+        )
+    assert exc.value.code == "plaintext_value_rejected"
+    assert [call.args[0] for call in seal.call_args_list] == ["LOGIN", "LOGIN.username"]
+
+
+@pytest.mark.parametrize(
+    ("field", "code"),
+    [
+        ({"name": "username", "blind_box": _agent_dek_blindbox("username", "username")}, "invalid_request"),
+        (
+            {
+                "name": "username",
+                "record": "LOGIN",
+                "blind_box": _agent_dek_blindbox("username", "username"),
+            },
+            "record_mismatch",
+        ),
+    ],
+)
+def test_create_extra_field_requires_matching_record(monkeypatch, field, code):
+    seal = Mock(return_value=_sealed("default"))
+    monkeypatch.setattr(api, "avault_seal_blind_box", seal)
+
+    with pytest.raises(api.VaultApiError) as exc:
+        api.create_vault_secret(
+            {
+                "name": "LOGIN",
+                "blind_box": _agent_dek_blindbox("default", "default"),
+                "fields": [field],
+            }
+        )
+
+    assert exc.value.code == code
+    seal.assert_not_called()
+    assert api.get_vault_secrets()["secrets"] == []
+
+
+def test_protected_field_put_rejects_stale_default_record_after_rename():
+    api.create_vault_secret(
+        {
+            "name": "LOGIN",
+            "protection": "protected",
+            "sealed": {"ciphertext": "ct-old", "nonce": "n-old", "wrap_meta": "wm-old"},
+        }
+    )
+    api.update_vault_secret("LOGIN", {"default_field": "password"})
+
+    with api._vault_engine().connect() as conn:
+        before = vault_service.get_protected_envelope(conn, "LOGIN")
+
+    with pytest.raises(api.VaultApiError) as exc:
+        api.update_vault_secret_field(
+            "LOGIN",
+            "value",
+            {
+                "record": "LOGIN",
+                "sealed": {"ciphertext": "ct-new", "nonce": "n-new", "wrap_meta": "wm-new"},
+            },
+        )
+
+    assert exc.value.code == "record_mismatch"
+    with api._vault_engine().connect() as conn:
+        assert vault_service.get_protected_envelope(conn, "LOGIN") == before
+
+
+def test_protected_field_put_record_guard_survives_concurrent_default_rename(monkeypatch):
+    api.create_vault_secret(
+        {
+            "name": "LOGIN",
+            "protection": "protected",
+            "sealed": {"ciphertext": "ct-old", "nonce": "n-old", "wrap_meta": "wm-old"},
+        }
+    )
+    original_sealed_from_payload = api._sealed_from_payload
+    raced = False
+
+    def seal_then_rename(payload):
+        nonlocal raced
+        sealed = original_sealed_from_payload(payload)
+        if not raced:
+            raced = True
+            with api._vault_engine().begin() as conn:
+                vault_service.update_secret_metadata(conn, "LOGIN", default_field="password")
+        return sealed
+
+    monkeypatch.setattr(api, "_sealed_from_payload", seal_then_rename)
+
+    with pytest.raises(api.VaultApiError) as exc:
+        api.update_vault_secret_field(
+            "LOGIN",
+            "value",
+            {
+                "record": "LOGIN",
+                "sealed": {"ciphertext": "ct-raced", "nonce": "n-raced", "wrap_meta": "wm-raced"},
+            },
+        )
+
+    assert exc.value.code == "record_mismatch"
+    with api._vault_engine().connect() as conn:
+        assert vault_service.get_protected_envelope(conn, "LOGIN") == _sealed("old")
+
+
+def test_protected_reveal_context_uses_field_record_name(monkeypatch):
+    api.create_vault_secret(
+        {
+            "name": "PROTECTED_LOGIN",
+            "protection": "protected",
+            "default_field": "password",
+            "sealed": {"ciphertext": "ct-password", "nonce": "n-password", "wrap_meta": "wm-password"},
+            "fields": [
+                {
+                    "name": "username",
+                    "record": "PROTECTED_LOGIN.username",
+                    "sealed": {"ciphertext": "ct-username", "nonce": "n-username", "wrap_meta": "wm-username"},
+                }
+            ],
+        }
+    )
+
+    result = api.create_vault_reveal_context("PROTECTED_LOGIN", {"field": "username"})
+    context = _verified_signed_context(result["context"])
+
+    assert result["envelope"] == {
+        "ciphertext": "ct-username",
+        "nonce": "n-username",
+        "wrap_meta": "wm-username",
+    }
+    assert context["release"]["name"] == "PROTECTED_LOGIN.username"
+    assert context["display"]["secrets"] == [{"name": "PROTECTED_LOGIN.username", "kind": "static"}]
+
+
+def test_every_web_field_error_code_has_english_and_chinese_translations():
+    codes = api._VAULT_FIELD_ERROR_CODES
+    assert codes and len(codes) == len(set(codes))
+    root = Path(__file__).resolve().parents[1]
+    for language in ("en", "zh"):
+        catalog = json.loads((root / "ui" / "src" / "i18n" / f"{language}.json").read_text(encoding="utf-8"))
+        for code in codes:
+            assert isinstance(catalog["errors"].get(code), str) and catalog["errors"][code].strip(), (language, code)
+
+    # Probe the real translator for every service exception type, rather than a
+    # second manually maintained list of field classes. Only type and message
+    # matter to this boundary; storage-specific constructor data is not read.
+    translated = set()
+    for error_type in vars(vault_service).values():
+        if isinstance(error_type, type) and issubclass(error_type, vault_service.VaultServiceError):
+            error = Exception.__new__(error_type)
+            Exception.__init__(error, "metadata error")
+            translated.add(api._vault_field_service_error(error).code)
+    generic_codes = {"vault_error", "invalid_request", "secret_not_found", "resource_access_forbidden"}
+    assert translated - generic_codes == set(codes)
+
+
+def test_single_agent_binding_maps_corrupt_extra_fields_to_fields_corrupt(monkeypatch):
+    agent_key = Mock(return_value=TEST_AGENT_PUBKEY)
+    monkeypatch.setattr(api, "avault_agent_pubkey", agent_key)
+    api.create_vault_secret({
+        "name": "CORRUPT_BIND", "protection": "protected",
+        "sealed": {"ciphertext": "ct", "nonce": "nonce", "wrap_meta": "wrap"},
+        "fields": [{"name": "username", "record": "CORRUPT_BIND.username", "sealed": {"ciphertext": "ct-u", "nonce": "nonce-u", "wrap_meta": "wrap-u"}}],
+    })
+    request = api.request_vault_access({"name": "CORRUPT_BIND"})["request"]
+    grant_id = request["card"]["grant_options"][0]["grant_id"]
+    with api._vault_engine().begin() as conn:
+        conn.execute(vault_secrets.update().where(vault_secrets.c.name == "CORRUPT_BIND").values(fields="invalid"))
+    with pytest.raises(api.VaultApiError) as exc:
+        api.create_vault_agent_binding({"name": "CORRUPT_BIND.username", "request_id": request["id"], "grant_id": grant_id})
+    assert (exc.value.status, exc.value.code) == (409, "fields_corrupt")
+    agent_key.assert_not_called()
+
+
+def test_corrupt_fields_return_stable_error_without_disabling_default_reveal():
+    api.create_vault_secret({
+        "name": "CORRUPT_LOGIN", "protection": "protected",
+        "sealed": {"ciphertext": "ct-default", "nonce": "n-default", "wrap_meta": "wm-default"},
+    })
+    engine = api._vault_engine()
+    damaged = '[{"name":"username","ciphertext":"retain-this-record"}]'
+    with engine.begin() as conn:
+        conn.execute(vault_secrets.update().where(vault_secrets.c.name == "CORRUPT_LOGIN").values(fields=damaged))
+    for operation in (
+        lambda: api.update_vault_secret("CORRUPT_LOGIN", {"default_field": "password"}),
+        lambda: api.update_vault_secret_field("CORRUPT_LOGIN", "value", {
+            "record": "CORRUPT_LOGIN",
+            "sealed": {"ciphertext": "ct-new", "nonce": "n-new", "wrap_meta": "wm-new"},
+        }),
+        lambda: api.delete_vault_secret_field("CORRUPT_LOGIN", "username"),
+        lambda: api.create_vault_reveal_context("CORRUPT_LOGIN", {"field": "username"}),
+    ):
+        with pytest.raises(api.VaultApiError) as exc:
+            operation()
+        assert (exc.value.status, exc.value.code) == (409, "fields_corrupt")
+    assert api.create_vault_reveal_context("CORRUPT_LOGIN")["envelope"] == {
+        "ciphertext": "ct-default", "nonce": "n-default", "wrap_meta": "wm-default",
+    }
+    with engine.connect() as conn:
+        assert conn.execute(select(vault_secrets.c.fields).where(vault_secrets.c.name == "CORRUPT_LOGIN")).scalar_one() == damaged
+
+
+def test_store_vault_pubkey_pin_maps_storage_cas_conflict_to_409(monkeypatch):
+    """A CAS conflict is a retryable API response, not an uncaught storage error."""
+    pin = {"public_key": "test-public-key", "fingerprint": "test-fingerprint"}
+    store = Mock(side_effect=vault_service.SecretConflictError("concurrent metadata update"))
+    monkeypatch.setattr(vault_service, "store_pubkey_pin", store)
+    publish = Mock()
+    monkeypatch.setattr(api, "_publish_vaults_updated", publish)
+    with pytest.raises(api.VaultApiError) as exc:
+        api.store_vault_pubkey_pin({"name": "PINNED_KEY", "pin": pin})
+    assert exc.value.status == 409
+    assert exc.value.code == "secret_conflict"
+    assert store.call_args.args[1:] == ("PINNED_KEY", pin)
+    publish.assert_not_called()
+
+
+def test_protected_agent_binding_batch_expands_record_names(monkeypatch):
+    monkeypatch.setattr(api, "_require_avault_grant_delivery_surface", lambda _feature: None)
+    monkeypatch.setattr(api, "avault_agent_pubkey", Mock(return_value=TEST_AGENT_PUBKEY))
+    api.create_vault_secret(
+        {
+            "name": "PROTECTED_LOGIN",
+            "protection": "protected",
+            "default_field": "password",
+            "sealed": {"ciphertext": "ct-password", "nonce": "n-password", "wrap_meta": "wm-password"},
+            "fields": [
+                {
+                    "name": "username",
+                    "record": "PROTECTED_LOGIN.username",
+                    "sealed": {"ciphertext": "ct-username", "nonce": "n-username", "wrap_meta": "wm-username"},
+                }
+            ],
+        }
+    )
+    requested = api.request_vault_access({"name": "PROTECTED_LOGIN", "session_id": "ses_1"})
+
+    result = api.create_vault_agent_bindings_batch({"request_id": requested["request"]["id"], "grant_duration": 300})
+
+    assert [item["name"] for item in result["items"]] == ["PROTECTED_LOGIN", "PROTECTED_LOGIN.username"]
+    display_names = [item["name"] for item in _verified_signed_context(result["items"][0]["context"])["display"]["secrets"]]
+    assert display_names == ["PROTECTED_LOGIN", "PROTECTED_LOGIN.username"]
+    for item in result["items"]:
+        context = _verified_signed_context(item["context"])
+        assert context["release"]["operationHash"] == api._agent_deliver_operation_hash(item["name"], 300)
+
+
+def test_create_grant_relays_every_protected_record_and_rejects_missing_dek(monkeypatch, avault_p2):
+    """Protect the grant boundary: every released record must reach avault by canonical name."""
+
+    agent_grant = Mock(return_value={"granted": 3, "ttl_secs": 300})
+    monkeypatch.setattr(api, "avault_agent_grant", agent_grant)
+    api.create_vault_secret(
+        {
+            "name": "PROTECTED_LOGIN",
+            "protection": "protected",
+            "default_field": "password",
+            "sealed": {"ciphertext": "ct-password", "nonce": "n-password", "wrap_meta": "wm-password"},
+            "fields": [
+                {
+                    "name": "username",
+                    "record": "PROTECTED_LOGIN.username",
+                    "sealed": {"ciphertext": "ct-username", "nonce": "n-username", "wrap_meta": "wm-username"},
+                },
+                {
+                    "name": "totp",
+                    "record": "PROTECTED_LOGIN.totp",
+                    "sealed": {"ciphertext": "ct-totp", "nonce": "n-totp", "wrap_meta": "wm-totp"},
+                },
+            ],
+        }
+    )
+    requested = api.request_vault_access({"name": "PROTECTED_LOGIN", "session_id": "ses_1"})
+    issued = _issued_agent_dek_payload(requested["request"]["id"])
+
+    with pytest.raises(api.VaultApiError) as exc:
+        api.create_vault_grant(
+            {
+                "session_id": "ses_1",
+                "request_id": requested["request"]["id"],
+                **issued,
+                "deks": issued["deks"][:-1],
+            }
+        )
+
+    assert exc.value.code == "invalid_grant"
+    agent_grant.assert_not_called()
+
+    created = api.create_vault_grant(
+        {
+            "session_id": "ses_1",
+            "request_id": requested["request"]["id"],
+            **issued,
+        }
+    )
+
+    assert created["grant"]["status"] == "active"
+    assert created["grant"]["member_snapshot"] == ["PROTECTED_LOGIN"]
+    assert [item["name"] for item in agent_grant.call_args.kwargs["deks"]] == [
+        "PROTECTED_LOGIN",
+        "PROTECTED_LOGIN.username",
+        "PROTECTED_LOGIN.totp",
+    ]

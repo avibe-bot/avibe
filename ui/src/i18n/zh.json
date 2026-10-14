@@ -2084,7 +2084,7 @@
       "migration": {
         "open": "迁移配置",
         "title": "迁移到模型网关",
-        "subtitle": "导入配置文件、Shell 启动文件或受支持凭据库中已保存的认证。迁移后，助手统一通过模型网关认证：订阅登录转交模型网关托管，API Key 复制导入，原配置默认保留。",
+        "subtitle": "导入配置文件、Shell 启动文件或受支持凭据库中已保存的认证。订阅登录转交模型网关托管；API Key 直接复制导入，原配置默认保留，迁移时不联网校验 Key 或拉取模型列表。Key 是否可用由后续模型调用确认。",
         "cleanApiKeys": "同时清理原生 CLI 中的 API Key 配置",
         "cleanApiKeysHint": "包括 Shell 启动文件和各 CLI 的配置文件。不勾选时这些 Key 保持原样，经模型网关启动的助手不会使用它们。",
         "empty": "没有检测到可迁移的配置。",
@@ -2112,7 +2112,7 @@
           "runtimeStopping": "这些助手刚才在 Avibe 中运行的任务还在停止中，请稍后重试。",
           "permissionNeeded": "请允许访问凭据，再重试。",
           "recoveryPending": "迁移尚未完成，请重试以继续。",
-          "itemConflict": "无法验证已保存的配置或凭据。请检查配置文件和认证是否有效后重试，或在模型网关中手动添加供应商。",
+          "itemConflict": "无法安全迁移所选配置。请重新打开迁移窗口以扫描最新配置；若仍然失败，请检查配置文件格式和访问权限。",
           "configurationBlocked": "请先调整原生配置，再重新扫描。",
           "credentialsInvalid": "认证已过期，请在模型网关中重新登录。",
           "reauthorizationRequired": "此后端已迁移过，无法确认改动后的原生登录是否是新授权。原配置文件未改动，请在模型网关中为已有供应商重新登录，不要再次导入这份登录。"
@@ -2520,6 +2520,15 @@
     "retry": "重试"
   },
   "errors": {
+    "invalid_field_name": "字段名须为 1–64 个小写字母、数字或下划线，且以字母开头。",
+    "field_exists": "此字段名已存在，请使用其他名称。",
+    "field_not_found": "此字段已不存在。请刷新密钥并选择当前字段。",
+    "too_many_fields": "每个密钥最多可包含 32 个字段（含默认字段）。",
+    "fields_corrupt": "此密钥保存的字段数据已损坏。默认值仍可使用；为保留现有数据，字段修改已禁用。",
+    "fields_not_supported": "签名密钥不支持命名字段或默认字段改名。",
+    "record_mismatch": "保存期间字段记录发生变化，请刷新密钥后重试。",
+    "secret_conflict": "此密钥已在其他位置修改。请检查刷新后的字段再试；你的修改尚未保存。",
+    "secret_not_found": "此密钥已不存在。请刷新密钥库并选择其他密钥。",
     "retry_not_available": "这条通知无法重试，可以发送消息继续。",
     "retry_stale": "会话已经开始了后续任务，如需继续请发送消息。",
     "retry_busy": "上一轮还在结束处理中，请稍后再试。",
@@ -4766,6 +4775,51 @@
       }
     },
     "agentActivity": {
+      "hosted": {
+        "errorCode": {
+          "provider_no_reason": "供应商未说明原因。",
+          "provider_no_image": "供应商没有返回图片。",
+          "image_not_streamed": "回复结束前图片未传完。",
+          "image_not_saved": "图片未能保存。",
+          "image_no_store": "当前环境无法保存生成的图片。",
+          "executor_no_image": "代理执行者没有返回图片。",
+          "gateway_unreachable": "无法连接模型网关。",
+          "gateway_refused": "模型网关拒绝了这次调用。",
+          "gateway_no_result": "模型网关没有返回结果。"
+        },
+        "mode": {
+          "native": "原生 · {{provider}}",
+          "proxy": "由 {{provider}} 代理"
+        },
+        "status": {
+          "failed": "失败",
+          "incomplete": "未完成",
+          "pending": "已中断"
+        },
+        "cost": {
+          "included": "订阅内含",
+          "list": "≈ ${{usd}}",
+          "reported": "${{usd}}",
+          "calls_one": "{{cost}}（{{count}} 次调用）",
+          "calls_other": "{{cost}}（{{count}} 次调用）"
+        },
+        "count": {
+          "sources_one": "{{count}} 个来源",
+          "sources_other": "{{count}} 个来源",
+          "posts_one": "{{count}} 条帖子",
+          "posts_other": "{{count}} 条帖子",
+          "images_one": "{{count}} 张",
+          "images_other": "{{count}} 张"
+        },
+        "ranNative": "原生执行：{{where}}",
+        "ranProxy": "代理执行：{{where}}",
+        "duration": "用时 {{seconds}} 秒",
+        "alsoSearched": "还搜索了：{{queries}}",
+        "image": {
+          "revisedPrompt": "修订后的提示词",
+          "download": "下载 {{name}}"
+        }
+      },
       "running": "正在执行",
       "step": "{{count}} 步",
       "steps": "{{count}} 步",
@@ -4890,9 +4944,41 @@
     "chat": {
       "floatApprovals": "等你授权 · {{count}}"
     },
+    "search": {
+      "label": "搜索密钥",
+      "placeholder": "搜索名称、描述、标签、域名…",
+      "clear": "清空搜索",
+      "count_one": "{{count}} 个密钥",
+      "count_other": "{{count}} 个密钥",
+      "filtered": "{{visible}} / {{total}} 个密钥"
+    },
     "filter": {
-      "clear": "清除筛选",
-      "empty": "没有匹配所选标签的密钥。"
+      "clear": "清除",
+      "clearAll": "清除全部",
+      "empty": "没有匹配的密钥",
+      "reset": "清除搜索和筛选",
+      "tags": "标签",
+      "skills": "Skills",
+      "tagsByUsage": "标签 · 按使用次数",
+      "selectedTags": "标签（{{count}}）",
+      "entry": "{{name}} · {{count}}",
+      "searchTags": "搜索标签",
+      "searchTagsPlaceholder": "在 {{count}} 个标签里查找",
+      "noTags": "没有这个标签",
+      "intersection": "可多选，需同时满足",
+      "remove": "移除筛选：{{name}}",
+      "moreTags": "显示其余 {{count}} 个标签",
+      "quick": "快捷筛选",
+      "all": "全部",
+      "protected": "保护档",
+      "signing": "签名密钥",
+      "unused": "从未使用"
+    },
+    "sort": {
+      "label": "排序",
+      "name": "名称",
+      "recent": "最近使用",
+      "added": "最近添加"
     },
     "grants": {
       "title": "活跃授权",
@@ -4940,17 +5026,44 @@
       "copy": "复制值",
       "showInBrowser": "在浏览器中查看",
       "errors": {
+        "staleField": "此链接指向的字段已不存在。请打开密钥并选择当前字段。",
         "contextFailed": "无法准备查看，请重试。",
         "unavailable": "此保护档暂不支持查看。"
       }
     },
     "saved": "已更新 {{name}}",
-    "editSecret": "编辑信息",
+    "editSecret": "编辑 Secret",
     "rowActions": "更多操作",
     "edit": {
-      "title": "编辑信息",
-      "subtitle": "普通信息不影响授权;Fetch 策略变化会重新审批",
+      "title": "编辑 Secret",
+      "subtitle": "值或 Fetch 策略变化后需要重新审批",
       "lockedHint": "名称、类型、保护级别不可修改"
+    },
+    "fields": {
+      "title": "字段",
+      "name": "字段 {{index}} 名称",
+      "namePlaceholder": "field_name",
+      "value": "{{field}} 的值",
+      "default": "默认",
+      "defaultName": "默认字段名称",
+      "newName": "新字段名称",
+      "newValue": "新字段值",
+      "add": "添加字段",
+      "loginTemplate": "登录模板",
+      "remove": "移除 {{field}}",
+      "removeConfirm": "移除此字段及其值？已有授权将失效。",
+      "rename": "改名",
+      "save": "保存字段",
+      "saveNamed": "保存 {{field}}",
+      "saved": "字段已保存",
+      "draftsDropped": "其他位置已移除字段，已丢弃这些草稿：{{fields}}。",
+      "recordConflict": "保存期间字段记录发生变化。值未写入，请重新加载 Secret 后再试。",
+      "secretConflict": "保存期间此密钥发生变化，字段已刷新。请检查后重新保存；你的值尚未写入。",
+      "replacePlaceholder": "输入替换值",
+      "revealField": "要显示的字段",
+      "namesHelp": "使用小写字母、数字和下划线，以字母开头。每个字段的名称必须唯一且必须填写值。",
+      "singleFile": "文件上传仅支持单值。添加字段前请先切换到文本模式。",
+      "editHelp": "修改立即保存。添加、替换或移除值会使授权失效；默认字段改名不会。值留空则保留原值。额外字段不能改名。"
     },
     "protectedUnlock": {
       "checking": "正在检查你的保护层…",
@@ -5591,15 +5704,15 @@
     "chooseSession": "选择一个会话",
     "switchSession": "切换会话",
     "openInAvibe": "在 Avibe 中打开",
-    "inputPlaceholder": "和 main agent 说…",
+    "inputPlaceholder": "和歪比说…",
     "send": "发送",
     "queued": "已排队，当前这轮结束后执行。",
     "moreInAvibe": "更多回复请在 Avibe 中查看",
     "empty": "还没有消息，说点什么开始吧。",
     "vaultRequest": "需要授权，在 Avibe 中打开",
     "noSessions": "还没有进行中的会话，先在 Avibe 里新建一个。",
-    "mainAgent": "MAIN AGENT",
-    "mainAgentTitle": "主 agent",
+    "mainAgent": "歪比",
+    "mainAgentTitle": "歪比",
     "thinking": "思考中",
     "waiting": "等待中",
     "repliedPrefix": "已回复：",

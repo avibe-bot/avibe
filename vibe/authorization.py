@@ -551,6 +551,7 @@ _MEMBER_HTTP_RULES = tuple(
         ("POST", r"^/api/models/quota/refresh$"),
         ("GET", r"^/api/models/hosted-tools$"),
         ("PUT", r"^/api/models/hosted-tools/[^/]+$"),
+        ("POST", r"^/api/models/hosted-tools/[^/]+/probe$"),
         ("POST", r"^/api/models/oauth/(?:start|submit|cancel)$"),
         ("GET", r"^/api/models/oauth/status/[^/]+$"),
         ("POST", r"^/api/models/migration/(?:scan|apply)$"),

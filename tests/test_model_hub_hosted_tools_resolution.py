@@ -223,7 +223,8 @@ def test_status_lists_where_each_tool_can_run_and_counts_re_verifications(tmp_pa
         live=ALL,
     )
     status = hosted_tools_status(
-        _config({"x_search": ON}), evidence=store, spec_for=_spec_for, engine=ENGINE, now=NOW
+        _config({"x_search": ON}), evidence=store, spec_for=_spec_for, engine=ENGINE, now=NOW,
+        probe_estimate=lambda _source, _model_id, _tool: None,
     )
     by_name = {tool["name"]: tool for tool in status["tools"]}
     assert [tool["name"] for tool in status["tools"]] == ["web_search", "x_search", "image_generation"]
@@ -237,3 +238,9 @@ def test_status_lists_where_each_tool_can_run_and_counts_re_verifications(tmp_pa
     ]
     assert by_name["image_generation"]["candidates"][0]["replay"] is None
     assert status["reverify"] == {"engine_upgraded": 2, "aged": 1}
+    # What a turn would bind now: the age-stale verified XAI call still routes; wire-stale ones do not.
+    assert by_name["web_search"]["bound"] == {"source_id": "src_xai00001", "model_id": "grok-4.6"}
+    assert by_name["x_search"]["bound"] is None
+    # An aged probe record has nothing left to wait for; a wire-stale one waits for the user's re-verify.
+    assert by_name["web_search"]["candidates"][0]["call"]["changes_at"] is None
+    assert by_name["x_search"]["candidates"][0]["call"]["changes_at"] is None

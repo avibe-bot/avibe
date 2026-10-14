@@ -874,7 +874,7 @@
         "drag": "拖动已观察的目标",
         "setValue": "设置已观察控件的值",
         "launch": "启动应用或 URL",
-        "quit": "退出应用",
+        "forceQuit": "强制终止应用；未保存的数据会丢失。",
         "clipboard": "读取或写入系统剪贴板",
         "clipboardRead": "读取系统剪贴板",
         "clipboardWrite": "写入系统剪贴板"
@@ -887,7 +887,7 @@
         "sessionArgumentForbidden": "Computer Use session 已绑定调用方 Avibe Session，不能通过 --args-json 或 --arg 提供。",
         "outputArgumentConflict": "请在 --output 和 --args-json 中的 screenshot_out_file 之间二选一，不能同时提供。",
         "unsupportedCommand": "不支持的 Computer Use 命令：{command}",
-        "screenshotMissing": "{tool} 没有返回可写入 --output 的图像。",
+        "screenshotMissing": "此结果没有可用的截图。窗口可能已隐藏或最小化，也可能是截图不可用。",
         "outputUnsupported": "--output 只支持 observe window 或 zoom。",
         "missingCallerSession": "Computer Use 需要 Avibe Agent 调用方 Session。",
         "missingCallerTurn": "Computer Use 要求调用方 Avibe Session 当前有活动 Turn。",
@@ -1092,6 +1092,7 @@
       "candidate_suppliers_changed": "可用供应商已发生变化，请刷新模型选项后重新确认。",
       "models_dev_unavailable": "models.dev 当前不可用，请手动填写模型参数或稍后重试。",
       "codex_catalog_unavailable": "Codex 无法准备本地模型网关目录，请重试本回合。",
+      "hosted_content_unpinned": "此请求携带的托管工具内容未固定到其渲染所针对的来源，因此不能发送给任何来源。",
       "request_too_large": "请求超过 Avibe 本地网关的 {limit_mib} MiB 大小上限。请减少图片或对话上下文后重试。",
       "engine_down": "本地模型网关不可用。",
       "engine_down_streamed": "本地模型网关不可用。本回合输出可能不完整。",
@@ -1101,6 +1102,21 @@
       "upstream_request_invalid": "供应商拒绝了请求。",
       "upstream_unauthorized": "刷新后供应商仍拒绝授权。",
       "upstream_error": "供应商返回错误。"
+    },
+    "hostedTools": {
+      "noExecutor": "没有已验证可运行 {tool} 的来源。请在「模型」中为某个来源验证它。",
+      "executorUnavailable": "本轮绑定运行 {tool} 的来源已不可用。",
+      "providerRefused": "执行方的供应商拒绝了此次调用（{detail}）。",
+      "timedOut": "执行方调用超时。",
+      "unreachable": "无法连接执行方。",
+      "unreadable": "无法读取执行方的响应。",
+      "tooLarge": "执行方的响应超出了大小上限。",
+      "didNotRun": "执行方没有运行 {tool}。",
+      "responseEnded": "执行方的响应以 {status} 结束。",
+      "callFailed": "供应商的 {tool} 调用失败。",
+      "callEnded": "供应商的 {tool} 调用以 {status} 结束。",
+      "imageFormat": "供应商返回了不支持的图片格式：{format}。",
+      "imageUnreadable": "供应商返回的图片无法使用。"
     },
     "events": {
       "sourceFallback": "供应商",
@@ -1716,5 +1732,47 @@
     "sessionTitle": "歪比 · 桌宠",
     "noChatProject": "先在 Avibe 里建一个项目，桌宠的对话需要放在项目里。",
     "builtinAgentUnavailable": "内置 Agent 当前不可用，桌宠暂时没有对话对象。"
+  },
+  "hostedTools": {
+    "errorCode": {
+      "provider_no_reason": "供应商未说明原因",
+      "provider_no_image": "供应商没有返回图片",
+      "image_not_streamed": "回复结束前图片未传完",
+      "image_not_saved": "图片未能保存",
+      "image_no_store": "当前环境无法保存生成的图片",
+      "executor_no_image": "代理执行者没有返回图片",
+      "gateway_unreachable": "无法连接模型网关",
+      "gateway_refused": "模型网关拒绝了这次调用",
+      "gateway_no_result": "模型网关没有返回结果"
+    },
+    "tool": {
+      "web_search": "网页搜索",
+      "x_search": "X 搜索",
+      "image_generation": "图片生成"
+    },
+    "quoted": "“{subject}”",
+    "mode": {
+      "native": "原生（{provider}）",
+      "proxy": "由 {provider} 代理"
+    },
+    "count": {
+      "sourceOne": "1 个来源",
+      "sources": "{count} 个来源",
+      "postOne": "1 条帖子",
+      "posts": "{count} 条帖子",
+      "imageOne": "1 张",
+      "images": "{count} 张"
+    },
+    "cost": {
+      "included": "订阅内含",
+      "list": "≈ ${usd}",
+      "reported": "${usd}",
+      "calls": "{cost}（{calls} 次调用）"
+    },
+    "status": {
+      "failed": "失败：{error}",
+      "incomplete": "未完成：{error}",
+      "pending": "已中断"
+    }
   }
 }

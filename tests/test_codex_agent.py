@@ -6628,6 +6628,7 @@ class CodexGenerationAcquisitionTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(previous.generation.retiring)
 
     async def test_hfr_473_dead_transport_restarts_past_stale_turn_ownership(self):
+        """HFR-473: a definitively dead transport is replaced past its stale Turn fence."""
         agent = self._agent()
         with tempfile.TemporaryDirectory() as cwd:
             dead = SimpleNamespace(
