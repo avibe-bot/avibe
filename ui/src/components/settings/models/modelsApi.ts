@@ -28,9 +28,8 @@ import type {
   ModelCandidateModelsDev,
   ModelCandidateSupplier,
   ModelsDevMatch,
-  HostedToolExecutor,
+  HostedToolClear,
   HostedToolName,
-  HostedToolProbeResult,
   HostedToolPut,
   HostedToolsStatus,
   NativeProtocol,
@@ -173,12 +172,14 @@ export type ModelsApi = {
   getQuota(): Promise<QuotaSummary>;
   /** The same report, re-read now (the service bounds how often). */
   refreshQuota(): Promise<QuotaSummary>;
-  /** The Tools tab read: each hosted tool's toggle, executor and evidence. */
+  /** The Tools tab read: each hosted tool's setting and what real use learned. */
   getHostedTools(): Promise<HostedToolsStatus>;
-  /** Replace one tool's toggle and executor; answers the whole status again. */
+  /** Change the fields the body names; answers the whole status again. */
   putHostedTool(tool: HostedToolName, body: HostedToolPut): Promise<HostedToolsStatus>;
-  /** One user-started call probe on exactly one (Source, model); answers the status it left. */
-  probeHostedTool(tool: HostedToolName, target: HostedToolExecutor): Promise<{ probe: HostedToolProbeResult; hosted_tools: HostedToolsStatus }>;
+  /** Clear a tool's refusals (one Source, one of its models, or all); answers the whole status again. */
+  clearHostedTool(tool: HostedToolName, body: HostedToolClear): Promise<HostedToolsStatus>;
+  /** Clear one refused reasoning effort on a Source model; answers that Source. */
+  clearRefusedEffort(sourceId: string, modelId: string, effort: string): Promise<Source>;
   getRuntimeStatus(): Promise<RuntimeDependency>;
   /** Start the contract-owned client installation transaction. */
   installRuntime(): Promise<RuntimeDependency>;
@@ -690,9 +691,13 @@ export const modelsApi: ModelsApi = {
   putHostedTool: (tool, body) => call<{ hosted_tools: HostedToolsStatus }>(
     `/api/models/hosted-tools/${encodeURIComponent(tool)}`, jsonInit('PUT', body),
   ).then((r) => r.hosted_tools),
-  probeHostedTool: (tool, target) => call<{ probe: HostedToolProbeResult; hosted_tools: HostedToolsStatus }>(
-    `/api/models/hosted-tools/${encodeURIComponent(tool)}/probe`, jsonInit('POST', target),
-  ),
+  clearHostedTool: (tool, body) => call<{ hosted_tools: HostedToolsStatus }>(
+    `/api/models/hosted-tools/${encodeURIComponent(tool)}/clear`, jsonInit('POST', body),
+  ).then((r) => r.hosted_tools),
+  clearRefusedEffort: (sourceId, modelId, effort) => call<{ source: Source }>(
+    `/api/models/sources/${encodeURIComponent(sourceId)}/evidence/clear`,
+    jsonInit('POST', { model_id: modelId, feature: { kind: 'effort', name: effort } }),
+  ).then((r) => r.source),
   getRuntimeStatus: () => call<{ runtime?: RuntimeDependency } & RuntimeDependency>('/api/models/runtime/status').then((r) => (r.runtime ?? r) as RuntimeDependency),
   installRuntime: () => call<{ runtime?: RuntimeDependency } & RuntimeDependency>('/api/models/runtime/install', jsonInit('POST')).then((r) => (r.runtime ?? r) as RuntimeDependency),
   startRuntime: () => call<{ runtime?: RuntimeDependency } & RuntimeDependency>('/api/models/runtime/start', jsonInit('POST')).then((r) => (r.runtime ?? r) as RuntimeDependency),

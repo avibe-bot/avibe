@@ -400,64 +400,56 @@ scenarios:
       - tests/test_vibey_agent.py::test_a_proxied_image_that_was_not_saved_is_a_failed_call_with_its_code
       - tests/test_agent_transcript.py::test_the_media_sweep_keeps_every_file_a_row_registers_and_takes_only_stale_orphans
   - id: MH-HOSTED-UI-001
-    name: A Tools-tab toggle or executor pick writes the tool's whole setting with an executor the server accepts; the picker offers only verified pairs
+    name: A Tools-tab control writes only the field it changes, and a tool's controls hold while its write is out
     status: covered
     kind: contract
     layer: unit
     test:
-      - 'ui/src/components/settings/models/ToolsTab.test.tsx::MH-HOSTED-UI-001: a toggle replaces the whole setting and keeps the saved executor'
-      - 'ui/src/components/settings/models/ToolsTab.test.tsx::MH-HOSTED-UI-001: writes a saved executor back only while the server would still accept it'
-      - 'ui/src/components/settings/models/ToolsTab.test.tsx::MH-HOSTED-UI-001: the executor picker offers only verified pairs, and a pick keeps the toggle'
-      - 'ui/src/components/settings/models/ToolsTab.test.tsx::MH-HOSTED-UI-001: a saved executor that is no longer verified stays visible as itself'
-      - 'ui/src/components/settings/models/ToolsTab.test.tsx::MH-HOSTED-UI-001: keeps a saved executor visible as itself when nothing is verified any more'
-      - 'ui/src/components/settings/models/ToolsTab.test.tsx::MH-HOSTED-UI-001: holds a tool''s controls while its write is in flight'
+      - 'ui/src/components/settings/models/ToolsTab.test.tsx::MH-HOSTED-UI-001: a switch writes only whether the tool is on'
+      - 'ui/src/components/settings/models/ToolsTab.test.tsx::MH-HOSTED-UI-001: holds a tool''s controls while its write is out, and leaves other tools free'
   - id: MH-HOSTED-UI-002
-    name: Every hosted-tool evidence shape maps to the chip it owes the user, including wire-stale records that route as unknown
+    name: 'A tool''s status lines come from real use only: nothing before first use, the latest run by date, refusals grouped by aspect and Source, and where the tool runs now only after a later success elsewhere'
     status: covered
     kind: observation
     layer: unit
     test:
-      - 'ui/src/components/settings/models/hostedTools.test.ts::MH-HOSTED-UI-002: gives every evidence shape the chip it owes the user'
+      - 'ui/src/components/settings/models/ToolsTab.test.tsx::MH-HOSTED-UI-002: says nothing about a tool before its first use'
+      - 'ui/src/components/settings/models/ToolsTab.test.tsx::MH-HOSTED-UI-002: names who ran the tool last, with the date only'
+      - 'ui/src/components/settings/models/hostedTools.test.ts::MH-HOSTED-UI-002: groups refusals by aspect and Source, with each group''s models and newest time'
+      - 'ui/src/components/settings/models/hostedTools.test.ts::MH-HOSTED-UI-002: leaves a Source that refused the call out of the replay line, so it counts once'
+      - 'ui/src/components/settings/models/hostedTools.test.ts::MH-HOSTED-UI-002: says where the tool runs now only after a later success on another Source'
+      - 'ui/src/components/settings/models/hostedTools.test.ts::MH-HOSTED-UI-002: says where the tool runs now only after no success since'
+      - 'ui/src/components/settings/models/hostedTools.test.ts::MH-HOSTED-UI-002: says where the tool runs now only after the success is on the refusing Source'
+      - 'ui/src/components/settings/models/hostedTools.test.ts::MH-HOSTED-UI-002: says where the tool runs now only after no success at all'
   - id: MH-HOSTED-UI-003
-    name: The Tools tab states a cost only where one is known; an image is never priced and unknown is never shown as zero
+    name: The Tools tab states a cost only where one is known; a subscription is included, and unknown is never shown as zero
     status: covered
     kind: observation
     layer: unit
     test:
-      - 'ui/src/components/settings/models/ToolsTab.test.tsx::MH-HOSTED-UI-003: states a cost only where one is known, and never prices an image'
-      - 'ui/src/components/settings/models/ToolsTab.test.tsx::MH-HOSTED-UI-003: the image cost copy is the orchestrator-decided Chinese line'
-      - 'ui/src/components/settings/models/ToolsTab.test.tsx::MH-HOSTED-UI-003: lets the locale compose a price with its extras'
-      - 'ui/src/components/settings/models/ToolsTab.test.tsx::MH-HOSTED-UI-003: says a check''s cost is unknown before it runs, when no estimate is known'
-      - 'ui/src/components/settings/models/SourceDetailPanel.test.tsx::MH-HOSTED-UI-003: says a re-check''s cost is unknown when no estimate is known'
+      - 'ui/src/components/settings/models/ToolsTab.test.tsx::MH-HOSTED-UI-003: prices each executor where a price is known, and never shows unknown as zero'
       - 'ui/src/components/settings/models/format.test.ts::MH-HOSTED-UI-003: keeps the first significant digits of a per-call price, and never shows a nonzero price as zero'
-  - id: MH-HOSTED-UI-004
-    name: The Tools tab says how many checks an engine upgrade made stale, and nothing when none did
-    status: covered
-    kind: observation
-    layer: unit
-    test:
-      - 'ui/src/components/settings/models/ToolsTab.test.tsx::MH-HOSTED-UI-004: says how many checks an engine upgrade made stale, and nothing when none did'
   - id: MH-HOSTED-UI-005
-    name: The hosted-tools report stays unread until the Tools tab opens, then re-reads on every open
+    name: The hosted-tools report stays unread until the Tools tab opens, re-reads on every open, and again after a committed Source change
     status: covered
     kind: observation
     layer: unit
     test:
       - 'ui/src/components/settings/models/SettingsModelsPage.render.test.tsx::MH-HOSTED-UI-005: leaves the hosted-tools report unread until its tab opens, then re-reads on every open'
+      - 'ui/src/components/settings/models/SettingsModelsPage.render.test.tsx::MH-HOSTED-UI-005: reads the hosted-tools report again after a committed Source change, since a Source change can drop its evidence'
   - id: MH-HOSTED-UI-006
-    name: A Source model shows one chip per tool with evidence; a refused tool reads via proxy only while the server binds one for it, and unchecked draws nothing
+    name: A Source model shows one chip per feature with a record, a refusal over a success, and an unused model draws nothing
     status: covered
     kind: observation
     layer: unit
     test:
-      - 'ui/src/components/settings/models/ToolsTab.test.tsx::MH-HOSTED-UI-006: names the Sources that have no native pair for a tool'
-      - 'ui/src/components/settings/models/SourceDetailPanel.test.tsx::MH-HOSTED-UI-006: draws evidence per model, and says "via proxy" only while a proxy is bound for the tool'
-      - 'ui/src/components/settings/models/SourceDetailPanel.test.tsx::MH-HOSTED-UI-006: draws a chip for each reasoning effort the Source refused, even with no tool evidence'
+      - 'ui/src/components/settings/models/SourceDetailPanel.test.tsx::MH-HOSTED-UI-006: draws one chip per feature with a record, a refusal over a success, and nothing for an unused model'
       - 'ui/src/components/settings/models/SourceDetailPanel.test.tsx::MH-HOSTED-UI-006: says when the capability read failed instead of drawing a Source with no evidence'
       - 'ui/src/components/settings/models/SourceDetailPanel.test.tsx::MH-HOSTED-UI-006: adds no capability column when no model has evidence'
-      - 'ui/src/components/settings/models/hostedTools.test.ts::MH-HOSTED-UI-006: gives a Source model one capability per tool with evidence, in catalog order'
+      - 'ui/src/components/settings/models/hostedTools.test.ts::MH-HOSTED-UI-006: gives each pair one record, a refusal over a success and a call refusal over a replay one'
+      - 'ui/src/components/settings/models/hostedTools.test.ts::MH-HOSTED-UI-006: gives a Source model one capability per tool with a record, in catalog order'
   - id: MH-HOSTED-UI-007
-    name: Hosted-tool writes run one at a time and a read never overlaps one, so the screen holds the newest committed state
+    name: Hosted-tool writes and clears run one at a time and a read never overlaps one, so the screen holds the newest committed state
     status: covered
     kind: concurrency
     layer: unit
@@ -467,56 +459,47 @@ scenarios:
       - 'ui/src/components/settings/models/useHostedTools.test.tsx::MH-HOSTED-UI-007: drops a read that was already out when a write started'
       - 'ui/src/components/settings/models/useHostedTools.test.tsx::MH-HOSTED-UI-007: re-reads after the newest write fails, because a lost answer may have committed'
       - 'ui/src/components/settings/models/useHostedTools.test.tsx::MH-HOSTED-UI-007: re-reads when the open Source changes, since an edit can drop its evidence'
-      - 'ui/src/components/settings/models/useHostedTools.test.tsx::MH-HOSTED-UI-007: keeps the status a probe answered with when the read after it fails'
-      - 'ui/src/components/settings/models/useHostedTools.test.tsx::MH-HOSTED-UI-007: lands the status read for a lost probe answer, even when the read after it fails'
       - 'ui/src/components/settings/models/useHostedTools.test.tsx::MH-HOSTED-UI-007: shows no status of the previous Source identity while the new identity''s read fails'
       - 'ui/src/components/settings/models/useHostedTools.test.tsx::MH-HOSTED-UI-007: keeps a tool pending until the read reconciling its lost write lands'
       - 'ui/src/components/settings/models/useHostedTools.test.tsx::MH-HOSTED-UI-007: drops a write answer asked under another Source identity'
-  - id: MH-HOSTED-UI-013
-    name: A hosted-tool check runs only on the user's ask, one pair at a time, with its estimated cost shown first, and an answer that is not evidence reads as not verified with a retry
-    status: covered
-    kind: contract
-    layer: unit
-    test:
-      - 'ui/src/components/settings/models/ToolsTab.test.tsx::MH-HOSTED-UI-013: checks one row with its cost on the button, and says when the answer was not evidence'
-      - 'ui/src/components/settings/models/ToolsTab.test.tsx::MH-HOSTED-UI-013: offers a check one pair at a time, never all pairs at once'
-      - 'ui/src/components/settings/models/ToolsTab.test.tsx::MH-HOSTED-UI-013: says why a failed check failed, and never shows the server''s key as text'
-      - 'ui/src/components/settings/models/SourceDetailPanel.test.tsx::MH-HOSTED-UI-013: checks a tool again from its chip, with the cost on the action, and answers there when the check is not evidence'
-      - 'ui/src/components/settings/models/useHostedTools.test.tsx::MH-HOSTED-UI-013: reads the record before calling a probe unanswered when its answer was lost'
-      - 'ui/src/components/settings/models/useHostedTools.test.tsx::MH-HOSTED-UI-013: reads a verdict the status does not carry as not verified, with why'
-  - id: MH-HOSTED-UI-016
-    name: A hosted-tool check is a real call on exactly one Source, so the Models page reads its Sources again after one, and a Source the probe verified shows as verified
-    status: covered
-    kind: contract
-    layer: unit
-    test:
-      - 'ui/src/components/settings/models/SettingsModelsPage.render.test.tsx::MH-HOSTED-UI-016: reads the hosted-tools report again after a committed Source change, since its models decide which pairs could run a tool'
-      - 'ui/src/components/settings/models/SettingsModelsPage.render.test.tsx::MH-HOSTED-UI-016: reads the Sources again after a check, since a probe can verify its Source'
+      - 'ui/src/components/settings/models/useHostedTools.test.tsx::MH-HOSTED-UI-007: queues a clear behind a write like any write, so its answer lands last'
   - id: MH-HOSTED-UI-018
-    name: The Tools tab never enables a tool that cannot run. It stays off until the server binds an executor, says whether a check or an executor pick is missing, and an enabled tool with nothing verified says its calls fail
+    name: Every hosted tool is on by default under its capability group, and nothing locks its switch
     status: covered
     kind: contract
     layer: unit
     test:
-      - 'ui/src/components/settings/models/ToolsTab.test.tsx::MH-HOSTED-UI-018: cannot turn a tool on until a pair is verified to run it, but can always turn it off'
-      - 'ui/src/components/settings/models/ToolsTab.test.tsx::MH-HOSTED-UI-018: keeps a tool off while the server binds no executor for it, and says to choose one when a verified pair exists'
-      - 'ui/src/components/settings/models/ToolsTab.test.tsx::MH-HOSTED-UI-018: claims routing only while the tool is on, and shows an off tool''s executor as a saved preference'
-      - 'ui/src/components/settings/models/ToolsTab.test.tsx::MH-HOSTED-UI-018: keeps an image tool off until a check verifies one of its pairs, and offers that check'
-      - 'ui/src/components/settings/models/ToolsTab.test.tsx::MH-HOSTED-UI-018: says an enabled tool with nothing verified fails its calls, instead of naming a proxy'
+      - 'ui/src/components/settings/models/ToolsTab.test.tsx::MH-HOSTED-UI-018: shows every tool on by default under its capability, and never locks a switch'
   - id: MH-HOSTED-UI-017
-    name: A Source's capability chip is usable without a mouse. Its spoken name is the locale's composition of the label, explanation and facts, it announces the detail it opens, and Enter moves focus to the detail's paid re-check
+    name: A Source's capability chip is usable without a mouse. Its spoken name is the locale's composition of the label, explanation and facts, and every chip opens its detail from the keyboard
     status: covered
     kind: contract
     layer: unit
     test:
-      - 'ui/src/components/settings/models/SourceDetailPanel.test.tsx::MH-HOSTED-UI-017: names the record time, how it was learned, the reason, and until when it holds'
-      - 'ui/src/components/settings/models/SourceDetailPanel.test.tsx::MH-HOSTED-UI-017: moves keyboard focus into the detail on Enter, so its paid re-check can be reached'
-  - id: MH-HOSTED-UI-019
-    name: A check's replay step reads as its own result. A replay that ran and did not verify asks for another try (or says the Source does not support it), and no replay says nothing; neither reads as the call failing
+      - 'ui/src/components/settings/models/SourceDetailPanel.test.tsx::MH-HOSTED-UI-017: names the record time, the reason, how long it stays, and the last success'
+      - 'ui/src/components/settings/models/SourceDetailPanel.test.tsx::MH-HOSTED-UI-017: opens any chip''s detail from the keyboard, a success''s included'
+  - id: MH-HOSTED-UI-020
+    name: Every refusal can be cleared where it is named. One refusing Source clears on its status line; with two or more the clears and Clear all sit in Advanced; a Source chip clears its own model; an effort chip clears through the Source evidence clear
     status: covered
-    kind: observation
+    kind: contract
     layer: unit
-    test: ui/src/components/settings/models/ToolsTab.test.tsx::MH-HOSTED-UI-019
+    test:
+      - 'ui/src/components/settings/models/ToolsTab.test.tsx::MH-HOSTED-UI-020: one refusing Source: its line names the models and where the tool runs now, and clears that Source'
+      - 'ui/src/components/settings/models/ToolsTab.test.tsx::MH-HOSTED-UI-020: two refusing Sources: the line names them, and the clears and Clear all sit in Advanced'
+      - 'ui/src/components/settings/models/ToolsTab.test.tsx::MH-HOSTED-UI-020: a replay refusal has its own line, and a Source that refused the call is not in it'
+      - 'ui/src/components/settings/models/ToolsTab.test.tsx::MH-HOSTED-UI-020: an image refusal reads and clears like a search refusal, and two move into Advanced'
+      - 'ui/src/components/settings/models/SourceDetailPanel.test.tsx::MH-HOSTED-UI-020: clears a tool refusal for its own model only'
+      - 'ui/src/components/settings/models/SourceDetailPanel.test.tsx::MH-HOSTED-UI-020: clears a refused effort and shows the Source the clear answered'
+      - 'ui/src/components/settings/models/SettingsModelsPage.render.test.tsx::MH-HOSTED-UI-020: clears a refusal from its Source chip and shows the status the clear answered'
+  - id: MH-HOSTED-UI-021
+    name: A search tool's executor order lists every eligible executor in effective order; a move saves the whole shown order, Reset saves automatic, and focus follows the moved row
+    status: covered
+    kind: contract
+    layer: unit
+    test:
+      - 'ui/src/components/settings/models/ToolsTab.test.tsx::MH-HOSTED-UI-021: lists the executors in effective order, and a move saves the whole shown order'
+      - 'ui/src/components/settings/models/ToolsTab.test.tsx::MH-HOSTED-UI-021: a customized order offers Reset, which saves automatic'
+      - 'ui/src/components/settings/models/ToolsTab.test.tsx::MH-HOSTED-UI-021: keeps focus on the moved row once the answer lands, on its other arrow at an end'
   - id: MH-VIBEY-007
     name: Vibey starts once with the user's Sources and built-in Agent models, seeded when its first Source exists
     status: covered

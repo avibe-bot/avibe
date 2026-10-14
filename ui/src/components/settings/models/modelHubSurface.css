@@ -216,12 +216,13 @@
   --model-hub-quota-row-gap: 14px;
   --model-hub-quota-nested-indent: 12px;
 
-  /* Tools tab: hosted tools (frames E5IkUQ, XZjhj). Reuses the usage tab's type scale. */
+  /* Tools tab: hosted tools (frames pDd61, kPTBo). Reuses the usage tab's type scale. */
   --model-hub-tools-gap: 16px;
+  --model-hub-tool-group-gap: 10px;
   --model-hub-tool-pad-x: 20px;
+  --model-hub-tool-line-pad-y: 10px;
   --model-hub-tool-row-pad-x: 14px;
   --model-hub-tool-row-pad-y: 9px;
-  --model-hub-tool-columns: minmax(0, 1.5fr) minmax(0, 1.3fr) minmax(0, 1fr) auto;
 
   /* Backend model catalog dialog. `--model-hub-catalog-row-gap` is read from a
    * Tailwind arbitrary value in the dialog's markup, which has no selector of
@@ -1544,6 +1545,21 @@
   }
 }
 .model-hub-capability-detail { font-size: var(--model-hub-usage-cell-size); line-height: 18px; }
+/* A chip is its label (which opens the detail) and, on a refusal, a trailing clear. */
+.model-hub-capability-chip { padding: 0; }
+.model-hub-capability-chip > button {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border-radius: inherit;
+}
+.model-hub-capability-chip > .model-hub-capability-clear {
+  border-left: 1px solid var(--model-hub-gold-66);
+  border-radius: 0 999px 999px 0;
+}
+.model-hub-capability-clear:disabled { opacity: 0.5; }
 .model-hub-source-capabilities-failure { font-size: var(--model-hub-source-tier-size); }
 .model-hub-capability-explain { color: var(--model-hub-usage-note-ink); }
 .model-hub-capability-facts {
@@ -2114,38 +2130,48 @@
 .model-hub-tools { gap: var(--model-hub-tools-gap); }
 .model-hub-tools-title { font-size: 15px; line-height: 21px; }
 .model-hub-tools-subtitle,
-.model-hub-tools-reverify,
 .model-hub-tools-foot {
   color: var(--model-hub-usage-note-ink);
   font-size: var(--model-hub-usage-cell-size);
   line-height: 18px;
 }
 .model-hub-tools-foot { font-size: var(--model-hub-usage-note-size); line-height: 16px; }
+.model-hub-tool-group { gap: var(--model-hub-tool-group-gap); }
+.model-hub-tool-group-title {
+  color: var(--model-hub-ink-73);
+  font-size: var(--model-hub-usage-label-size);
+  line-height: 15px;
+}
 .model-hub-tool-card-head { padding: 14px var(--model-hub-tool-pad-x); }
 .model-hub-tool-name { font-size: 14px; line-height: 20px; }
 .model-hub-tool-description,
 .model-hub-tool-state { font-size: var(--model-hub-usage-cell-size); }
 .model-hub-tool-description { color: var(--model-hub-usage-note-ink); }
-.model-hub-tool-table { padding: 12px var(--model-hub-tool-row-pad-x) 14px; }
-.model-hub-tool-table-head,
-.model-hub-tool-row {
-  grid-template-columns: var(--model-hub-tool-columns);
-  column-gap: var(--model-hub-usage-gutter);
-  padding-inline: var(--model-hub-tool-row-pad-x);
+/* A status line, and the Advanced toggle, each a full-width row under the head. */
+.model-hub-tool-status,
+.model-hub-tool-advanced-toggle {
+  padding: var(--model-hub-tool-line-pad-y) var(--model-hub-tool-pad-x);
+  font-size: var(--model-hub-usage-cell-size);
+  line-height: 18px;
 }
-.model-hub-tool-table-head {
-  color: var(--model-hub-ink-73);
-  font-size: var(--model-hub-usage-label-size);
-  line-height: 15px;
-}
-.model-hub-tool-row {
-  row-gap: 8px;
-  padding-block: var(--model-hub-tool-row-pad-y);
+.model-hub-tool-advanced-body {
+  padding: 2px var(--model-hub-tool-pad-x) 16px;
   font-size: var(--model-hub-usage-cell-size);
 }
-/* Below md the row stacks: identity, then evidence, then cost. */
+.model-hub-tool-executor-row,
+.model-hub-tool-pair-row {
+  column-gap: var(--model-hub-usage-gutter);
+  row-gap: 6px;
+  padding: var(--model-hub-tool-row-pad-y) var(--model-hub-tool-row-pad-x);
+}
+.model-hub-tool-executor-row { grid-template-columns: auto minmax(0, 1fr) minmax(0, auto) auto; }
+.model-hub-tool-pair-row { grid-template-columns: minmax(0, 1fr) minmax(0, auto) auto; }
+/* Below md a row stacks: identity, then its state or price, then its actions. */
 @media (max-width: 767px) {
-  .model-hub-tool-row { grid-template-columns: minmax(0, 1fr); }
+  .model-hub-tool-executor-row { grid-template-columns: auto minmax(0, 1fr) auto; }
+  .model-hub-tool-executor-row > :nth-child(3) { grid-column: 2 / -1; grid-row: 2; }
+  .model-hub-tool-pair-row { grid-template-columns: minmax(0, 1fr) auto; }
+  .model-hub-tool-pair-row > :nth-child(2) { grid-column: 1 / -1; grid-row: 2; }
 }
 .model-hub-tool-cost-note {
   color: var(--model-hub-usage-note-ink);
@@ -2156,10 +2182,6 @@
   color: var(--model-hub-usage-note-ink);
   font-size: var(--model-hub-usage-note-size);
   line-height: 16px;
-}
-.model-hub-tool-executor {
-  padding: 12px var(--model-hub-tool-pad-x);
-  font-size: var(--model-hub-usage-cell-size);
 }
 .model-hub-usage-empty {
   padding: 26px var(--model-hub-usage-padding-x);

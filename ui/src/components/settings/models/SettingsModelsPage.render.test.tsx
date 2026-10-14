@@ -249,13 +249,13 @@ const routedImpact = {
   interrupted: [{ backend: 'claude' as const, model_id: routedModelId, agents: ['Release bot'] }],
 };
 
+const unused = { latest_ok: null, verified: [], refused: [] };
 const hostedToolsStatus: HostedToolsStatus = {
   tools: [
-    { name: 'web_search', enabled: false, executor: null, bound: null, candidates: [] },
-    { name: 'x_search', enabled: false, executor: null, bound: null, candidates: [] },
-    { name: 'image_generation', enabled: false, executor: null, bound: null, candidates: [] },
+    { name: 'web_search', enabled: true, status: unused, executor_order: null, effective_order: [], executor_candidates: [] },
+    { name: 'x_search', enabled: true, status: unused, executor_order: null, effective_order: [], executor_candidates: [] },
+    { name: 'image_generate', enabled: true, status: unused, default_model: null, effective_default: null, models: [], image_offered_by: [] },
   ],
-  reverify: { engine_upgraded: 0, aged: 0 },
 };
 
 const deferred = <T,>() => {
@@ -2862,7 +2862,7 @@ describe('SettingsModelsPage tools region', () => {
     await waitFor(() => expect(read).toHaveBeenCalledTimes(2));
   });
 
-  it('MH-HOSTED-UI-016: reads the hosted-tools report again after a committed Source change, since its models decide which pairs could run a tool', async () => {
+  it('MH-HOSTED-UI-005: reads the hosted-tools report again after a committed Source change, since a Source change can drop its evidence', async () => {
     renderPage([retainedSource]);
     const updatedSource = { ...retainedSource, display_name: 'Updated source' };
     vi.spyOn(modelsApi, 'patchSource').mockResolvedValueOnce({ source: updatedSource, removed_hops: [], interrupted: [] });
@@ -2885,27 +2885,21 @@ describe('SettingsModelsPage tools region', () => {
     await waitFor(() => expect(read.mock.calls.length).toBeGreaterThan(readsBefore));
   });
 
-  it('MH-HOSTED-UI-016: reads the Sources again after a check, since a probe can verify its Source', async () => {
-    const unknown = { status: 'unknown' as const, stale: null, basis: null, observed_at: null, detail: null, changes_at: null };
-    const withCandidate: HostedToolsStatus = {
-      ...hostedToolsStatus,
+  it('MH-HOSTED-UI-020: clears a refusal from its Source chip and shows the status the clear answered', async () => {
+    const withModel = { ...retainedSource, models: [{ id: 'claude-opus-5-5', display_name: null, origin: 'discovered' as const, reasoning_efforts: [], reasoning_efforts_source: null }] };
+    const refused: HostedToolsStatus = {
       tools: hostedToolsStatus.tools.map((tool) => tool.name === 'web_search'
-        ? { ...tool, candidates: [{ source_id: retainedSource.id, model_id: 'claude-opus-5-5', call: unknown, replay: unknown, billing: 'metered' as const, price: null, probe_estimate: null }] }
+        ? { ...tool, status: { ...unused, refused: [{ source_id: withModel.id, model_id: 'claude-opus-5-5', aspect: 'call' as const, at: '2026-10-14T09:00:00Z', reason: '400 unsupported_tool_type' }] } }
         : tool),
     };
-    renderPage([retainedSource]);
-    vi.mocked(modelsApi.getHostedTools).mockResolvedValue(withCandidate);
-    const probe = vi.spyOn(modelsApi, 'probeHostedTool').mockResolvedValue({
-      probe: { tool: 'web_search', source_id: retainedSource.id, model_id: 'claude-opus-5-5', call: { outcome: 'verified', error: null }, replay: null },
-      hosted_tools: withCandidate,
-    });
-    await screen.findByText('Retained source');
-    await userEvent.click(screen.getByRole('tab', { name: /^Tools$|^工具$/ }));
-    const card = await screen.findByRole('region', { name: /^Web search$|^网页搜索$/ });
-    const sourceReads = vi.mocked(modelsApi.listSources).mock.calls.length;
+    renderPage([withModel]);
+    vi.mocked(modelsApi.getHostedTools).mockResolvedValue(refused);
+    const clear = vi.spyOn(modelsApi, 'clearHostedTool').mockResolvedValue(hostedToolsStatus);
+    await userEvent.click((await screen.findByText('Retained source')).closest('button') as HTMLButtonElement);
+    await screen.findByRole('dialog', { name: 'Retained source' });
 
-    await userEvent.click(within(card).getByRole('button', { name: /^Check · cost unknown$|^检测 · 费用未知$/ }));
-    expect(probe).toHaveBeenCalledTimes(1);
-    await waitFor(() => expect(vi.mocked(modelsApi.listSources).mock.calls.length).toBeGreaterThan(sourceReads));
+    await userEvent.click(await screen.findByRole('button', { name: /^Clear the web search refusal of claude-opus-5-5$|^清除 claude-opus-5-5 的网页搜索拒绝记录$/ }));
+    expect(clear).toHaveBeenCalledWith('web_search', { source_id: withModel.id, model_id: 'claude-opus-5-5' });
+    await waitFor(() => expect(document.querySelector('[data-capability]')).toBeNull());
   });
 });

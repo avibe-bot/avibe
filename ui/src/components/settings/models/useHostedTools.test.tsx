@@ -15,8 +15,14 @@ import type { HostedToolsStatus } from './types';
 import { useHostedTools } from './useHostedTools';
 
 const status = (enabled: boolean): HostedToolsStatus => ({
-  tools: [{ name: 'web_search', enabled, executor: null, bound: null, candidates: [] }],
-  reverify: { engine_upgraded: 0, aged: 0 },
+  tools: [{
+    name: 'web_search',
+    enabled,
+    status: { latest_ok: null, verified: [], refused: [] },
+    executor_order: null,
+    effective_order: [],
+    executor_candidates: [],
+  }],
 });
 
 const deferred = <T,>() => {
@@ -51,7 +57,7 @@ describe('useHostedTools ordering', () => {
     await waitFor(() => expect(shown(result.current.read)).toBe(false));
 
     let saving!: Promise<void>;
-    act(() => { saving = result.current.save('web_search', { enabled: true, executor: null }); });
+    act(() => { saving = result.current.save('web_search', { enabled: true }); });
     // The tab is left and reopened while the PUT is still out.
     await act(async () => { await result.current.refresh(); });
     expect(get).toHaveBeenCalledTimes(1);
@@ -75,8 +81,8 @@ describe('useHostedTools ordering', () => {
     let writes!: Promise<void>[];
     act(() => {
       writes = [
-        result.current.save('web_search', { enabled: true, executor: null }),
-        result.current.save('x_search', { enabled: true, executor: null }),
+        result.current.save('web_search', { enabled: true }),
+        result.current.save('x_search', { enabled: true }),
       ];
     });
     // The second PUT has not left: had both, the server could commit them in
@@ -95,7 +101,7 @@ describe('useHostedTools ordering', () => {
     vi.spyOn(modelsApi, 'putHostedTool').mockResolvedValue(status(true));
     const { result } = renderHook(() => useHostedTools(true), { wrapper });
 
-    await act(async () => { await result.current.save('web_search', { enabled: true, executor: null }); });
+    await act(async () => { await result.current.save('web_search', { enabled: true }); });
     expect(shown(result.current.read)).toBe(true);
     // The read cannot tell whether it saw the write, so its answer never lands.
     await act(async () => { first.resolve(status(false)); await first.promise; });
@@ -109,7 +115,7 @@ describe('useHostedTools ordering', () => {
     await waitFor(() => expect(get).toHaveBeenCalledTimes(1));
 
     get.mockResolvedValue(status(true));
-    await act(async () => { await result.current.save('web_search', { enabled: true, executor: null }); });
+    await act(async () => { await result.current.save('web_search', { enabled: true }); });
     await waitFor(() => expect(get).toHaveBeenCalledTimes(2));
     expect(shown(result.current.read)).toBe(true);
   });
@@ -123,77 +129,6 @@ describe('useHostedTools ordering', () => {
     await waitFor(() => expect(get).toHaveBeenCalledTimes(1));
     rerender({ revision: 'source-a-with-a-new-key' });
     await waitFor(() => expect(get).toHaveBeenCalledTimes(2));
-  });
-
-  it('MH-HOSTED-UI-007: keeps the status a probe answered with when the read after it fails', async () => {
-    // Before: unchecked (shown here as off). The probe's answer: the tool's state after it.
-    vi.spyOn(modelsApi, 'getHostedTools')
-      .mockResolvedValueOnce(status(false))
-      .mockRejectedValueOnce(new Error('offline'));
-    vi.spyOn(modelsApi, 'probeHostedTool').mockResolvedValue({
-      probe: { tool: 'web_search', source_id: 'src_relay001', model_id: 'gpt-6-astra', call: { outcome: 'verified', error: null }, replay: null },
-      hosted_tools: status(true),
-    });
-    const { result } = renderHook(() => useHostedTools(true), { wrapper });
-    await waitFor(() => expect(shown(result.current.read)).toBe(false));
-
-    const candidate = {
-      source_id: 'src_relay001', model_id: 'gpt-6-astra', billing: 'metered' as const, price: null, probe_estimate: null,
-      call: { status: 'unknown' as const, stale: null, basis: null, observed_at: null, detail: null, changes_at: null },
-      replay: null,
-    };
-    await act(async () => { await result.current.probe({ tool: 'web_search', candidate }); });
-    // The read that follows failed; what the probe answered still stands.
-    await waitFor(() => expect(shown(result.current.read)).toBe(true));
-  });
-
-  it('MH-HOSTED-UI-013: reads the record before calling a probe unanswered when its answer was lost', async () => {
-    const before = { status: 'unknown' as const, stale: null, basis: null, observed_at: null, detail: null, changes_at: null };
-    const candidate = {
-      source_id: 'src_relay001', model_id: 'gpt-6-astra', billing: 'metered' as const, price: null, probe_estimate: null, call: before, replay: null,
-    };
-    const recorded: HostedToolsStatus = {
-      tools: [{
-        name: 'web_search', enabled: false, executor: null, bound: null,
-        candidates: [{ ...candidate, call: { ...before, status: 'verified', basis: 'probe', observed_at: '2026-10-14T07:00:00Z' } }],
-      }],
-      reverify: { engine_upgraded: 0, aged: 0 },
-    };
-    vi.spyOn(modelsApi, 'getHostedTools').mockResolvedValueOnce(status(false)).mockResolvedValue(recorded);
-    // The probe ran and recorded its evidence, but its answer never arrived.
-    vi.spyOn(modelsApi, 'probeHostedTool').mockRejectedValue(new Error('connection reset'));
-    const { result } = renderHook(() => useHostedTools(true), { wrapper });
-    await waitFor(() => expect(shown(result.current.read)).toBe(false));
-
-    let outcome: Awaited<ReturnType<typeof result.current.probe>> = null;
-    await act(async () => { outcome = await result.current.probe({ tool: 'web_search', candidate }); });
-    // Verified, not "no answer", so nothing invites a second paid request.
-    expect(outcome).toMatchObject({ call: { outcome: 'verified' } });
-  });
-
-  it('MH-HOSTED-UI-007: lands the status read for a lost probe answer, even when the read after it fails', async () => {
-    const before = { status: 'unknown' as const, stale: null, basis: null, observed_at: null, detail: null, changes_at: null };
-    const candidate = {
-      source_id: 'src_relay001', model_id: 'gpt-6-astra', billing: 'metered' as const, price: null, probe_estimate: null, call: before, replay: null,
-    };
-    const recorded: HostedToolsStatus = {
-      tools: [{
-        name: 'web_search', enabled: true, executor: null, bound: null,
-        candidates: [{ ...candidate, call: { ...before, status: 'verified', basis: 'probe', observed_at: '2026-10-14T07:00:00Z' } }],
-      }],
-      reverify: { engine_upgraded: 0, aged: 0 },
-    };
-    vi.spyOn(modelsApi, 'getHostedTools')
-      .mockResolvedValueOnce(status(false))
-      .mockResolvedValueOnce(recorded)
-      .mockRejectedValue(new Error('offline'));
-    vi.spyOn(modelsApi, 'probeHostedTool').mockRejectedValue(new Error('connection reset'));
-    const { result } = renderHook(() => useHostedTools(true), { wrapper });
-    await waitFor(() => expect(shown(result.current.read)).toBe(false));
-
-    await act(async () => { await result.current.probe({ tool: 'web_search', candidate }); });
-    // The recovered status shows; the failed read after it only marks it degraded.
-    await waitFor(() => expect(shown(result.current.read)).toBe(true));
   });
 
   it('MH-HOSTED-UI-007: shows no status of the previous Source identity while the new identity\'s read fails', async () => {
@@ -218,7 +153,7 @@ describe('useHostedTools ordering', () => {
     await waitFor(() => expect(shown(result.current.read)).toBe(false));
 
     let saving!: Promise<void>;
-    act(() => { saving = result.current.save('web_search', { enabled: true, executor: null }); });
+    act(() => { saving = result.current.save('web_search', { enabled: true }); });
     // The answer was lost and the write may have committed: still pending while the read is out.
     await waitFor(() => expect(modelsApi.getHostedTools).toHaveBeenCalledTimes(2));
     expect(result.current.pending.has('web_search')).toBe(true);
@@ -239,7 +174,7 @@ describe('useHostedTools ordering', () => {
     await waitFor(() => expect(shown(result.current.read)).toBe(false));
 
     let saving!: Promise<void>;
-    act(() => { saving = result.current.save('web_search', { enabled: true, executor: null }); });
+    act(() => { saving = result.current.save('web_search', { enabled: true }); });
     // The key is replaced while the write is out.
     rerender({ revision: 'identity-b' });
     await act(async () => { put.resolve(status(true)); await saving; });
@@ -247,26 +182,25 @@ describe('useHostedTools ordering', () => {
     expect(shown(result.current.read)).toBeNull();
   });
 
-  it('MH-HOSTED-UI-013: reads a verdict the status does not carry as not verified, with why', async () => {
-    const unknown = { status: 'unknown' as const, stale: null, basis: null, observed_at: null, detail: null, changes_at: null };
-    const candidate = {
-      source_id: 'src_relay001', model_id: 'gpt-6-astra', billing: 'metered' as const, price: null, probe_estimate: null, call: unknown, replay: null,
-    };
-    const unrecorded: HostedToolsStatus = {
-      tools: [{ name: 'web_search', enabled: false, executor: null, bound: null, candidates: [candidate] }],
-      reverify: { engine_upgraded: 0, aged: 0 },
-    };
-    vi.spyOn(modelsApi, 'getHostedTools').mockResolvedValue(unrecorded);
-    // The probe verified the tool, but the server could not write the record.
-    vi.spyOn(modelsApi, 'probeHostedTool').mockResolvedValue({
-      probe: { tool: 'web_search', source_id: 'src_relay001', model_id: 'gpt-6-astra', call: { outcome: 'verified', error: null }, replay: null },
-      hosted_tools: unrecorded,
-    });
+  it('MH-HOSTED-UI-007: queues a clear behind a write like any write, so its answer lands last', async () => {
+    vi.spyOn(modelsApi, 'getHostedTools').mockResolvedValue(status(false));
+    const put = deferred<HostedToolsStatus>();
+    vi.spyOn(modelsApi, 'putHostedTool').mockReturnValue(put.promise);
+    const clear = vi.spyOn(modelsApi, 'clearHostedTool').mockResolvedValue(status(false));
     const { result } = renderHook(() => useHostedTools(true), { wrapper });
-    await waitFor(() => expect(result.current.read.kind).toBe('ready'));
+    await waitFor(() => expect(shown(result.current.read)).toBe(false));
 
-    let outcome: Awaited<ReturnType<typeof result.current.probe>> = null;
-    await act(async () => { outcome = await result.current.probe({ tool: 'web_search', candidate }); });
-    expect(outcome).toMatchObject({ call: { outcome: 'transient', error: 'settings.models.tools.probe.notRecorded' } });
+    let writes!: Promise<void>[];
+    act(() => {
+      writes = [
+        result.current.save('web_search', { enabled: true }),
+        result.current.clear('web_search', { source_id: 'src_relay001', model_id: 'gpt-6-astra' }),
+      ];
+    });
+    await waitFor(() => expect(modelsApi.putHostedTool).toHaveBeenCalledTimes(1));
+    expect(clear).not.toHaveBeenCalled();
+    await act(async () => { put.resolve(status(true)); await Promise.all(writes); });
+    expect(clear).toHaveBeenCalledWith('web_search', { source_id: 'src_relay001', model_id: 'gpt-6-astra' });
+    expect(shown(result.current.read)).toBe(false);
   });
 });
