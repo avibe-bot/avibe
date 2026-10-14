@@ -12,13 +12,18 @@ import json
 import os
 from pathlib import Path
 import re
+import selectors
 import signal
 import subprocess
 import sys
 import threading
 import time
-import tomllib
 import uuid
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # Product tests still support Python 3.10.
+    import tomli as tomllib
 
 from .credential import consume, metadata
 
@@ -54,9 +59,14 @@ def command(argv, *, timeout=10):
 
 def absolute(path, *, exists=True):
     p = Path(path)
+    if any(char in str(p) for char in "%$\n\r\x00"):
+        raise ValueError("systemd specifiers and variable expansions are not supported in paths")
     if not p.is_absolute():
         raise ValueError("absolute execution paths required; relocate explicitly before submission")
-    return p.resolve(strict=exists)
+    resolved = p.resolve(strict=exists)
+    if any(char in str(resolved) for char in "%$\n\r\x00"):
+        raise ValueError("resolved path contains a systemd expansion")
+    return resolved
 
 
 def validate(config_path, credential_env=None):
@@ -95,7 +105,10 @@ def validate(config_path, credential_env=None):
         credential_env = profile.credential_env
         wheel = absolute(kwargs["wheel_path"])
         with wheel.open("rb") as file:
-            if hashlib.file_digest(file, "sha256").hexdigest() != kwargs["wheel_sha256"]:
+            digest = hashlib.sha256()
+            for chunk in iter(lambda: file.read(1024 * 1024), b""):
+                digest.update(chunk)
+            if digest.hexdigest() != kwargs["wheel_sha256"]:
                 raise ValueError("wheel hash mismatch")
     credential_env = credential_env or "BENCHMARK_API_KEY"
     if not re.fullmatch(r"[A-Z][A-Z0-9_]{0,100}", credential_env):
@@ -114,6 +127,8 @@ def release(root):
 def prepare(config_path, root, wall_seconds, credential_env=None):
     config, job_dir, task, credential_env = validate(config_path, credential_env)
     root = absolute(root, exists=False)
+    source_root = absolute(Path(__file__).resolve().parents[2])
+    absolute(sys.executable)  # Reject manager expansion in the interpreter path too.
     if not 0 < wall_seconds <= 7200:
         raise ValueError("invalid hard wall cap")
     if any(root == p or root in p.parents or p in root.parents for p in (task, job_dir)):
@@ -133,7 +148,7 @@ def prepare(config_path, root, wall_seconds, credential_env=None):
                     "job_dir": str(job_dir), "task": str(task), "wall_seconds": wall_seconds,
                     "credential_env": credential_env, "created_at": time.time(),
                     "config_sha256": hashlib.sha256(Path(config_path).read_bytes()).hexdigest(),
-                    "source_root": str(Path(__file__).resolve().parents[2])}
+                    "source_root": str(source_root)}
         save(root / "config.json", config)
         save(root / "manifest.json", manifest)
         save(root / "lifecycle.json", {"state": "prepared"})
@@ -172,6 +187,42 @@ def docker_state(projects, run=command):
     return owned, nets
 
 
+def archive_artifact(container_id, source, destination, timeout):
+    """Keep untrusted Docker tar bytes opaque; never extract onto the host.
+
+    Separate exclusive files prevent overlapping artifact paths or symlinks in
+    one artifact from redirecting a later host write. Bound both bytes and time.
+    """
+    deadline = time.monotonic() + timeout
+    with destination.open("xb") as file:
+        os.fchmod(file.fileno(), 0o600)
+        child = subprocess.Popen(["docker", "cp", f"{container_id}:{source}", "-"],
+                                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        try:
+            with selectors.DefaultSelector() as selector:
+                selector.register(child.stdout, selectors.EVENT_READ)
+                size = 0
+                while True:
+                    left = deadline - time.monotonic()
+                    if left <= 0 or not selector.select(left):
+                        raise subprocess.TimeoutExpired("artifact archive", timeout)
+                    chunk = os.read(child.stdout.fileno(), 65536)
+                    if not chunk:
+                        break
+                    size += len(chunk)
+                    if size > 32 * 1024 * 1024:
+                        raise OSError("artifact archive exceeds byte budget")
+                    file.write(chunk)
+                child.wait(timeout=max(.1, deadline - time.monotonic()))
+                if child.returncode:
+                    raise subprocess.CalledProcessError(child.returncode, "artifact archive")
+        finally:
+            if child.poll() is None:
+                child.kill()
+                child.wait(timeout=2)
+            child.stdout.close()
+
+
 def copy_artifacts(root, manifest, containers, deadline):
     records = []
     try:
@@ -179,7 +230,7 @@ def copy_artifacts(root, manifest, containers, deadline):
     except (OSError, ValueError):
         return [{"status": "metadata_unavailable"}]
     for container in containers:
-        for path in declared[:32]:
+        for index, path in enumerate(declared[:32]):
             if time.monotonic() >= deadline:
                 return [*records, {"status": "recovery_budget_exhausted"}]
             if not isinstance(path, str):
@@ -189,15 +240,15 @@ def copy_artifacts(root, manifest, containers, deadline):
                 continue
             if source.parts[1] in {"installed-agent", "proc", "sys", "dev", "etc", "root", "run", "logs"}:
                 continue
-            destination = root / "recovered-artifacts" / container["Id"][:12] / source.relative_to("/")
+            destination = root / "recovered-artifacts" / container["Id"][:12] / f"{index:02d}.tar"
             destination.parent.mkdir(parents=True, exist_ok=True)
             try:
-                command(["docker", "cp", f"{container['Id']}:{source}", str(destination)],
-                        timeout=min(3, max(.1, deadline - time.monotonic())))
-                status = "copied"
+                archive_artifact(container["Id"], source, destination, min(3, max(.1, deadline - time.monotonic())))
+                status = "archived"
             except (subprocess.SubprocessError, OSError):
                 status = "unavailable"
-            records.append({"path": path, "status": status})
+            records.append({"path": path, "status": status, "archive": str(destination.relative_to(root)),
+                            "extracted_on_host": False})
     return records
 
 

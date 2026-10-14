@@ -89,8 +89,12 @@ The historical pilot still lacks evidence identifying its final stop reason.
   (`empty_response` rather than `length`); 14 controls passed.
 - Core/adapter green: 83 focused cases, including persisted error rows and
   localized length causes for empty, thinking-only and visible partial finals.
-- Wrapper/host green: 48 focused tests before the additional credential-name
-  regression; final suite results are recorded at delivery.
+- Wrapper/host final targeted pass: 33 cases, including split-secret redaction,
+  global ownership, malformed evidence, exact trial identity, systemd expansion
+  refusal (also behind symlinks), the Python 3.10 TOML-import fallback, and opaque
+  recovery archives. An expanded run passed 1120 of 1122 cases; one missing remote
+  schema fixture was synchronized and one stale Run-show error-code assertion
+  was corrected. Both failures plus neighboring cases then passed (9 tests).
 - Real full-runtime source acceptance: two simulated provider cases (empty stop,
   thinking-only length) both completed failure reporting, retained the distinct
   canonical stop/block diagnostics and proved owned cleanup. No model bill.
@@ -99,7 +103,10 @@ The historical pilot still lacks evidence identifying its final stop reason.
   supervisor, and SIGKILL of the Harbor child each produced their own terminal
   orchestration receipt, retained fixture artifacts, and left no owned container
   or network. A separate bystander container remained running and was removed
-  only by the test owner after all assertions. No paid task was repeated.
+  only by the test owner after all assertions. An additional real Docker case
+  recovered overlapping directory/file declarations containing an absolute
+  symlink as two opaque tar files; the host sentinel remained unchanged and all
+  owned containers/networks were removed. No paid task was repeated.
 
 Review findings fixed as a class: parse failures cannot block cleanup; one
 host-wide reservation plus permanent destination claim; post-stop-only receipt

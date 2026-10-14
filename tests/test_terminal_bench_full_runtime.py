@@ -219,7 +219,8 @@ def test_owned_cleanup_reaps_detached_child_and_preserves_bystander(tmp_path):
     ("poll", "timeout", "cli_helper_timeout"),
     ("poll", "exit", "cli_helper_failed_2"),
     ("poll", "signal", "cli_helper_failed_-9"),
-    ("poll", "json", "cli_helper_invalid_json"),
+    # Run-show validates the durable Run payload, not just generic helper JSON.
+    ("poll", "json", "cli_helper_invalid_run_payload"),
     ("poll", "quiescence", "harness_quiescence_unconfirmed"),
     ("poll", "unsafe_trial_error", "unclassified_trial_error"),
     ("poll", "upstream_exception", None),

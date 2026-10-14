@@ -166,7 +166,9 @@ The credential parent must be owned mode0700 and the regular file mode0600;
 the supervisor consumes it before starting Harbor. Full-runtime jobs derive the
 environment-variable name from the profile, and explicit mismatches are refused.
 For a reference agent specify its provider variable with `--credential-env`.
-No secret value enters systemd properties or command arguments.
+No secret value enters systemd properties or command arguments. Paths containing
+systemd `%` specifiers, `$` expansions or line breaks are refused (including
+resolved symlink targets) rather than interpreted by the service manager.
 
 The host-wide `/run/lock/avibe-benchmark.active.json` reservation rejects a second
 submission regardless of run-root parent. A permanent per-job destination claim
@@ -182,8 +184,10 @@ The pinned Harbor driver's awaited START hook records exact agent and verifier
 Compose project labels **before** resources are created, including network-only
 startup failures. systemd owns the worker and descendants; ExecStopPost runs
 only after their process group is fenced. This phase recovers declared task
-artifacts within a small total budget, removes only proven-owned containers and
-networks, and writes `receipt.json`. Missing/malformed Harbor output cannot skip
+artifacts as separate, size/time-bounded **opaque tar files**, never extracts
+container-controlled symlinks onto the host, removes only proven-owned containers
+and networks, and writes `receipt.json`. Inspect recovered archives in an isolated
+workspace; do not blindly extract untrusted paths on the host. Missing/malformed Harbor output cannot skip
 cleanup. A zero child exit plus a job timestamp is not enough: completion needs
 the one exact trial's terminal receipt as well. Harbor results are never rewritten
 and orchestration failure never invents a reward or usage.

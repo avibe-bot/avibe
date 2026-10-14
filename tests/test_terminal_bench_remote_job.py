@@ -17,6 +17,7 @@ from scripts.terminal_bench import remote_job as job
 def host_scope(tmp_path, monkeypatch):
     monkeypatch.setattr(job, "HOST_RESERVATION", tmp_path / "host-reservation")
     monkeypatch.setenv("SERVICE_RESULT", "success")
+    monkeypatch.setattr(job, "archive_artifact", lambda cid, source, destination, timeout: destination.write_bytes(b"opaque-fixture"))
 
 
 def config(tmp_path):
@@ -258,10 +259,80 @@ def test_artifact_recovery_stops_at_its_total_budget(tmp_path, monkeypatch):
     clock = [0.0]
     monkeypatch.setattr(job.time, "monotonic", lambda: clock[0])
     calls = []
-    def copy(argv, timeout):
-        calls.append(argv); clock[0] += timeout
+    def copy(cid, source, destination, timeout):
+        calls.append(source); clock[0] += timeout
         raise subprocess.TimeoutExpired("docker cp", timeout)
-    monkeypatch.setattr(job, "command", copy)
+    monkeypatch.setattr(job, "archive_artifact", copy)
     result = job.copy_artifacts(root, job.load(root / "manifest.json"), [{"Id": "a" * 64}], 8)
     assert clock[0] <= 8 and len(calls) <= 3
     assert result[-1]["status"] == "recovery_budget_exhausted"
+
+
+@pytest.mark.parametrize("component", ["%n", "$NAME", "a\nb"])
+def test_manager_expansion_paths_fail_before_ownership(tmp_path, component):
+    p = config(tmp_path)
+    with pytest.raises(ValueError, match="systemd"):
+        job.prepare(p, tmp_path / "runs" / component, 5)
+    assert not job.HOST_RESERVATION.exists()
+
+
+def test_manager_expansion_cannot_hide_behind_a_symlink(tmp_path):
+    p = config(tmp_path)
+    target = tmp_path / "%n"
+    target.mkdir()
+    alias = tmp_path / "alias"
+    alias.symlink_to(target, target_is_directory=True)
+    with pytest.raises(ValueError, match="systemd"):
+        job.prepare(p, alias / "job", 5)
+    assert not job.HOST_RESERVATION.exists()
+
+
+def test_tomli_fallback_keeps_module_collectable_on_python310(monkeypatch):
+    import builtins
+    import importlib.util
+    original = builtins.__import__
+    used = []
+    def compat(name, *args, **kwargs):
+        if name == "tomllib":
+            raise ModuleNotFoundError(name)
+        if name == "tomli":
+            used.append(name)
+            return job.tomllib
+        return original(name, *args, **kwargs)
+    monkeypatch.setattr(builtins, "__import__", compat)
+    spec = importlib.util.spec_from_file_location("scripts.terminal_bench.compat_fixture", job.__file__)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert used == ["tomli"]
+    assert module.tomllib.loads("x=1") == {"x": 1}
+
+
+def test_overlapping_artifact_symlinks_remain_opaque_archives(tmp_path, monkeypatch):
+    import tarfile
+    root = prepared(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    sentinel = outside / "payload"
+    sentinel.write_text("must-stay-unchanged")
+    (tmp_path / "task/task.toml").write_text('artifacts=["/app/out","/app/out/link/payload"]')
+    destinations = []
+    def archive(cid, source, destination, timeout):
+        destinations.append(destination)
+        with tarfile.open(destination, "w") as tar:
+            if str(source) == "/app/out":
+                link = tarfile.TarInfo("out/link")
+                link.type = tarfile.SYMTYPE
+                link.linkname = str(outside)
+                tar.addfile(link)
+            else:
+                member = tarfile.TarInfo("payload")
+                data = b"overwrite-sentinel"
+                member.size = len(data)
+                tar.addfile(member, io.BytesIO(data))
+    monkeypatch.setattr(job, "archive_artifact", archive)
+    result = job.copy_artifacts(root, job.load(root / "manifest.json"), [{"Id": "a" * 64}], job.time.monotonic() + 5)
+    assert len(destinations) == 2 and destinations[0] != destinations[1]
+    assert all(p.is_relative_to(root) and p.suffix == ".tar" for p in destinations)
+    assert all(r["status"] == "archived" and r["extracted_on_host"] is False for r in result)
+    assert sentinel.read_text() == "must-stay-unchanged"
+    assert not list((root / "recovered-artifacts").rglob("link"))
