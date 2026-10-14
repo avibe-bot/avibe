@@ -24,6 +24,7 @@ import os
 import re
 import secrets
 import stat
+import threading
 import time
 from pathlib import Path
 from typing import Optional
@@ -42,6 +43,9 @@ _EXTENSIONS = {"image/png": "png", "image/jpeg": "jpg", "image/gif": "gif", "ima
 SWEEP_GRACE_S = 24 * 3600.0
 _STORED_NAME = re.compile(r"[0-9a-f]{64}\.(?:png|jpg|gif|webp)")
 _TEMP_NAME = re.compile(r"\.[0-9a-f]{64}\.[0-9a-f]{8}\.tmp")
+#: Orders a save's reuse of a file against the sweep's last look at it and its removal, in this process, the only one
+#: that writes the root.
+_ROOT_LOCK = threading.Lock()
 
 
 class MediaUnavailable(RuntimeError):
@@ -117,7 +121,12 @@ class MediaSnapshots:
         regular file that still holds those bytes: history reads these paths directly, and their owner can change
         them. Anything else is replaced by one atomic rename, which never follows the entry it replaces, so nothing is
         repaired in place and a link's target is never touched. A reused file older than half the sweep's grace is
-        made new again, so ``sweep`` never takes a file a save is about to register."""
+        made new again, under the lock the sweep removes a file under, so ``sweep`` never takes a file a save is about
+        to register."""
+        with _ROOT_LOCK:
+            return self._store_locked(data, mime_type)
+
+    def _store_locked(self, data: bytes, mime_type: str) -> Path:
         digest = hashlib.sha256(data).hexdigest()
         path = self._root / f"{digest}.{_EXTENSIONS[mime_type]}"
         try:
@@ -165,14 +174,16 @@ class MediaSnapshots:
                     continue
                 if not temporary and media_service.is_registered_path(conn, {str(path), str(path.resolve())}):
                     continue
-                # Looked at again just before it goes: a save that reused it since has made it new (``_store``).
-                size = self._stale(path, cutoff)
-                if size is None:
-                    continue
-                try:
-                    path.unlink()
-                except FileNotFoundError:
-                    continue
+                # Looked at again as it goes, under the lock a save reuses a file under: one that reused it since has
+                # made it new (``_store``).
+                with _ROOT_LOCK:
+                    size = self._stale(path, cutoff)
+                    if size is None:
+                        continue
+                    try:
+                        path.unlink()
+                    except FileNotFoundError:
+                        continue
                 removed, freed = removed + 1, freed + size
         return removed, freed
 

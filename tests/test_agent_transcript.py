@@ -492,10 +492,10 @@ async def test_a_call_instance_is_settled_once_whoever_writes(engine) -> None:
 
 
 async def test_the_media_sweep_keeps_every_file_a_row_registers_and_takes_only_stale_orphans(engine, tmp_path) -> None:
-    """#2588 (``vibey-hosted-tools.md`` §7.3): a generated image is saved before the row that names it commits, so an
-    interruption in between leaves a file no row names. A committed row registers each image it names, native or
-    proxied, as an input snapshot is registered; the sweep removes only a file nothing registers that is older than
-    any Turn holds an uncommitted save, and never a link or a name of someone else's."""
+    """MH-HOSTED-VIBEY-007, #2588 (``vibey-hosted-tools.md`` §7.3): a generated image is saved before the row that
+    names it commits, so an interruption in between leaves a file no row names. A committed row registers each image
+    it names, native or proxied, as an input snapshot is registered; the sweep removes only a file nothing registers
+    that is older than any Turn holds an uncommitted save, and never a link or a name of someone else's."""
     import base64
     import os
     import time
