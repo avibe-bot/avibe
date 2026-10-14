@@ -51,6 +51,7 @@ vi.mock('./CapabilityTabs', () => ({ CapabilityTabs: () => null }));
 type FakeModelCatalog = {
   models: string[];
   reasoningOptions?: Record<string, { value: string; label: string }[]>;
+  effortMenus?: Record<string, { omitted: string[]; not_on: Record<string, string[]> }>;
 };
 let modelCatalog: FakeModelCatalog = { models: [] };
 let modelCatalogReads = 0;
@@ -1658,6 +1659,26 @@ describe('AgentsPage reconnect reconciliation', () => {
     // The column is back because this model has one, but no segment is chosen:
     // the server holds no effort, and the panel may not invent one.
     expect(screen.getByText('agents.detail.effort')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'medium', exact: true }).className).not.toContain('bg-mint-soft');
+  });
+
+  it('MH-EFFORT-MENU-003: shows a saved effort routing now refuses on every hop as itself, and says so', async () => {
+    // Model Hub leaves `xhigh` out of the menu, but this Agent still sends it.
+    modelCatalog = {
+      models: [],
+      reasoningOptions: { 'reasoning-model': [{ value: 'medium', label: 'Medium' }] },
+      effortMenus: { 'reasoning-model': { omitted: ['xhigh'], not_on: {} } },
+    };
+    const initial = { ...brief('agent-a', 'description'), model: 'reasoning-model', reasoning_effort: 'xhigh' };
+    const getVibeAgent = vi.fn().mockResolvedValue(fullAgent(initial, 'initial prompt'));
+    const api = makeApi(vi.fn().mockResolvedValue(listResult(initial)), getVibeAgent);
+    renderPage(api, { canManageAgents: true });
+
+    await waitFor(() => expect(screen.getByDisplayValue('description')).toBeTruthy());
+    expect(screen.getByText('xhigh', { exact: true }).getAttribute('title')).toBe('chat.picker.effortRefused');
+    expect(screen.getByText('chat.picker.effortRefused')).toBeTruthy();
+    // It is not offered: only what routing still serves can be picked.
+    expect(screen.queryByRole('button', { name: 'xhigh', exact: true })).toBeNull();
     expect(screen.getByRole('button', { name: 'medium', exact: true }).className).not.toContain('bg-mint-soft');
   });
 

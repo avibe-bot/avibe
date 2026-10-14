@@ -4690,6 +4690,7 @@
       "effort": "Effort",
       "effortNotOn": "Not on {{sources}}",
       "effortNotOnSome": "Not on some Sources",
+      "effortRefused": "No Source accepts it now",
       "newAgent": "New agent",
       "addModel": "Add model",
       "noModels": "No models found",

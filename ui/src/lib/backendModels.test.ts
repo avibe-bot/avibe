@@ -215,7 +215,7 @@ describe('fetchBackendModels in gateway mode', () => {
     const result = await fetchBackendModels(api, 'vibey');
 
     expect(resolveEffortOptions('vibey', 'gpt-6-astra', result.reasoningOptions)).toEqual(['low', 'high', 'xhigh']);
-    expect(result.effortNotOn).toEqual({ 'gpt-6-astra': { xhigh: ['src_relaygpt1'] } });
+    expect(result.effortMenus).toEqual({ 'gpt-6-astra': { omitted: ['ultra'], not_on: { xhigh: ['src_relaygpt1'] } } });
     // A model with no evidence is offered exactly what its row declares.
     expect(resolveEffortOptions('vibey', 'grok-4.6', result.reasoningOptions)).toEqual(['low', 'high']);
   });

@@ -3,7 +3,7 @@ import { useLocation, useNavigate } from 'react-router-dom';
 
 import { routeableCatalogModelIds } from '../components/settings/models/backendCatalog';
 import { modelHubCatalogPath } from '../components/settings/models/modelHubRoutes';
-import type { PickerAgentCatalog } from '../components/settings/models/types';
+import type { EffortMenu, PickerAgentCatalog } from '../components/settings/models/types';
 import { ApiError, useApi, type ApiContextType } from '../context/ApiContext';
 import { useInstanceAuthorization } from '../context/InstanceAuthorizationContext';
 import { useRouteSurfaceActive } from './routeSurfaceActivity';
@@ -18,9 +18,10 @@ export interface BackendModels {
   /** Per-model reasoning-effort option sets; undefined when a backend has none.
    *  A Hub catalog leaves out every effort routing would refuse on every hop. */
   reasoningOptions?: Record<string, { value: string; label: string }[]>;
-  /** Per model, per effort: the Source ids that refuse an effort the model's other
-   *  hops still serve (the menu's "not on: <Source>"). Hub catalogs only. */
-  effortNotOn?: Record<string, Record<string, string[]>>;
+  /** Per model, what routing would do with its efforts now (Model Hub's
+   *  `effort_menu`): the efforts left out above, and by Source id the hops that
+   *  refuse one the others still serve. Hub catalogs only. */
+  effortMenus?: Record<string, EffortMenu>;
   /** True while a background remote-catalog refresh may produce a newer snapshot. */
   catalogRefreshPending?: boolean;
 }
@@ -50,7 +51,7 @@ const hubCatalogModels = (agent: PickerAgentCatalog | null, backend: string): Ba
   // "constructor" and "__proto__" from colliding with Object properties.
   const modelLabels = Object.create(null) as Record<string, string>;
   const reasoningOptions = Object.create(null) as Record<string, { value: string; label: string }[]>;
-  const effortNotOn = Object.create(null) as Record<string, Record<string, string[]>>;
+  const effortMenus = Object.create(null) as Record<string, EffortMenu>;
   for (const id of models) {
     const row = rows.get(id);
     if (!row) continue;
@@ -64,10 +65,9 @@ const hubCatalogModels = (agent: PickerAgentCatalog | null, backend: string): Ba
     reasoningOptions[id] = row.supports_reasoning === false
       ? []
       : row.reasoning_efforts.filter((effort) => !omitted.has(effort)).map((effort) => ({ value: effort, label: effort }));
-    const notOn = row.effort_menu?.not_on;
-    if (notOn && Object.keys(notOn).length > 0) effortNotOn[id] = notOn;
+    if (row.effort_menu) effortMenus[id] = row.effort_menu;
   }
-  return { models, modelLabels, reasoningOptions, effortNotOn };
+  return { models, modelLabels, reasoningOptions, effortMenus };
 };
 
 // Single source of truth for "list the selectable models for a backend",

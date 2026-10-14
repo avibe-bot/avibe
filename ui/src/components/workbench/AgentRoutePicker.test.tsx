@@ -41,7 +41,7 @@ vi.mock('../../context/ApiContext', async (importOriginal) => ({
 // model, so a test can say "this model has no efforts" the same way the server
 // does — and an empty default keeps the backend fallback in play.
 let catalogReasoning: Record<string, { value: string; label: string }[]> = {};
-let catalogNotOn: Record<string, Record<string, string[]>> = {};
+let catalogMenus: Record<string, { omitted: string[]; not_on: Record<string, string[]> }> = {};
 // How many catalog reads were made, and whether the next ones wait to be answered.
 let catalogReads = 0;
 let deferReads = false;
@@ -58,7 +58,7 @@ vi.mock('../../lib/backendModels', async (importOriginal) => ({
       models: string[];
       modelLabels: Record<string, string>;
       reasoningOptions: Record<string, { value: string; label: string }[]>;
-      effortNotOn: Record<string, Record<string, string[]>>;
+      effortMenus: Record<string, { omitted: string[]; not_on: Record<string, string[]> }>;
       catalogRefreshPending: boolean;
     }) => void,
   ) => {
@@ -67,7 +67,7 @@ vi.mock('../../lib/backendModels', async (importOriginal) => ({
       models: ['sonnet', 'opus'],
       modelLabels: {},
       reasoningOptions: catalogReasoning,
-      effortNotOn: catalogNotOn,
+      effortMenus: catalogMenus,
       catalogRefreshPending: false,
     });
     if (deferReads) pendingReads.push(answer);
@@ -175,7 +175,7 @@ describe('AgentRoutePicker', () => {
   afterEach(() => {
     cleanup();
     catalogReasoning = {};
-    catalogNotOn = {};
+    catalogMenus = {};
     sourceNames = null;
     hubMode = 'direct';
     catalogReads = 0;
@@ -246,7 +246,7 @@ describe('AgentRoutePicker', () => {
   it('MH-EFFORT-MENU-002: names the Sources that refuse an effort, and says some do when it cannot read them', async () => {
     hubMode = 'hub';
     catalogReasoning = { sonnet: [{ value: 'low', label: 'low' }, { value: 'high', label: 'high' }] };
-    catalogNotOn = { sonnet: { high: ['src_relaygpt1'] } };
+    catalogMenus = { sonnet: { omitted: [], not_on: { high: ['src_relaygpt1'] } } };
     sourceNames = { src_relaygpt1: 'relay-gpt' };
     const user = userEvent.setup();
     render(<HubPicker role="owner" />);
@@ -265,6 +265,23 @@ describe('AgentRoutePicker', () => {
     await openMenu(user);
     expect(screen.getByRole('button', { name: /chat\.picker\.effortOptions\.high/ }).textContent)
       .toContain('chat.picker.effortNotOnSome');
+  });
+
+  it('MH-EFFORT-MENU-003: keeps a saved effort routing now refuses everywhere visible as itself, and says so', async () => {
+    // The route holds `low`; Model Hub now leaves it out because every hop refuses it.
+    hubMode = 'hub';
+    catalogReasoning = { sonnet: [{ value: 'high', label: 'high' }] };
+    catalogMenus = { sonnet: { omitted: ['low'], not_on: {} } };
+    const user = userEvent.setup();
+    render(<HubPicker role="owner" />);
+    await openMenu(user);
+
+    const saved = screen.getByRole('button', { name: /chat\.picker\.effortOptions\.low/ });
+    expect(saved.textContent).toContain('chat.picker.effortRefused');
+    expect(saved.className).toContain('text-cyan-ink');
+    // What routing serves is still offered, without the mark.
+    expect(screen.getByRole('button', { name: /chat\.picker\.effortOptions\.high/ }).textContent)
+      .toBe('chat.picker.effortOptions.high');
   });
 
   it('reads the list again for a menu left open while Settings covered it', async () => {

@@ -15,6 +15,7 @@ capability:
     - ui/src/components/workbench/HostedToolRow.test.tsx
     - ui/src/lib/backendModels.test.ts
     - ui/src/components/workbench/AgentRoutePicker.test.tsx
+    - ui/src/components/workbench/AgentsPage.test.tsx
     - tests/agent_core/ai/test_hosted_requests.py
     - tests/agent_core/ai/test_hosted_parsing.py
     - tests/agent_core/ai/test_hosted_transform.py
@@ -278,6 +279,14 @@ scenarios:
     kind: observation
     layer: unit
     test: ui/src/components/workbench/AgentRoutePicker.test.tsx::MH-EFFORT-MENU-002
+  - id: MH-EFFORT-MENU-003
+    name: A saved effort routing now refuses on every hop stays visible as itself, marked, in the Chat route picker and on the Agents page, and is not offered as a choice
+    status: covered
+    kind: observation
+    layer: unit
+    test:
+      - ui/src/components/workbench/AgentRoutePicker.test.tsx::MH-EFFORT-MENU-003
+      - ui/src/components/workbench/AgentsPage.test.tsx::MH-EFFORT-MENU-003
   - id: MH-HOSTED-VIBEY-001
     name: Vibey declares a hop's native hosted tool verbatim with its include values and pins that request to the hop's Source; the probe builds the same request
     status: covered

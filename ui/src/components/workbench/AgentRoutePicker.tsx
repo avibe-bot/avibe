@@ -6,8 +6,9 @@ import clsx from 'clsx';
 
 import { useApi } from '../../context/ApiContext';
 import type { VibeAgentBrief } from '../../context/ApiContext';
+import type { EffortMenu } from '../settings/models/types';
 import { loadBackendModelsWithRefresh, modelOptionLabel, useAddModelExit } from '../../lib/backendModels';
-import { isEffortSupported, resolveEffortOptions } from '../../lib/effortOptions';
+import { isEffortSupported, refusedSavedEffort, resolveEffortOptions } from '../../lib/effortOptions';
 import { useSourceNames } from '../../lib/useSourceNames';
 import { useRouteSurfaceActive } from '../../lib/routeSurfaceActivity';
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
@@ -105,10 +106,11 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
   const [reasoningByBackend, setReasoningByBackend] = useState<
     Record<string, Record<string, ReasoningOption[]>>
   >({});
-  // Per backend, per model, per effort: the Sources that refuse it (Model Hub's
-  // `effort_menu.not_on`), for the column's "not on: <Source>" hint.
-  const [effortNotOnByBackend, setEffortNotOnByBackend] = useState<
-    Record<string, Record<string, Record<string, string[]>>>
+  // Per backend, per model: what routing would do with its efforts now (Model
+  // Hub's `effort_menu`), for the column's "not on: <Source>" hints and a saved
+  // effort it refuses everywhere.
+  const [effortMenusByBackend, setEffortMenusByBackend] = useState<
+    Record<string, Record<string, EffortMenu>>
   >({});
   const loadedModelBackendsRef = useRef<Set<string>>(new Set());
   const surfaceActive = useRouteSurfaceActive();
@@ -208,7 +210,7 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
     setModelsByBackend({});
     setModelLabelsByBackend({});
     setReasoningByBackend({});
-    setEffortNotOnByBackend({});
+    setEffortMenusByBackend({});
   }, [surfaceActive]);
 
   const grouped = useMemo(() => {
@@ -231,10 +233,10 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
     const cancel = loadBackendModelsWithRefresh(
       api,
       backend,
-      ({ models, modelLabels, reasoningOptions, effortNotOn, catalogRefreshPending }) => {
+      ({ models, modelLabels, reasoningOptions, effortMenus, catalogRefreshPending }) => {
         reloadOnNextOpen = Boolean(catalogRefreshPending);
         setReasoningByBackend((prev) => ({ ...prev, [backend]: reasoningOptions ?? {} }));
-        setEffortNotOnByBackend((prev) => ({ ...prev, [backend]: effortNotOn ?? {} }));
+        setEffortMenusByBackend((prev) => ({ ...prev, [backend]: effortMenus ?? {} }));
         setModelsByBackend((prev) => ({ ...prev, [backend]: models }));
         setModelLabelsByBackend((prev) => ({ ...prev, [backend]: modelLabels ?? {} }));
         setLoadingModels(false);
@@ -282,10 +284,14 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
     () => (catalogAnswered ? resolveEffortOptions(backend, currentModel, backendReasoning) : []),
     [catalogAnswered, backend, currentModel, backendReasoning],
   );
-  const effortNotOn = (currentModel && effortNotOnByBackend[backend]?.[currentModel]) || null;
+  const effortMenus = effortMenusByBackend[backend];
+  const effortNotOn = (currentModel && effortMenus?.[currentModel]?.not_on) || null;
+  // Routing now refuses the saved effort on every hop: it is out of the menu, but
+  // the route still sends it, so it shows as itself and says so.
+  const refusedEffort = catalogAnswered ? refusedSavedEffort(currentEffort, currentModel, effortMenus) : null;
   // Names only when an effort needs one; a role that cannot read Sources gets the
   // hint without them.
-  const sourceNames = useSourceNames(open && effortNotOn !== null);
+  const sourceNames = useSourceNames(open && effortNotOn !== null && Object.keys(effortNotOn).length > 0);
   const notOnLabel = (effort: string): string | null => {
     const ids = effortNotOn?.[effort];
     if (!ids || ids.length === 0) return null;
@@ -497,8 +503,16 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
           </RouteColumn>
 
           {/* Column 3 — Effort (uses per-model catalog entries when available) */}
-          {effortOptions.length > 0 && (
+          {(effortOptions.length > 0 || refusedEffort) && (
             <RouteColumn title={t('chat.picker.effort')}>
+              {refusedEffort && (
+                <RouteItem active onClick={() => setOpen(false)}>
+                  <span className="flex min-w-0 flex-1 flex-col">
+                    <span className="capitalize">{t(`chat.picker.effortOptions.${refusedEffort}`, { defaultValue: refusedEffort })}</span>
+                    <span className="text-[10px] leading-snug text-gold-ink">{t('chat.picker.effortRefused')}</span>
+                  </span>
+                </RouteItem>
+              )}
               {effortOptions.map((opt) => {
                 const notOn = notOnLabel(opt);
                 return (

@@ -51,7 +51,7 @@ import { onPageReactivated } from '../../lib/pageActivity';
 import { useRouteSurfaceActive } from '../../lib/routeSurfaceActivity';
 import { estimateTokens } from '../../lib/tokenEstimate';
 import { loadBackendModelsWithRefresh, modelOptionLabel, useAddModelExit } from '../../lib/backendModels';
-import { compatibleEffort, resolveEffortOptions } from '../../lib/effortOptions';
+import { compatibleEffort, refusedSavedEffort, resolveEffortOptions } from '../../lib/effortOptions';
 import { WorkbenchPageHeader } from './WorkbenchPageHeader';
 import { CapabilityTabs } from './CapabilityTabs';
 // Backend order / labels / accent classes live in lib/backendAccent, shared
@@ -68,6 +68,7 @@ import { BackendAvatar } from '../visual';
 import { isBuiltinAgent } from '../onboarding/setupTargets';
 import { modelsApi } from '../settings/models/modelsApi';
 import { agentsWithoutModel } from '../settings/models/supply';
+import type { EffortMenu } from '../settings/models/types';
 import { errorMessage } from '@/lib/errorMessage';
 // Tab set + its cross-visit memory live together so the remembered value can
 // never name a tab this page no longer renders (see agentsViewMemory).
@@ -2018,6 +2019,7 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, ca
       {
         modelOptions: ComboboxOption[];
         reasoningOptions: Record<string, { value: string; label: string }[]>;
+        effortMenus?: Record<string, EffortMenu>;
       }
     >
   >({});
@@ -2109,12 +2111,13 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, ca
     const cancel = loadBackendModelsWithRefresh(
       api,
       agent.backend,
-      ({ models, modelLabels, reasoningOptions: opts }) => {
+      ({ models, modelLabels, reasoningOptions: opts, effortMenus }) => {
         setModelCatalogs((current) => ({
           ...current,
           [agent.backend]: {
             modelOptions: models.map((m) => ({ value: m, label: modelOptionLabel(m, modelLabels) })),
             reasoningOptions: opts ?? {},
+            effortMenus,
           },
         }));
       },
@@ -2143,6 +2146,9 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, ca
   const systemPromptTokens = estimateTokens(systemPrompt);
   // Effort options follow the backend + selected model when the catalog provides them.
   const effortOptions = resolveEffortOptions(agent.backend, model, reasoningOptions);
+  // Routing now refuses the saved effort on every hop: out of the options, but the
+  // Agent still sends it, so it shows as itself and says so.
+  const refusedEffort = refusedSavedEffort(effort, model, activeModelCatalog?.effortMenus);
   // The efforts shown before the catalog answers are the backend's fallback
   // ladder, which may hold one the model rejects; they stay visible but cannot
   // be picked until the read (or its failure) lands.
@@ -2465,12 +2471,20 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, ca
       {/* Reasoning effort — design.pen LsjxT. A model whose catalog row states
           no efforts has nothing to choose, so the field is absent rather than an
           empty outline the user would read as a control that failed to load. */}
-      {effortOptions.length > 0 && (
+      {(effortOptions.length > 0 || refusedEffort) && (
       <Field label={t('agents.detail.effort')}>
         <div
           className="grid gap-0.5 rounded-lg border border-border-strong bg-surface-2 p-0.5"
           style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(3.25rem, 1fr))' }}
         >
+          {refusedEffort && (
+            <span
+              title={t('chat.picker.effortRefused')}
+              className="truncate rounded-md bg-gold/10 px-1 py-1.5 text-center text-[11px] font-bold capitalize text-gold-ink"
+            >
+              {refusedEffort}
+            </span>
+          )}
           {effortOptions.map((opt) => {
             const active = effort === opt;
             return (
@@ -2496,6 +2510,7 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, ca
             );
           })}
         </div>
+        {refusedEffort && <span className="text-[11px] text-gold-ink">{t('chat.picker.effortRefused')}</span>}
       </Field>
       )}
 

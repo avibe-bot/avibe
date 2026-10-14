@@ -4690,6 +4690,7 @@
       "effort": "思考强度",
       "effortNotOn": "{{sources}} 不支持",
       "effortNotOnSome": "部分供应商不支持",
+      "effortRefused": "当前没有供应商支持",
       "newAgent": "新建 Agent",
       "addModel": "添加模型",
       "noModels": "未找到模型",
