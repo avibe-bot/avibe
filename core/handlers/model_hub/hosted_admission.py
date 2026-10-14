@@ -106,10 +106,10 @@ def hosted_content(request: Mapping[str, Any], protocol: str, *, pinned: bool) -
 
 
 def _text(item: Any, key: str) -> str | None:
-    """A request field read as text; anything else, or a non-object item, is absent."""
+    """A request field read as text with content; anything else, blank text, or a non-object item is absent."""
 
     value = item.get(key) if isinstance(item, Mapping) else None
-    return value if isinstance(value, str) else None
+    return value if isinstance(value, str) and value.strip() else None
 
 
 def _responses_hosted_tool(item: Any) -> str | None:

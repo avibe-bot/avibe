@@ -468,6 +468,8 @@ IN_FLIGHT_CASES = [
     ("responses_custom_call_without_name", "openai_responses",
      [USER, WEB_CALL, {key: value for key, value in X_CALL.items() if key != "name"}, LOCAL_CALL, LOCAL_OUTPUT],
      True, {"web_search"}),
+    ("responses_custom_call_blank_name", "openai_responses",
+     [USER, WEB_CALL, {**X_CALL, "name": " "}, LOCAL_CALL, LOCAL_OUTPUT], True, {"web_search"}),
     ("responses_function_call_without_name", "openai_responses",
      [USER, WEB_CALL, {key: value for key, value in LOCAL_CALL.items() if key != "name"}, LOCAL_OUTPUT], True,
      {"web_search"}),
