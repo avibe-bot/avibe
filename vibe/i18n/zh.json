@@ -874,7 +874,7 @@
         "drag": "拖动已观察的目标",
         "setValue": "设置已观察控件的值",
         "launch": "启动应用或 URL",
-        "quit": "退出应用",
+        "forceQuit": "强制终止应用；未保存的数据会丢失。",
         "clipboard": "读取或写入系统剪贴板",
         "clipboardRead": "读取系统剪贴板",
         "clipboardWrite": "写入系统剪贴板"
@@ -887,7 +887,7 @@
         "sessionArgumentForbidden": "Computer Use session 已绑定调用方 Avibe Session，不能通过 --args-json 或 --arg 提供。",
         "outputArgumentConflict": "请在 --output 和 --args-json 中的 screenshot_out_file 之间二选一，不能同时提供。",
         "unsupportedCommand": "不支持的 Computer Use 命令：{command}",
-        "screenshotMissing": "{tool} 没有返回可写入 --output 的图像。",
+        "screenshotMissing": "窗口已隐藏或最小化，因此没有可用的截图。",
         "outputUnsupported": "--output 只支持 observe window 或 zoom。",
         "missingCallerSession": "Computer Use 需要 Avibe Agent 调用方 Session。",
         "missingCallerTurn": "Computer Use 要求调用方 Avibe Session 当前有活动 Turn。",

@@ -24,7 +24,7 @@ vibe computer set-value --arg pid=123 --arg value=enabled --arg element_token=el
 vibe computer clipboard read --arg include_text=true
 vibe computer clipboard write --arg text="copied text"
 vibe computer launch --arg bundle_id=com.example.App
-vibe computer quit --arg pid=123
+vibe computer force-quit --arg pid=123
 ```
 
 Every leaf accepts `--args-json OBJECT`, `--args-json @FILE`, repeatable
@@ -32,6 +32,34 @@ Every leaf accepts `--args-json OBJECT`, `--args-json @FILE`, repeatable
 `--output PATH`; the CLI writes or confirms the caller-selected PNG and prints
 the resulting path. `observe window` and `zoom` are the observation operations
 that establish the exact window state required before input.
+
+`--json` keeps the structured driver object at `result.structuredContent`.
+The legacy `content` text block remains available for existing callers.
+
+Consecutive `vibe computer` calls in the same Avibe Session share the driver
+session. Element tokens from one observation stay valid for following calls
+until a newer observation replaces that snapshot, so a short script can
+observe once, click several times, and observe once at the end:
+
+```text
+vibe computer observe window --arg pid=123 --arg window_id=456
+vibe computer click --arg pid=123 --arg window_id=456 --arg element_token=el_1
+vibe computer click --arg pid=123 --arg window_id=456 --arg element_token=el_2
+vibe computer observe window --arg pid=123 --arg window_id=456
+```
+
+Each call still passes the Controller's safety checks. A later observation
+replaces the earlier element tokens.
+
+QQ, WeChat, and similar Electron applications may return only window chrome and
+menus on the first observation after launch. The driver enables the
+accessibility tree and waits up to 4 seconds; after a timeout it backs off for
+30 seconds. Wait about 30 seconds and observe again before concluding that the
+application text is unreadable.
+
+`force-quit` maps to the driver's `kill_app` operation and sends SIGKILL. It
+can lose unsaved work; use the application's cooperative close flow first and
+reserve this command for an explicit forced termination.
 
 Argument contract:
 
