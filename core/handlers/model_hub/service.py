@@ -5304,7 +5304,7 @@ class ModelHubService:
                     reasoning_efforts.append(effort)
         return suppliers, display_name, reasoning_efforts
 
-    def _models_dev_descriptions(self, model_ids: list[str]) -> dict[str, dict]:
+    def _models_dev_descriptions(self, model_ids: list[str], *, fetch_catalog: bool = True) -> dict[str, dict]:
         """Exact models.dev matches for provider candidates; empty when unknown.
 
         The description is optional: an unreadable catalog leaves every
@@ -5313,10 +5313,11 @@ class ModelHubService:
 
         if not model_ids:
             return {}
-        from vibe.models_dev_catalog import exact_models_dev_matches
+        from vibe.models_dev_catalog import cached_models_dev_catalog, exact_models_dev_matches
 
         try:
-            return exact_models_dev_matches(model_ids, dict(self.models_dev_catalog()))
+            catalog = self.models_dev_catalog() if fetch_catalog else cached_models_dev_catalog()
+            return exact_models_dev_matches(model_ids, dict(catalog))
         except Exception as exc:  # noqa: BLE001 - optional metadata never fails a read
             logger.info("Model Hub candidates have no models.dev metadata: %s", type(exc).__name__)
             return {}
@@ -5578,6 +5579,7 @@ class ModelHubService:
         backend: BackendName,
         *,
         native_sources: Collection[tuple[str, str]] = (),
+        fetch_catalog: bool = True,
     ) -> None:
         """Give each Agent's model a Gateway menu row when a Source serves it.
 
@@ -5603,6 +5605,14 @@ class ModelHubService:
             menu_ids = {model.id for model in agent.models}
             if not selected or self._menu_model_for_selection(agent, selected) in menu_ids:
                 continue
+            if backend == "opencode" and native_sources:
+                provider, separator, model = selected.partition("/")
+                if not separator or not model or not any(
+                    native_provider == provider for native_provider, _ in native_sources
+                ):
+                    # A same-named inventory entry from a different provider
+                    # does not consent to migrating this Direct selection.
+                    continue
             candidates = (
                 opencode_menu_model_candidates(selected)
                 if backend == "opencode"
@@ -5640,7 +5650,7 @@ class ModelHubService:
                 carried.append(served)
         if not carried:
             return
-        described = self._models_dev_descriptions(carried)
+        described = self._models_dev_descriptions(carried, fetch_catalog=fetch_catalog)
         for model_id in carried:
             candidate = self._provider_candidate(
                 config,
@@ -5709,7 +5719,7 @@ class ModelHubService:
             )
             if served is not None and served not in model_ids:
                 model_ids.append(served)
-        described = self._models_dev_descriptions(model_ids)
+        described = self._models_dev_descriptions(model_ids, fetch_catalog=fetch_catalog)
         rows = []
         for model_id in model_ids:
             match = described.get(model_id)
@@ -5721,12 +5731,14 @@ class ModelHubService:
             if candidate is not None:
                 rows.append(candidate[0])
         if not rows:
-            starting = self._vibey_starting_model(config)
+            starting = self._vibey_starting_model(config, fetch_catalog=fetch_catalog)
             rows = [starting] if starting is not None else []
         agent.models = rows
         return True
 
-    def _vibey_starting_model(self, config: ModelHubConfig) -> ModelHubBackendModelConfig | None:
+    def _vibey_starting_model(
+        self, config: ModelHubConfig, *, fetch_catalog: bool = True,
+    ) -> ModelHubBackendModelConfig | None:
         """The one model a seed with no qualifying selection starts Vibey on, or ``None``.
 
         The first model, in Vibey's Source order and then each Source's own
@@ -5746,7 +5758,7 @@ class ModelHubService:
                 if not model.retired
             )
         )
-        described = self._models_dev_descriptions(listed)
+        described = self._models_dev_descriptions(listed, fetch_catalog=fetch_catalog)
         for model_id in listed:
             match = described.get(model_id)
             if match is None or not _described_as_fit_for_agent_turns(match):

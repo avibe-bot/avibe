@@ -1379,7 +1379,7 @@ def test_mh_switch_001_migration_carries_agent_models_into_the_switched_menu(
     service.named_agents_override = lambda backend: [
         ("opencode", "openrouter/openrouter-model"),
         ("zhipu", "zhipuai/zhipuai-model"),
-        ("stranger", "openai/not-served"),
+        ("stranger", "openai/manual-openrouter-model"),
     ] if backend == "opencode" else []
 
     items = [item["id"] for item in service.migration_scan()["items"] if item["backend"] == "opencode"]
@@ -1400,7 +1400,7 @@ def test_mh_switch_001_migration_carries_agent_models_into_the_switched_menu(
             else ("openrouter-model", None)
         ),
         "zhipu": ("zhipuai-model", None),
-        "stranger": ("openai/not-served", "route_unconfigured"),
+        "stranger": ("openai/manual-openrouter-model", "route_unconfigured"),
     }
     # Carrying a saved selection creates a menu row, not a made-up discovered
     # Source inventory. The old provider prefix stays on the named Agent.
@@ -2038,6 +2038,22 @@ def test_mh_mig_015_static_keys_migrate_from_saved_configuration_without_upstrea
 
     _write_offline_static_keys(native_home)
     before = _tree_digest(native_home)
+    # No models.dev refresh may sneak in through menu carry or Vibey's seed.
+    # The normal cache getter starts a background fetch on a miss; merely
+    # avoiding the explicit foreground loader is not sufficient.
+    catalog_requests = []
+
+    def unexpected_catalog_request(*args, **kwargs):
+        catalog_requests.append("models.dev")
+        raise AssertionError("migration must read models.dev only from cache")
+
+    monkeypatch.setattr("vibe.models_dev_catalog.load_models_dev_catalog_with_date", unexpected_catalog_request)
+    monkeypatch.setattr("vibe.models_dev_catalog.load_models_dev_catalog", unexpected_catalog_request)
+    store.config.vibey_supply_pending = True
+    store.config.agents["opencode"].mode = "direct"
+    service.named_agents_override = lambda backend: [
+        ("offline", "openrouter/manual-openrouter-model"),
+    ] if backend == "opencode" else []
     adapter.offline = True
     items = service.migration_scan()["items"]
     assert {(item["backend"], item.get("vendor")) for item in items} == {
@@ -2052,6 +2068,7 @@ def test_mh_mig_015_static_keys_migrate_from_saved_configuration_without_upstrea
     finally:
         # A refused call may resurface only as a generic conflict; name it.
         assert adapter.upstream_calls == []
+        assert catalog_requests == []
     assert set(result) == {"applied", "sources", "added_to"}
     assert result["applied"] == len(items)
     config = _assert_canonical_round_trip(store.config)
