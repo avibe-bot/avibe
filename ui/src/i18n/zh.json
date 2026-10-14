@@ -4922,7 +4922,9 @@
           "executor_no_image": "代理执行者没有返回图片。",
           "gateway_unreachable": "无法连接模型网关。",
           "gateway_refused": "模型网关拒绝了这次调用。",
-          "gateway_no_result": "模型网关没有返回结果。"
+          "gateway_no_result": "模型网关没有返回结果。",
+          "image_param_unsupported": "所选图片模型不支持其中一个参数。",
+          "image_model_unavailable": "所选图片模型当前不可用。"
         },
         "mode": {
           "native": "原生 · {{provider}}",

@@ -19,6 +19,7 @@ from core.agent_core.messages import (
     HOSTED_ERROR_CODES,
     AssistantMessage,
     Citation,
+    FailedAttempt,
     HostedAction,
     HostedCost,
     HostedImage,
@@ -91,23 +92,6 @@ def _produced() -> list:
                 record=HostedRecord(status="pending"),
                 native=_native({"type": "custom_tool_call", "name": "x_bookmark_lookup"}),
             ),
-            HostedToolBlock(
-                id="ig_1",
-                tool="image_generation",
-                action=HostedAction(type="generate", prompt="一只猫, watercolor", size="1536x1024", quality="low"),
-                record=HostedRecord(
-                    status="completed",
-                    images=(HostedImage(path="/tmp/media/image-3f2a.png", mime="image/png", width=1536, height=1024),),
-                ),
-                native=_native({"type": "image_generation_call", "result": "[image saved: /tmp/media/image-3f2a.png]"}),
-            ),
-            HostedToolBlock(
-                id="ig_2",
-                tool="image_generation",
-                action=HostedAction(type="generate"),
-                record=HostedRecord(status="failed", error="moderation_blocked", images=()),
-                native=_native({"type": "image_generation_call", "status": "failed"}),
-            ),
             TextBlock(
                 text=answer,
                 citations=(
@@ -136,25 +120,48 @@ def _produced() -> list:
         content=(TextBlock(text="1. Avibe 本地优先 — https://x.com/avibe/status/1"),),
         hosted=HostedResult(
             record=HostedRecord(status="completed", sources=(POST,)),
+            # The chain's first executor failed after billing, and its cost is in the sum.
             execution=ProxyExecution(
-                executor_origin=XAI, executor_source_id=SOURCE, executor_billing="metered", cost=HostedCost(basis="list", usd=0.03)
+                executor_origin=XAI,
+                executor_source_id=SOURCE,
+                executor_billing="metered",
+                cost=HostedCost(basis="list", usd=0.03),
+                failed_attempts=(FailedAttempt("src_o9p8q7r6s5", "metered", HostedCost(basis="list", usd=0.01)),),
             ),
         ),
     )
     included = ToolResultMessage(
         tool_call_id="call_8",
-        tool_name="image_generation",
+        tool_name="image_generate",
         content=(TextBlock(text="[image saved: /tmp/media/image-77.png · 1024x1024]"),),
         hosted=HostedResult(
             record=HostedRecord(status="completed", images=(HostedImage(path="/tmp/media/image-77.png", mime="image/webp"),)),
             execution=ProxyExecution(
-                executor_origin=Origin(provider="openai", api="openai_responses", model="gpt-6-astra"),
+                executor_origin=Origin(provider="openai", api="openai_responses", model="gpt-image-2"),
                 executor_source_id="src_o9p8q7r6s5",
                 executor_billing="monthly",
                 cost=HostedCost(basis="included"),
+                mode="direct",
             ),
-            # What the executor rendered: its revised prompt and the resolved size and quality.
-            action=HostedAction(type="generate", prompt="A lighthouse at dusk", size="1024x1024", quality="high"),
+            # What the image endpoint rendered: the model, its revised prompt and the resolved size and quality.
+            action=HostedAction(
+                type="generate", prompt="A lighthouse at dusk", size="1024x1024", quality="high", model="gpt-image-2"
+            ),
+        ),
+    )
+    refused_image = ToolResultMessage(
+        tool_call_id="call_10",
+        tool_name="image_generate",
+        content=(TextBlock(text="[image_generate failed: grok-imagine-image takes no images argument]"),),
+        is_error=True,
+        hosted=HostedResult(
+            record=HostedRecord(
+                status="failed",
+                error="grok-imagine-image takes no images argument",
+                error_code="image_param_unsupported",
+                images=(),
+            ),
+            action=HostedAction(type="generate", model="grok-imagine-image"),
         ),
     )
     unexecuted = ToolResultMessage(
@@ -170,10 +177,12 @@ def _produced() -> list:
             )
         ),
     )
-    return [native_turn, proxy_call, proxied, included, unexecuted]
+    return [native_turn, proxy_call, proxied, included, unexecuted, refused_image]
 
 
-@pytest.mark.parametrize("message", _produced(), ids=["native", "proxy-call", "proxied", "included", "unexecuted"])
+@pytest.mark.parametrize(
+    "message", _produced(), ids=["native", "proxy-call", "proxied", "included", "unexecuted", "refused-image"]
+)
 def test_hosted_messages_the_producer_writes_match_the_schema_and_round_trip(message):
     payload = message_to_dict(message)
     VALIDATOR.validate(payload)
@@ -183,6 +192,8 @@ def test_hosted_messages_the_producer_writes_match_the_schema_and_round_trip(mes
 
 NATIVE = message_to_dict(_produced()[0])
 PROXIED = message_to_dict(_produced()[2])
+IMAGE = message_to_dict(_produced()[3])
+REFUSED_IMAGE = message_to_dict(_produced()[5])
 
 
 def _without(payload: dict, path: tuple, field: str) -> dict:
@@ -210,9 +221,9 @@ MANDATORY = [
     (NATIVE, ("content", 0, "record"), "status"),
     (NATIVE, ("content", 0, "record"), "sources"),
     (NATIVE, ("content", 0, "record", "sources", 0), "url"),
-    (NATIVE, ("content", 4, "record", "images", 0), "path"),
-    (NATIVE, ("content", 4, "record", "images", 0), "mime"),
-    (NATIVE, ("content", 6, "citations", 0), "url"),
+    (IMAGE, ("hosted", "record", "images", 0), "path"),
+    (IMAGE, ("hosted", "record", "images", 0), "mime"),
+    (NATIVE, ("content", 4, "citations", 0), "url"),
     (NATIVE, ("hosted_summary",), "counts"),
     (NATIVE, ("hosted_summary",), "cited_sources"),
     (NATIVE, ("hosted_summary", "cost"), "basis"),
@@ -221,6 +232,8 @@ MANDATORY = [
     (PROXIED, ("hosted", "execution"), "executor_origin"),
     (PROXIED, ("hosted", "execution"), "executor_source_id"),
     (PROXIED, ("hosted", "execution"), "executor_billing"),
+    (PROXIED, ("hosted", "execution", "failed_attempts", 0), "source_id"),
+    (PROXIED, ("hosted", "execution", "failed_attempts", 0), "billing"),
 ]
 
 
@@ -243,18 +256,21 @@ def _set(payload: dict, path: tuple, value) -> dict:
 
 VIOLATIONS = {
     "error-on-completed": _set(NATIVE, ("content", 0, "record", "error"), "boom"),
-    "failed-without-error": _without(NATIVE, ("content", 5, "record"), "error"),
+    "failed-without-error": _without(NATIVE, ("content", 1, "record"), "error"),
     "error-too-long": _set(NATIVE, ("content", 1, "record", "error"), "x" * 401),
     "error-code-without-error": _set(NATIVE, ("content", 0, "record", "error_code"), "image_not_saved"),
-    "error-code-not-snake-case": _set(NATIVE, ("content", 5, "record", "error_code"), "Image Not Saved"),
-    "empty-error-code": _set(NATIVE, ("content", 5, "record", "error_code"), ""),
+    "error-code-not-snake-case": _set(NATIVE, ("content", 1, "record", "error_code"), "Image Not Saved"),
+    "empty-error-code": _set(NATIVE, ("content", 1, "record", "error_code"), ""),
     "unknown-status": _set(NATIVE, ("content", 0, "record", "status"), "done"),
     "images-on-web-search": _set(NATIVE, ("content", 0, "record", "images"), []),
-    "no-images-on-image-generation": _without(NATIVE, ("content", 4, "record"), "images"),
-    "image-base64": _set(NATIVE, ("content", 4, "record", "images", 0, "b64_json"), "iVBORw0KGgo="),
+    "no-images-on-image-generate": _without(IMAGE, ("hosted", "record"), "images"),
+    "image-base64": _set(IMAGE, ("hosted", "record", "images", 0, "b64_json"), "iVBORw0KGgo="),
     "generate-on-web-search": _set(NATIVE, ("content", 0, "action"), {"type": "generate", "prompt": "p"}),
+    "generate-on-proxied-search": _set(PROXIED, ("hosted", "action"), {"type": "generate", "prompt": "p"}),
     "search-on-x-search": _set(NATIVE, ("content", 2, "action"), {"type": "search", "queries": ["q"]}),
-    "completed-generate-without-prompt": _without(NATIVE, ("content", 4, "action"), "prompt"),
+    "completed-generate-without-prompt": _without(IMAGE, ("hosted", "action"), "prompt"),
+    # v2 has no native image tool, and an rc-era block is not read (§4.2, §15).
+    "native-image-block": _set(NATIVE, ("content", 0, "tool"), "image_generation"),
     "unknown-action": _set(NATIVE, ("content", 0, "action"), {"type": "browse", "url": "https://a"}),
     "field-of-another-action": _set(NATIVE, ("content", 0, "action", "url"), "https://a"),
     "empty-queries": _set(NATIVE, ("content", 0, "action", "queries"), []),
@@ -272,11 +288,11 @@ VIOLATIONS = {
     "negative-usd": _set(NATIVE, ("hosted_summary", "cost", "usd"), -0.01),
     "negative-count": _set(NATIVE, ("hosted_summary", "counts", "x_posts_fetched"), -1),
     "counter-name": _set(NATIVE, ("hosted_summary", "counts"), {"Web Search": 1}),
-    "citation-start-only": _without(NATIVE, ("content", 6, "citations", 0), "end"),
+    "citation-start-only": _without(NATIVE, ("content", 4, "citations", 0), "end"),
     "citations-on-reference-text": _set(
-        NATIVE, ("content", 6), {"type": "text", "ref": {"ref": "sha256:" + "a" * 64, "bytes": 9}, "citations": [{"url": "https://a"}]}
+        NATIVE, ("content", 4), {"type": "text", "ref": {"ref": "sha256:" + "a" * 64, "bytes": 9}, "citations": [{"url": "https://a"}]}
     ),
-    "empty-citations": _set(NATIVE, ("content", 6, "citations"), []),
+    "empty-citations": _set(NATIVE, ("content", 4, "citations"), []),
     "unexecuted-not-failed": _set(
         _set(_without(PROXIED, ("hosted",), "execution"), ("hosted", "record"), {"status": "incomplete", "error": "cut", "sources": []}),
         ("is_error",),
@@ -287,8 +303,9 @@ VIOLATIONS = {
     ),
     "completed-result-flagged": _set(PROXIED, ("is_error",), True),
     "hosted-on-local-tool": _set(PROXIED, ("tool_name",), "bash"),
-    "proxy-mode": _set(PROXIED, ("hosted", "execution", "mode"), "native"),
+    "execution-mode": _set(PROXIED, ("hosted", "execution", "mode"), "native"),
     "proxy-billing": _set(PROXIED, ("hosted", "execution", "executor_billing"), "free"),
+    "failed-attempt-billing": _set(PROXIED, ("hosted", "execution", "failed_attempts", 0, "billing"), "free"),
     "proxy-images-on-x-search": _set(PROXIED, ("hosted", "record", "images"), []),
 }
 
@@ -303,17 +320,17 @@ def test_schema_and_reader_refuse_the_same_hosted_violations(payload):
 def test_a_record_with_an_error_code_this_build_does_not_know_still_loads():
     """#2589: a newer build may add codes; an older one reads the record and shows its English error."""
 
-    newer = _set(NATIVE, ("content", 5, "record", "error_code"), "executor_overloaded")
+    newer = _set(NATIVE, ("content", 1, "record", "error_code"), "executor_overloaded")
     assert "executor_overloaded" not in HOSTED_ERROR_CODES
     VALIDATOR.validate(newer)
-    assert message_from_dict(newer).content[5].record.error_code == "executor_overloaded"
+    assert message_from_dict(newer).content[1].record.error_code == "executor_overloaded"
 
 
 def test_a_failed_generate_may_lack_the_revised_prompt():
-    # Item 28: OpenAI may return a failed image_generation_call with no revised_prompt.
-    failed = NATIVE["content"][5]
+    # An image call refused before the endpoint ran has the model it named and no rendered prompt.
+    failed = REFUSED_IMAGE["hosted"]
     assert "prompt" not in failed["action"] and failed["record"]["status"] == "failed"
-    VALIDATOR.validate(NATIVE)
+    VALIDATOR.validate(REFUSED_IMAGE)
 
 
 def test_a_citation_range_must_lie_within_its_text():
@@ -321,4 +338,4 @@ def test_a_citation_range_must_lie_within_its_text():
     with pytest.raises(ValueError):
         TextBlock(text="短", citations=(Citation(url="https://a", start=0, end=2),))
     with pytest.raises(ValueError):
-        message_from_dict(_set(NATIVE, ("content", 6, "citations", 0, "end"), 99))
+        message_from_dict(_set(NATIVE, ("content", 4, "citations", 0, "end"), 99))

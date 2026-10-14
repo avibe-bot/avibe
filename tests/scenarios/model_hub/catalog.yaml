@@ -19,7 +19,6 @@ capability:
     - tests/agent_core/ai/test_hosted_parsing.py
     - tests/agent_core/ai/test_hosted_transform.py
     - tests/agent_core/ai/test_hosted_replay.py
-    - tests/agent_core/ai/test_hosted_images.py
     - tests/agent_core/ai/test_hosted_pause_turn.py
     - tests/test_vibey_agent.py
     - tests/test_model_hub_evidence_rules.py
@@ -250,30 +249,26 @@ scenarios:
     related_tests:
       - tests/test_hosted_activity.py::test_the_im_line_names_a_subscription_and_a_shared_response_cost
   - id: MH-HOSTED-UI-012
-    name: A final whose only content is a generated image is a reply, not an empty one, and reaches the user as an attachment
-    status: covered
+    name: A turn whose image_generate call completed reaches the user with the image as an attachment, even when the model says nothing after it (hosted tools v2 C2)
+    status: gap
     kind: contract
     layer: contract
-    test: tests/test_vibey_agent.py::test_an_image_only_final_is_a_reply_and_reaches_the_user
-    related_tests:
-      - tests/agent_core/agent/test_loop.py::test_tool_free_final_reply_is_committed_and_empty_success_is_an_error
   - id: MH-HOSTED-UI-011
-    name: Vibey delivers a native hosted call as its IM line and Web card, its answer with provider citations as links, and its generated image as an attachment
+    name: Vibey delivers a native hosted call as its IM line and Web card, and its answer with provider citations as links
     status: covered
     kind: contract
     layer: contract
-    test: tests/test_vibey_agent.py::test_a_native_hosted_call_reaches_im_as_one_line_with_its_cited_answer_and_image
+    test: tests/test_vibey_agent.py::test_a_native_hosted_call_reaches_im_as_one_line_with_its_cited_answer
     related_tests:
       - tests/test_vibey_agent.py::test_a_native_hosted_call_reaches_the_workbench_as_a_card_and_cited_answer
       - tests/test_vibey_agent.py::test_a_proxied_hosted_result_shows_once_its_result_is_committed
   - id: MH-HOSTED-UI-014
-    name: A hosted call that did not complete shows its status and any known charge, and claims neither how it ran nor what it found, on the IM line, the Web card (collapsed or expanded) and image delivery alike
+    name: A hosted call that did not complete shows its status and any known charge, and claims neither how it ran nor what it found, on the IM line and the Web card (collapsed or expanded)
     status: covered
     kind: contract
     layer: unit
     test:
       - tests/test_hosted_activity.py::test_the_im_line_claims_how_a_call_ran_and_what_it_found_only_once_it_completed
-      - tests/test_vibey_agent.py::test_an_image_from_a_call_that_did_not_complete_is_not_delivered
       - ui/src/components/workbench/HostedToolRow.test.tsx::MH-HOSTED-UI-014 (pending)
       - ui/src/components/workbench/HostedToolRow.test.tsx::MH-HOSTED-UI-014 (failed)
       - ui/src/components/workbench/HostedToolRow.test.tsx::MH-HOSTED-UI-014 (incomplete)
@@ -307,7 +302,7 @@ scenarios:
       - ui/src/components/workbench/AgentRoutePicker.test.tsx::MH-EFFORT-MENU-003
       - ui/src/components/workbench/AgentsPage.test.tsx::MH-EFFORT-MENU-003
   - id: MH-HOSTED-VIBEY-001
-    name: Vibey declares a hop's native hosted tool verbatim with its include values and pins that request to the hop's Source; the probe builds the same request
+    name: Vibey declares a search tool natively, verbatim with its include values, exactly when the hop's facts assume it, and pins that request to the hop's Source
     status: covered
     kind: contract
     layer: contract
@@ -315,8 +310,7 @@ scenarios:
     related_tests:
       - tests/test_vibey_agent.py::test_a_hop_with_an_invalid_hosted_tool_entry_is_refused
       - tests/agent_core/ai/test_hosted_requests.py::test_a_hosted_spec_on_a_native_route_is_sent_as_the_declaration_in_its_place_and_pinned
-      - tests/agent_core/ai/test_hosted_requests.py::test_the_probe_entry_builds_exactly_the_request_the_adapter_sends
-      - tests/agent_core/ai/test_hosted_requests.py::test_tool_choice_forces_the_named_tool_in_each_protocols_form
+      - tests/agent_core/ai/test_hosted_requests.py::test_the_wire_builder_the_tests_read_is_exactly_the_request_the_adapter_sends
   - id: MH-HOSTED-006
     name: A real upstream 400 teaches only the feature it names, and a refused effort then skips its hop instead of another provider 400
     status: covered
@@ -366,7 +360,7 @@ scenarios:
     status: covered
     kind: contract
     layer: contract
-    test: tests/test_vibey_agent.py::test_a_proxied_hosted_call_runs_on_the_bound_executor_and_keeps_its_record
+    test: tests/test_vibey_agent.py::test_a_proxied_hosted_call_runs_on_the_turns_executor_chain_and_keeps_its_record
   - id: MH-HOSTED-VIBEY-005
     name: A hosted call goes back verbatim and pinned only to the Source that served it, within its turn or with current replay evidence; pin_unavailable gets exactly one portable, unpinned resend
     status: covered
@@ -387,17 +381,13 @@ scenarios:
       - tests/agent_core/ai/test_hosted_pause_turn.py::test_a_paused_response_its_source_cannot_continue_ends_interrupted_and_keeps_what_it_has
       - tests/agent_core/ai/test_hosted_pause_turn.py::test_a_continued_response_is_verified_only_when_every_response_in_it_was_from_one_origin
   - id: MH-HOSTED-VIBEY-007
-    name: A native generated image is saved to a file as its done item is parsed and its record names that file; no base64 enters history, partial and terminal copies are never decoded, and an image over read's inline limit says so
+    name: A generated image the endpoint returns is saved through the media sink and its record names that file; no base64 enters history, and a call that saved no file is a failed record with its code
     status: covered
     kind: contract
     layer: contract
-    test: tests/agent_core/ai/test_hosted_images.py::test_a_native_image_is_saved_once_from_its_done_item_and_history_holds_only_its_path
+    test: tests/test_vibey_agent.py::test_an_image_the_endpoint_returns_is_saved_through_the_media_sink_and_its_record_names_the_file
     related_tests:
-      - tests/agent_core/ai/test_hosted_images.py::test_an_image_that_was_not_saved_is_a_failed_call_never_a_completed_one
-      - tests/agent_core/ai/test_hosted_images.py::test_a_six_megabyte_image_streams_under_the_image_line_cap_and_its_record_says_read_cannot_show_it
-      - tests/agent_core/ai/test_hosted_images.py::test_a_response_that_streams_images_past_its_budget_ends_as_an_error
       - tests/test_vibey_agent.py::test_a_generated_image_is_kept_as_an_immutable_file_its_bytes_name_and_type
-      - tests/test_vibey_agent.py::test_a_proxied_image_that_was_not_saved_is_a_failed_call_with_its_code
       - tests/test_agent_transcript.py::test_the_media_sweep_keeps_every_file_a_row_registers_and_takes_only_stale_orphans
   - id: MH-HOSTED-UI-001
     name: A Tools-tab control writes only the field it changes, and a tool's controls hold while its write is out

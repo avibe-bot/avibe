@@ -50,7 +50,8 @@ class HostedActivity:
 
     call_id: str
     tool: str
-    mode: Literal["native", "proxy"]
+    # How it ran: natively by the model's provider, by a search executor, or by an image endpoint directly.
+    mode: Literal["native", "proxy", "direct"]
     status: str
     # Model-facing English; ``error_code`` names the reasons Avibe worded itself.
     error: Optional[str]
@@ -228,7 +229,8 @@ def proxy_activity(
     source_names: SourceNames = _no_names,
     duration_ms: Optional[int] = None,
 ) -> HostedActivity:
-    """A proxied hosted call: the model's own call, and the record its executor returned."""
+    """A hosted call that ran outside the model: the model's own call, and the record its search executor
+    (``proxy``) or image endpoint (``direct``) returned."""
 
     arguments = call.arguments if isinstance(call.arguments, dict) else {}
     subject = next(
@@ -243,7 +245,7 @@ def proxy_activity(
     return HostedActivity(
         call_id=call.id,
         tool=call.name,
-        mode="proxy",
+        mode=execution.mode if execution is not None else "proxy",
         status=result.record.status,
         error=result.record.error,
         error_code=result.record.error_code,
@@ -286,7 +288,7 @@ def _clip(text: str, limit: int = LINE_SUBJECT_MAX_CHARS) -> str:
 
 
 def _count(activity: HostedActivity, lang: str) -> Optional[str]:
-    if activity.tool == "image_generation":
+    if activity.tool == "image_generate":
         count, unit = len(activity.images), "image"
     elif activity.tool == "x_search":
         count, unit = len(activity.sources), "post"
@@ -335,7 +337,7 @@ def hosted_line(activity: HostedActivity, lang: str, *, escape: Callable[[str], 
     subject safe for the destination's markup.
     """
 
-    emoji = "🖼" if activity.tool == "image_generation" else "🔎"
+    emoji = "🖼" if activity.tool == "image_generate" else "🔎"
     parts: list[Optional[str]] = [f"{emoji} {i18n_t(f'hostedTools.tool.{activity.tool}', lang)}"]
     if activity.subject:
         parts[0] += " " + i18n_t("hostedTools.quoted", lang, subject=escape(_clip(activity.subject)))

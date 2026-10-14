@@ -26,13 +26,19 @@ _SOURCE_ID_RE = re.compile(r"^src_[a-z0-9]{8,}$")
 _COUNTER_NAME_RE = re.compile(r"^[a-z0-9_]{1,64}$")
 _ERROR_CODE_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 
-HostedToolName = Literal["web_search", "x_search", "image_generation"]
-HOSTED_TOOLS: tuple[str, ...] = ("web_search", "x_search", "image_generation")
+#: The tools a provider runs natively, each a ``HostedToolBlock`` in assistant content (``vibey-hosted-tools.md`` §4.2).
+HostedToolName = Literal["web_search", "x_search"]
+HOSTED_TOOLS: tuple[str, ...] = ("web_search", "x_search")
+#: The tools whose ``ToolResultMessage`` carries ``hosted``: a proxied search, and every ``image_generate`` call.
+HOSTED_RESULT_TOOLS: tuple[str, ...] = (*HOSTED_TOOLS, "image_generate")
+EXECUTION_MODES: tuple[str, ...] = ("proxy", "direct")
 HostedStatus = Literal["completed", "failed", "incomplete", "pending"]
 HOSTED_STATUSES: tuple[str, ...] = ("completed", "failed", "incomplete", "pending")
 HOSTED_ERROR_MAX_CHARS = 400
 #: The stable code of each hosted failure Avibe words itself (``HostedRecord.error_code``), by which a display localizes
 #: it; a provider's own reason has none. A record loads with any snake_case code, so one a newer build wrote still reads.
+#: ``provider_no_image`` and ``image_not_streamed`` have no producer since native images went (v2); they stay for the
+#: records already written.
 HOSTED_ERROR_CODES: tuple[str, ...] = (
     "provider_no_reason",
     "provider_no_image",
@@ -43,6 +49,8 @@ HOSTED_ERROR_CODES: tuple[str, ...] = (
     "gateway_unreachable",
     "gateway_refused",
     "gateway_no_result",
+    "image_param_unsupported",
+    "image_model_unavailable",
 )
 COST_BASES: tuple[str, ...] = ("reported", "list", "included")
 SOURCE_BILLINGS: tuple[str, ...] = ("monthly", "metered")
@@ -237,7 +245,7 @@ _HOSTED_ACTIONS: dict[str, tuple[Optional[str], dict[str, type], dict[str, type]
     "x_search": ("x_search", {"variant": str, "query": str}, {"limit": int, "mode": str}),
     "x_user_search": ("x_search", {"query": str}, {}),
     "x_thread_fetch": ("x_search", {"ref": str}, {}),
-    "generate": ("image_generation", {}, {"prompt": str, "size": str, "quality": str}),
+    "generate": ("image_generate", {}, {"prompt": str, "size": str, "quality": str, "model": str}),
     "other": (None, {"name": str}, {}),
 }
 _X_SEARCH_VARIANTS = ("keyword", "semantic")
@@ -261,6 +269,8 @@ class HostedAction:
     size: Optional[str] = None
     quality: Optional[str] = None
     name: Optional[str] = None
+    #: ``generate`` only: the image model the call ran on.
+    model: Optional[str] = None
 
     def __post_init__(self) -> None:
         _require(self.type, str, "hosted action type")
@@ -278,7 +288,7 @@ class HostedAction:
                 raise ValueError("search queries are a non-empty tuple")
             for query in self.queries:
                 _require_text(query, "search query")
-        for name in ("url", "pattern", "query", "ref", "prompt", "size", "quality", "name"):
+        for name in ("url", "pattern", "query", "ref", "prompt", "size", "quality", "name", "model"):
             _require_text(getattr(self, name), f"action {name}", optional=True)
         _require(self.variant, str, "action variant", optional=True)
         if self.variant is not None and self.variant not in _X_SEARCH_VARIANTS:
@@ -297,6 +307,7 @@ class HostedAction:
 
 _HOSTED_ACTION_FIELDS: tuple[str, ...] = (
     "queries", "url", "pattern", "variant", "query", "limit", "mode", "ref", "prompt", "size", "quality", "name",
+    "model",
 )
 
 
@@ -337,7 +348,7 @@ class HostedImage:
 
 @dataclass(frozen=True)
 class HostedRecord:
-    """Per-call facts. ``images`` is set exactly for ``image_generation`` (possibly empty).
+    """Per-call facts. ``images`` is set exactly for ``image_generate`` (possibly empty).
 
     ``error`` is model-facing English. ``error_code`` names a reason Avibe wrote (``HOSTED_ERROR_CODES``), only beside
     an ``error``.
@@ -369,8 +380,8 @@ class HostedRecord:
             raise ValueError("hosted images must be a tuple of HostedImage")
 
     def check_tool(self, tool: str) -> None:
-        if (self.images is not None) != (tool == "image_generation"):
-            raise ValueError("a hosted record lists images exactly for image_generation")
+        if (self.images is not None) != (tool == "image_generate"):
+            raise ValueError("a hosted record lists images exactly for image_generate")
 
 
 @dataclass(frozen=True)
@@ -411,8 +422,6 @@ class HostedToolBlock:
         if not self.action.fits(self.tool):
             raise ValueError(f"a {self.action.type} action does not belong to {self.tool}")
         self.record.check_tool(self.tool)
-        if self.action.type == "generate" and self.record.status == "completed" and self.action.prompt is None:
-            raise ValueError("a completed generate action needs its prompt")
 
 
 @dataclass(frozen=True)
@@ -464,19 +473,43 @@ class HostedSummary:
 
 
 @dataclass(frozen=True)
+class FailedAttempt:
+    """An earlier billable attempt of a proxied search chain, before the one that ran the call (§6)."""
+
+    source_id: str
+    billing: str
+    cost: Optional[HostedCost] = None
+
+    def __post_init__(self) -> None:
+        _require(self.source_id, str, "attempt source id")
+        if not _SOURCE_ID_RE.fullmatch(self.source_id):
+            raise ValueError(f"invalid source id: {self.source_id!r}")
+        _require(self.billing, str, "attempt billing")
+        if self.billing not in SOURCE_BILLINGS:
+            raise ValueError(f"unknown billing: {self.billing}")
+        _require(self.cost, HostedCost, "attempt cost", optional=True)
+
+
+@dataclass(frozen=True)
 class ProxyExecution:
-    """Which executor ran a proxied hosted call; absent when the call never reached one."""
+    """What ran a hosted call outside the model: a search executor (``proxy``) or an image endpoint (``direct``);
+    absent when the call never reached one. ``cost`` sums every billable attempt, ``failed_attempts`` included."""
 
     executor_origin: Origin
     executor_source_id: str
     executor_billing: str
     cost: Optional[HostedCost] = None
-
-    @property
-    def mode(self) -> Literal["proxy"]:
-        return "proxy"
+    mode: Literal["proxy", "direct"] = "proxy"
+    failed_attempts: tuple[FailedAttempt, ...] = ()
 
     def __post_init__(self) -> None:
+        _require(self.mode, str, "execution mode")
+        if self.mode not in EXECUTION_MODES:
+            raise ValueError(f"unknown execution mode: {self.mode}")
+        if not isinstance(self.failed_attempts, tuple) or not all(
+            isinstance(attempt, FailedAttempt) for attempt in self.failed_attempts
+        ):
+            raise ValueError("failed attempts must be a tuple of FailedAttempt")
         _require(self.executor_origin, Origin, "executor origin")
         _require(self.executor_source_id, str, "executor source id")
         if not _SOURCE_ID_RE.fullmatch(self.executor_source_id):
@@ -489,9 +522,9 @@ class ProxyExecution:
 
 @dataclass(frozen=True)
 class HostedResult:
-    """``ToolResultMessage.hosted``: the canonical record of a proxied hosted call. ``action`` is what the executor
-    reports it did, where that differs from the model's request: for ``image_generation``, the prompt it rendered and
-    the output's resolved size and quality, as a native call's block carries them."""
+    """``ToolResultMessage.hosted``: the canonical record of a proxied search or an ``image_generate`` call.
+    ``action`` is what the executor reports it did, where that differs from the model's request: for
+    ``image_generate``, the model it ran on, the prompt it rendered, and the output's resolved size and quality."""
 
     record: HostedRecord
     execution: Optional[ProxyExecution] = None
@@ -503,6 +536,13 @@ class HostedResult:
         _require(self.action, HostedAction, "hosted result action", optional=True)
         if self.execution is None and self.record.status != "failed":
             raise ValueError("a hosted result without an execution is a failed record")
+        if (
+            self.action is not None
+            and self.action.type == "generate"
+            and self.record.status == "completed"
+            and self.action.prompt is None
+        ):
+            raise ValueError("a completed generate action needs its prompt")
 
 
 UserContent = Union[TextBlock, ImageBlock]
@@ -615,9 +655,11 @@ class ToolResultMessage:
         if not self.tool_call_id or not self.tool_name:
             raise ValueError("a tool result needs its call id and tool name")
         if self.hosted is not None:
-            if self.tool_name not in HOSTED_TOOLS:
+            if self.tool_name not in HOSTED_RESULT_TOOLS:
                 raise ValueError(f"{self.tool_name} is not a hosted tool")
             self.hosted.record.check_tool(self.tool_name)
+            if self.hosted.action is not None and not self.hosted.action.fits(self.tool_name):
+                raise ValueError(f"a {self.hosted.action.type} action does not belong to {self.tool_name}")
             if self.is_error != (self.hosted.record.status in ("failed", "incomplete")):
                 raise ValueError("a hosted result is an error exactly when its record failed or is incomplete")
 
@@ -634,18 +676,13 @@ def text(value: str) -> TextBlock:
 
 
 def has_reply(message: AssistantMessage) -> bool:
-    """Whether a response says something to the user: non-blank text, or an image a hosted call generated.
+    """Whether a response says something to the user: non-blank text.
 
     The one rule for "the model replied", read by the loop's empty-reply test and
-    by a final row's outcome. A generated image is a reply on its own: a model
-    asked for a picture may answer with the picture alone.
+    by a final row's outcome. A generated image is an ``image_generate`` tool
+    result, delivered with the turn, never part of the response itself.
     """
-    for block in message.content:
-        if isinstance(block, TextBlock) and block.text and block.text.strip():
-            return True
-        if isinstance(block, HostedToolBlock) and block.record.status == "completed" and block.record.images:
-            return True
-    return False
+    return any(isinstance(block, TextBlock) and block.text and block.text.strip() for block in message.content)
 
 
 # --- persisted form ---------------------------------------------------------
@@ -923,6 +960,15 @@ def message_to_dict(message: Message) -> dict[str, Any]:
                 }
                 if execution.cost is not None:
                     hosted_result["execution"]["cost"] = _cost_to_dict(execution.cost)
+                if execution.failed_attempts:
+                    hosted_result["execution"]["failed_attempts"] = [
+                        {
+                            "source_id": attempt.source_id,
+                            "billing": attempt.billing,
+                            **({"cost": _cost_to_dict(attempt.cost)} if attempt.cost is not None else {}),
+                        }
+                        for attempt in execution.failed_attempts
+                    ]
             if message.hosted.action is not None:
                 hosted_result["action"] = _action_to_dict(message.hosted.action)
             result["hosted"] = hosted_result
@@ -980,15 +1026,25 @@ def message_from_dict(data: Mapping[str, Any]) -> Message:
                         "executor_source_id": str,
                         "executor_billing": str,
                     },
-                    {"cost": dict},
+                    {"cost": dict, "failed_attempts": list},
                 )
-                if e["mode"] != "proxy":
-                    raise ValueError("proxy execution.mode must be proxy")
+                attempts = []
+                for attempt in e.get("failed_attempts", ()):
+                    a = _read(attempt, "failed attempt", {"source_id": str, "billing": str}, {"cost": dict})
+                    attempts.append(
+                        FailedAttempt(
+                            source_id=a["source_id"],
+                            billing=a["billing"],
+                            cost=_cost_from_dict(a["cost"]) if "cost" in a else None,
+                        )
+                    )
                 execution = ProxyExecution(
                     executor_origin=origin_from_dict(e["executor_origin"]),
                     executor_source_id=e["executor_source_id"],
                     executor_billing=e["executor_billing"],
                     cost=_cost_from_dict(e["cost"]) if "cost" in e else None,
+                    mode=e["mode"],
+                    failed_attempts=tuple(attempts),
                 )
             hosted_result = HostedResult(
                 record=_record_from_dict(h["record"]),

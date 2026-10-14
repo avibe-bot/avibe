@@ -20,7 +20,6 @@ from core.agent_core.ai._common import (
     content_parts,
     drive_sse_stream,
     endpoint_origin,
-    forced_tool,
     hosted_pin,
     PIN_UNAVAILABLE,
     portable_request,
@@ -30,7 +29,6 @@ from core.agent_core.ai._common import (
     native_hosted_tools,
     prepare_messages,
     request_credential_values,
-    required_only_tool,
     StreamAssembler,
     validate_wire_shape,
     WireField,
@@ -739,12 +737,6 @@ def build_chat_payload(
     ]
     if tools:
         payload["tools"] = tools
-    forced = forced_tool(request)
-    if forced is not None:
-        name, route = forced
-        payload["tool_choice"] = (
-            required_only_tool(tools) if route is not None else {"type": "function", "function": {"name": name}}
-        )
     effort = sent_effort(request.reasoning_effort or "")
     if effort is not None:
         payload["reasoning_effort"] = effort

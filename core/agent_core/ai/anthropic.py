@@ -983,10 +983,6 @@ def build_messages_payload(
         tools[functions[-1]]["cache_control"] = _cache_control(prefix_ttl)
     if tools:
         payload["tools"] = tools
-    if request.tool_choice is not None:
-        # Current Claude models refuse a forced `tool` or `any` choice, as does extended thinking, so a request that
-        # forces one would test the refusal instead of the tool. A hosted-tool probe asks in its message instead.
-        raise ValueError("an Anthropic request never forces a tool")
     effort = (request.reasoning_effort or "").lower()
     if effort in {"none", "off", "disabled"}:
         payload["thinking"] = {"type": "disabled"}

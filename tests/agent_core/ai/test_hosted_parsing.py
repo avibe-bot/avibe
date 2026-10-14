@@ -40,8 +40,8 @@ SERVED = "src_served00001"
 ORIGIN_X = Origin("upstream", "openai_responses", "model-x")
 WEB, X = hosted_tool_spec("web_search"), hosted_tool_spec("x_search")
 NATIVE = {
-    "web_search": HostedToolRoute("native", None, False, declaration={"type": "web_search"}),
-    "x_search": HostedToolRoute("native", None, False, declaration={"type": "x_search"}),
+    "web_search": HostedToolRoute("native", False, declaration={"type": "web_search"}),
+    "x_search": HostedToolRoute("native", False, declaration={"type": "x_search"}),
 }
 
 

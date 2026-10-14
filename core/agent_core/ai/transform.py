@@ -261,13 +261,13 @@ def native_replay(
     """Whether a response's hosted calls go back verbatim, their native payloads in place (§4.4, §5).
 
     Only to the hop the request goes to, when that hop's Source served them on the same origin: one hop then builds
-    the request and serves it (§3.5 as implemented; a moved hop gets the in-place form). The hop must still have each
-    tool they called and a Source, which a portable request has not, over a protocol with native hosted content. A
-    generated image never goes back verbatim: its stored item no longer holds the image.
-    * The response its turn continues (``in_flight``) needs no replay evidence: that is the provider's own
-      continuation contract.
-    * Any earlier response needs the hop's current ``replay`` evidence for every tool it called, and every one of its
-      calls finished.
+    the request and serves it (§3.5; a moved hop gets the in-place form). The hop must still declare each tool they
+    called natively, since a provider refuses its server items without their declaration, and have a Source, which a
+    portable request has not, over a protocol with native hosted content.
+    * The response its turn continues (``in_flight``) needs no ``replay``: that is the provider's own continuation
+      contract.
+    * Any earlier response needs ``replay`` assumed on the hop for every tool it called, and every one of its calls
+      finished.
     """
 
     blocks = [block for block in message.content if isinstance(block, HostedToolBlock)]
@@ -282,7 +282,7 @@ def native_replay(
         return False
     for block in blocks:
         route = endpoint.hosted_tools.get(block.tool)
-        if route is None or block.tool == "image_generation":
+        if route is None or route.mode != "native":
             return False
         if not in_flight and (not route.replay or block.record.status == "pending"):
             return False

@@ -1723,6 +1723,7 @@
       "unclassified": "请求模型时出现了 {backend} 无法归类的错误。可以重试，或换一个模型。",
       "outputLimit": "模型在生成可用的答案或工具调用前达到了输出上限。请让它分成更小的步骤，或换用输出上限更大的模型。",
       "internal": "{backend} 因内部错误而停止。可以重试；如果再次出现，服务日志里记录了原因。",
+      "historyUnreadable": "这个会话的历史记录无法加载，{backend} 无法继续它。请发送 /new 开始一个新会话。",
       "generic": "{backend} 运行失败。"
     }
   },
@@ -1741,17 +1742,20 @@
       "executor_no_image": "代理执行者没有返回图片",
       "gateway_unreachable": "无法连接模型网关",
       "gateway_refused": "模型网关拒绝了这次调用",
-      "gateway_no_result": "模型网关没有返回结果"
+      "gateway_no_result": "模型网关没有返回结果",
+      "image_param_unsupported": "所选图片模型不支持其中一个参数",
+      "image_model_unavailable": "所选图片模型当前不可用"
     },
     "tool": {
       "web_search": "网页搜索",
       "x_search": "X 搜索",
-      "image_generation": "图片生成"
+      "image_generate": "图片生成"
     },
     "quoted": "“{subject}”",
     "mode": {
       "native": "原生（{provider}）",
-      "proxy": "由 {provider} 代理"
+      "proxy": "由 {provider} 代理",
+      "direct": "{provider} 直连"
     },
     "count": {
       "sourceOne": "1 个来源",

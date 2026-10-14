@@ -17,7 +17,8 @@ import pytest
 
 from core.agent_core.ai._common import PIN_MODEL_HEADER, PIN_SOURCE_HEADER
 from core.agent_core.ai.provider import Done, HostedToolRoute, ModelEndpoint, ModelRequest, ProviderError
-from core.agent_core.ai.registry import build_wire_request, create_adapter
+from core.agent_core.ai.registry import create_adapter
+from tests.agent_core.ai._wire import build_wire_request
 from core.agent_core.cancel import CancelToken
 from core.agent_core.messages import (
     AssistantMessage,
@@ -63,9 +64,9 @@ def _endpoint(protocol: str, *, replay: bool, native: bool = True, source_id: st
     provider, model = MODELS[protocol]
     declaration = {"type": "web_search_20250305", "name": "web_search"} if protocol == "anthropic" else {"type": "web_search"}
     route = (
-        HostedToolRoute("native", None, replay, declaration=declaration)
+        HostedToolRoute("native", replay, declaration=declaration)
         if native
-        else HostedToolRoute("proxy", None, replay)
+        else HostedToolRoute("proxy", replay)
     )
     return ModelEndpoint(
         protocol,  # type: ignore[arg-type]
@@ -137,7 +138,7 @@ async def test_a_hosted_call_goes_back_verbatim_and_pinned_only_to_its_own_sourc
     protocol, replay, served_by, identity, verbatim
 ):
     request = _request(
-        _endpoint(protocol, replay=replay, native=False),
+        _endpoint(protocol, replay=replay),
         _searched(protocol, served_by=served_by, identity=identity),
         UserMessage((TextBlock("and then?"),)),
     )
@@ -145,8 +146,8 @@ async def test_a_hosted_call_goes_back_verbatim_and_pinned_only_to_its_own_sourc
     wire = await build_wire_request(request, gateway=True)
 
     assert _verbatim(protocol, wire.body) is verbatim
-    # The request carries no native declaration here (a proxied route), so only a verbatim payload pins it.
-    assert (wire.headers.get(PIN_SOURCE_HEADER) == SOURCE) is verbatim
+    # A payload goes back verbatim only where the tool is declared natively, so the request is pinned either way.
+    assert wire.headers[PIN_SOURCE_HEADER] == SOURCE
     assert PIN_MODEL_HEADER not in wire.headers
 
 

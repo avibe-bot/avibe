@@ -83,5 +83,22 @@
     "subject": "from:xai",
     "sources": [],
     "images": []
+  },
+  "direct_image": {
+    "version": 1,
+    "call_id": "call_ig1",
+    "tool": "image_generate",
+    "mode": "direct",
+    "status": "completed",
+    "sources": [],
+    "images": [{ "path": "/media/3f2a.png", "mime": "image/png", "width": 1536, "height": 1024, "bytes": 1993000 }],
+    "subject": "A wide photo of an open laptop on a desk at night, empty dark space in the upper right",
+    "provider": "openai",
+    "source_id": "src_relaygpt1",
+    "source_name": "relay-gpt",
+    "model": "gpt-image-2",
+    "size": "1536x1024",
+    "quality": "medium",
+    "revised_prompt": "A wide photo of an open laptop on a desk at night, empty dark space in the upper right"
   }
 }

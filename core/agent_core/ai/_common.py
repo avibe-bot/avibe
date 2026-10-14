@@ -1654,7 +1654,7 @@ def portable_request(request: ModelRequest) -> ModelRequest:
     that Source serves is still its own, and its opaque payloads are bound to that identity."""
 
     endpoint = request.endpoint
-    routes = {name: HostedToolRoute("proxy", route.executor, False) for name, route in endpoint.hosted_tools.items()}
+    routes = {name: HostedToolRoute("proxy", False) for name in endpoint.hosted_tools}
     return replace(request, endpoint=replace(endpoint, portable=True, hosted_tools=routes))
 
 
@@ -1719,42 +1719,13 @@ def _header_value(value: str) -> bool:
     return bool(value) and value == value.strip() and all(" " <= char <= "~" for char in value)
 
 
-def forced_tool(request: ModelRequest) -> tuple[str, HostedToolRoute | None] | None:
-    """``request.tool_choice`` with its native hosted route (None when it is sent as a function); None when nothing
-    is forced. The forced tool must be one the request declares."""
-
-    name = request.tool_choice
-    if name is None:
-        return None
-    if not any(tool.name == name for tool in request.tools):
-        raise ValueError(f"tool_choice names {name!r}, which the request does not declare")
-    return name, native_hosted_tools(request).get(name)
-
-
-def required_only_tool(tools: list[Any]) -> str:
-    """OpenAI's forced choice of a hosted tool: ``required`` over a request that declares only that tool.
-
-    The Responses and Chat named choices name a function, and their hosted-tool choice types have no
-    ``web_search`` or ``x_search``, so ``required`` is the one form that forces any hosted tool.
-    """
-
-    if len(tools) != 1:
-        raise ValueError("forcing a hosted tool on this protocol needs it to be the request's only tool")
-    return "required"
-
-
 async def iter_sse_events(
     response: httpx.Response,
     cancel: CancelToken,
-    *,
-    max_line_size: int | None = None,
 ) -> AsyncIterator[SSEEvent]:
-    """Yield SSE events while allowing a CancelToken to interrupt a stalled read. ``max_line_size`` overrides the
-    parser's default line cap; a stream allowed lines that long (a generated image's) is parsed off the controller
-    loop, because one event can be many MiB."""
+    """Yield SSE events while allowing a CancelToken to interrupt a stalled read."""
 
-    parser = SSEParser(max_line_size=max_line_size)
-    offload = max_line_size is not None
+    parser = SSEParser()
     iterator = response.aiter_bytes().__aiter__()
     while True:
         if cancel.cancelled:
@@ -1769,9 +1740,9 @@ async def iter_sse_events(
             break
         if chunk is None:
             return
-        for event in await asyncio.to_thread(parser.feed, chunk) if offload else parser.feed(chunk):
+        for event in parser.feed(chunk):
             yield event
-    for event in await asyncio.to_thread(parser.finish) if offload else parser.finish():
+    for event in parser.finish():
         yield event
 
 
@@ -1788,7 +1759,6 @@ async def drive_sse_stream(
     resolver: ServedHopResolver | None,
     gateway: bool,
     translate: WireTranslator,
-    max_line_size: int | None = None,
     refused: Callable[[ProviderError], bool] | None = None,
 ) -> AsyncIterator[Any]:
     """Own the complete request/stream/terminal/cleanup lifecycle.
@@ -1877,7 +1847,7 @@ async def drive_sse_stream(
                             resolved_origin.source_id,
                             resolved_origin.source_identity,
                         )
-                        async for item in translate(iter_sse_events(response, cancel, max_line_size=max_line_size)):
+                        async for item in translate(iter_sse_events(response, cancel)):
                             if isinstance(item, (Done, ProviderError)):
                                 candidate = item
                                 break

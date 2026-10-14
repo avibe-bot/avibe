@@ -36,7 +36,7 @@ _PIN_UNAVAILABLE = {"type": "error", "error": {"type": "model_hub_pin_unavailabl
 
 
 def _request(*, cache: str = "none", base_url: str = "http://hub.invalid/vibey/v1") -> ModelRequest:
-    route = HostedToolRoute("native", None, False, declaration=DECLARATION)
+    route = HostedToolRoute("native", False, declaration=DECLARATION)
     return ModelRequest(
         endpoint=ModelEndpoint(
             "anthropic",

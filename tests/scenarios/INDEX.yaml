@@ -62,7 +62,6 @@ capabilities:
       - tests/agent_core/ai/test_hosted_parsing.py
       - tests/agent_core/ai/test_hosted_transform.py
       - tests/agent_core/ai/test_hosted_replay.py
-      - tests/agent_core/ai/test_hosted_images.py
       - tests/agent_core/ai/test_hosted_pause_turn.py
       - tests/test_vibey_agent.py
       - tests/test_model_hub_evidence_rules.py

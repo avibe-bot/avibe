@@ -9,18 +9,15 @@ Payload and stream rules are ported from tau's ``tau_ai/openai_compatible.py``
 
 from __future__ import annotations
 
-import asyncio
 import copy
 import json
 from collections.abc import AsyncIterator, Mapping
-from dataclasses import replace
 from typing import Any
 
 import httpx
 
 from core.agent_core.ai.hosted import (
     citation,
-    image_dimensions,
     reported_cost,
     reported_counts,
     responses_hosted_block,
@@ -35,7 +32,6 @@ from core.agent_core.ai._common import (
     drive_sse_stream,
     dispatch_wire_event,
     endpoint_origin,
-    forced_tool,
     hosted_pin,
     PIN_UNAVAILABLE,
     portable_request,
@@ -45,7 +41,6 @@ from core.agent_core.ai._common import (
     native_hosted_tools,
     prepare_messages,
     request_credential_values,
-    required_only_tool,
     StreamAssembler,
     validate_wire_shape,
     WireField,
@@ -54,19 +49,15 @@ from core.agent_core.ai._common import (
 )
 from core.agent_core.ai.provider import (
     Done,
-    HostedToolRoute,
     MediaLoader,
-    MediaSink,
     ModelRequest,
     ProviderAdapter,
     ProviderError,
     TextDelta,
 )
 from core.agent_core.cancel import CancelToken
-from core.agent_core.ai.sse import DEFAULT_MAX_PENDING_EVENT_SIZE
 from core.agent_core.messages import (
     AssistantMessage,
-    HostedImage,
     HostedToolBlock,
     TextBlock,
     ThinkingBlock,
@@ -74,19 +65,6 @@ from core.agent_core.messages import (
     ToolResultMessage,
     UserMessage,
 )
-
-#: A preview OpenAI streams while an image is drawn (``partial_images``); only the done item's image is kept.
-_PARTIAL_IMAGE_EVENT = "response.image_generation_call.partial_image"
-#: Every image one response streams, previews and finals, decoded (plan item 25). The terminal response repeats every
-#: final image in one event, so the budget is what one event can carry as base64, less a margin for the rest of it.
-IMAGE_BYTES_PER_RESPONSE = (DEFAULT_MAX_PENDING_EVENT_SIZE - 1024 * 1024) * 3 // 4
-#: Image events beyond the declared previews and the final, per image call (plan item 25).
-_IMAGE_EVENT_MARGIN = 2
-#: An event longer than this (a generated image's) is parsed off the controller loop.
-_INLINE_PARSE_CHARS = 1024 * 1024
-#: The line cap of a stream that may carry a generated image: the whole event cap, as one image line can be several
-#: MiB of base64 (§7.5). Other streams keep the default line cap.
-IMAGE_STREAM_LINE_BYTES = DEFAULT_MAX_PENDING_EVENT_SIZE
 
 _KNOWN_RESPONSE_EVENTS = frozenset(
     {
@@ -307,7 +285,6 @@ class OpenAIResponsesAdapter(ProviderAdapter):
         client: httpx.AsyncClient | None = None,
         *,
         media_loader: MediaLoader | None = None,
-        media_sink: MediaSink | None = None,
         served_hop_resolver: ServedHopResolver | None = None,
         gateway: bool = False,
     ) -> None:
@@ -315,7 +292,6 @@ class OpenAIResponsesAdapter(ProviderAdapter):
         self._client = client or httpx.AsyncClient(timeout=None, trust_env=not gateway)
         self._owns_client = client is None
         self._media_loader = media_loader
-        self._media_sink = media_sink
         self._served_hop_resolver = served_hop_resolver
         self._gateway = gateway
 
@@ -366,7 +342,6 @@ class OpenAIResponsesAdapter(ProviderAdapter):
         refusal = False
         # The hosted tools this request declared natively: only their items become hosted calls (§4.2).
         hosted = frozenset(native_hosted_tools(request))
-        images = _ImageBudget(native_hosted_tools(request).get("image_generation"))
 
         try:
             wire = wire_request(request, transformed_messages, gateway=self._gateway, loaded_images=loaded_images)
@@ -380,24 +355,7 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                         return
                     if not event.data or event.data == "[DONE]":
                         continue
-                    # A preview of an image still being drawn is never kept: named as one, its base64 is not even
-                    # parsed. Named or known by its JSON type, it counts against the response's image budget.
-                    named_preview = event.event == _PARTIAL_IMAGE_EVENT
-                    if named_preview:
-                        chunk = None
-                    elif len(event.data) > _INLINE_PARSE_CHARS:
-                        # A generated image's event is many MiB: parsed off the controller loop.
-                        chunk = await asyncio.to_thread(json_object, event.data)
-                    else:
-                        chunk = json_object(event.data)
-                    if named_preview or (chunk is not None and chunk.get("type") == _PARTIAL_IMAGE_EVENT):
-                        exceeded = images.charge(len(event.data))
-                        if exceeded is not None:
-                            terminal = assembler.terminal(assembler.error(exceeded, kind="invalid_request"))
-                            if terminal is not None:
-                                yield terminal
-                            return
-                        continue
+                    chunk = json_object(event.data)
                     if chunk is None:
                         terminal = assembler.terminal(
                             assembler.error(
@@ -688,8 +646,6 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                             assembler.ensure_text_slot(output_index)
                         else:
                             # A hosted call takes its place in the output order now; its done item fills it in.
-                            if responses_hosted_tool(item) == "image_generation":
-                                images.started()
                             _add_hosted_call(assembler, item, output_index, hosted, finished=False)
                     elif event_type == "response.reasoning_summary_text.done":
                         continue
@@ -980,22 +936,6 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                                 end = assembler.block_end(output_index)
                                 if end is not None:
                                     yield end
-                            elif (
-                                responses_hosted_tool(item) == "image_generation"
-                                and "image_generation" in hosted
-                                and assembler.source_id is not None
-                            ):
-                                encoded = item.get("result")
-                                exceeded = images.charge(len(encoded) if isinstance(encoded, str) else 0)
-                                if exceeded is not None:
-                                    terminal = assembler.terminal(assembler.error(exceeded, kind="invalid_request"))
-                                    if terminal is not None:
-                                        yield terminal
-                                    return
-                                image, failure = await _saved_image(self._media_sink, item)
-                                _add_hosted_call(
-                                    assembler, item, output_index, hosted, image=image, image_error=failure
-                                )
                             else:
                                 _add_hosted_call(assembler, item, output_index, hosted)
                     elif event_type in {"response.completed", "response.incomplete"}:
@@ -1359,8 +1299,6 @@ class OpenAIResponsesAdapter(ProviderAdapter):
                     resolver=self._served_hop_resolver,
                     gateway=self._gateway,
                     translate=translate,
-                    # A generated image arrives as one base64 line of several MiB (§7.5).
-                    max_line_size=IMAGE_STREAM_LINE_BYTES if "image_generation" in hosted else None,
                 )
                 unavailable = False
                 try:
@@ -1443,10 +1381,6 @@ def build_responses_payload(
         include.extend(route.include)
     if include:
         payload["include"] = list(dict.fromkeys(include))
-    forced = forced_tool(request)
-    if forced is not None:
-        name, route = forced
-        payload["tool_choice"] = required_only_tool(tools) if route is not None else {"type": "function", "name": name}
     return payload
 
 
@@ -1643,15 +1577,11 @@ def _add_hosted_call(
     *,
     finished: bool = True,
     backfill: bool = False,
-    image: HostedImage | None = None,
-    image_error: tuple[str, str] | None = None,
 ) -> None:
     """An output item of a hosted tool the request declared natively, as its hosted call at its output index (§4.2):
     pending when only added, filled in when done. A call the terminal response backfills keeps a block it has.
 
     A response whose served Source is unknown keeps no hosted call: its native payload could never be replayed.
-    A generated image is ``image``, the file its done item was saved to. The terminal response repeats that image,
-    and its copy is never decoded (§7.5), so a call it alone finishes saved none.
     """
 
     tool = responses_hosted_tool(item)
@@ -1660,69 +1590,12 @@ def _add_hosted_call(
     current = assembler.hosted_block_at(output_index)
     if backfill and current is not None and current.record.status != "pending":
         return
-    if backfill and tool == "image_generation":
-        image_error = ("the image was not streamed before the response ended", "image_not_streamed")
     assembler.hosted_block(
         output_index,
         responses_hosted_block(
-            item,
-            source_id=assembler.source_id,
-            call_id=f"hosted_{output_index}",
-            finished=finished,
-            image=image,
-            image_error=image_error,
+            item, source_id=assembler.source_id, call_id=f"hosted_{output_index}", finished=finished
         ),
     )
-
-
-class _ImageBudget:
-    """The image data one response may stream (plan item 25): per image call, the previews its declaration asks for
-    and the final, plus a small margin; and a cumulative decoded size. Exceeding either ends the stream as an error,
-    so a misbehaving provider cannot stream images without bound. The terminal response's duplicate is not counted:
-    it is never decoded."""
-
-    def __init__(self, route: HostedToolRoute | None) -> None:
-        partials = (route.declaration or {}).get("partial_images") if route is not None else None
-        self._per_call = (partials if isinstance(partials, int) and partials > 0 else 0) + 1
-        self._calls = 0
-        self._events = 0
-        self._bytes = 0
-
-    def started(self) -> None:
-        self._calls += 1
-
-    def charge(self, encoded_length: int) -> str | None:
-        """Count one preview or final of ``encoded_length`` base64 characters; why the stream must end, if it must."""
-
-        self._events += 1
-        self._bytes += encoded_length * 3 // 4
-        if self._events > self._per_call * self._calls + _IMAGE_EVENT_MARGIN:
-            return "the provider streamed more images than the response asked for"
-        if self._bytes > IMAGE_BYTES_PER_RESPONSE:
-            return "the provider streamed more image data than one response may carry"
-        return None
-
-
-async def _saved_image(
-    sink: MediaSink | None, item: Mapping[str, Any]
-) -> tuple[HostedImage | None, tuple[str, str] | None]:
-    """The file a done ``image_generation_call`` was saved to, with its output size, or why there is none and its code
-    (§7.3).
-
-    Only a completed call's image is saved: that is the only record that lists one, so no file is written that no
-    record names."""
-
-    encoded = item.get("result")
-    if item.get("status") != "completed" or not isinstance(encoded, str) or not encoded:
-        return None, None
-    if sink is None:
-        return None, ("nothing here can keep a generated image", "image_no_store")
-    try:
-        image = await sink.save_image(encoded)
-    except (ValueError, OSError) as error:
-        return None, (f"the image could not be saved: {error}", "image_not_saved")
-    width, height = image_dimensions(item.get("size"))
-    return replace(image, width=width, height=height), None
 
 
 def _add_message_citations(assembler: StreamAssembler, index: int, item: Mapping[str, Any]) -> None:

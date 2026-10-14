@@ -106,28 +106,26 @@ def proxy_x_search():
     )
 
 
-def native_image():
-    [activity] = native_activities(
-        _message(
-            HostedToolBlock(
-                id="ig_01",
-                tool="image_generation",
-                action=HostedAction(type="generate", prompt=PROMPT, size="1536x1024", quality="medium"),
-                record=HostedRecord(
-                    status="completed",
-                    images=(HostedImage(path="/media/3f2a.png", mime="image/png", width=1536, height=1024, bytes=1993000),),
-                ),
-                native=_native("src_relaygpt1"),
+def direct_image():
+    """An ``image_generate`` call, run directly on the image endpoint (§7.4)."""
+    return proxy_activity(
+        ToolCallBlock(id="call_ig1", name="image_generate", arguments={"model": "gpt-image-2", "prompt": PROMPT}),
+        HostedResult(
+            record=HostedRecord(
+                status="completed",
+                images=(HostedImage(path="/media/3f2a.png", mime="image/png", width=1536, height=1024, bytes=1993000),),
             ),
-            # Phase 1 knows no image price, so the response carries no cost at all.
-            summary=HostedSummary(),
-            provider="openai",
-            api="openai_responses",
-            model="gpt-6.1-sol",
+            # No image price is known here, so the call carries no cost at all.
+            execution=ProxyExecution(
+                executor_origin=Origin(provider="openai", api="openai_responses", model="gpt-image-2"),
+                executor_source_id="src_relaygpt1",
+                executor_billing="metered",
+                mode="direct",
+            ),
+            action=HostedAction(type="generate", prompt=PROMPT, size="1536x1024", quality="medium", model="gpt-image-2"),
         ),
         source_names=NAMES,
     )
-    return activity
 
 
 def proxy_failed():
@@ -142,7 +140,7 @@ def test_a_proxied_image_shows_what_its_executor_rendered_as_a_native_one_does()
     """A proxied image's card reads the executor's rendered prompt and resolved size and quality from the result's
     action, as a native image's reads its block's action: one reading, no mode branch."""
 
-    call = ToolCallBlock(id="call_i1", name="image_generation", arguments={"prompt": "a lighthouse", "size": "auto"})
+    call = ToolCallBlock(id="call_i1", name="image_generate", arguments={"prompt": "a lighthouse", "size": "auto"})
     activity = proxy_activity(
         call,
         HostedResult(
@@ -171,7 +169,7 @@ def proxy_unreachable():
     )
 
 
-@pytest.mark.parametrize("build", [native_web_search, proxy_x_search, native_image, proxy_failed, proxy_unreachable])
+@pytest.mark.parametrize("build", [native_web_search, proxy_x_search, direct_image, proxy_failed, proxy_unreachable])
 def test_payloads_match_the_shape_the_web_card_renders(build):
     """MH-HOSTED-UI-009: every mode and outcome the card distinguishes, from the canonical records each producer writes.
 
@@ -233,10 +231,10 @@ def test_a_response_scoped_summary_is_shown_once():
         ),
         (proxy_x_search, "zh", "🔎 X 搜索 “from:OpenAI within_time:7d” · 由 xAI 代理 · 2 条帖子 · $0.11"),
         (
-            native_image,
+            direct_image,
             "en",
             "🖼 Image generation “A wide photo of an open laptop on a desk at night, empty da…”"
-            " · native (OpenAI) · 1 image",
+            " · direct (OpenAI) · 1 image",
         ),
         (proxy_failed, "zh", "🔎 X 搜索 “from:OpenAI” · 失败：no Source is verified for X search"),
     ],
