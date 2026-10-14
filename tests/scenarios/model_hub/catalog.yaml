@@ -277,6 +277,7 @@ scenarios:
       - tests/test_model_hub_evidence_rules.py::test_a_refused_effort_still_waits_for_a_capable_hop_that_is_cooling_down
       - tests/test_model_hub_reasoning_tiers.py::test_the_hop_declares_exactly_its_models_levels
       - tests/test_model_hub_reasoning_tiers.py::test_rows_saved_by_3_2_0_are_derived_again_once_at_startup
+      - tests/test_model_hub_evidence_rules.py::test_the_picker_menu_states_which_efforts_routing_refuses_in_menu_values
   - id: MH-HOSTED-VIBEY-002
     name: Every native hosted item becomes one hosted call with a provider-neutral action and its record; citations stay on the text that cites them; the response's counters and reported cost go to its summary
     status: covered

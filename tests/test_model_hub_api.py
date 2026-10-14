@@ -2409,6 +2409,8 @@ def test_backend_catalog_add_edit_and_runtime_refresh(
         "reasoning_efforts": ["low", "high"],
         "locked": False,
         "routeable": True,
+        # Server-derived like ``locked``: a client may send back the row it read, and the read states it again.
+        "effort_menu": {"omitted": [], "not_on": {}},
     }
     if backend == "opencode":
         added["native_protocol"] = "openai_responses"
@@ -2914,6 +2916,7 @@ def test_backend_catalog_add_validates_supplier_echo_and_stores_draft_literally(
         "reasoning_efforts": [],
         "locked": False,
         "routeable": True,
+        "effort_menu": {"omitted": [], "not_on": {}},
     }
     before = store.config.to_payload()
 

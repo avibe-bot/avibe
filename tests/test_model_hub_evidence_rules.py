@@ -381,3 +381,83 @@ async def test_a_refusing_runnable_hop_never_makes_recovery_spin(tmp_path):
     assert served.source_id == cooling.id
     assert clock.delays and all(delay > 0 for delay in clock.delays)
     assert [invocation[0] for invocation in service.adapter.invocations] == [cooling.id]
+
+
+MENU_CASES = [
+    # (case, hops as (Source id, protocol, upstream model), refused (Source id, wire token) pairs,
+    #  the menu row's efforts, the expected effort_menu)
+    (
+        "every-hop-or-some",
+        [("src_menuhop01", "openai_responses", "gpt-6-sol"), ("src_menuhop02", "openai_responses", "gpt-6-sol")],
+        [("src_menuhop01", "xhigh"), ("src_menuhop02", "xhigh"), ("src_menuhop01", "high")],
+        ["low", "high", "xhigh"],
+        {"omitted": ["xhigh"], "not_on": {"high": ["src_menuhop01"]}},
+    ),
+    # Vibey sends menu `minimal` to Anthropic as `low`, so a refused `low` refuses both menu values.
+    (
+        "menu-value-differs-from-wire",
+        [("src_menuhop03", "anthropic", "claude-opus-4-7")],
+        [("src_menuhop03", "low")],
+        ["minimal", "low", "high"],
+        {"omitted": ["minimal", "low"], "not_on": {}},
+    ),
+    # One request carries one token to every hop: the one written for the hop it is built on. Behind an OpenAI
+    # primary, menu `minimal` reaches an Anthropic fallback as `minimal` too, so that is the evidence it is read under.
+    (
+        "the-primary-hop-decides-the-token",
+        [("src_menuhop05", "openai_responses", "gpt-6-sol"), ("src_menuhop06", "anthropic", "claude-opus-4-7")],
+        [("src_menuhop05", "minimal"), ("src_menuhop06", "minimal")],
+        ["minimal", "low"],
+        {"omitted": ["minimal"], "not_on": {}},
+    ),
+    (
+        "nothing-refused",
+        [("src_menuhop04", "openai_responses", "gpt-6-sol")],
+        [],
+        ["low", "high"],
+        {"omitted": [], "not_on": {}},
+    ),
+]
+
+
+@pytest.mark.parametrize("hops,refused,efforts,expected", [case[1:] for case in MENU_CASES], ids=[c[0] for c in MENU_CASES])
+def test_the_picker_menu_states_which_efforts_routing_refuses_in_menu_values(tmp_path, hops, refused, efforts, expected):
+    """MH-HOSTED-006: the Editor picker's read omits a tier every hop refuses and names the Sources of a tier only
+    some refuse, in the values the menu offers, mapped to each hop's wire token by Vibey's own adapters."""
+    from config.v2_config import ModelHubBackendModelConfig
+    from core.handlers.model_hub.capability_evidence import EvidenceRecord, identity_digest
+    from core.handlers.model_hub.hosted_tools import HOSTED_PROBE_SHAPE
+    from tests.test_model_hub_vibey_consumer import _vibey_service
+
+    sources = [_source(source_id, source_id, vendor=protocol.split("_")[0], protocol=protocol, model_id=model)
+               for source_id, protocol, model in hops]
+    service = _vibey_service(tmp_path, sources)
+    service.store.config.agents["vibey"].models = [ModelHubBackendModelConfig(id="menu-alias", reasoning_efforts=efforts)]
+    live = service.store.load().sources
+    by_id = {source.id: source for source in live}
+    for source_id, token in refused:
+        source = by_id[source_id]
+        service.capability_evidence.write(
+            EvidenceRecord(
+                source_id=source_id,
+                model_id=source.models[0].id,
+                feature=EvidenceFeature.effort(token),
+                status="unsupported",
+                basis="observed",
+                observed_at=service.now(),
+                engine=service.engine_stamp,
+                shape=HOSTED_PROBE_SHAPE,
+                source_identity=identity_digest(source),
+                detail="400 invalid_request_error",
+            ),
+            live=live,
+        )
+
+    agent = service.get_agent_sources("vibey")
+
+    [row] = agent["catalog_models"]
+    assert row["effort_menu"] == expected
+    # The menu itself is unchanged: the editor saves it, and the read it submits back is accepted.
+    assert row["reasoning_efforts"] == efforts
+    assert list(ModelHubBackendModelConfig.from_payload(row).reasoning_efforts) == efforts
+    _assert_valid("backend-model.schema.json", row)
