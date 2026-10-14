@@ -182,6 +182,30 @@ describe('useHostedTools ordering', () => {
     expect(shown(result.current.read)).toBeNull();
   });
 
+  it('MH-HOSTED-UI-007: keeps a tool pending until every write queued for it has settled', async () => {
+    vi.spyOn(modelsApi, 'getHostedTools').mockResolvedValue(status(false));
+    const put = deferred<HostedToolsStatus>();
+    const clear = deferred<HostedToolsStatus>();
+    vi.spyOn(modelsApi, 'putHostedTool').mockReturnValue(put.promise);
+    vi.spyOn(modelsApi, 'clearHostedTool').mockReturnValue(clear.promise);
+    const { result } = renderHook(() => useHostedTools(true), { wrapper });
+    await waitFor(() => expect(shown(result.current.read)).toBe(false));
+
+    let writes!: Promise<void>[];
+    act(() => {
+      writes = [
+        result.current.save('web_search', { enabled: true }),
+        result.current.clear('web_search', { source_id: 'src_relay001' }),
+      ];
+    });
+    await act(async () => { put.resolve(status(true)); await writes[0]; });
+    // The clear is still out and will answer a newer status: no control may build on this one.
+    expect(result.current.pending.has('web_search')).toBe(true);
+
+    await act(async () => { clear.resolve(status(true)); await writes[1]; });
+    expect(result.current.pending.has('web_search')).toBe(false);
+  });
+
   it('MH-HOSTED-UI-007: queues a clear behind a write like any write, so its answer lands last', async () => {
     vi.spyOn(modelsApi, 'getHostedTools').mockResolvedValue(status(false));
     const put = deferred<HostedToolsStatus>();
