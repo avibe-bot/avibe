@@ -648,6 +648,10 @@ REPLAY_CASES = [
     ("anthropic-names-a-result", ANTHROPIC, ANTHROPIC_SEARCH, "answer-from-payload", "verified", "verified"),
     # Restating the answer it already gave proves nothing: that text came back in the visible transcript.
     ("restates-the-visible-answer", XAI, _responses(SEARCH, ANSWER), _responses_text("https://avibe.bot/"), "inconclusive", None),
+    # A URL that only starts like the hidden result is a different URL.
+    ("names-a-longer-url", XAI, _responses(SEARCH, ANSWER), _responses_text(HIDDEN + "-old"), "inconclusive", None),
+    # The way a sentence ends a URL does not change it.
+    ("names-it-in-a-sentence", XAI, _responses(SEARCH, ANSWER), _responses_text(f"The other one was {HIDDEN}/."), "verified", "verified"),
     # Searching again instead of using the results it holds is what a dropped replay looks like.
     ("searches-again", XAI, _responses(SEARCH, ANSWER), _responses(SEARCH, ANSWER), "unsupported", "unsupported"),
     ("names-no-result", XAI, _responses(SEARCH, ANSWER), _responses_text("I can't tell."), "inconclusive", None),

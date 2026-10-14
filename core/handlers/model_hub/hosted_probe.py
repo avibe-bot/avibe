@@ -25,8 +25,10 @@ import asyncio
 import base64
 import binascii
 import json
+import re
 from dataclasses import dataclass, replace
 from typing import Any, AsyncIterator, Awaitable, Callable, Final, Literal, Optional, Protocol
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 
@@ -165,9 +167,8 @@ def hidden_result_urls(message: AssistantMessage) -> frozenset[str]:
     }
     if message.hosted_summary is not None:
         shown.update(source.url for source in message.hosted_summary.cited_sources)
-    return frozenset(
-        url for url in returned if url and url not in shown and url not in text and url.rstrip("/") not in text
-    )
+    written = {_same_url(url) for url in _URL.findall(text)} | {_same_url(url) for url in shown}
+    return frozenset(url for url in returned if url and _same_url(url) not in written)
 
 
 def carries_native_payload(body: Any, message: AssistantMessage) -> bool:
@@ -454,9 +455,21 @@ def replay_outcome(
         if any(isinstance(block, HostedToolBlock) and block.tool == tool for block in content):
             return "unsupported"
         text = " ".join(block.text for block in content if isinstance(block, TextBlock) and block.text)
-        named = any(url in text or url.rstrip("/") in text for url in asked)
+        named = {_same_url(url) for url in _URL.findall(text)} & {_same_url(url) for url in asked}
         return "verified" if named else "inconclusive"
     return _failure(terminal, outcome)
+
+
+# A URL as an answer writes it: up to the whitespace or bracket that ends it.
+_URL = re.compile(r"https?://[^\s<>()\[\]{}\"'`]+")
+
+
+def _same_url(url: str) -> str:
+    """A URL as a comparison key: whole, without the punctuation a sentence leaves on it, its scheme and host in
+    lower case, and no trailing slash on its path."""
+
+    parts = urlsplit(url.rstrip(".,;:!?"))
+    return urlunsplit((parts.scheme.lower(), parts.netloc.lower(), parts.path.rstrip("/"), parts.query, ""))
 
 
 def _failure(terminal: ProviderError | None, outcome: RawCallOutcome) -> ProbeOutcome:

@@ -84,8 +84,8 @@ verified for X search.
   provider). Vibey's adapter runs unchanged, and Model Hub serves every request it sends with its own invocation
   of exactly that Source, never the turn gateway, so there is no route and no failover. A resend the adapter makes
   for a field the endpoint refused before answering (Anthropic's one-hour cache lifetime) is one more such call;
-  a probe sends at most two, and only one runs the model. A result is recognized only as the hosted call a real
-  turn would keep. Normal turns never receive a probe resolution.
+  each probe step (call, then replay) sends at most two requests and runs the model once. A result is recognized only
+  as the hosted call a real turn would keep. Normal turns never receive a probe resolution.
 - **The `call` probe.** The fixed message is "search the web for 'Avibe local-first agent OS' and reply with the
   first result's URL" (X search: "search X for posts about …, and reply with the first post's URL").
   - **`verified`:** the response completes and carries the provider's own result item for that tool (§4.2).
