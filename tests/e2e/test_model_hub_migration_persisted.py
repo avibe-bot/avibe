@@ -37,15 +37,14 @@ def _seed_hub(app) -> None:
     _write(path, json.dumps(payload))
 
 
-def _assert_cpa_bearer_consumption(app, upstream, key: str) -> None:
+def _assert_cpa_bearer_consumption(app, upstream, key: str, source_id: str) -> None:
     """After migration, explicitly discover the fixture model and consume CPA.
 
     Migration no longer publishes an eagerly discovered ``mock-model`` alias.
     Direct CPA calls bypass Avibe's per-request model admission, so this transport
     check explicitly requests the inventory it needs after migration has finished.
     """
-    [source] = app.client.get("/api/models/sources").json()["sources"]
-    refreshed = app.client.post(f"/api/models/sources/{source['id']}/refresh", {})
+    refreshed = app.client.post(f"/api/models/sources/{source_id}/refresh", {})
     assert refreshed.status == 200, refreshed.json()
     status = app.client.get("/api/models/runtime/status").json()["runtime"]["status"]
     listening = status["listening"]
@@ -159,7 +158,7 @@ def test_f4_persisted_configuration_migrates_with_runtime_auth_present(
 
         if backend == "claude":
             # Only a later real model call tests the pinned engine's transport.
-            _assert_cpa_bearer_consumption(app, mock_llm_upstream, KEY)
+            _assert_cpa_bearer_consumption(app, mock_llm_upstream, KEY, source["id"])
 
 
 @pytest.mark.parametrize("required", [None, "fixture-rejected-key"], ids=["public", "wrong-key"])
@@ -370,7 +369,7 @@ def test_f4_replace_migrated_bearer_without_old_secret_retains_cpa_transport(
         assert applied.status == 200, applied.json()
         [source] = applied.json()["sources"]
         assert source["credential_ref"].startswith("cred_auth_bearer_")
-        _assert_cpa_bearer_consumption(app, mock_llm_upstream, KEY)
+        _assert_cpa_bearer_consumption(app, mock_llm_upstream, KEY, source["id"])
         config_path = app.avibe_home / "config/config.json"
         agents_before = json.loads(config_path.read_text())["model_hub"]["agents"]
         old_path = (
@@ -396,7 +395,7 @@ def test_f4_replace_migrated_bearer_without_old_secret_retains_cpa_transport(
         assert not old_path.exists()
         pending = app.avibe_home / "state/model_hub_pending_revocations.json"
         assert json.loads(pending.read_text()) == []
-        _assert_cpa_bearer_consumption(app, mock_llm_upstream, replacement)
+        _assert_cpa_bearer_consumption(app, mock_llm_upstream, replacement, source["id"])
 
 
 @pytest.mark.parametrize("history", ["marked", "legacy-unknown"])
