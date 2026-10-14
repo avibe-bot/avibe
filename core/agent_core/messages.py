@@ -567,7 +567,7 @@ class AssistantMessage:
     error_message: Optional[str] = None
     hosted_summary: Optional[HostedSummary] = None
     #: The identity of the Source that served the message (credential, base URL, protocol, vendor, kind,
-    #: verification), when known: its opaque payloads go back only to a hop of that identity, since an account
+    #: credential generation), when known: its opaque payloads go back only to a hop of that identity, since an account
     #: refuses another's ciphertext (``cross-provider.md``). Credential-free.
     source_identity: Optional[str] = None
 

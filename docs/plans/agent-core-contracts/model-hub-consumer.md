@@ -26,7 +26,7 @@ consumer's requirements, and the Model Hub lane lands the change in both places.
    - `request_headers` carries `x-avibe-turn-id`, the Turn the resolution was made for, and the agent sends it on
      every gateway request: model calls and proxied hosted calls.
    - `source_identity` is the primary hop Source's credential-free identity (`identity_digest`: kind, vendor,
-     protocol, supply channel, base URL, credential reference, verification), taken from the snapshot its origin
+     protocol, supply channel, base URL, credential reference, credential generation), taken from the snapshot its origin
      came from. The agent records it on each response its own Source served (C-1 `AssistantMessage.source_identity`)
      and replays opaque payloads only to a hop of the same identity (`cross-provider.md`). Its inputs are therefore
      a persisted comparison key: changing them later sends every stored message once in the different-origin form,

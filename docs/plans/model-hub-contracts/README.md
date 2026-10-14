@@ -7,6 +7,9 @@ identity, not only to the origin (#2620): a provider refuses another account's e
 - The gateway strips an unpinned request's opaque history for another origin, Source, or Source identity, read on the
   final admission snapshot. A request pinned to the primary hop whose identity changed since the launch answers
   `pin_unavailable` (`vibey-consumer.md`). The identity stays in memory: never in the served-hop header or provenance.
+- `source.schema.json` gains the optional `credential_generation`; Source identity follows it instead of
+  `verification_pending`, so verification changes no identity and an identity never reverts after a credential
+  change.
 
 It builds on v13 (2026-10-14), which published the hosted-tools Phase 1 additions
 (`../vibey-hosted-tools.md`) as one version event:
