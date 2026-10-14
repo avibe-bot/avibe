@@ -79,7 +79,12 @@
       "saveFailed": "Computer Use — setting was not saved",
       "foregroundConsent": "{{sessionTitle}} requests foreground control: Allow for this conversation",
       "foregroundActive": "Foreground control active: {{target}}",
-      "foregroundAttention": "Foreground restoration needs attention: {{target}}",
+      "foregroundAttention": "Foreground restoration needs attention: {{target}} ({{components}})",
+      "foregroundRestorePriorFrontmost": "prior window",
+      "foregroundRestorePointer": "pointer",
+      "foregroundRestoreActiveSpace": "active Space",
+      "foregroundRestoreUnknown": "restoration state",
+      "foregroundRestoreSeparator": ", ",
       "foregroundAllow": "Allow foreground control for this conversation",
       "foregroundRevoke": "{{sessionTitle}} foreground control: Turn off for this conversation"
     },

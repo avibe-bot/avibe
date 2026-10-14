@@ -176,6 +176,11 @@ struct NativeComputerUseCatalog {
     foreground_consent: String,
     foreground_active: String,
     foreground_attention: String,
+    foreground_restore_prior_frontmost: String,
+    foreground_restore_pointer: String,
+    foreground_restore_active_space: String,
+    foreground_restore_unknown: String,
+    foreground_restore_separator: String,
     foreground_allow: String,
     foreground_revoke: String,
 }
@@ -232,9 +237,44 @@ fn native_tray_catalog() -> NativeTrayCatalog {
 }
 
 #[cfg(target_os = "macos")]
+fn foreground_restoration_components(catalog: &NativeComputerUseCatalog, restoration: &serde_json::Value) -> String {
+    let components = restoration.get("components").and_then(serde_json::Value::as_object);
+    let mut failed = Vec::new();
+    for (name, label) in [
+        ("prior_frontmost", catalog.foreground_restore_prior_frontmost.as_str()),
+        ("pointer", catalog.foreground_restore_pointer.as_str()),
+        ("active_space", catalog.foreground_restore_active_space.as_str()),
+    ] {
+        let component = components.and_then(|components| components.get(name));
+        let failed_component = component.is_none_or(|component| {
+            component.get("attempted").and_then(serde_json::Value::as_bool) != Some(true)
+                || component.get("verified").and_then(serde_json::Value::as_bool) != Some(true)
+                || component
+                    .get("failure_detail")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|detail| !detail.is_empty())
+        });
+        if failed_component {
+            failed.push(label);
+        }
+    }
+    if failed.is_empty() {
+        catalog.foreground_restore_unknown.clone()
+    } else {
+        failed.join(&catalog.foreground_restore_separator)
+    }
+}
+
+#[cfg(target_os = "macos")]
 fn computer_use_label(catalog: &NativeComputerUseCatalog, view: &computer_use::MenuView) -> String {
-    if let Some(target) = view.foreground_attention.as_deref() {
-        return catalog.foreground_attention.replace("{{target}}", target);
+    if let Some(attention) = view.foreground_attention.as_ref() {
+        return catalog
+            .foreground_attention
+            .replace("{{target}}", &attention.target)
+            .replace(
+                "{{components}}",
+                &foreground_restoration_components(catalog, &attention.restoration),
+            );
     }
     if let Some(target) = view.foreground_active.as_deref() {
         return catalog.foreground_active.replace("{{target}}", target);
@@ -2477,6 +2517,43 @@ mod tests {
         assert!(computer_use_consent_label(&catalog, &granted).contains("Turn off"));
 
         assert!(!computer_use_consent_control_enabled(&computer_use::MenuView::default()));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn foreground_attention_renders_failed_components_from_the_restoration_result() {
+        let catalog = native_catalog_for_locales(["en-US".to_owned()]).computer_use;
+        let view = computer_use::MenuView {
+            foreground_attention: Some(computer_use::ForegroundAttention {
+                target: "QQ conversation: QQ".to_owned(),
+                restoration: serde_json::json!({
+                    "components": {
+                        "prior_frontmost": {
+                            "attempted": true,
+                            "verified": true,
+                            "failure_detail": null
+                        },
+                        "pointer": {
+                            "attempted": true,
+                            "verified": true,
+                            "failure_detail": null
+                        },
+                        "active_space": {
+                            "attempted": true,
+                            "verified": false,
+                            "failure_detail": "affected display active Space was not restored"
+                        }
+                    },
+                    "restoration_ok": false
+                }),
+            }),
+            ..Default::default()
+        };
+
+        let label = computer_use_label(&catalog, &view);
+        assert!(label.contains("QQ conversation: QQ"));
+        assert!(label.contains("active Space"));
+        assert!(!label.contains("pointer"));
     }
 
     #[test]

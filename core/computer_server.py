@@ -676,7 +676,115 @@ class _ForegroundContract:
     prior_frontmost: dict[str, Any]
     pointer: dict[str, float]
     active_space_id: int
-    target_original_state: dict[str, bool]
+
+
+@dataclass
+class _RestorationComponent:
+    recorded: Any
+    attempted: bool = False
+    verified: bool = False
+    failure_detail: str | None = None
+
+    def fail(self, detail: Any) -> None:
+        bounded = _bounded_diagnostic(detail) or "restoration failed without detail"
+        if self.failure_detail is None:
+            self.failure_detail = bounded
+        elif bounded not in self.failure_detail:
+            self.failure_detail = _bounded_diagnostic(
+                f"{self.failure_detail}; {bounded}"
+            )
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "recorded": deepcopy(self.recorded),
+            "attempted": self.attempted,
+            "verified": self.verified,
+            "failure_detail": self.failure_detail,
+        }
+
+
+@dataclass
+class _ForegroundRestoration:
+    prior_frontmost: _RestorationComponent
+    pointer: _RestorationComponent
+    active_space: _RestorationComponent
+
+    @classmethod
+    def from_contract(
+        cls,
+        contract: _ForegroundContract,
+    ) -> "_ForegroundRestoration":
+        return cls(
+            prior_frontmost=_RestorationComponent(
+                recorded={
+                    "pid": contract.prior_frontmost["pid"],
+                    "window_id": contract.prior_frontmost["window_id"],
+                }
+            ),
+            pointer=_RestorationComponent(recorded=deepcopy(contract.pointer)),
+            active_space=_RestorationComponent(
+                recorded=contract.active_space_id
+            ),
+        )
+
+    def items(self) -> tuple[tuple[str, _RestorationComponent], ...]:
+        return (
+            ("prior_frontmost", self.prior_frontmost),
+            ("pointer", self.pointer),
+            ("active_space", self.active_space),
+        )
+
+    @property
+    def restoration_ok(self) -> bool:
+        return all(
+            component.attempted
+            and component.verified
+            and component.failure_detail is None
+            for _name, component in self.items()
+        )
+
+    def fail_all(self, detail: Any) -> None:
+        for _name, component in self.items():
+            component.fail(detail)
+
+    def apply_native_result(self, response: Mapping[str, Any]) -> None:
+        if response.get("ok") is not True:
+            self.fail_all(
+                response.get("error") or "native restoration failed"
+            )
+            return
+        native = response.get("restoration")
+        if not isinstance(native, Mapping):
+            self.fail_all("native restoration result was missing")
+            return
+        components = native.get("components")
+        if not isinstance(components, Mapping):
+            self.fail_all("native restoration components were missing")
+            return
+        for name, component in self.items():
+            native_component = components.get(name)
+            if not isinstance(native_component, Mapping):
+                component.fail(f"native {name} restoration result was missing")
+                continue
+            if native_component.get("recorded") != component.recorded:
+                component.fail(
+                    f"native {name} restoration changed the recorded value"
+                )
+            component.attempted = native_component.get("attempted") is True
+            if not component.attempted:
+                component.fail(f"native {name} restoration was not attempted")
+            detail = native_component.get("failure_detail")
+            if isinstance(detail, str) and detail.strip():
+                component.fail(detail)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "components": {
+                name: component.as_dict()
+                for name, component in self.items()
+            },
+            "restoration_ok": self.restoration_ok,
+        }
 
 
 def _structured_content(result: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -793,13 +901,13 @@ def _with_foreground_outcome(
     result: dict[str, Any],
     *,
     outcome: str,
-    restoration_verified: bool,
+    restoration: Mapping[str, Any],
     effect: str | None = None,
 ) -> dict[str, Any]:
     enriched = deepcopy(result)
     payload = _structured_content(enriched) or {}
     payload["foreground_outcome"] = outcome
-    payload["restoration_verified"] = restoration_verified
+    payload["restoration"] = deepcopy(dict(restoration))
     if effect is not None:
         payload["effect"] = effect
     content = enriched.get("content")
@@ -1693,6 +1801,21 @@ class ComputerUseServer:
                 "target_not_admissible",
                 "The prior frontmost window could not be verified.",
             )
+        prior_key = _window_identity(prior_frontmost)
+        assert prior_key is not None
+        prior_window = _window_by_key(
+            windows_payload,
+            prior_key,
+        )
+        if (
+            prior_window is None
+            or prior_window.get("current_space_id") != active_space_id
+            or prior_window.get("on_current_space") is not True
+        ):
+            raise ComputerServerError(
+                "target_not_admissible",
+                "The prior frontmost window is not on the target's active Space.",
+            )
         pointer_result = await self._run_while_lease_owned(
             heartbeat,
             self._upstream_call(upstream, "get_cursor_position", {"session": session}),
@@ -1725,79 +1848,142 @@ class ComputerUseServer:
             prior_frontmost=prior_frontmost,
             pointer={"x": pointer_x, "y": pointer_y},
             active_space_id=int(active_space_id),
-            target_original_state={
-                "hidden": False,
-                "minimized": False,
-            },
         )
 
-    async def _verify_foreground_restore(
+    async def _restore_and_verify_foreground(
         self,
         upstream: Upstream,
         contract: _ForegroundContract,
         *,
         session: str,
+        title: str,
         heartbeat: asyncio.Task[None],
-    ) -> tuple[bool, str]:
-        windows_result = await self._run_while_lease_owned(
-            heartbeat,
-            self._upstream_call(upstream, "list_windows", {"session": session}),
-        )
-        if windows_result.get("isError"):
-            return False, "fresh window observation failed"
-        windows_payload = _structured_content(windows_result)
-        if windows_payload is None:
-            return False, "fresh window observation was not structured"
-        prior_frontmost = _frontmost_window(windows_payload)
-        if (
-            prior_frontmost is None
-            or _window_identity(prior_frontmost)
-            != _window_identity(contract.prior_frontmost)
-        ):
-            return False, "prior frontmost application or window was not restored"
-        target = _window_by_key(
-            windows_payload,
-            (contract.target["pid"], contract.target["window_id"]),
-        )
-        if target is None:
-            return False, "target window disappeared during restoration"
-        if target.get("current_space_id") != contract.active_space_id:
-            return False, "affected display active Space was not restored"
-        if target.get("on_current_space") is not True:
-            return False, "target window is no longer on the recorded active Space"
-        if contract.target_original_state["minimized"]:
-            if target.get("minimized") is not True:
-                return False, "target minimized state was not restored"
-        elif target.get("minimized") is True or target.get("is_on_screen") is not True:
-            return False, "target unminimized state was not restored"
-        if contract.target_original_state["hidden"]:
-            hidden = (
-                target.get("is_on_screen") is False
-                and target.get("minimized") is not True
+    ) -> _ForegroundRestoration:
+        restoration = _ForegroundRestoration.from_contract(contract)
+        try:
+            native_result = await self._foreground_control.request(
+                "restore",
+                session=session,
+                title=title,
+                target=contract.target,
+                restoration=restoration.as_dict(),
             )
-            if not hidden:
-                return False, "target hidden state was not restored"
-        elif target.get("is_on_screen") is not True:
-            return False, "target visible state was not restored"
-        pointer_result = await self._run_while_lease_owned(
-            heartbeat,
-            self._upstream_call(upstream, "get_cursor_position", {"session": session}),
-        )
-        if pointer_result.get("isError"):
-            return False, "fresh pointer observation failed"
-        pointer_payload = _structured_content(pointer_result)
-        if pointer_payload is None or pointer_payload.get("available") is not True:
-            return False, "fresh pointer observation was unavailable"
-        pointer_x = _float_value(pointer_payload.get("x"))
-        pointer_y = _float_value(pointer_payload.get("y"))
-        if pointer_x is None or pointer_y is None:
-            return False, "fresh pointer observation was not verifiable"
-        if (
-            abs(pointer_x - contract.pointer["x"]) > _FOREGROUND_POINTER_TOLERANCE
-            or abs(pointer_y - contract.pointer["y"]) > _FOREGROUND_POINTER_TOLERANCE
-        ):
-            return False, "hardware pointer position was not restored"
-        return True, ""
+        except Exception as exc:
+            restoration.fail_all(
+                _bounded_diagnostic(str(exc)) or "native restoration failed"
+            )
+        else:
+            restoration.apply_native_result(native_result)
+
+        windows_payload: dict[str, Any] | None = None
+        windows_failure: str | None = None
+        try:
+            windows_result = await self._run_while_lease_owned(
+                heartbeat,
+                self._upstream_call(
+                    upstream,
+                    "list_windows",
+                    {"session": session},
+                ),
+            )
+            if windows_result.get("isError"):
+                windows_failure = "fresh window observation failed"
+            else:
+                windows_payload = _structured_content(windows_result)
+                if windows_payload is None:
+                    windows_failure = (
+                        "fresh window observation was not structured"
+                    )
+        except Exception as exc:
+            windows_failure = (
+                _bounded_diagnostic(str(exc))
+                or "fresh window observation failed"
+            )
+
+        pointer_payload: dict[str, Any] | None = None
+        pointer_failure: str | None = None
+        try:
+            pointer_result = await self._run_while_lease_owned(
+                heartbeat,
+                self._upstream_call(
+                    upstream,
+                    "get_cursor_position",
+                    {"session": session},
+                ),
+            )
+            if pointer_result.get("isError"):
+                pointer_failure = "fresh pointer observation failed"
+            else:
+                pointer_payload = _structured_content(pointer_result)
+                if (
+                    pointer_payload is None
+                    or pointer_payload.get("available") is not True
+                ):
+                    pointer_failure = "fresh pointer observation was unavailable"
+        except Exception as exc:
+            pointer_failure = (
+                _bounded_diagnostic(str(exc))
+                or "fresh pointer observation failed"
+            )
+
+        if windows_failure is not None:
+            restoration.prior_frontmost.fail(windows_failure)
+            restoration.active_space.fail(windows_failure)
+        else:
+            assert windows_payload is not None
+            prior_frontmost = _frontmost_window(windows_payload)
+            if (
+                prior_frontmost is not None
+                and _window_identity(prior_frontmost)
+                == _window_identity(contract.prior_frontmost)
+            ):
+                restoration.prior_frontmost.verified = True
+            else:
+                restoration.prior_frontmost.fail(
+                    "prior frontmost application or exact window was not restored"
+                )
+
+            prior_window = _window_by_key(
+                windows_payload,
+                (
+                    contract.prior_frontmost["pid"],
+                    contract.prior_frontmost["window_id"],
+                ),
+            )
+            if (
+                prior_window is not None
+                and prior_window.get("current_space_id")
+                == contract.active_space_id
+                and prior_window.get("on_current_space") is True
+            ):
+                restoration.active_space.verified = True
+            else:
+                restoration.active_space.fail(
+                    "affected display active Space was not restored"
+                )
+
+        if pointer_failure is not None:
+            restoration.pointer.fail(pointer_failure)
+        else:
+            assert pointer_payload is not None
+            pointer_x = _float_value(pointer_payload.get("x"))
+            pointer_y = _float_value(pointer_payload.get("y"))
+            if pointer_x is None or pointer_y is None:
+                restoration.pointer.fail(
+                    "fresh pointer observation was not verifiable"
+                )
+            elif (
+                abs(pointer_x - contract.pointer["x"])
+                <= _FOREGROUND_POINTER_TOLERANCE
+                and abs(pointer_y - contract.pointer["y"])
+                <= _FOREGROUND_POINTER_TOLERANCE
+            ):
+                restoration.pointer.verified = True
+            else:
+                restoration.pointer.fail(
+                    "hardware pointer position was not restored"
+                )
+        return restoration
 
     async def _finish_foreground_transaction(
         self,
@@ -1807,53 +1993,27 @@ class ComputerUseServer:
         session: str,
         title: str,
         heartbeat: asyncio.Task[None],
-    ) -> str | None:
-        async def attention(detail: str) -> None:
+    ) -> tuple[_ForegroundRestoration, str | None]:
+        async def attention(restoration: _ForegroundRestoration) -> None:
             with suppress(Exception):
                 await self._foreground_control.request(
                     "attention",
                     session=session,
                     title=title,
                     target=contract.target,
-                    restoration={"detail": detail},
+                    restoration=restoration.as_dict(),
                 )
 
-        restoration_error: str | None = None
-        try:
-            restore = await self._foreground_control.request(
-                "restore",
-                session=session,
-                title=title,
-                target=contract.target,
-                restoration={
-                    "target": contract.target,
-                    "prior_frontmost": contract.prior_frontmost,
-                    "pointer": contract.pointer,
-                    "active_space_id": contract.active_space_id,
-                    "target_original_state": contract.target_original_state,
-                },
-            )
-            if restore.get("ok") is not True:
-                restoration_error = str(
-                    restore.get("error") or "native restoration failed"
-                )
-            else:
-                verified, detail = await self._verify_foreground_restore(
-                    upstream,
-                    contract,
-                    session=session,
-                    heartbeat=heartbeat,
-                )
-                if not verified:
-                    restoration_error = detail
-        except Exception as exc:
-            restoration_error = (
-                _bounded_diagnostic(str(exc)) or "restoration could not be verified"
-            )
-
-        if restoration_error is not None:
-            await attention(restoration_error)
-            return restoration_error
+        restoration = await self._restore_and_verify_foreground(
+            upstream,
+            contract,
+            session=session,
+            title=title,
+            heartbeat=heartbeat,
+        )
+        if not restoration.restoration_ok:
+            await attention(restoration)
+            return restoration, None
 
         try:
             cleared = await self._foreground_control.request(
@@ -1867,16 +2027,14 @@ class ComputerUseServer:
                 _bounded_diagnostic(str(exc))
                 or "the active foreground indicator could not be cleared"
             )
-            await attention(clear_error)
-            return clear_error
+            return restoration, clear_error
         if cleared.get("ok") is not True:
             clear_error = str(
                 cleared.get("error")
                 or "the active foreground indicator could not be cleared"
             )
-            await attention(clear_error)
-            return clear_error
-        return None
+            return restoration, clear_error
+        return restoration, None
 
     async def _call_foreground(
         self,
@@ -2001,7 +2159,7 @@ class ComputerUseServer:
                 "The foreground Computer Use call could not be completed.",
             )
 
-        restoration_error, finish_error, finish_cancellation = (
+        finish_result, finish_error, finish_cancellation = (
             await _settle_without_cancelling(
                 self._finish_foreground_transaction(
                     upstream,
@@ -2013,14 +2171,19 @@ class ComputerUseServer:
             )
         )
         if finish_error is not None:
-            restoration_error = (
+            restoration = _ForegroundRestoration.from_contract(contract)
+            restoration.fail_all(
                 _bounded_diagnostic(str(finish_error))
                 or "restoration could not be completed"
             )
+            indicator_error = None
+        else:
+            assert isinstance(finish_result, tuple)
+            restoration, indicator_error = finish_result
         if operation_cancellation is not None or finish_cancellation is not None:
             raise finish_cancellation or operation_cancellation
 
-        if restoration_error is not None:
+        if not restoration.restoration_ok:
             if effect == "confirmed":
                 outcome = "effect_occurred_restore_failed"
             else:
@@ -2030,8 +2193,25 @@ class ComputerUseServer:
                 "Foreground control could not restore and verify the prior desktop state.",
                 result_params={
                     "foreground_outcome": outcome,
-                    "restoration_detail": restoration_error,
+                    "restoration": restoration.as_dict(),
                     "effect": effect or "unverifiable",
+                },
+            )
+
+        outcome = (
+            "attempted_effect_unverifiable"
+            if effect != "confirmed"
+            else "effect_occurred_restore_verified"
+        )
+        if indicator_error is not None:
+            return _error_result(
+                "foreground_shell_unavailable",
+                "Foreground control restored the desktop, but the native indicator could not be cleared.",
+                result_params={
+                    "foreground_outcome": outcome,
+                    "restoration": restoration.as_dict(),
+                    "effect": effect or "unverifiable",
+                    "shell_error": indicator_error,
                 },
             )
 
@@ -2039,15 +2219,13 @@ class ComputerUseServer:
             return _with_foreground_outcome(
                 result,
                 outcome="attempted_effect_unverifiable",
-                restoration_verified=True,
+                restoration=restoration.as_dict(),
                 effect=effect or "unverifiable",
             )
         return _with_foreground_outcome(
             result,
-            outcome="attempted_effect_unverifiable"
-            if effect != "confirmed"
-            else "effect_occurred_restore_verified",
-            restoration_verified=True,
+            outcome=outcome,
+            restoration=restoration.as_dict(),
             effect=effect or "unverifiable",
         )
 

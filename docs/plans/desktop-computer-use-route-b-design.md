@@ -96,6 +96,10 @@ The first delivery PR stages this amendment behind the existing change-size
 guard: it ships the bounded foreground contract for already-visible targets,
 then follows immediately with native reveal and hidden/minimized restoration.
 The staged delivery does not change the approved end-state contract.
+For that visible-target first PR, restoring the exact prior frontmost window is
+the only Space restoration action: it does not call private Space APIs and
+verifies the affected display's active Space against the recorded value in the
+same fresh observation.
 
 Route B inherits the existing documented same-user local trust boundary. This
 record does not introduce a second authority model for same-user processes.

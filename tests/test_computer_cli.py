@@ -382,6 +382,7 @@ def test_computer_cli_error_translations_exist_in_all_supported_languages() -> N
         "computer.cli.error.scriptRuntimeInvalid",
         "computer.cli.error.scriptTimedOut",
         "computer.cli.error.scriptFailed",
+        "computer.cli.error.restorationDetailUnavailable",
     }
     for catalog_path in sorted(Path("vibe/i18n").glob("*.json")):
         catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
@@ -395,6 +396,105 @@ def test_computer_cli_error_translations_exist_in_all_supported_languages() -> N
             assert isinstance(value, str) and value.strip(), (
                 f"{catalog_path.stem} has an empty translation for {key}"
             )
+
+
+def test_human_restore_failure_renders_structured_component_details() -> None:
+    restoration = {
+        "components": {
+            "prior_frontmost": {
+                "recorded": {"pid": 3, "window_id": 30},
+                "attempted": True,
+                "verified": False,
+                "failure_detail": "prior exact window was not restored",
+            },
+            "pointer": {
+                "recorded": {"x": 10.0, "y": 20.0},
+                "attempted": True,
+                "verified": True,
+                "failure_detail": None,
+            },
+            "active_space": {
+                "recorded": 1,
+                "attempted": True,
+                "verified": False,
+                "failure_detail": "active Space was not restored",
+            },
+        },
+        "restoration_ok": False,
+    }
+    result = {
+        "isError": True,
+        "structuredContent": {
+            "code": "foreground_restore_failed",
+            "params": {"restoration": restoration},
+        },
+        "content": [],
+    }
+
+    output = format_human_result(
+        "click",
+        result,
+        translate=lambda key, **kwargs: i18n_t(key, "zh", **kwargs),
+    )
+
+    assert "prior exact window was not restored" in output
+    assert "active Space was not restored" in output
+    assert "恢复详情不可用" not in output
+
+
+def test_json_restore_failure_keeps_the_complete_restoration_result(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys,
+) -> None:
+    monkeypatch.setenv("AVIBE_SESSION_ID", "ses-cli")
+    restoration = {
+        "components": {
+            "prior_frontmost": {
+                "recorded": {"pid": 3, "window_id": 30},
+                "attempted": True,
+                "verified": False,
+                "failure_detail": "prior exact window was not restored",
+            },
+            "pointer": {
+                "recorded": {"x": 10.0, "y": 20.0},
+                "attempted": True,
+                "verified": True,
+                "failure_detail": None,
+            },
+            "active_space": {
+                "recorded": 1,
+                "attempted": True,
+                "verified": False,
+                "failure_detail": "active Space was not restored",
+            },
+        },
+        "restoration_ok": False,
+    }
+    body = {
+        "ok": False,
+        "tool": "click",
+        "result": {
+            "isError": True,
+            "structuredContent": {
+                "code": "foreground_restore_failed",
+                "params": {"restoration": restoration},
+            },
+            "content": [],
+        },
+    }
+
+    with patch(
+        "vibe.internal_client.computer_use_sync",
+        lambda **_kwargs: {"status_code": 200, "body": body},
+    ):
+        args = cli.build_parser().parse_args(["computer", "click", "--json"])
+        assert cli.cmd_computer(args) == 1
+
+    payload = json.loads(capsys.readouterr().out)
+    assert (
+        payload["result"]["structuredContent"]["params"]["restoration"]
+        == restoration
+    )
 
 
 @pytest.mark.parametrize(

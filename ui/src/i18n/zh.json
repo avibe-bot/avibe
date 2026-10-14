@@ -79,7 +79,12 @@
       "saveFailed": "电脑操作 — 设置未保存",
       "foregroundConsent": "{{sessionTitle}} 请求前台控制：允许此对话使用",
       "foregroundActive": "前台控制进行中：{{target}}",
-      "foregroundAttention": "前台恢复需要处理：{{target}}",
+      "foregroundAttention": "前台恢复需要处理：{{target}}（{{components}}）",
+      "foregroundRestorePriorFrontmost": "操作前窗口",
+      "foregroundRestorePointer": "指针",
+      "foregroundRestoreActiveSpace": "活动 Space",
+      "foregroundRestoreUnknown": "恢复状态",
+      "foregroundRestoreSeparator": "、",
       "foregroundAllow": "允许此对话使用前台控制",
       "foregroundRevoke": "{{sessionTitle}} 前台控制：关闭此对话授权"
     },

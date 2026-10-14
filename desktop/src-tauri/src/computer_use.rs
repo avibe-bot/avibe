@@ -28,7 +28,7 @@ use objc2_app_kit::{NSApplicationActivationOptions, NSApplicationDidBecomeActive
 use objc2_foundation::{
     NSArray, NSError, NSNotification, NSNotificationCenter, NSOperationQueue, NSPoint, NSRect, NSSize,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tauri::plugin::{Builder as PluginBuilder, TauriPlugin};
@@ -122,6 +122,12 @@ unsafe extern "C" {
 unsafe extern "C" {}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ForegroundAttention {
+    pub target: String,
+    pub restoration: Value,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct MenuView {
     pub enabled: bool,
     pub phase: ComputerUsePhase,
@@ -134,7 +140,7 @@ pub(crate) struct MenuView {
     pub foreground_pending: Option<String>,
     pub foreground_granted: Option<String>,
     pub foreground_active: Option<String>,
-    pub foreground_attention: Option<String>,
+    pub foreground_attention: Option<ForegroundAttention>,
 }
 
 impl Default for MenuView {
@@ -1002,23 +1008,19 @@ impl RuntimeState {
         if session.is_empty() || session.len() > FOREGROUND_TITLE_LIMIT {
             return json!({"ok": false, "error": "invalid_session"});
         }
-        let title = request.title.trim();
-        let title = if title.is_empty() { session } else { title };
-        if title.len() > FOREGROUND_TITLE_LIMIT {
-            return json!({"ok": false, "error": "invalid_title"});
-        }
+        let title = foreground_display_title(session, &request.title);
         match request.operation.as_str() {
             "request_consent" => {
                 if !self.lifecycle.enabled() || self.lifecycle.phase() != ComputerUsePhase::Ready {
                     return json!({"ok": false, "error": "computer_use_unavailable"});
                 }
                 if self.foreground_consent_sessions.contains_key(session) {
-                    self.update_view(|view| view.foreground_granted = Some(title.to_owned()));
+                    self.update_view(|view| view.foreground_granted = Some(title.clone()));
                     self.publish_view();
                     return json!({"ok": true, "allowed": true});
                 }
-                self.pending_foreground = Some((session.to_owned(), title.to_owned()));
-                self.update_view(|view| view.foreground_pending = Some(title.to_owned()));
+                self.pending_foreground = Some((session.to_owned(), title.clone()));
+                self.update_view(|view| view.foreground_pending = Some(title.clone()));
                 self.publish_view();
                 json!({"ok": true, "allowed": false})
             }
@@ -1037,7 +1039,7 @@ impl RuntimeState {
                     view.foreground_active = Some(
                         target
                             .map(|target| format!("{title}: {target}"))
-                            .unwrap_or_else(|| title.to_owned()),
+                            .unwrap_or_else(|| title.clone()),
                     );
                 });
                 if let Err(error) = self.publish_view_and_wait().await {
@@ -1054,7 +1056,7 @@ impl RuntimeState {
                 }
                 let restoration = request.restoration.clone();
                 match tokio::task::spawn_blocking(move || restore_native_foreground_state(restoration.as_ref())).await {
-                    Ok(Ok(())) => json!({"ok": true}),
+                    Ok(Ok(restoration)) => json!({"ok": true, "restoration": restoration}),
                     Ok(Err(error)) => json!({"ok": false, "error": error}),
                     Err(_) => json!({"ok": false, "error": "foreground restoration task failed"}),
                 }
@@ -1073,16 +1075,22 @@ impl RuntimeState {
                 if self.foreground_active_session.as_deref() != Some(session) {
                     return json!({"ok": false, "error": "foreground_transaction_mismatch"});
                 }
-                let detail = request
-                    .restoration
+                let Some(restoration) = request.restoration else {
+                    return json!({"ok": false, "error": "missing restoration result"});
+                };
+                if parse_foreground_restoration(Some(&restoration)).is_err() {
+                    return json!({"ok": false, "error": "invalid restoration result"});
+                }
+                let target = request
+                    .target
                     .as_ref()
-                    .and_then(|value| value.get("detail"))
-                    .and_then(Value::as_str)
-                    .unwrap_or("foreground restoration failed");
+                    .and_then(foreground_target_label)
+                    .map(|target| format!("{title}: {target}"))
+                    .unwrap_or_else(|| title.clone());
                 self.foreground_active_session = None;
                 self.update_view(|view| {
                     view.foreground_active = None;
-                    view.foreground_attention = Some(format!("{title}: {detail}"));
+                    view.foreground_attention = Some(ForegroundAttention { target, restoration });
                 });
                 self.publish_view();
                 self.apply_deferred_foreground_stop().await;
@@ -1182,31 +1190,57 @@ fn foreground_target_label(target: &Value) -> Option<String> {
     (!label.is_empty()).then(|| label.to_owned())
 }
 
-#[derive(Deserialize)]
+fn foreground_display_title(session: &str, title: &str) -> String {
+    let candidate = match title.trim() {
+        "" => session,
+        title => title,
+    };
+    if candidate.len() <= FOREGROUND_TITLE_LIMIT {
+        return candidate.to_owned();
+    }
+    let mut end = FOREGROUND_TITLE_LIMIT;
+    while !candidate.is_char_boundary(end) {
+        end -= 1;
+    }
+    let truncated = candidate[..end].trim_end();
+    if truncated.is_empty() {
+        session.to_owned()
+    } else {
+        truncated.to_owned()
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 struct ForegroundWindowReference {
     pid: i32,
     window_id: u32,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 struct ForegroundPointer {
     x: f64,
     y: f64,
 }
 
-#[derive(Deserialize)]
-struct ForegroundTargetOriginalState {
-    hidden: bool,
-    minimized: bool,
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+struct ForegroundRestorationComponent<T> {
+    recorded: T,
+    attempted: bool,
+    verified: bool,
+    failure_detail: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+struct ForegroundRestorationComponents {
+    prior_frontmost: ForegroundRestorationComponent<ForegroundWindowReference>,
+    pointer: ForegroundRestorationComponent<ForegroundPointer>,
+    active_space: ForegroundRestorationComponent<u64>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 struct ForegroundRestoration {
-    target: ForegroundWindowReference,
-    prior_frontmost: ForegroundWindowReference,
-    pointer: ForegroundPointer,
-    active_space_id: u64,
-    target_original_state: ForegroundTargetOriginalState,
+    components: ForegroundRestorationComponents,
+    restoration_ok: bool,
 }
 
 fn cf_string(value: &str) -> Result<*const c_void, String> {
@@ -1322,42 +1356,84 @@ fn parse_foreground_restoration(restoration: Option<&Value>) -> Result<Foregroun
         })
 }
 
-fn restore_native_foreground_state(restoration: Option<&Value>) -> Result<(), String> {
-    let restoration = parse_foreground_restoration(restoration)?;
-    if !restoration.pointer.x.is_finite() || !restoration.pointer.y.is_finite() {
+fn combine_restoration_failures(failures: Vec<String>) -> Result<(), String> {
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures.join("; "))
+    }
+}
+
+fn restore_prior_frontmost(target: &ForegroundWindowReference) -> Result<(), String> {
+    let mut failures = Vec::new();
+    match running_application(target) {
+        Ok(application) => {
+            if let Err(error) = set_exact_window_minimized(target, false) {
+                failures.push(error);
+            }
+            if !application.unhide() {
+                failures.push("could not reveal the prior frontmost application".to_owned());
+            }
+            if !application.activateWithOptions(NSApplicationActivationOptions::empty()) {
+                failures.push("could not restore prior frontmost application".to_owned());
+            }
+        }
+        Err(error) => failures.push(error),
+    }
+    if let Err(error) = raise_exact_window(target) {
+        failures.push(error);
+    }
+    combine_restoration_failures(failures)
+}
+
+fn restore_pointer(pointer: &ForegroundPointer) -> Result<(), String> {
+    if !pointer.x.is_finite() || !pointer.y.is_finite() {
         return Err("hardware pointer contract is invalid".to_owned());
     }
-    let _recorded_active_space = restoration.active_space_id;
-
-    let target_application = running_application(&restoration.target)?;
-    set_exact_window_minimized(&restoration.target, restoration.target_original_state.minimized)?;
-    if !restoration.target_original_state.hidden && !target_application.unhide() {
-        return Err("could not restore target application visibility".to_owned());
-    }
-    if restoration.target_original_state.hidden && !target_application.hide() {
-        return Err("could not restore target application hidden state".to_owned());
-    }
-
-    let prior_application = running_application(&restoration.prior_frontmost)?;
-    set_exact_window_minimized(&restoration.prior_frontmost, false)?;
-    if !prior_application.unhide() {
-        return Err("could not reveal the prior frontmost application".to_owned());
-    }
-    if !prior_application.activateWithOptions(NSApplicationActivationOptions::empty()) {
-        return Err("could not restore prior frontmost application".to_owned());
-    }
-    raise_exact_window(&restoration.prior_frontmost)?;
-
     let pointer_result = unsafe {
         CGWarpMouseCursorPosition(NSPoint {
-            x: restoration.pointer.x,
-            y: restoration.pointer.y,
+            x: pointer.x,
+            y: pointer.y,
         })
     };
     if pointer_result != 0 {
-        return Err(format!("could not restore hardware pointer ({pointer_result})"));
+        Err(format!("could not restore hardware pointer ({pointer_result})"))
+    } else {
+        Ok(())
     }
-    Ok(())
+}
+
+fn record_restoration_attempt<T>(component: &mut ForegroundRestorationComponent<T>, result: Result<(), String>) {
+    component.attempted = true;
+    component.verified = false;
+    component.failure_detail = result.err();
+}
+
+fn attempt_native_foreground_restoration(
+    mut restoration: ForegroundRestoration,
+    restore_prior: impl FnOnce(&ForegroundWindowReference) -> Result<(), String>,
+    restore_hardware_pointer: impl FnOnce(&ForegroundPointer) -> Result<(), String>,
+) -> ForegroundRestoration {
+    let prior_result = restore_prior(&restoration.components.prior_frontmost.recorded);
+    record_restoration_attempt(&mut restoration.components.prior_frontmost, prior_result);
+
+    let pointer_result = restore_hardware_pointer(&restoration.components.pointer.recorded);
+    record_restoration_attempt(&mut restoration.components.pointer, pointer_result);
+
+    restoration.components.active_space.attempted = restoration.components.prior_frontmost.attempted;
+    restoration.components.active_space.verified = false;
+    restoration.components.active_space.failure_detail = None;
+    restoration.restoration_ok = false;
+    restoration
+}
+
+fn restore_native_foreground_state(restoration: Option<&Value>) -> Result<ForegroundRestoration, String> {
+    let restoration = parse_foreground_restoration(restoration)?;
+    Ok(attempt_native_foreground_restoration(
+        restoration,
+        restore_prior_frontmost,
+        restore_pointer,
+    ))
 }
 
 async fn serve_foreground_control(stream: UnixStream, events: mpsc::UnboundedSender<Event>) {
@@ -2628,6 +2704,7 @@ pub(crate) fn activation_plugin() -> TauriPlugin<tauri::Wry> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
     use std::collections::BTreeMap;
     use std::os::unix::fs::PermissionsExt;
 
@@ -3138,33 +3215,126 @@ done
     }
 
     #[test]
-    fn foreground_restoration_contract_requires_all_four_recorded_items() {
+    fn foreground_display_titles_are_utf8_safe_and_never_block_admission() {
+        assert_eq!(foreground_display_title("ses-a", "  "), "ses-a");
+        let title = "前台控制".repeat(80);
+        let truncated = foreground_display_title("ses-a", &title);
+        assert!(truncated.len() <= FOREGROUND_TITLE_LIMIT);
+        assert!(title.starts_with(&truncated));
+        assert!(std::str::from_utf8(truncated.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn foreground_restoration_contract_requires_three_component_entries() {
         let contract = json!({
-            "target": {"pid": 7, "window_id": 9},
-            "prior_frontmost": {"pid": 3, "window_id": 30},
-            "pointer": {"x": 10.0, "y": 20.0},
-            "active_space_id": 42,
-            "target_original_state": {"hidden": false, "minimized": false}
+            "components": {
+                "prior_frontmost": {
+                    "recorded": {"pid": 3, "window_id": 30},
+                    "attempted": false,
+                    "verified": false,
+                    "failure_detail": null
+                },
+                "pointer": {
+                    "recorded": {"x": 10.0, "y": 20.0},
+                    "attempted": false,
+                    "verified": false,
+                    "failure_detail": null
+                },
+                "active_space": {
+                    "recorded": 42,
+                    "attempted": false,
+                    "verified": false,
+                    "failure_detail": null
+                }
+            },
+            "restoration_ok": false
         });
         let parsed = parse_foreground_restoration(Some(&contract)).expect("complete restoration contract");
-        assert_eq!((parsed.target.pid, parsed.target.window_id), (7, 9));
-        assert_eq!((parsed.prior_frontmost.pid, parsed.prior_frontmost.window_id), (3, 30));
-        assert_eq!((parsed.pointer.x, parsed.pointer.y), (10.0, 20.0));
-        assert_eq!(parsed.active_space_id, 42);
-        assert!(!parsed.target_original_state.hidden);
-        assert!(!parsed.target_original_state.minimized);
+        assert_eq!(
+            (
+                parsed.components.prior_frontmost.recorded.pid,
+                parsed.components.prior_frontmost.recorded.window_id
+            ),
+            (3, 30)
+        );
+        assert_eq!(
+            (
+                parsed.components.pointer.recorded.x,
+                parsed.components.pointer.recorded.y
+            ),
+            (10.0, 20.0)
+        );
+        assert_eq!(parsed.components.active_space.recorded, 42);
+        assert!(!parsed.restoration_ok);
 
-        for missing in [
-            "target",
-            "prior_frontmost",
-            "pointer",
-            "active_space_id",
-            "target_original_state",
-        ] {
+        for missing in ["prior_frontmost", "pointer", "active_space"] {
             let mut incomplete = contract.clone();
-            incomplete.as_object_mut().expect("contract object").remove(missing);
+            incomplete["components"]
+                .as_object_mut()
+                .expect("component object")
+                .remove(missing);
             assert!(parse_foreground_restoration(Some(&incomplete)).is_err());
         }
+        let mut incomplete = contract.clone();
+        incomplete
+            .as_object_mut()
+            .expect("contract object")
+            .remove("restoration_ok");
+        assert!(parse_foreground_restoration(Some(&incomplete)).is_err());
+    }
+
+    #[test]
+    fn native_restoration_attempts_every_component_after_a_failure() {
+        let contract = json!({
+            "components": {
+                "prior_frontmost": {
+                    "recorded": {"pid": 3, "window_id": 30},
+                    "attempted": false,
+                    "verified": false,
+                    "failure_detail": null
+                },
+                "pointer": {
+                    "recorded": {"x": 10.0, "y": 20.0},
+                    "attempted": false,
+                    "verified": false,
+                    "failure_detail": null
+                },
+                "active_space": {
+                    "recorded": 42,
+                    "attempted": false,
+                    "verified": false,
+                    "failure_detail": null
+                }
+            },
+            "restoration_ok": false
+        });
+        let restoration = parse_foreground_restoration(Some(&contract)).expect("restoration contract");
+        let prior_attempted = Cell::new(false);
+        let pointer_attempted = Cell::new(false);
+
+        let result = attempt_native_foreground_restoration(
+            restoration,
+            |_| {
+                prior_attempted.set(true);
+                Err("prior window failed".to_owned())
+            },
+            |_| {
+                pointer_attempted.set(true);
+                Ok(())
+            },
+        );
+
+        assert!(prior_attempted.get());
+        assert!(pointer_attempted.get());
+        assert!(result.components.prior_frontmost.attempted);
+        assert_eq!(
+            result.components.prior_frontmost.failure_detail.as_deref(),
+            Some("prior window failed")
+        );
+        assert!(result.components.pointer.attempted);
+        assert!(result.components.pointer.failure_detail.is_none());
+        assert!(result.components.active_space.attempted);
+        assert!(!result.restoration_ok);
     }
 
     #[tokio::test]

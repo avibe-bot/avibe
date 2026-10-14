@@ -254,6 +254,23 @@ _COMPUTER_REASON_I18N_KEYS = {
 }
 
 
+def _restoration_failure_details(restoration: Any) -> list[str]:
+    if not isinstance(restoration, Mapping):
+        return []
+    components = restoration.get("components")
+    if not isinstance(components, Mapping):
+        return []
+    details: list[str] = []
+    for name in ("prior_frontmost", "pointer", "active_space"):
+        component = components.get(name)
+        if not isinstance(component, Mapping):
+            continue
+        detail = component.get("failure_detail")
+        if isinstance(detail, str) and detail.strip() and detail not in details:
+            details.append(detail.strip())
+    return details
+
+
 def translate_computer_error(
     error: Mapping[str, Any],
     *,
@@ -298,6 +315,12 @@ def translate_computer_error(
             reasonCode=reason_code,
             reason=translate(reason_key, code=reason_code),
         )
+    if code == "foreground_restore_failed" and isinstance(params, Mapping):
+        details = _restoration_failure_details(params.get("restoration"))
+        detail = "; ".join(details) if details else translate(
+            "computer.cli.error.restorationDetailUnavailable"
+        )
+        return translate(key, detail=detail)
     return translate(key)
 
 

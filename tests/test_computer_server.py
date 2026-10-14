@@ -185,7 +185,20 @@ class FakeForegroundControl:
         )
         if operation == "request_consent":
             return {"ok": True, "allowed": self.allowed}
-        return self.responses.get(operation, {"ok": True})
+        if operation in self.responses:
+            return self.responses[operation]
+        if operation == "restore":
+            restored = json.loads(json.dumps(restoration or {}))
+            components = restored.get("components", {})
+            for name in ("prior_frontmost", "pointer", "active_space"):
+                component = components.get(name)
+                if isinstance(component, dict):
+                    component["attempted"] = True
+                    component["verified"] = False
+                    component["failure_detail"] = None
+            restored["restoration_ok"] = False
+            return {"ok": True, "restoration": restored}
+        return {"ok": True}
 
 
 class ForegroundUpstream(FakeUpstream):
@@ -198,6 +211,9 @@ class ForegroundUpstream(FakeUpstream):
         after_pointer: tuple[float, float] | None = None,
         click_effect: str = "confirmed",
         after_prior_title: str | None = None,
+        after_prior_space_id: int | None = None,
+        fail_restore_windows: bool = False,
+        omit_target_after_restore: bool = False,
         extra_windows: list[dict[str, Any]] | None = None,
     ) -> None:
         super().__init__()
@@ -217,6 +233,9 @@ class ForegroundUpstream(FakeUpstream):
         self.after_pointer = after_pointer or pointer
         self.click_effect = click_effect
         self.after_prior_title = after_prior_title
+        self.after_prior_space_id = after_prior_space_id
+        self.fail_restore_windows = fail_restore_windows
+        self.omit_target_after_restore = omit_target_after_restore
         self.extra_windows = extra_windows or []
         self.list_windows_calls = 0
         self.cursor_calls = 0
@@ -226,6 +245,18 @@ class ForegroundUpstream(FakeUpstream):
         if tool_name == "list_windows":
             self.calls.append((method, json.loads(json.dumps(params))))
             self.list_windows_calls += 1
+            if self.list_windows_calls > 1 and self.fail_restore_windows:
+                return {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "result": {
+                        "isError": True,
+                        "content": [],
+                        "structuredContent": {
+                            "code": "window_observation_failed"
+                        },
+                    },
+                }
             target = (
                 self.after_restore
                 if self.list_windows_calls > 1 and self.after_restore is not None
@@ -244,7 +275,12 @@ class ForegroundUpstream(FakeUpstream):
                 "is_on_screen": True,
                 "minimized": False,
                 "on_current_space": True,
-                "current_space_id": 1,
+                "current_space_id": (
+                    self.after_prior_space_id
+                    if self.list_windows_calls > 1
+                    and self.after_prior_space_id is not None
+                    else 1
+                ),
                 "z_index": 20,
             }
             return {
@@ -254,7 +290,16 @@ class ForegroundUpstream(FakeUpstream):
                     "content": [],
                     "structuredContent": {
                         "current_space_id": 1,
-                        "windows": [target, prior, *self.extra_windows],
+                        "windows": [
+                            *(
+                                []
+                                if self.list_windows_calls > 1
+                                and self.omit_target_after_restore
+                                else [target]
+                            ),
+                            prior,
+                            *self.extra_windows,
+                        ],
                     },
                 },
             }
@@ -1945,14 +1990,21 @@ async def test_foreground_click_on_visible_target_verifies_restore(
     assert result["structuredContent"]["foreground_outcome"] == (
         "effect_occurred_restore_verified"
     )
-    assert result["structuredContent"]["restoration_verified"] is True
+    restoration = result["structuredContent"]["restoration"]
+    assert restoration["restoration_ok"] is True
+    assert all(
+        component["attempted"]
+        and component["verified"]
+        and component["failure_detail"] is None
+        for component in restoration["components"].values()
+    )
     payloads = [
         json.loads(item["text"].split("\n", 1)[1])
         for item in result["content"]
         if item.get("type") == "text" and item["text"].startswith("Structured content:\n")
     ]
     assert payloads[-1]["foreground_outcome"] == "effect_occurred_restore_verified"
-    assert payloads[-1]["restoration_verified"] is True
+    assert payloads[-1]["restoration"] == restoration
     assert [name for name, _ in control.calls] == [
         "request_consent",
         "set_active",
@@ -1981,21 +2033,30 @@ async def test_foreground_click_on_visible_target_verifies_restore(
         if operation == "restore"
     )
     assert restore_request["restoration"] == {
-        "target": {
-            "pid": 7,
-            "window_id": 9,
-            "app_name": "Target",
-            "title": "Target Window",
+        "components": {
+            "prior_frontmost": {
+                "recorded": {
+                    "pid": 3,
+                    "window_id": 30,
+                },
+                "attempted": False,
+                "verified": False,
+                "failure_detail": None,
+            },
+            "pointer": {
+                "recorded": {"x": 10.0, "y": 20.0},
+                "attempted": False,
+                "verified": False,
+                "failure_detail": None,
+            },
+            "active_space": {
+                "recorded": 1,
+                "attempted": False,
+                "verified": False,
+                "failure_detail": None,
+            },
         },
-        "prior_frontmost": {
-            "pid": 3,
-            "window_id": 30,
-            "app_name": "Prior",
-            "title": "Prior Window",
-        },
-        "pointer": {"x": 10.0, "y": 20.0},
-        "active_space_id": 1,
-        "target_original_state": {"hidden": False, "minimized": False},
+        "restoration_ok": False,
     }
 
 
@@ -2067,7 +2128,37 @@ async def test_foreground_restore_ignores_mutable_window_titles(
     )
 
     assert not result.get("isError")
-    assert result["structuredContent"]["restoration_verified"] is True
+    assert result["structuredContent"]["restoration"]["restoration_ok"] is True
+
+
+@pytest.mark.asyncio
+async def test_foreground_restore_does_not_require_the_target_after_the_effect(
+    tmp_path: Path,
+) -> None:
+    state_path, state = _state(tmp_path)
+    upstream = ForegroundUpstream(omit_target_after_restore=True)
+    control = FakeForegroundControl()
+    server = _foreground_server(state_path, state, upstream, control)
+    await server.call_tool(
+        "get_window_state",
+        {"session": "ses-a", "pid": 7, "window_id": 9},
+    )
+
+    result = await server.call_tool(
+        "click",
+        {
+            "session": "ses-a",
+            "pid": 7,
+            "window_id": 9,
+            "x": 1,
+            "y": 2,
+            "capture_id": "capture-7-9",
+            "delivery_mode": "foreground",
+        },
+    )
+
+    assert not result.get("isError")
+    assert result["structuredContent"]["restoration"]["restoration_ok"] is True
 
 
 @pytest.mark.asyncio
@@ -2233,6 +2324,14 @@ async def test_foreground_restore_failure_reports_effect_without_retry(
     payload = json.loads(result["content"][0]["text"])
     assert payload["code"] == "foreground_restore_failed"
     assert payload["params"]["foreground_outcome"] == "effect_occurred_restore_failed"
+    restoration = payload["params"]["restoration"]
+    assert restoration["restoration_ok"] is False
+    assert (
+        restoration["components"]["prior_frontmost"]["failure_detail"]
+        == "prior frontmost application or exact window was not restored"
+    )
+    assert restoration["components"]["pointer"]["verified"] is True
+    assert restoration["components"]["active_space"]["verified"] is True
     assert [name for name, _ in control.calls] == [
         "request_consent",
         "set_active",
@@ -2282,7 +2381,84 @@ async def test_unexpected_restore_failure_leaves_native_attention(
         "attention",
     ]
     attention = control.calls[-1][1]["restoration"]
-    assert attention["detail"] == "unexpected native restore failure"
+    assert attention == result["structuredContent"]["params"]["restoration"]
+    assert attention["restoration_ok"] is False
+    assert all(
+        component["failure_detail"] == "unexpected native restore failure"
+        for component in attention["components"].values()
+    )
+
+
+@pytest.mark.asyncio
+async def test_foreground_restoration_verifies_every_component_after_window_failure(
+    tmp_path: Path,
+) -> None:
+    state_path, state = _state(tmp_path)
+    upstream = ForegroundUpstream(fail_restore_windows=True)
+    control = FakeForegroundControl()
+    server = _foreground_server(state_path, state, upstream, control)
+    await server.call_tool(
+        "get_window_state",
+        {"session": "ses-a", "pid": 7, "window_id": 9},
+    )
+
+    result = await server.call_tool(
+        "click",
+        {
+            "session": "ses-a",
+            "pid": 7,
+            "window_id": 9,
+            "x": 1,
+            "y": 2,
+            "capture_id": "capture-7-9",
+            "delivery_mode": "foreground",
+        },
+    )
+
+    restoration = result["structuredContent"]["params"]["restoration"]
+    assert result["structuredContent"]["code"] == "foreground_restore_failed"
+    assert upstream.cursor_calls == 2
+    assert restoration["components"]["prior_frontmost"]["verified"] is False
+    assert restoration["components"]["active_space"]["verified"] is False
+    assert restoration["components"]["pointer"]["verified"] is True
+
+
+@pytest.mark.asyncio
+async def test_foreground_restoration_verifies_space_via_prior_window(
+    tmp_path: Path,
+) -> None:
+    state_path, state = _state(tmp_path)
+    upstream = ForegroundUpstream(after_prior_space_id=2)
+    control = FakeForegroundControl()
+    server = _foreground_server(state_path, state, upstream, control)
+    await server.call_tool(
+        "get_window_state",
+        {"session": "ses-a", "pid": 7, "window_id": 9},
+    )
+
+    result = await server.call_tool(
+        "click",
+        {
+            "session": "ses-a",
+            "pid": 7,
+            "window_id": 9,
+            "x": 1,
+            "y": 2,
+            "capture_id": "capture-7-9",
+            "delivery_mode": "foreground",
+        },
+    )
+
+    restoration = result["structuredContent"]["params"]["restoration"]
+    assert restoration["restoration_ok"] is False
+    assert restoration["components"]["prior_frontmost"]["verified"] is True
+    assert restoration["components"]["pointer"]["verified"] is True
+    assert restoration["components"]["active_space"] == {
+        "recorded": 1,
+        "attempted": True,
+        "verified": False,
+        "failure_detail": "affected display active Space was not restored",
+    }
 
 
 @pytest.mark.asyncio
