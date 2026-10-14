@@ -60,3 +60,21 @@ describe('ensureDesktopMiniSession', () => {
     expect(showToast).not.toHaveBeenCalled();
   });
 });
+
+describe('getMainSession', () => {
+  it('reads the stable main session from the main-session endpoint', async () => {
+    render(<ApiProvider><CaptureApi /></ApiProvider>);
+    await waitFor(() => expect(capturedApi).not.toBeNull());
+    apiFetch.mockResolvedValueOnce(response({
+      session: { id: 'ses_main', title: 'Vibey', capabilities: { can_chat: true } },
+      capabilities: { can_chat: true },
+    }));
+    const result = await capturedApi!.getMainSession();
+    expect(result).toMatchObject({
+      status: 200,
+      session: { id: 'ses_main', title: 'Vibey' },
+      capabilities: { can_chat: true },
+    });
+    expect(apiFetch).toHaveBeenCalledWith('/api/sessions/main');
+  });
+});

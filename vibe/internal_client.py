@@ -384,6 +384,106 @@ def computer_use_sync(
     return {"status_code": response.status_code, "body": body}
 
 
+def resolve_computer_script_endpoint(
+    socket_path: Optional[Path] = None,
+) -> control_ipc.ControlIpcClientEndpoint:
+    """Resolve and verify the Controller endpoint before launching Node."""
+
+    return _resolve_endpoint(socket_path)
+
+
+def computer_script_endpoint_payload(
+    endpoint: control_ipc.ControlIpcClientEndpoint,
+) -> dict[str, Any]:
+    """Serialize one already-verified endpoint for the shipped Node runner."""
+
+    if endpoint.transport == "unix":
+        if endpoint.socket_path is None:
+            raise InternalServerUnavailable("control IPC Unix endpoint has no socket")
+        return {
+            "transport": "unix",
+            "socket_path": str(endpoint.socket_path),
+        }
+    descriptor = endpoint.descriptor
+    if descriptor is None:
+        raise InternalServerUnavailable("control IPC TCP endpoint has no descriptor")
+    return {
+        "transport": "tcp",
+        "host": descriptor.host,
+        "port": descriptor.port,
+        "headers": endpoint.headers,
+        "instance_id": descriptor.instance_id,
+        "instance_header": control_ipc.CONTROL_IPC_INSTANCE_HEADER,
+    }
+
+
+def _computer_script_post_sync(
+    endpoint: control_ipc.ControlIpcClientEndpoint,
+    path: str,
+    payload: dict[str, Any],
+    *,
+    timeout: float,
+) -> dict[str, Any]:
+    try:
+        with httpx.Client(
+            transport=_sync_transport(endpoint),
+            base_url=endpoint.base_url,
+            headers=endpoint.headers,
+            timeout=httpx.Timeout(timeout, connect=5.0),
+        ) as client:
+            response = client.post(path, json=payload)
+            _validate_response(response, endpoint)
+            try:
+                body = response.json() if response.content else {}
+            except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+                raise InternalServerUnavailable(
+                    f"{path} returned invalid JSON"
+                ) from exc
+    except _SOCKET_CONNECT_ERRORS as exc:
+        raise InternalServerUnavailable(str(exc)) from exc
+    except (httpx.TimeoutException, httpx.TransportError) as exc:
+        raise InternalServerTimeout(str(exc)) from exc
+    if not isinstance(body, dict):
+        raise InternalServerUnavailable(f"{path} returned invalid JSON")
+    return {"status_code": response.status_code, "body": body}
+
+
+def computer_script_open_sync(
+    *,
+    endpoint: control_ipc.ControlIpcClientEndpoint,
+    caller_session_id: str,
+    timeout_seconds: float,
+    request_timeout: float = 10.0,
+) -> dict[str, Any]:
+    """Open one exact-Turn-bound script connection."""
+
+    return _computer_script_post_sync(
+        endpoint,
+        "/internal/computer-script/open",
+        {
+            "caller_session_id": caller_session_id,
+            "timeout_seconds": timeout_seconds,
+        },
+        timeout=request_timeout,
+    )
+
+
+def computer_script_close_sync(
+    *,
+    endpoint: control_ipc.ControlIpcClientEndpoint,
+    connection_token: str,
+    timeout: float = 5.0,
+) -> dict[str, Any]:
+    """Best-effort close for a script connection known to the Python runner."""
+
+    return _computer_script_post_sync(
+        endpoint,
+        "/internal/computer-script/close",
+        {"connection_token": connection_token},
+        timeout=timeout,
+    )
+
+
 async def dispatch_async(
     payload: dict[str, Any],
     *,

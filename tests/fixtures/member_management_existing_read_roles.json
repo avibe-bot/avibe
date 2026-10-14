@@ -55,6 +55,7 @@
   "GET /api/sessions/example/messages": "viewer",
   "GET /api/sessions/example/queue": "editor",
   "GET /api/sessions/example/turn-state": "viewer",
+  "GET /api/sessions/main": "viewer",
   "GET /api/show-pages": "viewer",
   "GET /api/show-pages/example": "editor",
   "GET /api/show-pages/example/access": "viewer",
