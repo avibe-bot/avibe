@@ -16,6 +16,14 @@ export function formatNameList(names: readonly string[], locale: string): string
 }
 
 /**
+ * Sentences read one after another, joined as the locale joins them: a space
+ * in English, nothing in Chinese. `Intl` owns the joiner, as it does above.
+ */
+export function formatSentences(sentences: readonly string[], locale: string): string {
+  return new Intl.ListFormat(locale, { style: 'narrow', type: 'unit' }).format(sentences);
+}
+
+/**
  * A counted quantity in the reader's own grouping — 「2,968,500」.
  *
  * Grouped rather than compacted (「3M」) because a usage report is read to be
@@ -101,6 +109,33 @@ export function formatDayTime(instant: string, locale: string): string {
   const ms = Date.parse(instant);
   if (Number.isNaN(ms)) return instant;
   return new Intl.DateTimeFormat(locale, { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }).format(ms);
+}
+
+/**
+ * A small per-call dollar figure with its first significant digits: $0.005, not
+ * $0.01, since a hosted tool's price is often under a cent. A figure of a dime or
+ * more keeps two decimals; one below a hundredth of a cent keeps two significant
+ * digits ($0.000012), so a nonzero price never reads as $0.
+ */
+export function formatSmallUsd(value: number): string {
+  if (value >= 0.1) return value.toFixed(2);
+  const fixed = value >= 0.001 ? value.toFixed(3)
+    : value === 0 || value >= 0.0001 ? value.toFixed(4)
+    // Below a hundredth of a cent, two significant digits, so no listed price reads as $0.
+    : Number(value.toPrecision(2)).toFixed(20);
+  return fixed.replace(/0+$/, '').replace(/\.$/, '');
+}
+
+/**
+ * The local calendar day as `MM-DD`, the stamp the capability chips carry
+ * ("verified 10-13"). Both locales use the same numeric form, so the chip reads
+ * the same width in either. An unparseable stamp renders verbatim.
+ */
+export function formatMonthDay(instant: string): string {
+  const ms = Date.parse(instant);
+  if (Number.isNaN(ms)) return instant;
+  const date = new Date(ms);
+  return `${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
 }
 
 /** Whole minutes until a cooldown retry_at (never negative). */

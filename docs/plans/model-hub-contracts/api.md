@@ -8,11 +8,11 @@ credential redaction and supply-impact confirmation rules still apply; unknown
 API siblings retain the Owner default.
 
 
-Status: **Normative, `contract_version` 12** — Model Hub implementations must conform, and the response conformance guard enumerates this route table and validates one real server response for every route.
+Status: **Normative, `contract_version` 13** — Model Hub implementations must conform, and the response conformance guard enumerates this route table and validates one real server response for every route.
 
-Success envelope: `{ok: true, contract_version: 12, ...}`.
+Success envelope: `{ok: true, contract_version: 13, ...}`.
 Failure envelope:
-`{ok: false, contract_version: 12, error: <machine_code>, detail?: <i18n_key>}`.
+`{ok: false, contract_version: 13, error: <machine_code>, detail?: <i18n_key>}`.
 `detail` is always a string. Structured error data lives in a named sibling.
 Guarded mutation refusals specialize that envelope through
 `guard-refusal.schema.json`; both report arrays are required and together form the plan
@@ -24,7 +24,7 @@ table. The contract guard requires the two endpoint sets to be identical, requir
 exercised HTTP response for every registry entry, and validates that response against
 the route's named schema.
 
-The shared envelope and every versioned nested contract carry `contract_version` 12, the
+The shared envelope and every versioned nested contract carry `contract_version` 13, the
 terminal value. Supported persisted config shapes and historical TurnProvenance
 remain readable; ephemeral envelopes use only the terminal version.
 
@@ -73,7 +73,7 @@ runtime open. Once models are configured it participates in the runtime Stop gua
 | POST `/api/models/quota/refresh` | → `{quota: QuotaSummary}` | Forced re-read. Rate-limited per Source to one vendor call every 30 seconds and suppressed while a Source cools down after a vendor 429; a suppressed Source returns its cached snapshot. |
 | GET `/api/models/hosted-tools` | → `{hosted_tools: HostedToolsStatus}` | The Tools tab read (`hosted-tools-status.schema.json`): every catalog tool with its toggle and chosen executor, every (Source, model) the overlay offers it on with an eligible credential and an untranslated path, each with its `call` and `replay` evidence as routing reads it and what one call probe there is estimated to cost (`probe_estimate`: `list` with `usd`, `included` on a monthly Source, or null when unknown, never zero), and `reverify` counts: `engine_upgraded` for probe evidence taken on another engine or probe shape (now routed as unknown) and `aged`. Never probes and never starts the engine. |
 | PUT `/api/models/hosted-tools/<tool>` | `{enabled: boolean, executor: null \| {source_id, model_id}}` → `{hosted_tools: HostedToolsStatus}` | Replaces one tool's toggle and chosen executor; it applies from the next turn and interrupts nothing. An unknown tool or a malformed body returns `400 invalid_parameter`; an executor naming a missing Source returns `404 source_not_found`; an executor that is not a hub Source serving that model (not a retired tombstone), with an eligible credential, an untranslated path and the overlay's declaration returns `400 invalid_parameter`. Whether the executor is verified is evidence, read at each hop resolution. |
-| POST `/api/models/hosted-tools/<tool>/probe` | `{source_id, model_id}` → `{probe: HostedToolProbeResult, hosted_tools: HostedToolsStatus}` | Runs the tool's call probe once on exactly that (Source, model), at the user's request: the production request Vibey would send natively, with one fixed message and, except on Anthropic, the tool forced. Vibey's adapter runs unchanged, and every request it sends is its own real, metered call pinned to that Source with no failover: at most two, the second only when the endpoint refused a field before answering (Anthropic's one-hour cache lifetime), so only one runs the model (`hosted-tool-probe-result.schema.json`). `verified` and `unsupported` write `probe` evidence for the tool's `call`; `inconclusive` (the response completed without the tool's result, or the request failed for another reason) and `transient` (overload, 5xx, rate limit, timeout) write none. `replay` is null until Vibey replays native payloads. A tool whose results Vibey does not parse yet (`image_generation`), an unknown tool or a malformed body returns `400 invalid_parameter`; the target is refused exactly as a PUT executor is. Nothing else starts a probe. |
+| POST `/api/models/hosted-tools/<tool>/probe` | `{source_id, model_id}` → `{probe: HostedToolProbeResult, hosted_tools: HostedToolsStatus}` | Runs the tool's call probe once on exactly that (Source, model), at the user's request: the production request Vibey would send natively, with one fixed message and, except on Anthropic, the tool forced. Vibey's adapter runs unchanged, and every request it sends is its own real, metered call pinned to that Source with no failover. Each probe step (the call, and the replay below) sends at most two requests, the second only when the endpoint refused a field before answering (Anthropic's one-hour cache lifetime), so each step runs the model once: an action makes at most four requests, of which at most two run the model (`hosted-tool-probe-result.schema.json`). `verified` and `unsupported` write `probe` evidence for the tool's `call`; `inconclusive` (the response completed without the tool's result, or the request failed for another reason) and `transient` (overload, 5xx, rate limit, timeout) write none. A generated image counts only when Vibey's parsing could keep it; the probe keeps no file. When the call verifies and was recorded, a tool with a `replay` aspect (`web_search`, `x_search`) on a protocol that replays natively (Anthropic, Responses) gets the replay probe in the same action. It sends the call's turn back with the native payload in place, with nothing forced, and asks for result URLs the visible answer did not show. It is `verified` when the answer names one of those without calling the tool, `unsupported` on a 400 naming the replayed content or a new call to the tool, and otherwise `inconclusive`, as is any request that did not carry the payload verbatim. It writes `replay` evidence by the same rules. `replay` is null when no replay ran, including when no result was hidden from the visible answer. The whole probe answers inside the UI's RPC timeout; a replay with under a minute left is not sent and reads `transient`. An unknown tool or a malformed body returns `400 invalid_parameter`; the target is refused exactly as a PUT executor is. Nothing else starts a probe. |
 | POST `/api/models/oauth/start` | `{vendor, channel, client_nonce?}` → `{flow: OAuthFlow}` | Starts creation of a new subscription source. Before provider work, the optional exact `(client_nonce, vendor, channel)` tuple is atomically claimed; concurrent retries coalesce to its one pending start and terminal result. |
 | GET `/api/models/oauth/status/<flow_id>` | → OAuth result | Terminal create and reauth shapes are below. A `failed` flow names its cause with the closed `error_key` and, when the provider, engine, or native CLI said more, carries that reason verbatim on one bounded line in `error_detail` for the dialog's copyable details. |
 | POST `/api/models/oauth/submit` | `{flow_id, value}` → OAuth result | Same terminal shape as status. A callback address is recognized with or without its `http(s)://` scheme, which browsers drop when copying a page that failed to load; any other value is a bare code. An address the flow refuses before anything reaches the provider is the non-terminal `422 submission_rejected`: one with no `code` or `error`, or one whose `state` answers a different sign-in link than this flow's (`detail: modelHub.errors.submission_rejected_other_attempt`). The flow stays `awaiting_action` and accepts another submission until its `expires_at`. |
@@ -81,7 +81,7 @@ runtime open. Once models are configured it participates in the runtime Stop gua
 | POST `/api/models/migration/scan` | → `{scan: MigrationScan}` | Read-only. |
 | POST `/api/models/migration/apply` | `{item_ids: string[], clean_api_keys?: boolean}` → `{applied, sources, added_to}` | Applies one grouped, server-owned custody transaction. It checks saved configuration and custody locally, copies API keys without upstream validation, upgrades an existing native subscription Source in place when present, and commits Source/Routes/backend mode atomically. API-key originals are kept unless cleanup was selected. Pre-exposure failure is reversible; post-exposure recovery is forward-only and keeps the backend blocked until terminalized. |
 | GET `/api/models/turns/<turn_id>/provenance` | → `{provenance: TurnProvenance}` or documented absence error | Debug read for exactly attributed Hub turns. |
-| GET `/api/models/runtime/status` | → `{runtime: RuntimeDependency}` | Read-only managed engine status. The nested object carries `contract_version` 12 and persisted user intent in `enabled`; `not_started` is installed lazy-start idleness, not an alarm. |
+| GET `/api/models/runtime/status` | → `{runtime: RuntimeDependency}` | Read-only managed engine status. The nested object carries `contract_version` 13 and persisted user intent in `enabled`; `not_started` is installed lazy-start idleness, not an alarm. |
 | POST `/api/models/runtime/install` | → `{runtime: RuntimeDependency}` | Idempotently starts server-owned installation. It returns and persists `installing`; reload reads the same state. Uses the existing mutation authentication and CSRF guards. |
 | POST `/api/models/runtime/start` | → `{runtime: RuntimeDependency}` | Persists `enabled: true` and explicitly starts the managed engine. Service startup restores this intent; runtime availability has no separate enable-confirmation step. Uses the existing mutation authentication and CSRF guards; status reads never start it. |
 | POST `/api/models/runtime/stop` | → `{runtime: RuntimeDependency}` | Explicitly stops the managed engine, persists `enabled: false`, and returns it to `not_started`. The mutation is rejected with `runtime_in_use` while any native backend is configured for Hub mode or Avibe has catalog models, so disabling the shared runtime cannot strand a configured route. An empty Avibe catalog does not keep the runtime open. |
@@ -639,7 +639,7 @@ The terminal result of both ordinary API-key creation and OAuth creation is:
 ```json
 {
   "ok": true,
-  "contract_version": 12,
+  "contract_version": 13,
   "source": {
     "id": "src_anthkey01",
     "kind": "api_key",
@@ -749,7 +749,7 @@ Every guarded Source/inventory mutation uses the §4.5 envelope matrix and the c
 ```json
 {
   "ok": false,
-  "contract_version": 12,
+  "contract_version": 13,
   "error": "source_last_supplier",
   "would_remove_hops": [],
   "would_interrupt": [
@@ -885,7 +885,7 @@ API-key success:
 ```json
 {
   "ok": true,
-  "contract_version": 12,
+  "contract_version": 13,
   "source": {
     "id": "src_relay9c1x",
     "kind": "api_key",
@@ -976,7 +976,7 @@ Status and submit return the same terminal shape:
 ```json
 {
   "ok": true,
-  "contract_version": 12,
+  "contract_version": 13,
   "flow": {
     "flow_id": "oaf_claude01",
     "client_nonce": "ofn_01j5w8z7p4n6q2rt",
@@ -1049,9 +1049,9 @@ a valid `interrupted` chain.
 ```json
 {
   "ok": true,
-  "contract_version": 12,
+  "contract_version": 13,
   "chain": {
-    "contract_version": 12,
+    "contract_version": 13,
     "backend": "codex",
     "model_id": "gpt-5.6",
     "manual_override": null,
@@ -1078,7 +1078,7 @@ In Direct mode both chain and probe refuse with:
 ```json
 {
   "ok": false,
-  "contract_version": 12,
+  "contract_version": 13,
   "error": "direct_mode",
   "detail": "models.hub.direct_mode"
 }
@@ -1092,9 +1092,9 @@ A successful probe nests its result:
 ```json
 {
   "ok": true,
-  "contract_version": 12,
+  "contract_version": 13,
   "probe": {
-    "contract_version": 12,
+    "contract_version": 13,
     "backend": "claude",
     "channel": "hub",
     "reachable": false,
@@ -1117,7 +1117,7 @@ not-ready carries the closed i18n key `models.probe.native_cli_unavailable`.
 
 ```json
 {
-  "contract_version": 12,
+  "contract_version": 13,
   "backend": "codex",
   "channel": "native_cli",
   "reachable": true,
@@ -1130,7 +1130,7 @@ not-ready carries the closed i18n key `models.probe.native_cli_unavailable`.
 
 ```json
 {
-  "contract_version": 12,
+  "contract_version": 13,
   "backend": "codex",
   "channel": "native_cli",
   "reachable": false,
@@ -1146,7 +1146,7 @@ No candidate is an API error with a typed model-scoped state:
 ```json
 {
   "ok": false,
-  "contract_version": 12,
+  "contract_version": 13,
   "error": "probe_no_candidate",
   "detail": "models.probe.no_candidate.waiting",
   "supply": {
@@ -1337,7 +1337,7 @@ The store retains at most 500 exactly attributed settled turns with its existing
 writes. Ambiguous attribution remains excluded; this is not a log of every upstream
 request. Null means no matching retained record, including eviction. A newer served,
 canceled or other record without a terminal error supersedes older error display.
-Success uses exactly `{ok: true, contract_version: 12, provenance: TurnProvenance | null}`;
+Success uses exactly `{ok: true, contract_version: 13, provenance: TurnProvenance | null}`;
 there is no `success` field or envelope exception.
 
 Local `engine_down` records may also contain `local_error_detail`, an OS-generated
@@ -1431,7 +1431,7 @@ ambiguous absence are explicit and distinguishable from an unknown turn:
 ```json
 {
   "ok": false,
-  "contract_version": 12,
+  "contract_version": 13,
   "error": "provenance_unavailable",
   "detail": "models.provenance.direct_mode"
 }
@@ -1440,7 +1440,7 @@ ambiguous absence are explicit and distinguishable from an unknown turn:
 ```json
 {
   "ok": false,
-  "contract_version": 12,
+  "contract_version": 13,
   "error": "provenance_unavailable",
   "detail": "models.provenance.attribution_ambiguous"
 }

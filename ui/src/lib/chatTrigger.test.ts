@@ -155,6 +155,10 @@ describe('harnessChipLabelKey (leading-label key by source presence)', () => {
     expect(callback('provision', 'fulfilled')).toBe('chat.source.vaultProvided');
     expect(callback('access', 'approved')).toBe('chat.source.vaultAccessApproved');
     expect(callback('sign', 'approved')).toBe('chat.source.vaultSigned');
+    expect(callback('delete', 'approved')).toBe('chat.source.vaultDeleteApproved');
+    expect(callback('delete', 'fulfilled')).toBe('chat.source.vaultDeleteApproved');
+    expect(callback('delete', 'denied')).toBe('chat.source.vaultDeleteDenied');
+    expect(callback('delete', 'expired')).toBe('chat.source.vaultDeleteExpired');
     expect(callback('access', 'expired')).toBe('chat.source.vaultExpired');
   });
 

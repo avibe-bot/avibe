@@ -1,9 +1,20 @@
 # Model Hub contracts
 
-Status: **contract_version 12**, 2026-10-13: the served-hop response header also names
-the serving Source id (`served-hop.schema.json`), because two Sources can share an origin.
-It builds on v11 (2026-10-02): the Vibey Hub-only consumer, primary-hop
-resolution and response origin linked to the served attempt, plus the Google protocol
+Status: **contract_version 13**, 2026-10-14: publishes the hosted-tools Phase 1 additions
+(`../vibey-hosted-tools.md`) as one version event:
+- the capability evidence the engine's 400s teach (`UpstreamRejection` in `adapter-interface.py`) and refused efforts,
+  on agent-chain hops and Source models, with when they change (`changes_at`);
+- the Tools tab's read (`hosted-tools-status.schema.json`): executor binding, candidate billing, price and probe
+  estimate, and evidence expiry;
+- the user-started hosted-tool probe (`POST /api/models/hosted-tools/<tool>/probe`,
+  `hosted-tool-probe-result.schema.json`): call and replay, and a call probe for image generation;
+- the picker read's `effort_menu` (`backend-model.schema.json`);
+- `clean_api_keys` on migration apply, which migrates saved API keys without upstream validation;
+- that the engine no longer adds its own `image_generation` tool (`opencode-overlay.md`).
+
+It builds on v12 (2026-10-13): the served-hop response header also names the serving Source
+id (`served-hop.schema.json`), because two Sources can share an origin. v12 builds on v11
+(2026-10-02): the Vibey Hub-only consumer, primary-hop resolution and response origin linked to the served attempt, plus the Google protocol
 vocabulary and Gemini gateway frontend, with API/config-only Source admission. See
 [`vibey-consumer.md`](vibey-consumer.md) and [`google-protocol.md`](google-protocol.md).
 The approved routing contract is
@@ -184,7 +195,7 @@ comparison. A gate may not report success by comparing stale input with itself.
 
 ## Version closure
 
-`contract_version` 12 must coexist in all registered version locations on the same tested head:
+`contract_version` 13 must coexist in all registered version locations on the same tested head:
 
 - `mirror-registry.json`
 - `agent-chain.schema.json`

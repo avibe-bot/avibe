@@ -50,8 +50,8 @@ import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
 import { onPageReactivated } from '../../lib/pageActivity';
 import { useRouteSurfaceActive } from '../../lib/routeSurfaceActivity';
 import { estimateTokens } from '../../lib/tokenEstimate';
-import { loadBackendModelsWithRefresh, modelOptionLabel, useAddModelExit } from '../../lib/backendModels';
-import { compatibleEffort, resolveEffortOptions } from '../../lib/effortOptions';
+import { loadBackendModelsWithRefresh, modelOptionLabel, supersedesHubAnswer, useAddModelExit, type BackendModels } from '../../lib/backendModels';
+import { compatibleEffort, refusedSavedEffort, resolveEffortOptions } from '../../lib/effortOptions';
 import { WorkbenchPageHeader } from './WorkbenchPageHeader';
 import { CapabilityTabs } from './CapabilityTabs';
 // Backend order / labels / accent classes live in lib/backendAccent, shared
@@ -68,6 +68,7 @@ import { BackendAvatar } from '../visual';
 import { isBuiltinAgent } from '../onboarding/setupTargets';
 import { modelsApi } from '../settings/models/modelsApi';
 import { agentsWithoutModel } from '../settings/models/supply';
+import type { EffortMenu } from '../settings/models/types';
 import { errorMessage } from '@/lib/errorMessage';
 // Tab set + its cross-visit memory live together so the remembered value can
 // never name a tab this page no longer renders (see agentsViewMemory).
@@ -2018,6 +2019,7 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, ca
       {
         modelOptions: ComboboxOption[];
         reasoningOptions: Record<string, { value: string; label: string }[]>;
+        effortMenus?: Record<string, EffortMenu>;
       }
     >
   >({});
@@ -2104,20 +2106,32 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, ca
   // backend doesn't know about yet (e.g. a freshly-released preview). Read
   // again when Settings uncovers the page: the Model Hub there edits the list,
   // so the rows read before the visit go when Settings covers it.
+  const applyModelCatalog = useCallback((backend: string, { models, modelLabels, reasoningOptions: opts, effortMenus }: BackendModels) => {
+    setModelCatalogs((current) => ({
+      ...current,
+      [backend]: {
+        modelOptions: models.map((m) => ({ value: m, label: modelOptionLabel(m, modelLabels) })),
+        reasoningOptions: opts ?? {},
+        effortMenus,
+      },
+    }));
+  }, []);
+  // Whether this backend answered from Model Hub in this activation; only another
+  // Hub answer replaces a Hub one (`supersedesHubAnswer`).
+  const hubKnownRef = useRef(false);
+  const takeModelCatalog = useCallback((backend: string, result: BackendModels) => {
+    if (!supersedesHubAnswer(result, hubKnownRef.current)) return;
+    // A confirmed Direct answer ends the Hub-only re-reads; an unread Hub got here only if none was known.
+    if (result.effortMenus !== undefined) hubKnownRef.current = true;
+    else if (!result.hubUnread) hubKnownRef.current = false;
+    applyModelCatalog(backend, result);
+  }, [applyModelCatalog]);
   useEffect(() => {
     if (!surfaceActive) return;
     const cancel = loadBackendModelsWithRefresh(
       api,
       agent.backend,
-      ({ models, modelLabels, reasoningOptions: opts }) => {
-        setModelCatalogs((current) => ({
-          ...current,
-          [agent.backend]: {
-            modelOptions: models.map((m) => ({ value: m, label: modelOptionLabel(m, modelLabels) })),
-            reasoningOptions: opts ?? {},
-          },
-        }));
-      },
+      (result) => takeModelCatalog(agent.backend, result),
       () => {
         setModelCatalogs((current) => ({
           ...current,
@@ -2133,6 +2147,39 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, ca
         return next;
       });
     };
+  }, [agent.backend, api, surfaceActive, takeModelCatalog]);
+
+  // A Hub catalog's effort menu follows capability evidence, which a turn in any
+  // session can change while this panel stays open. Like the route picker, which
+  // reads it as its menu opens, read it again as the user turns to the effort
+  // field, the moment it is chosen from; the last answer shows until it lands.
+  const effortRefreshRef = useRef<(() => void) | null>(null);
+  // One read per approach: a read still out answers for this one too. Dropping a
+  // read does not stop its request, so restarting would only add requests.
+  const effortRefreshOutRef = useRef(false);
+  const refreshEffortMenus = useCallback(() => {
+    if (!surfaceActive || !hubKnownRef.current || effortRefreshOutRef.current) return;
+    effortRefreshOutRef.current = true;
+    const backend = agent.backend;
+    const settle = () => { effortRefreshOutRef.current = false; };
+    effortRefreshRef.current = loadBackendModelsWithRefresh(
+      api,
+      backend,
+      (result) => {
+        settle();
+        takeModelCatalog(backend, result);
+      },
+      settle,
+    );
+  }, [agent.backend, api, surfaceActive, takeModelCatalog]);
+  // A refresh still out when the page is covered or its backend changes answers
+  // for a catalog this page no longer shows, so it is dropped.
+  useEffect(() => () => {
+    effortRefreshRef.current?.();
+    effortRefreshRef.current = null;
+    effortRefreshOutRef.current = false;
+    // A new activation or backend starts without knowing which catalog serves it.
+    hubKnownRef.current = false;
   }, [agent.backend, api, surfaceActive]);
 
   const lockHint = system
@@ -2143,6 +2190,9 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, ca
   const systemPromptTokens = estimateTokens(systemPrompt);
   // Effort options follow the backend + selected model when the catalog provides them.
   const effortOptions = resolveEffortOptions(agent.backend, model, reasoningOptions);
+  // Routing now refuses the saved effort on every hop: out of the options, but the
+  // Agent still sends it, so it shows as itself and says so.
+  const refusedEffort = refusedSavedEffort(effort, model, activeModelCatalog?.effortMenus);
   // The efforts shown before the catalog answers are the backend's fallback
   // ladder, which may hold one the model rejects; they stay visible but cannot
   // be picked until the read (or its failure) lands.
@@ -2434,7 +2484,9 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, ca
             value={model}
             onValueChange={(next) => {
               const value = next.trim();
-              if (!value) return;
+              // Choosing the current model again is no edit: nothing to write, and a
+              // refused saved effort stays what it is.
+              if (!value || value === model) return;
               markFieldEdit('model');
               markFieldSubmitted('model');
               setModel(value);
@@ -2465,12 +2517,26 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, ca
       {/* Reasoning effort — design.pen LsjxT. A model whose catalog row states
           no efforts has nothing to choose, so the field is absent rather than an
           empty outline the user would read as a control that failed to load. */}
-      {effortOptions.length > 0 && (
+      {(effortOptions.length > 0 || refusedEffort) && (
       <Field label={t('agents.detail.effort')}>
         <div
           className="grid gap-0.5 rounded-lg border border-border-strong bg-surface-2 p-0.5"
           style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(3.25rem, 1fr))' }}
+          data-effort-field
+          onPointerEnter={refreshEffortMenus}
+          // Focus coming into the field, not moving between its buttons.
+          onFocusCapture={(event) => {
+            if (!event.currentTarget.contains(event.relatedTarget as Node | null)) refreshEffortMenus();
+          }}
         >
+          {refusedEffort && (
+            <span
+              title={t('chat.picker.effortRefused')}
+              className="truncate rounded-md bg-gold/10 px-1 py-1.5 text-center text-[11px] font-bold capitalize text-gold-ink"
+            >
+              {refusedEffort === 'none' ? t('chat.picker.effortOptions.none') : refusedEffort}
+            </span>
+          )}
           {effortOptions.map((opt) => {
             const active = effort === opt;
             return (
@@ -2496,6 +2562,7 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, ca
             );
           })}
         </div>
+        {refusedEffort && <span className="text-[11px] text-gold-ink">{t('chat.picker.effortRefused')}</span>}
       </Field>
       )}
 

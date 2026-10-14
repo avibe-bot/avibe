@@ -51,6 +51,8 @@ vi.mock('./CapabilityTabs', () => ({ CapabilityTabs: () => null }));
 type FakeModelCatalog = {
   models: string[];
   reasoningOptions?: Record<string, { value: string; label: string }[]>;
+  effortMenus?: Record<string, { omitted: string[]; not_on: Record<string, string[]> }>;
+  hubUnread?: true;
 };
 let modelCatalog: FakeModelCatalog = { models: [] };
 let modelCatalogReads = 0;
@@ -62,9 +64,12 @@ vi.mock('../../lib/backendModels', async (importOriginal) => ({
   loadBackendModelsWithRefresh: (_api: unknown, _backend: string, onLoaded: (payload: FakeModelCatalog) => void) => {
     modelCatalogReads += 1;
     const catalog = modelCatalog;
-    if (deferModelReads) pendingModelReads.push(() => onLoaded(catalog));
-    else onLoaded(catalog);
-    return () => {};
+    // As the real loader: a cancelled read never answers.
+    let cancelled = false;
+    const answer = () => { if (!cancelled) onLoaded(catalog); };
+    if (deferModelReads) pendingModelReads.push(answer);
+    else answer();
+    return () => { cancelled = true; };
   },
 }));
 vi.mock('react-i18next', () => ({
@@ -1659,6 +1664,175 @@ describe('AgentsPage reconnect reconciliation', () => {
     // the server holds no effort, and the panel may not invent one.
     expect(screen.getByText('agents.detail.effort')).toBeTruthy();
     expect(screen.getByRole('button', { name: 'medium', exact: true }).className).not.toContain('bg-mint-soft');
+  });
+
+  it('MH-EFFORT-MENU-003: shows a saved effort routing now refuses on every hop as itself, and says so', async () => {
+    // Model Hub leaves the explicit Off (`none`) out of the menu, but this Agent still sends it.
+    modelCatalog = {
+      models: [],
+      reasoningOptions: { 'reasoning-model': [{ value: 'medium', label: 'Medium' }] },
+      effortMenus: { 'reasoning-model': { omitted: ['none'], not_on: {} } },
+    };
+    const initial = { ...brief('agent-a', 'description'), model: 'reasoning-model', reasoning_effort: 'none' };
+    const getVibeAgent = vi.fn().mockResolvedValue(fullAgent(initial, 'initial prompt'));
+    const api = makeApi(vi.fn().mockResolvedValue(listResult(initial)), getVibeAgent);
+    renderPage(api, { canManageAgents: true });
+
+    await waitFor(() => expect(screen.getByDisplayValue('description')).toBeTruthy());
+    // Named as the page names it anywhere else, not as the raw token.
+    expect(screen.getByText('chat.picker.effortOptions.none').getAttribute('title')).toBe('chat.picker.effortRefused');
+    expect(screen.queryByText('none', { exact: true })).toBeNull();
+    expect(screen.getByText('chat.picker.effortRefused')).toBeTruthy();
+    // It is not offered: only what routing still serves can be picked.
+    expect(screen.queryByRole('button', { name: 'chat.picker.effortOptions.none' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'medium', exact: true }).className).not.toContain('bg-mint-soft');
+  });
+
+  it('writes nothing, and keeps a refused saved effort, when the current model is chosen again', async () => {
+    modelCatalog = {
+      models: [],
+      reasoningOptions: { 'reasoning-model': [{ value: 'medium', label: 'Medium' }] },
+      effortMenus: { 'reasoning-model': { omitted: ['xhigh'], not_on: {} } },
+    };
+    const initial = { ...brief('agent-a', 'description'), model: 'reasoning-model', reasoning_effort: 'xhigh' };
+    const getVibeAgent = vi.fn().mockResolvedValue(fullAgent(initial, 'initial prompt'));
+    const updateVibeAgent = vi.fn().mockResolvedValue({ ok: true });
+    const api = makeApi(vi.fn().mockResolvedValue(listResult(initial)), getVibeAgent, undefined, undefined, updateVibeAgent);
+    renderPage(api, { canManageAgents: true });
+
+    await waitFor(() => expect(screen.getByDisplayValue('description')).toBeTruthy());
+    fireEvent.click(screen.getByRole('combobox'));
+    fireEvent.change(screen.getByPlaceholderText('Search...'), { target: { value: 'reasoning-model' } });
+    fireEvent.click(screen.getByText('Use "reasoning-model"'));
+
+    expect(updateVibeAgent).not.toHaveBeenCalled();
+    expect(screen.getByText('xhigh', { exact: true }).getAttribute('title')).toBe('chat.picker.effortRefused');
+  });
+
+  it('reads the effort menu again as the effort field is used, since any turn can change it', async () => {
+    modelCatalog = {
+      models: [],
+      reasoningOptions: { 'reasoning-model': [{ value: 'medium', label: 'Medium' }, { value: 'xhigh', label: 'xhigh' }] },
+      effortMenus: { 'reasoning-model': { omitted: [], not_on: {} } },
+    };
+    const initial = { ...brief('agent-a', 'description'), model: 'reasoning-model', reasoning_effort: 'medium' };
+    const getVibeAgent = vi.fn().mockResolvedValue(fullAgent(initial, 'initial prompt'));
+    const api = makeApi(vi.fn().mockResolvedValue(listResult(initial)), getVibeAgent);
+    renderPage(api, { canManageAgents: true });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'xhigh', exact: true })).toBeTruthy());
+
+    // Another session's turn records that every hop refuses `xhigh`.
+    modelCatalog = {
+      models: [],
+      reasoningOptions: { 'reasoning-model': [{ value: 'medium', label: 'Medium' }] },
+      effortMenus: { 'reasoning-model': { omitted: ['xhigh'], not_on: {} } },
+    };
+    fireEvent.pointerEnter(document.querySelector('[data-effort-field]') as HTMLElement);
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'xhigh', exact: true })).toBeNull());
+  });
+
+  it('keeps the last Hub effort menu when a refresh falls back to the native list, and asks Hub again next time', async () => {
+    const hub = {
+      models: [],
+      reasoningOptions: { 'reasoning-model': [{ value: 'medium', label: 'Medium' }] },
+      effortMenus: { 'reasoning-model': { omitted: ['xhigh'], not_on: {} } },
+    };
+    modelCatalog = hub;
+    const initial = { ...brief('agent-a', 'description'), model: 'reasoning-model', reasoning_effort: 'medium' };
+    const api = makeApi(vi.fn().mockResolvedValue(listResult(initial)), vi.fn().mockResolvedValue(fullAgent(initial, 'prompt')));
+    renderPage(api, { canManageAgents: true });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'medium', exact: true })).toBeTruthy());
+    const field = () => document.querySelector('[data-effort-field]') as HTMLElement;
+
+    // A refresh whose Hub read failed answers with the native ladder, which offers `xhigh`.
+    const native = { models: [], reasoningOptions: { 'reasoning-model': [{ value: 'medium', label: 'Medium' }, { value: 'xhigh', label: 'xhigh' }] } };
+    modelCatalog = { ...native, hubUnread: true };
+    fireEvent.pointerEnter(field());
+    expect(screen.queryByRole('button', { name: 'xhigh', exact: true })).toBeNull();
+
+    // Hub answers again, and the next use of the field still asks it.
+    modelCatalog = hub;
+    const reads = modelCatalogReads;
+    fireEvent.pointerEnter(field());
+    expect(modelCatalogReads).toBe(reads + 1);
+
+    // Another tab switched the backend to Direct: a confirmed answer replaces the Hub one.
+    modelCatalog = native;
+    fireEvent.pointerEnter(field());
+    expect(screen.getByRole('button', { name: 'xhigh', exact: true })).toBeTruthy();
+    // And the Hub-only re-reads end with it: a native read may start a CLI.
+    const directReads = modelCatalogReads;
+    fireEvent.pointerEnter(field());
+    expect(modelCatalogReads).toBe(directReads);
+  });
+
+  it('reads the effort menu once per approach to the field, not on every focus move inside it', async () => {
+    modelCatalog = {
+      models: [],
+      reasoningOptions: { 'reasoning-model': [{ value: 'medium', label: 'Medium' }, { value: 'high', label: 'High' }] },
+      effortMenus: { 'reasoning-model': { omitted: [], not_on: {} } },
+    };
+    const initial = { ...brief('agent-a', 'description'), model: 'reasoning-model', reasoning_effort: 'medium' };
+    const api = makeApi(vi.fn().mockResolvedValue(listResult(initial)), vi.fn().mockResolvedValue(fullAgent(initial, 'prompt')));
+    renderPage(api, { canManageAgents: true });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'high', exact: true })).toBeTruthy());
+    const field = document.querySelector('[data-effort-field]') as HTMLElement;
+    const medium = screen.getByRole('button', { name: 'medium', exact: true });
+    const high = screen.getByRole('button', { name: 'high', exact: true });
+
+    deferModelReads = true;
+    const reads = modelCatalogReads;
+    // The pointer arrives and the click focuses a button: one approach, one read.
+    fireEvent.pointerEnter(field);
+    fireEvent.focusIn(medium);
+    expect(modelCatalogReads).toBe(reads + 1);
+    act(() => pendingModelReads.shift()!());
+
+    // Tabbing between the field's own buttons is not a new approach.
+    fireEvent.focusIn(high, { relatedTarget: medium });
+    expect(modelCatalogReads).toBe(reads + 1);
+  });
+
+  it('drops an effort-menu read still out when Settings covers the page', async () => {
+    modelCatalog = {
+      models: [],
+      reasoningOptions: { 'reasoning-model': [{ value: 'medium', label: 'Medium' }, { value: 'xhigh', label: 'xhigh' }] },
+      effortMenus: { 'reasoning-model': { omitted: [], not_on: {} } },
+    };
+    const initial = { ...brief('agent-a', 'description'), model: 'reasoning-model', reasoning_effort: 'medium' };
+    const api = makeApi(vi.fn().mockResolvedValue(listResult(initial)), vi.fn().mockResolvedValue(fullAgent(initial, 'prompt')));
+    apiRef.current = api;
+    const page = (surfaceActive: boolean) => (
+      <InstanceAuthorizationContext.Provider
+        value={{ remote: false, instanceKind: null, instanceRole: 'owner', capabilities: { ...OWNER_INSTANCE_CAPABILITIES, can_manage_agents: true } }}
+      >
+        <RouteSurfaceActiveContext.Provider value={surfaceActive}>
+          <MemoryRouter initialEntries={['/agents']}>
+            <AgentsPage />
+          </MemoryRouter>
+        </RouteSurfaceActiveContext.Provider>
+      </InstanceAuthorizationContext.Provider>
+    );
+    const view = render(page(true));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'xhigh', exact: true })).toBeTruthy());
+
+    // A refresh goes out with the old menu, then Settings covers the page while a
+    // turn elsewhere records that every hop refuses `xhigh`.
+    deferModelReads = true;
+    fireEvent.pointerEnter(document.querySelector('[data-effort-field]') as HTMLElement);
+    modelCatalog = {
+      models: [],
+      reasoningOptions: { 'reasoning-model': [{ value: 'medium', label: 'Medium' }] },
+      effortMenus: { 'reasoning-model': { omitted: ['xhigh'], not_on: {} } },
+    };
+    view.rerender(page(false));
+    view.rerender(page(true));
+    const [stale, fresh] = pendingModelReads;
+    act(() => fresh());
+    expect(screen.queryByRole('button', { name: 'xhigh', exact: true })).toBeNull();
+    // The read from before the visit lands last, and must not bring `xhigh` back.
+    act(() => stale());
+    expect(screen.queryByRole('button', { name: 'xhigh', exact: true })).toBeNull();
   });
 
   it('keeps a still-valid effort untouched when the model changes', async () => {

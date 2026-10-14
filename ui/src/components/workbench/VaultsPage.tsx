@@ -378,8 +378,9 @@ const RequestRow: React.FC<{ request: VaultRequest; onReview: (request: VaultReq
   const type = requestReviewType(r);
   const isSign = type === 'sign';
   const isProvision = type === 'provision';
+  const isDelete = type === 'delete';
   const isProtected = card.protection === 'protected';
-  const Icon = isSign || card.kind === 'keypair' ? Wallet : KeyRound;
+  const Icon = isDelete ? Trash2 : isSign || card.kind === 'keypair' ? Wallet : KeyRound;
   const session = vaultRequestSessionDisplay(r);
   const reviewInBrowser = !isProvision && vaultPasskeyNeedsBrowser() && vaultApprovalNeedsPasskey(r);
   return (
@@ -391,7 +392,7 @@ const RequestRow: React.FC<{ request: VaultRequest; onReview: (request: VaultReq
         <div className="flex flex-wrap items-center gap-2">
           <span className="truncate font-mono text-sm font-semibold">{r.secret_name}</span>
           <Badge variant="info">
-            {isProvision ? t('vaults.requests.provision') : isSign ? t('vaults.requests.sign') : t('vaults.requests.access')}
+            {isProvision ? t('vaults.requests.provision') : isSign ? t('vaults.requests.sign') : isDelete ? t('vaults.requests.delete') : t('vaults.requests.access')}
           </Badge>
           {isProtected ? <Badge variant="warning">{t('vaults.protected')}</Badge> : null}
         </div>
@@ -450,7 +451,7 @@ const PendingRequestsSection: React.FC<{
       const res = await api.getVaultRequests({ status: 'pending' }, { handleError: false });
       const pending = (res.requests ?? []).filter((r) => {
         const type = requestReviewType(r);
-        return type === 'access' || type === 'sign' || type === 'provision';
+        return type === 'access' || type === 'sign' || type === 'provision' || type === 'delete';
       });
       setRequests(pending);
     } catch {
@@ -501,10 +502,17 @@ const PendingRequestsSection: React.FC<{
       const key =
         outcome.kind === 'denied'
           ? 'vaults.requests.denied'
-          : outcome.requestType === 'sign'
+          : outcome.requestType === 'delete'
+            ? 'vaults.deleted'
+            : outcome.requestType === 'sign'
             ? 'vaults.requests.signed'
             : 'vaults.requests.approved';
-      showToast(t(key), outcome.kind === 'denied' ? 'warning' : 'success');
+      showToast(
+        outcome.requestType === 'delete' && reviewing?.secret_name
+          ? t(key, { name: reviewing.secret_name })
+          : t(key),
+        outcome.kind === 'denied' ? 'warning' : 'success',
+      );
       load();
       onResolved();
     },

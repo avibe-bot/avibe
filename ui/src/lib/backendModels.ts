@@ -3,7 +3,7 @@ import { useLocation, useNavigate } from 'react-router-dom';
 
 import { routeableCatalogModelIds } from '../components/settings/models/backendCatalog';
 import { modelHubCatalogPath } from '../components/settings/models/modelHubRoutes';
-import type { AgentSupply } from '../components/settings/models/types';
+import type { EffortMenu, PickerAgentCatalog } from '../components/settings/models/types';
 import { ApiError, useApi, type ApiContextType } from '../context/ApiContext';
 import { useInstanceAuthorization } from '../context/InstanceAuthorizationContext';
 import { useRouteSurfaceActive } from './routeSurfaceActivity';
@@ -15,10 +15,18 @@ export interface BackendModels {
   models: string[];
   /** Optional display labels keyed by model identifier; values remain raw ids. */
   modelLabels?: Record<string, string>;
-  /** Per-model reasoning-effort option sets; undefined when a backend has none. */
+  /** Per-model reasoning-effort option sets; undefined when a backend has none.
+   *  A Hub catalog leaves out every effort routing would refuse on every hop. */
   reasoningOptions?: Record<string, { value: string; label: string }[]>;
+  /** Per model, what routing would do with its efforts now (Model Hub's
+   *  `effort_menu`): the efforts left out above, and by Source id the hops that
+   *  refuse one the others still serve. Hub catalogs only. */
+  effortMenus?: Record<string, EffortMenu>;
   /** True while a background remote-catalog refresh may produce a newer snapshot. */
   catalogRefreshPending?: boolean;
+  /** Model Hub gave no answer (the read failed, or the server predates the read),
+   *  so these are the native list. A Direct-mode answer is an answer: absent. */
+  hubUnread?: true;
 }
 
 const CATALOG_REFRESH_RETRY_DELAY_MS = 3_500;
@@ -32,8 +40,6 @@ export function modelOptionLabel(model: string, labels?: Record<string, string>)
 
 // In Hub mode the persisted catalog is authoritative. A missing catalog uses
 // the native fallback; an explicitly empty catalog remains an empty menu.
-type PickerAgentCatalog = Pick<AgentSupply, 'backend' | 'mode' | 'catalog_models'>;
-
 const isHubAgent = (agent: PickerAgentCatalog | null, backend: string): agent is PickerAgentCatalog =>
   agent !== null && agent.backend === backend && agent.mode === 'hub';
 
@@ -48,19 +54,35 @@ const hubCatalogModels = (agent: PickerAgentCatalog | null, backend: string): Ba
   // "constructor" and "__proto__" from colliding with Object properties.
   const modelLabels = Object.create(null) as Record<string, string>;
   const reasoningOptions = Object.create(null) as Record<string, { value: string; label: string }[]>;
+  const effortMenus = Object.create(null) as Record<string, EffortMenu>;
   for (const id of models) {
     const row = rows.get(id);
     if (!row) continue;
     if (row.display_name) modelLabels[id] = row.display_name;
+    // Model Hub states what routing would do with each effort now (`effort_menu`):
+    // one every hop refuses would only fail, so it is not offered.
+    const omitted = new Set(row.effort_menu?.omitted ?? []);
     // Every routeable model gets a key, including an empty one: the catalog is
     // authoritative here, so "this model does not reason" must be sayable and
     // must not read as "nobody answered" and fall back to the generic ladder.
     reasoningOptions[id] = row.supports_reasoning === false
       ? []
-      : row.reasoning_efforts.map((effort) => ({ value: effort, label: effort }));
+      : row.reasoning_efforts.filter((effort) => !omitted.has(effort)).map((effort) => ({ value: effort, label: effort }));
+    if (row.effort_menu) effortMenus[id] = row.effort_menu;
   }
-  return { models, modelLabels, reasoningOptions };
+  return { models, modelLabels, reasoningOptions, effortMenus };
 };
+
+/**
+ * Whether `result` may replace what a surface shows for a backend. Model Hub
+ * answers with effort menus; a Hub read that fails comes back as the native
+ * list (`hubUnread`), which says nothing about Hub routing and would offer
+ * efforts Hub refuses. So once a backend has answered from Hub in a surface's
+ * activation, an unread Hub does not replace it: the last answer stands, and the
+ * next read asks Hub again. A confirmed Direct answer does replace it.
+ */
+export const supersedesHubAnswer = (result: BackendModels, knownHub: boolean): boolean =>
+  !knownHub || result.effortMenus !== undefined || result.hubUnread !== true;
 
 // Single source of truth for "list the selectable models for a backend",
 // shared by ChatPage, the Agents detail panel, and the New Agent dialog so a
@@ -79,8 +101,14 @@ export async function fetchBackendModels(
   api: ApiContextType,
   backend: string,
 ): Promise<BackendModels> {
-  const hub = hubCatalogModels(await api.readModelHubAgentCatalogForModelPicker(backend), backend);
+  const agent = await api.readModelHubAgentCatalogForModelPicker(backend);
+  const hub = hubCatalogModels(agent, backend);
   if (hub) return hub;
+  const native = await nativeBackendModels(api, backend);
+  return agent === null ? { ...native, hubUnread: true } : native;
+}
+
+async function nativeBackendModels(api: ApiContextType, backend: string): Promise<BackendModels> {
   if (!getBackendUiMeta(backend).capabilities.supports_cli) return { models: [] };
   if (backend === 'claude') {
     const res = await api.claudeModels();

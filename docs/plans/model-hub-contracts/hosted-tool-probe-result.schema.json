@@ -12,7 +12,7 @@
     "model_id": {"type": "string", "minLength": 1},
     "call": {"$ref": "#/definitions/aspect"},
     "replay": {
-      "description": "Null until Vibey replays native payloads, and always for a tool without a replay aspect.",
+      "description": "The replay probe that follows a verified, recorded call: null when none ran (the call did not verify or was not recorded, the tool has no replay aspect, the protocol does not replay natively, or no result URL was hidden from the visible answer). transient with a null error when the probe had too little time left to send it.",
       "oneOf": [{"type": "null"}, {"$ref": "#/definitions/aspect"}]
     }
   },

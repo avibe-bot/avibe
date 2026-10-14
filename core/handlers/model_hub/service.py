@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import json
 import logging
+import threading
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -112,7 +114,13 @@ from .events import (
     build_resolution_event,
     contains_credential_material,
 )
-from .capability_evidence import CapabilityEvidenceStore, EvidenceFeature, EvidenceRecord, identity_digest
+from .capability_evidence import (
+    HOSTED_TOOL_ASPECTS,
+    CapabilityEvidenceStore,
+    EvidenceFeature,
+    EvidenceRecord,
+    identity_digest,
+)
 from .errors import ModelDiscoveryError
 from .evidence_rules import LearnedEvidence
 from .evidence_rules import learn as learn_from_rejection
@@ -133,10 +141,22 @@ from .hosted_executor import (
     responses_result,
 )
 from .hosted_probe import ESTIMATED_COUNTS as ESTIMATED_PROBE_COUNTS
+from .hosted_probe import ESTIMATED_REPLAY_USAGE as ESTIMATED_REPLAY_PROBE_USAGE
 from .hosted_probe import ESTIMATED_USAGE as ESTIMATED_PROBE_USAGE
-from .hosted_probe import PROBE_MAX_OUTPUT_TOKENS, PROBED_TOOLS
+from .hosted_probe import (
+    NATIVE_REPLAY_PROTOCOLS,
+    PROBE_MAX_OUTPUT_TOKENS,
+    PROBE_BUDGET_SECONDS,
+    PROBED_TOOLS,
+    REPLAY_MIN_SECONDS,
+    ProbeImageCheck,
+    carries_native_payload,
+    hidden_result_urls,
+)
 from .hosted_probe import call_outcome as hosted_call_outcome
 from .hosted_probe import probe_request as hosted_probe_request
+from .hosted_probe import replay_outcome as hosted_replay_outcome
+from .hosted_probe import replay_request as hosted_replay_request
 from .hosted_probe import run_probe as run_hosted_probe
 from .hosted_tools import (
     HOSTED_PROBE_SHAPE,
@@ -220,7 +240,7 @@ from .usage import (
     local_usage_day,
 )
 
-CONTRACT_VERSION = 12
+CONTRACT_VERSION = 13
 
 
 def seeded_source_name(vendor: str) -> str:
@@ -343,12 +363,10 @@ def _described_as_unfit_for_agent_turns(match: Mapping[str, Any]) -> bool:
     )
 
 
-AGENT_CHAIN_CONTRACT_VERSION = 12
-PROBE_RESULT_CONTRACT_VERSION = 12
+AGENT_CHAIN_CONTRACT_VERSION = 13
+PROBE_RESULT_CONTRACT_VERSION = 13
 _SOURCE_DISCOVERY_TIMEOUT_SECONDS = 15
 _SOURCE_PROBE_TIMEOUT_SECONDS = 60
-# A hosted-tool probe waits for the provider's search as well as the answer.
-_HOSTED_PROBE_TIMEOUT_SECONDS = 120
 # Background inventory refresh. The first tick doubles as the startup delay, so
 # a stale Source catches up shortly after boot without boot waiting on upstream.
 _BACKGROUND_DISCOVERY_INTERVAL = timedelta(hours=6)
@@ -497,11 +515,38 @@ class ModelHubConfigStore(Protocol):
     def mutate(self, mutator: Callable[[ModelHubConfig], bool]) -> None: ...
 
 
+def _file_identity(path: Path) -> tuple | None:
+    """What changes whenever the config file is replaced or rewritten: its path, inode and size, and its times."""
+
+    try:
+        stat = path.stat()
+    except FileNotFoundError:
+        return None
+    return (str(path), stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+
+
 class V2ModelHubConfigStore:
+    """Model Hub's config, read from the shared config file and served from a snapshot (#2568).
+
+    Reading the file parses the whole config, which grows with Sources,
+    inventories and routes, and Model Hub reads it on every request. So the
+    store keeps the last parse and serves a copy of it while the file is
+    unchanged: a read costs one ``stat`` and a copy, never a parse. Any change to
+    the file (a write through this store, another writer in this process, the UI
+    process or the CLI) replaces or rewrites it, which changes its identity, and
+    the next read parses again. A write through this store keeps what it
+    committed as the snapshot, inside its own lock, so the reads after it parse
+    nothing.
+    """
+
     _NATIVE_AUTH_FIELDS = {
         "claude": ("auth_mode", "api_key", "base_url", "auth_mode_set"),
         "codex": ("auth_mode", "api_key", "base_url", "oauth_relay_marker"),
     }
+
+    def __init__(self) -> None:
+        self._snapshot_lock = threading.Lock()
+        self._snapshot: tuple[tuple, ModelHubConfig] | None = None
 
     def native_auth_snapshot(self, backends: tuple[str, ...]) -> dict[str, dict]:
         try:
@@ -524,26 +569,47 @@ class V2ModelHubConfigStore:
         *,
         expected_hub: tuple[dict, ...],
     ) -> None:
-        from config.v2_config import config_write_transaction
+        from config.v2_config import config_file_lock, config_write_transaction
 
         self.ensure_writable()
-        with config_write_transaction() as config:
-            if config.model_hub.to_payload() not in expected_hub:
-                raise MigrationConflictError
-            for backend, values in desired.items():
-                target = getattr(config.agents, backend)
-                actual = {name: getattr(target, name) for name in values}
-                if actual not in (expected.get(backend), values):
+        path = paths.get_config_path()
+        with config_file_lock(path):
+            with config_write_transaction(path) as config:
+                if config.model_hub.to_payload() not in expected_hub:
                     raise MigrationConflictError
-                for name, value in values.items():
-                    setattr(target, name, value)
-            config.model_hub = ModelHubConfig.from_payload(model_hub.to_payload())
+                for backend, values in desired.items():
+                    target = getattr(config.agents, backend)
+                    actual = {name: getattr(target, name) for name in values}
+                    if actual not in (expected.get(backend), values):
+                        raise MigrationConflictError
+                    for name, value in values.items():
+                        setattr(target, name, value)
+                config.model_hub = ModelHubConfig.from_payload(model_hub.to_payload())
+            self._seed(path, config.model_hub)
 
     def load(self) -> ModelHubConfig:
+        path = paths.get_config_path()
+        identity = _file_identity(path)
+        with self._snapshot_lock:
+            snapshot = self._snapshot
+        if snapshot is not None and identity is not None and snapshot[0] == identity:
+            # Callers own what they load and may change it; the snapshot stays as the file holds it.
+            return copy.deepcopy(snapshot[1])
+        fresh = self._read(path)
+        return default_config().model_hub if fresh is None else fresh[1]
+
+    def _read(self, path: Path) -> tuple[tuple, ModelHubConfig] | None:
+        """Parse the file and keep the parse, when the file did not change while it was read."""
+
+        before = _file_identity(path)
         try:
-            return V2Config.load().model_hub
+            model_hub = V2Config.load().model_hub
         except FileNotFoundError:
-            return default_config().model_hub
+            return None
+        if before is not None and _file_identity(path) == before:
+            with self._snapshot_lock:
+                self._snapshot = (before, copy.deepcopy(model_hub))
+        return (before or (), model_hub)
 
     def ensure_writable(self) -> None:
         try:
@@ -557,17 +623,36 @@ class V2ModelHubConfigStore:
     def save(self, model_hub: ModelHubConfig) -> None:
         model_hub = ModelHubConfig.from_payload(model_hub.to_payload())
         self.ensure_writable()
-        from config.v2_config import update_config_fields
+        from config.v2_config import config_file_lock, update_config_fields
 
-        update_config_fields(lambda cfg: setattr(cfg, "model_hub", model_hub))
+        path = paths.get_config_path()
+        with config_file_lock(path):
+            committed = update_config_fields(lambda cfg: setattr(cfg, "model_hub", model_hub), config_path=path)
+            self._seed(path, committed.model_hub)
 
     def mutate(self, mutator: Callable[[ModelHubConfig], bool]) -> None:
         from config.v2_config import config_file_lock
 
-        with config_file_lock():
+        path = paths.get_config_path()
+        with config_file_lock(path):
             config = V2Config.load()
             if mutator(config.model_hub):
                 config.save()
+                self._seed(path, config.model_hub)
+
+    def _seed(self, path: Path, model_hub: ModelHubConfig) -> None:
+        """Keep what a write just committed as the snapshot, without reading the file back.
+
+        Called inside the write's config lock, so no other writer can have
+        replaced the file since: its identity now names exactly this content. The
+        section is settled the way a load settles it (the one repairing door).
+        """
+
+        identity = _file_identity(path)
+        if identity is not None:
+            settled = ModelHubConfig.from_payload(model_hub.to_payload(), repairing=True)
+            with self._snapshot_lock:
+                self._snapshot = (identity, settled)
 
 class UnavailableEngineAdapter:
     """Explicit fail-closed adapter for isolated callers and tests."""
@@ -1141,7 +1226,7 @@ def _runtime_payload(status: EngineStatus, *, enabled: bool) -> dict:
 
     manager = EngineRuntimeManager()
     return {
-        "contract_version": 12,
+        "contract_version": 13,
         "enabled": enabled,
         "host_platform": status.host_platform or manager.host_platform(),
         "manifest": manager.contract_manifest(),
@@ -5956,20 +6041,27 @@ class ModelHubService:
         }
 
     def _probe_estimate(self, source: ModelHubSourceConfig, model_id: str, tool: str) -> Optional[dict]:
-        """What one call probe of ``tool`` on this Source and model is estimated to cost; None when unknown.
+        """What probing ``tool`` on this Source and model is estimated to cost at most; None when unknown.
 
-        Priced by the one pricing owner from the probe's nominal usage. A tool
-        that cannot be probed yet has no estimate.
+        Priced by the one pricing owner from each probe's nominal usage: the call
+        probe, plus the replay probe that follows a verified call where the tool's
+        payload can go back verbatim (that request uses no tool, so no tool fee).
         """
 
         if tool not in PROBED_TOOLS:
             return None
-        cost = self.hosted_call_cost(
-            source, model_id, (tool,), usage=ESTIMATED_PROBE_USAGE, counts=ESTIMATED_PROBE_COUNTS[tool],
-        )
-        if cost is None:
+        costs = [
+            self.hosted_call_cost(
+                source, model_id, (tool,), usage=ESTIMATED_PROBE_USAGE, counts=ESTIMATED_PROBE_COUNTS[tool],
+            )
+        ]
+        if "replay" in HOSTED_TOOL_ASPECTS[tool] and source.protocol in NATIVE_REPLAY_PROTOCOLS:
+            costs.append(self.hosted_call_cost(source, model_id, (), usage=ESTIMATED_REPLAY_PROBE_USAGE, counts={}))
+        if any(cost is None for cost in costs):
             return None
-        return {"basis": cost.basis} if cost.usd is None else {"basis": cost.basis, "usd": cost.usd}
+        if any(cost.usd is None for cost in costs):
+            return {"basis": "included"}
+        return {"basis": "list", "usd": round(sum(cost.usd for cost in costs), 6)}
 
     async def set_hosted_tool(self, tool: str, payload: object) -> dict:
         """Replace one hosted tool's toggle and chosen executor; it applies from the next turn."""
@@ -7677,92 +7769,198 @@ class ModelHubService:
                 raise ModelHubError("mapping_target_unavailable", status=409)
             return current
 
-        async def pinned_call(body: dict, read: Callable[[InvokeHandle], Awaitable[None]]):
-            return await self._user_test_call(
-                source_id,
-                model_id,
-                selected,
-                lambda source: ModelHubRequest(body, protocol=source.protocol),
-                stream=True,
-                origin="vibey",
-                consume=read,
-                timeout=_HOSTED_PROBE_TIMEOUT_SECONDS,
-            )
+        # The whole probe answers inside the UI's RPC wait. Each call gets as long as a turn's executor gives the
+        # tool, but never more than the probe has left.
+        deadline = time.monotonic() + PROBE_BUDGET_SECONDS
 
-        terminal, calls = await run_hosted_probe(request, pinned_call)
+        def remaining() -> float:
+            return deadline - time.monotonic()
+
+        def pinned(select: Callable[[ModelHubConfig], ModelHubSourceConfig]):
+            async def call(body: dict, read: Callable[[InvokeHandle], Awaitable[None]]):
+                return await self._user_test_call(
+                    source_id,
+                    model_id,
+                    select,
+                    lambda source: ModelHubRequest(body, protocol=source.protocol),
+                    stream=True,
+                    origin="vibey",
+                    consume=read,
+                    timeout=max(1.0, min(call_timeout(tool), remaining())),
+                )
+
+            return call
+
+        pinned_call = pinned(selected)
+
+        media_sink = ProbeImageCheck() if tool == "image_generation" else None
+        terminal, calls = await run_hosted_probe(request, pinned_call, media_sink=media_sink)
         if not calls:
             logger.warning("Model Hub's %s probe sent no request", tool)
             raise ModelHubError("invalid_parameter", status=400)
-        # Only the request the response ended on speaks for the tool: a resend that completes outranks a refusal
-        # of the request it replaced.
-        last = calls[-1]
-        learned = (
-            learn_from_rejection(
-                last.body,
-                last.outcome.rejection,
-                request_protocol=last.source.protocol,
-                source=last.source,
-                model_id=model_id,
-                spec_for=hosted_tool_spec,
-            )
-            if last.outcome.rejection is not None
-            else None
+        call_last = calls[-1]
+        replays_natively = "replay" in HOSTED_TOOL_ASPECTS[tool] and source.protocol in NATIVE_REPLAY_PROTOCOLS
+
+        # Each step reads what the provider sent, which can be megabytes of results and payload, off the controller
+        # loop.
+        def judge_call() -> tuple[Optional[LearnedEvidence], str, frozenset[str]]:
+            learned = self._probe_rejection(call_last, model_id)
+            verdict = hosted_call_outcome(tool, terminal, call_last.outcome, learned)
+            # Only a result the visible answer does not show proves a replayed payload was read; with none, the
+            # replay stays unknown and turns replay synthetically, which is lossless.
+            verified = verdict == "verified" and isinstance(terminal, Done)
+            return learned, verdict, hidden_result_urls(terminal.message) if verified and replays_natively else frozenset()
+
+        call_learned, call_verdict, asked = await asyncio.to_thread(judge_call)
+        recorded_for = await self._record_probe_evidence(
+            EvidenceFeature.hosted(tool, "call"), call_verdict, call_last, call_learned, model_id,
         )
-        verdict = hosted_call_outcome(tool, terminal, last.outcome, learned)
-        # The evidence follows the Source as it reads now. The one change a probe may see is its own: its call's
-        # success retired the pending verification it was made under, which settlement proves. Any other change
-        # during the probe (a new credential, endpoint, protocol, or a marker another grant's call retired) means
-        # the probe vouches for nothing there.
+        replay: Optional[dict] = None
+        # The replay probe follows a call probe that verified and was recorded for the Source as it is, on a tool
+        # whose payload can go back verbatim, when the call returned a result the replay can ask about.
+        replayable = recorded_for is not None and bool(asked)
+        if replayable and remaining() < REPLAY_MIN_SECONDS:
+            # Too little of the probe's time is left for a replay that could finish: try again.
+            replay = {"outcome": "transient", "error": None}
+        elif replayable:
+            assert isinstance(terminal, Done)
+
+            def replay_selected(config: ModelHubConfig) -> ModelHubSourceConfig:
+                current = selected(config)
+                # The replay carries the call's provider-native payload, so it goes only to the Source identity that
+                # produced it and was recorded for it: never through a credential or endpoint that replaced it.
+                if identity_digest(current) != recorded_for:
+                    raise ModelHubError("mapping_target_unavailable", status=409)
+                return current
+
+            try:
+                replay_terminal, replay_calls = await run_hosted_probe(
+                    hosted_replay_request(request, tool, terminal.message), pinned(replay_selected),
+                )
+            except ModelHubError as refused:
+                # The call's result stands; the replay did not run. A Source that changed has no replay to report,
+                # and anything else (the engine went away) is worth trying again.
+                replay_terminal, replay_calls = None, []
+                if refused.code != "mapping_target_unavailable":
+                    replay = {"outcome": "transient", "error": None}
+            if replay_calls:
+                replay_last = replay_calls[-1]
+
+                def judge_replay() -> tuple[Optional[LearnedEvidence], str]:
+                    learned = self._probe_rejection(replay_last, model_id)
+                    carried = carries_native_payload(replay_last.body, terminal.message)
+                    return learned, hosted_replay_outcome(
+                        tool, replay_terminal, replay_last.outcome, learned, asked=asked, carried=carried,
+                    )
+
+                replay_learned, replay_verdict = await asyncio.to_thread(judge_replay)
+                await self._record_probe_evidence(
+                    EvidenceFeature.hosted(tool, "replay"),
+                    replay_verdict,
+                    replay_last,
+                    replay_learned,
+                    model_id,
+                    identity=recorded_for,
+                )
+                replay = self._probe_aspect(replay_verdict, replay_terminal, replay_last)
+        return {
+            "probe": {
+                "tool": tool,
+                "source_id": call_last.source.id,
+                "model_id": model_id,
+                "call": self._probe_aspect(call_verdict, terminal, call_last),
+                "replay": replay,
+            },
+            **await asyncio.to_thread(self.hosted_tools_status),
+        }
+
+    def _probe_rejection(self, call: Any, model_id: str) -> LearnedEvidence | None:
+        """The one feature a probe request's refusal names, through the narrow rules real requests learn from.
+
+        Only the request the response ended on speaks for the tool: a resend that completes outranks a refusal of
+        the request it replaced.
+        """
+
+        if call.outcome.rejection is None:
+            return None
+        return learn_from_rejection(
+            call.body,
+            call.outcome.rejection,
+            request_protocol=call.source.protocol,
+            source=call.source,
+            model_id=model_id,
+            spec_for=hosted_tool_spec,
+        )
+
+    def _probe_aspect(self, verdict: str, terminal: Any, last: Any) -> dict:
+        """One probe aspect's result, with why a request that never completed failed, as the Source test shows it."""
+
+        return {
+            "outcome": verdict,
+            "error": (
+                self._test_call_failure(last.outcome)
+                if verdict != "unsupported" and not isinstance(terminal, Done)
+                else None
+            ),
+        }
+
+    async def _record_probe_evidence(
+        self,
+        feature: EvidenceFeature,
+        verdict: str,
+        last: Any,
+        learned: LearnedEvidence | None,
+        model_id: str,
+        *,
+        identity: str | None = None,
+    ) -> str | None:
+        """Record what a probe showed for the Source as it reads now; the identity recorded for, or None.
+
+        Only ``verified`` and ``unsupported`` are evidence. The one change a probe
+        may see is its own: its call's success retired the pending verification it
+        was made under, which settlement proves. Any other change during the probe
+        (a new credential, endpoint, protocol, or a marker another grant's call
+        retired) means the probe vouches for nothing there. ``identity``, when
+        given, is the one the probe's earlier aspect was recorded for: both
+        records then describe the same Source.
+        """
+
         current = await asyncio.to_thread(self.store.load)
         live = next((item for item in current.sources if item.id == last.source.id), None)
-        attributable = live is not None and (
+        if live is None or not (
             identity_digest(live) == identity_digest(last.source)
             or (
                 last.retired_own_marker
                 and identity_digest(replace(last.source, verification_pending=None)) == identity_digest(live)
             )
-        )
-        if verdict in ("verified", "unsupported") and attributable:
+        ):
+            return None
+        digest = identity_digest(live)
+        if identity is not None and digest != identity:
+            return None
+        if verdict in ("verified", "unsupported"):
             try:
                 await asyncio.to_thread(
                     self.capability_evidence.write,
                     EvidenceRecord(
                         source_id=live.id,
                         model_id=model_id,
-                        feature=EvidenceFeature.hosted(tool, "call"),
+                        feature=feature,
                         status=verdict,
                         basis="probe",
                         observed_at=self.now(),
                         engine=self.engine_stamp,
                         shape=HOSTED_PROBE_SHAPE,
-                        source_identity=identity_digest(live),
+                        source_identity=digest,
                         detail=learned.detail if verdict == "unsupported" and learned is not None else None,
                     ),
                     live=current.sources,
                 )
             except (OSError, ValueError):
-                # Evidence is advisory state: the status read below shows what was kept.
-                logger.warning("Model Hub could not record the %s probe result", tool, exc_info=True)
-        return {
-            "probe": {
-                "tool": tool,
-                "source_id": last.source.id,
-                "model_id": model_id,
-                "call": {
-                    "outcome": verdict,
-                    # Why a call that never completed failed, as the Source test shows it.
-                    "error": (
-                        self._test_call_failure(last.outcome)
-                        if verdict != "unsupported" and not isinstance(terminal, Done)
-                        else None
-                    ),
-                },
-                # The replay probe sends the call's native payload back, which
-                # Vibey's adapters do not do yet.
-                "replay": None,
-            },
-            **await asyncio.to_thread(self.hosted_tools_status),
-        }
+                # Evidence is advisory state: the status read the probe returns shows what was kept.
+                logger.warning("Model Hub could not record the %s probe result", feature.name, exc_info=True)
+                return None
+        return digest
 
     def _probe_output_budget(self, config: ModelHubConfig, source_id: str, model_id: str) -> int:
         """The smallest output any Vibey turn on this hop would ask for, at most the probe's own ceiling.
@@ -9537,6 +9735,12 @@ class ModelHubService:
                     # Hosted content is admitted on this final snapshot, so evidence
                     # or a Source that changed while the engine was prepared counts.
                     if hosted and not self._admits_hosted(hosted, source, model_id):
+                        raise _pin_unavailable()
+                    # Native content stays on one identity of the Source per turn. The
+                    # claim is made here, under the exclusion this call is admitted in,
+                    # so no concurrent request or config change slips between them.
+                    claim = getattr(request, "pin_identity_claim", None)
+                    if hosted and (claim is None or not claim(identity_digest(source), bool(hosted.in_flight))):
                         raise _pin_unavailable()
                 if self._engine_synced:
                     if recovery_request is not None and recovery_request.expired:

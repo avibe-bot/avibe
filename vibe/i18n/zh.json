@@ -311,6 +311,7 @@
       "type": {
         "access": "访问请求",
         "sign": "签名请求",
+        "delete": "删除请求",
         "provision": "需要你填写一个密钥"
       },
       "secretSet": "所选密钥",

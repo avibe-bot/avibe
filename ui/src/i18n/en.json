@@ -973,6 +973,7 @@
         },
         "tab": {
           "hub": "Sources & gateway",
+          "tools": "Tools",
           "quota": "Subscription quota",
           "usage": "Usage",
           "logs": "Logs"
@@ -2344,6 +2345,214 @@
         "refreshed": "Updated",
         "unresolved": "Still not working",
         "failed": "Couldn't do that, please retry"
+      },
+      "tools": {
+        "title": "Hosted tools",
+        "subtitle": "Vendor-hosted tools Vibey can call in a conversation. They are off by default: a call may cost money, and its content goes to the vendor that runs the tool.",
+        "reverify": {
+          "engineUpgraded_one": "Engine upgraded · {{count}} needs a new check",
+          "engineUpgraded_other": "Engine upgraded · {{count}} need a new check",
+          "aged_one": "{{count}} check is over 30 days old",
+          "aged_other": "{{count}} checks are over 30 days old",
+          "both": "<upgraded>{{engineUpgraded}}</upgraded> · {{aged}}",
+          "upgradedOnly": "<upgraded>{{engineUpgraded}}</upgraded>",
+          "agedOnly": "{{aged}}"
+        },
+        "tool": {
+          "web_search": {
+            "name": "Web search",
+            "inline": "web search",
+            "description": "Searches the web and cites its sources in the answer."
+          },
+          "x_search": {
+            "name": "X search",
+            "inline": "X search",
+            "description": "Searches posts on X, with operators such as from: and within_time:."
+          },
+          "image_generation": {
+            "name": "Image generation",
+            "inline": "image generation",
+            "description": "Generates images, shown in the answer and saved as files."
+          }
+        },
+        "state": {
+          "on": "On",
+          "off": "Off",
+          "needsCheck": "Off · check a Source first",
+          "needsExecutor": "Off · choose an executor first"
+        },
+        "toggle": {
+          "turnOn": "Turn on {{name}}",
+          "turnOff": "Turn off {{name}}"
+        },
+        "col": {
+          "source": "Source · model",
+          "native": "Runs natively",
+          "cost": "Cost per call"
+        },
+        "chip": {
+          "unsupportedAged": "Not supported as of {{date}} · check again",
+          "native": "Native · verified {{date}}",
+          "reverify": "Verified {{date}} · check again",
+          "engineUpgraded": "Engine upgraded · check again",
+          "unsupported": "Not supported on this Source",
+          "unchecked": "Not checked",
+          "executor": "Proxy executor"
+        },
+        "cost": {
+          "included": "Included in subscription",
+          "includedNote": "No extra charge",
+          "imageTokens": "Billed per image token · no per-image price yet",
+          "list": "≈ {{price}}",
+          "perUnit": "${{usd}} / {{unit}}",
+          "unit": {
+            "call": "call",
+            "search": "search",
+            "post": "post",
+            "profile": "profile"
+          },
+          "listNote": "At API price",
+          "listNoteExtras": "At API price · {{extras}}",
+          "extra": "+ {{price}}",
+          "extraSeparator": " · ",
+          "unknown": "No list price"
+        },
+        "empty": "None of your Sources can run {{toolInline}} natively. Add a Source that offers it, then check it here.",
+        "noNative": "Models on {{sources}} have no native {{toolInline}}.",
+        "executor": {
+          "label": "Proxy executor",
+          "pick": "Proxy executor for {{name}}",
+          "automatic": "Automatic: first verified in Vibey's order",
+          "unavailable": "Available after a check",
+          "option": "{{source}} · {{model}}",
+          "notVerified": "{{source}} · {{model}} (not verified)",
+          "note": {
+            "off": "Applies when the tool is on.",
+            "bound": "Verified models run it natively. Other models use {{source}}, and those calls are billed to it.",
+            "unbound": "No Source is verified, so calls to it fail until you check one."
+          },
+          "automaticBound": "Automatic ({{source}} · {{model}})"
+        },
+        "footnote": "Costs are estimates per call. API keys are valued at the vendor's list price, and a relay may bill differently. Subscriptions add no charge. A Claude subscription can't run hosted tools.",
+        "saveFailed": "Couldn't save the {{toolInline}} setting. Please retry.",
+        "probe": {
+          "check": "Check",
+          "checkCost": "Check · {{cost}}",
+          "recheckCost": "Check again · {{cost}}",
+          "retryCost": "Retry · {{cost}}",
+          "recheck": "Check again",
+          "retry": "Retry",
+          "running": "Checking…",
+          "about": "about ${{usd}}",
+          "included": "included in subscription",
+          "unknown": "cost unknown",
+          "notRecorded": "the result couldn't be recorded",
+          "plusIncluded_one": "+ {{count}} included",
+          "plusIncluded_other": "+ {{count}} included",
+          "plusUnpriced_one": "+ {{count}} without a price",
+          "plusUnpriced_other": "+ {{count}} without a price",
+          "replay": {
+            "unverified": "Replay not verified · try again",
+            "unsupported": "Replay not supported on this Source"
+          },
+          "outcome": {
+            "inconclusive": "Not verified · the model didn't use the tool; try again",
+            "transient": "Couldn't verify · try again",
+            "transientReason": "Couldn't verify · {{reason}}"
+          }
+        },
+        "header": {
+          "pending_one": "{{count}} pair to check",
+          "pending_other": "{{count}} pairs to check",
+          "total": "{{cost}} in total",
+          "totalIncluded": "included in subscriptions",
+          "totalUnknown": "cost unknown",
+          "summary": "{{pending}} · {{cost}}",
+          "none": "Everything is checked",
+          "action": "Check available tools"
+        },
+        "dialog": {
+          "title": "Check available tools",
+          "subtitle": "Hosted tools · Vibey",
+          "body_one": "This sends {{count}} real request to the Source below to confirm it can run the tool natively.",
+          "body_other": "This sends {{count}} real requests to the Sources below to confirm they can run these tools natively.",
+          "privacy": "Each request carries one fixed test query and none of your conversation. Checking turns no tool on and changes no route.",
+          "listTitle": "To check",
+          "pair": "<tool>{{tool}}</tool><muted>·</muted><source>{{source}}</source><model>{{model}}</model>",
+          "total": "Total",
+          "totalNote": "Estimated at API price; a relay may bill differently",
+          "cancel": "Cancel",
+          "start": "Start check",
+          "startCost": "Start check · {{cost}}",
+          "running_one": "Checking {{done}} of {{count}}…",
+          "running_other": "Checking {{done}} of {{count}}…"
+        },
+        "result": {
+          "title": "Check finished",
+          "verified_one": "{{count}} runs natively",
+          "verified_other": "{{count}} run natively",
+          "unsupported_one": "{{count}} not supported",
+          "unsupported_other": "{{count}} not supported",
+          "unverified_one": "{{count}} not verified",
+          "unverified_other": "{{count}} not verified",
+          "outcome": {
+            "verified": "Runs natively",
+            "unsupported": "Not supported",
+            "unverified": "Not verified"
+          },
+          "reason": {
+            "inconclusive": "The model didn't use the tool. Try again; this is not recorded as unsupported.",
+            "transient": "Couldn't verify this time. Try again; this is not recorded as unsupported.",
+            "transientReason": "Couldn't verify this time ({{reason}}). Try again; this is not recorded as unsupported."
+          },
+          "note": "Verified models call the tool natively; other models use the proxy executor. Tools stay off until you turn them on.",
+          "retry_one": "Retry {{count}}",
+          "retry_other": "Retry {{count}}",
+          "retryCost_one": "Retry {{count}} · {{cost}}",
+          "retryCost_other": "Retry {{count}} · {{cost}}",
+          "done": "Done"
+        }
+      },
+      "capability": {
+        "readFailed": "Couldn't read this Source's tool capabilities.",
+        "col": "Capabilities",
+        "chip": {
+          "unsupportedAged": "{{tool}} · not supported as of {{date}} · check again",
+          "native": "{{tool}} · native · verified {{date}}",
+          "reverify": "{{tool}} · verified {{date}} · check again",
+          "engineUpgraded": "{{tool}} · engine upgraded · check again",
+          "unsupported": "{{tool}} · not supported on this Source",
+          "viaProxy": "{{tool}} · via proxy",
+          "viaProxyAged": "{{tool}} · via proxy · check again"
+        },
+        "explain": {
+          "unsupportedAged": "This Source refused {{toolInline}} in a check over 30 days old. Check again to see whether it supports it now.",
+          "native": "Verified: this model runs the vendor's own tool on this Source.",
+          "reverify": "This check is over 30 days old. The tool still runs natively; check again when convenient.",
+          "engineUpgraded": "The model engine was upgraded after this check, so it no longer counts as verified until it is checked again.",
+          "unsupported": "This Source refused {{toolInline}}, so it is never sent here.",
+          "viaProxy": "{{tool}} is on, but this Source can't run it natively, so calls go to the proxy executor.",
+          "viaProxyAged": "{{tool}} is on. This Source refused it in a check over 30 days old, so calls go to the proxy executor; check again to see whether it runs natively now."
+        },
+        "recorded": "Recorded",
+        "recordedValue": "{{time}} · {{basis}}",
+        "basis": {
+          "probe": "a check",
+          "observed": "a real request"
+        },
+        "reason": "Reason",
+        "expiry": "Valid",
+        "expiryObserved": "until {{date}}, then the default applies",
+        "expiryProbe": "check again after {{date}}",
+        "recheck": "Check again",
+        "recheckCost": "Check again · {{cost}}",
+        "accessibleName": "{{label}}. {{explanation}}",
+        "accessibleNameFacts": "{{label}}. {{explanation}} {{facts}}",
+        "accessibleFact": "{{term}}: {{value}}.",
+        "effort": {
+          "unsupported": "{{effort}} · not supported on this Source",
+          "explain": "This Source refused this reasoning effort, so requests at it skip this Source."
+        }
       }
     }
   },
@@ -4671,6 +4880,9 @@
       "vaultDenied": "Denied",
       "vaultFailed": "Failed",
       "vaultExpired": "Expired",
+      "vaultDeleteApproved": "Deletion approved — secret deleted",
+      "vaultDeleteDenied": "Deletion denied",
+      "vaultDeleteExpired": "Deletion request expired",
       "agentFallback": "agent"
     },
     "citation": {
@@ -4688,6 +4900,9 @@
       "agent": "Agent",
       "model": "Model",
       "effort": "Effort",
+      "effortNotOn": "Not on {{sources}}",
+      "effortNotOnSome": "Not on some Sources",
+      "effortRefused": "No Source accepts it now",
       "newAgent": "New agent",
       "addModel": "Add model",
       "noModels": "No models found",
@@ -5191,6 +5406,7 @@
       "waitingForValue": "Waiting for value",
       "access": "Use secret",
       "sign": "Sign",
+      "delete": "Delete request",
       "provision": "Provide secret",
       "approved": "Access approved",
       "signed": "Signed",
@@ -5201,7 +5417,14 @@
       "accessSubtitle": "You decide whether the agent may use it. Its value is never shown to the AI or the chat.",
       "signTitle": "Agent wants to sign",
       "signSubtitle": "Each signature needs your approval — it can't be pre-approved.",
+      "deleteTitle": "Agent wants to delete a secret",
+      "deleteSubtitle": "Review the details before permanently deleting this secret.",
+      "deleteManagementHint": "Deleting needs instance management access. You can still deny this request.",
+      "deleteFields": "Deleting removes all fields: {{fields}}",
       "secret": "Secret",
+      "description": "Description",
+      "reason": "Reason",
+      "tags": "Tags",
       "key": "Key",
       "session": "Session",
       "command": "Command",

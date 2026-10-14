@@ -33,6 +33,14 @@ afterEach(() => {
 });
 
 describe('usePendingVaultRequests', () => {
+  it('keeps delete requests for the desktop mini Vaults deep link', async () => {
+    getVaultRequests.mockResolvedValue({ requests: [{ ...request, id: 'vr_delete', request_type: 'delete' }] });
+
+    const { result, unmount } = renderHook(() => usePendingVaultRequests('ses_1'));
+    await waitFor(() => expect(result.current.requests.map((item) => item.id)).toEqual(['vr_delete']));
+    unmount();
+  });
+
   it('drops rows read under the old authorization and reads them again', async () => {
     let answerReread: (value: { requests: unknown[] }) => void = () => undefined;
     getVaultRequests.mockResolvedValue({ requests: [request] });

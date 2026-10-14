@@ -14,7 +14,7 @@ from vibe.i18n import t as i18n_t
 
 logger = logging.getLogger(__name__)
 
-REQUEST_TYPES = {"access", "sign", "provision"}
+REQUEST_TYPES = {"access", "sign", "provision", "delete"}
 MAX_SECRET_NAMES = 3
 
 

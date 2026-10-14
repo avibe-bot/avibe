@@ -84,10 +84,13 @@ verified for X search.
   provider). Vibey's adapter runs unchanged, and Model Hub serves every request it sends with its own invocation
   of exactly that Source, never the turn gateway, so there is no route and no failover. A resend the adapter makes
   for a field the endpoint refused before answering (Anthropic's one-hour cache lifetime) is one more such call;
-  a probe sends at most two, and only one runs the model. A result is recognized only as the hosted call a real
-  turn would keep. Normal turns never receive a probe resolution.
-- **The `call` probe.** The fixed message is "search the web for 'Avibe local-first agent OS' and reply with the
-  first result's URL" (X search: "search X for posts about …, and reply with the first post's URL").
+  each probe step (call, then replay) sends at most two requests and runs the model once. A result is recognized only
+  as the hosted call a real turn would keep. Normal turns never receive a probe resolution.
+- **The `call` probe.** The fixed message is "search the web for a news article published today about technology and
+  reply with its URL" (X search: "search X for posts about 'Avibe local-first agent OS' and reply with the first
+  post's URL"). The web search asks for fresh articles because the replay probe asks about the other results: a
+  fixed topic's other results (its site's other pages) can be inferred from the first, while a page published after
+  the model was trained cannot, and a post's URL carries its id.
   - **`verified`:** the response completes and carries the provider's own result item for that tool (§4.2).
   - **`unsupported`:** only an HTTP 400 that names the tool type (observed: `Unsupported tool type: x_search`).
   - **Inconclusive, not evidence:** a completed response without that item. The model may simply not have used the
@@ -96,23 +99,35 @@ verified for X search.
       paths are never native anyway (§3.5).
   - **Not evidence:** a transient failure (overload, 5xx, timeout). The UI reports "couldn't verify, try again"
     (observed: every OpenAI-relay web search ended with an in-stream "servers overloaded").
-- **Delivery order.** The `call` probe for `web_search` and `x_search` ships first
-  (`POST /api/models/hosted-tools/<tool>/probe`). The `replay` probe follows Vibey's verbatim native replay, and the
-  `image_generation` call probe follows Vibey's parsing of image results. Until then a probe reports `replay: null`
-  and the API refuses an image probe, because no response could show its result.
+- **One action, both aspects.** `POST /api/models/hosted-tools/<tool>/probe` runs the `call` probe. When it
+  verifies and is recorded, and the tool has a `replay` aspect on a protocol that replays natively, the `replay`
+  probe follows at once, on the call's own turn. The `image_generation` call probe reads the image through Vibey's own
+  parsing, which keeps it only when it is an image; the probe keeps no file. The Tools tab's estimate covers both
+  requests.
 - **The `replay` probe.** A second production request with the native declaration still present. Its history is
-  the call probe's turn, with the native payload verbatim, followed by "give the URL of the second result you found,
-  without searching again".
-  - **`verified`:** the answer contains a URL from the first response's results, and the response makes no new
-    call to the tool.
+  the call probe's turn, with the native payload verbatim and without the answer's reasoning (which may restate the
+  results, readably or encrypted), followed by "list the URLs of the other results you
+  found, without using any tool again", under instructions that ask for an answer from those results without a
+  tool (the call's would ask for the tool). Nothing is forced.
+  - **`verified`:** the answer names a result URL the call returned that its visible answer does not show (only the
+    replayed payload holds it), and the response makes no new call to the tool.
   - **`unsupported`:** a 400 that names the replayed hosted content (observed on the Anthropic relay, 3 of 3:
-    `Invalid encrypted_content in search_result block`), or an answer that does not use the earlier results (a new
-    tool call, or no URL from them). Transport acceptance alone is never verification. xAI accepted verbatim
-    replay, 3 of 3.
+    `Invalid encrypted_content in search_result block`), or a new call to the tool (§12 item 23). Transport
+    acceptance alone is never verification. xAI accepted verbatim replay, 3 of 3.
+  - **Inconclusive:** an answer naming no such URL, or a refusal, and any request that did not carry the native
+    payload verbatim. With no hidden URL to ask about, no replay runs.
+  - **Matching:** a result's URL is matched exactly but for the equivalences RFC 3986 allows (the case of its scheme
+    and host, an empty path as `/`); only where prose ends a written URL is read both ways.
+  - **Known by design:** a result that is a section or home page can still be guessed by a model whose payload was
+    dropped. The fresh-article query makes such results rare, and a re-probe replaces a wrong record.
+  - **Within the UI's wait:** the whole probe answers inside the UI's RPC timeout. Each call's deadline is the
+    tool's (as for a turn's proxied call) or what the probe has left, whichever is shorter. A replay with under a
+    minute left is not sent and reads as transient: try again.
 - **Cost and when probes run.** A probe pair costs about $0.02–0.15 (spike: xAI $0.01–0.11 per call, Anthropic $0.01
   per search plus tokens). The Tools tab shows the estimate before running.
-- **What changes probe results** (capability model §3.3). A Source identity change drops them. An engine upgrade or
-  a probe-shape change makes them **current-wire stale**: they no longer describe the request being sent, so for
+- **What changes probe results** (capability model §3.3). A Source identity change drops them. A change of the engine
+  manifest's `hosted_wire` (an engine upgrade whose hosted passthrough is not byte-identical) or a probe-shape change
+  makes them **current-wire stale**: they no longer describe the request being sent, so for
   routing they count as unknown (proxy and synthetic replay) until the user re-verifies. Age alone (30 days) only
   marks them for re-verification and keeps routing.
 - **Failures in real use demote evidence** through the narrow rules in capability model §3.2.
@@ -827,9 +842,11 @@ encoded either as a schema clause or as a producer test. The PR names which for 
     unverified, so it keeps no payload or signature of any response.
 22. The `generate` action records the output's resolved `quality` and `size`; pricing uses those output values, not
     the declaration's.
-23. The replay probe asks for a URL the call probe actually returned (such as the first). An answer with no earlier
-    URL, or a refusal, is inconclusive; `unsupported` comes only from a 400 naming the replayed content or a new call
-    to the tool.
+23. The replay probe asks for a result URL the call returned that its visible answer does not show, since only the
+    replayed native payload holds it. With no such URL (a single result, or results that stay encrypted, such as
+    xAI's X search) no replay runs and replay evidence stays unknown, so turns replay synthetically. An answer without
+    such a URL, or a refusal, is inconclusive; `unsupported` comes only from a 400 naming the replayed content or a new
+    call to the tool.
 24. For OpenAI and xAI executors, each source's `snippet` is the answer text its `url_citation` span covers, extended
     to the enclosing sentence; the executor instruction asks for one or two cited sentences per result so the spans
     align. A source without a span has no snippet; Anthropic keeps `cited_text`. Tested against a recorded executor

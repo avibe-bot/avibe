@@ -6077,6 +6077,25 @@ def vault_request_deny_post(request_id):
         return _vault_error_response(exc)
 
 
+@app.post("/api/vault/requests/{request_id}/approve-delete", include_in_schema=False)
+async def vault_request_approve_delete_post(request_id: str, starlette_request: FastAPIRequest):
+    async def handler():
+        from vibe import api
+
+        try:
+            return jsonify(
+                await asyncio.to_thread(
+                    api.approve_vault_delete_request,
+                    request_id,
+                    user_context=getattr(g, "authorization_context", None),
+                )
+            )
+        except ValueError as exc:
+            return _vault_error_response(exc)
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
+
+
 @app.route("/api/vault/requests/<request_id>/fulfill-access", methods=["POST"])
 def vault_request_fulfill_access_post(request_id):
     from vibe import api

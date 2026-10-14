@@ -55,6 +55,9 @@ capabilities:
       - tests/test_model_hub_capability_evidence.py
       - tests/test_provider_overlay.py
       - tests/test_hosted_activity.py
+      - ui/src/lib/backendModels.test.ts
+      - ui/src/components/workbench/AgentRoutePicker.test.tsx
+      - ui/src/components/workbench/AgentsPage.test.tsx
       - tests/agent_core/ai/test_hosted_requests.py
       - tests/agent_core/ai/test_hosted_parsing.py
       - tests/agent_core/ai/test_hosted_transform.py
@@ -115,6 +118,10 @@ capabilities:
       - ui/src/components/settings/models/BackendModelCatalogDialog.test.tsx
       - ui/src/components/settings/models/AgentCard.test.tsx
       - ui/src/components/workbench/HostedToolRow.test.tsx
+      - ui/src/components/settings/models/ToolsTab.test.tsx
+      - ui/src/components/settings/models/hostedTools.test.ts
+      - ui/src/components/settings/models/useHostedTools.test.tsx
+      - ui/src/components/settings/models/SourceDetailPanel.test.tsx
       - ui/src/components/settings/models/MigrationDialog.test.tsx
       - ui/src/components/settings/models/migrationScan.test.ts
       - ui/src/components/onboarding/providers/providerStage.test.ts

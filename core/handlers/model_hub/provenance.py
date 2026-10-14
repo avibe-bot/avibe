@@ -725,6 +725,9 @@ class TurnTrace:
     # Vibey: the hosted-tool executors the turn's first resolution bound, with
     # each executor Source's identity. Written once; settings apply next turn.
     hosted_executors: Optional[tuple[tuple[str, tuple[str, str, str] | None], ...]] = None
+    # Vibey: per Source, the identity digest the turn's native content is bound
+    # to, claimed by its first admitted pinned request. Each entry is written once.
+    pinned_identities: dict[str, str] = field(default_factory=dict)
 
     @property
     def pending_attempt(self) -> Optional[AttemptIdentity]:
@@ -1334,6 +1337,29 @@ class TurnCorrelationRegistry:
                     route=route,
                 )
         return token
+
+    def claim_pinned_identity(
+        self, turn_id: Optional[str], source_id: str, identity: str, continuation: bool,
+    ) -> bool:
+        """Whether a turn's native content may go to this Source under ``identity``; binds the first claim.
+
+        The turn's first claim for a Source binds its identity, and later ones
+        must match it. A continuation carries the native items of a response
+        already served, so it needs an identity already bound. A request without
+        a live turn has none to bind to.
+        """
+
+        with self._lock:
+            trace = self._traces.get(str(turn_id or "").strip())
+            if trace is None:
+                return False
+            bound = trace.pinned_identities.get(source_id)
+            if bound is None:
+                if continuation:
+                    return False
+                trace.pinned_identities[source_id] = identity
+                return True
+            return bound == identity
 
     def turn_hosted_executors(
         self, turn_id: Optional[str],
@@ -2676,7 +2702,7 @@ class TurnCorrelationRegistry:
 
             self.store.put(
                 {
-                    "contract_version": 12,
+                    "contract_version": 13,
                     "turn_id": normalized_turn_id,
                     "ts": ts or _utc_now_iso(),
                     "agent": trace.agent,

@@ -6,8 +6,11 @@ import clsx from 'clsx';
 
 import { useApi } from '../../context/ApiContext';
 import type { VibeAgentBrief } from '../../context/ApiContext';
-import { loadBackendModelsWithRefresh, modelOptionLabel, useAddModelExit } from '../../lib/backendModels';
-import { isEffortSupported, resolveEffortOptions } from '../../lib/effortOptions';
+import { useInstanceAuthorization } from '../../context/InstanceAuthorizationContext';
+import type { EffortMenu } from '../settings/models/types';
+import { loadBackendModelsWithRefresh, modelOptionLabel, supersedesHubAnswer, useAddModelExit } from '../../lib/backendModels';
+import { isEffortSupported, refusedSavedEffort, resolveEffortOptions } from '../../lib/effortOptions';
+import { useSourceNames } from '../../lib/useSourceNames';
 import { useRouteSurfaceActive } from '../../lib/routeSurfaceActivity';
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
 import { Button } from '../ui/button';
@@ -97,6 +100,7 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
 }) => {
   const { t } = useTranslation();
   const api = useApi();
+  const authorization = useInstanceAuthorization();
   const navigate = useNavigate();
   const [open, setOpen] = useState(false);
   const [modelsByBackend, setModelsByBackend] = useState<Record<string, string[]>>({});
@@ -104,7 +108,16 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
   const [reasoningByBackend, setReasoningByBackend] = useState<
     Record<string, Record<string, ReasoningOption[]>>
   >({});
+  // Per backend, per model: what routing would do with its efforts now (Model
+  // Hub's `effort_menu`), for the column's "not on: <Source>" hints and a saved
+  // effort it refuses everywhere.
+  const [effortMenusByBackend, setEffortMenusByBackend] = useState<
+    Record<string, Record<string, EffortMenu>>
+  >({});
   const loadedModelBackendsRef = useRef<Set<string>>(new Set());
+  // Backends whose catalog Model Hub answered: their effort menus are read on
+  // every open, even after one open fell back to the native list.
+  const hubBackendsRef = useRef<Set<string>>(new Set());
   const surfaceActive = useRouteSurfaceActive();
   const [loadingModels, setLoadingModels] = useState(false);
   // Free-text filter for the model column — long backends (OpenCode) list dozens.
@@ -199,9 +212,11 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
   useEffect(() => {
     if (surfaceActive) return;
     loadedModelBackendsRef.current.clear();
+    hubBackendsRef.current.clear();
     setModelsByBackend({});
     setModelLabelsByBackend({});
     setReasoningByBackend({});
+    setEffortMenusByBackend({});
   }, [surfaceActive]);
 
   const grouped = useMemo(() => {
@@ -214,7 +229,10 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
 
   // Fetch the active backend's model list the first time the menu opens for it;
   // cached per backend so toggling agents doesn't refetch. A menu left open
-  // under Settings reads again as it is uncovered.
+  // under Settings reads again as it is uncovered. A Hub catalog is read again on
+  // every open: its effort menu follows capability evidence, which any turn can
+  // change, and the read is the persisted catalog, which starts no CLI. The last
+  // answer shows until the new one lands.
   useEffect(() => {
     const loadedBackends = loadedModelBackendsRef.current;
     if (!open || !surfaceActive || !backend || loadedBackends.has(backend)) return;
@@ -224,12 +242,21 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
     const cancel = loadBackendModelsWithRefresh(
       api,
       backend,
-      ({ models, modelLabels, reasoningOptions, catalogRefreshPending }) => {
-        reloadOnNextOpen = Boolean(catalogRefreshPending);
+      (result) => {
+        const { models, modelLabels, reasoningOptions, effortMenus, catalogRefreshPending } = result;
+        const knownHub = hubBackendsRef.current.has(backend);
+        // A Hub answer marks the backend as Hub, a confirmed Direct one unmarks it
+        // (back to the per-mount Direct cache); an unread Hub changes neither.
+        if (effortMenus !== undefined) hubBackendsRef.current.add(backend);
+        else if (!result.hubUnread) hubBackendsRef.current.delete(backend);
+        reloadOnNextOpen = Boolean(catalogRefreshPending) || hubBackendsRef.current.has(backend);
+        setLoadingModels(false);
+        // A transient Hub failure answers with the native list: the last Hub answer stands.
+        if (!supersedesHubAnswer(result, knownHub)) return;
         setReasoningByBackend((prev) => ({ ...prev, [backend]: reasoningOptions ?? {} }));
+        setEffortMenusByBackend((prev) => ({ ...prev, [backend]: effortMenus ?? {} }));
         setModelsByBackend((prev) => ({ ...prev, [backend]: models }));
         setModelLabelsByBackend((prev) => ({ ...prev, [backend]: modelLabels ?? {} }));
-        setLoadingModels(false);
       },
       () => {
         loadedBackends.delete(backend);
@@ -274,6 +301,28 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
     () => (catalogAnswered ? resolveEffortOptions(backend, currentModel, backendReasoning) : []),
     [catalogAnswered, backend, currentModel, backendReasoning],
   );
+  const effortMenus = effortMenusByBackend[backend];
+  const effortNotOn = (currentModel && effortMenus?.[currentModel]?.not_on) || null;
+  // Routing now refuses the saved effort on every hop: it is out of the menu, but
+  // the route still sends it, so it shows as itself and says so.
+  const refusedEffort = catalogAnswered ? refusedSavedEffort(currentEffort, currentModel, effortMenus) : null;
+  // The layout and the column read one answer, so a refused-only column keeps its place.
+  const showEffortColumn = effortOptions.length > 0 || refusedEffort !== null;
+  // Names only when an effort needs one; a role that cannot read Sources gets the
+  // hint without them.
+  const sourceNames = useSourceNames(
+    open && effortNotOn !== null && Object.keys(effortNotOn).length > 0,
+    surfaceActive,
+    authorization.instanceRole ?? 'none',
+  );
+  const notOnLabel = (effort: string): string | null => {
+    // Efforts are free-form strings: only the map's own entry for this one counts,
+    // never one inherited from Object.prototype (an effort named "constructor").
+    const ids = effortNotOn && Object.prototype.hasOwnProperty.call(effortNotOn, effort) ? effortNotOn[effort] : null;
+    if (!Array.isArray(ids) || ids.length === 0) return null;
+    if (!sourceNames) return t('chat.picker.effortNotOnSome');
+    return t('chat.picker.effortNotOn', { sources: ids.map((id) => sourceNames[id] ?? id).join(', ') });
+  };
 
   return (
     <Popover open={open} onOpenChange={setOpen} modal={modal}>
@@ -343,7 +392,7 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
         <div
           className={clsx(
             'grid grid-cols-1 divide-y divide-border sm:divide-x sm:divide-y-0',
-            effortOptions.length > 0 ? 'sm:grid-cols-[1fr_1.35fr_0.7fr]' : 'sm:grid-cols-[1fr_1.35fr]',
+            showEffortColumn ? 'sm:grid-cols-[1fr_1.35fr_0.7fr]' : 'sm:grid-cols-[1fr_1.35fr]',
           )}
         >
           {/* Column 1 — Agent */}
@@ -447,8 +496,9 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
                     const patch: AgentRoutePatch = { model };
                     // Switching to a model whose effort set no longer includes
                     // the current effort: clear it in the same patch so the displayed
-                    // route matches what dispatches.
-                    if (!isEffortSupported(backend, model, currentEffort, backendReasoning)) {
+                    // route matches what dispatches. Choosing the current model
+                    // again changes nothing, a refused saved effort included.
+                    if (model !== currentModel && !isEffortSupported(backend, model, currentEffort, backendReasoning)) {
                       patch.reasoning_effort = null;
                     }
                     applyPatch(patch);
@@ -479,19 +529,31 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
           </RouteColumn>
 
           {/* Column 3 — Effort (uses per-model catalog entries when available) */}
-          {effortOptions.length > 0 && (
+          {showEffortColumn && (
             <RouteColumn title={t('chat.picker.effort')}>
-              {effortOptions.map((opt) => (
-                <RouteItem
-                  key={opt}
-                  active={opt === currentEffort}
-                  onClick={() => applyPatch({ reasoning_effort: opt })}
-                >
-                  <span className="flex-1 capitalize">
-                    {t(`chat.picker.effortOptions.${opt}`, { defaultValue: opt })}
+              {refusedEffort && (
+                <RouteItem active onClick={() => setOpen(false)}>
+                  <span className="flex min-w-0 flex-1 flex-col">
+                    <span className="capitalize">{t(`chat.picker.effortOptions.${refusedEffort}`, { defaultValue: refusedEffort })}</span>
+                    <span className="text-[10px] leading-snug text-gold-ink">{t('chat.picker.effortRefused')}</span>
                   </span>
                 </RouteItem>
-              ))}
+              )}
+              {effortOptions.map((opt) => {
+                const notOn = notOnLabel(opt);
+                return (
+                  <RouteItem
+                    key={opt}
+                    active={opt === currentEffort}
+                    onClick={() => applyPatch({ reasoning_effort: opt })}
+                  >
+                    <span className="flex min-w-0 flex-1 flex-col">
+                      <span className="capitalize">{t(`chat.picker.effortOptions.${opt}`, { defaultValue: opt })}</span>
+                      {notOn && <span className="text-[10px] leading-snug text-muted">{notOn}</span>}
+                    </span>
+                  </RouteItem>
+                );
+              })}
             </RouteColumn>
           )}
         </div>

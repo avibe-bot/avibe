@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import type { VaultRequest, WorkbenchMessage } from '@/context/ApiContext';
 import {
   isVaultApprovalRequest,
+  vaultApprovalNeedsPasskey,
   placeVaultProvisionRequests,
   vaultRequestType,
 } from './vaultRequestPlacement';
@@ -80,6 +81,9 @@ describe('vaultRequestType', () => {
     expect(vaultRequestType(request('p', 'provision', '2026-07-30T10:00:00Z'))).toBe('provision');
     expect(isVaultApprovalRequest(request('a', 'access', '2026-07-30T10:00:00Z'))).toBe(true);
     expect(isVaultApprovalRequest(request('s', 'sign', '2026-07-30T10:00:00Z'))).toBe(true);
+    expect(vaultRequestType(request('d', 'delete', '2026-07-30T10:00:00Z'))).toBe('delete');
+    expect(isVaultApprovalRequest(request('d', 'delete', '2026-07-30T10:00:00Z'))).toBe(true);
+    expect(vaultApprovalNeedsPasskey({ ...request('d', 'delete', '2026-07-30T10:00:00Z'), card: { request_type: 'delete', protection: 'protected' } })).toBe(false);
     expect(isVaultApprovalRequest(request('p', 'provision', '2026-07-30T10:00:00Z'))).toBe(false);
   });
 });

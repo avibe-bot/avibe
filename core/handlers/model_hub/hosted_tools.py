@@ -59,20 +59,25 @@ def _manifest_engine_stamp(path: Optional[str]) -> str:
     else:
         resource = resources.files("vibe").joinpath("model_hub_runtime/cliproxyapi_manifest.json")
         payload = json.loads(resource.read_text(encoding="utf-8"))
-    stamp = payload.get("asset_release_tag") or payload.get("release_tag") or payload.get("version")
-    if not isinstance(stamp, str) or not stamp:
-        raise ValueError("the engine manifest names no release")
-    return stamp
+    for key in ("hosted_wire", "asset_release_tag", "release_tag", "version"):
+        stamp = payload.get(key)
+        if isinstance(stamp, str) and stamp:
+            return stamp
+    raise ValueError("the engine manifest names no release")
 
 
 def engine_stamp() -> str:
-    """The engine release evidence is stamped with: the shipped manifest's asset release.
+    """The engine wire evidence is stamped with: the shipped manifest's ``hosted_wire``, else its asset release.
 
-    Engine upgrades ship as manifest changes, and a patched rebuild of the same
-    upstream version gets a new asset release, so this is what a wire change
-    looks like from here. Read once, when Model Hub's service is built; a
-    manifest that cannot be read is the fixed unknown engine, whose evidence
-    never matches a real release and never raises on a request.
+    ``hosted_wire`` names the oldest engine release whose hosted passthrough is
+    byte-identical to this one; the engine release gate carries it forward
+    across such upgrades and sets it to the new asset release otherwise, so a
+    byte-identical upgrade keeps evidence current and anything else makes it
+    stale. A manifest without it is stamped with its asset release (a patched
+    rebuild of the same upstream version gets a new one), which is the value
+    the gate first carries forward. Read once, when Model Hub's service is
+    built; a manifest that cannot be read is the fixed unknown engine, whose
+    evidence never matches a real release and never raises on a request.
     """
 
     try:

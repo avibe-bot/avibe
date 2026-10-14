@@ -1,7 +1,7 @@
 import React, { createContext, useContext, useEffect, useMemo, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useToast } from './ToastContext';
-import type { AgentSupply } from '../components/settings/models/types';
+import type { PickerAgentCatalog } from '../components/settings/models/types';
 import type { AgentBackendId, NativeCliBackend, WebOAuthBackend } from '../lib/agentBackends';
 import { apiFetch, recoverRemoteAuthFromSessionProbe, withApiDeadline } from '../lib/apiFetch';
 import { isAuthorizationSensitiveReadPath } from '../lib/authorizationCache';
@@ -697,7 +697,7 @@ export type ApiContextType = {
   /** Picker-safe persisted catalog. Null tells pickers to use the native fallback. */
   readModelHubAgentCatalogForModelPicker: (
     backend: string,
-  ) => Promise<Pick<AgentSupply, 'backend' | 'mode' | 'catalog_models'> | null>;
+  ) => Promise<PickerAgentCatalog | null>;
   getLogs: (lines?: number, source?: string) => Promise<{ logs: LogEntry[]; total: number; source: string; sources: LogSource[] }>;
   getVersion: () => Promise<VersionInfo>;
   doUpgrade: () => Promise<UpgradeResult>;
@@ -865,6 +865,7 @@ export type ApiContextType = {
   getVaultProvisionRequestById: (requestId: string, opts?: { handleError?: boolean }) => Promise<{ ok: boolean; request: VaultRequest | null }>;
   getVaultRequests: (params?: { status?: string; type?: string; limit?: number; session?: string }, opts?: { handleError?: boolean }) => Promise<{ ok: boolean; requests: VaultRequest[] }>;
   denyVaultRequest: (requestId: string) => Promise<{ ok: boolean; request?: VaultRequest; code?: string; message?: string }>;
+  approveVaultDeleteRequest: (requestId: string) => Promise<{ ok: boolean; request?: VaultRequest; removed?: boolean; name?: string; code?: string; message?: string }>;
   fulfillVaultAccessRequest: (requestId: string, payload: VaultAccessFulfillmentPayload) => Promise<{ ok: boolean; request_id?: string; grant?: VaultGrant; result?: { type: string; grant?: VaultGrant }; code?: string; message?: string }>;
   getVaultGrants: (params?: { status?: string; sessionId?: string }, opts?: { handleError?: boolean }) => Promise<{ ok: boolean; grants: VaultGrant[] }>;
   createVaultGrant: (payload: Record<string, unknown>) => Promise<{ ok: boolean; grant: VaultGrant; code?: string; message?: string }>;
@@ -3679,7 +3680,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         .then((payload) => {
           const agent = payload?.ok === false ? null : payload?.agent;
           return agent && typeof agent === 'object'
-            ? (agent as Pick<AgentSupply, 'backend' | 'mode' | 'catalog_models'>)
+            ? (agent as PickerAgentCatalog)
             : null;
         })
         .catch(() => null),
@@ -4063,6 +4064,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return getCachedJson(qs ? `/api/vault/requests?${qs}` : '/api/vault/requests', 1500, opts);
     },
     denyVaultRequest: (requestId) => postJson(`/api/vault/requests/${encodeURIComponent(requestId)}/deny`, {}),
+    approveVaultDeleteRequest: (requestId) => postJson(`/api/vault/requests/${encodeURIComponent(requestId)}/approve-delete`, {}),
     fulfillVaultAccessRequest: (requestId, payload) =>
       postJson(`/api/vault/requests/${encodeURIComponent(requestId)}/fulfill-access`, payload),
     getVaultGrants: (params, opts) => {

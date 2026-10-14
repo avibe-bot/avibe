@@ -216,6 +216,13 @@
   --model-hub-quota-row-gap: 14px;
   --model-hub-quota-nested-indent: 12px;
 
+  /* Tools tab: hosted tools (frames E5IkUQ, XZjhj). Reuses the usage tab's type scale. */
+  --model-hub-tools-gap: 16px;
+  --model-hub-tool-pad-x: 20px;
+  --model-hub-tool-row-pad-x: 14px;
+  --model-hub-tool-row-pad-y: 9px;
+  --model-hub-tool-columns: minmax(0, 1.5fr) minmax(0, 1.3fr) minmax(0, 1fr) auto;
+
   /* Backend model catalog dialog. `--model-hub-catalog-row-gap` is read from a
    * Tailwind arbitrary value in the dialog's markup, which has no selector of
    * its own to declare it on. */
@@ -1523,6 +1530,30 @@
   min-height: var(--model-hub-source-table-row-height);
   padding-block: var(--model-hub-source-table-padding-y);
 }
+/* Capability chips (frame FB4vC): their own column from md, a full-width line
+   under the model id below it. */
+@media (min-width: 768px) {
+  .model-hub-source-table--capabilities {
+    --model-hub-source-table-columns: minmax(0, 0.8fr) minmax(0, 1.7fr) auto;
+  }
+}
+@media (max-width: 767px) {
+  .model-hub-source-table--capabilities .model-hub-source-capabilities {
+    grid-column: 1 / -1;
+    order: 3;
+  }
+}
+.model-hub-capability-detail { font-size: var(--model-hub-usage-cell-size); line-height: 18px; }
+.model-hub-source-capabilities-failure { font-size: var(--model-hub-source-tier-size); }
+.model-hub-capability-explain { color: var(--model-hub-usage-note-ink); }
+.model-hub-capability-facts {
+  grid-template-columns: auto minmax(0, 1fr);
+  padding: 8px 10px;
+  background: var(--model-hub-wash-05);
+  font-size: var(--model-hub-usage-note-size);
+}
+.model-hub-capability-facts dt { color: var(--model-hub-ink-73); }
+.model-hub-capability-facts dd { overflow-wrap: anywhere; }
 /* The draft spans the table width, with commands on their own trailing line. */
 .model-hub-source-table-draft {
   grid-template-columns: minmax(0, 1fr) auto;
@@ -2078,6 +2109,78 @@
   font-size: var(--model-hub-usage-cell-size);
 }
 .model-hub-usage-pending { font-size: var(--model-hub-usage-title-size); }
+
+/* Tools tab. */
+.model-hub-tools { gap: var(--model-hub-tools-gap); }
+.model-hub-tools-title { font-size: 15px; line-height: 21px; }
+.model-hub-tools-subtitle,
+.model-hub-tools-reverify,
+.model-hub-tools-foot {
+  color: var(--model-hub-usage-note-ink);
+  font-size: var(--model-hub-usage-cell-size);
+  line-height: 18px;
+}
+.model-hub-tools-foot { font-size: var(--model-hub-usage-note-size); line-height: 16px; }
+.model-hub-tool-card-head { padding: 14px var(--model-hub-tool-pad-x); }
+.model-hub-tool-name { font-size: 14px; line-height: 20px; }
+.model-hub-tool-description,
+.model-hub-tool-state { font-size: var(--model-hub-usage-cell-size); }
+.model-hub-tool-description { color: var(--model-hub-usage-note-ink); }
+.model-hub-tool-table { padding: 12px var(--model-hub-tool-row-pad-x) 14px; }
+.model-hub-tool-table-head,
+.model-hub-tool-row {
+  grid-template-columns: var(--model-hub-tool-columns);
+  column-gap: var(--model-hub-usage-gutter);
+  padding-inline: var(--model-hub-tool-row-pad-x);
+}
+.model-hub-tool-table-head {
+  color: var(--model-hub-ink-73);
+  font-size: var(--model-hub-usage-label-size);
+  line-height: 15px;
+}
+.model-hub-tool-row {
+  row-gap: 8px;
+  padding-block: var(--model-hub-tool-row-pad-y);
+  font-size: var(--model-hub-usage-cell-size);
+}
+/* Below md the row stacks: identity, then evidence, then cost. */
+@media (max-width: 767px) {
+  .model-hub-tool-row { grid-template-columns: minmax(0, 1fr); }
+}
+.model-hub-tool-cost-note {
+  color: var(--model-hub-usage-note-ink);
+  font-size: var(--model-hub-usage-note-size);
+  line-height: 15px;
+}
+.model-hub-tool-note {
+  color: var(--model-hub-usage-note-ink);
+  font-size: var(--model-hub-usage-note-size);
+  line-height: 16px;
+}
+/* Check dialogs (frame vQPXo). */
+.model-hub-probe-head { padding: 16px 20px 12px; font-size: var(--model-hub-usage-cell-size); }
+.model-hub-probe-body { padding: 14px 20px; font-size: var(--model-hub-usage-cell-size); line-height: 18px; }
+.model-hub-probe-foot { padding: 12px 20px; }
+.model-hub-probe-row { padding: 9px 12px; font-size: var(--model-hub-usage-cell-size); }
+.model-hub-probe-privacy {
+  padding: 9px 12px;
+  background: var(--model-hub-mint-14);
+  color: var(--foreground);
+}
+.model-hub-probe-label {
+  color: var(--model-hub-ink-73);
+  font-size: var(--model-hub-usage-label-size);
+}
+.model-hub-probe-total { padding: 6px 12px 0; }
+.model-hub-probe-reason {
+  padding: 0 12px;
+  color: var(--model-hub-usage-note-ink);
+  font-size: var(--model-hub-usage-note-size);
+}
+.model-hub-tool-executor {
+  padding: 12px var(--model-hub-tool-pad-x);
+  font-size: var(--model-hub-usage-cell-size);
+}
 .model-hub-usage-empty {
   padding: 26px var(--model-hub-usage-padding-x);
   font-size: var(--model-hub-usage-cell-size);

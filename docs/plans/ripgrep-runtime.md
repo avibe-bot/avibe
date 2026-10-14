@@ -25,10 +25,21 @@ The prompt had stated a tool that did not exist.
   verified Git under its existing rules, then the managed ripgrep only when the
   effective PATH has no `rg`, so a user's own ripgrep keeps precedence, as for
   Git. An absent or unverifiable install leaves PATH unchanged.
-- Vibey's bash rule names `rg` only when the Turn's composed PATH finds it, and
-  `grep` otherwise. That PATH changes only when the service's PATH or the
-  installed tools change, so a Session's system prompt stays byte-stable and
-  cacheable between Turns. No per-Session state is kept.
+- Vibey's command guidance names `rg` only when the Turn's composed PATH finds
+  it. With a Bash or PowerShell tool available, one shared hint recommends
+  ripgrep for file searches and direct invocation of the `rg` command. Without
+  `rg`, the existing `grep` / `Select-String` guidance remains; without a command
+  tool, no search command is recommended.
+  This is a short recommendation, not a file-discovery tutorial: it introduces no
+  CLI option examples or claim to include hidden/ignored files. Existing file
+  discovery guidance remains unchanged. That PATH changes only when the service's
+  PATH or installed tools change, so the system prompt stays byte-stable between
+  Turns. No per-Session state is kept.
+
+The prompt contract is tested at both the rendered rule and real Turn/job-host
+boundaries: available and missing ripgrep, POSIX and Windows wording, no shell,
+and no duplicate hint with multiple command tools. Runtime installation, PATH
+precedence and dependency failure behavior are unchanged.
 
 ## Availability
 
