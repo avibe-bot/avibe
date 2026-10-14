@@ -188,6 +188,7 @@ scenarios:
     test: tests/test_model_hub_capability_evidence.py::test_evidence_resolves_for_routing
     related_tests:
       - tests/test_model_hub_capability_evidence.py::test_a_changed_source_identity_reads_as_unknown_and_is_pruned
+      - tests/test_model_hub_capability_evidence.py::test_hosted_evidence_is_stamped_with_the_engines_hosted_wire
       - tests/test_model_hub_capability_evidence.py::test_persisted_records_match_the_schema_and_unreadable_ones_are_unknown
   - id: MH-HOSTED-004
     name: The Tools API reads every tool's candidates and evidence and writes one toggle without touching other Model Hub state

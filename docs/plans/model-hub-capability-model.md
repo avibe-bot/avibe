@@ -68,7 +68,7 @@ is its JSON Schema. The store is `core/handlers/model_hub/capability_evidence.py
 | `status` | `verified` or `unsupported` |
 | `basis` | `probe` (a live probe the user started) or `observed` (learned from a real request's error) |
 | `observed_at` | UTC timestamp |
-| `engine` | engine release at that time (the shipped engine manifest's asset release); a change makes `probe` evidence stale (§3.3) |
+| `engine` | engine wire at that time: the shipped engine manifest's `hosted_wire` (the oldest release whose hosted passthrough is byte-identical, kept by the engine release gate), else its asset release; a change makes `probe` evidence stale (§3.3) |
 | `shape` | version of the request shape that produced the record; a change makes `probe` evidence stale |
 | `detail` | required when `basis` is `observed`: the HTTP status and upstream machine code, e.g. `400 invalid_value`, at most 64 characters, never upstream text |
 | `source_identity` | digest of `retry.source_identity` when the record was written |
@@ -116,7 +116,7 @@ and is pruned at the next write.
 - **The probe spec belongs to the feature.**
   - Hosted tools: [`vibey-hosted-tools.md`](vibey-hosted-tools.md) §3.2.
   - Efforts: one minimal request at that effort. Only the efforts a user actually selects are ever probed.
-- **Probe evidence becomes stale** on an engine upgrade, a probe-shape change, or when it is 30 days old.
+- **Probe evidence becomes stale** on an engine upgrade that changes `hosted_wire`, a probe-shape change, or when it is 30 days old. A byte-identical engine upgrade keeps `hosted_wire`, so it re-probes nothing.
   - **Current-wire staleness** (the record's `engine` or `shape` differs from the current one) matters for hosted
     tools. Their positive evidence is needed because a native failure can be silent (§3.4). Evidence taken on another
     wire cannot vouch for this one, and a silent drop would never trip a narrow rule. So stale hosted-tool `call` and
@@ -296,8 +296,8 @@ No new billing store, budget, or cap.
 2. Only a narrow rule creates negative evidence. The rule names the (Source, model, feature) it learned. A generic
    error creates none.
 3. No probe runs without a user action, and every probe action shows its cost before it runs.
-4. Changing a Source's identity drops its evidence. An engine upgrade marks probe evidence stale; it does not
-   delete it. Stale hosted-tool evidence from another engine or probe shape never authorizes native mode or native
+4. Changing a Source's identity drops its evidence. An engine upgrade that changes `hosted_wire` marks probe
+   evidence stale; it does not delete it. Stale hosted-tool evidence from another engine or probe shape never authorizes native mode or native
    replay.
 5. #2539: a Source that rejected `ultra` shows "ultra · not supported on this Source". The next request at `ultra`
    either skips that hop or fails before invocation with `effort_unsupported`, never a provider 400.
