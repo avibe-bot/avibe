@@ -17,6 +17,18 @@ export function vaultFieldFingerprint(secret: Pick<VaultSecret, 'default_field' 
   return JSON.stringify([vaultDefaultField(secret), vaultFieldNames(secret), secret.fields_state ?? null, secret.updated_at]);
 }
 
+type VaultFieldShape = Pick<VaultSecret, 'default_field' | 'fields' | 'fields_state'> &
+  Partial<Pick<VaultSecret, 'kind'>>;
+
+export function vaultHasNamedFieldShape(secret: VaultFieldShape): boolean {
+  if (secret.kind === 'keypair') return false;
+  const fields = vaultFieldNames(secret);
+  return secret.fields_state === 'corrupt'
+    || secret.default_field !== 'value'
+    || fields.length !== 1
+    || fields[0] !== 'value';
+}
+
 export function vaultRecordName(name: string, field: string, defaultField: string): string {
   return field === defaultField ? name : `${name}.${field}`;
 }

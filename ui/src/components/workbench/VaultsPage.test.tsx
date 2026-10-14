@@ -149,6 +149,19 @@ describe('VaultsPage remote audit history', () => {
     expect(await screen.findByText('alpha')).toBeTruthy();
   });
 
+  it('shows a single custom field label without offering a field selector', async () => {
+    api.listVaultSecrets.mockResolvedValue({
+      secrets: [{
+        name: 'LOGIN', default_field: 'password', fields: ['password'], kind: 'static', protection: 'standard',
+        signer_kind: null, source: 'user', tags: [], policy: {}, last_used_at: null, use_count: 0,
+        created_at: 'created', updated_at: 'version-1',
+      }],
+    });
+    renderPage();
+    expect(await screen.findByText(/password/)).toBeTruthy();
+    expect(screen.queryByRole('combobox')).toBeNull();
+  });
+
   it('shows Vault management controls to an Editor', async () => {
     renderPage(activeOrgMember);
 

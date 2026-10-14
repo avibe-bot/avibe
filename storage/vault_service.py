@@ -1282,7 +1282,7 @@ def _unique_grant_release_refs(rows: list[dict[str, Any]]) -> list[dict[str, str
 
 def _field_metadata(row: dict[str, Any]) -> dict[str, Any]:
     default_field = _default_field_name(row)
-    payload = {"name": str(row["name"]), "default_field": default_field, "fields": [default_field]}
+    payload = {"name": str(row["name"]), "kind": str(row.get("kind") or "static"), "default_field": default_field, "fields": [default_field]}
     try:
         payload["fields"].extend(item["name"] for item in _extra_field_rows(row, strict=True))
     except FieldsCorruptError:
@@ -1881,7 +1881,7 @@ def list_pending_request_callbacks(
         ).mappings().first()
         if secret is not None:
             current = _field_metadata(dict(secret))
-            if len(current["fields"]) > 1:
+            if has_named_field_shape(current):
                 row["provision_secret"] = current
     return rows
 

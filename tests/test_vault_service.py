@@ -421,7 +421,7 @@ def test_default_rename_is_metadata_only_and_collision_safe(vault, protection):
         assert hydrated["status"] == "pending"
         assert hydrated["card"]["grant_options"][0]["member_versions"] == pending_versions
         assert hydrated["card"]["grant_options"][0]["member_fields"] == [
-            {"name": "LOGIN", "default_field": "credential", "fields": ["credential", "username"]}
+            {"name": "LOGIN", "kind": "static", "default_field": "credential", "fields": ["credential", "username"]}
         ]
         # The persisted authorization snapshot is unchanged; only its UI projection is current.
         stored = conn.execute(select(vault_requests.c.delivery).where(vault_requests.c.id == pending["id"])).scalar_one()
@@ -774,6 +774,7 @@ def test_access_request_deduplicates_secret_members_and_exposes_field_metadata(v
         assert option["member_fields"] == [
             {
                 "name": "PROTECTED_LOGIN",
+                "kind": "static",
                 "default_field": "password",
                 "fields": ["password", "username"],
             }
@@ -839,7 +840,7 @@ def test_standard_ask_card_persists_fields_and_field_access_uses_secret_members(
         assert request["secret_name"] == "LOGIN"
         assert option["member_snapshot"] == ["LOGIN"]
         assert option["member_fields"] == [
-            {"name": "LOGIN", "default_field": "value", "fields": ["value", "username"]}
+            {"name": "LOGIN", "kind": "static", "default_field": "value", "fields": ["value", "username"]}
         ]
         assert "unlock_material" not in json.dumps(request)
 

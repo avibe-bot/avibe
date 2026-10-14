@@ -16,6 +16,7 @@ import { partitionTags } from '@/lib/vaultTags';
 import { useProtectedVault, useVaultSandboxWarm, type ProtectedUnlockMaterial } from '@/lib/useProtectedVault';
 import { openVaultsInBrowser, vaultPasskeyNeedsBrowser } from '@/lib/vaultBrowserHandoff';
 import { vaultApprovalNeedsPasskey } from '@/lib/vaultRequestPlacement';
+import { vaultHasNamedFieldShape } from '@/lib/vaultFields';
 import { usePreparedRequest } from '@/lib/usePreparedRequest';
 import { openVaultAuthorizationWindow } from '@/lib/vaultSandboxClient';
 import { SigningAddressList } from './signing-address-list';
@@ -466,7 +467,12 @@ export const VaultApprovalCard: React.FC<{
           const labels = metadata?.fields ?? materials
             .filter((material) => material.name === name || material.name.startsWith(`${name}.`))
             .map((material) => material.field ?? material.name.split('.')[1] ?? 'value');
-          if (labels.length < 2) return null;
+          const shape = metadata ?? {
+            kind: isKeypair ? 'keypair' : 'static',
+            default_field: labels[0] ?? 'value',
+            fields: labels,
+          };
+          if (isKeypair || !vaultHasNamedFieldShape(shape)) return null;
           return (
             <DetailRow key={name} label={name}>
               {labels.map((field) => (

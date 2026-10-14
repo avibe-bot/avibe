@@ -13,7 +13,7 @@ import { VaultLockIndicator } from '../ui/vault-lock-indicator';
 import { onPageReactivated } from '../../lib/pageActivity';
 import { cn } from '../../lib/utils';
 import { partitionTags } from '../../lib/vaultTags';
-import { vaultDefaultField, vaultFieldFingerprint, vaultFieldNames, vaultRecordName } from '../../lib/vaultFields';
+import { vaultDefaultField, vaultFieldFingerprint, vaultFieldNames, vaultHasNamedFieldShape, vaultRecordName } from '../../lib/vaultFields';
 import { vaultErrorMessage } from '../../lib/vaultErrors';
 import {
   useApi,
@@ -137,7 +137,7 @@ const SecretRow: React.FC<{
           <span role="alert" className="text-xs text-destructive-ink">{t('errors.fields_corrupt')}</span>
         )}
         {isKeypair && s.signing_addresses ? <SigningAddressList addresses={s.signing_addresses} className="mt-1" /> : null}
-        {!isKeypair && fields.length > 1 && (
+        {!isKeypair && vaultHasNamedFieldShape(s) && (
           <div className="flex flex-wrap gap-1">
             {fields.map((field) => <Badge key={field} variant="outline" className="font-mono">
               {field}{field === vaultDefaultField(s) ? ` · ${t('vaults.fields.default')}` : ''}
@@ -153,6 +153,7 @@ const SecretRow: React.FC<{
             </Button>
           </PopoverTrigger>
           <PopoverContent align="end" className="w-44 p-1" role="menu">
+            {/* Choice-only: a single custom field is displayed above but needs no selector. */}
             {canReveal && fields.length > 1 && (
               <label className="flex flex-col gap-1 px-2.5 py-2 text-xs text-muted">
                 {t('vaults.fields.revealField')}

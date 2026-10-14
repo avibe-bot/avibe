@@ -18,7 +18,7 @@ from modules.im import MessageContext
 from storage import vault_service as vs
 from storage import messages_service
 from storage.db import create_sqlite_engine
-from storage.models import metadata, vault_requests
+from storage.models import metadata, vault_requests, vault_secrets
 from storage.vault_crypto import Sealed
 
 
@@ -149,6 +149,30 @@ def test_field_provision_callback_reports_current_value_free_fields(vault, with_
         assert "totp" not in plan.message and "password" not in plan.message
         assert "do-not-show" not in plan.message
         assert "ciphertext" not in plan.message
+
+
+@pytest.mark.parametrize(
+    ("default_field", "corrupt", "expected"),
+    [("password", False, "LOGIN.password"), ("value", True, "corrupt")],
+)
+def test_async_field_provision_callback_attaches_single_custom_and_corrupt_shapes(
+    vault, default_field, corrupt, expected,
+):
+    with vault.begin() as conn:
+        req = vs.create_provision_request(conn, "LOGIN", requester={"session_id": "ses_p"})
+        vs.create_secret(conn, name="LOGIN", default_field=default_field, sealed=_sealed("do-not-show"))
+        if corrupt:
+            conn.execute(
+                vault_secrets.update()
+                .where(vault_secrets.c.name == "LOGIN")
+                .values(fields="{malformed")
+            )
+        pending = next(row for row in vs.list_pending_request_callbacks(conn) if row["id"] == req["id"])
+        plan = vs.resolve_request_callback(pending)
+        assert plan is not None
+        assert expected in plan.message
+        assert "Current fields:" in plan.message
+        assert "do-not-show" not in plan.message
 
 
 def test_expiry_arms_callback(vault):

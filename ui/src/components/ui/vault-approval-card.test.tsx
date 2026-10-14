@@ -194,7 +194,21 @@ describe('VaultApprovalCard protected access approval', () => {
     expect(popup.close).toHaveBeenCalledOnce();
   });
 
-  // Contract: the approve button waits until the contexts for the duration it shows and the sandbox
+  it('shows a single custom field label in an access approval', () => {
+    const request: VaultRequest = {
+      ...protectedAccess,
+      card: {
+        request_type: 'access', protection: 'standard', secret_names: ['LOGIN'], protected_secret_names: [],
+        grant_options: [{
+          grant_id: 'grant_1', member_snapshot: ['LOGIN'], unlock_material: [],
+          member_fields: [{ name: 'LOGIN', default_field: 'password', fields: ['password'] }],
+        }],
+      },
+    };
+    render(<I18nextProvider i18n={i18n}><VaultApprovalCard request={request} onResolved={vi.fn()} onCancel={vi.fn()} /></I18nextProvider>);
+    expect(screen.getByText('password · Default')).toBeTruthy();
+  });
+
   // client are ready, so a click never has to wait on either after opening the window. Without the
   // wait (the regression), a click right after the card opens or the duration changes, or on a page
   // whose sandbox client is still building, reaches the daemon or the sandbox only after the window
