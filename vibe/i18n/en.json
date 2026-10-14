@@ -936,6 +936,7 @@
         "desktopLeaseLost": "The desktop lease was lost before Computer Use completed.",
         "focusShortcutForbidden": "This focus shortcut is not allowed. Use launch with a URL instead.",
         "foregroundForbidden": "Foreground input is not allowed.",
+        "foregroundAttentionPending": "Foreground control is paused until you dismiss the restoration warning from the native Avibe desktop menu.",
         "foregroundConsentRequired": "Foreground control needs approval from the native Avibe desktop menu.",
         "foregroundRestoreFailed": "Foreground control ran, but Avibe could not restore and verify the prior desktop state. Details: {detail}",
         "restorationDetailUnavailable": "restoration details were unavailable",

@@ -2232,10 +2232,16 @@ class ComputerUseServer:
                 detail=_bounded_diagnostic(str(exc)),
             )
         if consent.get("ok") is not True:
+            shell_error = str(consent.get("error") or "unknown")
+            if shell_error == "foreground_attention_pending":
+                return _foreground_error(
+                    "foreground_attention_pending",
+                    "Foreground control is blocked until the owner dismisses the native restoration warning.",
+                )
             return _foreground_error(
                 "foreground_shell_unavailable",
                 "The native shell did not accept the foreground consent request.",
-                shell_error=str(consent.get("error") or "unknown"),
+                shell_error=shell_error,
             )
         if consent.get("allowed") is not True:
             return _foreground_error(
@@ -2261,10 +2267,16 @@ class ComputerUseServer:
                 detail=_bounded_diagnostic(str(exc)),
             )
         if active.get("ok") is not True:
+            shell_error = str(active.get("error") or "unknown")
+            if shell_error == "foreground_attention_pending":
+                return _foreground_error(
+                    "foreground_attention_pending",
+                    "Foreground control is blocked until the owner dismisses the native restoration warning.",
+                )
             return _foreground_error(
                 "foreground_shell_unavailable",
                 "The native shell could not mark foreground control active.",
-                shell_error=str(active.get("error") or "unknown"),
+                shell_error=shell_error,
             )
 
         forwarded = dict(arguments)

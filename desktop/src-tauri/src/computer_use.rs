@@ -127,6 +127,59 @@ pub(crate) struct ForegroundAttention {
     pub restoration: Value,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ForegroundAttentionEvent {
+    RequestConsent,
+    SetActive,
+    ComputerUseToggle,
+    ConsentChange,
+    SessionChange,
+    ComputerUseStopStart,
+    OwnerDismiss,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ForegroundAttentionOutcome {
+    NoAttention,
+    Refused,
+    Kept,
+    Dismissed,
+}
+
+#[derive(Default)]
+struct ForegroundAttentionLatch {
+    attention: Option<ForegroundAttention>,
+}
+
+impl ForegroundAttentionLatch {
+    fn latch(&mut self, attention: ForegroundAttention) {
+        self.attention = Some(attention);
+    }
+
+    fn current(&self) -> Option<&ForegroundAttention> {
+        self.attention.as_ref()
+    }
+
+    fn transition(&mut self, event: ForegroundAttentionEvent) -> ForegroundAttentionOutcome {
+        if self.attention.is_none() {
+            return ForegroundAttentionOutcome::NoAttention;
+        }
+        match event {
+            ForegroundAttentionEvent::RequestConsent | ForegroundAttentionEvent::SetActive => {
+                ForegroundAttentionOutcome::Refused
+            }
+            ForegroundAttentionEvent::OwnerDismiss => {
+                self.attention = None;
+                ForegroundAttentionOutcome::Dismissed
+            }
+            ForegroundAttentionEvent::ComputerUseToggle
+            | ForegroundAttentionEvent::ConsentChange
+            | ForegroundAttentionEvent::SessionChange
+            | ForegroundAttentionEvent::ComputerUseStopStart => ForegroundAttentionOutcome::Kept,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct MenuView {
     pub enabled: bool,
@@ -251,6 +304,7 @@ enum Event {
         reason: ForegroundExitReason,
     },
     ToggleForegroundConsent,
+    DismissForegroundAttention,
     Shutdown {
         reason: ForegroundExitReason,
         reply: oneshot::Sender<()>,
@@ -317,6 +371,10 @@ impl Controller {
 
     pub(crate) fn toggle_foreground_consent(&self) {
         let _ = self.sender.send(Event::ToggleForegroundConsent);
+    }
+
+    pub(crate) fn dismiss_foreground_attention(&self) {
+        let _ = self.sender.send(Event::DismissForegroundAttention);
     }
 
     pub(crate) async fn shutdown(&self, reason: ForegroundExitReason) {
@@ -488,6 +546,7 @@ struct RuntimeState {
     foreground_consent_sessions: HashMap<String, String>,
     pending_foreground: Option<(String, String)>,
     foreground_activity: Option<ForegroundActivity>,
+    foreground_attention: ForegroundAttentionLatch,
     next_foreground_transaction_id: u64,
 }
 
@@ -539,6 +598,7 @@ impl RuntimeState {
             foreground_consent_sessions: HashMap::new(),
             pending_foreground: None,
             foreground_activity: None,
+            foreground_attention: ForegroundAttentionLatch::default(),
             next_foreground_transaction_id: 0,
         };
         runtime.host_bundle_id = runtime.app.config().identifier.clone();
@@ -604,6 +664,7 @@ impl RuntimeState {
                             }
                         }
                         Event::ToggleForegroundConsent => self.toggle_foreground_consent(),
+                        Event::DismissForegroundAttention => self.dismiss_foreground_attention(),
                         Event::Shutdown { reason, reply } => {
                             if self.foreground_activity.is_some() {
                                 self.await_foreground_stop(
@@ -634,6 +695,9 @@ impl RuntimeState {
     }
 
     async fn toggle(&mut self) {
+        let _ = self
+            .foreground_attention
+            .transition(ForegroundAttentionEvent::ComputerUseToggle);
         self.update_view(|view| {
             view.runtime_refused = false;
             view.invalid_state = false;
@@ -652,7 +716,7 @@ impl RuntimeState {
                 self.publish_view();
                 return;
             }
-            self.clear_foreground_state();
+            self.expire_foreground_authorization();
             self.apply(directive).await;
             return;
         }
@@ -717,6 +781,9 @@ impl RuntimeState {
         reason: ForegroundExitReason,
         completion: Option<oneshot::Sender<()>>,
     ) {
+        let _ = self
+            .foreground_attention
+            .transition(ForegroundAttentionEvent::ComputerUseStopStart);
         self.invalidate_start_retry();
         if clear_origin {
             self.origin = None;
@@ -728,7 +795,7 @@ impl RuntimeState {
             self.publish_view();
             return;
         }
-        self.clear_foreground_state();
+        self.expire_foreground_authorization();
         self.apply(directive).await;
         if let Some(completion) = completion {
             let _ = completion.send(());
@@ -1125,6 +1192,11 @@ impl RuntimeState {
 
     async fn dispatch_foreground_control(&mut self, request: ForegroundControlRequest, reply: oneshot::Sender<Value>) {
         let session = request.session.trim().to_owned();
+        if request.operation == "revoke_session" {
+            let _ = self
+                .foreground_attention
+                .transition(ForegroundAttentionEvent::SessionChange);
+        }
         if request.operation == "revoke_session"
             && self
                 .foreground_activity
@@ -1219,22 +1291,27 @@ impl RuntimeState {
     }
 
     fn mark_foreground_attention_incomplete(&mut self, reason: ForegroundExitReason) {
-        let Some(call) = self.foreground_activity.as_mut() else {
-            return;
+        let (attention, target_pid, target_window_id) = {
+            let Some(call) = self.foreground_activity.as_mut() else {
+                return;
+            };
+            let mut restoration = call.restoration.clone();
+            let detail = format!("foreground restoration was incomplete before {}", reason.code());
+            fail_restoration(&mut restoration, &detail);
+            call.restoration = restoration.clone();
+            call.mark_terminal();
+            let target = call.target_label.clone();
+            let target_pid = call.target.pid;
+            let target_window_id = call.target.window_id;
+            let restoration = serde_json::to_value(&restoration).unwrap_or_else(|_| json!({"restoration_ok": false}));
+            (
+                ForegroundAttention { target, restoration },
+                target_pid,
+                target_window_id,
+            )
         };
-        let mut restoration = call.restoration.clone();
-        let detail = format!("foreground restoration was incomplete before {}", reason.code());
-        fail_restoration(&mut restoration, &detail);
-        call.restoration = restoration.clone();
-        call.mark_terminal();
-        let target = call.target_label.clone();
-        let target_pid = call.target.pid;
-        let target_window_id = call.target.window_id;
-        let restoration = serde_json::to_value(&restoration).unwrap_or_else(|_| json!({"restoration_ok": false}));
-        self.update_view(|view| {
-            view.foreground_active = None;
-            view.foreground_attention = Some(ForegroundAttention { target, restoration });
-        });
+        self.update_view(|view| view.foreground_active = None);
+        self.latch_foreground_attention(attention);
         self.diagnostics.record(
             "computer-use.foreground-terminal-failure",
             &[
@@ -1254,6 +1331,13 @@ impl RuntimeState {
         let title = foreground_display_title(session, &request.title);
         match request.operation.as_str() {
             "request_consent" => {
+                if self
+                    .foreground_attention
+                    .transition(ForegroundAttentionEvent::RequestConsent)
+                    == ForegroundAttentionOutcome::Refused
+                {
+                    return json!({"ok": false, "error": "foreground_attention_pending"});
+                }
                 if !self.lifecycle.enabled() || self.lifecycle.phase() != ComputerUsePhase::Ready {
                     return json!({"ok": false, "error": "computer_use_unavailable"});
                 }
@@ -1268,6 +1352,13 @@ impl RuntimeState {
                 json!({"ok": true, "allowed": false})
             }
             "set_active" => {
+                if self
+                    .foreground_attention
+                    .transition(ForegroundAttentionEvent::SetActive)
+                    == ForegroundAttentionOutcome::Refused
+                {
+                    return json!({"ok": false, "error": "foreground_attention_pending"});
+                }
                 if !self.lifecycle.enabled() || self.lifecycle.phase() != ComputerUsePhase::Ready {
                     return json!({"ok": false, "error": "computer_use_unavailable"});
                 }
@@ -1303,7 +1394,6 @@ impl RuntimeState {
                 self.foreground_activity = Some(activity);
                 self.update_view(|view| {
                     view.foreground_pending = None;
-                    view.foreground_attention = None;
                     view.foreground_active = self
                         .foreground_activity
                         .as_ref()
@@ -1337,30 +1427,34 @@ impl RuntimeState {
                 json!({"ok": true, "restoration": restoration})
             }
             "terminal" => {
-                let Some(call) = self.foreground_activity.as_mut() else {
-                    return json!({"ok": false, "error": "foreground_transaction_mismatch"});
+                let attention = {
+                    let Some(call) = self.foreground_activity.as_mut() else {
+                        return json!({"ok": false, "error": "foreground_transaction_mismatch"});
+                    };
+                    if call.session != session {
+                        return json!({"ok": false, "error": "foreground_transaction_mismatch"});
+                    }
+                    let restoration = match parse_foreground_restoration(request.restoration.as_ref()) {
+                        Ok(restoration) => restoration,
+                        Err(error) => return json!({"ok": false, "error": error}),
+                    };
+                    if !same_restoration_contract(&call.restoration, &restoration) {
+                        return json!({"ok": false, "error": "foreground_transaction_mismatch"});
+                    }
+                    call.restoration = restoration;
+                    call.mark_terminal();
+                    if call.restoration.restoration_ok {
+                        None
+                    } else {
+                        let target = call.target_label.clone();
+                        let restoration = serde_json::to_value(&call.restoration)
+                            .unwrap_or_else(|_| json!({"restoration_ok": false}));
+                        Some(ForegroundAttention { target, restoration })
+                    }
                 };
-                if call.session != session {
-                    return json!({"ok": false, "error": "foreground_transaction_mismatch"});
-                }
-                let restoration = match parse_foreground_restoration(request.restoration.as_ref()) {
-                    Ok(restoration) => restoration,
-                    Err(error) => return json!({"ok": false, "error": error}),
-                };
-                if !same_restoration_contract(&call.restoration, &restoration) {
-                    return json!({"ok": false, "error": "foreground_transaction_mismatch"});
-                }
-                call.restoration = restoration;
-                call.mark_terminal();
-                let attention = !call.restoration.restoration_ok;
-                let target = call.target_label.clone();
-                let restoration =
-                    serde_json::to_value(&call.restoration).unwrap_or_else(|_| json!({"restoration_ok": false}));
                 self.update_view(|view| view.foreground_active = None);
-                if attention {
-                    self.update_view(|view| {
-                        view.foreground_attention = Some(ForegroundAttention { target, restoration });
-                    });
+                if let Some(attention) = attention {
+                    self.latch_foreground_attention(attention);
                 }
                 self.publish_view();
                 self.remove_terminal_foreground_transaction_if_unblocked();
@@ -1384,7 +1478,25 @@ impl RuntimeState {
         }
     }
 
+    fn dismiss_foreground_attention(&mut self) {
+        if self
+            .foreground_attention
+            .transition(ForegroundAttentionEvent::OwnerDismiss)
+            == ForegroundAttentionOutcome::Dismissed
+        {
+            self.sync_foreground_attention_view();
+            self.publish_view();
+        }
+    }
+
     fn toggle_foreground_consent(&mut self) {
+        if self
+            .foreground_attention
+            .transition(ForegroundAttentionEvent::ConsentChange)
+            == ForegroundAttentionOutcome::Kept
+        {
+            return;
+        }
         if !self.lifecycle.enabled() || self.lifecycle.phase() != ComputerUsePhase::Ready {
             return;
         }
@@ -1450,11 +1562,18 @@ impl RuntimeState {
         }
     }
 
-    fn clear_foreground_state(&mut self) {
+    fn latch_foreground_attention(&mut self, attention: ForegroundAttention) {
+        self.foreground_attention.latch(attention);
+        self.sync_foreground_attention_view();
+    }
+
+    fn sync_foreground_attention_view(&self) {
+        let attention = self.foreground_attention.current().cloned();
+        self.update_view(move |view| view.foreground_attention = attention);
+    }
+
+    fn expire_foreground_authorization(&mut self) {
         self.expire_foreground_grants();
-        self.update_view(|view| {
-            view.foreground_attention = None;
-        });
         self.publish_view();
     }
 }
@@ -3712,6 +3831,58 @@ done
         assert_eq!(codes.len(), 8);
         assert_eq!(unique.len(), codes.len());
         assert!(codes.iter().all(|code| !code.is_empty()));
+    }
+
+    #[test]
+    fn foreground_attention_is_latched_until_owner_dismissal() {
+        let cases = [
+            (
+                ForegroundAttentionEvent::RequestConsent,
+                ForegroundAttentionOutcome::Refused,
+                true,
+            ),
+            (
+                ForegroundAttentionEvent::SetActive,
+                ForegroundAttentionOutcome::Refused,
+                true,
+            ),
+            (
+                ForegroundAttentionEvent::ComputerUseToggle,
+                ForegroundAttentionOutcome::Kept,
+                true,
+            ),
+            (
+                ForegroundAttentionEvent::ConsentChange,
+                ForegroundAttentionOutcome::Kept,
+                true,
+            ),
+            (
+                ForegroundAttentionEvent::SessionChange,
+                ForegroundAttentionOutcome::Kept,
+                true,
+            ),
+            (
+                ForegroundAttentionEvent::ComputerUseStopStart,
+                ForegroundAttentionOutcome::Kept,
+                true,
+            ),
+            (
+                ForegroundAttentionEvent::OwnerDismiss,
+                ForegroundAttentionOutcome::Dismissed,
+                false,
+            ),
+        ];
+
+        for (event, expected_outcome, remains_latched) in cases {
+            let mut latch = ForegroundAttentionLatch::default();
+            latch.latch(ForegroundAttention {
+                target: "QQ conversation: QQ".to_owned(),
+                restoration: json!({"restoration_ok": false}),
+            });
+
+            assert_eq!(latch.transition(event), expected_outcome);
+            assert_eq!(latch.current().is_some(), remains_latched);
+        }
     }
 
     #[test]

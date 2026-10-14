@@ -86,3 +86,4 @@ def test_builtin_computer_use_skill_loads_through_the_managed_resolver() -> None
     assert "Never auto-replay an unverifiable background result" in loaded.body
     assert "verify both the application effect and restoration" in loaded.body
     assert "desktop_busy" in loaded.body
+    assert "foreground_attention_pending" in loaded.body

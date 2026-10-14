@@ -936,6 +936,7 @@
         "desktopLeaseLost": "Computer Use 完成前桌面租约已丢失。",
         "focusShortcutForbidden": "不允许使用可能切换焦点的快捷键，请改用带 URL 的 launch。",
         "foregroundForbidden": "不允许使用前台输入。",
+        "foregroundAttentionPending": "在你通过 Avibe 原生桌面菜单解除恢复提醒前，前台控制已暂停。",
         "foregroundConsentRequired": "前台控制需要通过 Avibe 原生桌面菜单授权。",
         "foregroundRestoreFailed": "前台控制已执行，但 Avibe 无法恢复并验证操作前的桌面状态。详情：{detail}",
         "restorationDetailUnavailable": "恢复详情不可用",

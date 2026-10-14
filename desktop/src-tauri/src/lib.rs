@@ -176,6 +176,7 @@ struct NativeComputerUseCatalog {
     foreground_consent: String,
     foreground_active: String,
     foreground_attention: String,
+    foreground_attention_dismiss: String,
     foreground_restore_prior_frontmost: String,
     foreground_restore_pointer: String,
     foreground_restore_active_space: String,
@@ -320,6 +321,9 @@ fn computer_use_label(catalog: &NativeComputerUseCatalog, view: &computer_use::M
 
 #[cfg(target_os = "macos")]
 fn computer_use_consent_label(catalog: &NativeComputerUseCatalog, view: &computer_use::MenuView) -> String {
+    if view.foreground_attention.is_some() {
+        return catalog.foreground_attention_dismiss.clone();
+    }
     if let Some(title) = view.foreground_pending.as_deref() {
         return catalog.foreground_consent.replace("{{sessionTitle}}", title);
     }
@@ -336,7 +340,7 @@ fn computer_use_control_enabled(view: &computer_use::MenuView) -> bool {
 
 #[cfg(target_os = "macos")]
 fn computer_use_consent_control_enabled(view: &computer_use::MenuView) -> bool {
-    view.foreground_pending.is_some() || view.foreground_granted.is_some()
+    view.foreground_attention.is_some() || view.foreground_pending.is_some() || view.foreground_granted.is_some()
 }
 
 #[cfg(target_os = "macos")]
@@ -2127,7 +2131,17 @@ pub fn run() {
                 }
                 #[cfg(target_os = "macos")]
                 COMPUTER_USE_CONSENT_MENU_ID => {
-                    app.state::<computer_use::Controller>().toggle_foreground_consent();
+                    let catalog = native_catalog_for_locales(sys_locale::get_locales()).computer_use;
+                    let dismiss_attention = app
+                        .try_state::<NativeMenus>()
+                        .and_then(|menus| menus.computer_use_consent.text().ok())
+                        .is_some_and(|label| label == catalog.foreground_attention_dismiss);
+                    let controller = app.state::<computer_use::Controller>();
+                    if dismiss_attention {
+                        controller.dismiss_foreground_attention();
+                    } else {
+                        controller.toggle_foreground_consent();
+                    }
                 }
                 _ => {}
             }
@@ -2519,6 +2533,21 @@ mod tests {
         };
         assert!(computer_use_consent_control_enabled(&granted));
         assert!(computer_use_consent_label(&catalog, &granted).contains("Turn off"));
+
+        let attention = computer_use::MenuView {
+            foreground_attention: Some(computer_use::ForegroundAttention {
+                target: "QQ conversation: QQ".to_owned(),
+                restoration: serde_json::json!({"restoration_ok": false}),
+            }),
+            foreground_pending: Some("pending conversation".to_owned()),
+            foreground_granted: Some("granted conversation".to_owned()),
+            ..Default::default()
+        };
+        assert!(computer_use_consent_control_enabled(&attention));
+        assert_eq!(
+            computer_use_consent_label(&catalog, &attention),
+            "Restoration checked: dismiss"
+        );
 
         assert!(!computer_use_consent_control_enabled(&computer_use::MenuView::default()));
     }

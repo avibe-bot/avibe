@@ -80,6 +80,7 @@
       "foregroundConsent": "{{sessionTitle}} requests foreground control: Allow for this conversation",
       "foregroundActive": "Foreground control active: {{target}}",
       "foregroundAttention": "Foreground restoration needs attention: {{target}} ({{components}})",
+      "foregroundAttentionDismiss": "Restoration checked: dismiss",
       "foregroundRestorePriorFrontmost": "prior window",
       "foregroundRestorePointer": "pointer",
       "foregroundRestoreActiveSpace": "active Space",

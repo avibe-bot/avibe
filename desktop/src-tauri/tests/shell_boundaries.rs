@@ -944,6 +944,92 @@ fn foreground_lifecycle_and_identity_inventories_are_exhaustive() {
             assert!(body.contains(marker), "{label} route is missing {marker}");
         }
     }
+
+    let attention_routes = [
+        (
+            "foreground request admission",
+            source_slice(
+                &native,
+                "    async fn handle_foreground_control",
+                "    fn dismiss_foreground_attention",
+            ),
+            &[
+                "ForegroundAttentionEvent::RequestConsent",
+                "ForegroundAttentionEvent::SetActive",
+                "foreground_attention_pending",
+            ][..],
+        ),
+        (
+            "restoration failure latch",
+            source_slice(
+                &native,
+                "    fn mark_foreground_attention_incomplete",
+                "    async fn handle_foreground_control",
+            ),
+            &["latch_foreground_attention(attention)"][..],
+        ),
+        (
+            "terminal verification failure latch",
+            source_slice(
+                &native,
+                "    async fn handle_foreground_control",
+                "    fn dismiss_foreground_attention",
+            ),
+            &["self.latch_foreground_attention(attention)"][..],
+        ),
+        (
+            "Computer Use toggle",
+            source_slice(&native, "async fn toggle(&mut self)", "async fn runtime_ready"),
+            &["ForegroundAttentionEvent::ComputerUseToggle"][..],
+        ),
+        (
+            "Computer Use stop and start",
+            source_slice(&native, "async fn set_runtime_lost", "async fn activated"),
+            &["ForegroundAttentionEvent::ComputerUseStopStart"][..],
+        ),
+        (
+            "consent changes",
+            source_slice(&native, "fn toggle_foreground_consent", "fn refresh_granted_view"),
+            &["ForegroundAttentionEvent::ConsentChange"][..],
+        ),
+        (
+            "Session changes",
+            source_slice(
+                &native,
+                "async fn dispatch_foreground_control",
+                "fn await_foreground_stop",
+            ),
+            &["ForegroundAttentionEvent::SessionChange"][..],
+        ),
+        (
+            "owner dismissal",
+            source_slice(
+                &native,
+                "    fn dismiss_foreground_attention",
+                "    fn toggle_foreground_consent",
+            ),
+            &[
+                "ForegroundAttentionEvent::OwnerDismiss",
+                "sync_foreground_attention_view",
+            ][..],
+        ),
+        (
+            "native owner-dismiss menu",
+            source_slice(&shell, "COMPUTER_USE_CONSENT_MENU_ID => {", "                _ => {}"),
+            &[
+                "computer_use_consent.text()",
+                "catalog.foreground_attention_dismiss",
+                "controller.dismiss_foreground_attention()",
+                "controller.toggle_foreground_consent()",
+            ][..],
+        ),
+    ];
+    for (label, body, markers) in attention_routes {
+        for marker in markers {
+            assert!(body.contains(marker), "{label} route is missing {marker}");
+        }
+    }
+
     let foreground_call = source_slice(
         &server,
         "    async def call_tool",

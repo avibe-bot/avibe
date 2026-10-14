@@ -178,6 +178,7 @@ _COMPUTER_ERROR_I18N_KEYS = {
     "element_not_actionable": "computer.cli.error.scriptElementNotActionable",
     "element_not_found": "computer.cli.error.scriptTargetNotFound",
     "focus_shortcut_forbidden": "computer.cli.error.focusShortcutForbidden",
+    "foreground_attention_pending": "computer.cli.error.foregroundAttentionPending",
     "foreground_consent_required": "computer.cli.error.foregroundConsentRequired",
     "foreground_forbidden": "computer.cli.error.foregroundForbidden",
     "foreground_restore_failed": "computer.cli.error.foregroundRestoreFailed",

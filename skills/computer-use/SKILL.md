@@ -167,6 +167,9 @@ retrying automatically:
   Session lease epoch.
 - `foreground_consent_required`: the native desktop menu must approve
   foreground control for this conversation.
+- `foreground_attention_pending`: the owner must inspect and dismiss the
+  native restoration warning before another foreground call; background
+  Computer Use remains available.
 - `foreground_restore_failed`: stop and report the concrete restoration
   failure; do not retry or claim that the input was undone.
 - `target_missing`, `target_off_active_space`, or `target_not_admissible`: the

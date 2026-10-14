@@ -404,6 +404,42 @@ def test_computer_cli_error_translations_exist_in_all_supported_languages() -> N
             )
 
 
+@pytest.mark.parametrize(
+    ("language", "expected"),
+    [
+        (
+            "en",
+            "Foreground control is paused until you dismiss the restoration warning "
+            "from the native Avibe desktop menu.",
+        ),
+        (
+            "zh",
+            "在你通过 Avibe 原生桌面菜单解除恢复提醒前，前台控制已暂停。",
+        ),
+    ],
+)
+def test_human_attention_pending_error_is_localized(
+    language: str,
+    expected: str,
+) -> None:
+    result = {
+        "isError": True,
+        "structuredContent": {
+            "code": "foreground_attention_pending",
+            "params": {"foreground_outcome": "unattempted"},
+        },
+        "content": [],
+    }
+
+    output = format_human_result(
+        "click",
+        result,
+        translate=lambda key, **kwargs: i18n_t(key, language, **kwargs),
+    )
+
+    assert expected in output
+
+
 def test_human_restore_failure_renders_structured_component_details() -> None:
     restoration = {
         "components": {

@@ -80,6 +80,7 @@
       "foregroundConsent": "{{sessionTitle}} 请求前台控制：允许此对话使用",
       "foregroundActive": "前台控制进行中：{{target}}",
       "foregroundAttention": "前台恢复需要处理：{{target}}（{{components}}）",
+      "foregroundAttentionDismiss": "已检查恢复状态：解除提醒",
       "foregroundRestorePriorFrontmost": "操作前窗口",
       "foregroundRestorePointer": "指针",
       "foregroundRestoreActiveSpace": "活动 Space",

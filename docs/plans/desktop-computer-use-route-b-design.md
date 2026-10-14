@@ -191,6 +191,13 @@ control. A successful restoration clears the active state; a failed or
 unverifiable restoration remains visible as an attention state until the
 owner resolves it.
 
+Restoration attention is a latched native admission state. While it is
+latched, every new foreground request is refused with
+`foreground_attention_pending`; background Computer Use remains available.
+Computer Use toggles, consent changes, Session changes, and a full Computer
+Use stop/start preserve the latch. Only the owner's explicit
+`Restoration checked: dismiss` action in the native tray clears it.
+
 The Workbench may mirror this state, but it cannot be the only indication
 because the request may originate from an IM or another hidden surface.
 
