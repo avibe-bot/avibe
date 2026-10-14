@@ -485,7 +485,11 @@ E2E stay.
     (reference images for an edit) and `n`. The overlay's `params` say which of `size`, `images` and `n` each model
     takes. A call that passes one the chosen model does not take returns a `failed` record naming the argument and
     the models that take it, before anything runs: silently dropping `images` would turn an edit into an unrelated
-    generation.
+    generation. Vibey's tool runtime refuses it before the call, from the turn's frozen `params`, so a bad call costs
+    nothing; the gateway validates again as the execution boundary.
+  - **Avibe-written failures carry stable codes** (#2589, `HOSTED_ERROR_CODES`): `image_param_unsupported` for an
+    argument the model does not take, and `image_model_unavailable` when the named model is no longer available
+    mid-turn. The UI adds copy for each.
   - **No tool without a model.** With no image model available, `image_generate` is not declared at all, and the
     Tools card says what to add (§8).
 - **The default** is `model_hub.hosted_tools.image_generate.default_model` (§3.3), else the first available model in
@@ -631,7 +635,9 @@ under the freeze protocol (`model-hub-contracts/README.md`).
 - `ToolResultMessage.hosted` keeps `{record, execution?, action?}`. `record.images[]` and `action: generate` occur
   only for `image_generate`; `generate` gains the `model` used, with `prompt` required for a `completed` record.
 - `ProxyExecution` becomes the result's `execution` with `mode: "proxy" | "direct"` (direct for an image endpoint);
-  its `cost` covers every billable attempt of the call.
+  its `cost` covers every billable attempt of the call. `core/hosted_activity` maps `direct` beside `proxy` for the
+  tool card and the IM line.
+- `HOSTED_ERROR_CODES` gains `image_param_unsupported` and `image_model_unavailable` (§7.2), with UI copy for each.
 - The conversion rows drop native image replay; an `image_generate` call is an ordinary tool call everywhere.
 
 ### 10.2 C-6 (`agent-core-contracts/model-hub-consumer.md`, both `hop-resolution.schema.json` copies)
