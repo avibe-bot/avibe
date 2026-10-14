@@ -157,7 +157,9 @@ export const HostedProbeDialog: React.FC<{
                     ? null
                     : outcomes[index] === 'inconclusive' && !failure
                       ? t('settings.models.tools.result.reason.inconclusive')
-                      : `${t('settings.models.tools.result.reason.transient')}${failure ? ` (${failure})` : ''}`;
+                      : failure
+                        ? t('settings.models.tools.result.reason.transientReason', { reason: failure })
+                        : t('settings.models.tools.result.reason.transient');
                   return (
                     <React.Fragment key={key}>
                       <TargetLine

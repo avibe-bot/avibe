@@ -361,8 +361,9 @@ describe('ToolsTab checks', () => {
   });
 
   it('runs the header check only after the dialog shows what it sends and costs', async () => {
-    const onProbe = vi.fn<RunProbe>(async (target) =>
-      result(target.candidate.source_id === RELAY.id ? 'verified' : 'transient', target.candidate.source_id, target.candidate.model_id));
+    const onProbe = vi.fn<RunProbe>(async (target) => target.candidate.source_id === RELAY.id
+      ? result('verified', target.candidate.source_id, target.candidate.model_id)
+      : { ...result('transient', target.candidate.source_id, target.candidate.model_id), call: { outcome: 'transient', error: 'models.source.cooldown.rate_limited' } });
     renderTab(searchable(), { onProbe });
 
     // Two unchecked pairs (the verified one and the image are not offered); the subscription adds nothing.
@@ -377,7 +378,8 @@ describe('ToolsTab checks', () => {
     expect(onProbe).toHaveBeenCalledTimes(2);
     within(dialog).getByText('1 runs natively');
     within(dialog).getByText('1 not verified');
-    within(dialog).getByText('Couldn\'t verify this time. Try again; this is not recorded as unsupported.');
+    // The reason sits where the locale puts it in the sentence.
+    within(dialog).getByText('Couldn\'t verify this time (Rate limited). Try again; this is not recorded as unsupported.');
 
     // Retrying runs only the pair that got no answer.
     await userEvent.click(within(dialog).getByRole('button', { name: 'Retry 1 · included in subscription' }));

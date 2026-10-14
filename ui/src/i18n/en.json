@@ -2485,7 +2485,8 @@
           },
           "reason": {
             "inconclusive": "The model didn't use the tool. Try again; this is not recorded as unsupported.",
-            "transient": "Couldn't verify this time. Try again; this is not recorded as unsupported."
+            "transient": "Couldn't verify this time. Try again; this is not recorded as unsupported.",
+            "transientReason": "Couldn't verify this time ({{reason}}). Try again; this is not recorded as unsupported."
           },
           "note": "Verified models call the tool natively; other models use the proxy executor. Tools stay off until you turn them on.",
           "retry_one": "Retry {{count}}",
