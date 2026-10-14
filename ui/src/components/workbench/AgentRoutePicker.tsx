@@ -223,7 +223,10 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
 
   // Fetch the active backend's model list the first time the menu opens for it;
   // cached per backend so toggling agents doesn't refetch. A menu left open
-  // under Settings reads again as it is uncovered.
+  // under Settings reads again as it is uncovered. A Hub catalog is read again on
+  // every open: its effort menu follows capability evidence, which any turn can
+  // change, and the read is the persisted catalog, which starts no CLI. The last
+  // answer shows until the new one lands.
   useEffect(() => {
     const loadedBackends = loadedModelBackendsRef.current;
     if (!open || !surfaceActive || !backend || loadedBackends.has(backend)) return;
@@ -234,7 +237,7 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
       api,
       backend,
       ({ models, modelLabels, reasoningOptions, effortMenus, catalogRefreshPending }) => {
-        reloadOnNextOpen = Boolean(catalogRefreshPending);
+        reloadOnNextOpen = Boolean(catalogRefreshPending) || effortMenus !== undefined;
         setReasoningByBackend((prev) => ({ ...prev, [backend]: reasoningOptions ?? {} }));
         setEffortMenusByBackend((prev) => ({ ...prev, [backend]: effortMenus ?? {} }));
         setModelsByBackend((prev) => ({ ...prev, [backend]: models }));
@@ -475,8 +478,9 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
                     const patch: AgentRoutePatch = { model };
                     // Switching to a model whose effort set no longer includes
                     // the current effort: clear it in the same patch so the displayed
-                    // route matches what dispatches.
-                    if (!isEffortSupported(backend, model, currentEffort, backendReasoning)) {
+                    // route matches what dispatches. Choosing the current model
+                    // again changes nothing, a refused saved effort included.
+                    if (model !== currentModel && !isEffortSupported(backend, model, currentEffort, backendReasoning)) {
                       patch.reasoning_effort = null;
                     }
                     applyPatch(patch);

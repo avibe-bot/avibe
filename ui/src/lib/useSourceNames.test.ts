@@ -25,4 +25,17 @@ describe('useSourceNames', () => {
     await waitFor(() => expect(result.current).toEqual({ src_relaygpt1: 'relay-gpt-eu' }));
     expect(list).toHaveBeenCalledTimes(2);
   });
+
+  it('drops names an earlier read gave when a later one is refused', async () => {
+    // A Member read, then the role is lowered to Editor: the hint goes generic.
+    vi.spyOn(modelsApi, 'listSources')
+      .mockResolvedValueOnce(named('relay-gpt'))
+      .mockRejectedValueOnce(new Error('forbidden'));
+    const { result, rerender } = renderHook(({ active }) => useSourceNames(active), { initialProps: { active: true } });
+    await waitFor(() => expect(result.current).toEqual({ src_relaygpt1: 'relay-gpt' }));
+
+    act(() => rerender({ active: false }));
+    act(() => rerender({ active: true }));
+    await waitFor(() => expect(result.current).toBeNull());
+  });
 });

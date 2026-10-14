@@ -2440,7 +2440,9 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, ca
             value={model}
             onValueChange={(next) => {
               const value = next.trim();
-              if (!value) return;
+              // Choosing the current model again is no edit: nothing to write, and a
+              // refused saved effort stays what it is.
+              if (!value || value === model) return;
               markFieldEdit('model');
               markFieldSubmitted('model');
               setModel(value);

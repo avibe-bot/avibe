@@ -58,7 +58,7 @@ vi.mock('../../lib/backendModels', async (importOriginal) => ({
       models: string[];
       modelLabels: Record<string, string>;
       reasoningOptions: Record<string, { value: string; label: string }[]>;
-      effortMenus: Record<string, { omitted: string[]; not_on: Record<string, string[]> }>;
+      effortMenus?: Record<string, { omitted: string[]; not_on: Record<string, string[]> }>;
       catalogRefreshPending: boolean;
     }) => void,
   ) => {
@@ -67,7 +67,8 @@ vi.mock('../../lib/backendModels', async (importOriginal) => ({
       models: ['sonnet', 'opus'],
       modelLabels: {},
       reasoningOptions: catalogReasoning,
-      effortMenus: catalogMenus,
+      // As the real loader answers: only a Hub catalog carries effort menus.
+      ...(hubMode === 'hub' ? { effortMenus: catalogMenus } : {}),
       catalogRefreshPending: false,
     });
     if (deferReads) pendingReads.push(answer);
@@ -161,13 +162,14 @@ const HubPicker: React.FC<{
   role: InstanceRole;
   surfaceActive?: boolean;
   onNavigateAway?: () => void;
-}> = ({ role, surfaceActive = true, onNavigateAway }) => (
+  onChange?: (value: AgentRouteValue) => void;
+}> = ({ role, surfaceActive = true, onNavigateAway, onChange = () => {} }) => (
   <InstanceAuthorizationContext.Provider
     value={{ remote: false, instanceKind: null, instanceRole: role, capabilities: capabilitiesFor(role) }}
   >
     <RouteSurfaceActiveContext.Provider value={surfaceActive}>
       <MemoryRouter>
-        <AgentRoutePicker value={CLAUDE_ROUTE} agents={AGENTS} onChange={() => {}} onNavigateAway={onNavigateAway} />
+        <AgentRoutePicker value={CLAUDE_ROUTE} agents={AGENTS} onChange={onChange} onNavigateAway={onNavigateAway} />
         <LocationProbe />
       </MemoryRouter>
     </RouteSurfaceActiveContext.Provider>
@@ -313,6 +315,37 @@ describe('AgentRoutePicker', () => {
       .toBe('chat.picker.effortOptions.constructor');
     expect(effortColumn().getByRole('button', { name: /chat\.picker\.effortOptions\.high/ }).textContent)
       .toContain('chat.picker.effortNotOn:relay-gpt');
+  });
+
+  it('reads a Hub catalog again on every open, since its effort menu follows evidence any turn can change', async () => {
+    hubMode = 'hub';
+    catalogReasoning = { sonnet: [{ value: 'low', label: 'low' }, { value: 'high', label: 'high' }] };
+    const user = userEvent.setup();
+    render(<HubPicker role="owner" />);
+    await openMenu(user);
+    expect(catalogReads).toBe(1);
+    await user.keyboard('{Escape}');
+
+    // A turn recorded that every hop refuses `high`.
+    catalogReasoning = { sonnet: [{ value: 'low', label: 'low' }] };
+    catalogMenus = { sonnet: { omitted: ['high'], not_on: {} } };
+    await openMenu(user);
+    expect(catalogReads).toBe(2);
+    expect(effortColumn().queryByRole('button', { name: /chat\.picker\.effortOptions\.high/ })).toBeNull();
+  });
+
+  it('keeps a refused saved effort when the current model is chosen again', async () => {
+    hubMode = 'hub';
+    catalogReasoning = { sonnet: [{ value: 'high', label: 'high' }] };
+    catalogMenus = { sonnet: { omitted: ['low'], not_on: {} } };
+    const onChange = vi.fn();
+    const user = userEvent.setup();
+    render(<HubPicker role="owner" onChange={onChange} />);
+    await openMenu(user);
+
+    await user.click(screen.getByRole('button', { name: 'sonnet' }));
+    // Nothing changed, so nothing clears the effort the route holds.
+    expect(onChange.mock.calls.map(([value]) => value.reasoning_effort)).not.toContain(null);
   });
 
   it('reads the list again for a menu left open while Settings covered it', async () => {

@@ -7,7 +7,7 @@ import { modelsApi } from '../components/settings/models/modelsApi';
  *
  * A Source can be renamed, added or replaced in Settings while a surface that
  * names it stays mounted, so a later activation reads the names afresh; the last
- * answer shows until the new one lands. The Sources read is a Member rule, and
+ * answer shows until the new one lands, and a failed read drops it. The Sources read is a Member rule, and
  * some surfaces that name a Source (the Chat route picker) are Editor surfaces,
  * so a refused read is an expected answer: it yields null, and the caller says
  * what it can without the names.
@@ -22,7 +22,9 @@ export function useSourceNames(active: boolean): Record<string, string> | null {
         if (current) setNames(Object.fromEntries(sources.map((source) => [source.id, source.display_name])));
       },
       () => {
-        // Refused or unreachable: the hint stays generic.
+        // Refused (a role that may not read Sources) or unreachable: the hint is
+        // generic, never names kept from an earlier read.
+        if (current) setNames(null);
       },
     );
     return () => { current = false; };

@@ -1684,6 +1684,27 @@ describe('AgentsPage reconnect reconciliation', () => {
     expect(screen.getByRole('button', { name: 'medium', exact: true }).className).not.toContain('bg-mint-soft');
   });
 
+  it('writes nothing, and keeps a refused saved effort, when the current model is chosen again', async () => {
+    modelCatalog = {
+      models: [],
+      reasoningOptions: { 'reasoning-model': [{ value: 'medium', label: 'Medium' }] },
+      effortMenus: { 'reasoning-model': { omitted: ['xhigh'], not_on: {} } },
+    };
+    const initial = { ...brief('agent-a', 'description'), model: 'reasoning-model', reasoning_effort: 'xhigh' };
+    const getVibeAgent = vi.fn().mockResolvedValue(fullAgent(initial, 'initial prompt'));
+    const updateVibeAgent = vi.fn().mockResolvedValue({ ok: true });
+    const api = makeApi(vi.fn().mockResolvedValue(listResult(initial)), getVibeAgent, undefined, undefined, updateVibeAgent);
+    renderPage(api, { canManageAgents: true });
+
+    await waitFor(() => expect(screen.getByDisplayValue('description')).toBeTruthy());
+    fireEvent.click(screen.getByRole('combobox'));
+    fireEvent.change(screen.getByPlaceholderText('Search...'), { target: { value: 'reasoning-model' } });
+    fireEvent.click(screen.getByText('Use "reasoning-model"'));
+
+    expect(updateVibeAgent).not.toHaveBeenCalled();
+    expect(screen.getByText('xhigh', { exact: true }).getAttribute('title')).toBe('chat.picker.effortRefused');
+  });
+
   it('keeps a still-valid effort untouched when the model changes', async () => {
     modelCatalog = {
       models: [],
