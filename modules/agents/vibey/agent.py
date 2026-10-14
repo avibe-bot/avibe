@@ -262,6 +262,7 @@ class VibeyAgent(BaseAgent):
         # J5 while the service runs: when the jobs directory was last pruned, and the pass in flight.
         self._pruned_at: Optional[float] = None
         self._prune_task: Optional[asyncio.Task] = None
+        self._media_sweep: Optional[asyncio.Task] = None
 
     # --- BaseAgent -----------------------------------------------------------
 
@@ -418,8 +419,11 @@ class VibeyAgent(BaseAgent):
         Sessions with accepted inputs no run consumed. Each runs the same resume a Turn
         runs (T2 and T3, no model call). A Session a run holds is skipped: its own resume
         settles it. J5 pruning follows a pass that settled everything. Never reports
-        success over a failure; ``VibeyRecovery`` owns the retries.
+        success over a failure; ``VibeyRecovery`` owns the retries. The first pass of the
+        process also starts the media sweep.
         """
+        if self._media_sweep is None:
+            self._media_sweep = asyncio.create_task(self._sweep_media(), name="vibey-agent-media-sweep")
         candidates = await asyncio.to_thread(self._recovery_candidates)
         unsettled: list[str] = []
         for session_id in candidates:
@@ -463,6 +467,16 @@ class VibeyAgent(BaseAgent):
                     logger.info("Vibey pruned %d settled job(s)", len(removed))
         except Exception:
             logger.exception("Vibey job pruning failed")
+
+    async def _sweep_media(self) -> None:
+        """Remove the media files no row registers, once per process, off the loop (``MediaSnapshots.sweep``)."""
+        try:
+            removed, freed = await asyncio.to_thread(self.media.sweep)
+        except Exception:
+            logger.exception("Vibey media sweep failed")
+            return
+        if removed:
+            logger.info("Vibey removed %d unregistered media file(s), %d bytes", removed, freed)
 
     def _job_call_settled(self, meta: Any) -> bool:
         """Whether the job's call instance has a durable ``tool_result`` row (the adapter's half of J5).

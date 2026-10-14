@@ -50,6 +50,11 @@ it, exactly as for the other backends' rows (``persist_agent_message`` with
 changes after commit. A final whose ``final_outcome`` failed commits as
 ``error``.
 
+Generated images. A committed row that names a generated image (a hosted
+record's ``images``) registers each file in ``media_objects`` in its own
+transaction, as an input snapshot is registered: the media sweep keeps exactly
+the files some row registers (``vibey-hosted-tools.md`` §7.3).
+
 Cancellation. A worker thread cannot be interrupted, so a cancelled write keeps
 the Session's lock until its transaction settles and only then raises: when a
 write call returns or raises, the rows already show whether it committed.
@@ -71,6 +76,7 @@ from core.agent_core.harness.projection import open_tool_calls
 from core.agent_core.harness.store import ContextEntry, EntryKind
 from core.agent_core.messages import (
     AssistantMessage,
+    HostedToolBlock,
     TextBlock,
     ToolResultMessage,
     has_reply,
@@ -79,7 +85,7 @@ from core.agent_core.messages import (
     message_to_dict,
     require_json_value,
 )
-from storage import agent_events_service, messages_service
+from storage import agent_events_service, media_service, messages_service
 from storage.agent_session_rows import reserve_write_lock
 from storage.message_deliveries import TURN_OWNER_STATES
 from storage.models import agent_events, agent_sessions, message_deliveries, messages, scopes, session_turns
@@ -249,6 +255,7 @@ class SQLiteTranscriptStore:
                 content={"model": model},
             )
             conn.execute(messages.update().where(messages.c.id == row["id"]).values(context_seq=seq))
+            _register_images(conn, origin.scope_id, session_id, message)
             return ContextEntry(
                 session_id, seq, "response", row["id"], message=message, payload=model, created_at=_epoch(row["created_at"])
             )
@@ -370,6 +377,8 @@ class SQLiteTranscriptStore:
             source="agent",
             context_seq=seq,
         )
+        if message is not None:
+            _register_images(conn, origin.scope_id, session_id, message)
         return ContextEntry(
             session_id, seq, kind, row["id"], message=message, payload=payload, created_at=_epoch(row["created_at"])
         )
@@ -395,6 +404,27 @@ async def _settle(task: asyncio.Future[Any]) -> None:
 
 
 # --- allocation and attribution ----------------------------------------------
+
+
+def _register_images(
+    conn: Connection, scope_id: Optional[str], session_id: str, message: AssistantMessage | ToolResultMessage
+) -> None:
+    """Register each generated image ``message`` names, in its row's transaction (module docstring)."""
+
+    if isinstance(message, AssistantMessage):
+        records = [block.record for block in message.content if isinstance(block, HostedToolBlock)]
+    else:
+        records = [message.hosted.record] if message.hosted is not None else []
+    for image in (image for record in records for image in record.images or ()):
+        media_service.register(
+            conn,
+            scope_id=scope_id,
+            session_id=session_id,
+            kind="image",
+            source=media_service.AGENT_CONTEXT_SOURCE,
+            local_path=image.path,
+            content_type=image.mime,
+        )
 
 
 def _own_bound(conn: Connection, session_id: str) -> Optional[int]:
