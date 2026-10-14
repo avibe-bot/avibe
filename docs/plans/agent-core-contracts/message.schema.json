@@ -898,7 +898,12 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 400,
-          "description": "Bounded and redacted."
+          "description": "Bounded and redacted. Model-facing English: the provider's own reason, or one Avibe wrote."
+        },
+        "error_code": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]{0,63}$",
+          "description": "The stable code of a reason Avibe wrote (`HOSTED_ERROR_CODES`), by which a display localizes it; absent for a provider's own reason. A reader accepts any snake_case code."
         },
         "sources": {
           "type": "array",
@@ -913,6 +918,11 @@
             "$ref": "#/definitions/HostedImage"
           }
         }
+      },
+      "dependencies": {
+        "error_code": [
+          "error"
+        ]
       },
       "if": {
         "properties": {

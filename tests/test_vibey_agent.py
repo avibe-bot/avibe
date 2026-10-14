@@ -265,6 +265,7 @@ class _Controller:
             provider="test-provider",
             supports_images=True,
             hosted_tools=self.hub_hosted_tools,
+            gateway_request_metadata={"x-avibe-turn-id": turn_id} if turn_id else {},
         )
 
     def _native_start(self, context, *, activation_identity=None) -> None:
@@ -2555,7 +2556,7 @@ def _anthropic_reply(*blocks: str, stop_reason: str) -> str:
 
 
 @pytest.mark.parametrize(
-    ("status", "answer", "is_error", "seen"),
+    ("status", "answer", "is_error", "seen", "code"),
     [
         (
             200,
@@ -2570,19 +2571,36 @@ def _anthropic_reply(*blocks: str, stop_reason: str) -> str:
             },
             False,
             "https://avibe.bot/r",
+            None,
         ),
-        (200, {"record": {"status": "failed", "error": "no Source is verified for web search", "sources": []}}, True, "[web_search failed: no Source is verified"),
-        (404, {"type": "error", "error": {"type": "not_found", "code": "unknown_tool"}}, True, "HTTP 404 unknown_tool"),
+        # The gateway's own reason: localized where it was written, so it carries no code.
+        (
+            200,
+            {"record": {"status": "failed", "error": "no Source is verified for web search", "sources": []}},
+            True,
+            "[web_search failed: no Source is verified",
+            None,
+        ),
+        (
+            404,
+            {"type": "error", "error": {"type": "not_found", "code": "unknown_tool"}},
+            True,
+            "HTTP 404 unknown_tool",
+            "gateway_refused",
+        ),
+        (None, None, True, "the gateway could not run the call (ConnectError)", "gateway_unreachable"),
+        (200, {"answer": "no record"}, True, "the gateway answered with no hosted result", "gateway_no_result"),
     ],
-    ids=["executed", "no-executor", "refused"],
+    ids=["executed", "no-executor", "refused", "unreachable", "no-result"],
 )
 async def test_a_proxied_hosted_call_runs_on_the_bound_executor_and_keeps_its_record(
-    engine, session, tmp_path, published, status, answer, is_error, seen
+    engine, session, tmp_path, published, status, answer, is_error, seen, code
 ) -> None:
     """MH-HOSTED-VIBEY-004 (vibey-hosted-tools.md §3.4): on a hop that does not run the tool natively, the model calls
     the same-named function; Vibey asks the gateway's executor bound for the Turn, keeps the record and execution on
     the tool result, and the model reads the record as text. A call that never reached an executor is a failed
-    record, never an empty success."""
+    record, never an empty success, and the reason Vibey writes for it carries its code (#2589). Every gateway
+    request, the model's and the executor's, names the Turn (``x-avibe-turn-id``), which binds the executor."""
     import httpx
 
     from modules.agents.vibey.models import registry_providers
@@ -2598,10 +2616,14 @@ async def test_a_proxied_hosted_call_runs_on_the_bound_executor_and_keeps_its_re
     ]
     models: list[dict] = []
     executed: list[httpx.Request] = []
+    named: list[str | None] = []
 
     def gateway(request: httpx.Request) -> httpx.Response:
+        named.append(request.headers.get("x-avibe-turn-id"))
         if request.url.path == "/vibey/v1/hosted-tools/web_search":
             executed.append(request)
+            if status is None:
+                raise httpx.ConnectError("connection refused", request=request)
             return httpx.Response(status, json=answer)
         models.append(json.loads(request.content))
         return httpx.Response(
@@ -2618,8 +2640,10 @@ async def test_a_proxied_hosted_call_runs_on_the_bound_executor_and_keeps_its_re
             gateway_client=client,
         )
         harness.controller.hub_hosted_tools = {"web_search": {"mode": "proxy", "executor": _EXECUTOR, "replay": False}}
-        await harness.agent.handle_message(harness.request("search"))
+        message = harness.request("search")
+        await harness.agent.handle_message(message)
 
+    assert len(named) == 3 and set(named) == {_turn(message.context)}
     (request,) = executed
     assert json.loads(request.content) == {"arguments": {"query": "avibe release"}, "executor": _EXECUTOR}
     assert request.headers["authorization"] == "Bearer hub-token"
@@ -2628,6 +2652,7 @@ async def test_a_proxied_hosted_call_runs_on_the_bound_executor_and_keeps_its_re
     result = next(row.message for row in await harness.context_rows() if isinstance(row.message, ToolResultMessage))
     assert result.is_error is is_error and result.hosted is not None
     assert (result.hosted.execution is not None) == (not is_error)
+    assert result.hosted.record.error_code == code
     sent = models[1]["messages"][-1]["content"][0]
     assert sent["type"] == "tool_result" and seen in json.dumps(sent)
 
@@ -2698,6 +2723,51 @@ async def test_a_proxied_image_is_saved_through_the_media_sink_and_its_record_na
         "generate", prompt="A lighthouse at dusk", size="1536x1024", quality="high"
     )
     assert result.content[0].text.startswith('[image_generation: "A lighthouse at dusk"]')
+
+
+@pytest.mark.parametrize(
+    ("images", "stored", "error", "code"),
+    [
+        ([], True, "the executor returned no image", "executor_no_image"),
+        ([{"mime": "image/jpeg", "data": "@@@ not base64 @@@"}], True, "the image could not be saved: ", "image_not_saved"),
+        ([{"mime": "image/jpeg", "data": "/9j/4AAQ"}], False, "nothing here can keep a generated image", "image_no_store"),
+    ],
+    ids=["no-image", "unreadable", "no-store"],
+)
+async def test_a_proxied_image_that_was_not_saved_is_a_failed_call_with_its_code(tmp_path, images, stored, error, code):
+    """§7.3, #2589: an executor's completed image call that saved no file is a failed record, never a completed one
+    listing nothing, and the reason Vibey writes for it carries its code, by which a display localizes it."""
+    import httpx
+
+    from core.agent_core.ai.provider import HostedExecutor, ModelEndpoint
+    from core.agent_core.tools.hosted import hosted_tool_spec
+    from modules.agents.vibey.tools import HostedTool
+
+    answer = {
+        "record": {"status": "completed", "sources": []},
+        "execution": {
+            "mode": "proxy",
+            "executor_origin": {"provider": "openai", "api": "openai_responses", "model": "gpt-image"},
+            "executor_source_id": "src_executor01",
+            "executor_billing": "metered",
+        },
+        "images": images,
+    }
+    endpoint = ModelEndpoint("anthropic", "http://hub.invalid/vibey/v1", "claude-opus-5-5", "hub-token")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(200, json=answer))) as client:
+        tool = HostedTool(
+            hosted_tool_spec("image_generation"),
+            HostedExecutor("src_executor01", "gpt-image"),
+            endpoint,
+            client,
+            media=MediaSnapshots(None, tmp_path / "media") if stored else None,  # type: ignore[arg-type]
+        )
+        result = await tool.execute({"prompt": "a lighthouse"}, None)  # type: ignore[arg-type]
+
+    record = result.hosted.record
+    assert result.is_error and record.status == "failed" and record.images == ()
+    assert record.error.startswith(error) and record.error_code == code
+    assert not (tmp_path / "media").exists() or not any((tmp_path / "media").iterdir())
 
 
 _NATIVE_SEARCH = {"mode": "native", "declaration": {"type": "web_search"}, "include": [], "executor": None, "replay": False}

@@ -1644,7 +1644,7 @@ def _add_hosted_call(
     finished: bool = True,
     backfill: bool = False,
     image: HostedImage | None = None,
-    image_error: str | None = None,
+    image_error: tuple[str, str] | None = None,
 ) -> None:
     """An output item of a hosted tool the request declared natively, as its hosted call at its output index (§4.2):
     pending when only added, filled in when done. A call the terminal response backfills keeps a block it has.
@@ -1661,7 +1661,7 @@ def _add_hosted_call(
     if backfill and current is not None and current.record.status != "pending":
         return
     if backfill and tool == "image_generation":
-        image_error = "the image was not streamed before the response ended"
+        image_error = ("the image was not streamed before the response ended", "image_not_streamed")
     assembler.hosted_block(
         output_index,
         responses_hosted_block(
@@ -1703,8 +1703,11 @@ class _ImageBudget:
         return None
 
 
-async def _saved_image(sink: MediaSink | None, item: Mapping[str, Any]) -> tuple[HostedImage | None, str | None]:
-    """The file a done ``image_generation_call`` was saved to, with its output size, or why there is none (§7.3).
+async def _saved_image(
+    sink: MediaSink | None, item: Mapping[str, Any]
+) -> tuple[HostedImage | None, tuple[str, str] | None]:
+    """The file a done ``image_generation_call`` was saved to, with its output size, or why there is none and its code
+    (§7.3).
 
     Only a completed call's image is saved: that is the only record that lists one, so no file is written that no
     record names."""
@@ -1713,11 +1716,11 @@ async def _saved_image(sink: MediaSink | None, item: Mapping[str, Any]) -> tuple
     if item.get("status") != "completed" or not isinstance(encoded, str) or not encoded:
         return None, None
     if sink is None:
-        return None, "nothing here can keep a generated image"
+        return None, ("nothing here can keep a generated image", "image_no_store")
     try:
         image = await sink.save_image(encoded)
     except (ValueError, OSError) as error:
-        return None, f"the image could not be saved: {error}"
+        return None, (f"the image could not be saved: {error}", "image_not_saved")
     width, height = image_dimensions(item.get("size"))
     return replace(image, width=width, height=height), None
 

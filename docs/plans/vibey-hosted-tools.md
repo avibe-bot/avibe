@@ -585,8 +585,9 @@ Each has a **Re-verify** action with its cost. Unknown shows nothing.
     cancel, crash or kill in between leaves a file no row references. Such files are content-addressed, so they never
     duplicate, and the per-response image budget bounds them. A startup sweep of the agent media root removes them
     (#2588, before the 3.2.1 RC).
-  - Avibe-authored failure reasons in a record's `error` are English model-facing text. Their display is localized
-    by a stable `error_code` at the display boundary (#2589, before the 3.2.1 RC).
+  - Avibe-authored failure reasons in a record's `error` are English model-facing text. Each carries a stable
+    `error_code` (C-1 `HostedRecord.error_code`, one of `HOSTED_ERROR_CODES`), by which the display boundary localizes
+    it; a provider's own reason carries none and shows as it is (#2589).
 - **The user sees the image.** The Workbench renders it inline from the file, and IM attaches it. That is display,
   separate from model context.
 - **History and replay never contain base64.**

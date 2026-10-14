@@ -24,12 +24,26 @@ IMAGE_MIME_TYPES: tuple[str, ...] = ("image/png", "image/jpeg", "image/gif", "im
 _LARGE_REF_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _SOURCE_ID_RE = re.compile(r"^src_[a-z0-9]{8,}$")
 _COUNTER_NAME_RE = re.compile(r"^[a-z0-9_]{1,64}$")
+_ERROR_CODE_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 
 HostedToolName = Literal["web_search", "x_search", "image_generation"]
 HOSTED_TOOLS: tuple[str, ...] = ("web_search", "x_search", "image_generation")
 HostedStatus = Literal["completed", "failed", "incomplete", "pending"]
 HOSTED_STATUSES: tuple[str, ...] = ("completed", "failed", "incomplete", "pending")
 HOSTED_ERROR_MAX_CHARS = 400
+#: The stable code of each hosted failure Avibe words itself (``HostedRecord.error_code``), by which a display localizes
+#: it; a provider's own reason has none. A record loads with any snake_case code, so one a newer build wrote still reads.
+HOSTED_ERROR_CODES: tuple[str, ...] = (
+    "provider_no_reason",
+    "provider_no_image",
+    "image_not_streamed",
+    "image_not_saved",
+    "image_no_store",
+    "executor_no_image",
+    "gateway_unreachable",
+    "gateway_refused",
+    "gateway_no_result",
+)
 COST_BASES: tuple[str, ...] = ("reported", "list", "included")
 SOURCE_BILLINGS: tuple[str, ...] = ("monthly", "metered")
 
@@ -323,12 +337,17 @@ class HostedImage:
 
 @dataclass(frozen=True)
 class HostedRecord:
-    """Per-call facts. ``images`` is set exactly for ``image_generation`` (possibly empty)."""
+    """Per-call facts. ``images`` is set exactly for ``image_generation`` (possibly empty).
+
+    ``error`` is model-facing English. ``error_code`` names a reason Avibe wrote (``HOSTED_ERROR_CODES``), only beside
+    an ``error``.
+    """
 
     status: HostedStatus
     error: Optional[str] = None
     sources: tuple[HostedSource, ...] = ()
     images: Optional[tuple[HostedImage, ...]] = None
+    error_code: Optional[str] = None
 
     def __post_init__(self) -> None:
         _require(self.status, str, "hosted status")
@@ -339,6 +358,9 @@ class HostedRecord:
             raise ValueError("a hosted error is present exactly for failed and incomplete records")
         if self.error is not None and len(self.error) > HOSTED_ERROR_MAX_CHARS:
             raise ValueError(f"a hosted error is at most {HOSTED_ERROR_MAX_CHARS} characters")
+        _require(self.error_code, str, "hosted error code", optional=True)
+        if self.error_code is not None and (self.error is None or not _ERROR_CODE_RE.fullmatch(self.error_code)):
+            raise ValueError("a hosted error code is snake_case and comes only with an error")
         if not isinstance(self.sources, tuple) or not all(isinstance(s, HostedSource) for s in self.sources):
             raise ValueError("hosted sources must be a tuple of HostedSource")
         if self.images is not None and (
@@ -671,6 +693,7 @@ def _source_from_dict(data: Any) -> HostedSource:
 def _record_to_dict(record: HostedRecord) -> dict[str, Any]:
     out: dict[str, Any] = {"status": record.status}
     _put(out, "error", record.error)
+    _put(out, "error_code", record.error_code)
     out["sources"] = [_source_to_dict(source) for source in record.sources]
     if record.images is not None:
         images = []
@@ -685,7 +708,7 @@ def _record_to_dict(record: HostedRecord) -> dict[str, Any]:
 
 
 def _record_from_dict(data: Any) -> HostedRecord:
-    f = _read(data, "hosted record", {"status": str, "sources": list}, {"error": str, "images": list})
+    f = _read(data, "hosted record", {"status": str, "sources": list}, {"error": str, "error_code": str, "images": list})
     images = None
     if "images" in f:
         images = tuple(
@@ -699,6 +722,7 @@ def _record_from_dict(data: Any) -> HostedRecord:
         error=f.get("error"),
         sources=tuple(_source_from_dict(source) for source in f["sources"]),
         images=images,
+        error_code=f.get("error_code"),
     )
 
 

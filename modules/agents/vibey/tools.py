@@ -24,7 +24,7 @@ import httpx
 from core.agent_core.agent.models import ModelSelection
 from core.agent_core.agent.recovery import RecoveryRenderer
 from core.agent_core.ai._common import CONNECT_TIMEOUT_S, auth_headers, join_endpoint_url
-from core.agent_core.ai.hosted import bounded_error, generate_action, image_dimensions, record_text
+from core.agent_core.ai.hosted import failure, generate_action, image_dimensions, record_text
 from core.agent_core.ai.provider import HostedExecutor, MediaSink, ModelEndpoint
 from core.agent_core.messages import (
     HostedImage,
@@ -160,17 +160,17 @@ class HostedTool:
                 async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
                     response = await client.post(url, json=body, headers=headers)
         except httpx.HTTPError as error:
-            return _failed(self.spec.name, f"the gateway could not run the call ({type(error).__name__})")
+            reason = f"the gateway could not run the call ({type(error).__name__})"
+            return _failed(self.spec.name, reason, "gateway_unreachable")
         if response.status_code != 200:
-            return _failed(
-                self.spec.name, f"the gateway refused the call (HTTP {response.status_code} {_error_code(response)})"
-            )
+            reason = f"the gateway refused the call (HTTP {response.status_code} {_error_code(response)})"
+            return _failed(self.spec.name, reason, "gateway_refused")
         try:
             # A proxied image's answer carries megabytes of base64: parsed off the controller loop.
             answer = await asyncio.to_thread(response.json)
             hosted = _hosted_result(self.spec.name, answer)
         except (TypeError, ValueError):
-            return _failed(self.spec.name, "the gateway answered with no hosted result")
+            return _failed(self.spec.name, "the gateway answered with no hosted result", "gateway_no_result")
         if self.spec.name == "image_generation" and hosted.record.status == "completed":
             hosted = await self._saved(hosted, answer)
         return hosted
@@ -182,31 +182,38 @@ class HostedTool:
         generation = answer.get("generation")
         generation = generation if isinstance(generation, Mapping) else {}
         width, height = image_dimensions(generation.get("size"))
+        images = answer.get("images")
+        if not isinstance(images, list) or not images:
+            failed = _failed_record(self.spec.name, "the executor returned no image", "executor_no_image")
+            return replace(hosted, record=failed)
+        if self.media is None:
+            failed = _failed_record(self.spec.name, "nothing here can keep a generated image", "image_no_store")
+            return replace(hosted, record=failed)
         saved: list[HostedImage] = []
         try:
-            for item in answer.get("images") or ():
+            for item in images:
                 encoded = item.get("data") if isinstance(item, Mapping) else None
-                if not isinstance(encoded, str) or self.media is None:
-                    raise ValueError("nothing here can keep a generated image")
+                if not isinstance(encoded, str):
+                    raise ValueError("the executor's image is not base64 text")
                 saved.append(replace(await self.media.save_image(encoded), width=width, height=height))
         except (ValueError, OSError) as error:
-            return replace(hosted, record=_failed_record(self.spec.name, f"the image could not be saved: {error}"))
-        if not saved:
-            return replace(hosted, record=_failed_record(self.spec.name, "the executor returned no image"))
+            failed = _failed_record(self.spec.name, f"the image could not be saved: {error}", "image_not_saved")
+            return replace(hosted, record=failed)
         # The executor's rendered prompt and resolved size and quality: where a native call's block carries them.
         return replace(hosted, record=replace(hosted.record, images=tuple(saved)), action=generate_action(generation))
 
 
-def _failed_record(tool: str, reason: str) -> HostedRecord:
+def _failed_record(tool: str, reason: str, code: str) -> HostedRecord:
+    error, error_code = failure(reason, code)
     return HostedRecord(
-        status="failed", error=bounded_error(reason), images=() if tool == "image_generation" else None
+        status="failed", error=error, error_code=error_code, images=() if tool == "image_generation" else None
     )
 
 
-def _failed(tool: str, reason: str) -> HostedResult:
+def _failed(tool: str, reason: str, code: str) -> HostedResult:
     """A call that never reached an executor: a failed record, and no execution (§4.2)."""
 
-    return HostedResult(record=_failed_record(tool, reason))
+    return HostedResult(record=_failed_record(tool, reason, code))
 
 
 def _error_code(response: httpx.Response) -> str:

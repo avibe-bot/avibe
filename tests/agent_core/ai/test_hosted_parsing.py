@@ -16,7 +16,7 @@ import pytest
 
 import core.agent_core.ai._common as common_module
 from core.agent_core.ai._common import OutputBudgetExceeded, StreamAssembler
-from core.agent_core.ai.hosted import reported_counts, responses_hosted_block
+from core.agent_core.ai.hosted import anthropic_hosted_block, reported_counts, responses_hosted_block
 from core.agent_core.ai.provider import Done, HostedToolRoute, ModelEndpoint, ModelRequest
 from core.agent_core.ai.registry import create_adapter
 from core.agent_core.cancel import CancelToken
@@ -407,7 +407,7 @@ async def test_parallel_anthropic_searches_finalize_by_id_and_a_search_cut_off_s
 
     first, second, third, read = message.content
     assert [first.id, second.id, third.id] == ["srvtoolu_a", "srvtoolu_b", "srvtoolu_c"]
-    assert (first.record.status, first.record.error) == ("failed", "max_uses_exceeded")
+    assert (first.record.status, first.record.error, first.record.error_code) == ("failed", "max_uses_exceeded", None)
     assert second.record.status == "completed"
     assert third.record.status == "pending" and len(third.native.payload) == 1
     assert read == ToolCallBlock(id="toolu_1", name="read", arguments={"path": "a"}, native_id="toolu_1")
@@ -423,6 +423,48 @@ async def test_parallel_responses_calls_keep_their_output_order_whatever_order_t
 
     assert [getattr(block, "id", "text") for block in message.content] == ["ws_1", "ws_2", "text"]
     assert all(block.record.status == "completed" for block in message.content[:2])
+
+
+_SEARCH_USE = {"type": "server_tool_use", "id": "srvtoolu_1", "name": "web_search", "input": {"query": "a"}}
+
+
+@pytest.mark.parametrize(
+    ("block", "reason", "code"),
+    [
+        (
+            lambda: responses_hosted_block(
+                {"id": "ws_1", "type": "web_search_call", "status": "failed", "error": {"message": "upstream timeout"}},
+                source_id=SERVED,
+                call_id="hosted_0",
+            ),
+            "upstream timeout",
+            None,
+        ),
+        (
+            lambda: responses_hosted_block(
+                {"id": "ws_1", "type": "web_search_call", "status": "incomplete"}, source_id=SERVED, call_id="hosted_0"
+            ),
+            "the provider ended the call incomplete",
+            "provider_no_reason",
+        ),
+        (
+            lambda: anthropic_hosted_block(
+                _SEARCH_USE,
+                {"type": "web_search_tool_result", "content": {"type": "web_search_tool_result_error"}},
+                source_id=SERVED,
+            ),
+            "the provider reported no reason",
+            "provider_no_reason",
+        ),
+    ],
+    ids=["responses-reason", "responses-no-reason", "anthropic-no-reason"],
+)
+def test_a_failed_call_keeps_the_providers_reason_uncoded_and_codes_the_one_avibe_writes_for_none(block, reason, code):
+    """#2589: a display localizes a hosted failure by its ``error_code``, and only Avibe's own English reasons have one;
+    the provider's words show as they are."""
+
+    record = block().record
+    assert (record.error, record.error_code) == (reason, code)
 
 
 def test_a_hosted_error_is_redacted_before_the_record_keeps_it():
