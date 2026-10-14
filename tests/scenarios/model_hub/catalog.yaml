@@ -194,7 +194,7 @@ scenarios:
     test: tests/test_model_hub_capability_evidence.py::test_a_refusal_holds_until_the_wire_or_the_source_changes
     related_tests:
       - tests/test_model_hub_capability_evidence.py::test_a_success_never_replaces_a_refusal_and_never_routes
-      - tests/test_model_hub_capability_evidence.py::test_successes_update_the_latest_at_once_and_the_file_at_most_hourly
+      - tests/test_model_hub_capability_evidence.py::test_successes_reach_memory_at_once_and_the_file_at_most_hourly
       - tests/test_model_hub_capability_evidence.py::test_a_refusal_holds_in_memory_when_its_write_fails
       - tests/test_model_hub_capability_evidence.py::test_a_clear_is_persisted_before_it_takes_effect
       - tests/test_model_hub_capability_evidence.py::test_a_changed_source_identity_is_pruned_at_the_next_write
@@ -213,6 +213,8 @@ scenarios:
       - tests/test_model_hub_hosted_tools_resolution.py::test_the_tools_read_states_saved_and_effective_values_and_what_real_use_showed
       - tests/test_model_hub_hosted_tools_resolution.py::test_a_put_changes_only_the_fields_it_names
       - tests/test_model_hub_hosted_tools_resolution.py::test_a_put_refuses_what_the_contract_forbids
+      - tests/test_model_hub_hosted_tools_resolution.py::test_the_latest_success_is_the_newest_in_time_not_in_text
+      - tests/test_model_hub_hosted_tools_resolution.py::test_the_latest_success_is_the_newest_one_whose_source_is_still_the_same
   - id: MH-HOSTED-005
     name: The bundled provider overlay resolves search-tool declarations, includes and prices, each vendor's executor model and its image models; a broken vendor entry disables only that vendor
     status: covered
@@ -460,6 +462,7 @@ scenarios:
       - 'ui/src/components/settings/models/useHostedTools.test.tsx::MH-HOSTED-UI-007: re-reads when the open Source changes, since an edit can drop its evidence'
       - 'ui/src/components/settings/models/useHostedTools.test.tsx::MH-HOSTED-UI-007: shows no status of the previous Source identity while the new identity''s read fails'
       - 'ui/src/components/settings/models/useHostedTools.test.tsx::MH-HOSTED-UI-007: keeps a tool pending until the read reconciling its lost write lands'
+      - 'ui/src/components/settings/models/useHostedTools.test.tsx::MH-HOSTED-UI-007: keeps a tool pending while the read reconciling its lost write fails, until a read lands'
       - 'ui/src/components/settings/models/useHostedTools.test.tsx::MH-HOSTED-UI-007: drops a write answer asked under another Source identity'
       - 'ui/src/components/settings/models/useHostedTools.test.tsx::MH-HOSTED-UI-007: keeps a tool pending until every write queued for it has settled'
       - 'ui/src/components/settings/models/useHostedTools.test.tsx::MH-HOSTED-UI-007: queues a clear behind a write like any write, so its answer lands last'
@@ -492,12 +495,14 @@ scenarios:
       - 'ui/src/components/settings/models/SourceDetailPanel.test.tsx::MH-HOSTED-UI-020: clears a refused effort and shows the Source the clear answered'
       - 'ui/src/components/settings/models/SettingsModelsPage.render.test.tsx::MH-HOSTED-UI-020: clears a refusal from its Source chip and shows the status the clear answered'
   - id: MH-HOSTED-UI-021
-    name: A search tool's executor order lists every eligible executor in effective order; a move saves the whole shown order, Reset saves automatic, and focus follows the moved row
+    name: A search tool's executor order lists every eligible executor in effective order; a move rearranges the shown executors within the saved order and keeps hidden ones, Reset saves automatic, and focus follows the moved row
     status: covered
     kind: contract
     layer: unit
     test:
       - 'ui/src/components/settings/models/ToolsTab.test.tsx::MH-HOSTED-UI-021: lists the executors in effective order, and a move saves the whole shown order'
+      - 'ui/src/components/settings/models/ToolsTab.test.tsx::MH-HOSTED-UI-021: a move keeps a saved executor the read does not show'
+      - 'ui/src/components/settings/models/hostedTools.test.ts::MH-HOSTED-UI-021: moves only the shown executors within the saved order, keeping hidden ones in place'
       - 'ui/src/components/settings/models/ToolsTab.test.tsx::MH-HOSTED-UI-021: a customized order offers Reset, which saves automatic'
       - 'ui/src/components/settings/models/ToolsTab.test.tsx::MH-HOSTED-UI-021: keeps focus on the moved row once the answer lands, on its other arrow at an end'
   - id: MH-VIBEY-007

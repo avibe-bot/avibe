@@ -136,11 +136,12 @@ The evidence store, its record and its owner are the capability model's §3. v2 
   - **A positive record carries the observed `mode`** (`native`, `executor` or `direct`) and is never retired by the
     wire stamp: it is display-only history, so an upgrade does not hide it. The stamp retires `unsupported` records
     only. A positive and a negative record for the same (Source, model, feature) coexist (the store keys by status
-    too), so a later refusal never erases the success history the projection is seeded from after a restart.
-  - **The latest execution is a projection, not a file write.** Model Hub keeps, per tool, the latest success
-    (`{source_id, model_id, mode, at}`) in memory, updated on every success and seeded at startup from the persisted
-    positive records. The read's `latest_ok` comes from it, so the status line is current even while file writes are
-    throttled.
+    too), so a later refusal never erases the success history kept for a restart.
+  - **Memory is the one source of success history.** Every success updates its (Source, model, tool) record in
+    memory at once; the file takes it at most hourly per key and seeds memory at startup. `latest_ok` is the newest
+    of those records whose Source still has the identity it ran under, compared by time, so the status line is
+    current while file writes are throttled, and a Source that changes identity hands the line to the newest other
+    success rather than to an older file copy. There is no separate per-tool projection to drift from the records.
   - Positive evidence never changes routing. It feeds the "最近一次 … 正常" lines (§8) and nothing else.
   - A `google` hop has no native hosted tools, and the Chat route Vibey uses gives no hosted item to observe.
 - **Negative (`unsupported`) is routing state.** When the file write fails, the narrow rule still updates the
@@ -232,7 +233,7 @@ The evidence store, its record and its owner are the capability model's §3. v2 
       upstream machine code, never provider prose); `verified[]` is `[{source_id, model_id, mode, at}]`, the persisted
       positive records, one per pair, from which the Source chips derive (hosted evidence lives on this read, which
       the clears answer; the Source read keeps effort evidence);
-    - `latest_ok` is the in-memory latest-execution projection (§3.2), not the newest file record;
+    - `latest_ok` is the newest identity-valid success in memory (§3.2), not the newest file record;
     - search tools: `executor_order` (saved, null when automatic), `effective_order` (as the gateway would try now),
       and `executor_candidates: [{source_id, model_id, billing, relay, price}]` in effective order (`model_id` the
       vendor's executor model; `price` the overlay's list price with its units, or null) (`relay` true for a Source on a
@@ -685,7 +686,9 @@ Unchanged from v1 §7.3 (owner decision, 2026-10-13 19:14), with the producer no
   buttons (keyboard- and screen-reader-accessible, the route chain editor's pattern), each row with its Source's
   executor model and its unit rates as the overlay lists them ("$5 / 1k posts + $10 / 1k profiles", "at API price"
   for a relay), never a single per-call figure where the count is unknown before the call, collapsed and fully automatic until touched, with "Reset to
-  automatic" (a `null` PUT). The price shows per row because it depends on who runs the search.
+  automatic" (a `null` PUT). The price shows per row because it depends on who runs the search. A move
+  rearranges the shown executors within the saved order: an id the saved order names but the read does not show (a
+  refused or absent Source) keeps its place, and a shown executor the order lacks follows it.
 - **The image card** lists the available image models with their one-line descriptions and a per-image price
   (owner-approved mockup): the vendor's list price where it has one (Grok Imagine "$0.02"); an estimate from token
   pricing, marked "≈", where the image's tokens are known: the pricing module values the overlay's

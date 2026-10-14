@@ -139,30 +139,32 @@ def test_a_success_never_replaces_a_refusal_and_never_routes(tmp_path):
     assert {record.status for record in store.records()} == {"verified", "unsupported"}
 
 
-def test_successes_update_the_latest_at_once_and_the_file_at_most_hourly(tmp_path, monkeypatch):
-    """MH-HOSTED-003: the status line is current while file writes are throttled, and it survives a restart."""
+def test_successes_reach_memory_at_once_and_the_file_at_most_hourly(tmp_path, monkeypatch):
+    """MH-HOSTED-003: every success is read at once while file writes are throttled per key, and a restart keeps what
+    reached the file."""
     from core.handlers.model_hub import capability_evidence
 
     path = tmp_path / "model_hub_capability_evidence.json"
     source, other = _source(), _source("src_xai00002")
+    live = [source, other]
     store = CapabilityEvidenceStore(path)
     writes = []
     persist = capability_evidence.write_state_document
     monkeypatch.setattr(capability_evidence, "write_state_document", lambda *args: (writes.append(1), persist(*args)))
 
-    store.note_success(_success(source, CALL), live=[source, other], now=NOW)
-    store.note_success(_success(other, CALL, observed_at=NOW + timedelta(minutes=5), mode="executor"), live=[source, other], now=NOW + timedelta(minutes=5))
-    store.note_success(_success(source, CALL, observed_at=NOW + timedelta(minutes=10)), live=[source, other], now=NOW + timedelta(minutes=10))
-    assert len(writes) == 2
-    assert store.latest_success("x_search").source_id == source.id
-    assert store.latest_success("x_search").at == NOW + timedelta(minutes=10)
+    def seen(store, source):
+        return store.get(source.id, "grok-4.6", CALL, "verified").observed_at
 
-    store.note_success(_success(source, CALL, observed_at=NOW + timedelta(hours=2)), live=[source, other], now=NOW + timedelta(hours=2))
+    store.note_success(_success(source, CALL), live=live, now=NOW)
+    store.note_success(_success(other, CALL, observed_at=NOW + timedelta(minutes=5)), live=live, now=NOW + timedelta(minutes=5))
+    store.note_success(_success(source, CALL, observed_at=NOW + timedelta(minutes=10)), live=live, now=NOW + timedelta(minutes=10))
+    assert len(writes) == 2
+    assert (seen(store, source), seen(store, other)) == (NOW + timedelta(minutes=10), NOW + timedelta(minutes=5))
+    assert seen(CapabilityEvidenceStore(path), source) == NOW
+
+    store.note_success(_success(source, CALL, observed_at=NOW + timedelta(hours=2)), live=live, now=NOW + timedelta(hours=2))
     assert len(writes) == 3
-    reloaded = CapabilityEvidenceStore(path)
-    assert (reloaded.latest_success("x_search").source_id, reloaded.latest_success("x_search").at) == (
-        source.id, NOW + timedelta(hours=2),
-    )
+    assert seen(CapabilityEvidenceStore(path), source) == NOW + timedelta(hours=2)
 
 
 def test_a_refusal_holds_in_memory_when_its_write_fails(tmp_path, monkeypatch, caplog):

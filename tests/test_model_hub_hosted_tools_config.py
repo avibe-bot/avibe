@@ -248,6 +248,8 @@ async def test_a_clear_removes_only_the_refusals_it_names(tmp_path):
         (service.clear_hosted_refusals("x_search", {"source_id": source.id, "model_id": None}), "invalid_parameter", 400),
         (service.clear_hosted_refusals("x_search", {"source_id": source.id, "model_id": " grok-4.6"}), "invalid_parameter", 400),
         (service.clear_source_evidence(source.id, {"model_id": "grok-4.6 ", "feature": {"kind": "effort", "name": "max"}}), "invalid_parameter", 400),
+        # The feature is exactly the shape the evidence writes: an effort has no aspect, not even a null one.
+        (service.clear_source_evidence(source.id, {"model_id": "grok-4.6", "feature": {"kind": "effort", "name": "max", "aspect": None}}), "invalid_parameter", 400),
         (service.clear_hosted_refusals("x_search", {"model_id": executor}), "invalid_parameter", 400),
         (service.clear_hosted_refusals("x_search", {"source_id": ""}), "invalid_parameter", 400),
         (service.clear_source_evidence("src_gone0001", {"model_id": "grok-4.6", "feature": {"kind": "effort", "name": "max"}}), "source_not_found", 404),
