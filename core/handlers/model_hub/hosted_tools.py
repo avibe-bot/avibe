@@ -15,7 +15,8 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from datetime import datetime
 from functools import lru_cache
 from importlib import resources
 from pathlib import Path
@@ -29,6 +30,9 @@ from config.v2_config import (
     ModelHubImageModelChoice,
     ModelHubSourceConfig,
     hosted_tool_setting,
+    is_model_hub_model_id,
+    is_model_hub_source_id,
+    model_hub_executor_order,
 )
 from vibe.backend_model_catalog import (
     HostedToolSpec,
@@ -366,7 +370,7 @@ def _status(
 
     live = {source.id: source for source in config.sources}
     refused: list[dict[str, Any]] = []
-    verified: list[dict[str, Any]] = []
+    successes: list[tuple[datetime, str, str, Optional[str]]] = []
     for record in evidence.store.records():
         source = live.get(record.source_id)
         if (
@@ -389,17 +393,24 @@ def _status(
                 }
             )
         else:
-            verified.append(
-                {"source_id": record.source_id, "model_id": record.model_id, "mode": record.mode, "at": utc_text(record.observed_at)}
-            )
+            successes.append((record.observed_at, record.source_id, record.model_id, record.mode))
     # The projection is current between the throttled file writes; either kind counts only under its Source's
     # current identity.
     latest = evidence.store.latest_success(tool)
-    candidates = list(verified)
+    candidates = list(successes)
     if latest is not None and latest.source_id in live and latest.source_identity == identity_digest(live[latest.source_id]):
-        candidates.append(latest.payload())
+        candidates.append((latest.at, latest.source_id, latest.model_id, latest.mode))
+    newest = max(candidates, key=lambda item: item[0], default=None)
+    verified = [
+        {"source_id": source_id, "model_id": model_id, "mode": mode, "at": utc_text(at)}
+        for at, source_id, model_id, mode in successes
+    ]
     return {
-        "latest_ok": max(candidates, key=lambda item: item["at"], default=None),
+        "latest_ok": (
+            {"source_id": newest[1], "model_id": newest[2], "mode": newest[3], "at": utc_text(newest[0])}
+            if newest is not None
+            else None
+        ),
         "refused": sorted(refused, key=lambda item: (item["at"], item["source_id"], item["model_id"])),
         "verified": sorted(verified, key=lambda item: (item["source_id"], item["model_id"])),
     }
@@ -483,15 +494,41 @@ def apply_hosted_tool_put(config: ModelHubConfig, tool: str, payload: object) ->
     allowed = {"enabled"} | ({"executor_order"} if tool in MODEL_HUB_SEARCH_TOOLS else {"default_model"})
     if not isinstance(payload, dict) or not payload or set(payload) - allowed:
         raise HostedToolSettingRefused("invalid_parameter", 400)
-    current = hosted_tool_setting(config, tool)
-    merged = {**current.to_payload(), **payload}
-    # Only the saved choices reset with null; a null ``enabled`` is invalid, never the default.
-    merged = {key: value for key, value in merged.items() if value is not None or key == "enabled"}
+    changes: dict[str, Any] = {}
     try:
-        setting = ModelHubHostedToolConfig.from_payload(merged, tool=tool)
+        if "enabled" in payload:
+            # Only the saved choices reset with null; a switch is a boolean.
+            if not isinstance(payload["enabled"], bool):
+                raise ValueError("enabled must be a boolean")
+            changes["enabled"] = payload["enabled"]
+        if "executor_order" in payload:
+            order = payload["executor_order"]
+            changes["executor_order"] = None if order is None else model_hub_executor_order(order, tool=tool)
+        if "default_model" in payload:
+            default = payload["default_model"]
+            changes["default_image"] = None if default is None else ModelHubImageModelChoice.from_payload(default, tool=tool)
     except ValueError:
         raise HostedToolSettingRefused("invalid_parameter", 400) from None
-    return setting
+    return replace(hosted_tool_setting(config, tool), **changes)
+
+
+def clear_request(tool: str, payload: object) -> Callable[[EvidenceRecord], bool]:
+    """One ``POST /api/models/hosted-tools/<tool>/clear`` body read as the refusals it clears.
+
+    Each field is optional and, when present, a Source id or a canonical model id; ``model_id`` needs
+    ``source_id``. Nothing is nullable: a malformed body is refused, never widened into a broader clear.
+    """
+
+    if tool not in MODEL_HUB_HOSTED_TOOLS:
+        raise HostedToolSettingRefused("hosted_tool_not_found", 404)
+    if (
+        not isinstance(payload, dict)
+        or set(payload) - {"source_id", "model_id"}
+        or ("source_id" in payload and not is_model_hub_source_id(payload["source_id"]))
+        or ("model_id" in payload and ("source_id" not in payload or not is_model_hub_model_id(payload["model_id"])))
+    ):
+        raise HostedToolSettingRefused("invalid_parameter", 400)
+    return clear_matcher(tool, payload.get("source_id"), payload.get("model_id"))
 
 
 def clear_matcher(

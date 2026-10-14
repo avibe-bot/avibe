@@ -674,7 +674,9 @@ def bundled_catalog_wire_efforts_by_model() -> Mapping[str, tuple[str, ...]]:
 # offers per model family and protocol. Priors only; whether a Source carries a
 # feature is evidence. Read from the bundled file alone, never the remote copy:
 # its declarations go on the wire and must be the ones this build shipped with.
-_HOSTED_TOOL_PRICE_UNITS = ("call", "search", "post", "profile", "image")
+_HOSTED_TOOL_PRICE_UNITS = ("call", "search", "post", "profile")
+# An image model is priced per image, and only an image model is.
+_IMAGE_PRICE_UNITS = ("image",)
 # The tools a chat request may declare natively. Image generation is never one (vibey-hosted-tools.md §7).
 OVERLAY_SEARCH_TOOLS: tuple[str, ...] = ("web_search", "x_search")
 IMAGE_MODEL_ENDPOINTS: tuple[str, ...] = ("images", "chat_image")
@@ -914,9 +916,7 @@ def _overlay_image_model(raw: object) -> ImageModelSpec:
 
 def _overlay_image_price(raw: object) -> ImageModelPrice:
     entry = _overlay_object(raw, "image model price", required=("price",), optional=("size", "quality"))
-    price = _overlay_price(entry["price"], "image model price")
-    if price.unit != "image":
-        raise ValueError("an image model price has the image unit")
+    price = _overlay_price(entry["price"], "image model price", units=_IMAGE_PRICE_UNITS)
     return ImageModelPrice(
         price=price,
         size=None if entry.get("size") is None else _overlay_token(entry["size"], "image model price size"),
@@ -959,8 +959,10 @@ def _overlay_hosted_tool(raw: object, what: str) -> HostedToolSpec:
     )
 
 
-def _overlay_price(raw: object, what: str) -> HostedToolPrice:
-    price = _overlay_object(raw, what, required=("unit", "usd_per_1k", "as_of", "url"), optional=("extra",))
+def _overlay_price(raw: object, what: str, *, units: tuple[str, ...] = _HOSTED_TOOL_PRICE_UNITS) -> HostedToolPrice:
+    # Only a search tool's price has further billed units.
+    extra_allowed = ("extra",) if units == _HOSTED_TOOL_PRICE_UNITS else ()
+    price = _overlay_object(raw, what, required=("unit", "usd_per_1k", "as_of", "url"), optional=extra_allowed)
     as_of = _overlay_date(price["as_of"], f"{what}.as_of")
     url = price["url"]
     if not isinstance(url, str) or not _OVERLAY_URL.fullmatch(url):
@@ -968,7 +970,7 @@ def _overlay_price(raw: object, what: str) -> HostedToolPrice:
     extra = price.get("extra", [])
     if not isinstance(extra, list):
         raise ValueError(f"{what}.extra must be a list")
-    unit, usd_per_1k = _overlay_price_component(price, what)
+    unit, usd_per_1k = _overlay_price_component(price, what, units)
     return HostedToolPrice(
         unit=unit,
         usd_per_1k=usd_per_1k,
@@ -979,6 +981,7 @@ def _overlay_price(raw: object, what: str) -> HostedToolPrice:
                 *_overlay_price_component(
                     _overlay_object(item, f"{what}.extra", required=("unit", "usd_per_1k")),
                     f"{what}.extra",
+                    units,
                 )
             )
             for item in extra
@@ -995,10 +998,10 @@ def _overlay_date(value: object, what: str) -> date:
     raise ValueError(f"{what} must be a YYYY-MM-DD date")
 
 
-def _overlay_price_component(price: Mapping[str, Any], what: str) -> tuple[str, float]:
+def _overlay_price_component(price: Mapping[str, Any], what: str, units: tuple[str, ...]) -> tuple[str, float]:
     unit = price["unit"]
     usd_per_1k = price["usd_per_1k"]
-    if not isinstance(unit, str) or unit not in _HOSTED_TOOL_PRICE_UNITS:
+    if not isinstance(unit, str) or unit not in units:
         raise ValueError(f"{what}.unit is not a known price unit")
     if (
         not isinstance(usd_per_1k, (int, float))
