@@ -113,6 +113,9 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
     Record<string, Record<string, EffortMenu>>
   >({});
   const loadedModelBackendsRef = useRef<Set<string>>(new Set());
+  // Backends whose catalog Model Hub answered: their effort menus are read on
+  // every open, even after one open fell back to the native list.
+  const hubBackendsRef = useRef<Set<string>>(new Set());
   const surfaceActive = useRouteSurfaceActive();
   const [loadingModels, setLoadingModels] = useState(false);
   // Free-text filter for the model column — long backends (OpenCode) list dozens.
@@ -207,6 +210,7 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
   useEffect(() => {
     if (surfaceActive) return;
     loadedModelBackendsRef.current.clear();
+    hubBackendsRef.current.clear();
     setModelsByBackend({});
     setModelLabelsByBackend({});
     setReasoningByBackend({});
@@ -237,7 +241,10 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
       api,
       backend,
       ({ models, modelLabels, reasoningOptions, effortMenus, catalogRefreshPending }) => {
-        reloadOnNextOpen = Boolean(catalogRefreshPending) || effortMenus !== undefined;
+        // A transient Hub failure answers with the native list, which carries no
+        // effort menus; that open does not make the backend a Direct one.
+        if (effortMenus !== undefined) hubBackendsRef.current.add(backend);
+        reloadOnNextOpen = Boolean(catalogRefreshPending) || hubBackendsRef.current.has(backend);
         setReasoningByBackend((prev) => ({ ...prev, [backend]: reasoningOptions ?? {} }));
         setEffortMenusByBackend((prev) => ({ ...prev, [backend]: effortMenus ?? {} }));
         setModelsByBackend((prev) => ({ ...prev, [backend]: models }));
@@ -296,7 +303,7 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
   const showEffortColumn = effortOptions.length > 0 || refusedEffort !== null;
   // Names only when an effort needs one; a role that cannot read Sources gets the
   // hint without them.
-  const sourceNames = useSourceNames(open && surfaceActive && effortNotOn !== null && Object.keys(effortNotOn).length > 0);
+  const sourceNames = useSourceNames(open && effortNotOn !== null && Object.keys(effortNotOn).length > 0, surfaceActive);
   const notOnLabel = (effort: string): string | null => {
     // Efforts are free-form strings: only the map's own entry for this one counts,
     // never one inherited from Object.prototype (an effort named "constructor").

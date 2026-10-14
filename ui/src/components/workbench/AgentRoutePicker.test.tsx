@@ -334,6 +334,25 @@ describe('AgentRoutePicker', () => {
     expect(effortColumn().queryByRole('button', { name: /chat\.picker\.effortOptions\.high/ })).toBeNull();
   });
 
+  it('keeps reading a Hub catalog on every open after one open fell back to the native list', async () => {
+    hubMode = 'hub';
+    const user = userEvent.setup();
+    render(<HubPicker role="owner" />);
+    await openMenu(user);
+    await user.keyboard('{Escape}');
+
+    // This open's Hub read failed over to the native list, which carries no effort menus.
+    hubMode = 'direct';
+    await openMenu(user);
+    await user.keyboard('{Escape}');
+    expect(catalogReads).toBe(2);
+
+    // Hub answers again, and the next open still asks it.
+    hubMode = 'hub';
+    await openMenu(user);
+    expect(catalogReads).toBe(3);
+  });
+
   it('keeps a refused saved effort when the current model is chosen again', async () => {
     hubMode = 'hub';
     catalogReasoning = { sonnet: [{ value: 'high', label: 'high' }] };

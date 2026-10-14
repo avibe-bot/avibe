@@ -13,15 +13,26 @@ const named = (display_name: string) => [{ id: 'src_relaygpt1', display_name } a
 afterEach(() => vi.restoreAllMocks());
 
 describe('useSourceNames', () => {
-  it('reads the names again each time it turns on, so a rename in Settings shows', async () => {
+  const mount = () => renderHook(
+    ({ wanted, active }) => useSourceNames(wanted, active),
+    { initialProps: { wanted: true, active: true } },
+  );
+
+  it('reads the names once per activation, and again after Settings covered the surface', async () => {
     const list = vi.spyOn(modelsApi, 'listSources')
       .mockResolvedValueOnce(named('relay-gpt'))
       .mockResolvedValueOnce(named('relay-gpt-eu'));
-    const { result, rerender } = renderHook(({ active }) => useSourceNames(active), { initialProps: { active: true } });
+    const { result, rerender } = mount();
     await waitFor(() => expect(result.current).toEqual({ src_relaygpt1: 'relay-gpt' }));
 
-    act(() => rerender({ active: false }));
-    act(() => rerender({ active: true }));
+    // Reopening the menu within one activation reads nothing: the Sources read is heavy.
+    act(() => rerender({ wanted: false, active: true }));
+    act(() => rerender({ wanted: true, active: true }));
+    expect(list).toHaveBeenCalledTimes(1);
+
+    // Settings, where a Source is renamed, covers the surface and uncovers it.
+    act(() => rerender({ wanted: true, active: false }));
+    act(() => rerender({ wanted: true, active: true }));
     await waitFor(() => expect(result.current).toEqual({ src_relaygpt1: 'relay-gpt-eu' }));
     expect(list).toHaveBeenCalledTimes(2);
   });
@@ -31,11 +42,11 @@ describe('useSourceNames', () => {
     vi.spyOn(modelsApi, 'listSources')
       .mockResolvedValueOnce(named('relay-gpt'))
       .mockRejectedValueOnce(new Error('forbidden'));
-    const { result, rerender } = renderHook(({ active }) => useSourceNames(active), { initialProps: { active: true } });
+    const { result, rerender } = mount();
     await waitFor(() => expect(result.current).toEqual({ src_relaygpt1: 'relay-gpt' }));
 
-    act(() => rerender({ active: false }));
-    act(() => rerender({ active: true }));
+    act(() => rerender({ wanted: true, active: false }));
+    act(() => rerender({ wanted: true, active: true }));
     await waitFor(() => expect(result.current).toBeNull());
   });
 });

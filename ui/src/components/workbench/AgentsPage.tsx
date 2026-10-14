@@ -2151,7 +2151,12 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, ca
     const backend = agent.backend;
     effortRefreshRef.current = loadBackendModelsWithRefresh(api, backend, (result) => applyModelCatalog(backend, result));
   }, [agent.backend, api, surfaceActive, hubEfforts, applyModelCatalog]);
-  useEffect(() => () => effortRefreshRef.current?.(), [agent.backend]);
+  // A refresh still out when the page is covered or its backend changes answers
+  // for a catalog this page no longer shows, so it is dropped.
+  useEffect(() => () => {
+    effortRefreshRef.current?.();
+    effortRefreshRef.current = null;
+  }, [agent.backend, api, surfaceActive]);
 
   const lockHint = system
     ? t('agents.detail.systemLocked')

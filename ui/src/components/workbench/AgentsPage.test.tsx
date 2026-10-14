@@ -63,9 +63,12 @@ vi.mock('../../lib/backendModels', async (importOriginal) => ({
   loadBackendModelsWithRefresh: (_api: unknown, _backend: string, onLoaded: (payload: FakeModelCatalog) => void) => {
     modelCatalogReads += 1;
     const catalog = modelCatalog;
-    if (deferModelReads) pendingModelReads.push(() => onLoaded(catalog));
-    else onLoaded(catalog);
-    return () => {};
+    // As the real loader: a cancelled read never answers.
+    let cancelled = false;
+    const answer = () => { if (!cancelled) onLoaded(catalog); };
+    if (deferModelReads) pendingModelReads.push(answer);
+    else answer();
+    return () => { cancelled = true; };
   },
 }));
 vi.mock('react-i18next', () => ({
@@ -1725,6 +1728,48 @@ describe('AgentsPage reconnect reconciliation', () => {
     };
     fireEvent.pointerEnter(document.querySelector('[data-effort-field]') as HTMLElement);
     await waitFor(() => expect(screen.queryByRole('button', { name: 'xhigh', exact: true })).toBeNull());
+  });
+
+  it('drops an effort-menu read still out when Settings covers the page', async () => {
+    modelCatalog = {
+      models: [],
+      reasoningOptions: { 'reasoning-model': [{ value: 'medium', label: 'Medium' }, { value: 'xhigh', label: 'xhigh' }] },
+      effortMenus: { 'reasoning-model': { omitted: [], not_on: {} } },
+    };
+    const initial = { ...brief('agent-a', 'description'), model: 'reasoning-model', reasoning_effort: 'medium' };
+    const api = makeApi(vi.fn().mockResolvedValue(listResult(initial)), vi.fn().mockResolvedValue(fullAgent(initial, 'prompt')));
+    apiRef.current = api;
+    const page = (surfaceActive: boolean) => (
+      <InstanceAuthorizationContext.Provider
+        value={{ remote: false, instanceKind: null, instanceRole: 'owner', capabilities: { ...OWNER_INSTANCE_CAPABILITIES, can_manage_agents: true } }}
+      >
+        <RouteSurfaceActiveContext.Provider value={surfaceActive}>
+          <MemoryRouter initialEntries={['/agents']}>
+            <AgentsPage />
+          </MemoryRouter>
+        </RouteSurfaceActiveContext.Provider>
+      </InstanceAuthorizationContext.Provider>
+    );
+    const view = render(page(true));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'xhigh', exact: true })).toBeTruthy());
+
+    // A refresh goes out with the old menu, then Settings covers the page while a
+    // turn elsewhere records that every hop refuses `xhigh`.
+    deferModelReads = true;
+    fireEvent.pointerEnter(document.querySelector('[data-effort-field]') as HTMLElement);
+    modelCatalog = {
+      models: [],
+      reasoningOptions: { 'reasoning-model': [{ value: 'medium', label: 'Medium' }] },
+      effortMenus: { 'reasoning-model': { omitted: ['xhigh'], not_on: {} } },
+    };
+    view.rerender(page(false));
+    view.rerender(page(true));
+    const [stale, fresh] = pendingModelReads;
+    act(() => fresh());
+    expect(screen.queryByRole('button', { name: 'xhigh', exact: true })).toBeNull();
+    // The read from before the visit lands last, and must not bring `xhigh` back.
+    act(() => stale());
+    expect(screen.queryByRole('button', { name: 'xhigh', exact: true })).toBeNull();
   });
 
   it('keeps a still-valid effort untouched when the model changes', async () => {
