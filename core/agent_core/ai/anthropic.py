@@ -12,6 +12,7 @@ import json
 import logging
 import re
 from collections.abc import AsyncIterator, Mapping
+from dataclasses import replace
 from typing import Any
 
 import httpx
@@ -26,7 +27,10 @@ from core.agent_core.ai._common import (
     dispatch_wire_event,
     endpoint_origin,
     hosted_pin,
+    PAUSE_TURN,
+    PIN_SOURCE_HEADER,
     PIN_UNAVAILABLE,
+    REFUSED,
     portable_request,
     join_endpoint_url,
     json_object,
@@ -57,12 +61,18 @@ from core.agent_core.messages import (
     ThinkingBlock,
     ToolCallBlock,
     ToolResultMessage,
+    Usage,
     UserMessage,
 )
 
 logger = logging.getLogger(__name__)
 
 ANTHROPIC_VERSION = "2023-06-01"
+#: How many times one response may be continued after the provider paused it (``vibey-hosted-tools.md`` §4.3).
+MAX_PAUSE_CONTINUATIONS = 5
+PAUSE_LIMIT_MESSAGE = f"the provider paused the turn more than {MAX_PAUSE_CONTINUATIONS} times"
+#: A paused response continues only on the Source that served it, pinned there (§4.3 as implemented).
+PAUSE_UNSERVED_MESSAGE = "the Source that served the paused turn cannot continue it"
 _MAX_CACHE_BREAKPOINTS = 4
 # A Claude route caches its static prefix, the tools and then the system prompt, for an hour (``_prefix_ttl``); the
 # conversation's breakpoints keep the default five minutes. Anthropic evaluates breakpoints as tools, system, messages
@@ -256,9 +266,22 @@ class AnthropicAdapter(ProviderAdapter):
         hosted = frozenset(native_hosted_tools(request))
         # Each hosted call's ``server_tool_use`` by stream index; its input JSON streams into the assembler.
         uses: dict[int, dict[str, Any]] = {}
+        # A paused response continues as the same one (§4.3): a continuation's blocks follow the paused ones, its hosted
+        # counters add to theirs, and its usage, the final request's, stands for the whole response.
+        paused = False
+        offset = next_index = 0
+        response_usage: Usage | None = None
+        carried_counts: dict[str, int] = {}
+        response_counts: dict[str, int] = {}
+
+        def block_index(chunk: Mapping[str, Any]) -> int | None:
+            index = _stream_index(chunk)
+            return None if index is None else index + offset
+
         try:
             async def translate(events: AsyncIterator[Any]) -> AsyncIterator[Any]:
-                nonlocal message_started, message_stopped, stop_reason
+                nonlocal message_started, message_stopped, stop_reason, paused, next_index, response_usage
+                nonlocal response_counts
                 async for event in events:
                     if cancel.cancelled:
                         terminal = assembler.terminal(assembler.aborted(cancel.reason))
@@ -360,14 +383,16 @@ class AnthropicAdapter(ProviderAdapter):
                             if terminal is not None:
                                 yield terminal
                             return
-                        assembler.set_usage(
-                            _anthropic_usage(message.get("usage"))
-                        )
+                        # Each response's own usage: the last request's input already holds every paused part, so
+                        # it is the context the merged response stands for (plan §4.3 as implemented).
+                        response_usage = _anthropic_usage(message.get("usage"))
+                        assembler.set_usage(response_usage)
                         start_usage = message.get("usage")
                         if isinstance(start_usage, Mapping) and "server_tool_use" in start_usage:
-                            assembler.set_hosted_facts(counts=reported_counts(start_usage.get("server_tool_use")))
+                            response_counts = reported_counts(start_usage.get("server_tool_use"))
+                            assembler.set_hosted_facts(counts=_summed(carried_counts, response_counts))
                     elif event_type == "content_block_start":
-                        index = _stream_index(chunk)
+                        index = block_index(chunk)
                         if index is None:
                             terminal = assembler.terminal(
                                 assembler.error("content_block_start index must be an integer", kind="invalid_request")
@@ -375,6 +400,7 @@ class AnthropicAdapter(ProviderAdapter):
                             if terminal is not None:
                                 yield terminal
                             return
+                        next_index = max(next_index, index + 1)
                         block = chunk.get("content_block")
                         if not isinstance(block, Mapping):
                             terminal = assembler.terminal(
@@ -544,7 +570,7 @@ class AnthropicAdapter(ProviderAdapter):
                             if isinstance(initial_input, Mapping):
                                 assembler.set_tool_arguments_object(index, initial_input)
                     elif event_type == "content_block_delta":
-                        index = _stream_index(chunk)
+                        index = block_index(chunk)
                         if index is None:
                             terminal = assembler.terminal(
                                 assembler.error("content_block_delta index must be an integer", kind="invalid_request")
@@ -661,7 +687,7 @@ class AnthropicAdapter(ProviderAdapter):
                         # Pi ignores delta variants it does not know yet.
                         # Known event shape has already been validated above.
                     elif event_type == "content_block_stop":
-                        index = _stream_index(chunk)
+                        index = block_index(chunk)
                         if index is None:
                             terminal = assembler.terminal(
                                 assembler.error("content_block_stop index must be an integer", kind="invalid_request")
@@ -734,10 +760,13 @@ class AnthropicAdapter(ProviderAdapter):
                                     if terminal is not None:
                                         yield terminal
                                     return
+                                paused = delta.get("stop_reason") == "pause_turn"
                                 stop_reason = _normalize_stop_reason(delta.get("stop_reason"))
-                        assembler.set_usage(_anthropic_usage(usage, current=assembler.usage))
+                        response_usage = _anthropic_usage(usage, current=response_usage)
+                        assembler.set_usage(response_usage)
                         if isinstance(usage, Mapping) and "server_tool_use" in usage:
-                            assembler.set_hosted_facts(counts=reported_counts(usage.get("server_tool_use")))
+                            response_counts = reported_counts(usage.get("server_tool_use"))
+                            assembler.set_hosted_facts(counts=_summed(carried_counts, response_counts))
                     elif event_type == "error":
                         shape_error = _error_event_shape_error(chunk)
                         if shape_error is not None:
@@ -767,6 +796,9 @@ class AnthropicAdapter(ProviderAdapter):
                             if terminal is not None:
                                 yield terminal
                             return
+                        if paused:
+                            yield PAUSE_TURN
+                            return
                         final = assembler.finalize(
                             stop_reason or ("tool_use" if assembler.has_tools() else "stop")
                         )
@@ -787,6 +819,9 @@ class AnthropicAdapter(ProviderAdapter):
                         yield terminal
                     return
                 if stop_reason is not None:
+                    if paused:
+                        yield PAUSE_TURN
+                        return
                     final = assembler.finalize(stop_reason)
                     terminal = assembler.terminal(
                         final if isinstance(final, ProviderError) else Done(final)
@@ -798,6 +833,7 @@ class AnthropicAdapter(ProviderAdapter):
                 if terminal is not None:
                     yield terminal
             sending = request
+            continuations = 0
             while True:
                 # The lifetime ``wire_request`` gives the prefix: the default once this route has rejected the field.
                 prefix_ttl = _prefix_ttl(sending)
@@ -814,14 +850,20 @@ class AnthropicAdapter(ProviderAdapter):
                     resolver=self._served_hop_resolver,
                     gateway=self._gateway,
                     translate=translate,
+                    # The endpoint refused the lifetime before answering: sent again below, with nothing lost.
+                    refused=_rejects_ttl if prefix_ttl is not None else None,
                 )
-                rejected = unavailable = False
+                rejected = unavailable = continued = paused = message_started = message_stopped = False
+                stop_reason = None
                 try:
                     async for event in driver:
                         if event is PIN_UNAVAILABLE:
                             unavailable = True
                             break
-                        if prefix_ttl is not None and _rejects_ttl(event):
+                        if event is PAUSE_TURN:
+                            continued = True
+                            break
+                        if event is REFUSED:
                             rejected = True
                             break
                         yield event
@@ -831,30 +873,58 @@ class AnthropicAdapter(ProviderAdapter):
                     # The pinned Source cannot serve this content: the same request once more, in portable form and
                     # unpinned, which the gateway fails over as any other (§3.5). Never the generic retry.
                     sending = portable_request(request)
-                    hosted = frozenset()
-                    prepared = await prepare_messages(
-                        sending.messages,
-                        target=origin,
-                        supports_images=sending.supports_images,
-                        protocol=self.protocol,
-                        media_loader=self._media_loader,
-                        cancel=cancel,
-                        endpoint=sending.endpoint,
-                    )
-                    if isinstance(prepared, ProviderError):
-                        terminal = assembler.terminal(prepared)
+                elif unavailable or (continued and self._gateway and PIN_SOURCE_HEADER not in wire.headers):
+                    # A paused response continues only on the Source that served it, pinned, so it stays one origin's
+                    # message: a continuation that Source cannot serve, or a send no pin held there, ends the response
+                    # with what it has (§4.3 as implemented).
+                    terminal = assembler.terminal(assembler.error(PAUSE_UNSERVED_MESSAGE, kind="interrupted"))
+                    if terminal is not None:
+                        yield terminal
+                    return
+                elif continued:
+                    # The provider paused the turn: send its content back as it is, with no new user message, pinned to
+                    # the Source and model that served it, and keep streaming the same response, at most
+                    # MAX_PAUSE_CONTINUATIONS times (§4.3).
+                    if continuations == MAX_PAUSE_CONTINUATIONS:
+                        terminal = assembler.terminal(assembler.error(PAUSE_LIMIT_MESSAGE, kind="interrupted"))
                         if terminal is not None:
                             yield terminal
                         return
-                    transformed_messages, loaded_images = prepared
-                    assembler = new_assembler()
+                    so_far = assembler.pause()
+                    if isinstance(so_far, ProviderError):
+                        terminal = assembler.terminal(so_far)
+                        if terminal is not None:
+                            yield terminal
+                        return
+                    continuations += 1
+                    response_usage = None
+                    carried_counts, response_counts = _summed(carried_counts, response_counts), {}
+                    offset = next_index
+                    sending = replace(sending, messages=(*request.messages, so_far))
+                elif rejected:
+                    # The endpoint refused the lifetime before answering, so nothing reached the consumer: the same
+                    # send once more with the default lifetime, which this route keeps from now on.
+                    _remember_ttl_rejection(sending.endpoint)
                     continue
-                if not rejected:
+                else:
                     return
-                # The endpoint refused the request before answering, so the consumer saw nothing: send it once more
-                # with the default lifetime, which this route keeps from now on.
-                _remember_ttl_rejection(request.endpoint)
-                assembler = new_assembler()
+                hosted = frozenset(native_hosted_tools(sending))
+                prepared = await prepare_messages(
+                    sending.messages,
+                    target=origin,
+                    supports_images=sending.supports_images,
+                    protocol=self.protocol,
+                    media_loader=self._media_loader,
+                    cancel=cancel,
+                    endpoint=sending.endpoint,
+                )
+                if isinstance(prepared, ProviderError):
+                    # A paused response keeps what it streamed, as a failed continuation request does.
+                    terminal = assembler.terminal(replace(prepared, partial=prepared.partial or assembler.partial()))
+                    if terminal is not None:
+                        yield terminal
+                    return
+                transformed_messages, loaded_images = prepared
         except Exception as exc:
             terminal = assembler.terminal(assembler.exception(exc))
             if terminal is not None:
@@ -1155,11 +1225,17 @@ def _usage(input_tokens: int = 0, output_tokens: int = 0, cache_read: int = 0, c
     )
 
 
+def _summed(counts: Mapping[str, int], more: Mapping[str, int]) -> dict[str, int]:
+    summed = dict(counts)
+    for name, value in more.items():
+        summed[name] = summed.get(name, 0) + value
+    return summed
+
+
 def _normalize_stop_reason(value: Any) -> str:
     normalized = {
         "end_turn": "stop",
         "stop_sequence": "stop",
-        "pause_turn": "stop",
         "max_tokens": "length",
         # Generation reached the context window (Claude 4.5 and newer accept input plus max_tokens over the window);
         # Anthropic says to treat the response as truncated, as at max_tokens.

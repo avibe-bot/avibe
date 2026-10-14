@@ -360,6 +360,15 @@ as a half-open code-point range into `text`.
   - Each continuation is pinned to the Source the paused response came from (§3.5). On `pin_unavailable`, the
     continuation is re-rendered in portable form, with the paused server blocks converted in place (§4.4), and goes
     out unpinned.
+  - **As implemented (orchestrator decision, 2026-10-14):** a continuation goes only to the Source that served the
+    paused response, pinned there, and is never re-rendered in portable form. A continuation that Source answers
+    `pin_unavailable`, or a pause of a send that carried no pin, ends the response with one terminal
+    `ProviderError(kind="interrupted")` whose partial keeps all assembled content, as at the bound. The merged
+    message is then always one origin's, so no paused part needs a stored form other than the one it streamed in.
+    The merged message is verified only when every response in it was verified and reported the same origin;
+    otherwise it is sanitized as any unverified response. The case given up is rare: the pinned Source becoming
+    unavailable seconds into a paused turn. The user keeps the partial answer and can retry. A turn's first request
+    still gets its one portable resend on `pin_unavailable` (§3.5).
   - **After the 5th continuation**, if the response is still `pause_turn`, the adapter ends with one terminal
     `ProviderError(kind="interrupted")`. Its partial keeps all assembled content and the summed usage, and its
     `error_message` is "the provider paused the turn more than 5 times". C-2's existing rule then applies: terminal
@@ -369,6 +378,12 @@ as a half-open code-point range into `text`.
   - Its `usage` is the **sum** of every continuation response's counters: input, output, and cache read and write.
     Today's parser resets usage at each `message_start`. The gateway already meters each continuation as its own
     call, so the usage ledger and provenance need no change.
+  - **As implemented (orchestrator decision, 2026-10-14):** the merged message carries the **final** continuation's
+    usage, not the sum. The context estimate anchors on a response's usage as the size of the request that produced
+    it, and the final request's input already holds every paused part, so a sum would roughly double the next
+    estimate. Billing and the ledger come from the gateway's per-call metering, and `hosted_summary` still sums
+    counts and cost across continuations. Vibey-side token sums that read message usage, such as side-turn audit
+    totals, undercount the earlier continuations.
   - **Pending calls carry over by id.** The adapter keeps its hosted blocks keyed by tool-call id across
     continuations. A result arriving in a continuation for a `pending` block finalizes that block, its `record` and
     its `native.payload`, so each call stays exactly one block.
@@ -695,7 +710,7 @@ shapes. No live upstream and no real credentials.
 | --- | --- | --- |
 | Adapter parsing | each adapter against stub SSE | the mapping rule, one case per row of §4.2's table, including `queries[]` versus the deprecated `query`, every xAI X-search variant, and an unknown item becoming `other`; `hosted_summary` with one and with several X searches (reported cost once, no per-call copies); Anthropic citations; pending `server_tool_use` at `pause_turn`; a hosted call that fails |
 | Cross-provider transform | `ai` request builders | each hosted block to each target, verified same Source versus other: native verbatim, synthetic call/result, split assistant message; citations never sent |
-| `pause_turn` | Anthropic adapter, stub returns `pause_turn`, then `end_turn` | one logical response; the bound; the merged message with summed usage; the pin header; `pin_unavailable` falls back to the in-place text form |
+| `pause_turn` | Anthropic adapter, stub returns `pause_turn`, then `end_turn` | one logical response; the bound; the merged message with summed usage; the pin header; `pin_unavailable` falls back to the in-place text form (as implemented: ends `interrupted`, §4.3) |
 | Gateway selection and pinning | real gateway + loopback fake engine | native only with evidence and an eligible credential; a pinned request is never failed over; an inadmissible pinned Source and a pre-output failure both answer `pin_unavailable`; Vibey's portable re-render is then served by failover; `x_search` to OpenAI never sent |
 | Evidence | classifier against recorded error bodies | `400 Unsupported tool type`, `invalid_value` effort and `Invalid encrypted_content` each create exactly one record; overload and 5xx create none |
 | Proxy executor | gateway endpoint, stub provider | executor choice; no effort sent; the record with excerpts; metering on the executor Source; error when no executor is verified; refusal of a Claude subscription |
@@ -788,6 +803,9 @@ encoded either as a schema clause or as a producer test. The PR names which for 
     `pin_unavailable` continuation served by another origin makes the merged message take the serving origin, and
     the paused part is kept in the portable form that was actually sent (§4.4 fallback, C-1 cross-origin rules), so
     no payload or signature from the first origin remains.
+    **As implemented (orchestrator decision, 2026-10-14):** there is no portable continuation, so no cross-origin
+    merge (§4.3). A continuation whose response reports another origin, or none, leaves the merged message
+    unverified, so it keeps no payload or signature of any response.
 22. The `generate` action records the output's resolved `quality` and `size`; pricing uses those output values, not
     the declaration's.
 23. The replay probe asks for a URL the call probe actually returned (such as the first). An answer with no earlier
