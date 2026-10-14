@@ -86,8 +86,11 @@ verified for X search.
   for a field the endpoint refused before answering (Anthropic's one-hour cache lifetime) is one more such call;
   each probe step (call, then replay) sends at most two requests and runs the model once. A result is recognized only
   as the hosted call a real turn would keep. Normal turns never receive a probe resolution.
-- **The `call` probe.** The fixed message is "search the web for 'Avibe local-first agent OS' and reply with the
-  first result's URL" (X search: "search X for posts about …, and reply with the first post's URL").
+- **The `call` probe.** The fixed message is "search the web for a news article published today about technology and
+  reply with its URL" (X search: "search X for posts about 'Avibe local-first agent OS' and reply with the first
+  post's URL"). The web search asks for fresh articles because the replay probe asks about the other results: a
+  fixed topic's other results (its site's other pages) can be inferred from the first, while a page published after
+  the model was trained cannot, and a post's URL carries its id.
   - **`verified`:** the response completes and carries the provider's own result item for that tool (§4.2).
   - **`unsupported`:** only an HTTP 400 that names the tool type (observed: `Unsupported tool type: x_search`).
   - **Inconclusive, not evidence:** a completed response without that item. The model may simply not have used the
@@ -111,6 +114,10 @@ verified for X search.
     acceptance alone is never verification. xAI accepted verbatim replay, 3 of 3.
   - **Inconclusive:** an answer naming no such URL, or a refusal, and any request that did not carry the native
     payload verbatim. With no hidden URL to ask about, no replay runs.
+  - **Matching:** a result's URL is matched exactly but for the equivalences RFC 3986 allows (the case of its scheme
+    and host, an empty path as `/`); only where prose ends a written URL is read both ways.
+  - **Known by design:** a result that is a section or home page can still be guessed by a model whose payload was
+    dropped. The fresh-article query makes such results rare, and a re-probe replaces a wrong record.
   - **Within the UI's wait:** the whole probe answers inside the UI's RPC timeout. Each call's deadline is the
     tool's (as for a turn's proxied call) or what the probe has left, whichever is shorter. A replay with under a
     minute left is not sent and reads as transient: try again.

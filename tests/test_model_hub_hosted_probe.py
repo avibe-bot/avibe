@@ -201,7 +201,7 @@ async def test_a_call_probe_sends_the_production_request_and_records_only_what_i
     request = sent[0]
     declaration = hosted_tool_spec(source.vendor, source.protocol, model_id, "web_search").declaration
     assert request["tools"] == [declaration]
-    assert "Avibe local-first agent OS" in json.dumps(request, ensure_ascii=False)
+    assert "news article published today" in json.dumps(request, ensure_ascii=False)
     assert "reasoning" not in request and "output_config" not in request
     if source.protocol == "anthropic":
         assert "tool_choice" not in request

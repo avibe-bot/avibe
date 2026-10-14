@@ -64,8 +64,11 @@ ProbeOutcome = Literal["verified", "unsupported", "inconclusive", "transient"]
 # Every catalog tool: Vibey's adapters parse each one's results.
 PROBED_TOOLS: tuple[str, ...] = ("web_search", "x_search", "image_generation")
 
+# The web search asks for fresh articles: the replay probe asks about the other results, and a model given only the
+# first could infer the rest of a fixed topic's results (its site's other pages), but not a page published after it
+# was trained.
 _MESSAGES = {
-    "web_search": "Search the web for 'Avibe local-first agent OS' and reply with the first result's URL.",
+    "web_search": "Search the web for a news article published today about technology and reply with its URL.",
     "x_search": "Search X for posts about 'Avibe local-first agent OS' and reply with the first post's URL.",
     "image_generation": "Generate a small, simple image: a blue circle on a white background.",
 }
