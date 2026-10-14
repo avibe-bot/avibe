@@ -524,7 +524,8 @@ class ProxyExecution:
 class HostedResult:
     """``ToolResultMessage.hosted``: the canonical record of a proxied search or an ``image_generate`` call.
     ``action`` is what the executor reports it did, where that differs from the model's request: for
-    ``image_generate``, the model it ran on, the prompt it rendered, and the output's resolved size and quality."""
+    ``image_generate``, the model it ran on, the prompt the endpoint revised it to when it did, and the output's
+    resolved size and quality when the endpoint reports them."""
 
     record: HostedRecord
     execution: Optional[ProxyExecution] = None
@@ -536,13 +537,6 @@ class HostedResult:
         _require(self.action, HostedAction, "hosted result action", optional=True)
         if self.execution is None and self.record.status != "failed":
             raise ValueError("a hosted result without an execution is a failed record")
-        if (
-            self.action is not None
-            and self.action.type == "generate"
-            and self.record.status == "completed"
-            and self.action.prompt is None
-        ):
-            raise ValueError("a completed generate action needs its prompt")
 
 
 UserContent = Union[TextBlock, ImageBlock]

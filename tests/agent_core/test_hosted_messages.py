@@ -268,7 +268,6 @@ VIOLATIONS = {
     "generate-on-web-search": _set(NATIVE, ("content", 0, "action"), {"type": "generate", "prompt": "p"}),
     "generate-on-proxied-search": _set(PROXIED, ("hosted", "action"), {"type": "generate", "prompt": "p"}),
     "search-on-x-search": _set(NATIVE, ("content", 2, "action"), {"type": "search", "queries": ["q"]}),
-    "completed-generate-without-prompt": _without(IMAGE, ("hosted", "action"), "prompt"),
     # v2 has no native image tool, and an rc-era block is not read (§4.2, §15).
     "native-image-block": _set(NATIVE, ("content", 0, "tool"), "image_generation"),
     "unknown-action": _set(NATIVE, ("content", 0, "action"), {"type": "browse", "url": "https://a"}),
@@ -326,11 +325,18 @@ def test_a_record_with_an_error_code_this_build_does_not_know_still_loads():
     assert message_from_dict(newer).content[1].record.error_code == "executor_overloaded"
 
 
-def test_a_failed_generate_may_lack_the_revised_prompt():
-    # An image call refused before the endpoint ran has the model it named and no rendered prompt.
-    failed = REFUSED_IMAGE["hosted"]
-    assert "prompt" not in failed["action"] and failed["record"]["status"] == "failed"
-    VALIDATOR.validate(REFUSED_IMAGE)
+@pytest.mark.parametrize(
+    "payload",
+    [_without(IMAGE, ("hosted", "action"), "prompt"), REFUSED_IMAGE],
+    ids=["completed-unrevised", "refused-before-the-endpoint"],
+)
+def test_a_generate_action_names_a_prompt_only_when_the_endpoint_revised_it(payload):
+    """The call's own arguments carry the model's prompt. The action's prompt is the endpoint's revision, which most
+    image endpoints never send, and an image call refused before the endpoint ran has none."""
+
+    assert "prompt" not in payload["hosted"]["action"]
+    VALIDATOR.validate(payload)
+    assert message_from_dict(payload).hosted.action.prompt is None
 
 
 def test_a_citation_range_must_lie_within_its_text():

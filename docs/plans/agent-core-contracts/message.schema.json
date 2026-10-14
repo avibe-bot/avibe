@@ -603,49 +603,6 @@
               "hosted"
             ],
             "properties": {
-              "hosted": {
-                "required": [
-                  "action"
-                ],
-                "properties": {
-                  "action": {
-                    "properties": {
-                      "type": {
-                        "const": "generate"
-                      }
-                    }
-                  },
-                  "record": {
-                    "properties": {
-                      "status": {
-                        "const": "completed"
-                      }
-                    }
-                  }
-                }
-              }
-            }
-          },
-          "then": {
-            "properties": {
-              "hosted": {
-                "properties": {
-                  "action": {
-                    "required": [
-                      "prompt"
-                    ]
-                  }
-                }
-              }
-            }
-          }
-        },
-        {
-          "if": {
-            "required": [
-              "hosted"
-            ],
-            "properties": {
               "tool_name": {
                 "enum": [
                   "web_search",
