@@ -96,10 +96,11 @@ verified for X search.
       paths are never native anyway (§3.5).
   - **Not evidence:** a transient failure (overload, 5xx, timeout). The UI reports "couldn't verify, try again"
     (observed: every OpenAI-relay web search ended with an in-stream "servers overloaded").
-- **Delivery order.** The `call` probe for `web_search` and `x_search` ships first
-  (`POST /api/models/hosted-tools/<tool>/probe`). The `replay` probe follows Vibey's verbatim native replay, and the
-  `image_generation` call probe follows Vibey's parsing of image results. Until then a probe reports `replay: null`
-  and the API refuses an image probe, because no response could show its result.
+- **One action, both aspects.** `POST /api/models/hosted-tools/<tool>/probe` runs the `call` probe. When it
+  verifies and is recorded, and the tool has a `replay` aspect on a protocol that replays natively, the `replay`
+  probe follows at once, on the call's own turn. The `image_generation` call probe reads the image through Vibey's own
+  parsing, which keeps it only when it is an image; the probe keeps no file. The Tools tab's estimate covers both
+  requests.
 - **The `replay` probe.** A second production request with the native declaration still present. Its history is
   the call probe's turn, with the native payload verbatim, followed by "give the URL of the second result you found,
   without searching again".

@@ -1,4 +1,4 @@
-"""The hosted-tool call probe (``vibey-hosted-tools.md`` §3.2, capability model §3.3). Scenario MH-HOSTED-007.
+"""The hosted-tool probes (``vibey-hosted-tools.md`` §3.2, capability model §3.3). Scenario MH-HOSTED-007.
 
 The real engine client invokes a loopback upstream that plays each provider's answer, and Vibey's own adapter
 reads the response, so a probe recognizes a result only as the hosted call a real turn would keep. Only
@@ -26,6 +26,11 @@ from vibe.backend_model_catalog import hosted_tool_spec
 XAI = _source("src_probe0001", "xAI 密钥", vendor="xai", protocol="openai_responses", model_id="grok-4.6")
 ANTHROPIC = _source("src_probe0002", "Anthropic 中转", vendor="anthropic", protocol="anthropic", model_id="claude-sonnet-4-6")
 CALL = EvidenceFeature.hosted("web_search", "call")
+REPLAY = EvidenceFeature.hosted("web_search", "replay")
+
+
+def _records(service, feature) -> list:
+    return [record for record in service.capability_evidence.records() if record.feature == feature]
 
 
 def _sse(*events: dict[str, Any]) -> str:
@@ -75,6 +80,22 @@ ANTHROPIC_SEARCH = _sse(
     {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 40, "server_tool_use": {"web_search_requests": 1}}},
     {"type": "message_stop"},
 )
+# The replay probe's answer: it names the first result's URL without calling the tool again.
+ANTHROPIC_ANSWER = _sse(
+    {"type": "message_start", "message": {"usage": {"input_tokens": 1200}}},
+    {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
+    {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "https://avibe.bot/"}},
+    {"type": "content_block_stop", "index": 0},
+    {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 12}},
+    {"type": "message_stop"},
+)
+REPLAY_ANSWER = {"anthropic": ANTHROPIC_ANSWER, "openai_responses": _responses(ANSWER)}
+
+
+def _stream(body: str) -> web.Response:
+    return web.Response(body=body.encode(), content_type="text/event-stream")
+
+
 # Output, then a server error in the stream: the call cannot be retried as a turn, but a probe can run again.
 FAILED_AFTER_OUTPUT = _sse(
     {"type": "response.created", "response": {"status": "in_progress"}},
@@ -117,6 +138,8 @@ async def test_a_call_probe_sends_the_production_request_and_records_only_what_i
 
     async def respond(request):
         sent.append(await request.json())
+        if len(sent) > 1:
+            return _stream(REPLAY_ANSWER[source.protocol])
         if isinstance(body, str):
             return web.Response(status=status, body=body.encode(), content_type="text/event-stream")
         return web.json_response(body, status=status)
@@ -139,7 +162,7 @@ async def test_a_call_probe_sends_the_production_request_and_records_only_what_i
         service.capability_evidence.write(prior, live=[live])
         result = await service.probe_hosted_tool("web_search", {"source_id": source.id, "model_id": model_id})
 
-    [request] = sent
+    request = sent[0]
     declaration = hosted_tool_spec(source.vendor, source.protocol, model_id, "web_search").declaration
     assert request["tools"] == [declaration]
     assert "Avibe local-first agent OS" in json.dumps(request, ensure_ascii=False)
@@ -151,12 +174,16 @@ async def test_a_call_probe_sends_the_production_request_and_records_only_what_i
 
     probe = result["probe"]
     _assert_valid("hosted-tool-probe-result.schema.json", probe)
-    assert (probe["tool"], probe["source_id"], probe["model_id"], probe["replay"]) == ("web_search", source.id, model_id, None)
+    assert (probe["tool"], probe["source_id"], probe["model_id"]) == ("web_search", source.id, model_id)
     assert probe["call"]["outcome"] == outcome
+    # Only a verified call is followed by the replay probe; its answer here names the first result without searching.
+    assert len(sent) == (2 if written == "verified" else 1)
+    assert probe["replay"] == ({"outcome": "verified", "error": None} if written == "verified" else None)
     # A response that failed says why, as the Source test does; a refusal naming the tool is the answer itself.
     assert (probe["call"]["error"] is not None) == (failed and outcome != "unsupported")
 
-    [record] = service.capability_evidence.records()
+    [record] = _records(service, CALL)
+    assert len(_records(service, REPLAY)) == (1 if written == "verified" else 0)
     if written is None:
         assert record == prior
     else:
@@ -191,7 +218,7 @@ async def test_a_probe_runs_only_on_a_target_the_tool_can_run_on(tmp_path):
 
     service.adapter.invoke = invoke
     for tool, target, code, status in [
-        # Vibey does not parse generated images yet, so an image probe could never see its result.
+        # xAI's overlay declares no image tool, so there is nothing to probe.
         ("image_generation", {"source_id": XAI.id, "model_id": "grok-4.6"}, "invalid_parameter", 400),
         ("code_interpreter", {"source_id": XAI.id, "model_id": "grok-4.6"}, "invalid_parameter", 400),
         ("web_search", {"source_id": XAI.id}, "invalid_parameter", 400),
@@ -241,8 +268,9 @@ async def test_a_probe_runs_only_on_a_target_the_tool_can_run_on(tmp_path):
 
 
 def test_each_candidate_states_what_probing_it_would_cost(tmp_path):
-    """MH-HOSTED-007: the Tools read prices one call probe before it runs: at list price on a metered Source,
-    included on a monthly one, and unknown (never zero) when the model has no token price."""
+    """MH-HOSTED-007: the Tools read prices a probe before it runs, the call and the replay that may follow it: at
+    list price on a metered Source, included on a monthly one, and unknown (never zero) when the model has no token
+    price."""
     from core.handlers.model_hub.usage import UsageWriter
     from tests.test_model_hub_pricing import _table
 
@@ -261,8 +289,10 @@ def test_each_candidate_states_what_probing_it_would_cost(tmp_path):
         for candidate in tool["candidates"]
     }
     tokens = 8000 * 2 / 1e6 + 500 * 6 / 1e6
-    assert estimates[("web_search", XAI.id)] == {"basis": "list", "usd": pytest.approx(tokens + 5 / 1000)}
-    assert estimates[("x_search", XAI.id)] == {"basis": "list", "usd": pytest.approx(tokens + 10 * 5 / 1000)}
+    # The replay sends the call's turn back and asks one question, using no tool, so it has no tool fee.
+    replay = 12000 * 2 / 1e6 + 300 * 6 / 1e6
+    assert estimates[("web_search", XAI.id)] == {"basis": "list", "usd": pytest.approx(tokens + 5 / 1000 + replay)}
+    assert estimates[("x_search", XAI.id)] == {"basis": "list", "usd": pytest.approx(tokens + 10 * 5 / 1000 + replay)}
     assert estimates[("web_search", monthly.id)] == {"basis": "included"}
     assert estimates[("web_search", unpriced.id)] is None
 
@@ -288,6 +318,8 @@ async def test_each_request_the_adapter_sends_is_its_own_pinned_call(tmp_path, m
 
     async def respond(request):
         sent.append(await request.json())
+        if len(sent) > 2:
+            return _stream(ANTHROPIC_ANSWER)
         if '"ttl": "1h"' in json.dumps(sent[-1]):
             return web.json_response(
                 {"type": "error", "error": {"type": "invalid_request_error", "message": refusal}},
@@ -300,11 +332,11 @@ async def test_each_request_the_adapter_sends_is_its_own_pinned_call(tmp_path, m
             "web_search", {"source_id": ANTHROPIC.id, "model_id": "claude-sonnet-4-6"}
         )
 
-    first, resent = sent
+    first, resent, _replay = sent
     assert '"ttl": "1h"' in json.dumps(first) and '"ttl": "1h"' not in json.dumps(resent)
     assert first["tools"] == resent["tools"]
     assert result["probe"]["call"] == {"outcome": "verified", "error": None}
-    [record] = service.capability_evidence.records()
+    [record] = _records(service, CALL)
     assert (record.source_id, record.status, record.basis) == (ANTHROPIC.id, "verified", "probe")
 
 
@@ -324,7 +356,7 @@ async def test_a_probe_that_verifies_its_source_records_evidence_for_the_source_
     [live] = service.store.load().sources
     assert live.verification_pending is None
     assert result["probe"]["call"]["outcome"] == "verified"
-    [record] = service.capability_evidence.records()
+    [record] = _records(service, CALL)
     assert record.source_identity == identity_digest(live)
     [candidate] = next(tool for tool in result["hosted_tools"]["tools"] if tool["name"] == "web_search")["candidates"]
     assert candidate["call"]["status"] == "verified"
@@ -406,8 +438,8 @@ async def test_the_probe_asks_for_no_more_output_than_a_turn_on_its_hop_would(tm
     async with loopback_engine(tmp_path, service, respond):
         result = await service.probe_hosted_tool("web_search", {"source_id": XAI.id, "model_id": "grok-4.6"})
 
-    [request] = sent
-    assert request["max_output_tokens"] == 1024
+    # The replay probe that follows asks for the same output.
+    assert [request["max_output_tokens"] for request in sent] == [1024, 1024]
     assert result["probe"]["call"]["outcome"] == "verified"
 
 
@@ -426,11 +458,11 @@ async def test_an_api_key_source_is_probed_on_a_passthrough_model_it_does_not_li
         # A padded id is the model routing knows: the probe sends and records the canonical one.
         result = await service.probe_hosted_tool("web_search", {"source_id": XAI.id, "model_id": " grok-4.7 "})
 
-    [request] = sent
+    request = sent[0]
     # The engine addresses a passthrough model through the Source's credential.
     assert request["model"].rsplit("/", 1)[-1] == "grok-4.7"
     assert result["probe"]["call"]["outcome"] == "verified"
-    [record] = service.capability_evidence.records()
+    [record] = _records(service, CALL)
     assert (record.source_id, record.model_id, record.status) == (XAI.id, "grok-4.7", "verified")
     # The Tools tab lists only what discovery found, so it never counts a re-verify it has no candidate for.
     service.engine_stamp = "model-hub-engine-next"
@@ -446,7 +478,7 @@ async def test_a_probe_that_times_out_before_its_handle_is_still_metered(tmp_pat
     from core.handlers.model_hub.stream_wire import ProtocolSSEState
     from tests.test_model_hub_l3 import _usage_of
 
-    monkeypatch.setattr(service_module, "_HOSTED_PROBE_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(service_module, "call_timeout", lambda _tool: 0.05)
     service, _clock, _models = configured_service(tmp_path, sources=[XAI])
     observed = ProtocolSSEState("openai_responses")
     observed.observe(
@@ -498,7 +530,7 @@ async def test_a_deadline_mid_stream_ends_the_probe_as_transient(tmp_path, monke
     for the next chunk ends the stream for the adapter and settles the call; the probe reports a transient failure."""
     from core.handlers.model_hub import service as service_module
 
-    monkeypatch.setattr(service_module, "_HOSTED_PROBE_TIMEOUT_SECONDS", 0.5)
+    monkeypatch.setattr(service_module, "call_timeout", lambda _tool: 0.5)
     service, _clock, _models = configured_service(tmp_path, sources=[XAI])
 
     async def respond(request):
@@ -527,7 +559,7 @@ async def test_a_probe_settles_when_the_adapter_is_done_even_if_the_body_stays_o
     settles as the success it was instead of waiting out the deadline with the body still open."""
     from core.handlers.model_hub import service as service_module
 
-    monkeypatch.setattr(service_module, "_HOSTED_PROBE_TIMEOUT_SECONDS", 5)
+    monkeypatch.setattr(service_module, "call_timeout", lambda _tool: 5)
     service, _clock, _models = configured_service(tmp_path, sources=[replace(XAI, verification_pending="vp_" + "5" * 32)])
 
     async def respond(request):
@@ -545,5 +577,97 @@ async def test_a_probe_settles_when_the_adapter_is_done_even_if_the_body_stays_o
     assert elapsed < 5
     assert result["probe"]["call"]["outcome"] == "verified"
     assert service.store.load().sources[0].verification_pending is None
-    [record] = service.capability_evidence.records()
+    [record] = _records(service, CALL)
     assert record.status == "verified"
+
+
+PNG = (
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
+)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("result,outcome", [(PNG, "verified"), ("bm90IGFuIGltYWdl", "inconclusive")], ids=["image", "not-an-image"])
+async def test_an_image_probe_verifies_only_an_image_vibey_could_keep(tmp_path, result, outcome):
+    """MH-HOSTED-007: the image call probe reads the generated image through Vibey's own parsing, which keeps it
+    only when it is an image; a probe keeps no file, and an image has no replay."""
+    openai = _source("src_probe0009", "OpenAI 密钥", vendor="openai", protocol="openai_responses", model_id="gpt-6-astra")
+    service, _clock, _models = configured_service(tmp_path, sources=[openai])
+    sent = []
+    image_call = {
+        "id": "ig_1",
+        "type": "image_generation_call",
+        "status": "completed",
+        "result": result,
+        "revised_prompt": "A blue circle on a white background",
+        "size": "1024x1024",
+    }
+
+    async def respond(request):
+        sent.append(await request.json())
+        return _stream(_responses(image_call))
+
+    async with loopback_engine(tmp_path, service, respond):
+        result_payload = await service.probe_hosted_tool("image_generation", {"source_id": openai.id, "model_id": "gpt-6-astra"})
+
+    [request] = sent
+    declaration = hosted_tool_spec("openai", "openai_responses", "gpt-6-astra", "image_generation").declaration
+    assert request["tools"] == [declaration] and request["tool_choice"] == "required"
+    probe = result_payload["probe"]
+    _assert_valid("hosted-tool-probe-result.schema.json", probe)
+    assert (probe["call"]["outcome"], probe["replay"]) == (outcome, None)
+    records = _records(service, EvidenceFeature.hosted("image_generation", "call"))
+    assert [record.status for record in records] == (["verified"] if outcome == "verified" else [])
+
+
+REPLAY_CASES = [
+    # (case, Source, the call's response, the replay's response or status and body, replay outcome, record)
+    ("names-a-result", XAI, _responses(SEARCH, ANSWER), _responses(ANSWER), "verified", "verified"),
+    ("anthropic-names-a-result", ANTHROPIC, ANTHROPIC_SEARCH, ANTHROPIC_ANSWER, "verified", "verified"),
+    # Searching again instead of using the results it holds is what a dropped replay looks like.
+    ("searches-again", XAI, _responses(SEARCH, ANSWER), _responses(SEARCH, ANSWER), "unsupported", "unsupported"),
+    ("names-no-result", XAI, _responses(SEARCH, ANSWER), _responses({**ANSWER, "content": [{"type": "output_text", "text": "I can't tell.", "annotations": []}]}), "inconclusive", None),
+    (
+        "anthropic-refuses-the-replayed-result",
+        ANTHROPIC,
+        ANTHROPIC_SEARCH,
+        (400, {"type": "error", "error": {"type": "invalid_request_error", "message": "Invalid encrypted_content in search_result block"}}),
+        "unsupported",
+        "unsupported",
+    ),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "source,first,second,outcome,written", [case[1:] for case in REPLAY_CASES], ids=[case[0] for case in REPLAY_CASES]
+)
+async def test_a_verified_call_is_followed_by_the_replay_probe(tmp_path, source, first, second, outcome, written):
+    """MH-HOSTED-007 (§3.2, §12 item 23): the replay probe sends the call's turn back with its native payload in
+    place, asks for a result it returned, and records only a named result, a new call or a refusal of the payload."""
+    service, _clock, _models = configured_service(tmp_path, sources=[source])
+    model_id = source.models[0].id
+    sent = []
+
+    async def respond(request):
+        sent.append(await request.json())
+        if len(sent) == 1:
+            return _stream(first)
+        if isinstance(second, tuple):
+            return web.json_response(second[1], status=second[0])
+        return _stream(second)
+
+    async with loopback_engine(tmp_path, service, respond):
+        result = await service.probe_hosted_tool("web_search", {"source_id": source.id, "model_id": model_id})
+
+    call, replay = sent
+    # The native declaration is still present, nothing is forced, and the call's own items go back verbatim.
+    assert replay["tools"] == call["tools"] and "tool_choice" not in replay
+    native = SEARCH if source.protocol == "openai_responses" else {"type": "web_search_tool_result"}
+    assert json.dumps(native["type"]) in json.dumps(replay)
+    assert "first result you found" in json.dumps(replay)
+    probe = result["probe"]
+    _assert_valid("hosted-tool-probe-result.schema.json", probe)
+    assert probe["call"]["outcome"] == "verified"
+    assert probe["replay"]["outcome"] == outcome
+    assert [record.status for record in _records(service, REPLAY)] == ([written] if written else [])
