@@ -113,7 +113,7 @@ it('updates envelope versions after replacing a field and renaming the default l
   );
   api.updateVaultSecret.mockResolvedValue({ ok: true, secret: { ...secret, default_field: 'credential', fields: ['credential', 'username'], updated_at: 'version-2' } });
   change('Default field name', 'credential');
-  fireEvent.click(screen.getByRole('button', { name: 'Rename' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Save password' }));
   await screen.findByLabelText('Value for credential');
   expect(api.updateVaultSecret).toHaveBeenCalledWith('LOGIN', { default_field: 'credential' }, { handleError: false });
   rendered.rerender(
@@ -133,17 +133,32 @@ it('updates envelope versions after replacing a field and renaming the default l
   ]);
 });
 
-it('moves a typed default value when its label is renamed', async () => {
-  api.updateVaultSecret.mockResolvedValue({
-    ok: true,
-    secret: { ...secret, default_field: 'credential', fields: ['credential', 'username'], updated_at: 'version-1' },
-  });
+// A row has one Save. On the default row it renames first (metadata only) and then seals the typed
+// value under the renamed field's bare record; sealing against the pre-rename metadata would fail
+// the field check and write nothing. Only the default field's name is editable.
+it('renames the default field and then saves its typed value under the new name', async () => {
+  const renamed = { ...secret, default_field: 'credential', fields: ['credential', 'username'], updated_at: 'version-2' };
+  api.updateVaultSecret.mockResolvedValue({ ok: true, secret: renamed });
+  api.updateVaultSecretField.mockResolvedValue({ ok: true, secret: { ...renamed, updated_at: 'version-3' } });
   renderEditor();
+  expect(screen.getAllByRole('textbox').filter((input) => input.getAttribute('aria-label') === 'Default field name')).toHaveLength(1);
+  expect(screen.getByTitle(en.vaults.fields.extraNotRenamable).textContent).toBe('username');
+  expect(screen.queryByRole('button', { name: 'Save password' })).toBeNull();
+  // A pending rename onto a sibling names the sibling it collides with, not the saved label.
+  change('Default field name', 'username');
+  expect(screen.getByText("There's already a username field")).toBeTruthy();
+  expect((screen.getByRole('button', { name: 'Save password' }) as HTMLButtonElement).disabled).toBe(true);
   change('Value for password', 'typed-default');
   change('Default field name', 'credential');
-  fireEvent.click(screen.getByRole('button', { name: 'Rename' }));
-  await waitFor(() => expect(screen.getByLabelText('Value for credential')).toBeTruthy());
-  expect((screen.getByLabelText('Value for credential') as HTMLInputElement).value).toBe('typed-default');
+  fireEvent.click(screen.getByRole('button', { name: 'Save password' }));
+  await waitFor(() => expect(api.updateVaultSecretField).toHaveBeenCalledWith(
+    'LOGIN', 'credential', { record: 'LOGIN', blind_box: box, expected_updated_at: 'version-2' }, { handleError: false },
+  ));
+  expect(api.updateVaultSecret).toHaveBeenCalledWith('LOGIN', { default_field: 'credential' }, { handleError: false });
+  expect(api.updateVaultSecret.mock.invocationCallOrder[0]).toBeLessThan(api.updateVaultSecretField.mock.invocationCallOrder[0]);
+  expect(sealBlindBox).toHaveBeenCalledWith('typed-default', { public_key: 'public' }, { purpose: 'seal', name: 'LOGIN' });
+  await waitFor(() => expect((screen.getByLabelText('Value for credential') as HTMLInputElement).value).toBe(''));
+  expect(screen.queryByRole('button', { name: 'Save credential' })).toBeNull();
 });
 
 it('keeps a typed default label when saving another field', async () => {
@@ -163,10 +178,11 @@ it('accepts a server refetch after a legitimate quick rename back before parent 
   const renamedByUser = { ...secret, default_field: 'password', fields: ['password', 'username'] };
   const renamedBackExternally = { ...secret, default_field: 'value', fields: ['value', 'username'] };
   api.updateVaultSecret.mockResolvedValueOnce({ ok: true, secret: renamedByUser });
-  const rendered = renderEditor();
+  const rendered = renderEditor({ ...renamedBackExternally });
   change('Default field name', 'password');
-  fireEvent.click(screen.getByRole('button', { name: 'Rename' }));
-  await waitFor(() => expect((screen.getByLabelText('Default field name') as HTMLInputElement).value).toBe('password'));
+  fireEvent.click(screen.getByRole('button', { name: 'Save value' }));
+  await waitFor(() => expect(api.updateVaultSecret).toHaveBeenCalledWith('LOGIN', { default_field: 'password' }, { handleError: false }));
+  await waitFor(() => expect(screen.getByLabelText('Value for password')).toBeTruthy());
 
   api.listVaultSecrets.mockResolvedValueOnce({ ok: true, secrets: [renamedBackExternally] });
   rendered.rerender(
@@ -269,10 +285,10 @@ it.each(['constructor', 'tostring', 'valueof'])('treats %s as a normal field key
   });
   renderEditor(entry);
   const value = screen.getByLabelText(`Value for ${field}`) as HTMLInputElement;
-  const save = screen.getByRole('button', { name: `Save ${field}` }) as HTMLButtonElement;
   expect(value.value).toBe('');
-  expect(save.disabled).toBe(true);
+  expect(screen.queryByRole('button', { name: `Save ${field}` })).toBeNull();
   fireEvent.change(value, { target: { value: 'typed-value' } });
+  const save = screen.getByRole('button', { name: `Save ${field}` }) as HTMLButtonElement;
   expect(save.disabled).toBe(false);
   fireEvent.click(save);
   await waitFor(() => expect(api.updateVaultSecretField).toHaveBeenCalledWith(
@@ -314,8 +330,8 @@ it('warns and disables field mutations when field metadata is corrupt', () => {
   expect(screen.getByRole('alert').textContent).toBe(en.errors.fields_corrupt);
   expect((screen.getByLabelText('Default field name') as HTMLInputElement).disabled).toBe(true);
   expect((screen.getByLabelText('Value for password') as HTMLInputElement).disabled).toBe(true);
-  expect((screen.getByRole('button', { name: 'Rename' }) as HTMLButtonElement).disabled).toBe(true);
-  expect((screen.getByRole('button', { name: 'Save password' }) as HTMLButtonElement).disabled).toBe(true);
+  expect((screen.getByLabelText('Value for username') as HTMLInputElement).disabled).toBe(true);
+  expect(screen.queryByRole('button', { name: /^Save / })).toBeNull();
   expect((screen.getByRole('button', { name: 'Remove username' }) as HTMLButtonElement).disabled).toBe(true);
   expect((screen.getByRole('button', { name: 'Add field' }) as HTMLButtonElement).disabled).toBe(true);
 });
@@ -332,7 +348,7 @@ it('adopts a same-version corruption state from refreshed metadata', async () =>
     </I18nextProvider>,
   );
   await waitFor(() => expect(screen.getByRole('alert').textContent).toBe(en.errors.fields_corrupt));
-  expect((screen.getByRole('button', { name: 'Save password' }) as HTMLButtonElement).disabled).toBe(true);
+  expect((screen.getByLabelText('Value for password') as HTMLInputElement).disabled).toBe(true);
 });
 
 it('requires a unique populated extra field, saves it under its record name, and confirms removal', async () => {
@@ -340,17 +356,20 @@ it('requires a unique populated extra field, saves it under its record name, and
   fireEvent.click(screen.getByRole('button', { name: 'Add field' }));
   change('New field name', 'username');
   change('New field value', 'seed');
-  expect((screen.getByRole('button', { name: 'Save field' }) as HTMLButtonElement).disabled).toBe(true);
+  expect(screen.getByText("There's already a username field")).toBeTruthy();
+  expect((screen.getByRole('button', { name: 'Save new field' }) as HTMLButtonElement).disabled).toBe(true);
   change('New field name', 'totp');
   api.updateVaultSecretField.mockResolvedValue({ ok: true, secret: { ...secret, fields: ['password', 'username', 'totp'], updated_at: 'version-2' } });
-  fireEvent.click(screen.getByRole('button', { name: 'Save field' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Save new field' }));
   await screen.findByLabelText('Value for totp');
+  expect(screen.queryByLabelText('New field name')).toBeNull();
   expect(sealBlindBox).toHaveBeenCalledWith('seed', { public_key: 'public' }, { purpose: 'seal', name: 'LOGIN.totp' });
   expect(screen.queryByRole('button', { name: 'Remove password' })).toBeNull();
   fireEvent.click(screen.getByRole('button', { name: 'Remove totp' }));
+  expect(screen.getByText(/and its value\?/).textContent).toBe('Remove totp and its value? Existing grants will expire.');
   expect(api.deleteVaultSecretField).not.toHaveBeenCalled();
   api.deleteVaultSecretField.mockResolvedValue({ ok: true, secret: { ...secret, updated_at: 'version-3' } });
-  fireEvent.click(screen.getByRole('button', { name: en.vaults.delete }));
+  fireEvent.click(screen.getByRole('button', { name: en.vaults.fields.confirmRemove }));
   await waitFor(() => expect(api.deleteVaultSecretField).toHaveBeenCalledWith('LOGIN', 'totp', { expected_updated_at: 'version-2' }));
   await waitFor(() => expect(screen.queryByLabelText('Value for totp')).toBeNull());
 });
@@ -360,13 +379,13 @@ it('refreshes a stale delete version without removing the newer field or retryin
   api.listVaultSecrets.mockResolvedValueOnce({ ok: true, secrets: [{ ...secret, updated_at: 'version-8' }] });
   renderEditor();
   fireEvent.click(screen.getByRole('button', { name: 'Remove username' }));
-  fireEvent.click(screen.getByRole('button', { name: en.vaults.delete }));
+  fireEvent.click(screen.getByRole('button', { name: en.vaults.fields.confirmRemove }));
   expect((await screen.findByRole('alert')).textContent).toBe(en.vaults.fields.secretConflict);
   expect(api.deleteVaultSecretField).toHaveBeenCalledOnce();
   expect(screen.getByLabelText('Value for username')).toBeTruthy();
   api.deleteVaultSecretField.mockResolvedValueOnce({ ok: true, secret: { ...secret, fields: ['password'], updated_at: 'version-9' } });
   fireEvent.click(screen.getByRole('button', { name: 'Remove username' }));
-  fireEvent.click(screen.getByRole('button', { name: en.vaults.delete }));
+  fireEvent.click(screen.getByRole('button', { name: en.vaults.fields.confirmRemove }));
   await waitFor(() => expect(screen.queryByLabelText('Value for username')).toBeNull());
   expect(api.deleteVaultSecretField.mock.calls).toEqual([
     ['LOGIN', 'username', { expected_updated_at: 'version-1' }],
@@ -517,7 +536,7 @@ it('does not report a dropped draft when its field is cleared before own removal
   change('Value for username', 'temporary');
   change('Value for username', '');
   fireEvent.click(screen.getByRole('button', { name: 'Remove username' }));
-  fireEvent.click(screen.getByRole('button', { name: en.vaults.delete }));
+  fireEvent.click(screen.getByRole('button', { name: en.vaults.fields.confirmRemove }));
   await waitFor(() => expect(screen.queryByLabelText('Value for username')).toBeNull());
   expect(screen.queryByText(en.vaults.fields.draftsDropped.replace('{{fields}}', 'username'))).toBeNull();
 });

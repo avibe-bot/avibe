@@ -96,7 +96,7 @@ export const VaultSecretDialog: React.FC<{
             </span>
             <div className="flex flex-col gap-0.5">
               <span className="text-[15px] font-semibold text-foreground">{title}</span>
-              <span className="text-xs text-muted-foreground">{subtitle}</span>
+              <span className="text-xs text-muted">{subtitle}</span>
             </div>
           </div>
           {notice ?? (

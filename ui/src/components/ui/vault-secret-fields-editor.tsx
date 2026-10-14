@@ -1,16 +1,20 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Loader2, Plus, X } from 'lucide-react';
+import { Loader2 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useApi, type VaultFieldValuePayload, type VaultSecret } from '@/context/ApiContext';
 import { sealBlindBox, standardCreateBlindBoxContext } from '@/lib/vaultCrypto';
 import { vaultErrorMessage } from '@/lib/vaultErrors';
 import { useProtectedVault } from '@/lib/useProtectedVault';
 import { openVaultsInBrowser } from '@/lib/vaultBrowserHandoff';
-import { MAX_VAULT_FIELDS, VAULT_FIELD_PATTERN, vaultDefaultField, vaultFieldNames, vaultRecordName } from '@/lib/vaultFields';
-import { Badge } from './badge';
+import { MAX_VAULT_FIELDS, vaultDefaultField, vaultFieldNameIssue, vaultFieldNames, vaultRecordName } from '@/lib/vaultFields';
 import { Button } from './button';
-import { ConfirmDialog } from './confirm-dialog';
-import { Input } from './input';
+import {
+  VaultFieldList,
+  VaultFieldReferences,
+  VaultFieldRemoveConfirm,
+  VaultFieldRow,
+  VaultFieldsHeader,
+} from './vault-field-list';
 import { VaultProtectedUnlock } from './vault-protected-unlock';
 
 type DraftReconciliation = {
@@ -61,10 +65,11 @@ export function VaultSecretFieldsEditor({
   const defaultLabelDirtyRef = useRef(false);
   const [newField, setNewField] = useState<string | null>(null);
   const [newValue, setNewValue] = useState('');
+  const [newNameTouched, setNewNameTouched] = useState(false);
+  const [focusedName, setFocusedName] = useState<'default' | 'new' | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
-  const [removeField, setRemoveField] = useState<string | null>(null);
   const [draftNotice, setDraftNotice] = useState<string | null>(null);
   const fields = vaultFieldNames(current);
   const defaultField = vaultDefaultField(current);
@@ -161,14 +166,16 @@ export function VaultSecretFieldsEditor({
     refetchSequenceRef.current += 1;
   }, []);
 
+  /** Resolves true once the server accepted the write and its result became the editor's truth. */
   const mutate = async (
     operation: () => Promise<{ ok: boolean; secret?: VaultSecret; message?: string; code?: string }>,
     renamed = false,
     operationRefetched: () => boolean = () => false,
-  ) => {
-    if (locked) return;
+  ): Promise<boolean> => {
+    if (locked) return false;
     const writeStartTruthRevision = truthRevisionRef.current;
     const writeStartSequence = refetchSequenceRef.current;
+    let accepted = false;
     setBusy(true);
     onBusyChange(true);
     setError(null);
@@ -187,6 +194,7 @@ export function VaultSecretFieldsEditor({
       invalidatePendingRefetches();
       applyTruth(next, renamed);
       setSaved(true);
+      accepted = true;
       if (needsCatchup) {
         try {
           const refreshed = await refetch();
@@ -216,6 +224,7 @@ export function VaultSecretFieldsEditor({
       setBusy(false);
       onBusyChange(false);
     }
+    return accepted;
   };
 
   const saveValue = (field: string, value: string, adding = false) => {
@@ -226,6 +235,7 @@ export function VaultSecretFieldsEditor({
     const clear = (targetField = field) => {
       if (adding) {
         setNewValue('');
+        setNewNameTouched(false);
         return;
       }
       const next = new Map(draftsRef.current);
@@ -263,9 +273,12 @@ export function VaultSecretFieldsEditor({
     let refetchedForRetry = false;
     void mutate(async () => {
       try {
-        const wasDefault = field === defaultField;
+        // Read the latest truth rather than this render's: a value saved right after its
+        // field's rename must be sealed under the renamed record.
+        const latest = currentRef.current;
+        const wasDefault = field === vaultDefaultField(latest);
         let savedField = field;
-        let result = await sealAndWrite(current, field, wasDefault);
+        let result = await sealAndWrite(latest, field, wasDefault);
         if (hasErrorCode(result, 'record_mismatch')) {
           refetchedForRetry = true;
           const refreshed = await refetch();
@@ -288,101 +301,142 @@ export function VaultSecretFieldsEditor({
     }, false, () => refetchedForRetry);
   };
 
+  // One Save per row: the default row renames (metadata only) and then writes a typed value
+  // under the renamed record; any other row writes its value.
+  const saveRow = async (field: string) => {
+    const value = draftsRef.current.get(field) ?? '';
+    if (field === defaultField && defaultLabel !== defaultField) {
+      const renamed = await mutate(
+        () => api.updateVaultSecret(current.name, { default_field: defaultLabel }, { handleError: false }),
+        true,
+      );
+      // The rename carried the typed value over to the new label (reconcileDrafts).
+      if (renamed && value) saveValue(vaultDefaultField(currentRef.current), value);
+      return;
+    }
+    if (value) saveValue(field, value);
+  };
+  const removeSavedField = async (field: string) => {
+    if (fieldsCorrupt) return;
+    await mutate(() => api.deleteVaultSecretField(current.name, field, { expected_updated_at: current.updated_at }));
+  };
+  const discardNewField = () => {
+    setNewField(null);
+    setNewValue('');
+    setNewNameTouched(false);
+  };
+
+  const labelIssue = vaultFieldNameIssue(defaultLabel, fields.filter((field) => field !== defaultField));
+  const newIssue = newField === null ? null : vaultFieldNameIssue(newField, fields);
+  const focusedIssue = focusedName === 'default' ? labelIssue : focusedName === 'new' ? newIssue : null;
+  const showNameRule = focusedName !== null && focusedIssue !== 'nameInvalid' && focusedIssue !== 'nameTaken';
+
   return (
-    <div className="flex flex-col gap-3" onKeyDown={(event) => {
+    <div className="flex flex-col gap-2" onKeyDown={(event) => {
       // These inputs save through their field buttons, not the enclosing metadata form.
       if (event.key === 'Enter' && event.target instanceof HTMLInputElement) event.preventDefault();
     }}>
-      <span className="text-[13px] font-medium">{t('vaults.fields.title')}</span>
-      <p className="text-[11px] text-muted-foreground">{t('vaults.fields.editHelp')}</p>
+      <VaultFieldsHeader count={fields.length + (newField === null ? 0 : 1)} note={t('vaults.fields.editHelp')} />
       {draftNotice && (
-        <p role="status" className="text-xs text-muted-foreground">{draftNotice}</p>
+        <p role="status" className="text-xs text-muted">{draftNotice}</p>
       )}
       {fieldsCorrupt && (
         <p role="alert" className="text-xs text-destructive-ink">{t('errors.fields_corrupt')}</p>
       )}
-      {fields.map((field) => (
-        <div key={field} className="flex flex-col gap-2 rounded-lg border border-border p-3">
-          <div className="flex items-center gap-2">
-            {field === defaultField ? (
-              <>
-                <Input value={defaultLabel} disabled={fieldMutationLocked}
-                  aria-label={t('vaults.fields.defaultName')}
-                  onChange={(event) => {
-                    defaultLabelDirtyRef.current = true;
-                    setDefaultLabel(event.target.value);
-                  }}
-                  className="min-w-0 font-mono" />
-                <Badge variant="secondary">{t('vaults.fields.default')}</Badge>
-                <Button type="button" size="sm" variant="ghost"
-                  disabled={fieldMutationLocked || defaultLabel === defaultField || !VAULT_FIELD_PATTERN.test(defaultLabel) || fields.includes(defaultLabel)}
-                  onClick={() => void mutate(
-                    () => api.updateVaultSecret(current.name, { default_field: defaultLabel }, { handleError: false }),
-                    true,
-                  )}>
-                  {t('vaults.fields.rename')}
+      <VaultFieldList
+        onAdd={() => setNewField('')}
+        addDisabled={fieldMutationLocked || newField !== null || fields.length >= MAX_VAULT_FIELDS}
+      >
+        {fields.map((field) => {
+          const isDefault = field === defaultField;
+          const draft = drafts.get(field) ?? '';
+          const renaming = isDefault && defaultLabel !== defaultField;
+          return (
+            <VaultFieldRow
+              key={field}
+              field={field}
+              isDefault={isDefault}
+              name={isDefault ? {
+                editable: true,
+                value: defaultLabel,
+                label: t('vaults.fields.defaultName'),
+                onChange: (next) => {
+                  defaultLabelDirtyRef.current = true;
+                  setDefaultLabel(next);
+                },
+                onFocus: () => setFocusedName('default'),
+                onBlur: () => setFocusedName(null),
+              } : { editable: false, title: t('vaults.fields.extraNotRenamable') }}
+              value={{
+                value: draft,
+                label: t('vaults.fields.value', { field }),
+                placeholder: t('vaults.fields.replacePlaceholder'),
+                onChange: (next) => {
+                  const nextDrafts = new Map(draftsRef.current);
+                  nextDrafts.set(field, next);
+                  updateDrafts(nextDrafts);
+                },
+              }}
+              action={draft || renaming ? (
+                <Button type="button" size="xs"
+                  aria-label={t('vaults.fields.saveNamed', { field })}
+                  disabled={fieldMutationLocked || (renaming && labelIssue !== null) || (Boolean(draft) && !canWriteValue)}
+                  onClick={() => void saveRow(field)}>
+                  {t('vaults.fields.save')}
                 </Button>
-              </>
-            ) : (
-              <>
-                <span className="min-w-0 flex-1 break-all font-mono text-xs">{field}</span>
-                <Button type="button" size="icon" variant="ghost" disabled={fieldMutationLocked}
-                  aria-label={t('vaults.fields.remove', { field })} onClick={() => setRemoveField(field)}>
-                  <X className="size-4" />
-                </Button>
-              </>
+              ) : null}
+              remove={isDefault ? undefined : {
+                label: t('vaults.fields.remove', { field }),
+                confirm: <VaultFieldRemoveConfirm field={field} revokesGrants />,
+                onRemove: () => removeSavedField(field),
+              }}
+              issue={isDefault && renaming ? labelIssue : null}
+              disabled={fieldMutationLocked}
+            />
+          );
+        })}
+        {newField !== null && (
+          <VaultFieldRow
+            field={newField || t('vaults.fields.newName')}
+            isDefault={false}
+            name={{
+              editable: true,
+              value: newField,
+              label: t('vaults.fields.newName'),
+              onChange: setNewField,
+              onFocus: () => setFocusedName('new'),
+              onBlur: () => {
+                setFocusedName(null);
+                setNewNameTouched(true);
+              },
+              autoFocus: true,
+            }}
+            value={{
+              value: newValue,
+              label: t('vaults.fields.newValue'),
+              placeholder: t('vaults.dialog.valuePlaceholder'),
+              onChange: setNewValue,
+            }}
+            action={(
+              <Button type="button" size="xs" aria-label={t('vaults.fields.saveNew')}
+                disabled={fieldMutationLocked || !canWriteValue || !newValue || newIssue !== null}
+                onClick={() => saveValue(newField, newValue, true)}>
+                {t('vaults.fields.save')}
+              </Button>
             )}
-          </div>
-          <div className="flex items-center gap-2">
-            <Input type="password" value={drafts.get(field) ?? ''} autoComplete="off" disabled={fieldMutationLocked}
-              aria-label={t('vaults.fields.value', { field })}
-              placeholder={t('vaults.fields.replacePlaceholder')}
-              onChange={(event) => {
-                const next = new Map(draftsRef.current);
-                next.set(field, event.target.value);
-                updateDrafts(next);
-              }} />
-            <Button type="button" variant="secondary" size="sm"
-              aria-label={t('vaults.fields.saveNamed', { field })}
-              disabled={fieldMutationLocked || !canWriteValue || !drafts.get(field)}
-              onClick={() => saveValue(field, drafts.get(field) ?? '')}>{t('vaults.fields.save')}</Button>
-          </div>
-        </div>
-      ))}
-      {newField !== null ? (
-        <div className="flex flex-col gap-2 rounded-lg border border-border p-3">
-          <Input value={newField} disabled={fieldMutationLocked} aria-label={t('vaults.fields.newName')}
-            placeholder={t('vaults.fields.namePlaceholder')} onChange={(event) => setNewField(event.target.value)} />
-          <Input type="password" value={newValue} autoComplete="off" disabled={fieldMutationLocked}
-            aria-label={t('vaults.fields.newValue')} placeholder={t('vaults.dialog.valuePlaceholder')}
-            onChange={(event) => setNewValue(event.target.value)} />
-          <div className="flex justify-end gap-2">
-            <Button type="button" variant="ghost" size="sm" disabled={locked}
-              onClick={() => { setNewField(null); setNewValue(''); }}>{t('vaults.dialog.cancel')}</Button>
-            <Button type="button" size="sm"
-              disabled={fieldMutationLocked || !canWriteValue || !newValue || !VAULT_FIELD_PATTERN.test(newField) || fields.includes(newField)}
-              onClick={() => saveValue(newField, newValue, true)}>{t('vaults.fields.save')}</Button>
-          </div>
-          <span className="text-[11px] text-muted-foreground">{t('vaults.fields.namesHelp')}</span>
-        </div>
-      ) : (
-        <Button type="button" variant="ghost" size="sm" className="self-start" disabled={fieldMutationLocked || fields.length >= MAX_VAULT_FIELDS}
-          onClick={() => setNewField('')}><Plus className="size-3.5" />{t('vaults.fields.add')}</Button>
-      )}
+            remove={{ label: t('vaults.fields.discardNew'), onRemove: discardNewField }}
+            issue={newIssue === 'nameRequired' && !newNameTouched && !newValue ? null : newIssue}
+            disabled={fieldMutationLocked}
+          />
+        )}
+      </VaultFieldList>
+      {showNameRule ? <span className="text-[11px] text-muted">{t('vaults.fields.nameRule')}</span> : null}
+      <VaultFieldReferences secretName={current.name} fields={fields} defaultField={defaultField} />
       {isProtected && <VaultProtectedUnlock vault={vault} secretName={current.name}
         onContinueInBrowser={() => openVaultsInBrowser({ kind: 'edit', secretName: current.name })} />}
       {busy && <Loader2 className="size-4 animate-spin text-muted" />}
       {saved && <p role="status" className="text-xs text-mint-ink">{t('vaults.fields.saved')}</p>}
       {error && <p role="alert" className="text-xs text-destructive-ink">{error}</p>}
-      <ConfirmDialog open={removeField !== null} onOpenChange={(open) => { if (!open) setRemoveField(null); }}
-        title={t('vaults.fields.remove', { field: removeField })}
-        description={t('vaults.fields.removeConfirm')}
-        confirmLabel={t('vaults.delete')} cancelLabel={t('vaults.dialog.cancel')} destructive
-        onConfirm={async () => {
-          if (!removeField || fieldsCorrupt) return;
-          await mutate(() => api.deleteVaultSecretField(current.name, removeField, { expected_updated_at: current.updated_at }));
-          setRemoveField(null);
-        }} />
     </div>
   );
 }
