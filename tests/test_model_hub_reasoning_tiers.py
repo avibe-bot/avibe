@@ -207,7 +207,8 @@ def test_a_persisted_catalog_list_offers_no_client_preset_to_vibey(tmp_path, pro
 @pytest.mark.asyncio
 async def test_rows_saved_by_3_2_0_are_derived_again_once_at_startup(tmp_path) -> None:
     """MH-HOSTED-006: 3.2.0 found no row for a snapshot id and declared xhigh for Opus and Sonnet 4.6. The fixture
-    was written by v3.2.0's own ladder; the startup reconcile derives those rows again, and only those."""
+    was written by v3.2.0's own ladder; the startup reconcile derives those rows again, and only those, and an agent's
+    rows that took their tiers from them follow (#2629)."""
     import json
     from pathlib import Path
 
@@ -243,5 +244,13 @@ async def test_rows_saved_by_3_2_0_are_derived_again_once_at_startup(tmp_path) -
         ("src_tiers3201", "claude-sonnet-4-6-20260301"),
         ("src_tiers3202", "gpt-6-astra-2026-09-01"),
     ]
+    # Vibey sends only the tiers its own row lists: a row that still holds what its suppliers gave follows them.
+    assert {row.id: row.reasoning_efforts for row in store.load().agents["vibey"].models} == {
+        "gpt-6-astra-2026-09-01": ["low", "medium", "high", "xhigh", "max"],
+        "claude-opus-4-6": ["low", "medium", "high", "max"],
+        # A list its suppliers never gave was set apart, and a typed row is the user's.
+        "claude-sonnet-4-6-20260301": ["low", "high"],
+        "relay-house-model": [],
+    }
     # Saved once: the next start finds nothing to change.
     assert await service.reconcile_source_reasoning_tiers() == []

@@ -6813,8 +6813,9 @@ class ModelHubService:
         Rows an earlier build derived keep its rules until discovery revisits
         them: 3.2.0 found no catalog row for a snapshot id and declared the whole
         protocol default list for Opus 4.6. ``rederive_persisted_tiers`` decides
-        which rows are derived again. The result is saved once, so a later start
-        changes nothing.
+        which rows are derived again, and an agent's provider rows that still hold
+        what those rows gave follow them. The result is saved once, so a later
+        start changes nothing.
         """
 
         async with self._mutation_lock:
@@ -6839,6 +6840,18 @@ class ModelHubService:
                     model.reasoning_efforts = list(resolution.efforts)
                     model.reasoning_efforts_source = resolution.source
                     changed.append((source.id, model.id))
+            if changed:
+                # A provider row in an agent's list took its tiers from its suppliers' Source rows when it was added,
+                # and a hop offers only the tiers its row lists (Vibey sends no other). A row that still holds what
+                # its suppliers gave follows them; one that holds anything else was set apart and stays.
+                for backend, agent in config.agents.items():
+                    for row in agent.models:
+                        if row.origin != "provider":
+                            continue
+                        before = self._candidate_suppliers(previous, backend, row.id)[2]
+                        after = self._candidate_suppliers(config, backend, row.id)[2]
+                        if after != before and list(row.reasoning_efforts) == before:
+                            row.reasoning_efforts = after
             if changed and self._reconcile_store_writable():
                 await self._commit_synced(previous, config)
                 return changed

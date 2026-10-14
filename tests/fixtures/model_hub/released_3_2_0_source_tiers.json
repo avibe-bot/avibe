@@ -788,6 +788,55 @@
         }
       ],
       "removed_model_ids": []
+    },
+    "vibey": {
+      "backend": "vibey",
+      "mode": "hub",
+      "menu_kind": "fixed",
+      "sources": {
+        "order": [
+          "src_tiers3201",
+          "src_tiers3202"
+        ]
+      },
+      "routes": {},
+      "menu": null,
+      "models": [
+        {
+          "id": "gpt-6-astra-2026-09-01",
+          "origin": "provider",
+          "display_name": null,
+          "reasoning_efforts": []
+        },
+        {
+          "id": "claude-opus-4-6",
+          "origin": "provider",
+          "display_name": null,
+          "reasoning_efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ]
+        },
+        {
+          "id": "claude-sonnet-4-6-20260301",
+          "origin": "provider",
+          "display_name": null,
+          "reasoning_efforts": [
+            "low",
+            "high"
+          ]
+        },
+        {
+          "id": "relay-house-model",
+          "origin": "manual",
+          "display_name": null,
+          "reasoning_efforts": []
+        }
+      ],
+      "removed_model_ids": []
     }
   }
 }
