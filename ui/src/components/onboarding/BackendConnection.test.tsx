@@ -399,7 +399,10 @@ describe('shared Settings and onboarding connection owner', () => {
     expect(mock.api.removeBackendAuth).not.toHaveBeenCalled();
     expect(screen.queryByRole('button', { name: en.settings.backends.oauthCleanStoredCredentials })).toBeNull();
   });
-  it.each([{ compact: true, action: 'login' }, { compact: false, action: 'login' }, { compact: false, action: 'remove' }])(
+  it.each([
+    { compact: true, action: 'login' }, { compact: false, action: 'login' }, { compact: false, action: 'remove' },
+    { compact: true, action: 'method' }, { compact: false, action: 'method' },
+  ])(
     'AUTH-SETUP-910 invalidates an in-flight receipt on $action (compact=$compact)', async ({ compact, action }) => {
       mock.api.getClaudeAuth.mockResolvedValue({ ...native(), auth_mode: 'oauth', active_auth_mode: 'none',
         has_api_key: false, has_oauth_credentials: false, auth_mode_uncertain: true, can_remove_oauth_credentials: true });
@@ -422,12 +425,18 @@ describe('shared Settings and onboarding connection owner', () => {
         mock.api.startOAuthWeb.mockRejectedValue(new Error('fixture new login failed'));
         fireEvent.click(screen.getByRole('button', { name: startLabel }));
         await screen.findByText(/fixture new login failed/);
-      } else {
+      } else if (action === 'remove') {
         mock.api.removeClaudeOAuthCredentials.mockReturnValue(removal.promise);
         fireEvent.click(screen.getByRole('button', { name: en.settings.backends.oauthCleanStoredCredentials }));
         await waitFor(() => expect(mock.api.removeClaudeOAuthCredentials).toHaveBeenCalledOnce());
+      } else {
+        const methods = await interactiveRadios(en.onboarding.connection.method);
+        fireEvent.click(within(methods).getByRole('radio', { name: en.onboarding.connection.claudeCredentials }));
+        mock.api.getClaudeAuth.mockResolvedValue({ ...native(), active_auth_mode: 'oauth', has_api_key: false });
       }
-      await act(async () => older.resolve(connection({ auth: 'unknown', ready: false, entry_eligible: false })));
+      await act(async () => older.resolve(connection(action === 'method'
+        ? { auth: 'subscription' }
+        : { auth: 'unknown', ready: false, entry_eligible: false })));
       expect(done).not.toHaveBeenCalled();
       expect(screen.queryByText(en.onboarding.connection.connected)).toBeNull();
       if (action === 'remove') await act(async () => removal.resolve({ ok: false, error: 'fixture removal failed' }));

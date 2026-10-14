@@ -33,7 +33,8 @@ for Refresh. Settlement, a new login/removal, method changes, or cancellation
 invalidate it; ordinary readiness never receives the receipt. The form owns
 readback/application errors rather than cancelling an already completed login.
 A pending receipt must still own the confirmation when its asynchronous read
-finishes; a new OAuth action invalidates both that owner and the read generation.
+finishes; a new OAuth action or auth-method selection invalidates both that
+owner and the read generation before a late read can mutate presentation.
 
 Native cleanup capability is separate from OAuth certainty. Opaque native
 containers may offer explicit cleanup without claiming sign-in. Environment- or
