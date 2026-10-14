@@ -23,7 +23,7 @@
     "Moment": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?Z$" },
     "Status": {
       "type": "object",
-      "description": "Passive evidence for the tool. latest_ok is the latest real success (an in-memory projection, current even while file writes are throttled); refused lists the current refusals; verified lists the persisted successes, one per (Source, model), from which Source chips derive.",
+      "description": "Passive evidence for the tool, read from memory, the one evidence history (the file catches up at most hourly per success). latest_ok is the newest success whose Source still has the identity it ran under; refused lists the current refusals; verified lists the successes, one per (Source, model), from which Source chips derive.",
       "required": ["latest_ok", "refused", "verified"],
       "additionalProperties": false,
       "properties": {

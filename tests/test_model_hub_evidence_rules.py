@@ -258,7 +258,8 @@ async def test_a_refused_effort_still_waits_for_a_capable_hop_that_is_cooling_do
             source_identity=identity_digest(refusing),
             detail="400 invalid_request_error",
         ),
-        live=[refusing, cooling],
+        live=lambda: [refusing, cooling],
+        wire_for=service.hosted_evidence().wire_for,
     )
     request = ModelHubRequest({"input": "hi", "reasoning": {"effort": "ultra"}}, protocol="openai_responses")
 
@@ -352,7 +353,8 @@ async def test_a_refusing_runnable_hop_never_makes_recovery_spin(tmp_path):
             source_identity=identity_digest(refusing),
             detail="400 invalid_request_error",
         ),
-        live=[refusing, cooling],
+        live=lambda: [refusing, cooling],
+        wire_for=service.hosted_evidence().wire_for,
     )
     passes = 0
     resolve = service.resolve
@@ -439,7 +441,8 @@ def test_the_picker_menu_states_which_efforts_routing_refuses_in_menu_values(tmp
                 source_identity=identity_digest(source),
                 detail="400 invalid_request_error",
             ),
-            live=live,
+            live=lambda: live,
+            wire_for=service.hosted_evidence().wire_for,
         )
 
     agent = service.get_agent_sources("vibey")
