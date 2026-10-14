@@ -519,3 +519,31 @@ async def test_a_deadline_mid_stream_ends_the_probe_as_transient(tmp_path, monke
 
     assert result["probe"]["call"]["outcome"] == "transient"
     assert service.capability_evidence.records() == []
+
+
+@pytest.mark.asyncio
+async def test_a_probe_settles_when_the_adapter_is_done_even_if_the_body_stays_open(tmp_path, monkeypatch):
+    """MH-HOSTED-007: once the adapter has the terminal event it closes the response, as production does, so the call
+    settles as the success it was instead of waiting out the deadline with the body still open."""
+    from core.handlers.model_hub import service as service_module
+
+    monkeypatch.setattr(service_module, "_HOSTED_PROBE_TIMEOUT_SECONDS", 5)
+    service, _clock, _models = configured_service(tmp_path, sources=[replace(XAI, verification_pending="vp_" + "5" * 32)])
+
+    async def respond(request):
+        response = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+        await response.prepare(request)
+        await response.write(_responses(SEARCH, ANSWER).encode())
+        await asyncio.sleep(30)
+        return response
+
+    async with loopback_engine(tmp_path, service, respond):
+        started = asyncio.get_running_loop().time()
+        result = await service.probe_hosted_tool("web_search", {"source_id": XAI.id, "model_id": "grok-4.6"})
+        elapsed = asyncio.get_running_loop().time() - started
+
+    assert elapsed < 5
+    assert result["probe"]["call"]["outcome"] == "verified"
+    assert service.store.load().sources[0].verification_pending is None
+    [record] = service.capability_evidence.records()
+    assert record.status == "verified"

@@ -164,8 +164,8 @@ class _CallStream(httpx.AsyncByteStream):
 
 
 async def _pump(handle: InvokeHandle, chunks: asyncio.Queue) -> None:
-    """Read the call's stream to its end into ``chunks``, so the call settles as it ended upstream, and always end
-    the queue: on a failure the adapter meets the same error where it would have read it."""
+    """Read the call's stream into ``chunks`` and always end the queue: on a failure the adapter meets the same error
+    where it would have read it."""
 
     try:
         if handle.stream is not None:
@@ -212,7 +212,16 @@ class PinnedCallTransport(httpx.AsyncBaseTransport):
 
         async def read(handle: InvokeHandle) -> None:
             opened.set_result(handle)
-            await _pump(handle, chunks)
+            # The call's own reader runs until the stream ends or the adapter closes its side, as production closes a
+            # response it has finished with; it is always over before the call settles and closes the stream.
+            pump = asyncio.create_task(_pump(handle, chunks))
+            closed = asyncio.create_task(released.wait())
+            try:
+                await asyncio.wait({pump, closed}, return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                pump.cancel()
+                closed.cancel()
+                await asyncio.gather(pump, closed, return_exceptions=True)
             await released.wait()
 
         async def run() -> None:
