@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useLayoutEffect, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
-import { ArrowLeftRight, ExternalLink, KeyRound } from 'lucide-react';
+import { ArrowLeft, ArrowLeftRight, ExternalLink, KeyRound } from 'lucide-react';
 
 import { ApiError, useApi, type SessionActivityState, type WorkbenchMessage } from '@/context/ApiContext';
 import { useInstanceAuthorization } from '@/context/InstanceAuthorizationContext';
@@ -16,7 +16,7 @@ import { ShowPageVoiceDictation } from '@/lib/showPageVoiceDictation';
 import { VoiceTranscriptionError } from '@/lib/voiceTranscription';
 
 import { PetAvatar, type PetPose } from './PetAvatar';
-import { petBridge, sessionLink, vaultRequestLink } from './petBridge';
+import { onPetHover, petBridge, sessionLink, vaultRequestLink } from './petBridge';
 import { petPanel, usePetPanel } from './petPanel';
 import { petComposer, usePetComposer } from './petComposer';
 import { petShell, useOnSummon, usePetBinding, usePetDismissed } from './petShell';
@@ -233,8 +233,15 @@ const PetSurface: React.FC = () => {
     };
   }, [binding, epoch]);
   useEffect(() => {
-    if (!expanded) setDetailOpen(false);
+    if (expanded) return;
+    // Collapsing leaves the switcher too, so the next expand shows the cards.
+    setDetailOpen(false);
+    setSwitcherOpen(false);
   }, [expanded]);
+  // The shell reports hover over Vibey and the dock: macOS gives a webview no
+  // hover while its window is not key, and the pet never takes focus itself.
+  const [hovered, setHovered] = useState(false);
+  useEffect(() => onPetHover(setHovered), []);
 
   const mainCard = useMemo<PetCard | null>(() => {
     const user = exchange.user;
@@ -463,7 +470,7 @@ const PetSurface: React.FC = () => {
   }, [expanded, visibleCards.length]);
 
   const avatar = (
-    <div className={clsx('pet-mini-avatar-wrap', voice.listening && 'is-listening')}>
+    <div className={clsx('pet-mini-avatar-wrap', voice.listening && 'is-listening', hovered && 'is-hovered')} data-pet-hover>
       {voice.listening && <span className="pet-mini-listen-ring" aria-hidden />}
       <button
         type="button"
@@ -543,13 +550,13 @@ const PetSurface: React.FC = () => {
       <div className={clsx('pet-mini-column', voice.listening && 'is-voice-active')}>
         <div className={clsx('pet-mini-cards', voice.listening && 'is-hidden')} inert={voice.listening || undefined} aria-label={expanded ? t('pet.panel') : undefined} style={{ height: expanded ? STACK_HEIGHT : collapsedHeight }}>
           <div ref={collapsedRef} key={expanded ? 'expanded' : 'collapsed'} className="pet-mini-swap is-switching" onAnimationEnd={(event) => { if (event.target === event.currentTarget) event.currentTarget.classList.remove('is-switching'); }}>
-          {expanded && (!binding || switcherOpen || visibleCards.length === 0) ? (
-            <SessionPicker canStartVibey={capabilities.can_chat} onPick={(sessionId) => {
+          {expanded && (!binding || switcherOpen) ? (
+            <SessionPicker canStartVibey={capabilities.can_chat} onBack={binding ? () => setSwitcherOpen(false) : undefined} onPick={(sessionId) => {
               if (!epoch.isCurrent()) return;
               petShell.pick(sessionId, epoch.isAuthorizationCurrent);
               setSwitcherOpen(false);
             }} />
-          ) : visibleCards.length > 0 && (
+          ) : (expanded || visibleCards.length > 0) && (
             expanded ? (
               <ExpandedCards
                 cards={visibleCards}
@@ -604,7 +611,7 @@ const SwitchSessionButton: React.FC<{ onClick: () => void; label: string }> = ({
   <button type="button" className="pet-mini-chip" data-pet-hit aria-label={label} onClick={onClick}><ArrowLeftRight aria-hidden />{label}</button>
 );
 
-const SessionPicker: React.FC<{ onPick: (sessionId: string) => void; canStartVibey: boolean }> = ({ onPick, canStartVibey }) => {
+const SessionPicker: React.FC<{ onPick: (sessionId: string) => void; onBack?: () => void; canStartVibey: boolean }> = ({ onPick, onBack, canStartVibey }) => {
   const { t } = useTranslation();
   const api = useApi();
   const { sessions, loading } = useSessionSwitcher(true);
@@ -628,6 +635,11 @@ const SessionPicker: React.FC<{ onPick: (sessionId: string) => void; canStartVib
   return (
     <div className="pet-mini-panel" aria-label={t('pet.chooseSession')}>
       <div className="pet-mini-scroll">
+        {onBack && (
+          <div className="pet-mini-action-row">
+            <button type="button" className="pet-mini-chip" data-pet-hit onClick={onBack}><ArrowLeft aria-hidden />{t('common.back')}</button>
+          </div>
+        )}
         <div className="pet-mini-session-picker" data-pet-hit>
           {canStartVibey && <button type="button" onClick={pickVibey} disabled={vibeyPending} className="pet-mini-session-option is-vibey">{t('pet.talkToVibey')}</button>}
           {vibeyError && <p className="pet-mini-detail-muted">{vibeyError}</p>}
@@ -685,7 +697,8 @@ function useHitRegions(rootRef: React.RefObject<HTMLDivElement | null>, epoch?: 
             top = Math.max(top, clip.top); bottom = Math.min(bottom, clip.bottom);
           }
         }
-        return right > left && bottom > top ? [{ x: left, y: top, width: right - left, height: bottom - top }] : [];
+        const hover = node.closest('[data-pet-hover]') !== null;
+        return right > left && bottom > top ? [{ x: left, y: top, width: right - left, height: bottom - top, ...(hover ? { hover } : {}) }] : [];
       });
       const encoded = JSON.stringify(rects);
       if (encoded !== last) {
