@@ -538,7 +538,8 @@ Anthropic stop reasons:
 
 | Wire value | Canonical |
 | --- | --- |
-| `end_turn`, `stop_sequence`, `pause_turn` | `stop` |
+| `end_turn`, `stop_sequence` | `stop` |
+| `pause_turn` | none: the response continues (Hosted tools, `pause_turn`) |
 | `max_tokens`, `model_context_window_exceeded` | `length` |
 | `tool_use` | `tool_use` |
 | `refusal` | `refusal` |
@@ -679,9 +680,7 @@ far:
   base64 comes back beside its record and is saved through the same `MediaSink` as a native one; the record lists the
   file.
 
-Still to come: `pause_turn`.
-Until `pause_turn` lands, the Anthropic stop table above still maps it to `stop`. An Anthropic citation covers its
-whole text block, so it carries no range.
+An Anthropic citation covers its whole text block, so it carries no range.
 
 | Concern | Anthropic Messages | OpenAI Responses (OpenAI, xAI) | OpenAI Chat Completions |
 | --- | --- | --- | --- |
@@ -693,7 +692,7 @@ whole text block, so it carries no range.
 | Same-Source replay (target hop is `native.source_id`, same origin, and `hosted_tools[tool].replay` is true now) | `native.payload` blocks verbatim, in place; citations not sent | `native.payload` items verbatim, in place; annotations not sent; never for `image_generation` | — |
 | Images | — | `image_generation_call` → a file saved through the `MediaSink` from its `output_item.done`. The record lists it as a `HostedImage`: absolute path, mime type sniffed from its bytes, the item's size as width and height, and the file's byte count. The action is `generate` with the revised prompt and the resolved size and quality. `native.payload` holds the path in place of `result`, so no base64 is ever stored. `partial_image` previews are skipped before parsing. The duplicate `result` in the terminal response is never decoded, and a call that saved no image is `failed`. The model reads the path record, and a file over `read`'s inline limit says so. A stream that declares `image_generation` gets the 32 MiB event cap as its line cap; others keep 8 MiB. | — |
 | Other-origin replay | assistant `tool_use(name=<tool>, input=<per-action arguments>)` + user `tool_result(record as text)`, splitting the assistant message; a `failed`/`incomplete` record sets `is_error: true` | `function_call(name=<tool>, arguments)` + `function_call_output(record as text)`; a failed record's text starts `[<tool> failed: <error>]` | assistant `tool_calls` + `tool` message, failure as in Responses |
-| Pinning (any protocol) | a request with a native declaration or a verbatim `native.payload` carries `x-avibe-pin-source: <hop source_id>`. A continuation whose calls go back verbatim also carries `x-avibe-pin-model: <its served model>`, the hop's own model. A `409` `model_hub_pin_unavailable` / `pin_unavailable` answer is not shown: the same request is rendered again in portable form (proxy declarations, synthetic history, in-place text) and sent unpinned, exactly once. | same | — |
+| Pinning (any protocol) | a request with a native declaration or a verbatim `native.payload` carries `x-avibe-pin-source: <hop source_id>`. A continuation whose calls go back verbatim also carries `x-avibe-pin-model: <its served model>`, the hop's own model. A `409` `model_hub_pin_unavailable` / `pin_unavailable` answer is not shown: the same request is rendered again in portable form (proxy declarations, synthetic history, in-place text) and sent unpinned, exactly once. A `pause_turn` continuation is the exception (below). | same | — |
 | Citations at delivery | `TextBlock.citations` → `core/citations.py` builder → Markdown links + Web sidecar | same | — |
-| `pause_turn` | not a stop: the adapter re-sends the request with the paused assistant content appended (no new user message), pinned to the paused response's Source (`x-avibe-pin-source`), and keeps streaming as one response, at most 5 continuations. `usage` is the sum of every continuation's counters. | — | — |
+| `pause_turn` | not a stop. The adapter sends the request again with the paused content appended as the last assistant message, with no new user message. That continuation goes to the same hop, pinned to the Source and model that served the paused response, and its output streams on as the same response. A continuation block's index follows the paused ones, and a result finalizes its pending call by id. The hosted counters and cost are summed over every response. `usage` is the final request's, whose input already holds every paused part, so the context estimate stays right; billing comes from the gateway's per-call metering. After 5 continuations, a sixth pause ends the response with one `interrupted` error whose partial keeps everything assembled. A continuation is never sent in portable form. One that Source answers `pin_unavailable`, or a pause of a send that carried no pin, ends the response the same way. The merged message is verified only when every response in it was verified and reported the same origin; otherwise it is sanitized as any unverified response. | — | — |
 | In-flight replay (same turn, pinned Source) | verbatim when the fresh hop is the Source that served it, else in place as text. On `pin_unavailable`, which the gateway also answers for a narrow rejection of the replayed content (§3.5), each server block pair is replaced in place by one text block; signed thinking is kept on the same origin. | same | — |

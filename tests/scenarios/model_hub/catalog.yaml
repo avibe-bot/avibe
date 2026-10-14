@@ -17,6 +17,7 @@ capability:
     - tests/agent_core/ai/test_hosted_transform.py
     - tests/agent_core/ai/test_hosted_replay.py
     - tests/agent_core/ai/test_hosted_images.py
+    - tests/agent_core/ai/test_hosted_pause_turn.py
     - tests/test_vibey_agent.py
     - tests/test_model_hub_evidence_rules.py
     - tests/test_model_hub_config.py
@@ -323,6 +324,16 @@ scenarios:
     related_tests:
       - tests/agent_core/ai/test_hosted_replay.py::test_a_hosted_call_goes_back_verbatim_and_pinned_only_to_its_own_source_with_replay_evidence
       - tests/agent_core/ai/test_hosted_replay.py::test_a_continuation_goes_back_verbatim_only_to_the_hop_that_served_it
+  - id: MH-HOSTED-VIBEY-006
+    name: An Anthropic pause_turn continues as one response pinned to its Source and model, with the final request's usage and summed hosted counters, pending calls finalized by id, at most five continuations, ending interrupted when its Source cannot continue it, and verified only when every response was from one origin
+    status: covered
+    kind: contract
+    layer: contract
+    test: tests/agent_core/ai/test_hosted_pause_turn.py::test_a_paused_response_continues_as_one_response_pinned_to_its_source_with_summed_counters
+    related_tests:
+      - tests/agent_core/ai/test_hosted_pause_turn.py::test_a_response_paused_past_the_bound_ends_interrupted_and_keeps_everything_it_assembled
+      - tests/agent_core/ai/test_hosted_pause_turn.py::test_a_paused_response_its_source_cannot_continue_ends_interrupted_and_keeps_what_it_has
+      - tests/agent_core/ai/test_hosted_pause_turn.py::test_a_continued_response_is_verified_only_when_every_response_in_it_was_from_one_origin
   - id: MH-HOSTED-VIBEY-007
     name: A native generated image is saved to a file as its done item is parsed and its record names that file; no base64 enters history, partial and terminal copies are never decoded, and an image over read's inline limit says so
     status: covered

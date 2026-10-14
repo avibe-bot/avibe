@@ -211,6 +211,8 @@ class StreamAssembler:
         self._hosted_counts: dict[str, int] = {}
         self._hosted_cited: tuple[HostedSource, ...] = ()
         self._hosted_cost: HostedCost | None = None
+        #: Whether the response was paused and continues (``pause``).
+        self._continuing = False
         self._terminal_seen = False
         self._emitted_output = False
         # Text or a tool call: output past which a dropped response is never retried.
@@ -249,6 +251,11 @@ class StreamAssembler:
         return self._emitted_output
 
     def set_origin(self, origin: Origin, verified_origin: bool, source_id: str | None = None) -> None:
+        if self._continuing:
+            # A continued response is one message (§4.3): verified only when every response in it was, from one origin,
+            # and its usage is the latest response's, none if that reports none.
+            verified_origin = verified_origin and self.verified_origin and origin == self.origin
+            self.usage = None
         self.origin = origin
         self.verified_origin = verified_origin
         self.source_id = source_id
@@ -1105,6 +1112,13 @@ class StreamAssembler:
             hosted_summary=self._hosted_summary(final),
         )
 
+    def pause(self) -> AssistantMessage | ProviderError:
+        """The response so far, as the assistant turn its continuation sends back (§4.3). The continuation's output
+        joins the same content, so the response stays one message."""
+
+        self._continuing = True
+        return self.finalize("tool_use")
+
     def partial(self, *, stop_reason: str = "error") -> AssistantMessage | None:
         if self.usage is None and not self._emitted_output:
             return None
@@ -1583,12 +1597,24 @@ PIN_SOURCE_HEADER = "x-avibe-pin-source"
 PIN_MODEL_HEADER = "x-avibe-pin-model"
 
 
-class PinUnavailable:
-    """The gateway's answer to a pinned request it cannot serve from the pinned Source (§3.5): HTTP 409
-    ``pin_unavailable``, before anything reached a model. ``drive_sse_stream`` yields it in place of a terminal."""
+class HandOff:
+    """A send that ends without a terminal, because the adapter sends again (§3.5, §4.3). ``drive_sse_stream`` yields
+    it in place of a terminal and commits nothing."""
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+
+    def __repr__(self) -> str:
+        return f"HandOff({self.reason!r})"
 
 
-PIN_UNAVAILABLE = PinUnavailable()
+#: The gateway's answer to a pinned request it cannot serve from the pinned Source (§3.5): HTTP 409
+#: ``pin_unavailable``, before anything reached a model.
+PIN_UNAVAILABLE = HandOff("pin_unavailable")
+#: A response the provider paused (Anthropic ``pause_turn``, §4.3): the adapter continues it as the same response.
+PAUSE_TURN = HandOff("pause_turn")
+#: An HTTP error the adapter answers by sending again (``drive_sse_stream``'s ``refused``).
+REFUSED = HandOff("refused")
 
 
 def _pin_unavailable(body: str) -> bool:
@@ -1742,8 +1768,12 @@ async def drive_sse_stream(
     gateway: bool,
     translate: WireTranslator,
     max_line_size: int | None = None,
+    refused: Callable[[ProviderError], bool] | None = None,
 ) -> AsyncIterator[Any]:
     """Own the complete request/stream/terminal/cleanup lifecycle.
+
+    ``refused`` names an HTTP error the adapter answers by sending again: the driver yields ``REFUSED`` for it in place
+    of a terminal, as for ``pin_unavailable``, so nothing the response already holds is lost.
 
     Protocol adapters provide only ``translate``. It receives the shared SSE
     iterator and yields canonical deltas or a candidate ``Done``/
@@ -1806,6 +1836,9 @@ async def drive_sse_stream(
                                 status=response.status_code,
                                 headers=response.headers,
                             )
+                            if refused is not None and refused(candidate):
+                                yield REFUSED
+                                return
                 else:
                     resolved_origin = await resolve_served_origin(
                         endpoint,
@@ -1823,6 +1856,8 @@ async def drive_sse_stream(
                                 candidate = item
                                 break
                             yield item
+                            if isinstance(item, HandOff):
+                                return
                         if candidate is None:
                             candidate = (
                                 assembler.aborted(cancel.reason)
