@@ -99,6 +99,7 @@ DEGRADED = [
     ("repeated-order", {"web_search": {"executor_order": ["src_xai00001", "src_xai00001"]}}, {"web_search": OFF}, True),
     ("order-not-a-source-id", {"web_search": {"executor_order": [" src_xai00001"]}}, {"web_search": OFF}, True),
     ("bad-default-shape", {"image_generate": {"default_model": {"source_id": "src_xai00001"}}}, {"image_generate": OFF}, True),
+    ("default-not-encodable", {"image_generate": {"default_model": {"source_id": "src_xai00001", "model_id": "x\ud800"}}}, {"image_generate": OFF}, True),
     # Saved values are never resolved: an order naming a Source that is gone is kept and skipped when read.
     ("order-source-gone", {"web_search": {"executor_order": ["src_gone0001"]}}, {"web_search": (True, ("src_gone0001",), None)}, False),
     ("entry-not-an-object", {"x_search": None}, {"x_search": OFF}, True),

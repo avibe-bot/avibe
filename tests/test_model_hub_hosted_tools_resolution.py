@@ -334,6 +334,8 @@ def test_a_put_changes_only_the_fields_it_names(tool, payload, expected):
         ("image_generate", {"default_model": {"source_id": "openai", "model_id": "gpt-image-2"}}, "invalid_parameter"),
         # A padded id would be saved and then never match the catalog id it names.
         ("image_generate", {"default_model": {"source_id": "src_oai00001", "model_id": " gpt-image-2 "}}, "invalid_parameter"),
+        # One admission rule for model ids: text UTF-8 storage and transport cannot encode is refused too.
+        ("image_generate", {"default_model": {"source_id": "src_oai00001", "model_id": "gpt-image-\ud800"}}, "invalid_parameter"),
         ("web_search", {"executor_order": ["src_a00000001", "src_a00000001"]}, "invalid_parameter"),
     ],
 )

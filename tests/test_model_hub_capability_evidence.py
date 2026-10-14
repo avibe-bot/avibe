@@ -166,6 +166,16 @@ def test_successes_reach_memory_at_once_and_the_file_at_most_hourly(tmp_path, mo
     assert len(writes) == 3
     assert seen(CapabilityEvidenceStore(path), source) == NOW + timedelta(hours=2)
 
+    # A new identity's first success is written at once: the file's copy belonged to the old one.
+    rotated = replace(source, credential_ref="cred_rotated")
+    at = NOW + timedelta(hours=2, minutes=1)
+    store.note_success(
+        _success(rotated, CALL, observed_at=at, source_identity=identity_digest(rotated), wire=_wire(rotated)),
+        live=[rotated, other], now=at,
+    )
+    assert len(writes) == 4
+    assert seen(CapabilityEvidenceStore(path), rotated) == at
+
 
 def test_a_refusal_holds_in_memory_when_its_write_fails(tmp_path, monkeypatch, caplog):
     """MH-HOSTED-003: a refusal is routing state; the re-render that follows must not declare the feature again."""
