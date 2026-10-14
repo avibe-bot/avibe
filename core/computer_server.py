@@ -42,6 +42,12 @@ from core.computer_use import (
     effective_computer_use_status,
     read_computer_use_state,
 )
+from core.computer_script_handles import (
+    ComputerScriptHandleError,
+    bind_handle_to_request,
+    parse_handle_descriptor,
+    validate_handle_is_current,
+)
 
 _LEASE_TTL_SECONDS = 60.0
 _LEASE_HEARTBEAT_SECONDS = 10.0
@@ -54,6 +60,7 @@ _UPSTREAM_DETAIL_LIMIT = 2048
 _UPSTREAM_DIAGNOSTIC_SCAN_LIMIT = 8192
 _UPSTREAM_DIAGNOSTIC_LOG_LIMIT = 20
 _ADMISSION_RETRY_LIMIT = 1
+_NO_SCRIPT_HANDLE = object()
 _PROXY_PROCESS_ENV_KEYS = (
     "HOME",
     "LANG",
@@ -80,6 +87,7 @@ _INPUT_TOOLS = frozenset(
 )
 _OBSERVE_TOOLS = frozenset({"get_window_state", "zoom"})
 _ALLOWED_TARGET_KEYS = frozenset({"kind", "pid", "window_id"})
+_UPSTREAM_NOT_DISPATCHED_CODES = frozenset({"foreground_consent_required"})
 _COMMAND_MODIFIERS = frozenset({"cmd", "command", "meta"})
 _SHIFT_MODIFIERS = frozenset({"shift"})
 
@@ -727,12 +735,17 @@ def _error_result(
     message: str | None = None,
     *,
     detail: str | bytes | None = None,
+    dispatched: bool | None = None,
     result_params: Mapping[str, Any] | None = None,
     **params: Any,
 ) -> dict[str, Any]:
+    if dispatched is not None and dispatched is not False:
+        raise ValueError("computer-use errors may only declare dispatched=false")
     payload_params = dict(result_params) if result_params is not None else {}
     payload_params.update(params)
     payload = {"code": code, "params": payload_params}
+    if dispatched is False:
+        payload["dispatched"] = False
     bounded_detail = _bounded_diagnostic(detail)
     if bounded_detail:
         payload["detail"] = bounded_detail
@@ -746,6 +759,23 @@ def _error_result(
         "structuredContent": payload,
         "isError": True,
     }
+
+
+def _not_dispatched_error_result(result: Mapping[str, Any]) -> dict[str, Any]:
+    structured = result.get("structuredContent")
+    if not isinstance(structured, Mapping):
+        return _error_result("computer_use_error", dispatched=False)
+    code = structured.get("code")
+    return _error_result(
+        code if isinstance(code, str) else "computer_use_error",
+        detail=structured.get("detail"),
+        dispatched=False,
+        result_params=(
+            structured.get("params")
+            if isinstance(structured.get("params"), Mapping)
+            else None
+        ),
+    )
 
 
 def _fold_tool_result(
@@ -774,14 +804,18 @@ def _fold_tool_result(
     structured = result.pop("structuredContent", None)
     if result.get("isError") is True:
         if isinstance(structured, dict) and isinstance(structured.get("code"), str):
+            code = structured["code"]
             detail = (
                 _diagnostic_from_mapping(structured)
                 or _diagnostic_from_mapping(structured.get("params"))
                 or _diagnostic_from_content(result.get("content"))
             )
             return _error_result(
-                structured["code"],
+                code,
                 detail=detail,
+                dispatched=(
+                    False if code in _UPSTREAM_NOT_DISPATCHED_CODES else None
+                ),
                 result_params=_driver_error_params(structured),
             )
         return _error_result(
@@ -1169,25 +1203,43 @@ class ComputerUseServer:
         self,
         name: str,
         arguments: Mapping[str, Any],
+        *,
+        handle_descriptor: Any = _NO_SCRIPT_HANDLE,
     ) -> dict[str, Any]:
         session = arguments.get("session")
         if not isinstance(session, str) or not session.strip():
             return _error_result(
                 "session_required",
                 "Every computer-use call requires the current Avibe session id.",
+                dispatched=False,
             )
         session = session.strip()
         if name not in COMPUTER_USE_TOOL_NAMES:
-            return _error_result("unknown_tool", tool=name)
+            return _error_result("unknown_tool", dispatched=False, tool=name)
         if not isinstance(arguments, dict):
-            return _error_result("invalid_arguments", "Tool arguments must be an object.")
+            return _error_result(
+                "invalid_arguments",
+                "Tool arguments must be an object.",
+                dispatched=False,
+            )
+        parsed_handle = None
+        if handle_descriptor is not _NO_SCRIPT_HANDLE:
+            try:
+                parsed_handle = parse_handle_descriptor(handle_descriptor)
+                bind_handle_to_request(parsed_handle, name, arguments)
+            except ComputerScriptHandleError as exc:
+                return _error_result(
+                    exc.code,
+                    dispatched=False,
+                    result_params=exc.params,
+                )
 
         lock = self._session_locks.setdefault(session, asyncio.Lock())
         async with lock:
             try:
                 _validate_input(name, arguments)
             except ComputerServerError as exc:
-                return _error_result(exc.code, str(exc))
+                return _error_result(exc.code, str(exc), dispatched=False)
 
             for admission_attempt in range(_ADMISSION_RETRY_LIMIT + 1):
                 acquisition: LeaseAcquisition | None = None
@@ -1200,6 +1252,7 @@ class ComputerUseServer:
                         return _error_result(
                             "computer_use_unavailable",
                             "Computer use is not ready.",
+                            dispatched=False,
                             status=status.status,
                             reason=status.reason,
                         )
@@ -1241,6 +1294,40 @@ class ComputerUseServer:
                             explicit_start=name == "start_session",
                         ),
                     )
+                    if handle_descriptor is not _NO_SCRIPT_HANDLE:
+                        async def discover(
+                            discovery_tool: str,
+                            discovery_arguments: Mapping[str, Any],
+                        ) -> dict[str, Any]:
+                            forwarded_discovery = {
+                                **discovery_arguments,
+                                "session": session,
+                            }
+                            if discovery_tool not in self._upstream_accepts_session:
+                                forwarded_discovery.pop("session", None)
+                            return await self._upstream_call(
+                                upstream,
+                                discovery_tool,
+                                forwarded_discovery,
+                            )
+
+                        try:
+                            validation_error = await self._run_while_lease_owned(
+                                heartbeat,
+                                validate_handle_is_current(
+                                    parsed_handle,
+                                    name,
+                                    discover,
+                                ),
+                            )
+                        except ComputerScriptHandleError as exc:
+                            return _error_result(
+                                exc.code,
+                                dispatched=False,
+                                result_params=exc.params,
+                            )
+                        if validation_error is not None:
+                            return _not_dispatched_error_result(validation_error)
                     self._require_observation(name, arguments, session_state)
                     await self._run_while_lease_owned(
                         heartbeat,
@@ -1303,6 +1390,7 @@ class ComputerUseServer:
                     return _error_result(
                         "desktop_lease_lost",
                         "The desktop lease changed before computer use completed.",
+                        dispatched=False if pre_forward else None,
                     )
                 except _DaemonGenerationChanged:
                     if upstream is not None:
@@ -1321,6 +1409,7 @@ class ComputerUseServer:
                     return _error_result(
                         "computer_use_unavailable",
                         "Computer use changed while the request was being admitted.",
+                        dispatched=False,
                         status="unavailable",
                         reason="daemon_generation_changed",
                     )
@@ -1334,7 +1423,11 @@ class ComputerUseServer:
                             self._lease_manager.release,
                             acquisition.lease,
                         )
-                    return _error_result(exc.code, str(exc))
+                    return _error_result(
+                        exc.code,
+                        str(exc),
+                        dispatched=False if pre_forward else None,
+                    )
                 except asyncio.CancelledError:
                     if (
                         acquisition is not None
@@ -1368,6 +1461,7 @@ class ComputerUseServer:
                         "upstream_unavailable",
                         "The computer-use proxy exited. Observe again before retrying.",
                         detail=detail,
+                        dispatched=False if pre_forward else None,
                     )
                 except Exception as exc:
                     if (
@@ -1389,6 +1483,7 @@ class ComputerUseServer:
                     return _error_result(
                         "computer_use_error",
                         detail=detail,
+                        dispatched=False if pre_forward else None,
                         error_type=type(exc).__name__,
                     )
                 finally:

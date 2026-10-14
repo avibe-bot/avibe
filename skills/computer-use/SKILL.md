@@ -10,6 +10,7 @@ version: 1.0.0
 Use the Controller-owned CLI for desktop work:
 
 ```text
+vibe computer run ./inspect-mail.mjs --arg mailbox=Inbox --arg query=@/tmp/query.txt
 vibe computer observe apps
 vibe computer observe windows
 vibe computer observe window --arg pid=123 --arg window_id=456 --output /tmp/window.png
@@ -27,11 +28,47 @@ vibe computer launch --arg bundle_id=com.example.App
 vibe computer force-quit --arg pid=123
 ```
 
-Every leaf accepts `--args-json OBJECT`, `--args-json @FILE`, repeatable
-`--arg NAME=VALUE`, and `--json`. The two screenshot operations also accept
-`--output PATH`; the CLI writes or confirms the caller-selected PNG and prints
-the resulting path. `observe window` and `zoom` are the observation operations
-that establish the exact window state required before input.
+For multi-step work, write a normal ESM file and import the shipped SDK:
+
+```js
+import { computer } from "@avibe/computer";
+
+export default async ({ mailbox, query }) => {
+  const mail = await computer.app({ bundleId: "com.apple.mail" });
+  const window = await mail.waitFor({ role: "AXWindow", labelContains: mailbox });
+  const search = window.element({ role: "textbox", labelContains: "Search" });
+  await search.fill(query);
+  await window
+    .expect({ role: "textbox", labelContains: "Search" })
+    .toHaveValue(query);
+  return { mailbox, query };
+};
+```
+
+Run it with `vibe computer run ./inspect-mail.mjs --arg mailbox=Inbox
+--arg query=@/tmp/query.txt`. Ordinary argument values remain strings; `@file`
+loads the file as UTF-8 text. The default-exported function receives one
+argument object. Its return value becomes the JSON result; an omitted return is
+reported as `null`, and any other return must be JSON-serializable.
+
+The runner uses Avibe's shipped Node runtime and injects `@avibe/computer`;
+never install or resolve another package with that name. The SDK keeps element
+tokens private, re-observes once when the Controller explicitly reports a stale
+observation, and stops on ambiguous action outcomes.
+App and window handles are immutable process descriptors; after an app
+relaunches, acquire fresh handles with `computer.app(...)` before continuing.
+
+Scripts that send, submit, pay, delete, or perform another irreversible action
+must follow verify -> confirm -> re-verify -> act. If the owner-confirmation
+primitive is unavailable, stop before the irreversible action and use an
+interactive flow. Save a proven script as a reusable Skill only after the owner
+explicitly approves saving it.
+
+Every single-operation leaf accepts `--args-json OBJECT`, `--args-json @FILE`,
+repeatable `--arg NAME=VALUE`, and `--json`. The two screenshot operations also
+accept `--output PATH`; the CLI writes or confirms the caller-selected PNG and
+prints the resulting path. `observe window` and `zoom` are the observation
+operations that establish the exact window state required before input.
 
 `--json` keeps the structured driver object at `result.structuredContent`.
 The legacy `content` text block remains available for existing callers.

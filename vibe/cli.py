@@ -756,6 +756,34 @@ def cmd_computer(args) -> int:
             hint=translate("computer.cli.hint.missingCallerSession"),
             help_command="vibe computer --help",
         )
+    if args.computer_command == "run":
+        from vibe.computer_script_runner import (
+            ComputerScriptRunnerError,
+            run_computer_script,
+        )
+
+        try:
+            result = run_computer_script(
+                caller_session_id=caller_session_id,
+                script_file=args.file,
+                arg_values=args.arg,
+            )
+        except ComputerScriptRunnerError as exc:
+            params = dict(exc.params)
+            if exc.structured_error is not None:
+                params["error"] = translate_computer_error(
+                    exc.structured_error,
+                    translate=translate,
+                    fallback=str(params.get("error") or ""),
+                )
+            raise TaskCliError(
+                translate(exc.key, **params),
+                code=exc.code,
+                details=exc.details,
+                help_command="vibe computer run --help",
+            ) from exc
+        print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+        return 0
     if args.computer_command == "observe":
         command_path = ("observe", args.computer_observe_command)
     elif args.computer_command == "clipboard":
@@ -17390,9 +17418,32 @@ def build_parser():
     )
     computer_subparsers = computer_parser.add_subparsers(
         dest="computer_command",
-        metavar="{observe,zoom,click,type,key,hotkey,scroll,drag,set-value,clipboard,launch,force-quit}",
+        metavar="{run,observe,zoom,click,type,key,hotkey,scroll,drag,set-value,clipboard,launch,force-quit}",
     )
     computer_subparsers.required = True
+
+    computer_run_parser = computer_subparsers.add_parser(
+        "run",
+        help=i18n_t("computer.cli.help.run", computer_help_language),
+        description=i18n_t(
+            "computer.cli.help.runDescription",
+            computer_help_language,
+        ),
+        error_help_command="vibe computer run --help",
+        error_hint=i18n_t("computer.cli.hint.invalidArguments", computer_help_language),
+        error_i18n_key="computer.cli.error.invalidArguments",
+    )
+    computer_run_parser.add_argument(
+        "file",
+        help=i18n_t("computer.cli.help.scriptFile", computer_help_language),
+    )
+    computer_run_parser.add_argument(
+        "--arg",
+        action="append",
+        default=[],
+        metavar="NAME=VALUE",
+        help=i18n_t("computer.cli.help.scriptArg", computer_help_language),
+    )
 
     def _add_computer_options(command_parser) -> None:
         command_parser.add_argument(
@@ -19390,6 +19441,7 @@ _CLI_COMMAND_FLOORS: dict[tuple[str, ...], Optional[str]] = {
     ("computer", "observe", "apps"): "member",
     ("computer", "observe", "windows"): "member",
     ("computer", "observe", "window"): "member",
+    ("computer", "run"): "member",
     ("computer", "zoom"): "member",
     ("computer", "click"): "member",
     ("computer", "type"): "member",

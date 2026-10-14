@@ -1,0 +1,8 @@
+{
+  "name": "@avibe/computer",
+  "version": "1.0.0",
+  "type": "module",
+  "exports": "./index.mjs",
+  "types": "./index.d.ts",
+  "private": true
+}
