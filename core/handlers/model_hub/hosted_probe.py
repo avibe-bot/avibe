@@ -43,7 +43,14 @@ from core.agent_core.ai.provider import (
 )
 from core.agent_core.ai.registry import create_adapter
 from core.agent_core.cancel import CancelToken
-from core.agent_core.messages import AssistantMessage, HostedImage, HostedToolBlock, TextBlock, UserMessage
+from core.agent_core.messages import (
+    IMAGE_MIME_TYPES,
+    AssistantMessage,
+    HostedImage,
+    HostedToolBlock,
+    TextBlock,
+    UserMessage,
+)
 from core.agent_core.tools.hosted import hosted_tool_spec as canonical_tool_spec
 from core.agent_core.tools.read import detect_supported_image_mime_type
 from vibe.backend_model_catalog import HostedToolSpec
@@ -158,33 +165,44 @@ def hidden_result_urls(message: AssistantMessage) -> frozenset[str]:
     """
 
     returned = {source.url for block in message.content if isinstance(block, HostedToolBlock) for source in block.record.sources}
+    shown = written_urls(message)
+    return frozenset(url for url in returned if url and _same_url(url) not in shown)
+
+
+def written_urls(message: AssistantMessage) -> frozenset[str]:
+    """Every URL a response's answer shows, as comparison keys: those its text writes and those it cites."""
+
     text = " ".join(block.text for block in message.content if isinstance(block, TextBlock) and block.text)
-    shown = {
+    urls = set(_URL.findall(text))
+    urls.update(
         citation.url
         for block in message.content
         if isinstance(block, TextBlock) and block.citations
         for citation in block.citations
-    }
+    )
     if message.hosted_summary is not None:
-        shown.update(source.url for source in message.hosted_summary.cited_sources)
-    written = {_same_url(url) for url in _URL.findall(text)} | {_same_url(url) for url in shown}
-    return frozenset(url for url in returned if url and _same_url(url) not in written)
+        urls.update(source.url for source in message.hosted_summary.cited_sources)
+    return frozenset(_same_url(url) for url in urls if url)
 
 
 def carries_native_payload(body: Any, message: AssistantMessage) -> bool:
     """Whether a request body sends every hosted call of ``message`` back verbatim, its provider items in place."""
 
-    def contains(node: Any, item: dict[str, Any]) -> bool:
-        if node == item:
-            return True
-        if isinstance(node, dict):
-            return any(contains(value, item) for value in node.values())
-        if isinstance(node, list):
-            return any(contains(value, item) for value in node)
-        return False
+    def canonical(value: Any) -> str:
+        return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
+    # Every object the body holds, once, then a lookup per item: one walk, whatever the payload's size.
+    held: set[str] = set()
+    pending = [body]
+    while pending:
+        node = pending.pop()
+        if isinstance(node, dict):
+            held.add(canonical(node))
+            pending.extend(node.values())
+        elif isinstance(node, list):
+            pending.extend(node)
     items = [item for block in message.content if isinstance(block, HostedToolBlock) for item in block.native.payload]
-    return bool(items) and all(contains(body, item) for item in items)
+    return bool(items) and all(canonical(item) in held for item in items)
 
 
 class ProbeImageCheck:
@@ -204,7 +222,8 @@ class ProbeImageCheck:
         except (binascii.Error, ValueError):
             raise ValueError("the image is not valid base64") from None
         mime_type = detect_supported_image_mime_type(data)
-        if mime_type is None:
+        # The kinds a turn's sink keeps (``IMAGE_MIME_TYPES``, which ``MediaSnapshots`` stores); any other is refused there.
+        if mime_type not in IMAGE_MIME_TYPES:
             raise ValueError("the image is not a PNG, JPEG, GIF or WebP")
         return HostedImage(path="probe:discarded", mime=mime_type, bytes=len(data))
 
@@ -444,18 +463,20 @@ def replay_outcome(
     * ``transient``: as for the call probe.
     """
 
+    if not carried:
+        # A request that did not send the payload verbatim tested nothing, whatever the provider said about it.
+        return "inconclusive"
     if learned is not None and (learned.feature.kind, learned.feature.name, learned.feature.aspect) == (
         "hosted_tool", tool, "replay"
     ):
         return "unsupported"
-    if not carried:
-        return "inconclusive"
     if isinstance(terminal, Done):
-        content = terminal.message.content
-        if any(isinstance(block, HostedToolBlock) and block.tool == tool for block in content):
+        message = terminal.message
+        if any(isinstance(block, HostedToolBlock) and block.tool == tool for block in message.content):
             return "unsupported"
-        text = " ".join(block.text for block in content if isinstance(block, TextBlock) and block.text)
-        named = {_same_url(url) for url in _URL.findall(text)} & {_same_url(url) for url in asked}
+        if message.stop_reason == "refusal":
+            return "inconclusive"
+        named = written_urls(message) & {_same_url(url) for url in asked}
         return "verified" if named else "inconclusive"
     return _failure(terminal, outcome)
 
@@ -465,11 +486,11 @@ _URL = re.compile(r"https?://[^\s<>()\[\]{}\"'`]+")
 
 
 def _same_url(url: str) -> str:
-    """A URL as a comparison key: whole, without the punctuation a sentence leaves on it, its scheme and host in
-    lower case, and no trailing slash on its path."""
+    """A URL as a comparison key: whole, fragment included, without the punctuation a sentence leaves on it, its
+    scheme and host in lower case, and no trailing slash on its path."""
 
     parts = urlsplit(url.rstrip(".,;:!?"))
-    return urlunsplit((parts.scheme.lower(), parts.netloc.lower(), parts.path.rstrip("/"), parts.query, ""))
+    return urlunsplit((parts.scheme.lower(), parts.netloc.lower(), parts.path.rstrip("/"), parts.query, parts.fragment))
 
 
 def _failure(terminal: ProviderError | None, outcome: RawCallOutcome) -> ProbeOutcome:

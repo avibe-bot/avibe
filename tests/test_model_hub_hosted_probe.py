@@ -8,6 +8,7 @@ reads the response, so a probe recognizes a result only as the hosted call a rea
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 from dataclasses import replace
 from datetime import timedelta
@@ -102,6 +103,19 @@ def _anthropic_text(text: str) -> str:
 
 def _responses_text(text: str) -> str:
     return _responses({"id": "msg_2", "type": "message", "content": [{"type": "output_text", "text": text, "annotations": []}]})
+
+
+REFUSAL = _sse(
+    {"type": "response.created", "response": {"status": "in_progress"}},
+    {"type": "response.output_item.added", "output_index": 0, "item": {"id": "msg_3", "type": "message", "status": "in_progress", "content": []}},
+    {"type": "response.refusal.delta", "output_index": 0, "delta": f"I won't repeat {HIDDEN}."},
+    {
+        "type": "response.output_item.done",
+        "output_index": 0,
+        "item": {"id": "msg_3", "type": "message", "status": "completed", "content": [{"type": "refusal", "refusal": f"I won't repeat {HIDDEN}."}]},
+    },
+    {"type": "response.completed", "response": {"status": "completed", "usage": {"input_tokens": 900, "output_tokens": 9}}},
+)
 
 
 def _replay_reply(protocol: str, request: dict) -> str:
@@ -609,7 +623,16 @@ PNG = (
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("result,outcome", [(PNG, "verified"), ("bm90IGFuIGltYWdl", "inconclusive")], ids=["image", "not-an-image"])
+@pytest.mark.parametrize(
+    "result,outcome",
+    [
+        (PNG, "verified"),
+        ("bm90IGFuIGltYWdl", "inconclusive"),
+        # A BMP is an image, but not one a turn's sink keeps, so it proves nothing a turn could use.
+        (base64.b64encode(b"BM" + bytes(52)).decode(), "inconclusive"),
+    ],
+    ids=["image", "not-an-image", "bmp"],
+)
 async def test_an_image_probe_verifies_only_an_image_vibey_could_keep(tmp_path, result, outcome):
     """MH-HOSTED-007: the image call probe reads the generated image through Vibey's own parsing, which keeps it
     only when it is an image; a probe keeps no file, and an image has no replay."""
@@ -648,8 +671,21 @@ REPLAY_CASES = [
     ("anthropic-names-a-result", ANTHROPIC, ANTHROPIC_SEARCH, "answer-from-payload", "verified", "verified"),
     # Restating the answer it already gave proves nothing: that text came back in the visible transcript.
     ("restates-the-visible-answer", XAI, _responses(SEARCH, ANSWER), _responses_text("https://avibe.bot/"), "inconclusive", None),
-    # A URL that only starts like the hidden result is a different URL.
+    # A URL that only starts like the hidden result is a different URL, and so is one with another fragment.
     ("names-a-longer-url", XAI, _responses(SEARCH, ANSWER), _responses_text(HIDDEN + "-old"), "inconclusive", None),
+    ("names-another-fragment", XAI, _responses(SEARCH, ANSWER), _responses_text(HIDDEN + "#other"), "inconclusive", None),
+    # Linked text names the result as surely as the URL written out.
+    ("cites-the-result", XAI, _responses(SEARCH, ANSWER), _responses({
+        "id": "msg_2",
+        "type": "message",
+        "content": [{
+            "type": "output_text",
+            "text": "The hosted tools docs.",
+            "annotations": [{"type": "url_citation", "url": HIDDEN, "start_index": 4, "end_index": 21, "title": "docs"}],
+        }],
+    }), "verified", "verified"),
+    # A refusal is inconclusive, even one that quotes the result.
+    ("refuses-quoting-the-result", XAI, _responses(SEARCH, ANSWER), REFUSAL, "inconclusive", None),
     # The way a sentence ends a URL does not change it.
     ("names-it-in-a-sentence", XAI, _responses(SEARCH, ANSWER), _responses_text(f"The other one was {HIDDEN}/."), "verified", "verified"),
     # Searching again instead of using the results it holds is what a dropped replay looks like.
@@ -701,6 +737,8 @@ async def test_a_verified_call_is_followed_by_the_replay_probe(tmp_path, source,
     _assert_valid("hosted-tool-probe-result.schema.json", probe)
     assert probe["call"]["outcome"] == "verified"
     assert probe["replay"]["outcome"] == outcome
+    # Every reply here completed (or named the payload in a refusal): the verdict is read from it, not from a failure.
+    assert probe["replay"]["error"] is None
     assert [record.status for record in _records(service, REPLAY)] == ([written] if written else [])
 
 

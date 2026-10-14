@@ -7760,7 +7760,8 @@ class ModelHubService:
                     replay_last.outcome,
                     replay_learned,
                     asked=asked,
-                    carried=carries_native_payload(replay_last.body, terminal.message),
+                    # The payload can be megabytes of provider items: compare it off the controller loop.
+                    carried=await asyncio.to_thread(carries_native_payload, replay_last.body, terminal.message),
                 )
                 await self._record_probe_evidence(
                     EvidenceFeature.hosted(tool, "replay"),
