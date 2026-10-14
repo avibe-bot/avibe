@@ -124,4 +124,26 @@ describe('useHostedTools ordering', () => {
     rerender({ revision: 'source-a-with-a-new-key' });
     await waitFor(() => expect(get).toHaveBeenCalledTimes(2));
   });
+
+  it('keeps the status a probe answered with when the read after it fails', async () => {
+    // Before: unchecked (shown here as off). The probe's answer: the tool's state after it.
+    vi.spyOn(modelsApi, 'getHostedTools')
+      .mockResolvedValueOnce(status(false))
+      .mockRejectedValueOnce(new Error('offline'));
+    vi.spyOn(modelsApi, 'probeHostedTool').mockResolvedValue({
+      probe: { tool: 'web_search', source_id: 'src_relay001', model_id: 'gpt-6-astra', call: { outcome: 'verified', error: null }, replay: null },
+      hosted_tools: status(true),
+    });
+    const { result } = renderHook(() => useHostedTools(true), { wrapper });
+    await waitFor(() => expect(shown(result.current.read)).toBe(false));
+
+    const candidate = {
+      source_id: 'src_relay001', model_id: 'gpt-6-astra', billing: 'metered' as const, price: null, probe_estimate: null,
+      call: { status: 'unknown' as const, stale: null, basis: null, observed_at: null, detail: null, changes_at: null },
+      replay: null,
+    };
+    await act(async () => { await result.current.probe({ tool: 'web_search', candidate }); });
+    // The read that follows failed; what the probe answered still stands.
+    await waitFor(() => expect(shown(result.current.read)).toBe(true));
+  });
 });

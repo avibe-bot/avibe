@@ -87,18 +87,26 @@ export function useHostedTools(active: boolean, revision: string | null = null) 
 
   /**
    * Run one call probe: a real, cost-bearing request the user asked for. Its
-   * answer carries the status it left, but a probe runs long beside writes, so
-   * the screen converges through an ordinary read rather than that snapshot.
+   * answer carries the status it left, which lands at once unless a write went
+   * out while it ran (that write's answer is newer); an ordinary read then
+   * reconciles, and if that read fails the probe's status still stands.
    * Null when the request itself failed.
    */
   const probe = React.useCallback(async (target: ProbeTarget): Promise<HostedToolProbeResult | null> => {
     const key = probeKey(target);
+    const clock = order.current;
+    const writesAtStart = clock.writes;
     setProbing((previous) => new Set(previous).add(key));
     try {
-      const { probe: result } = await modelsApi.probeHostedTool(target.tool, {
+      const { probe: result, hosted_tools: status } = await modelsApi.probeHostedTool(target.tool, {
         source_id: target.candidate.source_id,
         model_id: target.candidate.model_id,
       });
+      if (alive.current && clock.writes === writesAtStart && clock.queued === 0) {
+        // Newer than any read still out, which must not overwrite it.
+        clock.reads += 1;
+        setRead(readyRegion(status));
+      }
       return result;
     } catch {
       return null;
