@@ -223,20 +223,24 @@ The evidence store, its record and its owner are the capability model's §3. v2 
       current negative records, with `aspect` `call` or `replay`;
     - `latest_ok` is the in-memory latest-execution projection (§3.2), not the newest file record;
     - search tools: `executor_order` (saved, null when automatic), `effective_order` (as the gateway would try now),
-      and `executor_candidates: [{source_id, price}]` in effective order, every eligible executor Source (a Claude
+      and `executor_candidates: [{source_id, billing, relay, price}]` in effective order (`relay` true for a Source on a
+      non-official endpoint, labelled "at API price"), every eligible executor Source (a Claude
       subscription never is) with its per-call price, so the order can be edited over the full list;
     - `image_generate`: `default_model` (saved, null when default; a saved model no longer available, or whose pair
       is refused, stays saved, flagged `available: false`); `effective_default` (the saved default if available,
       else the same `model_id` on another Source that serves it, since the user picked a model, not a relay, else
-      the first available model in catalog order); `models: [{source_id, model_id, description, price}]`, exactly
+      the first available model in catalog order); `models: [{source_id, model_id, description, price}]`, where
+      `price` is `{usd, basis: "list" | "estimated"}` per image or null ("暂无单价"), exactly
       the enum's candidate pairs, so a refused pair leaves it and the card's refusal line says why (clearing the
       refusal brings the pair back, and a saved default with it, with no write); and `image_offered_by: [vendor]`,
       the vendors whose overlay lists image models, for the empty state.
   - `PUT /api/models/hosted-tools/<tool>` is per field: an absent field is unchanged, and an explicit `null` resets
     `executor_order` to automatic or `default_model` to the default. `enabled` is a boolean. It answers the same
     read.
-  - `POST /api/models/hosted-tools/<tool>/clear` with `{source_id}` clears that Source's negative records for the tool
-    (`call` and `replay`, every model); with `{}` it clears them for every Source of the tool. It answers the same
+  - `POST /api/models/hosted-tools/<tool>/clear` with `{source_id, model_id?}` clears that Source's negative records
+    for the tool (`call` and `replay`): for that model when `model_id` is given (a Source chip on a model row), else
+    for every model (the Tools tab's per-Source line); with `{}` it clears them for every Source of the tool. A
+    `model_id` with no records is a no-op like the others. It answers the same
     read, writes nothing else, and from the next request (hop facts are resolved per request, §3.4) the tool is
     assumed again on those Sources. A request in a running turn may therefore try it again; if it still refuses, the
     re-resolve bounds of §3.5 apply.
@@ -631,16 +635,18 @@ Unchanged from v1 §7.3 (owner decision, 2026-10-13 19:14), with the producer no
 - **One status line per tool, from the read's `status` (§3.3), and only after something happened:**
   - "最近一次由 <Source> 执行 · 正常 · 10-15" from `latest_ok`. It shows a date, not a time: positive records are
     written at most hourly (§3.2);
-  - refusals come from `refused[]` grouped by `source_id` (the read stays per record), each group with its newest
-    `at` and its refused models, since evidence is per (Source, model) and the same Source may run the tool on
-    another model:
+  - refusals come from `refused[]` grouped by aspect and then by `source_id` (the read stays per record), each group
+    with its newest `at` and its refused models, since evidence is per (Source, model) and the same Source may run
+    the tool on another model. Call refusals and replay refusals each get their own line under the rules below; a
+    Source with a call refusal appears only in the call line, since its replay refusal is moot while the tool is not
+    declared natively there. The two-or-more threshold counts distinct Sources across both lines:
     - **one Source refused:** the status line reads "<Source> 不支持 · <models>" (joined with `Intl.ListFormat`), with
       "，已改用 <Source>" appended when that newest `at` is older than `latest_ok` and `latest_ok` is on another
       Source, and has a "清除" action for that (Source, tool);
     - **two or more Sources refused** (owner-approved mockup, 2026-10-15): the status line names the Sources
       ("A、B 不支持"), and the per-Source "清除" actions and "全部清除" sit in the card's **Advanced** section;
-  - a `replay` refusal reads "<Source> 不支持回放历史结果" instead, since that Source still runs the tool, and clears
-    the same way;
+  - the replay line reads "<Source> 不支持回放历史结果" (or "A、B 不支持回放历史结果"), since those Sources still run
+    the tool, and clears the same way;
   - every clear uses the `clear` endpoint (§3.3). A cleared Source is tried natively again from its next request; if
     it still refuses, the line comes back after that call. Refusals do not expire on their own (§3.2);
   - nothing before first use. No "unknown", "unverified" or "unchecked" wording anywhere.
@@ -651,9 +657,11 @@ Unchanged from v1 §7.3 (owner decision, 2026-10-13 19:14), with the producer no
   automatic" (a `null` PUT). The price shows per row because it depends on who runs the search.
 - **The image card** lists the available image models with their one-line descriptions and a per-image price
   (owner-approved mockup): the vendor's list price where it has one (Grok Imagine "$0.02"); an estimate from token
-  pricing, marked "≈", where the image's tokens are known (Nano Banana "≈$0.067"); "暂无单价" / "no unit price" where
+  pricing, marked "≈", where the image's tokens are known: the pricing module values the overlay's
+  `tokens_per_image` at the model's output token rate (Nano Banana "≈$0.067"); "暂无单价" / "no unit price" where
   neither is (gpt-image-2, which OpenAI prices per image token at a varying count). It has a default-model picker over `default_model` / `effective_default`; a saved default that is no longer available
-  shows as itself, "(unavailable)". Image-endpoint refusals (§3.2) show and clear like search refusals; any other
+  shows as itself, "(unavailable)". Image-endpoint refusals (§3.2) show and clear like search refusals; the image card
+  gets an Advanced section only when its clears move there (two or more Sources refused), holding only those; any other
   failed image call shows only on its tool card in chat, since passive evidence keeps no other image failures. With no image model available, the card names the vendors from
   `image_offered_by` ("Add an OpenAI or Google API key").
 - **Removed:** check and check-all, the confirm and result dialogs, Re-verify, the probe estimate, the executor
@@ -664,10 +672,14 @@ Unchanged from v1 §7.3 (owner decision, 2026-10-13 19:14), with the producer no
 Each model row on a Source's detail panel shows only passive state, with the detail popover (time, basis, reason).
 There is no "via proxy" chip: proxying is the tool's business, not the Source's.
 - "网页搜索 · 正常 · 10-15", "图片生成 · 正常": a positive chip, with no action;
-- "X 搜索 · 不支持", "图片生成 · 不支持", "ultra · 不支持": a refusal chip, whose popover has "清除" for that record
-  (owner-approved mockup, 2026-10-15). A hosted-tool refusal clears through the Tools `clear` endpoint with that
-  `source_id` (§3.3); an effort refusal through the Source evidence clear (capability model §5). After a clear the
+- "X 搜索 · 不支持", "图片生成 · 不支持", "网页搜索 · 不支持回放", "ultra · 不支持": a refusal chip, whose popover has
+  "清除" (owner-approved mockup, 2026-10-15). A hosted-tool refusal chip clears both aspects of that tool for that
+  model, through the Tools `clear` endpoint with its `source_id` and `model_id` (§3.3); an effort refusal through the Source evidence clear (capability model §5). After a clear the
   Sources and the hosted-tools read are both read again.
+
+A model row shows one chip per feature: when a positive and a negative record coexist (§3.2), the refusal chip
+wins, because it is routing state, and its popover may still name the last success ("曾于 10-15 正常"). A call
+refusal also hides that tool's replay chip, which is moot while the tool is not declared natively.
 
 Unknown shows nothing. The chips reuse `EvidenceChip`'s locale-composed spoken name and popup semantics, without the
 recheck action. Every chip stays focusable and opens its detail from the keyboard, positive or refusal, because the
