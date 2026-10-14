@@ -342,7 +342,7 @@ scenarios:
     backend: shared
     test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_quota_card_reauth_reaches_a_fresh_quota_reading
   - id: AUTH-SETUP-910
-    name: Hub-owned native subscription creation preserves verified login through opaque Keychain observation
+    name: Hub-owned native subscription creation preserves verified login through opaque Keychain observation and application retry
     status: covered
     kind: historical_regression
     layer: scenario

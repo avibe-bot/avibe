@@ -172,7 +172,9 @@ export function BackendConnectionForm({ backend, provider, initialMethod = 'oaut
       return { ...current, [credential]: next };
     });
   }, [credential]);
-  const pendingConfirmation = useRef<Submission | null>(null);
+  // Keep the verified login receipt only with its unresolved confirmation.
+  // Refresh may retry application, but ordinary observations never inherit it.
+  const pendingConfirmation = useRef<(Submission & { verifiedOAuth?: boolean }) | null>(null);
   const writeState = useRef(onWriteState); writeState.current = onWriteState;
   const lifetime = useRef({ mounted: true, busy: false });
   const onConnectedRef = useRef(onConnected); onConnectedRef.current = onConnected;
@@ -314,7 +316,7 @@ export function BackendConnectionForm({ backend, provider, initialMethod = 'oaut
     });
   };
   const confirm = async (submission: Submission, receiptError = '', verifiedOAuth = false) => {
-    pendingConfirmation.current = submission;
+    pendingConfirmation.current = { ...submission, verifiedOAuth };
     if (!await observe({ expected: submission, receiptError, verifiedOAuth })) return false;
     pendingConfirmation.current = null;
     consume(submission);
@@ -325,17 +327,25 @@ export function BackendConnectionForm({ backend, provider, initialMethod = 'oaut
   // typing, and not an address they were part-way through changing either.
   const OAUTH: Submission = { method: 'oauth', baseUrl: null, credential: null, sent: null };
   const confirmOAuth = async () => {
-    if (!await confirm(OAUTH, '', true)) throw new Error(t('onboarding.connection.applyPending'));
+    const confirmed = await confirm(OAUTH, '', true);
+    // Claude's login is already verified; the form owns any remaining
+    // application/readback error and its Refresh. Do not cancel a completed
+    // flow or leave a second, stale OAuth error after that Refresh succeeds.
+    if (!confirmed && backend !== 'claude') throw new Error(t('onboarding.connection.applyPending'));
   };
   const observeOAuthFailure = async (receiptError: string) => {
     pendingConfirmation.current = OAUTH;
     await observe({ receiptError });
   };
+  const changeOAuthActive = (value: boolean) => {
+    if (value) pendingConfirmation.current = null; // A new login/removal supersedes the old receipt.
+    setActive(value);
+  };
   const oauth = useBackendOAuth({ backend, opencodeProviderId: provider?.id, onSuccess: confirmOAuth,
-    onFailure: observeOAuthFailure, onCancel: () => { pendingConfirmation.current = null; observation.current += 1; }, onActiveChange: setActive, onPendingChange: onWriteState });
+    onFailure: observeOAuthFailure, onCancel: () => { pendingConfirmation.current = null; observation.current += 1; }, onActiveChange: changeOAuthActive, onPendingChange: onWriteState });
   const refresh = async () => {
     const expected = pendingConfirmation.current;
-    if (expected) await confirm(expected);
+    if (expected) await confirm(expected, '', expected.verifiedOAuth);
     else await observe();
   };
   const removed = async (result: OAuthWebMutationResult) => {
@@ -470,7 +480,7 @@ export function BackendConnectionForm({ backend, provider, initialMethod = 'oaut
     {savedDisabled && <p className="text-xs text-muted break-words" role="status">{t('onboarding.connection.savedDisabled')}</p>}
     {error && <div role="alert" className="connection-error">{error}{!native && !currentProvider && <Button variant="secondary" onClick={() => void observe()}>{t('common.retry')}</Button>}</div>}
     {method === 'oauth' && (!compact ? <BackendOAuthPanel backend={backend} opencodeProviderId={provider?.id} signedIn={signedIn}
-      title={title} subtitle={hint} hideRemove={backend === 'opencode'} onSuccess={confirmOAuth} onRemoved={removed} onFailure={observeOAuthFailure} onCancel={() => { pendingConfirmation.current = null; observation.current += 1; }} onActiveChange={setActive}
+      title={title} subtitle={hint} hideRemove={backend === 'opencode'} onSuccess={confirmOAuth} onRemoved={removed} onFailure={observeOAuthFailure} onCancel={() => { pendingConfirmation.current = null; observation.current += 1; }} onActiveChange={changeOAuthActive}
       canRemoveAuth={authReadable && Boolean(native && ('has_oauth_credentials' in native ? native.has_oauth_credentials : native.has_chatgpt_tokens))}
       signedInDetail={native && 'chatgpt_account' in native && native.chatgpt_account ? [native.chatgpt_account.email, native.chatgpt_account.plan_type, (native.chatgpt_account.organizations?.find((org) => org.is_default) || native.chatgpt_account.organizations?.[0])?.title].filter(Boolean).join(' · ') : undefined} /> : <>
       {oauth.hubOwnedAuth && <HubOwnedAuthNotice onNavigate={onCancel} />}

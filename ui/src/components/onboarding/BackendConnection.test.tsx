@@ -332,6 +332,43 @@ describe('shared Settings and onboarding connection owner', () => {
     expect(screen.queryByText(en.onboarding.connection.savedSubscription)).toBeNull();
     expect(screen.getByText(en.onboarding.connection.uncertain)).toBeTruthy();
   });
+  it.each([
+    [true, false], [false, false], [true, true], [false, true],
+  ])('AUTH-SETUP-910 retries only the pending verified Claude receipt (compact=%s, superseded=%s)', async (compact, superseded) => {
+    mock.api.getClaudeAuth.mockResolvedValue({ ...native(), auth_mode: 'oauth', active_auth_mode: 'none',
+      has_api_key: false, has_oauth_credentials: false, auth_mode_uncertain: true });
+    mock.api.getBackendConnection.mockResolvedValue(connection({ auth: 'unknown', ready: false, entry_eligible: false }));
+    const done = vi.fn();
+    render(wrap(<BackendConnectionForm backend="claude" compact={compact} onConnected={done} />));
+    await screen.findByText(en.onboarding.connection.uncertain);
+    const startLabel = compact ? en.onboarding.connection.claudeSignIn : en.settings.backends.claudeSignInButton;
+    mock.api.startOAuthWeb.mockResolvedValue({ ok: true, flow_id: 'verified-pending', state: 'success' });
+    if (compact) mock.api.getBackendConnection.mockRejectedValue(new Error('fixture IPC'));
+    else mock.api.getBackendConnection.mockResolvedValue(connection({ auth: 'unknown', application: 'draining', ready: false, entry_eligible: false }));
+    fireEvent.click(screen.getByRole('button', { name: startLabel }));
+    await screen.findByRole('alert');
+    const refresh = screen.getByRole('button', { name: en.onboarding.connection.refresh });
+    await waitFor(() => expect(refresh.hasAttribute('disabled')).toBe(false));
+    expect(done).not.toHaveBeenCalled();
+    expect(mock.api.cancelOAuthWeb).not.toHaveBeenCalled();
+    if (superseded) {
+      // Even a start rejected before it returns a flow supersedes the receipt.
+      mock.api.startOAuthWeb.mockRejectedValue(new Error('fixture new login failed'));
+      fireEvent.click(screen.getByRole('button', { name: startLabel }));
+      await screen.findByText(/fixture new login failed/);
+      await waitFor(() => expect(refresh.hasAttribute('disabled')).toBe(false));
+    }
+    mock.api.getBackendConnection.mockResolvedValue(connection({ auth: 'unknown', ready: false, entry_eligible: false }));
+    fireEvent.click(refresh);
+    await waitFor(() => expect(screen.queryByRole('button', { name: en.onboarding.connection.refresh })).toBeNull());
+    expect(done).toHaveBeenCalledTimes(superseded ? 0 : 1);
+    if (!superseded) expect(screen.queryByRole('alert')).toBeNull();
+    expect(mock.api.startOAuthWeb).toHaveBeenCalledTimes(superseded ? 2 : 1);
+    expect(mock.api.saveClaudeAuth).not.toHaveBeenCalled();
+    expect(mock.api.cancelOAuthWeb).not.toHaveBeenCalled();
+    expect(screen.queryByText(en.onboarding.connection.connected)).toBeNull();
+    expect(screen.getByText(en.onboarding.connection.uncertain)).toBeTruthy();
+  });
   it('cancelling Settings OAuth during confirmation discards its late native observation', async () => {
     mock.api.getCodexAuth.mockResolvedValue(codexNative({ active_auth_mode: 'none', has_api_key: false, has_chatgpt_tokens: false }));
     mock.api.getBackendConnection.mockResolvedValue(connection({ backend: 'codex', auth: 'none', ready: false, entry_eligible: false }));

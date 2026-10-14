@@ -22,7 +22,11 @@ refute the verified result, while a concrete competing API-key selection still
 wins. Do not spawn a second status CLI or change AgentAuthService lifecycle. This
 is a completion receipt, not a perpetual readiness cache. A Settings confirmation
 may acknowledge that successful login while still displaying an uncertain current
-Keychain observation and not marking the backend ready.
+Keychain observation and not marking the backend ready. If controller application
+is pending/unavailable, keep that receipt only on the existing pending confirmation
+for Refresh. Settlement, a new login/removal, method changes, or cancellation
+invalidate it; ordinary readiness never receives the receipt. The form owns
+readback/application errors rather than cancelling an already completed login.
 
 ## Validation contract
 
@@ -36,6 +40,8 @@ Keychain observation and not marking the backend ready.
   start exclusion until the Source is committed.
 - UI test covers successful Claude OAuth followed by opaque Keychain observation:
   no cancellation, no false connected indicator; ordinary unknown stays unknown.
+  AUTH-SETUP-910 also covers Settings/onboarding application recovery via Refresh
+  and a new failed attempt superseding the old pending receipt.
 - Run focused Python tests, frontend tests/build and lint before push; GitHub CI
   and exact-head Codex review plus zero unresolved threads gate merge.
 
