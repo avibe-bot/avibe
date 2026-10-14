@@ -26,7 +26,7 @@ from config.v2_config import ModelHubSourceConfig
 from vibe.backend_model_catalog import HostedToolSpec, bundled_provider_overlay
 
 from .capability_evidence import HOSTED_TOOL_ASPECTS, CapabilityEvidenceStore, EvidenceFeature
-from .hosted_tools import credential_eligible, untranslated
+from .hosted_tools import runs_on
 
 PIN_SOURCE_HEADER: Final = "x-avibe-pin-source"
 # The served-hop model a continuation was rendered for; without it a pin is the launch's primary hop.
@@ -103,22 +103,26 @@ def hosted_content(request: Mapping[str, Any], protocol: str, *, pinned: bool) -
     return HostedContent(calls, replays)
 
 
+def _text(item: Any, key: str) -> str | None:
+    """A request field read as text; anything else, or a non-object item, is absent."""
+
+    value = item.get(key) if isinstance(item, Mapping) else None
+    return value if isinstance(value, str) else None
+
+
 def _responses_hosted_tool(item: Any) -> str | None:
-    if not isinstance(item, Mapping):
-        return None
-    kind = item.get("type")
-    if kind == "custom_tool_call" and item.get("name") in _X_SEARCH_CALLS:
+    kind = _text(item, "type")
+    if kind == "custom_tool_call" and _text(item, "name") in _X_SEARCH_CALLS:
         return "x_search"
-    return _RESPONSES_HOSTED_ITEMS.get(kind) if isinstance(kind, str) else None
+    return _RESPONSES_HOSTED_ITEMS.get(kind) if kind is not None else None
 
 
 def _responses_output_item(item: Any) -> bool:
     if not isinstance(item, Mapping):
         return False
-    kind = item.get("type")
-    if kind is None or kind == "message":
+    if item.get("type") in (None, "message"):
         return item.get("role") == "assistant"
-    return kind in _RESPONSES_MODEL_OUTPUTS
+    return _text(item, "type") in _RESPONSES_MODEL_OUTPUTS
 
 
 def _responses_replays(items: Any, *, pinned: bool) -> frozenset[str]:
@@ -128,7 +132,7 @@ def _responses_replays(items: Any, *, pinned: bool) -> frozenset[str]:
     if pinned:
         # The in-flight response is the trailing run of output items, followed
         # only by the client's tool outputs.
-        while end and isinstance(items[end - 1], Mapping) and items[end - 1].get("type") in _RESPONSES_TOOL_OUTPUTS:
+        while end and _text(items[end - 1], "type") in _RESPONSES_TOOL_OUTPUTS:
             end -= 1
         while end and _responses_output_item(items[end - 1]):
             end -= 1
@@ -142,13 +146,11 @@ def _responses_replays(items: Any, *, pinned: bool) -> frozenset[str]:
 
 
 def _anthropic_hosted_tool(block: Any) -> str | None:
-    if not isinstance(block, Mapping):
-        return None
-    kind = block.get("type")
+    kind = _text(block, "type")
     if kind == "server_tool_use":
-        name = block.get("name")
+        name = _text(block, "name")
         return name if name in HOSTED_TOOL_ASPECTS else None
-    return _ANTHROPIC_SERVER_RESULTS.get(kind) if isinstance(kind, str) else None
+    return _ANTHROPIC_SERVER_RESULTS.get(kind) if kind is not None else None
 
 
 def _only_tool_results(message: Any) -> bool:
@@ -197,20 +199,18 @@ def admits(
     shape: int,
     now: datetime,
 ) -> bool:
-    """Whether this hop offers every piece of hosted content and has current positive evidence for it.
+    """Whether this hop runs every piece of hosted content and has current positive evidence for it.
 
-    The overlay must still offer the tool on this hop, with the declaration
-    type the request carries, as native resolution requires. The first lookup
-    may load the evidence file, so call this off the event loop.
+    Where a tool may run is ``runs_on``, the rule hop resolution uses for
+    native mode, so the two agree by construction; a declaration must also
+    carry the type the overlay declares there. Evidence is read from memory.
     """
 
     if not content:
         return True
-    if not credential_eligible(source) or not untranslated(source):
-        return False
 
     def offered(tool: str) -> HostedToolSpec | None:
-        return spec_for(source.vendor, source.protocol, model_id, tool)
+        return runs_on(source, model_id, tool, spec_for=spec_for)
 
     def verified(tool: str, aspect: str) -> bool:
         if aspect not in HOSTED_TOOL_ASPECTS.get(tool, ()):

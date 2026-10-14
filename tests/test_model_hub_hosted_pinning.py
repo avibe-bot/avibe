@@ -22,14 +22,17 @@ import pytest
 from config.v2_config import ModelHubModelConfig, ModelHubRouteConfig, ModelHubRouteHopConfig
 from core.handlers.model_hub import service as service_module
 from core.handlers.model_hub.adapter import RawOutcomeKind, UpstreamRejection
-from core.handlers.model_hub.capability_evidence import EvidenceFeature, EvidenceRecord, identity_digest
-from core.handlers.model_hub.hosted_admission import hosted_content
+from core.handlers.model_hub.capability_evidence import (
+    CapabilityEvidenceStore, EvidenceFeature, EvidenceRecord, identity_digest,
+)
+from core.handlers.model_hub.hosted_admission import admits, hosted_content
 from core.handlers.model_hub.hosted_tools import HOSTED_PROBE_SHAPE, engine_stamp
 from core.handlers.model_hub.turn_gateway import ModelHubTurnGateway
 from core.run_settlement import SETTLED_BY_STOPPED, SETTLED_BY_TERMINAL_RESULT
 from modules.agents.model_hub import ModelHubRuntimeRouter
 from tests.test_model_hub_l3 import NOW, InvokeHandle, LiveInvokeHandle, _outcome, _source
 from tests.test_model_hub_vibey_consumer import _validate, _vibey_service
+from vibe.backend_model_catalog import hosted_tool_spec
 
 PIN = "x-avibe-pin-source"
 PIN_MODEL = "x-avibe-pin-model"
@@ -88,6 +91,8 @@ def _native(hop, *, history=()):
     ("evidence_from_another_engine", 409, []),
     ("source_cooling_down", 409, []),
     ("source_not_on_route", 409, []),
+    # Admission reads the snapshot the call is made on, after the engine is prepared.
+    ("evidence_demoted_while_the_engine_is_prepared", 409, []),
 ])
 async def test_a_pinned_request_is_served_only_by_its_source_or_handed_back(
     tmp_path, monkeypatch, case, status, invoked,
@@ -116,6 +121,22 @@ async def test_a_pinned_request_is_served_only_by_its_source_or_handed_back(
     elif case != "no_call_evidence":
         engine = "model-hub-engine-previous" if case == "evidence_from_another_engine" else None
         _verify(service, primary, primary_model, "x_search", "call", engine=engine)
+    if case == "evidence_demoted_while_the_engine_is_prepared":
+        prepare = service._prepare_engine_for_demand
+
+        async def demoting(*args, **kwargs):
+            await prepare(*args, **kwargs)
+            service.capability_evidence.write(
+                EvidenceRecord(
+                    source_id=primary.id, model_id=primary_model, feature=EvidenceFeature.hosted("x_search", "call"),
+                    status="unsupported", basis="observed", observed_at=service.now(), engine=engine_stamp(),
+                    shape=HOSTED_PROBE_SHAPE, source_identity=identity_digest(primary),
+                    detail="400 invalid_request_error",
+                ),
+                live=service.store.config.sources,
+            )
+
+        service._prepare_engine_for_demand = demoting
     scanning_threads = []
     scan = service_module.hosted_content
 
@@ -440,6 +461,14 @@ IN_FLIGHT_CASES = [
      [USER, {"role": "assistant", "content": [SERVER_USE, SERVER_RESULT]}, "not a message"], True, {"web_search"}),
     ("anthropic_unpinned", "anthropic",
      [USER, {"role": "assistant", "content": [SERVER_USE, SERVER_RESULT]}], False, {"web_search"}),
+    # A field that is not text is absent: an item with one is no hosted item and ends the in-flight run.
+    ("responses_custom_call_name_not_text", "openai_responses",
+     [USER, WEB_CALL, ASSISTANT_TEXT, USER, {**X_CALL, "name": {"x": 1}}, LOCAL_CALL, LOCAL_OUTPUT], True,
+     {"web_search"}),
+    ("responses_item_type_not_text", "openai_responses",
+     [USER, WEB_CALL, LOCAL_CALL, {"type": ["function_call_output"], "call_id": "fc_1"}], True, {"web_search"}),
+    ("anthropic_server_tool_name_not_text", "anthropic",
+     [USER, {"role": "assistant", "content": [{**SERVER_USE, "name": ["web_search"]}]}, USER], True, set()),
 ]
 
 
@@ -452,6 +481,38 @@ def test_only_items_outside_the_in_flight_response_need_replay_evidence(protocol
     content = hosted_content({field: history, "tools": [SHELL]}, protocol, pinned=pinned)
     assert content.replays == frozenset(replays)
     assert content.calls == frozenset()
+
+
+@pytest.mark.parametrize(("case", "kind", "channel", "listed", "admitted"), [
+    ("api_key_listed", "api_key", "hub", "listed", True),
+    ("api_key_unlisted", "api_key", "hub", "unlisted", True),
+    ("api_key_retired_tombstone", "api_key", "hub", "retired", False),
+    ("subscription_unlisted", "subscription", "hub", "unlisted", False),
+    ("native_channel", "api_key", "native_cli", "listed", False),
+])
+def test_admission_runs_a_tool_only_where_hop_resolution_would(tmp_path, case, kind, channel, listed, admitted):
+    """MH-HOSTED-GATEWAY-002: admission uses ``runs_on``, so old evidence never admits a hop the tool cannot run on."""
+
+    model_id = "gpt-6-astra"
+    source = replace(_source("src_openai0001", "OpenAI", vendor="openai", model_id=model_id), kind=kind,
+                     supply_channel=channel)
+    if listed != "listed":
+        source.models = [ModelHubModelConfig(id=model_id if listed == "retired" else "gpt-6-other",
+                                             provenance="discovered", retired=listed == "retired" or None)]
+    evidence = CapabilityEvidenceStore(tmp_path / "evidence.json")
+    evidence.write(
+        EvidenceRecord(
+            source_id=source.id, model_id=model_id, feature=EvidenceFeature.hosted("web_search", "call"),
+            status="verified", basis="probe", observed_at=NOW, engine=engine_stamp(), shape=HOSTED_PROBE_SHAPE,
+            source_identity=identity_digest(source),
+        ),
+        live=[source],
+    )
+    content = hosted_content({"tools": [{"type": "web_search"}]}, "openai_responses", pinned=True)
+    assert admits(
+        content, source=source, model_id=model_id, spec_for=hosted_tool_spec, evidence=evidence,
+        engine=engine_stamp(), shape=HOSTED_PROBE_SHAPE, now=NOW,
+    ) is admitted
 
 
 def test_declarations_are_recognized_by_every_vendors_type():

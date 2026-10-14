@@ -74,13 +74,20 @@ consumer's requirements, and the Model Hub lane lands the change in both places.
        that model.
      - A pin that is neither matches no hop.
      - Nothing turn-wide is read, because a turn may have concurrent requests.
-   - **Admission** reads the overlay and the evidence at the current engine and probe shape:
+   - **Admission** reads the overlay and the evidence at the current engine and probe shape, on the same snapshot the
+     call is then made on (after the engine is prepared, for every attempt):
      - the pinned hop must be a runnable hop of the route;
-     - every hosted declaration in `tools` needs the overlay to still offer that tool on the hop with that
-       declaration `type`, and `call` evidence. A declaration is a tool whose `type` the overlay declares for a
-       catalog tool on this protocol, for any vendor; a function never is one;
-     - every replayed hosted item outside the in-flight response needs the overlay to still offer its tool on the
-       hop, and `replay` evidence. A generated image never has it.
+     - "the tool runs on the hop" is the one rule hop resolution uses for native mode (`hosted_tools.runs_on`): a hub
+       Source with an eligible credential and an untranslated path that serves the model (an API-key Source any
+       model it does not list as retired; a subscription only its listed models), for which the overlay declares the
+       tool;
+     - every hosted declaration in `tools` needs the tool to run on the hop with that declaration `type`, and
+       `call` evidence. A declaration is a tool whose `type` the overlay declares for a catalog tool on this
+       protocol, for any vendor; a function never is one;
+     - every replayed hosted item outside the in-flight response needs its tool to run on the hop, and `replay`
+       evidence. A generated image never has it.
+     - A request field that is not of its kind (a non-text `type` or `name`) is absent, so its item is no hosted
+       item and ends the in-flight run.
      - The hosted items are Responses `web_search_call`, `image_generation_call`, and `custom_tool_call` named
        `x_keyword_search`, `x_semantic_search`, `x_user_search` or `x_thread_fetch`; and Anthropic `server_tool_use`
        named after a catalog tool, and `web_search_tool_result`.
