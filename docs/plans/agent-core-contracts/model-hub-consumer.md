@@ -154,7 +154,16 @@ consumer's requirements, and the Model Hub lane lands the change in both places.
        model (`model_not_found`) also writes negative `call` evidence for (Source, `executor_model`, tool). A
        completed response that never ran the tool ends the chain. One deadline covers the whole chain (180 s).
      - **An `image_generate` call** runs directly on the image endpoint of the (Source, model) the turn's frozen
-       models name (`vibey-hosted-tools.md` §7.4).
+       models name (`vibey-hosted-tools.md` §7.4), admitted on the final snapshot; there is no chain and no
+       fallback. Its arguments are `{model, prompt, size?, images?, n?}`, `images` being at most 4 base64 strings,
+       each a supported image within `read`'s inline limit. An argument the model does not take, or a `size` in a
+       form it does not accept, is a `failed` record with `error_code: "image_param_unsupported"` naming the models
+       that take it; a model the snapshot no longer admits is one with `"image_model_unavailable"`. Nothing runs in
+       either case. The answer is `{"record", "execution"?, "images"?, "generation"?}`: `execution.mode` is
+       `direct`, with no `failed_attempts`; `images` is `[{"data": <base64>}]`, in order, only on a completed call,
+       and Vibey saves each one through its media sink and fills `record.images`; `generation` holds the
+       endpoint's own `size`, `quality` and `revised_prompt` when it reported them. A failed record names the
+       turn's other models. An endpoint that answers with URLs only is `failed`: the gateway never fetches one.
      - Every outcome of a well-formed call is a 200 with `{"record", "execution"?}` in the
        `ToolResultMessage.hosted` encoding. `execution` names the attempt whose response the record came from (the
        last one tried when all failed), with its billing and cost; earlier billable attempts are listed in

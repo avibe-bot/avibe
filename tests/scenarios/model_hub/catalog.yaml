@@ -2460,6 +2460,24 @@ scenarios:
     test: tests/test_model_hub_hosted_evidence.py::test_a_served_response_proves_only_its_own_completed_search_item
     related_tests:
       - tests/test_model_hub_hosted_evidence.py::test_a_native_success_is_recorded_at_settlement_for_a_tool_the_request_declared
+  - id: MH-HOSTED-GATEWAY-007
+    name: image_generate runs directly on the images endpoint of a model its turn's frozen enum names, admitted on the final snapshot with no fallback; an argument the model does not take or a model no longer admitted fails before anything runs; only usable base64 images complete; only an upstream refusal of the model or its endpoint is learned; each offered path is verified through the pinned engine
+    status: covered
+    kind: contract
+    layer: contract
+    test: tests/test_model_hub_hosted_images.py::test_an_image_call_runs_directly_on_the_named_models_source
+    related_tests:
+      - tests/test_model_hub_hosted_images.py::test_a_ratio_and_reference_images_map_to_the_endpoints_fields
+      - tests/test_model_hub_hosted_images.py::test_an_image_call_its_turn_cannot_make_is_refused_unrun
+      - tests/test_model_hub_hosted_images.py::test_an_argument_the_model_does_not_take_fails_before_anything_runs
+      - tests/test_model_hub_hosted_images.py::test_a_model_gone_mid_turn_is_unavailable_and_the_record_names_the_others
+      - tests/test_model_hub_hosted_images.py::test_only_usable_images_complete_the_call
+      - tests/test_model_hub_hosted_images.py::test_only_an_upstream_refusal_of_the_model_or_endpoint_is_learned
+      - tests/test_model_hub_hosted_images.py::test_a_malformed_image_call_is_refused_before_anything_runs
+      - tests/test_model_hub_hosted_images.py::test_an_image_call_body_is_bounded_by_its_reference_images
+      - tests/test_model_hub_hosted_images.py::test_an_image_call_costs_its_delivered_images_at_their_list_price
+      - tests/e2e/test_model_hub_images.py::test_each_offered_image_path_reaches_the_vendors_images_endpoint
+      - tests/e2e/test_model_hub_images.py::test_only_an_upstream_refusal_teaches_that_a_source_lacks_an_image_model
 next_priority:
   - MH-PROTOCOL-004
   - MH-RUNTIME-001
