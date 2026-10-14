@@ -1,0 +1,38 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "model-hub/hosted-tool-probe-result.schema.json",
+  "title": "HostedToolProbeResult",
+  "description": "One user-started hosted-tool probe on exactly one (Source, model). Only verified and unsupported are evidence; inconclusive and transient leave the current record as it was (vibey-hosted-tools.md §3.2).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["tool", "source_id", "model_id", "call", "replay"],
+  "properties": {
+    "tool": {"enum": ["web_search", "x_search", "image_generation"]},
+    "source_id": {"type": "string", "minLength": 1},
+    "model_id": {"type": "string", "minLength": 1},
+    "call": {"$ref": "#/definitions/aspect"},
+    "replay": {
+      "description": "Null until Vibey replays native payloads, and always for a tool without a replay aspect.",
+      "oneOf": [{"type": "null"}, {"$ref": "#/definitions/aspect"}]
+    }
+  },
+  "definitions": {
+    "aspect": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["outcome", "error"],
+      "properties": {
+        "outcome": {"enum": ["verified", "unsupported", "inconclusive", "transient"]},
+        "error": {
+          "description": "The Source test's detail key for a request that failed before its response completed; null otherwise.",
+          "type": ["string", "null"],
+          "minLength": 1
+        }
+      },
+      "allOf": [{
+        "if": {"properties": {"outcome": {"enum": ["verified", "unsupported"]}}},
+        "then": {"properties": {"error": {"type": "null"}}}
+      }]
+    }
+  }
+}

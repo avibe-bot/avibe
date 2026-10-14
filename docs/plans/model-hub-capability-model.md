@@ -262,6 +262,10 @@ and the existing tone vocabulary (`TimeHint` for dates):
    - native: the tool fee per call plus a token estimate;
    - proxy: the same plus the executor model's call.
 
+   Before a probe runs, the Tools read states each candidate's `probe_estimate`: one call probe priced from its
+   nominal usage (`hosted_probe.ESTIMATED_USAGE` and one search's counters), `included` on a monthly Source, and
+   unknown rather than zero when the model has no token price.
+
    All of it is computed by the one pricing owner, `pricing.py` (`hosted_response_cost`, reached through
    `ModelHubService.hosted_call_cost`, which reads only the price table the usage writer already holds, so pricing a
    response does no I/O). It is stored once per response: as the message's

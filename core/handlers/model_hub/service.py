@@ -12,7 +12,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Collection, Iterable, Literal, Mapping, Optional, Protocol, cast
+from typing import Any, Awaitable, Callable, Collection, Iterable, Literal, Mapping, NamedTuple, Optional, Protocol, cast
 
 from sqlalchemy import func, literal_column, select
 
@@ -43,6 +43,7 @@ from config.v2_config import (
     validate_model_hub_source_client_nonce,
 )
 from core.agent_auth_service import BackendLoginInProgressError
+from core.agent_core.ai.provider import Done, ModelCapabilities
 from core.agent_core.ai.registry import sent_effort
 from core.agent_core.messages import HostedCost
 from core.os_errors import format_os_errno, local_error_detail
@@ -50,6 +51,7 @@ from core.services.settings import default_config
 from storage.db import get_cached_sqlite_engine
 from storage.models import MESSAGE_TURN_ID_SQL, agent_sessions, messages
 from vibe.backend_model_catalog import (
+    HostedToolSpec,
     PROTOCOL_REASONING_EFFORT_DEFAULTS,
     builtin_display_name,
     bundled_catalog_wire_efforts_by_model,
@@ -130,12 +132,19 @@ from .hosted_executor import (
     provider_charges,
     responses_result,
 )
+from .hosted_probe import ESTIMATED_COUNTS as ESTIMATED_PROBE_COUNTS
+from .hosted_probe import ESTIMATED_USAGE as ESTIMATED_PROBE_USAGE
+from .hosted_probe import PROBE_MAX_OUTPUT_TOKENS, PROBED_TOOLS
+from .hosted_probe import call_outcome as hosted_call_outcome
+from .hosted_probe import probe_request as hosted_probe_request
+from .hosted_probe import run_probe as run_hosted_probe
 from .hosted_tools import (
     HOSTED_PROBE_SHAPE,
     HostedToolSettingRefused,
     credential_eligible,
     untranslated,
     engine_stamp,
+    hosted_tool_target,
     hosted_tools_status,
     parse_hosted_tool_setting,
     resolve_hosted_tools,
@@ -338,6 +347,8 @@ AGENT_CHAIN_CONTRACT_VERSION = 12
 PROBE_RESULT_CONTRACT_VERSION = 12
 _SOURCE_DISCOVERY_TIMEOUT_SECONDS = 15
 _SOURCE_PROBE_TIMEOUT_SECONDS = 60
+# A hosted-tool probe waits for the provider's search as well as the answer.
+_HOSTED_PROBE_TIMEOUT_SECONDS = 120
 # Background inventory refresh. The first tick doubles as the startup delay, so
 # a stale Source catches up shortly after boot without boot waiting on upstream.
 _BACKGROUND_DISCOVERY_INTERVAL = timedelta(hours=6)
@@ -716,6 +727,16 @@ def _pin_unavailable() -> ModelHubError:
     """The pinned hop cannot serve this request before output (``vibey-hosted-tools.md`` §3.5)."""
 
     return ModelHubError(PIN_UNAVAILABLE_CODE, status=409)
+
+
+class UserTestCall(NamedTuple):
+    """One call a user asked for, as it settled (``ModelHubService._user_test_call``)."""
+
+    source: ModelHubSourceConfig
+    outcome: RawCallOutcome
+    elapsed_ms: int
+    # Whether this call's own success retired the pending verification it was made under.
+    retired_own_marker: bool
 
 
 def _call_usage(outcome: RawCallOutcome | None, observed: ProtocolSSEState | None) -> ProtocolUsageReport | None:
@@ -5930,8 +5951,25 @@ class ModelHubService:
                 spec_for=hosted_tool_spec,
                 engine=self.engine_stamp,
                 now=self.now(),
+                probe_estimate=self._probe_estimate,
             )
         }
+
+    def _probe_estimate(self, source: ModelHubSourceConfig, model_id: str, tool: str) -> Optional[dict]:
+        """What one call probe of ``tool`` on this Source and model is estimated to cost; None when unknown.
+
+        Priced by the one pricing owner from the probe's nominal usage. A tool
+        that cannot be probed yet has no estimate.
+        """
+
+        if tool not in PROBED_TOOLS:
+            return None
+        cost = self.hosted_call_cost(
+            source, model_id, (tool,), usage=ESTIMATED_PROBE_USAGE, counts=ESTIMATED_PROBE_COUNTS[tool],
+        )
+        if cost is None:
+            return None
+        return {"basis": cost.basis} if cost.usd is None else {"basis": cost.basis, "usd": cost.usd}
 
     async def set_hosted_tool(self, tool: str, payload: object) -> dict:
         """Replace one hosted tool's toggle and chosen executor; it applies from the next turn."""
@@ -7568,18 +7606,234 @@ class ModelHubService:
                 raise ModelHubError(reason, status=422)
             return source
 
+        async def drain(handle: InvokeHandle) -> None:
+            if handle.stream is not None:
+                async for _chunk in handle.stream:
+                    pass
+
+        source, outcome, elapsed_ms, _retired = await self._user_test_call(
+            source_id,
+            model_id,
+            selected,
+            # OpenCode preserves the request's explicit protocol and API keys
+            # have unrestricted origins.
+            lambda source: self._probe_request(source, model_id, "opencode", output_tokens=128),
+            stream=False,
+            origin="opencode",
+            consume=drain,
+            timeout=_SOURCE_PROBE_TIMEOUT_SECONDS,
+        )
+        succeeded = outcome.kind is RawOutcomeKind.SUCCESS
+        return {
+            "source_id": source.id,
+            "model_id": model_id,
+            "protocol": source.protocol,
+            "reachable": succeeded,
+            "latency_ms": elapsed_ms,
+            "error": None if succeeded else self._test_call_failure(outcome),
+        }
+
+    async def probe_hosted_tool(self, tool: str, payload: object) -> dict:
+        """Run the call probe of one hosted tool on one (Source, model), and record what it shows.
+
+        A user action starts every probe; nothing calls this on its own. Every
+        request it sends is its own call pinned to the probed Source, with no
+        route and no failover. Only ``verified``
+        and ``unsupported`` are evidence; an inconclusive or transient probe
+        leaves the current record as it is (``vibey-hosted-tools.md`` §3.2).
+        """
+
+        if (
+            tool not in PROBED_TOOLS
+            or not isinstance(payload, dict)
+            or set(payload) != {"source_id", "model_id"}
+            or not isinstance(payload["source_id"], str)
+            or not payload["source_id"]
+        ):
+            raise ModelHubError("invalid_parameter", status=400)
+        # The model as routing and evidence know it: the probe sends and records exactly that identity.
+        source_id, model_id = payload["source_id"], canonical_model_id(payload["model_id"])
+        if model_id is None:
+            raise ModelHubError("invalid_parameter", status=400)
+
+        def target(config: ModelHubConfig) -> tuple[ModelHubSourceConfig, HostedToolSpec]:
+            try:
+                return hosted_tool_target(config, tool, source_id, model_id, spec_for=hosted_tool_spec)
+            except HostedToolSettingRefused as refused:
+                raise ModelHubError(refused.code, status=refused.status) from None
+
+        # Reading the config parses the whole file, so that alone runs off the controller loop. Everything after
+        # reads the snapshot in memory, and recovery state stays on the loop that owns it.
+        config = await asyncio.to_thread(self.store.load)
+        source, spec = target(config)
+        request = hosted_probe_request(
+            source, model_id, tool, spec, max_tokens=self._probe_output_budget(config, source.id, model_id),
+        )
+
+        def selected(config: ModelHubConfig) -> ModelHubSourceConfig:
+            current, current_spec = target(config)
+            # The probe was built for this protocol and declaration; it is never sent as anything else.
+            if current.protocol != source.protocol or current_spec.declaration != spec.declaration:
+                raise ModelHubError("mapping_target_unavailable", status=409)
+            return current
+
+        async def pinned_call(body: dict, read: Callable[[InvokeHandle], Awaitable[None]]):
+            return await self._user_test_call(
+                source_id,
+                model_id,
+                selected,
+                lambda source: ModelHubRequest(body, protocol=source.protocol),
+                stream=True,
+                origin="vibey",
+                consume=read,
+                timeout=_HOSTED_PROBE_TIMEOUT_SECONDS,
+            )
+
+        terminal, calls = await run_hosted_probe(request, pinned_call)
+        if not calls:
+            logger.warning("Model Hub's %s probe sent no request", tool)
+            raise ModelHubError("invalid_parameter", status=400)
+        # Only the request the response ended on speaks for the tool: a resend that completes outranks a refusal
+        # of the request it replaced.
+        last = calls[-1]
+        learned = (
+            learn_from_rejection(
+                last.body,
+                last.outcome.rejection,
+                request_protocol=last.source.protocol,
+                source=last.source,
+                model_id=model_id,
+                spec_for=hosted_tool_spec,
+            )
+            if last.outcome.rejection is not None
+            else None
+        )
+        verdict = hosted_call_outcome(tool, terminal, last.outcome, learned)
+        # The evidence follows the Source as it reads now. The one change a probe may see is its own: its call's
+        # success retired the pending verification it was made under, which settlement proves. Any other change
+        # during the probe (a new credential, endpoint, protocol, or a marker another grant's call retired) means
+        # the probe vouches for nothing there.
+        current = await asyncio.to_thread(self.store.load)
+        live = next((item for item in current.sources if item.id == last.source.id), None)
+        attributable = live is not None and (
+            identity_digest(live) == identity_digest(last.source)
+            or (
+                last.retired_own_marker
+                and identity_digest(replace(last.source, verification_pending=None)) == identity_digest(live)
+            )
+        )
+        if verdict in ("verified", "unsupported") and attributable:
+            try:
+                await asyncio.to_thread(
+                    self.capability_evidence.write,
+                    EvidenceRecord(
+                        source_id=live.id,
+                        model_id=model_id,
+                        feature=EvidenceFeature.hosted(tool, "call"),
+                        status=verdict,
+                        basis="probe",
+                        observed_at=self.now(),
+                        engine=self.engine_stamp,
+                        shape=HOSTED_PROBE_SHAPE,
+                        source_identity=identity_digest(live),
+                        detail=learned.detail if verdict == "unsupported" and learned is not None else None,
+                    ),
+                    live=current.sources,
+                )
+            except (OSError, ValueError):
+                # Evidence is advisory state: the status read below shows what was kept.
+                logger.warning("Model Hub could not record the %s probe result", tool, exc_info=True)
+        return {
+            "probe": {
+                "tool": tool,
+                "source_id": last.source.id,
+                "model_id": model_id,
+                "call": {
+                    "outcome": verdict,
+                    # Why a call that never completed failed, as the Source test shows it.
+                    "error": (
+                        self._test_call_failure(last.outcome)
+                        if verdict != "unsupported" and not isinstance(terminal, Done)
+                        else None
+                    ),
+                },
+                # The replay probe sends the call's native payload back, which
+                # Vibey's adapters do not do yet.
+                "replay": None,
+            },
+            **await asyncio.to_thread(self.hosted_tools_status),
+        }
+
+    def _probe_output_budget(self, config: ModelHubConfig, source_id: str, model_id: str) -> int:
+        """The smallest output any Vibey turn on this hop would ask for, at most the probe's own ceiling.
+
+        A Vibey turn asks for its menu model's ``output_budget``, so a probe on a
+        hop several menu models route to takes the smallest of theirs, and one
+        no menu model routes to takes the budget of a model nothing describes.
+        """
+
+        from modules.agents.vibey.context import output_budget
+
+        now = self.now()
+        unavailable = self._unavailable_native_sources(config, "vibey")
+        # ``config`` is the current snapshot, so recovery reads it directly rather than loading another.
+        live_recovery = self.recovery.annotations(config)
+        budgets = [
+            output_budget(ModelCapabilities(context_window=model.context_window, max_output_tokens=model.max_output_tokens))
+            for model in config.agents["vibey"].models
+            if any(
+                hop.source_id == source_id and hop.model_id == model_id
+                for hop in resolve_model_hub_turn(
+                    config, "vibey", model.id, now=now, unavailable_source_ids=unavailable, live_recovery=live_recovery,
+                ).inspected_hops
+            )
+        ]
+        return min([PROBE_MAX_OUTPUT_TOKENS, *(budgets or [output_budget(ModelCapabilities())])])
+
+    def _test_call_failure(self, outcome: RawCallOutcome) -> str:
+        """A failed user test call's detail key, for display only: it blocks nothing and changes no route state."""
+
+        decision = classify_outcome(outcome)
+        if decision.action == "refresh":
+            decision = ResolutionDecision("fallback", reason="credential_revoked")
+        return self._probe_failure(outcome, decision, recovery_managed=False)[0]
+
+    async def _user_test_call(
+        self,
+        source_id: str,
+        model_id: str,
+        selected: Callable[[ModelHubConfig], ModelHubSourceConfig],
+        request: Callable[[ModelHubSourceConfig], ModelHubRequest],
+        *,
+        stream: bool,
+        origin: str,
+        consume: Callable[[InvokeHandle], Awaitable[None]],
+        timeout: float,
+    ) -> UserTestCall:
+        """One call a user asked for, on exactly this Source and model: no Agent route, no failover.
+
+        ``selected`` re-checks the Source on every snapshot it is invoked from,
+        and ``consume`` reads the opened call. The call is settled whatever
+        happens: a success counts as the retry a cooldown waits for and verifies
+        the credential, a failure changes no route state, and the call is
+        metered. Returns the Source as invoked, its outcome, its latency, and
+        whether this call retired the Source's pending verification itself.
+        """
+
         handle = None
         outcome = None
         source = None
         admitted_at = None
         attempt_generation = PRE_ATTEMPT_SETTLEMENT_GENERATION
+        cancelled_observed: ProtocolSSEState | None = None
+        retired_own_marker = False
 
         async def invoke_selected() -> None:
-            nonlocal source, handle, outcome, admitted_at, attempt_generation
+            nonlocal source, handle, outcome, admitted_at, attempt_generation, cancelled_observed
             # Bound local waiting too, but never call it a model failure before
             # the adapter has actually admitted this Source/model invocation.
             async with self._mutation_lock:
-                selected(self.store.load())
+                selected(await asyncio.to_thread(self.store.load))
             while True:
                 await self._prepare_engine_for_demand()
                 await self._mutation_lock.acquire()
@@ -7602,32 +7856,38 @@ class ModelHubService:
 
                 try:
                     source = ModelHubSourceConfig.from_payload(
-                        selected(self.store.load()).to_payload(),
+                        selected(await asyncio.to_thread(self.store.load)).to_payload(),
                     )
                     if not self._engine_synced:
                         continue
-                    # OpenCode preserves the request's explicit protocol and
-                    # API keys have unrestricted origins. No Agent resolver
-                    # is involved: the adapter binds this exact Source.
-                    handle = await self._engine_call(self.adapter.invoke(
-                        source.id,
-                        model_id,
-                        self._probe_request(source, model_id, "opencode", output_tokens=128),
-                        False,
-                        "opencode",
-                        on_admitted=admitted,
-                    ))
+                    # No Agent resolver is involved: the adapter binds this exact Source.
+                    try:
+                        handle = await self._engine_call(self.adapter.invoke(
+                            source.id,
+                            model_id,
+                            request(source),
+                            stream,
+                            origin,
+                            on_admitted=admitted,
+                        ))
+                    except InvokeCancelledError as cancelled_early:
+                        # Cancelled after admission, before a handle (a timeout
+                        # included): the wire facts already observed are billed,
+                        # so they are still metered. Raised on as a plain
+                        # cancellation, which the deadline below reads as its own
+                        # timeout and any other canceller as theirs.
+                        cancelled_observed = cancelled_early.observed
+                        raise asyncio.CancelledError() from None
                     break
                 finally:
                     release_owner()
             if admitted_at is None:
                 raise ModelHubError("engine_down", status=503)
-            if handle.stream is not None:
-                async for _chunk in handle.stream:
-                    pass
+            await consume(handle)
             outcome = await self._engine_call(handle.outcome())
 
         async def settle_attempt() -> None:
+            nonlocal retired_own_marker
             try:
                 if source is not None and outcome is not None:
                     # The explicit test is the retry a cooldown waits for.
@@ -7635,21 +7895,22 @@ class ModelHubService:
                         await self._record_recovery_success(
                             source.id, attempt_generation, backend="system", model_id=model_id,
                         )
-                    await self._verify_successful_source(
+                    retired_own_marker = await self._verify_successful_source(
                         source.id, source.credential_ref, source.verification_pending, outcome,
                     )
             finally:
-                if handle is not None:
-                    try:
+                try:
+                    if handle is not None:
                         await handle.close_stream()
-                    finally:
+                finally:
+                    if handle is not None or cancelled_observed is not None:
                         await self._meter_call(
-                            source_id=source_id, model_id=model_id,
-                            outcome=outcome, observed=handle.observed,
+                            source_id=source_id, model_id=model_id, outcome=outcome,
+                            observed=handle.observed if handle is not None else cancelled_observed,
                         )
 
         try:
-            await asyncio.wait_for(invoke_selected(), timeout=_SOURCE_PROBE_TIMEOUT_SECONDS)
+            await asyncio.wait_for(invoke_selected(), timeout=timeout)
         except asyncio.TimeoutError:
             if admitted_at is None:
                 raise ModelHubError("engine_down", status=503) from None
@@ -7677,24 +7938,7 @@ class ModelHubService:
                     pass
                 raise cancelled
         assert source is not None and outcome is not None
-        succeeded = outcome.kind is RawOutcomeKind.SUCCESS
-        # Classify failures for display only. A selected model failure cannot
-        # block other models on this Source, refresh credentials, or modify route
-        # state.
-        decision = classify_outcome(outcome)
-        if decision.action == "refresh":
-            decision = ResolutionDecision("fallback", reason="credential_revoked")
-        error = None if succeeded else self._probe_failure(
-            outcome, decision, recovery_managed=False,
-        )[0]
-        return {
-            "source_id": source.id,
-            "model_id": model_id,
-            "protocol": source.protocol,
-            "reachable": succeeded,
-            "latency_ms": elapsed_ms,
-            "error": error,
-        }
+        return UserTestCall(source, outcome, elapsed_ms, retired_own_marker)
 
     @staticmethod
     def _probe_failure(
@@ -9014,10 +9258,10 @@ class ModelHubService:
         credential_ref: str | None,
         verification_pending: str | None,
         outcome: RawCallOutcome,
-    ) -> None:
-        """Retire pending verification only for the current credential's call."""
+    ) -> bool:
+        """Retire pending verification only for the current credential's call; whether this call retired it."""
         if outcome.kind is not RawOutcomeKind.SUCCESS or verification_pending is None:
-            return
+            return False
         retired_identity: tuple[tuple, tuple] | None = None
 
         def clear_current(config: ModelHubConfig) -> bool:
@@ -9042,6 +9286,7 @@ class ModelHubService:
                     self.recovery.verification_retired(source_id, previous_identity, current_identity)
                     if self._source_attempt_identities.get(source_id) == previous_identity:
                         self._source_attempt_identities[source_id] = current_identity
+            return retired_identity is not None
         except ValueError as exc:
             if "recovery warnings" not in str(exc):
                 raise
@@ -9050,6 +9295,7 @@ class ModelHubService:
             # Advisory bookkeeping must not turn a completed model call into a
             # failed response. Retain pending verification for the next success.
             logger.warning("Could not persist Model Hub verification state")
+        return False
 
     async def settle_handle_outcome(
         self,

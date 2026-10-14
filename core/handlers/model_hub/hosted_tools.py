@@ -95,12 +95,30 @@ def _verified(context: _Context, source: ModelHubSourceConfig, model_id: str, fe
     return view.status == "verified"
 
 
+def runs_on(source: ModelHubSourceConfig, model_id: str, tool: str, *, spec_for: SpecLookup) -> Optional[HostedToolSpec]:
+    """The declaration ``tool`` runs with on this (Source, model), or None where it may not run at all.
+
+    One rule for every place that asks: the Tools-tab candidates, a chosen
+    executor, the executor a turn binds, a hop's native mode and a probe's
+    target. The Source is a hub Source with an eligible credential and an
+    untranslated path, it serves the model as its admission rule says (an
+    API-key Source serves any model it does not list as a retired tombstone; a
+    subscription only its listed models), and the overlay declares the tool for
+    it.
+    """
+
+    if source.supply_channel != "hub" or not credential_eligible(source) or not untranslated(source):
+        return None
+    listed = next((model for model in source.models if model.id == model_id), None)
+    if (listed.retired if listed is not None else source.kind != "api_key"):
+        return None
+    return spec_for(source.vendor, source.protocol, model_id, tool)
+
+
 def _runnable_spec(
     context: _Context, source: ModelHubSourceConfig, model_id: str, tool: str
 ) -> Optional[HostedToolSpec]:
-    if not credential_eligible(source) or not untranslated(source):
-        return None
-    spec = context.spec_for(source.vendor, source.protocol, model_id, tool)
+    spec = runs_on(source, model_id, tool, spec_for=context.spec_for)
     if spec is None or not _verified(context, source, model_id, EvidenceFeature.hosted(tool, "call")):
         return None
     return spec
@@ -207,16 +225,23 @@ def _price_payload(price: Any) -> dict[str, Any] | None:
     }
 
 
-def _candidate_sources(config: ModelHubConfig) -> list[ModelHubSourceConfig]:
-    """Hub Sources that may run hosted tools, Vibey's Source order first."""
+def _candidate_targets(
+    config: ModelHubConfig, tool: str, *, spec_for: SpecLookup
+) -> list[tuple[ModelHubSourceConfig, str, HostedToolSpec]]:
+    """The (Source, model)s the Tools tab lists for ``tool``, with its declaration on each, Vibey's Source order first.
+
+    Every model a Source lists that ``runs_on`` admits. A passthrough model an
+    API-key Source may also serve is not listed: there is nothing to show for it.
+    """
 
     by_id = {source.id: source for source in config.sources}
     ordered = [by_id[source_id] for source_id in config.agents["vibey"].sources.order if source_id in by_id]
     ordered += [source for source in config.sources if source not in ordered]
     return [
-        source
+        (source, model.id, spec)
         for source in ordered
-        if source.supply_channel == "hub" and credential_eligible(source) and untranslated(source)
+        for model in source.models
+        if (spec := runs_on(source, model.id, tool, spec_for=spec_for)) is not None
     ]
 
 
@@ -227,42 +252,44 @@ def hosted_tools_status(
     spec_for: SpecLookup,
     engine: str,
     now: datetime,
+    probe_estimate: Callable[[ModelHubSourceConfig, str, str], Optional[dict[str, Any]]],
     shape: int = HOSTED_PROBE_SHAPE,
 ) -> dict[str, Any]:
     """What the Tools tab reads: each tool's toggle and where it can run, with its evidence.
 
     ``candidates`` lists every (Source, model) the overlay offers the tool on,
-    on an eligible credential and an untranslated path. ``reverify`` counts
+    on an eligible credential and an untranslated path, with what probing it
+    would cost (``probe_estimate``, None when unknown). ``reverify`` counts
     hosted-tool probe evidence that needs a user re-verify: ``engine_upgraded``
     for evidence taken on another engine or probe shape (it routes as unknown),
     ``aged`` for evidence that is only old (it still routes).
     """
 
     tools = []
+    # Every (Source, model, tool) the Tools tab lists, so a re-verify it counts is one it can offer.
+    listed: set[tuple[str, str, str]] = set()
     for tool in MODEL_HUB_HOSTED_TOOLS:
         toggle = config.hosted_tools.get(tool)
         candidates = []
-        for source in _candidate_sources(config):
-            for model in source.models:
-                spec = spec_for(source.vendor, source.protocol, model.id, tool)
-                if spec is None:
-                    continue
-                views = {
-                    aspect: evidence.view(
-                        source, model.id, EvidenceFeature.hosted(tool, aspect), engine=engine, shape=shape, now=now
-                    )
-                    for aspect in HOSTED_TOOL_ASPECTS[tool]
-                }
-                candidates.append(
-                    {
-                        "source_id": source.id,
-                        "model_id": model.id,
-                        "call": _evidence_payload(views["call"]),
-                        "replay": _evidence_payload(views["replay"]) if "replay" in views else None,
-                        "billing": source.billing,
-                        "price": _price_payload(spec.price),
-                    }
+        for source, model_id, spec in _candidate_targets(config, tool, spec_for=spec_for):
+            listed.add((source.id, model_id, tool))
+            views = {
+                aspect: evidence.view(
+                    source, model_id, EvidenceFeature.hosted(tool, aspect), engine=engine, shape=shape, now=now
                 )
+                for aspect in HOSTED_TOOL_ASPECTS[tool]
+            }
+            candidates.append(
+                {
+                    "source_id": source.id,
+                    "model_id": model_id,
+                    "call": _evidence_payload(views["call"]),
+                    "replay": _evidence_payload(views["replay"]) if "replay" in views else None,
+                    "billing": source.billing,
+                    "price": _price_payload(spec.price),
+                    "probe_estimate": probe_estimate(source, model_id, tool),
+                }
+            )
         chosen = (toggle.executor.source_id, toggle.executor.model_id) if toggle and toggle.executor else None
         tools.append(
             {
@@ -278,7 +305,12 @@ def hosted_tools_status(
     reverify = {"engine_upgraded": 0, "aged": 0}
     for record in evidence.records():
         source = live.get(record.source_id)
-        if record.feature.kind != "hosted_tool" or record.basis != "probe" or source is None:
+        if (
+            record.feature.kind != "hosted_tool"
+            or record.basis != "probe"
+            or source is None
+            or (record.source_id, record.model_id, record.feature.name) not in listed
+        ):
             continue
         stale = evidence.view(
             source, record.model_id, record.feature, engine=engine, shape=shape, now=now
@@ -304,9 +336,8 @@ def parse_hosted_tool_setting(
 ) -> ModelHubHostedToolConfig:
     """Validate one ``PUT /api/models/hosted-tools/<tool>`` body against the current config.
 
-    The executor must be a hub Source with that model, an eligible credential,
-    an untranslated path, and the overlay's declaration for the tool. Whether
-    it is verified is evidence, decided at every resolution, never here.
+    The executor must be a ``hosted_tool_target``. Whether it is verified is
+    evidence, decided at every resolution, never here.
     """
 
     if tool not in MODEL_HUB_HOSTED_TOOLS:
@@ -316,15 +347,20 @@ def parse_hosted_tool_setting(
     except ValueError:
         raise HostedToolSettingRefused("invalid_parameter", 400) from None
     executor = setting.executor
-    if executor is None:
-        return setting
-    source = next((item for item in config.sources if item.id == executor.source_id), None)
+    if executor is not None:
+        hosted_tool_target(config, tool, executor.source_id, executor.model_id, spec_for=spec_for)
+    return setting
+
+
+def hosted_tool_target(
+    config: ModelHubConfig, tool: str, source_id: str, model_id: str, *, spec_for: SpecLookup
+) -> tuple[ModelHubSourceConfig, HostedToolSpec]:
+    """The Source a tool may run on with this model, as executor or for a probe, and its declaration there (``runs_on``)."""
+
+    source = next((item for item in config.sources if item.id == source_id), None)
     if source is None:
         raise HostedToolSettingRefused("source_not_found", 404)
-    if (
-        source not in _candidate_sources(config)
-        or executor.model_id not in {model.id for model in source.models}
-        or spec_for(source.vendor, source.protocol, executor.model_id, tool) is None
-    ):
+    spec = runs_on(source, model_id, tool, spec_for=spec_for)
+    if spec is None:
         raise HostedToolSettingRefused("invalid_parameter", 400)
-    return setting
+    return source, spec

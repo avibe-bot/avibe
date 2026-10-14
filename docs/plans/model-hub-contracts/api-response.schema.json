@@ -39,6 +39,7 @@
     {"method": "POST", "path": "/api/models/quota/refresh", "response_schema": "QuotaResponse", "exercise": {"path": "/api/models/quota/refresh", "status": 200}},
     {"method": "GET", "path": "/api/models/hosted-tools", "response_schema": "HostedToolsResponse", "exercise": {"path": "/api/models/hosted-tools", "status": 200}},
     {"method": "PUT", "path": "/api/models/hosted-tools/<tool>", "response_schema": "HostedToolsResponse", "exercise": {"path": "/api/models/hosted-tools/web_search", "status": 200, "json": {"enabled": true, "executor": null}}},
+    {"method": "POST", "path": "/api/models/hosted-tools/<tool>/probe", "response_schema": "HostedToolProbeResponse", "exercise": {"path": "/api/models/hosted-tools/web_search/probe", "status": 200, "json": {"source_id": "src_conform001", "model_id": "claude-opus-4-6"}}},
     {"method": "POST", "path": "/api/models/oauth/start", "response_schema": "OAuthFlowResponse", "exercise": {"path": "/api/models/oauth/start", "status": 200, "json": {"vendor": "anthropic", "channel": "hub"}}},
     {"method": "GET", "path": "/api/models/oauth/status/<flow_id>", "response_schema": "OAuthResultResponse", "exercise": {"path": "/api/models/oauth/status/oaf_00000001", "status": 200}},
     {"method": "POST", "path": "/api/models/oauth/submit", "response_schema": "OAuthResultResponse", "exercise": {"path": "/api/models/oauth/submit", "status": 200, "json": {"flow_id": "oaf_00000001", "value": "contract-code"}}},
@@ -530,6 +531,17 @@
       "properties": {
         "ok": {"const": true},
         "contract_version": {"const": 12},
+        "hosted_tools": {"$ref": "model-hub/hosted-tools-status.schema.json"}
+      }
+    },
+    "HostedToolProbeResponse": {
+      "type": "object",
+      "required": ["ok", "contract_version", "probe", "hosted_tools"],
+      "additionalProperties": false,
+      "properties": {
+        "ok": {"const": true},
+        "contract_version": {"const": 12},
+        "probe": {"$ref": "model-hub/hosted-tool-probe-result.schema.json"},
         "hosted_tools": {"$ref": "model-hub/hosted-tools-status.schema.json"}
       }
     },
