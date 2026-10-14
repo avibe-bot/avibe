@@ -1114,7 +1114,13 @@
       "didNotRun": "The executor did not run {tool}.",
       "responseEnded": "The executor's response ended as {status}.",
       "callFailed": "The provider's {tool} call failed.",
-      "triedSources": "Tried: {sources}."
+      "triedSources": "Tried: {sources}.",
+      "imageMissing": "The image endpoint returned no image data.",
+      "imageUnreadable": "The image endpoint returned an image that could not be used.",
+      "imageModelUnavailable": "{model} is no longer available this turn.",
+      "imageParamUnsupported": "{model} does not take {param}.",
+      "imageParamTakers": "Models that take it: {models}.",
+      "imageAlternatives": "Available: {models}."
     },
     "events": {
       "sourceFallback": "source",

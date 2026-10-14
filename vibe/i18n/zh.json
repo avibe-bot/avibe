@@ -1114,7 +1114,13 @@
       "didNotRun": "执行方没有运行 {tool}。",
       "responseEnded": "执行方的响应以 {status} 结束。",
       "callFailed": "供应商的 {tool} 调用失败。",
-      "triedSources": "已尝试：{sources}。"
+      "triedSources": "已尝试：{sources}。",
+      "imageMissing": "图像端点没有返回图像数据。",
+      "imageUnreadable": "图像端点返回的图像无法使用。",
+      "imageModelUnavailable": "本轮中 {model} 已不可用。",
+      "imageParamUnsupported": "{model} 不支持 {param}。",
+      "imageParamTakers": "支持它的模型：{models}。",
+      "imageAlternatives": "可用：{models}。"
     },
     "events": {
       "sourceFallback": "供应商",
