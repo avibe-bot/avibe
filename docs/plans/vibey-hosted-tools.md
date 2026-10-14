@@ -671,7 +671,9 @@ Unchanged from v1 §7.3 (owner decision, 2026-10-13 19:14), with the producer no
   buttons (keyboard- and screen-reader-accessible, the route chain editor's pattern), each row with its Source's
   executor model and its unit rates as the overlay lists them ("$5 / 1k posts + $10 / 1k profiles", "at API price"
   for a relay), never a single per-call figure where the count is unknown before the call, collapsed and fully automatic until touched, with "Reset to
-  automatic" (a `null` PUT). The price shows per row because it depends on who runs the search.
+  automatic" (a `null` PUT). The price shows per row because it depends on who runs the search. A move
+  rearranges the shown executors within the saved order: an id the saved order names but the read does not show (a
+  refused or absent Source) keeps its place, and a shown executor the order lacks follows it.
 - **The image card** lists the available image models with their one-line descriptions and a per-image price
   (owner-approved mockup): the vendor's list price where it has one (Grok Imagine "$0.02"); an estimate from token
   pricing, marked "≈", where the image's tokens are known: the pricing module values the overlay's

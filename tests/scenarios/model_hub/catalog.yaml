@@ -461,6 +461,7 @@ scenarios:
       - 'ui/src/components/settings/models/useHostedTools.test.tsx::MH-HOSTED-UI-007: re-reads when the open Source changes, since an edit can drop its evidence'
       - 'ui/src/components/settings/models/useHostedTools.test.tsx::MH-HOSTED-UI-007: shows no status of the previous Source identity while the new identity''s read fails'
       - 'ui/src/components/settings/models/useHostedTools.test.tsx::MH-HOSTED-UI-007: keeps a tool pending until the read reconciling its lost write lands'
+      - 'ui/src/components/settings/models/useHostedTools.test.tsx::MH-HOSTED-UI-007: keeps a tool pending while the read reconciling its lost write fails, until a read lands'
       - 'ui/src/components/settings/models/useHostedTools.test.tsx::MH-HOSTED-UI-007: drops a write answer asked under another Source identity'
       - 'ui/src/components/settings/models/useHostedTools.test.tsx::MH-HOSTED-UI-007: keeps a tool pending until every write queued for it has settled'
       - 'ui/src/components/settings/models/useHostedTools.test.tsx::MH-HOSTED-UI-007: queues a clear behind a write like any write, so its answer lands last'
@@ -493,12 +494,14 @@ scenarios:
       - 'ui/src/components/settings/models/SourceDetailPanel.test.tsx::MH-HOSTED-UI-020: clears a refused effort and shows the Source the clear answered'
       - 'ui/src/components/settings/models/SettingsModelsPage.render.test.tsx::MH-HOSTED-UI-020: clears a refusal from its Source chip and shows the status the clear answered'
   - id: MH-HOSTED-UI-021
-    name: A search tool's executor order lists every eligible executor in effective order; a move saves the whole shown order, Reset saves automatic, and focus follows the moved row
+    name: A search tool's executor order lists every eligible executor in effective order; a move rearranges the shown executors within the saved order and keeps hidden ones, Reset saves automatic, and focus follows the moved row
     status: covered
     kind: contract
     layer: unit
     test:
       - 'ui/src/components/settings/models/ToolsTab.test.tsx::MH-HOSTED-UI-021: lists the executors in effective order, and a move saves the whole shown order'
+      - 'ui/src/components/settings/models/ToolsTab.test.tsx::MH-HOSTED-UI-021: a move keeps a saved executor the read does not show'
+      - 'ui/src/components/settings/models/hostedTools.test.ts::MH-HOSTED-UI-021: moves only the shown executors within the saved order, keeping hidden ones in place'
       - 'ui/src/components/settings/models/ToolsTab.test.tsx::MH-HOSTED-UI-021: a customized order offers Reset, which saves automatic'
       - 'ui/src/components/settings/models/ToolsTab.test.tsx::MH-HOSTED-UI-021: keeps focus on the moved row once the answer lands, on its other arrow at an end'
   - id: MH-VIBEY-007

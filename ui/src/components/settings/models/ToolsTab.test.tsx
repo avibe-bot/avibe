@@ -294,6 +294,21 @@ describe('ToolsTab executor order', () => {
     expect(screen.getByRole('status').textContent).toBe('Moved relay-claude to position 1 of 3.');
   });
 
+  it('MH-HOSTED-UI-021: a move keeps a saved executor the read does not show', async () => {
+    const user = userEvent.setup();
+    const { onSave } = renderTab({
+      tools: [search('web_search', {
+        // relay-gpt is saved first but refused now, so it is not a candidate.
+        executor_order: [RELAY.id, GROK.id, CLAUDE.id],
+        executor_candidates: [candidate(GROK.id, 'grok-fast'), candidate(CLAUDE.id, 'claude-haiku-5-5')],
+      })],
+    });
+
+    await openAdvanced(user, 'Web search');
+    await user.click(screen.getByRole('button', { name: 'Move relay-claude up' }));
+    expect(onSave).toHaveBeenCalledWith('web_search', { executor_order: [RELAY.id, CLAUDE.id, GROK.id] });
+  });
+
   it('MH-HOSTED-UI-021: a customized order offers Reset, which saves automatic', async () => {
     const user = userEvent.setup();
     const { onSave } = renderTab({

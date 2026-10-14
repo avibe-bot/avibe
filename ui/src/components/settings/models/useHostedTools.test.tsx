@@ -163,6 +163,28 @@ describe('useHostedTools ordering', () => {
     expect(shown(result.current.read)).toBe(true);
   });
 
+  it('MH-HOSTED-UI-007: keeps a tool pending while the read reconciling its lost write fails, until a read lands', async () => {
+    vi.spyOn(modelsApi, 'getHostedTools')
+      .mockResolvedValueOnce(status(false))
+      .mockRejectedValueOnce(new Error('offline'))
+      .mockResolvedValueOnce(status(true));
+    vi.spyOn(modelsApi, 'putHostedTool').mockRejectedValue(new Error('connection reset'));
+    const { result } = renderHook(() => useHostedTools(true), { wrapper });
+    await waitFor(() => expect(shown(result.current.read)).toBe(false));
+
+    await act(async () => { await result.current.save('web_search', { enabled: true }); });
+    // The write may have committed and the read that would say so failed: what
+    // is shown is the pre-write status, so nothing may build on it.
+    expect(modelsApi.getHostedTools).toHaveBeenCalledTimes(2);
+    expect(result.current.read.kind).toBe('degraded');
+    expect(result.current.pending.has('web_search')).toBe(true);
+
+    // The tab's Retry reads again; that read lands and settles it.
+    await act(async () => { await result.current.refresh(); });
+    expect(shown(result.current.read)).toBe(true);
+    expect(result.current.pending.has('web_search')).toBe(false);
+  });
+
   it('MH-HOSTED-UI-007: drops a write answer asked under another Source identity', async () => {
     const put = deferred<HostedToolsStatus>();
     vi.spyOn(modelsApi, 'getHostedTools').mockResolvedValueOnce(status(false)).mockRejectedValue(new Error('offline'));

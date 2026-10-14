@@ -13,7 +13,7 @@ import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import { ToggleSwitch } from '../SettingsPrimitives';
 import { formatMonthDay, formatNameList, formatSmallUsd } from './format';
-import { pairEvidence, refusalSummary, type PairEvidence, type RefusalSummary } from './hostedTools';
+import { executorOrderAfterMove, pairEvidence, refusalSummary, type PairEvidence, type RefusalSummary } from './hostedTools';
 import { foldRegionRead, regionFailed, type RegionRead } from './regionRead';
 import { ACCENT_ICON, ACCENT_PILL, ACCENT_TILE, sourceVisual } from './vendorMeta';
 import type {
@@ -179,12 +179,11 @@ const ExecutorOrder: React.FC<{ tool: HostedSearchToolStatus; lookup: SourceLook
   }, [candidates]);
   const move = (index: number, direction: -1 | 1) => {
     if (pending) return;
-    const next = candidates.map((candidate) => candidate.source_id);
-    const [moved] = next.splice(index, 1);
-    next.splice(index + direction, 0, moved);
-    refocus.current = { sourceId: moved, direction };
-    setMoved({ sourceId: moved, position: index + direction + 1, count: next.length });
-    onSave(tool.name, { executor_order: next });
+    const shown = candidates.map((candidate) => candidate.source_id);
+    const sourceId = shown[index];
+    refocus.current = { sourceId, direction };
+    setMoved({ sourceId, position: index + direction + 1, count: shown.length });
+    onSave(tool.name, { executor_order: executorOrderAfterMove(tool.executor_order, shown, index, direction) });
   };
   return (
     <div className="flex flex-col gap-2">
