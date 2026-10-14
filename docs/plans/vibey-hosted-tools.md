@@ -567,9 +567,9 @@ Unchanged from v1 §7.3 (owner decision, 2026-10-13 19:14), with the producer no
   - **生成**: 图片生成.
 - **The subtitle says where content goes**, plainly, because tools are on by default:
   - en: "Tools Vibey can use in a conversation. Searches send the query to the vendor that runs them; if one fails,
-    the query may be retried with another of your vendors. Image prompts go to the image model's vendor. On metered
+    the query may be retried with another of your Sources. Image prompts go to the image model's vendor. On metered
     Sources each call is billed."
-  - zh: "Vibey 在对话中可使用的工具。搜索会把查询发给执行它的厂商，失败时可能改由你的其他厂商重试；图片提示词会发给图片模型的厂商。按量计费的供应商每次调用都会计费。"
+  - zh: "Vibey 在对话中可使用的工具。搜索会把查询发给执行它的厂商，失败时可能改由你的其他供应商重试；图片提示词会发给图片模型的厂商。按量计费的供应商每次调用都会计费。"
 - **One status line per tool, from the read's `status` (§3.3), and only after something happened:**
   - "最近一次由 <Source> 执行 · 正常 · 10-15" from `latest_ok`. It shows a date, not a time: positive records are
     written at most hourly (§3.2);
@@ -612,7 +612,8 @@ used and the cost; IM attaches the file.
   call costs money, sends queries to a third party, and needed a cost-bearing check to turn on. v2 removes the check;
   the other two remain true and are stated in the public docs:
   - a search sends the model's query to the vendor that runs it: the hop's provider natively, or the executor
-    Source's vendor via proxy; when an executor fails, the same query may go to the next configured vendor (§6);
+    Source's vendor via proxy; when an executor fails, the same query may go to the user's next executor Source,
+    which can be another vendor or the same vendor through another key or relay (§6);
   - an image prompt and any reference images go to the chosen image model's vendor;
   - on metered Sources each call costs the tool fee plus tokens (§10.4); on subscriptions it is included.
 - **No onboarding step mentions tools**, and nothing calls a provider unless the model calls a tool in a turn the
@@ -749,5 +750,9 @@ and no real credentials.
    user cannot pick a different executor model in v2.
 4. **A decrypt refusal drops a whole identity's opaque payloads for the turn**, reasoning included, because xAI's
    refusal does not say which ciphertext failed (§3.5). The turn continues with portable history for that Source.
-5. **rc-era state is dropped**: probe evidence reads as `basis: probe`, which v2's loader does not accept, so those
+5. **An rc-era image opt-out is not carried over.** v1's tool was `image_generation`; v2's is `image_generate`, and the
+   loader treats the old key as unknown rather than mapping it (owner directive: no compatibility code for
+   pre-release state). Only rc testers who turned image generation on and then off are affected; rc4 kept it off
+   unless enabled.
+6. **rc-era state is dropped**: probe evidence reads as `basis: probe`, which v2's loader does not accept, so those
    records are pruned; an rc-era `hosted_tools` section resets to the defaults.
