@@ -137,8 +137,11 @@ the main agent; there is no Follow up on cards.
 
 - **Position:** always the first card, collapsed or expanded. It cannot be
   dismissed and has no stop button in this version.
-- **Eyebrow:** "MAIN AGENT" above the title, 2px gap.
-  - 10px, semibold, uppercase, tracking 0.14em.
+- **Eyebrow:** the agent's name above the title, 2px gap: "Vibey" / "歪比"
+  as written, no forced uppercase (owner decision, 2026-10-14). The fallback
+  title and the input placeholder ("Message Vibey…" / "和歪比说…") name
+  Vibey the same way; "main agent" is never shown to the user.
+  - 11px, semibold, normal case and tracking.
   - Light green at 80%: map to the theme's mint token; the prototype used
     `emerald-300`.
   - It names the card type, not the speaker.
@@ -275,7 +278,7 @@ the main agent; there is no Follow up on cards.
 - **Look:** the same width as a card, radius 22px, background `#2a2a2e`,
   border `white / 10%`, padding 6px (14px left), no shadow.
 - **Textarea:** one line by default, auto-grows to 4 lines (96px), 13px,
-  placeholder "和 main agent 说…".
+  placeholder "和歪比说…".
 - **Buttons, right side:**
   - a 32px mic (`white / 10%`) that dictates more and appends;
   - a 32px send button: white with a black up-arrow SVG; `white / 10%` and
@@ -581,7 +584,7 @@ Until the `main` type exists, the mini's main agent is a Vibey conversation
       the end; recomputed on resize.
 - [ ] Cards, marquee and bubble share one width. A long title truncates and
       never widens a card.
-- [ ] Main card: "MAIN AGENT" eyebrow; mint border; `#34343b` background;
+- [ ] Main card: "Vibey" / "歪比" eyebrow; mint border; `#34343b` background;
       16px after it; no ×; no stop; no avatar.
 - [ ] Clicking the main card opens and closes the detail inside the fixed
       box (280ms). The detail has the latest exchange, mark-read, More in

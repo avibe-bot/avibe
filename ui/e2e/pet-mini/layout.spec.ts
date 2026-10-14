@@ -166,3 +166,11 @@ test('Vibey and its dock are reported as the hover zone, and a shell hover shows
   await page.evaluate(() => window.dispatchEvent(new CustomEvent('avibe:pet-hover', { detail: { hover: false } })));
   await expect(dock).toHaveCSS('opacity', '0');
 });
+
+test('the main card names Vibey as written', async ({ page }) => {
+  await page.goto('/e2e/pet-mini/fixture.html?main=true&layers=0');
+  const eyebrow = page.locator('.pet-mini-collapsed .pet-mini-eyebrow');
+  await expect(eyebrow).toBeVisible();
+  // innerText applies text-transform, so this is what the user reads.
+  expect(await eyebrow.evaluate((node) => node.innerText)).toBe('Vibey');
+});
