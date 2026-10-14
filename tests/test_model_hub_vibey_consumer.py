@@ -287,12 +287,14 @@ async def test_failover_strips_opaque_history_for_another_origin_or_source(tmp_p
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("turn_id", ["turn-snapshot", None])
-@pytest.mark.parametrize("origin_state", ["unchanged", "changed", "unverified"])
+@pytest.mark.parametrize("origin_state", ["unchanged", "changed", "rotated", "unverified"])
 async def test_opaque_history_uses_launch_snapshot_without_requiring_turn_attribution(tmp_path, turn_id, origin_state):
     """MH-VIBEY-005: config reload and untracked calls cannot invent primary provenance.
 
     A fallback-only case cannot catch snapshot recomputation at HTTP arrival or
-    loss of the route credential when no dispatched turn is being tracked.
+    loss of the route credential when no dispatched turn is being tracked. A key
+    rotated after the launch makes the primary another account, whose history
+    was signed under the launch identity (C-6 item 6).
     """
     primary = _source("src_primary01", "Primary", vendor="anthropic", protocol="anthropic")
     service = _vibey_service(tmp_path, [primary], handles=[
@@ -311,6 +313,8 @@ async def test_opaque_history_uses_launch_snapshot_without_requiring_turn_attrib
             request_headers = hop["request_headers"]
         if origin_state == "changed":
             service.store.config.sources[0].vendor = "custom"
+        if origin_state == "rotated":
+            service.store.config.sources[0].credential_ref = "cred_rotated0001"
         async with aiohttp.ClientSession() as client:
             async with client.post(
                 f"{base_url}/messages",

@@ -73,9 +73,13 @@ class HopOrigin:
     api: str
     model: str
     # The serving Source: two Sources can share an origin. Equality stays the
-    # origin's; opaque payloads are also bound to the Source (C-6 item 6), which
-    # the failover strip compares on its own.
+    # origin's; opaque payloads are also bound to the Source's account (C-6 item
+    # 6), which the failover strip compares on its own.
     source: str = field(compare=False)
+    # The launch Source's credential-free identity (``identity_digest``), taken
+    # from the snapshot the origin came from. In memory only: never in
+    # ``payload()``, the served-hop header, or persisted provenance.
+    identity: str = field(default="", compare=False, repr=False)
 
     def payload(self) -> dict[str, str]:
         return {"provider": self.provider, "api": self.api, "model": self.model}
@@ -2703,7 +2707,7 @@ class TurnCorrelationRegistry:
 
             self.store.put(
                 {
-                    "contract_version": 13,
+                    "contract_version": 14,
                     "turn_id": normalized_turn_id,
                     "ts": ts or _utc_now_iso(),
                     "agent": trace.agent,

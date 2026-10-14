@@ -73,12 +73,14 @@ class ServedResolution:
     """The response origin, whether its signature data is verified, and its Source.
 
     ``source_id`` is the endpoint's own Source in direct mode (``None`` when it names none), and ``None`` for a
-    missing or invalid served-hop report.
+    missing or invalid served-hop report. ``source_identity`` is the endpoint's identity when its own Source served
+    the response, else ``None``: the identity of another Source is unknown here.
     """
 
     origin: Origin
     verified: bool
     source_id: str | None
+    source_identity: str | None = None
 
 
 ServedHopResolver = Callable[
@@ -206,6 +208,7 @@ class StreamAssembler:
         self.usage: Any = None
         #: The Source that served the response (the served-hop report): the ``native.source_id`` of its hosted calls.
         self.source_id: str | None = None
+        self.source_identity: str | None = None
         self._citations: dict[int, list[Citation]] = {}
         self._hosted_inputs: dict[Hashable, io.StringIO] = {}
         self._hosted_counts: dict[str, int] = {}
@@ -250,17 +253,27 @@ class StreamAssembler:
 
         return self._emitted_output
 
-    def set_origin(self, origin: Origin, verified_origin: bool, source_id: str | None = None) -> None:
+    def set_origin(
+        self,
+        origin: Origin,
+        verified_origin: bool,
+        source_id: str | None = None,
+        source_identity: str | None = None,
+    ) -> None:
         if self._continuing:
             # A continued response is one message (§4.3): verified only when every response in it was, from one origin
-            # and one Source, and its usage is the latest response's, none if that reports none.
+            # and one Source identity, and its usage is the latest response's, none if that reports none.
             verified_origin = (
-                verified_origin and self.verified_origin and origin == self.origin and source_id == self.source_id
+                verified_origin
+                and self.verified_origin
+                and origin == self.origin
+                and source_identity == self.source_identity
             )
             self.usage = None
         self.origin = origin
         self.verified_origin = verified_origin
         self.source_id = source_id
+        self.source_identity = source_identity
 
     def begin_driver(self) -> None:
         """Defer terminal marking while the shared lifecycle driver runs."""
@@ -1112,7 +1125,7 @@ class StreamAssembler:
             error_message=error_message,
             verified_origin=self.verified_origin,
             hosted_summary=self._hosted_summary(final),
-            source_id=self.source_id,
+            source_identity=self.source_identity,
         )
 
     def pause(self) -> AssistantMessage | ProviderError:
@@ -1136,7 +1149,7 @@ class StreamAssembler:
             verified_origin=self.verified_origin,
             stop_reason=stop_reason,
             hosted_summary=self._hosted_summary(content),
-            source_id=self.source_id,
+            source_identity=self.source_identity,
         )
 
     def error(
@@ -1514,7 +1527,7 @@ async def resolve_served_origin(
     direct = endpoint_origin(endpoint)
     if not gateway:
         # Without a gateway the endpoint is the served hop, and its Source, when it names one, served the response.
-        return ServedResolution(direct, True, endpoint.source_id)
+        return ServedResolution(direct, True, endpoint.source_id, endpoint.source_identity)
     candidate = resolver(headers) if resolver is not None else default_served_hop_resolver(headers)
     if inspect.isawaitable(candidate):
         try:
@@ -1527,7 +1540,8 @@ async def resolve_served_origin(
         return None
     if served is None:
         return ServedResolution(direct, False, None)
-    return ServedResolution(served.origin, True, served.source_id)
+    identity = endpoint.source_identity if served.source_id == endpoint.source_id else None
+    return ServedResolution(served.origin, True, served.source_id, identity)
 
 
 def default_served_hop_resolver(headers: Mapping[str, str]) -> ServedHop | None:
@@ -1854,7 +1868,12 @@ async def drive_sse_stream(
                     if resolved_origin is None:
                         candidate = assembler.aborted(cancel.reason)
                     else:
-                        assembler.set_origin(resolved_origin.origin, resolved_origin.verified, resolved_origin.source_id)
+                        assembler.set_origin(
+                            resolved_origin.origin,
+                            resolved_origin.verified,
+                            resolved_origin.source_id,
+                            resolved_origin.source_identity,
+                        )
                         async for item in translate(iter_sse_events(response, cancel, max_line_size=max_line_size)):
                             if isinstance(item, (Done, ProviderError)):
                                 candidate = item
@@ -2198,7 +2217,7 @@ def assistant_message(
     error_message: str | None = None,
     verified_origin: bool = True,
     hosted_summary: HostedSummary | None = None,
-    source_id: str | None = None,
+    source_identity: str | None = None,
 ) -> AssistantMessage:
     if not verified_origin:
         sanitized: list[AssistantContent] = []
@@ -2225,7 +2244,7 @@ def assistant_message(
         error_message=error_message,
         hosted_summary=hosted_summary,
         # An unverified origin names no Source its opaque payloads could go back to; it keeps none anyway.
-        source_id=source_id if verified_origin else None,
+        source_identity=source_identity if verified_origin else None,
     )
 
 
@@ -2258,7 +2277,7 @@ def partial_message(
     verified_origin: bool = True,
     stop_reason: str = "aborted",
     hosted_summary: HostedSummary | None = None,
-    source_id: str | None = None,
+    source_identity: str | None = None,
 ) -> AssistantMessage:
     if stop_reason in {"aborted", "error"}:
         content = [block for block in content if not isinstance(block, ToolCallBlock)]
@@ -2269,7 +2288,7 @@ def partial_message(
         usage=usage,
         verified_origin=verified_origin,
         hosted_summary=hosted_summary,
-        source_id=source_id,
+        source_identity=source_identity,
     )
 
 

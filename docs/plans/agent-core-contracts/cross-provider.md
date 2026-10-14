@@ -21,12 +21,14 @@ Invariants:
 
 - "Opaque provider payload" means any `signature` field on any block, and any redacted thinking. Every rule here
   about signatures applies to all of them. A signature is never synthesized and never sent to a different origin.
-- Opaque payloads are also bound to the Source that served the message (`AssistantMessage.source_id`), because a
-  provider can refuse another account's ciphertext (OpenAI and xAI encrypted reasoning). When the request names its
-  hop (`endpoint`), a message takes the "same origin" column only if its origin equals the target's **and** its
-  `source_id` equals the hop's Source. A message another Source served, or one no known Source served (no
-  `source_id`, as for rows written before the field), takes the "different origin" column at a hop that names a
-  Source. The gateway applies the same binding at failover (C-6 item 6).
+- Opaque payloads are also bound to the account that issued them, the identity of the Source that served the message
+  (`AssistantMessage.source_identity`, from HopResolution `source_identity`), because a provider refuses another
+  account's ciphertext (OpenAI and xAI encrypted reasoning). When the request names its hop (`endpoint`), a message
+  takes the "same origin" column only if its origin equals the target's **and** its `source_identity` equals the
+  hop's. A message another identity served (another Source, or the same Source after its key or relay changed), or
+  one no known identity served (after a failover to another Source, or a row written before the field), takes the
+  "different origin" column at a hop that names an identity. The gateway applies the same binding at failover
+  (C-6 item 6).
 - Tool-call id normalization is deterministic: the stored id when the target accepts it; otherwise
   `call_` + the first 24 hex characters of SHA-256 of the stored id. Anthropic accepts `^[a-zA-Z0-9_-]{1,64}$`; the
   other protocols' limits are recorded in the `ai` lane's conversion tables. The map is computed per request; the

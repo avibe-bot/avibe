@@ -1,6 +1,14 @@
 # Model Hub contracts
 
-Status: **contract_version 13**, 2026-10-14: publishes the hosted-tools Phase 1 additions
+Status: **contract_version 14**, 2026-10-14: opaque history is bound to the account that issued it, the Source
+identity, not only to the origin (#2620): a provider refuses another account's encrypted reasoning.
+- `HopResolution.source_identity` (`hop-resolution.schema.json`) names the primary hop Source's credential-free
+  identity, which Vibey records on each response its own Source served and matches before replaying opaque payloads.
+- The gateway strips an unpinned request's opaque history for another origin, Source, or Source identity, read on the
+  final admission snapshot. A request pinned to the primary hop whose identity changed since the launch answers
+  `pin_unavailable` (`vibey-consumer.md`). The identity stays in memory: never in the served-hop header or provenance.
+
+It builds on v13 (2026-10-14), which published the hosted-tools Phase 1 additions
 (`../vibey-hosted-tools.md`) as one version event:
 - the capability evidence the engine's 400s teach (`UpstreamRejection` in `adapter-interface.py`) and refused efforts,
   on agent-chain hops and Source models, with when they change (`changes_at`);
@@ -195,7 +203,7 @@ comparison. A gate may not report success by comparing stale input with itself.
 
 ## Version closure
 
-`contract_version` 13 must coexist in all registered version locations on the same tested head:
+`contract_version` 14 must coexist in all registered version locations on the same tested head:
 
 - `mirror-registry.json`
 - `agent-chain.schema.json`

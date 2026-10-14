@@ -285,6 +285,32 @@ async def test_a_continuation_stays_on_the_identity_its_response_was_served_unde
 
 
 @pytest.mark.asyncio
+async def test_a_pinned_request_rendered_for_the_launch_identity_is_handed_back_after_a_rotation(tmp_path):
+    """MH-HOSTED-GATEWAY-002, C-6 item 6: a pinned request is never rewritten, so one rendered for the launch
+    identity cannot go to its Source under another. A key rotated and re-verified before the turn's first pinned
+    admission would otherwise bind the new identity while the body carries the old account's ciphertext, which the
+    provider refuses as a request error; it is handed back, and Vibey renders it again portably."""
+
+    primary, fallback = _sources()
+    service = _vibey_service(tmp_path, [primary, fallback], handles=[
+        LiveInvokeHandle(_outcome(RawOutcomeKind.SUCCESS, source_id=primary.id), (b"{}",)),
+    ])
+    _verify(service, primary, "grok-4.6", "x_search", "call")
+    gateway = ModelHubTurnGateway(service)
+    router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
+    try:
+        hop = await router.resolve_hop("menu-alias", process_scope="vibey:rotated", turn_id="turn-rotated")
+        live = service.store.config.sources[0]
+        live.credential_ref = "cred_rotated0001"
+        _verify(service, live, "grok-4.6", "x_search", "call")
+        answer = await _post(hop, _native(hop, history=[SIGNED_REASONING]), pin=primary.id)
+    finally:
+        await gateway.close()
+    assert answer == (409, PIN_UNAVAILABLE)
+    assert service.adapter.invocations == []
+
+
+@pytest.mark.asyncio
 async def test_overlapping_first_pinned_requests_bind_one_identity(tmp_path):
     """MH-HOSTED-GATEWAY-002: the identity is bound at final admission, so a concurrent first request cannot use another.
 

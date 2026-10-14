@@ -22,6 +22,7 @@ from jsonschema import ValidationError
 
 from config.v2_config import ModelHubModelConfig, ModelHubRouteConfig, ModelHubRouteHopConfig, ModelHubSourceConfig
 from core.handlers.model_hub.adapter import ObservationOutcome, RawOutcomeKind, SourceBinding
+from core.handlers.model_hub.capability_evidence import identity_digest
 from core.handlers.model_hub.provenance import SERVED_HOP_HEADER
 from core.run_settlement import SETTLED_BY_TERMINAL_RESULT
 from core.handlers.model_hub.stream_wire import (
@@ -353,6 +354,10 @@ async def test_google_router_gateway_failover_preserves_visible_history_and_orig
         record = service.provenance.get("turn-google")
         _validate("turn-provenance.schema.json", record)
         assert {**record["served"]["origin"], "source": record["served"]["source_id"]} == origin
+        # The Source identity opaque payloads are bound to stays in memory (C-6 item 6): the hop resolution names it,
+        # but neither the served-hop report nor persisted provenance carries it.
+        assert hop["source_identity"] == identity_digest(primary)
+        assert identity_digest(primary) not in json.dumps(record) + response.headers[SERVED_HOP_HEADER]
     finally:
         await gateway.close()
 

@@ -132,24 +132,28 @@ def test_cross_provider_transform_drops_opaque_payload_and_answers_orphaned_call
 @pytest.mark.parametrize(
     ("served_by", "hop", "bound"),
     [
-        ("src_account0001", "src_account0001", True),
-        ("src_account0001", "src_account0002", False),
-        (None, "src_account0002", False),
+        ("sha256:account-one", "sha256:account-one", True),
+        ("sha256:account-one", "sha256:account-two", False),
+        (None, "sha256:account-two", False),
         (None, None, True),
     ],
-    ids=["same-source", "another-source", "unknown-source", "no-source-anywhere"],
+    ids=["same-identity", "another-identity", "unknown-identity", "no-identity-anywhere"],
 )
-def test_opaque_payloads_go_back_only_to_the_source_that_served_them(served_by, hop, bound) -> None:
+def test_opaque_payloads_go_back_only_to_the_source_identity_that_served_them(served_by, hop, bound) -> None:
     """cross-provider.md: another account refuses a Source's ciphertext (xAI's and OpenAI's encrypted reasoning), so a
-    message's signatures, redacted thinking and native ids go back only to a hop of the Source that served it. A
-    message no known Source served, as one written before ``source_id``, goes to a Source as a different origin's."""
+    message's signatures, redacted thinking and native ids go back only to a hop of the Source identity that served
+    it: another Source, or the same Source after its key changed, is another identity. A message no known identity
+    served, as one written before ``source_identity``, goes to a hop that names one as a different origin's."""
 
     origin = Origin("openai", "openai_responses", "gpt-test")
     reasoning = ThinkingBlock("plan", '{"id": "rs_1", "encrypted_content": "account-bound"}')
     redacted = ThinkingBlock("", "redacted-opaque", redacted=True)
     call = ToolCallBlock("call_1", "read", {"path": "x"}, native_id="fc_1", signature="call-opaque")
-    message = AssistantMessage((reasoning, redacted, call), origin, "tool_use", source_id=served_by)
-    endpoint = ModelEndpoint("openai_responses", "http://hub.invalid/v1", "gpt-test", "token", source_id=hop)
+    message = AssistantMessage((reasoning, redacted, call), origin, "tool_use", source_identity=served_by)
+    endpoint = ModelEndpoint(
+        "openai_responses", "http://hub.invalid/v1", "gpt-test", "token", source_id="src_account0001",
+        source_identity=hop,
+    )
 
     result = transform_messages((UserMessage((TextBlock("go"),)), message), origin, endpoint=endpoint)
 

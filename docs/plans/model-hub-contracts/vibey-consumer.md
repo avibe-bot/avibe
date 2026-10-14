@@ -102,8 +102,14 @@ travels as in-memory request metadata, never as upstream JSON or a caller-suppli
 header. Each revalidated Vibey attempt compares its admitted origin against that
 original primary, including fallback, credential refresh, and recovery walks.
 
-If any origin component differs, or the primary origin cannot be verified, the
-gateway strips opaque history **before engine invocation and protocol conversion**:
+If any origin component differs, the serving Source or its identity differs
+from the primary's, or the primary origin cannot be verified, the gateway strips
+opaque history **before engine invocation and protocol conversion**. Opaque
+payloads are bound to the account that issued them: a provider refuses another
+account's ciphertext. The serving identity (`identity_digest`) is read on the
+final admission snapshot, so a key rotated while the engine was prepared counts.
+The launch identity rides only on the in-memory primary origin, never in the
+served-hop header, `HopOrigin.payload()`, or persisted provenance.
 
 - Block `signature`, `thoughtSignature`, `thought_signature`, and encrypted
   reasoning payloads are removed, including protocol-owned tool-call extensions.
@@ -113,10 +119,13 @@ gateway strips opaque history **before engine invocation and protocol conversion
 - Tool ids, arguments, results, and unrelated request options remain unchanged.
   A tool argument named `signature` is user data, not protocol metadata.
 
-Same-origin fallback, even on another Source, retains the original history. Each
-attempt gets its own cleaned history; cleaning never mutates the original request
-that a later same-origin attempt might reuse. Native callers retain their existing
-history behavior.
+A retry on the primary Source under its launch identity retains the original
+history; a fallback to another Source of the same origin does not. A pinned
+request is never rewritten: one pinned to the primary hop whose identity changed
+since the launch answers `pin_unavailable`, and Vibey renders it again
+portably. Each attempt gets its own cleaned history; cleaning never mutates the
+original request that a later attempt might reuse. Native callers retain their
+existing history behavior.
 
 After a request completes, the consumer may resolve the **same catalog alias and
 turn** again to obtain a different primary hop. The existing turn keeps its attempt

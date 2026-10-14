@@ -258,6 +258,7 @@ class _Controller:
             target_model=requested_model,
             runtime_model=requested_model,
             source_id="src_test",
+            source_identity="sha256:test-source-identity",
             gateway_base_url="http://hub.invalid/vibey",
             gateway_token="hub-token",
             **self.hub_limits,
@@ -2839,7 +2840,8 @@ def test_a_hop_with_an_invalid_hosted_tool_entry_is_refused(hosted_tools) -> Non
 
     hop = ModelHubLaunch(
         backend="vibey", channel="hub", requested_model="m", target_model="m", runtime_model="m",
-        source_id="src_test", gateway_base_url="http://hub.invalid/vibey", gateway_token="hub-token",
+        source_id="src_test", source_identity="sha256:test-source-identity",
+        gateway_base_url="http://hub.invalid/vibey", gateway_token="hub-token",
         protocol="openai_responses", provider="openai",
     ).to_hop_resolution()
     hop["hosted_tools"] = hosted_tools
