@@ -176,11 +176,22 @@ The evidence store, its record and its owner are the capability model's §3. v2 
     with v1's `executor` field is invalid, so the loader drops the whole section with one warning and the tools take
     their defaults. That is the existing safe-degradation rule for an optional feature, with no rc-specific code.
   - A settings change applies from the next turn, as every runtime config change does.
-- **API.**
-  - `GET /api/models/hosted-tools` → `{hosted_tools: HostedToolsStatus}` (§10.3): each tool's switch, its passive
-    status lines, the search executor order as the gateway would try it now, and the image models with the default.
-  - `PUT /api/models/hosted-tools/<tool>` with `{enabled}`, plus `executor_order` for a search tool or
-    `default_model` for `image_generate` → the same read. It replaces that tool's entry.
+- **API.** Saved and effective values are separate fields, and the UI never writes back an effective value: v1's
+  toggle echoed the resolved executor and so froze "automatic" into a saved choice.
+  - `GET /api/models/hosted-tools` → `{hosted_tools: HostedToolsStatus}` (§10.3). Per tool:
+    - `enabled`;
+    - `status: {latest_ok, refused[]}` (§8.1): `latest_ok` is `{source_id, model_id, mode: "native" | "executor",
+      at}` or null, the latest positive record; `refused[]` is `[{source_id, model_id, at, reason}]`, the current
+      negative records;
+    - search tools: `executor_order` (saved, null when automatic), `effective_order` (as the gateway would try now),
+      and `executor_candidates: [{source_id, price}]` in effective order, every eligible executor Source (a Claude
+      subscription never is) with its per-call price, so the order can be edited over the full list;
+    - `image_generate`: `default_model` (saved, null when default; a saved model no longer available stays, flagged
+      `available: false`), `effective_default`, `models: [{source_id, model_id, description, price}]`, and
+      `image_offered_by: [vendor]`, the vendors whose overlay lists image models, for the empty state.
+  - `PUT /api/models/hosted-tools/<tool>` is per field: an absent field is unchanged, and an explicit `null` resets
+    `executor_order` to automatic or `default_model` to the default. `enabled` is a boolean. It answers the same
+    read.
   - The probe endpoint is removed (§11).
 
 ### 3.4 Hop facts
@@ -499,26 +510,32 @@ Unchanged from v1 §7.3 (owner decision, 2026-10-13 19:14), with the producer no
 - **Grouped by capability**, one card per tool, each with one switch, on by default:
   - **搜索**: 网页搜索, X 搜索;
   - **生成**: 图片生成.
-- **The subtitle says where content goes**, plainly, because tools are on by default: a search sends the query to
-  the vendor that runs it (the hop's own provider, or the executor Source's), and an image prompt goes to the image
-  model's vendor; metered Sources are billed per call.
-- **One status line per tool, from passive evidence only, and only after something happened:**
-  - "最近一次由 <Source> 执行 · 正常 · 10-15 14:02": the latest positive record for the tool, native or executor;
-  - "<Source> 不支持，已改用 <Source>": a current negative record, with the later call that ran elsewhere;
+- **The subtitle says where content goes**, plainly, because tools are on by default:
+  - en: "Tools Vibey can use in a conversation. Searches send the query to the vendor that runs them, and image
+    prompts go to the image model's vendor. On metered Sources each call is billed."
+  - zh: "Vibey 在对话中可使用的工具。搜索会把查询发给执行它的厂商，图片提示词会发给图片模型的厂商；按量计费的供应商每次调用都会计费。"
+- **One status line per tool, from the read's `status` (§3.3), and only after something happened:**
+  - "最近一次由 <Source> 执行 · 正常 · 10-15" from `latest_ok`. It shows a date, not a time: positive records are
+    written at most hourly (§3.2);
+  - "<Source> 不支持，已改用 <Source>" when a `refused[]` entry is older than `latest_ok` and on another Source;
+    "<Source> 不支持" alone otherwise;
   - nothing before first use. No "unknown", "unverified" or "unchecked" wording anywhere.
-- **Search cards** show the per-call list price where known, and an optional **Advanced** section with the executor
-  order: up/down buttons (keyboard- and screen-reader-accessible, the route chain editor's pattern), collapsed and
-  fully automatic until touched, with "Reset to automatic".
-- **The image card** lists the available image models with their one-line descriptions and a default-model picker
-  (`default_model`, §3.3). A model that failed shows the fact after use ("最近一次失败：…"), never a tag before it.
-  With no image model available it says which Source to add.
+- **Search cards** show an optional **Advanced** section with the executor order over `executor_candidates`: up/down
+  buttons (keyboard- and screen-reader-accessible, the route chain editor's pattern), each row with its Source's
+  per-call price ("at API price" for a relay), collapsed and fully automatic until touched, with "Reset to
+  automatic" (a `null` PUT). The price shows per row because it depends on who runs the search.
+- **The image card** lists the available image models with their one-line descriptions and prices, and a
+  default-model picker over `default_model` / `effective_default`; a saved default that is no longer available
+  shows as itself, "(unavailable)". There is no failure line: a failed image call shows on its tool card in chat,
+  and passive evidence keeps no image failures. With no image model available, the card names the vendors from
+  `image_offered_by` ("Add an OpenAI or Google API key").
 - **Removed:** check and check-all, the confirm and result dialogs, Re-verify, the probe estimate, the executor
   picker, and "engine upgraded" headers (§11).
 
 ### 8.2 Source detail chips
 
 Each model row on a Source's detail panel shows only passive state, with the detail popover (time, basis, reason)
-and no action:
+and no action. There is no "via proxy" chip: proxying is the tool's business, not the Source's.
 - "网页搜索 · 正常 · 10-15";
 - "X 搜索 · 不支持";
 - "ultra · 不支持" (efforts, unchanged).
@@ -578,9 +595,10 @@ under the freeze protocol (`model-hub-contracts/README.md`).
 - `capability-evidence.schema.json`: `basis` is `observed` only; `status` `verified` (display only) or
   `unsupported`; `shape` is removed and `engine` becomes `wire`, the stamp of §3.2; `feature.name` is `web_search`
   | `x_search` | `image_generate`, and `image_generate` has `call` only.
-- `hosted-tools-status.schema.json` is rewritten for §3.3's read: per tool `enabled`, `status` (the latest positive
-  and current negative records as status lines), `executor_order` (search) or `models` and `default` (image), and
-  the per-call `price`. `reverify`, `executor`, `bound`, `candidates[].call`/`replay`/`probe_estimate` go.
+- `hosted-tools-status.schema.json` is rewritten for §3.3's read: per tool `enabled` and `status {latest_ok,
+  refused[]}`; search tools `executor_order`, `effective_order`, `executor_candidates[]`; `image_generate`
+  `default_model`, `effective_default`, `models[]`, `image_offered_by[]`. `reverify`, `executor`, `bound` and
+  `candidates[]` (with `call`, `replay`, `probe_estimate`) go. The PUT body is per field (§3.3).
 - `hosted-tool-probe-result.schema.json` is deleted, with its `api-response.schema.json` branch and `api.md` row.
 - `provider-overlay.schema.json` gains `executor_model` per vendor family and `image_models[]`.
 - V2 config: `model_hub.hosted_tools` as §3.3.
@@ -599,9 +617,9 @@ under the freeze protocol (`model-hub-contracts/README.md`).
 | Model Hub | `core/handlers/model_hub/hosted_probe.py`; `ModelHubService.probe_hosted_tool`, `_record_probe_evidence`, `_probe_estimate`, `_probe_rejection`, `_probe_aspect`; the RPC and UI-server routes for `POST /api/models/hosted-tools/<tool>/probe`; `MODEL_HUB_RPC_TIMEOUT_SECONDS`' probe dependency (it moves back to `vibe/model_hub_client.py`); `HOSTED_PROBE_SHAPE` and every `shape` parameter; the evidence `probe` basis and probe staleness; `engine_stamp()`'s `hosted_wire` branch (#2623); the per-turn executor binding and `_executor`; `UserTestCall`'s probe-only callers |
 | Gateway | `stream_wire`'s `response.image_generation_call.partial_image` model-output envelope; the executor's native image path (`ResponsesStreamReader(partial_images=…)`, the 32 MiB image line cap, the image event and byte budget, `_image_result`, the `_IMAGE_*` constants, the 300 s image `call_timeout`), replaced by what the images endpoint needs; the OpenAI `image_generation` overlay declaration (#2580's JPEG q90 becomes the images-endpoint request parameters); `executor` in the proxy body; the `hosted_tools_status` candidates and bound-executor projection. Kept: `disable-image-generation: passthrough`; `hosted_admission`'s "image calls are never replayed" rule until no transcript can carry a native image call; #2616's per-turn identity binding and #2586's turn id. |
 | Vibey | the native `image_generation` declaration, its parsing (`responses_hosted_tool`'s `image_generation_call` mapping, `image=`/`image_error=` in `responses_hosted_block`), `_ImageBudget`, `_saved_image`, `_PARTIAL_IMAGE_EVENT`, `IMAGE_STREAM_LINE_BYTES`, the large-event JSON offload, `drive_sse_stream`'s `max_line_size` and `iter_sse_events`' offload (every stream returns to 8 MiB); `ModelRequest.tool_choice` and `_common.forced_tool`; `registry.build_wire_request` (its tests move to each adapter's `wire_request`); the adapters' probe-only `media_sink` parameter and the `media_sink` argument of `registry_providers(media_loader=…, media_sink=…)`; `HostedTool`'s `executor` field and its `executor` body; the agent's `_with_hosted_images` / `_emit_orphan_images` path for native images (`agent.py`), kept for `image_generate` results. `HostedRecord.images`, `HostedImage`, `generate_action` and the `generate` action stay, on `ToolResultMessage.hosted` only. |
-| UI | `ProbeAnswerNote.tsx` (with `ReplayNote`); in `ToolsTab.tsx` `ProbeCell`, the executor picker and its notes, the `needsCheck`/`needsExecutor` states, the "unchecked" chip and the probe column; in `HostedCapabilityChips.tsx` the recheck action, the keyboard focus-into-detail, and the reverify, engineUpgraded and unsupportedAged states; `useEstimateLabel.ts`; the `probeHostedTool` wiring and the Sources re-read after a probe in `SettingsModelsPage.tsx`; in `useHostedTools` `probe`, `probing`, `lostProbeOutcome`, `recordedOutcome` and `PROBE_NOT_RECORDED` (the serialized writes, identity fencing and re-read after Source mutations stay); in `hostedTools.ts` `ProbeTarget`, `probeKey`, `probeUnanswered`, `verifiedCandidates`, `sameExecutor` and the `aged`/`engineUpgraded` branches of `evidenceChip`; `modelsApi.probeHostedTool`; the types `HostedToolProbeResult`, `HostedProbeAspect`, `HostedCostEstimate`, `probe_estimate`, and `executor` in `HostedToolPut`. Check-all is removed by the UI lane's pending PR. |
-| i18n (`settings.models`) | `tools.probe.*`; `tools.state.needsCheck` and `needsExecutor`; `tools.executor.*`; `tools.chip.unchecked`, `reverify`, `engineUpgraded`, `unsupportedAged`; `tools.reverify.*`; `capability.recheck`, `recheckCost`; `capability.chip.*` and `capability.explain.*` for reverify, engineUpgraded, viaProxyAged and unsupportedAged; `capability.expiryProbe` |
-| Tests and scenarios | `tests/test_model_hub_hosted_probe.py`; the probe and executor-binding cases in `test_model_hub_hosted_tools_resolution.py`, `test_model_hub_hosted_executor.py`, `test_model_hub_hosted_pinning.py` and `test_model_hub_evidence_rules.py`; the native image cases in the Responses adapter tests; UI `ToolsTab.test` MH-HOSTED-UI-013 and 019, the executor cases of 001 and the probe parts of 003 and 018, `useHostedTools.test` 013 and parts of 007, `hostedTools.test` 013, `SourceDetailPanel.test` 013 and 017, `SettingsModelsPage.render` 016; catalog rows MH-HOSTED-007 (probe), UI-013, UI-016 and UI-019 retire, and the rows they share shrink |
+| UI | `ProbeAnswerNote.tsx` (with `ReplayNote`); in `ToolsTab.tsx` `ProbeCell`, the executor picker and its notes, the `needsCheck`/`needsExecutor` states, the "unchecked" chip and the probe column; in `HostedCapabilityChips.tsx` the recheck action, the keyboard focus-into-detail, and the reverify, engineUpgraded and unsupportedAged states; `useEstimateLabel.ts`; the `probeHostedTool` wiring and the Sources re-read after a probe in `SettingsModelsPage.tsx`; in `useHostedTools` `probe`, `probing`, `lostProbeOutcome`, `recordedOutcome` and `PROBE_NOT_RECORDED` (the serialized writes, identity fencing and re-read after Source mutations stay); in `hostedTools.ts` `ProbeTarget`, `probeKey`, `probeUnanswered`, `verifiedCandidates`, `sameExecutor` and the `aged`/`engineUpgraded` branches of `evidenceChip`; `modelsApi.probeHostedTool`; the types `HostedToolProbeResult`, `HostedProbeAspect`, `HostedCostEstimate`, `probe_estimate`, `HostedToolCandidate`, `bound`, and `executor` in `HostedToolPut`. Rebuilt on the new read rather than only trimmed: `modelCapabilities` and the Tools-tab rows on `status`; `cost.imageTokens` ("no per-image price yet") by per-image prices; `capability.chip.viaProxy` and `explain.viaProxy` go with the "via proxy" chip. Check-all is removed by the UI lane's pending PR. |
+| i18n (`settings.models`) | `tools.probe.*`; `tools.state.needsCheck` and `needsExecutor`; `tools.executor.*`; `tools.chip.unchecked`, `reverify`, `engineUpgraded`, `unsupportedAged`; `tools.reverify.*`; `capability.recheck`, `recheckCost`; `capability.chip.*` and `capability.explain.*` for reverify, engineUpgraded, viaProxy, viaProxyAged and unsupportedAged; `capability.expiryProbe`; `tools.col.*` and `tools.chip.native`/`unsupported`/`executor` (the candidate table goes). Rewritten: `tools.subtitle` (§8.1), `tools.empty` and `tools.noNative` against the new read; `tools.footnote` keeps its relay and subscription sentences. |
+| Tests and scenarios | `tests/test_model_hub_hosted_probe.py`; the probe and executor-binding cases in `test_model_hub_hosted_tools_resolution.py`, `test_model_hub_hosted_executor.py`, `test_model_hub_hosted_pinning.py` and `test_model_hub_evidence_rules.py`; the native image cases in the Responses adapter tests; UI `ToolsTab.test` MH-HOSTED-UI-013 and 019, the executor cases of 001 and the probe parts of 003 and 018, `useHostedTools.test` 013 and parts of 007, `hostedTools.test` 013, `SourceDetailPanel.test` 013 and 017, `SettingsModelsPage.render` 016; catalog rows MH-HOSTED-007 (probe), UI-004 (the engine-upgraded and aged header), UI-013, UI-016 and UI-019 retire; UI-002 shrinks to the passive states; UI-018's "locked until verified" becomes "on by default, nothing locks"; UI-001's write contract becomes the per-field PUT |
 | Contracts | as §10 |
 
 ## 12. Implementation split
@@ -614,7 +632,7 @@ edits a frozen file, and later phases join it if it has not shipped.
 | A. Evidence and priors | foundation | passive positive rule and the xAI decrypt rule (status per the A/B) in `evidence_rules.py`; `wire` stamp and negative-only routing; drop `probe`, `shape`, the `hosted_wire` branch; overlay `executor_model` and `image_models` with loader and schema; `hosted_tools` config v2 with absence = on; hop facts (§3.4); `hosted-tools-status` v2 read and PUT; remove the probe stack (§11 Model Hub) | — |
 | B. Gateway | gateway | the served-stream observer's projection paths for hosted items, streamed and buffered (§3.2), feeding phase A's positive rule; `pin_unavailable.reason`; admission on negative evidence only; the search executor chain at call time with `executor_model`, `executor_order` and failover (§6); `image_generate` direct execution per kind (§7.4), with recorded stub tests; route verification of each shipped image model | A (hop facts, overlay) |
 | C. Vibey | Vibey | declarations from facts (§4.1); the turn freeze (§3.4); `pin_unavailable` surfaced to the loop and re-resolve with its bounds (§3.5); in-flight rule; `image_generate` tool with the enum, reference images and the path record; remove native image parsing and the probe-only seams (§11 Vibey) | A; B for the executor body and images |
-| D. UI | UI | the grouped Tools tab, status lines, executor order, image models and default; passive Source chips; removals (§11 UI, i18n); the Tools-tab and chip frames in `avibe-docs/design.pen`, edited through Pencil | A (read shape) |
+| D. UI | UI | the grouped Tools tab, status lines, executor order, image models and default; passive Source chips; removals (§11 UI, i18n); the Tools-tab and chip frames in `avibe-docs/design.pen`, edited through Pencil (the Pencil MCP must be connected on the host that does it) | A (read shape, overlay `image_models`); B for positive records, which "正常" and "已改用" need |
 | E. Docs | foundation | public docs: what each tool does, default-on, where content goes, cost (§9) | A–D |
 
 ## 13. Acceptance properties
