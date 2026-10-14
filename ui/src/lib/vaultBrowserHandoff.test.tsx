@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { createInstance } from 'i18next';
-import { cleanup, render, screen, within } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { ReactElement } from 'react';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
@@ -226,6 +226,16 @@ const cases: Array<{
       expect(await screen.findByRole('menuitem', { name: /^show value$/i })).toBeTruthy();
     },
   },
+  {
+    surface: 'protected field edit',
+    desktop: () => <VaultSecretForm editSecret={protectedSecret} onCancel={vi.fn()} onCreated={vi.fn()} />,
+    clicks: [openInBrowser],
+    secrets: [protectedSecret],
+    vaultStatus: 'locked',
+    resumed: async () => {
+      expect(within(await resumedDialog()).getByLabelText('Value for value')).toBeTruthy();
+    },
+  },
 ];
 
 const ceremonies = [vault.setupPasskey, vault.unlockPasskey, vault.approveProtectedRelease, vault.signProtectedRequest, vault.revealProtectedValue];
@@ -263,6 +273,29 @@ afterEach(() => {
 // on the request's Standard default, a reveal on a bare list, an agent's name dropped from Add),
 // strands the user in the browser; only a round trip through both ends catches that.
 describe('desktop shell protected-vault browser handoff', () => {
+  // Field labels must survive the same round trip as the secret name; reopening just the
+  // secret silently changes an extra-field reveal into a default-field reveal.
+  it('resumes the selected extra field in the browser without revealing anything automatically', async () => {
+    const user = userEvent.setup();
+    api.getVaultRequests.mockResolvedValue({ requests: [] });
+    api.listVaultSecrets.mockResolvedValue({
+      secrets: [{ ...protectedSecret, default_field: 'password', fields: ['password', 'username'] }],
+    });
+    const open = vi.spyOn(window, 'open').mockReturnValue(null);
+    Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { configurable: true, value: true });
+    renderAt('/vaults', <VaultsPage />);
+    await user.click(await screen.findByRole('button', { name: /^more actions$/i }));
+    fireEvent.change(screen.getByRole('combobox', { name: 'Field to reveal' }), { target: { value: 'username' } });
+    await user.click(screen.getByRole('menuitem', { name: /^show in browser$/i }));
+    const target = new URL(String(open.mock.calls[0][0]));
+    expect(target.searchParams.get('field')).toBe('username');
+    cleanup();
+    delete (window as { __AVIBE_DESKTOP_SHELL__?: true }).__AVIBE_DESKTOP_SHELL__;
+    renderAt(`${target.pathname}${target.search}`, <VaultsPage />);
+    expect((await screen.findByRole('combobox', { name: 'Field to reveal' }) as HTMLSelectElement).value).toBe('username');
+    expect(vault.revealProtectedValue).not.toHaveBeenCalled();
+  });
+
   it.each(cases)('$surface resumes in the browser without starting a passkey step', async (c) => {
     const user = userEvent.setup();
     vault.status = c.vaultStatus ?? 'needs-setup';

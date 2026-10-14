@@ -7,12 +7,15 @@ import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 
 import { InstanceAuthorizationContext } from '../../context/InstanceAuthorizationContext';
+import { ApiError } from '../../context/ApiContext';
 import { OWNER_INSTANCE_CAPABILITIES } from '../../lib/sessionInfo';
+import zh from '../../i18n/zh.json';
 import { VaultsPage } from './VaultsPage';
 
 type WorkbenchEventHandlers = { onVaultsUpdated?: (data: unknown) => void };
 
 const eventHandlers = vi.hoisted(() => [] as WorkbenchEventHandlers[]);
+const testTranslation = vi.hoisted(() => ({ locale: 'keys' as 'keys' | 'zh' }));
 const api = vi.hoisted(() => ({
   connectWorkbenchEvents: vi.fn(() => () => undefined),
   createVaultRevealContext: vi.fn(),
@@ -59,9 +62,18 @@ vi.mock('../../lib/useProtectedVault', () => ({
   useVaultLock: () => ({ unlocked: false, remainingMs: 0, lockNow: vi.fn() }),
 }));
 
-vi.mock('react-i18next', () => ({
-  useTranslation: () => ({ t: (key: string) => key }),
-}));
+vi.mock('react-i18next', async () => {
+  const { default: catalog } = await import('../../i18n/zh.json');
+  const localized: Record<string, string> = {
+    'errors.fields_corrupt': catalog.errors.fields_corrupt,
+    'vaults.reveal.errors.contextFailed': catalog.vaults.reveal.errors.contextFailed,
+  };
+  return {
+    useTranslation: () => ({
+      t: (key: string) => testTranslation.locale === 'zh' ? localized[key] ?? key : key,
+    }),
+  };
+});
 
 vi.mock('./CapabilityTabs', () => ({
   CapabilityTabs: () => <div data-testid="capability-tabs" />,
@@ -76,10 +88,20 @@ vi.mock('./WorkbenchPageHeader', () => ({
   ),
 }));
 
-function renderPage(context = remoteOwner) {
+vi.mock('../ui/vault-secret-dialog', () => ({
+  VaultSecretDialog: ({
+    open,
+    editSecret,
+  }: {
+    open: boolean;
+    editSecret?: { name: string; updated_at: string } | null;
+  }) => open ? <div data-testid="vault-edit-dialog">{editSecret?.name}:{editSecret?.updated_at}</div> : null,
+}));
+
+function renderPage(context = remoteOwner, initialEntries = ['/vaults']) {
   return render(
     <InstanceAuthorizationContext.Provider value={context}>
-      <MemoryRouter initialEntries={['/vaults']}>
+      <MemoryRouter initialEntries={initialEntries}>
         <VaultsPage />
       </MemoryRouter>
     </InstanceAuthorizationContext.Provider>,
@@ -105,6 +127,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  testTranslation.locale = 'keys';
   vi.clearAllMocks();
   vi.restoreAllMocks();
 });
@@ -126,11 +149,57 @@ describe('VaultsPage remote audit history', () => {
     expect(await screen.findByText('alpha')).toBeTruthy();
   });
 
+  it('shows a single custom field label without offering a field selector', async () => {
+    api.listVaultSecrets.mockResolvedValue({
+      secrets: [{
+        name: 'LOGIN', default_field: 'password', fields: ['password'], kind: 'static', protection: 'standard',
+        signer_kind: null, source: 'user', tags: [], policy: {}, last_used_at: null, use_count: 0,
+        created_at: 'created', updated_at: 'version-1',
+      }],
+    });
+    renderPage();
+    expect(await screen.findByText(/password/)).toBeTruthy();
+    expect(screen.queryByRole('combobox')).toBeNull();
+  });
+
   it('shows Vault management controls to an Editor', async () => {
     renderPage(activeOrgMember);
 
     expect(await screen.findByRole('button', { name: 'vaults.add' })).toBeTruthy();
     expect(screen.queryByText('vaults.remoteReadOnly')).toBeNull();
+  });
+});
+
+describe('VaultsPage edit metadata freshness', () => {
+  it('passes the refreshed list entry to an already-open edit dialog', async () => {
+    const original = {
+      name: 'LOGIN',
+      default_field: 'password',
+      fields: ['password', 'username'],
+      kind: 'static',
+      protection: 'standard',
+      signer_kind: null,
+      source: 'user',
+      tags: [],
+      policy: {},
+      last_used_at: null,
+      use_count: 0,
+      created_at: 'created',
+      updated_at: 'version-1',
+    };
+    const refreshed = { ...original, updated_at: 'version-2' };
+    api.listVaultSecrets.mockResolvedValue({ secrets: [original] });
+    renderPage();
+    await screen.findByText('LOGIN');
+    fireEvent.click(await screen.findByRole('button', { name: 'vaults.rowActions' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'vaults.editSecret' }));
+    expect((await screen.findByTestId('vault-edit-dialog')).textContent).toBe('LOGIN:version-1');
+
+    api.listVaultSecrets.mockResolvedValue({ secrets: [refreshed] });
+    await act(async () => {
+      for (const handler of [...eventHandlers]) handler.onVaultsUpdated?.({});
+    });
+    expect((await screen.findByTestId('vault-edit-dialog')).textContent).toBe('LOGIN:version-2');
   });
 });
 
@@ -230,6 +299,38 @@ describe('VaultsPage protected reveal', () => {
     expect(api.createVaultRevealContext).toHaveBeenCalledTimes(fetches);
   });
 
+  it('shows the localized corruption warning on a row while keeping default reveal available', async () => {
+    testTranslation.locale = 'zh';
+    api.listVaultSecrets.mockResolvedValue({
+      secrets: [{ ...protectedSecret('alpha'), fields_state: 'corrupt' }],
+    });
+    api.createVaultRevealContext.mockResolvedValue({ ok: true, context: { secret_name: 'alpha' }, envelope });
+    await openMenu();
+    expect((await screen.findByRole('alert')).textContent).toBe(zh.errors.fields_corrupt);
+    expect(screen.getByRole('menuitem', { name: 'vaults.reveal.show' })).toBeTruthy();
+  });
+
+  it.each(['response', 'exception'] as const)('localizes a reveal context failure from a %s in Chinese', async (failure) => {
+    testTranslation.locale = 'zh';
+    if (failure === 'response') {
+      api.createVaultRevealContext.mockResolvedValue({
+        ok: false,
+        code: 'fields_corrupt',
+        message: 'English service detail',
+      });
+    } else {
+      api.createVaultRevealContext.mockRejectedValue(
+        new ApiError('English service detail', 409, 'fields_corrupt'),
+      );
+    }
+    const popup = { closed: false, close: vi.fn() };
+    vi.spyOn(window, 'open').mockReturnValue(popup as unknown as Window);
+    await openMenu();
+    await vi.waitFor(() => expect(api.createVaultRevealContext).toHaveBeenCalledOnce());
+    fireEvent.click(showValue());
+    await vi.waitFor(() => expect(showToast).toHaveBeenCalledWith(zh.errors.fields_corrupt, 'warning'));
+  });
+
   it('keeps Show value waiting while the context or the sandbox client are not ready', async () => {
     let answer: () => void = () => undefined;
     api.createVaultRevealContext.mockImplementation(
@@ -263,6 +364,97 @@ describe('VaultsPage protected reveal', () => {
     await clickShowValue();
 
     expect(revealProtectedValue.mock.calls[0][1]).toEqual({ secret_name: 'beta' });
+  });
+
+  // A field switch needs its own prepared context. The single-secret cases above cannot detect
+  // displaying the default envelope for an extra field, or using NAME.password as a default record.
+  it.each([
+    { field: 'password', record: 'alpha' },
+    { field: 'username', record: 'alpha.username' },
+  ])('reveals $field with its own context and canonical record', async ({ field, record }) => {
+    api.listVaultSecrets.mockResolvedValue({
+      secrets: [{ ...protectedSecret('alpha'), default_field: 'password', fields: ['password', 'username'] }],
+    });
+    api.createVaultRevealContext.mockImplementation(async (_name, payload) => ({
+      ok: true, context: { field: payload.field }, envelope,
+    }));
+    await openMenu();
+    fireEvent.change(screen.getByRole('combobox', { name: 'vaults.fields.revealField' }), { target: { value: field } });
+    await vi.waitFor(() => expect(api.createVaultRevealContext).toHaveBeenLastCalledWith(
+      'alpha', { session_label: 'vaults.title', field },
+    ));
+    await clickShowValue();
+    expect(revealProtectedValue.mock.calls[0][0].name).toBe(record);
+    expect(revealProtectedValue.mock.calls[0][1]).toEqual({ field });
+  });
+
+  it('shows a stale handoff field without preparing or revealing the default field', async () => {
+    api.listVaultSecrets.mockResolvedValue({
+      secrets: [{ ...protectedSecret('alpha'), default_field: 'password', fields: ['password'] }],
+    });
+    renderPage(remoteOwner, ['/vaults?reveal=alpha&field=username']);
+
+    expect((await screen.findByRole('alert')).textContent).toBe('vaults.reveal.errors.staleField');
+    expect(api.createVaultRevealContext).not.toHaveBeenCalled();
+    expect(revealProtectedValue).not.toHaveBeenCalled();
+  });
+
+  it('keeps a disappearing active field stale without preparing the default field', async () => {
+    const initial = { ...protectedSecret('alpha'), default_field: 'password', fields: ['password', 'username'] };
+    api.listVaultSecrets.mockResolvedValue({ secrets: [initial] });
+    api.createVaultRevealContext.mockResolvedValue({ ok: true, context: { field: 'ready' }, envelope });
+    renderPage();
+    const user = userEvent.setup();
+    await user.click((await screen.findByRole('button', { name: 'vaults.rowActions' })));
+    await vi.waitFor(() => expect(api.createVaultRevealContext).toHaveBeenCalledOnce());
+    fireEvent.change(screen.getByRole('combobox', { name: 'vaults.fields.revealField' }), { target: { value: 'username' } });
+    await vi.waitFor(() => expect(api.createVaultRevealContext).toHaveBeenCalledTimes(2));
+    const preparedBeforeRefresh = api.createVaultRevealContext.mock.calls.length;
+
+    api.listVaultSecrets.mockResolvedValue({
+      secrets: [{ ...initial, fields: ['password'] }],
+    });
+    await act(async () => {
+      for (const handler of [...eventHandlers]) handler.onVaultsUpdated?.({});
+    });
+
+    expect((await screen.findByRole('alert')).textContent).toBe('vaults.reveal.errors.staleField');
+    expect(api.createVaultRevealContext).toHaveBeenCalledTimes(preparedBeforeRefresh);
+  });
+
+  it('refreshes a prepared extra-field context when only the default label changes', async () => {
+    const entry = { ...protectedSecret('alpha'), default_field: 'password', fields: ['password', 'username'] };
+    api.listVaultSecrets.mockResolvedValue({ secrets: [entry] });
+    api.createVaultRevealContext.mockResolvedValue({ ok: true, context: { label: 'password' }, envelope });
+    await openMenu();
+    await vi.waitFor(() => expect(api.createVaultRevealContext).toHaveBeenCalledOnce());
+    fireEvent.change(screen.getByRole('combobox', { name: 'vaults.fields.revealField' }), { target: { value: 'username' } });
+    await vi.waitFor(() => expect(api.createVaultRevealContext).toHaveBeenCalledTimes(2));
+    api.listVaultSecrets.mockResolvedValue({ secrets: [{ ...entry, default_field: 'credential', fields: ['credential', 'username'] }] });
+    api.createVaultRevealContext.mockResolvedValue({ ok: true, context: { label: 'credential' }, envelope });
+    await act(async () => {
+      for (const handler of eventHandlers) handler.onVaultsUpdated?.({ scope: 'secret', secret_name: 'alpha' });
+    });
+    await vi.waitFor(() => expect(api.createVaultRevealContext).toHaveBeenCalledTimes(3));
+    await clickShowValue();
+    expect(revealProtectedValue.mock.calls[0][1]).toEqual({ label: 'credential' });
+  });
+
+  it('prepares the replacement envelope when an open secret changes version', async () => {
+    let version = 'old';
+    api.createVaultRevealContext.mockImplementation(async () => ({ ok: true, context: { version }, envelope }));
+    await openMenu();
+    await vi.waitFor(() => expect(api.createVaultRevealContext).toHaveBeenCalledOnce());
+    version = 'new';
+    api.listVaultSecrets.mockResolvedValue({
+      secrets: [{ ...protectedSecret('alpha'), updated_at: '2026-10-13T12:00:00Z' }],
+    });
+    await act(async () => {
+      for (const handler of eventHandlers) handler.onVaultsUpdated?.({ scope: 'secret', secret_name: 'alpha' });
+    });
+    await vi.waitFor(() => expect(api.createVaultRevealContext).toHaveBeenCalledTimes(2));
+    await clickShowValue();
+    expect(revealProtectedValue.mock.calls[0][1]).toEqual({ version: 'new' });
   });
 
   it('refreshes the context while the menu stays open, so the click fetches nothing', async () => {

@@ -24,6 +24,7 @@ import { invalidateVaultSandboxPolicy } from './vaultSandboxPolicy';
  */
 export type ProtectedUnlockMaterial = {
   name: string;
+  field?: string;
   kind?: string | null;
   envelope: ProtectedRecordEnvelope;
 };
