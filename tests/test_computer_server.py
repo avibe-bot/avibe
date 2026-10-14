@@ -2013,6 +2013,74 @@ async def test_foreground_attention_pending_refuses_before_input(
     assert "delivery_mode" not in background_click
 
 
+@pytest.mark.parametrize(
+    ("refused_operation", "expected_control_calls"),
+    [
+        ("request_consent", ["request_consent"]),
+        ("set_active", ["request_consent", "set_active"]),
+    ],
+)
+@pytest.mark.asyncio
+async def test_foreground_disabled_refuses_before_input_and_keeps_background_available(
+    tmp_path: Path,
+    refused_operation: str,
+    expected_control_calls: list[str],
+) -> None:
+    state_path, state = _state(tmp_path)
+    upstream = ForegroundUpstream()
+    control = FakeForegroundControl()
+    control.responses[refused_operation] = {
+        "ok": False,
+        "error": "foreground_disabled",
+    }
+    server = _foreground_server(state_path, state, upstream, control)
+    observed = await server.call_tool(
+        "get_window_state",
+        {"session": "ses-a", "pid": 7, "window_id": 9},
+    )
+    assert not observed.get("isError")
+
+    result = await server.call_tool(
+        "click",
+        {
+            "session": "ses-a",
+            "pid": 7,
+            "window_id": 9,
+            "x": 1,
+            "y": 2,
+            "capture_id": "capture-7-9",
+            "delivery_mode": "foreground",
+        },
+    )
+
+    payload = result["structuredContent"]
+    assert payload["code"] == "foreground_disabled"
+    assert payload["params"]["foreground_outcome"] == "unattempted"
+    assert [name for name, _payload in control.calls] == expected_control_calls
+    assert not any(
+        params["arguments"].get("name") == "click"
+        for _method, params in upstream.calls
+    )
+
+    background = await server.call_tool(
+        "click",
+        {
+            "session": "ses-a",
+            "pid": 7,
+            "window_id": 9,
+            "x": 1,
+            "y": 2,
+        },
+    )
+    assert not background.get("isError")
+    background_click = next(
+        params["arguments"]
+        for _method, params in reversed(upstream.calls)
+        if params.get("name") == "click"
+    )
+    assert "delivery_mode" not in background_click
+
+
 @pytest.mark.asyncio
 async def test_foreground_click_on_visible_target_verifies_restore(
     tmp_path: Path,
@@ -2183,13 +2251,25 @@ async def test_foreground_caller_cancellation_does_not_cancel_transaction(
         "set_active",
     ]
 
+    background = asyncio.create_task(
+        server.call_tool(
+            "click",
+            {
+                "session": "ses-a",
+                "pid": 7,
+                "window_id": 9,
+                "x": 3,
+                "y": 4,
+            },
+        )
+    )
+    await asyncio.sleep(0)
+    assert not background.done()
+
     upstream.release_click.set()
-    for _ in range(100):
-        if server._foreground_transaction is None:
-            break
-        await asyncio.sleep(0)
-    else:
-        pytest.fail("foreground transaction did not reach terminal")
+    background_result = await asyncio.wait_for(background, timeout=1)
+    assert not background_result.get("isError")
+    assert server._foreground_transaction is None
 
     assert [name for name, _ in control.calls] == [
         "request_consent",

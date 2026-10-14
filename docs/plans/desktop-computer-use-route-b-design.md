@@ -119,6 +119,17 @@ Known limitation: if the owner stops during the sub-second transaction, the
 click can complete before the stop takes effect; if a platform call hangs past
 the bound, restoration may be incomplete and is reported as such.
 
+On 2026-10-15, the owner approved shipping Route B behind a native desktop
+setting, `Experimental: allow foreground control`. It is persisted in native
+shell state, defaults off, and can be changed only through the native UI. While
+off, foreground requests fail before activation or input with
+`foreground_disabled`, foreground consent controls are hidden, and background
+Computer Use is unchanged. Turning the setting off closes admission for new
+foreground calls and applies the same bounded terminal wait to an in-flight
+transaction. The foreground transaction task owns the per-Session exclusion
+until terminal, so caller cancellation cannot admit a same-Session background
+call during restoration.
+
 Route B inherits the existing documented same-user local trust boundary. This
 record does not introduce a second authority model for same-user processes.
 Signed shell capabilities, secure-enclave or keychain keys, mutual-authenticated

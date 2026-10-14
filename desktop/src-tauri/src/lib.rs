@@ -88,6 +88,8 @@ const SETTINGS_MENU_ID: &str = "open-settings";
 #[cfg(target_os = "macos")]
 const COMPUTER_USE_MENU_ID: &str = "computer-use";
 #[cfg(target_os = "macos")]
+const COMPUTER_USE_FOREGROUND_MENU_ID: &str = "computer-use-foreground-enabled";
+#[cfg(target_os = "macos")]
 const COMPUTER_USE_CONSENT_MENU_ID: &str = "computer-use-foreground-consent";
 /// Where Settings leads: the Workbench deep link, whose destination
 /// `parse_deep_link` owns. It is delivered as a page load only when the window
@@ -173,6 +175,7 @@ struct NativeComputerUseCatalog {
     unavailable: String,
     initialization_failed: String,
     save_failed: String,
+    foreground_experimental: String,
     foreground_consent: String,
     foreground_active: String,
     foreground_attention: String,
@@ -344,6 +347,32 @@ fn computer_use_consent_control_enabled(view: &computer_use::MenuView) -> bool {
 }
 
 #[cfg(target_os = "macos")]
+fn computer_use_consent_control_present(view: &computer_use::MenuView) -> bool {
+    view.foreground_enabled || view.foreground_attention.is_some()
+}
+
+#[cfg(target_os = "macos")]
+fn computer_use_foreground_control_enabled(view: &computer_use::MenuView) -> bool {
+    !view.initialization_error && (view.foreground_enabled || view.foreground_active.is_none())
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ForegroundConsentMenuAction {
+    ToggleConsent,
+    DismissAttention,
+}
+
+#[cfg(target_os = "macos")]
+fn foreground_consent_menu_action(view: &computer_use::MenuView) -> ForegroundConsentMenuAction {
+    if view.foreground_attention.is_some() {
+        ForegroundConsentMenuAction::DismissAttention
+    } else {
+        ForegroundConsentMenuAction::ToggleConsent
+    }
+}
+
+#[cfg(target_os = "macos")]
 fn computer_use_menu_state(view: &computer_use::MenuView) -> (bool, bool) {
     (computer_use_control_enabled(view), view.enabled)
 }
@@ -462,8 +491,12 @@ struct NativeMenus {
     #[cfg(target_os = "macos")]
     computer_use: CheckMenuItem<tauri::Wry>,
     #[cfg(target_os = "macos")]
+    computer_use_foreground: CheckMenuItem<tauri::Wry>,
+    #[cfg(target_os = "macos")]
     computer_use_consent: MenuItem<tauri::Wry>,
     stop_present: AtomicBool,
+    #[cfg(target_os = "macos")]
+    foreground_consent_present: AtomicBool,
     displayed: Mutex<Option<(TrayRuntimeState, bool, bool)>>,
 }
 
@@ -513,6 +546,17 @@ fn install_native_tray(app: &AppHandle) -> tauri::Result<()> {
         None::<&str>,
     )?;
     #[cfg(target_os = "macos")]
+    let computer_use_foreground = CheckMenuItem::with_id(
+        app,
+        COMPUTER_USE_FOREGROUND_MENU_ID,
+        &native_catalog_for_locales(sys_locale::get_locales())
+            .computer_use
+            .foreground_experimental,
+        computer_use_foreground_control_enabled(&computer_use_view),
+        computer_use_view.foreground_enabled,
+        None::<&str>,
+    )?;
+    #[cfg(target_os = "macos")]
     let computer_use_consent = MenuItem::with_id(
         app,
         COMPUTER_USE_CONSENT_MENU_ID,
@@ -531,6 +575,7 @@ fn install_native_tray(app: &AppHandle) -> tauri::Result<()> {
             &status,
             &PredefinedMenuItem::separator(app)?,
             &computer_use,
+            &computer_use_foreground,
             &computer_use_consent,
             &settings,
             &updater.menu,
@@ -576,8 +621,19 @@ fn install_native_tray(app: &AppHandle) -> tauri::Result<()> {
         #[cfg(target_os = "macos")]
         submenu.insert(&computer_use, 0)?;
         #[cfg(target_os = "macos")]
-        submenu.insert(&computer_use_consent, 1)?;
+        submenu.insert(&computer_use_foreground, 1)?;
+        #[cfg(target_os = "macos")]
+        submenu.insert(&computer_use_consent, 2)?;
         submenu.insert_items(&[&open, &status, &login, &PredefinedMenuItem::separator(app)?], 0)?;
+    }
+    #[cfg(target_os = "macos")]
+    let foreground_consent_present = computer_use_consent_control_present(&computer_use_view);
+    #[cfg(target_os = "macos")]
+    if !foreground_consent_present {
+        tray.remove(&computer_use_consent)?;
+        if let Some(submenu) = &application {
+            submenu.remove(&computer_use_consent)?;
+        }
     }
     app.set_menu(application_menu)?;
     TrayIconBuilder::with_id(TRAY_ID)
@@ -596,8 +652,12 @@ fn install_native_tray(app: &AppHandle) -> tauri::Result<()> {
         #[cfg(target_os = "macos")]
         computer_use,
         #[cfg(target_os = "macos")]
+        computer_use_foreground,
+        #[cfg(target_os = "macos")]
         computer_use_consent,
         stop_present: AtomicBool::new(false),
+        #[cfg(target_os = "macos")]
+        foreground_consent_present: AtomicBool::new(foreground_consent_present),
         displayed: Mutex::new(None),
     });
     if login_unavailable {
@@ -736,6 +796,45 @@ fn refresh_native_controls(app: &AppHandle, requested: Option<TrayRuntimeState>)
 }
 
 #[cfg(target_os = "macos")]
+fn menu_position_before(items: &[MenuItemKind<tauri::Wry>], id: &str) -> usize {
+    items
+        .iter()
+        .position(|item| item.id().as_ref() == id)
+        .unwrap_or(items.len())
+}
+
+#[cfg(target_os = "macos")]
+fn sync_foreground_consent_control(menus: &NativeMenus, present: bool) -> tauri::Result<()> {
+    if menus.foreground_consent_present.load(Ordering::SeqCst) == present {
+        return Ok(());
+    }
+    if present {
+        let tray_items = menus.tray.items()?;
+        menus.tray.insert(
+            &menus.computer_use_consent,
+            menu_position_before(&tray_items, SETTINGS_MENU_ID),
+        )?;
+        if let Some(submenu) = &menus.application {
+            let application_items = submenu.items()?;
+            if let Err(error) = submenu.insert(
+                &menus.computer_use_consent,
+                menu_position_before(&application_items, SETTINGS_MENU_ID),
+            ) {
+                let _ = menus.tray.remove(&menus.computer_use_consent);
+                return Err(error);
+            }
+        }
+    } else {
+        menus.tray.remove(&menus.computer_use_consent)?;
+        if let Some(submenu) = &menus.application {
+            submenu.remove(&menus.computer_use_consent)?;
+        }
+    }
+    menus.foreground_consent_present.store(present, Ordering::SeqCst);
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
 fn apply_computer_use_control(handle: &AppHandle) -> Result<(), String> {
     let menus = handle
         .try_state::<NativeMenus>()
@@ -751,6 +850,13 @@ fn apply_computer_use_control(handle: &AppHandle) -> Result<(), String> {
         .set_text(computer_use_label(&catalog, &view))
         .and_then(|()| menus.computer_use.set_enabled(enabled))
         .and_then(|()| menus.computer_use.set_checked(checked))
+        .and_then(|()| menus.computer_use_foreground.set_text(&catalog.foreground_experimental))
+        .and_then(|()| {
+            menus
+                .computer_use_foreground
+                .set_enabled(computer_use_foreground_control_enabled(&view))
+        })
+        .and_then(|()| menus.computer_use_foreground.set_checked(view.foreground_enabled))
         .and_then(|()| {
             menus
                 .computer_use_consent
@@ -761,6 +867,7 @@ fn apply_computer_use_control(handle: &AppHandle) -> Result<(), String> {
                 .computer_use_consent
                 .set_enabled(computer_use_consent_control_enabled(&view))
         })
+        .and_then(|()| sync_foreground_consent_control(&menus, computer_use_consent_control_present(&view)))
         .map_err(|error| error.to_string())
 }
 
@@ -2130,17 +2237,19 @@ pub fn run() {
                     app.state::<computer_use::Controller>().toggle();
                 }
                 #[cfg(target_os = "macos")]
+                COMPUTER_USE_FOREGROUND_MENU_ID => {
+                    app.state::<computer_use::Controller>().toggle_foreground_enabled();
+                }
+                #[cfg(target_os = "macos")]
                 COMPUTER_USE_CONSENT_MENU_ID => {
-                    let catalog = native_catalog_for_locales(sys_locale::get_locales()).computer_use;
-                    let dismiss_attention = app
-                        .try_state::<NativeMenus>()
-                        .and_then(|menus| menus.computer_use_consent.text().ok())
-                        .is_some_and(|label| label == catalog.foreground_attention_dismiss);
                     let controller = app.state::<computer_use::Controller>();
-                    if dismiss_attention {
-                        controller.dismiss_foreground_attention();
-                    } else {
-                        controller.toggle_foreground_consent();
+                    match foreground_consent_menu_action(&controller.view()) {
+                        ForegroundConsentMenuAction::DismissAttention => {
+                            controller.dismiss_foreground_attention();
+                        }
+                        ForegroundConsentMenuAction::ToggleConsent => {
+                            controller.toggle_foreground_consent();
+                        }
                     }
                 }
                 _ => {}
@@ -2521,16 +2630,20 @@ mod tests {
     fn foreground_consent_control_toggles_between_pending_granted_and_off() {
         let catalog = native_catalog_for_locales(["en-US".to_owned()]).computer_use;
         let pending = computer_use::MenuView {
+            foreground_enabled: true,
             foreground_pending: Some("QQ conversation".to_owned()),
             ..Default::default()
         };
+        assert!(computer_use_consent_control_present(&pending));
         assert!(computer_use_consent_control_enabled(&pending));
         assert!(computer_use_consent_label(&catalog, &pending).contains("Allow"));
 
         let granted = computer_use::MenuView {
+            foreground_enabled: true,
             foreground_granted: Some("QQ conversation".to_owned()),
             ..Default::default()
         };
+        assert!(computer_use_consent_control_present(&granted));
         assert!(computer_use_consent_control_enabled(&granted));
         assert!(computer_use_consent_label(&catalog, &granted).contains("Turn off"));
 
@@ -2543,13 +2656,37 @@ mod tests {
             foreground_granted: Some("granted conversation".to_owned()),
             ..Default::default()
         };
+        assert!(computer_use_consent_control_present(&attention));
         assert!(computer_use_consent_control_enabled(&attention));
         assert_eq!(
             computer_use_consent_label(&catalog, &attention),
             "Restoration checked: dismiss"
         );
 
-        assert!(!computer_use_consent_control_enabled(&computer_use::MenuView::default()));
+        let disabled = computer_use::MenuView::default();
+        assert!(!computer_use_consent_control_present(&disabled));
+        assert!(!computer_use_consent_control_enabled(&disabled));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn foreground_consent_action_uses_state_when_locale_changes_after_render() {
+        let view = computer_use::MenuView {
+            foreground_attention: Some(computer_use::ForegroundAttention {
+                target: "QQ conversation: QQ".to_owned(),
+                restoration: serde_json::json!({"restoration_ok": false}),
+            }),
+            ..Default::default()
+        };
+        let english = native_catalog_for_locales(["en-US".to_owned()]).computer_use;
+        let rendered = computer_use_consent_label(&english, &view);
+        let chinese = native_catalog_for_locales(["zh-CN".to_owned()]).computer_use;
+
+        assert_ne!(rendered, chinese.foreground_attention_dismiss);
+        assert_eq!(
+            foreground_consent_menu_action(&view),
+            ForegroundConsentMenuAction::DismissAttention
+        );
     }
 
     #[cfg(target_os = "macos")]

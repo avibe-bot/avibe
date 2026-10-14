@@ -2168,31 +2168,24 @@ class ComputerUseServer:
 
     async def _run_foreground_transaction(
         self,
-        upstream: Upstream,
         name: str,
         arguments: Mapping[str, Any],
         *,
-        session: str,
         title: str,
-        heartbeat: asyncio.Task[None],
-        target_observation: _WindowObservation | None,
+        session_lock: asyncio.Lock,
     ) -> dict[str, Any]:
         try:
-            return await self._call_foreground(
-                upstream,
+            return await self.call_tool(
                 name,
                 arguments,
-                session=session,
-                title=title,
-                heartbeat=heartbeat,
-                target_observation=target_observation,
+                session_title=title,
+                _foreground_transaction_owner=True,
+                _session_lock=session_lock,
             )
         finally:
-            heartbeat.cancel()
-            with suppress(BaseException):
-                await heartbeat
-            if self._foreground_transaction is asyncio.current_task():
-                self._foreground_transaction = None
+            async with self._foreground_transaction_lock:
+                if self._foreground_transaction is asyncio.current_task():
+                    self._foreground_transaction = None
 
     async def _call_foreground(
         self,
@@ -2233,6 +2226,11 @@ class ComputerUseServer:
             )
         if consent.get("ok") is not True:
             shell_error = str(consent.get("error") or "unknown")
+            if shell_error == "foreground_disabled":
+                return _foreground_error(
+                    "foreground_disabled",
+                    "Foreground control is disabled in the native desktop shell.",
+                )
             if shell_error == "foreground_attention_pending":
                 return _foreground_error(
                     "foreground_attention_pending",
@@ -2268,6 +2266,11 @@ class ComputerUseServer:
             )
         if active.get("ok") is not True:
             shell_error = str(active.get("error") or "unknown")
+            if shell_error == "foreground_disabled":
+                return _foreground_error(
+                    "foreground_disabled",
+                    "Foreground control is disabled in the native desktop shell.",
+                )
             if shell_error == "foreground_attention_pending":
                 return _foreground_error(
                     "foreground_attention_pending",
@@ -2372,6 +2375,8 @@ class ComputerUseServer:
         *,
         handle_descriptor: Any = _NO_SCRIPT_HANDLE,
         session_title: str | None = None,
+        _foreground_transaction_owner: bool = False,
+        _session_lock: asyncio.Lock | None = None,
     ) -> dict[str, Any]:
         session = arguments.get("session")
         if not isinstance(session, str) or not session.strip():
@@ -2401,7 +2406,38 @@ class ComputerUseServer:
                     result_params=exc.params,
                 )
 
-        lock = self._session_locks.setdefault(session, asyncio.Lock())
+        lock = _session_lock or self._session_locks.setdefault(
+            session,
+            asyncio.Lock(),
+        )
+        if (
+            arguments.get("delivery_mode") == "foreground"
+            and not _foreground_transaction_owner
+        ):
+            async with self._foreground_transaction_lock:
+                if not self._foreground_admission_open:
+                    return _foreground_error(
+                        "computer_use_unavailable",
+                        "Computer Use is shutting down.",
+                    )
+                existing = self._foreground_transaction
+                if existing is not None and not existing.done():
+                    return _foreground_error(
+                        "foreground_transaction_active",
+                        "Another foreground Computer Use call is still in flight.",
+                    )
+                foreground_task = asyncio.create_task(
+                    self._run_foreground_transaction(
+                        name,
+                        arguments,
+                        title=session_title or session,
+                        session_lock=lock,
+                    ),
+                    name=f"computer-use-foreground-{session}",
+                )
+                self._foreground_transaction = foreground_task
+            return await asyncio.shield(foreground_task)
+
         async with lock:
             try:
                 _validate_input(name, arguments)
@@ -2431,7 +2467,6 @@ class ComputerUseServer:
                 acquisition: LeaseAcquisition | None = None
                 upstream: Upstream | None = None
                 heartbeat: asyncio.Task[None] | None = None
-                foreground_heartbeat_owned = False
                 pre_forward = True
                 try:
                     status = await asyncio.to_thread(self._status_reader)
@@ -2548,35 +2583,15 @@ class ComputerUseServer:
                     pre_forward = False
 
                     if arguments.get("delivery_mode") == "foreground":
-                        async with self._foreground_transaction_lock:
-                            if not self._foreground_admission_open:
-                                return _foreground_error(
-                                    "computer_use_unavailable",
-                                    "Computer Use is shutting down.",
-                                )
-                            existing = self._foreground_transaction
-                            if existing is not None and not existing.done():
-                                return _foreground_error(
-                                    "foreground_transaction_active",
-                                    "Another foreground Computer Use call is still in flight.",
-                                )
-                            foreground_task = asyncio.create_task(
-                                self._run_foreground_transaction(
-                                    upstream,
-                                    name,
-                                    arguments,
-                                    session=session,
-                                    title=session_title or session,
-                                    heartbeat=heartbeat,
-                                    target_observation=foreground_observation,
-                                ),
-                                name=f"computer-use-foreground-{session}",
-                            )
-                            self._foreground_transaction = foreground_task
-                        foreground_heartbeat_owned = True
-                        result = await asyncio.shield(foreground_task)
-                        if self._foreground_transaction is foreground_task:
-                            self._foreground_transaction = None
+                        result = await self._call_foreground(
+                            upstream,
+                            name,
+                            arguments,
+                            session=session,
+                            title=session_title or session,
+                            heartbeat=heartbeat,
+                            target_observation=foreground_observation,
+                        )
                     else:
                         forwarded = dict(arguments)
                         forwarded["session"] = session
@@ -2620,7 +2635,8 @@ class ComputerUseServer:
                         )
                         await self.revoke_foreground_consent(session)
                         self._sessions.pop(session, None)
-                        self._session_locks.pop(session, None)
+                        if self._foreground_transaction is None:
+                            self._session_locks.pop(session, None)
                     return result
                 except _LeaseLost:
                     if upstream is not None:
@@ -2740,7 +2756,7 @@ class ComputerUseServer:
                         error_type=type(exc).__name__,
                     )
                 finally:
-                    if heartbeat is not None and not foreground_heartbeat_owned:
+                    if heartbeat is not None:
                         heartbeat.cancel()
                         with suppress(BaseException):
                             await heartbeat

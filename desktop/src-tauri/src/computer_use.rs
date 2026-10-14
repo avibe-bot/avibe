@@ -59,6 +59,7 @@ const SOCKET_DIRECTORY_MODE: u32 = 0o700;
 const SOCKET_FLAVOR_HEX_BYTES: usize = 12;
 const DAEMON_STDERR_TAIL_BYTES: usize = 8 * 1024;
 const FOREGROUND_CONTROL_SOCKET_FILE: &str = "foreground-control.sock";
+const FOREGROUND_CONTROL_PREFERENCE_FILE: &str = "foreground-control.json";
 const FOREGROUND_TITLE_LIMIT: usize = 256;
 const FOREGROUND_STOP_TIMEOUT: Duration = Duration::from_secs(5);
 const AX_MESSAGING_TIMEOUT_SECONDS: f32 = 1.0;
@@ -132,6 +133,7 @@ enum ForegroundAttentionEvent {
     RequestConsent,
     SetActive,
     ComputerUseToggle,
+    ForegroundSettingChange,
     ConsentChange,
     SessionChange,
     ComputerUseStopStart,
@@ -173,6 +175,7 @@ impl ForegroundAttentionLatch {
                 ForegroundAttentionOutcome::Dismissed
             }
             ForegroundAttentionEvent::ComputerUseToggle
+            | ForegroundAttentionEvent::ForegroundSettingChange
             | ForegroundAttentionEvent::ConsentChange
             | ForegroundAttentionEvent::SessionChange
             | ForegroundAttentionEvent::ComputerUseStopStart => ForegroundAttentionOutcome::Kept,
@@ -183,6 +186,7 @@ impl ForegroundAttentionLatch {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct MenuView {
     pub enabled: bool,
+    pub foreground_enabled: bool,
     pub phase: ComputerUsePhase,
     pub reason: Option<String>,
     pub invalid_state: bool,
@@ -200,6 +204,7 @@ impl Default for MenuView {
     fn default() -> Self {
         Self {
             enabled: false,
+            foreground_enabled: false,
             phase: ComputerUsePhase::Off,
             reason: None,
             invalid_state: false,
@@ -227,6 +232,7 @@ struct ForegroundControlRequest {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ForegroundExitReason {
     ToggleOff,
+    ForegroundDisabled,
     ComputerUseStop,
     ConsentRevoke,
     SessionEndOrArchive,
@@ -238,8 +244,9 @@ pub(crate) enum ForegroundExitReason {
 
 impl ForegroundExitReason {
     #[allow(dead_code)]
-    const ALL: [Self; 8] = [
+    const ALL: [Self; 9] = [
         Self::ToggleOff,
+        Self::ForegroundDisabled,
         Self::ComputerUseStop,
         Self::ConsentRevoke,
         Self::SessionEndOrArchive,
@@ -252,6 +259,7 @@ impl ForegroundExitReason {
     const fn code(self) -> &'static str {
         match self {
             Self::ToggleOff => "toggle_off",
+            Self::ForegroundDisabled => "foreground_disabled",
             Self::ComputerUseStop => "computer_use_stop",
             Self::ConsentRevoke => "consent_revoke",
             Self::SessionEndOrArchive => "session_end_or_archive",
@@ -272,6 +280,7 @@ enum ForegroundStopAction {
         session: String,
         reply: Option<oneshot::Sender<Value>>,
     },
+    DisableForeground,
     Shutdown {
         reason: ForegroundExitReason,
         reply: oneshot::Sender<()>,
@@ -304,6 +313,7 @@ enum Event {
         reason: ForegroundExitReason,
     },
     ToggleForegroundConsent,
+    ToggleForegroundEnabled,
     DismissForegroundAttention,
     Shutdown {
         reason: ForegroundExitReason,
@@ -373,6 +383,10 @@ impl Controller {
         let _ = self.sender.send(Event::ToggleForegroundConsent);
     }
 
+    pub(crate) fn toggle_foreground_enabled(&self) {
+        let _ = self.sender.send(Event::ToggleForegroundEnabled);
+    }
+
     pub(crate) fn dismiss_foreground_attention(&self) {
         let _ = self.sender.send(Event::DismissForegroundAttention);
     }
@@ -397,6 +411,7 @@ struct Paths {
     policy: PathBuf,
     snapshot: PathBuf,
     foreground_control_socket: PathBuf,
+    foreground_control_preference: PathBuf,
 }
 
 impl Paths {
@@ -414,6 +429,7 @@ impl Paths {
         let driver = configured_path(bundled_driver_path(&executable), DRIVER_PATH_ENV);
         let policy = configured_path(resource_dir.join("computer-use/policy.yaml"), POLICY_PATH_ENV);
         let snapshot = configured_path(resource_dir.join("computer-use/tools-v0.31.0.json"), SNAPSHOT_PATH_ENV);
+        let foreground_control_preference = state_dir.join(FOREGROUND_CONTROL_PREFERENCE_FILE);
         Ok(Self {
             state_file: state_dir.join(COMPUTER_USE_STATE_FILE),
             socket,
@@ -422,6 +438,7 @@ impl Paths {
             policy,
             snapshot,
             foreground_control_socket,
+            foreground_control_preference,
         })
     }
 
@@ -430,6 +447,31 @@ impl Paths {
             && self.policy.is_file()
             && sha256_file(&self.snapshot).as_deref() == Some(COMPUTER_USE_TOOL_SNAPSHOT_SHA256)
     }
+}
+
+#[derive(Deserialize, Serialize)]
+struct ForegroundPreference {
+    enabled: bool,
+}
+
+fn read_foreground_preference(path: &Path) -> bool {
+    std::fs::read(path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<ForegroundPreference>(&bytes).ok())
+        .is_some_and(|preference| preference.enabled)
+}
+
+fn write_foreground_preference(path: &Path, enabled: bool) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let bytes = serde_json::to_vec(&ForegroundPreference { enabled })?;
+    let temporary = path.with_extension("tmp");
+    let result = std::fs::write(&temporary, bytes).and_then(|()| std::fs::rename(&temporary, path));
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result
 }
 
 fn short_socket_path(state_dir: &Path, owner_uid: u32) -> PathBuf {
@@ -543,6 +585,7 @@ struct RuntimeState {
     assets_valid: bool,
     pending_write: Option<ComputerUseRecord>,
     started_at: Instant,
+    foreground_enabled: bool,
     foreground_consent_sessions: HashMap<String, String>,
     pending_foreground: Option<(String, String)>,
     foreground_activity: Option<ForegroundActivity>,
@@ -572,6 +615,10 @@ impl RuntimeState {
         }
         let foreground_control_listener = UnixListener::bind(&paths.foreground_control_socket)?;
         std::fs::set_permissions(&paths.foreground_control_socket, std::fs::Permissions::from_mode(0o600))?;
+        let foreground_enabled = read_foreground_preference(&paths.foreground_control_preference);
+        if let Ok(mut current) = view.lock() {
+            current.foreground_enabled = foreground_enabled;
+        }
         let mut runtime = Self {
             app,
             events,
@@ -595,6 +642,7 @@ impl RuntimeState {
             assets_valid,
             pending_write: None,
             started_at: Instant::now(),
+            foreground_enabled,
             foreground_consent_sessions: HashMap::new(),
             pending_foreground: None,
             foreground_activity: None,
@@ -664,6 +712,7 @@ impl RuntimeState {
                             }
                         }
                         Event::ToggleForegroundConsent => self.toggle_foreground_consent(),
+                        Event::ToggleForegroundEnabled => self.toggle_foreground_enabled(),
                         Event::DismissForegroundAttention => self.dismiss_foreground_attention(),
                         Event::Shutdown { reason, reply } => {
                             if self.foreground_activity.is_some() {
@@ -737,6 +786,35 @@ impl RuntimeState {
         }
         let directive = self.lifecycle.toggle_on(self.capabilities.current(), grants);
         self.apply(directive).await;
+    }
+
+    fn toggle_foreground_enabled(&mut self) {
+        let _ = self
+            .foreground_attention
+            .transition(ForegroundAttentionEvent::ForegroundSettingChange);
+        if !self.foreground_enabled && self.foreground_activity.is_some() {
+            return;
+        }
+        let enabled = !self.foreground_enabled;
+        if let Err(error) = write_foreground_preference(&self.paths.foreground_control_preference, enabled) {
+            eprintln!("The foreground control preference could not be saved: {error}");
+            return;
+        }
+        self.foreground_enabled = enabled;
+        self.update_view(|view| view.foreground_enabled = enabled);
+        if enabled {
+            self.publish_view();
+            return;
+        }
+
+        self.expire_foreground_grants();
+        if self.foreground_activity.is_some() {
+            self.await_foreground_stop(
+                ForegroundExitReason::ForegroundDisabled,
+                ForegroundStopAction::DisableForeground,
+            );
+        }
+        self.publish_view();
     }
 
     async fn runtime_ready(&mut self, origin: LoopbackOrigin, adoption: bool) {
@@ -1280,6 +1358,10 @@ impl RuntimeState {
                         let _ = reply.send(json!({"ok": true}));
                     }
                 }
+                ForegroundStopAction::DisableForeground => {
+                    self.expire_foreground_grants();
+                    self.publish_view();
+                }
                 ForegroundStopAction::Shutdown { reason, reply } => {
                     self.shutdown_now(reason).await;
                     let _ = reply.send(());
@@ -1331,6 +1413,9 @@ impl RuntimeState {
         let title = foreground_display_title(session, &request.title);
         match request.operation.as_str() {
             "request_consent" => {
+                if !self.foreground_enabled {
+                    return json!({"ok": false, "error": "foreground_disabled"});
+                }
                 if self
                     .foreground_attention
                     .transition(ForegroundAttentionEvent::RequestConsent)
@@ -1352,6 +1437,9 @@ impl RuntimeState {
                 json!({"ok": true, "allowed": false})
             }
             "set_active" => {
+                if !self.foreground_enabled {
+                    return json!({"ok": false, "error": "foreground_disabled"});
+                }
                 if self
                     .foreground_attention
                     .transition(ForegroundAttentionEvent::SetActive)
@@ -1490,6 +1578,9 @@ impl RuntimeState {
     }
 
     fn toggle_foreground_consent(&mut self) {
+        if !self.foreground_enabled {
+            return;
+        }
         if self
             .foreground_attention
             .transition(ForegroundAttentionEvent::ConsentChange)
@@ -3828,9 +3919,24 @@ done
         unique.sort_unstable();
         unique.dedup();
 
-        assert_eq!(codes.len(), 8);
+        assert_eq!(codes.len(), 9);
         assert_eq!(unique.len(), codes.len());
         assert!(codes.iter().all(|code| !code.is_empty()));
+    }
+
+    #[test]
+    fn foreground_preference_defaults_off_and_persists_only_explicit_owner_choices() {
+        let directory = tempfile::tempdir().expect("foreground preference directory");
+        let path = directory.path().join(FOREGROUND_CONTROL_PREFERENCE_FILE);
+
+        assert!(!read_foreground_preference(&path));
+        write_foreground_preference(&path, true).expect("enable foreground preference");
+        assert!(read_foreground_preference(&path));
+        write_foreground_preference(&path, false).expect("disable foreground preference");
+        assert!(!read_foreground_preference(&path));
+
+        std::fs::write(&path, "invalid").expect("invalid foreground preference");
+        assert!(!read_foreground_preference(&path));
     }
 
     #[test]
@@ -3848,6 +3954,11 @@ done
             ),
             (
                 ForegroundAttentionEvent::ComputerUseToggle,
+                ForegroundAttentionOutcome::Kept,
+                true,
+            ),
+            (
+                ForegroundAttentionEvent::ForegroundSettingChange,
                 ForegroundAttentionOutcome::Kept,
                 true,
             ),

@@ -77,6 +77,7 @@
       "unavailable": "电脑操作 — 内置驱动不可用",
       "initializationFailed": "电脑操作 — 当前不可用；请重启 Avibe 后重试",
       "saveFailed": "电脑操作 — 设置未保存",
+      "foregroundExperimental": "实验性功能：允许前台控制",
       "foregroundConsent": "{{sessionTitle}} 请求前台控制：允许此对话使用",
       "foregroundActive": "前台控制进行中：{{target}}",
       "foregroundAttention": "前台恢复需要处理：{{target}}（{{components}}）",

@@ -938,6 +938,7 @@
         "foregroundForbidden": "Foreground input is not allowed.",
         "foregroundAttentionPending": "Foreground control is paused until you dismiss the restoration warning from the native Avibe desktop menu.",
         "foregroundConsentRequired": "Foreground control needs approval from the native Avibe desktop menu.",
+        "foregroundDisabled": "Foreground control is disabled in the native Avibe desktop menu.",
         "foregroundRestoreFailed": "Foreground control ran, but Avibe could not restore and verify the prior desktop state. Details: {detail}",
         "restorationDetailUnavailable": "restoration details were unavailable",
         "restoration": {

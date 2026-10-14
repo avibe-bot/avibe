@@ -440,6 +440,41 @@ def test_human_attention_pending_error_is_localized(
     assert expected in output
 
 
+@pytest.mark.parametrize(
+    ("language", "expected"),
+    [
+        (
+            "en",
+            "Foreground control is disabled in the native Avibe desktop menu.",
+        ),
+        (
+            "zh",
+            "前台控制未在 Avibe 原生桌面菜单中启用。",
+        ),
+    ],
+)
+def test_human_foreground_disabled_error_is_localized(
+    language: str,
+    expected: str,
+) -> None:
+    result = {
+        "isError": True,
+        "structuredContent": {
+            "code": "foreground_disabled",
+            "params": {"foreground_outcome": "unattempted"},
+        },
+        "content": [],
+    }
+
+    output = format_human_result(
+        "click",
+        result,
+        translate=lambda key, **kwargs: i18n_t(key, language, **kwargs),
+    )
+
+    assert expected in output
+
+
 def test_human_restore_failure_renders_structured_component_details() -> None:
     restoration = {
         "components": {

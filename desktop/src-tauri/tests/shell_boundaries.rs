@@ -868,6 +868,19 @@ fn foreground_lifecycle_and_identity_inventories_are_exhaustive() {
             ][..],
         ),
         (
+            "foreground setting disabled",
+            source_slice(
+                &native,
+                "fn toggle_foreground_enabled(&mut self)",
+                "async fn runtime_ready",
+            ),
+            &[
+                "ForegroundExitReason::ForegroundDisabled",
+                "ForegroundStopAction::DisableForeground",
+                "await_foreground_stop(",
+            ][..],
+        ),
+        (
             "session end or archive",
             source_slice(
                 &native,
@@ -888,7 +901,12 @@ fn foreground_lifecycle_and_identity_inventories_are_exhaustive() {
                 "    async def _run_foreground_transaction",
                 "    async def _call_foreground",
             ),
-            &["asyncio.current_task()", "heartbeat.cancel()"][..],
+            &[
+                "return await self.call_tool(",
+                "_foreground_transaction_owner=True",
+                "_session_lock=session_lock",
+                "asyncio.current_task()",
+            ][..],
         ),
         (
             "Controller shutdown",
@@ -983,6 +1001,15 @@ fn foreground_lifecycle_and_identity_inventories_are_exhaustive() {
             &["ForegroundAttentionEvent::ComputerUseToggle"][..],
         ),
         (
+            "foreground setting changes",
+            source_slice(
+                &native,
+                "fn toggle_foreground_enabled(&mut self)",
+                "async fn runtime_ready",
+            ),
+            &["ForegroundAttentionEvent::ForegroundSettingChange"][..],
+        ),
+        (
             "Computer Use stop and start",
             source_slice(&native, "async fn set_runtime_lost", "async fn activated"),
             &["ForegroundAttentionEvent::ComputerUseStopStart"][..],
@@ -1017,8 +1044,7 @@ fn foreground_lifecycle_and_identity_inventories_are_exhaustive() {
             "native owner-dismiss menu",
             source_slice(&shell, "COMPUTER_USE_CONSENT_MENU_ID => {", "                _ => {}"),
             &[
-                "computer_use_consent.text()",
-                "catalog.foreground_attention_dismiss",
+                "foreground_consent_menu_action(&controller.view())",
                 "controller.dismiss_foreground_attention()",
                 "controller.toggle_foreground_consent()",
             ][..],
@@ -1040,10 +1066,51 @@ fn foreground_lifecycle_and_identity_inventories_are_exhaustive() {
     assert_eq!(foreground_call.matches("asyncio.shield(").count(), 1);
     assert_eq!(controller_shutdown.matches("asyncio.shield(").count(), 1);
     assert_eq!(foreground_call.matches("self._run_foreground_transaction(").count(), 1);
+    assert_eq!(foreground_call.matches("async with lock:").count(), 1);
+    assert!(foreground_call.contains("_foreground_transaction_owner"));
+    assert!(foreground_call.contains("session_lock=lock"));
+    assert!(foreground_call.contains(
+        "if self._foreground_transaction is None:\n                            self._session_locks.pop(session, None)"
+    ));
+    assert!(
+        foreground_call.find("async with lock:") < foreground_call.find("result = await self._call_foreground("),
+        "the foreground transaction task must hold the Session lock through terminal"
+    );
     assert!(
         controller_shutdown.find("asyncio.wait_for(") < controller_shutdown.find("await upstream.close()"),
         "Controller shutdown must finish its bounded foreground wait before closing upstream"
     );
+
+    let foreground_admission = source_slice(
+        &native,
+        "    async fn handle_foreground_control",
+        "    fn dismiss_foreground_attention",
+    );
+    assert_eq!(
+        foreground_admission.matches("\"foreground_disabled\"").count(),
+        2,
+        "both consent and activation must fail closed while foreground control is disabled"
+    );
+    let foreground_preference = source_slice(&native, "struct ForegroundPreference", "fn short_socket_path");
+    for marker in [
+        "fn read_foreground_preference",
+        "fn write_foreground_preference",
+        "is_some_and(|preference| preference.enabled)",
+        "std::fs::rename(&temporary, path)",
+    ] {
+        assert!(
+            foreground_preference.contains(marker),
+            "foreground preference boundary is missing {marker}"
+        );
+    }
+    let foreground_menu = source_slice(
+        &shell,
+        "fn computer_use_consent_control_present",
+        "fn computer_use_menu_state",
+    );
+    assert!(foreground_menu.contains("view.foreground_enabled || view.foreground_attention.is_some()"));
+    let owner_dispatch = source_slice(&shell, "COMPUTER_USE_CONSENT_MENU_ID => {", "                _ => {}");
+    assert!(!owner_dispatch.contains(".text()"));
 
     let identity_sites = [
         (

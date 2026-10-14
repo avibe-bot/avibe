@@ -180,6 +180,7 @@ _COMPUTER_ERROR_I18N_KEYS = {
     "focus_shortcut_forbidden": "computer.cli.error.focusShortcutForbidden",
     "foreground_attention_pending": "computer.cli.error.foregroundAttentionPending",
     "foreground_consent_required": "computer.cli.error.foregroundConsentRequired",
+    "foreground_disabled": "computer.cli.error.foregroundDisabled",
     "foreground_forbidden": "computer.cli.error.foregroundForbidden",
     "foreground_restore_failed": "computer.cli.error.foregroundRestoreFailed",
     "foreground_shell_unavailable": "computer.cli.error.foregroundShellUnavailable",

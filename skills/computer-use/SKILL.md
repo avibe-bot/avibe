@@ -133,6 +133,8 @@ Follow five rules for every Computer Use task:
 1. Start with background delivery and observe the exact target before input.
 2. Choose foreground delivery only when the caller explicitly requests it with
    `--arg delivery_mode=foreground`; it is never an automatic fallback.
+   Foreground control is experimental and may be unavailable. Do not request it
+   unless the owner has enabled it in the native Avibe desktop menu.
 3. Agents cannot grant foreground consent. The owner must approve it in the
    native Avibe desktop menu for the current conversation.
 4. Never auto-replay an unverifiable background result. Observe the application
@@ -167,6 +169,8 @@ retrying automatically:
   Session lease epoch.
 - `foreground_consent_required`: the native desktop menu must approve
   foreground control for this conversation.
+- `foreground_disabled`: the owner has not enabled experimental foreground
+  control in the native desktop menu; do not ask for foreground delivery.
 - `foreground_attention_pending`: the owner must inspect and dismiss the
   native restoration warning before another foreground call; background
   Computer Use remains available.
