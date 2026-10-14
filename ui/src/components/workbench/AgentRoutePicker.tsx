@@ -7,7 +7,7 @@ import clsx from 'clsx';
 import { useApi } from '../../context/ApiContext';
 import type { VibeAgentBrief } from '../../context/ApiContext';
 import type { EffortMenu } from '../settings/models/types';
-import { loadBackendModelsWithRefresh, modelOptionLabel, useAddModelExit } from '../../lib/backendModels';
+import { loadBackendModelsWithRefresh, modelOptionLabel, supersedesHubAnswer, useAddModelExit } from '../../lib/backendModels';
 import { isEffortSupported, refusedSavedEffort, resolveEffortOptions } from '../../lib/effortOptions';
 import { useSourceNames } from '../../lib/useSourceNames';
 import { useRouteSurfaceActive } from '../../lib/routeSurfaceActivity';
@@ -240,16 +240,18 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
     const cancel = loadBackendModelsWithRefresh(
       api,
       backend,
-      ({ models, modelLabels, reasoningOptions, effortMenus, catalogRefreshPending }) => {
-        // A transient Hub failure answers with the native list, which carries no
-        // effort menus; that open does not make the backend a Direct one.
+      (result) => {
+        const { models, modelLabels, reasoningOptions, effortMenus, catalogRefreshPending } = result;
+        const knownHub = hubBackendsRef.current.has(backend);
         if (effortMenus !== undefined) hubBackendsRef.current.add(backend);
         reloadOnNextOpen = Boolean(catalogRefreshPending) || hubBackendsRef.current.has(backend);
+        setLoadingModels(false);
+        // A transient Hub failure answers with the native list: the last Hub answer stands.
+        if (!supersedesHubAnswer(result, knownHub)) return;
         setReasoningByBackend((prev) => ({ ...prev, [backend]: reasoningOptions ?? {} }));
         setEffortMenusByBackend((prev) => ({ ...prev, [backend]: effortMenus ?? {} }));
         setModelsByBackend((prev) => ({ ...prev, [backend]: models }));
         setModelLabelsByBackend((prev) => ({ ...prev, [backend]: modelLabels ?? {} }));
-        setLoadingModels(false);
       },
       () => {
         loadedBackends.delete(backend);

@@ -334,18 +334,25 @@ describe('AgentRoutePicker', () => {
     expect(effortColumn().queryByRole('button', { name: /chat\.picker\.effortOptions\.high/ })).toBeNull();
   });
 
-  it('keeps reading a Hub catalog on every open after one open fell back to the native list', async () => {
+  it('keeps the last Hub answer, and reads Hub again, when one open falls back to the native list', async () => {
+    // Hub: every hop refuses the route's `low`.
     hubMode = 'hub';
+    catalogReasoning = { sonnet: [{ value: 'high', label: 'high' }] };
+    catalogMenus = { sonnet: { omitted: ['low'], not_on: {} } };
     const user = userEvent.setup();
     render(<HubPicker role="owner" />);
     await openMenu(user);
     await user.keyboard('{Escape}');
 
-    // This open's Hub read failed over to the native list, which carries no effort menus.
+    // This open's Hub read failed over to the native ladder, which offers `low` and
+    // says nothing about Hub routing: the Hub answer stands.
     hubMode = 'direct';
+    catalogReasoning = { sonnet: [{ value: 'low', label: 'low' }, { value: 'high', label: 'high' }] };
     await openMenu(user);
-    await user.keyboard('{Escape}');
     expect(catalogReads).toBe(2);
+    expect(effortColumn().getByRole('button', { name: /chat\.picker\.effortOptions\.low/ }).textContent)
+      .toContain('chat.picker.effortRefused');
+    await user.keyboard('{Escape}');
 
     // Hub answers again, and the next open still asks it.
     hubMode = 'hub';

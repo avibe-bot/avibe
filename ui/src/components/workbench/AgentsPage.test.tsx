@@ -1730,6 +1730,31 @@ describe('AgentsPage reconnect reconciliation', () => {
     await waitFor(() => expect(screen.queryByRole('button', { name: 'xhigh', exact: true })).toBeNull());
   });
 
+  it('keeps the last Hub effort menu when a refresh falls back to the native list, and asks Hub again next time', async () => {
+    const hub = {
+      models: [],
+      reasoningOptions: { 'reasoning-model': [{ value: 'medium', label: 'Medium' }] },
+      effortMenus: { 'reasoning-model': { omitted: ['xhigh'], not_on: {} } },
+    };
+    modelCatalog = hub;
+    const initial = { ...brief('agent-a', 'description'), model: 'reasoning-model', reasoning_effort: 'medium' };
+    const api = makeApi(vi.fn().mockResolvedValue(listResult(initial)), vi.fn().mockResolvedValue(fullAgent(initial, 'prompt')));
+    renderPage(api, { canManageAgents: true });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'medium', exact: true })).toBeTruthy());
+    const field = () => document.querySelector('[data-effort-field]') as HTMLElement;
+
+    // A refresh whose Hub read failed answers with the native ladder, which offers `xhigh`.
+    modelCatalog = { models: [], reasoningOptions: { 'reasoning-model': [{ value: 'medium', label: 'Medium' }, { value: 'xhigh', label: 'xhigh' }] } };
+    fireEvent.pointerEnter(field());
+    expect(screen.queryByRole('button', { name: 'xhigh', exact: true })).toBeNull();
+
+    // Hub answers again, and the next use of the field still asks it.
+    modelCatalog = hub;
+    const reads = modelCatalogReads;
+    fireEvent.pointerEnter(field());
+    expect(modelCatalogReads).toBe(reads + 1);
+  });
+
   it('drops an effort-menu read still out when Settings covers the page', async () => {
     modelCatalog = {
       models: [],

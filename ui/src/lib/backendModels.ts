@@ -70,6 +70,17 @@ const hubCatalogModels = (agent: PickerAgentCatalog | null, backend: string): Ba
   return { models, modelLabels, reasoningOptions, effortMenus };
 };
 
+/**
+ * Whether `result` may replace what a surface shows for a backend. Model Hub
+ * answers with effort menus; a Hub read that fails comes back as the native
+ * list, which says nothing about Hub routing and would offer efforts Hub
+ * refuses. So once a backend has answered from Hub in a surface's activation,
+ * only another Hub answer replaces it: the last one stands, and the next read
+ * asks Hub again.
+ */
+export const supersedesHubAnswer = (result: BackendModels, knownHub: boolean): boolean =>
+  !knownHub || result.effortMenus !== undefined;
+
 // Single source of truth for "list the selectable models for a backend",
 // shared by ChatPage, the Agents detail panel, and the New Agent dialog so a
 // new backend (or a fix like OpenCode's provider-prefixing) lands in one place.

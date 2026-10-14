@@ -50,7 +50,7 @@ import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
 import { onPageReactivated } from '../../lib/pageActivity';
 import { useRouteSurfaceActive } from '../../lib/routeSurfaceActivity';
 import { estimateTokens } from '../../lib/tokenEstimate';
-import { loadBackendModelsWithRefresh, modelOptionLabel, useAddModelExit, type BackendModels } from '../../lib/backendModels';
+import { loadBackendModelsWithRefresh, modelOptionLabel, supersedesHubAnswer, useAddModelExit, type BackendModels } from '../../lib/backendModels';
 import { compatibleEffort, refusedSavedEffort, resolveEffortOptions } from '../../lib/effortOptions';
 import { WorkbenchPageHeader } from './WorkbenchPageHeader';
 import { CapabilityTabs } from './CapabilityTabs';
@@ -2116,12 +2116,20 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, ca
       },
     }));
   }, []);
+  // Whether this backend answered from Model Hub in this activation; only another
+  // Hub answer replaces a Hub one (`supersedesHubAnswer`).
+  const hubKnownRef = useRef(false);
+  const takeModelCatalog = useCallback((backend: string, result: BackendModels) => {
+    if (!supersedesHubAnswer(result, hubKnownRef.current)) return;
+    if (result.effortMenus !== undefined) hubKnownRef.current = true;
+    applyModelCatalog(backend, result);
+  }, [applyModelCatalog]);
   useEffect(() => {
     if (!surfaceActive) return;
     const cancel = loadBackendModelsWithRefresh(
       api,
       agent.backend,
-      (result) => applyModelCatalog(agent.backend, result),
+      (result) => takeModelCatalog(agent.backend, result),
       () => {
         setModelCatalogs((current) => ({
           ...current,
@@ -2137,25 +2145,26 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, ca
         return next;
       });
     };
-  }, [agent.backend, api, surfaceActive, applyModelCatalog]);
+  }, [agent.backend, api, surfaceActive, takeModelCatalog]);
 
   // A Hub catalog's effort menu follows capability evidence, which a turn in any
   // session can change while this panel stays open. Like the route picker, which
   // reads it as its menu opens, read it again as the user turns to the effort
   // field, the moment it is chosen from; the last answer shows until it lands.
   const effortRefreshRef = useRef<(() => void) | null>(null);
-  const hubEfforts = activeModelCatalog?.effortMenus !== undefined;
   const refreshEffortMenus = useCallback(() => {
-    if (!surfaceActive || !hubEfforts) return;
+    if (!surfaceActive || !hubKnownRef.current) return;
     effortRefreshRef.current?.();
     const backend = agent.backend;
-    effortRefreshRef.current = loadBackendModelsWithRefresh(api, backend, (result) => applyModelCatalog(backend, result));
-  }, [agent.backend, api, surfaceActive, hubEfforts, applyModelCatalog]);
+    effortRefreshRef.current = loadBackendModelsWithRefresh(api, backend, (result) => takeModelCatalog(backend, result));
+  }, [agent.backend, api, surfaceActive, takeModelCatalog]);
   // A refresh still out when the page is covered or its backend changes answers
   // for a catalog this page no longer shows, so it is dropped.
   useEffect(() => () => {
     effortRefreshRef.current?.();
     effortRefreshRef.current = null;
+    // A new activation or backend starts without knowing which catalog serves it.
+    hubKnownRef.current = false;
   }, [agent.backend, api, surfaceActive]);
 
   const lockHint = system
